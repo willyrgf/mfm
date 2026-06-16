@@ -498,10 +498,10 @@ pub(crate) fn validate_side_effect_terminal_evidence(
             node.node_id, attempt_id
         )));
     };
-    if matches!(
-        projection.phase,
-        store::SideEffectPhase::ConfirmationObserved { .. }
-    ) {
+    let state = projection
+        .ledger_state()
+        .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
+    if state.is_confirmed() {
         Ok(())
     } else {
         Err(RuntimeError::InvalidRunStream(format!(
@@ -579,6 +579,9 @@ pub(crate) fn validate_runner_side_effect_payload(
             if let Some(projection) =
                 side_effect_projection_for_attempt(projections, node, attempt_id)?
             {
+                projection
+                    .ledger_state()
+                    .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))?;
                 let claim = projection.claim.as_ref().ok_or_else(|| {
                     RuntimeError::InvalidRunnerOutput(format!(
                         "side-effect node {} takeover requires an active claim",
@@ -667,11 +670,14 @@ pub(crate) fn validate_side_effect_resume_output(
         events::KernelEventPayload::SideEffectFailed(payload) => Some(payload),
         _ => None,
     });
-    let closes_projection =
-        validate_side_effect_resume_failure(node, &projection.phase, terminal_failure)?;
+    let state = projection
+        .ledger_state()
+        .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))?;
+    let phase = state.phase();
+    let closes_projection = validate_side_effect_resume_failure(node, &phase, terminal_failure)?;
 
-    match projection.phase {
-        store::SideEffectPhase::Claimed { .. } => {
+    match phase {
+        store::SideEffectLedgerPhase::Claimed { .. } => {
             if !closes_projection && !has_takeover && !has_invocation_prepared {
                 return Err(RuntimeError::InvalidRunnerOutput(format!(
                     "side-effect node {} resumed claimed ledger {} without takeover or prepared invocation",
@@ -679,7 +685,7 @@ pub(crate) fn validate_side_effect_resume_output(
                 )));
             }
         }
-        store::SideEffectPhase::InvocationPrepared { .. } => {
+        store::SideEffectLedgerPhase::Prepared { .. } => {
             if !closes_projection && !has_takeover && !has_invocation_started {
                 return Err(RuntimeError::InvalidRunnerOutput(format!(
                     "side-effect node {} resumed prepared ledger {} without takeover or invocation start",
@@ -687,7 +693,10 @@ pub(crate) fn validate_side_effect_resume_output(
                 )));
             }
         }
-        store::SideEffectPhase::NotSubmittedProven { .. } => {
+        store::SideEffectLedgerPhase::SubmissionKnown {
+            status: store::SideEffectSubmissionState::NotSubmitted,
+            ..
+        } => {
             if !closes_projection && !has_claim {
                 return Err(RuntimeError::InvalidRunnerOutput(format!(
                     "side-effect node {} resumed not-submitted ledger {} without next-epoch claim",
@@ -695,8 +704,11 @@ pub(crate) fn validate_side_effect_resume_output(
                 )));
             }
         }
-        store::SideEffectPhase::InvocationStarted { .. }
-        | store::SideEffectPhase::SubmissionUnknown { .. } => {
+        store::SideEffectLedgerPhase::Started { .. }
+        | store::SideEffectLedgerPhase::SubmissionKnown {
+            status: store::SideEffectSubmissionState::Unknown,
+            ..
+        } => {
             if !has_submission_recovery {
                 return Err(RuntimeError::InvalidRunnerOutput(format!(
                     "side-effect node {} resumed uncertain submission ledger {} without submission recovery evidence",
@@ -704,26 +716,29 @@ pub(crate) fn validate_side_effect_resume_output(
                 )));
             }
         }
-        store::SideEffectPhase::Ambiguous { .. } => {
+        store::SideEffectLedgerPhase::Ambiguous { .. } => {
             return Err(RuntimeError::InvalidRunnerOutput(format!(
                 "side-effect node {} attempted to run ambiguous ledger {}",
                 node.node_id, projection.ledger_key
             )));
         }
-        store::SideEffectPhase::Failed { .. } => {
+        store::SideEffectLedgerPhase::Failed { .. } => {
             return Err(RuntimeError::InvalidRunnerOutput(format!(
                 "side-effect node {} attempted to run failed ledger {} on the same attempt",
                 node.node_id, projection.ledger_key
             )));
         }
-        store::SideEffectPhase::IntentPersisted { .. }
-        | store::SideEffectPhase::SubmissionObserved { .. }
-        | store::SideEffectPhase::ReceiptObserved { .. }
-        | store::SideEffectPhase::ConfirmationObserved { .. } => {}
+        store::SideEffectLedgerPhase::IntentPersisted { .. }
+        | store::SideEffectLedgerPhase::SubmissionKnown {
+            status: store::SideEffectSubmissionState::Observed { .. },
+            ..
+        }
+        | store::SideEffectLedgerPhase::ReceiptObserved { .. }
+        | store::SideEffectLedgerPhase::Confirmed { .. } => {}
     }
 
     if has_invocation_started
-        && matches!(projection.phase, store::SideEffectPhase::Claimed { .. })
+        && matches!(phase, store::SideEffectLedgerPhase::Claimed { .. })
         && !has_takeover
         && !has_invocation_prepared
     {
@@ -738,7 +753,7 @@ pub(crate) fn validate_side_effect_resume_output(
 
 fn validate_side_effect_resume_failure(
     node: &spec::NodeSpec,
-    phase: &store::SideEffectPhase,
+    phase: &store::SideEffectLedgerPhase<'_>,
     failure: Option<&events::side_effect::Failed>,
 ) -> Result<bool> {
     let Some(failure) = failure else {
@@ -747,12 +762,15 @@ fn validate_side_effect_resume_failure(
     let failure_matches_phase = matches!(
         (phase, failure.failure_phase),
         (
-            store::SideEffectPhase::IntentPersisted { .. }
-                | store::SideEffectPhase::Claimed { .. }
-                | store::SideEffectPhase::InvocationPrepared { .. },
+            store::SideEffectLedgerPhase::IntentPersisted { .. }
+                | store::SideEffectLedgerPhase::Claimed { .. }
+                | store::SideEffectLedgerPhase::Prepared { .. },
             events::side_effect::FailurePhase::BeforeInvocationStarted
         ) | (
-            store::SideEffectPhase::NotSubmittedProven { .. },
+            store::SideEffectLedgerPhase::SubmissionKnown {
+                status: store::SideEffectSubmissionState::NotSubmitted,
+                ..
+            },
             events::side_effect::FailurePhase::AfterNotSubmittedProven
         )
     );

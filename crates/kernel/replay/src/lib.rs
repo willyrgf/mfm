@@ -4514,6 +4514,41 @@ pub mod v1 {
                 phase: store::SideEffectPhase,
                 event_byte: u8,
             ) -> store::SideEffectProjection {
+                let claim = side_effect_phase_requires_claim(&phase).then(|| {
+                    store::SideEffectClaimProjection {
+                        node_id: node_id.clone(),
+                        attempt_id: self.attempt_id.clone(),
+                        claim_owner: events::RunnerInvocationId::new("projection-owner")
+                            .expect("claim owner"),
+                        invocation_epoch: 1,
+                        claim_generation: 1,
+                        claim_fencing_token: side_effect::ClaimFencingToken::new(
+                            "projection-token",
+                        )
+                        .expect("fencing token"),
+                    }
+                });
+                let submission = side_effect_phase_requires_submission(&phase).then(|| {
+                    store::SideEffectArtifactProjection {
+                        artifact_id: artifact(event_byte.wrapping_add(2)),
+                        content_digest: content(event_byte.wrapping_add(2)),
+                        schema_id: Some(schema("mfm.test.projection_submission", event_byte)),
+                    }
+                });
+                let receipt = side_effect_phase_requires_receipt(&phase).then(|| {
+                    store::SideEffectArtifactProjection {
+                        artifact_id: artifact(event_byte.wrapping_add(3)),
+                        content_digest: content(event_byte.wrapping_add(3)),
+                        schema_id: Some(schema("mfm.test.projection_receipt", event_byte)),
+                    }
+                });
+                let confirmation = side_effect_phase_requires_confirmation(&phase).then(|| {
+                    store::SideEffectArtifactProjection {
+                        artifact_id: artifact(event_byte.wrapping_add(4)),
+                        content_digest: content(event_byte.wrapping_add(4)),
+                        schema_id: Some(schema("mfm.test.projection_confirmation", event_byte)),
+                    }
+                });
                 store::SideEffectProjection {
                     run_id: self.stream[0].run_id().clone(),
                     ledger_key,
@@ -4538,11 +4573,11 @@ pub mod v1 {
                     },
                     prepared_invocation: None,
                     resource_key: None,
-                    submission: None,
-                    receipt: None,
-                    confirmation: None,
+                    submission,
+                    receipt,
+                    confirmation,
                     resource_touched_set: None,
-                    claim: None,
+                    claim,
                     phase,
                 }
             }
@@ -4818,6 +4853,39 @@ pub mod v1 {
                 side_effects,
                 ..Default::default()
             })
+            .expect("test side-effect projection is typed-valid")
+        }
+
+        fn side_effect_phase_requires_claim(phase: &store::SideEffectPhase) -> bool {
+            !matches!(
+                phase,
+                store::SideEffectPhase::IntentPersisted { .. }
+                    | store::SideEffectPhase::Failed {
+                        failure_phase: side_effect::FailurePhase::BeforeInvocationStarted,
+                        ..
+                    }
+            )
+        }
+
+        fn side_effect_phase_requires_submission(phase: &store::SideEffectPhase) -> bool {
+            matches!(
+                phase,
+                store::SideEffectPhase::SubmissionObserved { .. }
+                    | store::SideEffectPhase::ReceiptObserved { .. }
+                    | store::SideEffectPhase::ConfirmationObserved { .. }
+            )
+        }
+
+        fn side_effect_phase_requires_receipt(phase: &store::SideEffectPhase) -> bool {
+            matches!(
+                phase,
+                store::SideEffectPhase::ReceiptObserved { .. }
+                    | store::SideEffectPhase::ConfirmationObserved { .. }
+            )
+        }
+
+        fn side_effect_phase_requires_confirmation(phase: &store::SideEffectPhase) -> bool {
+            matches!(phase, store::SideEffectPhase::ConfirmationObserved { .. })
         }
 
         fn stored_artifact(

@@ -946,7 +946,7 @@ async fn load_projection_snapshot_tx(
         retentions.insert(run_id.clone(), retention);
     }
 
-    Ok(ProjectionSnapshot::from_parts(ProjectionSnapshotParts {
+    ProjectionSnapshot::from_parts(ProjectionSnapshotParts {
         run_states,
         saga_policy_digests,
         run_completions,
@@ -959,7 +959,8 @@ async fn load_projection_snapshot_tx(
         resource_lanes,
         public_outputs,
         retentions,
-    }))
+    })
+    .map_err(PostgresTypedStoreError::Store)
 }
 
 async fn load_run_stream_client(

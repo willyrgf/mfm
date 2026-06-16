@@ -111,7 +111,7 @@ pub(super) fn require_side_effect_phase<'a>(
     run_id: &RunId,
     ledger_key: &events::SideEffectLedgerKey,
     expected: &'static str,
-    predicate: impl FnOnce(&SideEffectProjection) -> bool,
+    predicate: impl FnOnce(&SideEffectLedgerState<'_>) -> bool,
 ) -> Result<&'a SideEffectProjection> {
     let Some(projection) = projections.side_effect_for_run(run_id, ledger_key) else {
         return Err(side_effect_projection_error(
@@ -119,7 +119,8 @@ pub(super) fn require_side_effect_phase<'a>(
             format!("missing side-effect projection; expected {expected}"),
         ));
     };
-    if predicate(projection) {
+    let state = projection.ledger_state()?;
+    if predicate(&state) {
         Ok(projection)
     } else {
         Err(side_effect_projection_error(
@@ -144,15 +145,6 @@ pub(super) fn require_side_effect_purpose(
     }
 }
 
-pub(super) fn previous_claim<'a>(
-    projection: &'a SideEffectProjection,
-    ledger_key: &events::SideEffectLedgerKey,
-) -> Result<&'a SideEffectClaimProjection> {
-    projection.claim.as_ref().ok_or_else(|| {
-        side_effect_projection_error(ledger_key, "side-effect transition requires active claim")
-    })
-}
-
 pub(super) fn require_active_attempt_for_side_effect(
     projections: &ProjectionSnapshot,
     node_id: &NodeId,
@@ -175,160 +167,6 @@ pub(super) fn require_active_attempt_for_side_effect(
     }
 }
 
-pub(super) fn require_intent_context(
-    projection: &SideEffectProjection,
-    node_id: &NodeId,
-    attempt_id: &AttemptId,
-    invocation_epoch: u32,
-) -> Result<()> {
-    let ledger_key = &projection.ledger_key;
-    if projection.intent.node_id != *node_id {
-        return Err(side_effect_projection_error(
-            ledger_key,
-            "node id does not match intent projection",
-        ));
-    }
-    if projection.intent.attempt_id != *attempt_id {
-        return Err(side_effect_projection_error(
-            ledger_key,
-            "attempt id does not match intent projection",
-        ));
-    }
-    if projection.intent.invocation_epoch != invocation_epoch {
-        return Err(side_effect_projection_error(
-            ledger_key,
-            "invocation epoch does not match intent projection",
-        ));
-    }
-    Ok(())
-}
-
-pub(super) fn require_intent_attempt_context(
-    projection: &SideEffectProjection,
-    node_id: &NodeId,
-    attempt_id: &AttemptId,
-) -> Result<()> {
-    let ledger_key = &projection.ledger_key;
-    if projection.intent.node_id != *node_id {
-        return Err(side_effect_projection_error(
-            ledger_key,
-            "node id does not match intent projection",
-        ));
-    }
-    if projection.intent.attempt_id != *attempt_id {
-        return Err(side_effect_projection_error(
-            ledger_key,
-            "attempt id does not match intent projection",
-        ));
-    }
-    Ok(())
-}
-
-pub(super) struct ExpectedClaimContext<'a> {
-    pub(super) node_id: &'a NodeId,
-    pub(super) attempt_id: &'a AttemptId,
-    pub(super) invocation_epoch: u32,
-    pub(super) claim_generation: u32,
-    pub(super) claim_fencing_token: &'a side_effect::ClaimFencingToken,
-    pub(super) claim_owner: Option<&'a events::RunnerInvocationId>,
-}
-
-pub(super) fn require_claim_context(
-    ledger_key: &events::SideEffectLedgerKey,
-    claim: &SideEffectClaimProjection,
-    expected: ExpectedClaimContext<'_>,
-) -> Result<()> {
-    if claim.node_id != *expected.node_id {
-        return Err(side_effect_projection_error(
-            ledger_key,
-            "node id does not match active claim",
-        ));
-    }
-    if claim.attempt_id != *expected.attempt_id {
-        return Err(side_effect_projection_error(
-            ledger_key,
-            "attempt id does not match active claim",
-        ));
-    }
-    if claim.invocation_epoch != expected.invocation_epoch {
-        return Err(side_effect_projection_error(
-            ledger_key,
-            "invocation epoch does not match active claim",
-        ));
-    }
-    if claim.claim_generation != expected.claim_generation {
-        return Err(side_effect_projection_error(
-            ledger_key,
-            "claim generation does not match active claim",
-        ));
-    }
-    if claim.claim_fencing_token != *expected.claim_fencing_token {
-        return Err(side_effect_projection_error(
-            ledger_key,
-            "claim fencing token does not match active claim",
-        ));
-    }
-    if let Some(claim_owner) = expected.claim_owner {
-        if claim.claim_owner != *claim_owner {
-            return Err(side_effect_projection_error(
-                ledger_key,
-                "claim owner does not match active claim",
-            ));
-        }
-    }
-    Ok(())
-}
-
-pub(super) fn require_claim_takeover_matches(
-    ledger_key: &events::SideEffectLedgerKey,
-    claim: &SideEffectClaimProjection,
-    payload: &side_effect::ClaimTakenOver,
-) -> Result<()> {
-    if claim.node_id != payload.node_id {
-        return Err(side_effect_projection_error(
-            ledger_key,
-            "node id does not match active claim",
-        ));
-    }
-    if claim.attempt_id != payload.attempt_id {
-        return Err(side_effect_projection_error(
-            ledger_key,
-            "attempt id does not match active claim",
-        ));
-    }
-    if claim.claim_owner != payload.previous_claim_owner {
-        return Err(side_effect_projection_error(
-            ledger_key,
-            "previous claim owner does not match active claim",
-        ));
-    }
-    if claim.claim_generation != payload.previous_claim_generation {
-        return Err(side_effect_projection_error(
-            ledger_key,
-            "previous claim generation does not match active claim",
-        ));
-    }
-    if payload.claim_generation <= payload.previous_claim_generation {
-        return Err(side_effect_projection_error(
-            ledger_key,
-            "takeover claim generation must increase",
-        ));
-    }
-    if payload.claim_fencing_token == claim.claim_fencing_token {
-        return Err(side_effect_projection_error(
-            ledger_key,
-            "takeover claim fencing token must change",
-        ));
-    }
-    if claim.invocation_epoch != payload.invocation_epoch {
-        return Err(side_effect_projection_error(
-            ledger_key,
-            "invocation epoch does not match active claim",
-        ));
-    }
-    Ok(())
-}
-
 pub(super) fn prepared_invocation_projection(
     artifact_id: &Option<ArtifactId>,
     content_digest: &Option<ContentDigest>,
@@ -348,24 +186,39 @@ pub(super) fn prepared_invocation_projection(
     }
 }
 
-fn phase_matches_expected(phase: &SideEffectPhase, expected: &'static str) -> bool {
+fn phase_matches_expected(phase: &SideEffectLedgerPhase<'_>, expected: &'static str) -> bool {
     match expected {
-        "started" => matches!(phase, SideEffectPhase::InvocationStarted { .. }),
+        "started" => matches!(phase, SideEffectLedgerPhase::Started { .. }),
         "submission_recovery" => matches!(
             phase,
-            SideEffectPhase::InvocationStarted { .. } | SideEffectPhase::SubmissionUnknown { .. }
+            SideEffectLedgerPhase::Started { .. }
+                | SideEffectLedgerPhase::SubmissionKnown {
+                    status: SideEffectSubmissionState::Unknown,
+                    ..
+                }
         ),
         "submission_observed" => {
-            matches!(phase, SideEffectPhase::SubmissionObserved { .. })
+            matches!(
+                phase,
+                SideEffectLedgerPhase::SubmissionKnown {
+                    status: SideEffectSubmissionState::Observed { .. },
+                    ..
+                }
+            )
         }
-        "receipt" => matches!(phase, SideEffectPhase::ReceiptObserved { .. }),
-        "not_submitted" => matches!(phase, SideEffectPhase::NotSubmittedProven { .. }),
+        "receipt" => matches!(phase, SideEffectLedgerPhase::ReceiptObserved { .. }),
+        "not_submitted" => matches!(
+            phase,
+            SideEffectLedgerPhase::SubmissionKnown {
+                status: SideEffectSubmissionState::NotSubmitted,
+                ..
+            }
+        ),
         "ambiguity_source" => matches!(
             phase,
-            SideEffectPhase::InvocationStarted { .. }
-                | SideEffectPhase::SubmissionUnknown { .. }
-                | SideEffectPhase::SubmissionObserved { .. }
-                | SideEffectPhase::ReceiptObserved { .. }
+            SideEffectLedgerPhase::Started { .. }
+                | SideEffectLedgerPhase::SubmissionKnown { .. }
+                | SideEffectLedgerPhase::ReceiptObserved { .. }
         ),
         _ => false,
     }
@@ -375,81 +228,26 @@ pub(super) struct EpochOnlyTransition<'a> {
     pub(super) run_id: &'a RunId,
     pub(super) ledger_key: &'a events::SideEffectLedgerKey,
     pub(super) ledger_purpose: &'a events::SideEffectLedgerPurpose,
-    pub(super) node_id: &'a NodeId,
-    pub(super) attempt_id: &'a AttemptId,
-    pub(super) event_id: EventId,
-    pub(super) invocation_epoch: u32,
     pub(super) required_previous: &'static str,
 }
 
 pub(super) fn transition_side_effect_epoch_only(
     projections: &mut ProjectionSnapshot,
     transition: EpochOnlyTransition<'_>,
-    next_phase: impl FnOnce(u32) -> SideEffectPhase,
-    update_projection: impl FnOnce(&mut SideEffectProjection) -> Result<()>,
+    transition_state: impl FnOnce(OwnedSideEffectLedgerState) -> Result<OwnedSideEffectLedgerState>,
 ) -> Result<()> {
-    let (
-        run_id,
-        ledger_purpose,
-        intent,
-        prepared_invocation,
-        resource_key,
-        submission,
-        receipt,
-        confirmation,
-        resource_touched_set,
-        claim,
-    ) = {
-        let previous = require_side_effect_phase(
-            projections,
-            transition.run_id,
-            transition.ledger_key,
-            transition.required_previous,
-            |projection| phase_matches_expected(&projection.phase, transition.required_previous),
-        )?;
-        require_side_effect_purpose(previous, transition.ledger_key, transition.ledger_purpose)?;
-        let claim = previous_claim(previous, transition.ledger_key)?;
-        require_claim_context(
-            transition.ledger_key,
-            claim,
-            ExpectedClaimContext {
-                node_id: transition.node_id,
-                attempt_id: transition.attempt_id,
-                invocation_epoch: transition.invocation_epoch,
-                claim_generation: claim.claim_generation,
-                claim_fencing_token: &claim.claim_fencing_token,
-                claim_owner: Some(&claim.claim_owner),
-            },
-        )?;
-        (
-            previous.run_id.clone(),
-            previous.ledger_purpose.clone(),
-            previous.intent.clone(),
-            previous.prepared_invocation.clone(),
-            previous.resource_key.clone(),
-            previous.submission.clone(),
-            previous.receipt.clone(),
-            previous.confirmation.clone(),
-            previous.resource_touched_set.clone(),
-            claim.clone(),
-        )
-    };
-    let mut projection = SideEffectProjection {
-        run_id,
-        ledger_key: transition.ledger_key.clone(),
-        ledger_purpose,
-        event_id: transition.event_id,
-        intent,
-        prepared_invocation,
-        resource_key,
-        submission,
-        receipt,
-        confirmation,
-        resource_touched_set,
-        claim: Some(claim),
-        phase: next_phase(transition.invocation_epoch),
-    };
-    update_projection(&mut projection)?;
+    let previous = require_side_effect_phase(
+        projections,
+        transition.run_id,
+        transition.ledger_key,
+        transition.required_previous,
+        |state| phase_matches_expected(&state.phase(), transition.required_previous),
+    )?;
+    require_side_effect_purpose(previous, transition.ledger_key, transition.ledger_purpose)?;
+    let projection = transition_state(OwnedSideEffectLedgerState::from_projection(
+        previous.clone(),
+    )?)?
+    .into_projection();
     projections.side_effects.insert(
         SideEffectLedgerRef::new((*transition.run_id).clone(), transition.ledger_key.clone()),
         projection,
@@ -463,118 +261,19 @@ pub(super) fn transition_side_effect_failure(
     payload: &side_effect::Failed,
     event_id: EventId,
 ) -> Result<()> {
-    let (
-        run_id,
-        ledger_purpose,
-        intent,
-        prepared_invocation,
-        resource_key,
-        submission,
-        receipt,
-        confirmation,
-        resource_touched_set,
-        claim,
-    ) = {
-        let Some(previous) = projections.side_effect_for_run(run_id, &payload.ledger_key) else {
-            return Err(side_effect_projection_error(
-                &payload.ledger_key,
-                "missing side-effect projection",
-            ));
-        };
-        require_side_effect_purpose(previous, &payload.ledger_key, &payload.ledger_purpose)?;
-        match payload.failure_phase {
-            side_effect::FailurePhase::BeforeInvocationStarted => match previous.phase {
-                SideEffectPhase::IntentPersisted { invocation_epoch } => {
-                    if payload.invocation_epoch != invocation_epoch {
-                        return Err(side_effect_projection_error(
-                            &payload.ledger_key,
-                            "failure invocation epoch does not match intent",
-                        ));
-                    }
-                    require_intent_context(
-                        previous,
-                        &payload.node_id,
-                        &payload.attempt_id,
-                        payload.invocation_epoch,
-                    )?;
-                }
-                SideEffectPhase::Claimed { .. } | SideEffectPhase::InvocationPrepared { .. } => {
-                    let claim = previous_claim(previous, &payload.ledger_key)?;
-                    require_claim_context(
-                        &payload.ledger_key,
-                        claim,
-                        ExpectedClaimContext {
-                            node_id: &payload.node_id,
-                            attempt_id: &payload.attempt_id,
-                            invocation_epoch: payload.invocation_epoch,
-                            claim_generation: claim.claim_generation,
-                            claim_fencing_token: &claim.claim_fencing_token,
-                            claim_owner: None,
-                        },
-                    )?;
-                }
-                _ => {
-                    return Err(side_effect_projection_error(
-                        &payload.ledger_key,
-                        "before-start failure requires intent, claim, or prepared phase",
-                    ));
-                }
-            },
-            side_effect::FailurePhase::AfterNotSubmittedProven => {
-                if !phase_matches_expected(&previous.phase, "not_submitted") {
-                    return Err(side_effect_projection_error(
-                        &payload.ledger_key,
-                        "after-not-submitted failure requires not-submitted phase",
-                    ));
-                }
-                let claim = previous_claim(previous, &payload.ledger_key)?;
-                require_claim_context(
-                    &payload.ledger_key,
-                    claim,
-                    ExpectedClaimContext {
-                        node_id: &payload.node_id,
-                        attempt_id: &payload.attempt_id,
-                        invocation_epoch: payload.invocation_epoch,
-                        claim_generation: claim.claim_generation,
-                        claim_fencing_token: &claim.claim_fencing_token,
-                        claim_owner: Some(&claim.claim_owner),
-                    },
-                )?;
-            }
-        }
-        (
-            previous.run_id.clone(),
-            previous.ledger_purpose.clone(),
-            previous.intent.clone(),
-            previous.prepared_invocation.clone(),
-            previous.resource_key.clone(),
-            previous.submission.clone(),
-            previous.receipt.clone(),
-            previous.confirmation.clone(),
-            previous.resource_touched_set.clone(),
-            previous.claim.clone(),
-        )
+    let Some(previous) = projections.side_effect_for_run(run_id, &payload.ledger_key) else {
+        return Err(side_effect_projection_error(
+            &payload.ledger_key,
+            "missing side-effect projection",
+        ));
     };
+    require_side_effect_purpose(previous, &payload.ledger_key, &payload.ledger_purpose)?;
+    let projection = OwnedSideEffectLedgerState::from_projection(previous.clone())?
+        .fail(event_id, payload)?
+        .into_projection();
     projections.side_effects.insert(
         SideEffectLedgerRef::new(run_id.clone(), payload.ledger_key.clone()),
-        SideEffectProjection {
-            run_id,
-            ledger_key: payload.ledger_key.clone(),
-            ledger_purpose,
-            event_id,
-            intent,
-            prepared_invocation,
-            resource_key,
-            submission,
-            receipt,
-            confirmation,
-            resource_touched_set,
-            claim,
-            phase: SideEffectPhase::Failed {
-                invocation_epoch: payload.invocation_epoch,
-                failure_phase: payload.failure_phase,
-            },
-        },
+        projection,
     );
     Ok(())
 }

@@ -254,23 +254,15 @@ fn apply_side_effect_intent_persisted(
     };
     projections.side_effects.insert(
         ledger_ref,
-        SideEffectProjection {
-            run_id: envelope.run_id().clone(),
-            ledger_key: payload.ledger_key.clone(),
-            ledger_purpose: payload.ledger_purpose.clone(),
-            event_id: envelope.event_id.clone(),
+        OwnedSideEffectLedgerState::intent_persisted(
+            envelope.run_id().clone(),
+            payload.ledger_key.clone(),
+            payload.ledger_purpose.clone(),
+            envelope.event_id.clone(),
             intent,
-            prepared_invocation: None,
-            resource_key: None,
-            submission: None,
-            receipt: None,
-            confirmation: None,
-            resource_touched_set: None,
-            claim: None,
-            phase: SideEffectPhase::IntentPersisted {
-                invocation_epoch: payload.invocation_epoch,
-            },
-        },
+            payload.invocation_epoch,
+        )
+        .into_projection(),
     );
     Ok(())
 }
@@ -297,96 +289,24 @@ fn apply_side_effect_claimed(
         envelope.run_id(),
         &payload.ledger_key,
         "intent or not-submitted",
-        |projection| {
+        |state| {
             matches!(
-                projection.phase,
-                SideEffectPhase::IntentPersisted { .. }
-                    | SideEffectPhase::NotSubmittedProven { .. }
+                state.phase(),
+                SideEffectLedgerPhase::IntentPersisted { .. }
+                    | SideEffectLedgerPhase::SubmissionKnown {
+                        status: SideEffectSubmissionState::NotSubmitted,
+                        ..
+                    }
             )
         },
     )?;
     require_side_effect_purpose(previous, &payload.ledger_key, &payload.ledger_purpose)?;
-    match previous.phase {
-        SideEffectPhase::IntentPersisted { invocation_epoch } => {
-            if payload.invocation_epoch != invocation_epoch {
-                return Err(side_effect_projection_error(
-                    &payload.ledger_key,
-                    "initial claim invocation epoch does not match intent",
-                ));
-            }
-            require_intent_context(
-                previous,
-                &payload.node_id,
-                &payload.attempt_id,
-                payload.invocation_epoch,
-            )?;
-        }
-        SideEffectPhase::NotSubmittedProven { invocation_epoch } => {
-            require_intent_attempt_context(previous, &payload.node_id, &payload.attempt_id)?;
-            let previous_claim = previous_claim(previous, &payload.ledger_key)?;
-            if payload.claim_generation <= previous_claim.claim_generation {
-                return Err(side_effect_projection_error(
-                    &payload.ledger_key,
-                    "retry claim generation must increase",
-                ));
-            }
-            if payload.claim_fencing_token == previous_claim.claim_fencing_token {
-                return Err(side_effect_projection_error(
-                    &payload.ledger_key,
-                    "retry claim fencing token must change",
-                ));
-            }
-            let next_epoch = invocation_epoch.checked_add(1).ok_or_else(|| {
-                side_effect_projection_error(&payload.ledger_key, "invocation epoch overflow")
-            })?;
-            if payload.invocation_epoch != next_epoch {
-                return Err(side_effect_projection_error(
-                    &payload.ledger_key,
-                    "retry claim must advance to the next invocation epoch",
-                ));
-            }
-        }
-        _ => unreachable!("phase predicate checked above"),
-    }
-    let intent = previous.intent.clone();
-    let run_id = previous.run_id.clone();
-    let ledger_purpose = previous.ledger_purpose.clone();
-    let prepared_invocation = previous.prepared_invocation.clone();
-    let resource_key = previous.resource_key.clone();
-    let submission = previous.submission.clone();
-    let receipt = previous.receipt.clone();
-    let confirmation = previous.confirmation.clone();
-    let resource_touched_set = previous.resource_touched_set.clone();
-    let claim = SideEffectClaimProjection {
-        node_id: payload.node_id.clone(),
-        attempt_id: payload.attempt_id.clone(),
-        claim_owner: payload.claim_owner.clone(),
-        invocation_epoch: payload.invocation_epoch,
-        claim_generation: payload.claim_generation,
-        claim_fencing_token: payload.claim_fencing_token.clone(),
-    };
+    let projection = OwnedSideEffectLedgerState::from_projection(previous.clone())?
+        .claim(envelope.event_id.clone(), payload)?
+        .into_projection();
     projections.side_effects.insert(
         SideEffectLedgerRef::new(envelope.run_id().clone(), payload.ledger_key.clone()),
-        SideEffectProjection {
-            run_id,
-            ledger_key: payload.ledger_key.clone(),
-            ledger_purpose,
-            event_id: envelope.event_id.clone(),
-            intent,
-            prepared_invocation,
-            resource_key,
-            submission,
-            receipt,
-            confirmation,
-            resource_touched_set,
-            claim: Some(claim),
-            phase: SideEffectPhase::Claimed {
-                claim_owner: payload.claim_owner.clone(),
-                invocation_epoch: payload.invocation_epoch,
-                claim_generation: payload.claim_generation,
-                claim_fencing_token: payload.claim_fencing_token.clone(),
-            },
-        },
+        projection,
     );
     Ok(())
 }
@@ -413,55 +333,20 @@ fn apply_side_effect_claim_taken_over(
         envelope.run_id(),
         &payload.ledger_key,
         "claim or prepared",
-        |projection| {
+        |state| {
             matches!(
-                projection.phase,
-                SideEffectPhase::Claimed { .. } | SideEffectPhase::InvocationPrepared { .. }
+                state.phase(),
+                SideEffectLedgerPhase::Claimed { .. } | SideEffectLedgerPhase::Prepared { .. }
             )
         },
     )?;
     require_side_effect_purpose(previous, &payload.ledger_key, &payload.ledger_purpose)?;
-    let old_claim = previous_claim(previous, &payload.ledger_key)?;
-    require_claim_takeover_matches(&payload.ledger_key, old_claim, payload)?;
-    let intent = previous.intent.clone();
-    let run_id = previous.run_id.clone();
-    let ledger_purpose = previous.ledger_purpose.clone();
-    let prepared_invocation = previous.prepared_invocation.clone();
-    let resource_key = previous.resource_key.clone();
-    let submission = previous.submission.clone();
-    let receipt = previous.receipt.clone();
-    let confirmation = previous.confirmation.clone();
-    let resource_touched_set = previous.resource_touched_set.clone();
-    let claim = SideEffectClaimProjection {
-        node_id: payload.node_id.clone(),
-        attempt_id: payload.attempt_id.clone(),
-        claim_owner: payload.new_claim_owner.clone(),
-        invocation_epoch: payload.invocation_epoch,
-        claim_generation: payload.claim_generation,
-        claim_fencing_token: payload.claim_fencing_token.clone(),
-    };
+    let projection = OwnedSideEffectLedgerState::from_projection(previous.clone())?
+        .take_over(envelope.event_id.clone(), payload)?
+        .into_projection();
     projections.side_effects.insert(
         SideEffectLedgerRef::new(envelope.run_id().clone(), payload.ledger_key.clone()),
-        SideEffectProjection {
-            run_id,
-            ledger_key: payload.ledger_key.clone(),
-            ledger_purpose,
-            event_id: envelope.event_id.clone(),
-            intent,
-            prepared_invocation,
-            resource_key,
-            submission,
-            receipt,
-            confirmation,
-            resource_touched_set,
-            claim: Some(claim),
-            phase: SideEffectPhase::Claimed {
-                claim_owner: payload.new_claim_owner.clone(),
-                invocation_epoch: payload.invocation_epoch,
-                claim_generation: payload.claim_generation,
-                claim_fencing_token: payload.claim_fencing_token.clone(),
-            },
-        },
+        projection,
     );
     Ok(())
 }
@@ -488,59 +373,29 @@ fn apply_side_effect_invocation_prepared(
         envelope.run_id(),
         &payload.ledger_key,
         "claim",
-        |projection| matches!(projection.phase, SideEffectPhase::Claimed { .. }),
+        |state| matches!(state.phase(), SideEffectLedgerPhase::Claimed { .. }),
     )?;
     require_side_effect_purpose(previous, &payload.ledger_key, &payload.ledger_purpose)?;
-    let claim = previous_claim(previous, &payload.ledger_key)?;
-    require_claim_context(
-        &payload.ledger_key,
-        claim,
-        ExpectedClaimContext {
-            node_id: &payload.node_id,
-            attempt_id: &payload.attempt_id,
-            invocation_epoch: payload.invocation_epoch,
-            claim_generation: payload.claim_generation,
-            claim_fencing_token: &payload.claim_fencing_token,
-            claim_owner: None,
-        },
-    )?;
-    let intent = previous.intent.clone();
-    let run_id = previous.run_id.clone();
-    let ledger_purpose = previous.ledger_purpose.clone();
     let prepared_invocation = prepared_invocation_projection(
         &payload.prepared_artifact_id,
         &payload.prepared_hash,
         &payload.ledger_key,
     )?
     .or_else(|| previous.prepared_invocation.clone());
-    let submission = previous.submission.clone();
-    let receipt = previous.receipt.clone();
-    let confirmation = previous.confirmation.clone();
-    let resource_touched_set = previous.resource_touched_set.clone();
-    let claim = claim.clone();
+    let previous_projection = previous.clone();
     let resource_key =
         acquire_resource_lane(projections, envelope.run_id(), &envelope.event_id, payload)?;
-    projections.side_effects.insert(
-        SideEffectLedgerRef::new(envelope.run_id().clone(), payload.ledger_key.clone()),
-        SideEffectProjection {
-            run_id,
-            ledger_key: payload.ledger_key.clone(),
-            ledger_purpose,
-            event_id: envelope.event_id.clone(),
-            intent,
+    let projection = OwnedSideEffectLedgerState::from_projection(previous_projection)?
+        .prepare(
+            envelope.event_id.clone(),
+            payload,
             prepared_invocation,
             resource_key,
-            submission,
-            receipt,
-            confirmation,
-            resource_touched_set,
-            claim: Some(claim),
-            phase: SideEffectPhase::InvocationPrepared {
-                invocation_epoch: payload.invocation_epoch,
-                claim_generation: payload.claim_generation,
-                claim_fencing_token: payload.claim_fencing_token.clone(),
-            },
-        },
+        )?
+        .into_projection();
+    projections.side_effects.insert(
+        SideEffectLedgerRef::new(envelope.run_id().clone(), payload.ledger_key.clone()),
+        projection,
     );
     Ok(())
 }
@@ -567,53 +422,15 @@ fn apply_side_effect_invocation_started(
         envelope.run_id(),
         &payload.ledger_key,
         "prepared",
-        |projection| matches!(projection.phase, SideEffectPhase::InvocationPrepared { .. }),
+        |state| matches!(state.phase(), SideEffectLedgerPhase::Prepared { .. }),
     )?;
     require_side_effect_purpose(previous, &payload.ledger_key, &payload.ledger_purpose)?;
-    let claim = previous_claim(previous, &payload.ledger_key)?;
-    require_claim_context(
-        &payload.ledger_key,
-        claim,
-        ExpectedClaimContext {
-            node_id: &payload.node_id,
-            attempt_id: &payload.attempt_id,
-            invocation_epoch: payload.invocation_epoch,
-            claim_generation: payload.claim_generation,
-            claim_fencing_token: &payload.claim_fencing_token,
-            claim_owner: Some(&payload.claim_owner),
-        },
-    )?;
-    let intent = previous.intent.clone();
-    let run_id = previous.run_id.clone();
-    let ledger_purpose = previous.ledger_purpose.clone();
-    let prepared_invocation = previous.prepared_invocation.clone();
-    let resource_key = previous.resource_key.clone();
-    let submission = previous.submission.clone();
-    let receipt = previous.receipt.clone();
-    let confirmation = previous.confirmation.clone();
-    let resource_touched_set = previous.resource_touched_set.clone();
+    let projection = OwnedSideEffectLedgerState::from_projection(previous.clone())?
+        .start(envelope.event_id.clone(), payload)?
+        .into_projection();
     projections.side_effects.insert(
         SideEffectLedgerRef::new(envelope.run_id().clone(), payload.ledger_key.clone()),
-        SideEffectProjection {
-            run_id,
-            ledger_key: payload.ledger_key.clone(),
-            ledger_purpose,
-            event_id: envelope.event_id.clone(),
-            intent,
-            prepared_invocation,
-            resource_key,
-            submission,
-            receipt,
-            confirmation,
-            resource_touched_set,
-            claim: Some(claim.clone()),
-            phase: SideEffectPhase::InvocationStarted {
-                claim_owner: payload.claim_owner.clone(),
-                invocation_epoch: payload.invocation_epoch,
-                claim_generation: payload.claim_generation,
-                claim_fencing_token: payload.claim_fencing_token.clone(),
-            },
-        },
+        projection,
     );
     Ok(())
 }
@@ -635,16 +452,9 @@ fn apply_side_effect_not_submitted_proven(
             run_id: envelope.run_id(),
             ledger_key: &payload.ledger_key,
             ledger_purpose: &payload.ledger_purpose,
-            node_id: &payload.node_id,
-            attempt_id: &payload.attempt_id,
-            event_id: envelope.event_id.clone(),
-            invocation_epoch: payload.invocation_epoch,
             required_previous: "submission_recovery",
         },
-        |epoch| SideEffectPhase::NotSubmittedProven {
-            invocation_epoch: epoch,
-        },
-        |_| Ok(()),
+        |state| state.mark_not_submitted(envelope.event_id.clone(), payload),
     )?;
     release_resource_lane_for_holder(
         projections,
@@ -670,23 +480,9 @@ fn apply_side_effect_submission_observed(
             run_id: envelope.run_id(),
             ledger_key: &payload.ledger_key,
             ledger_purpose: &payload.ledger_purpose,
-            node_id: &payload.node_id,
-            attempt_id: &payload.attempt_id,
-            event_id: envelope.event_id.clone(),
-            invocation_epoch: payload.invocation_epoch,
             required_previous: "submission_recovery",
         },
-        |epoch| SideEffectPhase::SubmissionObserved {
-            invocation_epoch: epoch,
-        },
-        |projection| {
-            projection.submission = Some(SideEffectArtifactProjection {
-                artifact_id: payload.submission_artifact_id.clone(),
-                content_digest: payload.submission_hash.clone(),
-                schema_id: Some(payload.submission_schema_id.clone()),
-            });
-            Ok(())
-        },
+        |state| state.record_submission(envelope.event_id.clone(), payload),
     )?;
     Ok(())
 }
@@ -708,16 +504,9 @@ fn apply_side_effect_submission_unknown(
             run_id: envelope.run_id(),
             ledger_key: &payload.ledger_key,
             ledger_purpose: &payload.ledger_purpose,
-            node_id: &payload.node_id,
-            attempt_id: &payload.attempt_id,
-            event_id: envelope.event_id.clone(),
-            invocation_epoch: payload.invocation_epoch,
             required_previous: "submission_recovery",
         },
-        |epoch| SideEffectPhase::SubmissionUnknown {
-            invocation_epoch: epoch,
-        },
-        |_| Ok(()),
+        |state| state.mark_submission_unknown(envelope.event_id.clone(), payload),
     )?;
     Ok(())
 }
@@ -739,26 +528,9 @@ fn apply_side_effect_receipt_observed(
             run_id: envelope.run_id(),
             ledger_key: &payload.ledger_key,
             ledger_purpose: &payload.ledger_purpose,
-            node_id: &payload.node_id,
-            attempt_id: &payload.attempt_id,
-            event_id: envelope.event_id.clone(),
-            invocation_epoch: payload.invocation_epoch,
             required_previous: "submission_observed",
         },
-        |epoch| SideEffectPhase::ReceiptObserved {
-            invocation_epoch: epoch,
-        },
-        |projection| {
-            projection.receipt = Some(SideEffectArtifactProjection {
-                artifact_id: payload.receipt_artifact_id.clone(),
-                content_digest: payload.receipt_hash.clone(),
-                schema_id: Some(payload.receipt_schema_id.clone()),
-            });
-            if let Some(touched_set) = payload.resource_touched_set.clone() {
-                projection.resource_touched_set = Some(touched_set);
-            }
-            Ok(())
-        },
+        |state| state.record_receipt(envelope.event_id.clone(), payload),
     )?;
     Ok(())
 }
@@ -780,26 +552,9 @@ fn apply_side_effect_confirmation_observed(
             run_id: envelope.run_id(),
             ledger_key: &payload.ledger_key,
             ledger_purpose: &payload.ledger_purpose,
-            node_id: &payload.node_id,
-            attempt_id: &payload.attempt_id,
-            event_id: envelope.event_id.clone(),
-            invocation_epoch: payload.invocation_epoch,
             required_previous: "receipt",
         },
-        |epoch| SideEffectPhase::ConfirmationObserved {
-            invocation_epoch: epoch,
-        },
-        |projection| {
-            projection.confirmation = Some(SideEffectArtifactProjection {
-                artifact_id: payload.confirmation_artifact_id.clone(),
-                content_digest: payload.confirmation_hash.clone(),
-                schema_id: Some(payload.confirmation_schema_id.clone()),
-            });
-            if let Some(touched_set) = payload.resource_touched_set.clone() {
-                projection.resource_touched_set = Some(touched_set);
-            }
-            Ok(())
-        },
+        |state| state.confirm(envelope.event_id.clone(), payload),
     )?;
     release_resource_lane_for_holder(
         projections,
@@ -825,16 +580,9 @@ fn apply_side_effect_ambiguous(
             run_id: envelope.run_id(),
             ledger_key: &payload.ledger_key,
             ledger_purpose: &payload.ledger_purpose,
-            node_id: &payload.node_id,
-            attempt_id: &payload.attempt_id,
-            event_id: envelope.event_id.clone(),
-            invocation_epoch: payload.invocation_epoch,
             required_previous: "ambiguity_source",
         },
-        |epoch| SideEffectPhase::Ambiguous {
-            invocation_epoch: epoch,
-        },
-        |_| Ok(()),
+        |state| state.mark_ambiguous(envelope.event_id.clone(), payload),
     )?;
     if matches!(
         payload.ledger_purpose,

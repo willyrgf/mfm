@@ -589,3 +589,50 @@ Checks run:
 - `cargo test -p mfm-certify -p mfm-runtime -p mfm-replay`
 - `cargo test -p mfm-integration-tests --test cargo_metadata_contract`
 - `cargo test -p mfm-integration-tests --test architecture_namespace_contract`
+
+## Phase 13: Side-Effect Ledger Typestate
+
+Status: completed.
+
+Files changed:
+
+- `crates/kernel/store/src/lib.rs`
+- `crates/kernel/store/src/v1/projection.rs`
+- `crates/kernel/store/src/v1/side_effects.rs`
+- `crates/kernel/store/tests/commit_contract.rs`
+- `crates/kernel/runtime/src/frontier.rs`
+- `crates/kernel/runtime/src/side_effects.rs`
+- `crates/kernel/replay/src/lib.rs`
+- `crates/storages/stream-store-postgres/src/typed.rs`
+- `IMPLEMENTATION_ACDC_SAGA_PRE_MERGE.md`
+
+Validators deleted or replaced:
+
+- Added `SideEffectLedgerState`, `SideEffectLedgerPhase`, and
+  `SideEffectSubmissionState` as validated borrowed views over side-effect ledger projections.
+- Added store-internal `OwnedSideEffectLedgerState` with private constructors, consuming
+  transition methods, and DTO conversion for store projection updates.
+- Replaced direct optional-field rewrites in side-effect projection transitions with typed
+  ledger transitions.
+- Replaced runtime frontier, resume, and terminal-evidence checks that read raw projection fields
+  with typed side-effect ledger views.
+- Replaced replay and Postgres projection hydration with `ProjectionSnapshot::from_parts`
+  validation that certifies side-effect DTO shape before exposing the snapshot.
+- Deleted the old duplicate side-effect transition validators:
+  `previous_claim`, `require_intent_context`, `require_intent_attempt_context`,
+  `ExpectedClaimContext`, `require_claim_context`, and `require_claim_takeover_matches`.
+
+Tests added or updated:
+
+- Added store tests for valid prepared ledger views, invalid claim projections, invalid confirmed
+  projections, and terminal ambiguity classification.
+- Updated replay side-effect projection fixtures to construct typed-valid terminal evidence for
+  hydrated snapshots.
+
+Checks run:
+
+- `cargo fmt --all -- --check`
+- `cargo check -p mfm-store -p mfm-runtime -p mfm-replay -p mfm-stream-store-postgres`
+- `cargo test -p mfm-store -p mfm-runtime -p mfm-replay -p mfm-stream-store-postgres`
+- `cargo test -p mfm-integration-tests --test cargo_metadata_contract`
+- `cargo test -p mfm-integration-tests --test architecture_namespace_contract`

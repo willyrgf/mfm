@@ -133,24 +133,9 @@ fn next_forward_completion_node<'a>(
         if node.side_effect.is_none() {
             continue;
         }
-        let Some(runnable) =
-            continuing_side_effect_node_if(runtime_spec, node, view, |projection| {
-                matches!(
-                    &projection.ledger_purpose,
-                    events::SideEffectLedgerPurpose::Forward
-                ) && matches!(
-                    projection.phase,
-                    store::SideEffectPhase::IntentPersisted { .. }
-                        | store::SideEffectPhase::Claimed { .. }
-                        | store::SideEffectPhase::InvocationPrepared { .. }
-                        | store::SideEffectPhase::InvocationStarted { .. }
-                        | store::SideEffectPhase::NotSubmittedProven { .. }
-                        | store::SideEffectPhase::SubmissionObserved { .. }
-                        | store::SideEffectPhase::SubmissionUnknown { .. }
-                        | store::SideEffectPhase::ReceiptObserved { .. }
-                        | store::SideEffectPhase::ConfirmationObserved { .. }
-                )
-            })?
+        let Some(runnable) = continuing_side_effect_node_if(runtime_spec, node, view, |state| {
+            state.is_forward_completion_candidate()
+        })?
         else {
             continue;
         };
@@ -274,7 +259,7 @@ fn continuing_side_effect_node_if<'a>(
     runtime_spec: &'a CertifiedRuntimeSpec,
     node: &'a spec::NodeSpec,
     view: &RuntimeRunView,
-    mut predicate: impl FnMut(&store::SideEffectProjection) -> bool,
+    mut predicate: impl FnMut(&store::SideEffectLedgerState<'_>) -> bool,
 ) -> Result<Option<RunnableNode<'a>>> {
     let mut selected = None;
     for ((attempt_node_id, attempt_id), attempt) in view.projections.attempts() {
@@ -289,7 +274,10 @@ fn continuing_side_effect_node_if<'a>(
         else {
             continue;
         };
-        if predicate(projection) && selected.replace(attempt_id.clone()).is_some() {
+        let state = projection
+            .ledger_state()
+            .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
+        if predicate(&state) && selected.replace(attempt_id.clone()).is_some() {
             return Err(RuntimeError::InvalidRunStream(format!(
                 "node {} has multiple side-effect completion candidates",
                 node.node_id
@@ -484,15 +472,17 @@ fn side_effect_attempt_plan(
                 if let Some(projection) =
                     side_effect_projection_for_attempt(&view.projections, node, attempt_id)?
                 {
-                    match projection.phase {
-                        store::SideEffectPhase::Ambiguous { .. } => return Ok(None),
-                        store::SideEffectPhase::Failed { .. } => {
-                            return Err(RuntimeError::InvalidRunStream(format!(
+                    let state = projection
+                        .ledger_state()
+                        .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
+                    if state.is_ambiguous() {
+                        return Ok(None);
+                    }
+                    if state.is_failed() {
+                        return Err(RuntimeError::InvalidRunStream(format!(
                                 "side-effect ledger {} failed while attempt {} for node {} remained started",
                                 projection.ledger_key, attempt_id, node.node_id
                             )));
-                        }
-                        _ => {}
                     }
                 }
                 if started.replace((attempt_id.clone(), *attempt_no)).is_some() {
