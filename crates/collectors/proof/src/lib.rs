@@ -119,16 +119,24 @@ impl CapabilitySpec for ProofMutationCapability {
 }
 
 /// Config for the proof fact read state.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
-#[mfm(schema = "mfm.proof.config.read_fact")]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue, MfmConfig)]
+#[mfm(
+    namespace = "mfm.proof",
+    name = "read-config",
+    schema = "mfm.proof.config.read_fact"
+)]
 pub struct ProofReadConfig {
     /// Deterministic fact value returned by the enabled proof implementation.
     pub fact_n: u64,
 }
 
 /// Config for the proof side-effect state.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq, MfmConfig)]
-#[mfm(schema = "mfm.proof.config.apply_side_effect")]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, MfmValue, MfmConfig)]
+#[mfm(
+    namespace = "mfm.proof",
+    name = "apply-config",
+    schema = "mfm.proof.config.apply_side_effect"
+)]
 pub struct ProofApplyConfig {
     /// Stable action name included in the intent and idempotency input.
     action: String,
@@ -172,39 +180,41 @@ impl<'de> Deserialize<'de> for ProofApplyConfig {
 }
 
 /// Config for proof output assembly.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
-#[mfm(schema = "mfm.proof.config.assemble_output")]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue, MfmConfig)]
+#[mfm(
+    namespace = "mfm.proof",
+    name = "assemble-config",
+    schema = "mfm.proof.config.assemble_output"
+)]
 pub struct ProofAssembleConfig {}
 
 /// Root proof workflow config.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue, MfmConfig)]
 #[mfm(
-    schema = "mfm.proof.config.workflow",
-    validate = "validate_proof_workflow_config"
+    namespace = "mfm.proof",
+    name = "workflow-config",
+    schema = "mfm.proof.config.workflow"
 )]
 pub struct ProofWorkflowConfig {
-    /// Workflow config contract version.
-    pub workflow_version: u64,
-    /// Deterministic fact value returned by the proof read state.
-    pub fact_n: u64,
-    /// Stable proof action used by the mutation intent.
-    pub action: String,
+    /// Config for the deterministic proof fact read.
+    pub read: ProofReadConfig,
+    /// Config for the proof side-effect mutation.
+    pub apply: ProofApplyConfig,
 }
 
-fn validate_proof_workflow_config(config: &ProofWorkflowConfig) -> Result<(), String> {
-    if config.workflow_version != 1 {
-        return Err("unsupported proof workflow config version".to_owned());
+impl ProofWorkflowConfig {
+    /// Creates a proof workflow config from validated child configs.
+    pub const fn new(read: ProofReadConfig, apply: ProofApplyConfig) -> Self {
+        Self { read, apply }
     }
-    Ok(())
 }
 
 impl Default for ProofWorkflowConfig {
     fn default() -> Self {
-        Self {
-            workflow_version: 1,
-            fact_n: 1,
-            action: "accept".to_owned(),
-        }
+        Self::new(
+            ProofReadConfig { fact_n: 1 },
+            ProofApplyConfig::new("accept").expect("default proof action is non-empty"),
+        )
     }
 }
 
@@ -614,5 +624,24 @@ mod tests {
     fn proof_apply_config_rejects_empty_actions_at_construction() {
         assert!(ProofApplyConfig::new("accept").is_ok());
         assert!(ProofApplyConfig::new("   ").is_err());
+    }
+
+    #[test]
+    fn proof_workflow_config_has_distinct_canonical_shape_from_runtime_intent() {
+        let config = ProofWorkflowConfig::default();
+        let intent = ProofIntent {
+            fact_n: config.read.fact_n,
+            action: config.apply.action().to_owned(),
+        };
+
+        let config_json = serde_json::to_string(&config).expect("config json");
+        let intent_json = serde_json::to_string(&intent).expect("intent json");
+        let config_bytes =
+            mfm_canonical::PlainCanonicalJsonBytes::from_json_str(&config_json).expect("config");
+        let intent_bytes =
+            mfm_canonical::PlainCanonicalJsonBytes::from_json_str(&intent_json).expect("intent");
+
+        assert_ne!(config_bytes.as_bytes(), intent_bytes.as_bytes());
+        assert_ne!(config_bytes.content_digest(), intent_bytes.content_digest());
     }
 }

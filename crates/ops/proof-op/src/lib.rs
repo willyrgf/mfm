@@ -72,16 +72,11 @@ impl Operation for ProofWorkflowOperation {
         _dispatch: mfm_program::OperationExpansionDispatch<Self>,
     ) -> mfm_program::Result<Self::Output<'program, 'scope>> {
         let config = config.into_inner();
-        let fact = builder.state::<ProofReadFactState, _>(
-            StateKey::new("read_fact")?,
-            ProofReadConfig {
-                fact_n: config.fact_n,
-            },
-            (),
-        )?;
+        let fact =
+            builder.state::<ProofReadFactState, _>(StateKey::new("read_fact")?, config.read, ())?;
         let side_effect = builder.side_effect::<ProofApplySideEffectState, _>(
             StateKey::new("apply_side_effect")?,
-            ProofApplyConfig::new(config.action).map_err(mfm_program::PlanError::Value)?,
+            config.apply,
             fact.clone(),
             ResourceClaim::manual_only(),
         )?;

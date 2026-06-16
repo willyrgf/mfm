@@ -5,9 +5,9 @@ use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_events::v1 as events;
 use mfm_ids::{ArtifactId, ContentDigest, DigestAlgorithm, DigestBytes, EventId, RunId};
 use mfm_op_proof::{
-    certified_proof_spec, proof_program_draft, ProofConfirmation, ProofFact, ProofFactResponse,
-    ProofIdempotencyInput, ProofIntent, ProofReceipt, ProofReplayVerifier, ProofSubmission,
-    ProofWorkflowConfig, RecordedProofFacts,
+    certified_proof_spec, proof_program_draft, ProofApplyConfig, ProofConfirmation, ProofFact,
+    ProofFactResponse, ProofIdempotencyInput, ProofIntent, ProofReadConfig, ProofReceipt,
+    ProofReplayVerifier, ProofSubmission, ProofWorkflowConfig, RecordedProofFacts,
 };
 use mfm_replay::v1 as replay;
 use mfm_runtime::{
@@ -170,11 +170,10 @@ async fn conformance_start_rejects_draft_not_bound_to_certified_spec() {
     let certified =
         certified_proof_spec(ProofWorkflowConfig::default()).expect("certified proof spec");
     let runtime_spec = CertifiedRuntimeSpec::new(certified).expect("runtime spec");
-    let mismatched_draft = proof_program_draft(ProofWorkflowConfig {
-        workflow_version: 1,
-        fact_n: 2,
-        action: "reject".to_owned(),
-    })
+    let mismatched_draft = proof_program_draft(ProofWorkflowConfig::new(
+        ProofReadConfig { fact_n: 2 },
+        ProofApplyConfig::new("reject").expect("non-empty proof action"),
+    ))
     .expect("mismatched proof draft");
     let artifacts = InMemoryProofArtifacts::default();
     let artifact_stager: Arc<dyn RuntimeArtifactStager> = Arc::new(artifacts);
