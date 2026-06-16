@@ -51,7 +51,10 @@ const PUBLIC_OUTPUT_KEY: &str = "contract";
 
 /// Aggregate full lifecycle authored config owned by the operation layer.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
-#[mfm(schema = "mfm.evm.contract.operation.config.lifecycle")]
+#[mfm(
+    schema = "mfm.evm.contract.operation.config.lifecycle",
+    validate = "validate_contract_lifecycle_config"
+)]
 pub struct ContractLifecycleConfig {
     /// Config contract version.
     pub lifecycle_version: u64,
@@ -77,16 +80,14 @@ impl ContractLifecycleConfig {
             validate,
         }
     }
+}
 
-    fn validate(&self) -> mfm_program::Result<()> {
-        if self.lifecycle_version != 1 {
-            return Err(mfm_program::PlanError::Key(
-                "unsupported contract lifecycle config version".to_owned(),
-            ));
-        }
-        ensure_phase_networks_match(&self.deploy, &self.configure, &self.validate)?;
-        Ok(())
+fn validate_contract_lifecycle_config(config: &ContractLifecycleConfig) -> Result<(), String> {
+    if config.lifecycle_version != 1 {
+        return Err("unsupported contract lifecycle config version".to_owned());
     }
+    ensure_phase_networks_match(&config.deploy, &config.configure, &config.validate)
+        .map_err(|error| error.to_string())
 }
 
 /// Output handles produced by deploy-only operation planning.
@@ -290,7 +291,6 @@ impl Operation for ContractLifecycleOperation {
         builder: &mut OperationExpansion<'program, 'scope>,
         _dispatch: mfm_program::OperationExpansionDispatch<Self>,
     ) -> mfm_program::Result<Self::Output<'program, 'scope>> {
-        config.validate()?;
         let deployed = builder
             .side_effect::<DeployContractState, _>(
                 StateKey::new("deploy")?,

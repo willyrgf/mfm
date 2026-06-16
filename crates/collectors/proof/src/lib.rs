@@ -17,8 +17,8 @@ use mfm_ids::{
     StateVersion,
 };
 use mfm_program::{
-    AdapterBindingSpec, IdempotencyKey, PureState, ReadState, SideEffectState, StateError,
-    StateResult, StateSpec,
+    AdapterBindingSpec, IdempotencyKey, PureState, ReadState, SideEffectState, StateResult,
+    StateSpec,
 };
 use mfm_program_derive::{MfmConfig, MfmValue, OperationOutput, PublicOutputs, StateInput};
 use serde::{Deserialize, Serialize};
@@ -128,7 +128,10 @@ pub struct ProofReadConfig {
 
 /// Config for the proof side-effect state.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
-#[mfm(schema = "mfm.proof.config.apply_side_effect")]
+#[mfm(
+    schema = "mfm.proof.config.apply_side_effect",
+    validate = "validate_proof_apply_config"
+)]
 pub struct ProofApplyConfig {
     /// Stable action name included in the intent and idempotency input.
     pub action: String,
@@ -136,10 +139,27 @@ pub struct ProofApplyConfig {
 
 /// Config for proof output assembly.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
-#[mfm(schema = "mfm.proof.config.assemble_output")]
+#[mfm(
+    schema = "mfm.proof.config.assemble_output",
+    validate = "validate_proof_assemble_config"
+)]
 pub struct ProofAssembleConfig {
     /// Output contract version.
     pub output_version: u64,
+}
+
+fn validate_proof_apply_config(config: &ProofApplyConfig) -> Result<(), String> {
+    if config.action.trim().is_empty() {
+        return Err("proof action must be non-empty".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_proof_assemble_config(config: &ProofAssembleConfig) -> Result<(), String> {
+    if config.output_version != 1 {
+        return Err("unsupported proof output version".to_owned());
+    }
+    Ok(())
 }
 
 /// Root proof workflow config.
@@ -408,11 +428,6 @@ impl StateSpec for ProofApplySideEffectState {
     }
 
     fn new(config: Self::Config) -> mfm_program::Result<Self> {
-        if config.action.trim().is_empty() {
-            return Err(mfm_program::PlanError::Key(
-                "proof action must be non-empty".to_owned(),
-            ));
-        }
         Ok(Self { config })
     }
 }
@@ -470,9 +485,7 @@ impl SideEffectState for ProofApplySideEffectState {
 }
 
 /// Pure state that assembles the proof public output value.
-pub struct ProofAssembleOutputState {
-    config: ProofAssembleConfig,
-}
+pub struct ProofAssembleOutputState;
 
 impl StateSpec for ProofAssembleOutputState {
     type Config = ProofAssembleConfig;
@@ -493,18 +506,13 @@ impl StateSpec for ProofAssembleOutputState {
         "mfm.proof.assemble_output"
     }
 
-    fn new(config: Self::Config) -> mfm_program::Result<Self> {
-        Ok(Self { config })
+    fn new(_config: Self::Config) -> mfm_program::Result<Self> {
+        Ok(Self)
     }
 }
 
 impl PureState for ProofAssembleOutputState {
     fn run(&self, input: Self::Input) -> StateResult<Self::Output> {
-        if self.config.output_version != 1 {
-            return Err(StateError::Message(
-                "unsupported proof output version".to_owned(),
-            ));
-        }
         Ok(ProofOutput {
             fact: input.fact,
             side_effect: input.side_effect,

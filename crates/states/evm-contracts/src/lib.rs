@@ -656,10 +656,22 @@ pub struct ProjectConfiguredContractRefState {
 
 /// Config for projecting a configured contract reference.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
-#[mfm(schema = "mfm.evm.contract.config.project_configured_ref")]
+#[mfm(
+    schema = "mfm.evm.contract.config.project_configured_ref",
+    validate = "validate_project_configured_contract_ref_config"
+)]
 pub struct ProjectConfiguredContractRefConfig {
     /// Projection contract version.
     pub projection_version: u64,
+}
+
+fn validate_project_configured_contract_ref_config(
+    config: &ProjectConfiguredContractRefConfig,
+) -> Result<(), String> {
+    if config.projection_version == 0 {
+        return Err("projection_version must be non-zero".to_owned());
+    }
+    Ok(())
 }
 
 impl StateSpec for ProjectConfiguredContractRefState {
@@ -682,11 +694,6 @@ impl StateSpec for ProjectConfiguredContractRefState {
     }
 
     fn new(config: Self::Config) -> mfm_program::Result<Self> {
-        if config.projection_version == 0 {
-            return Err(mfm_program::PlanError::Key(
-                "projection_version must be non-zero".to_owned(),
-            ));
-        }
         Ok(Self { config })
     }
 }
