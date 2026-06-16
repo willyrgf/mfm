@@ -11,7 +11,7 @@ use syn::parse_macro_input;
 use syn::spanned::Spanned;
 use syn::{
     Attribute, Data, DataEnum, DataStruct, DeriveInput, Fields, FieldsNamed, FieldsUnnamed,
-    GenericArgument, GenericParam, Ident, LitStr, PathArguments, Type, TypePath, Variant,
+    GenericArgument, GenericParam, Ident, LitStr, Path, PathArguments, Type, TypePath, Variant,
 };
 
 #[proc_macro_derive(MfmValue, attributes(mfm, serde))]
@@ -191,6 +191,25 @@ fn expand_schema_derive_result(
         )
     };
 
+    let config_validate_method = if let Some(validate_path) = &attrs.validate {
+        if kind != DeriveKind::Config {
+            return Err(syn::Error::new_spanned(
+                &input.ident,
+                "#[mfm(validate = \"...\")] is supported only for MfmConfig",
+            ));
+        }
+        quote! {
+            fn validate(
+                &self,
+            ) -> ::std::result::Result<(), ::mfm_values::ConfigError> {
+                #validate_path(self)
+                    .map_err(|error| ::mfm_values::ConfigError::new(error.to_string()))
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     let impl_block = match kind {
         DeriveKind::Value => quote! {
             impl ::mfm_values::MfmValue for #ident {
@@ -206,6 +225,8 @@ fn expand_schema_derive_result(
                 fn schema_descriptor() -> ::mfm_values::Result<::mfm_values::SchemaDescriptor> {
                     #descriptor_body
                 }
+
+                #config_validate_method
             }
         },
         DeriveKind::StateInput => quote! {
@@ -456,6 +477,7 @@ struct ContainerAttrs {
     rename_all: Option<String>,
     enum_tag: Option<String>,
     enum_content: Option<String>,
+    validate: Option<Path>,
 }
 
 impl ContainerAttrs {
@@ -469,6 +491,7 @@ impl ContainerAttrs {
             rename_all: None,
             enum_tag: None,
             enum_content: None,
+            validate: None,
         };
 
         for attr in attrs {
@@ -482,6 +505,15 @@ impl ContainerAttrs {
                         output.version = meta.value()?.parse::<LitStr>()?.value();
                     } else if meta.path.is_ident("schema") {
                         output.schema_name = meta.value()?.parse::<LitStr>()?.value();
+                    } else if meta.path.is_ident("validate") {
+                        let value = meta.value()?.parse::<LitStr>()?.value();
+                        output.validate =
+                            Some(syn::parse_str::<Path>(&value).map_err(|error| {
+                                syn::Error::new(
+                                    meta.path.span(),
+                                    format!("invalid config validator path: {error}"),
+                                )
+                            })?);
                     } else {
                         return Err(meta.error("unsupported #[mfm(...)] container attribute"));
                     }
