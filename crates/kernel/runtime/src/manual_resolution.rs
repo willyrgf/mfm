@@ -178,15 +178,15 @@ pub(crate) fn prepare_manual_resolution_commit(
     };
     verify_artifact_bytes(verified.proof_bytes(), &authorization_ref)?;
 
-    let request = store::TypedCommitRequest {
-        run_id: claim.run_id.clone(),
+    let request = store::TypedCommitRequest::from_payloads(
+        claim.run_id.clone(),
         expected_next_seq,
-        commit_key: store::CommitKey::new(format!(
+        store::CommitKey::new(format!(
             "manual-resolution:{}:{}",
             claim.outcome.as_str(),
             authorization_hash.as_str()
         ))?,
-        payloads: vec![events::KernelEventPayload::ManualResolutionRecorded(
+        vec![events::KernelEventPayload::ManualResolutionRecorded(
             events::ManualResolutionRecorded {
                 run_id: claim.run_id.clone(),
                 spec_hash: claim.spec_hash.clone(),
@@ -200,8 +200,8 @@ pub(crate) fn prepare_manual_resolution_commit(
                 note,
             },
         )],
-        required_artifacts: vec![evidence_ref.clone(), authorization_ref.clone()],
-        preconditions: store::CommitPreconditions {
+        vec![evidence_ref.clone(), authorization_ref.clone()],
+        store::CommitPreconditions {
             required_run_state: store::RequiredRunState::NotCompleted,
             saga_admit_token: Some(store::SagaAdmitToken::new(
                 claim.run_id.clone(),
@@ -210,7 +210,7 @@ pub(crate) fn prepare_manual_resolution_commit(
             )?),
             ..store::CommitPreconditions::default()
         },
-    };
+    )?;
     let prepared = store::PreparedCommit::<store::ManualResolution>::new(
         request,
         store::CommitArtifactEvidenceSet::new(

@@ -1508,6 +1508,77 @@ pub mod v1 {
         pub preconditions: CommitPreconditions,
     }
 
+    impl TypedCommitRequest {
+        /// Creates a typed commit request from a validated non-empty payload batch.
+        pub fn new(
+            run_id: RunId,
+            expected_next_seq: StreamSeq,
+            commit_key: CommitKey,
+            payloads: NonEmptyPayloadBatch,
+            required_artifacts: Vec<ArtifactEvidenceRef>,
+            preconditions: CommitPreconditions,
+        ) -> Result<Self> {
+            validate_payload_run_and_spec(&run_id, payloads.as_slice())?;
+            Ok(Self {
+                run_id,
+                expected_next_seq,
+                commit_key,
+                payloads: payloads.into_vec(),
+                required_artifacts,
+                preconditions,
+            })
+        }
+
+        /// Creates a typed commit request after validating the raw payload collection.
+        pub fn from_payloads(
+            run_id: RunId,
+            expected_next_seq: StreamSeq,
+            commit_key: CommitKey,
+            payloads: Vec<KernelEventPayload>,
+            required_artifacts: Vec<ArtifactEvidenceRef>,
+            preconditions: CommitPreconditions,
+        ) -> Result<Self> {
+            Self::new(
+                run_id,
+                expected_next_seq,
+                commit_key,
+                NonEmptyPayloadBatch::new(payloads)?,
+                required_artifacts,
+                preconditions,
+            )
+        }
+
+        /// Returns the run id to append to.
+        pub fn run_id(&self) -> &RunId {
+            &self.run_id
+        }
+
+        /// Returns the caller's expected next store-owned stream sequence.
+        pub fn expected_next_seq(&self) -> StreamSeq {
+            self.expected_next_seq
+        }
+
+        /// Returns the commit key for idempotency.
+        pub fn commit_key(&self) -> &CommitKey {
+            &self.commit_key
+        }
+
+        /// Returns the ordered typed event payloads.
+        pub fn payloads(&self) -> &[KernelEventPayload] {
+            &self.payloads
+        }
+
+        /// Returns artifact evidence refs required for the commit.
+        pub fn required_artifacts(&self) -> &[ArtifactEvidenceRef] {
+            &self.required_artifacts
+        }
+
+        /// Returns atomic commit preconditions.
+        pub fn preconditions(&self) -> &CommitPreconditions {
+            &self.preconditions
+        }
+    }
+
     /// Non-empty ordered kernel payload batch.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct NonEmptyPayloadBatch {

@@ -277,20 +277,17 @@ impl CommitPlanner {
         payloads.push(bootstrap_completed);
         payloads.push(bootstrap_ref);
         payloads.push(retention_payload);
-        let request = store::TypedCommitRequest {
+        let request = store::TypedCommitRequest::from_payloads(
             run_id,
             expected_next_seq,
-            commit_key: store::CommitKey::new(format!(
-                "run-start:{}",
-                runtime_spec.spec_hash().as_str()
-            ))?,
+            store::CommitKey::new(format!("run-start:{}", runtime_spec.spec_hash().as_str()))?,
             payloads,
-            required_artifacts: required_artifacts.clone(),
-            preconditions: store::CommitPreconditions {
+            required_artifacts.clone(),
+            store::CommitPreconditions {
                 required_run_state: store::RequiredRunState::Absent,
                 ..store::CommitPreconditions::default()
             },
-        };
+        )?;
         let commit = store::PreparedCommit::<store::RunStart>::new(
             request,
             store::CommitArtifactEvidenceSet::new(required_artifacts, admitted_artifacts)?,
@@ -358,17 +355,14 @@ impl CommitPlanner {
         preconditions
             .required_cell_states
             .extend(node_cell_preconditions(runtime_spec, node)?);
-        let request = store::TypedCommitRequest {
-            run_id: run_id.clone(),
-            expected_next_seq: view.next_seq,
-            commit_key: store::CommitKey::new(format!(
-                "attempt-start:{}:{}",
-                node.node_id, attempt_id
-            ))?,
-            payloads: vec![start_payload],
-            required_artifacts: Vec::new(),
+        let request = store::TypedCommitRequest::from_payloads(
+            run_id.clone(),
+            view.next_seq,
+            store::CommitKey::new(format!("attempt-start:{}:{}", node.node_id, attempt_id))?,
+            vec![start_payload],
+            Vec::new(),
             preconditions,
-        };
+        )?;
         store::PreparedCommit::<store::StateAttemptStarted>::new(
             request,
             store::CommitArtifactEvidenceSet::empty(),
@@ -520,14 +514,14 @@ impl CommitPlanner {
             &payloads,
             started_in_same_commit.is_none(),
         )?;
-        let request = store::TypedCommitRequest {
-            run_id: input.run_id.clone(),
-            expected_next_seq: input.view.next_seq,
-            commit_key: runner_output_commit_key(input.node, input.attempt_id, &payloads)?,
+        let request = store::TypedCommitRequest::from_payloads(
+            input.run_id.clone(),
+            input.view.next_seq,
+            runner_output_commit_key(input.node, input.attempt_id, &payloads)?,
             payloads,
-            required_artifacts: required_artifacts.clone(),
+            required_artifacts.clone(),
             preconditions,
-        };
+        )?;
         let commit = store::PreparedCommitPlan::runner_output(
             request,
             store::CommitArtifactEvidenceSet::new(required_artifacts, admitted_artifacts)?,
