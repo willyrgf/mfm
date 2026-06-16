@@ -849,7 +849,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
             let actual = ExpectedValue::from_json_value(&actual_json)
                 .map_err(EvmContractAdapterError::Model)?;
             read_results.push(ValidationReadResult {
-                function: assertion.function.clone(),
+                function: assertion.function.to_string(),
                 args: assertion.args.clone(),
                 expected: assertion.expected.clone(),
                 passed: expected_matches(&actual, &assertion.expected),
@@ -1266,11 +1266,11 @@ fn configure_transaction_input(
     to: Address,
     call: &ContractCallConfig,
 ) -> Result<PreparedTransactionInput> {
-    let (data, _) = resolve_function_call(abi, &call.function, &call.args)
+    let (data, _) = resolve_function_call(abi, call.function.as_str(), &call.args)
         .map_err(EvmContractAdapterError::Model)?;
     Ok(PreparedTransactionInput {
         to: Some(to),
-        value_wei: parse_optional_wei(call.value_wei.as_deref())?,
+        value_wei: parse_optional_wei(call.value_wei.as_ref().map(|value| value.as_str()))?,
         data,
     })
 }

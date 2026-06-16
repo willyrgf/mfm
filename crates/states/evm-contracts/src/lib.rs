@@ -722,8 +722,8 @@ fn transaction_intent_from_configure_call(
         signer_ref: config.signer().signer_ref_str().to_owned(),
         expected_signer_address: config.signer().expected_signer_address_str().to_owned(),
         to_address: Some(deployed.contract_address.clone()),
-        value_wei: call.value_wei.clone(),
-        data_ref: Some(call.function.clone()),
+        value_wei: call.value_wei.as_ref().map(ToString::to_string),
+        data_ref: Some(call.function.to_string()),
         transaction: config.transaction().clone(),
     }
 }

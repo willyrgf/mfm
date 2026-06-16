@@ -28,14 +28,15 @@
 use alloy_primitives::Address;
 use mfm_evm_contract_model::{
     AbiArgumentValue, ContractArtifactConfig, ContractCallConfig, EventAssertionConfig,
-    ReadAssertionConfig,
+    EvmContractScalarError, EvmNetworkId, ReadAssertionConfig, WeiAmount,
 };
 use mfm_evm_core::encoding::address_hex_lower;
-use mfm_evm_core::tx::{parse_address, parse_u128_quantity};
+use mfm_evm_core::tx::parse_address;
 use mfm_program_derive::{MfmConfig, MfmValue};
 use mfm_signing::SignerRef;
 use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
+use std::num::NonZeroU64;
 
 fn default_poll_interval_ms() -> u64 {
     500
@@ -52,19 +53,31 @@ pub const MAX_RECEIPT_POLLS: u64 = 600;
 /// Maximum total receipt polling wait accepted for one mutation phase.
 pub const MAX_RECEIPT_TOTAL_WAIT_MS: u64 = 600_000;
 
-fn validate_nonempty(value: &str, field: &'static str) -> Result<(), String> {
-    if value.trim().is_empty() {
-        Err(format!("{field} must be non-empty"))
-    } else {
-        Ok(())
-    }
+fn nonzero_u64(value: u64, field: &'static str) -> Result<NonZeroU64, String> {
+    NonZeroU64::new(value).ok_or_else(|| format!("{field} must be non-zero"))
 }
 
-fn validate_quantity(value: &Option<String>, field: &'static str) -> Result<(), String> {
-    if let Some(value) = value {
-        parse_u128_quantity(value, field).map_err(|error| error.message)?;
-    }
-    Ok(())
+fn optional_nonzero_u64(
+    value: Option<u64>,
+    field: &'static str,
+) -> Result<Option<NonZeroU64>, String> {
+    value.map(|value| nonzero_u64(value, field)).transpose()
+}
+
+fn wei_amount(value: String, field: &'static str) -> Result<WeiAmount, String> {
+    WeiAmount::new(value).map_err(|error| match error {
+        EvmContractScalarError::InvalidQuantity { message, .. } => {
+            format!("{field} must be a valid EVM quantity: {message}")
+        }
+        EvmContractScalarError::Empty { .. } => format!("{field} must be non-empty"),
+    })
+}
+
+fn optional_wei_amount(
+    value: Option<String>,
+    field: &'static str,
+) -> Result<Option<WeiAmount>, String> {
+    value.map(|value| wei_amount(value, field)).transpose()
 }
 
 /// Semantic EVM network intent.
@@ -75,31 +88,28 @@ fn validate_quantity(value: &Option<String>, field: &'static str) -> Result<(), 
     schema = "mfm.evm.contract.config.network_intent"
 )]
 pub struct EvmNetworkIntent {
-    network_id: String,
-    expected_chain_id: u64,
+    network_id: EvmNetworkId,
+    expected_chain_id: NonZeroU64,
 }
 
 impl EvmNetworkIntent {
     /// Creates validated semantic network intent.
     pub fn new(network_id: impl AsRef<str>, expected_chain_id: u64) -> Result<Self, String> {
-        validate_nonempty(network_id.as_ref(), "network_id")?;
-        if expected_chain_id == 0 {
-            return Err("expected_chain_id must be non-zero".to_string());
-        }
         Ok(Self {
-            network_id: network_id.as_ref().to_owned(),
-            expected_chain_id,
+            network_id: EvmNetworkId::new(network_id.as_ref())
+                .map_err(|error| error.to_string())?,
+            expected_chain_id: nonzero_u64(expected_chain_id, "expected_chain_id")?,
         })
     }
 
     /// Returns the stable semantic network id.
     pub fn network_id(&self) -> &str {
-        &self.network_id
+        self.network_id.as_str()
     }
 
     /// Returns the expected EVM chain id.
     pub const fn expected_chain_id(&self) -> u64 {
-        self.expected_chain_id
+        self.expected_chain_id.get()
     }
 }
 
@@ -111,12 +121,16 @@ impl<'de> Deserialize<'de> for EvmNetworkIntent {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct RawNetworkIntent {
-            network_id: String,
+            network_id: EvmNetworkId,
             expected_chain_id: u64,
         }
 
         let raw = RawNetworkIntent::deserialize(deserializer)?;
-        Self::new(raw.network_id, raw.expected_chain_id).map_err(de::Error::custom)
+        Ok(Self {
+            network_id: raw.network_id,
+            expected_chain_id: nonzero_u64(raw.expected_chain_id, "expected_chain_id")
+                .map_err(de::Error::custom)?,
+        })
     }
 }
 
@@ -209,10 +223,10 @@ pub enum EvmTransactionStyle {
 )]
 pub struct EvmTransactionPolicy {
     style: EvmTransactionStyle,
-    gas_limit: Option<u64>,
-    max_fee_per_gas: Option<String>,
-    max_priority_fee_per_gas: Option<String>,
-    gas_price: Option<String>,
+    gas_limit: Option<NonZeroU64>,
+    max_fee_per_gas: Option<WeiAmount>,
+    max_priority_fee_per_gas: Option<WeiAmount>,
+    gas_price: Option<WeiAmount>,
 }
 
 impl Default for EvmTransactionPolicy {
@@ -238,10 +252,13 @@ impl EvmTransactionPolicy {
     ) -> Result<Self, String> {
         let policy = Self {
             style,
-            gas_limit,
-            max_fee_per_gas,
-            max_priority_fee_per_gas,
-            gas_price,
+            gas_limit: optional_nonzero_u64(gas_limit, "gas_limit")?,
+            max_fee_per_gas: optional_wei_amount(max_fee_per_gas, "max_fee_per_gas")?,
+            max_priority_fee_per_gas: optional_wei_amount(
+                max_priority_fee_per_gas,
+                "max_priority_fee_per_gas",
+            )?,
+            gas_price: optional_wei_amount(gas_price, "gas_price")?,
         };
         policy.validate()?;
         Ok(policy)
@@ -253,33 +270,28 @@ impl EvmTransactionPolicy {
     }
 
     /// Returns the optional gas limit.
-    pub const fn gas_limit(&self) -> Option<u64> {
-        self.gas_limit
+    pub fn gas_limit(&self) -> Option<u64> {
+        self.gas_limit.map(NonZeroU64::get)
     }
 
     /// Returns the optional EIP-1559 maximum fee per gas.
     pub fn max_fee_per_gas(&self) -> Option<&str> {
-        self.max_fee_per_gas.as_deref()
+        self.max_fee_per_gas.as_ref().map(WeiAmount::as_str)
     }
 
     /// Returns the optional EIP-1559 priority fee per gas.
     pub fn max_priority_fee_per_gas(&self) -> Option<&str> {
-        self.max_priority_fee_per_gas.as_deref()
+        self.max_priority_fee_per_gas
+            .as_ref()
+            .map(WeiAmount::as_str)
     }
 
     /// Returns the optional legacy gas price.
     pub fn gas_price(&self) -> Option<&str> {
-        self.gas_price.as_deref()
+        self.gas_price.as_ref().map(WeiAmount::as_str)
     }
 
     fn validate(&self) -> Result<(), String> {
-        if self.gas_limit == Some(0) {
-            return Err("gas_limit must be non-zero when provided".to_string());
-        }
-        validate_quantity(&self.max_fee_per_gas, "max_fee_per_gas")?;
-        validate_quantity(&self.max_priority_fee_per_gas, "max_priority_fee_per_gas")?;
-        validate_quantity(&self.gas_price, "gas_price")?;
-
         match self.style {
             EvmTransactionStyle::Eip1559 if self.gas_price.is_some() => {
                 Err("gas_price is only valid for legacy transactions".to_string())
@@ -466,7 +478,7 @@ pub struct DeployPhaseConfig {
     network: EvmNetworkIntent,
     signer: EvmSignerIntent,
     constructor_args: Vec<AbiArgumentValue>,
-    value_wei: Option<String>,
+    value_wei: Option<WeiAmount>,
     transaction: EvmTransactionPolicy,
     receipt: ReceiptRetryPolicy,
 }
@@ -494,7 +506,7 @@ impl DeployPhaseConfig {
 
     /// Returns optional deployment value in wei.
     pub fn value_wei(&self) -> Option<&str> {
-        self.value_wei.as_deref()
+        self.value_wei.as_ref().map(WeiAmount::as_str)
     }
 
     /// Returns transaction policy.
@@ -531,13 +543,13 @@ impl<'de> Deserialize<'de> for DeployPhaseConfig {
         }
 
         let raw = RawDeployPhaseConfig::deserialize(deserializer)?;
-        validate_quantity(&raw.value_wei, "value_wei").map_err(de::Error::custom)?;
         Ok(Self {
             artifact: raw.artifact,
             network: raw.network,
             signer: raw.signer,
             constructor_args: raw.constructor_args,
-            value_wei: raw.value_wei,
+            value_wei: optional_wei_amount(raw.value_wei, "value_wei")
+                .map_err(de::Error::custom)?,
             transaction: raw.transaction,
             receipt: raw.receipt,
         })

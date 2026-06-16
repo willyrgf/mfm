@@ -11,8 +11,8 @@
 //!
 //! ```rust
 //! use mfm_evm_contract_model::{
-//!     prepare_validate_assertions, AbiJson, BlockSelector, EventAssertionConfig, ExpectedValue,
-//!     ReadAssertionConfig,
+//!     prepare_validate_assertions, AbiJson, BlockSelector, BlockTag, EventAssertionConfig,
+//!     EventName, ExpectedValue, FunctionName, ReadAssertionConfig,
 //! };
 //!
 //! let abi_json = AbiJson::from_json_value(&serde_json::json!([
@@ -35,18 +35,18 @@
 //! let (reads, events) = prepare_validate_assertions(
 //!     &abi,
 //!     &[ReadAssertionConfig {
-//!         function: "owner".to_string(),
+//!         function: FunctionName::new("owner").map_err(|error| error.to_string())?,
 //!         args: vec![],
 //!         expected: ExpectedValue::from_json_value(&serde_json::json!(
 //!             "0x0000000000000000000000000000000000000000"
 //!         ))?,
 //!     }],
 //!     &[EventAssertionConfig {
-//!         event: "Configured".to_string(),
+//!         event: EventName::new("Configured").map_err(|error| error.to_string())?,
 //!         min_count: 1,
 //!         from_block: Some(BlockSelector::Number { number: 0 }),
 //!         to_block: Some(BlockSelector::Tag {
-//!             tag: "latest".to_string(),
+//!             tag: BlockTag::Latest,
 //!         }),
 //!     }],
 //! )?;
@@ -57,11 +57,16 @@
 //! # Ok::<(), String>(())
 //! ```
 
+use std::fmt;
+use std::ops::Deref;
+use std::str::FromStr;
+
 use alloy_primitives::keccak256;
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_evm_core::abi as common_abi;
 use mfm_evm_core::encoding;
 use mfm_evm_core::hex as common_hex;
+use mfm_evm_core::tx::parse_u128_quantity;
 use mfm_ids::{ArtifactId, ContentDigest, SchemaId, SemanticTypeId};
 use mfm_program_derive::{MfmConfig, MfmValue};
 use serde::de::{self, Deserializer};
@@ -69,6 +74,237 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub use common_abi::{AbiEvent, AbiFunction, ParsedAbi};
+
+/// Error returned when constructing EVM contract scalar authorities.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EvmContractScalarError {
+    /// A string scalar was empty or whitespace-only.
+    Empty {
+        /// Human-readable scalar kind.
+        kind: &'static str,
+    },
+    /// A wei quantity failed canonical quantity parsing.
+    InvalidQuantity {
+        /// Human-readable scalar kind.
+        kind: &'static str,
+        /// Parser diagnostic.
+        message: String,
+    },
+}
+
+impl fmt::Display for EvmContractScalarError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty { kind } => write!(f, "{kind} must be non-empty"),
+            Self::InvalidQuantity { kind, message } => {
+                write!(f, "{kind} must be a valid EVM quantity: {message}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for EvmContractScalarError {}
+
+fn require_non_empty(kind: &'static str, value: &str) -> Result<(), EvmContractScalarError> {
+    if value.trim().is_empty() {
+        Err(EvmContractScalarError::Empty { kind })
+    } else {
+        Ok(())
+    }
+}
+
+macro_rules! evm_string_scalar {
+    ($ty:ident, $kind:literal, $semantic:literal, $schema:literal, $doc:literal) => {
+        #[doc = $doc]
+        #[derive(
+            Clone,
+            Debug,
+            PartialEq,
+            Eq,
+            PartialOrd,
+            Ord,
+            Hash,
+            Serialize,
+            Deserialize,
+            MfmValue,
+        )]
+        #[serde(try_from = "String", into = "String")]
+        #[mfm(namespace = "mfm.evm.contract", name = $semantic, schema = $schema, transparent_string)]
+        pub struct $ty {
+            raw: String,
+        }
+
+        impl $ty {
+            /// Creates a checked EVM contract scalar authority.
+            pub fn new(value: impl Into<String>) -> Result<Self, EvmContractScalarError> {
+                let raw = value.into();
+                require_non_empty($kind, &raw)?;
+                Ok(Self { raw })
+            }
+
+            /// Returns the canonical string representation.
+            pub fn as_str(&self) -> &str {
+                &self.raw
+            }
+
+            /// Consumes this authority into its canonical string representation.
+            pub fn into_string(self) -> String {
+                self.raw
+            }
+        }
+
+        impl AsRef<str> for $ty {
+            fn as_ref(&self) -> &str {
+                self.as_str()
+            }
+        }
+
+        impl Deref for $ty {
+            type Target = str;
+
+            fn deref(&self) -> &Self::Target {
+                self.as_str()
+            }
+        }
+
+        impl fmt::Display for $ty {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(self.as_str())
+            }
+        }
+
+        impl FromStr for $ty {
+            type Err = EvmContractScalarError;
+
+            fn from_str(value: &str) -> Result<Self, Self::Err> {
+                Self::new(value)
+            }
+        }
+
+        impl TryFrom<String> for $ty {
+            type Error = EvmContractScalarError;
+
+            fn try_from(value: String) -> Result<Self, Self::Error> {
+                Self::new(value)
+            }
+        }
+
+        impl From<$ty> for String {
+            fn from(value: $ty) -> Self {
+                value.raw
+            }
+        }
+
+        impl PartialEq<&str> for $ty {
+            fn eq(&self, other: &&str) -> bool {
+                self.as_str() == *other
+            }
+        }
+    };
+}
+
+evm_string_scalar!(
+    EvmNetworkId,
+    "network_id",
+    "network-id",
+    "mfm.evm.contract.id.network",
+    "Stable typed EVM network identifier."
+);
+
+evm_string_scalar!(
+    FunctionName,
+    "function",
+    "function-name",
+    "mfm.evm.contract.id.function",
+    "Checked EVM ABI function name."
+);
+
+evm_string_scalar!(
+    EventName,
+    "event",
+    "event-name",
+    "mfm.evm.contract.id.event",
+    "Checked EVM ABI event name."
+);
+
+/// Checked wei quantity rendered in the authored EVM quantity format.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, MfmValue)]
+#[serde(try_from = "String", into = "String")]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "wei-amount",
+    schema = "mfm.evm.contract.value.wei_amount",
+    transparent_string
+)]
+pub struct WeiAmount {
+    raw: String,
+}
+
+impl WeiAmount {
+    /// Creates a checked wei amount.
+    pub fn new(value: impl Into<String>) -> Result<Self, EvmContractScalarError> {
+        let raw = value.into();
+        parse_u128_quantity(&raw, "wei").map_err(|error| {
+            EvmContractScalarError::InvalidQuantity {
+                kind: "wei",
+                message: error.message,
+            }
+        })?;
+        Ok(Self { raw })
+    }
+
+    /// Returns the canonical string representation.
+    pub fn as_str(&self) -> &str {
+        &self.raw
+    }
+
+    /// Consumes this authority into its canonical string representation.
+    pub fn into_string(self) -> String {
+        self.raw
+    }
+}
+
+impl AsRef<str> for WeiAmount {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl Deref for WeiAmount {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for WeiAmount {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for WeiAmount {
+    type Err = EvmContractScalarError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<String> for WeiAmount {
+    type Error = EvmContractScalarError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<WeiAmount> for String {
+    fn from(value: WeiAmount) -> Self {
+        value.raw
+    }
+}
 
 fn canonical_json_text_from_str(input: &str) -> Result<String, String> {
     PlainCanonicalJsonBytes::from_json_str(input)
@@ -390,7 +626,7 @@ pub struct ContractArtifactConfig {
 )]
 pub struct ContractCallConfig {
     /// Function name to invoke.
-    pub function: String,
+    pub function: FunctionName,
 
     /// Positional arguments passed to the function call.
     #[serde(default)]
@@ -398,11 +634,45 @@ pub struct ContractCallConfig {
 
     /// Optional call value expressed in wei.
     #[serde(default)]
-    pub value_wei: Option<String>,
+    pub value_wei: Option<WeiAmount>,
 }
 
 fn default_min_count() -> u64 {
     1
+}
+
+/// Symbolic EVM block tag.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[serde(rename_all = "snake_case")]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "block-tag",
+    schema = "mfm.evm.contract.value.block_tag"
+)]
+pub enum BlockTag {
+    /// Earliest available block.
+    Earliest,
+    /// Latest available block.
+    Latest,
+    /// Pending block.
+    Pending,
+    /// Safe block tag when supported by the provider.
+    Safe,
+    /// Finalized block tag when supported by the provider.
+    Finalized,
+}
+
+impl BlockTag {
+    /// Returns the canonical JSON-RPC tag string.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Earliest => "earliest",
+            Self::Latest => "latest",
+            Self::Pending => "pending",
+            Self::Safe => "safe",
+            Self::Finalized => "finalized",
+        }
+    }
 }
 
 /// Block selector used by validation reads and event queries.
@@ -422,7 +692,7 @@ pub enum BlockSelector {
     /// Symbolic tag such as `latest` or `earliest`.
     Tag {
         /// Symbolic block tag.
-        tag: String,
+        tag: BlockTag,
     },
 }
 
@@ -435,7 +705,7 @@ impl<'de> Deserialize<'de> for BlockSelector {
         #[serde(tag = "kind", rename_all = "snake_case")]
         enum RawBlockSelector {
             Number { number: u64 },
-            Tag { tag: String },
+            Tag { tag: BlockTag },
         }
 
         match RawBlockSelector::deserialize(deserializer)? {
@@ -454,7 +724,7 @@ impl<'de> Deserialize<'de> for BlockSelector {
 )]
 pub struct ReadAssertionConfig {
     /// Function name to call.
-    pub function: String,
+    pub function: FunctionName,
 
     /// Positional arguments passed to the function call.
     #[serde(default)]
@@ -473,7 +743,7 @@ pub struct ReadAssertionConfig {
 )]
 pub struct EventAssertionConfig {
     /// Event name expected in the ABI.
-    pub event: String,
+    pub event: EventName,
 
     /// Minimum matching log count required for success.
     pub min_count: u64,
@@ -492,7 +762,7 @@ impl<'de> Deserialize<'de> for EventAssertionConfig {
     {
         #[derive(Deserialize)]
         struct RawEventAssertionConfig {
-            event: String,
+            event: EventName,
             #[serde(default = "default_min_count")]
             min_count: u64,
             #[serde(default)]
@@ -771,7 +1041,7 @@ fn block_selector_to_rpc_value(
 ) -> serde_json::Value {
     match block {
         Some(BlockSelector::Number { number }) => serde_json::json!(format!("0x{:x}", number)),
-        Some(BlockSelector::Tag { tag }) => serde_json::json!(tag),
+        Some(BlockSelector::Tag { tag }) => serde_json::json!(tag.as_str()),
         None if default_latest => serde_json::json!("latest"),
         None => serde_json::json!("earliest"),
     }
@@ -785,8 +1055,9 @@ pub fn prepare_validate_assertions(
 ) -> Result<(Vec<PreparedReadAssertion>, Vec<PreparedEventAssertion>), String> {
     let mut reads = Vec::with_capacity(read_assertions.len());
     for assertion in read_assertions {
-        let (call_data, outputs) = resolve_function_call(abi, &assertion.function, &assertion.args)
-            .map_err(|_| "read assertion did not match ABI".to_string())?;
+        let (call_data, outputs) =
+            resolve_function_call(abi, assertion.function.as_str(), &assertion.args)
+                .map_err(|_| "read assertion did not match ABI".to_string())?;
         reads.push(PreparedReadAssertion {
             data_hex: bytes_to_hex_prefixed(&call_data),
             expected: assertion.expected.clone(),
@@ -799,7 +1070,7 @@ pub fn prepare_validate_assertions(
         let event = abi
             .events
             .iter()
-            .find(|event| event.name == assertion.event)
+            .find(|event| event.name == assertion.event.as_str())
             .ok_or_else(|| "event assertion referenced unknown event".to_string())?;
         if event.anonymous {
             return Err("anonymous events are not supported for validation".to_string());
@@ -810,7 +1081,7 @@ pub fn prepare_validate_assertions(
         let from_block = block_selector_to_rpc_value(&assertion.from_block, false);
         let to_block = block_selector_to_rpc_value(&assertion.to_block, true);
         events.push(PreparedEventAssertion {
-            event: assertion.event.clone(),
+            event: assertion.event.to_string(),
             topic0_hex,
             min_count: assertion.min_count,
             from_block,
@@ -822,8 +1093,9 @@ pub fn prepare_validate_assertions(
 }
 
 /// Normalizes an optional wei value into RPC hex quantity form.
-pub fn parse_value_wei_to_hex(value_wei: &Option<String>) -> Result<Option<String>, String> {
-    common_abi::parse_value_wei_to_hex(value_wei).map_err(|error| error.message)
+pub fn parse_value_wei_to_hex(value_wei: &Option<WeiAmount>) -> Result<Option<String>, String> {
+    let raw = value_wei.as_ref().map(|value| value.as_str().to_owned());
+    common_abi::parse_value_wei_to_hex(&raw).map_err(|error| error.message)
 }
 
 /// Ensures the receipt-poll budget is non-zero.
@@ -991,7 +1263,7 @@ mod tests {
         let (reads, events) = prepare_validate_assertions(
             &abi,
             &[ReadAssertionConfig {
-                function: "owner".to_string(),
+                function: FunctionName::new("owner").expect("function name"),
                 args: vec![],
                 expected: expected.clone(),
             }],
@@ -1098,7 +1370,7 @@ mod tests {
         assert_eq!(
             typed_tag,
             BlockSelector::Tag {
-                tag: "latest".to_string()
+                tag: BlockTag::Latest
             }
         );
         assert!(serde_json::from_value::<BlockSelector>(serde_json::json!(12)).is_err());
