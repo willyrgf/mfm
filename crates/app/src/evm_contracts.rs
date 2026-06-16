@@ -312,7 +312,7 @@ async fn run_mutation(
 }
 
 struct DeployMutationPlan {
-    config: DeployPhaseConfig,
+    config: ValidatedConfig<DeployPhaseConfig>,
     state: DeployContractState,
     intent: ContractDeployIntent,
     idempotency: ContractTransactionIdempotency,
@@ -320,7 +320,7 @@ struct DeployMutationPlan {
 }
 
 struct ConfigureMutationPlan {
-    config: ConfigurePhaseConfig,
+    config: ValidatedConfig<ConfigurePhaseConfig>,
     state: ConfigureContractState,
     input: ConfigureContractInput,
     intent: ContractConfigureIntent,
@@ -339,7 +339,7 @@ async fn run_deploy_mutation(
         .map(|projection| projection.phase.clone())
     {
         None => {
-            let runtime = factory.runtime_for(plan.config.network().network_id())?;
+            let runtime = factory.runtime_for(plan.config.as_ref().network().network_id())?;
             let prepared = runtime
                 .adapter()
                 .prepare_deploy_invocation(&plan.config, &plan.intent)
@@ -365,7 +365,7 @@ async fn run_deploy_mutation(
                 factory.artifacts(),
             )
             .await?;
-            let runtime = factory.runtime_for(plan.config.network().network_id())?;
+            let runtime = factory.runtime_for(plan.config.as_ref().network().network_id())?;
             let prepared = runtime
                 .adapter()
                 .reconstruct_deploy_invocation(&plan.config, &plan.intent, &stored_prepared)
@@ -376,7 +376,7 @@ async fn run_deploy_mutation(
         Some(store::SideEffectPhase::SubmissionObserved { invocation_epoch }) => {
             let prepared_projection = projected_prepared_artifact(&ctx, &plan.ledger_key)?;
             let submission_projection = projected_submission_artifact(&ctx, &plan.ledger_key)?;
-            let runtime = factory.runtime_for(plan.config.network().network_id())?;
+            let runtime = factory.runtime_for(plan.config.as_ref().network().network_id())?;
             side_effect_receipt(
                 ctx,
                 factory.artifacts(),
@@ -447,7 +447,7 @@ async fn run_configure_mutation(
         .map(|projection| projection.phase.clone())
     {
         None => {
-            let runtime = factory.runtime_for(plan.config.network().network_id())?;
+            let runtime = factory.runtime_for(plan.config.as_ref().network().network_id())?;
             let prepared = runtime
                 .adapter()
                 .prepare_configure_invocation(&plan.config, &plan.input, &plan.intent)
@@ -473,7 +473,7 @@ async fn run_configure_mutation(
                 factory.artifacts(),
             )
             .await?;
-            let runtime = factory.runtime_for(plan.config.network().network_id())?;
+            let runtime = factory.runtime_for(plan.config.as_ref().network().network_id())?;
             let prepared = runtime
                 .adapter()
                 .reconstruct_configure_invocation(
@@ -489,7 +489,7 @@ async fn run_configure_mutation(
         Some(store::SideEffectPhase::SubmissionObserved { invocation_epoch }) => {
             let prepared_projection = projected_prepared_artifact(&ctx, &plan.ledger_key)?;
             let submission_projection = projected_submission_artifact(&ctx, &plan.ledger_key)?;
-            let runtime = factory.runtime_for(plan.config.network().network_id())?;
+            let runtime = factory.runtime_for(plan.config.as_ref().network().network_id())?;
             side_effect_receipt(
                 ctx,
                 factory.artifacts(),
@@ -555,7 +555,7 @@ async fn deploy_mutation_plan(
         .map_err(runtime_state_error)?;
     let ledger_key = ledger_key_for_idempotency(&idempotency)?;
     Ok(DeployMutationPlan {
-        config: config.into_inner(),
+        config,
         state,
         intent,
         idempotency,
@@ -578,7 +578,7 @@ async fn configure_mutation_plan(
         .map_err(runtime_state_error)?;
     let ledger_key = ledger_key_for_idempotency(&idempotency)?;
     Ok(ConfigureMutationPlan {
-        config: config.into_inner(),
+        config,
         state,
         input,
         intent,
@@ -595,11 +595,10 @@ async fn run_validate(
     let input = load_validate_input(ctx.inputs(), factory.artifacts()).await?;
     let state = ValidateContractState::new(config.clone())
         .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
-    let config = config.into_inner();
     let request = state
         .read_request(&input)
         .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
-    let runtime = factory.runtime_for(config.network().network_id())?;
+    let runtime = factory.runtime_for(config.as_ref().network().network_id())?;
     let response = runtime
         .adapter()
         .validate_contract(&config, &input, &request)
