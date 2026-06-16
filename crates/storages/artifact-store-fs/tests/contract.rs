@@ -156,11 +156,11 @@ fn verified_retention_projection_for(
         artifact_role: ArtifactRole::TypedSpecCertificate,
     };
     let mut run_store = InMemoryTypedRunStore::new();
-    let run_start_request = TypedCommitRequest {
-        run_id: run_id.clone(),
-        expected_next_seq: StreamSeq::FIRST,
-        commit_key: CommitKey::new("run-start").expect("commit key"),
-        payloads: vec![KernelEventPayload::RunStarted(mfm_events::v1::RunStarted {
+    let run_start_request = TypedCommitRequest::from_payloads(
+        run_id.clone(),
+        StreamSeq::FIRST,
+        CommitKey::new("run-start").expect("commit key"),
+        vec![KernelEventPayload::RunStarted(mfm_events::v1::RunStarted {
             run_id: run_id.clone(),
             spec_hash: spec_hash.clone(),
             spec_artifact_id,
@@ -184,24 +184,25 @@ fn verified_retention_projection_for(
             source_revision: SourceRevision::new("test-revision").expect("source revision"),
             seed_cells: Vec::new(),
         })],
-        required_artifacts: vec![spec_evidence, certificate_evidence],
-        preconditions: CommitPreconditions {
+        vec![spec_evidence, certificate_evidence],
+        CommitPreconditions {
             required_run_state: RequiredRunState::Absent,
             ..CommitPreconditions::default()
         },
-    };
-    let run_start_artifacts = run_start_request.required_artifacts.clone();
+    )
+    .expect("run start request");
+    let run_start_artifacts = run_start_request.required_artifacts().to_vec();
     run_store
         .append_prepared_typed_commit(
             PreparedTypedCommit::new(run_start_request, run_start_artifacts)
                 .expect("prepare run start"),
         )
         .expect("append run start");
-    let retention_request = TypedCommitRequest {
-        run_id: run_id.clone(),
-        expected_next_seq: run_store.expected_next_seq(&run_id),
-        commit_key: CommitKey::new("retain-artifact").expect("commit key"),
-        payloads: vec![KernelEventPayload::RetentionRefsAppended(
+    let retention_request = TypedCommitRequest::from_payloads(
+        run_id.clone(),
+        run_store.expected_next_seq(&run_id),
+        CommitKey::new("retain-artifact").expect("commit key"),
+        vec![KernelEventPayload::RetentionRefsAppended(
             mfm_events::v1::RetentionRefsAppended {
                 run_id: run_id.clone(),
                 spec_hash,
@@ -213,12 +214,13 @@ fn verified_retention_projection_for(
                 reason: RetentionReason::RuntimeEvidence,
             },
         )],
-        required_artifacts: Vec::new(),
-        preconditions: CommitPreconditions {
+        Vec::new(),
+        CommitPreconditions {
             required_run_state: RequiredRunState::Started,
             ..CommitPreconditions::default()
         },
-    };
+    )
+    .expect("retention request");
     run_store
         .append_prepared_typed_commit(
             PreparedTypedCommit::new(retention_request, vec![evidence.clone()])

@@ -1495,17 +1495,17 @@ pub mod v1 {
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct TypedCommitRequest {
         /// Run id to append to.
-        pub run_id: RunId,
+        run_id: RunId,
         /// Caller's expected next store-owned stream sequence.
-        pub expected_next_seq: StreamSeq,
+        expected_next_seq: StreamSeq,
         /// Commit key for idempotency.
-        pub commit_key: CommitKey,
+        commit_key: CommitKey,
         /// Ordered typed event payloads.
-        pub payloads: Vec<KernelEventPayload>,
+        payloads: Vec<KernelEventPayload>,
         /// Artifact evidence refs required for the commit.
-        pub required_artifacts: Vec<ArtifactEvidenceRef>,
+        required_artifacts: Vec<ArtifactEvidenceRef>,
         /// Atomic commit preconditions.
-        pub preconditions: CommitPreconditions,
+        preconditions: CommitPreconditions,
     }
 
     impl TypedCommitRequest {
@@ -1576,6 +1576,27 @@ pub mod v1 {
         /// Returns atomic commit preconditions.
         pub fn preconditions(&self) -> &CommitPreconditions {
             &self.preconditions
+        }
+
+        /// Returns this request with a different expected next sequence.
+        pub fn with_expected_next_seq(mut self, expected_next_seq: StreamSeq) -> Self {
+            self.expected_next_seq = expected_next_seq;
+            self
+        }
+
+        /// Returns this request with different required artifact evidence refs.
+        pub fn with_required_artifacts(
+            mut self,
+            required_artifacts: Vec<ArtifactEvidenceRef>,
+        ) -> Self {
+            self.required_artifacts = required_artifacts;
+            self
+        }
+
+        /// Returns this request with different atomic preconditions.
+        pub fn with_preconditions(mut self, preconditions: CommitPreconditions) -> Self {
+            self.preconditions = preconditions;
+            self
         }
     }
 

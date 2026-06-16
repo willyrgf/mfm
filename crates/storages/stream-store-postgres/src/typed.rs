@@ -321,7 +321,7 @@ COMMIT;
             .map_err(|_| PostgresTypedStoreError::Database("failed to start transaction"))?;
 
         if let Some((stored_fingerprint, stored_seq)) =
-            read_commit_key(&tx, &request.run_id, request.commit_key.as_str()).await?
+            read_commit_key(&tx, request.run_id(), request.commit_key().as_str()).await?
         {
             if stored_fingerprint == fingerprint_text {
                 let batch = build_prepared_committed_batch(&commit, stored_seq)?;
@@ -331,19 +331,19 @@ COMMIT;
                 return Ok(CommitOutcome::Idempotent(batch));
             }
             return Err(StoreError::CommitConflict {
-                commit_key: request.commit_key.clone(),
+                commit_key: request.commit_key().clone(),
             }
             .into());
         }
 
-        ensure_run_head(&tx, &request.run_id).await?;
-        let head = read_head_for_update(&tx, &request.run_id).await?;
+        ensure_run_head(&tx, request.run_id()).await?;
+        let head = read_head_for_update(&tx, request.run_id()).await?;
 
         // A same-run transaction may have inserted the key while this transaction waited for the
         // run-head lock. Re-check before sequence validation while preserving the required initial
         // commit-key lookup order.
         if let Some((stored_fingerprint, stored_seq)) =
-            read_commit_key(&tx, &request.run_id, request.commit_key.as_str()).await?
+            read_commit_key(&tx, request.run_id(), request.commit_key().as_str()).await?
         {
             if stored_fingerprint == fingerprint_text {
                 let batch = build_prepared_committed_batch(&commit, stored_seq)?;
@@ -353,7 +353,7 @@ COMMIT;
                 return Ok(CommitOutcome::Idempotent(batch));
             }
             return Err(StoreError::CommitConflict {
-                commit_key: request.commit_key.clone(),
+                commit_key: request.commit_key().clone(),
             }
             .into());
         }
@@ -363,9 +363,9 @@ COMMIT;
         lock_resource_lanes_tx(&tx).await?;
         let base = TypedCommitBase {
             artifacts,
-            logical_keys: load_logical_keys(&tx, &request.run_id).await?,
-            unique_logical_payloads: load_unique_logical_payloads(&tx, &request.run_id).await?,
-            projections: load_projection_snapshot_tx(&tx, &request.run_id).await?,
+            logical_keys: load_logical_keys(&tx, request.run_id()).await?,
+            unique_logical_payloads: load_unique_logical_payloads(&tx, request.run_id()).await?,
+            projections: load_projection_snapshot_tx(&tx, request.run_id()).await?,
             actual_next_seq: next_seq_from_head(head)?,
         };
         let staged = stage_prepared_typed_run_commit(&base, &commit)?;
@@ -415,10 +415,10 @@ COMMIT;
         tx.execute(
             "INSERT INTO typed_commit_keys \
              (run_id, commit_key, commit_fingerprint, seq, event_count) \
-             VALUES ($1,$2,$3,$4,$5)",
+            VALUES ($1,$2,$3,$4,$5)",
             &[
-                &request.run_id.as_str(),
-                &request.commit_key.as_str(),
+                &request.run_id().as_str(),
+                &request.commit_key().as_str(),
                 &fingerprint_text,
                 &commit_seq,
                 &event_count,
@@ -431,7 +431,7 @@ COMMIT;
             tx.execute(
                 "INSERT INTO typed_logical_keys (run_id, logical_key) VALUES ($1,$2) \
                  ON CONFLICT (run_id, logical_key) DO NOTHING",
-                &[&request.run_id.as_str(), &event.logical_key().as_str()],
+                &[&request.run_id().as_str(), &event.logical_key().as_str()],
             )
             .await
             .map_err(|_| PostgresTypedStoreError::Database("failed to insert logical key"))?;
@@ -440,9 +440,9 @@ COMMIT;
                     "INSERT INTO typed_unique_logical_payloads \
                      (run_id, logical_key, payload_hash) VALUES ($1,$2,$3) \
                      ON CONFLICT (run_id, logical_key) DO UPDATE \
-                     SET payload_hash = EXCLUDED.payload_hash",
+                    SET payload_hash = EXCLUDED.payload_hash",
                     &[
-                        &request.run_id.as_str(),
+                        &request.run_id().as_str(),
                         &event.logical_key().as_str(),
                         &event.payload_hash().as_str(),
                     ],
@@ -454,11 +454,11 @@ COMMIT;
             }
         }
 
-        write_projection_tables(&tx, &request.run_id, &staged_projections).await?;
+        write_projection_tables(&tx, request.run_id(), &staged_projections).await?;
         tx.execute(
             "UPDATE typed_run_heads SET head_seq = $2 WHERE run_id = $1",
             &[
-                &request.run_id.as_str(),
+                &request.run_id().as_str(),
                 &u64_to_i64(batch.seq().as_u64(), "typed_run_heads.head_seq")?,
             ],
         )
@@ -1942,14 +1942,15 @@ mod tests {
         key: &str,
         payloads: Vec<KernelEventPayload>,
     ) -> mfm_store::v1::TypedCommitRequest {
-        mfm_store::v1::TypedCommitRequest {
+        mfm_store::v1::TypedCommitRequest::from_payloads(
             run_id,
-            expected_next_seq: StreamSeq::new(seq).expect("seq"),
-            commit_key: CommitKey::new(key).expect("commit key"),
+            StreamSeq::new(seq).expect("seq"),
+            CommitKey::new(key).expect("commit key"),
             payloads,
-            required_artifacts: Vec::new(),
-            preconditions: CommitPreconditions::default(),
-        }
+            Vec::new(),
+            CommitPreconditions::default(),
+        )
+        .expect("typed commit request")
     }
 
     async fn append_prepared(
@@ -1978,22 +1979,23 @@ mod tests {
         )
         .await
         .expect("run start");
-        let request = mfm_store::v1::TypedCommitRequest {
-            run_id: run.clone(),
-            expected_next_seq: store.expected_next_seq(&run).await.expect("next seq"),
-            commit_key: CommitKey::new("prepared-fingerprint").expect("commit key"),
-            payloads: vec![retention_refs_appended(
+        let request = mfm_store::v1::TypedCommitRequest::from_payloads(
+            run.clone(),
+            store.expected_next_seq(&run).await.expect("next seq"),
+            CommitKey::new("prepared-fingerprint").expect("commit key"),
+            vec![retention_refs_appended(
                 run.clone(),
                 artifact,
                 digest,
                 ArtifactRole::StateOutput,
             )],
-            required_artifacts: vec![evidence.clone()],
-            preconditions: CommitPreconditions {
+            vec![evidence.clone()],
+            CommitPreconditions {
                 required_run_state: RequiredRunState::Started,
                 ..CommitPreconditions::default()
             },
-        };
+        )
+        .expect("typed commit request");
 
         append_prepared(&store, request.clone(), vec![evidence])
             .await
@@ -2293,13 +2295,13 @@ mod tests {
         )
         .await
         .expect("side-effect ambiguous");
-        let mut manual_request = request(
+        let manual_request = request(
             run.clone(),
             5,
             "saga-manual-resolution",
             vec![manual_resolution_recorded(run.clone(), 42)],
-        );
-        manual_request.preconditions = saga_preconditions(&run, manual_saga_policy(42));
+        )
+        .with_preconditions(saga_preconditions(&run, manual_saga_policy(42)));
         append_prepared(&store, manual_request, manual_resolution_artifacts(42))
             .await
             .expect("manual resolution");
@@ -2453,7 +2455,8 @@ mod tests {
                 events::RunCompletionOutcome::FailedWithoutAcdcClaim,
             )],
         );
-        terminal_request.preconditions = saga_preconditions(&terminal_run, terminal_policy);
+        let terminal_request =
+            terminal_request.with_preconditions(saga_preconditions(&terminal_run, terminal_policy));
         let terminal_commit = PreparedCommit::<SagaTerminal>::new(
             terminal_request,
             CommitArtifactEvidenceSet::empty(),
@@ -2547,7 +2550,10 @@ mod tests {
                 missing_digest.clone(),
             )],
         );
-        fact_request.preconditions.required_run_state = RequiredRunState::Started;
+        let fact_request = fact_request.with_preconditions(CommitPreconditions {
+            required_run_state: RequiredRunState::Started,
+            ..CommitPreconditions::default()
+        });
         let err = append_prepared(&store, fact_request.clone(), Vec::new())
             .await
             .expect_err("missing fact artifact");

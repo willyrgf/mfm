@@ -2623,14 +2623,15 @@ pub mod v1 {
                 bytes(0xf1),
             )
             .expect("rogue capability");
-            let request = TypedCommitRequest {
-                run_id: stream[fact_index].run_id().clone(),
-                expected_next_seq: stream[fact_index].seq(),
-                commit_key: CommitKey::new("bad-fact-replay").expect("commit key"),
-                payloads: vec![KernelEventPayload::FactRecorded(fact)],
-                required_artifacts: Vec::new(),
-                preconditions: CommitPreconditions::default(),
-            };
+            let request = TypedCommitRequest::from_payloads(
+                stream[fact_index].run_id().clone(),
+                stream[fact_index].seq(),
+                CommitKey::new("bad-fact-replay").expect("commit key"),
+                vec![KernelEventPayload::FactRecorded(fact)],
+                Vec::new(),
+                CommitPreconditions::default(),
+            )
+            .expect("typed commit request");
             let batch = build_committed_batch(&request, stream[fact_index].seq())
                 .expect("rebuild fact envelope");
             stream[fact_index] = batch.events()[0].clone();
@@ -4798,14 +4799,15 @@ pub mod v1 {
             preconditions: CommitPreconditions,
         ) {
             retained_artifacts.extend(artifacts.iter().cloned());
-            let request = TypedCommitRequest {
-                run_id: run_id.clone(),
-                expected_next_seq: store.expected_next_seq(run_id),
-                commit_key: CommitKey::new(commit_key).expect("commit key"),
+            let request = TypedCommitRequest::from_payloads(
+                run_id.clone(),
+                store.expected_next_seq(run_id),
+                CommitKey::new(commit_key).expect("commit key"),
                 payloads,
-                required_artifacts: artifacts.clone(),
+                artifacts.clone(),
                 preconditions,
-            };
+            )
+            .expect("typed commit request");
             let commit =
                 PreparedTypedCommit::new(request, artifacts).expect("prepare typed commit");
             store
@@ -4828,14 +4830,15 @@ pub mod v1 {
         ) {
             let seq = stream.last().expect("non-empty stream").seq();
             let seq = StreamSeq::new(seq.as_u64() + 1).expect("next sequence");
-            let request = TypedCommitRequest {
-                run_id: stream[0].run_id().clone(),
-                expected_next_seq: seq,
-                commit_key: CommitKey::new(commit_key).expect("commit key"),
+            let request = TypedCommitRequest::from_payloads(
+                stream[0].run_id().clone(),
+                seq,
+                CommitKey::new(commit_key).expect("commit key"),
                 payloads,
-                required_artifacts: Vec::new(),
-                preconditions: CommitPreconditions::default(),
-            };
+                Vec::new(),
+                CommitPreconditions::default(),
+            )
+            .expect("typed commit request");
             let batch = build_committed_batch(&request, seq).expect("build envelope");
             stream.extend(batch.events().iter().cloned());
         }
@@ -4902,14 +4905,15 @@ pub mod v1 {
                 .map(|candidate| stream[*candidate].payload().clone())
                 .collect::<Vec<_>>();
             payloads[rewrite_index] = rewrite(payloads[rewrite_index].clone());
-            let request = TypedCommitRequest {
-                run_id: stream[index].run_id().clone(),
-                expected_next_seq: seq,
-                commit_key: CommitKey::new(commit_key).expect("commit key"),
+            let request = TypedCommitRequest::from_payloads(
+                stream[index].run_id().clone(),
+                seq,
+                CommitKey::new(commit_key).expect("commit key"),
                 payloads,
-                required_artifacts: Vec::new(),
-                preconditions: CommitPreconditions::default(),
-            };
+                Vec::new(),
+                CommitPreconditions::default(),
+            )
+            .expect("typed commit request");
             let batch = build_committed_batch(&request, seq).expect("rebuild envelope");
             assert_eq!(batch.events().len(), indices.len());
             for (candidate, event) in indices.into_iter().zip(batch.events()) {

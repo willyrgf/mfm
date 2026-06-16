@@ -124,14 +124,14 @@ fn resource_lane_block_for_request(
     projections: &store::ProjectionSnapshot,
     request: &store::TypedCommitRequest,
 ) -> Option<store::ResourceLaneKey> {
-    request.payloads.iter().find_map(|payload| {
+    request.payloads().iter().find_map(|payload| {
         let events::KernelEventPayload::SideEffectInvocationPrepared(payload) = payload else {
             return None;
         };
         let resource_key = payload.resource_key.as_ref()?;
         let lane_key = store::ResourceLaneKey::from_evidence(resource_key);
         let holder =
-            store::SideEffectLedgerRef::new(request.run_id.clone(), payload.ledger_key.clone());
+            store::SideEffectLedgerRef::new(request.run_id().clone(), payload.ledger_key.clone());
         projections
             .resource_lane(&lane_key)
             .filter(|projection| projection.holder != holder)
@@ -140,7 +140,7 @@ fn resource_lane_block_for_request(
 }
 
 fn request_has_resource_lane_prepare(request: &store::TypedCommitRequest) -> bool {
-    request.payloads.iter().any(|payload| {
+    request.payloads().iter().any(|payload| {
         matches!(
             payload,
             events::KernelEventPayload::SideEffectInvocationPrepared(payload)

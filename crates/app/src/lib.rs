@@ -4178,13 +4178,13 @@ mod tests {
             let contains_run_started = payloads
                 .iter()
                 .any(|payload| matches!(payload, events::KernelEventPayload::RunStarted(_)));
-            let request = store::TypedCommitRequest {
-                run_id: run_id.clone(),
-                expected_next_seq: corrupt_store.expected_next_seq(&run_id),
-                commit_key: group[0].commit_key().clone(),
+            let request = store::TypedCommitRequest::from_payloads(
+                run_id.clone(),
+                corrupt_store.expected_next_seq(&run_id),
+                group[0].commit_key().clone(),
                 payloads,
                 required_artifacts,
-                preconditions: store::CommitPreconditions {
+                store::CommitPreconditions {
                     required_run_state: if contains_run_started {
                         store::RequiredRunState::Absent
                     } else {
@@ -4192,7 +4192,8 @@ mod tests {
                     },
                     ..store::CommitPreconditions::default()
                 },
-            };
+            )
+            .expect("typed commit request");
             let commit = store::PreparedTypedCommit::new(request, admitted_artifacts)
                 .expect("prepare corrupt-history test commit");
             corrupt_store
@@ -4255,14 +4256,15 @@ mod tests {
                 .map(|event| event.payload().clone())
                 .collect::<Vec<_>>();
             if !payloads.is_empty() {
-                let request = store::TypedCommitRequest {
-                    run_id: run_id.clone(),
-                    expected_next_seq: seq,
+                let request = store::TypedCommitRequest::from_payloads(
+                    run_id.clone(),
+                    seq,
                     commit_key,
                     payloads,
-                    required_artifacts: Vec::new(),
-                    preconditions: store::CommitPreconditions::default(),
-                };
+                    Vec::new(),
+                    store::CommitPreconditions::default(),
+                )
+                .expect("typed commit request");
                 let batch =
                     store::build_committed_batch(&request, seq).expect("rewritten commit batch");
                 rewritten.extend(batch.events().iter().cloned());
@@ -4291,11 +4293,11 @@ mod tests {
             .last()
             .map(|event| store::StreamSeq::new(event.seq().as_u64() + 1).expect("next stream seq"))
             .unwrap_or(store::StreamSeq::FIRST);
-        let request = store::TypedCommitRequest {
-            run_id: run_started.run_id.clone(),
-            expected_next_seq: seq,
-            commit_key: store::CommitKey::new("post-completion-retention-ref").expect("commit key"),
-            payloads: vec![events::KernelEventPayload::RetentionRefsAppended(
+        let request = store::TypedCommitRequest::from_payloads(
+            run_started.run_id.clone(),
+            seq,
+            store::CommitKey::new("post-completion-retention-ref").expect("commit key"),
+            vec![events::KernelEventPayload::RetentionRefsAppended(
                 events::RetentionRefsAppended {
                     run_id: run_started.run_id.clone(),
                     spec_hash: run_started.spec_hash.clone(),
@@ -4303,9 +4305,10 @@ mod tests {
                     reason: events::RetentionReason::RuntimeEvidence,
                 },
             )],
-            required_artifacts: Vec::new(),
-            preconditions: store::CommitPreconditions::default(),
-        };
+            Vec::new(),
+            store::CommitPreconditions::default(),
+        )
+        .expect("typed commit request");
         let batch = store::build_committed_batch(&request, seq).expect("retention refs batch");
         let mut rewritten = stream.to_vec();
         rewritten.extend(batch.events().iter().cloned());
@@ -4337,14 +4340,15 @@ mod tests {
             }
         }
         assert!(tampered, "bootstrap receipt artifact reference exists");
-        let request = store::TypedCommitRequest {
+        let request = store::TypedCommitRequest::from_payloads(
             run_id,
-            expected_next_seq: first_seq,
-            commit_key: first_key,
+            first_seq,
+            first_key.clone(),
             payloads,
-            required_artifacts: Vec::new(),
-            preconditions: store::CommitPreconditions::default(),
-        };
+            Vec::new(),
+            store::CommitPreconditions::default(),
+        )
+        .expect("typed commit request");
         let batch =
             store::build_committed_batch(&request, first_seq).expect("tampered bootstrap batch");
         let mut rewritten = batch.events().to_vec();
@@ -4352,7 +4356,7 @@ mod tests {
             stream
                 .iter()
                 .filter(|event| {
-                    !(event.seq() == first_seq && event.commit_key() == &request.commit_key)
+                    !(event.seq() == first_seq && event.commit_key() == request.commit_key())
                 })
                 .cloned(),
         );
@@ -4373,11 +4377,11 @@ mod tests {
                 + 1,
         )
         .expect("next sequence");
-        let request = store::TypedCommitRequest {
-            run_id: run_id.clone(),
-            expected_next_seq: seq,
-            commit_key: store::CommitKey::new("forged-manual-resolution").expect("commit key"),
-            payloads: vec![events::KernelEventPayload::ManualResolutionRecorded(
+        let request = store::TypedCommitRequest::from_payloads(
+            run_id.clone(),
+            seq,
+            store::CommitKey::new("forged-manual-resolution").expect("commit key"),
+            vec![events::KernelEventPayload::ManualResolutionRecorded(
                 events::ManualResolutionRecorded {
                     run_id,
                     spec_hash: first.spec_hash().clone(),
@@ -4391,9 +4395,10 @@ mod tests {
                     note: None,
                 },
             )],
-            required_artifacts: Vec::new(),
-            preconditions: store::CommitPreconditions::default(),
-        };
+            Vec::new(),
+            store::CommitPreconditions::default(),
+        )
+        .expect("typed commit request");
         let batch = store::build_committed_batch(&request, seq).expect("manual batch");
         let mut rewritten = stream.to_vec();
         rewritten.extend(batch.events().iter().cloned());

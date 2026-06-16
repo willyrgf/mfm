@@ -34,6 +34,27 @@ const D7: DigestBytes = DigestBytes::from_array([0x17; 32]);
 const D8: DigestBytes = DigestBytes::from_array([0x18; 32]);
 const D9: DigestBytes = DigestBytes::from_array([0x19; 32]);
 
+macro_rules! store_typed_commit_request {
+    (
+        run_id: $run_id:expr,
+        expected_next_seq: $expected_next_seq:expr,
+        commit_key: $commit_key:expr,
+        payloads: $payloads:expr,
+        required_artifacts: $required_artifacts:expr,
+        preconditions: $preconditions:expr $(,)?
+    ) => {
+        store::TypedCommitRequest::from_payloads(
+            $run_id,
+            $expected_next_seq,
+            $commit_key,
+            $payloads,
+            $required_artifacts,
+            $preconditions,
+        )
+        .expect("typed commit request")
+    };
+}
+
 trait TestPreparedCommitExt {
     fn append_prepared_commit(
         &mut self,
@@ -46,7 +67,7 @@ impl TestPreparedCommitExt for store::InMemoryTypedRunStore {
         &mut self,
         request: store::TypedCommitRequest,
     ) -> store::Result<store::CommitOutcome> {
-        let admitted_artifacts = request.required_artifacts.clone();
+        let admitted_artifacts = request.required_artifacts().to_vec();
         let commit = store::PreparedTypedCommit::new(request, admitted_artifacts)?;
         self.append_prepared_typed_commit(commit)
     }
@@ -92,7 +113,7 @@ impl store::TypedRunEventStore for RecordingTypedRunStore {
         &mut self,
         commit: store::PreparedTypedCommit,
     ) -> store::Result<store::CommitOutcome> {
-        let payloads = commit.request().payloads.clone();
+        let payloads = commit.request().payloads().to_vec();
         let admitted_artifacts = commit.admitted_artifacts().to_vec();
         let outcome = self.inner.append_prepared_typed_commit(commit)?;
         if let store::CommitOutcome::Appended(batch) = &outcome {
@@ -1373,7 +1394,7 @@ async fn runtime_rejects_standalone_retention_manifest_projection_history() {
     )
     .expect("manifest");
     let manifest_evidence = manifest.evidence.clone();
-    let request = store::TypedCommitRequest {
+    let request = store_typed_commit_request! {
         run_id: fixture.run_id.clone(),
         expected_next_seq: store.expected_next_seq(&fixture.run_id),
         commit_key: store::CommitKey::new("synthetic/standalone-retention-projection")
@@ -1658,7 +1679,7 @@ async fn runtime_rejects_non_completed_run_completion_without_saga_terminal_auth
         .await
         .expect("start run");
         let seq = store.expected_next_seq(&fixture.run_id);
-        let request = store::TypedCommitRequest {
+        let request = store_typed_commit_request! {
             run_id: fixture.run_id.clone(),
             expected_next_seq: seq,
             commit_key: store::CommitKey::new(format!("forged-{name}-completion"))
@@ -2199,7 +2220,7 @@ async fn replay_rejects_run_completed_without_public_output_evidence() {
     .await
     .expect("start run");
     store
-        .append_prepared_commit(store::TypedCommitRequest {
+        .append_prepared_commit(store_typed_commit_request! {
             run_id: fixture.run_id.clone(),
             expected_next_seq: store.expected_next_seq(&fixture.run_id),
             commit_key: store::CommitKey::new("forged-complete-without-public-output")
@@ -2916,7 +2937,7 @@ async fn rejected_staged_payload_mismatch_does_not_admit_artifact_evidence() {
     let attempt_logical_key =
         store::LogicalEventKey::new(format!("attempt:{}:{}", node.node_id, attempt_id))
             .expect("attempt key");
-    let leaked_artifact_request = store::TypedCommitRequest {
+    let leaked_artifact_request = store_typed_commit_request! {
         run_id: fixture.run_id.clone(),
         expected_next_seq: store.expected_next_seq(&fixture.run_id),
         commit_key: store::CommitKey::new("missing-leaked-staged-artifact").expect("commit key"),
@@ -3370,7 +3391,7 @@ async fn replay_rejects_terminal_cell_producer_outside_certified_spec() {
         artifact_role: events::ArtifactRole::StateOutput,
     };
     store
-        .append_prepared_commit(store::TypedCommitRequest {
+        .append_prepared_commit(store_typed_commit_request! {
             run_id: fixture.run_id.clone(),
             expected_next_seq: store.expected_next_seq(&fixture.run_id),
             commit_key: store::CommitKey::new("forged-attempt-start").expect("commit key"),
@@ -3392,7 +3413,7 @@ async fn replay_rejects_terminal_cell_producer_outside_certified_spec() {
         })
         .expect("append forged attempt start");
     store
-        .append_prepared_commit(store::TypedCommitRequest {
+        .append_prepared_commit(store_typed_commit_request! {
             run_id: fixture.run_id.clone(),
             expected_next_seq: store.expected_next_seq(&fixture.run_id),
             commit_key: store::CommitKey::new("forged-terminal").expect("commit key"),
@@ -3470,7 +3491,7 @@ async fn store_rejects_fact_without_started_attempt() {
         artifact_role: events::ArtifactRole::FactResponse,
     };
     assert!(store
-        .append_prepared_commit(store::TypedCommitRequest {
+        .append_prepared_commit(store_typed_commit_request! {
             run_id: fixture.run_id.clone(),
             expected_next_seq: store.expected_next_seq(&fixture.run_id),
             commit_key: store::CommitKey::new("forged-fact").expect("commit key"),
@@ -3569,7 +3590,7 @@ async fn replay_rejects_public_output_without_render_attempt() {
         artifact_role: events::ArtifactRole::StateOutput,
     };
     store
-        .append_prepared_commit(store::TypedCommitRequest {
+        .append_prepared_commit(store_typed_commit_request! {
             run_id: fixture.run_id.clone(),
             expected_next_seq: store.expected_next_seq(&fixture.run_id),
             commit_key: store::CommitKey::new("forged-public-output").expect("commit key"),
@@ -3736,7 +3757,7 @@ async fn replay_rejects_public_output_with_forged_rendered_digest() {
         panic!("expected render node");
     };
     store
-        .append_prepared_commit(store::TypedCommitRequest {
+        .append_prepared_commit(store_typed_commit_request! {
             run_id: fixture.run_id.clone(),
             expected_next_seq: store.expected_next_seq(&fixture.run_id),
             commit_key: store::CommitKey::new("forged-public-output-rendered-digest")
@@ -6976,11 +6997,11 @@ fn rewrite_commit_payload(
         .map(|index| stream[*index].payload().clone())
         .collect::<Vec<_>>();
     payloads[target_ordinal] = payload;
-    let request = store::TypedCommitRequest {
+    let request = store_typed_commit_request! {
         run_id: target.run_id().clone(),
         expected_next_seq: seq,
-        commit_key,
-        payloads,
+        commit_key: commit_key,
+            payloads: payloads,
         required_artifacts: Vec::new(),
         preconditions: store::CommitPreconditions::default(),
     };
@@ -7074,10 +7095,10 @@ where
             continue;
         }
         let seq = next_seq_for_stream_for_tests(first.run_id(), &rewritten);
-        let request = store::TypedCommitRequest {
+        let request = store_typed_commit_request! {
             run_id: first.run_id().clone(),
             expected_next_seq: seq,
-            commit_key,
+            commit_key: commit_key,
             payloads: commit
                 .iter()
                 .map(|event| event.payload().clone())
@@ -7120,11 +7141,11 @@ fn prepend_payloads_to_retention_projection_commit_for_tests(
         }) {
             let mut payloads = prefix_payloads.clone();
             payloads.extend(commit.iter().map(|event| event.payload().clone()));
-            let request = store::TypedCommitRequest {
+            let request = store_typed_commit_request! {
                 run_id: first.run_id().clone(),
                 expected_next_seq: seq,
-                commit_key,
-                payloads,
+                commit_key: commit_key,
+            payloads: payloads,
                 required_artifacts: Vec::new(),
                 preconditions: store::CommitPreconditions::default(),
             };
@@ -7179,7 +7200,7 @@ fn append_same_sequence_sidecar_to_retention_projection_for_tests(
                 .expect("retention projection runtime evidence refs");
             let sidecar_key =
                 store::CommitKey::new("forged-same-seq-retention-sidecar").expect("commit key");
-            let request = store::TypedCommitRequest {
+            let request = store_typed_commit_request! {
                 run_id: first.run_id().clone(),
                 expected_next_seq: seq,
                 commit_key: sidecar_key.clone(),
@@ -7257,10 +7278,10 @@ fn split_public_output_payload_to_own_commit_for_tests(
                 !terminal_payloads.is_empty(),
                 "public-output commit keeps terminal evidence"
             );
-            let terminal_request = store::TypedCommitRequest {
+            let terminal_request = store_typed_commit_request! {
                 run_id: first.run_id().clone(),
                 expected_next_seq: next_seq,
-                commit_key,
+                commit_key: commit_key,
                 payloads: terminal_payloads,
                 required_artifacts: Vec::new(),
                 preconditions: store::CommitPreconditions::default(),
@@ -7279,11 +7300,11 @@ fn split_public_output_payload_to_own_commit_for_tests(
             next_seq = increment_stream_seq_for_tests(next_seq);
             split = true;
         } else {
-            let request = store::TypedCommitRequest {
+            let request = store_typed_commit_request! {
                 run_id: first.run_id().clone(),
                 expected_next_seq: next_seq,
-                commit_key,
-                payloads: commit.iter().map(|event| event.payload().clone()).collect(),
+                commit_key: commit_key,
+            payloads: commit.iter().map(|event| event.payload().clone()).collect(),
                 required_artifacts: Vec::new(),
                 preconditions: store::CommitPreconditions::default(),
             };
@@ -7327,11 +7348,11 @@ fn append_payloads_commit_for_tests(
     payloads: Vec<events::KernelEventPayload>,
 ) {
     let seq = next_seq_for_stream_for_tests(run_id, stream);
-    let request = store::TypedCommitRequest {
+    let request = store_typed_commit_request! {
         run_id: run_id.clone(),
         expected_next_seq: seq,
         commit_key: store::CommitKey::new(commit_key).expect("commit key"),
-        payloads,
+        payloads: payloads,
         required_artifacts: Vec::new(),
         preconditions: store::CommitPreconditions::default(),
     };
@@ -7345,7 +7366,7 @@ fn rewrite_single_payload_envelope(
     payload: events::KernelEventPayload,
 ) -> store::KernelEventEnvelope {
     assert_eq!(event.ordinal(), store::CommitOrdinal::new(0));
-    let request = store::TypedCommitRequest {
+    let request = store_typed_commit_request! {
         run_id: event.run_id().clone(),
         expected_next_seq: event.seq(),
         commit_key: event.commit_key().clone(),
@@ -7775,7 +7796,7 @@ fn append_attempt_start(
     )
     .expect("attempt id");
     store
-        .append_prepared_commit(store::TypedCommitRequest {
+        .append_prepared_commit(store_typed_commit_request! {
             run_id: fixture.run_id.clone(),
             expected_next_seq: store.expected_next_seq(&fixture.run_id),
             commit_key: store::CommitKey::new(format!(
@@ -7811,7 +7832,7 @@ fn append_attempt_failure(
     retryable: bool,
 ) {
     store
-        .append_prepared_commit(store::TypedCommitRequest {
+        .append_prepared_commit(store_typed_commit_request! {
             run_id: fixture.run_id.clone(),
             expected_next_seq: store.expected_next_seq(&fixture.run_id),
             commit_key: store::CommitKey::new(format!(
@@ -7858,7 +7879,7 @@ fn append_synthetic_run_started(
     let spec_artifact = spec_artifact(&fixture.runtime_spec).evidence;
     let certificate_artifact = certificate_artifact(&fixture.runtime_spec).evidence;
     store
-        .append_prepared_commit(store::TypedCommitRequest {
+        .append_prepared_commit(store_typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(run_id),
             commit_key: store::CommitKey::new(commit_key).expect("commit key"),
@@ -7914,7 +7935,7 @@ fn append_synthetic_exclusive_prepare(
     let attempt_id =
         attempt_id(run_id, fixture.runtime_spec.spec_hash(), &node.node_id, 1).expect("attempt id");
     store
-        .append_prepared_commit(store::TypedCommitRequest {
+        .append_prepared_commit(store_typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(run_id),
             commit_key: store::CommitKey::new(format!("{commit_key}-attempt-start"))
@@ -7959,7 +7980,7 @@ fn append_synthetic_exclusive_prepare(
         artifact_role: events::ArtifactRole::SideEffectIntent,
     };
     store
-        .append_prepared_commit(store::TypedCommitRequest {
+        .append_prepared_commit(store_typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(run_id),
             commit_key: store::CommitKey::new(commit_key).expect("commit key"),
@@ -8046,7 +8067,7 @@ fn append_synthetic_invocation_started(
     commit_key: &str,
 ) {
     store
-        .append_prepared_commit(store::TypedCommitRequest {
+        .append_prepared_commit(store_typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(run_id),
             commit_key: store::CommitKey::new(commit_key).expect("commit key"),
@@ -8087,7 +8108,7 @@ fn append_synthetic_side_effect_failed(
     commit_key: &str,
 ) {
     store
-        .append_prepared_commit(store::TypedCommitRequest {
+        .append_prepared_commit(store_typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(run_id),
             commit_key: store::CommitKey::new(commit_key).expect("commit key"),
@@ -8147,7 +8168,7 @@ fn append_synthetic_ambiguous(
         artifact_role: events::ArtifactRole::AmbiguityEvidence,
     };
     store
-        .append_prepared_commit(store::TypedCommitRequest {
+        .append_prepared_commit(store_typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(run_id),
             commit_key: store::CommitKey::new(commit_key).expect("commit key"),
@@ -8192,7 +8213,7 @@ fn append_synthetic_completed_terminal(
     commit_key: &str,
 ) {
     store
-        .append_prepared_commit(store::TypedCommitRequest {
+        .append_prepared_commit(store_typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(run_id),
             commit_key: store::CommitKey::new(commit_key).expect("commit key"),
@@ -8337,7 +8358,7 @@ fn append_fact(
         artifact_role: events::ArtifactRole::FactResponse,
     };
     store
-        .append_prepared_commit(store::TypedCommitRequest {
+        .append_prepared_commit(store_typed_commit_request! {
             run_id: fixture.run_id.clone(),
             expected_next_seq: store.expected_next_seq(&fixture.run_id),
             commit_key: store::CommitKey::new(format!(
@@ -8395,7 +8416,7 @@ fn append_terminal(
     let evidence =
         state_output_artifact(node, descriptor, artifact_id.clone(), output_digest.clone());
     store
-        .append_prepared_commit(store::TypedCommitRequest {
+        .append_prepared_commit(store_typed_commit_request! {
             run_id: fixture.run_id.clone(),
             expected_next_seq: store.expected_next_seq(&fixture.run_id),
             commit_key: store::CommitKey::new(format!(
@@ -8454,7 +8475,7 @@ fn append_public_output_render_failure(
     };
     let error = public_output_error();
     store
-        .append_prepared_commit(store::TypedCommitRequest {
+        .append_prepared_commit(store_typed_commit_request! {
             run_id: fixture.run_id.clone(),
             expected_next_seq: store.expected_next_seq(&fixture.run_id),
             commit_key: store::CommitKey::new(format!(
@@ -8527,7 +8548,7 @@ fn append_not_submitted_proven(
         artifact_role: events::ArtifactRole::NotSubmittedProof,
     };
     store
-        .append_prepared_commit(store::TypedCommitRequest {
+        .append_prepared_commit(store_typed_commit_request! {
             run_id: fixture.run_id.clone(),
             expected_next_seq: store.expected_next_seq(&fixture.run_id),
             commit_key: store::CommitKey::new(format!(

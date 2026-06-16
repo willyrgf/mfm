@@ -26,6 +26,27 @@ use mfm_store::v1::{
 
 const SPEC_MEDIA_TYPE: &str = "application/vnd.mfm.typed-execution-spec+json;version=1";
 
+macro_rules! typed_commit_request {
+    (
+        run_id: $run_id:expr,
+        expected_next_seq: $expected_next_seq:expr,
+        commit_key: $commit_key:expr,
+        payloads: $payloads:expr,
+        required_artifacts: $required_artifacts:expr,
+        preconditions: $preconditions:expr $(,)?
+    ) => {
+        TypedCommitRequest::from_payloads(
+            $run_id,
+            $expected_next_seq,
+            $commit_key,
+            $payloads,
+            $required_artifacts,
+            $preconditions,
+        )
+        .expect("typed commit request")
+    };
+}
+
 fn digest_bytes(byte: u8) -> DigestBytes {
     DigestBytes::from_array([byte; 32])
 }
@@ -851,14 +872,15 @@ fn manual_resolution_request(
     byte: u8,
     policy: SagaPolicySpec,
 ) -> TypedCommitRequest {
-    TypedCommitRequest {
-        run_id: run_id.clone(),
+    TypedCommitRequest::from_payloads(
+        run_id.clone(),
         expected_next_seq,
-        commit_key: CommitKey::new(commit_key).expect("commit key"),
-        payloads: vec![manual_resolution_recorded_for_run(run_id.clone(), byte)],
-        required_artifacts: manual_resolution_artifacts(byte),
-        preconditions: saga_preconditions(run_id, policy),
-    }
+        CommitKey::new(commit_key).expect("commit key"),
+        vec![manual_resolution_recorded_for_run(run_id.clone(), byte)],
+        manual_resolution_artifacts(byte),
+        saga_preconditions(run_id, policy),
+    )
+    .expect("manual resolution request")
 }
 
 fn set_remediation_purpose(
@@ -1184,72 +1206,78 @@ fn prepared_commit_plan_mints_valid_run_start_authority() {
     let run_id = run_id(145);
     let request = run_start_request(run_id.clone(), "purpose-run-start");
     let artifacts = CommitArtifactEvidenceSet::new(
-        request.required_artifacts.clone(),
-        request.required_artifacts.clone(),
+        request.required_artifacts().to_vec(),
+        request.required_artifacts().to_vec(),
     )
     .expect("artifact evidence set");
     let commit =
         PreparedCommit::<RunStart>::new(request.clone(), artifacts).expect("run-start authority");
     let plan = PreparedCommitPlan::from(commit);
 
-    assert_eq!(&plan.request().run_id, &run_id);
-    assert_eq!(&plan.request().payloads, &request.payloads);
+    assert_eq!(plan.request().run_id(), &run_id);
+    assert_eq!(plan.request().payloads(), request.payloads());
     assert_eq!(
-        &plan.request().required_artifacts,
-        &request.required_artifacts
+        plan.request().required_artifacts(),
+        request.required_artifacts()
     );
 }
 
 #[test]
 fn prepared_commit_authority_rejects_invalid_request_shapes() {
     let base_run_id = run_id(146);
-    let empty = TypedCommitRequest {
-        run_id: base_run_id.clone(),
-        expected_next_seq: StreamSeq::FIRST,
-        commit_key: CommitKey::new("purpose-empty").expect("commit key"),
-        payloads: Vec::new(),
-        required_artifacts: Vec::new(),
-        preconditions: CommitPreconditions::default(),
-    };
     assert!(matches!(
-        PreparedCommit::<RunStart>::new(empty, CommitArtifactEvidenceSet::empty()),
+        TypedCommitRequest::from_payloads(
+            base_run_id.clone(),
+            StreamSeq::FIRST,
+            CommitKey::new("purpose-empty").expect("commit key"),
+            Vec::new(),
+            Vec::new(),
+            CommitPreconditions::default(),
+        ),
         Err(StoreError::EmptyCommit)
     ));
 
-    let mut mixed_run = run_start_request(base_run_id.clone(), "purpose-mixed-run");
-    mixed_run.payloads = vec![run_started(run_id(147))];
-    let mixed_run_artifacts = CommitArtifactEvidenceSet::new(
-        mixed_run.required_artifacts.clone(),
-        mixed_run.required_artifacts.clone(),
-    )
-    .expect("artifact evidence set");
     assert!(matches!(
-        PreparedCommit::<RunStart>::new(mixed_run, mixed_run_artifacts),
+        TypedCommitRequest::from_payloads(
+            base_run_id.clone(),
+            StreamSeq::FIRST,
+            CommitKey::new("purpose-mixed-run").expect("commit key"),
+            vec![run_started(run_id(147))],
+            Vec::new(),
+            CommitPreconditions::default(),
+        ),
         Err(StoreError::PayloadRunMismatch { .. })
     ));
 
-    let mut mixed_spec = run_start_request(base_run_id.clone(), "purpose-mixed-spec");
     let mut foreign_spec_payload = side_effect_attempt_started();
     let KernelEventPayload::StateAttemptStarted(payload) = &mut foreign_spec_payload else {
         panic!("state-attempt-start payload")
     };
     payload.spec_hash = spec_hash(148);
-    mixed_spec.payloads.push(foreign_spec_payload);
-    let mixed_spec_artifacts = CommitArtifactEvidenceSet::new(
-        mixed_spec.required_artifacts.clone(),
-        mixed_spec.required_artifacts.clone(),
-    )
-    .expect("artifact evidence set");
     assert!(matches!(
-        PreparedCommit::<RunStart>::new(mixed_spec, mixed_spec_artifacts),
+        TypedCommitRequest::from_payloads(
+            base_run_id.clone(),
+            StreamSeq::FIRST,
+            CommitKey::new("purpose-mixed-spec").expect("commit key"),
+            vec![run_started(base_run_id.clone()), foreign_spec_payload],
+            Vec::new(),
+            CommitPreconditions::default(),
+        ),
         Err(StoreError::PayloadSpecHashMismatch { .. })
     ));
 
-    let mut missing_artifact = run_start_request(base_run_id.clone(), "purpose-missing-artifact");
-    missing_artifact.required_artifacts = vec![spec_artifact_ref()];
+    let missing_artifact = TypedCommitRequest::from_payloads(
+        base_run_id.clone(),
+        StreamSeq::FIRST,
+        CommitKey::new("purpose-missing-artifact").expect("commit key"),
+        vec![run_started(base_run_id.clone())],
+        vec![spec_artifact_ref()],
+        CommitPreconditions::default(),
+    )
+    .expect("missing artifact request");
     let missing_artifact_set = CommitArtifactEvidenceSet::new(
-        missing_artifact.required_artifacts.clone(),
-        missing_artifact.required_artifacts.clone(),
+        missing_artifact.required_artifacts().to_vec(),
+        missing_artifact.required_artifacts().to_vec(),
     )
     .expect("artifact evidence set");
     assert!(matches!(
@@ -1262,8 +1290,8 @@ fn prepared_commit_authority_rejects_invalid_request_shapes() {
 
     let wrong_purpose = run_start_request(base_run_id, "purpose-wrong-marker");
     let wrong_purpose_artifacts = CommitArtifactEvidenceSet::new(
-        wrong_purpose.required_artifacts.clone(),
-        wrong_purpose.required_artifacts.clone(),
+        wrong_purpose.required_artifacts().to_vec(),
+        wrong_purpose.required_artifacts().to_vec(),
     )
     .expect("artifact evidence set");
     assert!(matches!(
@@ -1281,11 +1309,11 @@ fn runner_output_plan_classifies_terminal_attempt_commits() {
     let digest = content_digest(150);
     let payloads = terminal_cell_commit_payloads(artifact_id.clone(), digest.clone());
     let artifact = store_artifact_ref(artifact_id, digest);
-    let request = TypedCommitRequest {
+    let request = typed_commit_request! {
         run_id: run_id(151),
         expected_next_seq: StreamSeq::FIRST,
         commit_key: CommitKey::new("purpose-attempt-terminal").expect("commit key"),
-        payloads,
+        payloads: payloads,
         required_artifacts: vec![artifact.clone()],
         preconditions: CommitPreconditions {
             required_run_state: RequiredRunState::NotCompleted,
@@ -1350,7 +1378,7 @@ impl TestPreparedCommitExt for InMemoryTypedRunStore {
         &mut self,
         request: TypedCommitRequest,
     ) -> mfm_store::v1::Result<CommitOutcome> {
-        let admitted_artifacts = request.required_artifacts.clone();
+        let admitted_artifacts = request.required_artifacts().to_vec();
         let commit = PreparedTypedCommit::new(request, admitted_artifacts)?;
         self.append_prepared_typed_commit(commit)
     }
@@ -1374,17 +1402,18 @@ fn run_start_request_with_saga_policy(
     commit_key: &str,
     saga_policy: &SagaPolicySpec,
 ) -> TypedCommitRequest {
-    TypedCommitRequest {
-        run_id: run_id.clone(),
-        expected_next_seq: StreamSeq::FIRST,
-        commit_key: CommitKey::new(commit_key).expect("commit key"),
-        payloads: vec![run_started_with_saga_policy(run_id, saga_policy)],
-        required_artifacts: vec![spec_artifact_ref(), certificate_artifact_ref()],
-        preconditions: CommitPreconditions {
+    TypedCommitRequest::from_payloads(
+        run_id.clone(),
+        StreamSeq::FIRST,
+        CommitKey::new(commit_key).expect("commit key"),
+        vec![run_started_with_saga_policy(run_id, saga_policy)],
+        vec![spec_artifact_ref(), certificate_artifact_ref()],
+        CommitPreconditions {
             required_run_state: RequiredRunState::Absent,
             ..CommitPreconditions::default()
         },
-    }
+    )
+    .expect("run start request")
 }
 
 fn append_side_effect_prepare(store: &mut InMemoryTypedRunStore, run_id: &RunId) {
@@ -1392,7 +1421,7 @@ fn append_side_effect_prepare(store: &mut InMemoryTypedRunStore, run_id: &RunId)
     let artifact_digest = content_digest(82);
     let intent_evidence = intent_artifact_ref(artifact_id.clone(), artifact_digest.clone());
     store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(run_id),
             commit_key: CommitKey::new("sidefx-attempt-start").expect("commit key"),
@@ -1402,7 +1431,7 @@ fn append_side_effect_prepare(store: &mut InMemoryTypedRunStore, run_id: &RunId)
         })
         .expect("append sidefx attempt start");
     store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(run_id),
             commit_key: CommitKey::new("sidefx-prepare").expect("commit key"),
@@ -1453,7 +1482,7 @@ fn append_side_effect_prepare_for_ledger_on_attempt(
 ) {
     if start_attempt {
         store
-            .append_prepared_commit(TypedCommitRequest {
+            .append_prepared_commit(typed_commit_request! {
                 run_id: run_id.clone(),
                 expected_next_seq: store.expected_next_seq(run_id),
                 commit_key: CommitKey::new(format!("{commit_key}-attempt-start"))
@@ -1485,7 +1514,7 @@ fn append_side_effect_prepare_for_ledger_on_attempt(
     }
 
     store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(run_id),
             commit_key: CommitKey::new(commit_key).expect("commit key"),
@@ -1498,7 +1527,7 @@ fn append_side_effect_prepare_for_ledger_on_attempt(
 
 fn append_side_effect_started(store: &mut InMemoryTypedRunStore, run_id: &RunId) {
     store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(run_id),
             commit_key: CommitKey::new("sidefx-started").expect("commit key"),
@@ -1515,7 +1544,7 @@ fn append_generic_nonretryable_failure(
     key_prefix: &str,
 ) {
     store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(run_id),
             commit_key: CommitKey::new(format!("{key_prefix}-attempt-start")).expect("commit key"),
@@ -1525,7 +1554,7 @@ fn append_generic_nonretryable_failure(
         })
         .expect("append generic attempt start");
     store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(run_id),
             commit_key: CommitKey::new(format!("{key_prefix}-attempt-failed")).expect("commit key"),
@@ -1546,7 +1575,7 @@ fn append_forward_confirmation(store: &mut InMemoryTypedRunStore, run_id: &RunId
     let confirmation_artifact_id = artifact_id(88);
     let confirmation_digest = content_digest(89);
     store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(run_id),
             commit_key: CommitKey::new("forward-confirmation").expect("commit key"),
@@ -1624,7 +1653,7 @@ fn append_remediation_confirmation(
     }
 
     store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(run_id),
             commit_key: CommitKey::new("remediation-confirmation").expect("commit key"),
@@ -1682,8 +1711,7 @@ fn commit_key_idempotency_precedes_stale_expected_next_seq() {
         .expect("append run start");
     assert!(matches!(appended, CommitOutcome::Appended(_)));
 
-    let mut retry = request;
-    retry.expected_next_seq = StreamSeq::new(99).expect("stale seq");
+    let retry = request.with_expected_next_seq(StreamSeq::new(99).expect("stale seq"));
     let outcome = store
         .append_prepared_commit(retry)
         .expect("idempotent retry");
@@ -1704,8 +1732,8 @@ fn commit_key_conflict_is_rejected_before_stale_sequence() {
         .append_prepared_commit(request)
         .expect("append run start");
 
-    let conflicting = TypedCommitRequest {
-        run_id,
+    let conflicting = typed_commit_request! {
+        run_id: run_id,
         expected_next_seq: StreamSeq::new(99).expect("stale seq"),
         commit_key: CommitKey::new("run-start").expect("commit key"),
         payloads: vec![state_attempt_started()],
@@ -1733,7 +1761,7 @@ fn store_owns_envelope_sequence_ordinal_and_event_id() {
     assert_eq!(first_event.logical_key().as_str(), "run:start");
 
     let second = store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("attempt-start").expect("commit key"),
@@ -1760,8 +1788,8 @@ fn projection_rebuild_rejects_gapped_persisted_run_stream() {
     )
     .expect("first batch");
     let second = build_committed_batch(
-        &TypedCommitRequest {
-            run_id,
+        &typed_commit_request! {
+            run_id: run_id,
             expected_next_seq: StreamSeq::new(3).expect("gapped seq"),
             commit_key: CommitKey::new("attempt-start").expect("commit key"),
             payloads: vec![state_attempt_started()],
@@ -1791,8 +1819,8 @@ fn projection_rebuild_rejects_mixed_commit_keys_for_one_sequence() {
     )
     .expect("first batch");
     let sidecar = build_committed_batch(
-        &TypedCommitRequest {
-            run_id,
+        &typed_commit_request! {
+            run_id: run_id,
             expected_next_seq: StreamSeq::FIRST,
             commit_key: CommitKey::new("same-seq-sidecar").expect("commit key"),
             payloads: vec![state_attempt_started()],
@@ -1828,7 +1856,7 @@ fn required_artifact_precondition_is_atomic_with_append() {
     let mut store = InMemoryTypedRunStore::new();
     let run_id = run_id(52);
     let evidence = event_artifact_ref(artifact_id, artifact_digest);
-    let request = TypedCommitRequest {
+    let request = typed_commit_request! {
         run_id: run_id.clone(),
         expected_next_seq: StreamSeq::FIRST,
         commit_key: CommitKey::new("artifact-ref").expect("commit key"),
@@ -1903,7 +1931,7 @@ fn prepared_commit_rejects_unreferenced_admitted_artifact_without_persisting_it(
 
     let error = store
         .append_prepared_commit_with_artifacts(
-            TypedCommitRequest {
+            typed_commit_request! {
                 run_id: run_id.clone(),
                 expected_next_seq: StreamSeq::FIRST,
                 commit_key: CommitKey::new("unreferenced-artifact").expect("commit key"),
@@ -1921,7 +1949,7 @@ fn prepared_commit_rejects_unreferenced_admitted_artifact_without_persisting_it(
     assert!(store.load_run_stream(&run_id).is_empty());
 
     let error = store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: StreamSeq::FIRST,
             commit_key: CommitKey::new("artifact-still-missing").expect("commit key"),
@@ -1952,7 +1980,7 @@ fn prepared_commit_idempotency_fingerprint_includes_admitted_artifacts() {
     store
         .append_prepared_commit(run_start_request(run_id.clone(), "run-start"))
         .expect("append run start");
-    let request = TypedCommitRequest {
+    let request = typed_commit_request! {
         run_id: run_id.clone(),
         expected_next_seq: store.expected_next_seq(&run_id),
         commit_key: CommitKey::new("prepared-fingerprint").expect("commit key"),
@@ -1971,8 +1999,7 @@ fn prepared_commit_idempotency_fingerprint_includes_admitted_artifacts() {
     store
         .append_prepared_commit_with_artifacts(request.clone(), vec![evidence])
         .expect("append initial prepared commit");
-    let mut retry = request;
-    retry.expected_next_seq = StreamSeq::new(99).expect("stale seq");
+    let retry = request.with_expected_next_seq(StreamSeq::new(99).expect("stale seq"));
     let error = store
         .append_prepared_commit_with_artifacts(retry, vec![conflicting_evidence])
         .expect_err("same request with different admitted evidence is not idempotent");
@@ -1988,7 +2015,7 @@ fn admitted_artifacts_are_rolled_back_when_commit_validation_fails() {
     let evidence = store_artifact_ref(artifact_id.clone(), artifact_digest.clone());
 
     let error = store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: StreamSeq::FIRST,
             commit_key: CommitKey::new("cell-without-attempt-complete").expect("commit key"),
@@ -2001,8 +2028,8 @@ fn admitted_artifacts_are_rolled_back_when_commit_validation_fails() {
     assert!(store.load_run_stream(&run_id).is_empty());
 
     let error = store
-        .append_prepared_commit(TypedCommitRequest {
-            run_id,
+        .append_prepared_commit(typed_commit_request! {
+            run_id: run_id,
             expected_next_seq: StreamSeq::FIRST,
             commit_key: CommitKey::new("artifact-not-leaked").expect("commit key"),
             payloads: vec![KernelEventPayload::ArtifactReferenced(
@@ -2030,7 +2057,7 @@ fn payload_artifact_byte_len_media_type_and_producer_mismatches_are_rejected() {
         store_artifact_ref(first_artifact_id.clone(), first_artifact_digest.clone());
     wrong_len.byte_len = 129;
     let evidence = event_artifact_ref(first_artifact_id.clone(), first_artifact_digest.clone());
-    let request = TypedCommitRequest {
+    let request = typed_commit_request! {
         run_id: first_run_id.clone(),
         expected_next_seq: StreamSeq::FIRST,
         commit_key: CommitKey::new("artifact-byte-len").expect("commit key"),
@@ -2066,7 +2093,7 @@ fn payload_artifact_byte_len_media_type_and_producer_mismatches_are_rejected() {
         store_artifact_ref(media_artifact_id.clone(), media_artifact_digest.clone());
     wrong_media.media_type = media_type("application/octet-stream");
     let evidence = event_artifact_ref(media_artifact_id.clone(), media_artifact_digest.clone());
-    let request = TypedCommitRequest {
+    let request = typed_commit_request! {
         run_id: media_run_id.clone(),
         expected_next_seq: StreamSeq::FIRST,
         commit_key: CommitKey::new("artifact-media-type").expect("commit key"),
@@ -2100,7 +2127,7 @@ fn payload_artifact_byte_len_media_type_and_producer_mismatches_are_rejected() {
     let mut wrong_producer =
         store_artifact_ref(second_artifact_id.clone(), second_artifact_digest.clone());
     wrong_producer.producer_node_id = Some(node_id(99));
-    let request = TypedCommitRequest {
+    let request = typed_commit_request! {
         run_id: second_run_id.clone(),
         expected_next_seq: StreamSeq::FIRST,
         commit_key: CommitKey::new("artifact-producer").expect("commit key"),
@@ -2130,7 +2157,7 @@ fn duplicate_attempt_lifecycle_events_are_rejected() {
     let mut store = InMemoryTypedRunStore::new();
     let artifact = store_artifact_ref(artifact_id.clone(), artifact_digest.clone());
     store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: StreamSeq::FIRST,
             commit_key: CommitKey::new("attempt-start").expect("commit key"),
@@ -2141,7 +2168,7 @@ fn duplicate_attempt_lifecycle_events_are_rejected() {
         .expect("append attempt start");
 
     let duplicate_start = store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("attempt-start-2").expect("commit key"),
@@ -2156,7 +2183,7 @@ fn duplicate_attempt_lifecycle_events_are_rejected() {
     ));
 
     store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("attempt-complete").expect("commit key"),
@@ -2167,7 +2194,7 @@ fn duplicate_attempt_lifecycle_events_are_rejected() {
         .expect("append attempt complete");
 
     let duplicate_terminal = store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("attempt-complete-2").expect("commit key"),
@@ -2187,7 +2214,7 @@ fn attempt_terminal_and_cell_terminal_must_commit_together() {
     let run_id = run_id(62);
     let mut store = InMemoryTypedRunStore::new();
     store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: StreamSeq::FIRST,
             commit_key: CommitKey::new("attempt-start").expect("commit key"),
@@ -2198,7 +2225,7 @@ fn attempt_terminal_and_cell_terminal_must_commit_together() {
         .expect("append attempt start");
 
     let completion_only = store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("completion-only").expect("commit key"),
@@ -2213,7 +2240,7 @@ fn attempt_terminal_and_cell_terminal_must_commit_together() {
     ));
 
     let cell_only = store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("cell-only").expect("commit key"),
@@ -2233,7 +2260,7 @@ fn public_output_must_commit_with_render_receipt_terminal() {
     let mut store = InMemoryTypedRunStore::new();
     let artifact = store_artifact_ref(artifact_id.clone(), artifact_digest.clone());
     store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: StreamSeq::FIRST,
             commit_key: CommitKey::new("attempt-start").expect("commit key"),
@@ -2243,7 +2270,7 @@ fn public_output_must_commit_with_render_receipt_terminal() {
         })
         .expect("append attempt start");
     store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("receipt-terminal").expect("commit key"),
@@ -2254,7 +2281,7 @@ fn public_output_must_commit_with_render_receipt_terminal() {
         .expect("append receipt terminal");
 
     let split_public_output = store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("split-public-output").expect("commit key"),
@@ -2277,7 +2304,7 @@ fn side_effect_transition_mismatches_are_rejected() {
     let mut store = InMemoryTypedRunStore::new();
     let intent_evidence = intent_artifact_ref(artifact_id.clone(), artifact_digest.clone());
     store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: StreamSeq::FIRST,
             commit_key: CommitKey::new("sidefx-attempt-start").expect("commit key"),
@@ -2287,7 +2314,7 @@ fn side_effect_transition_mismatches_are_rejected() {
         })
         .expect("append sidefx attempt start");
     store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("sidefx-intent").expect("commit key"),
@@ -2297,7 +2324,7 @@ fn side_effect_transition_mismatches_are_rejected() {
         })
         .expect("append intent");
     store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("sidefx-claim").expect("commit key"),
@@ -2308,7 +2335,7 @@ fn side_effect_transition_mismatches_are_rejected() {
         .expect("append claim");
 
     let wrong_generation = store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("sidefx-prepared-wrong-generation").expect("commit key"),
@@ -2323,7 +2350,7 @@ fn side_effect_transition_mismatches_are_rejected() {
     ));
 
     let wrong_token = store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("sidefx-prepared-wrong-token").expect("commit key"),
@@ -2511,7 +2538,7 @@ fn resource_lane_rejects_same_key_for_other_ledgers_same_run_and_cross_run() {
             set_side_effect_node_attempt(payload, branch_node.clone(), branch_attempt.clone());
         }
         store
-            .append_prepared_commit(TypedCommitRequest {
+            .append_prepared_commit(typed_commit_request! {
                 run_id: run_a.clone(),
                 expected_next_seq: store.expected_next_seq(&run_a),
                 commit_key: CommitKey::new("resource-a-conflict").expect("commit key"),
@@ -2548,7 +2575,7 @@ fn resource_lane_rejects_same_key_for_other_ledgers_same_run_and_cross_run() {
             set_side_effect_node_attempt(payload, branch_node.clone(), branch_attempt.clone());
         }
         store
-            .append_prepared_commit(TypedCommitRequest {
+            .append_prepared_commit(typed_commit_request! {
                 run_id: run_b.clone(),
                 expected_next_seq: store.expected_next_seq(&run_b),
                 commit_key: CommitKey::new("resource-b-conflict").expect("commit key"),
@@ -2619,7 +2646,7 @@ fn resource_lane_holder_identity_includes_run_for_same_ledger_key_across_runs() 
                 );
                 set_side_effect_node_attempt(payload, branch_node.clone(), branch_attempt.clone());
             }
-            TypedCommitRequest {
+            typed_commit_request! {
                 run_id: run_b.clone(),
                 expected_next_seq: store.expected_next_seq(&run_b),
                 commit_key: CommitKey::new("resource-same-ledger-b-conflict").expect("commit key"),
@@ -2699,7 +2726,7 @@ fn resource_lane_allows_same_ledger_refresh_with_same_key_only() {
         events::SideEffectLedgerPurpose::Forward,
     );
     store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run.clone(),
             expected_next_seq: store.expected_next_seq(&run),
             commit_key: CommitKey::new("resource-refresh-same-key").expect("commit key"),
@@ -2728,7 +2755,7 @@ fn resource_lane_allows_same_ledger_refresh_with_same_key_only() {
         events::SideEffectLedgerPurpose::Forward,
     );
     let error = store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run.clone(),
             expected_next_seq: store.expected_next_seq(&run),
             commit_key: CommitKey::new("resource-refresh-changed-key").expect("commit key"),
@@ -2774,7 +2801,7 @@ fn resource_lane_releases_on_ledger_terminals_manual_resolution_and_run_terminal
         events::SideEffectLedgerPurpose::Forward,
     );
     not_submitted_store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run.clone(),
             expected_next_seq: not_submitted_store.expected_next_seq(&run),
             commit_key: CommitKey::new("resource-not-submitted-terminal").expect("commit key"),
@@ -2858,12 +2885,12 @@ fn resource_lane_releases_on_ledger_terminals_manual_resolution_and_run_terminal
             })
             .unwrap_or_default();
         confirmation_store
-            .append_prepared_commit(TypedCommitRequest {
+            .append_prepared_commit(typed_commit_request! {
                 run_id: run.clone(),
                 expected_next_seq: confirmation_store.expected_next_seq(&run),
                 commit_key: CommitKey::new(commit_key).expect("commit key"),
                 payloads: vec![payload],
-                required_artifacts,
+                required_artifacts: required_artifacts,
                 preconditions: CommitPreconditions::default(),
             })
             .expect("append confirmation path event");
@@ -2894,7 +2921,7 @@ fn resource_lane_releases_on_ledger_terminals_manual_resolution_and_run_terminal
         events::SideEffectLedgerPurpose::Forward,
     );
     failure_store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run.clone(),
             expected_next_seq: failure_store.expected_next_seq(&run),
             commit_key: CommitKey::new("resource-failed-terminal").expect("commit key"),
@@ -2936,7 +2963,7 @@ fn resource_lane_releases_on_ledger_terminals_manual_resolution_and_run_terminal
         );
     }
     manual_store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run.clone(),
             expected_next_seq: manual_store.expected_next_seq(&run),
             commit_key: CommitKey::new("resource-manual-ambiguous").expect("commit key"),
@@ -2955,7 +2982,7 @@ fn resource_lane_releases_on_ledger_terminals_manual_resolution_and_run_terminal
         .resource_lane(&lane_key)
         .is_some());
     manual_store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run.clone(),
             expected_next_seq: manual_store.expected_next_seq(&run),
             commit_key: CommitKey::new("resource-manual-release").expect("commit key"),
@@ -2991,7 +3018,7 @@ fn resource_lane_releases_on_ledger_terminals_manual_resolution_and_run_terminal
         .resource_lane(&lane_key)
         .is_some());
     terminal_store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run.clone(),
             expected_next_seq: terminal_store.expected_next_seq(&run),
             commit_key: CommitKey::new("resource-run-terminal-release").expect("commit key"),
@@ -3042,7 +3069,7 @@ fn resource_lane_reprepare_after_release_requires_stable_resource_key_evidence()
         );
     }
     store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run.clone(),
             expected_next_seq: store.expected_next_seq(&run),
             commit_key: CommitKey::new("resource-stability-release").expect("commit key"),
@@ -3071,7 +3098,7 @@ fn resource_lane_reprepare_after_release_requires_stable_resource_key_evidence()
         );
     }
     let missing_key = store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run.clone(),
             expected_next_seq: store.expected_next_seq(&run),
             commit_key: CommitKey::new("resource-stability-missing-key").expect("commit key"),
@@ -3097,7 +3124,7 @@ fn resource_lane_reprepare_after_release_requires_stable_resource_key_evidence()
         );
     }
     let changed_key = store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run.clone(),
             expected_next_seq: store.expected_next_seq(&run),
             commit_key: CommitKey::new("resource-stability-changed-key").expect("commit key"),
@@ -3152,7 +3179,7 @@ fn resource_touched_set_evidence_is_schema_checked_at_admission() {
     let submission_artifact_id = artifact_id(54);
     let submission_digest = content_digest(55);
     store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run.clone(),
             expected_next_seq: store.expected_next_seq(&run),
             commit_key: CommitKey::new("resource-touched-submission").expect("commit key"),
@@ -3179,7 +3206,7 @@ fn resource_touched_set_evidence_is_schema_checked_at_admission() {
     wrong_touched_artifact.schema_id = Some(schema_id("mfm.test.wrong_touched_set", 53));
     let error = store
         .append_prepared_commit_with_artifacts(
-            TypedCommitRequest {
+            typed_commit_request! {
                 run_id: run.clone(),
                 expected_next_seq: store.expected_next_seq(&run),
                 commit_key: CommitKey::new("resource-touched-wrong-schema").expect("commit key"),
@@ -3216,7 +3243,7 @@ fn resource_touched_set_evidence_is_schema_checked_at_admission() {
 
     store
         .append_prepared_commit_with_artifacts(
-            TypedCommitRequest {
+            typed_commit_request! {
                 run_id: run.clone(),
                 expected_next_seq: store.expected_next_seq(&run),
                 commit_key: CommitKey::new("resource-touched-valid").expect("commit key"),
@@ -3286,7 +3313,7 @@ fn side_effect_ledger_purpose_cannot_change_after_intent() {
     let artifact_digest = content_digest(94);
     let mut store = InMemoryTypedRunStore::new();
     store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: StreamSeq::FIRST,
             commit_key: CommitKey::new("purpose-attempt-start").expect("commit key"),
@@ -3296,7 +3323,7 @@ fn side_effect_ledger_purpose_cannot_change_after_intent() {
         })
         .expect("append sidefx attempt start");
     store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("purpose-intent").expect("commit key"),
@@ -3317,7 +3344,7 @@ fn side_effect_ledger_purpose_cannot_change_after_intent() {
         forward_ledger_key: side_effect_ledger_key(),
     };
     let error = store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("purpose-changed-claim").expect("commit key"),
@@ -3419,7 +3446,7 @@ fn forward_fence_rejects_boundary_events_after_engagement() {
             .append_prepared_commit(run_start_request(run_id.clone(), "fence-run-start"))
             .expect("append run start");
         store
-            .append_prepared_commit(TypedCommitRequest {
+            .append_prepared_commit(typed_commit_request! {
                 run_id: run_id.clone(),
                 expected_next_seq: store.expected_next_seq(&run_id),
                 commit_key: CommitKey::new("fence-sidefx-attempt-start").expect("commit key"),
@@ -3436,7 +3463,7 @@ fn forward_fence_rejects_boundary_events_after_engagement() {
     let intent_artifact_id = artifact_id(130);
     let intent_digest = content_digest(131);
     let error = store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("fence-intent-reject").expect("commit key"),
@@ -3454,7 +3481,7 @@ fn forward_fence_rejects_boundary_events_after_engagement() {
     let intent_artifact_id = artifact_id(132);
     let intent_digest = content_digest(133);
     store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("fence-claim-intent").expect("commit key"),
@@ -3468,7 +3495,7 @@ fn forward_fence_rejects_boundary_events_after_engagement() {
         .expect("append intent before engagement");
     append_generic_nonretryable_failure(&mut store, &run_id, "fence-claim");
     let error = store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("fence-claim-reject").expect("commit key"),
@@ -3483,7 +3510,7 @@ fn forward_fence_rejects_boundary_events_after_engagement() {
     let intent_artifact_id = artifact_id(134);
     let intent_digest = content_digest(135);
     store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("fence-takeover-intent-claim").expect("commit key"),
@@ -3497,7 +3524,7 @@ fn forward_fence_rejects_boundary_events_after_engagement() {
         .expect("append claim before engagement");
     append_generic_nonretryable_failure(&mut store, &run_id, "fence-takeover");
     let error = store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("fence-takeover-reject").expect("commit key"),
@@ -3512,7 +3539,7 @@ fn forward_fence_rejects_boundary_events_after_engagement() {
     let intent_artifact_id = artifact_id(136);
     let intent_digest = content_digest(137);
     store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("fence-prepared-intent-claim").expect("commit key"),
@@ -3526,7 +3553,7 @@ fn forward_fence_rejects_boundary_events_after_engagement() {
         .expect("append claim before engagement");
     append_generic_nonretryable_failure(&mut store, &run_id, "fence-prepared");
     let error = store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("fence-prepared-reject").expect("commit key"),
@@ -3541,7 +3568,7 @@ fn forward_fence_rejects_boundary_events_after_engagement() {
     let intent_artifact_id = artifact_id(138);
     let intent_digest = content_digest(139);
     store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("fence-started-prepare").expect("commit key"),
@@ -3556,7 +3583,7 @@ fn forward_fence_rejects_boundary_events_after_engagement() {
         .expect("append prepared before engagement");
     append_generic_nonretryable_failure(&mut store, &run_id, "fence-started");
     let error = store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("fence-started-reject").expect("commit key"),
@@ -3580,7 +3607,7 @@ fn remediation_intent_requires_engaged_confirmed_forward_and_unique_link() {
     let mut remediation_intent = side_effect_intent(artifact_id(140), content_digest(141));
     set_remediation_purpose(&mut remediation_intent, remediation_ledger_key(1));
     let error = store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("remediation-before-engagement").expect("commit key"),
@@ -3595,7 +3622,7 @@ fn remediation_intent_requires_engaged_confirmed_forward_and_unique_link() {
     let mut remediation_intent = side_effect_intent(artifact_id(142), content_digest(143));
     set_remediation_purpose(&mut remediation_intent, remediation_ledger_key(1));
     store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("remediation-admitted").expect("commit key"),
@@ -3608,7 +3635,7 @@ fn remediation_intent_requires_engaged_confirmed_forward_and_unique_link() {
     let mut duplicate = side_effect_intent(artifact_id(144), content_digest(145));
     set_remediation_purpose(&mut duplicate, remediation_ledger_key(2));
     let error = store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("remediation-duplicate").expect("commit key"),
@@ -3636,7 +3663,7 @@ fn remediation_intent_requires_engaged_confirmed_forward_and_unique_link() {
     let mut remediation_intent = side_effect_intent(artifact_id(146), content_digest(147));
     set_remediation_purpose(&mut remediation_intent, remediation_ledger_key(3));
     let error = unconfirmed
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: unconfirmed_run_id.clone(),
             expected_next_seq: unconfirmed.expected_next_seq(&unconfirmed_run_id),
             commit_key: CommitKey::new("remediation-unconfirmed").expect("commit key"),
@@ -3776,14 +3803,14 @@ fn manual_resolution_artifacts_require_dedicated_roles() {
         append_generic_nonretryable_failure(&mut store, &run_id, "manual-artifact-role-failure");
         let mut artifacts = manual_resolution_artifacts(156);
         mutate(&mut artifacts);
-        let mut request = manual_resolution_request(
+        let request = manual_resolution_request(
             &run_id,
             store.expected_next_seq(&run_id),
             commit_key,
             156,
             manual_saga_policy(156),
-        );
-        request.required_artifacts = artifacts;
+        )
+        .with_required_artifacts(artifacts);
         let error = store
             .append_prepared_commit(request)
             .expect_err("manual artifact mismatch rejects");
@@ -3837,7 +3864,7 @@ fn saga_run_completed_requires_terminal_proof() {
         .expect_err("proof rejects before terminal saga mode");
     assert_projection_conflict_contains(proof_error, "requires terminal saga mode");
     let error = store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("terminal-non-quiescent").expect("commit key"),
@@ -3868,7 +3895,7 @@ fn saga_run_completed_requires_terminal_proof() {
         .expect_err("manual terminal rejects before manual resolution");
     assert_projection_conflict_contains(proof_error, "requires terminal saga mode");
     let error = forged
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: forged.expected_next_seq(&run_id),
             commit_key: CommitKey::new("terminal-forged-manual").expect("commit key"),
@@ -3916,7 +3943,7 @@ fn saga_terminal_prepared_commit_requires_matching_proof() {
         .derive_saga_projection(&run_id, &policy);
     let proof =
         SagaTerminalProof::new(&policy, &saga, None).expect("failed terminal proof authority");
-    let request = TypedCommitRequest {
+    let request = typed_commit_request! {
         run_id: run_id.clone(),
         expected_next_seq: store.expected_next_seq(&run_id),
         commit_key: CommitKey::new("terminal-proof").expect("commit key"),
@@ -4073,7 +4100,7 @@ fn side_effect_ledger_state_classifies_ambiguity_as_terminal_not_frontier() {
     let ambiguity_artifact = artifact_id(121);
     let ambiguity_digest = content_digest(122);
     store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("sidefx-ambiguity-typestate").expect("commit key"),
@@ -4109,7 +4136,7 @@ fn side_effect_phase_order_and_fencing_are_enforced() {
     let stale_owner_run = run_id(100);
     append_side_effect_prepare(&mut stale_owner_store, &stale_owner_run);
     let stale_owner = stale_owner_store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: stale_owner_run.clone(),
             expected_next_seq: stale_owner_store.expected_next_seq(&stale_owner_run),
             commit_key: CommitKey::new("sidefx-started-stale-owner").expect("commit key"),
@@ -4124,7 +4151,7 @@ fn side_effect_phase_order_and_fencing_are_enforced() {
     let stale_token_run = run_id(101);
     append_side_effect_prepare(&mut stale_token_store, &stale_token_run);
     let stale_token = stale_token_store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: stale_token_run.clone(),
             expected_next_seq: stale_token_store.expected_next_seq(&stale_token_run),
             commit_key: CommitKey::new("sidefx-started-stale-token").expect("commit key"),
@@ -4139,7 +4166,7 @@ fn side_effect_phase_order_and_fencing_are_enforced() {
     let takeover_run = run_id(102);
     append_side_effect_prepare(&mut takeover_store, &takeover_run);
     let reused_token_takeover = takeover_store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: takeover_run.clone(),
             expected_next_seq: takeover_store.expected_next_seq(&takeover_run),
             commit_key: CommitKey::new("sidefx-takeover-reused-token").expect("commit key"),
@@ -4153,7 +4180,7 @@ fn side_effect_phase_order_and_fencing_are_enforced() {
         StoreError::ProjectionConflict { .. }
     ));
     takeover_store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: takeover_run.clone(),
             expected_next_seq: takeover_store.expected_next_seq(&takeover_run),
             commit_key: CommitKey::new("sidefx-takeover").expect("commit key"),
@@ -4163,7 +4190,7 @@ fn side_effect_phase_order_and_fencing_are_enforced() {
         })
         .expect("takeover before invocation started succeeds");
     takeover_store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: takeover_run.clone(),
             expected_next_seq: takeover_store.expected_next_seq(&takeover_run),
             commit_key: CommitKey::new("sidefx-prepared-after-takeover").expect("commit key"),
@@ -4173,7 +4200,7 @@ fn side_effect_phase_order_and_fencing_are_enforced() {
         })
         .expect("prepare after takeover succeeds");
     takeover_store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: takeover_run.clone(),
             expected_next_seq: takeover_store.expected_next_seq(&takeover_run),
             commit_key: CommitKey::new("sidefx-started-after-takeover").expect("commit key"),
@@ -4183,7 +4210,7 @@ fn side_effect_phase_order_and_fencing_are_enforced() {
         })
         .expect("start after takeover succeeds");
     let late_takeover = takeover_store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: takeover_run.clone(),
             expected_next_seq: takeover_store.expected_next_seq(&takeover_run),
             commit_key: CommitKey::new("sidefx-late-takeover").expect("commit key"),
@@ -4226,7 +4253,7 @@ fn side_effect_phase_order_and_fencing_are_enforced() {
         ArtifactRole::Receipt,
     );
     let receipt_without_submission = receipt_store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: receipt_run.clone(),
             expected_next_seq: receipt_store.expected_next_seq(&receipt_run),
             commit_key: CommitKey::new("sidefx-receipt-without-submission").expect("commit key"),
@@ -4253,7 +4280,7 @@ fn side_effect_phase_order_and_fencing_are_enforced() {
         ArtifactRole::Submission,
     );
     confirmation_store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: confirmation_run.clone(),
             expected_next_seq: confirmation_store.expected_next_seq(&confirmation_run),
             commit_key: CommitKey::new("sidefx-submission").expect("commit key"),
@@ -4274,7 +4301,7 @@ fn side_effect_phase_order_and_fencing_are_enforced() {
         ArtifactRole::Confirmation,
     );
     let confirmation_without_receipt = confirmation_store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: confirmation_run.clone(),
             expected_next_seq: confirmation_store.expected_next_seq(&confirmation_run),
             commit_key: CommitKey::new("sidefx-confirmation-without-receipt").expect("commit key"),
@@ -4300,7 +4327,7 @@ fn side_effect_phase_order_and_fencing_are_enforced() {
         ArtifactRole::SubmissionUnknownEvidence,
     );
     let duplicate_submit = confirmation_store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: confirmation_run.clone(),
             expected_next_seq: confirmation_store.expected_next_seq(&confirmation_run),
             commit_key: CommitKey::new("sidefx-duplicate-submit").expect("commit key"),
@@ -4323,7 +4350,7 @@ fn side_effect_phase_order_and_fencing_are_enforced() {
     let failure_run = run_id(105);
     append_side_effect_prepare(&mut failure_store, &failure_run);
     let mismatched_retryability = failure_store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: failure_run.clone(),
             expected_next_seq: failure_store.expected_next_seq(&failure_run),
             commit_key: CommitKey::new("sidefx-failure-mismatched-retryability")
@@ -4345,7 +4372,7 @@ fn side_effect_phase_order_and_fencing_are_enforced() {
         &failed_without_attempt_run,
     );
     let failed_without_attempt = failed_without_attempt_store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: failed_without_attempt_run.clone(),
             expected_next_seq: failed_without_attempt_store
                 .expected_next_seq(&failed_without_attempt_run),
@@ -4364,7 +4391,7 @@ fn side_effect_phase_order_and_fencing_are_enforced() {
     let failed_with_attempt_run = run_id(107);
     append_side_effect_prepare(&mut failed_with_attempt_store, &failed_with_attempt_run);
     failed_with_attempt_store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: failed_with_attempt_run.clone(),
             expected_next_seq: failed_with_attempt_store
                 .expected_next_seq(&failed_with_attempt_run),
@@ -4381,7 +4408,7 @@ fn side_effect_phase_order_and_fencing_are_enforced() {
     let mut mismatched_attempt = side_effect_attempt_failed(false);
     set_attempt_failure_node_attempt(&mut mismatched_attempt, node_id(170), attempt_id(172));
     let failed_mismatched_attempt = failed_mismatch_store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: failed_mismatch_run.clone(),
             expected_next_seq: failed_mismatch_store.expected_next_seq(&failed_mismatch_run),
             commit_key: CommitKey::new("sidefx-failed-mismatched-attempt").expect("commit key"),
@@ -4414,7 +4441,7 @@ fn side_effect_phase_order_and_fencing_are_enforced() {
         ArtifactRole::AmbiguityEvidence,
     );
     let ambiguity_without_attempt = ambiguity_without_attempt_store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: ambiguity_without_attempt_run.clone(),
             expected_next_seq: ambiguity_without_attempt_store
                 .expected_next_seq(&ambiguity_without_attempt_run),
@@ -4448,7 +4475,7 @@ fn side_effect_phase_order_and_fencing_are_enforced() {
         ArtifactRole::AmbiguityEvidence,
     );
     ambiguity_with_attempt_store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: ambiguity_with_attempt_run.clone(),
             expected_next_seq: ambiguity_with_attempt_store
                 .expected_next_seq(&ambiguity_with_attempt_run),
@@ -4481,7 +4508,7 @@ fn side_effect_phase_order_and_fencing_are_enforced() {
         ArtifactRole::AmbiguityEvidence,
     );
     let retryable_attempt = ambiguity_retryable_attempt_store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: ambiguity_retryable_attempt_run.clone(),
             expected_next_seq: ambiguity_retryable_attempt_store
                 .expected_next_seq(&ambiguity_retryable_attempt_run),
@@ -4514,7 +4541,7 @@ fn side_effect_phase_order_and_fencing_are_enforced() {
     let mut mismatched_attempt = side_effect_attempt_failed(false);
     set_attempt_failure_node_attempt(&mut mismatched_attempt, node_id(230), attempt_id(232));
     let ambiguity_mismatched_attempt = ambiguity_mismatch_store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: ambiguity_mismatch_run.clone(),
             expected_next_seq: ambiguity_mismatch_store.expected_next_seq(&ambiguity_mismatch_run),
             commit_key: CommitKey::new("sidefx-ambiguity-mismatched-attempt").expect("commit key"),
@@ -4548,7 +4575,7 @@ fn side_effect_submission_unknown_recovery_uses_one_submission_result_key() {
         ArtifactRole::SubmissionUnknownEvidence,
     );
     let unknown = store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("sidefx-submission-unknown").expect("commit key"),
@@ -4580,7 +4607,7 @@ fn side_effect_submission_unknown_recovery_uses_one_submission_result_key() {
         ArtifactRole::SubmissionUnknownEvidence,
     );
     let refreshed_unknown = store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("sidefx-submission-unknown-refresh").expect("commit key"),
@@ -4618,7 +4645,7 @@ fn side_effect_submission_unknown_recovery_uses_one_submission_result_key() {
         ArtifactRole::Submission,
     );
     let observed = store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("sidefx-submission-observed-after-unknown")
@@ -4657,7 +4684,7 @@ fn side_effect_submission_unknown_recovery_uses_one_submission_result_key() {
         ArtifactRole::Submission,
     );
     let duplicate = store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("sidefx-duplicate-observed-after-recovery")
@@ -4687,7 +4714,7 @@ fn fact_recorded_projects_reusable_fact_evidence() {
         .append_prepared_commit(run_start_request(run_id.clone(), "run-start"))
         .expect("append run start");
     store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("fact-attempt-start").expect("commit key"),
@@ -4700,7 +4727,7 @@ fn fact_recorded_projects_reusable_fact_evidence() {
         })
         .expect("append fact attempt start");
     store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("fact-recorded").expect("commit key"),
@@ -4734,7 +4761,7 @@ fn fact_recorded_requires_started_attempt_projection() {
         .expect("append run start");
 
     let error = store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("fact-before-attempt").expect("commit key"),
@@ -4760,7 +4787,7 @@ fn retention_refs_are_projected_from_authoritative_stream() {
         .append_prepared_commit(run_start_request(run_id.clone(), "run-start"))
         .expect("append run start");
     store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("retention-refs").expect("commit key"),
@@ -4809,7 +4836,7 @@ fn retention_manifest_projection_must_chain_append_only() {
         .expect("append run start");
 
     let skipped_first = store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("retention-manifest-skipped-first").expect("commit key"),
@@ -4832,7 +4859,7 @@ fn retention_manifest_projection_must_chain_append_only() {
     ));
 
     store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("retention-manifest-1").expect("commit key"),
@@ -4851,7 +4878,7 @@ fn retention_manifest_projection_must_chain_append_only() {
         .expect("append first manifest");
 
     let wrong_previous = store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("retention-manifest-wrong-prev").expect("commit key"),
@@ -4874,7 +4901,7 @@ fn retention_manifest_projection_must_chain_append_only() {
     ));
 
     store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("retention-manifest-2").expect("commit key"),
@@ -4933,7 +4960,7 @@ fn retention_manifest_projection_requires_same_commit_retention_ref() {
         .expect("append run start");
 
     let missing_ref = store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("retention-manifest-missing-ref").expect("commit key"),
@@ -5091,7 +5118,7 @@ fn projections_rebuild_from_authoritative_run_stream() {
         .append_prepared_commit(run_start_request(run_id.clone(), "run-start"))
         .expect("append run start");
     store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("attempt-start").expect("commit key"),
@@ -5104,7 +5131,7 @@ fn projections_rebuild_from_authoritative_run_stream() {
         })
         .expect("append attempt start");
     store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("fact-attempt-start").expect("commit key"),
@@ -5117,7 +5144,7 @@ fn projections_rebuild_from_authoritative_run_stream() {
         })
         .expect("append fact attempt start");
     store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("fact-recorded").expect("commit key"),
@@ -5145,7 +5172,7 @@ fn projections_rebuild_from_authoritative_run_stream() {
         output_digest.clone(),
     ));
     store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("cell-produced").expect("commit key"),
@@ -5158,7 +5185,7 @@ fn projections_rebuild_from_authoritative_run_stream() {
         })
         .expect("append cell produced");
     store
-        .append_prepared_commit(TypedCommitRequest {
+        .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("retention-manifest").expect("commit key"),
