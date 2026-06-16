@@ -419,10 +419,7 @@ async fn side_effect_output(ctx: ErasedRunCtx<'_>) -> mfm_runtime::Result<Erased
 }
 
 async fn run_assemble(ctx: ErasedRunCtx<'_>) -> mfm_runtime::Result<ErasedRunnerOutput> {
-    ensure_config::<ProofAssembleConfig>(
-        &ctx.node().config_ref,
-        &ProofAssembleConfig { output_version: 1 },
-    )?;
+    ensure_config::<ProofAssembleConfig>(&ctx.node().config_ref, &ProofAssembleConfig {})?;
     ensure_struct_input_digest(ctx.inputs(), "fact", &digest_value(&proof_fact())?)?;
     ensure_struct_input_digest(
         ctx.inputs(),

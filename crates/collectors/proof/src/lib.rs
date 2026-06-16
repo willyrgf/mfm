@@ -139,25 +139,12 @@ pub struct ProofApplyConfig {
 
 /// Config for proof output assembly.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
-#[mfm(
-    schema = "mfm.proof.config.assemble_output",
-    validate = "validate_proof_assemble_config"
-)]
-pub struct ProofAssembleConfig {
-    /// Output contract version.
-    pub output_version: u64,
-}
+#[mfm(schema = "mfm.proof.config.assemble_output")]
+pub struct ProofAssembleConfig {}
 
 fn validate_proof_apply_config(config: &ProofApplyConfig) -> Result<(), String> {
     if config.action.trim().is_empty() {
         return Err("proof action must be non-empty".to_owned());
-    }
-    Ok(())
-}
-
-fn validate_proof_assemble_config(config: &ProofAssembleConfig) -> Result<(), String> {
-    if config.output_version != 1 {
-        return Err("unsupported proof output version".to_owned());
     }
     Ok(())
 }

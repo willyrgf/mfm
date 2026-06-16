@@ -656,29 +656,12 @@ impl ReadState for ValidateContractState {
 }
 
 /// Pure state that projects a configured contract reference for public outputs.
-pub struct ProjectConfiguredContractRefState {
-    config: ProjectConfiguredContractRefConfig,
-}
+pub struct ProjectConfiguredContractRefState;
 
 /// Config for projecting a configured contract reference.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
-#[mfm(
-    schema = "mfm.evm.contract.config.project_configured_ref",
-    validate = "validate_project_configured_contract_ref_config"
-)]
-pub struct ProjectConfiguredContractRefConfig {
-    /// Projection contract version.
-    pub projection_version: u64,
-}
-
-fn validate_project_configured_contract_ref_config(
-    config: &ProjectConfiguredContractRefConfig,
-) -> Result<(), String> {
-    if config.projection_version == 0 {
-        return Err("projection_version must be non-zero".to_owned());
-    }
-    Ok(())
-}
+#[mfm(schema = "mfm.evm.contract.config.project_configured_ref")]
+pub struct ProjectConfiguredContractRefConfig {}
 
 impl StateSpec for ProjectConfiguredContractRefState {
     type Config = ProjectConfiguredContractRefConfig;
@@ -699,16 +682,13 @@ impl StateSpec for ProjectConfiguredContractRefState {
         "mfm.evm.contract.project_configured_ref"
     }
 
-    fn new(config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
-        Ok(Self {
-            config: config.into_inner(),
-        })
+    fn new(_config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
+        Ok(Self)
     }
 }
 
 impl PureState for ProjectConfiguredContractRefState {
     fn run(&self, input: Self::Input) -> StateResult<Self::Output> {
-        let _ = self.config.projection_version;
         Ok(ConfiguredContractRef::from_configured(&input))
     }
 }

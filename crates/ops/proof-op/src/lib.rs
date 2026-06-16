@@ -89,7 +89,7 @@ impl Operation for ProofWorkflowOperation {
         )?;
         let output = builder.state::<ProofAssembleOutputState, _>(
             StateKey::new("assemble_output")?,
-            ProofAssembleConfig { output_version: 1 },
+            ProofAssembleConfig {},
             ProofAssembleInputHandles {
                 fact,
                 side_effect: side_effect.into_handle(),
