@@ -1,8 +1,9 @@
-use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex};
 
 use mfm_events::v1 as events;
 use mfm_ids::{AttemptId, NodeId, RunId};
+use mfm_manual_auth::VerifiedManualResolutionForPrefix;
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 
@@ -150,6 +151,7 @@ fn async_error_is_resource_lane_block(error: &impl store::StoreErrorInspection) 
 pub struct SerialTypedScheduler {
     runners: ErasedRunnerRegistry,
     artifact_stager: Arc<dyn RuntimeArtifactStager>,
+    manual_terminal_proofs: Arc<Mutex<BTreeMap<RunId, VerifiedManualResolutionForPrefix>>>,
 }
 
 impl SerialTypedScheduler {
@@ -161,6 +163,7 @@ impl SerialTypedScheduler {
         Self {
             runners,
             artifact_stager,
+            manual_terminal_proofs: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -226,6 +229,10 @@ impl SerialTypedScheduler {
             &evidence_artifact,
             authorization_proof_bytes,
         )?;
+        self.manual_terminal_proofs
+            .lock()
+            .map_err(|_| RuntimeError::Store("manual proof cache lock was poisoned".to_owned()))?
+            .insert(run_id.clone(), verified.clone());
         let stream = store.load_run_stream(run_id);
         let saga = store
             .projection_snapshot()
@@ -513,6 +520,7 @@ impl SerialTypedScheduler {
             caps: invocation.caps(),
             recorded_facts: invocation.recorded_facts(),
             view: &latest_view,
+            saga_terminal_proof: None,
             output,
         })?;
         if resource_lane_block_for_request(
@@ -580,6 +588,20 @@ impl SerialTypedScheduler {
             .runner
             .run_erased(ErasedRunCtx::from_prepared(&invocation))
             .await?;
+        let proof = if matches!(
+            &node.framework,
+            Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_))
+        ) {
+            let manual = self.verified_manual_resolution_for_terminal(run_id)?;
+            Some(crate::framework::saga_terminal_proof(
+                runtime_spec,
+                run_id,
+                &view.projections,
+                manual,
+            )?)
+        } else {
+            None
+        };
         let terminal_output = CommitPlanner::prepare_started_runner_output(
             RunnerOutputCommitInput {
                 runtime_spec,
@@ -589,6 +611,7 @@ impl SerialTypedScheduler {
                 caps: invocation.caps(),
                 recorded_facts: invocation.recorded_facts(),
                 view,
+                saga_terminal_proof: proof,
                 output,
             },
             attempt_no,
@@ -702,6 +725,7 @@ impl SerialTypedScheduler {
             caps: invocation.caps(),
             recorded_facts: invocation.recorded_facts(),
             view: &latest_view,
+            saga_terminal_proof: None,
             output,
         })?;
         let has_resource_lane_prepare =
@@ -763,6 +787,20 @@ impl SerialTypedScheduler {
             .runner
             .run_erased(ErasedRunCtx::from_prepared(&invocation))
             .await?;
+        let proof = if matches!(
+            &node.framework,
+            Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_))
+        ) {
+            let manual = self.verified_manual_resolution_for_terminal(run_id)?;
+            Some(crate::framework::saga_terminal_proof(
+                runtime_spec,
+                run_id,
+                &view.projections,
+                manual,
+            )?)
+        } else {
+            None
+        };
         let terminal_output = CommitPlanner::prepare_started_runner_output(
             RunnerOutputCommitInput {
                 runtime_spec,
@@ -772,6 +810,7 @@ impl SerialTypedScheduler {
                 caps: invocation.caps(),
                 recorded_facts: invocation.recorded_facts(),
                 view,
+                saga_terminal_proof: proof,
                 output,
             },
             attempt_no,
@@ -792,6 +831,16 @@ impl SerialTypedScheduler {
                 .await?;
         }
         Ok(())
+    }
+
+    fn verified_manual_resolution_for_terminal(
+        &self,
+        run_id: &RunId,
+    ) -> Result<Option<mfm_manual_auth::VerifiedManualResolutionForPrefix>> {
+        self.manual_terminal_proofs
+            .lock()
+            .map_err(|_| RuntimeError::Store("manual proof cache lock was poisoned".to_owned()))
+            .map(|proofs| proofs.get(run_id).cloned())
     }
 }
 

@@ -632,6 +632,17 @@ pub(crate) fn saga_terminal_completion_outcome(
         .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))
 }
 
+pub(crate) fn saga_terminal_proof(
+    runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
+    projections: &store::ProjectionSnapshot,
+    manual: Option<mfm_manual_auth::VerifiedManualResolutionForPrefix>,
+) -> Result<store::SagaTerminalProof> {
+    let saga = projections.derive_saga_projection(run_id, &runtime_spec.spec().saga);
+    store::SagaTerminalProof::new(&runtime_spec.spec().saga, &saga, manual)
+        .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))
+}
+
 pub(crate) fn run_completion_evidence(
     runtime_spec: &CertifiedRuntimeSpec,
     projections: &store::ProjectionSnapshot,

@@ -16,11 +16,12 @@ pub mod v1 {
     use mfm_events::v1::{self as events, side_effect, ArtifactRole, KernelEventPayload};
     use mfm_ids::{
         AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind, CapabilityVersion,
-        ContentDigest, NodeId, SchemaId, SpecHash,
+        ContentDigest, NodeId, RunId, SchemaId, SpecHash,
     };
     use mfm_manual_auth::{
         manual_authorization_proof_schema_id, ManualResolutionEvidenceRef,
         ManualResolutionPrefixAuthority, ManualResolutionProofAuthority,
+        VerifiedManualResolutionForPrefix,
     };
     use mfm_spec::v1::{self as spec, CanonicalizerIdentity, HashedSpecEnvelope};
     use mfm_spec::SpecError;
@@ -414,6 +415,7 @@ pub mod v1 {
         submissions: BTreeMap<SideEffectKey, side_effect::SubmissionObserved>,
         receipts: BTreeMap<SideEffectKey, side_effect::ReceiptObserved>,
         confirmations: BTreeMap<SideEffectKey, side_effect::ConfirmationObserved>,
+        manual_resolutions: BTreeMap<RunId, VerifiedManualResolutionForPrefix>,
     }
 
     impl ReplayBroker {
@@ -452,7 +454,6 @@ pub mod v1 {
                 &authority,
                 &retained_artifacts,
             )?;
-            verify_terminal_outcome_agreement(&certified_spec, &stream)?;
             verify_remediation_ledger_links(&certified_spec, &projection)?;
 
             let mut broker = Self {
@@ -468,9 +469,11 @@ pub mod v1 {
                 submissions: BTreeMap::new(),
                 receipts: BTreeMap::new(),
                 confirmations: BTreeMap::new(),
+                manual_resolutions: BTreeMap::new(),
             };
             broker.authorize_certified_spec_artifacts()?;
             broker.index_stream(&stream)?;
+            broker.verify_terminal_outcome_agreement()?;
             broker.reject_unauthorized_artifact_evidence()?;
             Ok(broker)
         }
@@ -943,7 +946,15 @@ pub mod v1 {
                         | events::RunCompletionOutcome::FailedWithoutAcdcClaim => {}
                     },
                     KernelEventPayload::ManualResolutionRecorded(payload) => {
-                        self.verify_manual_resolution_against_spec(envelope, payload)?;
+                        let verified =
+                            self.verify_manual_resolution_against_spec(envelope, payload)?;
+                        insert_unique(
+                            &mut self.manual_resolutions,
+                            payload.run_id.clone(),
+                            verified,
+                            ReplayErrorKind::InvalidRunStream,
+                            "duplicate manual resolution replay event",
+                        )?;
                         self.authorize_event_artifacts(envelope.payload())?;
                     }
                     KernelEventPayload::RetentionManifestProjected(_) => {
@@ -1322,7 +1333,7 @@ pub mod v1 {
             &self,
             envelope: &KernelEventEnvelope,
             payload: &events::ManualResolutionRecorded,
-        ) -> Result<()> {
+        ) -> Result<VerifiedManualResolutionForPrefix> {
             let manual = certified_manual_resolution_spec(&self.certified_spec.spec.saga)
                 .ok_or_else(|| {
                     certified_evidence_mismatch(
@@ -1445,7 +1456,7 @@ pub mod v1 {
                     format!("manual authorization prefix failed validation: {error}"),
                 )
             })?;
-            ManualResolutionProofAuthority::new(
+            let verified = ManualResolutionProofAuthority::new(
                 prefix,
                 payload.outcome,
                 ManualResolutionEvidenceRef {
@@ -1467,7 +1478,60 @@ pub mod v1 {
                     format!("manual authorization proof failed verification: {error}"),
                 )
             })?;
-            Ok(())
+            Ok(verified)
+        }
+
+        fn verify_terminal_outcome_agreement(&self) -> Result<()> {
+            let Some((terminal_start, payload)) = terminal_completion_event(&self.stream)? else {
+                return Ok(());
+            };
+            match &payload.outcome {
+                events::RunCompletionOutcome::Completed(evidence) => {
+                    match self
+                        .projection
+                        .public_output(&evidence.public_output_schema_id)
+                    {
+                        Some(store::PublicOutputProjection::Produced { event_id, .. })
+                            if event_id == &evidence.public_output_event_id =>
+                        {
+                            Ok(())
+                        }
+                        _ => Err(certified_evidence_mismatch(
+                            "completed terminal outcome does not match projected public output",
+                        )),
+                    }
+                }
+                events::RunCompletionOutcome::Compensated
+                | events::RunCompletionOutcome::ManuallyResolved
+                | events::RunCompletionOutcome::FailedWithoutAcdcClaim => {
+                    let prefix_projection = ProjectionSnapshot::rebuild_from_run_stream(
+                        &self.stream[..terminal_start],
+                    )?;
+                    let saga = prefix_projection.derive_saga_projection(
+                        &self.run_id.run_id,
+                        &self.certified_spec.spec.saga,
+                    );
+                    let proof = store::SagaTerminalProof::new(
+                        &self.certified_spec.spec.saga,
+                        &saga,
+                        self.manual_resolutions.get(&self.run_id.run_id).cloned(),
+                    )
+                    .map_err(|error| {
+                        ReplayError::new(
+                            ReplayErrorKind::CertifiedEvidenceMismatch,
+                            error.to_string(),
+                        )
+                    })?;
+                    if proof.outcome() == payload.outcome {
+                        Ok(())
+                    } else {
+                        Err(ReplayError::new(
+                            ReplayErrorKind::CertifiedEvidenceMismatch,
+                            "saga terminal outcome does not match proof",
+                        ))
+                    }
+                }
+            }
         }
 
         fn reject_unauthorized_artifact_evidence(&self) -> Result<()> {
@@ -1983,49 +2047,6 @@ pub mod v1 {
             }
         }
         Ok(())
-    }
-
-    fn verify_terminal_outcome_agreement(
-        certified_spec: &HashedSpecEnvelope,
-        stream: &[KernelEventEnvelope],
-    ) -> Result<()> {
-        let run_started = run_started_payload(stream)?;
-        let Some((terminal_start, payload)) = terminal_completion_event(stream)? else {
-            return Ok(());
-        };
-        match &payload.outcome {
-            events::RunCompletionOutcome::Completed(evidence) => {
-                let projection = ProjectionSnapshot::rebuild_from_run_stream(stream)?;
-                match projection.public_output(&evidence.public_output_schema_id) {
-                    Some(store::PublicOutputProjection::Produced { event_id, .. })
-                        if event_id == &evidence.public_output_event_id =>
-                    {
-                        Ok(())
-                    }
-                    _ => Err(certified_evidence_mismatch(
-                        "completed terminal outcome does not match projected public output",
-                    )),
-                }
-            }
-            events::RunCompletionOutcome::Compensated
-            | events::RunCompletionOutcome::ManuallyResolved
-            | events::RunCompletionOutcome::FailedWithoutAcdcClaim => {
-                let prefix_projection =
-                    ProjectionSnapshot::rebuild_from_run_stream(&stream[..terminal_start])?;
-                prefix_projection
-                    .require_saga_terminal_outcome_admissible(
-                        &run_started.run_id,
-                        &certified_spec.spec.saga,
-                        &payload.outcome,
-                    )
-                    .map_err(|error| {
-                        ReplayError::new(
-                            ReplayErrorKind::CertifiedEvidenceMismatch,
-                            error.to_string(),
-                        )
-                    })
-            }
-        }
     }
 
     fn terminal_completion_event(

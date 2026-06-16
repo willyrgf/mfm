@@ -15,11 +15,9 @@ use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 
 #[cfg(test)]
-use mfm_ids::{ArtifactId, CellId};
+use mfm_ids::CellId;
 #[cfg(test)]
 use std::collections::BTreeSet;
-#[cfg(test)]
-use std::sync::Arc;
 
 mod artifacts;
 mod commit;

@@ -636,3 +636,57 @@ Checks run:
 - `cargo test -p mfm-store -p mfm-runtime -p mfm-replay -p mfm-stream-store-postgres`
 - `cargo test -p mfm-integration-tests --test cargo_metadata_contract`
 - `cargo test -p mfm-integration-tests --test architecture_namespace_contract`
+
+## Phase 14: Saga Terminal Proof Types
+
+Status: completed.
+
+Files changed:
+
+- `Cargo.lock`
+- `crates/kernel/store/Cargo.toml`
+- `crates/kernel/store/src/lib.rs`
+- `crates/kernel/store/src/v1/admission.rs`
+- `crates/kernel/store/tests/commit_contract.rs`
+- `crates/kernel/runtime/src/commit.rs`
+- `crates/kernel/runtime/src/framework.rs`
+- `crates/kernel/runtime/src/lib.rs`
+- `crates/kernel/runtime/src/scheduler.rs`
+- `crates/kernel/runtime/src/tests.rs`
+- `crates/kernel/replay/src/lib.rs`
+- `IMPLEMENTATION_ACDC_SAGA_PRE_MERGE.md`
+
+Validators deleted or replaced:
+
+- Added store-owned `SagaTerminalProof`, `ManualBlockedPrefix`,
+  `ClosedObligationsNonEmpty`, and `FailedWithoutAcdcClaimProof` authority types.
+- Changed `PreparedCommit<SagaTerminal>` and `PreparedCommitPlan::runner_output` to require
+  `SagaTerminalProof` for non-completed saga terminal `RunCompleted` commits.
+- Changed raw `PreparedTypedCommit::new` to reject saga terminal completion outcomes unless the
+  purpose-specific saga terminal authority path was used.
+- Replaced store admission's duplicate prefix-derived terminal-outcome validator with
+  purpose-specific proof construction.
+- Changed runtime saga-terminal resolution to derive and pass terminal proof into the commit
+  planner, including verified manual authorization for manual terminal outcomes.
+- Changed replay terminal agreement to construct `SagaTerminalProof` after indexing verified
+  manual resolution proofs, so replay uses the same proof object as live execution.
+- Deleted `ProjectionSnapshot::require_saga_terminal_outcome_admissible` and the corresponding
+  RunCompleted admission branch.
+
+Tests added or updated:
+
+- Replaced the old prefix-derived terminal outcome store test with
+  `saga_run_completed_requires_terminal_proof`.
+- Added `saga_terminal_prepared_commit_requires_matching_proof`.
+- Updated runtime scheduler test scaffolding to retain staged artifact bytes needed by
+  proof-backed manual terminal execution.
+- Kept runtime manual terminal resolution and replay signed manual authorization coverage on the
+  shared proof path.
+
+Checks run:
+
+- `cargo fmt --all -- --check`
+- `cargo check -p mfm-store -p mfm-runtime -p mfm-replay`
+- `cargo test -p mfm-store -p mfm-runtime -p mfm-replay`
+- `cargo test -p mfm-integration-tests --test cargo_metadata_contract`
+- `cargo test -p mfm-integration-tests --test architecture_namespace_contract`

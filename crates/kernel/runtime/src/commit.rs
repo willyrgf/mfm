@@ -86,6 +86,7 @@ pub(crate) struct RunnerOutputCommitInput<'a> {
     pub(crate) caps: &'a CertifiedRuntimeCapabilities,
     pub(crate) recorded_facts: &'a RecordedFacts,
     pub(crate) view: &'a RuntimeRunView,
+    pub(crate) saga_terminal_proof: Option<store::SagaTerminalProof>,
     pub(crate) output: ErasedRunnerOutput,
 }
 
@@ -530,6 +531,7 @@ impl CommitPlanner {
         let commit = store::PreparedCommitPlan::runner_output(
             request,
             store::CommitArtifactEvidenceSet::new(required_artifacts, admitted_artifacts)?,
+            input.saga_terminal_proof,
         )?;
         Ok(PreparedRunnerOutput {
             commit,

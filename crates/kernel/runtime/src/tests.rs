@@ -1,15 +1,15 @@
 use super::*;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use mfm_canonical::sha256_digest_bytes;
 use mfm_capabilities::{
     CapabilityDescriptor, CapabilityRole, CapabilitySetDescriptor, EffectSpec, ManagedPlatformWrite,
 };
 use mfm_ids::{
-    DigestBytes, EffectKind, EffectVersion, EventId, LoweringVersion, SchemaId, ScopeId, SeedId,
-    SemanticTypeId, SpecVersion, StateKind, StateVersion,
+    ArtifactId, DigestBytes, EffectKind, EffectVersion, EventId, LoweringVersion, SchemaId,
+    ScopeId, SeedId, SemanticTypeId, SpecVersion, StateKind, StateVersion,
 };
 use mfm_manual_auth::{
     ManualAuthorizationSignatureBytes, ManualResolutionAuthorizationProof,
@@ -115,8 +115,12 @@ impl store::TypedRunEventStore for RecordingTypedRunStore {
     }
 }
 
-#[derive(Clone)]
-struct TestRuntimeArtifactStager;
+type TestArtifactMap = BTreeMap<ArtifactId, (Vec<u8>, store::ArtifactEvidenceRef)>;
+
+#[derive(Clone, Default)]
+struct TestRuntimeArtifactStager {
+    artifacts: Arc<Mutex<TestArtifactMap>>,
+}
 
 impl RuntimeArtifactStager for TestRuntimeArtifactStager {
     fn stage_verified_artifact<'a>(
@@ -126,7 +130,33 @@ impl RuntimeArtifactStager for TestRuntimeArtifactStager {
     ) -> RuntimeArtifactStageFuture<'a> {
         Box::pin(async move {
             verify_artifact_bytes(&bytes, &evidence)?;
+            self.artifacts
+                .lock()
+                .expect("test artifact stager lock")
+                .insert(evidence.artifact_id.clone(), (bytes, evidence));
             Ok(())
+        })
+    }
+}
+
+impl store::RetainedArtifactReadProvider for TestRuntimeArtifactStager {
+    fn read_retained_artifact<'a>(
+        &'a self,
+        requirement: &'a store::EventArtifactRequirement,
+    ) -> store::RetainedArtifactReadFuture<'a> {
+        Box::pin(async move {
+            let (bytes, evidence) = self
+                .artifacts
+                .lock()
+                .map_err(|_| store::StoreError::ArtifactReadFailed {
+                    artifact_id: requirement.artifact_id.clone(),
+                })?
+                .get(&requirement.artifact_id)
+                .cloned()
+                .ok_or_else(|| store::StoreError::MissingArtifact {
+                    artifact_id: requirement.artifact_id.clone(),
+                })?;
+            store::VerifiedRunArtifactBytes::new(bytes, evidence, requirement)
         })
     }
 }
@@ -134,6 +164,7 @@ impl RuntimeArtifactStager for TestRuntimeArtifactStager {
 #[derive(Clone)]
 struct RecordingRuntimeArtifactStager {
     staged: Arc<Mutex<Vec<store::ArtifactEvidenceRef>>>,
+    artifacts: Arc<Mutex<TestArtifactMap>>,
 }
 
 impl RuntimeArtifactStager for RecordingRuntimeArtifactStager {
@@ -147,20 +178,48 @@ impl RuntimeArtifactStager for RecordingRuntimeArtifactStager {
             self.staged
                 .lock()
                 .expect("recording stager lock")
-                .push(evidence);
+                .push(evidence.clone());
+            self.artifacts
+                .lock()
+                .expect("recording artifact stager lock")
+                .insert(evidence.artifact_id.clone(), (bytes, evidence));
             Ok(())
+        })
+    }
+}
+
+impl store::RetainedArtifactReadProvider for RecordingRuntimeArtifactStager {
+    fn read_retained_artifact<'a>(
+        &'a self,
+        requirement: &'a store::EventArtifactRequirement,
+    ) -> store::RetainedArtifactReadFuture<'a> {
+        Box::pin(async move {
+            let (bytes, evidence) = self
+                .artifacts
+                .lock()
+                .map_err(|_| store::StoreError::ArtifactReadFailed {
+                    artifact_id: requirement.artifact_id.clone(),
+                })?
+                .get(&requirement.artifact_id)
+                .cloned()
+                .ok_or_else(|| store::StoreError::MissingArtifact {
+                    artifact_id: requirement.artifact_id.clone(),
+                })?;
+            store::VerifiedRunArtifactBytes::new(bytes, evidence, requirement)
         })
     }
 }
 
 struct FailingAfterRuntimeArtifactStager {
     remaining_successes: AtomicUsize,
+    artifacts: Mutex<TestArtifactMap>,
 }
 
 impl FailingAfterRuntimeArtifactStager {
     fn after(successes: usize) -> Self {
         Self {
             remaining_successes: AtomicUsize::new(successes),
+            artifacts: Mutex::new(BTreeMap::new()),
         }
     }
 }
@@ -180,6 +239,10 @@ impl RuntimeArtifactStager for FailingAfterRuntimeArtifactStager {
                 })
                 .is_ok()
             {
+                self.artifacts
+                    .lock()
+                    .expect("failing artifact stager lock")
+                    .insert(evidence.artifact_id.clone(), (bytes, evidence));
                 Ok(())
             } else {
                 Err(RuntimeError::Store(
@@ -190,8 +253,30 @@ impl RuntimeArtifactStager for FailingAfterRuntimeArtifactStager {
     }
 }
 
+impl store::RetainedArtifactReadProvider for FailingAfterRuntimeArtifactStager {
+    fn read_retained_artifact<'a>(
+        &'a self,
+        requirement: &'a store::EventArtifactRequirement,
+    ) -> store::RetainedArtifactReadFuture<'a> {
+        Box::pin(async move {
+            let (bytes, evidence) = self
+                .artifacts
+                .lock()
+                .map_err(|_| store::StoreError::ArtifactReadFailed {
+                    artifact_id: requirement.artifact_id.clone(),
+                })?
+                .get(&requirement.artifact_id)
+                .cloned()
+                .ok_or_else(|| store::StoreError::MissingArtifact {
+                    artifact_id: requirement.artifact_id.clone(),
+                })?;
+            store::VerifiedRunArtifactBytes::new(bytes, evidence, requirement)
+        })
+    }
+}
+
 fn test_scheduler(registry: ErasedRunnerRegistry) -> SerialTypedScheduler {
-    test_scheduler_with_stager(registry, Arc::new(TestRuntimeArtifactStager))
+    test_scheduler_with_stager(registry, Arc::new(TestRuntimeArtifactStager::default()))
 }
 
 fn test_scheduler_with_stager(
@@ -673,6 +758,7 @@ async fn no_second_authority_full_run_stages_and_admits_first_artifact_reference
         registry,
         Arc::new(RecordingRuntimeArtifactStager {
             staged: Arc::clone(&staged),
+            artifacts: Arc::new(Mutex::new(BTreeMap::new())),
         }),
     );
     let mut store = RecordingTypedRunStore::new();
@@ -786,6 +872,7 @@ async fn run_launch_executes_bootstrap_genesis_batch_and_stages_launch_artifacts
         registered_fixture_runners(&fixture),
         Arc::new(RecordingRuntimeArtifactStager {
             staged: Arc::clone(&staged),
+            artifacts: Arc::new(Mutex::new(BTreeMap::new())),
         }),
     );
     let mut store = store::InMemoryTypedRunStore::new();

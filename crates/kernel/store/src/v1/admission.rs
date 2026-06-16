@@ -15,26 +15,6 @@ pub(super) fn require_admission_preconditions(
             )?;
             projections.require_manual_resolution_admissible(&payload.run_id, policy)
         }
-        KernelEventPayload::RunCompleted(payload)
-            if matches!(
-                &payload.outcome,
-                events::RunCompletionOutcome::Compensated
-                    | events::RunCompletionOutcome::ManuallyResolved
-                    | events::RunCompletionOutcome::FailedWithoutAcdcClaim
-            ) =>
-        {
-            let policy = require_saga_admit_token(
-                projections,
-                &payload.run_id,
-                &payload.spec_hash,
-                saga_admit_token,
-            )?;
-            projections.require_saga_terminal_outcome_admissible(
-                &payload.run_id,
-                policy,
-                &payload.outcome,
-            )
-        }
         _ => Ok(()),
     }
 }

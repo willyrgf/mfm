@@ -19,6 +19,7 @@ mfm-canonical = { path = "../canonical" }
 mfm-capabilities = { path = "../capabilities" }
 mfm-events = { path = "../events" }
 mfm-ids = { path = "../ids" }
+mfm-manual-auth = { path = "../manual-auth" }
 mfm-spec = { path = "../spec" }
 serde_json = { workspace = true }
 

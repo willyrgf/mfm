@@ -30,9 +30,10 @@ pub mod v1 {
         CellId, ContentDigest, DigestAlgorithm, EventId, IdentityError, NodeId, RunId, SchemaId,
         ScopeId, SeedId, SemanticTypeId, SpecHash, StateKind, StateVersion,
     };
+    use mfm_manual_auth::{ManualResolutionBlockReason, VerifiedManualResolutionForPrefix};
     use mfm_spec::v1::{
-        CanonicalizerIdentity, CellProducer, DescriptorIdentity, MediaType,
-        OperationDescriptorIdentity, PublicFieldPath, RemediationUnresolvedSpec,
+        CanonicalizerIdentity, CellProducer, DescriptorIdentity, ManualResolutionEvidenceSpec,
+        MediaType, OperationDescriptorIdentity, PublicFieldPath, RemediationUnresolvedSpec,
         RendererDescriptorIdentity, RendererKind, RendererVersion, ResourceNamespace,
         SagaPolicySpec, StateDescriptorIdentity, ValueLineageRef,
     };
@@ -917,6 +918,440 @@ pub mod v1 {
         pub run_completion: Option<RunCompletionProjection>,
     }
 
+    /// Store-derived authority that a prefix is manually blocked.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ManualBlockedPrefix {
+        run_id: RunId,
+        spec_hash: SpecHash,
+        expected_next_seq: StreamSeq,
+        manual_block_reason: ManualBlockReason,
+        manual_policy: ManualResolutionEvidenceSpec,
+    }
+
+    impl ManualBlockedPrefix {
+        /// Mints manual-blocked prefix authority from certified policy and the current saga view.
+        pub fn new(
+            saga: &SagaProjection,
+            spec_hash: SpecHash,
+            expected_next_seq: StreamSeq,
+            policy: &SagaPolicySpec,
+        ) -> Result<Self> {
+            if saga.run_mode != RunMode::ManualBlocked {
+                return Err(StoreError::ProjectionConflict {
+                    key: format!("run:{}:manual_prefix", saga.run_id),
+                    message: format!(
+                        "manual prefix requires manual_blocked saga mode, found {}",
+                        saga.run_mode.as_str()
+                    ),
+                });
+            }
+            let reason =
+                saga.manual_block_reason
+                    .ok_or_else(|| StoreError::ProjectionConflict {
+                        key: format!("run:{}:manual_prefix", saga.run_id),
+                        message: "manual prefix lacks block reason".to_owned(),
+                    })?;
+            let manual_policy = manual_policy_for_block_reason(policy, reason)
+                .ok_or_else(|| StoreError::ProjectionConflict {
+                    key: format!("run:{}:manual_prefix", saga.run_id),
+                    message:
+                        "certified saga policy does not permit manual resolution for this prefix"
+                            .to_owned(),
+                })?
+                .clone();
+            Ok(Self {
+                run_id: saga.run_id.clone(),
+                spec_hash,
+                expected_next_seq,
+                manual_block_reason: reason,
+                manual_policy,
+            })
+        }
+
+        /// Returns the run id bound into this prefix.
+        pub const fn run_id(&self) -> &RunId {
+            &self.run_id
+        }
+
+        /// Returns the certified spec hash bound into this prefix.
+        pub const fn spec_hash(&self) -> &SpecHash {
+            &self.spec_hash
+        }
+
+        /// Returns the expected sequence for the manual-resolution append.
+        pub const fn expected_next_seq(&self) -> StreamSeq {
+            self.expected_next_seq
+        }
+
+        /// Returns the manual block reason derived from the prefix.
+        pub const fn manual_block_reason(&self) -> ManualBlockReason {
+            self.manual_block_reason
+        }
+
+        /// Returns the certified manual evidence policy bound into this prefix.
+        pub const fn manual_policy(&self) -> &ManualResolutionEvidenceSpec {
+            &self.manual_policy
+        }
+    }
+
+    /// Non-empty proof that compensating obligations were closed.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ClosedObligationsNonEmpty {
+        forward_ledger_keys: BTreeSet<events::SideEffectLedgerKey>,
+    }
+
+    impl ClosedObligationsNonEmpty {
+        fn new(policy: &SagaPolicySpec, saga: &SagaProjection) -> Result<Self> {
+            if !matches!(policy, SagaPolicySpec::CompensateCompleted { .. }) {
+                return Err(StoreError::ProjectionConflict {
+                    key: format!("run:{}:saga_terminal", saga.run_id),
+                    message: "compensated terminal requires compensating saga policy".to_owned(),
+                });
+            }
+            if saga.run_mode != RunMode::Compensated {
+                return Err(StoreError::ProjectionConflict {
+                    key: format!("run:{}:saga_terminal", saga.run_id),
+                    message: format!(
+                        "compensated terminal requires compensated saga mode, found {}",
+                        saga.run_mode.as_str()
+                    ),
+                });
+            }
+            let mut closed = BTreeSet::new();
+            for obligation in saga.obligations.values() {
+                if obligation.classification != ForwardLedgerClassification::Owed {
+                    continue;
+                }
+                match obligation.remediation.as_ref() {
+                    Some(remediation) if remediation.closed && remediation.unresolved.is_none() => {
+                        closed.insert(obligation.forward_ledger_key.clone());
+                    }
+                    _ => {
+                        return Err(StoreError::ProjectionConflict {
+                            key: format!(
+                                "run:{}:obligation:{}",
+                                saga.run_id, obligation.forward_ledger_key
+                            ),
+                            message:
+                                "compensated terminal requires every owed obligation to be closed"
+                                    .to_owned(),
+                        });
+                    }
+                }
+            }
+            if closed.is_empty() {
+                return Err(StoreError::ProjectionConflict {
+                    key: format!("run:{}:saga_terminal", saga.run_id),
+                    message: "compensated terminal requires a non-empty owed obligation set"
+                        .to_owned(),
+                });
+            }
+            Ok(Self {
+                forward_ledger_keys: closed,
+            })
+        }
+
+        /// Iterates the forward ledgers whose owed obligations were closed.
+        pub fn forward_ledger_keys(&self) -> impl Iterator<Item = &events::SideEffectLedgerKey> {
+            self.forward_ledger_keys.iter()
+        }
+    }
+
+    /// Proof that a failed terminal outcome makes no AC/DC-equivalence claim.
+    #[derive(Debug, Clone)]
+    pub struct FailedWithoutAcdcClaimProof {
+        source: FailedWithoutAcdcClaimSource,
+    }
+
+    #[derive(Debug, Clone)]
+    enum FailedWithoutAcdcClaimSource {
+        Policy,
+        Manual(VerifiedManualResolutionForPrefix),
+    }
+
+    impl FailedWithoutAcdcClaimProof {
+        fn new(
+            policy: &SagaPolicySpec,
+            saga: &SagaProjection,
+            manual: Option<VerifiedManualResolutionForPrefix>,
+        ) -> Result<Self> {
+            if saga.run_mode != RunMode::FailedWithoutAcdcClaim {
+                return Err(StoreError::ProjectionConflict {
+                    key: format!("run:{}:saga_terminal", saga.run_id),
+                    message: format!(
+                        "failed-without-ACDC terminal requires failed_without_acdc_claim saga mode, found {}",
+                        saga.run_mode.as_str()
+                    ),
+                });
+            }
+            if saga.manual_resolution.is_some() {
+                let verified = manual.ok_or_else(|| StoreError::ProjectionConflict {
+                    key: format!("run:{}:saga_terminal", saga.run_id),
+                    message: "manual failed terminal requires verified manual resolution proof"
+                        .to_owned(),
+                })?;
+                require_verified_manual_resolution_matches(
+                    saga,
+                    &verified,
+                    events::ManualResolutionOutcome::FailWithoutAcdcClaim,
+                )?;
+                return Ok(Self {
+                    source: FailedWithoutAcdcClaimSource::Manual(verified),
+                });
+            }
+            if !policy_allows_failed_without_acdc_claim(policy) {
+                return Err(StoreError::ProjectionConflict {
+                    key: format!("run:{}:saga_terminal", saga.run_id),
+                    message:
+                        "certified saga policy does not permit failed_without_acdc_claim terminal"
+                            .to_owned(),
+                });
+            }
+            Ok(Self {
+                source: FailedWithoutAcdcClaimSource::Policy,
+            })
+        }
+
+        /// Returns true when the proof is backed by a verified manual authorization.
+        pub const fn is_manual_authorized(&self) -> bool {
+            matches!(self.source, FailedWithoutAcdcClaimSource::Manual(_))
+        }
+    }
+
+    /// Read-only terminal proof view.
+    #[derive(Debug, Clone, Copy)]
+    pub enum SagaTerminalProofView<'a> {
+        /// Forward public output completed the run.
+        Completed,
+        /// Certified remediation closed a non-empty obligation set.
+        Compensated(&'a ClosedObligationsNonEmpty),
+        /// Signed manual authorization resolved the run as remediated.
+        ManuallyResolved(&'a VerifiedManualResolutionForPrefix),
+        /// The run failed without making a compensation or AC/DC-equivalence claim.
+        FailedWithoutAcdcClaim(&'a FailedWithoutAcdcClaimProof),
+    }
+
+    /// Opaque proof for one terminal saga outcome.
+    #[derive(Debug, Clone)]
+    pub struct SagaTerminalProof {
+        kind: SagaTerminalProofKind,
+    }
+
+    #[derive(Debug, Clone)]
+    enum SagaTerminalProofKind {
+        Completed(events::PublicOutputCompletionEvidence),
+        Compensated(ClosedObligationsNonEmpty),
+        ManuallyResolved(VerifiedManualResolutionForPrefix),
+        FailedWithoutAcdcClaim(FailedWithoutAcdcClaimProof),
+    }
+
+    impl SagaTerminalProof {
+        /// Mints terminal proof from certified saga policy plus current saga projection.
+        pub fn new(
+            policy: &SagaPolicySpec,
+            saga: &SagaProjection,
+            manual: Option<VerifiedManualResolutionForPrefix>,
+        ) -> Result<Self> {
+            match saga.run_mode {
+                RunMode::Compensated => Ok(Self {
+                    kind: SagaTerminalProofKind::Compensated(ClosedObligationsNonEmpty::new(
+                        policy, saga,
+                    )?),
+                }),
+                RunMode::ManuallyResolved => {
+                    let verified = manual.ok_or_else(|| StoreError::ProjectionConflict {
+                        key: format!("run:{}:saga_terminal", saga.run_id),
+                        message: "manual terminal requires verified manual resolution proof"
+                            .to_owned(),
+                    })?;
+                    require_verified_manual_resolution_matches(
+                        saga,
+                        &verified,
+                        events::ManualResolutionOutcome::ConfirmRemediated,
+                    )?;
+                    Ok(Self {
+                        kind: SagaTerminalProofKind::ManuallyResolved(verified),
+                    })
+                }
+                RunMode::FailedWithoutAcdcClaim => Ok(Self {
+                    kind: SagaTerminalProofKind::FailedWithoutAcdcClaim(
+                        FailedWithoutAcdcClaimProof::new(policy, saga, manual)?,
+                    ),
+                }),
+                RunMode::Completed => {
+                    let Some(RunCompletionProjection {
+                        outcome: events::RunCompletionOutcome::Completed(evidence),
+                        ..
+                    }) = saga.run_completion.as_ref()
+                    else {
+                        return Err(StoreError::ProjectionConflict {
+                            key: format!("run:{}:saga_terminal", saga.run_id),
+                            message: "completed proof requires completed run projection".to_owned(),
+                        });
+                    };
+                    Ok(Self {
+                        kind: SagaTerminalProofKind::Completed((**evidence).clone()),
+                    })
+                }
+                RunMode::Forward | RunMode::Remediating | RunMode::ManualBlocked => {
+                    Err(StoreError::ProjectionConflict {
+                        key: format!("run:{}:saga_terminal", saga.run_id),
+                        message: format!(
+                            "saga terminal proof requires terminal saga mode, found {}",
+                            saga.run_mode.as_str()
+                        ),
+                    })
+                }
+            }
+        }
+
+        /// Returns a read-only view of this terminal proof.
+        pub const fn view(&self) -> SagaTerminalProofView<'_> {
+            match &self.kind {
+                SagaTerminalProofKind::Completed(_) => SagaTerminalProofView::Completed,
+                SagaTerminalProofKind::Compensated(proof) => {
+                    SagaTerminalProofView::Compensated(proof)
+                }
+                SagaTerminalProofKind::ManuallyResolved(proof) => {
+                    SagaTerminalProofView::ManuallyResolved(proof)
+                }
+                SagaTerminalProofKind::FailedWithoutAcdcClaim(proof) => {
+                    SagaTerminalProofView::FailedWithoutAcdcClaim(proof)
+                }
+            }
+        }
+
+        /// Returns the run completion outcome proven by this terminal proof.
+        pub fn outcome(&self) -> events::RunCompletionOutcome {
+            match &self.kind {
+                SagaTerminalProofKind::Completed(evidence) => {
+                    events::RunCompletionOutcome::Completed(Box::new(evidence.clone()))
+                }
+                SagaTerminalProofKind::Compensated(_) => events::RunCompletionOutcome::Compensated,
+                SagaTerminalProofKind::ManuallyResolved(_) => {
+                    events::RunCompletionOutcome::ManuallyResolved
+                }
+                SagaTerminalProofKind::FailedWithoutAcdcClaim(_) => {
+                    events::RunCompletionOutcome::FailedWithoutAcdcClaim
+                }
+            }
+        }
+
+        fn verified_manual_resolution(&self) -> Option<&VerifiedManualResolutionForPrefix> {
+            match &self.kind {
+                SagaTerminalProofKind::ManuallyResolved(verified) => Some(verified),
+                SagaTerminalProofKind::FailedWithoutAcdcClaim(proof) => match &proof.source {
+                    FailedWithoutAcdcClaimSource::Manual(verified) => Some(verified),
+                    FailedWithoutAcdcClaimSource::Policy => None,
+                },
+                SagaTerminalProofKind::Completed(_) | SagaTerminalProofKind::Compensated(_) => None,
+            }
+        }
+    }
+
+    fn manual_policy_for_block_reason(
+        policy: &SagaPolicySpec,
+        reason: ManualBlockReason,
+    ) -> Option<&ManualResolutionEvidenceSpec> {
+        match (policy, reason) {
+            (
+                SagaPolicySpec::ManualResolution { manual },
+                ManualBlockReason::PolicyManualResolution,
+            ) => Some(manual),
+            (
+                SagaPolicySpec::CompensateCompleted {
+                    on_remediation_unresolved:
+                        RemediationUnresolvedSpec::ManualResolution { manual },
+                },
+                ManualBlockReason::ForwardAmbiguous
+                | ManualBlockReason::RemediationFailed
+                | ManualBlockReason::RemediationAmbiguous,
+            ) => Some(manual.as_ref()),
+            _ => None,
+        }
+    }
+
+    fn policy_allows_failed_without_acdc_claim(policy: &SagaPolicySpec) -> bool {
+        matches!(
+            policy,
+            SagaPolicySpec::NoSideEffects
+                | SagaPolicySpec::FailWithoutAcdcClaim
+                | SagaPolicySpec::CompensateCompleted {
+                    on_remediation_unresolved: RemediationUnresolvedSpec::FailWithoutAcdcClaim
+                }
+        )
+    }
+
+    fn require_verified_manual_resolution_matches(
+        saga: &SagaProjection,
+        verified: &VerifiedManualResolutionForPrefix,
+        expected_outcome: events::ManualResolutionOutcome,
+    ) -> Result<()> {
+        if verified.prefix().run_id() != &saga.run_id {
+            return Err(StoreError::ProjectionConflict {
+                key: format!("run:{}:saga_terminal", saga.run_id),
+                message: "manual proof run id does not match saga projection".to_owned(),
+            });
+        }
+        if verified.outcome() != expected_outcome {
+            return Err(StoreError::ProjectionConflict {
+                key: format!("run:{}:saga_terminal", saga.run_id),
+                message: "manual proof outcome does not match terminal outcome".to_owned(),
+            });
+        }
+        let Some(manual) = saga.manual_resolution.as_ref() else {
+            return Err(StoreError::ProjectionConflict {
+                key: format!("run:{}:saga_terminal", saga.run_id),
+                message: "manual terminal requires recorded manual resolution".to_owned(),
+            });
+        };
+        if manual.outcome != expected_outcome {
+            return Err(StoreError::ProjectionConflict {
+                key: format!("run:{}:saga_terminal", saga.run_id),
+                message: "recorded manual resolution outcome does not match terminal outcome"
+                    .to_owned(),
+            });
+        }
+        if manual.evidence_schema_id != verified.evidence().schema_id
+            || manual.evidence_hash != verified.evidence().content_hash
+            || manual.evidence_artifact_id != verified.evidence().artifact_id
+            || manual.authorization_schema_id != verified.authorization().schema_id
+            || manual.authorization_hash != verified.authorization().content_hash
+            || manual.authorization_artifact_id != verified.authorization().artifact_id
+        {
+            return Err(StoreError::ProjectionConflict {
+                key: format!("run:{}:saga_terminal", saga.run_id),
+                message: "recorded manual resolution artifacts do not match verified proof"
+                    .to_owned(),
+            });
+        }
+        if saga.manual_block_reason.map(manual_block_reason_for_auth)
+            != Some(verified.prefix().manual_block_reason())
+            && saga.run_mode == RunMode::ManualBlocked
+        {
+            return Err(StoreError::ProjectionConflict {
+                key: format!("run:{}:saga_terminal", saga.run_id),
+                message: "manual block reason does not match verified proof".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    const fn manual_block_reason_for_auth(
+        reason: ManualBlockReason,
+    ) -> ManualResolutionBlockReason {
+        match reason {
+            ManualBlockReason::PolicyManualResolution => {
+                ManualResolutionBlockReason::PolicyManualResolution
+            }
+            ManualBlockReason::ForwardAmbiguous => ManualResolutionBlockReason::ForwardAmbiguous,
+            ManualBlockReason::RemediationFailed => ManualResolutionBlockReason::RemediationFailed,
+            ManualBlockReason::RemediationAmbiguous => {
+                ManualResolutionBlockReason::RemediationAmbiguous
+            }
+        }
+    }
+
     /// Required run state for a typed commit.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
     pub enum RequiredRunState {
@@ -1201,10 +1636,11 @@ pub mod v1 {
     }
 
     impl<Purpose: CommitPurpose> PreparedCommit<Purpose> {
-        fn prepare_with(
+        fn prepare_with_authority(
             request: TypedCommitRequest,
             artifacts: CommitArtifactEvidenceSet,
             validate: impl FnOnce(&TypedCommitRequest) -> Result<()>,
+            allow_saga_terminal: bool,
         ) -> Result<Self> {
             validate_payload_run_and_spec(&request.run_id, &request.payloads)?;
             if artifacts.required_artifacts != request.required_artifacts {
@@ -1215,11 +1651,23 @@ pub mod v1 {
             }
             validate_required_artifacts_cover_payload_references(Purpose::NAME, &request)?;
             validate(&request)?;
-            let inner = PreparedTypedCommit::new(request, artifacts.admitted_artifacts)?;
+            let inner = PreparedTypedCommit::new_with_saga_terminal_authority(
+                request,
+                artifacts.admitted_artifacts,
+                allow_saga_terminal,
+            )?;
             Ok(Self {
                 inner,
                 _purpose: PhantomData,
             })
+        }
+
+        fn prepare_with(
+            request: TypedCommitRequest,
+            artifacts: CommitArtifactEvidenceSet,
+            validate: impl FnOnce(&TypedCommitRequest) -> Result<()>,
+        ) -> Result<Self> {
+            Self::prepare_with_authority(request, artifacts, validate, false)
         }
 
         /// Returns the typed request sealed into this prepared commit.
@@ -1313,8 +1761,14 @@ pub mod v1 {
         pub fn new(
             request: TypedCommitRequest,
             artifacts: CommitArtifactEvidenceSet,
+            proof: &SagaTerminalProof,
         ) -> Result<Self> {
-            Self::prepare_with(request, artifacts, validate_saga_terminal_commit)
+            Self::prepare_with_authority(
+                request,
+                artifacts,
+                |request| validate_saga_terminal_commit_with_proof(request, proof),
+                true,
+            )
         }
     }
 
@@ -1344,13 +1798,20 @@ pub mod v1 {
         pub fn runner_output(
             request: TypedCommitRequest,
             artifacts: CommitArtifactEvidenceSet,
+            saga_terminal_proof: Option<SagaTerminalProof>,
         ) -> Result<Self> {
             let payloads = request.payloads.as_slice();
             if payloads.iter().any(is_saga_terminal_payload)
                 && request.preconditions.saga_admit_token.is_some()
             {
+                let proof = saga_terminal_proof.ok_or_else(|| {
+                    invalid_prepared_commit_purpose(
+                        SagaTerminal::NAME,
+                        "saga terminal resolution requires SagaTerminalProof",
+                    )
+                })?;
                 return Ok(Self::SagaTerminal(PreparedCommit::<SagaTerminal>::new(
-                    request, artifacts,
+                    request, artifacts, &proof,
                 )?));
             }
             if payloads.iter().any(is_retention_payload) {
@@ -1424,6 +1885,12 @@ pub mod v1 {
         }
     }
 
+    impl From<PreparedCommit<SagaTerminal>> for PreparedCommitPlan {
+        fn from(commit: PreparedCommit<SagaTerminal>) -> Self {
+            Self::SagaTerminal(commit)
+        }
+    }
+
     /// Runtime-prepared atomic store mutation for typed run streams.
     ///
     /// A prepared commit carries both the event payload batch and the artifact evidence that must
@@ -1445,6 +1912,20 @@ pub mod v1 {
             request: TypedCommitRequest,
             admitted_artifacts: Vec<ArtifactEvidenceRef>,
         ) -> Result<Self> {
+            Self::new_with_saga_terminal_authority(request, admitted_artifacts, false)
+        }
+
+        fn new_with_saga_terminal_authority(
+            request: TypedCommitRequest,
+            admitted_artifacts: Vec<ArtifactEvidenceRef>,
+            allow_saga_terminal: bool,
+        ) -> Result<Self> {
+            if !allow_saga_terminal && request_contains_saga_terminal_outcome(&request) {
+                return Err(invalid_prepared_commit_purpose(
+                    SagaTerminal::NAME,
+                    "saga terminal resolution requires SagaTerminalProof",
+                ));
+            }
             let referenced_artifacts = referenced_artifact_ids(&request);
             for evidence in &request.required_artifacts {
                 if !referenced_artifacts.contains(&evidence.artifact_id) {
@@ -3562,25 +4043,6 @@ pub mod v1 {
                 })
         }
 
-        /// Requires that a claimed saga terminal outcome matches the prefix-derived outcome.
-        pub fn require_saga_terminal_outcome_admissible(
-            &self,
-            run_id: &RunId,
-            policy: &SagaPolicySpec,
-            claimed: &events::RunCompletionOutcome,
-        ) -> Result<()> {
-            let expected = self.saga_terminal_completion_outcome(run_id, policy)?;
-            if claimed == &expected {
-                Ok(())
-            } else {
-                Err(StoreError::ProjectionConflict {
-                    key: format!("run:{run_id}:saga_terminal"),
-                    message: "saga terminal outcome does not match prefix-derived run mode"
-                        .to_owned(),
-                })
-            }
-        }
-
         /// Iterates projected run states.
         pub fn run_states(&self) -> impl Iterator<Item = (&RunId, &RunState)> {
             self.run_states.iter()
@@ -5150,6 +5612,50 @@ pub mod v1 {
         validate_terminal_attempt_cell_pairs(&request.payloads)
     }
 
+    fn validate_saga_terminal_commit_with_proof(
+        request: &TypedCommitRequest,
+        proof: &SagaTerminalProof,
+    ) -> Result<()> {
+        validate_saga_terminal_commit(request)?;
+        let completed = request
+            .payloads
+            .iter()
+            .filter_map(|payload| match payload {
+                KernelEventPayload::RunCompleted(payload) => Some(payload),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if completed.len() != 1 {
+            return Err(invalid_prepared_commit_purpose(
+                SagaTerminal::NAME,
+                "saga terminal resolution requires exactly one RunCompleted payload",
+            ));
+        }
+        let payload = completed[0];
+        let proof_outcome = proof.outcome();
+        if payload.outcome != proof_outcome {
+            return Err(invalid_prepared_commit_purpose(
+                SagaTerminal::NAME,
+                "RunCompleted outcome does not match SagaTerminalProof",
+            ));
+        }
+        if matches!(payload.outcome, events::RunCompletionOutcome::Completed(_)) {
+            return Err(invalid_prepared_commit_purpose(
+                SagaTerminal::NAME,
+                "completed public-output terminal must use CompleteRun authority",
+            ));
+        }
+        if let Some(verified) = proof.verified_manual_resolution() {
+            if verified.prefix().spec_hash() != &payload.spec_hash {
+                return Err(invalid_prepared_commit_purpose(
+                    SagaTerminal::NAME,
+                    "manual proof spec hash does not match RunCompleted payload",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn require_purpose_payload(
         purpose: &'static str,
         request: &TypedCommitRequest,
@@ -5204,6 +5710,20 @@ pub mod v1 {
 
     fn is_saga_terminal_payload(payload: &KernelEventPayload) -> bool {
         matches!(payload, KernelEventPayload::RunCompleted(_))
+    }
+
+    fn request_contains_saga_terminal_outcome(request: &TypedCommitRequest) -> bool {
+        request.payloads.iter().any(|payload| {
+            matches!(
+                payload,
+                KernelEventPayload::RunCompleted(events::RunCompleted {
+                    outcome: events::RunCompletionOutcome::Compensated
+                        | events::RunCompletionOutcome::ManuallyResolved
+                        | events::RunCompletionOutcome::FailedWithoutAcdcClaim,
+                    ..
+                })
+            )
+        })
     }
 
     fn invalid_prepared_commit_purpose(

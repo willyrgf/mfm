@@ -2342,6 +2342,7 @@ dependencies = [
  "mfm-certify",
  "mfm-events",
  "mfm-ids",
+ "mfm-manual-auth",
  "mfm-spec",
  "serde_json",
 ]

@@ -19,9 +19,9 @@ use mfm_store::v1::{
     NonEmptyPayloadBatch, PersistedKernelEventRecord, PreparedCommit, PreparedCommitPlan,
     PreparedTypedCommit, ProjectionSnapshot, RequiredRunState, ResourceLaneKey,
     RunCompletionProjection, RunMode, RunStart, RunState, SagaAdmitToken, SagaEngagementProjection,
-    SagaEngagementReason, SideEffectLedgerPhase, SideEffectPhase, StateAttemptStarted, StoreError,
-    StreamSeq, TypedCommitRequest, TypedProjectionRead, TypedRunEventStore,
-    VerifiedRetentionProjection, VerifiedRetentionProjectionSet,
+    SagaEngagementReason, SagaTerminal, SagaTerminalProof, SideEffectLedgerPhase, SideEffectPhase,
+    StateAttemptStarted, StoreError, StreamSeq, TypedCommitRequest, TypedProjectionRead,
+    TypedRunEventStore, VerifiedRetentionProjection, VerifiedRetentionProjectionSet,
 };
 
 const SPEC_MEDIA_TYPE: &str = "application/vnd.mfm.typed-execution-spec+json;version=1";
@@ -372,6 +372,16 @@ fn assert_projection_conflict_contains(error: StoreError, expected: &str) {
         matches!(
             &error,
             StoreError::ProjectionConflict { message, .. } if message.contains(expected)
+        ),
+        "unexpected error: {error:?}"
+    );
+}
+
+fn assert_invalid_prepared_commit_contains(error: StoreError, expected: &str) {
+    assert!(
+        matches!(
+            &error,
+            StoreError::InvalidPreparedCommitPurpose { message, .. } if message.contains(expected)
         ),
         "unexpected error: {error:?}"
     );
@@ -1347,6 +1357,7 @@ fn runner_output_plan_classifies_terminal_attempt_commits() {
         request,
         CommitArtifactEvidenceSet::new(vec![artifact.clone()], vec![artifact])
             .expect("artifact evidence set"),
+        None,
     )
     .expect("runner output plan");
 
@@ -3870,19 +3881,26 @@ fn manual_resolution_artifacts_require_dedicated_roles() {
 }
 
 #[test]
-fn saga_run_completed_requires_prefix_derived_terminal_outcome() {
+fn saga_run_completed_requires_terminal_proof() {
     let run_id = run_id(120);
     let mut store = InMemoryTypedRunStore::new();
+    let policy = manual_saga_policy(160);
     store
         .append_prepared_commit(run_start_request_with_saga_policy(
             run_id.clone(),
             "terminal-quiescence-run-start",
-            &manual_saga_policy(160),
+            &policy,
         ))
         .expect("append run start");
     append_side_effect_prepare(&mut store, &run_id);
     append_side_effect_started(&mut store, &run_id);
     append_generic_nonretryable_failure(&mut store, &run_id, "terminal-quiescence");
+    let saga = store
+        .projection_snapshot()
+        .derive_saga_projection(&run_id, &policy);
+    let proof_error = SagaTerminalProof::new(&policy, &saga, None)
+        .expect_err("proof rejects before terminal saga mode");
+    assert_projection_conflict_contains(proof_error, "requires terminal saga mode");
     let error = store
         .append_prepared_commit(TypedCommitRequest {
             run_id: run_id.clone(),
@@ -3892,21 +3910,28 @@ fn saga_run_completed_requires_prefix_derived_terminal_outcome() {
                 events::RunCompletionOutcome::FailedWithoutAcdcClaim,
             )],
             required_artifacts: Vec::new(),
-            preconditions: saga_preconditions(&run_id, manual_saga_policy(160)),
+            preconditions: saga_preconditions(&run_id, policy.clone()),
         })
-        .expect_err("terminal completion rejects before terminal saga mode");
-    assert_projection_conflict_contains(error, "requires terminal saga mode");
+        .expect_err("raw terminal completion rejects without proof");
+    assert_invalid_prepared_commit_contains(error, "requires SagaTerminalProof");
 
     let mut forged = InMemoryTypedRunStore::new();
+    let forged_policy = manual_saga_policy(162);
     forged
         .append_prepared_commit(run_start_request_with_saga_policy(
             run_id.clone(),
             "terminal-forged-run-start",
-            &manual_saga_policy(162),
+            &forged_policy,
         ))
         .expect("append run start");
     append_forward_confirmation(&mut forged, &run_id);
     append_generic_nonretryable_failure(&mut forged, &run_id, "terminal-forged-failure");
+    let saga = forged
+        .projection_snapshot()
+        .derive_saga_projection(&run_id, &forged_policy);
+    let proof_error = SagaTerminalProof::new(&forged_policy, &saga, None)
+        .expect_err("manual terminal rejects before manual resolution");
+    assert_projection_conflict_contains(proof_error, "requires terminal saga mode");
     let error = forged
         .append_prepared_commit(TypedCommitRequest {
             run_id: run_id.clone(),
@@ -3916,10 +3941,10 @@ fn saga_run_completed_requires_prefix_derived_terminal_outcome() {
                 events::RunCompletionOutcome::ManuallyResolved,
             )],
             required_artifacts: Vec::new(),
-            preconditions: saga_preconditions(&run_id, manual_saga_policy(162)),
+            preconditions: saga_preconditions(&run_id, forged_policy.clone()),
         })
-        .expect_err("forged manual terminal rejects before manual resolution");
-    assert_projection_conflict_contains(error, "requires terminal saga mode");
+        .expect_err("raw forged manual terminal rejects without proof");
+    assert_invalid_prepared_commit_contains(error, "requires SagaTerminalProof");
 
     forged
         .append_prepared_commit(TypedCommitRequest {
@@ -3928,21 +3953,60 @@ fn saga_run_completed_requires_prefix_derived_terminal_outcome() {
             commit_key: CommitKey::new("terminal-manual-recorded").expect("commit key"),
             payloads: vec![manual_resolution_recorded(162)],
             required_artifacts: manual_resolution_artifacts(162),
-            preconditions: saga_preconditions(&run_id, manual_saga_policy(162)),
+            preconditions: saga_preconditions(&run_id, forged_policy.clone()),
         })
         .expect("manual resolution admitted");
-    forged
-        .append_prepared_commit(TypedCommitRequest {
-            run_id: run_id.clone(),
-            expected_next_seq: forged.expected_next_seq(&run_id),
-            commit_key: CommitKey::new("terminal-manual-resolved").expect("commit key"),
-            payloads: vec![run_completed(
-                events::RunCompletionOutcome::ManuallyResolved,
-            )],
-            required_artifacts: Vec::new(),
-            preconditions: saga_preconditions(&run_id, manual_saga_policy(162)),
-        })
-        .expect("manual terminal completion admitted after manual resolution");
+    let saga = forged
+        .projection_snapshot()
+        .derive_saga_projection(&run_id, &forged_policy);
+    let proof_error = SagaTerminalProof::new(&forged_policy, &saga, None)
+        .expect_err("manual terminal requires verified proof authority");
+    assert_projection_conflict_contains(proof_error, "requires verified manual resolution proof");
+}
+
+#[test]
+fn saga_terminal_prepared_commit_requires_matching_proof() {
+    let run_id = run_id(122);
+    let policy = SagaPolicySpec::FailWithoutAcdcClaim;
+    let mut store = InMemoryTypedRunStore::new();
+    store
+        .append_prepared_commit(run_start_request_with_saga_policy(
+            run_id.clone(),
+            "terminal-proof-run-start",
+            &policy,
+        ))
+        .expect("append run start");
+    append_generic_nonretryable_failure(&mut store, &run_id, "terminal-proof-failure");
+    let saga = store
+        .projection_snapshot()
+        .derive_saga_projection(&run_id, &policy);
+    let proof =
+        SagaTerminalProof::new(&policy, &saga, None).expect("failed terminal proof authority");
+    let request = TypedCommitRequest {
+        run_id: run_id.clone(),
+        expected_next_seq: store.expected_next_seq(&run_id),
+        commit_key: CommitKey::new("terminal-proof").expect("commit key"),
+        payloads: vec![run_completed_for_run(
+            run_id.clone(),
+            events::RunCompletionOutcome::FailedWithoutAcdcClaim,
+        )],
+        required_artifacts: Vec::new(),
+        preconditions: saga_preconditions(&run_id, policy),
+    };
+    let prepared =
+        PreparedCommit::<SagaTerminal>::new(request, CommitArtifactEvidenceSet::empty(), &proof)
+            .expect("proof-backed saga terminal commit");
+    store
+        .append_prepared_commit_plan(prepared.into())
+        .expect("append proof-backed saga terminal");
+    assert!(matches!(
+        store
+            .projection_snapshot()
+            .run_completion(&run_id)
+            .expect("run completion")
+            .outcome,
+        events::RunCompletionOutcome::FailedWithoutAcdcClaim
+    ));
 }
 
 #[test]
