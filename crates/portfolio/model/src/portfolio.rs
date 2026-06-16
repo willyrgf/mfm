@@ -788,11 +788,6 @@ pub fn decode_portfolio_config(value: &Value) -> Result<PortfolioConfig, Portfol
     cfg.validated()
 }
 
-/// Validates a canonical portfolio config.
-pub fn validate_portfolio_config(cfg: &PortfolioConfig) -> Result<(), PortfolioConfigError> {
-    ValidatedPortfolioConfig::new(cfg.clone()).map(|_| ())
-}
-
 fn validate_portfolio_config_inner(cfg: &PortfolioConfig) -> Result<(), PortfolioConfigError> {
     if cfg.portfolio_id.trim().is_empty() {
         return Err(PortfolioConfigError::EmptyPortfolioId);
@@ -918,15 +913,9 @@ fn validate_portfolio_config_inner(cfg: &PortfolioConfig) -> Result<(), Portfoli
 }
 
 fn validate_portfolio_config_for_mfm(cfg: &PortfolioConfig) -> Result<(), String> {
-    validate_portfolio_config(cfg).map_err(|error| error.to_string())
-}
-
-/// Validates the canonical portfolio config together with its valuation source registry.
-pub fn validate_portfolio_bundle(
-    cfg: &PortfolioConfig,
-    registry: &ValuationSourceRegistry,
-) -> Result<(), PortfolioConfigError> {
-    ValidatedPortfolioBundle::new(cfg.clone(), registry.clone()).map(|_| ())
+    ValidatedPortfolioConfig::new(cfg.clone())
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 fn valuation_source_index(registry: &ValuationSourceRegistry) -> BTreeMap<String, usize> {
