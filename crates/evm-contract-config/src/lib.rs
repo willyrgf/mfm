@@ -216,27 +216,37 @@ pub enum EvmTransactionStyle {
 
 /// Transaction fee and gas policy.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, MfmValue, MfmConfig)]
+#[serde(tag = "style", rename_all = "snake_case")]
 #[mfm(
     namespace = "mfm.evm.contract",
     name = "transaction-policy",
     schema = "mfm.evm.contract.config.transaction_policy"
 )]
-pub struct EvmTransactionPolicy {
-    style: EvmTransactionStyle,
-    gas_limit: Option<NonZeroU64>,
-    max_fee_per_gas: Option<WeiAmount>,
-    max_priority_fee_per_gas: Option<WeiAmount>,
-    gas_price: Option<WeiAmount>,
+pub enum EvmTransactionPolicy {
+    /// EIP-1559 dynamic fee transaction policy.
+    Eip1559 {
+        /// Optional explicit gas limit.
+        gas_limit: Option<NonZeroU64>,
+        /// Optional maximum fee per gas in wei.
+        max_fee_per_gas: Option<WeiAmount>,
+        /// Optional maximum priority fee per gas in wei.
+        max_priority_fee_per_gas: Option<WeiAmount>,
+    },
+    /// Legacy gas-price transaction policy.
+    Legacy {
+        /// Optional explicit gas limit.
+        gas_limit: Option<NonZeroU64>,
+        /// Optional gas price in wei.
+        gas_price: Option<WeiAmount>,
+    },
 }
 
 impl Default for EvmTransactionPolicy {
     fn default() -> Self {
-        Self {
-            style: EvmTransactionStyle::Eip1559,
+        Self::Eip1559 {
             gas_limit: None,
             max_fee_per_gas: None,
             max_priority_fee_per_gas: None,
-            gas_price: None,
         }
     }
 }
@@ -250,58 +260,77 @@ impl EvmTransactionPolicy {
         max_priority_fee_per_gas: Option<String>,
         gas_price: Option<String>,
     ) -> Result<Self, String> {
-        let policy = Self {
-            style,
-            gas_limit: optional_nonzero_u64(gas_limit, "gas_limit")?,
-            max_fee_per_gas: optional_wei_amount(max_fee_per_gas, "max_fee_per_gas")?,
-            max_priority_fee_per_gas: optional_wei_amount(
-                max_priority_fee_per_gas,
-                "max_priority_fee_per_gas",
-            )?,
-            gas_price: optional_wei_amount(gas_price, "gas_price")?,
-        };
-        policy.validate()?;
-        Ok(policy)
+        match style {
+            EvmTransactionStyle::Eip1559 => {
+                if gas_price.is_some() {
+                    return Err("gas_price is only valid for legacy transactions".to_string());
+                }
+                Ok(Self::Eip1559 {
+                    gas_limit: optional_nonzero_u64(gas_limit, "gas_limit")?,
+                    max_fee_per_gas: optional_wei_amount(max_fee_per_gas, "max_fee_per_gas")?,
+                    max_priority_fee_per_gas: optional_wei_amount(
+                        max_priority_fee_per_gas,
+                        "max_priority_fee_per_gas",
+                    )?,
+                })
+            }
+            EvmTransactionStyle::Legacy => {
+                if max_fee_per_gas.is_some() || max_priority_fee_per_gas.is_some() {
+                    return Err(
+                        "EIP-1559 fee fields are not valid for legacy transactions".to_string()
+                    );
+                }
+                Ok(Self::Legacy {
+                    gas_limit: optional_nonzero_u64(gas_limit, "gas_limit")?,
+                    gas_price: optional_wei_amount(gas_price, "gas_price")?,
+                })
+            }
+        }
     }
 
     /// Returns the configured transaction style.
     pub const fn style(&self) -> EvmTransactionStyle {
-        self.style
+        match self {
+            Self::Eip1559 { .. } => EvmTransactionStyle::Eip1559,
+            Self::Legacy { .. } => EvmTransactionStyle::Legacy,
+        }
     }
 
     /// Returns the optional gas limit.
     pub fn gas_limit(&self) -> Option<u64> {
-        self.gas_limit.map(NonZeroU64::get)
+        match self {
+            Self::Eip1559 { gas_limit, .. } | Self::Legacy { gas_limit, .. } => {
+                gas_limit.map(NonZeroU64::get)
+            }
+        }
     }
 
     /// Returns the optional EIP-1559 maximum fee per gas.
     pub fn max_fee_per_gas(&self) -> Option<&str> {
-        self.max_fee_per_gas.as_ref().map(WeiAmount::as_str)
+        match self {
+            Self::Eip1559 {
+                max_fee_per_gas, ..
+            } => max_fee_per_gas.as_ref().map(WeiAmount::as_str),
+            Self::Legacy { .. } => None,
+        }
     }
 
     /// Returns the optional EIP-1559 priority fee per gas.
     pub fn max_priority_fee_per_gas(&self) -> Option<&str> {
-        self.max_priority_fee_per_gas
-            .as_ref()
-            .map(WeiAmount::as_str)
+        match self {
+            Self::Eip1559 {
+                max_priority_fee_per_gas,
+                ..
+            } => max_priority_fee_per_gas.as_ref().map(WeiAmount::as_str),
+            Self::Legacy { .. } => None,
+        }
     }
 
     /// Returns the optional legacy gas price.
     pub fn gas_price(&self) -> Option<&str> {
-        self.gas_price.as_ref().map(WeiAmount::as_str)
-    }
-
-    fn validate(&self) -> Result<(), String> {
-        match self.style {
-            EvmTransactionStyle::Eip1559 if self.gas_price.is_some() => {
-                Err("gas_price is only valid for legacy transactions".to_string())
-            }
-            EvmTransactionStyle::Legacy
-                if self.max_fee_per_gas.is_some() || self.max_priority_fee_per_gas.is_some() =>
-            {
-                Err("EIP-1559 fee fields are not valid for legacy transactions".to_string())
-            }
-            _ => Ok(()),
+        match self {
+            Self::Legacy { gas_price, .. } => gas_price.as_ref().map(WeiAmount::as_str),
+            Self::Eip1559 { .. } => None,
         }
     }
 }
