@@ -20,7 +20,7 @@ use mfm_evm_capabilities::{
 use mfm_evm_core::encoding::{encode_erc20_balance_of, encode_erc20_decimals, parse_u8_u256};
 use mfm_evm_core::hex::hex_to_bytes;
 use mfm_ids::{ArtifactId, ContentDigest, DescriptorId, NodeId};
-use mfm_program::StateSpec;
+use mfm_program::{StateSpec, ValidatedConfig};
 use mfm_runtime::{
     ErasedNodeRunner, ErasedRunCtx, ErasedRunnerBinding, ErasedRunnerFuture, ErasedRunnerOutput,
     ErasedRunnerRegistry, MaterializedCellTerminal, MaterializedInputNode, RunnerEventPayload,
@@ -245,7 +245,8 @@ impl ErasedNodeRunner for PrepareSourcesRunner {
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
             let config = load_config::<PrepareSourcesConfig>(&ctx, self.artifacts.as_ref()).await?;
-            let prepared = prepare_sources_from_config(&config);
+            let config = config.as_ref();
+            let prepared = prepare_sources_from_config(config);
             let request = SourcePreparationRequest {
                 network_ids: config
                     .networks()
@@ -270,12 +271,13 @@ impl ErasedNodeRunner for ResolveSubjectsRunner {
         Box::pin(async move {
             let config =
                 load_config::<ResolveSubjectsConfig>(&ctx, self.artifacts.as_ref()).await?;
+            let config = config.as_ref();
             let _prepared = load_input_cell::<mfm_state_portfolio::PreparedSources>(
                 ctx.inputs(),
                 self.artifacts.as_ref(),
             )
             .await?;
-            let output = resolve_subjects_from_config(&config);
+            let output = resolve_subjects_from_config(config);
             state_output(ctx, &output).await
         })
     }
@@ -290,13 +292,14 @@ impl ErasedNodeRunner for PinViewsRunner {
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
             let config = load_config::<PinViewsConfig>(&ctx, self.artifacts.as_ref()).await?;
+            let config = config.as_ref();
             let _prepared = load_input_cell::<mfm_state_portfolio::PreparedSources>(
                 ctx.inputs(),
                 self.artifacts.as_ref(),
             )
             .await?;
             let backend = EvmCapabilityPortfolioBackend::new(Arc::clone(&self.evm));
-            let output = pin_views_with_backend(&config, &backend)
+            let output = pin_views_with_backend(config, &backend)
                 .await
                 .map_err(portfolio_read_runtime_error)?;
             let request = ViewPinRequest {
@@ -323,12 +326,13 @@ impl ErasedNodeRunner for ResolveValuationsRunner {
         Box::pin(async move {
             let config =
                 load_config::<ResolveValuationsConfig>(&ctx, self.artifacts.as_ref()).await?;
+            let config = config.as_ref();
             let views = load_input_cell::<mfm_state_portfolio::PinnedViews>(
                 ctx.inputs(),
                 self.artifacts.as_ref(),
             )
             .await?;
-            let output = resolve_valuations_from_config(&config, &views);
+            let output = resolve_valuations_from_config(config, &views);
             state_output(ctx, &output).await
         })
     }
@@ -343,12 +347,13 @@ impl ErasedNodeRunner for ObserveBatchRunner {
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
             let config = load_config::<ObserveBatchConfig>(&ctx, self.artifacts.as_ref()).await?;
+            let config = config.as_ref();
             let input =
                 load_struct_input::<ObserveBatchInput>(ctx.inputs(), self.artifacts.as_ref())
                     .await?;
             let block_number = evm_block_number_for(&input.views, &config.network().network_id);
             let backend = EvmCapabilityPortfolioBackend::new(Arc::clone(&self.evm));
-            let output = observe_batch_with_backend(&config, &input, &backend).await;
+            let output = observe_batch_with_backend(config, &input, &backend).await;
             let request = ObservationRequest {
                 wallet_id: config.wallet().wallet_id.clone(),
                 symbol_id: config.symbol().symbol_id.clone(),
@@ -392,10 +397,11 @@ impl ErasedNodeRunner for AssembleSnapshotRunner {
         Box::pin(async move {
             let config =
                 load_config::<AssembleSnapshotConfig>(&ctx, self.artifacts.as_ref()).await?;
+            let config = config.as_ref();
             let input =
                 load_struct_input::<AssembleSnapshotInput>(ctx.inputs(), self.artifacts.as_ref())
                     .await?;
-            let output = mfm_state_portfolio::assemble_snapshot(&config, input, 0);
+            let output = mfm_state_portfolio::assemble_snapshot(config, input, 0);
             state_output(ctx, &output).await
         })
     }
@@ -409,6 +415,7 @@ impl ErasedNodeRunner for ProjectReportRunner {
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
             let config = load_config::<ProjectReportConfig>(&ctx, self.artifacts.as_ref()).await?;
+            let config = config.as_ref();
             let input =
                 load_struct_input::<ProjectReportInput>(ctx.inputs(), self.artifacts.as_ref())
                     .await?;
@@ -508,7 +515,7 @@ fn staged_attempt_artifact(
 async fn load_config<T>(
     ctx: &ErasedRunCtx<'_>,
     artifacts: &dyn ArtifactReadProvider,
-) -> mfm_runtime::Result<T>
+) -> mfm_runtime::Result<ValidatedConfig<T>>
 where
     T: MfmConfig + DeserializeOwned,
 {
@@ -520,18 +527,17 @@ where
     decode_config_bytes(verified.bytes())
 }
 
-fn decode_config_bytes<T>(bytes: &[u8]) -> mfm_runtime::Result<T>
+fn decode_config_bytes<T>(bytes: &[u8]) -> mfm_runtime::Result<ValidatedConfig<T>>
 where
     T: MfmConfig + DeserializeOwned,
 {
     let config: T = serde_json::from_slice(bytes)
         .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
-    config.validate().map_err(|error| {
+    ValidatedConfig::new(config).map_err(|error| {
         mfm_runtime::RuntimeError::InvalidRunnerOutput(format!(
             "portfolio config failed validation: {error}"
         ))
-    })?;
-    Ok(config)
+    })
 }
 
 async fn load_input_cell<T>(

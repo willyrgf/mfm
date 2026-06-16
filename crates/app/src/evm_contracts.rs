@@ -25,7 +25,7 @@ use mfm_evm_contract_config::{
 };
 use mfm_evm_contract_model::{ConfiguredContract, DeployedContract};
 use mfm_ids::{ArtifactId, CapabilityKind, CapabilityVersion, ContentDigest, DescriptorId, NodeId};
-use mfm_program::{SideEffectState, StateSpec};
+use mfm_program::{SideEffectState, StateSpec, ValidatedConfig};
 use mfm_runtime::{
     ErasedNodeRunner, ErasedRunCtx, ErasedRunnerBinding, ErasedRunnerFuture, ErasedRunnerOutput,
     ErasedRunnerRegistry, MaterializedCell, MaterializedCellTerminal, MaterializedInputNode,
@@ -548,15 +548,14 @@ async fn deploy_mutation_plan(
     artifacts: &dyn ArtifactReadProvider,
 ) -> mfm_runtime::Result<DeployMutationPlan> {
     let config = load_config::<DeployPhaseConfig>(ctx, artifacts).await?;
-    let state =
-        DeployContractState::new(validated_config(config.clone())?).map_err(runtime_plan_error)?;
+    let state = DeployContractState::new(config.clone()).map_err(runtime_plan_error)?;
     let intent = state.prepare_intent(&()).map_err(runtime_state_error)?;
     let idempotency = state
         .idempotency_input(&(), &intent)
         .map_err(runtime_state_error)?;
     let ledger_key = ledger_key_for_idempotency(&idempotency)?;
     Ok(DeployMutationPlan {
-        config,
+        config: config.into_inner(),
         state,
         intent,
         idempotency,
@@ -572,15 +571,14 @@ async fn configure_mutation_plan(
     let deployed =
         load_struct_input_value::<DeployedContract>(ctx.inputs(), "deployed", artifacts).await?;
     let input = ConfigureContractInput { deployed };
-    let state = ConfigureContractState::new(validated_config(config.clone())?)
-        .map_err(runtime_plan_error)?;
+    let state = ConfigureContractState::new(config.clone()).map_err(runtime_plan_error)?;
     let intent = state.prepare_intent(&input).map_err(runtime_state_error)?;
     let idempotency = state
         .idempotency_input(&input, &intent)
         .map_err(runtime_state_error)?;
     let ledger_key = ledger_key_for_idempotency(&idempotency)?;
     Ok(ConfigureMutationPlan {
-        config,
+        config: config.into_inner(),
         state,
         input,
         intent,
@@ -595,8 +593,9 @@ async fn run_validate(
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
     let config = load_config::<ValidatePhaseConfig>(&ctx, factory.artifacts()).await?;
     let input = load_validate_input(ctx.inputs(), factory.artifacts()).await?;
-    let state = ValidateContractState::new(validated_config(config.clone())?)
+    let state = ValidateContractState::new(config.clone())
         .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
+    let config = config.into_inner();
     let request = state
         .read_request(&input)
         .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
@@ -984,7 +983,7 @@ where
 async fn load_config<T>(
     ctx: &ErasedRunCtx<'_>,
     artifacts: &dyn ArtifactReadProvider,
-) -> mfm_runtime::Result<T>
+) -> mfm_runtime::Result<ValidatedConfig<T>>
 where
     T: MfmConfig + DeserializeOwned,
 {
@@ -993,7 +992,11 @@ where
         .read_artifact(&request)
         .await
         .map_err(runtime_artifact_read_error)?;
-    verified.decode_json().map_err(runtime_artifact_read_error)
+    let config = verified
+        .decode_json::<T>()
+        .map_err(runtime_artifact_read_error)?;
+    ValidatedConfig::new(config)
+        .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))
 }
 
 async fn load_prepared_invocation(
@@ -1483,13 +1486,6 @@ fn runtime_adapter_error(
 
 fn runtime_plan_error(error: mfm_program::PlanError) -> mfm_runtime::RuntimeError {
     mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
-}
-
-fn validated_config<T: MfmConfig>(
-    config: T,
-) -> mfm_runtime::Result<mfm_program::ValidatedConfig<T>> {
-    mfm_program::ValidatedConfig::new(config)
-        .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))
 }
 
 fn runtime_state_error(error: mfm_program::StateError) -> mfm_runtime::RuntimeError {
