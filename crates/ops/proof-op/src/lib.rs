@@ -71,11 +71,6 @@ impl Operation for ProofWorkflowOperation {
         builder: &mut OperationExpansion<'program, 'scope>,
         _dispatch: mfm_program::OperationExpansionDispatch<Self>,
     ) -> mfm_program::Result<Self::Output<'program, 'scope>> {
-        if config.workflow_version != 1 {
-            return Err(mfm_program::PlanError::Key(
-                "unsupported proof workflow config version".to_owned(),
-            ));
-        }
         let fact = builder.state::<ProofReadFactState, _>(
             StateKey::new("read_fact")?,
             ProofReadConfig {

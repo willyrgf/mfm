@@ -164,7 +164,10 @@ fn validate_proof_assemble_config(config: &ProofAssembleConfig) -> Result<(), St
 
 /// Root proof workflow config.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
-#[mfm(schema = "mfm.proof.config.workflow")]
+#[mfm(
+    schema = "mfm.proof.config.workflow",
+    validate = "validate_proof_workflow_config"
+)]
 pub struct ProofWorkflowConfig {
     /// Workflow config contract version.
     pub workflow_version: u64,
@@ -172,6 +175,13 @@ pub struct ProofWorkflowConfig {
     pub fact_n: u64,
     /// Stable proof action used by the mutation intent.
     pub action: String,
+}
+
+fn validate_proof_workflow_config(config: &ProofWorkflowConfig) -> Result<(), String> {
+    if config.workflow_version != 1 {
+        return Err("unsupported proof workflow config version".to_owned());
+    }
+    Ok(())
 }
 
 impl Default for ProofWorkflowConfig {
