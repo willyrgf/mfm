@@ -7,7 +7,8 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::ids::{
-    NetworkId, PortfolioId, PortfolioScalarError, SymbolId, ValuationSourceId, WalletId,
+    ControlScopeId, NetworkId, PortfolioId, PortfolioScalarError, SymbolId, ValuationSourceId,
+    WalletId,
 };
 use crate::symbol::{
     validate_symbol_config, BalanceReaderConfig, Observation, PriceSourceRef, QuoteCode,
@@ -127,7 +128,7 @@ pub struct NetworkConfig {
     #[serde(default)]
     pub chain_id: Option<u64>,
     /// Stable control-plane scope used for managed rpc.control reads on this network.
-    pub control_scope: String,
+    pub control_scope: ControlScopeId,
     /// Canonical metadata surface.
     #[serde(default)]
     pub metadata: BTreeMap<String, String>,
@@ -144,6 +145,8 @@ impl NetworkConfig {
     ) -> Result<Self, PortfolioConfigError> {
         let network_id = NetworkId::new(network_id)
             .map_err(|source| PortfolioConfigError::InvalidNetworkId { source })?;
+        let control_scope = ControlScopeId::new(control_scope)
+            .map_err(|source| PortfolioConfigError::InvalidNetworkControlScope { source })?;
         Self {
             network_id,
             family,
@@ -677,11 +680,11 @@ pub enum PortfolioConfigError {
         /// Underlying scalar validation failure.
         source: PortfolioScalarError,
     },
-    /// One of the network control scopes was empty.
-    #[error("network `{network_id}` control_scope must be non-empty")]
-    EmptyNetworkControlScope {
-        /// Network id associated with the failure.
-        network_id: String,
+    /// `control_scope` did not satisfy the portfolio identifier grammar.
+    #[error("control_scope is invalid: {source}")]
+    InvalidNetworkControlScope {
+        /// Underlying scalar validation failure.
+        source: PortfolioScalarError,
     },
     /// EVM networks require an explicit chain id.
     #[error("network `{network_id}` with family `evm` must declare chain_id")]
@@ -1109,11 +1112,6 @@ fn validate_portfolio_bundle_sources(
 
 /// Validates one canonical network config.
 pub fn validate_network_config(network: &NetworkConfig) -> Result<(), PortfolioConfigError> {
-    if network.control_scope.trim().is_empty() {
-        return Err(PortfolioConfigError::EmptyNetworkControlScope {
-            network_id: network.network_id.to_string(),
-        });
-    }
     if let Some(key) = string_map_secret_marker_key(&network.metadata) {
         return Err(PortfolioConfigError::NetworkMetadataContainsSecret {
             network_id: network.network_id.to_string(),

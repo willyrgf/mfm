@@ -666,7 +666,7 @@ mod tests {
                 network_id: "ethereum-mainnet".parse().expect("valid network id"),
                 family: NetworkFamilyConfig::Evm,
                 chain_id: Some(1),
-                control_scope: "shared".to_owned(),
+                control_scope: "shared".parse().expect("valid control scope"),
                 metadata: BTreeMap::new(),
             }],
             wallets: vec![WalletConfig {

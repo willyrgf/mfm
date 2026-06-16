@@ -1189,7 +1189,7 @@ pub fn prepare_sources_from_config(config: &PrepareSourcesConfig) -> PreparedSou
         .iter()
         .map(|network| PreparedSource {
             network_id: network.network_id.to_string(),
-            control_scope: network.control_scope.clone(),
+            control_scope: network.control_scope.to_string(),
             family: network.family,
         })
         .collect::<Vec<_>>();
@@ -2116,7 +2116,7 @@ mod tests {
                 network_id: "ethereum-goerli".parse().expect("valid network id"),
                 family: NetworkFamilyConfig::Evm,
                 chain_id: Some(5),
-                control_scope: "shared".to_owned(),
+                control_scope: "shared".parse().expect("valid control scope"),
                 metadata: BTreeMap::new(),
             },
         };
@@ -2136,7 +2136,7 @@ mod tests {
             network_id: "ethereum-mainnet".parse().expect("valid network id"),
             family: NetworkFamilyConfig::Evm,
             chain_id: Some(1),
-            control_scope: "shared".to_owned(),
+            control_scope: "shared".parse().expect("valid control scope"),
             metadata: BTreeMap::new(),
         };
         let wallet = WalletConfig {

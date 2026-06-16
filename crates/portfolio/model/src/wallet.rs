@@ -8,7 +8,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::ids::{NetworkId, PortfolioScalarError, SymbolId, WalletId};
+use crate::ids::{
+    ExternalSignerId, KeystoreEntryId, NetworkId, PortfolioScalarError, SymbolId, WalletId,
+};
 
 /// Canonical subject kind selected for one wallet declaration.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
@@ -121,7 +123,7 @@ pub enum WalletImplementationConfig {
     /// Address/signer backed by a keystore entry.
     KeystoreEntry {
         /// Stable keystore entry identifier.
-        entry_id: String,
+        entry_id: KeystoreEntryId,
     },
     /// Account managed by the node.
     NodeManagedAccount {
@@ -131,7 +133,7 @@ pub enum WalletImplementationConfig {
     /// External signer resolved by id.
     ExternalSigner {
         /// Stable signer identifier.
-        signer_id: String,
+        signer_id: ExternalSignerId,
     },
 }
 
@@ -224,12 +226,6 @@ pub enum WalletConfigError {
         /// Underlying scalar validation failure.
         source: PortfolioScalarError,
     },
-    /// `entry_id` was empty for a keystore-backed wallet.
-    #[error("keystore entry_id must be non-empty")]
-    EmptyKeystoreEntryId,
-    /// `signer_id` was empty for an external signer wallet.
-    #[error("external signer_id must be non-empty")]
-    EmptyExternalSignerId,
     /// Wallet metadata contained a secret-shaped key or value.
     #[error("metadata key `{key}` contains secret-shaped content")]
     MetadataContainsSecret {
@@ -278,21 +274,6 @@ pub fn validate_wallet_config(cfg: &WalletConfig) -> Result<(), WalletConfigErro
             key: key.to_string(),
         });
     }
-    match &cfg.implementation {
-        WalletImplementationConfig::AddressOnly {} => {}
-        WalletImplementationConfig::KeystoreEntry { entry_id } => {
-            if entry_id.trim().is_empty() {
-                return Err(WalletConfigError::EmptyKeystoreEntryId);
-            }
-        }
-        WalletImplementationConfig::NodeManagedAccount { .. } => {}
-        WalletImplementationConfig::ExternalSigner { signer_id } => {
-            if signer_id.trim().is_empty() {
-                return Err(WalletConfigError::EmptyExternalSignerId);
-            }
-        }
-    }
-
     Ok(())
 }
 

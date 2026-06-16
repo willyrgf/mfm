@@ -213,6 +213,30 @@ portfolio_id_type!(
     "Stable typed Aave reserve identifier."
 );
 
+portfolio_id_type!(
+    ControlScopeId,
+    "control_scope",
+    "control-scope-id",
+    "mfm.portfolio.id.control_scope",
+    "Stable typed portfolio control-plane scope identifier."
+);
+
+portfolio_id_type!(
+    KeystoreEntryId,
+    "entry_id",
+    "keystore-entry-id",
+    "mfm.portfolio.id.keystore_entry",
+    "Stable typed portfolio keystore entry identifier."
+);
+
+portfolio_id_type!(
+    ExternalSignerId,
+    "signer_id",
+    "external-signer-id",
+    "mfm.portfolio.id.external_signer",
+    "Stable typed portfolio external signer identifier."
+);
+
 /// Normalized lowercase EVM address authority.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, MfmValue)]
 #[serde(try_from = "String", into = "String")]
