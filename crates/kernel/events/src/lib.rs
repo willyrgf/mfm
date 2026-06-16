@@ -1071,49 +1071,6 @@ pub mod v1 {
 
     fn event_artifact_requirements(payload: &KernelEventPayload) -> Vec<EventArtifactRequirement> {
         let mut requirements = Vec::new();
-        macro_rules! push_content {
-            ($source:ident, $id:expr, $digest:expr, $schema:expr, $semantic:expr, $node:expr, $seed:expr, $role:expr) => {
-                push_content_artifact(
-                    &mut requirements,
-                    EventArtifactReferenceSource::$source,
-                    $id,
-                    $digest,
-                    $schema,
-                    $semantic,
-                    $node,
-                    $seed,
-                    $role,
-                );
-            };
-        }
-        macro_rules! push_node_schema_role {
-            ($source:ident, $id:expr, $digest:expr, $schema:expr, $node:expr, $role:ident) => {
-                push_content!(
-                    $source,
-                    $id,
-                    $digest,
-                    Some($schema),
-                    None,
-                    Some($node.clone()),
-                    None,
-                    Some(ArtifactRole::$role)
-                );
-            };
-        }
-        macro_rules! push_schema_role {
-            ($source:ident, $id:expr, $digest:expr, $schema:expr, $role:ident) => {
-                push_content!(
-                    $source,
-                    $id,
-                    $digest,
-                    Some($schema),
-                    None,
-                    None,
-                    None,
-                    Some(ArtifactRole::$role)
-                );
-            };
-        }
         match payload {
             KernelEventPayload::RunStarted(payload) => {
                 requirements.push(EventArtifactRequirement {
@@ -1154,14 +1111,18 @@ pub mod v1 {
                 }
             }
             KernelEventPayload::FactRecorded(payload) => {
-                push_node_schema_role!(
-                    FactResponse,
-                    &payload.artifact_id,
-                    &payload.response_hash,
-                    &payload.response_schema_id,
-                    &payload.node_id,
-                    FactResponse
-                );
+                requirements.push(EventArtifactRequirement {
+                    source: EventArtifactReferenceSource::FactResponse,
+                    artifact_id: payload.artifact_id.clone(),
+                    digest: Some(payload.response_hash.clone()),
+                    byte_len: None,
+                    media_type: None,
+                    schema_id: Some(payload.response_schema_id.clone()),
+                    semantic_type_id: None,
+                    producer_node_id: Some(payload.node_id.clone()),
+                    producer_seed_id: None,
+                    artifact_role: Some(ArtifactRole::FactResponse),
+                });
             }
             KernelEventPayload::ArtifactReferenced(payload) => {
                 push_event_artifact(
@@ -1173,41 +1134,49 @@ pub mod v1 {
                 );
             }
             KernelEventPayload::CellProduced(payload) => {
-                push_content!(
-                    StateOutput,
-                    &payload.artifact_id,
-                    &payload.content_digest,
-                    Some(&payload.schema_id),
-                    Some(&payload.semantic_type_id),
-                    Some(payload.node_id.clone()),
-                    None,
-                    Some(ArtifactRole::StateOutput)
-                );
+                requirements.push(EventArtifactRequirement {
+                    source: EventArtifactReferenceSource::StateOutput,
+                    artifact_id: payload.artifact_id.clone(),
+                    digest: Some(payload.content_digest.clone()),
+                    byte_len: None,
+                    media_type: None,
+                    schema_id: Some(payload.schema_id.clone()),
+                    semantic_type_id: Some(payload.semantic_type_id.clone()),
+                    producer_node_id: Some(payload.node_id.clone()),
+                    producer_seed_id: None,
+                    artifact_role: Some(ArtifactRole::StateOutput),
+                });
             }
             KernelEventPayload::PublicOutputProduced(payload) => {
                 for cell in &payload.cells {
                     let (producer_node_id, producer_seed_id) =
                         cell_producer_artifact_owner(&cell.producer);
-                    push_content!(
-                        PublicOutputCell,
-                        &cell.artifact_id,
-                        &cell.content_digest,
-                        Some(&cell.schema_id),
-                        Some(&cell.semantic_type_id),
+                    requirements.push(EventArtifactRequirement {
+                        source: EventArtifactReferenceSource::PublicOutputCell,
+                        artifact_id: cell.artifact_id.clone(),
+                        digest: Some(cell.content_digest.clone()),
+                        byte_len: None,
+                        media_type: None,
+                        schema_id: Some(cell.schema_id.clone()),
+                        semantic_type_id: Some(cell.semantic_type_id.clone()),
                         producer_node_id,
                         producer_seed_id,
-                        None
-                    );
+                        artifact_role: None,
+                    });
                 }
                 if let Some(artifact_id) = &payload.rendered_artifact_id {
-                    push_node_schema_role!(
-                        PublicOutputRendered,
-                        artifact_id,
-                        &payload.rendered_digest,
-                        &payload.public_schema_id,
-                        &payload.node_id,
-                        PublicOutput
-                    );
+                    requirements.push(EventArtifactRequirement {
+                        source: EventArtifactReferenceSource::PublicOutputRendered,
+                        artifact_id: artifact_id.clone(),
+                        digest: Some(payload.rendered_digest.clone()),
+                        byte_len: None,
+                        media_type: None,
+                        schema_id: Some(payload.public_schema_id.clone()),
+                        semantic_type_id: None,
+                        producer_node_id: Some(payload.node_id.clone()),
+                        producer_seed_id: None,
+                        artifact_role: Some(ArtifactRole::PublicOutput),
+                    });
                 }
             }
             KernelEventPayload::PublicOutputRenderFailed(payload) => {
@@ -1233,20 +1202,30 @@ pub mod v1 {
                 }
             }
             KernelEventPayload::ManualResolutionRecorded(payload) => {
-                push_schema_role!(
-                    ManualResolutionEvidence,
-                    &payload.evidence_artifact_id,
-                    &payload.evidence_hash,
-                    &payload.evidence_schema_id,
-                    ManualResolutionEvidence
-                );
-                push_schema_role!(
-                    ManualResolutionAuthorization,
-                    &payload.authorization_artifact_id,
-                    &payload.authorization_hash,
-                    &payload.authorization_schema_id,
-                    ManualResolutionAuthorization
-                );
+                requirements.push(EventArtifactRequirement {
+                    source: EventArtifactReferenceSource::ManualResolutionEvidence,
+                    artifact_id: payload.evidence_artifact_id.clone(),
+                    digest: Some(payload.evidence_hash.clone()),
+                    byte_len: None,
+                    media_type: None,
+                    schema_id: Some(payload.evidence_schema_id.clone()),
+                    semantic_type_id: None,
+                    producer_node_id: None,
+                    producer_seed_id: None,
+                    artifact_role: Some(ArtifactRole::ManualResolutionEvidence),
+                });
+                requirements.push(EventArtifactRequirement {
+                    source: EventArtifactReferenceSource::ManualResolutionAuthorization,
+                    artifact_id: payload.authorization_artifact_id.clone(),
+                    digest: Some(payload.authorization_hash.clone()),
+                    byte_len: None,
+                    media_type: None,
+                    schema_id: Some(payload.authorization_schema_id.clone()),
+                    semantic_type_id: None,
+                    producer_node_id: None,
+                    producer_seed_id: None,
+                    artifact_role: Some(ArtifactRole::ManualResolutionAuthorization),
+                });
             }
             KernelEventPayload::RunCompleted(payload) => match &payload.outcome {
                 RunCompletionOutcome::Completed(_) => {}
@@ -1255,96 +1234,126 @@ pub mod v1 {
                 | RunCompletionOutcome::FailedWithoutAcdcClaim => {}
             },
             KernelEventPayload::SideEffectIntentPersisted(payload) => {
-                push_node_schema_role!(
-                    SideEffectIntent,
-                    &payload.intent_artifact_id,
-                    &payload.intent_hash,
-                    &payload.intent_schema_id,
-                    &payload.node_id,
-                    SideEffectIntent
-                );
+                requirements.push(EventArtifactRequirement {
+                    source: EventArtifactReferenceSource::SideEffectIntent,
+                    artifact_id: payload.intent_artifact_id.clone(),
+                    digest: Some(payload.intent_hash.clone()),
+                    byte_len: None,
+                    media_type: None,
+                    schema_id: Some(payload.intent_schema_id.clone()),
+                    semantic_type_id: None,
+                    producer_node_id: Some(payload.node_id.clone()),
+                    producer_seed_id: None,
+                    artifact_role: Some(ArtifactRole::SideEffectIntent),
+                });
             }
             KernelEventPayload::SideEffectInvocationPrepared(payload) => {
                 if let (Some(artifact_id), Some(hash)) =
                     (&payload.prepared_artifact_id, &payload.prepared_hash)
                 {
-                    push_content!(
-                        PreparedInvocation,
-                        artifact_id,
-                        hash,
-                        None,
-                        None,
-                        Some(payload.node_id.clone()),
-                        None,
-                        Some(ArtifactRole::PreparedInvocation)
-                    );
+                    requirements.push(EventArtifactRequirement {
+                        source: EventArtifactReferenceSource::PreparedInvocation,
+                        artifact_id: artifact_id.clone(),
+                        digest: Some(hash.clone()),
+                        byte_len: None,
+                        media_type: None,
+                        schema_id: None,
+                        semantic_type_id: None,
+                        producer_node_id: Some(payload.node_id.clone()),
+                        producer_seed_id: None,
+                        artifact_role: Some(ArtifactRole::PreparedInvocation),
+                    });
                 }
             }
             KernelEventPayload::SideEffectNotSubmittedProven(payload) => {
-                push_node_schema_role!(
-                    NotSubmittedProof,
-                    &payload.proof_artifact_id,
-                    &payload.proof_hash,
-                    &payload.proof_schema_id,
-                    &payload.node_id,
-                    NotSubmittedProof
-                );
+                requirements.push(EventArtifactRequirement {
+                    source: EventArtifactReferenceSource::NotSubmittedProof,
+                    artifact_id: payload.proof_artifact_id.clone(),
+                    digest: Some(payload.proof_hash.clone()),
+                    byte_len: None,
+                    media_type: None,
+                    schema_id: Some(payload.proof_schema_id.clone()),
+                    semantic_type_id: None,
+                    producer_node_id: Some(payload.node_id.clone()),
+                    producer_seed_id: None,
+                    artifact_role: Some(ArtifactRole::NotSubmittedProof),
+                });
             }
             KernelEventPayload::SideEffectSubmissionObserved(payload) => {
-                push_node_schema_role!(
-                    Submission,
-                    &payload.submission_artifact_id,
-                    &payload.submission_hash,
-                    &payload.submission_schema_id,
-                    &payload.node_id,
-                    Submission
-                );
+                requirements.push(EventArtifactRequirement {
+                    source: EventArtifactReferenceSource::Submission,
+                    artifact_id: payload.submission_artifact_id.clone(),
+                    digest: Some(payload.submission_hash.clone()),
+                    byte_len: None,
+                    media_type: None,
+                    schema_id: Some(payload.submission_schema_id.clone()),
+                    semantic_type_id: None,
+                    producer_node_id: Some(payload.node_id.clone()),
+                    producer_seed_id: None,
+                    artifact_role: Some(ArtifactRole::Submission),
+                });
             }
             KernelEventPayload::SideEffectSubmissionUnknown(payload) => {
-                push_node_schema_role!(
-                    SubmissionUnknownEvidence,
-                    &payload.evidence_artifact_id,
-                    &payload.evidence_hash,
-                    &payload.evidence_schema_id,
-                    &payload.node_id,
-                    SubmissionUnknownEvidence
-                );
+                requirements.push(EventArtifactRequirement {
+                    source: EventArtifactReferenceSource::SubmissionUnknownEvidence,
+                    artifact_id: payload.evidence_artifact_id.clone(),
+                    digest: Some(payload.evidence_hash.clone()),
+                    byte_len: None,
+                    media_type: None,
+                    schema_id: Some(payload.evidence_schema_id.clone()),
+                    semantic_type_id: None,
+                    producer_node_id: Some(payload.node_id.clone()),
+                    producer_seed_id: None,
+                    artifact_role: Some(ArtifactRole::SubmissionUnknownEvidence),
+                });
             }
             KernelEventPayload::SideEffectReceiptObserved(payload) => {
-                push_node_schema_role!(
-                    Receipt,
-                    &payload.receipt_artifact_id,
-                    &payload.receipt_hash,
-                    &payload.receipt_schema_id,
-                    &payload.node_id,
-                    Receipt
-                );
+                requirements.push(EventArtifactRequirement {
+                    source: EventArtifactReferenceSource::Receipt,
+                    artifact_id: payload.receipt_artifact_id.clone(),
+                    digest: Some(payload.receipt_hash.clone()),
+                    byte_len: None,
+                    media_type: None,
+                    schema_id: Some(payload.receipt_schema_id.clone()),
+                    semantic_type_id: None,
+                    producer_node_id: Some(payload.node_id.clone()),
+                    producer_seed_id: None,
+                    artifact_role: Some(ArtifactRole::Receipt),
+                });
                 if let Some(touched_set) = &payload.resource_touched_set {
                     push_resource_touched_set_requirement(&mut requirements, touched_set);
                 }
             }
             KernelEventPayload::SideEffectConfirmationObserved(payload) => {
-                push_node_schema_role!(
-                    Confirmation,
-                    &payload.confirmation_artifact_id,
-                    &payload.confirmation_hash,
-                    &payload.confirmation_schema_id,
-                    &payload.node_id,
-                    Confirmation
-                );
+                requirements.push(EventArtifactRequirement {
+                    source: EventArtifactReferenceSource::Confirmation,
+                    artifact_id: payload.confirmation_artifact_id.clone(),
+                    digest: Some(payload.confirmation_hash.clone()),
+                    byte_len: None,
+                    media_type: None,
+                    schema_id: Some(payload.confirmation_schema_id.clone()),
+                    semantic_type_id: None,
+                    producer_node_id: Some(payload.node_id.clone()),
+                    producer_seed_id: None,
+                    artifact_role: Some(ArtifactRole::Confirmation),
+                });
                 if let Some(touched_set) = &payload.resource_touched_set {
                     push_resource_touched_set_requirement(&mut requirements, touched_set);
                 }
             }
             KernelEventPayload::SideEffectAmbiguous(payload) => {
-                push_node_schema_role!(
-                    AmbiguityEvidence,
-                    &payload.evidence_artifact_id,
-                    &payload.evidence_hash,
-                    &payload.evidence_schema_id,
-                    &payload.node_id,
-                    AmbiguityEvidence
-                );
+                requirements.push(EventArtifactRequirement {
+                    source: EventArtifactReferenceSource::AmbiguityEvidence,
+                    artifact_id: payload.evidence_artifact_id.clone(),
+                    digest: Some(payload.evidence_hash.clone()),
+                    byte_len: None,
+                    media_type: None,
+                    schema_id: Some(payload.evidence_schema_id.clone()),
+                    semantic_type_id: None,
+                    producer_node_id: Some(payload.node_id.clone()),
+                    producer_seed_id: None,
+                    artifact_role: Some(ArtifactRole::AmbiguityEvidence),
+                });
             }
             KernelEventPayload::SideEffectFailed(payload) => {
                 if let Some(ref evidence) = payload.error.diagnostic_ref {
@@ -1374,16 +1383,18 @@ pub mod v1 {
                 }
             }
             KernelEventPayload::RetentionManifestProjected(payload) => {
-                push_content!(
-                    RetentionManifest,
-                    &payload.manifest_artifact_id,
-                    &payload.manifest_digest,
-                    None,
-                    None,
-                    None,
-                    None,
-                    Some(ArtifactRole::RetentionManifest)
-                );
+                requirements.push(EventArtifactRequirement {
+                    source: EventArtifactReferenceSource::RetentionManifest,
+                    artifact_id: payload.manifest_artifact_id.clone(),
+                    digest: Some(payload.manifest_digest.clone()),
+                    byte_len: None,
+                    media_type: None,
+                    schema_id: None,
+                    semantic_type_id: None,
+                    producer_node_id: None,
+                    producer_seed_id: None,
+                    artifact_role: Some(ArtifactRole::RetentionManifest),
+                });
             }
             KernelEventPayload::StateAttemptStarted(_)
             | KernelEventPayload::CellSkipped(_)
@@ -1393,32 +1404,6 @@ pub mod v1 {
             | KernelEventPayload::StateAttemptCompleted(_) => {}
         }
         requirements
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn push_content_artifact(
-        requirements: &mut Vec<EventArtifactRequirement>,
-        source: EventArtifactReferenceSource,
-        artifact_id: &ArtifactId,
-        digest: &ContentDigest,
-        schema_id: Option<&SchemaId>,
-        semantic_type_id: Option<&SemanticTypeId>,
-        producer_node_id: Option<NodeId>,
-        producer_seed_id: Option<SeedId>,
-        artifact_role: Option<ArtifactRole>,
-    ) {
-        requirements.push(EventArtifactRequirement {
-            source,
-            artifact_id: artifact_id.clone(),
-            digest: Some(digest.clone()),
-            byte_len: None,
-            media_type: None,
-            schema_id: schema_id.cloned(),
-            semantic_type_id: semantic_type_id.cloned(),
-            producer_node_id,
-            producer_seed_id,
-            artifact_role,
-        });
     }
 
     fn push_event_artifact(
@@ -1576,26 +1561,6 @@ pub mod v1 {
             "claim fencing token"
         );
 
-        macro_rules! side_effect_payload {
-            ($(#[$meta:meta])* pub struct $name:ident { $($fields:tt)* }) => {
-                $(#[$meta])*
-                #[derive(Debug, Clone, PartialEq, Eq)]
-                pub struct $name {
-                    /// Certified typed spec hash.
-                    pub spec_hash: SpecHash,
-                    /// Node id.
-                    pub node_id: NodeId,
-                    /// Attempt id.
-                    pub attempt_id: AttemptId,
-                    /// Side-effect ledger key.
-                    pub ledger_key: SideEffectLedgerKey,
-                    /// Side-effect ledger purpose.
-                    pub ledger_purpose: SideEffectLedgerPurpose,
-                    $($fields)*
-                }
-            };
-        }
-
         /// Side-effect intent persisted event payload.
         #[derive(Debug, Clone, PartialEq, Eq)]
         pub struct IntentPersisted {
@@ -1635,9 +1600,19 @@ pub mod v1 {
             pub adapter_version: AdapterVersion,
         }
 
-        side_effect_payload! {
-            /// Side-effect claim acquired event payload.
-            pub struct Claimed {
+        /// Side-effect claim acquired event payload.
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub struct Claimed {
+            /// Certified typed spec hash.
+            pub spec_hash: SpecHash,
+            /// Node id.
+            pub node_id: NodeId,
+            /// Attempt id.
+            pub attempt_id: AttemptId,
+            /// Side-effect ledger key.
+            pub ledger_key: SideEffectLedgerKey,
+            /// Side-effect ledger purpose.
+            pub ledger_purpose: SideEffectLedgerPurpose,
             /// Claim owner.
             pub claim_owner: RunnerInvocationId,
             /// Invocation epoch.
@@ -1646,12 +1621,21 @@ pub mod v1 {
             pub claim_generation: u32,
             /// Claim fencing token.
             pub claim_fencing_token: ClaimFencingToken,
-            }
         }
 
-        side_effect_payload! {
-            /// Side-effect claim takeover event payload.
-            pub struct ClaimTakenOver {
+        /// Side-effect claim takeover event payload.
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub struct ClaimTakenOver {
+            /// Certified typed spec hash.
+            pub spec_hash: SpecHash,
+            /// Node id.
+            pub node_id: NodeId,
+            /// Attempt id.
+            pub attempt_id: AttemptId,
+            /// Side-effect ledger key.
+            pub ledger_key: SideEffectLedgerKey,
+            /// Side-effect ledger purpose.
+            pub ledger_purpose: SideEffectLedgerPurpose,
             /// Previous claim owner.
             pub previous_claim_owner: RunnerInvocationId,
             /// New claim owner.
@@ -1664,12 +1648,21 @@ pub mod v1 {
             pub claim_generation: u32,
             /// Claim fencing token.
             pub claim_fencing_token: ClaimFencingToken,
-            }
         }
 
-        side_effect_payload! {
-            /// Side-effect invocation prepared event payload.
-            pub struct InvocationPrepared {
+        /// Side-effect invocation prepared event payload.
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub struct InvocationPrepared {
+            /// Certified typed spec hash.
+            pub spec_hash: SpecHash,
+            /// Node id.
+            pub node_id: NodeId,
+            /// Attempt id.
+            pub attempt_id: AttemptId,
+            /// Side-effect ledger key.
+            pub ledger_key: SideEffectLedgerKey,
+            /// Side-effect ledger purpose.
+            pub ledger_purpose: SideEffectLedgerPurpose,
             /// Invocation epoch.
             pub invocation_epoch: u32,
             /// Claim generation.
@@ -1682,12 +1675,21 @@ pub mod v1 {
             pub prepared_hash: Option<ContentDigest>,
             /// Optional exclusive resource lane key evidence.
             pub resource_key: Option<ResourceKeyEvidence>,
-            }
         }
 
-        side_effect_payload! {
-            /// Side-effect invocation started event payload.
-            pub struct InvocationStarted {
+        /// Side-effect invocation started event payload.
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub struct InvocationStarted {
+            /// Certified typed spec hash.
+            pub spec_hash: SpecHash,
+            /// Node id.
+            pub node_id: NodeId,
+            /// Attempt id.
+            pub attempt_id: AttemptId,
+            /// Side-effect ledger key.
+            pub ledger_key: SideEffectLedgerKey,
+            /// Side-effect ledger purpose.
+            pub ledger_purpose: SideEffectLedgerPurpose,
             /// Invocation epoch.
             pub invocation_epoch: u32,
             /// Claim owner.
@@ -1696,12 +1698,21 @@ pub mod v1 {
             pub claim_generation: u32,
             /// Claim fencing token.
             pub claim_fencing_token: ClaimFencingToken,
-            }
         }
 
-        side_effect_payload! {
-            /// Side-effect not-submitted proof event payload.
-            pub struct NotSubmittedProven {
+        /// Side-effect not-submitted proof event payload.
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub struct NotSubmittedProven {
+            /// Certified typed spec hash.
+            pub spec_hash: SpecHash,
+            /// Node id.
+            pub node_id: NodeId,
+            /// Attempt id.
+            pub attempt_id: AttemptId,
+            /// Side-effect ledger key.
+            pub ledger_key: SideEffectLedgerKey,
+            /// Side-effect ledger purpose.
+            pub ledger_purpose: SideEffectLedgerPurpose,
             /// Invocation epoch.
             pub invocation_epoch: u32,
             /// Proof schema id.
@@ -1710,12 +1721,21 @@ pub mod v1 {
             pub proof_hash: ContentDigest,
             /// Proof artifact id.
             pub proof_artifact_id: ArtifactId,
-            }
         }
 
-        side_effect_payload! {
-            /// Side-effect submission observed event payload.
-            pub struct SubmissionObserved {
+        /// Side-effect submission observed event payload.
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub struct SubmissionObserved {
+            /// Certified typed spec hash.
+            pub spec_hash: SpecHash,
+            /// Node id.
+            pub node_id: NodeId,
+            /// Attempt id.
+            pub attempt_id: AttemptId,
+            /// Side-effect ledger key.
+            pub ledger_key: SideEffectLedgerKey,
+            /// Side-effect ledger purpose.
+            pub ledger_purpose: SideEffectLedgerPurpose,
             /// Invocation epoch.
             pub invocation_epoch: u32,
             /// Submission schema id.
@@ -1724,12 +1744,21 @@ pub mod v1 {
             pub submission_hash: ContentDigest,
             /// Submission artifact id.
             pub submission_artifact_id: ArtifactId,
-            }
         }
 
-        side_effect_payload! {
-            /// Side-effect submission unknown event payload.
-            pub struct SubmissionUnknown {
+        /// Side-effect submission unknown event payload.
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub struct SubmissionUnknown {
+            /// Certified typed spec hash.
+            pub spec_hash: SpecHash,
+            /// Node id.
+            pub node_id: NodeId,
+            /// Attempt id.
+            pub attempt_id: AttemptId,
+            /// Side-effect ledger key.
+            pub ledger_key: SideEffectLedgerKey,
+            /// Side-effect ledger purpose.
+            pub ledger_purpose: SideEffectLedgerPurpose,
             /// Invocation epoch.
             pub invocation_epoch: u32,
             /// Evidence schema id.
@@ -1738,12 +1767,21 @@ pub mod v1 {
             pub evidence_hash: ContentDigest,
             /// Evidence artifact id.
             pub evidence_artifact_id: ArtifactId,
-            }
         }
 
-        side_effect_payload! {
-            /// Side-effect receipt observed event payload.
-            pub struct ReceiptObserved {
+        /// Side-effect receipt observed event payload.
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub struct ReceiptObserved {
+            /// Certified typed spec hash.
+            pub spec_hash: SpecHash,
+            /// Node id.
+            pub node_id: NodeId,
+            /// Attempt id.
+            pub attempt_id: AttemptId,
+            /// Side-effect ledger key.
+            pub ledger_key: SideEffectLedgerKey,
+            /// Side-effect ledger purpose.
+            pub ledger_purpose: SideEffectLedgerPurpose,
             /// Invocation epoch.
             pub invocation_epoch: u32,
             /// Receipt schema id.
@@ -1756,12 +1794,21 @@ pub mod v1 {
             pub replay_verifier_id: ReplayVerifierId,
             /// Optional exact touched-set evidence.
             pub resource_touched_set: Option<ResourceTouchedSetEvidence>,
-            }
         }
 
-        side_effect_payload! {
-            /// Side-effect confirmation observed event payload.
-            pub struct ConfirmationObserved {
+        /// Side-effect confirmation observed event payload.
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub struct ConfirmationObserved {
+            /// Certified typed spec hash.
+            pub spec_hash: SpecHash,
+            /// Node id.
+            pub node_id: NodeId,
+            /// Attempt id.
+            pub attempt_id: AttemptId,
+            /// Side-effect ledger key.
+            pub ledger_key: SideEffectLedgerKey,
+            /// Side-effect ledger purpose.
+            pub ledger_purpose: SideEffectLedgerPurpose,
             /// Invocation epoch.
             pub invocation_epoch: u32,
             /// Confirmation schema id.
@@ -1774,12 +1821,21 @@ pub mod v1 {
             pub replay_verifier_id: ReplayVerifierId,
             /// Optional exact touched-set evidence.
             pub resource_touched_set: Option<ResourceTouchedSetEvidence>,
-            }
         }
 
-        side_effect_payload! {
-            /// Side-effect ambiguous event payload.
-            pub struct Ambiguous {
+        /// Side-effect ambiguous event payload.
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub struct Ambiguous {
+            /// Certified typed spec hash.
+            pub spec_hash: SpecHash,
+            /// Node id.
+            pub node_id: NodeId,
+            /// Attempt id.
+            pub attempt_id: AttemptId,
+            /// Side-effect ledger key.
+            pub ledger_key: SideEffectLedgerKey,
+            /// Side-effect ledger purpose.
+            pub ledger_purpose: SideEffectLedgerPurpose,
             /// Invocation epoch.
             pub invocation_epoch: u32,
             /// Ambiguity code.
@@ -1790,12 +1846,21 @@ pub mod v1 {
             pub evidence_hash: ContentDigest,
             /// Evidence artifact id.
             pub evidence_artifact_id: ArtifactId,
-            }
         }
 
-        side_effect_payload! {
-            /// Side-effect failed event payload.
-            pub struct Failed {
+        /// Side-effect failed event payload.
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub struct Failed {
+            /// Certified typed spec hash.
+            pub spec_hash: SpecHash,
+            /// Node id.
+            pub node_id: NodeId,
+            /// Attempt id.
+            pub attempt_id: AttemptId,
+            /// Side-effect ledger key.
+            pub ledger_key: SideEffectLedgerKey,
+            /// Side-effect ledger purpose.
+            pub ledger_purpose: SideEffectLedgerPurpose,
             /// Invocation epoch.
             pub invocation_epoch: u32,
             /// Failure phase.
@@ -1804,7 +1869,6 @@ pub mod v1 {
             pub retryable: bool,
             /// Redaction-safe error information.
             pub error: MfmErrorInfo,
-            }
         }
 
         /// Legal side-effect failure phase.
