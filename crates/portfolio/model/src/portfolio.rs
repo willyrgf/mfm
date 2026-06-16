@@ -7,9 +7,9 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::symbol::{
-    validate_symbol_config, validate_valuation_source_registry, BalanceReaderConfig, Observation,
-    PriceSourceRef, QuoteCode, SymbolConfig, SymbolConfigError, SymbolKind, ValuationReaderConfig,
-    ValuationSourceConfig, ValuationSourceRegistry, ValuationSourceRegistryError,
+    validate_symbol_config, BalanceReaderConfig, Observation, PriceSourceRef, QuoteCode,
+    SymbolConfig, SymbolConfigError, SymbolKind, ValuationReaderConfig, ValuationSourceConfig,
+    ValuationSourceRegistry, ValuationSourceRegistryError,
 };
 use crate::wallet::{validate_wallet_config, WalletConfig, WalletConfigError, WalletSubjectKind};
 
@@ -100,10 +100,8 @@ impl PortfolioConfig {
     }
 
     /// Validates this config, normalizes it, and returns the validated value.
-    pub fn validated(mut self) -> Result<Self, PortfolioConfigError> {
-        validate_portfolio_config(&self)?;
-        self.normalize();
-        Ok(self)
+    pub fn validated(self) -> Result<Self, PortfolioConfigError> {
+        Ok(ValidatedPortfolioConfig::new(self)?.into_config())
     }
 }
 
@@ -153,6 +151,155 @@ impl NetworkConfig {
     pub fn validated(self) -> Result<Self, PortfolioConfigError> {
         validate_network_config(&self)?;
         Ok(self)
+    }
+}
+
+/// Validated, normalized portfolio config authority.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ValidatedPortfolioConfig {
+    config: PortfolioConfig,
+    index: PortfolioConfigIndex,
+}
+
+impl ValidatedPortfolioConfig {
+    /// Creates a validated portfolio config authority.
+    pub fn new(config: PortfolioConfig) -> Result<Self, PortfolioConfigError> {
+        validate_portfolio_config_inner(&config)?;
+        let mut config = config;
+        config.normalize();
+        let index = PortfolioConfigIndex::new(&config);
+        Ok(Self { config, index })
+    }
+
+    /// Returns the normalized portfolio config.
+    pub const fn as_config(&self) -> &PortfolioConfig {
+        &self.config
+    }
+
+    /// Consumes this authority into the normalized portfolio config.
+    pub fn into_config(self) -> PortfolioConfig {
+        self.config
+    }
+
+    /// Returns a configured quote code when it exists.
+    pub fn quote(&self, quote: QuoteCode) -> Option<QuoteCode> {
+        self.index.quotes.contains(&quote).then_some(quote)
+    }
+
+    /// Returns a network by stable id.
+    pub fn network(&self, network_id: &str) -> Option<&NetworkConfig> {
+        self.index
+            .networks
+            .get(network_id)
+            .map(|index| &self.config.networks[*index])
+    }
+
+    /// Returns a wallet by stable id.
+    pub fn wallet(&self, wallet_id: &str) -> Option<&WalletConfig> {
+        self.index
+            .wallets
+            .get(wallet_id)
+            .map(|index| &self.config.wallets[*index])
+    }
+
+    /// Returns a symbol by stable id.
+    pub fn symbol(&self, symbol_id: &str) -> Option<&SymbolConfig> {
+        self.index
+            .symbols
+            .get(symbol_id)
+            .map(|index| &self.config.symbol_configs[*index])
+    }
+}
+
+/// Validated portfolio plus valuation-source registry authority.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ValidatedPortfolioBundle {
+    portfolio: ValidatedPortfolioConfig,
+    valuation_source_registry: ValuationSourceRegistry,
+    source_index: BTreeMap<String, usize>,
+}
+
+impl ValidatedPortfolioBundle {
+    /// Creates a validated portfolio bundle authority.
+    pub fn new(
+        portfolio: PortfolioConfig,
+        valuation_source_registry: ValuationSourceRegistry,
+    ) -> Result<Self, PortfolioConfigError> {
+        let portfolio = ValidatedPortfolioConfig::new(portfolio)?;
+        let valuation_source_registry = valuation_source_registry
+            .validated()
+            .map_err(|source| PortfolioConfigError::InvalidValuationSourceRegistry { source })?;
+        let source_index = valuation_source_index(&valuation_source_registry);
+        validate_portfolio_bundle_sources(
+            portfolio.as_config(),
+            &valuation_source_registry,
+            &source_index,
+        )?;
+        Ok(Self {
+            portfolio,
+            valuation_source_registry,
+            source_index,
+        })
+    }
+
+    /// Returns the validated portfolio config authority.
+    pub const fn portfolio(&self) -> &ValidatedPortfolioConfig {
+        &self.portfolio
+    }
+
+    /// Returns the normalized valuation source registry.
+    pub const fn valuation_source_registry(&self) -> &ValuationSourceRegistry {
+        &self.valuation_source_registry
+    }
+
+    /// Returns a valuation source by stable id.
+    pub fn valuation_source(&self, source_id: &str) -> Option<&ValuationSourceConfig> {
+        self.source_index
+            .get(source_id)
+            .map(|index| &self.valuation_source_registry.sources[*index])
+    }
+
+    /// Consumes this authority into normalized portfolio and registry parts.
+    pub fn into_parts(self) -> (PortfolioConfig, ValuationSourceRegistry) {
+        (self.portfolio.into_config(), self.valuation_source_registry)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PortfolioConfigIndex {
+    quotes: BTreeSet<QuoteCode>,
+    networks: BTreeMap<String, usize>,
+    wallets: BTreeMap<String, usize>,
+    symbols: BTreeMap<String, usize>,
+}
+
+impl PortfolioConfigIndex {
+    fn new(config: &PortfolioConfig) -> Self {
+        let quotes = config.quote_codes.iter().copied().collect();
+        let networks = config
+            .networks
+            .iter()
+            .enumerate()
+            .map(|(index, network)| (network.network_id.clone(), index))
+            .collect();
+        let wallets = config
+            .wallets
+            .iter()
+            .enumerate()
+            .map(|(index, wallet)| (wallet.wallet_id.clone(), index))
+            .collect();
+        let symbols = config
+            .symbol_configs
+            .iter()
+            .enumerate()
+            .map(|(index, symbol)| (symbol.symbol_id.clone(), index))
+            .collect();
+        Self {
+            quotes,
+            networks,
+            wallets,
+            symbols,
+        }
     }
 }
 
@@ -643,6 +790,10 @@ pub fn decode_portfolio_config(value: &Value) -> Result<PortfolioConfig, Portfol
 
 /// Validates a canonical portfolio config.
 pub fn validate_portfolio_config(cfg: &PortfolioConfig) -> Result<(), PortfolioConfigError> {
+    ValidatedPortfolioConfig::new(cfg.clone()).map(|_| ())
+}
+
+fn validate_portfolio_config_inner(cfg: &PortfolioConfig) -> Result<(), PortfolioConfigError> {
     if cfg.portfolio_id.trim().is_empty() {
         return Err(PortfolioConfigError::EmptyPortfolioId);
     }
@@ -775,16 +926,28 @@ pub fn validate_portfolio_bundle(
     cfg: &PortfolioConfig,
     registry: &ValuationSourceRegistry,
 ) -> Result<(), PortfolioConfigError> {
-    validate_portfolio_config(cfg)?;
-    validate_valuation_source_registry(registry)
-        .map_err(|source| PortfolioConfigError::InvalidValuationSourceRegistry { source })?;
+    ValidatedPortfolioBundle::new(cfg.clone(), registry.clone()).map(|_| ())
+}
 
+fn valuation_source_index(registry: &ValuationSourceRegistry) -> BTreeMap<String, usize> {
+    registry
+        .sources
+        .iter()
+        .enumerate()
+        .map(|(index, source)| (source.source_id.clone(), index))
+        .collect()
+}
+
+fn validate_portfolio_bundle_sources(
+    cfg: &PortfolioConfig,
+    registry: &ValuationSourceRegistry,
+    source_index: &BTreeMap<String, usize>,
+) -> Result<(), PortfolioConfigError> {
     let network_ids: HashSet<_> = cfg
         .networks
         .iter()
         .map(|network| network.network_id.clone())
         .collect();
-    let mut sources_by_id = BTreeMap::new();
     for source in &registry.sources {
         if !network_ids.contains(&source.network_id) {
             return Err(PortfolioConfigError::UnknownValuationSourceNetwork {
@@ -792,7 +955,6 @@ pub fn validate_portfolio_bundle(
                 network_id: source.network_id.clone(),
             });
         }
-        sources_by_id.insert(source.source_id.clone(), source);
     }
 
     for symbol in &cfg.symbol_configs {
@@ -804,7 +966,8 @@ pub fn validate_portfolio_bundle(
                         symbol,
                         quote.quote,
                         source,
-                        &sources_by_id,
+                        registry,
+                        source_index,
                     )?;
                 }
                 ValuationReaderConfig::DerivedUnitPrice {
@@ -815,13 +978,15 @@ pub fn validate_portfolio_bundle(
                         symbol,
                         quote.quote,
                         numerator,
-                        &sources_by_id,
+                        registry,
+                        source_index,
                     )?;
                     validate_price_source_registry_match(
                         symbol,
                         quote.quote,
                         denominator,
-                        &sources_by_id,
+                        registry,
+                        source_index,
                     )?;
                 }
             }
@@ -977,15 +1142,17 @@ fn validate_price_source_registry_match(
     symbol: &SymbolConfig,
     quote: QuoteCode,
     source_ref: &PriceSourceRef,
-    sources_by_id: &BTreeMap<String, &ValuationSourceConfig>,
+    registry: &ValuationSourceRegistry,
+    source_index: &BTreeMap<String, usize>,
 ) -> Result<(), PortfolioConfigError> {
-    let Some(source_cfg) = sources_by_id.get(&source_ref.source_id) else {
+    let Some(index) = source_index.get(&source_ref.source_id) else {
         return Err(PortfolioConfigError::UnknownValuationSource {
             symbol_id: symbol.symbol_id.clone(),
             quote,
             source_id: source_ref.source_id.clone(),
         });
     };
+    let source_cfg = &registry.sources[*index];
 
     if source_cfg.network_id != source_ref.network_id {
         return Err(PortfolioConfigError::ValuationSourceMismatch {
@@ -1047,6 +1214,99 @@ mod tests {
             cfg.symbol_configs[0].balance_reader,
             BalanceReaderConfig::NativeBalance {}
         ));
+    }
+
+    #[test]
+    fn validated_portfolio_bundle_indexes_normalized_authority() {
+        let portfolio = decode_portfolio_config(&json!({
+            "portfolio_id": "portfolio_main",
+            "quote_codes": ["USD"],
+            "networks": [
+                {
+                    "network_id": "ethereum-mainnet",
+                    "family": "evm",
+                    "chain_id": 1,
+                    "control_scope": "shared",
+                    "metadata": {}
+                }
+            ],
+            "wallets": [
+                {
+                    "wallet_id": "wallet_main",
+                    "address": "0x000000000000000000000000000000000000dead",
+                    "subject_kind": "evm_address",
+                    "network_id": "ethereum-mainnet",
+                    "implementation": {"kind": "address_only"},
+                    "symbol_ids": ["eth.native.ethereum-mainnet"],
+                    "metadata": {}
+                }
+            ],
+            "symbol_configs": [
+                {
+                    "symbol_id": "eth.native.ethereum-mainnet",
+                    "display_symbol": "ETH",
+                    "kind": "native_balance",
+                    "role": "native",
+                    "network_id": "ethereum-mainnet",
+                    "protocol": null,
+                    "balance_reader": {"kind": "native_balance"},
+                    "valuation": {
+                        "quotes": [
+                            {
+                                "quote": "USD",
+                                "priced_symbol_id": "eth.native.ethereum-mainnet",
+                                "reader": {
+                                    "kind": "fixed_unit_price",
+                                    "unit_price_dec": "1800.00"
+                                }
+                            }
+                        ]
+                    },
+                    "decimals": 18,
+                    "underlying_symbol_id": null,
+                    "metadata": {}
+                }
+            ],
+            "metadata": {}
+        }))
+        .expect("portfolio config");
+        let bundle = ValidatedPortfolioBundle::new(
+            portfolio,
+            ValuationSourceRegistry {
+                sources: Vec::new(),
+            },
+        )
+        .expect("portfolio bundle");
+
+        assert_eq!(
+            bundle.portfolio().quote(QuoteCode::Usd),
+            Some(QuoteCode::Usd)
+        );
+        assert_eq!(
+            bundle
+                .portfolio()
+                .network("ethereum-mainnet")
+                .expect("network")
+                .chain_id,
+            Some(1)
+        );
+        assert_eq!(
+            bundle
+                .portfolio()
+                .wallet("wallet_main")
+                .expect("wallet")
+                .address,
+            "0x000000000000000000000000000000000000dead"
+        );
+        assert!(bundle
+            .portfolio()
+            .symbol("eth.native.ethereum-mainnet")
+            .is_some());
+        assert!(bundle.valuation_source("missing").is_none());
+
+        let (portfolio, registry) = bundle.into_parts();
+        assert_eq!(portfolio.wallets[0].wallet_id, "wallet_main");
+        assert!(registry.sources.is_empty());
     }
 
     #[test]
