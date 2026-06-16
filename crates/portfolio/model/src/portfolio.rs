@@ -339,7 +339,7 @@ impl ValidatedSymbolConfigs {
             validate_symbol_config(symbol).map_err(|source| {
                 PortfolioConfigError::InvalidSymbolConfig {
                     symbol_id: symbol.symbol_id.to_string(),
-                    source,
+                    source: Box::new(source),
                 }
             })?;
             if !seen.insert(symbol.symbol_id.as_str()) {
@@ -874,7 +874,7 @@ pub enum PortfolioConfigError {
         /// Symbol id associated with the validation failure.
         symbol_id: String,
         /// Underlying symbol validation failure.
-        source: SymbolConfigError,
+        source: Box<SymbolConfigError>,
     },
     /// Symbol used a reader or symbol kind unsupported by the referenced network family.
     #[error(
@@ -1026,7 +1026,7 @@ fn validate_portfolio_config_inner(cfg: &PortfolioConfig) -> Result<(), Portfoli
         validate_symbol_config(symbol).map_err(|source| {
             PortfolioConfigError::InvalidSymbolConfig {
                 symbol_id: symbol.symbol_id.to_string(),
-                source,
+                source: Box::new(source),
             }
         })?;
         if !symbol_ids.insert(symbol.symbol_id.clone()) {
@@ -1386,7 +1386,7 @@ mod tests {
 
         let authority =
             ValidatedNetworkConfigs::new(vec![network.clone()]).expect("network authority");
-        assert_eq!(authority.as_slice(), &[network.clone()]);
+        assert_eq!(authority.as_slice(), std::slice::from_ref(&network));
         assert_eq!(authority.into_vec(), vec![network.clone()]);
 
         assert!(matches!(
@@ -1403,7 +1403,7 @@ mod tests {
         let symbol = cfg.symbol_configs[0].clone();
 
         let wallets = ValidatedWalletConfigs::new(vec![wallet.clone()]).expect("wallets");
-        assert_eq!(wallets.as_slice(), &[wallet.clone()]);
+        assert_eq!(wallets.as_slice(), std::slice::from_ref(&wallet));
         assert_eq!(wallets.into_vec(), vec![wallet.clone()]);
         assert!(matches!(
             ValidatedWalletConfigs::new(vec![wallet.clone(), wallet]),
@@ -1413,7 +1413,7 @@ mod tests {
 
         let expected_symbol_id = symbol.symbol_id.clone();
         let symbols = ValidatedSymbolConfigs::new(vec![symbol.clone()]).expect("symbols");
-        assert_eq!(symbols.as_slice(), &[symbol.clone()]);
+        assert_eq!(symbols.as_slice(), std::slice::from_ref(&symbol));
         assert_eq!(symbols.into_vec(), vec![symbol.clone()]);
         assert!(matches!(
             ValidatedSymbolConfigs::new(vec![symbol.clone(), symbol]),
@@ -1702,11 +1702,11 @@ mod tests {
             decode_portfolio_config(&derived_mismatch).unwrap_err(),
             PortfolioConfigError::InvalidSymbolConfig {
                 symbol_id: "usdc.wallet.ethereum-mainnet".to_string(),
-                source: SymbolConfigError::DerivedPriceQuoteMismatch {
+                source: Box::new(SymbolConfigError::DerivedPriceQuoteMismatch {
                     quote: QuoteCode::Btc,
                     numerator_quote: QuoteCode::Usd,
                     denominator_quote: QuoteCode::Btc,
-                },
+                }),
             }
         );
     }

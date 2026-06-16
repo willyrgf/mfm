@@ -2000,8 +2000,7 @@ mod tests {
         append_prepared(&store, request.clone(), vec![evidence])
             .await
             .expect("append initial prepared commit");
-        let mut retry = request;
-        retry.expected_next_seq = StreamSeq::new(99).expect("stale seq");
+        let retry = request.with_expected_next_seq(StreamSeq::new(99).expect("stale seq"));
         let error = append_prepared(&store, retry, vec![conflicting_evidence])
             .await
             .expect_err("same request with different admitted evidence is not idempotent");
@@ -2061,8 +2060,8 @@ mod tests {
         .expect("terminal commit");
         assert!(matches!(appended, CommitOutcome::Appended(_)));
 
-        let mut stale_retry = terminal_request;
-        stale_retry.expected_next_seq = StreamSeq::new(1).expect("stale seq");
+        let stale_retry =
+            terminal_request.with_expected_next_seq(StreamSeq::new(1).expect("stale seq"));
         let idempotent = append_prepared(
             &store,
             stale_retry,
@@ -2446,7 +2445,7 @@ mod tests {
             terminal_before_completion.derive_saga_projection(&terminal_run, &terminal_policy);
         let terminal_proof =
             SagaTerminalProof::new(&terminal_policy, &terminal_saga, None).expect("terminal proof");
-        let mut terminal_request = request(
+        let terminal_request = request(
             terminal_run.clone(),
             5,
             "saga-terminal-run-completed",
@@ -2541,7 +2540,7 @@ mod tests {
 
         let missing_artifact = artifact_id(11);
         let missing_digest = content_digest(12);
-        let mut fact_request = request(
+        let fact_request = request(
             run.clone(),
             3,
             "fact",
