@@ -71,11 +71,3 @@ jobs:
         run: |
           nix -L -v --log-format bar-with-logs run .#ci
 
-      - name: Upload CI artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: nixfied-state-${{ matrix.runner }}
-          path: |
-            ${{ runner.temp }}/nixfied-state
-          if-no-files-found: ignore
