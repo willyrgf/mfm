@@ -2,7 +2,6 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 
-use mfm_evm_core::encoding::normalize_address;
 use mfm_program_derive::MfmValue;
 use mfm_values::string_map_secret_marker_key;
 use serde::{Deserialize, Serialize};
@@ -10,7 +9,9 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::aave::AaveProtocolPositionConfig;
-use crate::ids::{NetworkId, PortfolioScalarError, SymbolId, ValuationSourceId};
+use crate::ids::{
+    NetworkId, NormalizedEvmAddress, PortfolioScalarError, SymbolId, ValuationSourceId,
+};
 
 /// Supported quote codes for the canonical portfolio snapshot surface.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, MfmValue)]
@@ -202,7 +203,7 @@ pub enum BalanceReaderConfig {
     /// Read an ERC-20 balance.
     Erc20Balance {
         /// Canonical token contract address.
-        token_address: String,
+        token_address: NormalizedEvmAddress,
     },
     /// Read a protocol-backed position through a protocol-specific reader.
     ProtocolPosition {
@@ -417,7 +418,7 @@ pub enum ValuationSourceReaderConfig {
 )]
 pub struct EvmOracleConfig {
     /// Normalized oracle contract address.
-    pub contract_address: String,
+    pub contract_address: NormalizedEvmAddress,
 }
 
 /// Supported valuation reader kinds.
@@ -616,12 +617,6 @@ pub enum SymbolConfigError {
         /// Metadata key associated with the rejected content.
         key: String,
     },
-    /// ERC-20 token address was invalid or not normalized.
-    #[error("token_address must be a normalized EVM address: {token_address}")]
-    InvalidTokenAddress {
-        /// Invalid token address input.
-        token_address: String,
-    },
     /// `protocol` in a `protocol_position` reader was empty.
     #[error("protocol_position.protocol must be non-empty")]
     EmptyProtocolReaderProtocol,
@@ -697,14 +692,6 @@ pub enum ValuationSourceRegistryError {
     /// `oracle_kind` was empty.
     #[error("evm_oracle.oracle_kind must be non-empty")]
     EmptyOracleKind,
-    /// Oracle contract address was invalid or not normalized.
-    #[error(
-        "evm_oracle.config.contract_address must be a normalized EVM address: {contract_address}"
-    )]
-    InvalidOracleContractAddress {
-        /// Invalid oracle contract address input.
-        contract_address: String,
-    },
     /// The same `source_id` appeared more than once.
     #[error("valuation source `{source_id}` must be unique")]
     DuplicateSourceId {
@@ -746,13 +733,7 @@ pub fn validate_symbol_config(cfg: &SymbolConfig) -> Result<(), SymbolConfigErro
 
     match &cfg.balance_reader {
         BalanceReaderConfig::NativeBalance {} => {}
-        BalanceReaderConfig::Erc20Balance { token_address } => {
-            validate_normalized_address(token_address).map_err(|_| {
-                SymbolConfigError::InvalidTokenAddress {
-                    token_address: token_address.clone(),
-                }
-            })?;
-        }
+        BalanceReaderConfig::Erc20Balance { .. } => {}
         BalanceReaderConfig::ProtocolPosition {
             protocol,
             reader,
@@ -796,18 +777,10 @@ pub fn validate_valuation_source_registry(
             });
         }
         match &source.reader {
-            ValuationSourceReaderConfig::EvmOracle {
-                oracle_kind,
-                config,
-            } => {
+            ValuationSourceReaderConfig::EvmOracle { oracle_kind, .. } => {
                 if oracle_kind.trim().is_empty() {
                     return Err(ValuationSourceRegistryError::EmptyOracleKind);
                 }
-                validate_normalized_address(&config.contract_address).map_err(|_| {
-                    ValuationSourceRegistryError::InvalidOracleContractAddress {
-                        contract_address: config.contract_address.clone(),
-                    }
-                })?;
             }
         }
     }
@@ -843,17 +816,6 @@ fn validate_valuation_reader_config(
     Ok(())
 }
 
-pub(crate) fn validate_normalized_address(raw: &str) -> Result<(), String> {
-    if raw.trim().is_empty() {
-        return Err("address must be non-empty".to_string());
-    }
-    let normalized = normalize_address(raw).map_err(|err| err.message)?;
-    if normalized != raw {
-        return Err("address must already be normalized".to_string());
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -874,7 +836,9 @@ mod tests {
                 reader: ValuationSourceReaderConfig::EvmOracle {
                     oracle_kind: "chainlink".to_string(),
                     config: EvmOracleConfig {
-                        contract_address: "0x0000000000000000000000000000000000000001".to_string(),
+                        contract_address: "0x0000000000000000000000000000000000000001"
+                            .parse()
+                            .expect("valid address"),
                     },
                 },
                 metadata,

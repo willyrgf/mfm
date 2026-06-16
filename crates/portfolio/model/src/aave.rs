@@ -1,12 +1,12 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
-use mfm_evm_core::encoding::normalize_address;
 use mfm_program_derive::MfmValue;
 use mfm_values::string_map_secret_marker_key;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::ids::NormalizedEvmAddress;
 use crate::portfolio::PortfolioConfig;
 use crate::symbol::{BalanceReaderConfig, QuoteCode, SymbolConfig, SymbolKind, SymbolRole};
 
@@ -32,7 +32,7 @@ pub struct AaveMarketConfig {
     /// EVM chain id for the market.
     pub chain_id: u64,
     /// Pool contract address used for collateral-flag reads.
-    pub pool_address: String,
+    pub pool_address: NormalizedEvmAddress,
     /// Explicit reserve registry for the market.
     pub reserves: Vec<AaveReserveConfig>,
     /// Canonical metadata surface.
@@ -74,15 +74,15 @@ pub struct AaveReserveConfig {
     /// Aave reserve index used by `getUserConfiguration`.
     pub reserve_index: u16,
     /// Underlying ERC-20 token contract address.
-    pub underlying_token_address: String,
+    pub underlying_token_address: NormalizedEvmAddress,
     /// aToken contract address for supplied positions.
-    pub a_token_address: String,
+    pub a_token_address: NormalizedEvmAddress,
     /// Optional variable debt token contract address.
     #[serde(default)]
-    pub variable_debt_token_address: Option<String>,
+    pub variable_debt_token_address: Option<NormalizedEvmAddress>,
     /// Optional stable debt token contract address.
     #[serde(default)]
-    pub stable_debt_token_address: Option<String>,
+    pub stable_debt_token_address: Option<NormalizedEvmAddress>,
     /// Canonical metadata surface.
     #[serde(default)]
     pub metadata: BTreeMap<String, String>,
@@ -529,8 +529,6 @@ fn validate_market_config(
             ),
         ));
     }
-    validate_address_field(symbol, "market.pool_address", market.pool_address.as_str())?;
-
     if market.reserves.is_empty() {
         return Err(invalid_market(symbol, "market.reserves must not be empty"));
     }
@@ -576,54 +574,8 @@ fn validate_market_config(
                 ),
             ));
         }
-        validate_address_field(
-            symbol,
-            "market.reserves[].underlying_token_address",
-            reserve.underlying_token_address.as_str(),
-        )?;
-        validate_address_field(
-            symbol,
-            "market.reserves[].a_token_address",
-            reserve.a_token_address.as_str(),
-        )?;
-        if let Some(address) = &reserve.variable_debt_token_address {
-            validate_address_field(
-                symbol,
-                "market.reserves[].variable_debt_token_address",
-                address.as_str(),
-            )?;
-        }
-        if let Some(address) = &reserve.stable_debt_token_address {
-            validate_address_field(
-                symbol,
-                "market.reserves[].stable_debt_token_address",
-                address.as_str(),
-            )?;
-        }
     }
 
-    Ok(())
-}
-
-fn validate_address_field(
-    symbol: &SymbolConfig,
-    field: &str,
-    value: &str,
-) -> Result<(), AavePortfolioConfigError> {
-    if value.trim().is_empty() {
-        return Err(invalid_market(
-            symbol,
-            format!("{field} must be a normalized EVM address"),
-        ));
-    }
-    let normalized = normalize_address(value)
-        .map_err(|_| invalid_market(symbol, format!("{field} must be a normalized EVM address")))?;
-    if normalized != value {
-        return Err(invalid_market(
-            symbol,
-            format!("{field} must be a normalized EVM address"),
-        ));
-    }
     Ok(())
 }
 
@@ -644,34 +596,40 @@ mod tests {
     };
     use serde_json::{json, Value};
 
+    fn evm_address(value: &str) -> NormalizedEvmAddress {
+        value.parse().expect("valid EVM address")
+    }
+
     fn aave_market() -> AaveMarketConfig {
         AaveMarketConfig {
             market_id: "aave-v3-mainnet".to_string(),
             network_id: "ethereum-mainnet".to_string(),
             chain_id: 1,
-            pool_address: "0x0000000000000000000000000000000000000abc".to_string(),
+            pool_address: evm_address("0x0000000000000000000000000000000000000abc"),
             reserves: vec![
                 AaveReserveConfig {
                     reserve_id: "wbtc".to_string(),
                     reserve_index: 1,
-                    underlying_token_address: "0x00000000000000000000000000000000000000b2"
-                        .to_string(),
-                    a_token_address: "0x00000000000000000000000000000000000000b3".to_string(),
-                    variable_debt_token_address: Some(
-                        "0x00000000000000000000000000000000000000b4".to_string(),
+                    underlying_token_address: evm_address(
+                        "0x00000000000000000000000000000000000000b2",
                     ),
+                    a_token_address: evm_address("0x00000000000000000000000000000000000000b3"),
+                    variable_debt_token_address: Some(evm_address(
+                        "0x00000000000000000000000000000000000000b4",
+                    )),
                     stable_debt_token_address: None,
                     metadata: BTreeMap::new(),
                 },
                 AaveReserveConfig {
                     reserve_id: "usdc".to_string(),
                     reserve_index: 0,
-                    underlying_token_address: "0x00000000000000000000000000000000000000a1"
-                        .to_string(),
-                    a_token_address: "0x00000000000000000000000000000000000000a2".to_string(),
-                    variable_debt_token_address: Some(
-                        "0x00000000000000000000000000000000000000a3".to_string(),
+                    underlying_token_address: evm_address(
+                        "0x00000000000000000000000000000000000000a1",
                     ),
+                    a_token_address: evm_address("0x00000000000000000000000000000000000000a2"),
+                    variable_debt_token_address: Some(evm_address(
+                        "0x00000000000000000000000000000000000000a3",
+                    )),
                     stable_debt_token_address: None,
                     metadata: BTreeMap::new(),
                 },
@@ -791,7 +749,7 @@ mod tests {
     #[test]
     fn rejects_conflicting_market_definitions_for_same_market_id() {
         let mut conflicting_market = aave_market();
-        conflicting_market.pool_address = "0x0000000000000000000000000000000000000def".to_string();
+        conflicting_market.pool_address = evm_address("0x0000000000000000000000000000000000000def");
         let portfolio = portfolio_with_aave_symbols(vec![
             aave_symbol(
                 "aave_v3.usdc.asset.ethereum-mainnet",

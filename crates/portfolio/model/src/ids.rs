@@ -2,6 +2,7 @@ use std::fmt;
 use std::ops::Deref;
 use std::str::FromStr;
 
+use mfm_evm_core::encoding::normalize_address;
 use mfm_program_derive::MfmValue;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -20,6 +21,14 @@ pub enum PortfolioScalarError {
         value: String,
         /// Underlying author-key grammar error.
         source: StableDomainKeyError,
+    },
+    /// A scalar was not a normalized EVM address.
+    #[error("{kind} `{value}` must be a normalized EVM address")]
+    InvalidEvmAddress {
+        /// Human-readable scalar kind.
+        kind: &'static str,
+        /// Rejected scalar value.
+        value: String,
     },
 }
 
@@ -163,3 +172,97 @@ portfolio_id_type!(
     "mfm.portfolio.id.valuation_source",
     "Stable typed portfolio valuation-source identifier."
 );
+
+/// Normalized lowercase EVM address authority.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, MfmValue)]
+#[serde(try_from = "String", into = "String")]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "normalized-evm-address",
+    schema = "mfm.portfolio.address.evm.normalized",
+    transparent_string
+)]
+pub struct NormalizedEvmAddress {
+    raw: String,
+}
+
+impl NormalizedEvmAddress {
+    /// Creates a checked normalized EVM address.
+    pub fn new(value: impl Into<String>, kind: &'static str) -> Result<Self, PortfolioScalarError> {
+        let raw = value.into();
+        let normalized =
+            normalize_address(&raw).map_err(|_| PortfolioScalarError::InvalidEvmAddress {
+                kind,
+                value: raw.clone(),
+            })?;
+        if normalized != raw {
+            return Err(PortfolioScalarError::InvalidEvmAddress { kind, value: raw });
+        }
+        Ok(Self { raw })
+    }
+
+    /// Creates a checked normalized EVM address for serde-decoded fields.
+    pub fn parse(value: impl Into<String>) -> Result<Self, PortfolioScalarError> {
+        Self::new(value, "evm_address")
+    }
+
+    /// Returns the canonical normalized address string.
+    pub fn as_str(&self) -> &str {
+        &self.raw
+    }
+
+    /// Consumes this authority into its canonical normalized address string.
+    pub fn into_string(self) -> String {
+        self.raw
+    }
+}
+
+impl AsRef<str> for NormalizedEvmAddress {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl Deref for NormalizedEvmAddress {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for NormalizedEvmAddress {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for NormalizedEvmAddress {
+    type Err = PortfolioScalarError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse(value)
+    }
+}
+
+impl TryFrom<String> for NormalizedEvmAddress {
+    type Error = PortfolioScalarError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(value)
+    }
+}
+
+impl TryFrom<&str> for NormalizedEvmAddress {
+    type Error = PortfolioScalarError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::parse(value)
+    }
+}
+
+impl From<NormalizedEvmAddress> for String {
+    fn from(value: NormalizedEvmAddress) -> Self {
+        value.raw
+    }
+}

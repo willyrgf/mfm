@@ -1616,15 +1616,9 @@ mod tests {
         let mut token_address = canonical_config_json();
         token_address["symbol_configs"][1]["balance_reader"]["token_address"] =
             json!("0x000000000000000000000000000000000000000A");
-        assert_eq!(
-            decode_portfolio_config(&token_address).unwrap_err(),
-            PortfolioConfigError::InvalidSymbolConfig {
-                symbol_id: "usdc.wallet.ethereum-mainnet".to_string(),
-                source: SymbolConfigError::InvalidTokenAddress {
-                    token_address: "0x000000000000000000000000000000000000000A".to_string(),
-                },
-            }
-        );
+        let err = decode_portfolio_config(&token_address).unwrap_err();
+        assert!(matches!(err, PortfolioConfigError::Decode(message)
+            if message.contains("normalized EVM address")));
     }
 
     #[test]
