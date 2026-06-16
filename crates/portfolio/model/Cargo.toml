@@ -10,6 +10,7 @@ license = "MIT"
 category = "domain-model"
 
 [dependencies]
+bech32 = { workspace = true }
 bs58 = { workspace = true, features = ["check"] }
 serde = { workspace = true }
 serde_json = { workspace = true }

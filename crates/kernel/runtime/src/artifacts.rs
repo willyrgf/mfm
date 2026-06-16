@@ -25,6 +25,17 @@ pub trait RuntimeArtifactStager: Send + Sync {
     ) -> RuntimeArtifactStageFuture<'a>;
 }
 
+/// Runtime artifact capability used by the scheduler.
+pub trait RuntimeArtifactStore:
+    RuntimeArtifactStager + store::RetainedArtifactReadProvider
+{
+}
+
+impl<T> RuntimeArtifactStore for T where
+    T: RuntimeArtifactStager + store::RetainedArtifactReadProvider
+{
+}
+
 /// Runtime-owned artifact binding kind for one staged attempt artifact.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StagedArtifactBindingKind {

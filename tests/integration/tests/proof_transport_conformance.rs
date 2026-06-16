@@ -12,7 +12,7 @@ use mfm_op_proof::{
 use mfm_replay::v1 as replay;
 use mfm_runtime::{
     CertifiedRuntimeSpec, RunLaunchArtifact, RunLaunchEvidence, RuntimeArtifactStageFuture,
-    RuntimeArtifactStager, SchedulerStatus, SerialTypedScheduler,
+    RuntimeArtifactStager, RuntimeArtifactStore, SchedulerStatus, SerialTypedScheduler,
 };
 use mfm_store::v1::{self as store, TypedRunEventStore};
 use serde::Serialize;
@@ -176,7 +176,7 @@ async fn conformance_start_rejects_draft_not_bound_to_certified_spec() {
     ))
     .expect("mismatched proof draft");
     let artifacts = InMemoryProofArtifacts::default();
-    let artifact_stager: Arc<dyn RuntimeArtifactStager> = Arc::new(artifacts);
+    let artifact_stager: Arc<dyn RuntimeArtifactStore> = Arc::new(artifacts);
     let scheduler = SerialTypedScheduler::new(
         mfm_transports_proof::deterministic_proof_runner_registry().expect("runner registry"),
         artifact_stager,
@@ -300,7 +300,7 @@ async fn proof_implementation_conformance_summary(
         CertifiedRuntimeSpec::new(certified.clone()).map_err(|error| error.to_string())?;
     let artifacts = InMemoryProofArtifacts::default();
     let mut store = store::InMemoryTypedRunStore::new();
-    let artifact_stager: Arc<dyn RuntimeArtifactStager> = Arc::new(artifacts.clone());
+    let artifact_stager: Arc<dyn RuntimeArtifactStore> = Arc::new(artifacts.clone());
     let scheduler = SerialTypedScheduler::new(
         mfm_transports_proof::deterministic_proof_runner_registry()
             .map_err(|error| error.to_string())?,
@@ -778,7 +778,7 @@ async fn conformance_stream() -> (
     let artifacts = InMemoryProofArtifacts::default();
 
     let mut store = store::InMemoryTypedRunStore::new();
-    let artifact_stager: Arc<dyn RuntimeArtifactStager> = Arc::new(artifacts.clone());
+    let artifact_stager: Arc<dyn RuntimeArtifactStore> = Arc::new(artifacts.clone());
     let scheduler = SerialTypedScheduler::new(
         mfm_transports_proof::deterministic_proof_runner_registry().expect("runner registry"),
         artifact_stager,

@@ -346,6 +346,15 @@ impl RuntimeArtifactStager for FsRuntimeArtifactStager {
     }
 }
 
+impl store::RetainedArtifactReadProvider for FsRuntimeArtifactStager {
+    fn read_retained_artifact<'a>(
+        &'a self,
+        requirement: &'a store::EventArtifactRequirement,
+    ) -> store::RetainedArtifactReadFuture<'a> {
+        self.artifacts.read_retained_artifact(requirement)
+    }
+}
+
 /// Generates a digest-only typed run id from a random UUID.
 pub fn new_run_id() -> RunId {
     let uuid = uuid::Uuid::new_v4();

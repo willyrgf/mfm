@@ -1134,6 +1134,8 @@ pub mod v1 {
     /// Opaque proof for one terminal saga outcome.
     #[derive(Debug, Clone)]
     pub struct SagaTerminalProof {
+        run_id: RunId,
+        saga_policy_digest: ContentDigest,
         kind: SagaTerminalProofKind,
     }
 
@@ -1152,12 +1154,13 @@ pub mod v1 {
             saga: &SagaProjection,
             manual: Option<VerifiedManualResolutionForPrefix>,
         ) -> Result<Self> {
-            match saga.run_mode {
-                RunMode::Compensated => Ok(Self {
-                    kind: SagaTerminalProofKind::Compensated(ClosedObligationsNonEmpty::new(
-                        policy, saga,
-                    )?),
-                }),
+            let saga_policy_digest = policy
+                .saga_policy_digest()
+                .map_err(|error| StoreError::Canonical(error.to_string()))?;
+            let kind = match saga.run_mode {
+                RunMode::Compensated => SagaTerminalProofKind::Compensated(
+                    ClosedObligationsNonEmpty::new(policy, saga)?,
+                ),
                 RunMode::ManuallyResolved => {
                     let verified = manual.ok_or_else(|| StoreError::ProjectionConflict {
                         key: format!("run:{}:saga_terminal", saga.run_id),
@@ -1169,15 +1172,11 @@ pub mod v1 {
                         &verified,
                         events::ManualResolutionOutcome::ConfirmRemediated,
                     )?;
-                    Ok(Self {
-                        kind: SagaTerminalProofKind::ManuallyResolved(Box::new(verified)),
-                    })
+                    SagaTerminalProofKind::ManuallyResolved(Box::new(verified))
                 }
-                RunMode::FailedWithoutAcdcClaim => Ok(Self {
-                    kind: SagaTerminalProofKind::FailedWithoutAcdcClaim(
-                        FailedWithoutAcdcClaimProof::new(policy, saga, manual)?,
-                    ),
-                }),
+                RunMode::FailedWithoutAcdcClaim => SagaTerminalProofKind::FailedWithoutAcdcClaim(
+                    FailedWithoutAcdcClaimProof::new(policy, saga, manual)?,
+                ),
                 RunMode::Completed => {
                     let Some(RunCompletionProjection {
                         outcome: events::RunCompletionOutcome::Completed(evidence),
@@ -1189,20 +1188,33 @@ pub mod v1 {
                             message: "completed proof requires completed run projection".to_owned(),
                         });
                     };
-                    Ok(Self {
-                        kind: SagaTerminalProofKind::Completed((**evidence).clone()),
-                    })
+                    SagaTerminalProofKind::Completed((**evidence).clone())
                 }
                 RunMode::Forward | RunMode::Remediating | RunMode::ManualBlocked => {
-                    Err(StoreError::ProjectionConflict {
+                    return Err(StoreError::ProjectionConflict {
                         key: format!("run:{}:saga_terminal", saga.run_id),
                         message: format!(
                             "saga terminal proof requires terminal saga mode, found {}",
                             saga.run_mode.as_str()
                         ),
-                    })
+                    });
                 }
-            }
+            };
+            Ok(Self {
+                run_id: saga.run_id.clone(),
+                saga_policy_digest,
+                kind,
+            })
+        }
+
+        /// Returns the run id this proof was minted for.
+        pub fn run_id(&self) -> &RunId {
+            &self.run_id
+        }
+
+        /// Returns the saga policy digest this proof was minted under.
+        pub fn saga_policy_digest(&self) -> &ContentDigest {
+            &self.saga_policy_digest
         }
 
         /// Returns a read-only view of this terminal proof.
@@ -5656,6 +5668,31 @@ pub mod v1 {
             ));
         }
         let payload = completed[0];
+        let token = request
+            .preconditions
+            .saga_admit_token
+            .as_ref()
+            .ok_or_else(|| {
+                invalid_prepared_commit_purpose(
+                    SagaTerminal::NAME,
+                    "saga terminal resolution requires saga admit token",
+                )
+            })?;
+        if proof.run_id() != request.run_id()
+            || proof.run_id() != &payload.run_id
+            || proof.run_id() != token.run_id()
+        {
+            return Err(invalid_prepared_commit_purpose(
+                SagaTerminal::NAME,
+                "SagaTerminalProof run id does not match terminal request",
+            ));
+        }
+        if proof.saga_policy_digest() != token.saga_policy_digest() {
+            return Err(invalid_prepared_commit_purpose(
+                SagaTerminal::NAME,
+                "SagaTerminalProof saga policy digest does not match admit token",
+            ));
+        }
         let proof_outcome = proof.outcome();
         if payload.outcome != proof_outcome {
             return Err(invalid_prepared_commit_purpose(

@@ -33,8 +33,9 @@ mod side_effects;
 mod spec_authority;
 
 pub use artifacts::{
-    RuntimeArtifactStageFuture, RuntimeArtifactStager, StagedArtifact, StagedArtifactBindingKind,
-    StagedArtifactHandle, StagedRetentionRefs, StagedSideEffectArtifactPhase,
+    RuntimeArtifactStageFuture, RuntimeArtifactStager, RuntimeArtifactStore, StagedArtifact,
+    StagedArtifactBindingKind, StagedArtifactHandle, StagedRetentionRefs,
+    StagedSideEffectArtifactPhase,
 };
 pub use commit::{PreparedRunLaunch, RunLaunchArtifact, RunLaunchEvidence, RunLaunchSeedCell};
 pub use error::RuntimeError;

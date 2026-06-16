@@ -302,7 +302,7 @@ fn test_scheduler(registry: ErasedRunnerRegistry) -> SerialTypedScheduler {
 
 fn test_scheduler_with_stager(
     registry: ErasedRunnerRegistry,
-    artifact_stager: Arc<dyn RuntimeArtifactStager>,
+    artifact_stager: Arc<dyn RuntimeArtifactStore>,
 ) -> SerialTypedScheduler {
     SerialTypedScheduler::new(registry, artifact_stager)
 }
@@ -5163,7 +5163,8 @@ async fn runtime_resolves_manual_resolution_terminal() {
             },
         ))
         .expect("binding read");
-    let scheduler = test_scheduler(registry);
+    let artifact_store = Arc::new(TestRuntimeArtifactStager::default());
+    let scheduler = test_scheduler_with_stager(registry.clone(), artifact_store.clone());
     let mut store = store::InMemoryTypedRunStore::new();
     start_fixture_run(
         &scheduler,
@@ -5204,8 +5205,9 @@ async fn runtime_resolves_manual_resolution_terminal() {
         .derive_saga_projection(&fixture.run_id, &fixture.runtime_spec.spec().saga);
     assert_eq!(saga.run_mode, store::RunMode::ManuallyResolved);
 
+    let fresh_scheduler = SerialTypedScheduler::new(registry, artifact_store);
     assert_eq!(
-        scheduler
+        fresh_scheduler
             .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
             .await
             .expect("resolve manual terminal"),

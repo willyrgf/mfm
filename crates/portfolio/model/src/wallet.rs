@@ -408,24 +408,19 @@ fn validate_bitcoin_address(raw: &str) -> Result<(), String> {
         return Err("address must be ASCII".to_string());
     }
 
-    let base58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-    let bech32 = "023456789acdefghjklmnpqrstuvwxyz";
     if raw.starts_with("bc1") || raw.starts_with("tb1") || raw.starts_with("bcrt1") {
         if raw != raw.to_ascii_lowercase() {
             return Err("bech32 bitcoin addresses must already be lowercase".to_string());
         }
-        let payload = raw
-            .split_once('1')
-            .map(|(_, payload)| payload)
-            .ok_or_else(|| {
-                "bech32 bitcoin address is missing the separator character".to_string()
-            })?;
-        if payload.is_empty() || !payload.chars().all(|ch| bech32.contains(ch)) {
-            return Err("bech32 bitcoin address contained unsupported characters".to_string());
+        let (hrp, _, _) = bech32::segwit::decode(raw)
+            .map_err(|_| "bech32 bitcoin address failed segwit validation".to_string())?;
+        if !hrp.is_valid_on_mainnet() && !hrp.is_valid_on_testnet() && !hrp.is_valid_on_regtest() {
+            return Err("unsupported bitcoin bech32 human-readable prefix".to_string());
         }
         return Ok(());
     }
 
+    let base58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
     let first = raw.chars().next().unwrap_or_default();
     if !matches!(first, '1' | '3' | '2' | 'm' | 'n') {
         return Err("unsupported bitcoin address prefix".to_string());
@@ -443,6 +438,7 @@ fn validate_bitcoin_address(raw: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::validate_bitcoin_address;
+    use bech32::{hrp, segwit};
 
     #[test]
     fn validate_bitcoin_address_rejects_bad_base58_checksum() {
@@ -451,5 +447,33 @@ mod tests {
             validate_bitcoin_address("1BoatSLRHtKNngkdXEeobR76b53LETtpyY").is_err(),
             "checksum mismatch should be rejected"
         );
+    }
+
+    #[test]
+    fn validate_bitcoin_address_accepts_segwit_v0_bech32() {
+        let witness_program = [0x11; 20];
+        let address = segwit::encode_v0(hrp::BC, &witness_program).expect("valid v0 address");
+
+        assert!(validate_bitcoin_address(&address).is_ok());
+        assert!(address.starts_with("bc1q"));
+    }
+
+    #[test]
+    fn validate_bitcoin_address_accepts_taproot_bech32m() {
+        let witness_program = [0x22; 32];
+        let address = segwit::encode_v1(hrp::BC, &witness_program).expect("valid v1 address");
+
+        assert!(validate_bitcoin_address(&address).is_ok());
+        assert!(address.starts_with("bc1p"));
+    }
+
+    #[test]
+    fn validate_bitcoin_address_rejects_bad_bech32_checksum() {
+        let witness_program = [0x33; 20];
+        let mut address = segwit::encode_v0(hrp::BC, &witness_program).expect("valid v0 address");
+        let last = address.pop().expect("non-empty address");
+        address.push(if last == 'q' { 'p' } else { 'q' });
+
+        assert!(validate_bitcoin_address(&address).is_err());
     }
 }

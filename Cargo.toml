@@ -55,6 +55,7 @@ members = [
 [workspace.dependencies]
 # Alloy blockchain library components
 alloy-primitives = "0.8"
+bech32 = "0.12"
 bs58 = "0.5.1"
 # Cryptography dependency
 ring = "0.17.14"

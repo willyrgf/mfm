@@ -7,7 +7,7 @@ use mfm_manual_auth::VerifiedManualResolutionForPrefix;
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 
-use crate::artifacts::RuntimeArtifactStager;
+use crate::artifacts::RuntimeArtifactStore;
 use crate::commit::{
     CommitPlanner, PreparedRunLaunch, PreparedStagedArtifact, RunLaunchEvidence,
     RunnerOutputCommitInput,
@@ -163,19 +163,19 @@ fn async_error_is_resource_lane_block(error: &impl store::StoreErrorInspection) 
 #[derive(Clone)]
 pub struct SerialTypedScheduler {
     runners: ErasedRunnerRegistry,
-    artifact_stager: Arc<dyn RuntimeArtifactStager>,
+    artifact_store: Arc<dyn RuntimeArtifactStore>,
     manual_terminal_proofs: Arc<Mutex<BTreeMap<RunId, VerifiedManualResolutionForPrefix>>>,
 }
 
 impl SerialTypedScheduler {
-    /// Creates a scheduler using a certified runner registry and runtime artifact stager.
+    /// Creates a scheduler using a certified runner registry and runtime artifact store.
     pub fn new(
         runners: ErasedRunnerRegistry,
-        artifact_stager: Arc<dyn RuntimeArtifactStager>,
+        artifact_store: Arc<dyn RuntimeArtifactStore>,
     ) -> Self {
         Self {
             runners,
-            artifact_stager,
+            artifact_store,
             manual_terminal_proofs: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
@@ -604,7 +604,9 @@ impl SerialTypedScheduler {
             &node.framework,
             Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_))
         ) {
-            let manual = self.verified_manual_resolution_for_terminal(run_id)?;
+            let manual = self
+                .verified_manual_resolution_for_terminal(runtime_spec, run_id, &view.stream)
+                .await?;
             Some(crate::framework::saga_terminal_proof(
                 runtime_spec,
                 run_id,
@@ -803,7 +805,9 @@ impl SerialTypedScheduler {
             &node.framework,
             Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_))
         ) {
-            let manual = self.verified_manual_resolution_for_terminal(run_id)?;
+            let manual = self
+                .verified_manual_resolution_for_terminal(runtime_spec, run_id, &view.stream)
+                .await?;
             Some(crate::framework::saga_terminal_proof(
                 runtime_spec,
                 run_id,
@@ -838,21 +842,119 @@ impl SerialTypedScheduler {
 
     async fn stage_prepared_artifacts(&self, artifacts: &[PreparedStagedArtifact]) -> Result<()> {
         for artifact in artifacts {
-            self.artifact_stager
+            self.artifact_store
                 .stage_verified_artifact(artifact.bytes.clone(), artifact.evidence.clone())
                 .await?;
         }
         Ok(())
     }
 
-    fn verified_manual_resolution_for_terminal(
+    async fn verified_manual_resolution_for_terminal(
         &self,
+        runtime_spec: &CertifiedRuntimeSpec,
         run_id: &RunId,
+        stream: &[store::KernelEventEnvelope],
     ) -> Result<Option<mfm_manual_auth::VerifiedManualResolutionForPrefix>> {
+        if let Some(proof) = self
+            .manual_terminal_proofs
+            .lock()
+            .map_err(|_| RuntimeError::Store("manual proof cache lock was poisoned".to_owned()))?
+            .get(run_id)
+            .cloned()
+        {
+            return Ok(Some(proof));
+        }
+
+        let Some((manual_index, manual_payload)) =
+            stream
+                .iter()
+                .enumerate()
+                .find_map(|(index, event)| match event.payload() {
+                    events::KernelEventPayload::ManualResolutionRecorded(payload)
+                        if &payload.run_id == run_id =>
+                    {
+                        Some((index, payload))
+                    }
+                    _ => None,
+                })
+        else {
+            return Ok(None);
+        };
+
+        let prefix_stream = stream.get(..manual_index).ok_or_else(|| {
+            RuntimeError::InvalidRunStream(
+                "manual resolution prefix index was outside the run stream".to_owned(),
+            )
+        })?;
+        let prefix_projection = store::ProjectionSnapshot::rebuild_from_run_stream(prefix_stream)?;
+        let prefix_saga =
+            prefix_projection.derive_saga_projection(run_id, &runtime_spec.spec().saga);
+        if prefix_saga.run_mode != store::RunMode::ManualBlocked {
+            return Err(RuntimeError::InvalidRunStream(format!(
+                "manual resolution prefix requires ManualBlocked saga mode, found {}",
+                prefix_saga.run_mode.as_str()
+            )));
+        }
+        let reason = prefix_saga.manual_block_reason.ok_or_else(|| {
+            RuntimeError::InvalidRunStream("manual resolution prefix lacks block reason".to_owned())
+        })?;
+        let manual = certified_manual_resolution_spec(&runtime_spec.spec().saga)?.clone();
+        let prefix = mfm_manual_auth::ManualResolutionPrefixAuthority::new(
+            run_id.clone(),
+            runtime_spec.spec_hash().clone(),
+            stream[manual_index].seq().as_u64(),
+            crate::manual_resolution::manual_resolution_stream_prefix_digest(prefix_stream)?,
+            crate::manual_resolution::manual_resolution_block_reason(reason),
+            crate::manual_resolution::unresolved_manual_obligations_digest(&prefix_saga)?,
+            manual,
+        )
+        .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
+
+        let requirements = store::event_artifact_requirements(
+            &events::KernelEventPayload::ManualResolutionRecorded(manual_payload.clone()),
+        );
+        let evidence_requirement = requirements
+            .iter()
+            .find(|requirement| requirement.artifact_id == manual_payload.evidence_artifact_id)
+            .cloned()
+            .ok_or_else(|| {
+                RuntimeError::InvalidRunStream(
+                    "manual resolution evidence artifact requirement was missing".to_owned(),
+                )
+            })?;
+        let authorization_requirement = requirements
+            .iter()
+            .find(|requirement| requirement.artifact_id == manual_payload.authorization_artifact_id)
+            .cloned()
+            .ok_or_else(|| {
+                RuntimeError::InvalidRunStream(
+                    "manual resolution authorization artifact requirement was missing".to_owned(),
+                )
+            })?;
+        let evidence = self
+            .artifact_store
+            .read_retained_artifact(&evidence_requirement)
+            .await?;
+        let authorization = self
+            .artifact_store
+            .read_retained_artifact(&authorization_requirement)
+            .await?;
+        let evidence_media_type = evidence.evidence().media_type.clone();
+        let evidence_artifact = ManualResolutionEvidenceArtifact {
+            bytes: evidence.into_bytes(),
+            media_type: evidence_media_type,
+        };
+        let verified = verify_manual_resolution_for_prefix(
+            prefix,
+            manual_payload.outcome,
+            &evidence_artifact,
+            authorization.into_bytes(),
+        )?;
         self.manual_terminal_proofs
             .lock()
-            .map_err(|_| RuntimeError::Store("manual proof cache lock was poisoned".to_owned()))
-            .map(|proofs| proofs.get(run_id).cloned())
+            .map_err(|_| RuntimeError::Store("manual proof cache lock was poisoned".to_owned()))?
+            .insert(run_id.clone(), verified.clone());
+        Ok(Some(verified))
     }
 }
 

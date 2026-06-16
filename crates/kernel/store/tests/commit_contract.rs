@@ -3971,6 +3971,133 @@ fn saga_terminal_prepared_commit_requires_matching_proof() {
 }
 
 #[test]
+fn saga_terminal_prepared_commit_rejects_cross_run_proof() {
+    let proof_run = run_id(123);
+    let request_run = run_id(124);
+    let policy = SagaPolicySpec::FailWithoutAcdcClaim;
+    let mut proof_store = InMemoryTypedRunStore::new();
+    proof_store
+        .append_prepared_commit(run_start_request_with_saga_policy(
+            proof_run.clone(),
+            "terminal-cross-run-proof-start",
+            &policy,
+        ))
+        .expect("append proof run start");
+    append_generic_nonretryable_failure(
+        &mut proof_store,
+        &proof_run,
+        "terminal-cross-run-proof-failure",
+    );
+    let proof_saga = proof_store
+        .projection_snapshot()
+        .derive_saga_projection(&proof_run, &policy);
+    let proof =
+        SagaTerminalProof::new(&policy, &proof_saga, None).expect("terminal proof authority");
+
+    let request = typed_commit_request! {
+        run_id: request_run.clone(),
+        expected_next_seq: StreamSeq::new(1).expect("stream seq"),
+        commit_key: CommitKey::new("terminal-cross-run-request").expect("commit key"),
+        payloads: vec![run_completed_for_run(
+            request_run.clone(),
+            events::RunCompletionOutcome::FailedWithoutAcdcClaim,
+        )],
+        required_artifacts: Vec::new(),
+        preconditions: saga_preconditions(&request_run, policy),
+    };
+    let error =
+        PreparedCommit::<SagaTerminal>::new(request, CommitArtifactEvidenceSet::empty(), &proof)
+            .expect_err("cross-run proof rejects");
+    assert_invalid_prepared_commit_contains(error, "run id does not match");
+}
+
+#[test]
+fn saga_terminal_prepared_commit_rejects_policy_digest_mismatch() {
+    let run_id = run_id(125);
+    let policy = SagaPolicySpec::FailWithoutAcdcClaim;
+    let mut store = InMemoryTypedRunStore::new();
+    store
+        .append_prepared_commit(run_start_request_with_saga_policy(
+            run_id.clone(),
+            "terminal-policy-proof-start",
+            &policy,
+        ))
+        .expect("append run start");
+    append_generic_nonretryable_failure(&mut store, &run_id, "terminal-policy-proof-failure");
+    let saga = store
+        .projection_snapshot()
+        .derive_saga_projection(&run_id, &policy);
+    let proof = SagaTerminalProof::new(&policy, &saga, None).expect("terminal proof authority");
+
+    let request = typed_commit_request! {
+        run_id: run_id.clone(),
+        expected_next_seq: store.expected_next_seq(&run_id),
+        commit_key: CommitKey::new("terminal-policy-mismatch").expect("commit key"),
+        payloads: vec![run_completed_for_run(
+            run_id.clone(),
+            events::RunCompletionOutcome::FailedWithoutAcdcClaim,
+        )],
+        required_artifacts: Vec::new(),
+        preconditions: saga_preconditions(&run_id, compensate_saga_policy()),
+    };
+    let error =
+        PreparedCommit::<SagaTerminal>::new(request, CommitArtifactEvidenceSet::empty(), &proof)
+            .expect_err("policy digest mismatch rejects");
+    assert_invalid_prepared_commit_contains(error, "policy digest");
+}
+
+#[test]
+fn saga_terminal_append_rechecks_current_projection() {
+    let run_id = run_id(126);
+    let policy = SagaPolicySpec::FailWithoutAcdcClaim;
+    let mut proof_store = InMemoryTypedRunStore::new();
+    proof_store
+        .append_prepared_commit(run_start_request_with_saga_policy(
+            run_id.clone(),
+            "terminal-current-proof-start",
+            &policy,
+        ))
+        .expect("append proof run start");
+    append_generic_nonretryable_failure(
+        &mut proof_store,
+        &run_id,
+        "terminal-current-proof-failure",
+    );
+    let proof_saga = proof_store
+        .projection_snapshot()
+        .derive_saga_projection(&run_id, &policy);
+    let proof =
+        SagaTerminalProof::new(&policy, &proof_saga, None).expect("terminal proof authority");
+
+    let mut store = InMemoryTypedRunStore::new();
+    store
+        .append_prepared_commit(run_start_request_with_saga_policy(
+            run_id.clone(),
+            "terminal-current-run-start",
+            &policy,
+        ))
+        .expect("append current run start");
+    let request = typed_commit_request! {
+        run_id: run_id.clone(),
+        expected_next_seq: store.expected_next_seq(&run_id),
+        commit_key: CommitKey::new("terminal-current-nonterminal").expect("commit key"),
+        payloads: vec![run_completed_for_run(
+            run_id.clone(),
+            events::RunCompletionOutcome::FailedWithoutAcdcClaim,
+        )],
+        required_artifacts: Vec::new(),
+        preconditions: saga_preconditions(&run_id, policy),
+    };
+    let prepared =
+        PreparedCommit::<SagaTerminal>::new(request, CommitArtifactEvidenceSet::empty(), &proof)
+            .expect("proof-backed commit can be prepared");
+    let error = store
+        .append_prepared_commit_plan(prepared.into())
+        .expect_err("append rechecks current projection");
+    assert_projection_conflict_contains(error, "requires terminal saga mode");
+}
+
+#[test]
 fn saga_projection_derives_obligations_and_run_mode_from_policy_and_stream() {
     let run_id = run_id(120);
     let mut store = InMemoryTypedRunStore::new();

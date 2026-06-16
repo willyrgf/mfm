@@ -15,6 +15,24 @@ pub(super) fn require_admission_preconditions(
             )?;
             projections.require_manual_resolution_admissible(&payload.run_id, policy)
         }
+        KernelEventPayload::RunCompleted(payload) if saga_admit_token.is_some() => {
+            let policy = require_saga_admit_token(
+                projections,
+                &payload.run_id,
+                &payload.spec_hash,
+                saga_admit_token,
+            )?;
+            let projected_outcome =
+                projections.saga_terminal_completion_outcome(&payload.run_id, policy)?;
+            if projected_outcome != payload.outcome {
+                return Err(StoreError::ProjectionConflict {
+                    key: format!("run:{}:saga_terminal", payload.run_id),
+                    message: "RunCompleted outcome does not match current saga projection"
+                        .to_owned(),
+                });
+            }
+            Ok(())
+        }
         _ => Ok(()),
     }
 }
