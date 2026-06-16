@@ -33,7 +33,7 @@ use mfm_replay::v1::{ReplayBroker, ReplayError, ReplayReadAuthority};
 use mfm_runtime::{
     CertifiedRuntimeSpec, RunLaunchArtifact, RunLaunchEvidence, RunLaunchSeedCell,
     RuntimeArtifactStageFuture, RuntimeArtifactStager, SchedulerStatus, SerialTypedScheduler,
-    VerifiedRunStream,
+    VerifiedRunHistory,
 };
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
@@ -892,7 +892,7 @@ where
             &stream,
         )
         .await?;
-        verified_run_stream_from_events(&self.artifacts, &runtime_spec, run_id, &stream).await?;
+        verified_run_history_from_events(&self.artifacts, &runtime_spec, run_id, &stream).await?;
         let mut store = self.store.lock().await;
         let status = self
             .drive_with_mode(&mut *store, &runtime_spec, run_id, drive)
@@ -919,7 +919,7 @@ where
             &stream,
         )
         .await?;
-        verified_run_stream_from_events(&self.artifacts, &runtime_spec, run_id, &stream).await?;
+        verified_run_history_from_events(&self.artifacts, &runtime_spec, run_id, &stream).await?;
         typed_run_status_from_stream(run_id, &runtime_spec, &stream)
     }
 
@@ -963,11 +963,12 @@ where
         )
         .await?;
         let runtime_spec = CertifiedRuntimeSpec::new(certified)?;
-        let verified_stream =
-            verified_run_stream_from_events(&self.artifacts, &runtime_spec, run_id, &stream)
+        let verified_history =
+            verified_run_history_from_events(&self.artifacts, &runtime_spec, run_id, &stream)
                 .await?;
         let authority =
-            replay_read_authority_for_run(&self.artifacts, &runtime_spec, &verified_stream).await?;
+            replay_read_authority_for_run(&self.artifacts, &runtime_spec, &verified_history)
+                .await?;
         ReplayBroker::from_read_authority(authority).map_err(Into::into)
     }
 
@@ -994,13 +995,13 @@ where
             &stream,
         )
         .await?;
-        let verified_stream =
-            verified_run_stream_from_events(&self.artifacts, &runtime_spec, run_id, &stream)
+        let verified_history =
+            verified_run_history_from_events(&self.artifacts, &runtime_spec, run_id, &stream)
                 .await?;
         let authority = public_output_read_authority_for_run(
             &self.artifacts,
             &runtime_spec,
-            &verified_stream,
+            &verified_history,
             public_schema_id,
         )
         .await?;
@@ -1131,7 +1132,7 @@ where
             &stream,
         )
         .await?;
-        verified_run_stream_from_events(&self.artifacts, &runtime_spec, run_id, &stream).await?;
+        verified_run_history_from_events(&self.artifacts, &runtime_spec, run_id, &stream).await?;
         let status = self.drive_with_mode(&runtime_spec, run_id, drive).await?;
         let stream = self
             .store
@@ -1161,7 +1162,7 @@ where
             &stream,
         )
         .await?;
-        verified_run_stream_from_events(&self.artifacts, &runtime_spec, run_id, &stream).await?;
+        verified_run_history_from_events(&self.artifacts, &runtime_spec, run_id, &stream).await?;
         typed_run_status_from_stream(run_id, &runtime_spec, &stream)
     }
 
@@ -1210,13 +1211,14 @@ where
         )
         .await?;
         let runtime_spec = CertifiedRuntimeSpec::new(certified)?;
-        let verified_stream =
-            verified_run_stream_from_events(&self.artifacts, &runtime_spec, run_id, &stream)
+        let verified_history =
+            verified_run_history_from_events(&self.artifacts, &runtime_spec, run_id, &stream)
                 .await?;
         let authority =
-            replay_read_authority_for_run(&self.artifacts, &runtime_spec, &verified_stream).await?;
+            replay_read_authority_for_run(&self.artifacts, &runtime_spec, &verified_history)
+                .await?;
         let broker = ReplayBroker::from_read_authority(authority)?;
-        let stream = verified_stream.events();
+        let stream = verified_history.events();
         mfm_adapters_evm_contracts::verify_contract_lifecycle_replay(&broker)?;
         mfm_transports_proof::verify_deterministic_proof_replay(&broker)?;
         let projection = broker.projection_snapshot();
@@ -1259,13 +1261,13 @@ where
             &stream,
         )
         .await?;
-        let verified_stream =
-            verified_run_stream_from_events(&self.artifacts, &runtime_spec, run_id, &stream)
+        let verified_history =
+            verified_run_history_from_events(&self.artifacts, &runtime_spec, run_id, &stream)
                 .await?;
         let authority = public_output_read_authority_for_run(
             &self.artifacts,
             &runtime_spec,
-            &verified_stream,
+            &verified_history,
             public_schema_id,
         )
         .await?;
@@ -1327,16 +1329,16 @@ async fn load_runtime_spec_for_run(
     CertifiedRuntimeSpec::new(certified).map_err(Into::into)
 }
 
-async fn verified_run_stream_from_events(
+async fn verified_run_history_from_events(
     artifacts: &FsTypedArtifactStore,
     runtime_spec: &CertifiedRuntimeSpec,
     run_id: &RunId,
     stream: &[store::KernelEventEnvelope],
-) -> Result<VerifiedRunStream, AppError> {
+) -> Result<VerifiedRunHistory, AppError> {
     let committed = store::CommittedRunStream::from_events(run_id.clone(), stream.to_vec())?;
     let retained_artifacts =
         store::VerifiedRunArtifactStore::from_committed_stream(&committed, artifacts).await?;
-    VerifiedRunStream::from_committed_stream(runtime_spec, committed, retained_artifacts)
+    VerifiedRunHistory::from_committed_stream(runtime_spec, committed, retained_artifacts)
         .map_err(Into::into)
 }
 
@@ -1353,17 +1355,18 @@ async fn validate_stored_run_stream_for_read(
         ));
     }
     let runtime_spec = load_runtime_spec_for_run(artifacts, registry, run_id, stream).await?;
-    verified_run_stream_from_events(artifacts, &runtime_spec, run_id, stream).await?;
+    verified_run_history_from_events(artifacts, &runtime_spec, run_id, stream).await?;
     Ok(())
 }
 
-/// Builds sealed replay read authority from retained artifact evidence in a verified run stream.
+/// Builds sealed replay read authority from retained artifact evidence in verified run history.
 pub async fn replay_read_authority_for_run(
     _artifacts: &FsTypedArtifactStore,
     runtime_spec: &CertifiedRuntimeSpec,
-    verified_stream: &VerifiedRunStream,
+    verified_history: &VerifiedRunHistory,
 ) -> Result<ReplayReadAuthority, AppError> {
-    ReplayReadAuthority::from_verified_run_stream(runtime_spec, verified_stream).map_err(Into::into)
+    ReplayReadAuthority::from_verified_run_history(runtime_spec, verified_history)
+        .map_err(Into::into)
 }
 
 fn certified_spec_launch_artifact(
@@ -1881,22 +1884,22 @@ pub fn typed_run_stream_response_from_events(
     }
 }
 
-/// Builds typed public-output read authority from certified runtime authority, a store-verified
-/// run stream, rebuilt projection, and verified typed artifact evidence.
+/// Builds typed public-output read authority from certified runtime authority, verified run
+/// history, rebuilt projection, and verified typed artifact evidence.
 pub async fn public_output_read_authority_for_run(
     artifacts: &FsTypedArtifactStore,
     runtime_spec: &CertifiedRuntimeSpec,
-    verified_stream: &VerifiedRunStream,
+    verified_history: &VerifiedRunHistory,
     public_schema_id: &SchemaId,
 ) -> Result<PublicOutputReadAuthority, AppError> {
-    if runtime_spec.spec_hash() != verified_stream.spec_hash() {
+    if runtime_spec.spec_hash() != verified_history.spec_hash() {
         return Err(AppError::new(
             ErrorClass::Internal,
             "PublicOutputAuthorityMismatch",
-            "verified stream spec hash does not match certified runtime authority",
+            "verified history spec hash does not match certified runtime authority",
         ));
     }
-    let projection = verified_stream.projection_snapshot();
+    let projection = verified_history.projection_snapshot();
     let public_output = projection.public_output(public_schema_id).ok_or_else(|| {
         AppError::not_found(
             "PublicOutputNotFound",
@@ -1917,7 +1920,7 @@ pub async fn public_output_read_authority_for_run(
     };
 
     let payload =
-        public_output_payload_from_stream(verified_stream.events(), event_id, public_schema_id)?;
+        public_output_payload_from_stream(verified_history.events(), event_id, public_schema_id)?;
     if &payload.spec_hash != runtime_spec.spec_hash()
         || &payload.public_schema_id != public_schema_id
         || public_schema_id != &runtime_spec.spec().public_outputs.public_schema_id
@@ -1937,7 +1940,7 @@ pub async fn public_output_read_authority_for_run(
     .await?;
 
     Ok(PublicOutputReadAuthority {
-        run_id: verified_stream.run_id().clone(),
+        run_id: verified_history.run_id().clone(),
         public_schema_id: public_schema_id.clone(),
         event_id: event_id.clone(),
         rendered_digest: rendered_digest.clone(),
@@ -3073,18 +3076,18 @@ mod tests {
         )
         .await
         .expect("runtime spec");
-        let verified_stream = verified_run_stream_from_events(
+        let verified_history = verified_run_history_from_events(
             services.artifacts(),
             &runtime_spec,
             &fixture.run_id,
             &stream,
         )
         .await
-        .expect("verified stream");
+        .expect("verified history");
         let authority = public_output_read_authority_for_run(
             services.artifacts(),
             &runtime_spec,
-            &verified_stream,
+            &verified_history,
             &fixture.public_schema_id,
         )
         .await
@@ -3428,7 +3431,7 @@ mod tests {
         };
         let err = async {
             let corrupt_stream = corrupt_store.stream.clone();
-            let verified_stream = verified_run_stream_from_events(
+            let verified_history = verified_run_history_from_events(
                 services.artifacts(),
                 &runtime_spec,
                 &fixture.run_id,
@@ -3438,7 +3441,7 @@ mod tests {
             public_output_read_authority_for_run(
                 services.artifacts(),
                 &runtime_spec,
-                &verified_stream,
+                &verified_history,
                 &fixture.public_schema_id,
             )
             .await
@@ -3484,7 +3487,7 @@ mod tests {
         };
         let err = async {
             let corrupt_stream = corrupt_store.stream.clone();
-            let verified_stream = verified_run_stream_from_events(
+            let verified_history = verified_run_history_from_events(
                 services.artifacts(),
                 &runtime_spec,
                 &fixture.run_id,
@@ -3494,7 +3497,7 @@ mod tests {
             public_output_read_authority_for_run(
                 services.artifacts(),
                 &runtime_spec,
-                &verified_stream,
+                &verified_history,
                 &fixture.public_schema_id,
             )
             .await
@@ -3712,7 +3715,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn verified_run_stream_rejects_missing_retained_artifact_bytes() {
+    async fn verified_run_history_rejects_missing_retained_artifact_bytes() {
         let (root, fixture, services, _started) = start_framework_fixture_run().await;
         let stream = services
             .store()
@@ -3739,14 +3742,14 @@ mod tests {
             .clone();
         std::fs::remove_file(artifact_blob_path(&root, &removed)).expect("remove artifact blob");
 
-        let err = verified_run_stream_from_events(
+        let err = verified_run_history_from_events(
             services.artifacts(),
             &runtime_spec,
             &fixture.run_id,
             &stream,
         )
         .await
-        .expect_err("missing retained bytes reject verified stream");
+        .expect_err("missing retained bytes reject verified history");
 
         assert_eq!(err.code, "RunStoreRejected");
         assert!(err.message.contains(&removed.to_string()));

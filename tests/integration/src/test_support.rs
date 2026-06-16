@@ -1905,14 +1905,14 @@ async fn replay_without_live_capabilities_for(
         store::VerifiedRunArtifactStore::from_committed_stream(&committed, artifacts)
             .await
             .map_err(display_error)?;
-    let verified_stream = mfm_runtime::VerifiedRunStream::from_committed_stream(
+    let verified_history = mfm_runtime::VerifiedRunHistory::from_committed_stream(
         runtime_spec,
         committed,
         retained_artifacts,
     )
     .map_err(display_error)?;
     let authority =
-        replay::ReplayReadAuthority::from_verified_run_stream(runtime_spec, &verified_stream)
+        replay::ReplayReadAuthority::from_verified_run_history(runtime_spec, &verified_history)
             .map_err(display_error)?;
     let broker = replay::ReplayBroker::from_read_authority(authority).map_err(display_error)?;
     let live_cap_rejected = matches!(

@@ -454,12 +454,12 @@ Validators deleted or replaced:
 
 - Added store-owned `RetainedArtifactReadProvider`, `VerifiedRunArtifactBytes`, and
   `VerifiedRunArtifactStore` authority.
-- Replaced runtime public `VerifiedRunStream` construction that accepted only certified spec plus
+- Replaced runtime public `VerifiedRunHistory` construction that accepted only certified spec plus
   stream with constructors requiring `VerifiedRunArtifactStore`.
 - Replaced app status/resume/replay/public-output read paths that validated raw streams with a
   helper that first loads and verifies all event-required artifact bytes from `FsTypedArtifactStore`.
 - Replaced replay authority's caller-supplied artifact evidence/proof-byte bags with derivation
-  from `VerifiedRunStream::artifact_store`.
+  from `VerifiedRunHistory::artifact_store`.
 - Replaced replay's retention-only artifact evidence validator with verification against the full
   store-verified artifact set carried by the run history.
 - Deleted app saga/manual terminal artifact collection exceptions; replay now consumes retained
@@ -469,7 +469,7 @@ Validators deleted or replaced:
 
 Tests added or updated:
 
-- Added app coverage proving missing retained artifact bytes reject verified run stream
+- Added app coverage proving missing retained artifact bytes reject verified run history
   construction before replay/status authority can be minted.
 - Updated app tamper tests to expect retained-artifact verification failures when corrupt histories
   reference missing or mismatched artifact evidence.
@@ -690,3 +690,50 @@ Checks run:
 - `cargo test -p mfm-store -p mfm-runtime -p mfm-replay`
 - `cargo test -p mfm-integration-tests --test cargo_metadata_contract`
 - `cargo test -p mfm-integration-tests --test architecture_namespace_contract`
+
+## Phase 15: Runtime And Replay Integration Cleanup
+
+Status: completed.
+
+Files changed:
+
+- `crates/kernel/runtime/src/history.rs`
+- `crates/kernel/runtime/src/lib.rs`
+- `crates/kernel/runtime/tests/runtime_authority_ui.rs`
+- `crates/kernel/runtime/tests/ui/fail/raw_verified_run_history_constructor.rs`
+- `crates/kernel/runtime/tests/ui/fail/raw_verified_run_history_constructor.stderr`
+- `crates/kernel/replay/src/lib.rs`
+- `crates/kernel/replay/README.md`
+- `crates/app/src/lib.rs`
+- `tests/integration/src/test_support.rs`
+- `tests/integration/tests/proof_transport_conformance.rs`
+- `IMPLEMENTATION_ACDC_SAGA_PRE_MERGE.md`
+
+Validators deleted or replaced:
+
+- Renamed runtime's public verified history authority from `VerifiedRunStream` to
+  `VerifiedRunHistory` to make retained-evidence history authority explicit at the API boundary.
+- Deleted the public `mfm_runtime::validate_run_stream` raw-slice helper and the internal
+  `VerifiedRunHistory::from_stream` raw-slice constructor; callers now enter through
+  `CommittedRunStream` plus `VerifiedRunArtifactStore`.
+- Changed replay authority construction to `ReplayReadAuthority::from_verified_run_history`, so
+  replay is minted from certified runtime authority plus verified run history.
+- Updated app resume/status/replay/public-output read paths and integration helpers to construct
+  verified history from a committed stream and retained artifact store before rendering or replay.
+- Replaced replay's overly narrow retained-evidence rejection with skipped-requirement
+  authorization that first checks projection-certified requirements and retained evidence, while
+  preserving rejection of truly extra retained artifacts.
+
+Tests added or updated:
+
+- Renamed the runtime compile-fail fixture to
+  `raw_verified_run_history_constructor`.
+- Updated app missing-retained-artifact coverage to assert verified-history construction rejects
+  missing retained bytes.
+- Kept replay extra-artifact rejection coverage on the stricter retained-evidence path.
+
+Checks run:
+
+- `cargo fmt --all -- --check`
+- `cargo check -p mfm-runtime -p mfm-replay -p mfm-app -p mfm-integration-tests`
+- `cargo test -p mfm-runtime -p mfm-replay -p mfm-app -p mfm-integration-tests`

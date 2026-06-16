@@ -50,16 +50,16 @@ pub(crate) struct CommittedArtifactReference {
     pub(crate) commit_key: store::CommitKey,
 }
 
-/// Store-owned run stream validated against certified runtime authority.
+/// Store-owned run history validated against certified runtime authority.
 #[derive(Debug, Clone)]
-pub struct VerifiedRunStream {
+pub struct VerifiedRunHistory {
     run_id: RunId,
     spec_hash: SpecHash,
     committed: store::CommittedRunStream,
     artifacts: store::VerifiedRunArtifactStore,
 }
 
-impl VerifiedRunStream {
+impl VerifiedRunHistory {
     /// Loads the authoritative run stream from a typed store and validates it against certified
     /// runtime authority and verified retained artifact evidence.
     pub fn from_store<S>(
@@ -97,16 +97,6 @@ impl VerifiedRunStream {
         Self::from_committed_stream(runtime_spec, committed, artifacts)
     }
 
-    pub(crate) fn from_stream(
-        runtime_spec: &CertifiedRuntimeSpec,
-        run_id: &RunId,
-        stream: &[store::KernelEventEnvelope],
-        artifacts: store::VerifiedRunArtifactStore,
-    ) -> Result<Self> {
-        let committed = store::CommittedRunStream::from_events(run_id.clone(), stream.to_vec())?;
-        Self::from_committed_stream(runtime_spec, committed, artifacts)
-    }
-
     /// Validates a committed stream against certified runtime authority and verified retained
     /// artifact evidence.
     pub fn from_committed_stream(
@@ -124,17 +114,17 @@ impl VerifiedRunStream {
         })
     }
 
-    /// Run id covered by this verified stream.
+    /// Run id covered by this verified history.
     pub fn run_id(&self) -> &RunId {
         &self.run_id
     }
 
-    /// Certified spec hash covered by this verified stream.
+    /// Certified spec hash covered by this verified history.
     pub fn spec_hash(&self) -> &SpecHash {
         &self.spec_hash
     }
 
-    /// Authoritative committed event envelopes covered by this verified stream.
+    /// Authoritative committed event envelopes covered by this verified history.
     pub fn events(&self) -> &[store::KernelEventEnvelope] {
         self.committed.events()
     }
@@ -144,7 +134,7 @@ impl VerifiedRunStream {
         self.committed.projection()
     }
 
-    /// Store-owned stream authority covered by this runtime verification.
+    /// Store-owned committed stream authority covered by this runtime verification.
     pub fn committed_stream(&self) -> &store::CommittedRunStream {
         &self.committed
     }
@@ -233,20 +223,6 @@ impl RuntimeRunView {
             next_seq: committed.next_seq(),
         })
     }
-}
-
-/// Validates a stored typed run stream against the certified runtime spec without executing work.
-///
-/// This is the read-only counterpart to scheduler resume: callers that inspect, render, or
-/// append-only resume a run must still prove the historical stream is bound to the stored certified
-/// spec before trusting projections.
-pub fn validate_run_stream(
-    runtime_spec: &CertifiedRuntimeSpec,
-    run_id: &RunId,
-    stream: &[store::KernelEventEnvelope],
-    artifacts: store::VerifiedRunArtifactStore,
-) -> Result<()> {
-    VerifiedRunStream::from_stream(runtime_spec, run_id, stream, artifacts).map(|_| ())
 }
 
 pub(crate) fn recorded_facts_for_attempt(

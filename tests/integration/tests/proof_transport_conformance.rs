@@ -399,7 +399,7 @@ async fn verify_conformance_replay(
                     error.to_string(),
                 )
             })?;
-    let verified_stream = mfm_runtime::VerifiedRunStream::from_committed_stream(
+    let verified_history = mfm_runtime::VerifiedRunHistory::from_committed_stream(
         runtime_spec,
         committed,
         retained_artifacts,
@@ -407,7 +407,7 @@ async fn verify_conformance_replay(
     .map_err(|error| {
         replay::ReplayError::new(replay::ReplayErrorKind::InvalidRunStream, error.to_string())
     })?;
-    let run_started = verified_stream
+    let run_started = verified_history
         .events()
         .iter()
         .find_map(|event| match event.payload() {
@@ -420,7 +420,7 @@ async fn verify_conformance_replay(
                 "proof conformance stream has no run-start event",
             )
         })?;
-    let projection = verified_stream.projection_snapshot();
+    let projection = verified_history.projection_snapshot();
     let _retention = projection.retention(&run_started.run_id).ok_or_else(|| {
         replay::ReplayError::new(
             replay::ReplayErrorKind::ArtifactMissing,
@@ -428,7 +428,7 @@ async fn verify_conformance_replay(
         )
     })?;
     let authority =
-        replay::ReplayReadAuthority::from_verified_run_stream(runtime_spec, &verified_stream)?;
+        replay::ReplayReadAuthority::from_verified_run_history(runtime_spec, &verified_history)?;
     let broker = replay::ReplayBroker::from_read_authority(authority)?;
     let proof_verified = mfm_transports_proof::verify_deterministic_proof_replay(&broker)?;
     Ok(proof_verified

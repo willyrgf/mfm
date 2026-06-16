@@ -156,7 +156,7 @@ pub mod v1 {
         }
     }
 
-    /// Sealed replay read authority minted from certified spec and verified stream evidence.
+    /// Sealed replay read authority minted from certified spec and verified run history.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct ReplayReadAuthority {
         certified_spec: HashedSpecEnvelope,
@@ -169,25 +169,25 @@ pub mod v1 {
     }
 
     impl ReplayReadAuthority {
-        /// Mints replay read authority from certifier-backed runtime authority, verified stream
-        /// evidence, and verified retained artifacts.
-        pub fn from_verified_run_stream(
+        /// Mints replay read authority from certifier-backed runtime authority and verified run
+        /// history.
+        pub fn from_verified_run_history(
             runtime_spec: &mfm_runtime::CertifiedRuntimeSpec,
-            verified_stream: &mfm_runtime::VerifiedRunStream,
+            verified_history: &mfm_runtime::VerifiedRunHistory,
         ) -> Result<Self> {
-            if runtime_spec.spec_hash() != verified_stream.spec_hash() {
+            if runtime_spec.spec_hash() != verified_history.spec_hash() {
                 return Err(ReplayError::new(
                     ReplayErrorKind::SpecHashMismatch,
-                    "verified stream spec hash does not match certified runtime spec",
+                    "verified history spec hash does not match certified runtime spec",
                 ));
             }
-            let run_started = run_started_payload(verified_stream.events())?;
-            let artifact_evidence = verified_stream
+            let run_started = run_started_payload(verified_history.events())?;
+            let artifact_evidence = verified_history
                 .artifact_store()
                 .artifacts()
                 .map(|(_, artifact)| artifact.evidence().clone())
                 .collect::<Vec<_>>();
-            let artifact_bytes = verified_stream
+            let artifact_bytes = verified_history
                 .artifact_store()
                 .artifacts()
                 .map(|(artifact_id, artifact)| ReplayArtifactBytes {
@@ -197,10 +197,10 @@ pub mod v1 {
                 .collect::<Vec<_>>();
             let artifacts = artifact_map(artifact_evidence.clone())?;
             let artifact_bytes = artifact_bytes_map(artifact_bytes)?;
-            verify_replay_artifact_authority(verified_stream, &artifacts)?;
+            verify_replay_artifact_authority(verified_history, &artifacts)?;
             Ok(Self {
                 certified_spec: runtime_spec.envelope().clone(),
-                stream: verified_stream.events().to_vec(),
+                stream: verified_history.events().to_vec(),
                 canonicalizer_identity: runtime_spec
                     .envelope()
                     .spec
@@ -488,7 +488,7 @@ pub mod v1 {
             &self.run_id
         }
 
-        /// Returns the broker-owned verified run stream used for replay evidence.
+        /// Returns the broker-owned verified history events used for replay evidence.
         pub fn events(&self) -> &[KernelEventEnvelope] {
             &self.stream
         }
@@ -1752,6 +1752,7 @@ pub mod v1 {
         fn authorize_event_artifacts(&mut self, payload: &KernelEventPayload) -> Result<()> {
             for requirement in store::event_artifact_requirements(payload) {
                 if self.should_skip_event_artifact_requirement(&requirement)? {
+                    self.authorize_skipped_event_artifact_requirement(&requirement)?;
                     continue;
                 }
                 self.authorize_event_artifact_requirement(&requirement)?;
@@ -1791,6 +1792,67 @@ pub mod v1 {
                 return Ok(false);
             };
             self.is_terminal_lifecycle_receipt_artifact(node_id, &requirement.artifact_id, digest)
+        }
+
+        fn authorize_skipped_event_artifact_requirement(
+            &mut self,
+            requirement: &store::EventArtifactRequirement,
+        ) -> Result<StoredArtifactEvidenceRef> {
+            let digest = requirement.digest.as_ref().ok_or_else(|| {
+                ReplayError::new(
+                    ReplayErrorKind::InvalidRunStream,
+                    format!(
+                        "artifact requirement for {} does not carry a digest",
+                        requirement.artifact_id
+                    ),
+                )
+            })?;
+            let evidence = self
+                .retained_artifacts
+                .get(&requirement.artifact_id)
+                .ok_or_else(|| {
+                    ReplayError::new(
+                        ReplayErrorKind::ArtifactMissing,
+                        format!(
+                            "missing retained artifact evidence for {}",
+                            requirement.artifact_id
+                        ),
+                    )
+                })?;
+            if &evidence.digest != digest
+                || requirement
+                    .schema_id
+                    .as_ref()
+                    .is_some_and(|schema_id| evidence.schema_id.as_ref() != Some(schema_id))
+                || requirement
+                    .semantic_type_id
+                    .as_ref()
+                    .is_some_and(|semantic_type_id| {
+                        evidence.semantic_type_id.as_ref() != Some(semantic_type_id)
+                    })
+                || requirement
+                    .artifact_role
+                    .is_some_and(|role| evidence.artifact_role != role)
+                || requirement
+                    .producer_node_id
+                    .as_ref()
+                    .is_some_and(|node_id| evidence.producer_node_id.as_ref() != Some(node_id))
+                || requirement
+                    .producer_seed_id
+                    .as_ref()
+                    .is_some_and(|seed_id| evidence.producer_seed_id.as_ref() != Some(seed_id))
+            {
+                return Err(ReplayError::new(
+                    ReplayErrorKind::ArtifactMismatch,
+                    format!(
+                        "skipped artifact evidence mismatch for {}",
+                        requirement.artifact_id
+                    ),
+                ));
+            }
+            let evidence = evidence.clone();
+            self.insert_authorized_artifact(evidence.clone())?;
+            Ok(evidence)
         }
 
         fn authorize_event_artifact_requirement(
@@ -2020,10 +2082,10 @@ pub mod v1 {
     }
 
     fn verify_replay_artifact_authority(
-        verified_stream: &mfm_runtime::VerifiedRunStream,
+        verified_history: &mfm_runtime::VerifiedRunHistory,
         artifacts: &BTreeMap<ArtifactId, StoredArtifactEvidenceRef>,
     ) -> Result<()> {
-        let verified_artifacts = verified_stream.artifact_store();
+        let verified_artifacts = verified_history.artifact_store();
         for (artifact_id, artifact) in verified_artifacts.artifacts() {
             let evidence = artifacts.get(artifact_id).ok_or_else(|| {
                 ReplayError::new(

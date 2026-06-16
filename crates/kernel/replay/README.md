@@ -8,7 +8,7 @@ recorded artifact evidence. It must not construct live capabilities, live transp
 machine, SDK, `PlannedOp`, `PortKey`, public `StateGraph`, `DependencyEdge`, `DynContext`, or
 generic `IoProvider` surfaces.
 
-Replay authority is minted from certified spec authority, a validated `VerifiedRunStream`, and
+Replay authority is minted from certified spec authority, a validated `VerifiedRunHistory`, and
 retained artifact evidence from the committed run stream plus rebuilt and validated projections. Raw
 status DTOs, stream JSON, hash-only specs, rendered public output, or artifact-store bytes without
 committed evidence cannot construct replay authority.
