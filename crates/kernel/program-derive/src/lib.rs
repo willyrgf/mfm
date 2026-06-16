@@ -473,6 +473,7 @@ struct ContainerAttrs {
     enum_tag: Option<String>,
     enum_content: Option<String>,
     validate: Option<Path>,
+    transparent_string: bool,
 }
 
 impl ContainerAttrs {
@@ -487,6 +488,7 @@ impl ContainerAttrs {
             enum_tag: None,
             enum_content: None,
             validate: None,
+            transparent_string: false,
         };
 
         for attr in attrs {
@@ -509,6 +511,8 @@ impl ContainerAttrs {
                                     format!("invalid config validator path: {error}"),
                                 )
                             })?);
+                    } else if meta.path.is_ident("transparent_string") {
+                        output.transparent_string = true;
                     } else {
                         return Err(meta.error("unsupported #[mfm(...)] container attribute"));
                     }
@@ -533,6 +537,9 @@ impl ContainerAttrs {
                         Ok(())
                     } else if meta.path.is_ident("content") {
                         output.enum_content = Some(meta.value()?.parse::<LitStr>()?.value());
+                        Ok(())
+                    } else if meta.path.is_ident("try_from") || meta.path.is_ident("into") {
+                        let _ = meta.value()?.parse::<LitStr>()?;
                         Ok(())
                     } else if meta.path.is_ident("untagged") {
                         Err(meta.error("serde(untagged) is not supported by MFM derives"))
@@ -655,6 +662,10 @@ fn schema_shape_tokens(
     kind: DeriveKind,
     attrs: &ContainerAttrs,
 ) -> syn::Result<SchemaShapeOutput> {
+    if attrs.transparent_string {
+        return transparent_string_shape_tokens(data);
+    }
+
     match data {
         Data::Struct(DataStruct {
             fields: Fields::Named(fields),
@@ -679,6 +690,42 @@ fn schema_shape_tokens(
             "MFM derives do not support unions",
         )),
     }
+}
+
+fn transparent_string_shape_tokens(data: &Data) -> syn::Result<SchemaShapeOutput> {
+    let Data::Struct(DataStruct {
+        fields: Fields::Named(fields),
+        ..
+    }) = data
+    else {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "mfm(transparent_string) requires a named struct",
+        ));
+    };
+
+    if fields.named.len() != 1 {
+        return Err(syn::Error::new(
+            fields.span(),
+            "mfm(transparent_string) requires exactly one String field",
+        ));
+    }
+
+    let field = fields
+        .named
+        .first()
+        .expect("field count checked before access");
+    if !is_string_type(&field.ty) {
+        return Err(syn::Error::new_spanned(
+            &field.ty,
+            "mfm(transparent_string) field must be String",
+        ));
+    }
+
+    Ok(SchemaShapeOutput {
+        shape: quote!(::mfm_values::SchemaShape::String),
+        default_bounds: Vec::new(),
+    })
 }
 
 fn enum_shape_tokens(

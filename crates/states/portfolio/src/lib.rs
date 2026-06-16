@@ -1188,7 +1188,7 @@ pub fn prepare_sources_from_config(config: &PrepareSourcesConfig) -> PreparedSou
         .networks
         .iter()
         .map(|network| PreparedSource {
-            network_id: network.network_id.clone(),
+            network_id: network.network_id.to_string(),
             control_scope: network.control_scope.clone(),
             family: network.family,
         })
@@ -1203,10 +1203,10 @@ pub fn resolve_subjects_from_config(config: &ResolveSubjectsConfig) -> ResolvedS
         .wallets
         .iter()
         .map(|wallet| ResolvedSubject {
-            wallet_id: wallet.wallet_id.clone(),
+            wallet_id: wallet.wallet_id.to_string(),
             address: wallet.address.clone(),
             subject_kind: wallet.subject_kind,
-            network_id: wallet.network_id.clone(),
+            network_id: wallet.network_id.to_string(),
             implementation_kind: wallet_implementation_kind(&wallet.implementation).to_owned(),
         })
         .collect::<Vec<_>>();
@@ -1227,7 +1227,7 @@ pub fn pinned_view_for_network(network: &NetworkConfig, evm_block_number: u64) -
         },
     };
     PinnedView {
-        network_id: network.network_id.clone(),
+        network_id: network.network_id.to_string(),
         anchor,
     }
 }
@@ -1281,9 +1281,9 @@ fn resolved_valuation_for_quote(
 ) -> Result<ResolvedValuation, Box<PortfolioSnapshotError>> {
     match &quote.reader {
         ValuationReaderConfig::FixedUnitPrice { unit_price_dec } => Ok(ResolvedValuation {
-            symbol_id: symbol.symbol_id.clone(),
+            symbol_id: symbol.symbol_id.to_string(),
             quote: quote.quote,
-            priced_symbol_id: quote.priced_symbol_id.clone(),
+            priced_symbol_id: quote.priced_symbol_id.to_string(),
             unit_price_dec: unit_price_dec.clone(),
             valuation_reader_kind: "fixed_unit_price".to_owned(),
             source_refs: Vec::new(),
@@ -1292,7 +1292,7 @@ fn resolved_valuation_for_quote(
             let Some(view) = views
                 .views
                 .iter()
-                .find(|view| view.network_id == source.network_id)
+                .find(|view| view.network_id == source.network_id.as_str())
             else {
                 return Err(Box::new(snapshot_error(
                     "missing_valuation_source_view",
@@ -1340,7 +1340,7 @@ pub fn observation_batch_from_raw_balance(
         .subjects
         .subjects
         .iter()
-        .find(|subject| subject.wallet_id == config.wallet.wallet_id)
+        .find(|subject| subject.wallet_id == config.wallet.wallet_id.as_str())
     else {
         errors.push(snapshot_error(
             "missing_resolved_subject",
@@ -1360,7 +1360,7 @@ pub fn observation_batch_from_raw_balance(
         .views
         .views
         .iter()
-        .find(|view| view.network_id == config.network.network_id)
+        .find(|view| view.network_id == config.network.network_id.as_str())
     else {
         errors.push(snapshot_error(
             "missing_pinned_view",
@@ -1406,11 +1406,11 @@ pub fn observation_batch_from_raw_balance(
     };
     let mut observation = Observation {
         wallet_id: subject.wallet_id.clone(),
-        symbol_id: config.symbol.symbol_id.clone(),
+        symbol_id: config.symbol.symbol_id.to_string(),
         display_symbol: config.symbol.display_symbol.clone(),
         kind: config.symbol.kind,
         role: config.symbol.role,
-        network_id: config.network.network_id.clone(),
+        network_id: config.network.network_id.to_string(),
         protocol: config.symbol.protocol.clone(),
         quantity: ObservationQuantity {
             raw_dec: raw.to_string(),
@@ -1420,7 +1420,7 @@ pub fn observation_batch_from_raw_balance(
         values,
         source: ObservationSource {
             balance_reader_kind: balance_reader_kind(&config.symbol.balance_reader).to_owned(),
-            network_id: config.network.network_id.clone(),
+            network_id: config.network.network_id.to_string(),
             anchor,
         },
         metadata: config.symbol.metadata.clone(),
@@ -1535,23 +1535,23 @@ pub fn assemble_snapshot(
         .iter()
         .map(|wallet| {
             let subject = subjects_by_wallet
-                .get(&wallet.wallet_id)
+                .get(wallet.wallet_id.as_str())
                 .cloned()
                 .unwrap_or_else(|| ResolvedSubject {
-                    wallet_id: wallet.wallet_id.clone(),
+                    wallet_id: wallet.wallet_id.to_string(),
                     address: wallet.address.clone(),
                     subject_kind: wallet.subject_kind,
-                    network_id: wallet.network_id.clone(),
+                    network_id: wallet.network_id.to_string(),
                     implementation_kind: wallet_implementation_kind(&wallet.implementation)
                         .to_owned(),
                 });
             let mut wallet = WalletSnapshot {
-                wallet_id: wallet.wallet_id.clone(),
+                wallet_id: wallet.wallet_id.to_string(),
                 address: subject.address,
                 subject_kind: subject.subject_kind,
                 network_id: subject.network_id,
                 observations: observations_by_wallet
-                    .remove(&wallet.wallet_id)
+                    .remove(wallet.wallet_id.as_str())
                     .unwrap_or_default(),
             };
             wallet.normalize();
@@ -1579,7 +1579,7 @@ pub fn assemble_snapshot(
 
     let mut snapshot = PortfolioSnapshot {
         schema_version: config.snapshot_version(),
-        portfolio_id: config.portfolio.portfolio_id.clone(),
+        portfolio_id: config.portfolio.portfolio_id.to_string(),
         generated_at_ms,
         network_pins,
         wallets,
@@ -1604,8 +1604,8 @@ pub fn project_report_from_snapshot(
             let wallet_totals = derive_quote_totals(&report_quotes, &wallet.observations)?;
             merge_quote_totals(&mut portfolio_totals, &wallet_totals);
             Ok(WalletReport {
-                wallet_id: wallet.wallet_id.clone(),
-                network_id: wallet.network_id.clone(),
+                wallet_id: wallet.wallet_id.to_string(),
+                network_id: wallet.network_id.to_string(),
                 totals_by_quote: quote_totals_to_vec(wallet_totals),
             })
         })
@@ -1654,7 +1654,8 @@ fn observation_values(
     let mut values = Vec::new();
     for quote in &config.symbol.valuation.quotes {
         let Some(resolved) = input.valuations.valuations.iter().find(|valuation| {
-            valuation.symbol_id == config.symbol.symbol_id && valuation.quote == quote.quote
+            valuation.symbol_id == config.symbol.symbol_id.as_str()
+                && valuation.quote == quote.quote
         }) else {
             errors.push(snapshot_error(
                 "missing_resolved_valuation",
@@ -2071,26 +2072,32 @@ mod tests {
     #[test]
     fn observe_batch_mfm_config_validation_rejects_network_mismatch() {
         let wallet = WalletConfig {
-            wallet_id: "wallet_main".to_owned(),
+            wallet_id: "wallet_main".parse().expect("valid wallet id"),
             address: "0x000000000000000000000000000000000000dead".to_owned(),
             subject_kind: WalletSubjectKind::EvmAddress,
-            network_id: "ethereum-mainnet".to_owned(),
+            network_id: "ethereum-mainnet".parse().expect("valid network id"),
             implementation: WalletImplementationConfig::AddressOnly {},
-            symbol_ids: vec!["eth.native.ethereum-mainnet".to_owned()],
+            symbol_ids: vec!["eth.native.ethereum-mainnet"
+                .parse()
+                .expect("valid symbol id")],
             metadata: BTreeMap::new(),
         };
         let symbol = SymbolConfig {
-            symbol_id: "eth.native.ethereum-mainnet".to_owned(),
+            symbol_id: "eth.native.ethereum-mainnet"
+                .parse()
+                .expect("valid symbol id"),
             display_symbol: Some("ETH".to_owned()),
             kind: SymbolKind::NativeBalance,
             role: SymbolRole::Native,
-            network_id: "ethereum-mainnet".to_owned(),
+            network_id: "ethereum-mainnet".parse().expect("valid network id"),
             protocol: None,
             balance_reader: BalanceReaderConfig::NativeBalance {},
             valuation: SymbolValuationConfig {
                 quotes: vec![QuoteValuationConfig {
                     quote: QuoteCode::Usd,
-                    priced_symbol_id: "eth.native.ethereum-mainnet".to_owned(),
+                    priced_symbol_id: "eth.native.ethereum-mainnet"
+                        .parse()
+                        .expect("valid priced symbol id"),
                     reader: ValuationReaderConfig::FixedUnitPrice {
                         unit_price_dec: "2.5".to_owned(),
                     },
@@ -2104,7 +2111,7 @@ mod tests {
             wallet,
             symbol,
             network: NetworkConfig {
-                network_id: "ethereum-goerli".to_owned(),
+                network_id: "ethereum-goerli".parse().expect("valid network id"),
                 family: NetworkFamilyConfig::Evm,
                 chain_id: Some(5),
                 control_scope: "shared".to_owned(),
@@ -2124,23 +2131,27 @@ mod tests {
     #[test]
     fn fixed_price_observation_projects_report_totals() {
         let network = NetworkConfig {
-            network_id: "ethereum-mainnet".to_owned(),
+            network_id: "ethereum-mainnet".parse().expect("valid network id"),
             family: NetworkFamilyConfig::Evm,
             chain_id: Some(1),
             control_scope: "shared".to_owned(),
             metadata: BTreeMap::new(),
         };
         let wallet = WalletConfig {
-            wallet_id: "wallet_main".to_owned(),
+            wallet_id: "wallet_main".parse().expect("valid wallet id"),
             address: "0x000000000000000000000000000000000000dead".to_owned(),
             subject_kind: WalletSubjectKind::EvmAddress,
             network_id: network.network_id.clone(),
             implementation: WalletImplementationConfig::AddressOnly {},
-            symbol_ids: vec!["eth.native.ethereum-mainnet".to_owned()],
+            symbol_ids: vec!["eth.native.ethereum-mainnet"
+                .parse()
+                .expect("valid symbol id")],
             metadata: BTreeMap::new(),
         };
         let symbol = SymbolConfig {
-            symbol_id: "eth.native.ethereum-mainnet".to_owned(),
+            symbol_id: "eth.native.ethereum-mainnet"
+                .parse()
+                .expect("valid symbol id"),
             display_symbol: Some("ETH".to_owned()),
             kind: SymbolKind::NativeBalance,
             role: SymbolRole::Native,
@@ -2150,7 +2161,9 @@ mod tests {
             valuation: SymbolValuationConfig {
                 quotes: vec![QuoteValuationConfig {
                     quote: QuoteCode::Usd,
-                    priced_symbol_id: "eth.native.ethereum-mainnet".to_owned(),
+                    priced_symbol_id: "eth.native.ethereum-mainnet"
+                        .parse()
+                        .expect("valid priced symbol id"),
                     reader: ValuationReaderConfig::FixedUnitPrice {
                         unit_price_dec: "2.5".to_owned(),
                     },
@@ -2163,16 +2176,16 @@ mod tests {
         let input = ObserveBatchInput {
             subjects: ResolvedSubjects {
                 subjects: vec![ResolvedSubject {
-                    wallet_id: wallet.wallet_id.clone(),
+                    wallet_id: wallet.wallet_id.to_string(),
                     address: wallet.address.clone(),
                     subject_kind: wallet.subject_kind,
-                    network_id: wallet.network_id.clone(),
+                    network_id: wallet.network_id.to_string(),
                     implementation_kind: "address_only".to_owned(),
                 }],
             },
             views: PinnedViews {
                 views: vec![PinnedView {
-                    network_id: network.network_id.clone(),
+                    network_id: network.network_id.to_string(),
                     anchor: ExecutionAnchor::Evm {
                         chain_id: 1,
                         block_number: 10,
@@ -2181,9 +2194,9 @@ mod tests {
             },
             valuations: ResolvedValuations {
                 valuations: vec![ResolvedValuation {
-                    symbol_id: symbol.symbol_id.clone(),
+                    symbol_id: symbol.symbol_id.to_string(),
                     quote: QuoteCode::Usd,
-                    priced_symbol_id: symbol.symbol_id.clone(),
+                    priced_symbol_id: symbol.symbol_id.to_string(),
                     unit_price_dec: "2.5".to_owned(),
                     valuation_reader_kind: "fixed_unit_price".to_owned(),
                     source_refs: Vec::new(),
@@ -2208,7 +2221,7 @@ mod tests {
             &AssembleSnapshotConfig::new(
                 2,
                 PortfolioConfig {
-                    portfolio_id: "portfolio_main".to_owned(),
+                    portfolio_id: "portfolio_main".parse().expect("valid portfolio id"),
                     quote_codes: vec![QuoteCode::Usd],
                     networks: vec![network],
                     wallets: vec![wallet],

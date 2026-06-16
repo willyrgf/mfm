@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+use crate::ids::{
+    NetworkId, PortfolioId, PortfolioScalarError, SymbolId, ValuationSourceId, WalletId,
+};
 use crate::symbol::{
     validate_symbol_config, BalanceReaderConfig, Observation, PriceSourceRef, QuoteCode,
     SymbolConfig, SymbolConfigError, SymbolKind, ValuationReaderConfig, ValuationSourceConfig,
@@ -41,7 +44,7 @@ impl mfm_values::MfmDefault for NetworkFamilyConfig {}
 )]
 pub struct PortfolioConfig {
     /// Stable machine identifier for the portfolio.
-    pub portfolio_id: String,
+    pub portfolio_id: PortfolioId,
     /// Quote units required for every configured symbol.
     pub quote_codes: Vec<QuoteCode>,
     /// Networks available to the portfolio.
@@ -65,6 +68,8 @@ impl PortfolioConfig {
         symbol_configs: Vec<SymbolConfig>,
         metadata: BTreeMap<String, String>,
     ) -> Result<Self, PortfolioConfigError> {
+        let portfolio_id = PortfolioId::new(portfolio_id)
+            .map_err(|source| PortfolioConfigError::InvalidPortfolioId { source })?;
         Self {
             portfolio_id,
             quote_codes,
@@ -114,7 +119,7 @@ impl PortfolioConfig {
 )]
 pub struct NetworkConfig {
     /// Stable machine identifier for the network.
-    pub network_id: String,
+    pub network_id: NetworkId,
     /// Declared execution family for the network.
     #[serde(default)]
     pub family: NetworkFamilyConfig,
@@ -137,6 +142,8 @@ impl NetworkConfig {
         control_scope: String,
         metadata: BTreeMap<String, String>,
     ) -> Result<Self, PortfolioConfigError> {
+        let network_id = NetworkId::new(network_id)
+            .map_err(|source| PortfolioConfigError::InvalidNetworkId { source })?;
         Self {
             network_id,
             family,
@@ -168,7 +175,7 @@ impl ValidatedNetworkConfigs {
             validate_network_config(network)?;
             if !seen.insert(network.network_id.as_str()) {
                 return Err(PortfolioConfigError::DuplicateNetworkId {
-                    network_id: network.network_id.clone(),
+                    network_id: network.network_id.to_string(),
                 });
             }
         }
@@ -199,13 +206,13 @@ impl ValidatedWalletConfigs {
         for wallet in &wallets {
             validate_wallet_config(wallet).map_err(|source| {
                 PortfolioConfigError::InvalidWalletConfig {
-                    wallet_id: wallet.wallet_id.clone(),
+                    wallet_id: wallet.wallet_id.to_string(),
                     source,
                 }
             })?;
             if !seen.insert(wallet.wallet_id.as_str()) {
                 return Err(PortfolioConfigError::DuplicateWalletId {
-                    wallet_id: wallet.wallet_id.clone(),
+                    wallet_id: wallet.wallet_id.to_string(),
                 });
             }
         }
@@ -236,13 +243,13 @@ impl ValidatedSymbolConfigs {
         for symbol in &symbols {
             validate_symbol_config(symbol).map_err(|source| {
                 PortfolioConfigError::InvalidSymbolConfig {
-                    symbol_id: symbol.symbol_id.clone(),
+                    symbol_id: symbol.symbol_id.to_string(),
                     source,
                 }
             })?;
             if !seen.insert(symbol.symbol_id.as_str()) {
                 return Err(PortfolioConfigError::DuplicateSymbolId {
-                    symbol_id: symbol.symbol_id.clone(),
+                    symbol_id: symbol.symbol_id.to_string(),
                 });
             }
         }
@@ -294,25 +301,28 @@ impl ValidatedPortfolioConfig {
 
     /// Returns a network by stable id.
     pub fn network(&self, network_id: &str) -> Option<&NetworkConfig> {
+        let network_id = NetworkId::new(network_id).ok()?;
         self.index
             .networks
-            .get(network_id)
+            .get(&network_id)
             .map(|index| &self.config.networks[*index])
     }
 
     /// Returns a wallet by stable id.
     pub fn wallet(&self, wallet_id: &str) -> Option<&WalletConfig> {
+        let wallet_id = WalletId::new(wallet_id).ok()?;
         self.index
             .wallets
-            .get(wallet_id)
+            .get(&wallet_id)
             .map(|index| &self.config.wallets[*index])
     }
 
     /// Returns a symbol by stable id.
     pub fn symbol(&self, symbol_id: &str) -> Option<&SymbolConfig> {
+        let symbol_id = SymbolId::new(symbol_id).ok()?;
         self.index
             .symbols
-            .get(symbol_id)
+            .get(&symbol_id)
             .map(|index| &self.config.symbol_configs[*index])
     }
 }
@@ -322,7 +332,7 @@ impl ValidatedPortfolioConfig {
 pub struct ValidatedPortfolioBundle {
     portfolio: ValidatedPortfolioConfig,
     valuation_source_registry: ValuationSourceRegistry,
-    source_index: BTreeMap<String, usize>,
+    source_index: BTreeMap<ValuationSourceId, usize>,
 }
 
 impl ValidatedPortfolioBundle {
@@ -360,8 +370,9 @@ impl ValidatedPortfolioBundle {
 
     /// Returns a valuation source by stable id.
     pub fn valuation_source(&self, source_id: &str) -> Option<&ValuationSourceConfig> {
+        let source_id = ValuationSourceId::new(source_id).ok()?;
         self.source_index
-            .get(source_id)
+            .get(&source_id)
             .map(|index| &self.valuation_source_registry.sources[*index])
     }
 
@@ -374,9 +385,9 @@ impl ValidatedPortfolioBundle {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PortfolioConfigIndex {
     quotes: BTreeSet<QuoteCode>,
-    networks: BTreeMap<String, usize>,
-    wallets: BTreeMap<String, usize>,
-    symbols: BTreeMap<String, usize>,
+    networks: BTreeMap<NetworkId, usize>,
+    wallets: BTreeMap<WalletId, usize>,
+    symbols: BTreeMap<SymbolId, usize>,
 }
 
 impl PortfolioConfigIndex {
@@ -648,18 +659,24 @@ pub enum PortfolioConfigError {
     /// The JSON payload could not be decoded into the canonical type.
     #[error("portfolio config decode failed: {0}")]
     Decode(String),
-    /// `portfolio_id` was empty.
-    #[error("portfolio_id must be non-empty")]
-    EmptyPortfolioId,
+    /// `portfolio_id` did not satisfy the portfolio identifier grammar.
+    #[error("portfolio_id is invalid: {source}")]
+    InvalidPortfolioId {
+        /// Underlying scalar validation failure.
+        source: PortfolioScalarError,
+    },
     /// Portfolio metadata contained a secret-shaped key or value.
     #[error("portfolio metadata key `{key}` contains secret-shaped content")]
     MetadataContainsSecret {
         /// Metadata key associated with the rejected content.
         key: String,
     },
-    /// One of the network ids was empty.
-    #[error("network_id must be non-empty")]
-    EmptyNetworkId,
+    /// `network_id` did not satisfy the portfolio identifier grammar.
+    #[error("network_id is invalid: {source}")]
+    InvalidNetworkId {
+        /// Underlying scalar validation failure.
+        source: PortfolioScalarError,
+    },
     /// One of the network control scopes was empty.
     #[error("network `{network_id}` control_scope must be non-empty")]
     EmptyNetworkControlScope {
@@ -895,9 +912,6 @@ pub fn decode_portfolio_config(value: &Value) -> Result<PortfolioConfig, Portfol
 }
 
 fn validate_portfolio_config_inner(cfg: &PortfolioConfig) -> Result<(), PortfolioConfigError> {
-    if cfg.portfolio_id.trim().is_empty() {
-        return Err(PortfolioConfigError::EmptyPortfolioId);
-    }
     if let Some(key) = string_map_secret_marker_key(&cfg.metadata) {
         return Err(PortfolioConfigError::MetadataContainsSecret {
             key: key.to_string(),
@@ -916,7 +930,7 @@ fn validate_portfolio_config_inner(cfg: &PortfolioConfig) -> Result<(), Portfoli
         validate_network_config(network)?;
         if !network_ids.insert(network.network_id.clone()) {
             return Err(PortfolioConfigError::DuplicateNetworkId {
-                network_id: network.network_id.clone(),
+                network_id: network.network_id.to_string(),
             });
         }
     }
@@ -925,13 +939,13 @@ fn validate_portfolio_config_inner(cfg: &PortfolioConfig) -> Result<(), Portfoli
     for symbol in &cfg.symbol_configs {
         validate_symbol_config(symbol).map_err(|source| {
             PortfolioConfigError::InvalidSymbolConfig {
-                symbol_id: symbol.symbol_id.clone(),
+                symbol_id: symbol.symbol_id.to_string(),
                 source,
             }
         })?;
         if !symbol_ids.insert(symbol.symbol_id.clone()) {
             return Err(PortfolioConfigError::DuplicateSymbolId {
-                symbol_id: symbol.symbol_id.clone(),
+                symbol_id: symbol.symbol_id.to_string(),
             });
         }
     }
@@ -939,8 +953,8 @@ fn validate_portfolio_config_inner(cfg: &PortfolioConfig) -> Result<(), Portfoli
     for symbol in &cfg.symbol_configs {
         if !network_ids.contains(&symbol.network_id) {
             return Err(PortfolioConfigError::UnknownSymbolNetwork {
-                symbol_id: symbol.symbol_id.clone(),
-                network_id: symbol.network_id.clone(),
+                symbol_id: symbol.symbol_id.to_string(),
+                network_id: symbol.network_id.to_string(),
             });
         }
         let network = cfg
@@ -952,8 +966,8 @@ fn validate_portfolio_config_inner(cfg: &PortfolioConfig) -> Result<(), Portfoli
         if let Some(underlying_symbol_id) = &symbol.underlying_symbol_id {
             if !symbol_ids.contains(underlying_symbol_id) {
                 return Err(PortfolioConfigError::UnknownUnderlyingSymbol {
-                    symbol_id: symbol.symbol_id.clone(),
-                    underlying_symbol_id: underlying_symbol_id.clone(),
+                    symbol_id: symbol.symbol_id.to_string(),
+                    underlying_symbol_id: underlying_symbol_id.to_string(),
                 });
             }
         }
@@ -964,19 +978,19 @@ fn validate_portfolio_config_inner(cfg: &PortfolioConfig) -> Result<(), Portfoli
     for wallet in &cfg.wallets {
         validate_wallet_config(wallet).map_err(|source| {
             PortfolioConfigError::InvalidWalletConfig {
-                wallet_id: wallet.wallet_id.clone(),
+                wallet_id: wallet.wallet_id.to_string(),
                 source,
             }
         })?;
         if !wallet_ids.insert(wallet.wallet_id.clone()) {
             return Err(PortfolioConfigError::DuplicateWalletId {
-                wallet_id: wallet.wallet_id.clone(),
+                wallet_id: wallet.wallet_id.to_string(),
             });
         }
         if !network_ids.contains(&wallet.network_id) {
             return Err(PortfolioConfigError::UnknownWalletNetwork {
-                wallet_id: wallet.wallet_id.clone(),
-                network_id: wallet.network_id.clone(),
+                wallet_id: wallet.wallet_id.to_string(),
+                network_id: wallet.network_id.to_string(),
             });
         }
         let network = cfg
@@ -986,8 +1000,8 @@ fn validate_portfolio_config_inner(cfg: &PortfolioConfig) -> Result<(), Portfoli
             .expect("validated network id must exist");
         if !wallet_subject_matches_network_family(wallet.subject_kind, network.family) {
             return Err(PortfolioConfigError::WalletSubjectNetworkFamilyMismatch {
-                wallet_id: wallet.wallet_id.clone(),
-                network_id: wallet.network_id.clone(),
+                wallet_id: wallet.wallet_id.to_string(),
+                network_id: wallet.network_id.to_string(),
                 wallet_subject_kind: wallet.subject_kind,
                 network_family: network.family,
             });
@@ -995,8 +1009,8 @@ fn validate_portfolio_config_inner(cfg: &PortfolioConfig) -> Result<(), Portfoli
         for symbol_id in &wallet.symbol_ids {
             if !symbol_ids.contains(symbol_id) {
                 return Err(PortfolioConfigError::UnknownWalletSymbol {
-                    wallet_id: wallet.wallet_id.clone(),
-                    symbol_id: symbol_id.clone(),
+                    wallet_id: wallet.wallet_id.to_string(),
+                    symbol_id: symbol_id.to_string(),
                 });
             }
             let symbol = cfg
@@ -1006,10 +1020,10 @@ fn validate_portfolio_config_inner(cfg: &PortfolioConfig) -> Result<(), Portfoli
                 .expect("validated symbol id must exist");
             if symbol.network_id != wallet.network_id {
                 return Err(PortfolioConfigError::WalletSymbolNetworkMismatch {
-                    wallet_id: wallet.wallet_id.clone(),
-                    symbol_id: symbol.symbol_id.clone(),
-                    wallet_network_id: wallet.network_id.clone(),
-                    symbol_network_id: symbol.network_id.clone(),
+                    wallet_id: wallet.wallet_id.to_string(),
+                    symbol_id: symbol.symbol_id.to_string(),
+                    wallet_network_id: wallet.network_id.to_string(),
+                    symbol_network_id: symbol.network_id.to_string(),
                 });
             }
         }
@@ -1024,7 +1038,9 @@ fn validate_portfolio_config_for_mfm(cfg: &PortfolioConfig) -> Result<(), String
         .map_err(|error| error.to_string())
 }
 
-fn valuation_source_index(registry: &ValuationSourceRegistry) -> BTreeMap<String, usize> {
+fn valuation_source_index(
+    registry: &ValuationSourceRegistry,
+) -> BTreeMap<ValuationSourceId, usize> {
     registry
         .sources
         .iter()
@@ -1036,7 +1052,7 @@ fn valuation_source_index(registry: &ValuationSourceRegistry) -> BTreeMap<String
 fn validate_portfolio_bundle_sources(
     cfg: &PortfolioConfig,
     registry: &ValuationSourceRegistry,
-    source_index: &BTreeMap<String, usize>,
+    source_index: &BTreeMap<ValuationSourceId, usize>,
 ) -> Result<(), PortfolioConfigError> {
     let network_ids: HashSet<_> = cfg
         .networks
@@ -1046,8 +1062,8 @@ fn validate_portfolio_bundle_sources(
     for source in &registry.sources {
         if !network_ids.contains(&source.network_id) {
             return Err(PortfolioConfigError::UnknownValuationSourceNetwork {
-                source_id: source.source_id.clone(),
-                network_id: source.network_id.clone(),
+                source_id: source.source_id.to_string(),
+                network_id: source.network_id.to_string(),
             });
         }
     }
@@ -1093,17 +1109,14 @@ fn validate_portfolio_bundle_sources(
 
 /// Validates one canonical network config.
 pub fn validate_network_config(network: &NetworkConfig) -> Result<(), PortfolioConfigError> {
-    if network.network_id.trim().is_empty() {
-        return Err(PortfolioConfigError::EmptyNetworkId);
-    }
     if network.control_scope.trim().is_empty() {
         return Err(PortfolioConfigError::EmptyNetworkControlScope {
-            network_id: network.network_id.clone(),
+            network_id: network.network_id.to_string(),
         });
     }
     if let Some(key) = string_map_secret_marker_key(&network.metadata) {
         return Err(PortfolioConfigError::NetworkMetadataContainsSecret {
-            network_id: network.network_id.clone(),
+            network_id: network.network_id.to_string(),
             key: key.to_string(),
         });
     }
@@ -1111,14 +1124,14 @@ pub fn validate_network_config(network: &NetworkConfig) -> Result<(), PortfolioC
         NetworkFamilyConfig::Evm => {
             if network.chain_id.is_none() {
                 return Err(PortfolioConfigError::MissingEvmChainId {
-                    network_id: network.network_id.clone(),
+                    network_id: network.network_id.to_string(),
                 });
             }
         }
         NetworkFamilyConfig::Bitcoin => {
             if network.chain_id.is_some() {
                 return Err(PortfolioConfigError::UnexpectedBitcoinChainId {
-                    network_id: network.network_id.clone(),
+                    network_id: network.network_id.to_string(),
                 });
             }
         }
@@ -1154,8 +1167,8 @@ fn validate_symbol_for_network_family(
         )
     {
         return Err(PortfolioConfigError::UnsupportedSymbolNetworkFamily {
-            symbol_id: symbol.symbol_id.clone(),
-            network_id: network.network_id.clone(),
+            symbol_id: symbol.symbol_id.to_string(),
+            network_id: network.network_id.to_string(),
             network_family: network.family,
         });
     }
@@ -1165,8 +1178,8 @@ fn validate_symbol_for_network_family(
 fn validate_symbol_quote_routes(
     symbol: &SymbolConfig,
     requested_quotes: &BTreeSet<QuoteCode>,
-    symbol_ids: &HashSet<String>,
-    network_ids: &HashSet<String>,
+    symbol_ids: &HashSet<SymbolId>,
+    network_ids: &HashSet<NetworkId>,
 ) -> Result<(), PortfolioConfigError> {
     let symbol_quotes: BTreeSet<_> = symbol
         .valuation
@@ -1178,7 +1191,7 @@ fn validate_symbol_quote_routes(
     for quote in requested_quotes {
         if !symbol_quotes.contains(quote) {
             return Err(PortfolioConfigError::MissingValuationQuote {
-                symbol_id: symbol.symbol_id.clone(),
+                symbol_id: symbol.symbol_id.to_string(),
                 quote: *quote,
             });
         }
@@ -1186,7 +1199,7 @@ fn validate_symbol_quote_routes(
     for quote in &symbol_quotes {
         if !requested_quotes.contains(quote) {
             return Err(PortfolioConfigError::UnexpectedValuationQuote {
-                symbol_id: symbol.symbol_id.clone(),
+                symbol_id: symbol.symbol_id.to_string(),
                 quote: *quote,
             });
         }
@@ -1195,9 +1208,9 @@ fn validate_symbol_quote_routes(
     for quote in &symbol.valuation.quotes {
         if !symbol_ids.contains(&quote.priced_symbol_id) {
             return Err(PortfolioConfigError::UnknownPricedSymbol {
-                symbol_id: symbol.symbol_id.clone(),
+                symbol_id: symbol.symbol_id.to_string(),
                 quote: quote.quote,
-                priced_symbol_id: quote.priced_symbol_id.clone(),
+                priced_symbol_id: quote.priced_symbol_id.to_string(),
             });
         }
         match &quote.reader {
@@ -1205,9 +1218,9 @@ fn validate_symbol_quote_routes(
             ValuationReaderConfig::DirectPrice { source } => {
                 if !network_ids.contains(&source.network_id) {
                     return Err(PortfolioConfigError::UnknownPriceSourceNetwork {
-                        symbol_id: symbol.symbol_id.clone(),
+                        symbol_id: symbol.symbol_id.to_string(),
                         quote: quote.quote,
-                        network_id: source.network_id.clone(),
+                        network_id: source.network_id.to_string(),
                         reader_kind: "direct_price",
                     });
                 }
@@ -1219,9 +1232,9 @@ fn validate_symbol_quote_routes(
                 for source in [numerator, denominator] {
                     if !network_ids.contains(&source.network_id) {
                         return Err(PortfolioConfigError::UnknownPriceSourceNetwork {
-                            symbol_id: symbol.symbol_id.clone(),
+                            symbol_id: symbol.symbol_id.to_string(),
                             quote: quote.quote,
-                            network_id: source.network_id.clone(),
+                            network_id: source.network_id.to_string(),
                             reader_kind: "derived_unit_price",
                         });
                     }
@@ -1238,38 +1251,38 @@ fn validate_price_source_registry_match(
     quote: QuoteCode,
     source_ref: &PriceSourceRef,
     registry: &ValuationSourceRegistry,
-    source_index: &BTreeMap<String, usize>,
+    source_index: &BTreeMap<ValuationSourceId, usize>,
 ) -> Result<(), PortfolioConfigError> {
     let Some(index) = source_index.get(&source_ref.source_id) else {
         return Err(PortfolioConfigError::UnknownValuationSource {
-            symbol_id: symbol.symbol_id.clone(),
+            symbol_id: symbol.symbol_id.to_string(),
             quote,
-            source_id: source_ref.source_id.clone(),
+            source_id: source_ref.source_id.to_string(),
         });
     };
     let source_cfg = &registry.sources[*index];
 
     if source_cfg.network_id != source_ref.network_id {
         return Err(PortfolioConfigError::ValuationSourceMismatch {
-            symbol_id: symbol.symbol_id.clone(),
+            symbol_id: symbol.symbol_id.to_string(),
             quote,
-            source_id: source_ref.source_id.clone(),
+            source_id: source_ref.source_id.to_string(),
             field: "network_id",
         });
     }
     if source_cfg.base_symbol_id != source_ref.base_symbol_id {
         return Err(PortfolioConfigError::ValuationSourceMismatch {
-            symbol_id: symbol.symbol_id.clone(),
+            symbol_id: symbol.symbol_id.to_string(),
             quote,
-            source_id: source_ref.source_id.clone(),
+            source_id: source_ref.source_id.to_string(),
             field: "base_symbol_id",
         });
     }
     if source_cfg.quote != source_ref.quote {
         return Err(PortfolioConfigError::ValuationSourceMismatch {
-            symbol_id: symbol.symbol_id.clone(),
+            symbol_id: symbol.symbol_id.to_string(),
             quote,
-            source_id: source_ref.source_id.clone(),
+            source_id: source_ref.source_id.to_string(),
             field: "quote",
         });
     }
@@ -1356,7 +1369,7 @@ mod tests {
         assert!(matches!(
             ValidatedSymbolConfigs::new(vec![symbol.clone(), symbol]),
             Err(PortfolioConfigError::DuplicateSymbolId { symbol_id })
-                if symbol_id == expected_symbol_id
+                if symbol_id == expected_symbol_id.as_str()
         ));
     }
 
@@ -1703,10 +1716,14 @@ mod tests {
             vec!["wallet_ops_arb", "wallet_treasury_eth"]
         );
         assert_eq!(
-            cfg.wallets[1].symbol_ids,
+            cfg.wallets[1]
+                .symbol_ids
+                .iter()
+                .map(|symbol_id| symbol_id.as_str())
+                .collect::<Vec<_>>(),
             vec![
-                "eth.native.ethereum-mainnet".to_string(),
-                "usdc.wallet.ethereum-mainnet".to_string()
+                "eth.native.ethereum-mainnet",
+                "usdc.wallet.ethereum-mainnet"
             ]
         );
         assert_eq!(

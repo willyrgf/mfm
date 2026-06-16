@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+use crate::ids::{NetworkId, PortfolioScalarError, SymbolId, WalletId};
+
 /// Canonical subject kind selected for one wallet declaration.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(rename_all = "snake_case")]
@@ -35,18 +37,18 @@ impl mfm_values::MfmDefault for WalletSubjectKind {}
 )]
 pub struct WalletConfig {
     /// Stable machine identifier for the wallet.
-    pub wallet_id: String,
+    pub wallet_id: WalletId,
     /// Canonical wallet address.
     pub address: String,
     /// Subject family resolved for this wallet declaration.
     #[serde(default)]
     pub subject_kind: WalletSubjectKind,
     /// Stable network identifier.
-    pub network_id: String,
+    pub network_id: NetworkId,
     /// Wallet implementation selection.
     pub implementation: WalletImplementationConfig,
     /// Symbols to read for this wallet.
-    pub symbol_ids: Vec<String>,
+    pub symbol_ids: Vec<SymbolId>,
     /// Canonical metadata surface.
     #[serde(default)]
     pub metadata: BTreeMap<String, String>,
@@ -63,6 +65,17 @@ impl WalletConfig {
         symbol_ids: Vec<String>,
         metadata: BTreeMap<String, String>,
     ) -> Result<Self, WalletConfigError> {
+        let wallet_id = WalletId::new(wallet_id)
+            .map_err(|source| WalletConfigError::InvalidWalletId { source })?;
+        let network_id = NetworkId::new(network_id)
+            .map_err(|source| WalletConfigError::InvalidNetworkId { source })?;
+        let symbol_ids = symbol_ids
+            .into_iter()
+            .map(|symbol_id| {
+                SymbolId::new(symbol_id.clone())
+                    .map_err(|source| WalletConfigError::InvalidSymbolIdRef { symbol_id, source })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         Self {
             wallet_id,
             address,
@@ -180,9 +193,12 @@ pub enum WalletConfigError {
     /// The JSON payload could not be decoded into the canonical type.
     #[error("wallet config decode failed: {0}")]
     Decode(String),
-    /// `wallet_id` was empty.
-    #[error("wallet_id must be non-empty")]
-    EmptyWalletId,
+    /// `wallet_id` did not satisfy the portfolio identifier grammar.
+    #[error("wallet_id is invalid: {source}")]
+    InvalidWalletId {
+        /// Underlying scalar validation failure.
+        source: PortfolioScalarError,
+    },
     /// `address` was empty.
     #[error("address must be non-empty")]
     EmptyAddress,
@@ -194,12 +210,20 @@ pub enum WalletConfigError {
         /// Subject kind that rejected the address.
         subject_kind: WalletSubjectKind,
     },
-    /// `network_id` was empty.
-    #[error("network_id must be non-empty")]
-    EmptyNetworkId,
-    /// One of the symbol refs was empty.
-    #[error("wallet symbol_ids must not contain empty entries")]
-    EmptySymbolIdRef,
+    /// `network_id` did not satisfy the portfolio identifier grammar.
+    #[error("network_id is invalid: {source}")]
+    InvalidNetworkId {
+        /// Underlying scalar validation failure.
+        source: PortfolioScalarError,
+    },
+    /// One of the symbol refs did not satisfy the portfolio identifier grammar.
+    #[error("wallet symbol_id ref `{symbol_id}` is invalid: {source}")]
+    InvalidSymbolIdRef {
+        /// Rejected symbol id.
+        symbol_id: String,
+        /// Underlying scalar validation failure.
+        source: PortfolioScalarError,
+    },
     /// `entry_id` was empty for a keystore-backed wallet.
     #[error("keystore entry_id must be non-empty")]
     EmptyKeystoreEntryId,
@@ -223,9 +247,6 @@ pub fn decode_wallet_config(value: &Value) -> Result<WalletConfig, WalletConfigE
 
 /// Validates a canonical wallet config.
 pub fn validate_wallet_config(cfg: &WalletConfig) -> Result<(), WalletConfigError> {
-    if cfg.wallet_id.trim().is_empty() {
-        return Err(WalletConfigError::EmptyWalletId);
-    }
     if cfg.address.trim().is_empty() {
         return Err(WalletConfigError::EmptyAddress);
     }
@@ -251,16 +272,6 @@ pub fn validate_wallet_config(cfg: &WalletConfig) -> Result<(), WalletConfigErro
                 }
             })?;
         }
-    }
-    if cfg.network_id.trim().is_empty() {
-        return Err(WalletConfigError::EmptyNetworkId);
-    }
-    if cfg
-        .symbol_ids
-        .iter()
-        .any(|symbol_id| symbol_id.trim().is_empty())
-    {
-        return Err(WalletConfigError::EmptySymbolIdRef);
     }
     if let Some(key) = string_map_secret_marker_key(&cfg.metadata) {
         return Err(WalletConfigError::MetadataContainsSecret {

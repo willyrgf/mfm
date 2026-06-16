@@ -19,6 +19,37 @@ struct PricedAsset {
     amount_minor: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[serde(try_from = "String", into = "String")]
+#[mfm(
+    namespace = "mfm.test",
+    name = "account_id",
+    version = "1",
+    schema = "mfm.test.account_id",
+    transparent_string
+)]
+struct AccountId {
+    raw: String,
+}
+
+impl TryFrom<String> for AccountId {
+    type Error = &'static str;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if value.is_empty() {
+            Err("account id must be non-empty")
+        } else {
+            Ok(Self { raw: value })
+        }
+    }
+}
+
+impl From<AccountId> for String {
+    fn from(value: AccountId) -> Self {
+        value.raw
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmConfig)]
 #[serde(rename_all = "camelCase")]
 struct PortfolioRequest {
@@ -107,6 +138,23 @@ fn generated_value_descriptor_is_stable() {
         descriptor.schema_id().expect("schema id").as_str(),
         "schema:mfm.test.priced_asset:1:sha256-jcs-v1:498b3d755f53fb1fa27079fb7b993b97bd4d27198e3162b5aaacd70a612362c2"
     );
+}
+
+#[test]
+fn transparent_string_value_descriptor_uses_string_shape() {
+    let descriptor = AccountId::schema_descriptor().expect("descriptor");
+
+    assert_eq!(descriptor.identity.schema_kind, SchemaKind::Value);
+    assert_eq!(descriptor.identity.schema_name, "mfm.test.account_id");
+    assert_eq!(descriptor.identity.shape, SchemaShape::String);
+    assert_eq!(
+        serde_json::to_value(AccountId {
+            raw: "acct".to_owned()
+        })
+        .expect("json"),
+        serde_json::json!("acct")
+    );
+    assert!(serde_json::from_value::<AccountId>(serde_json::json!("")).is_err());
 }
 
 #[test]

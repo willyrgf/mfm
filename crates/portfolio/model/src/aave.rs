@@ -346,27 +346,27 @@ pub fn decode_aave_protocol_position_config(
 ) -> Result<AaveProtocolPositionConfig, AavePortfolioConfigError> {
     if symbol.kind != SymbolKind::ProtocolPosition {
         return Err(AavePortfolioConfigError::SymbolKindMismatch {
-            symbol_id: symbol.symbol_id.clone(),
+            symbol_id: symbol.symbol_id.to_string(),
         });
     }
     if symbol.protocol.as_deref() != Some(AAVE_V3_PROTOCOL_ID) {
         return Err(AavePortfolioConfigError::SymbolProtocolMismatch {
-            symbol_id: symbol.symbol_id.clone(),
+            symbol_id: symbol.symbol_id.to_string(),
         });
     }
 
     let underlying_symbol_id = symbol.underlying_symbol_id.as_ref().ok_or_else(|| {
         AavePortfolioConfigError::MissingUnderlyingSymbolId {
-            symbol_id: symbol.symbol_id.clone(),
+            symbol_id: symbol.symbol_id.to_string(),
         }
     })?;
     for quote in &symbol.valuation.quotes {
         if quote.priced_symbol_id != *underlying_symbol_id {
             return Err(
                 AavePortfolioConfigError::ValuationMustUseUnderlyingSymbolId {
-                    symbol_id: symbol.symbol_id.clone(),
+                    symbol_id: symbol.symbol_id.to_string(),
                     quote: quote.quote,
-                    underlying_symbol_id: underlying_symbol_id.clone(),
+                    underlying_symbol_id: underlying_symbol_id.to_string(),
                 },
             );
         }
@@ -379,12 +379,12 @@ pub fn decode_aave_protocol_position_config(
     } = &symbol.balance_reader
     else {
         return Err(AavePortfolioConfigError::SymbolKindMismatch {
-            symbol_id: symbol.symbol_id.clone(),
+            symbol_id: symbol.symbol_id.to_string(),
         });
     };
     if protocol != AAVE_V3_PROTOCOL_ID {
         return Err(AavePortfolioConfigError::SymbolProtocolMismatch {
-            symbol_id: symbol.symbol_id.clone(),
+            symbol_id: symbol.symbol_id.to_string(),
         });
     }
 
@@ -392,7 +392,7 @@ pub fn decode_aave_protocol_position_config(
         (AAVE_V3_READER_RESERVE_POSITION, AaveProtocolPositionConfig::ReservePosition(cfg)) => {
             if symbol.role == SymbolRole::Debt {
                 return Err(AavePortfolioConfigError::ReserveRoleInvalid {
-                    symbol_id: symbol.symbol_id.clone(),
+                    symbol_id: symbol.symbol_id.to_string(),
                 });
             }
             Ok(AaveProtocolPositionConfig::ReservePosition(cfg.clone()))
@@ -400,13 +400,13 @@ pub fn decode_aave_protocol_position_config(
         (AAVE_V3_READER_DEBT_POSITION, AaveProtocolPositionConfig::DebtPosition(cfg)) => {
             if symbol.role != SymbolRole::Debt {
                 return Err(AavePortfolioConfigError::DebtRoleInvalid {
-                    symbol_id: symbol.symbol_id.clone(),
+                    symbol_id: symbol.symbol_id.to_string(),
                 });
             }
             Ok(AaveProtocolPositionConfig::DebtPosition(cfg.clone()))
         }
         (reader, _) => Err(AavePortfolioConfigError::UnsupportedReader {
-            symbol_id: symbol.symbol_id.clone(),
+            symbol_id: symbol.symbol_id.to_string(),
             reader: reader.to_string(),
         }),
     }
@@ -431,14 +431,14 @@ pub fn validate_aave_portfolio_config(
         let cfg = decode_aave_protocol_position_config(symbol)?;
         let Some(network_chain_id) = network_chain_ids.get(symbol.network_id.as_str()) else {
             return Err(AavePortfolioConfigError::UnknownPortfolioNetwork {
-                symbol_id: symbol.symbol_id.clone(),
-                network_id: symbol.network_id.clone(),
+                symbol_id: symbol.symbol_id.to_string(),
+                network_id: symbol.network_id.to_string(),
             });
         };
 
         let network_chain_id =
             (*network_chain_id).ok_or_else(|| AavePortfolioConfigError::InvalidMarketConfig {
-                symbol_id: symbol.symbol_id.clone(),
+                symbol_id: symbol.symbol_id.to_string(),
                 reason: format!(
                     "portfolio network `{}` did not declare an evm chain_id",
                     symbol.network_id
@@ -448,7 +448,7 @@ pub fn validate_aave_portfolio_config(
         validate_market_config(symbol, cfg.market(), network_chain_id)?;
         let reserve = cfg.market().reserve(cfg.reserve_id()).ok_or_else(|| {
             AavePortfolioConfigError::UnknownReserve {
-                symbol_id: symbol.symbol_id.clone(),
+                symbol_id: symbol.symbol_id.to_string(),
                 market_id: cfg.market().market_id.clone(),
                 reserve_id: cfg.reserve_id().to_string(),
             }
@@ -457,14 +457,14 @@ pub fn validate_aave_portfolio_config(
             match debt_cfg.debt_kind {
                 AaveDebtKind::Variable if reserve.variable_debt_token_address.is_none() => {
                     return Err(AavePortfolioConfigError::MissingDebtTokenAddress {
-                        symbol_id: symbol.symbol_id.clone(),
+                        symbol_id: symbol.symbol_id.to_string(),
                         reserve_id: debt_cfg.reserve_id.clone(),
                         debt_kind: debt_cfg.debt_kind,
                     });
                 }
                 AaveDebtKind::Stable if reserve.stable_debt_token_address.is_none() => {
                     return Err(AavePortfolioConfigError::MissingDebtTokenAddress {
-                        symbol_id: symbol.symbol_id.clone(),
+                        symbol_id: symbol.symbol_id.to_string(),
                         reserve_id: debt_cfg.reserve_id.clone(),
                         debt_kind: debt_cfg.debt_kind,
                     });
@@ -478,7 +478,7 @@ pub fn validate_aave_portfolio_config(
         if let Some(first_market) = markets_by_id.get(market_id.as_str()) {
             if first_market != &market {
                 return Err(AavePortfolioConfigError::ConflictingMarketDefinition {
-                    symbol_id: symbol.symbol_id.clone(),
+                    symbol_id: symbol.symbol_id.to_string(),
                     market_id,
                 });
             }
@@ -500,7 +500,7 @@ fn validate_market_config(
     }
     if let Some(key) = string_map_secret_marker_key(&market.metadata) {
         return Err(AavePortfolioConfigError::MarketMetadataContainsSecret {
-            symbol_id: symbol.symbol_id.clone(),
+            symbol_id: symbol.symbol_id.to_string(),
             market_id: market.market_id.clone(),
             key: key.to_string(),
         });
@@ -511,7 +511,7 @@ fn validate_market_config(
             "market.network_id must be non-empty",
         ));
     }
-    if market.network_id != symbol.network_id {
+    if market.network_id != symbol.network_id.as_str() {
         return Err(invalid_market(
             symbol,
             format!(
@@ -546,7 +546,7 @@ fn validate_market_config(
         }
         if let Some(key) = string_map_secret_marker_key(&reserve.metadata) {
             return Err(AavePortfolioConfigError::ReserveMetadataContainsSecret {
-                symbol_id: symbol.symbol_id.clone(),
+                symbol_id: symbol.symbol_id.to_string(),
                 market_id: market.market_id.clone(),
                 reserve_id: reserve.reserve_id.clone(),
                 key: key.to_string(),
@@ -629,7 +629,7 @@ fn validate_address_field(
 
 fn invalid_market(symbol: &SymbolConfig, reason: impl Into<String>) -> AavePortfolioConfigError {
     AavePortfolioConfigError::InvalidMarketConfig {
-        symbol_id: symbol.symbol_id.clone(),
+        symbol_id: symbol.symbol_id.to_string(),
         reason: reason.into(),
     }
 }
@@ -683,7 +683,7 @@ mod tests {
     fn fixed_usd_quote(priced_symbol_id: &str) -> QuoteValuationConfig {
         QuoteValuationConfig {
             quote: QuoteCode::Usd,
-            priced_symbol_id: priced_symbol_id.to_string(),
+            priced_symbol_id: priced_symbol_id.parse().expect("valid priced symbol id"),
             reader: ValuationReaderConfig::FixedUnitPrice {
                 unit_price_dec: "1.00".to_string(),
             },
@@ -704,11 +704,11 @@ mod tests {
             _ => config,
         };
         SymbolConfig {
-            symbol_id: symbol_id.to_string(),
+            symbol_id: symbol_id.parse().expect("valid symbol id"),
             display_symbol: Some("USDC".to_string()),
             kind: SymbolKind::ProtocolPosition,
             role,
-            network_id: "ethereum-mainnet".to_string(),
+            network_id: "ethereum-mainnet".parse().expect("valid network id"),
             protocol: Some(AAVE_V3_PROTOCOL_ID.to_string()),
             balance_reader: serde_json::from_value(json!({
                 "kind": "protocol_position",
@@ -721,7 +721,8 @@ mod tests {
                 quotes: vec![fixed_usd_quote(priced_symbol_id)],
             },
             decimals: Some(6),
-            underlying_symbol_id: underlying_symbol_id.map(ToString::to_string),
+            underlying_symbol_id: underlying_symbol_id
+                .map(|symbol_id| symbol_id.parse().expect("valid underlying symbol id")),
             metadata: BTreeMap::new(),
         }
     }

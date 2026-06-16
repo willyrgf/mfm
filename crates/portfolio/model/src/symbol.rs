@@ -10,6 +10,7 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::aave::AaveProtocolPositionConfig;
+use crate::ids::{NetworkId, PortfolioScalarError, SymbolId, ValuationSourceId};
 
 /// Supported quote codes for the canonical portfolio snapshot surface.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, MfmValue)]
@@ -104,7 +105,7 @@ pub enum SymbolRole {
 )]
 pub struct SymbolConfig {
     /// Stable machine identifier for the symbol.
-    pub symbol_id: String,
+    pub symbol_id: SymbolId,
     /// Optional human-facing display symbol.
     pub display_symbol: Option<String>,
     /// Symbol implementation kind.
@@ -112,7 +113,7 @@ pub struct SymbolConfig {
     /// Exposure role.
     pub role: SymbolRole,
     /// Stable network identifier.
-    pub network_id: String,
+    pub network_id: NetworkId,
     /// Optional protocol identifier.
     pub protocol: Option<String>,
     /// Balance reader selection.
@@ -122,7 +123,7 @@ pub struct SymbolConfig {
     /// Optional decimals used to render raw quantities.
     pub decimals: Option<u8>,
     /// Optional underlying symbol for protocol-backed exposures.
-    pub underlying_symbol_id: Option<String>,
+    pub underlying_symbol_id: Option<SymbolId>,
     /// Canonical metadata surface.
     #[serde(default)]
     pub metadata: BTreeMap<String, String>,
@@ -144,6 +145,14 @@ impl SymbolConfig {
         underlying_symbol_id: Option<String>,
         metadata: BTreeMap<String, String>,
     ) -> Result<Self, SymbolConfigError> {
+        let symbol_id = SymbolId::new(symbol_id)
+            .map_err(|source| SymbolConfigError::InvalidSymbolId { source })?;
+        let network_id = NetworkId::new(network_id)
+            .map_err(|source| SymbolConfigError::InvalidNetworkId { source })?;
+        let underlying_symbol_id = underlying_symbol_id
+            .map(SymbolId::new)
+            .transpose()
+            .map_err(|source| SymbolConfigError::InvalidUnderlyingSymbolId { source })?;
         Self {
             symbol_id,
             display_symbol,
@@ -236,7 +245,7 @@ pub struct QuoteValuationConfig {
     /// Requested quote unit.
     pub quote: QuoteCode,
     /// Symbol whose unit price applies to the observation.
-    pub priced_symbol_id: String,
+    pub priced_symbol_id: SymbolId,
     /// Reader configuration used to obtain the unit price.
     pub reader: ValuationReaderConfig,
 }
@@ -250,11 +259,11 @@ pub struct QuoteValuationConfig {
 )]
 pub struct PriceSourceRef {
     /// Stable source identifier within the runtime environment.
-    pub source_id: String,
+    pub source_id: ValuationSourceId,
     /// Network on which the source must be pinned.
-    pub network_id: String,
+    pub network_id: NetworkId,
     /// Symbol identity used by the source.
-    pub base_symbol_id: String,
+    pub base_symbol_id: SymbolId,
     /// Quote unit returned by the source.
     pub quote: QuoteCode,
 }
@@ -306,11 +315,11 @@ impl ValuationSourceRegistry {
 )]
 pub struct ValuationSourceConfig {
     /// Stable logical source identifier.
-    pub source_id: String,
+    pub source_id: ValuationSourceId,
     /// Network on which the source must be pinned.
-    pub network_id: String,
+    pub network_id: NetworkId,
     /// Symbol identity used by the source.
-    pub base_symbol_id: String,
+    pub base_symbol_id: SymbolId,
     /// Quote unit returned by the source.
     pub quote: QuoteCode,
     /// Reader family and its typed config blob.
@@ -330,6 +339,12 @@ impl ValuationSourceConfig {
         reader: ValuationSourceReaderConfig,
         metadata: BTreeMap<String, String>,
     ) -> Result<Self, ValuationSourceRegistryError> {
+        let source_id = ValuationSourceId::new(source_id)
+            .map_err(|source| ValuationSourceRegistryError::InvalidSourceId { source })?;
+        let network_id = NetworkId::new(network_id)
+            .map_err(|source| ValuationSourceRegistryError::InvalidNetworkId { source })?;
+        let base_symbol_id = SymbolId::new(base_symbol_id)
+            .map_err(|source| ValuationSourceRegistryError::InvalidBaseSymbolId { source })?;
         let registry = ValuationSourceRegistry {
             sources: vec![Self {
                 source_id,
@@ -574,18 +589,27 @@ pub enum SymbolConfigError {
     /// The JSON payload could not be decoded into the canonical type.
     #[error("symbol config decode failed: {0}")]
     Decode(String),
-    /// `symbol_id` was empty.
-    #[error("symbol_id must be non-empty")]
-    EmptySymbolId,
-    /// `network_id` was empty.
-    #[error("network_id must be non-empty")]
-    EmptyNetworkId,
+    /// `symbol_id` did not satisfy the portfolio identifier grammar.
+    #[error("symbol_id is invalid: {source}")]
+    InvalidSymbolId {
+        /// Underlying scalar validation failure.
+        source: PortfolioScalarError,
+    },
+    /// `network_id` did not satisfy the portfolio identifier grammar.
+    #[error("network_id is invalid: {source}")]
+    InvalidNetworkId {
+        /// Underlying scalar validation failure.
+        source: PortfolioScalarError,
+    },
     /// `protocol` was present but empty.
     #[error("protocol must be non-empty when present")]
     EmptyProtocol,
-    /// `underlying_symbol_id` was present but empty.
-    #[error("underlying_symbol_id must be non-empty when present")]
-    EmptyUnderlyingSymbolId,
+    /// `underlying_symbol_id` did not satisfy the portfolio identifier grammar.
+    #[error("underlying_symbol_id is invalid: {source}")]
+    InvalidUnderlyingSymbolId {
+        /// Underlying scalar validation failure.
+        source: PortfolioScalarError,
+    },
     /// Symbol metadata contained a secret-shaped key or value.
     #[error("metadata key `{key}` contains secret-shaped content")]
     MetadataContainsSecret {
@@ -610,41 +634,19 @@ pub enum SymbolConfigError {
         /// Duplicate quote code.
         quote: QuoteCode,
     },
-    /// `priced_symbol_id` was empty for a quote route.
-    #[error("priced_symbol_id must be non-empty for quote `{quote}`")]
-    EmptyPricedSymbolId {
+    /// `priced_symbol_id` did not satisfy the portfolio identifier grammar.
+    #[error("priced_symbol_id is invalid for quote `{quote}`: {source}")]
+    InvalidPricedSymbolId {
         /// Quote whose route was invalid.
         quote: QuoteCode,
+        /// Underlying scalar validation failure.
+        source: PortfolioScalarError,
     },
     /// `fixed_unit_price.unit_price_dec` was empty.
     #[error("fixed_unit_price.unit_price_dec must be non-empty for quote `{quote}`")]
     EmptyFixedUnitPrice {
         /// Quote whose route was invalid.
         quote: QuoteCode,
-    },
-    /// `source_id` was empty on a price source ref.
-    #[error("{field}.source_id must be non-empty for quote `{quote}`")]
-    EmptyPriceSourceId {
-        /// Quote whose route was invalid.
-        quote: QuoteCode,
-        /// Field name that owned the invalid source ref.
-        field: &'static str,
-    },
-    /// `network_id` was empty on a price source ref.
-    #[error("{field}.network_id must be non-empty for quote `{quote}`")]
-    EmptyPriceSourceNetworkId {
-        /// Quote whose route was invalid.
-        quote: QuoteCode,
-        /// Field name that owned the invalid source ref.
-        field: &'static str,
-    },
-    /// `base_symbol_id` was empty on a price source ref.
-    #[error("{field}.base_symbol_id must be non-empty for quote `{quote}`")]
-    EmptyPriceSourceBaseSymbolId {
-        /// Quote whose route was invalid.
-        quote: QuoteCode,
-        /// Field name that owned the invalid source ref.
-        field: &'static str,
     },
     /// Derived price source quotes did not match.
     #[error(
@@ -666,15 +668,24 @@ pub enum ValuationSourceRegistryError {
     /// The JSON payload could not be decoded into the canonical type.
     #[error("valuation source registry decode failed: {0}")]
     Decode(String),
-    /// `source_id` was empty.
-    #[error("source_id must be non-empty")]
-    EmptySourceId,
-    /// `network_id` was empty.
-    #[error("network_id must be non-empty")]
-    EmptyNetworkId,
-    /// `base_symbol_id` was empty.
-    #[error("base_symbol_id must be non-empty")]
-    EmptyBaseSymbolId,
+    /// `source_id` did not satisfy the portfolio identifier grammar.
+    #[error("source_id is invalid: {source}")]
+    InvalidSourceId {
+        /// Underlying scalar validation failure.
+        source: PortfolioScalarError,
+    },
+    /// `network_id` did not satisfy the portfolio identifier grammar.
+    #[error("network_id is invalid: {source}")]
+    InvalidNetworkId {
+        /// Underlying scalar validation failure.
+        source: PortfolioScalarError,
+    },
+    /// `base_symbol_id` did not satisfy the portfolio identifier grammar.
+    #[error("base_symbol_id is invalid: {source}")]
+    InvalidBaseSymbolId {
+        /// Underlying scalar validation failure.
+        source: PortfolioScalarError,
+    },
     /// Registry metadata contained a secret-shaped key or value.
     #[error("valuation source `{source_id}` metadata key `{key}` contains secret-shaped content")]
     MetadataContainsSecret {
@@ -720,25 +731,12 @@ pub fn decode_valuation_source_registry(
 
 /// Validates a canonical symbol config.
 pub fn validate_symbol_config(cfg: &SymbolConfig) -> Result<(), SymbolConfigError> {
-    if cfg.symbol_id.trim().is_empty() {
-        return Err(SymbolConfigError::EmptySymbolId);
-    }
-    if cfg.network_id.trim().is_empty() {
-        return Err(SymbolConfigError::EmptyNetworkId);
-    }
     if cfg
         .protocol
         .as_deref()
         .is_some_and(|value| value.trim().is_empty())
     {
         return Err(SymbolConfigError::EmptyProtocol);
-    }
-    if cfg
-        .underlying_symbol_id
-        .as_deref()
-        .is_some_and(|value| value.trim().is_empty())
-    {
-        return Err(SymbolConfigError::EmptyUnderlyingSymbolId);
     }
     if let Some(key) = string_map_secret_marker_key(&cfg.metadata) {
         return Err(SymbolConfigError::MetadataContainsSecret {
@@ -774,9 +772,6 @@ pub fn validate_symbol_config(cfg: &SymbolConfig) -> Result<(), SymbolConfigErro
         if !seen_quotes.insert(quote.quote) {
             return Err(SymbolConfigError::DuplicateQuoteValuation { quote: quote.quote });
         }
-        if quote.priced_symbol_id.trim().is_empty() {
-            return Err(SymbolConfigError::EmptyPricedSymbolId { quote: quote.quote });
-        }
         validate_valuation_reader_config(quote.quote, &quote.reader)?;
     }
 
@@ -789,23 +784,14 @@ pub fn validate_valuation_source_registry(
 ) -> Result<(), ValuationSourceRegistryError> {
     let mut seen_ids = HashSet::new();
     for source in &registry.sources {
-        if source.source_id.trim().is_empty() {
-            return Err(ValuationSourceRegistryError::EmptySourceId);
-        }
         if !seen_ids.insert(source.source_id.clone()) {
             return Err(ValuationSourceRegistryError::DuplicateSourceId {
-                source_id: source.source_id.clone(),
+                source_id: source.source_id.to_string(),
             });
-        }
-        if source.network_id.trim().is_empty() {
-            return Err(ValuationSourceRegistryError::EmptyNetworkId);
-        }
-        if source.base_symbol_id.trim().is_empty() {
-            return Err(ValuationSourceRegistryError::EmptyBaseSymbolId);
         }
         if let Some(key) = string_map_secret_marker_key(&source.metadata) {
             return Err(ValuationSourceRegistryError::MetadataContainsSecret {
-                source_id: source.source_id.clone(),
+                source_id: source.source_id.to_string(),
                 key: key.to_string(),
             });
         }
@@ -839,15 +825,11 @@ fn validate_valuation_reader_config(
                 return Err(SymbolConfigError::EmptyFixedUnitPrice { quote });
             }
         }
-        ValuationReaderConfig::DirectPrice { source } => {
-            validate_price_source_ref(quote, "source", source)?;
-        }
+        ValuationReaderConfig::DirectPrice { .. } => {}
         ValuationReaderConfig::DerivedUnitPrice {
             numerator,
             denominator,
         } => {
-            validate_price_source_ref(quote, "numerator", numerator)?;
-            validate_price_source_ref(quote, "denominator", denominator)?;
             if numerator.quote != denominator.quote {
                 return Err(SymbolConfigError::DerivedPriceQuoteMismatch {
                     quote,
@@ -858,23 +840,6 @@ fn validate_valuation_reader_config(
         }
     }
 
-    Ok(())
-}
-
-fn validate_price_source_ref(
-    quote: QuoteCode,
-    field: &'static str,
-    source: &PriceSourceRef,
-) -> Result<(), SymbolConfigError> {
-    if source.source_id.trim().is_empty() {
-        return Err(SymbolConfigError::EmptyPriceSourceId { quote, field });
-    }
-    if source.network_id.trim().is_empty() {
-        return Err(SymbolConfigError::EmptyPriceSourceNetworkId { quote, field });
-    }
-    if source.base_symbol_id.trim().is_empty() {
-        return Err(SymbolConfigError::EmptyPriceSourceBaseSymbolId { quote, field });
-    }
     Ok(())
 }
 
@@ -900,9 +865,11 @@ mod tests {
 
         let registry = ValuationSourceRegistry {
             sources: vec![ValuationSourceConfig {
-                source_id: "chainlink_eth_usd".to_string(),
-                network_id: "ethereum-mainnet".to_string(),
-                base_symbol_id: "eth.native.ethereum-mainnet".to_string(),
+                source_id: "chainlink_eth_usd".parse().expect("valid source id"),
+                network_id: "ethereum-mainnet".parse().expect("valid network id"),
+                base_symbol_id: "eth.native.ethereum-mainnet"
+                    .parse()
+                    .expect("valid base symbol id"),
                 quote: QuoteCode::Usd,
                 reader: ValuationSourceReaderConfig::EvmOracle {
                     oracle_kind: "chainlink".to_string(),

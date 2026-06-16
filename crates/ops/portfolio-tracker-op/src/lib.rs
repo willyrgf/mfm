@@ -507,7 +507,7 @@ fn networks_by_id(
     for network in networks {
         if by_id.insert(network.network_id.as_str(), network).is_some() {
             return Err(mfm_program::PlanError::DuplicateDomainKey(
-                network.network_id.clone(),
+                network.network_id.to_string(),
             ));
         }
     }
@@ -519,7 +519,7 @@ fn symbols_by_id(symbols: &[SymbolConfig]) -> mfm_program::Result<BTreeMap<&str,
     for symbol in symbols {
         if by_id.insert(symbol.symbol_id.as_str(), symbol).is_some() {
             return Err(mfm_program::PlanError::DuplicateDomainKey(
-                symbol.symbol_id.clone(),
+                symbol.symbol_id.to_string(),
             ));
         }
     }
@@ -633,9 +633,11 @@ mod tests {
     #[test]
     fn duplicate_observation_domain_key_is_rejected() {
         let mut portfolio = sample_portfolio_config();
-        portfolio.wallets[0]
-            .symbol_ids
-            .push("eth.native.ethereum-mainnet".to_owned());
+        portfolio.wallets[0].symbol_ids.push(
+            "eth.native.ethereum-mainnet"
+                .parse()
+                .expect("valid symbol id"),
+        );
         let config = PortfolioWorkflowConfig::new(portfolio, sample_valuation_source_registry())
             .expect("workflow config");
         let err = portfolio_program_draft(config).expect_err("duplicate domain key");
@@ -658,36 +660,42 @@ mod tests {
 
     fn sample_portfolio_config() -> PortfolioConfig {
         PortfolioConfig {
-            portfolio_id: "portfolio_main".to_owned(),
+            portfolio_id: "portfolio_main".parse().expect("valid portfolio id"),
             quote_codes: vec![QuoteCode::Usd],
             networks: vec![NetworkConfig {
-                network_id: "ethereum-mainnet".to_owned(),
+                network_id: "ethereum-mainnet".parse().expect("valid network id"),
                 family: NetworkFamilyConfig::Evm,
                 chain_id: Some(1),
                 control_scope: "shared".to_owned(),
                 metadata: BTreeMap::new(),
             }],
             wallets: vec![WalletConfig {
-                wallet_id: "wallet_main".to_owned(),
+                wallet_id: "wallet_main".parse().expect("valid wallet id"),
                 address: "0x000000000000000000000000000000000000dead".to_owned(),
                 subject_kind: WalletSubjectKind::EvmAddress,
-                network_id: "ethereum-mainnet".to_owned(),
+                network_id: "ethereum-mainnet".parse().expect("valid network id"),
                 implementation: WalletImplementationConfig::AddressOnly {},
-                symbol_ids: vec!["eth.native.ethereum-mainnet".to_owned()],
+                symbol_ids: vec!["eth.native.ethereum-mainnet"
+                    .parse()
+                    .expect("valid symbol id")],
                 metadata: BTreeMap::new(),
             }],
             symbol_configs: vec![SymbolConfig {
-                symbol_id: "eth.native.ethereum-mainnet".to_owned(),
+                symbol_id: "eth.native.ethereum-mainnet"
+                    .parse()
+                    .expect("valid symbol id"),
                 display_symbol: Some("ETH".to_owned()),
                 kind: SymbolKind::NativeBalance,
                 role: SymbolRole::Native,
-                network_id: "ethereum-mainnet".to_owned(),
+                network_id: "ethereum-mainnet".parse().expect("valid network id"),
                 protocol: None,
                 balance_reader: BalanceReaderConfig::NativeBalance {},
                 valuation: SymbolValuationConfig {
                     quotes: vec![QuoteValuationConfig {
                         quote: QuoteCode::Usd,
-                        priced_symbol_id: "eth.native.ethereum-mainnet".to_owned(),
+                        priced_symbol_id: "eth.native.ethereum-mainnet"
+                            .parse()
+                            .expect("valid priced symbol id"),
                         reader: ValuationReaderConfig::FixedUnitPrice {
                             unit_price_dec: "1800.00".to_owned(),
                         },

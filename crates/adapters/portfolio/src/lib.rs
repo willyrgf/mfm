@@ -251,7 +251,7 @@ impl ErasedNodeRunner for PrepareSourcesRunner {
                 network_ids: config
                     .networks()
                     .iter()
-                    .map(|network| network.network_id.clone())
+                    .map(|network| network.network_id.to_string())
                     .collect(),
             };
             let response = SourcePreparationResponse {
@@ -306,7 +306,7 @@ impl ErasedNodeRunner for PinViewsRunner {
                 network_ids: config
                     .networks()
                     .iter()
-                    .map(|network| network.network_id.clone())
+                    .map(|network| network.network_id.to_string())
                     .collect(),
             };
             let response = ViewPinResponse {
@@ -355,9 +355,9 @@ impl ErasedNodeRunner for ObserveBatchRunner {
             let backend = EvmCapabilityPortfolioBackend::new(Arc::clone(&self.evm));
             let output = observe_batch_with_backend(config, &input, &backend).await;
             let request = ObservationRequest {
-                wallet_id: config.wallet().wallet_id.clone(),
-                symbol_id: config.symbol().symbol_id.clone(),
-                network_id: config.network().network_id.clone(),
+                wallet_id: config.wallet().wallet_id.to_string(),
+                symbol_id: config.symbol().symbol_id.to_string(),
+                network_id: config.network().network_id.to_string(),
                 balance_reader_kind: balance_reader_kind(&config.symbol().balance_reader)
                     .to_owned(),
                 block_number: Some(block_number),

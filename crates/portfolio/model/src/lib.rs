@@ -38,6 +38,8 @@
 pub mod aave;
 /// Stable portfolio domain keys used by typed fanout/fanin planning.
 pub mod domain_key;
+/// Strong portfolio scalar identifiers used by config authorities.
+pub mod ids;
 /// Canonical portfolio-domain models, validation helpers, and normalization utilities.
 pub mod portfolio;
 /// Canonical symbol-domain models, validation helpers, and normalization utilities.
