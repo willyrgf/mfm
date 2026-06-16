@@ -12,7 +12,7 @@ use mfm_spec::v1::{
 };
 use mfm_store::v1::{
     build_committed_batch, event_artifact_requirements, payload_canonical_json,
-    payload_from_json_value, ArtifactEvidenceRef, CellTerminalProjection,
+    payload_from_json_value, ArtifactEvidenceRef, AttemptTerminal, CellTerminalProjection,
     CommitArtifactEvidenceSet, CommitKey, CommitOrdinal, CommitOutcome, CommitPreconditions,
     CommittedRunStream, EventArtifactReferenceSource, ForwardLedgerClassification,
     InMemoryTypedRunStore, KernelEventEnvelope, ManualBlockReason, ManualResolutionProjection,
@@ -1304,7 +1304,7 @@ fn prepared_commit_authority_rejects_invalid_request_shapes() {
 }
 
 #[test]
-fn runner_output_plan_classifies_terminal_attempt_commits() {
+fn prepared_commit_plan_accepts_explicit_terminal_attempt_authority() {
     let artifact_id = artifact_id(149);
     let digest = content_digest(150);
     let payloads = terminal_cell_commit_payloads(artifact_id.clone(), digest.clone());
@@ -1320,13 +1320,13 @@ fn runner_output_plan_classifies_terminal_attempt_commits() {
             ..CommitPreconditions::default()
         },
     };
-    let plan = PreparedCommitPlan::runner_output(
+    let commit = PreparedCommit::<AttemptTerminal>::new(
         request,
         CommitArtifactEvidenceSet::new(vec![artifact.clone()], vec![artifact])
             .expect("artifact evidence set"),
-        None,
     )
-    .expect("runner output plan");
+    .expect("attempt-terminal authority");
+    let plan = PreparedCommitPlan::from(commit);
 
     assert!(matches!(plan, PreparedCommitPlan::AttemptTerminal(_)));
 }

@@ -522,7 +522,7 @@ impl CommitPlanner {
             required_artifacts.clone(),
             preconditions,
         )?;
-        let commit = store::PreparedCommitPlan::runner_output(
+        let commit = prepare_runner_output_commit_plan(
             request,
             store::CommitArtifactEvidenceSet::new(required_artifacts, admitted_artifacts)?,
             input.saga_terminal_proof,
@@ -532,6 +532,69 @@ impl CommitPlanner {
             artifacts_to_stage,
         })
     }
+}
+
+fn prepare_runner_output_commit_plan(
+    request: store::TypedCommitRequest,
+    artifacts: store::CommitArtifactEvidenceSet,
+    saga_terminal_proof: Option<store::SagaTerminalProof>,
+) -> Result<store::PreparedCommitPlan> {
+    let payloads = request.payloads();
+    if payloads.iter().any(is_saga_terminal_payload)
+        && request.preconditions().saga_admit_token.is_some()
+    {
+        let proof = saga_terminal_proof.ok_or_else(|| {
+            RuntimeError::InvalidRunnerOutput(
+                "saga terminal resolution requires SagaTerminalProof".to_owned(),
+            )
+        })?;
+        return Ok(
+            store::PreparedCommit::<store::SagaTerminal>::new(request, artifacts, &proof)?.into(),
+        );
+    }
+    if payloads.iter().any(is_retention_payload) {
+        return Ok(store::PreparedCommit::<store::Retention>::new(request, artifacts)?.into());
+    }
+    if payloads.iter().any(is_side_effect_terminal_payload) {
+        return Ok(
+            store::PreparedCommit::<store::SideEffectTerminal>::new(request, artifacts)?.into(),
+        );
+    }
+    if payloads.iter().any(is_side_effect_payload) {
+        return Ok(
+            store::PreparedCommit::<store::SideEffectProgress>::new(request, artifacts)?.into(),
+        );
+    }
+    Ok(store::PreparedCommit::<store::AttemptTerminal>::new(request, artifacts)?.into())
+}
+
+fn is_saga_terminal_payload(payload: &events::KernelEventPayload) -> bool {
+    matches!(payload, events::KernelEventPayload::RunCompleted(_))
+}
+
+fn is_retention_payload(payload: &events::KernelEventPayload) -> bool {
+    matches!(
+        payload,
+        events::KernelEventPayload::RetentionRefsAppended(_)
+            | events::KernelEventPayload::RetentionManifestProjected(_)
+    )
+}
+
+fn is_side_effect_terminal_payload(payload: &events::KernelEventPayload) -> bool {
+    matches!(
+        payload,
+        events::KernelEventPayload::SideEffectNotSubmittedProven(_)
+            | events::KernelEventPayload::SideEffectSubmissionObserved(_)
+            | events::KernelEventPayload::SideEffectSubmissionUnknown(_)
+            | events::KernelEventPayload::SideEffectReceiptObserved(_)
+            | events::KernelEventPayload::SideEffectConfirmationObserved(_)
+            | events::KernelEventPayload::SideEffectAmbiguous(_)
+            | events::KernelEventPayload::SideEffectFailed(_)
+    )
+}
+
+fn is_side_effect_payload(payload: &events::KernelEventPayload) -> bool {
+    payload.side_effect_ref().is_some()
 }
 
 fn required_artifacts_for_payloads(

@@ -1866,50 +1866,6 @@ pub mod v1 {
     }
 
     impl PreparedCommitPlan {
-        /// Classifies and prepares a runtime runner-output commit plan.
-        pub fn runner_output(
-            request: TypedCommitRequest,
-            artifacts: CommitArtifactEvidenceSet,
-            saga_terminal_proof: Option<SagaTerminalProof>,
-        ) -> Result<Self> {
-            let payloads = request.payloads.as_slice();
-            if payloads.iter().any(is_saga_terminal_payload)
-                && request.preconditions.saga_admit_token.is_some()
-            {
-                let proof = saga_terminal_proof.ok_or_else(|| {
-                    invalid_prepared_commit_purpose(
-                        SagaTerminal::NAME,
-                        "saga terminal resolution requires SagaTerminalProof",
-                    )
-                })?;
-                return Ok(Self::SagaTerminal(PreparedCommit::<SagaTerminal>::new(
-                    request, artifacts, &proof,
-                )?));
-            }
-            if payloads.iter().any(is_retention_payload) {
-                return Ok(Self::Retention(PreparedCommit::<Retention>::new(
-                    request, artifacts,
-                )?));
-            }
-            if payloads.iter().any(is_side_effect_terminal_payload) {
-                return Ok(Self::SideEffectTerminal(PreparedCommit::<
-                    SideEffectTerminal,
-                >::new(
-                    request, artifacts
-                )?));
-            }
-            if payloads.iter().any(is_side_effect_payload) {
-                return Ok(Self::SideEffectProgress(PreparedCommit::<
-                    SideEffectProgress,
-                >::new(
-                    request, artifacts
-                )?));
-            }
-            Ok(Self::AttemptTerminal(
-                PreparedCommit::<AttemptTerminal>::new(request, artifacts)?,
-            ))
-        }
-
         /// Returns the sealed request for read-only planning decisions.
         pub fn request(&self) -> &TypedCommitRequest {
             match self {
@@ -1951,6 +1907,10 @@ pub mod v1 {
 
     impl_prepared_commit_plan_from!(RunStart, RunStart);
     impl_prepared_commit_plan_from!(StateAttemptStarted, StateAttemptStarted);
+    impl_prepared_commit_plan_from!(AttemptTerminal, AttemptTerminal);
+    impl_prepared_commit_plan_from!(SideEffectTerminal, SideEffectTerminal);
+    impl_prepared_commit_plan_from!(SideEffectProgress, SideEffectProgress);
+    impl_prepared_commit_plan_from!(Retention, Retention);
     impl_prepared_commit_plan_from!(ManualResolution, ManualResolution);
     impl_prepared_commit_plan_from!(SagaTerminal, SagaTerminal);
 
