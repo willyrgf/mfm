@@ -251,7 +251,7 @@ impl ErasedNodeRunner for PrepareSourcesRunner {
                 network_ids: config
                     .networks()
                     .iter()
-                    .map(|network| network.network_id.to_string())
+                    .map(|network| network.network_id().to_string())
                     .collect(),
             };
             let response = SourcePreparationResponse {
@@ -306,7 +306,7 @@ impl ErasedNodeRunner for PinViewsRunner {
                 network_ids: config
                     .networks()
                     .iter()
-                    .map(|network| network.network_id.to_string())
+                    .map(|network| network.network_id().to_string())
                     .collect(),
             };
             let response = ViewPinResponse {
@@ -351,13 +351,13 @@ impl ErasedNodeRunner for ObserveBatchRunner {
             let input =
                 load_struct_input::<ObserveBatchInput>(ctx.inputs(), self.artifacts.as_ref())
                     .await?;
-            let block_number = evm_block_number_for(&input.views, &config.network().network_id);
+            let block_number = evm_block_number_for(&input.views, config.network().network_id());
             let backend = EvmCapabilityPortfolioBackend::new(Arc::clone(&self.evm));
             let output = observe_batch_with_backend(config, &input, &backend).await;
             let request = ObservationRequest {
                 wallet_id: config.wallet().wallet_id.to_string(),
                 symbol_id: config.symbol().symbol_id.to_string(),
-                network_id: config.network().network_id.to_string(),
+                network_id: config.network().network_id().to_string(),
                 balance_reader_kind: balance_reader_kind(&config.symbol().balance_reader)
                     .to_owned(),
                 block_number: Some(block_number),
@@ -804,7 +804,7 @@ impl EvmCapabilityPortfolioBackend {
         match &config.symbol().balance_reader {
             mfm_portfolio_model::symbol::BalanceReaderConfig::NativeBalance {} => {
                 let wallet = wallet_evm_address(config)?;
-                let (source_ref, policy_id) = self.route(&config.network().network_id)?;
+                let (source_ref, policy_id) = self.route(config.network().network_id())?;
                 let response = self
                     .evm
                     .read_balance(&EvmBalanceReadRequest {
@@ -822,7 +822,7 @@ impl EvmCapabilityPortfolioBackend {
                     Some(decimals) => decimals,
                     None => {
                         self.erc20_decimals(
-                            &config.network().network_id,
+                            config.network().network_id(),
                             token_address,
                             block_number,
                         )
@@ -833,7 +833,7 @@ impl EvmCapabilityPortfolioBackend {
                 let token = parse_address(token_address, "token address")?;
                 let raw = self
                     .evm_call_u256(
-                        &config.network().network_id,
+                        config.network().network_id(),
                         token,
                         encode_erc20_balance_of(&wallet),
                         block_number,

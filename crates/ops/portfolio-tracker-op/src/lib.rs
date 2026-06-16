@@ -505,9 +505,12 @@ fn networks_by_id(
 ) -> mfm_program::Result<BTreeMap<&str, &NetworkConfig>> {
     let mut by_id = BTreeMap::new();
     for network in networks {
-        if by_id.insert(network.network_id.as_str(), network).is_some() {
+        if by_id
+            .insert(network.network_id().as_str(), network)
+            .is_some()
+        {
             return Err(mfm_program::PlanError::DuplicateDomainKey(
-                network.network_id.to_string(),
+                network.network_id().to_string(),
             ));
         }
     }
@@ -664,13 +667,14 @@ mod tests {
         PortfolioConfig {
             portfolio_id: "portfolio_main".parse().expect("valid portfolio id"),
             quote_codes: vec![QuoteCode::Usd],
-            networks: vec![NetworkConfig {
-                network_id: "ethereum-mainnet".parse().expect("valid network id"),
-                family: NetworkFamilyConfig::Evm,
-                chain_id: Some(1),
-                control_scope: "shared".parse().expect("valid control scope"),
-                metadata: BTreeMap::new(),
-            }],
+            networks: vec![NetworkConfig::new(
+                "ethereum-mainnet".to_owned(),
+                NetworkFamilyConfig::Evm,
+                Some(1),
+                "shared".to_owned(),
+                BTreeMap::new(),
+            )
+            .expect("valid network config")],
             wallets: vec![WalletConfig {
                 wallet_id: "wallet_main".parse().expect("valid wallet id"),
                 subject: WalletSubject::new(

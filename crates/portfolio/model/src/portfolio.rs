@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::num::NonZeroU64;
 
 use mfm_program_derive::{MfmConfig, MfmValue, PublicOutputs};
 use mfm_values::string_map_secret_marker_key;
@@ -86,7 +87,7 @@ impl PortfolioConfig {
     pub fn normalize(&mut self) {
         self.quote_codes.sort();
         self.networks
-            .sort_by(|left, right| left.network_id.cmp(&right.network_id));
+            .sort_by(|left, right| left.network_id().cmp(right.network_id()));
         for wallet in &mut self.wallets {
             wallet.normalize();
         }
@@ -113,25 +114,35 @@ impl PortfolioConfig {
 
 /// Canonical network configuration.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, MfmValue)]
+#[serde(tag = "family", rename_all = "snake_case")]
 #[mfm(
     namespace = "mfm.portfolio",
     name = "network-config",
     schema = "mfm.portfolio.network_config"
 )]
-pub struct NetworkConfig {
-    /// Stable machine identifier for the network.
-    pub network_id: NetworkId,
-    /// Declared execution family for the network.
-    #[serde(default)]
-    pub family: NetworkFamilyConfig,
-    /// EVM chain id for the network when `family = "evm"`.
-    #[serde(default)]
-    pub chain_id: Option<u64>,
-    /// Stable control-plane scope used for managed rpc.control reads on this network.
-    pub control_scope: ControlScopeId,
-    /// Canonical metadata surface.
-    #[serde(default)]
-    pub metadata: BTreeMap<String, String>,
+pub enum NetworkConfig {
+    /// Ethereum-compatible execution network.
+    Evm {
+        /// Stable machine identifier for the network.
+        network_id: NetworkId,
+        /// Non-zero EVM chain id for the network.
+        chain_id: NonZeroU64,
+        /// Stable control-plane scope used for managed rpc.control reads on this network.
+        control_scope: ControlScopeId,
+        /// Canonical metadata surface.
+        #[serde(default)]
+        metadata: BTreeMap<String, String>,
+    },
+    /// Bitcoin-family execution network.
+    Bitcoin {
+        /// Stable machine identifier for the network.
+        network_id: NetworkId,
+        /// Stable control-plane scope used for managed rpc.control reads on this network.
+        control_scope: ControlScopeId,
+        /// Canonical metadata surface.
+        #[serde(default)]
+        metadata: BTreeMap<String, String>,
+    },
 }
 
 impl NetworkConfig {
@@ -147,20 +158,91 @@ impl NetworkConfig {
             .map_err(|source| PortfolioConfigError::InvalidNetworkId { source })?;
         let control_scope = ControlScopeId::new(control_scope)
             .map_err(|source| PortfolioConfigError::InvalidNetworkControlScope { source })?;
-        Self {
-            network_id,
-            family,
-            chain_id,
-            control_scope,
-            metadata,
+        match family {
+            NetworkFamilyConfig::Evm => {
+                let Some(chain_id) = chain_id else {
+                    return Err(PortfolioConfigError::MissingEvmChainId {
+                        network_id: network_id.to_string(),
+                    });
+                };
+                let Some(chain_id) = NonZeroU64::new(chain_id) else {
+                    return Err(PortfolioConfigError::InvalidEvmChainId {
+                        network_id: network_id.to_string(),
+                    });
+                };
+                Self::Evm {
+                    network_id,
+                    chain_id,
+                    control_scope,
+                    metadata,
+                }
+                .validated()
+            }
+            NetworkFamilyConfig::Bitcoin => {
+                if chain_id.is_some() {
+                    return Err(PortfolioConfigError::UnexpectedBitcoinChainId {
+                        network_id: network_id.to_string(),
+                    });
+                }
+                Self::Bitcoin {
+                    network_id,
+                    control_scope,
+                    metadata,
+                }
+                .validated()
+            }
         }
-        .validated()
     }
 
     /// Validates this network config and returns it unchanged.
     pub fn validated(self) -> Result<Self, PortfolioConfigError> {
         validate_network_config(&self)?;
         Ok(self)
+    }
+
+    /// Returns the stable machine identifier for this network.
+    pub fn network_id(&self) -> &NetworkId {
+        match self {
+            Self::Evm { network_id, .. } | Self::Bitcoin { network_id, .. } => network_id,
+        }
+    }
+
+    /// Returns the execution family for this network.
+    pub const fn family(&self) -> NetworkFamilyConfig {
+        match self {
+            Self::Evm { .. } => NetworkFamilyConfig::Evm,
+            Self::Bitcoin { .. } => NetworkFamilyConfig::Bitcoin,
+        }
+    }
+
+    /// Returns the EVM chain id when this is an EVM network.
+    pub const fn chain_id(&self) -> Option<NonZeroU64> {
+        match self {
+            Self::Evm { chain_id, .. } => Some(*chain_id),
+            Self::Bitcoin { .. } => None,
+        }
+    }
+
+    /// Returns the EVM chain id as a primitive integer when present.
+    pub const fn chain_id_u64(&self) -> Option<u64> {
+        match self {
+            Self::Evm { chain_id, .. } => Some(chain_id.get()),
+            Self::Bitcoin { .. } => None,
+        }
+    }
+
+    /// Returns the stable control-plane scope for managed reads on this network.
+    pub fn control_scope(&self) -> &ControlScopeId {
+        match self {
+            Self::Evm { control_scope, .. } | Self::Bitcoin { control_scope, .. } => control_scope,
+        }
+    }
+
+    /// Returns the public metadata associated with this network.
+    pub fn metadata(&self) -> &BTreeMap<String, String> {
+        match self {
+            Self::Evm { metadata, .. } | Self::Bitcoin { metadata, .. } => metadata,
+        }
     }
 }
 
@@ -176,9 +258,9 @@ impl ValidatedNetworkConfigs {
         let mut seen = BTreeSet::new();
         for network in &networks {
             validate_network_config(network)?;
-            if !seen.insert(network.network_id.as_str()) {
+            if !seen.insert(network.network_id().as_str()) {
                 return Err(PortfolioConfigError::DuplicateNetworkId {
-                    network_id: network.network_id.to_string(),
+                    network_id: network.network_id().to_string(),
                 });
             }
         }
@@ -400,7 +482,7 @@ impl PortfolioConfigIndex {
             .networks
             .iter()
             .enumerate()
-            .map(|(index, network)| (network.network_id.clone(), index))
+            .map(|(index, network)| (network.network_id().clone(), index))
             .collect();
         let wallets = config
             .wallets
@@ -692,6 +774,12 @@ pub enum PortfolioConfigError {
         /// Network id associated with the failure.
         network_id: String,
     },
+    /// EVM networks require a non-zero chain id.
+    #[error("network `{network_id}` with family `evm` must declare non-zero chain_id")]
+    InvalidEvmChainId {
+        /// Network id associated with the failure.
+        network_id: String,
+    },
     /// Bitcoin networks must not declare an EVM chain id.
     #[error("network `{network_id}` with family `bitcoin` must not declare chain_id")]
     UnexpectedBitcoinChainId {
@@ -931,9 +1019,9 @@ fn validate_portfolio_config_inner(cfg: &PortfolioConfig) -> Result<(), Portfoli
     let mut network_ids = HashSet::new();
     for network in &cfg.networks {
         validate_network_config(network)?;
-        if !network_ids.insert(network.network_id.clone()) {
+        if !network_ids.insert(network.network_id().clone()) {
             return Err(PortfolioConfigError::DuplicateNetworkId {
-                network_id: network.network_id.to_string(),
+                network_id: network.network_id().to_string(),
             });
         }
     }
@@ -963,7 +1051,7 @@ fn validate_portfolio_config_inner(cfg: &PortfolioConfig) -> Result<(), Portfoli
         let network = cfg
             .networks
             .iter()
-            .find(|network| network.network_id == symbol.network_id)
+            .find(|network| network.network_id() == &symbol.network_id)
             .expect("validated network id must exist");
         validate_symbol_for_network_family(symbol, network)?;
         if let Some(underlying_symbol_id) = &symbol.underlying_symbol_id {
@@ -999,15 +1087,15 @@ fn validate_portfolio_config_inner(cfg: &PortfolioConfig) -> Result<(), Portfoli
         let network = cfg
             .networks
             .iter()
-            .find(|network| network.network_id == wallet.network_id)
+            .find(|network| network.network_id() == &wallet.network_id)
             .expect("validated network id must exist");
         let wallet_subject_kind = wallet.subject.kind();
-        if !wallet_subject_matches_network_family(wallet_subject_kind, network.family) {
+        if !wallet_subject_matches_network_family(wallet_subject_kind, network.family()) {
             return Err(PortfolioConfigError::WalletSubjectNetworkFamilyMismatch {
                 wallet_id: wallet.wallet_id.to_string(),
                 network_id: wallet.network_id.to_string(),
                 wallet_subject_kind,
-                network_family: network.family,
+                network_family: network.family(),
             });
         }
         for symbol_id in &wallet.symbol_ids {
@@ -1061,7 +1149,7 @@ fn validate_portfolio_bundle_sources(
     let network_ids: HashSet<_> = cfg
         .networks
         .iter()
-        .map(|network| network.network_id.clone())
+        .map(|network| network.network_id().clone())
         .collect();
     for source in &registry.sources {
         if !network_ids.contains(&source.network_id) {
@@ -1113,27 +1201,11 @@ fn validate_portfolio_bundle_sources(
 
 /// Validates one canonical network config.
 pub fn validate_network_config(network: &NetworkConfig) -> Result<(), PortfolioConfigError> {
-    if let Some(key) = string_map_secret_marker_key(&network.metadata) {
+    if let Some(key) = string_map_secret_marker_key(network.metadata()) {
         return Err(PortfolioConfigError::NetworkMetadataContainsSecret {
-            network_id: network.network_id.to_string(),
+            network_id: network.network_id().to_string(),
             key: key.to_string(),
         });
-    }
-    match network.family {
-        NetworkFamilyConfig::Evm => {
-            if network.chain_id.is_none() {
-                return Err(PortfolioConfigError::MissingEvmChainId {
-                    network_id: network.network_id.to_string(),
-                });
-            }
-        }
-        NetworkFamilyConfig::Bitcoin => {
-            if network.chain_id.is_some() {
-                return Err(PortfolioConfigError::UnexpectedBitcoinChainId {
-                    network_id: network.network_id.to_string(),
-                });
-            }
-        }
     }
     Ok(())
 }
@@ -1156,7 +1228,7 @@ fn validate_symbol_for_network_family(
     symbol: &SymbolConfig,
     network: &NetworkConfig,
 ) -> Result<(), PortfolioConfigError> {
-    if network.family == NetworkFamilyConfig::Bitcoin
+    if network.family() == NetworkFamilyConfig::Bitcoin
         && !matches!(
             (&symbol.kind, &symbol.balance_reader),
             (
@@ -1167,8 +1239,8 @@ fn validate_symbol_for_network_family(
     {
         return Err(PortfolioConfigError::UnsupportedSymbolNetworkFamily {
             symbol_id: symbol.symbol_id.to_string(),
-            network_id: network.network_id.to_string(),
-            network_family: network.family,
+            network_id: network.network_id().to_string(),
+            network_family: network.family(),
         });
     }
     Ok(())
@@ -1445,7 +1517,7 @@ mod tests {
                 .portfolio()
                 .network("ethereum-mainnet")
                 .expect("network")
-                .chain_id,
+                .chain_id_u64(),
             Some(1)
         );
         assert_eq!(
@@ -1693,7 +1765,7 @@ mod tests {
         assert_eq!(
             cfg.networks
                 .iter()
-                .map(|network| network.network_id.as_str())
+                .map(|network| network.network_id().as_str())
                 .collect::<Vec<_>>(),
             vec!["arbitrum-mainnet", "ethereum-mainnet"]
         );

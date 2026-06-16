@@ -419,7 +419,7 @@ pub fn validate_aave_portfolio_config(
     let network_chain_ids: HashMap<_, _> = portfolio
         .networks
         .iter()
-        .map(|network| (network.network_id.as_str(), network.chain_id))
+        .map(|network| (network.network_id().as_str(), network.chain_id_u64()))
         .collect();
     let mut markets_by_id: HashMap<AaveMarketId, AaveMarketConfig> = HashMap::new();
 

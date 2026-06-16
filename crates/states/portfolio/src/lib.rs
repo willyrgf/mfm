@@ -1188,9 +1188,9 @@ pub fn prepare_sources_from_config(config: &PrepareSourcesConfig) -> PreparedSou
         .networks
         .iter()
         .map(|network| PreparedSource {
-            network_id: network.network_id.to_string(),
-            control_scope: network.control_scope.to_string(),
-            family: network.family,
+            network_id: network.network_id().to_string(),
+            control_scope: network.control_scope().to_string(),
+            family: network.family(),
         })
         .collect::<Vec<_>>();
     sources.sort_by(|left, right| left.network_id.cmp(&right.network_id));
@@ -1216,18 +1216,18 @@ pub fn resolve_subjects_from_config(config: &ResolveSubjectsConfig) -> ResolvedS
 
 /// Builds a pinned view for `network` using the supplied EVM block number.
 pub fn pinned_view_for_network(network: &NetworkConfig, evm_block_number: u64) -> PinnedView {
-    let anchor = match network.family {
-        NetworkFamilyConfig::Evm => ExecutionAnchor::Evm {
-            chain_id: network.chain_id.unwrap_or_default(),
+    let anchor = match network {
+        NetworkConfig::Evm { chain_id, .. } => ExecutionAnchor::Evm {
+            chain_id: chain_id.get(),
             block_number: evm_block_number,
         },
-        NetworkFamilyConfig::Bitcoin => ExecutionAnchor::Bitcoin {
+        NetworkConfig::Bitcoin { .. } => ExecutionAnchor::Bitcoin {
             height: 0,
             block_hash: String::new(),
         },
     };
     PinnedView {
-        network_id: network.network_id.to_string(),
+        network_id: network.network_id().to_string(),
         anchor,
     }
 }
@@ -1242,8 +1242,8 @@ where
 {
     let mut views = Vec::new();
     for network in config.networks() {
-        let block_number = match network.family {
-            NetworkFamilyConfig::Evm => backend.evm_block_number(&network.network_id).await?,
+        let block_number = match network.family() {
+            NetworkFamilyConfig::Evm => backend.evm_block_number(network.network_id()).await?,
             NetworkFamilyConfig::Bitcoin => 0,
         };
         views.push(pinned_view_for_network(network, block_number));
@@ -1347,7 +1347,7 @@ pub fn observation_batch_from_raw_balance(
             "missing resolved subject for observation batch",
             Some(&config.wallet.wallet_id),
             Some(&config.symbol.symbol_id),
-            Some(&config.network.network_id),
+            Some(config.network.network_id()),
             None,
         ));
         return ObservationBatch {
@@ -1360,14 +1360,14 @@ pub fn observation_batch_from_raw_balance(
         .views
         .views
         .iter()
-        .find(|view| view.network_id == config.network.network_id.as_str())
+        .find(|view| view.network_id == config.network.network_id().as_str())
     else {
         errors.push(snapshot_error(
             "missing_pinned_view",
             "missing pinned view for observation batch",
             Some(&config.wallet.wallet_id),
             Some(&config.symbol.symbol_id),
-            Some(&config.network.network_id),
+            Some(config.network.network_id()),
             None,
         ));
         return ObservationBatch {
@@ -1384,7 +1384,7 @@ pub fn observation_batch_from_raw_balance(
             "observation had no resolved valuation values",
             Some(&config.wallet.wallet_id),
             Some(&config.symbol.symbol_id),
-            Some(&config.network.network_id),
+            Some(config.network.network_id()),
             Some(balance_reader_kind(&config.symbol.balance_reader)),
         ));
         return ObservationBatch {
@@ -1410,7 +1410,7 @@ pub fn observation_batch_from_raw_balance(
         display_symbol: config.symbol.display_symbol.clone(),
         kind: config.symbol.kind,
         role: config.symbol.role,
-        network_id: config.network.network_id.to_string(),
+        network_id: config.network.network_id().to_string(),
         protocol: config.symbol.protocol.as_ref().map(ToString::to_string),
         quantity: ObservationQuantity {
             raw_dec: raw.to_string(),
@@ -1420,7 +1420,7 @@ pub fn observation_batch_from_raw_balance(
         values,
         source: ObservationSource {
             balance_reader_kind: balance_reader_kind(&config.symbol.balance_reader).to_owned(),
-            network_id: config.network.network_id.to_string(),
+            network_id: config.network.network_id().to_string(),
             anchor,
         },
         metadata: config.symbol.metadata.clone(),
@@ -1447,7 +1447,7 @@ pub fn observation_batch_error(
             message,
             Some(&config.wallet.wallet_id),
             Some(&config.symbol.symbol_id),
-            Some(&config.network.network_id),
+            Some(config.network.network_id()),
             Some(balance_reader_kind(&config.symbol.balance_reader)),
         )],
     }
@@ -1462,7 +1462,7 @@ pub async fn observe_batch_with_backend<B>(
 where
     B: PortfolioReadBackend + ?Sized,
 {
-    let block_number = evm_block_number_for(&input.views, &config.network.network_id);
+    let block_number = evm_block_number_for(&input.views, config.network.network_id());
     match backend.observe_raw_balance(config, block_number).await {
         Ok((raw, decimals)) => {
             observation_batch_from_raw_balance(config, input, raw, decimals, block_number)
@@ -1662,7 +1662,7 @@ fn observation_values(
                 format!("missing valuation for quote `{}`", quote.quote),
                 Some(&config.wallet.wallet_id),
                 Some(&config.symbol.symbol_id),
-                Some(&config.network.network_id),
+                Some(config.network.network_id()),
                 Some("valuation"),
             ));
             continue;
@@ -1681,7 +1681,7 @@ fn observation_values(
                 error.to_string(),
                 Some(&config.wallet.wallet_id),
                 Some(&config.symbol.symbol_id),
-                Some(&config.network.network_id),
+                Some(config.network.network_id()),
                 Some("valuation"),
             )),
         }
@@ -1694,16 +1694,20 @@ fn validate_observe_batch_config(config: &ObserveBatchConfig) -> Result<(), Stri
     validate_wallet_config(&config.wallet).map_err(|error| error.to_string())?;
     validate_symbol_config(&config.symbol).map_err(|error| error.to_string())?;
     validate_network_config(&config.network).map_err(|error| error.to_string())?;
-    if config.wallet.network_id != config.network.network_id {
+    if &config.wallet.network_id != config.network.network_id() {
         return Err(format!(
             "wallet `{}` network `{}` did not match observation network `{}`",
-            config.wallet.wallet_id, config.wallet.network_id, config.network.network_id
+            config.wallet.wallet_id,
+            config.wallet.network_id,
+            config.network.network_id()
         ));
     }
-    if config.symbol.network_id != config.network.network_id {
+    if &config.symbol.network_id != config.network.network_id() {
         return Err(format!(
             "symbol `{}` network `{}` did not match observation network `{}`",
-            config.symbol.symbol_id, config.symbol.network_id, config.network.network_id
+            config.symbol.symbol_id,
+            config.symbol.network_id,
+            config.network.network_id()
         ));
     }
     if !config
@@ -2116,13 +2120,14 @@ mod tests {
         let config = ObserveBatchConfig {
             wallet,
             symbol,
-            network: NetworkConfig {
-                network_id: "ethereum-goerli".parse().expect("valid network id"),
-                family: NetworkFamilyConfig::Evm,
-                chain_id: Some(5),
-                control_scope: "shared".parse().expect("valid control scope"),
-                metadata: BTreeMap::new(),
-            },
+            network: NetworkConfig::new(
+                "ethereum-goerli".to_owned(),
+                NetworkFamilyConfig::Evm,
+                Some(5),
+                "shared".to_owned(),
+                BTreeMap::new(),
+            )
+            .expect("valid network config"),
         };
 
         let error = config.validate().expect_err("network mismatch must fail");
@@ -2136,13 +2141,15 @@ mod tests {
 
     #[test]
     fn fixed_price_observation_projects_report_totals() {
-        let network = NetworkConfig {
-            network_id: "ethereum-mainnet".parse().expect("valid network id"),
-            family: NetworkFamilyConfig::Evm,
-            chain_id: Some(1),
-            control_scope: "shared".parse().expect("valid control scope"),
-            metadata: BTreeMap::new(),
-        };
+        let network = NetworkConfig::new(
+            "ethereum-mainnet".to_owned(),
+            NetworkFamilyConfig::Evm,
+            Some(1),
+            "shared".to_owned(),
+            BTreeMap::new(),
+        )
+        .expect("valid network config");
+        let network_id = network.network_id().clone();
         let wallet = WalletConfig {
             wallet_id: "wallet_main".parse().expect("valid wallet id"),
             subject: WalletSubject::new(
@@ -2150,7 +2157,7 @@ mod tests {
                 WalletSubjectKind::EvmAddress,
             )
             .expect("valid wallet subject"),
-            network_id: network.network_id.clone(),
+            network_id: network_id.clone(),
             implementation: WalletImplementationConfig::AddressOnly {},
             symbol_ids: vec!["eth.native.ethereum-mainnet"
                 .parse()
@@ -2164,7 +2171,7 @@ mod tests {
             display_symbol: Some("ETH".to_owned()),
             kind: SymbolKind::NativeBalance,
             role: SymbolRole::Native,
-            network_id: network.network_id.clone(),
+            network_id: network_id.clone(),
             protocol: None,
             balance_reader: BalanceReaderConfig::NativeBalance {},
             valuation: SymbolValuationConfig {
@@ -2194,7 +2201,7 @@ mod tests {
             },
             views: PinnedViews {
                 views: vec![PinnedView {
-                    network_id: network.network_id.to_string(),
+                    network_id: network.network_id().to_string(),
                     anchor: ExecutionAnchor::Evm {
                         chain_id: 1,
                         block_number: 10,
