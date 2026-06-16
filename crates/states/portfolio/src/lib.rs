@@ -34,8 +34,8 @@ use mfm_portfolio_model::aave::AAVE_V3_PROTOCOL_ID;
 use mfm_portfolio_model::portfolio::{
     validate_network_config, ExecutionAnchor, NetworkConfig, NetworkFamilyConfig, NetworkPin,
     PortfolioConfig, PortfolioQuoteTotal, PortfolioReport, PortfolioSnapshot,
-    PortfolioSnapshotError, ValidatedPortfolioBundle, ValidatedPortfolioConfig, WalletReport,
-    WalletSnapshot,
+    PortfolioSnapshotError, ValidatedNetworkConfigs, ValidatedPortfolioBundle,
+    ValidatedPortfolioConfig, WalletReport, WalletSnapshot,
 };
 use mfm_portfolio_model::symbol::{
     validate_symbol_config, validate_valuation_source_registry, BalanceReaderConfig, Observation,
@@ -523,7 +523,9 @@ fn validate_portfolio_workflow_config(config: &PortfolioWorkflowConfig) -> Resul
 }
 
 fn validate_prepare_sources_config(config: &PrepareSourcesConfig) -> Result<(), String> {
-    validate_network_collection(&config.networks)
+    ValidatedNetworkConfigs::new(config.networks.clone())
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 fn validate_resolve_subjects_config(config: &ResolveSubjectsConfig) -> Result<(), String> {
@@ -537,7 +539,9 @@ fn validate_pin_views_config(config: &PinViewsConfig) -> Result<(), String> {
     if config.pin_version != 1 {
         return Err("unsupported portfolio pin config version".to_owned());
     }
-    validate_network_collection(&config.networks)
+    ValidatedNetworkConfigs::new(config.networks.clone())
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 fn validate_resolve_valuations_config(config: &ResolveValuationsConfig) -> Result<(), String> {
@@ -572,13 +576,6 @@ fn validate_project_report_config(config: &ProjectReportConfig) -> Result<(), St
     } else {
         Ok(())
     }
-}
-
-fn validate_network_collection(networks: &[NetworkConfig]) -> Result<(), String> {
-    for network in networks {
-        validate_network_config(network).map_err(|error| error.to_string())?;
-    }
-    validate_network_keys(networks)
 }
 
 /// Prepared external source summary for one network.
@@ -1694,19 +1691,6 @@ fn observation_values(
     }
     values.sort_by_key(|value| value.quote);
     values
-}
-
-fn validate_network_keys(networks: &[NetworkConfig]) -> Result<(), String> {
-    let mut seen = BTreeSet::new();
-    for network in networks {
-        if !seen.insert(network.network_id.as_str()) {
-            return Err(format!(
-                "duplicate portfolio network domain key `{}`",
-                network.network_id
-            ));
-        }
-    }
-    Ok(())
 }
 
 fn validate_wallet_keys(wallets: &[WalletConfig]) -> Result<(), String> {

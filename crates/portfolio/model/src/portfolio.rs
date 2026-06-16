@@ -154,6 +154,38 @@ impl NetworkConfig {
     }
 }
 
+/// Validated network config collection authority.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ValidatedNetworkConfigs {
+    networks: Vec<NetworkConfig>,
+}
+
+impl ValidatedNetworkConfigs {
+    /// Creates a validated network config collection authority.
+    pub fn new(networks: Vec<NetworkConfig>) -> Result<Self, PortfolioConfigError> {
+        let mut seen = BTreeSet::new();
+        for network in &networks {
+            validate_network_config(network)?;
+            if !seen.insert(network.network_id.as_str()) {
+                return Err(PortfolioConfigError::DuplicateNetworkId {
+                    network_id: network.network_id.clone(),
+                });
+            }
+        }
+        Ok(Self { networks })
+    }
+
+    /// Returns the validated network configs.
+    pub fn as_slice(&self) -> &[NetworkConfig] {
+        &self.networks
+    }
+
+    /// Consumes this authority into the validated network configs.
+    pub fn into_vec(self) -> Vec<NetworkConfig> {
+        self.networks
+    }
+}
+
 /// Validated, normalized portfolio config authority.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ValidatedPortfolioConfig {
@@ -1202,6 +1234,29 @@ mod tests {
         assert!(matches!(
             cfg.symbol_configs[0].balance_reader,
             BalanceReaderConfig::NativeBalance {}
+        ));
+    }
+
+    #[test]
+    fn validated_network_configs_reject_duplicate_network_ids() {
+        let network = NetworkConfig::new(
+            "ethereum-mainnet".to_owned(),
+            NetworkFamilyConfig::Evm,
+            Some(1),
+            "shared".to_owned(),
+            BTreeMap::new(),
+        )
+        .expect("network config");
+
+        let authority =
+            ValidatedNetworkConfigs::new(vec![network.clone()]).expect("network authority");
+        assert_eq!(authority.as_slice(), &[network.clone()]);
+        assert_eq!(authority.into_vec(), vec![network.clone()]);
+
+        assert!(matches!(
+            ValidatedNetworkConfigs::new(vec![network.clone(), network]),
+            Err(PortfolioConfigError::DuplicateNetworkId { network_id })
+                if network_id == "ethereum-mainnet"
         ));
     }
 
