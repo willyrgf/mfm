@@ -186,6 +186,80 @@ impl ValidatedNetworkConfigs {
     }
 }
 
+/// Validated wallet config collection authority.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ValidatedWalletConfigs {
+    wallets: Vec<WalletConfig>,
+}
+
+impl ValidatedWalletConfigs {
+    /// Creates a validated wallet config collection authority.
+    pub fn new(wallets: Vec<WalletConfig>) -> Result<Self, PortfolioConfigError> {
+        let mut seen = BTreeSet::new();
+        for wallet in &wallets {
+            validate_wallet_config(wallet).map_err(|source| {
+                PortfolioConfigError::InvalidWalletConfig {
+                    wallet_id: wallet.wallet_id.clone(),
+                    source,
+                }
+            })?;
+            if !seen.insert(wallet.wallet_id.as_str()) {
+                return Err(PortfolioConfigError::DuplicateWalletId {
+                    wallet_id: wallet.wallet_id.clone(),
+                });
+            }
+        }
+        Ok(Self { wallets })
+    }
+
+    /// Returns the validated wallet configs.
+    pub fn as_slice(&self) -> &[WalletConfig] {
+        &self.wallets
+    }
+
+    /// Consumes this authority into the validated wallet configs.
+    pub fn into_vec(self) -> Vec<WalletConfig> {
+        self.wallets
+    }
+}
+
+/// Validated symbol config collection authority.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ValidatedSymbolConfigs {
+    symbols: Vec<SymbolConfig>,
+}
+
+impl ValidatedSymbolConfigs {
+    /// Creates a validated symbol config collection authority.
+    pub fn new(symbols: Vec<SymbolConfig>) -> Result<Self, PortfolioConfigError> {
+        let mut seen = BTreeSet::new();
+        for symbol in &symbols {
+            validate_symbol_config(symbol).map_err(|source| {
+                PortfolioConfigError::InvalidSymbolConfig {
+                    symbol_id: symbol.symbol_id.clone(),
+                    source,
+                }
+            })?;
+            if !seen.insert(symbol.symbol_id.as_str()) {
+                return Err(PortfolioConfigError::DuplicateSymbolId {
+                    symbol_id: symbol.symbol_id.clone(),
+                });
+            }
+        }
+        Ok(Self { symbols })
+    }
+
+    /// Returns the validated symbol configs.
+    pub fn as_slice(&self) -> &[SymbolConfig] {
+        &self.symbols
+    }
+
+    /// Consumes this authority into the validated symbol configs.
+    pub fn into_vec(self) -> Vec<SymbolConfig> {
+        self.symbols
+    }
+}
+
 /// Validated, normalized portfolio config authority.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ValidatedPortfolioConfig {
@@ -1257,6 +1331,32 @@ mod tests {
             ValidatedNetworkConfigs::new(vec![network.clone(), network]),
             Err(PortfolioConfigError::DuplicateNetworkId { network_id })
                 if network_id == "ethereum-mainnet"
+        ));
+    }
+
+    #[test]
+    fn validated_wallet_and_symbol_configs_reject_duplicate_ids() {
+        let cfg = decode_portfolio_config(&canonical_config_json()).expect("config should decode");
+        let wallet = cfg.wallets[0].clone();
+        let symbol = cfg.symbol_configs[0].clone();
+
+        let wallets = ValidatedWalletConfigs::new(vec![wallet.clone()]).expect("wallets");
+        assert_eq!(wallets.as_slice(), &[wallet.clone()]);
+        assert_eq!(wallets.into_vec(), vec![wallet.clone()]);
+        assert!(matches!(
+            ValidatedWalletConfigs::new(vec![wallet.clone(), wallet]),
+            Err(PortfolioConfigError::DuplicateWalletId { wallet_id })
+                if wallet_id == "wallet_ops_arb"
+        ));
+
+        let expected_symbol_id = symbol.symbol_id.clone();
+        let symbols = ValidatedSymbolConfigs::new(vec![symbol.clone()]).expect("symbols");
+        assert_eq!(symbols.as_slice(), &[symbol.clone()]);
+        assert_eq!(symbols.into_vec(), vec![symbol.clone()]);
+        assert!(matches!(
+            ValidatedSymbolConfigs::new(vec![symbol.clone(), symbol]),
+            Err(PortfolioConfigError::DuplicateSymbolId { symbol_id })
+                if symbol_id == expected_symbol_id
         ));
     }
 

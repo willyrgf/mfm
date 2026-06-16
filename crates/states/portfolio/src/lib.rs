@@ -35,7 +35,8 @@ use mfm_portfolio_model::portfolio::{
     validate_network_config, ExecutionAnchor, NetworkConfig, NetworkFamilyConfig, NetworkPin,
     PortfolioConfig, PortfolioQuoteTotal, PortfolioReport, PortfolioSnapshot,
     PortfolioSnapshotError, ValidatedNetworkConfigs, ValidatedPortfolioBundle,
-    ValidatedPortfolioConfig, WalletReport, WalletSnapshot,
+    ValidatedPortfolioConfig, ValidatedSymbolConfigs, ValidatedWalletConfigs, WalletReport,
+    WalletSnapshot,
 };
 use mfm_portfolio_model::symbol::{
     validate_symbol_config, validate_valuation_source_registry, BalanceReaderConfig, Observation,
@@ -529,10 +530,9 @@ fn validate_prepare_sources_config(config: &PrepareSourcesConfig) -> Result<(), 
 }
 
 fn validate_resolve_subjects_config(config: &ResolveSubjectsConfig) -> Result<(), String> {
-    for wallet in &config.wallets {
-        validate_wallet_config(wallet).map_err(|error| error.to_string())?;
-    }
-    validate_wallet_keys(&config.wallets)
+    ValidatedWalletConfigs::new(config.wallets.clone())
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 fn validate_pin_views_config(config: &PinViewsConfig) -> Result<(), String> {
@@ -545,10 +545,9 @@ fn validate_pin_views_config(config: &PinViewsConfig) -> Result<(), String> {
 }
 
 fn validate_resolve_valuations_config(config: &ResolveValuationsConfig) -> Result<(), String> {
-    for symbol in &config.symbol_configs {
-        validate_symbol_config(symbol).map_err(|error| error.to_string())?;
-    }
-    validate_symbol_keys(&config.symbol_configs)?;
+    ValidatedSymbolConfigs::new(config.symbol_configs.clone())
+        .map(|_| ())
+        .map_err(|error| error.to_string())?;
     validate_valuation_source_registry(&config.valuation_source_registry)
         .map_err(|error| error.to_string())
 }
@@ -1691,32 +1690,6 @@ fn observation_values(
     }
     values.sort_by_key(|value| value.quote);
     values
-}
-
-fn validate_wallet_keys(wallets: &[WalletConfig]) -> Result<(), String> {
-    let mut seen = BTreeSet::new();
-    for wallet in wallets {
-        if !seen.insert(wallet.wallet_id.as_str()) {
-            return Err(format!(
-                "duplicate portfolio wallet domain key `{}`",
-                wallet.wallet_id
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn validate_symbol_keys(symbols: &[SymbolConfig]) -> Result<(), String> {
-    let mut seen = BTreeSet::new();
-    for symbol in symbols {
-        if !seen.insert(symbol.symbol_id.as_str()) {
-            return Err(format!(
-                "duplicate portfolio symbol domain key `{}`",
-                symbol.symbol_id
-            ));
-        }
-    }
-    Ok(())
 }
 
 fn validate_observe_batch_config(config: &ObserveBatchConfig) -> Result<(), String> {
