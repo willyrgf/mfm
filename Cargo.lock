@@ -2331,6 +2331,7 @@ dependencies = [
  "num-bigint",
  "num-traits",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

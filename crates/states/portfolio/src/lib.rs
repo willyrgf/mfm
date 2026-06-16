@@ -200,14 +200,12 @@ impl PortfolioReadBackend for UnavailablePortfolioReadBackend {
 }
 
 /// Root typed portfolio workflow config.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, MfmConfig)]
+#[derive(Debug, Clone, Serialize, PartialEq, MfmConfig)]
 #[mfm(
     schema = "mfm.portfolio.config.workflow",
     validate = "validate_portfolio_workflow_config"
 )]
 pub struct PortfolioWorkflowConfig {
-    /// Workflow config contract version.
-    workflow_version: u64,
     /// Canonical portfolio config.
     portfolio: PortfolioConfig,
     /// Canonical valuation source registry.
@@ -221,17 +219,11 @@ impl PortfolioWorkflowConfig {
         valuation_source_registry: ValuationSourceRegistry,
     ) -> Result<Self, ConfigError> {
         let config = Self {
-            workflow_version: 1,
             portfolio,
             valuation_source_registry,
         };
         validate_portfolio_workflow_config(&config).map_err(ConfigError::new)?;
         Ok(config)
-    }
-
-    /// Returns the workflow config contract version.
-    pub const fn workflow_version(&self) -> u64 {
-        self.workflow_version
     }
 
     /// Returns the canonical portfolio config.
@@ -242,6 +234,26 @@ impl PortfolioWorkflowConfig {
     /// Returns the canonical valuation source registry.
     pub const fn valuation_source_registry(&self) -> &ValuationSourceRegistry {
         &self.valuation_source_registry
+    }
+}
+
+impl<'de> Deserialize<'de> for PortfolioWorkflowConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawPortfolioWorkflowConfig {
+            portfolio: PortfolioConfig,
+            valuation_source_registry: ValuationSourceRegistry,
+        }
+
+        let raw = RawPortfolioWorkflowConfig::deserialize(deserializer)?;
+        Ok(Self {
+            portfolio: raw.portfolio,
+            valuation_source_registry: raw.valuation_source_registry,
+        })
     }
 }
 
@@ -303,14 +315,12 @@ impl ResolveSubjectsConfig {
 }
 
 /// Config for execution-view pinning.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, MfmConfig)]
+#[derive(Debug, Clone, Serialize, PartialEq, MfmConfig)]
 #[mfm(
     schema = "mfm.portfolio.config.pin_views",
     validate = "validate_pin_views_config"
 )]
 pub struct PinViewsConfig {
-    /// Pinning config contract version.
-    pin_version: u64,
     /// Networks to pin.
     networks: Vec<NetworkConfig>,
 }
@@ -318,22 +328,32 @@ pub struct PinViewsConfig {
 impl PinViewsConfig {
     /// Creates validated view-pinning config.
     pub fn new(networks: Vec<NetworkConfig>) -> Result<Self, ConfigError> {
-        let config = Self {
-            pin_version: 1,
-            networks,
-        };
+        let config = Self { networks };
         validate_pin_views_config(&config).map_err(ConfigError::new)?;
         Ok(config)
-    }
-
-    /// Returns the pinning config contract version.
-    pub const fn pin_version(&self) -> u64 {
-        self.pin_version
     }
 
     /// Returns the networks to pin.
     pub fn networks(&self) -> &[NetworkConfig] {
         &self.networks
+    }
+}
+
+impl<'de> Deserialize<'de> for PinViewsConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawPinViewsConfig {
+            networks: Vec<NetworkConfig>,
+        }
+
+        let raw = RawPinViewsConfig::deserialize(deserializer)?;
+        Ok(Self {
+            networks: raw.networks,
+        })
     }
 }
 
@@ -423,25 +443,28 @@ impl ObserveBatchConfig {
 }
 
 /// Config for observation fan-in.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
-#[mfm(
-    schema = "mfm.portfolio.config.merge_observations",
-    validate = "validate_merge_observations_config"
-)]
-pub struct MergeObservationsConfig {
-    /// Merge config contract version.
-    merge_version: u64,
-}
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, MfmConfig)]
+#[mfm(schema = "mfm.portfolio.config.merge_observations")]
+pub struct MergeObservationsConfig {}
 
 impl MergeObservationsConfig {
     /// Creates validated observation-merge config.
     pub fn new() -> Self {
-        Self { merge_version: 1 }
+        Self {}
     }
+}
 
-    /// Returns the merge config contract version.
-    pub const fn merge_version(&self) -> u64 {
-        self.merge_version
+impl<'de> Deserialize<'de> for MergeObservationsConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawMergeObservationsConfig {}
+
+        let _raw = RawMergeObservationsConfig::deserialize(deserializer)?;
+        Ok(Self::new())
     }
 }
 
@@ -512,9 +535,6 @@ impl ProjectReportConfig {
 }
 
 fn validate_portfolio_workflow_config(config: &PortfolioWorkflowConfig) -> Result<(), String> {
-    if config.workflow_version != 1 {
-        return Err("unsupported portfolio workflow config version".to_owned());
-    }
     ValidatedPortfolioBundle::new(
         config.portfolio.clone(),
         config.valuation_source_registry.clone(),
@@ -536,9 +556,6 @@ fn validate_resolve_subjects_config(config: &ResolveSubjectsConfig) -> Result<()
 }
 
 fn validate_pin_views_config(config: &PinViewsConfig) -> Result<(), String> {
-    if config.pin_version != 1 {
-        return Err("unsupported portfolio pin config version".to_owned());
-    }
     ValidatedNetworkConfigs::new(config.networks.clone())
         .map(|_| ())
         .map_err(|error| error.to_string())
@@ -550,14 +567,6 @@ fn validate_resolve_valuations_config(config: &ResolveValuationsConfig) -> Resul
         .map_err(|error| error.to_string())?;
     validate_valuation_source_registry(&config.valuation_source_registry)
         .map_err(|error| error.to_string())
-}
-
-fn validate_merge_observations_config(config: &MergeObservationsConfig) -> Result<(), String> {
-    if config.merge_version == 1 {
-        Ok(())
-    } else {
-        Err("unsupported portfolio merge config version".to_owned())
-    }
 }
 
 fn validate_assemble_snapshot_config(config: &AssembleSnapshotConfig) -> Result<(), String> {
@@ -1074,9 +1083,7 @@ impl ReadState for ObserveBatchState {
 }
 
 /// State that merges non-empty observation batches.
-pub struct MergeObservationsState {
-    config: MergeObservationsConfig,
-}
+pub struct MergeObservationsState;
 
 impl StateSpec for MergeObservationsState {
     type Config = MergeObservationsConfig;
@@ -1098,15 +1105,13 @@ impl StateSpec for MergeObservationsState {
     }
 
     fn new(config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
-        Ok(Self {
-            config: config.into_inner(),
-        })
+        let _config = config.into_inner();
+        Ok(Self)
     }
 }
 
 impl PureState for MergeObservationsState {
     fn run(&self, input: Self::Input) -> StateResult<Self::Output> {
-        let _ = self.config.merge_version();
         Ok(merge_observation_batches(input))
     }
 }
@@ -2053,6 +2058,23 @@ mod tests {
     use super::*;
     use mfm_portfolio_model::symbol::{SymbolKind, SymbolValuationConfig};
     use mfm_values::MfmConfig as _;
+
+    #[test]
+    fn removed_portfolio_version_fields_are_rejected_on_decode() {
+        let workflow_error =
+            serde_json::from_str::<PortfolioWorkflowConfig>(r#"{"workflow_version":1}"#)
+                .expect_err("stale workflow version must fail");
+        assert!(workflow_error.to_string().contains("unknown field"));
+
+        let pin_error =
+            serde_json::from_str::<PinViewsConfig>(r#"{"pin_version":1,"networks":[]}"#)
+                .expect_err("stale pin version must fail");
+        assert!(pin_error.to_string().contains("unknown field"));
+
+        let merge_error = serde_json::from_str::<MergeObservationsConfig>(r#"{"merge_version":1}"#)
+            .expect_err("stale merge version must fail");
+        assert!(merge_error.to_string().contains("unknown field"));
+    }
 
     #[test]
     fn observe_batch_mfm_config_validation_rejects_network_mismatch() {

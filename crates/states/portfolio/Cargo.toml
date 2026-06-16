@@ -27,3 +27,4 @@ mfm-portfolio-config = { path = "../../portfolio-config", version = "0.1.0" }
 mfm-portfolio-model = { path = "../../portfolio/model", version = "0.1.0" }
 
 [dev-dependencies]
+serde_json = { workspace = true }
