@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use mfm_certify::{CertifiedDescriptorSet, CertifiedSpecCertificate, CertifiedTypedSpec};
+use mfm_certify::{
+    CertifiedDescriptorSet, CertifiedSpecCertificate, CertifiedSpecGraph, CertifiedTypedSpec,
+};
 use mfm_ids::{CellId, DescriptorId, NodeId, SpecHash};
 #[cfg(test)]
 use mfm_ids::{ContentDigest, DigestAlgorithm};
@@ -24,9 +26,14 @@ impl CertifiedRuntimeSpec {
     /// Builds deterministic runtime indexes from certifier-backed typed-spec authority.
     pub fn new(certified: CertifiedTypedSpec) -> Result<Self> {
         let parts = certified.into_parts();
-        let state_descriptors = certified_state_descriptors(&parts.descriptor_set);
+        let state_descriptors = certified_state_descriptors(parts.graph.descriptors());
         let _framework_lifecycle = parts.framework_lifecycle;
-        Self::from_verified_parts(parts.envelope, parts.certificate, state_descriptors)
+        Self::from_certified_graph(
+            parts.envelope,
+            parts.certificate,
+            state_descriptors,
+            parts.graph,
+        )
     }
 
     #[cfg(test)]
@@ -72,13 +79,12 @@ impl CertifiedRuntimeSpec {
         Self::from_verified_parts(envelope, certificate, state_descriptors)
     }
 
+    #[cfg(test)]
     fn from_verified_parts(
         envelope: spec::HashedSpecEnvelope,
         certificate: CertifiedSpecCertificate,
         state_descriptors: BTreeMap<DescriptorId, spec::StateDescriptorIdentity>,
     ) -> Result<Self> {
-        envelope.verify_hash()?;
-
         let mut cells = BTreeMap::new();
         for cell in &envelope.spec.cells {
             if cells.insert(cell.cell_id.clone(), cell.clone()).is_some() {
@@ -99,6 +105,55 @@ impl CertifiedRuntimeSpec {
             }
         }
         let remediations = envelope.spec.remediations.clone();
+
+        Self::from_verified_indexes(
+            envelope,
+            certificate,
+            state_descriptors,
+            nodes,
+            remediations,
+            cells,
+        )
+    }
+
+    fn from_certified_graph(
+        envelope: spec::HashedSpecEnvelope,
+        certificate: CertifiedSpecCertificate,
+        state_descriptors: BTreeMap<DescriptorId, spec::StateDescriptorIdentity>,
+        graph: CertifiedSpecGraph,
+    ) -> Result<Self> {
+        let cells = graph
+            .cells()
+            .map(|(cell_id, cell)| (cell_id.clone(), cell.clone()))
+            .collect();
+        let nodes = graph
+            .forward_nodes()
+            .map(|node| (node.node_id.clone(), node.clone()))
+            .collect();
+        let remediations = graph
+            .remediations()
+            .map(|(forward_node_id, node)| (forward_node_id.clone(), node.clone()))
+            .collect();
+
+        Self::from_verified_indexes(
+            envelope,
+            certificate,
+            state_descriptors,
+            nodes,
+            remediations,
+            cells,
+        )
+    }
+
+    fn from_verified_indexes(
+        envelope: spec::HashedSpecEnvelope,
+        certificate: CertifiedSpecCertificate,
+        state_descriptors: BTreeMap<DescriptorId, spec::StateDescriptorIdentity>,
+        nodes: BTreeMap<NodeId, spec::NodeSpec>,
+        remediations: BTreeMap<NodeId, spec::NodeSpec>,
+        cells: BTreeMap<CellId, spec::CellSpec>,
+    ) -> Result<Self> {
+        envelope.verify_hash()?;
 
         let runtime = Self {
             envelope,

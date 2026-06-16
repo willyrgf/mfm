@@ -192,8 +192,8 @@ impl ValidatedTypedExecutionSpec {
         &self.envelope.spec_hash
     }
 
-    fn into_envelope(self) -> spec::HashedSpecEnvelope {
-        self.envelope
+    fn into_parts(self) -> (spec::HashedSpecEnvelope, CertifiedSpecGraph) {
+        (self.envelope, self.graph)
     }
 }
 
@@ -209,10 +209,6 @@ pub struct CertifiedDescriptorSet {
 }
 
 impl CertifiedDescriptorSet {
-    fn from_validated_spec(validated: &ValidatedTypedExecutionSpec) -> Result<Self> {
-        Ok(validated.graph().descriptors().clone())
-    }
-
     fn from_descriptor_index(descriptors: &DescriptorIndex<'_>) -> Self {
         Self {
             states: descriptors
@@ -270,6 +266,7 @@ pub struct CertifiedSpecGraph {
     value_lineages: BTreeMap<String, spec::ValueLineage>,
     cells: BTreeMap<String, spec::CellSpec>,
     forward_nodes: BTreeMap<String, spec::NodeSpec>,
+    remediations: BTreeMap<NodeId, spec::NodeSpec>,
 }
 
 impl CertifiedSpecGraph {
@@ -280,6 +277,7 @@ impl CertifiedSpecGraph {
         value_lineages: BTreeMap<String, spec::ValueLineage>,
         cells: BTreeMap<String, spec::CellSpec>,
         forward_nodes: BTreeMap<String, spec::NodeSpec>,
+        remediations: BTreeMap<NodeId, spec::NodeSpec>,
     ) -> Self {
         Self {
             scope_ids,
@@ -288,6 +286,7 @@ impl CertifiedSpecGraph {
             value_lineages,
             cells,
             forward_nodes,
+            remediations,
         }
     }
 
@@ -321,6 +320,11 @@ impl CertifiedSpecGraph {
         self.cells.len()
     }
 
+    /// Iterates certified cells in deterministic id order.
+    pub fn cells(&self) -> impl Iterator<Item = (&CellId, &spec::CellSpec)> {
+        self.cells.values().map(|cell| (&cell.cell_id, cell))
+    }
+
     /// Returns the certified cell for `cell_id`, when present.
     pub fn cell(&self, cell_id: &CellId) -> Option<&spec::CellSpec> {
         self.cells.get(cell_id.as_str())
@@ -339,6 +343,24 @@ impl CertifiedSpecGraph {
     /// Iterates certified forward nodes in deterministic id order.
     pub fn forward_nodes(&self) -> impl Iterator<Item = &spec::NodeSpec> {
         self.forward_nodes.values()
+    }
+
+    /// Returns the number of certified remediation nodes.
+    pub fn remediation_count(&self) -> usize {
+        self.remediations.len()
+    }
+
+    /// Returns the certified remediation node linked to `forward_node_id`, when present.
+    pub fn remediation_for_forward_node(
+        &self,
+        forward_node_id: &NodeId,
+    ) -> Option<&spec::NodeSpec> {
+        self.remediations.get(forward_node_id)
+    }
+
+    /// Iterates certified remediation nodes keyed by their forward side-effect node id.
+    pub fn remediations(&self) -> impl Iterator<Item = (&NodeId, &spec::NodeSpec)> {
+        self.remediations.iter()
     }
 }
 
@@ -389,10 +411,8 @@ pub struct CertifiedFrameworkLifecycle {
 }
 
 impl CertifiedFrameworkLifecycle {
-    fn from_validated_spec(
-        validated: &ValidatedTypedExecutionSpec,
-        descriptors: &CertifiedDescriptorSet,
-    ) -> Result<Self> {
+    fn from_validated_spec(validated: &ValidatedTypedExecutionSpec) -> Result<Self> {
+        let descriptors = validated.graph().descriptors();
         let mut bootstrap = None;
         let mut render = None;
         let mut retention = None;
@@ -798,7 +818,6 @@ pub struct CertifiedRemediationLink<'a> {
 pub struct CertifiedTypedSpec {
     validated: ValidatedTypedExecutionSpec,
     certificate: CertifiedSpecCertificate,
-    descriptor_set: CertifiedDescriptorSet,
     framework_lifecycle: CertifiedFrameworkLifecycle,
 }
 
@@ -830,7 +849,7 @@ impl CertifiedTypedSpec {
 
     /// Returns the certified descriptor authority.
     pub fn descriptor_set(&self) -> &CertifiedDescriptorSet {
-        &self.descriptor_set
+        self.validated.graph().descriptors()
     }
 
     /// Returns the certified framework lifecycle authority.
@@ -840,10 +859,11 @@ impl CertifiedTypedSpec {
 
     /// Consumes the authority and returns runtime construction parts.
     pub fn into_parts(self) -> CertifiedTypedSpecParts {
+        let (envelope, graph) = self.validated.into_parts();
         CertifiedTypedSpecParts {
-            envelope: self.validated.into_envelope(),
+            envelope,
+            graph,
             certificate: self.certificate,
-            descriptor_set: self.descriptor_set,
             framework_lifecycle: self.framework_lifecycle,
         }
     }
@@ -859,10 +879,10 @@ impl CertifiedTypedSpec {
 pub struct CertifiedTypedSpecParts {
     /// Hash-only typed spec envelope covered by the certificate.
     pub envelope: spec::HashedSpecEnvelope,
+    /// Certified graph and index authority for the typed spec.
+    pub graph: CertifiedSpecGraph,
     /// Verified certificate evidence for the typed spec.
     pub certificate: CertifiedSpecCertificate,
-    /// Certified descriptor authority for the typed spec.
-    pub descriptor_set: CertifiedDescriptorSet,
     /// Certified static framework lifecycle authority for the typed spec.
     pub framework_lifecycle: CertifiedFrameworkLifecycle,
 }
@@ -1804,13 +1824,10 @@ pub fn certify_typed_spec(
 ) -> Result<CertifiedTypedSpec> {
     let validated = validate_typed_spec(input.into().into_raw_spec(), registry)?;
     let certificate = certificate_for_envelope(validated.envelope(), registry)?;
-    let descriptor_set = CertifiedDescriptorSet::from_validated_spec(&validated)?;
-    let framework_lifecycle =
-        CertifiedFrameworkLifecycle::from_validated_spec(&validated, &descriptor_set)?;
+    let framework_lifecycle = CertifiedFrameworkLifecycle::from_validated_spec(&validated)?;
     Ok(CertifiedTypedSpec {
         validated,
         certificate,
-        descriptor_set,
         framework_lifecycle,
     })
 }
@@ -3302,6 +3319,7 @@ fn validate_typed_spec(
         lineage_index,
         cell_index,
         node_index,
+        spec.remediations.clone(),
     );
     Ok(ValidatedTypedExecutionSpec::new(envelope, graph))
 }
@@ -7086,6 +7104,7 @@ mod tests {
         assert_eq!(graph.value_lineage_count(), spec.value_lineages.len());
         assert_eq!(graph.cell_count(), spec.cells.len());
         assert_eq!(graph.forward_node_count(), spec.nodes.len());
+        assert_eq!(graph.remediation_count(), spec.remediations.len());
         assert!(graph.cell(lifecycle.bootstrap().output_cell()).is_some());
         assert!(graph
             .forward_node(lifecycle.bootstrap().node_id())
