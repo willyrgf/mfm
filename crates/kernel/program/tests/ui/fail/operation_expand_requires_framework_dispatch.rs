@@ -34,7 +34,7 @@ impl Operation for ForwardingOperation {
 
     fn expand<'program, 'scope>(
         &self,
-        config: Self::Config,
+        config: mfm_program::ValidatedConfig<Self::Config>,
         input: Self::Input<'program, 'scope>,
         builder: &mut OperationExpansion<'program, 'scope>,
         dispatch: OperationExpansionDispatch<Self>,

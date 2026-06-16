@@ -82,11 +82,12 @@ impl Operation for PortfolioTrackerWorkflowOperation {
 
     fn expand<'program, 'scope>(
         &self,
-        config: Self::Config,
+        config: mfm_program::ValidatedConfig<Self::Config>,
         _input: Self::Input<'program, 'scope>,
         builder: &mut OperationExpansion<'program, 'scope>,
         _dispatch: mfm_program::OperationExpansionDispatch<Self>,
     ) -> mfm_program::Result<Self::Output<'program, 'scope>> {
+        let config = config.into_inner();
         let portfolio = config.portfolio().clone().normalized();
         let valuation_source_registry = config.valuation_source_registry().clone().normalized();
         let networks_by_id = networks_by_id(&portfolio.networks)?;

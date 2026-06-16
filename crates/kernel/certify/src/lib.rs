@@ -6436,8 +6436,10 @@ mod tests {
             "mfm.certify.test.multiply"
         }
 
-        fn new(config: Self::Config) -> program::Result<Self> {
-            Ok(Self { config })
+        fn new(config: program::ValidatedConfig<Self::Config>) -> program::Result<Self> {
+            Ok(Self {
+                config: config.into_inner(),
+            })
         }
     }
 
@@ -6504,8 +6506,10 @@ mod tests {
             "mfm.certify.test.mutating"
         }
 
-        fn new(config: Self::Config) -> program::Result<Self> {
-            Ok(Self { config })
+        fn new(config: program::ValidatedConfig<Self::Config>) -> program::Result<Self> {
+            Ok(Self {
+                config: config.into_inner(),
+            })
         }
     }
 
@@ -6578,7 +6582,7 @@ mod tests {
 
         fn expand<'p, 's>(
             &self,
-            config: Self::Config,
+            config: program::ValidatedConfig<Self::Config>,
             input: Self::Input<'p, 's>,
             builder: &mut mfm_program::OperationExpansion<'p, 's>,
             _dispatch: mfm_program::OperationExpansionDispatch<Self>,
@@ -6586,7 +6590,7 @@ mod tests {
             let result = builder.state::<MultiplyState, _>(
                 StateKey::new("multiply-state")?,
                 TestConfig {
-                    multiplier: config.multiplier,
+                    multiplier: config.as_ref().multiplier,
                 },
                 input,
             )?;

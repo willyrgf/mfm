@@ -60,8 +60,10 @@ impl mfm_program::StateSpec for TryPureState {
         "try_pure_state"
     }
 
-    fn new(config: Self::Config) -> mfm_program::Result<Self> {
-        Ok(Self { config })
+    fn new(config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
+        Ok(Self {
+            config: config.into_inner(),
+        })
     }
 }
 
@@ -134,8 +136,10 @@ macro_rules! impl_try_side_effect_state {
                 $name
             }
 
-            fn new(config: Self::Config) -> mfm_program::Result<Self> {
-                Ok(Self { config })
+            fn new(config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
+                Ok(Self {
+                    config: config.into_inner(),
+                })
             }
         }
 
@@ -225,14 +229,14 @@ impl mfm_program::Operation for TryOperation {
 
     fn expand<'program, 'scope>(
         &self,
-        config: Self::Config,
+        config: mfm_program::ValidatedConfig<Self::Config>,
         input: Self::Input<'program, 'scope>,
         builder: &mut mfm_program::OperationExpansion<'program, 'scope>,
         _dispatch: mfm_program::OperationExpansionDispatch<Self>,
     ) -> mfm_program::Result<Self::Output<'program, 'scope>> {
         let result = builder.state::<TryPureState, _>(
             mfm_program::StateKey::new("try-operation/state")?,
-            config,
+            config.into_inner(),
             input,
         )?;
         Ok(TryOperationOutputs { result })

@@ -893,8 +893,10 @@ impl StateSpec for PrepareSourcesState {
         adapter_binding()
     }
 
-    fn new(config: Self::Config) -> mfm_program::Result<Self> {
-        Ok(Self { config })
+    fn new(config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
+        Ok(Self {
+            config: config.into_inner(),
+        })
     }
 }
 
@@ -930,8 +932,10 @@ impl StateSpec for ResolveSubjectsState {
         "mfm.portfolio.resolve_subjects"
     }
 
-    fn new(config: Self::Config) -> mfm_program::Result<Self> {
-        Ok(Self { config })
+    fn new(config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
+        Ok(Self {
+            config: config.into_inner(),
+        })
     }
 }
 
@@ -969,8 +973,10 @@ impl StateSpec for PinViewsState {
         adapter_binding()
     }
 
-    fn new(config: Self::Config) -> mfm_program::Result<Self> {
-        Ok(Self { config })
+    fn new(config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
+        Ok(Self {
+            config: config.into_inner(),
+        })
     }
 }
 
@@ -1010,8 +1016,10 @@ impl StateSpec for ResolveValuationsState {
         "mfm.portfolio.resolve_valuations"
     }
 
-    fn new(config: Self::Config) -> mfm_program::Result<Self> {
-        Ok(Self { config })
+    fn new(config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
+        Ok(Self {
+            config: config.into_inner(),
+        })
     }
 }
 
@@ -1049,8 +1057,10 @@ impl StateSpec for ObserveBatchState {
         adapter_binding()
     }
 
-    fn new(config: Self::Config) -> mfm_program::Result<Self> {
-        Ok(Self { config })
+    fn new(config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
+        Ok(Self {
+            config: config.into_inner(),
+        })
     }
 }
 
@@ -1091,8 +1101,10 @@ impl StateSpec for MergeObservationsState {
         "mfm.portfolio.merge_observations"
     }
 
-    fn new(config: Self::Config) -> mfm_program::Result<Self> {
-        Ok(Self { config })
+    fn new(config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
+        Ok(Self {
+            config: config.into_inner(),
+        })
     }
 }
 
@@ -1127,8 +1139,10 @@ impl StateSpec for AssembleSnapshotState {
         "mfm.portfolio.assemble_snapshot"
     }
 
-    fn new(config: Self::Config) -> mfm_program::Result<Self> {
-        Ok(Self { config })
+    fn new(config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
+        Ok(Self {
+            config: config.into_inner(),
+        })
     }
 }
 
@@ -1162,8 +1176,10 @@ impl StateSpec for ProjectReportState {
         "mfm.portfolio.project_report"
     }
 
-    fn new(config: Self::Config) -> mfm_program::Result<Self> {
-        Ok(Self { config })
+    fn new(config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
+        Ok(Self {
+            config: config.into_inner(),
+        })
     }
 }
 

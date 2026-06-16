@@ -31,7 +31,7 @@ impl mfm_program::StateSpec for StateWithoutRunner {
         "state_without_runner"
     }
 
-    fn new(_config: Self::Config) -> mfm_program::Result<Self> {
+    fn new(_config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
         Ok(Self)
     }
 }

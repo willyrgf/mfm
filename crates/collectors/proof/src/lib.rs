@@ -394,8 +394,10 @@ impl StateSpec for ProofReadFactState {
         adapter_binding()
     }
 
-    fn new(config: Self::Config) -> mfm_program::Result<Self> {
-        Ok(Self { config })
+    fn new(config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
+        Ok(Self {
+            config: config.into_inner(),
+        })
     }
 }
 
@@ -437,8 +439,10 @@ impl StateSpec for ProofApplySideEffectState {
         adapter_binding()
     }
 
-    fn new(config: Self::Config) -> mfm_program::Result<Self> {
-        Ok(Self { config })
+    fn new(config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
+        Ok(Self {
+            config: config.into_inner(),
+        })
     }
 }
 
@@ -516,7 +520,7 @@ impl StateSpec for ProofAssembleOutputState {
         "mfm.proof.assemble_output"
     }
 
-    fn new(_config: Self::Config) -> mfm_program::Result<Self> {
+    fn new(_config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
         Ok(Self)
     }
 }

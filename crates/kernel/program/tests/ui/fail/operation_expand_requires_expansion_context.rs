@@ -9,7 +9,8 @@ fn call_expand_directly<'program, 'scope>(
     input: mfm_program::Handle<'program, 'scope, TryValue>,
     builder: &mut ScopeBuilder<'program, 'scope>,
 ) -> mfm_program::Result<TryOperationOutputs<'program, 'scope>> {
-    operation.expand(TryConfig { multiplier: 2 }, input, builder)
+    let config = mfm_program::ValidatedConfig::new(TryConfig { multiplier: 2 }).unwrap();
+    operation.expand(config, input, builder)
 }
 
 fn main() {}

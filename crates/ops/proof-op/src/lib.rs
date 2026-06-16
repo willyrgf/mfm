@@ -66,11 +66,12 @@ impl Operation for ProofWorkflowOperation {
 
     fn expand<'program, 'scope>(
         &self,
-        config: Self::Config,
+        config: mfm_program::ValidatedConfig<Self::Config>,
         _input: Self::Input<'program, 'scope>,
         builder: &mut OperationExpansion<'program, 'scope>,
         _dispatch: mfm_program::OperationExpansionDispatch<Self>,
     ) -> mfm_program::Result<Self::Output<'program, 'scope>> {
+        let config = config.into_inner();
         let fact = builder.state::<ProofReadFactState, _>(
             StateKey::new("read_fact")?,
             ProofReadConfig {

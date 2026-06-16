@@ -32,11 +32,11 @@ pub use mfm_spec::v1::{
     ManualAuthorizationVerifierId, ManualSigningSchemeSpec, OperatorAuthorityId,
     OperatorAuthorityMemberSpec, OperatorId, OperatorPublicIdentity, ResourceNamespace,
 };
-pub use mfm_values::NonEmpty;
 use mfm_values::{
     MfmConfig, MfmValue, PublicOutputDescriptor, SchemaDescriptor, SchemaShape, StateInput,
     ValueTerminalPolicy,
 };
+pub use mfm_values::{NonEmpty, ValidatedConfig};
 
 #[cfg(test)]
 mod tests;
@@ -409,8 +409,8 @@ pub trait StateSpec: Send + Sync + 'static {
         Ok(Vec::new())
     }
 
-    /// Constructs the executable state from validated config.
-    fn new(config: Self::Config) -> Result<Self>
+    /// Constructs the executable state from validated config authority.
+    fn new(config: ValidatedConfig<Self::Config>) -> Result<Self>
     where
         Self: Sized;
 }
@@ -436,7 +436,7 @@ pub trait Operation: Send + Sync + 'static {
     /// Expands this operation into typed state and child-operation calls.
     fn expand<'program, 'scope>(
         &self,
-        config: Self::Config,
+        config: ValidatedConfig<Self::Config>,
         input: Self::Input<'program, 'scope>,
         builder: &mut OperationExpansion<'program, 'scope>,
         dispatch: OperationExpansionDispatch<Self>,
@@ -3981,6 +3981,8 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
         S::Caps: CapabilitySetFor<S::Effect>,
         I: IntoStateInput<'program, 'scope, S::Input>,
     {
+        let config =
+            ValidatedConfig::new(config).map_err(|error| PlanError::Value(error.to_string()))?;
         let config_binding = canonical_config_binding::<S::Config>(&config)?;
         let input = input.into_binding()?;
         let adapter_bindings = S::adapter_bindings()?;
@@ -4154,6 +4156,8 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
         if self.operation_keys.contains(&key_string) {
             return Err(PlanError::DuplicateOperationKey(key.as_str().to_owned()));
         }
+        let config =
+            ValidatedConfig::new(config).map_err(|error| PlanError::Value(error.to_string()))?;
         let config_binding = canonical_config_binding::<O::Config>(&config)?;
         let operation_input = input.into_operation_input()?;
         let input_binding = operation_input.input_binding()?;
@@ -5113,12 +5117,11 @@ fn bridge_ref_key(bridge_ref: &BridgeRef) -> String {
     )
 }
 
-fn canonical_config_binding<C: MfmConfig>(config: &C) -> Result<ConfigBindingSpec> {
-    config
-        .validate()
-        .map_err(|error| PlanError::Value(error.to_string()))?;
-    let json =
-        serde_json::to_string(config).map_err(|error| PlanError::Serialize(error.to_string()))?;
+fn canonical_config_binding<C: MfmConfig>(
+    config: &ValidatedConfig<C>,
+) -> Result<ConfigBindingSpec> {
+    let json = serde_json::to_string(config.as_ref())
+        .map_err(|error| PlanError::Serialize(error.to_string()))?;
     let canonical = PlainCanonicalJsonBytes::from_json_str(&json)
         .map_err(|error| PlanError::Canonical(error.to_string()))?;
     let schema_id = C::schema_id().map_err(|error| PlanError::Value(error.to_string()))?;

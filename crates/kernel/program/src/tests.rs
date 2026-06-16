@@ -201,8 +201,10 @@ impl StateSpec for MultiplyState {
         "multiply"
     }
 
-    fn new(config: Self::Config) -> Result<Self> {
-        Ok(Self { config })
+    fn new(config: ValidatedConfig<Self::Config>) -> Result<Self> {
+        Ok(Self {
+            config: config.into_inner(),
+        })
     }
 }
 
@@ -277,8 +279,10 @@ macro_rules! impl_side_effect_state_spec {
                 $name
             }
 
-            fn new(config: Self::Config) -> Result<Self> {
-                Ok(Self { config })
+            fn new(config: ValidatedConfig<Self::Config>) -> Result<Self> {
+                Ok(Self {
+                    config: config.into_inner(),
+                })
             }
         }
 
@@ -370,14 +374,14 @@ impl Operation for MultiplyOperation {
 
     fn expand<'program, 'scope>(
         &self,
-        config: Self::Config,
+        config: ValidatedConfig<Self::Config>,
         input: Self::Input<'program, 'scope>,
         builder: &mut OperationExpansion<'program, 'scope>,
         _dispatch: OperationExpansionDispatch<Self>,
     ) -> Result<Self::Output<'program, 'scope>> {
         let result = builder.state::<MultiplyState, _>(
             StateKey::new("multiply-operation/state")?,
-            config,
+            config.into_inner(),
             input,
         )?;
         Ok(LaunchOperationOutputs { result })
@@ -413,13 +417,16 @@ impl Operation for FailingOperation {
 
     fn expand<'program, 'scope>(
         &self,
-        config: Self::Config,
+        config: ValidatedConfig<Self::Config>,
         input: Self::Input<'program, 'scope>,
         builder: &mut OperationExpansion<'program, 'scope>,
         _dispatch: OperationExpansionDispatch<Self>,
     ) -> Result<Self::Output<'program, 'scope>> {
-        let _planned =
-            builder.state::<MultiplyState, _>(StateKey::new("rollback/state")?, config, input)?;
+        let _planned = builder.state::<MultiplyState, _>(
+            StateKey::new("rollback/state")?,
+            config.into_inner(),
+            input,
+        )?;
         builder.child_scope(ScopeKey::new("rollback/child")?, |child| {
             child.bridge_to_parent(())
         })?;

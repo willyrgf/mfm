@@ -172,11 +172,12 @@ impl Operation for DeployContractOperation {
 
     fn expand<'program, 'scope>(
         &self,
-        config: Self::Config,
+        config: mfm_program::ValidatedConfig<Self::Config>,
         _input: Self::Input<'program, 'scope>,
         builder: &mut OperationExpansion<'program, 'scope>,
         _dispatch: mfm_program::OperationExpansionDispatch<Self>,
     ) -> mfm_program::Result<Self::Output<'program, 'scope>> {
+        let config = config.into_inner();
         let deployed = builder
             .side_effect::<DeployContractState, _>(
                 StateKey::new("deploy")?,
@@ -211,11 +212,12 @@ impl Operation for ConfigureContractOperation {
 
     fn expand<'program, 'scope>(
         &self,
-        config: Self::Config,
+        config: mfm_program::ValidatedConfig<Self::Config>,
         deployed: Self::Input<'program, 'scope>,
         builder: &mut OperationExpansion<'program, 'scope>,
         _dispatch: mfm_program::OperationExpansionDispatch<Self>,
     ) -> mfm_program::Result<Self::Output<'program, 'scope>> {
+        let config = config.into_inner();
         let configured = builder
             .side_effect::<ConfigureContractState, _>(
                 StateKey::new("configure")?,
@@ -250,11 +252,12 @@ impl Operation for ValidateContractOperation {
 
     fn expand<'program, 'scope>(
         &self,
-        config: Self::Config,
+        config: mfm_program::ValidatedConfig<Self::Config>,
         configured: Self::Input<'program, 'scope>,
         builder: &mut OperationExpansion<'program, 'scope>,
         _dispatch: mfm_program::OperationExpansionDispatch<Self>,
     ) -> mfm_program::Result<Self::Output<'program, 'scope>> {
+        let config = config.into_inner();
         let validation_report = builder.state::<ValidateContractState, _>(
             StateKey::new("validate")?,
             config,
@@ -286,11 +289,12 @@ impl Operation for ContractLifecycleOperation {
 
     fn expand<'program, 'scope>(
         &self,
-        config: Self::Config,
+        config: mfm_program::ValidatedConfig<Self::Config>,
         _input: Self::Input<'program, 'scope>,
         builder: &mut OperationExpansion<'program, 'scope>,
         _dispatch: mfm_program::OperationExpansionDispatch<Self>,
     ) -> mfm_program::Result<Self::Output<'program, 'scope>> {
+        let config = config.into_inner();
         let deployed = builder
             .side_effect::<DeployContractState, _>(
                 StateKey::new("deploy")?,

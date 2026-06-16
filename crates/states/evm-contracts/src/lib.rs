@@ -381,8 +381,10 @@ impl StateSpec for DeployContractState {
         adapter_binding()
     }
 
-    fn new(config: Self::Config) -> mfm_program::Result<Self> {
-        Ok(Self { config })
+    fn new(config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
+        Ok(Self {
+            config: config.into_inner(),
+        })
     }
 }
 
@@ -473,8 +475,10 @@ impl StateSpec for ConfigureContractState {
         adapter_binding()
     }
 
-    fn new(config: Self::Config) -> mfm_program::Result<Self> {
-        Ok(Self { config })
+    fn new(config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
+        Ok(Self {
+            config: config.into_inner(),
+        })
     }
 }
 
@@ -636,8 +640,10 @@ impl StateSpec for ValidateContractState {
         adapter_binding()
     }
 
-    fn new(config: Self::Config) -> mfm_program::Result<Self> {
-        Ok(Self { config })
+    fn new(config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
+        Ok(Self {
+            config: config.into_inner(),
+        })
     }
 }
 
@@ -693,8 +699,10 @@ impl StateSpec for ProjectConfiguredContractRefState {
         "mfm.evm.contract.project_configured_ref"
     }
 
-    fn new(config: Self::Config) -> mfm_program::Result<Self> {
-        Ok(Self { config })
+    fn new(config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
+        Ok(Self {
+            config: config.into_inner(),
+        })
     }
 }
 
@@ -782,6 +790,10 @@ mod tests {
     use super::*;
     use mfm_capabilities::CapabilitySet;
     use mfm_values::MfmValue;
+
+    fn validated_config<T: mfm_values::MfmConfig>(config: T) -> mfm_program::ValidatedConfig<T> {
+        mfm_program::ValidatedConfig::new(config).expect("valid config")
+    }
 
     fn network_json() -> serde_json::Value {
         serde_json::json!({
@@ -946,7 +958,7 @@ mod tests {
 
     #[test]
     fn deploy_intent_contains_no_signed_payload_or_secret_material() {
-        let state = DeployContractState::new(deploy_config()).expect("state");
+        let state = DeployContractState::new(validated_config(deploy_config())).expect("state");
         let intent = state.prepare_intent(&()).expect("intent");
         let json = serde_json::to_string(&intent).expect("intent json");
 
@@ -964,7 +976,8 @@ mod tests {
 
     #[test]
     fn configure_confirmation_projects_configured_typestate() {
-        let state = ConfigureContractState::new(configure_config()).expect("state");
+        let state =
+            ConfigureContractState::new(validated_config(configure_config())).expect("state");
         let input = ConfigureContractInput {
             deployed: deployed_contract(),
         };
@@ -994,7 +1007,8 @@ mod tests {
 
     #[test]
     fn configure_rejects_typestate_network_mismatch() {
-        let state = ConfigureContractState::new(configure_config()).expect("state");
+        let state =
+            ConfigureContractState::new(validated_config(configure_config())).expect("state");
         let input = ConfigureContractInput {
             deployed: deployed_contract_on_chain(2),
         };
@@ -1020,7 +1034,7 @@ mod tests {
 
     #[test]
     fn validate_report_projection_fails_closed_on_wrong_chain() {
-        let state = ValidateContractState::new(validate_config()).expect("state");
+        let state = ValidateContractState::new(validated_config(validate_config())).expect("state");
         let input = ValidateContractInput {
             configured: configured_contract(),
         };
@@ -1049,7 +1063,7 @@ mod tests {
 
     #[test]
     fn validate_rejects_typestate_network_mismatch() {
-        let state = ValidateContractState::new(validate_config()).expect("state");
+        let state = ValidateContractState::new(validated_config(validate_config())).expect("state");
         let input = ValidateContractInput {
             configured: configured_contract_on_chain(2),
         };

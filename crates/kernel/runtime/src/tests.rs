@@ -359,8 +359,10 @@ impl StateSpec for CertifierState {
         "mfm.runtime.test.multiply"
     }
 
-    fn new(config: Self::Config) -> mfm_program::Result<Self> {
-        Ok(Self { config })
+    fn new(config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
+        Ok(Self {
+            config: config.into_inner(),
+        })
     }
 }
 

@@ -64,7 +64,7 @@ use mfm_state_evm_contracts::{
     ContractTransactionSubmissions, ContractValidationReadRequest, ContractValidationReadResponse,
     DeployContractState, ValidateContractInput, ValidateContractState,
 };
-use mfm_values::MfmValue;
+use mfm_values::{MfmConfig, MfmValue};
 use serde::{Deserialize, Serialize};
 
 const REPLAY_VERIFIER_ID: &str = "mfm.evm.contract.replay.v1";
@@ -319,7 +319,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         config: &DeployPhaseConfig,
         intent: &ContractDeployIntent,
     ) -> Result<PreparedContractMutation> {
-        let expected = DeployContractState::new(config.clone())
+        let expected = DeployContractState::new(validated_config(config.clone())?)
             .map_err(state_error)?
             .prepare_intent(&())
             .map_err(state_runtime_error)?;
@@ -359,7 +359,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         input: &ConfigureContractInput,
         intent: &ContractConfigureIntent,
     ) -> Result<PreparedContractMutation> {
-        let expected = ConfigureContractState::new(config.clone())
+        let expected = ConfigureContractState::new(validated_config(config.clone())?)
             .map_err(state_error)?
             .prepare_intent(input)
             .map_err(state_runtime_error)?;
@@ -395,7 +395,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         intent: &ContractDeployIntent,
         evidence: &PreparedContractInvocation,
     ) -> Result<PreparedContractMutation> {
-        let expected = DeployContractState::new(config.clone())
+        let expected = DeployContractState::new(validated_config(config.clone())?)
             .map_err(state_error)?
             .prepare_intent(&())
             .map_err(state_runtime_error)?;
@@ -432,7 +432,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         intent: &ContractConfigureIntent,
         evidence: &PreparedContractInvocation,
     ) -> Result<PreparedContractMutation> {
-        let expected = ConfigureContractState::new(config.clone())
+        let expected = ConfigureContractState::new(validated_config(config.clone())?)
             .map_err(state_error)?
             .prepare_intent(input)
             .map_err(state_runtime_error)?;
@@ -548,7 +548,8 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         receipt: ContractTransactionReceipt,
         contract_address: Address,
     ) -> Result<mfm_evm_contract_model::DeployedContract> {
-        let state = DeployContractState::new(config.clone()).map_err(state_error)?;
+        let state =
+            DeployContractState::new(validated_config(config.clone())?).map_err(state_error)?;
         let confirmation = ContractDeployConfirmation {
             confirmation_version: 1,
             contract_address: normalize_address(&format!("{contract_address:?}"))
@@ -568,7 +569,8 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         intent: &ContractConfigureIntent,
         receipts: Vec<ContractTransactionReceipt>,
     ) -> Result<ConfiguredContract> {
-        let state = ConfigureContractState::new(config.clone()).map_err(state_error)?;
+        let state =
+            ConfigureContractState::new(validated_config(config.clone())?).map_err(state_error)?;
         let confirmation = ContractConfigureConfirmation {
             confirmation_version: 1,
             configured_block_number: receipts.iter().map(|receipt| receipt.block_number).max(),
@@ -586,7 +588,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         input: &ValidateContractInput,
         request: &ContractValidationReadRequest,
     ) -> Result<ContractValidationReadResponse> {
-        let expected = ValidateContractState::new(config.clone())
+        let expected = ValidateContractState::new(validated_config(config.clone())?)
             .map_err(state_error)?
             .read_request(input)
             .map_err(state_runtime_error)?;
@@ -1453,6 +1455,11 @@ fn state_error(error: mfm_program::PlanError) -> EvmContractAdapterError {
     EvmContractAdapterError::State(error.to_string())
 }
 
+fn validated_config<T: MfmConfig>(config: T) -> Result<mfm_program::ValidatedConfig<T>> {
+    mfm_program::ValidatedConfig::new(config)
+        .map_err(|error| EvmContractAdapterError::State(error.to_string()))
+}
+
 fn state_runtime_error(error: mfm_program::StateError) -> EvmContractAdapterError {
     EvmContractAdapterError::State(error.to_string())
 }
@@ -1612,7 +1619,7 @@ mod tests {
     }
 
     fn deploy_intent(config: &DeployPhaseConfig) -> ContractDeployIntent {
-        DeployContractState::new(config.clone())
+        DeployContractState::new(validated_config(config.clone()).expect("valid config"))
             .expect("state")
             .prepare_intent(&())
             .expect("intent")

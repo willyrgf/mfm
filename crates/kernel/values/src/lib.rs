@@ -218,6 +218,30 @@ pub trait MfmConfig: Serialize + DeserializeOwned + Send + Sync + 'static {
     }
 }
 
+/// Config value that has passed its [`MfmConfig`] semantic validation hook.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedConfig<C: MfmConfig> {
+    config: C,
+}
+
+impl<C: MfmConfig> ValidatedConfig<C> {
+    /// Validates a config value and mints validated config authority.
+    pub fn new(config: C) -> std::result::Result<Self, ConfigError> {
+        config.validate()?;
+        Ok(Self { config })
+    }
+
+    /// Returns the validated config value.
+    pub const fn as_ref(&self) -> &C {
+        &self.config
+    }
+
+    /// Consumes this authority into the validated config value.
+    pub fn into_inner(self) -> C {
+        self.config
+    }
+}
+
 /// Descriptor contract for public launch/render output surfaces.
 pub trait PublicOutputDescriptor: Send + Sync + 'static {
     /// Returns the public output schema descriptor.

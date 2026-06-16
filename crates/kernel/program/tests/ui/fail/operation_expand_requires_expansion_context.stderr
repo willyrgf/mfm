@@ -1,10 +1,10 @@
 error[E0061]: this method takes 4 arguments but 3 arguments were supplied
-  --> tests/ui/fail/operation_expand_requires_expansion_context.rs:12:15
+  --> tests/ui/fail/operation_expand_requires_expansion_context.rs:13:15
    |
-12 |     operation.expand(TryConfig { multiplier: 2 }, input, builder)
-   |               ^^^^^^---------------------------------------------
-   |                     |                                    |
-   |                     |                                    expected `&mut OperationExpansion<'_, '_>`, found `&mut ScopeBuilder<'_, '_>`
+13 |     operation.expand(config, input, builder)
+   |               ^^^^^^------------------------
+   |                     |               |
+   |                     |               expected `&mut OperationExpansion<'_, '_>`, found `&mut ScopeBuilder<'_, '_>`
    |                     argument #4 of type `mfm_program::OperationExpansionDispatch<TryOperation>` is missing
    |
    = note: expected mutable reference `&mut OperationExpansion<'_, '_>`
@@ -16,6 +16,6 @@ note: method defined here
    |        ^^^^^^
 help: provide the argument
    |
-12 -     operation.expand(TryConfig { multiplier: 2 }, input, builder)
-12 +     operation.expand(TryConfig { multiplier: 2 }, input, /* &mut OperationExpansion<'_, '_> */, /* mfm_program::OperationExpansionDispatch<TryOperation> */)
+13 -     operation.expand(config, input, builder)
+13 +     operation.expand(config, input, /* &mut OperationExpansion<'_, '_> */, /* mfm_program::OperationExpansionDispatch<TryOperation> */)
    |
