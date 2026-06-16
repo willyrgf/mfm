@@ -69,6 +69,9 @@ fn wei_amount(value: String, field: &'static str) -> Result<WeiAmount, String> {
         EvmContractScalarError::InvalidQuantity { message, .. } => {
             format!("{field} must be a valid EVM quantity: {message}")
         }
+        EvmContractScalarError::InvalidIdentity { message, .. } => {
+            format!("{field} must be a valid typed identity: {message}")
+        }
         EvmContractScalarError::Empty { .. } => format!("{field} must be non-empty"),
     })
 }

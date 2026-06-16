@@ -90,6 +90,13 @@ pub enum EvmContractScalarError {
         /// Parser diagnostic.
         message: String,
     },
+    /// A typed identity failed category-specific parsing.
+    InvalidIdentity {
+        /// Human-readable scalar kind.
+        kind: &'static str,
+        /// Parser diagnostic.
+        message: String,
+    },
 }
 
 impl fmt::Display for EvmContractScalarError {
@@ -98,6 +105,9 @@ impl fmt::Display for EvmContractScalarError {
             Self::Empty { kind } => write!(f, "{kind} must be non-empty"),
             Self::InvalidQuantity { kind, message } => {
                 write!(f, "{kind} must be a valid EVM quantity: {message}")
+            }
+            Self::InvalidIdentity { kind, message } => {
+                write!(f, "{kind} must be a valid typed identity: {message}")
             }
         }
     }
@@ -225,6 +235,164 @@ evm_string_scalar!(
     "event-name",
     "mfm.evm.contract.id.event",
     "Checked EVM ABI event name."
+);
+
+evm_string_scalar!(
+    ArtifactPort,
+    "artifact_port",
+    "artifact-port",
+    "mfm.evm.contract.id.artifact_port",
+    "Checked artifact context port name."
+);
+
+macro_rules! evidence_identity_scalar {
+    (
+        $ty:ident,
+        $target:ty,
+        $kind:literal,
+        $semantic:literal,
+        $schema:literal,
+        $doc:literal
+    ) => {
+        #[doc = $doc]
+        #[derive(
+            Clone,
+            Debug,
+            PartialEq,
+            Eq,
+            PartialOrd,
+            Ord,
+            Hash,
+            Serialize,
+            Deserialize,
+            MfmValue,
+        )]
+        #[serde(try_from = "String", into = "String")]
+        #[mfm(namespace = "mfm.evm.contract", name = $semantic, schema = $schema, transparent_string)]
+        pub struct $ty {
+            raw: String,
+        }
+
+        impl $ty {
+            /// Creates a checked evidence identity reference.
+            pub fn new(value: impl Into<String>) -> Result<Self, EvmContractScalarError> {
+                let raw = value.into();
+                require_non_empty($kind, &raw)?;
+                <$target>::parse(&raw).map_err(|error| EvmContractScalarError::InvalidIdentity {
+                    kind: $kind,
+                    message: error.to_string(),
+                })?;
+                Ok(Self { raw })
+            }
+
+            /// Returns the canonical string representation.
+            pub fn as_str(&self) -> &str {
+                &self.raw
+            }
+
+            /// Parses this checked reference into the corresponding kernel identity.
+            pub fn typed(&self) -> Result<$target, String> {
+                <$target>::parse(&self.raw).map_err(|error| error.to_string())
+            }
+
+            /// Consumes this authority into its canonical string representation.
+            pub fn into_string(self) -> String {
+                self.raw
+            }
+        }
+
+        impl AsRef<str> for $ty {
+            fn as_ref(&self) -> &str {
+                self.as_str()
+            }
+        }
+
+        impl Deref for $ty {
+            type Target = str;
+
+            fn deref(&self) -> &Self::Target {
+                self.as_str()
+            }
+        }
+
+        impl fmt::Display for $ty {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(self.as_str())
+            }
+        }
+
+        impl FromStr for $ty {
+            type Err = EvmContractScalarError;
+
+            fn from_str(value: &str) -> Result<Self, Self::Err> {
+                Self::new(value)
+            }
+        }
+
+        impl TryFrom<String> for $ty {
+            type Error = EvmContractScalarError;
+
+            fn try_from(value: String) -> Result<Self, Self::Error> {
+                Self::new(value)
+            }
+        }
+
+        impl From<$target> for $ty {
+            fn from(value: $target) -> Self {
+                Self {
+                    raw: value.to_string(),
+                }
+            }
+        }
+
+        impl From<$ty> for String {
+            fn from(value: $ty) -> Self {
+                value.raw
+            }
+        }
+
+        impl PartialEq<&str> for $ty {
+            fn eq(&self, other: &&str) -> bool {
+                self.as_str() == *other
+            }
+        }
+    };
+}
+
+evidence_identity_scalar!(
+    ArtifactEvidenceArtifactId,
+    ArtifactId,
+    "artifact_id",
+    "artifact-evidence-artifact-id",
+    "mfm.evm.contract.id.artifact_evidence_artifact",
+    "Checked artifact id reference carried by lifecycle evidence."
+);
+
+evidence_identity_scalar!(
+    ArtifactEvidenceContentDigest,
+    ContentDigest,
+    "content_digest",
+    "artifact-evidence-content-digest",
+    "mfm.evm.contract.id.artifact_evidence_content_digest",
+    "Checked content digest reference carried by lifecycle evidence."
+);
+
+evidence_identity_scalar!(
+    ArtifactEvidenceSchemaId,
+    SchemaId,
+    "schema_id",
+    "artifact-evidence-schema-id",
+    "mfm.evm.contract.id.artifact_evidence_schema",
+    "Checked schema id reference carried by lifecycle evidence."
+);
+
+evidence_identity_scalar!(
+    ArtifactEvidenceSemanticTypeId,
+    SemanticTypeId,
+    "semantic_type_id",
+    "artifact-evidence-semantic-type-id",
+    "mfm.evm.contract.id.artifact_evidence_semantic_type",
+    "Checked semantic type id reference carried by lifecycle evidence."
 );
 
 /// Checked wei quantity rendered in the authored EVM quantity format.
@@ -480,18 +648,18 @@ impl<'de> Deserialize<'de> for ExpectedValue {
 impl_json_text_value!(ExpectedValue);
 
 /// Typed artifact evidence reference used by contract lifecycle values.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, MfmValue)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[mfm(
     namespace = "mfm.evm.contract",
     name = "artifact-evidence-ref",
     schema = "mfm.evm.contract.value.artifact_evidence_ref"
 )]
 pub struct LifecycleArtifactEvidenceRef {
-    artifact_id: String,
-    content_digest: String,
+    artifact_id: ArtifactEvidenceArtifactId,
+    content_digest: ArtifactEvidenceContentDigest,
     byte_len: u64,
-    schema_id: Option<String>,
-    semantic_type_id: Option<String>,
+    schema_id: Option<ArtifactEvidenceSchemaId>,
+    semantic_type_id: Option<ArtifactEvidenceSemanticTypeId>,
 }
 
 impl LifecycleArtifactEvidenceRef {
@@ -504,32 +672,32 @@ impl LifecycleArtifactEvidenceRef {
         semantic_type_id: Option<SemanticTypeId>,
     ) -> Self {
         Self {
-            artifact_id: artifact_id.to_string(),
-            content_digest: content_digest.to_string(),
+            artifact_id: artifact_id.into(),
+            content_digest: content_digest.into(),
             byte_len,
-            schema_id: schema_id.map(|schema_id| schema_id.to_string()),
-            semantic_type_id: semantic_type_id.map(|semantic_type_id| semantic_type_id.to_string()),
+            schema_id: schema_id.map(Into::into),
+            semantic_type_id: semantic_type_id.map(Into::into),
         }
     }
 
     /// Returns the artifact id string.
     pub fn artifact_id_str(&self) -> &str {
-        &self.artifact_id
+        self.artifact_id.as_str()
     }
 
     /// Parses and returns the typed artifact id.
     pub fn artifact_id(&self) -> Result<ArtifactId, String> {
-        ArtifactId::parse(&self.artifact_id).map_err(|error| error.to_string())
+        self.artifact_id.typed()
     }
 
     /// Returns the content digest string.
     pub fn content_digest_str(&self) -> &str {
-        &self.content_digest
+        self.content_digest.as_str()
     }
 
     /// Parses and returns the typed content digest.
     pub fn content_digest(&self) -> Result<ContentDigest, String> {
-        ContentDigest::parse(&self.content_digest).map_err(|error| error.to_string())
+        self.content_digest.typed()
     }
 
     /// Returns the artifact byte length.
@@ -539,67 +707,32 @@ impl LifecycleArtifactEvidenceRef {
 
     /// Returns the optional schema id string.
     pub fn schema_id_str(&self) -> Option<&str> {
-        self.schema_id.as_deref()
+        self.schema_id
+            .as_ref()
+            .map(ArtifactEvidenceSchemaId::as_str)
     }
 
     /// Parses and returns the optional typed schema id.
     pub fn schema_id(&self) -> Result<Option<SchemaId>, String> {
         self.schema_id
-            .as_deref()
-            .map(SchemaId::parse)
+            .as_ref()
+            .map(ArtifactEvidenceSchemaId::typed)
             .transpose()
-            .map_err(|error| error.to_string())
     }
 
     /// Returns the optional semantic type id string.
     pub fn semantic_type_id_str(&self) -> Option<&str> {
-        self.semantic_type_id.as_deref()
+        self.semantic_type_id
+            .as_ref()
+            .map(ArtifactEvidenceSemanticTypeId::as_str)
     }
 
     /// Parses and returns the optional typed semantic type id.
     pub fn semantic_type_id(&self) -> Result<Option<SemanticTypeId>, String> {
         self.semantic_type_id
-            .as_deref()
-            .map(SemanticTypeId::parse)
+            .as_ref()
+            .map(ArtifactEvidenceSemanticTypeId::typed)
             .transpose()
-            .map_err(|error| error.to_string())
-    }
-
-    fn validate(&self) -> Result<(), String> {
-        self.artifact_id()?;
-        self.content_digest()?;
-        self.schema_id()?;
-        self.semantic_type_id()?;
-        Ok(())
-    }
-}
-
-impl<'de> Deserialize<'de> for LifecycleArtifactEvidenceRef {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct RawLifecycleArtifactEvidenceRef {
-            artifact_id: String,
-            content_digest: String,
-            byte_len: u64,
-            #[serde(default)]
-            schema_id: Option<String>,
-            #[serde(default)]
-            semantic_type_id: Option<String>,
-        }
-
-        let raw = RawLifecycleArtifactEvidenceRef::deserialize(deserializer)?;
-        let evidence = Self {
-            artifact_id: raw.artifact_id,
-            content_digest: raw.content_digest,
-            byte_len: raw.byte_len,
-            schema_id: raw.schema_id,
-            semantic_type_id: raw.semantic_type_id,
-        };
-        evidence.validate().map_err(de::Error::custom)?;
-        Ok(evidence)
     }
 }
 
@@ -1108,10 +1241,9 @@ pub fn ensure_nonzero_polls(max_receipt_polls: u64) -> Result<(), String> {
 
 /// Ensures the configured artifact context port is non-empty.
 pub fn ensure_nonempty_artifact_port(artifact_port: &str) -> Result<(), String> {
-    if artifact_port.trim().is_empty() {
-        return Err("artifact_port must be non-empty".to_string());
-    }
-    Ok(())
+    ArtifactPort::new(artifact_port)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 /// Normalizes an EVM address to canonical lowercase `0x`-prefixed form.
@@ -1433,5 +1565,31 @@ mod tests {
             serde_json::from_value(json).expect("decoded evidence");
 
         assert_eq!(decoded, evidence);
+    }
+
+    #[test]
+    fn lifecycle_artifact_evidence_refs_reject_invalid_identity_fields() {
+        let invalid_artifact_id = serde_json::json!({
+            "artifact_id": "not-an-artifact-id",
+            "content_digest": ContentDigest::from_digest(
+                DigestAlgorithm::Sha256JcsV1,
+                digest()
+            ).to_string(),
+            "byte_len": 128
+        });
+
+        assert!(
+            serde_json::from_value::<LifecycleArtifactEvidenceRef>(invalid_artifact_id).is_err()
+        );
+    }
+
+    #[test]
+    fn artifact_port_is_a_checked_string_authority() {
+        let port = ArtifactPort::new("artifact").expect("artifact port");
+
+        assert_eq!(port.as_str(), "artifact");
+        assert!(ArtifactPort::new(" ").is_err());
+        assert!(ensure_nonempty_artifact_port("artifact").is_ok());
+        assert!(ensure_nonempty_artifact_port(" ").is_err());
     }
 }
