@@ -319,7 +319,7 @@ in
   };
 
   # MFM's public verbs, in MFM's vocabulary: `nix run .#check`, `.#test`,
-  # `.#ci`. Admission lives at the reserved `.#admit`.
+  # `.#ci`. Admission lives at the generated `.#model-check`.
   nixfied.surface.verbs = [
     "check"
     "test"

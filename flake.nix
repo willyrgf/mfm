@@ -71,7 +71,7 @@
         system:
         # The verification surface is generated: MFM's own task names become
         # the verbs (`.#check`/`.#test`/`.#ci` via nixfied.surface.verbs),
-        # admission lives at `.#admit`. The only override is MFM's own binary.
+        # model admission lives at `.#model-check`. The only override is MFM's own binary.
         (nixfied.lib.${system}.projectApps ./nixfied.nix)
         // {
           mfm = {

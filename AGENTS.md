@@ -115,7 +115,7 @@ Prefer editing `nixfied.nix` for Nixfied task/composite changes. Do not recreate
 
 Current Nixfied command contract:
 
-- `nix run .#admit`: model admission only.
+- `nix run .#model-check`: model admission only.
 - `nix run .#check`: rustfmt, clippy, and architecture/cargo metadata contracts.
 - `nix run .#test`: `cargo nextest run --workspace` plus `cargo test --workspace --doc` without managed external services.
 - `nix run .#ci`: full CI by definition; starts managed Postgres and Reth and runs all parity tests.
