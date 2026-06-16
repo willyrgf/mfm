@@ -87,7 +87,7 @@ pub use mfm_authored_config::AuthoredConfigFormat;
 use mfm_canonical::{CanonicalError, PlainCanonicalJsonBytes};
 use mfm_ids::{ArtifactId, DigestAlgorithm};
 use mfm_portfolio_model::portfolio::{
-    validate_portfolio_bundle, PortfolioConfig, PortfolioConfigError,
+    PortfolioConfig, PortfolioConfigError, ValidatedPortfolioBundle,
 };
 use mfm_portfolio_model::symbol::ValuationSourceRegistry;
 use mfm_program_derive::{MfmConfig, MfmValue, PublicOutputs};
@@ -273,13 +273,13 @@ pub fn parse_portfolio_snapshot_authored_config_with_hint(
 pub fn canonicalize_portfolio_snapshot_authored_config(
     authored: PortfolioSnapshotAuthoredConfig,
 ) -> Result<PortfolioSnapshotCanonicalConfig, PortfolioSnapshotConfigError> {
-    let canonical = PortfolioSnapshotCanonicalConfig {
-        portfolio: authored.portfolio,
-        valuation_source_registry: authored.valuation_source_registry,
-    }
-    .normalized();
-    validate_portfolio_bundle(&canonical.portfolio, &canonical.valuation_source_registry)?;
-    Ok(canonical)
+    let (portfolio, valuation_source_registry) =
+        ValidatedPortfolioBundle::new(authored.portfolio, authored.valuation_source_registry)?
+            .into_parts();
+    Ok(PortfolioSnapshotCanonicalConfig {
+        portfolio,
+        valuation_source_registry,
+    })
 }
 
 /// Decodes canonical portfolio snapshot config.
@@ -290,10 +290,14 @@ pub fn decode_portfolio_snapshot_canonical_config(
         .map_err(|source| PortfolioSnapshotConfigError::Decode {
             stage: "canonical config",
             source,
-        })?
-        .normalized();
-    validate_portfolio_bundle(&canonical.portfolio, &canonical.valuation_source_registry)?;
-    Ok(canonical)
+        })?;
+    let (portfolio, valuation_source_registry) =
+        ValidatedPortfolioBundle::new(canonical.portfolio, canonical.valuation_source_registry)?
+            .into_parts();
+    Ok(PortfolioSnapshotCanonicalConfig {
+        portfolio,
+        valuation_source_registry,
+    })
 }
 
 #[cfg(test)]

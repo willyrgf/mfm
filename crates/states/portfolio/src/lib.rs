@@ -32,9 +32,10 @@ use mfm_ids::{
 use mfm_portfolio_config::PortfolioSnapshotCanonicalConfig;
 use mfm_portfolio_model::aave::AAVE_V3_PROTOCOL_ID;
 use mfm_portfolio_model::portfolio::{
-    validate_network_config, validate_portfolio_bundle, validate_portfolio_config, ExecutionAnchor,
-    NetworkConfig, NetworkFamilyConfig, NetworkPin, PortfolioConfig, PortfolioQuoteTotal,
-    PortfolioReport, PortfolioSnapshot, PortfolioSnapshotError, WalletReport, WalletSnapshot,
+    validate_network_config, ExecutionAnchor, NetworkConfig, NetworkFamilyConfig, NetworkPin,
+    PortfolioConfig, PortfolioQuoteTotal, PortfolioReport, PortfolioSnapshot,
+    PortfolioSnapshotError, ValidatedPortfolioBundle, ValidatedPortfolioConfig, WalletReport,
+    WalletSnapshot,
 };
 use mfm_portfolio_model::symbol::{
     validate_symbol_config, validate_valuation_source_registry, BalanceReaderConfig, Observation,
@@ -591,8 +592,12 @@ fn validate_portfolio_workflow_config(config: &PortfolioWorkflowConfig) -> Resul
     if config.workflow_version != 1 {
         return Err("unsupported portfolio workflow config version".to_owned());
     }
-    validate_portfolio_bundle(&config.portfolio, &config.valuation_source_registry)
-        .map_err(|error| error.to_string())
+    ValidatedPortfolioBundle::new(
+        config.portfolio.clone(),
+        config.valuation_source_registry.clone(),
+    )
+    .map(|_| ())
+    .map_err(|error| error.to_string())
 }
 
 fn validate_prepare_sources_config(config: &PrepareSourcesConfig) -> Result<(), String> {
@@ -634,7 +639,9 @@ fn validate_assemble_snapshot_config(config: &AssembleSnapshotConfig) -> Result<
     if config.snapshot_version == 0 {
         return Err("snapshot schema version must be non-zero".to_owned());
     }
-    validate_portfolio_config(&config.portfolio).map_err(|error| error.to_string())
+    ValidatedPortfolioConfig::new(config.portfolio.clone())
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 fn validate_project_report_config(config: &ProjectReportConfig) -> Result<(), String> {
