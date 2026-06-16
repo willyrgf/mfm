@@ -517,8 +517,21 @@ where
         .read_artifact(&request)
         .await
         .map_err(runtime_artifact_read_error)?;
-    serde_json::from_slice(verified.bytes())
-        .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))
+    decode_config_bytes(verified.bytes())
+}
+
+fn decode_config_bytes<T>(bytes: &[u8]) -> mfm_runtime::Result<T>
+where
+    T: MfmConfig + DeserializeOwned,
+{
+    let config: T = serde_json::from_slice(bytes)
+        .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
+    config.validate().map_err(|error| {
+        mfm_runtime::RuntimeError::InvalidRunnerOutput(format!(
+            "portfolio config failed validation: {error}"
+        ))
+    })?;
+    Ok(config)
 }
 
 async fn load_input_cell<T>(
@@ -940,4 +953,19 @@ fn runtime_artifact_read_error(
 
 fn portfolio_read_runtime_error(error: PortfolioReadError) -> mfm_runtime::RuntimeError {
     mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_config_bytes_rejects_invalid_serialized_config() {
+        let error = decode_config_bytes::<ProjectReportConfig>(br#"{"report_version":0}"#)
+            .expect_err("zero report version must fail validation");
+        let mfm_runtime::RuntimeError::InvalidRunnerOutput(message) = error else {
+            panic!("unexpected error: {error}");
+        };
+        assert!(message.contains("report schema version must be non-zero"));
+    }
 }
