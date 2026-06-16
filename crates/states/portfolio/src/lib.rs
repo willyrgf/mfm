@@ -33,11 +33,10 @@ use mfm_ids::{
 use mfm_portfolio_config::PortfolioSnapshotCanonicalConfig;
 use mfm_portfolio_model::aave::AAVE_V3_PROTOCOL_ID;
 use mfm_portfolio_model::portfolio::{
-    validate_network_config, ExecutionAnchor, NetworkConfig, NetworkFamilyConfig, NetworkPin,
-    PortfolioConfig, PortfolioQuoteTotal, PortfolioReport, PortfolioSnapshot,
-    PortfolioSnapshotError, ValidatedNetworkConfigs, ValidatedPortfolioBundle,
-    ValidatedPortfolioConfig, ValidatedSymbolConfigs, ValidatedWalletConfigs, WalletReport,
-    WalletSnapshot,
+    ExecutionAnchor, NetworkConfig, NetworkFamilyConfig, NetworkPin, PortfolioConfig,
+    PortfolioQuoteTotal, PortfolioReport, PortfolioSnapshot, PortfolioSnapshotError,
+    ValidatedNetworkConfigs, ValidatedPortfolioBundle, ValidatedPortfolioConfig,
+    ValidatedSymbolConfigs, ValidatedWalletConfigs, WalletReport, WalletSnapshot,
 };
 use mfm_portfolio_model::symbol::{
     validate_symbol_config, validate_valuation_source_registry, BalanceReaderConfig, Observation,
@@ -45,9 +44,7 @@ use mfm_portfolio_model::symbol::{
     ObservationValueSourceRef, QuoteCode, QuoteValuationConfig, SymbolConfig, SymbolRole,
     ValuationReaderConfig, ValuationSourceRegistry,
 };
-use mfm_portfolio_model::wallet::{
-    validate_wallet_config, WalletConfig, WalletImplementationConfig, WalletSubjectKind,
-};
+use mfm_portfolio_model::wallet::{WalletConfig, WalletImplementationConfig, WalletSubjectKind};
 use mfm_program::{AdapterBindingSpec, PureState, ReadState, StateError, StateResult, StateSpec};
 use mfm_program_derive::{MfmConfig, MfmValue, OperationOutput, PublicOutputs, StateInput};
 use mfm_values::{ConfigError, NonEmpty};
@@ -1691,9 +1688,7 @@ fn observation_values(
 }
 
 fn validate_observe_batch_config(config: &ObserveBatchConfig) -> Result<(), String> {
-    validate_wallet_config(&config.wallet).map_err(|error| error.to_string())?;
     validate_symbol_config(&config.symbol).map_err(|error| error.to_string())?;
-    validate_network_config(&config.network).map_err(|error| error.to_string())?;
     if &config.wallet.network_id != config.network.network_id() {
         return Err(format!(
             "wallet `{}` network `{}` did not match observation network `{}`",

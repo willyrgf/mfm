@@ -16,7 +16,7 @@ use crate::symbol::{
     SymbolConfig, SymbolConfigError, SymbolKind, ValuationReaderConfig, ValuationSourceConfig,
     ValuationSourceRegistry, ValuationSourceRegistryError,
 };
-use crate::wallet::{validate_wallet_config, WalletConfig, WalletConfigError, WalletSubjectKind};
+use crate::wallet::{WalletConfig, WalletSubjectKind};
 
 /// Supported network families on the canonical portfolio config surface.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
@@ -207,7 +207,6 @@ impl NetworkConfig {
 
     /// Validates this network config and returns it unchanged.
     pub fn validated(self) -> Result<Self, PortfolioConfigError> {
-        validate_network_config(&self)?;
         Ok(self)
     }
 
@@ -275,7 +274,6 @@ impl ValidatedNetworkConfigs {
     pub fn new(networks: Vec<NetworkConfig>) -> Result<Self, PortfolioConfigError> {
         let mut seen = BTreeSet::new();
         for network in &networks {
-            validate_network_config(network)?;
             if !seen.insert(network.network_id().as_str()) {
                 return Err(PortfolioConfigError::DuplicateNetworkId {
                     network_id: network.network_id().to_string(),
@@ -307,12 +305,6 @@ impl ValidatedWalletConfigs {
     pub fn new(wallets: Vec<WalletConfig>) -> Result<Self, PortfolioConfigError> {
         let mut seen = BTreeSet::new();
         for wallet in &wallets {
-            validate_wallet_config(wallet).map_err(|source| {
-                PortfolioConfigError::InvalidWalletConfig {
-                    wallet_id: wallet.wallet_id.to_string(),
-                    source,
-                }
-            })?;
             if !seen.insert(wallet.wallet_id.as_str()) {
                 return Err(PortfolioConfigError::DuplicateWalletId {
                     wallet_id: wallet.wallet_id.to_string(),
@@ -824,14 +816,6 @@ pub enum PortfolioConfigError {
         /// Duplicate wallet id.
         wallet_id: String,
     },
-    /// A wallet config failed local validation.
-    #[error("wallet `{wallet_id}` is invalid: {source}")]
-    InvalidWalletConfig {
-        /// Wallet id associated with the validation failure.
-        wallet_id: String,
-        /// Underlying wallet validation failure.
-        source: WalletConfigError,
-    },
     /// Wallet referenced an unknown network.
     #[error("wallet `{wallet_id}` referenced unknown network `{network_id}`")]
     UnknownWalletNetwork {
@@ -1030,7 +1014,6 @@ fn validate_portfolio_config_inner(cfg: &PortfolioConfig) -> Result<(), Portfoli
 
     let mut network_ids = HashSet::new();
     for network in &cfg.networks {
-        validate_network_config(network)?;
         if !network_ids.insert(network.network_id().clone()) {
             return Err(PortfolioConfigError::DuplicateNetworkId {
                 network_id: network.network_id().to_string(),
@@ -1079,12 +1062,6 @@ fn validate_portfolio_config_inner(cfg: &PortfolioConfig) -> Result<(), Portfoli
 
     let mut wallet_ids = HashSet::new();
     for wallet in &cfg.wallets {
-        validate_wallet_config(wallet).map_err(|source| {
-            PortfolioConfigError::InvalidWalletConfig {
-                wallet_id: wallet.wallet_id.to_string(),
-                source,
-            }
-        })?;
         if !wallet_ids.insert(wallet.wallet_id.clone()) {
             return Err(PortfolioConfigError::DuplicateWalletId {
                 wallet_id: wallet.wallet_id.to_string(),
@@ -1208,11 +1185,6 @@ fn validate_portfolio_bundle_sources(
         }
     }
 
-    Ok(())
-}
-
-/// Validates one canonical network config.
-pub fn validate_network_config(_network: &NetworkConfig) -> Result<(), PortfolioConfigError> {
     Ok(())
 }
 

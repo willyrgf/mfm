@@ -263,7 +263,6 @@ impl WalletConfig {
 
     /// Validates this wallet config, normalizes it, and returns the validated value.
     pub fn validated(mut self) -> Result<Self, WalletConfigError> {
-        validate_wallet_config(&self)?;
         self.normalize();
         Ok(self)
     }
@@ -396,11 +395,6 @@ pub fn decode_wallet_config(value: &Value) -> Result<WalletConfig, WalletConfigE
     let cfg: WalletConfig = serde_json::from_value(value.clone())
         .map_err(|err| WalletConfigError::Decode(err.to_string()))?;
     cfg.validated()
-}
-
-/// Validates a canonical wallet config.
-pub fn validate_wallet_config(_cfg: &WalletConfig) -> Result<(), WalletConfigError> {
-    Ok(())
 }
 
 fn validate_bitcoin_address(raw: &str) -> Result<(), String> {
