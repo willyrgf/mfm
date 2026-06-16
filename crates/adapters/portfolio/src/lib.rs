@@ -248,7 +248,7 @@ impl ErasedNodeRunner for PrepareSourcesRunner {
             let prepared = prepare_sources_from_config(&config);
             let request = SourcePreparationRequest {
                 network_ids: config
-                    .networks
+                    .networks()
                     .iter()
                     .map(|network| network.network_id.clone())
                     .collect(),
@@ -301,7 +301,7 @@ impl ErasedNodeRunner for PinViewsRunner {
                 .map_err(portfolio_read_runtime_error)?;
             let request = ViewPinRequest {
                 network_ids: config
-                    .networks
+                    .networks()
                     .iter()
                     .map(|network| network.network_id.clone())
                     .collect(),
@@ -346,14 +346,15 @@ impl ErasedNodeRunner for ObserveBatchRunner {
             let input =
                 load_struct_input::<ObserveBatchInput>(ctx.inputs(), self.artifacts.as_ref())
                     .await?;
-            let block_number = evm_block_number_for(&input.views, &config.network.network_id);
+            let block_number = evm_block_number_for(&input.views, &config.network().network_id);
             let backend = EvmCapabilityPortfolioBackend::new(Arc::clone(&self.evm));
             let output = observe_batch_with_backend(&config, &input, &backend).await;
             let request = ObservationRequest {
-                wallet_id: config.wallet.wallet_id.clone(),
-                symbol_id: config.symbol.symbol_id.clone(),
-                network_id: config.network.network_id.clone(),
-                balance_reader_kind: balance_reader_kind(&config.symbol.balance_reader).to_owned(),
+                wallet_id: config.wallet().wallet_id.clone(),
+                symbol_id: config.symbol().symbol_id.clone(),
+                network_id: config.network().network_id.clone(),
+                balance_reader_kind: balance_reader_kind(&config.symbol().balance_reader)
+                    .to_owned(),
                 block_number: Some(block_number),
             };
             let response = ObservationResponse {
@@ -413,7 +414,7 @@ impl ErasedNodeRunner for ProjectReportRunner {
                     .await?;
             let output = mfm_state_portfolio::project_report_from_snapshot(
                 input.snapshot,
-                config.report_version,
+                config.report_version(),
             )
             .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
             state_output(ctx, &output).await
@@ -781,15 +782,15 @@ impl EvmCapabilityPortfolioBackend {
         config: &ObserveBatchConfig,
         block_number: u64,
     ) -> Result<(U256, u8), PortfolioReadError> {
-        match &config.symbol.balance_reader {
+        match &config.symbol().balance_reader {
             mfm_portfolio_model::symbol::BalanceReaderConfig::NativeBalance {} => {
-                let wallet: Address = config.wallet.address.parse().map_err(|_| {
+                let wallet: Address = config.wallet().address.parse().map_err(|_| {
                     PortfolioReadError::new(
                         "invalid_wallet_address",
                         "wallet address was invalid for native balance read",
                     )
                 })?;
-                let (source_ref, policy_id) = self.route(&config.network.network_id)?;
+                let (source_ref, policy_id) = self.route(&config.network().network_id)?;
                 let response = self
                     .evm
                     .read_balance(&EvmBalanceReadRequest {
@@ -800,17 +801,21 @@ impl EvmCapabilityPortfolioBackend {
                     })
                     .await
                     .map_err(portfolio_evm_capability_error)?;
-                Ok((response.balance_wei, config.symbol.decimals.unwrap_or(18)))
+                Ok((response.balance_wei, config.symbol().decimals.unwrap_or(18)))
             }
             mfm_portfolio_model::symbol::BalanceReaderConfig::Erc20Balance { token_address } => {
-                let decimals = match config.symbol.decimals {
+                let decimals = match config.symbol().decimals {
                     Some(decimals) => decimals,
                     None => {
-                        self.erc20_decimals(&config.network.network_id, token_address, block_number)
-                            .await?
+                        self.erc20_decimals(
+                            &config.network().network_id,
+                            token_address,
+                            block_number,
+                        )
+                        .await?
                     }
                 };
-                let wallet: Address = config.wallet.address.parse().map_err(|_| {
+                let wallet: Address = config.wallet().address.parse().map_err(|_| {
                     PortfolioReadError::new(
                         "invalid_wallet_address",
                         "wallet address was invalid for ERC-20 balance read",
@@ -819,7 +824,7 @@ impl EvmCapabilityPortfolioBackend {
                 let token = parse_address(token_address, "token address")?;
                 let raw = self
                     .evm_call_u256(
-                        &config.network.network_id,
+                        &config.network().network_id,
                         token,
                         encode_erc20_balance_of(&wallet),
                         block_number,

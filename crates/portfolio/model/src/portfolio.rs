@@ -774,7 +774,8 @@ pub fn validate_portfolio_bundle(
     Ok(())
 }
 
-fn validate_network_config(network: &NetworkConfig) -> Result<(), PortfolioConfigError> {
+/// Validates one canonical network config.
+pub fn validate_network_config(network: &NetworkConfig) -> Result<(), PortfolioConfigError> {
     if network.network_id.trim().is_empty() {
         return Err(PortfolioConfigError::EmptyNetworkId);
     }

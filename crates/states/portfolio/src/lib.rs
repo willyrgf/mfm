@@ -32,19 +32,22 @@ use mfm_ids::{
 use mfm_portfolio_config::PortfolioSnapshotCanonicalConfig;
 use mfm_portfolio_model::aave::AAVE_V3_PROTOCOL_ID;
 use mfm_portfolio_model::portfolio::{
-    ExecutionAnchor, NetworkConfig, NetworkFamilyConfig, NetworkPin, PortfolioConfig,
-    PortfolioQuoteTotal, PortfolioReport, PortfolioSnapshot, PortfolioSnapshotError, WalletReport,
-    WalletSnapshot,
+    validate_network_config, validate_portfolio_bundle, validate_portfolio_config, ExecutionAnchor,
+    NetworkConfig, NetworkFamilyConfig, NetworkPin, PortfolioConfig, PortfolioQuoteTotal,
+    PortfolioReport, PortfolioSnapshot, PortfolioSnapshotError, WalletReport, WalletSnapshot,
 };
 use mfm_portfolio_model::symbol::{
-    BalanceReaderConfig, Observation, ObservationAnchor, ObservationQuantity, ObservationSource,
-    ObservationValue, ObservationValueSourceRef, QuoteCode, QuoteValuationConfig, SymbolConfig,
-    SymbolRole, ValuationReaderConfig, ValuationSourceRegistry,
+    validate_symbol_config, validate_valuation_source_registry, BalanceReaderConfig, Observation,
+    ObservationAnchor, ObservationQuantity, ObservationSource, ObservationValue,
+    ObservationValueSourceRef, QuoteCode, QuoteValuationConfig, SymbolConfig, SymbolRole,
+    ValuationReaderConfig, ValuationSourceRegistry,
 };
-use mfm_portfolio_model::wallet::{WalletConfig, WalletImplementationConfig, WalletSubjectKind};
+use mfm_portfolio_model::wallet::{
+    validate_wallet_config, WalletConfig, WalletImplementationConfig, WalletSubjectKind,
+};
 use mfm_program::{AdapterBindingSpec, PureState, ReadState, StateError, StateResult, StateSpec};
 use mfm_program_derive::{MfmConfig, MfmValue, OperationOutput, PublicOutputs, StateInput};
-use mfm_values::NonEmpty;
+use mfm_values::{ConfigError, NonEmpty};
 use num_bigint::BigInt;
 use num_traits::{Signed, Zero};
 use serde::{Deserialize, Serialize};
@@ -196,98 +199,457 @@ impl PortfolioReadBackend for UnavailablePortfolioReadBackend {
 
 /// Root typed portfolio workflow config.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, MfmConfig)]
-#[mfm(schema = "mfm.portfolio.config.workflow")]
+#[mfm(
+    schema = "mfm.portfolio.config.workflow",
+    validate = "validate_portfolio_workflow_config"
+)]
 pub struct PortfolioWorkflowConfig {
     /// Workflow config contract version.
-    pub workflow_version: u64,
+    workflow_version: u64,
     /// Canonical portfolio config.
-    pub portfolio: PortfolioConfig,
+    portfolio: PortfolioConfig,
     /// Canonical valuation source registry.
-    pub valuation_source_registry: ValuationSourceRegistry,
+    valuation_source_registry: ValuationSourceRegistry,
+}
+
+impl PortfolioWorkflowConfig {
+    /// Creates a validated root portfolio workflow config.
+    pub fn new(
+        portfolio: PortfolioConfig,
+        valuation_source_registry: ValuationSourceRegistry,
+    ) -> Result<Self, ConfigError> {
+        Self::with_version(1, portfolio, valuation_source_registry)
+    }
+
+    /// Creates a portfolio workflow config with an explicit persisted contract version.
+    pub fn with_version(
+        workflow_version: u64,
+        portfolio: PortfolioConfig,
+        valuation_source_registry: ValuationSourceRegistry,
+    ) -> Result<Self, ConfigError> {
+        let config = Self {
+            workflow_version,
+            portfolio,
+            valuation_source_registry,
+        };
+        validate_portfolio_workflow_config(&config).map_err(ConfigError::new)?;
+        Ok(config)
+    }
+
+    /// Validates this config and returns it unchanged.
+    pub fn validated(self) -> Result<Self, ConfigError> {
+        validate_portfolio_workflow_config(&self).map_err(ConfigError::new)?;
+        Ok(self)
+    }
+
+    /// Returns the workflow config contract version.
+    pub const fn workflow_version(&self) -> u64 {
+        self.workflow_version
+    }
+
+    /// Returns the canonical portfolio config.
+    pub const fn portfolio(&self) -> &PortfolioConfig {
+        &self.portfolio
+    }
+
+    /// Returns the canonical valuation source registry.
+    pub const fn valuation_source_registry(&self) -> &ValuationSourceRegistry {
+        &self.valuation_source_registry
+    }
 }
 
 impl From<PortfolioSnapshotCanonicalConfig> for PortfolioWorkflowConfig {
     fn from(canonical: PortfolioSnapshotCanonicalConfig) -> Self {
-        Self {
-            workflow_version: 1,
-            portfolio: canonical.portfolio,
-            valuation_source_registry: canonical.valuation_source_registry,
-        }
+        Self::new(canonical.portfolio, canonical.valuation_source_registry)
+            .expect("canonical portfolio snapshot config must validate")
     }
 }
 
 /// Config for source preparation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, MfmConfig)]
-#[mfm(schema = "mfm.portfolio.config.prepare_sources")]
+#[mfm(
+    schema = "mfm.portfolio.config.prepare_sources",
+    validate = "validate_prepare_sources_config"
+)]
 pub struct PrepareSourcesConfig {
     /// Networks whose source pools are prepared.
-    pub networks: Vec<NetworkConfig>,
+    networks: Vec<NetworkConfig>,
+}
+
+impl PrepareSourcesConfig {
+    /// Creates validated source-preparation config.
+    pub fn new(networks: Vec<NetworkConfig>) -> Result<Self, ConfigError> {
+        let config = Self { networks };
+        validate_prepare_sources_config(&config).map_err(ConfigError::new)?;
+        Ok(config)
+    }
+
+    /// Validates this config and returns it unchanged.
+    pub fn validated(self) -> Result<Self, ConfigError> {
+        validate_prepare_sources_config(&self).map_err(ConfigError::new)?;
+        Ok(self)
+    }
+
+    /// Returns the networks whose source pools are prepared.
+    pub fn networks(&self) -> &[NetworkConfig] {
+        &self.networks
+    }
 }
 
 /// Config for subject resolution.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, MfmConfig)]
-#[mfm(schema = "mfm.portfolio.config.resolve_subjects")]
+#[mfm(
+    schema = "mfm.portfolio.config.resolve_subjects",
+    validate = "validate_resolve_subjects_config"
+)]
 pub struct ResolveSubjectsConfig {
     /// Wallets to resolve.
-    pub wallets: Vec<WalletConfig>,
+    wallets: Vec<WalletConfig>,
+}
+
+impl ResolveSubjectsConfig {
+    /// Creates validated subject-resolution config.
+    pub fn new(wallets: Vec<WalletConfig>) -> Result<Self, ConfigError> {
+        let config = Self { wallets };
+        validate_resolve_subjects_config(&config).map_err(ConfigError::new)?;
+        Ok(config)
+    }
+
+    /// Validates this config and returns it unchanged.
+    pub fn validated(self) -> Result<Self, ConfigError> {
+        validate_resolve_subjects_config(&self).map_err(ConfigError::new)?;
+        Ok(self)
+    }
+
+    /// Returns the wallets to resolve.
+    pub fn wallets(&self) -> &[WalletConfig] {
+        &self.wallets
+    }
 }
 
 /// Config for execution-view pinning.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, MfmConfig)]
-#[mfm(schema = "mfm.portfolio.config.pin_views")]
+#[mfm(
+    schema = "mfm.portfolio.config.pin_views",
+    validate = "validate_pin_views_config"
+)]
 pub struct PinViewsConfig {
     /// Pinning config contract version.
-    pub pin_version: u64,
+    pin_version: u64,
     /// Networks to pin.
-    pub networks: Vec<NetworkConfig>,
+    networks: Vec<NetworkConfig>,
+}
+
+impl PinViewsConfig {
+    /// Creates validated view-pinning config.
+    pub fn new(networks: Vec<NetworkConfig>) -> Result<Self, ConfigError> {
+        Self::with_version(1, networks)
+    }
+
+    /// Creates view-pinning config with an explicit persisted contract version.
+    pub fn with_version(
+        pin_version: u64,
+        networks: Vec<NetworkConfig>,
+    ) -> Result<Self, ConfigError> {
+        let config = Self {
+            pin_version,
+            networks,
+        };
+        validate_pin_views_config(&config).map_err(ConfigError::new)?;
+        Ok(config)
+    }
+
+    /// Validates this config and returns it unchanged.
+    pub fn validated(self) -> Result<Self, ConfigError> {
+        validate_pin_views_config(&self).map_err(ConfigError::new)?;
+        Ok(self)
+    }
+
+    /// Returns the pinning config contract version.
+    pub const fn pin_version(&self) -> u64 {
+        self.pin_version
+    }
+
+    /// Returns the networks to pin.
+    pub fn networks(&self) -> &[NetworkConfig] {
+        &self.networks
+    }
 }
 
 /// Config for valuation resolution.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, MfmConfig)]
-#[mfm(schema = "mfm.portfolio.config.resolve_valuations")]
+#[mfm(
+    schema = "mfm.portfolio.config.resolve_valuations",
+    validate = "validate_resolve_valuations_config"
+)]
 pub struct ResolveValuationsConfig {
     /// Symbols whose valuation routes should be resolved.
-    pub symbol_configs: Vec<SymbolConfig>,
+    symbol_configs: Vec<SymbolConfig>,
     /// Typed valuation source registry.
-    pub valuation_source_registry: ValuationSourceRegistry,
+    valuation_source_registry: ValuationSourceRegistry,
+}
+
+impl ResolveValuationsConfig {
+    /// Creates validated valuation-resolution config.
+    pub fn new(
+        symbol_configs: Vec<SymbolConfig>,
+        valuation_source_registry: ValuationSourceRegistry,
+    ) -> Result<Self, ConfigError> {
+        let config = Self {
+            symbol_configs,
+            valuation_source_registry,
+        };
+        validate_resolve_valuations_config(&config).map_err(ConfigError::new)?;
+        Ok(config)
+    }
+
+    /// Validates this config and returns it unchanged.
+    pub fn validated(self) -> Result<Self, ConfigError> {
+        validate_resolve_valuations_config(&self).map_err(ConfigError::new)?;
+        Ok(self)
+    }
+
+    /// Returns the symbols whose valuation routes should be resolved.
+    pub fn symbol_configs(&self) -> &[SymbolConfig] {
+        &self.symbol_configs
+    }
+
+    /// Returns the typed valuation source registry.
+    pub const fn valuation_source_registry(&self) -> &ValuationSourceRegistry {
+        &self.valuation_source_registry
+    }
 }
 
 /// Config for one typed observation fanout state.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, MfmConfig)]
-#[mfm(schema = "mfm.portfolio.config.observe_batch")]
+#[mfm(
+    schema = "mfm.portfolio.config.observe_batch",
+    validate = "validate_observe_batch_config"
+)]
 pub struct ObserveBatchConfig {
     /// Wallet being observed.
-    pub wallet: WalletConfig,
+    wallet: WalletConfig,
     /// Symbol being observed for the wallet.
-    pub symbol: SymbolConfig,
+    symbol: SymbolConfig,
     /// Network shared by the wallet and symbol.
-    pub network: NetworkConfig,
+    network: NetworkConfig,
+}
+
+impl ObserveBatchConfig {
+    /// Creates validated observation-batch config.
+    pub fn new(
+        wallet: WalletConfig,
+        symbol: SymbolConfig,
+        network: NetworkConfig,
+    ) -> Result<Self, ConfigError> {
+        let config = Self {
+            wallet,
+            symbol,
+            network,
+        };
+        validate_observe_batch_config(&config).map_err(ConfigError::new)?;
+        Ok(config)
+    }
+
+    /// Validates this config and returns it unchanged.
+    pub fn validated(self) -> Result<Self, ConfigError> {
+        validate_observe_batch_config(&self).map_err(ConfigError::new)?;
+        Ok(self)
+    }
+
+    /// Returns the wallet being observed.
+    pub const fn wallet(&self) -> &WalletConfig {
+        &self.wallet
+    }
+
+    /// Returns the symbol being observed.
+    pub const fn symbol(&self) -> &SymbolConfig {
+        &self.symbol
+    }
+
+    /// Returns the network shared by the wallet and symbol.
+    pub const fn network(&self) -> &NetworkConfig {
+        &self.network
+    }
 }
 
 /// Config for observation fan-in.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
-#[mfm(schema = "mfm.portfolio.config.merge_observations")]
+#[mfm(
+    schema = "mfm.portfolio.config.merge_observations",
+    validate = "validate_merge_observations_config"
+)]
 pub struct MergeObservationsConfig {
     /// Merge config contract version.
-    pub merge_version: u64,
+    merge_version: u64,
+}
+
+impl MergeObservationsConfig {
+    /// Creates validated observation-merge config.
+    pub fn new() -> Self {
+        Self { merge_version: 1 }
+    }
+
+    /// Creates observation-merge config with an explicit persisted contract version.
+    pub fn with_version(merge_version: u64) -> Result<Self, ConfigError> {
+        let config = Self { merge_version };
+        validate_merge_observations_config(&config).map_err(ConfigError::new)?;
+        Ok(config)
+    }
+
+    /// Validates this config and returns it unchanged.
+    pub fn validated(self) -> Result<Self, ConfigError> {
+        validate_merge_observations_config(&self).map_err(ConfigError::new)?;
+        Ok(self)
+    }
+
+    /// Returns the merge config contract version.
+    pub const fn merge_version(&self) -> u64 {
+        self.merge_version
+    }
+}
+
+impl Default for MergeObservationsConfig {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Config for snapshot assembly.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, MfmConfig)]
-#[mfm(schema = "mfm.portfolio.config.assemble_snapshot")]
+#[mfm(
+    schema = "mfm.portfolio.config.assemble_snapshot",
+    validate = "validate_assemble_snapshot_config"
+)]
 pub struct AssembleSnapshotConfig {
     /// Snapshot schema version to emit.
-    pub snapshot_version: u64,
+    snapshot_version: u64,
     /// Portfolio config carried into the public snapshot.
-    pub portfolio: PortfolioConfig,
+    portfolio: PortfolioConfig,
+}
+
+impl AssembleSnapshotConfig {
+    /// Creates validated snapshot-assembly config.
+    pub fn new(snapshot_version: u64, portfolio: PortfolioConfig) -> Result<Self, ConfigError> {
+        let config = Self {
+            snapshot_version,
+            portfolio,
+        };
+        validate_assemble_snapshot_config(&config).map_err(ConfigError::new)?;
+        Ok(config)
+    }
+
+    /// Validates this config and returns it unchanged.
+    pub fn validated(self) -> Result<Self, ConfigError> {
+        validate_assemble_snapshot_config(&self).map_err(ConfigError::new)?;
+        Ok(self)
+    }
+
+    /// Returns the snapshot schema version to emit.
+    pub const fn snapshot_version(&self) -> u64 {
+        self.snapshot_version
+    }
+
+    /// Returns the portfolio config carried into the public snapshot.
+    pub const fn portfolio(&self) -> &PortfolioConfig {
+        &self.portfolio
+    }
 }
 
 /// Config for report projection.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
-#[mfm(schema = "mfm.portfolio.config.project_report")]
+#[mfm(
+    schema = "mfm.portfolio.config.project_report",
+    validate = "validate_project_report_config"
+)]
 pub struct ProjectReportConfig {
     /// Report schema version to emit.
-    pub report_version: u64,
+    report_version: u64,
+}
+
+impl ProjectReportConfig {
+    /// Creates validated report-projection config.
+    pub fn new(report_version: u64) -> Result<Self, ConfigError> {
+        let config = Self { report_version };
+        validate_project_report_config(&config).map_err(ConfigError::new)?;
+        Ok(config)
+    }
+
+    /// Validates this config and returns it unchanged.
+    pub fn validated(self) -> Result<Self, ConfigError> {
+        validate_project_report_config(&self).map_err(ConfigError::new)?;
+        Ok(self)
+    }
+
+    /// Returns the report schema version to emit.
+    pub const fn report_version(&self) -> u64 {
+        self.report_version
+    }
+}
+
+fn validate_portfolio_workflow_config(config: &PortfolioWorkflowConfig) -> Result<(), String> {
+    if config.workflow_version != 1 {
+        return Err("unsupported portfolio workflow config version".to_owned());
+    }
+    validate_portfolio_bundle(&config.portfolio, &config.valuation_source_registry)
+        .map_err(|error| error.to_string())
+}
+
+fn validate_prepare_sources_config(config: &PrepareSourcesConfig) -> Result<(), String> {
+    validate_network_collection(&config.networks)
+}
+
+fn validate_resolve_subjects_config(config: &ResolveSubjectsConfig) -> Result<(), String> {
+    for wallet in &config.wallets {
+        validate_wallet_config(wallet).map_err(|error| error.to_string())?;
+    }
+    validate_wallet_keys(&config.wallets)
+}
+
+fn validate_pin_views_config(config: &PinViewsConfig) -> Result<(), String> {
+    if config.pin_version != 1 {
+        return Err("unsupported portfolio pin config version".to_owned());
+    }
+    validate_network_collection(&config.networks)
+}
+
+fn validate_resolve_valuations_config(config: &ResolveValuationsConfig) -> Result<(), String> {
+    for symbol in &config.symbol_configs {
+        validate_symbol_config(symbol).map_err(|error| error.to_string())?;
+    }
+    validate_symbol_keys(&config.symbol_configs)?;
+    validate_valuation_source_registry(&config.valuation_source_registry)
+        .map_err(|error| error.to_string())
+}
+
+fn validate_merge_observations_config(config: &MergeObservationsConfig) -> Result<(), String> {
+    if config.merge_version == 1 {
+        Ok(())
+    } else {
+        Err("unsupported portfolio merge config version".to_owned())
+    }
+}
+
+fn validate_assemble_snapshot_config(config: &AssembleSnapshotConfig) -> Result<(), String> {
+    if config.snapshot_version == 0 {
+        return Err("snapshot schema version must be non-zero".to_owned());
+    }
+    validate_portfolio_config(&config.portfolio).map_err(|error| error.to_string())
+}
+
+fn validate_project_report_config(config: &ProjectReportConfig) -> Result<(), String> {
+    if config.report_version == 0 {
+        Err("report schema version must be non-zero".to_owned())
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_network_collection(networks: &[NetworkConfig]) -> Result<(), String> {
+    for network in networks {
+        validate_network_config(network).map_err(|error| error.to_string())?;
+    }
+    validate_network_keys(networks)
 }
 
 /// Prepared external source summary for one network.
@@ -603,7 +965,9 @@ impl StateSpec for PrepareSourcesState {
     }
 
     fn new(config: Self::Config) -> mfm_program::Result<Self> {
-        validate_network_keys(&config.networks)?;
+        let config = config
+            .validated()
+            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
         Ok(Self { config })
     }
 }
@@ -641,7 +1005,9 @@ impl StateSpec for ResolveSubjectsState {
     }
 
     fn new(config: Self::Config) -> mfm_program::Result<Self> {
-        validate_wallet_keys(&config.wallets)?;
+        let config = config
+            .validated()
+            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
         Ok(Self { config })
     }
 }
@@ -681,7 +1047,9 @@ impl StateSpec for PinViewsState {
     }
 
     fn new(config: Self::Config) -> mfm_program::Result<Self> {
-        validate_network_keys(&config.networks)?;
+        let config = config
+            .validated()
+            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
         Ok(Self { config })
     }
 }
@@ -723,7 +1091,9 @@ impl StateSpec for ResolveValuationsState {
     }
 
     fn new(config: Self::Config) -> mfm_program::Result<Self> {
-        validate_symbol_keys(&config.symbol_configs)?;
+        let config = config
+            .validated()
+            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
         Ok(Self { config })
     }
 }
@@ -763,7 +1133,9 @@ impl StateSpec for ObserveBatchState {
     }
 
     fn new(config: Self::Config) -> mfm_program::Result<Self> {
-        validate_observe_batch_config(&config)?;
+        let config = config
+            .validated()
+            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
         Ok(Self { config })
     }
 }
@@ -806,18 +1178,16 @@ impl StateSpec for MergeObservationsState {
     }
 
     fn new(config: Self::Config) -> mfm_program::Result<Self> {
-        if config.merge_version != 1 {
-            return Err(mfm_program::PlanError::Key(
-                "unsupported portfolio merge version".to_owned(),
-            ));
-        }
+        let config = config
+            .validated()
+            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
         Ok(Self { config })
     }
 }
 
 impl PureState for MergeObservationsState {
     fn run(&self, input: Self::Input) -> StateResult<Self::Output> {
-        let _ = self.config.merge_version;
+        let _ = self.config.merge_version();
         Ok(merge_observation_batches(input))
     }
 }
@@ -847,11 +1217,9 @@ impl StateSpec for AssembleSnapshotState {
     }
 
     fn new(config: Self::Config) -> mfm_program::Result<Self> {
-        if config.snapshot_version == 0 {
-            return Err(mfm_program::PlanError::Key(
-                "portfolio snapshot version must be non-zero".to_owned(),
-            ));
-        }
+        let config = config
+            .validated()
+            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
         Ok(Self { config })
     }
 }
@@ -887,18 +1255,16 @@ impl StateSpec for ProjectReportState {
     }
 
     fn new(config: Self::Config) -> mfm_program::Result<Self> {
-        if config.report_version == 0 {
-            return Err(mfm_program::PlanError::Key(
-                "portfolio report version must be non-zero".to_owned(),
-            ));
-        }
+        let config = config
+            .validated()
+            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
         Ok(Self { config })
     }
 }
 
 impl PureState for ProjectReportState {
     fn run(&self, input: Self::Input) -> StateResult<Self::Output> {
-        project_report_from_snapshot(input.snapshot, self.config.report_version)
+        project_report_from_snapshot(input.snapshot, self.config.report_version())
     }
 }
 
@@ -1409,57 +1775,60 @@ fn observation_values(
     values
 }
 
-fn validate_network_keys(networks: &[NetworkConfig]) -> mfm_program::Result<()> {
+fn validate_network_keys(networks: &[NetworkConfig]) -> Result<(), String> {
     let mut seen = BTreeSet::new();
     for network in networks {
         if !seen.insert(network.network_id.as_str()) {
-            return Err(mfm_program::PlanError::Key(format!(
+            return Err(format!(
                 "duplicate portfolio network domain key `{}`",
                 network.network_id
-            )));
+            ));
         }
     }
     Ok(())
 }
 
-fn validate_wallet_keys(wallets: &[WalletConfig]) -> mfm_program::Result<()> {
+fn validate_wallet_keys(wallets: &[WalletConfig]) -> Result<(), String> {
     let mut seen = BTreeSet::new();
     for wallet in wallets {
         if !seen.insert(wallet.wallet_id.as_str()) {
-            return Err(mfm_program::PlanError::Key(format!(
+            return Err(format!(
                 "duplicate portfolio wallet domain key `{}`",
                 wallet.wallet_id
-            )));
+            ));
         }
     }
     Ok(())
 }
 
-fn validate_symbol_keys(symbols: &[SymbolConfig]) -> mfm_program::Result<()> {
+fn validate_symbol_keys(symbols: &[SymbolConfig]) -> Result<(), String> {
     let mut seen = BTreeSet::new();
     for symbol in symbols {
         if !seen.insert(symbol.symbol_id.as_str()) {
-            return Err(mfm_program::PlanError::Key(format!(
+            return Err(format!(
                 "duplicate portfolio symbol domain key `{}`",
                 symbol.symbol_id
-            )));
+            ));
         }
     }
     Ok(())
 }
 
-fn validate_observe_batch_config(config: &ObserveBatchConfig) -> mfm_program::Result<()> {
+fn validate_observe_batch_config(config: &ObserveBatchConfig) -> Result<(), String> {
+    validate_wallet_config(&config.wallet).map_err(|error| error.to_string())?;
+    validate_symbol_config(&config.symbol).map_err(|error| error.to_string())?;
+    validate_network_config(&config.network).map_err(|error| error.to_string())?;
     if config.wallet.network_id != config.network.network_id {
-        return Err(mfm_program::PlanError::Key(format!(
+        return Err(format!(
             "wallet `{}` network `{}` did not match observation network `{}`",
             config.wallet.wallet_id, config.wallet.network_id, config.network.network_id
-        )));
+        ));
     }
     if config.symbol.network_id != config.network.network_id {
-        return Err(mfm_program::PlanError::Key(format!(
+        return Err(format!(
             "symbol `{}` network `{}` did not match observation network `{}`",
             config.symbol.symbol_id, config.symbol.network_id, config.network.network_id
-        )));
+        ));
     }
     if !config
         .wallet
@@ -1467,10 +1836,10 @@ fn validate_observe_batch_config(config: &ObserveBatchConfig) -> mfm_program::Re
         .iter()
         .any(|symbol_id| symbol_id == &config.symbol.symbol_id)
     {
-        return Err(mfm_program::PlanError::Key(format!(
+        return Err(format!(
             "wallet `{}` did not include observation symbol `{}`",
             config.wallet.wallet_id, config.symbol.symbol_id
-        )));
+        ));
     }
     if let BalanceReaderConfig::ProtocolPosition {
         protocol,
@@ -1479,18 +1848,18 @@ fn validate_observe_batch_config(config: &ObserveBatchConfig) -> mfm_program::Re
     } = &config.symbol.balance_reader
     {
         if config.symbol.protocol.as_deref() != Some(protocol.as_str()) {
-            return Err(mfm_program::PlanError::Key(format!(
+            return Err(format!(
                 "symbol `{}` protocol did not match typed protocol reader `{}`",
                 config.symbol.symbol_id, protocol
-            )));
+            ));
         }
         if protocol == AAVE_V3_PROTOCOL_ID && reader != protocol_config.reader_name() {
-            return Err(mfm_program::PlanError::Key(format!(
+            return Err(format!(
                 "symbol `{}` Aave reader `{}` did not match typed config reader `{}`",
                 config.symbol.symbol_id,
                 reader,
                 protocol_config.reader_name()
-            )));
+            ));
         }
     }
     Ok(())
@@ -1805,6 +2174,60 @@ fn ten_pow(n: u32) -> BigInt {
 mod tests {
     use super::*;
     use mfm_portfolio_model::symbol::{SymbolKind, SymbolValuationConfig};
+    use mfm_values::MfmConfig as _;
+
+    #[test]
+    fn observe_batch_mfm_config_validation_rejects_network_mismatch() {
+        let wallet = WalletConfig {
+            wallet_id: "wallet_main".to_owned(),
+            address: "0x000000000000000000000000000000000000dead".to_owned(),
+            subject_kind: WalletSubjectKind::EvmAddress,
+            network_id: "ethereum-mainnet".to_owned(),
+            implementation: WalletImplementationConfig::AddressOnly {},
+            symbol_ids: vec!["eth.native.ethereum-mainnet".to_owned()],
+            metadata: BTreeMap::new(),
+        };
+        let symbol = SymbolConfig {
+            symbol_id: "eth.native.ethereum-mainnet".to_owned(),
+            display_symbol: Some("ETH".to_owned()),
+            kind: SymbolKind::NativeBalance,
+            role: SymbolRole::Native,
+            network_id: "ethereum-mainnet".to_owned(),
+            protocol: None,
+            balance_reader: BalanceReaderConfig::NativeBalance {},
+            valuation: SymbolValuationConfig {
+                quotes: vec![QuoteValuationConfig {
+                    quote: QuoteCode::Usd,
+                    priced_symbol_id: "eth.native.ethereum-mainnet".to_owned(),
+                    reader: ValuationReaderConfig::FixedUnitPrice {
+                        unit_price_dec: "2.5".to_owned(),
+                    },
+                }],
+            },
+            decimals: Some(18),
+            underlying_symbol_id: None,
+            metadata: BTreeMap::new(),
+        };
+        let config = ObserveBatchConfig {
+            wallet,
+            symbol,
+            network: NetworkConfig {
+                network_id: "ethereum-goerli".to_owned(),
+                family: NetworkFamilyConfig::Evm,
+                chain_id: Some(5),
+                control_scope: "shared".to_owned(),
+                metadata: BTreeMap::new(),
+            },
+        };
+
+        let error = config.validate().expect_err("network mismatch must fail");
+        assert!(
+            error
+                .message()
+                .contains("did not match observation network"),
+            "{error}"
+        );
+    }
 
     #[test]
     fn fixed_price_observation_projects_report_totals() {
@@ -1877,11 +2300,8 @@ mod tests {
             },
         };
         let batch = observation_batch_from_raw_balance(
-            &ObserveBatchConfig {
-                wallet: wallet.clone(),
-                symbol: symbol.clone(),
-                network: network.clone(),
-            },
+            &ObserveBatchConfig::new(wallet.clone(), symbol.clone(), network.clone())
+                .expect("observe config"),
             &input,
             U256::from(1_000_000_000_000_000_000u128),
             18,
@@ -1893,9 +2313,9 @@ mod tests {
         );
 
         let snapshot = assemble_snapshot(
-            &AssembleSnapshotConfig {
-                snapshot_version: 2,
-                portfolio: PortfolioConfig {
+            &AssembleSnapshotConfig::new(
+                2,
+                PortfolioConfig {
                     portfolio_id: "portfolio_main".to_owned(),
                     quote_codes: vec![QuoteCode::Usd],
                     networks: vec![network],
@@ -1903,7 +2323,8 @@ mod tests {
                     symbol_configs: vec![symbol],
                     metadata: BTreeMap::new(),
                 },
-            },
+            )
+            .expect("assemble config"),
             AssembleSnapshotInput {
                 subjects: input.subjects,
                 views: input.views,

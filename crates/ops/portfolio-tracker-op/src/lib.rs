@@ -27,7 +27,7 @@ use mfm_portfolio_model::domain_key::{
     ObservationBatchDomainKey, ReportDomainKey, SourceDomainKey, SubjectDomainKey,
     ValuationDomainKey, ViewDomainKey,
 };
-use mfm_portfolio_model::portfolio::{validate_portfolio_bundle, NetworkConfig, PortfolioConfig};
+use mfm_portfolio_model::portfolio::{NetworkConfig, PortfolioConfig};
 use mfm_portfolio_model::symbol::SymbolConfig;
 use mfm_portfolio_model::wallet::WalletConfig;
 use mfm_program::{
@@ -87,16 +87,11 @@ impl Operation for PortfolioTrackerWorkflowOperation {
         builder: &mut OperationExpansion<'program, 'scope>,
         _dispatch: mfm_program::OperationExpansionDispatch<Self>,
     ) -> mfm_program::Result<Self::Output<'program, 'scope>> {
-        if config.workflow_version != 1 {
-            return Err(mfm_program::PlanError::Key(
-                "unsupported portfolio workflow config version".to_owned(),
-            ));
-        }
-        validate_portfolio_bundle(&config.portfolio, &config.valuation_source_registry)
+        let config = config
+            .validated()
             .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
-
-        let portfolio = config.portfolio.normalized();
-        let valuation_source_registry = config.valuation_source_registry.normalized();
+        let portfolio = config.portfolio().clone().normalized();
+        let valuation_source_registry = config.valuation_source_registry().clone().normalized();
         let networks_by_id = networks_by_id(&portfolio.networks)?;
 
         let source_key = SourceDomainKey::new("portfolio_sources")
@@ -112,35 +107,32 @@ impl Operation for PortfolioTrackerWorkflowOperation {
 
         let prepared = builder.state_with_domain_keys::<PrepareSourcesState, _, _>(
             StateKey::new("prepare_sources")?,
-            PrepareSourcesConfig {
-                networks: portfolio.networks.clone(),
-            },
+            PrepareSourcesConfig::new(portfolio.networks.clone())
+                .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
             (),
             vec![source_key],
         )?;
         let subjects = builder.state_with_domain_keys::<ResolveSubjectsState, _, _>(
             StateKey::new("resolve_subjects")?,
-            ResolveSubjectsConfig {
-                wallets: portfolio.wallets.clone(),
-            },
+            ResolveSubjectsConfig::new(portfolio.wallets.clone())
+                .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
             prepared.clone(),
             vec![subject_key],
         )?;
         let views = builder.state_with_domain_keys::<PinViewsState, _, _>(
             StateKey::new("pin_views")?,
-            PinViewsConfig {
-                pin_version: 1,
-                networks: portfolio.networks.clone(),
-            },
+            PinViewsConfig::new(portfolio.networks.clone())
+                .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
             prepared,
             vec![view_key],
         )?;
         let valuations = builder.state_with_domain_keys::<ResolveValuationsState, _, _>(
             StateKey::new("resolve_valuations")?,
-            ResolveValuationsConfig {
-                symbol_configs: portfolio.symbol_configs.clone(),
+            ResolveValuationsConfig::new(
+                portfolio.symbol_configs.clone(),
                 valuation_source_registry,
-            },
+            )
+            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
             views.clone(),
             vec![valuation_key],
         )?;
@@ -165,11 +157,8 @@ impl Operation for PortfolioTrackerWorkflowOperation {
                 .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
             let handle = builder.state_with_domain_keys::<ObserveBatchState, _, _>(
                 StateKey::new(format!("observe/{batch_key}"))?,
-                ObserveBatchConfig {
-                    wallet: wallet.clone(),
-                    symbol: symbol.clone(),
-                    network: network.clone(),
-                },
+                ObserveBatchConfig::new(wallet.clone(), symbol.clone(), network.clone())
+                    .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
                 ObserveBatchInputHandles {
                     subjects: subjects.clone(),
                     views: views.clone(),
@@ -182,17 +171,15 @@ impl Operation for PortfolioTrackerWorkflowOperation {
 
         let observations = builder.state::<MergeObservationsState, _>(
             StateKey::new("merge_observations")?,
-            MergeObservationsConfig { merge_version: 1 },
+            MergeObservationsConfig::new(),
             DomainKeyedNonEmptyHandles::<ObservationBatchDomainKey, ObservationBatch>::new(
                 observation_handles,
             )?,
         )?;
         let snapshot = builder.state::<AssembleSnapshotState, _>(
             StateKey::new("assemble_snapshot")?,
-            AssembleSnapshotConfig {
-                snapshot_version: 2,
-                portfolio: portfolio.clone(),
-            },
+            AssembleSnapshotConfig::new(2, portfolio.clone())
+                .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
             AssembleSnapshotInputHandles {
                 subjects,
                 views,
@@ -201,7 +188,8 @@ impl Operation for PortfolioTrackerWorkflowOperation {
         )?;
         let report = builder.state_with_domain_keys::<ProjectReportState, _, _>(
             StateKey::new("project_report")?,
-            ProjectReportConfig { report_version: 2 },
+            ProjectReportConfig::new(2)
+                .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?,
             ProjectReportInputHandles {
                 snapshot: snapshot.clone(),
             },
@@ -646,62 +634,72 @@ mod tests {
 
     #[test]
     fn duplicate_observation_domain_key_is_rejected() {
-        let mut config = sample_workflow_config();
-        config.portfolio.wallets[0]
+        let mut portfolio = sample_portfolio_config();
+        portfolio.wallets[0]
             .symbol_ids
             .push("eth.native.ethereum-mainnet".to_owned());
+        let config = PortfolioWorkflowConfig::new(portfolio, sample_valuation_source_registry())
+            .expect("workflow config");
         let err = portfolio_program_draft(config).expect_err("duplicate domain key");
         assert!(matches!(err, mfm_program::PlanError::DuplicateDomainKey(_)));
     }
 
     fn sample_workflow_config() -> PortfolioWorkflowConfig {
-        PortfolioWorkflowConfig {
-            workflow_version: 1,
-            portfolio: PortfolioConfig {
-                portfolio_id: "portfolio_main".to_owned(),
-                quote_codes: vec![QuoteCode::Usd],
-                networks: vec![NetworkConfig {
-                    network_id: "ethereum-mainnet".to_owned(),
-                    family: NetworkFamilyConfig::Evm,
-                    chain_id: Some(1),
-                    control_scope: "shared".to_owned(),
-                    metadata: BTreeMap::new(),
-                }],
-                wallets: vec![WalletConfig {
-                    wallet_id: "wallet_main".to_owned(),
-                    address: "0x000000000000000000000000000000000000dead".to_owned(),
-                    subject_kind: WalletSubjectKind::EvmAddress,
-                    network_id: "ethereum-mainnet".to_owned(),
-                    implementation: WalletImplementationConfig::AddressOnly {},
-                    symbol_ids: vec!["eth.native.ethereum-mainnet".to_owned()],
-                    metadata: BTreeMap::new(),
-                }],
-                symbol_configs: vec![SymbolConfig {
-                    symbol_id: "eth.native.ethereum-mainnet".to_owned(),
-                    display_symbol: Some("ETH".to_owned()),
-                    kind: SymbolKind::NativeBalance,
-                    role: SymbolRole::Native,
-                    network_id: "ethereum-mainnet".to_owned(),
-                    protocol: None,
-                    balance_reader: BalanceReaderConfig::NativeBalance {},
-                    valuation: SymbolValuationConfig {
-                        quotes: vec![QuoteValuationConfig {
-                            quote: QuoteCode::Usd,
-                            priced_symbol_id: "eth.native.ethereum-mainnet".to_owned(),
-                            reader: ValuationReaderConfig::FixedUnitPrice {
-                                unit_price_dec: "1800.00".to_owned(),
-                            },
-                        }],
-                    },
-                    decimals: Some(18),
-                    underlying_symbol_id: None,
-                    metadata: BTreeMap::new(),
-                }],
+        PortfolioWorkflowConfig::new(
+            sample_portfolio_config(),
+            sample_valuation_source_registry(),
+        )
+        .expect("workflow config")
+    }
+
+    fn sample_valuation_source_registry() -> ValuationSourceRegistry {
+        ValuationSourceRegistry {
+            sources: Vec::new(),
+        }
+    }
+
+    fn sample_portfolio_config() -> PortfolioConfig {
+        PortfolioConfig {
+            portfolio_id: "portfolio_main".to_owned(),
+            quote_codes: vec![QuoteCode::Usd],
+            networks: vec![NetworkConfig {
+                network_id: "ethereum-mainnet".to_owned(),
+                family: NetworkFamilyConfig::Evm,
+                chain_id: Some(1),
+                control_scope: "shared".to_owned(),
                 metadata: BTreeMap::new(),
-            },
-            valuation_source_registry: ValuationSourceRegistry {
-                sources: Vec::new(),
-            },
+            }],
+            wallets: vec![WalletConfig {
+                wallet_id: "wallet_main".to_owned(),
+                address: "0x000000000000000000000000000000000000dead".to_owned(),
+                subject_kind: WalletSubjectKind::EvmAddress,
+                network_id: "ethereum-mainnet".to_owned(),
+                implementation: WalletImplementationConfig::AddressOnly {},
+                symbol_ids: vec!["eth.native.ethereum-mainnet".to_owned()],
+                metadata: BTreeMap::new(),
+            }],
+            symbol_configs: vec![SymbolConfig {
+                symbol_id: "eth.native.ethereum-mainnet".to_owned(),
+                display_symbol: Some("ETH".to_owned()),
+                kind: SymbolKind::NativeBalance,
+                role: SymbolRole::Native,
+                network_id: "ethereum-mainnet".to_owned(),
+                protocol: None,
+                balance_reader: BalanceReaderConfig::NativeBalance {},
+                valuation: SymbolValuationConfig {
+                    quotes: vec![QuoteValuationConfig {
+                        quote: QuoteCode::Usd,
+                        priced_symbol_id: "eth.native.ethereum-mainnet".to_owned(),
+                        reader: ValuationReaderConfig::FixedUnitPrice {
+                            unit_price_dec: "1800.00".to_owned(),
+                        },
+                    }],
+                },
+                decimals: Some(18),
+                underlying_symbol_id: None,
+                metadata: BTreeMap::new(),
+            }],
+            metadata: BTreeMap::new(),
         }
     }
 }
