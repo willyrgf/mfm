@@ -249,6 +249,10 @@ These commands use:
 - the certified typed PostgreSQL run-event store (requires `DATABASE_URL` or `--database-url`)
 - the typed filesystem artifact store (defaults to `$MFM_TYPED_ARTIFACT_ROOT` or `~/.mfm/typed_run_artifacts`, or use `--typed-artifact-root`)
 
+The CLI validates the PostgreSQL schema on connect and does not create or alter
+tables. Apply the `mfm-stream-store-postgres` migrations before running typed
+run commands.
+
 Run ids use the typed identity format `run:<algorithm>:<digest>`. Old UUID dynamic run ids are not
 accepted by the typed CLI run surface.
 
@@ -512,6 +516,7 @@ The CLI's behavior can be modified using environment variables, which is ideal f
 - **`DATABASE_URL`**: PostgreSQL connection string used by `run` commands (unless `--database-url` is provided).
   ```sh
   export DATABASE_URL="postgresql://postgres:postgres@localhost:5432/mfm_test"
+  cargo sqlx migrate run --source crates/storages/stream-store-postgres/migrations
   mfm_cli run status "run:sha256-jcs-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   ```
 

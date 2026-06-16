@@ -30,6 +30,15 @@ Environment variables:
 - `MFM_EVM_CONTRACT_SOURCE_POLICY_ID`: optional EVM source policy id for contract lifecycle routes
 - `MFM_EVM_SIGNERS_JSON`: runtime-only signer provider registry for contract lifecycle routes
 
+The REST API validates the PostgreSQL schema on startup and does not create or
+alter tables. Apply the `mfm-stream-store-postgres` migrations before starting
+the server:
+
+```bash
+export DATABASE_URL="postgresql://postgres:postgres@localhost:5432/mfm_test"
+cargo sqlx migrate run --source crates/storages/stream-store-postgres/migrations
+```
+
 ## API
 
 All responses are JSON envelopes:

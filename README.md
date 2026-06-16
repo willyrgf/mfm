@@ -104,6 +104,7 @@ surface:
 nix run .#model-check
 nix run .#check
 nix run .#test
+nix run .#test-db
 nix run .#ci
 ```
 
@@ -111,6 +112,8 @@ nix run .#ci
 
 `nix run .#test` runs `cargo nextest run --workspace` followed by
 `cargo test --workspace --doc`, without managed external services.
+`nix run .#test-db` starts managed Postgres and runs Postgres-backed parity
+tests.
 `.#ci` is full by definition: it starts managed Postgres and Reth and runs all feature-gated parity
 tests. There is no `--mode` or `--full` compatibility flag.
 
