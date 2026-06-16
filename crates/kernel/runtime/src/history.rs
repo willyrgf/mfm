@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Range;
 
 use mfm_events::v1 as events;
 use mfm_ids::{ArtifactId, AttemptId, CellId, ContentDigest, NodeId, RunId, SpecHash};
@@ -48,6 +49,55 @@ pub(crate) struct CommittedArtifactReference {
     pub(crate) attempt_id: Option<AttemptId>,
     pub(crate) commit_seq: store::StreamSeq,
     pub(crate) commit_key: store::CommitKey,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RuntimeCommittedHistory {
+    commits: Vec<RuntimeCommittedBatch>,
+}
+
+impl RuntimeCommittedHistory {
+    fn from_committed_stream(committed: &store::CommittedRunStream) -> Self {
+        let mut start = 0;
+        let commits = committed
+            .commits()
+            .iter()
+            .map(|commit| {
+                let end = start + commit.events().len();
+                let batch = RuntimeCommittedBatch {
+                    event_range: start..end,
+                };
+                start = end;
+                batch
+            })
+            .collect();
+        Self { commits }
+    }
+
+    fn commits(&self) -> &[RuntimeCommittedBatch] {
+        &self.commits
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeCommittedBatch {
+    event_range: Range<usize>,
+}
+
+impl RuntimeCommittedBatch {
+    fn events<'a>(
+        &self,
+        stream: &'a [store::KernelEventEnvelope],
+    ) -> &'a [store::KernelEventEnvelope] {
+        &stream[self.event_range.clone()]
+    }
+
+    fn prefix<'a>(
+        &self,
+        stream: &'a [store::KernelEventEnvelope],
+    ) -> &'a [store::KernelEventEnvelope] {
+        &stream[..self.event_range.start]
+    }
 }
 
 /// Store-owned run history validated against certified runtime authority.
@@ -170,6 +220,7 @@ impl RuntimeRunView {
         committed: &store::CommittedRunStream,
     ) -> Result<Self> {
         let stream = committed.events();
+        let history = RuntimeCommittedHistory::from_committed_stream(committed);
         let projections = committed.projection().clone();
         let mut run_started = None;
         for event in stream {
@@ -210,7 +261,13 @@ impl RuntimeRunView {
                 "run has not started with certified RunStarted evidence".to_owned(),
             ));
         };
-        validate_historical_run_stream(runtime_spec, committed.run_id(), stream, &projections)?;
+        validate_historical_run_stream(
+            runtime_spec,
+            committed.run_id(),
+            stream,
+            &projections,
+            &history,
+        )?;
         let seed_cells = validate_seed_cells(runtime_spec, &run_started.seed_cells)?;
         let config_artifacts = config_artifacts_from_stream(runtime_spec, stream)?;
         let artifact_refs = artifact_refs_from_stream(stream)?;
@@ -548,6 +605,7 @@ fn validate_historical_run_stream(
     run_id: &RunId,
     stream: &[store::KernelEventEnvelope],
     projections: &store::ProjectionSnapshot,
+    history: &RuntimeCommittedHistory,
 ) -> Result<()> {
     let mut available_cells = BTreeSet::<CellId>::new();
     let mut active_attempts = BTreeSet::<(NodeId, AttemptId)>::new();
@@ -842,8 +900,8 @@ fn validate_historical_run_stream(
     }
     validate_atomic_terminal_pairs(runtime_spec, stream)?;
     validate_historical_bootstrap_run_batch(runtime_spec, run_id, stream)?;
-    validate_historical_retention_ref_batches(runtime_spec, stream)?;
-    validate_historical_retention_manifest_batches(runtime_spec, stream)?;
+    validate_historical_retention_ref_batches(runtime_spec, stream, history)?;
+    validate_historical_retention_manifest_batches(runtime_spec, stream, history)?;
     validate_historical_terminal_tail(runtime_spec, run_id, stream)?;
     validate_atomic_side_effect_failure_pairs(runtime_spec, stream)?;
     validate_recovery_frontier(runtime_spec, projections)?;
@@ -1055,22 +1113,14 @@ fn validate_atomic_terminal_pairs(
 fn validate_historical_retention_manifest_batches(
     runtime_spec: &CertifiedRuntimeSpec,
     stream: &[store::KernelEventEnvelope],
+    history: &RuntimeCommittedHistory,
 ) -> Result<()> {
-    let mut index = 0;
-    while index < stream.len() {
-        let first = &stream[index];
-        let seq = first.seq();
-        let commit_key = first.commit_key().clone();
-        let mut end = index + 1;
-        while end < stream.len()
-            && stream[end].seq() == seq
-            && stream[end].commit_key() == &commit_key
-        {
-            end += 1;
-        }
-        let commit = &stream[index..end];
-        validate_historical_retention_manifest_batch(runtime_spec, &stream[..index], commit)?;
-        index = end;
+    for commit in history.commits() {
+        validate_historical_retention_manifest_batch(
+            runtime_spec,
+            commit.prefix(stream),
+            commit.events(stream),
+        )?;
     }
     Ok(())
 }
@@ -1080,21 +1130,10 @@ type RetentionRefKey = (ArtifactId, ContentDigest, events::ArtifactRole);
 fn validate_historical_retention_ref_batches(
     runtime_spec: &CertifiedRuntimeSpec,
     stream: &[store::KernelEventEnvelope],
+    history: &RuntimeCommittedHistory,
 ) -> Result<()> {
-    let mut index = 0;
-    while index < stream.len() {
-        let first = &stream[index];
-        let seq = first.seq();
-        let commit_key = first.commit_key().clone();
-        let mut end = index + 1;
-        while end < stream.len()
-            && stream[end].seq() == seq
-            && stream[end].commit_key() == &commit_key
-        {
-            end += 1;
-        }
-        validate_historical_retention_ref_batch(runtime_spec, &stream[index..end])?;
-        index = end;
+    for commit in history.commits() {
+        validate_historical_retention_ref_batch(runtime_spec, commit.events(stream))?;
     }
     Ok(())
 }
