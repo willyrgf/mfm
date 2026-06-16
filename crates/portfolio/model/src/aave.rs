@@ -6,7 +6,7 @@ use mfm_values::string_map_secret_marker_key;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::ids::NormalizedEvmAddress;
+use crate::ids::{AaveMarketId, AaveReserveId, NetworkId, NormalizedEvmAddress};
 use crate::portfolio::PortfolioConfig;
 use crate::symbol::{BalanceReaderConfig, QuoteCode, SymbolConfig, SymbolKind, SymbolRole};
 
@@ -26,9 +26,9 @@ pub const AAVE_V3_READER_DEBT_POSITION: &str = "debt_position";
 )]
 pub struct AaveMarketConfig {
     /// Stable logical market identifier.
-    pub market_id: String,
+    pub market_id: AaveMarketId,
     /// Stable portfolio network identifier on which the market lives.
-    pub network_id: String,
+    pub network_id: NetworkId,
     /// EVM chain id for the market.
     pub chain_id: u64,
     /// Pool contract address used for collateral-flag reads.
@@ -70,7 +70,7 @@ impl AaveMarketConfig {
 )]
 pub struct AaveReserveConfig {
     /// Stable reserve identifier used in symbol configs.
-    pub reserve_id: String,
+    pub reserve_id: AaveReserveId,
     /// Aave reserve index used by `getUserConfiguration`.
     pub reserve_index: u16,
     /// Underlying ERC-20 token contract address.
@@ -99,7 +99,7 @@ pub struct AaveReservePositionConfig {
     /// Explicit market config used to resolve reserve token addresses.
     pub market: AaveMarketConfig,
     /// Reserve identifier within the market.
-    pub reserve_id: String,
+    pub reserve_id: AaveReserveId,
     /// Optional collateral-flag requirement enforced against `getUserConfiguration`.
     #[serde(default)]
     pub use_as_collateral_required: Option<bool>,
@@ -116,7 +116,7 @@ pub struct AaveDebtPositionConfig {
     /// Explicit market config used to resolve debt token addresses.
     pub market: AaveMarketConfig,
     /// Reserve identifier within the market.
-    pub reserve_id: String,
+    pub reserve_id: AaveReserveId,
     /// Debt token family to read.
     #[serde(default)]
     pub debt_kind: AaveDebtKind,
@@ -336,7 +336,7 @@ pub fn is_aave_protocol_position(symbol: &SymbolConfig) -> bool {
         || matches!(
             &symbol.balance_reader,
             BalanceReaderConfig::ProtocolPosition { protocol, .. }
-                if protocol == AAVE_V3_PROTOCOL_ID
+                if protocol.as_str() == AAVE_V3_PROTOCOL_ID
         )
 }
 
@@ -382,7 +382,7 @@ pub fn decode_aave_protocol_position_config(
             symbol_id: symbol.symbol_id.to_string(),
         });
     };
-    if protocol != AAVE_V3_PROTOCOL_ID {
+    if protocol.as_str() != AAVE_V3_PROTOCOL_ID {
         return Err(AavePortfolioConfigError::SymbolProtocolMismatch {
             symbol_id: symbol.symbol_id.to_string(),
         });
@@ -421,7 +421,7 @@ pub fn validate_aave_portfolio_config(
         .iter()
         .map(|network| (network.network_id.as_str(), network.chain_id))
         .collect();
-    let mut markets_by_id: HashMap<String, AaveMarketConfig> = HashMap::new();
+    let mut markets_by_id: HashMap<AaveMarketId, AaveMarketConfig> = HashMap::new();
 
     for symbol in &portfolio.symbol_configs {
         if !is_aave_protocol_position(symbol) {
@@ -449,7 +449,7 @@ pub fn validate_aave_portfolio_config(
         let reserve = cfg.market().reserve(cfg.reserve_id()).ok_or_else(|| {
             AavePortfolioConfigError::UnknownReserve {
                 symbol_id: symbol.symbol_id.to_string(),
-                market_id: cfg.market().market_id.clone(),
+                market_id: cfg.market().market_id.to_string(),
                 reserve_id: cfg.reserve_id().to_string(),
             }
         })?;
@@ -458,14 +458,14 @@ pub fn validate_aave_portfolio_config(
                 AaveDebtKind::Variable if reserve.variable_debt_token_address.is_none() => {
                     return Err(AavePortfolioConfigError::MissingDebtTokenAddress {
                         symbol_id: symbol.symbol_id.to_string(),
-                        reserve_id: debt_cfg.reserve_id.clone(),
+                        reserve_id: debt_cfg.reserve_id.to_string(),
                         debt_kind: debt_cfg.debt_kind,
                     });
                 }
                 AaveDebtKind::Stable if reserve.stable_debt_token_address.is_none() => {
                     return Err(AavePortfolioConfigError::MissingDebtTokenAddress {
                         symbol_id: symbol.symbol_id.to_string(),
-                        reserve_id: debt_cfg.reserve_id.clone(),
+                        reserve_id: debt_cfg.reserve_id.to_string(),
                         debt_kind: debt_cfg.debt_kind,
                     });
                 }
@@ -475,11 +475,11 @@ pub fn validate_aave_portfolio_config(
 
         let market_id = cfg.market().market_id.clone();
         let market = cfg.market().clone().normalized();
-        if let Some(first_market) = markets_by_id.get(market_id.as_str()) {
+        if let Some(first_market) = markets_by_id.get(&market_id) {
             if first_market != &market {
                 return Err(AavePortfolioConfigError::ConflictingMarketDefinition {
                     symbol_id: symbol.symbol_id.to_string(),
-                    market_id,
+                    market_id: market_id.to_string(),
                 });
             }
         } else {
@@ -495,23 +495,14 @@ fn validate_market_config(
     market: &AaveMarketConfig,
     expected_chain_id: u64,
 ) -> Result<(), AavePortfolioConfigError> {
-    if market.market_id.trim().is_empty() {
-        return Err(invalid_market(symbol, "market_id must be non-empty"));
-    }
     if let Some(key) = string_map_secret_marker_key(&market.metadata) {
         return Err(AavePortfolioConfigError::MarketMetadataContainsSecret {
             symbol_id: symbol.symbol_id.to_string(),
-            market_id: market.market_id.clone(),
+            market_id: market.market_id.to_string(),
             key: key.to_string(),
         });
     }
-    if market.network_id.trim().is_empty() {
-        return Err(invalid_market(
-            symbol,
-            "market.network_id must be non-empty",
-        ));
-    }
-    if market.network_id != symbol.network_id.as_str() {
+    if market.network_id != symbol.network_id {
         return Err(invalid_market(
             symbol,
             format!(
@@ -536,17 +527,11 @@ fn validate_market_config(
     let mut reserve_ids = HashMap::new();
     let mut reserve_indexes = HashMap::new();
     for reserve in &market.reserves {
-        if reserve.reserve_id.trim().is_empty() {
-            return Err(invalid_market(
-                symbol,
-                "market.reserves[].reserve_id must be non-empty",
-            ));
-        }
         if let Some(key) = string_map_secret_marker_key(&reserve.metadata) {
             return Err(AavePortfolioConfigError::ReserveMetadataContainsSecret {
                 symbol_id: symbol.symbol_id.to_string(),
-                market_id: market.market_id.clone(),
-                reserve_id: reserve.reserve_id.clone(),
+                market_id: market.market_id.to_string(),
+                reserve_id: reserve.reserve_id.to_string(),
                 key: key.to_string(),
             });
         }
@@ -602,13 +587,13 @@ mod tests {
 
     fn aave_market() -> AaveMarketConfig {
         AaveMarketConfig {
-            market_id: "aave-v3-mainnet".to_string(),
-            network_id: "ethereum-mainnet".to_string(),
+            market_id: "aave-v3-mainnet".parse().expect("valid market id"),
+            network_id: "ethereum-mainnet".parse().expect("valid network id"),
             chain_id: 1,
             pool_address: evm_address("0x0000000000000000000000000000000000000abc"),
             reserves: vec![
                 AaveReserveConfig {
-                    reserve_id: "wbtc".to_string(),
+                    reserve_id: "wbtc".parse().expect("valid reserve id"),
                     reserve_index: 1,
                     underlying_token_address: evm_address(
                         "0x00000000000000000000000000000000000000b2",
@@ -621,7 +606,7 @@ mod tests {
                     metadata: BTreeMap::new(),
                 },
                 AaveReserveConfig {
-                    reserve_id: "usdc".to_string(),
+                    reserve_id: "usdc".parse().expect("valid reserve id"),
                     reserve_index: 0,
                     underlying_token_address: evm_address(
                         "0x00000000000000000000000000000000000000a1",
@@ -667,7 +652,7 @@ mod tests {
             kind: SymbolKind::ProtocolPosition,
             role,
             network_id: "ethereum-mainnet".parse().expect("valid network id"),
-            protocol: Some(AAVE_V3_PROTOCOL_ID.to_string()),
+            protocol: Some(AAVE_V3_PROTOCOL_ID.parse().expect("valid protocol id")),
             balance_reader: serde_json::from_value(json!({
                 "kind": "protocol_position",
                 "protocol": AAVE_V3_PROTOCOL_ID,

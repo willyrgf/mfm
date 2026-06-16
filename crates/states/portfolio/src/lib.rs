@@ -1411,7 +1411,7 @@ pub fn observation_batch_from_raw_balance(
         kind: config.symbol.kind,
         role: config.symbol.role,
         network_id: config.network.network_id.to_string(),
-        protocol: config.symbol.protocol.clone(),
+        protocol: config.symbol.protocol.as_ref().map(ToString::to_string),
         quantity: ObservationQuantity {
             raw_dec: raw.to_string(),
             decimals,
@@ -1636,7 +1636,7 @@ pub fn balance_reader_kind(reader: &BalanceReaderConfig) -> &'static str {
         BalanceReaderConfig::Erc20Balance { .. } => "erc20_balance",
         BalanceReaderConfig::ProtocolPosition {
             protocol, reader, ..
-        } if protocol == AAVE_V3_PROTOCOL_ID => match reader.as_str() {
+        } if protocol.as_str() == AAVE_V3_PROTOCOL_ID => match reader.as_str() {
             "reserve_position" => "aave_v3/reserve_position",
             "debt_position" => "aave_v3/debt_position",
             _ => "protocol_position",
@@ -1729,7 +1729,9 @@ fn validate_observe_batch_config(config: &ObserveBatchConfig) -> Result<(), Stri
                 config.symbol.symbol_id, protocol
             ));
         }
-        if protocol == AAVE_V3_PROTOCOL_ID && reader != protocol_config.reader_name() {
+        if protocol.as_str() == AAVE_V3_PROTOCOL_ID
+            && reader.as_str() != protocol_config.reader_name()
+        {
             return Err(format!(
                 "symbol `{}` Aave reader `{}` did not match typed config reader `{}`",
                 config.symbol.symbol_id,

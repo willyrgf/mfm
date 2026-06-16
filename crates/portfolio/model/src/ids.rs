@@ -173,6 +173,46 @@ portfolio_id_type!(
     "Stable typed portfolio valuation-source identifier."
 );
 
+portfolio_id_type!(
+    ProtocolId,
+    "protocol",
+    "protocol-id",
+    "mfm.portfolio.id.protocol",
+    "Stable typed portfolio protocol identifier."
+);
+
+portfolio_id_type!(
+    ProtocolReaderId,
+    "protocol_reader",
+    "protocol-reader-id",
+    "mfm.portfolio.id.protocol_reader",
+    "Stable typed portfolio protocol reader identifier."
+);
+
+portfolio_id_type!(
+    OracleKindId,
+    "oracle_kind",
+    "oracle-kind-id",
+    "mfm.portfolio.id.oracle_kind",
+    "Stable typed portfolio oracle kind identifier."
+);
+
+portfolio_id_type!(
+    AaveMarketId,
+    "aave_market_id",
+    "aave-market-id",
+    "mfm.portfolio.id.aave_market",
+    "Stable typed Aave market identifier."
+);
+
+portfolio_id_type!(
+    AaveReserveId,
+    "aave_reserve_id",
+    "aave-reserve-id",
+    "mfm.portfolio.id.aave_reserve",
+    "Stable typed Aave reserve identifier."
+);
+
 /// Normalized lowercase EVM address authority.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, MfmValue)]
 #[serde(try_from = "String", into = "String")]

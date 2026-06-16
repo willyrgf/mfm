@@ -10,7 +10,8 @@ use thiserror::Error;
 
 use crate::aave::AaveProtocolPositionConfig;
 use crate::ids::{
-    NetworkId, NormalizedEvmAddress, PortfolioScalarError, SymbolId, ValuationSourceId,
+    NetworkId, NormalizedEvmAddress, OracleKindId, PortfolioScalarError, ProtocolId,
+    ProtocolReaderId, SymbolId, ValuationSourceId,
 };
 
 /// Supported quote codes for the canonical portfolio snapshot surface.
@@ -116,7 +117,7 @@ pub struct SymbolConfig {
     /// Stable network identifier.
     pub network_id: NetworkId,
     /// Optional protocol identifier.
-    pub protocol: Option<String>,
+    pub protocol: Option<ProtocolId>,
     /// Balance reader selection.
     pub balance_reader: BalanceReaderConfig,
     /// Quote valuation routes for the symbol.
@@ -154,6 +155,10 @@ impl SymbolConfig {
             .map(SymbolId::new)
             .transpose()
             .map_err(|source| SymbolConfigError::InvalidUnderlyingSymbolId { source })?;
+        let protocol = protocol
+            .map(ProtocolId::new)
+            .transpose()
+            .map_err(|source| SymbolConfigError::InvalidProtocol { source })?;
         Self {
             symbol_id,
             display_symbol,
@@ -208,9 +213,9 @@ pub enum BalanceReaderConfig {
     /// Read a protocol-backed position through a protocol-specific reader.
     ProtocolPosition {
         /// Stable protocol identifier.
-        protocol: String,
+        protocol: ProtocolId,
         /// Stable reader identifier inside the protocol module.
-        reader: String,
+        reader: ProtocolReaderId,
         /// Typed protocol reader config.
         config: AaveProtocolPositionConfig,
     },
@@ -403,7 +408,7 @@ pub enum ValuationSourceReaderConfig {
     /// EVM oracle reader selected by `oracle_kind`.
     EvmOracle {
         /// Concrete oracle family used at runtime.
-        oracle_kind: String,
+        oracle_kind: OracleKindId,
         /// Typed oracle config.
         config: EvmOracleConfig,
     },
@@ -603,8 +608,11 @@ pub enum SymbolConfigError {
         source: PortfolioScalarError,
     },
     /// `protocol` was present but empty.
-    #[error("protocol must be non-empty when present")]
-    EmptyProtocol,
+    #[error("protocol is invalid: {source}")]
+    InvalidProtocol {
+        /// Underlying scalar validation failure.
+        source: PortfolioScalarError,
+    },
     /// `underlying_symbol_id` did not satisfy the portfolio identifier grammar.
     #[error("underlying_symbol_id is invalid: {source}")]
     InvalidUnderlyingSymbolId {
@@ -617,12 +625,6 @@ pub enum SymbolConfigError {
         /// Metadata key associated with the rejected content.
         key: String,
     },
-    /// `protocol` in a `protocol_position` reader was empty.
-    #[error("protocol_position.protocol must be non-empty")]
-    EmptyProtocolReaderProtocol,
-    /// `reader` in a `protocol_position` reader was empty.
-    #[error("protocol_position.reader must be non-empty")]
-    EmptyProtocolReader,
     /// A quote route appeared more than once.
     #[error("valuation quote `{quote}` must be unique per symbol")]
     DuplicateQuoteValuation {
@@ -689,9 +691,6 @@ pub enum ValuationSourceRegistryError {
         /// Metadata key associated with the rejected content.
         key: String,
     },
-    /// `oracle_kind` was empty.
-    #[error("evm_oracle.oracle_kind must be non-empty")]
-    EmptyOracleKind,
     /// The same `source_id` appeared more than once.
     #[error("valuation source `{source_id}` must be unique")]
     DuplicateSourceId {
@@ -718,13 +717,6 @@ pub fn decode_valuation_source_registry(
 
 /// Validates a canonical symbol config.
 pub fn validate_symbol_config(cfg: &SymbolConfig) -> Result<(), SymbolConfigError> {
-    if cfg
-        .protocol
-        .as_deref()
-        .is_some_and(|value| value.trim().is_empty())
-    {
-        return Err(SymbolConfigError::EmptyProtocol);
-    }
     if let Some(key) = string_map_secret_marker_key(&cfg.metadata) {
         return Err(SymbolConfigError::MetadataContainsSecret {
             key: key.to_string(),
@@ -734,18 +726,7 @@ pub fn validate_symbol_config(cfg: &SymbolConfig) -> Result<(), SymbolConfigErro
     match &cfg.balance_reader {
         BalanceReaderConfig::NativeBalance {} => {}
         BalanceReaderConfig::Erc20Balance { .. } => {}
-        BalanceReaderConfig::ProtocolPosition {
-            protocol,
-            reader,
-            config: _,
-        } => {
-            if protocol.trim().is_empty() {
-                return Err(SymbolConfigError::EmptyProtocolReaderProtocol);
-            }
-            if reader.trim().is_empty() {
-                return Err(SymbolConfigError::EmptyProtocolReader);
-            }
-        }
+        BalanceReaderConfig::ProtocolPosition { .. } => {}
     }
 
     let mut seen_quotes = HashSet::new();
@@ -775,13 +756,6 @@ pub fn validate_valuation_source_registry(
                 source_id: source.source_id.to_string(),
                 key: key.to_string(),
             });
-        }
-        match &source.reader {
-            ValuationSourceReaderConfig::EvmOracle { oracle_kind, .. } => {
-                if oracle_kind.trim().is_empty() {
-                    return Err(ValuationSourceRegistryError::EmptyOracleKind);
-                }
-            }
         }
     }
 
@@ -834,7 +808,7 @@ mod tests {
                     .expect("valid base symbol id"),
                 quote: QuoteCode::Usd,
                 reader: ValuationSourceReaderConfig::EvmOracle {
-                    oracle_kind: "chainlink".to_string(),
+                    oracle_kind: "chainlink".parse().expect("valid oracle kind"),
                     config: EvmOracleConfig {
                         contract_address: "0x0000000000000000000000000000000000000001"
                             .parse()
