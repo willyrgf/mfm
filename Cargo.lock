@@ -1932,6 +1932,7 @@ dependencies = [
  "mfm-program-derive",
  "mfm-values",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
