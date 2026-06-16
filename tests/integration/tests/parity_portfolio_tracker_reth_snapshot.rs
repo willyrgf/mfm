@@ -8,7 +8,7 @@ mod support;
 
 const NETWORK_ID: &str = "reth-local";
 const SYMBOL_ID: &str = "eth.native.reth-local";
-const CONTROL_SCOPE: &str = "parity.portfolio_snapshot.eth_only";
+const CONTROL_SCOPE: &str = "parity/portfolio-snapshot/eth-only";
 const DEFAULT_PARITY_RETH_HTTP_PORT: &str = "8565";
 const ENV_EVM_RPC_SOURCES_JSON: &str = "MFM_EVM_RPC_SOURCES_JSON";
 
