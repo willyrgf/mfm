@@ -107,7 +107,8 @@ cargo test --workspace
 Nixfied v2 is consumed as a flake input, not vendored as a framework tree.
 
 - `flake.nix`: pins the `nixfied` input, compiles `nixfied.nix`, and exposes `.#check`, `.#test`, `.#test-db`, `.#ci`, and `.#mfm`.
-- `flake.lock`: records the exact Nixfied/nixpkgs/Rust overlay inputs.
+- `flake.lock`: records the exact Nixfied/nixpkgs/Rust overlay inputs; the root
+  nixpkgs pin supplies the SQLx CLI used by `.#test-db`.
 - `nixfied.nix`: project-owned model for MFM tasks, composites, services, slots, and ports.
 
 Prefer editing `nixfied.nix` for Nixfied task/composite changes. Do not recreate v1-style `nixfied/project/`,

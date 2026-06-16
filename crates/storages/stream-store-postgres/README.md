@@ -24,21 +24,23 @@ Local SQLx metadata lives in `.sqlx/` beside this README and must be regenerated
 from a migrated Postgres database whenever checked queries or migrations change:
 
 ```sh
-nix shell nixpkgs#sqlx-cli --command cargo sqlx --version
+nix shell .#sqlx-cli --command cargo sqlx --version
 
 export DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:5432/mfm_test"
-nix shell nixpkgs#sqlx-cli --command \
+nix shell .#sqlx-cli --command \
   sqlx migrate run --source crates/storages/stream-store-postgres/migrations
-nix shell nixpkgs#sqlx-cli --command bash -lc \
+nix shell .#sqlx-cli --command bash -lc \
   'cd crates/storages/stream-store-postgres && cargo sqlx prepare -- --all-targets --features parity-tests'
 cargo clean -p mfm-stream-store-postgres
-nix shell nixpkgs#sqlx-cli --command bash -lc \
+nix shell .#sqlx-cli --command bash -lc \
   'cd crates/storages/stream-store-postgres && cargo sqlx prepare --check -- --all-targets --features parity-tests'
 SQLX_OFFLINE=true cargo check -p mfm-stream-store-postgres --all-targets --features parity-tests
 ```
 
 Repository CI exposes the Postgres-backed subset as `nix run .#test-db`. The
-plain `nix run .#test` gate intentionally remains service-free.
+gate uses the flake-pinned SQLx CLI package and checks metadata against a
+freshly migrated schema before running parity tests. The plain `nix run .#test`
+gate intentionally remains service-free.
 
 The old dynamic stream-store surface has been removed from this crate. New run
 submission, resume, and replay paths go through the typed `mfm-store` contract

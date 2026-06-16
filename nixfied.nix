@@ -19,6 +19,12 @@ let
   ]
   ++ [ "cc" ]
   ++ lib.optionals pkgs.stdenv.hostPlatform.isDarwin [ pkgs.libiconv ];
+  sqlxCli = assert pkgs.sqlx-cli.version == "0.9.0"; pkgs.sqlx-cli;
+  sqlxTools = cargoTools ++ [
+    pkgs.bash
+    "pg-psql"
+    sqlxCli
+  ];
 
   ccEnvSuffix = lib.replaceStrings [ "-" ] [ "_" ] pkgs.stdenv.hostPlatform.config;
   # The hermetic-env replacements for the old shell `export`s: typed values,
@@ -36,6 +42,10 @@ let
   postgresEnv = {
     DATABASE_URL = "postgresql://postgres@\${host:postgres}:\${port:postgres}/postgres";
     SQLX_OFFLINE = "true";
+  };
+  postgresSqlxEnv = {
+    DATABASE_URL = "postgresql://postgres@\${host:postgres}:\${port:postgres}/postgres";
+    SQLX_OFFLINE = "false";
   };
   rethEnv = {
     RETH_HTTP_PORT = "\${port:reth}";
@@ -63,10 +73,11 @@ let
       run,
       env ? { },
       requires ? [ ],
+      tools ? cargoTools,
     }:
     {
       invocation = {
-        tools = cargoTools;
+        inherit tools;
         inherit run;
         env = cargoEnv // env;
         timeoutMs = 7200000;
@@ -194,6 +205,37 @@ in
         "--nocapture"
       ];
     };
+    postgres-sqlx-check = cargoLeaf {
+      tools = sqlxTools;
+      run = [
+        "bash"
+        "-lc"
+        ''
+          set -euo pipefail
+          admin_database_url="$DATABASE_URL"
+          schema="sqlx_prepare_$$"
+          psql "$admin_database_url" -v ON_ERROR_STOP=1 -c "CREATE SCHEMA $schema"
+          cleanup() {
+            psql "$admin_database_url" -v ON_ERROR_STOP=1 -c "DROP SCHEMA IF EXISTS $schema CASCADE"
+          }
+          trap cleanup EXIT
+
+          if [[ "$admin_database_url" == *\?* ]]; then
+            separator='&'
+          else
+            separator='?'
+          fi
+          export DATABASE_URL="$admin_database_url''${separator}options=-csearch_path%3D$schema"
+
+          cd crates/storages/stream-store-postgres
+          cargo sqlx migrate run --source migrations
+          cargo clean -p mfm-stream-store-postgres
+          cargo sqlx prepare --check -- --all-targets --features parity-tests
+        ''
+      ];
+      env = postgresSqlxEnv;
+      requires = [ "postgres" ];
+    };
     parity-postgres-rest-api = cargoLeaf {
       run = [
         "cargo"
@@ -285,7 +327,11 @@ in
     test-db = {
       kind = "composite";
       steps = {
-        parity-postgres-state-events.task = "parity-postgres-state-events";
+        postgres-sqlx-check.task = "postgres-sqlx-check";
+        parity-postgres-state-events = {
+          task = "parity-postgres-state-events";
+          dependsOn = [ "postgres-sqlx-check" ];
+        };
         parity-postgres-rest-api = {
           task = "parity-postgres-rest-api";
           dependsOn = [ "parity-postgres-state-events" ];

@@ -430,17 +430,18 @@ async fn admit_artifact_evidence_tx(
         .fetch_one(&mut **tx)
         .await
         .map_err(|error| database_error("failed to query artifact evidence", error))?;
-        let stored = artifact_from_parts(
-            evidence.artifact_id.clone(),
-            row.digest,
-            row.byte_len,
-            row.media_type,
-            row.schema_id,
-            row.semantic_type_id,
-            row.producer_node_id,
-            row.producer_seed_id,
-            row.artifact_role,
-        )?;
+        let stored = ArtifactEvidenceParts {
+            artifact_id: evidence.artifact_id.clone(),
+            digest: row.digest,
+            byte_len: row.byte_len,
+            media_type: row.media_type,
+            schema_id: row.schema_id,
+            semantic_type_id: row.semantic_type_id,
+            producer_node_id: row.producer_node_id,
+            producer_seed_id: row.producer_seed_id,
+            artifact_role: row.artifact_role,
+        }
+        .into_evidence_ref()?;
         if &stored != evidence {
             return Err(StoreError::ArtifactEvidenceMismatch {
                 artifact_id: evidence.artifact_id.clone(),
@@ -552,23 +553,24 @@ async fn load_artifacts(
     let mut artifacts = BTreeMap::new();
     for row in rows {
         let artifact_id = parse_identity::<ArtifactId>(&row.artifact_id)?;
-        let evidence = artifact_from_parts(
-            artifact_id.clone(),
-            row.digest,
-            row.byte_len,
-            row.media_type,
-            row.schema_id,
-            row.semantic_type_id,
-            row.producer_node_id,
-            row.producer_seed_id,
-            row.artifact_role,
-        )?;
+        let evidence = ArtifactEvidenceParts {
+            artifact_id: artifact_id.clone(),
+            digest: row.digest,
+            byte_len: row.byte_len,
+            media_type: row.media_type,
+            schema_id: row.schema_id,
+            semantic_type_id: row.semantic_type_id,
+            producer_node_id: row.producer_node_id,
+            producer_seed_id: row.producer_seed_id,
+            artifact_role: row.artifact_role,
+        }
+        .into_evidence_ref()?;
         artifacts.insert(artifact_id, evidence);
     }
     Ok(artifacts)
 }
 
-fn artifact_from_parts(
+struct ArtifactEvidenceParts {
     artifact_id: ArtifactId,
     digest: String,
     byte_len: i64,
@@ -578,18 +580,22 @@ fn artifact_from_parts(
     producer_node_id: Option<String>,
     producer_seed_id: Option<String>,
     artifact_role: String,
-) -> Result<ArtifactEvidenceRef> {
-    Ok(ArtifactEvidenceRef {
-        artifact_id,
-        digest: parse_identity::<ContentDigest>(&digest)?,
-        byte_len: i64_to_nonnegative_u64(byte_len, "typed_artifacts.byte_len")?,
-        media_type: MediaType::new(media_type)?,
-        schema_id: parse_optional_identity(schema_id)?,
-        semantic_type_id: parse_optional_identity(semantic_type_id)?,
-        producer_node_id: parse_optional_identity(producer_node_id)?,
-        producer_seed_id: parse_optional_identity(producer_seed_id)?,
-        artifact_role: parse_artifact_role(&artifact_role)?,
-    })
+}
+
+impl ArtifactEvidenceParts {
+    fn into_evidence_ref(self) -> Result<ArtifactEvidenceRef> {
+        Ok(ArtifactEvidenceRef {
+            artifact_id: self.artifact_id,
+            digest: parse_identity::<ContentDigest>(&self.digest)?,
+            byte_len: i64_to_nonnegative_u64(self.byte_len, "typed_artifacts.byte_len")?,
+            media_type: MediaType::new(self.media_type)?,
+            schema_id: parse_optional_identity(self.schema_id)?,
+            semantic_type_id: parse_optional_identity(self.semantic_type_id)?,
+            producer_node_id: parse_optional_identity(self.producer_node_id)?,
+            producer_seed_id: parse_optional_identity(self.producer_seed_id)?,
+            artifact_role: parse_artifact_role(&self.artifact_role)?,
+        })
+    }
 }
 
 async fn load_logical_keys(

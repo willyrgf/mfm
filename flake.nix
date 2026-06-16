@@ -2,12 +2,19 @@
   description = "MFM";
 
   inputs = {
-    nixfied.url = "github:willyrgf/nixfied";
-    nixpkgs.follows = "nixfied/nixpkgs";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    nixfied = {
+      url = "github:willyrgf/nixfied";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
-    { self, nixfied, nixpkgs }:
+    {
+      self,
+      nixfied,
+      nixpkgs,
+    }:
     let
       systems = [
         "aarch64-darwin"
@@ -29,6 +36,13 @@
           inherit system;
           overlays = [ nixfied.inputs.rust-overlay.overlays.default ];
         };
+      mkSqlxCli =
+        system:
+        let
+          pkgs = mkPkgs system;
+        in
+        assert pkgs.sqlx-cli.version == "0.9.0";
+        pkgs.sqlx-cli;
     in
     {
       packages = forAllSystems (
@@ -44,6 +58,7 @@
         {
           default = self.packages.${system}.model;
           model = nixfied.lib.${system}.compileModel ./nixfied.nix;
+          sqlx-cli = mkSqlxCli system;
           mfm = rustPlatform.buildRustPackage {
             pname = "mfm";
             version = "0.1.29";
