@@ -50,6 +50,19 @@ impl From<AccountId> for String {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[serde(transparent)]
+#[mfm(
+    namespace = "mfm.test",
+    name = "public_metadata",
+    version = "1",
+    schema = "mfm.test.public_metadata",
+    transparent_map
+)]
+struct PublicMetadata {
+    entries: BTreeMap<String, String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmConfig)]
 #[serde(rename_all = "camelCase")]
 struct PortfolioRequest {
@@ -155,6 +168,27 @@ fn transparent_string_value_descriptor_uses_string_shape() {
         serde_json::json!("acct")
     );
     assert!(serde_json::from_value::<AccountId>(serde_json::json!("")).is_err());
+}
+
+#[test]
+fn transparent_map_value_descriptor_uses_map_shape() {
+    let descriptor = PublicMetadata::schema_descriptor().expect("descriptor");
+
+    assert_eq!(descriptor.identity.schema_kind, SchemaKind::Value);
+    assert_eq!(descriptor.identity.schema_name, "mfm.test.public_metadata");
+    assert_eq!(
+        descriptor.identity.shape,
+        SchemaShape::BTreeMapString {
+            value: Box::new(SchemaShape::String)
+        }
+    );
+    assert_eq!(
+        serde_json::to_value(PublicMetadata {
+            entries: BTreeMap::from([("source".to_owned(), "fixture".to_owned())])
+        })
+        .expect("json"),
+        serde_json::json!({"source": "fixture"})
+    );
 }
 
 #[test]

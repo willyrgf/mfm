@@ -474,6 +474,7 @@ struct ContainerAttrs {
     enum_content: Option<String>,
     validate: Option<Path>,
     transparent_string: bool,
+    transparent_map: bool,
 }
 
 impl ContainerAttrs {
@@ -489,6 +490,7 @@ impl ContainerAttrs {
             enum_content: None,
             validate: None,
             transparent_string: false,
+            transparent_map: false,
         };
 
         for attr in attrs {
@@ -513,6 +515,8 @@ impl ContainerAttrs {
                             })?);
                     } else if meta.path.is_ident("transparent_string") {
                         output.transparent_string = true;
+                    } else if meta.path.is_ident("transparent_map") {
+                        output.transparent_map = true;
                     } else {
                         return Err(meta.error("unsupported #[mfm(...)] container attribute"));
                     }
@@ -541,6 +545,8 @@ impl ContainerAttrs {
                     } else if meta.path.is_ident("try_from") || meta.path.is_ident("into") {
                         let _ = meta.value()?.parse::<LitStr>()?;
                         Ok(())
+                    } else if meta.path.is_ident("transparent") {
+                        Ok(())
                     } else if meta.path.is_ident("untagged") {
                         Err(meta.error("serde(untagged) is not supported by MFM derives"))
                     } else {
@@ -549,6 +555,13 @@ impl ContainerAttrs {
                     }
                 })?;
             }
+        }
+
+        if output.transparent_string && output.transparent_map {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                "MFM derives accept only one transparent container mode",
+            ));
         }
 
         Ok(output)
@@ -665,6 +678,9 @@ fn schema_shape_tokens(
     if attrs.transparent_string {
         return transparent_string_shape_tokens(data);
     }
+    if attrs.transparent_map {
+        return transparent_map_shape_tokens(data, kind);
+    }
 
     match data {
         Data::Struct(DataStruct {
@@ -690,6 +706,64 @@ fn schema_shape_tokens(
             "MFM derives do not support unions",
         )),
     }
+}
+
+fn transparent_map_shape_tokens(data: &Data, kind: DeriveKind) -> syn::Result<SchemaShapeOutput> {
+    let Data::Struct(DataStruct {
+        fields: Fields::Named(fields),
+        ..
+    }) = data
+    else {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "mfm(transparent_map) requires a named struct",
+        ));
+    };
+
+    if fields.named.len() != 1 {
+        return Err(syn::Error::new(
+            fields.span(),
+            "mfm(transparent_map) requires exactly one BTreeMap field",
+        ));
+    }
+
+    let field = fields
+        .named
+        .first()
+        .expect("field count checked before access");
+    let Type::Path(type_path) = &field.ty else {
+        return Err(syn::Error::new_spanned(
+            &field.ty,
+            "mfm(transparent_map) field must be BTreeMap<String, V>",
+        ));
+    };
+    let Some(segment) = type_path.path.segments.last() else {
+        return Err(syn::Error::new_spanned(
+            &field.ty,
+            "unsupported empty type path",
+        ));
+    };
+    if segment.ident != "BTreeMap" {
+        return Err(syn::Error::new_spanned(
+            &field.ty,
+            "mfm(transparent_map) field must be BTreeMap<String, V>",
+        ));
+    }
+    let (key, value) = two_generic_types(segment, "BTreeMap")?;
+    if !is_string_type(key) {
+        return Err(syn::Error::new_spanned(
+            key,
+            "mfm(transparent_map) BTreeMap keys must be String",
+        ));
+    }
+    let value_shape = shape_tokens(value, kind)?;
+
+    Ok(SchemaShapeOutput {
+        shape: quote!(::mfm_values::SchemaShape::BTreeMapString {
+            value: Box::new(#value_shape)
+        }),
+        default_bounds: Vec::new(),
+    })
 }
 
 fn transparent_string_shape_tokens(data: &Data) -> syn::Result<SchemaShapeOutput> {
