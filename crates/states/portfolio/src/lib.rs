@@ -1204,8 +1204,8 @@ pub fn resolve_subjects_from_config(config: &ResolveSubjectsConfig) -> ResolvedS
         .iter()
         .map(|wallet| ResolvedSubject {
             wallet_id: wallet.wallet_id.to_string(),
-            address: wallet.address.clone(),
-            subject_kind: wallet.subject_kind,
+            address: wallet.subject.address_str().to_owned(),
+            subject_kind: wallet.subject.kind(),
             network_id: wallet.network_id.to_string(),
             implementation_kind: wallet_implementation_kind(&wallet.implementation).to_owned(),
         })
@@ -1284,7 +1284,7 @@ fn resolved_valuation_for_quote(
             symbol_id: symbol.symbol_id.to_string(),
             quote: quote.quote,
             priced_symbol_id: quote.priced_symbol_id.to_string(),
-            unit_price_dec: unit_price_dec.clone(),
+            unit_price_dec: unit_price_dec.to_string(),
             valuation_reader_kind: "fixed_unit_price".to_owned(),
             source_refs: Vec::new(),
         }),
@@ -1539,8 +1539,8 @@ pub fn assemble_snapshot(
                 .cloned()
                 .unwrap_or_else(|| ResolvedSubject {
                     wallet_id: wallet.wallet_id.to_string(),
-                    address: wallet.address.clone(),
-                    subject_kind: wallet.subject_kind,
+                    address: wallet.subject.address_str().to_owned(),
+                    subject_kind: wallet.subject.kind(),
                     network_id: wallet.network_id.to_string(),
                     implementation_kind: wallet_implementation_kind(&wallet.implementation)
                         .to_owned(),
@@ -2052,6 +2052,7 @@ fn ten_pow(n: u32) -> BigInt {
 mod tests {
     use super::*;
     use mfm_portfolio_model::symbol::{SymbolKind, SymbolValuationConfig};
+    use mfm_portfolio_model::wallet::WalletSubject;
     use mfm_values::MfmConfig as _;
 
     #[test]
@@ -2075,8 +2076,11 @@ mod tests {
     fn observe_batch_mfm_config_validation_rejects_network_mismatch() {
         let wallet = WalletConfig {
             wallet_id: "wallet_main".parse().expect("valid wallet id"),
-            address: "0x000000000000000000000000000000000000dead".to_owned(),
-            subject_kind: WalletSubjectKind::EvmAddress,
+            subject: WalletSubject::new(
+                "0x000000000000000000000000000000000000dead",
+                WalletSubjectKind::EvmAddress,
+            )
+            .expect("valid wallet subject"),
             network_id: "ethereum-mainnet".parse().expect("valid network id"),
             implementation: WalletImplementationConfig::AddressOnly {},
             symbol_ids: vec!["eth.native.ethereum-mainnet"
@@ -2101,7 +2105,7 @@ mod tests {
                         .parse()
                         .expect("valid priced symbol id"),
                     reader: ValuationReaderConfig::FixedUnitPrice {
-                        unit_price_dec: "2.5".to_owned(),
+                        unit_price_dec: "2.5".parse().expect("valid unit price"),
                     },
                 }],
             },
@@ -2141,8 +2145,11 @@ mod tests {
         };
         let wallet = WalletConfig {
             wallet_id: "wallet_main".parse().expect("valid wallet id"),
-            address: "0x000000000000000000000000000000000000dead".to_owned(),
-            subject_kind: WalletSubjectKind::EvmAddress,
+            subject: WalletSubject::new(
+                "0x000000000000000000000000000000000000dead",
+                WalletSubjectKind::EvmAddress,
+            )
+            .expect("valid wallet subject"),
             network_id: network.network_id.clone(),
             implementation: WalletImplementationConfig::AddressOnly {},
             symbol_ids: vec!["eth.native.ethereum-mainnet"
@@ -2167,7 +2174,7 @@ mod tests {
                         .parse()
                         .expect("valid priced symbol id"),
                     reader: ValuationReaderConfig::FixedUnitPrice {
-                        unit_price_dec: "2.5".to_owned(),
+                        unit_price_dec: "2.5".parse().expect("valid unit price"),
                     },
                 }],
             },
@@ -2179,8 +2186,8 @@ mod tests {
             subjects: ResolvedSubjects {
                 subjects: vec![ResolvedSubject {
                     wallet_id: wallet.wallet_id.to_string(),
-                    address: wallet.address.clone(),
-                    subject_kind: wallet.subject_kind,
+                    address: wallet.subject.address_str().to_owned(),
+                    subject_kind: wallet.subject.kind(),
                     network_id: wallet.network_id.to_string(),
                     implementation_kind: "address_only".to_owned(),
                 }],

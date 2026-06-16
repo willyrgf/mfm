@@ -5,7 +5,7 @@
 //! typed proof operation. It has no dependency on the legacy machine, SDK, context, or generic IO
 //! surfaces.
 
-use std::future;
+use std::{fmt, future, ops::Deref, str::FromStr};
 
 use mfm_canonical::sha256_digest_bytes;
 use mfm_capabilities::{
@@ -21,7 +21,7 @@ use mfm_program::{
     StateSpec,
 };
 use mfm_program_derive::{MfmConfig, MfmValue, OperationOutput, PublicOutputs, StateInput};
-use serde::{de, Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 
 const NAMESPACE: &str = "mfm.proof";
 const ADAPTER_NAME: &str = "deterministic-proof";
@@ -139,27 +139,25 @@ pub struct ProofReadConfig {
 )]
 pub struct ProofApplyConfig {
     /// Stable action name included in the intent and idempotency input.
-    action: String,
+    action: ProofActionName,
 }
 
 impl ProofApplyConfig {
     /// Creates a proof apply config with a non-empty action.
     pub fn new(action: impl Into<String>) -> Result<Self, String> {
-        let action = action.into();
-        if action.trim().is_empty() {
-            return Err("proof action must be non-empty".to_owned());
-        }
-        Ok(Self { action })
+        Ok(Self {
+            action: ProofActionName::new(action)?,
+        })
     }
 
     /// Returns the stable proof action.
     pub fn action(&self) -> &str {
-        &self.action
+        self.action.as_str()
     }
 
     /// Consumes this config into the stable proof action.
     pub fn into_action(self) -> String {
-        self.action
+        self.action.into_string()
     }
 }
 
@@ -171,11 +169,95 @@ impl<'de> Deserialize<'de> for ProofApplyConfig {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct RawProofApplyConfig {
-            action: String,
+            action: ProofActionName,
         }
 
         let raw = RawProofApplyConfig::deserialize(deserializer)?;
-        Self::new(raw.action).map_err(de::Error::custom)
+        Ok(Self { action: raw.action })
+    }
+}
+
+/// Stable non-empty proof action authority.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash, MfmValue)]
+#[serde(try_from = "String", into = "String")]
+#[mfm(
+    namespace = "mfm.proof",
+    name = "action-name",
+    schema = "mfm.proof.action_name",
+    transparent_string
+)]
+pub struct ProofActionName {
+    raw: String,
+}
+
+impl ProofActionName {
+    /// Creates a checked proof action name.
+    pub fn new(value: impl Into<String>) -> Result<Self, String> {
+        let raw = value.into();
+        if raw.is_empty() || raw.trim() != raw {
+            return Err("proof action must be non-empty without surrounding whitespace".to_owned());
+        }
+        Ok(Self { raw })
+    }
+
+    /// Returns the action string.
+    pub fn as_str(&self) -> &str {
+        &self.raw
+    }
+
+    /// Consumes this action into its string representation.
+    pub fn into_string(self) -> String {
+        self.raw
+    }
+}
+
+impl AsRef<str> for ProofActionName {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl Deref for ProofActionName {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for ProofActionName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ProofActionName {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<String> for ProofActionName {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<&str> for ProofActionName {
+    type Error = String;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<ProofActionName> for String {
+    fn from(value: ProofActionName) -> Self {
+        value.raw
     }
 }
 
@@ -481,7 +563,7 @@ impl SideEffectState for ProofApplySideEffectState {
     fn prepare_intent(&self, input: &Self::Input) -> StateResult<Self::Intent> {
         Ok(ProofIntent {
             fact_n: input.n,
-            action: self.config.action.clone(),
+            action: self.config.action.to_string(),
         })
     }
 

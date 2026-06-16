@@ -35,7 +35,10 @@
 //!             "wallets": [
 //!                 {
 //!                     "wallet_id": "wallet_main",
-//!                     "address": "0x000000000000000000000000000000000000dead",
+//!                     "subject": {
+//!                         "kind": "evm_address",
+//!                         "address": "0x000000000000000000000000000000000000dead"
+//!                     },
 //!                     "implementation": { "kind": "address_only" },
 //!                     "network_id": "ethereum-mainnet",
 //!                     "symbol_ids": ["eth.native.ethereum-mainnet"],
@@ -329,7 +332,10 @@ mod tests {
                 "wallets": [
                     {
                         "wallet_id": "wallet_main",
-                        "address": "0x000000000000000000000000000000000000dead",
+                        "subject": {
+                            "kind": "evm_address",
+                            "address": "0x000000000000000000000000000000000000dead"
+                        },
                         "implementation": {
                             "kind": "address_only"
                         },

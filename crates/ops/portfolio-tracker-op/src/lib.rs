@@ -565,7 +565,9 @@ mod tests {
         BalanceReaderConfig, QuoteCode, QuoteValuationConfig, SymbolKind, SymbolRole,
         SymbolValuationConfig, ValuationReaderConfig, ValuationSourceRegistry,
     };
-    use mfm_portfolio_model::wallet::{WalletImplementationConfig, WalletSubjectKind};
+    use mfm_portfolio_model::wallet::{
+        WalletImplementationConfig, WalletSubject, WalletSubjectKind,
+    };
     use serde_json::Value;
 
     #[test]
@@ -671,8 +673,11 @@ mod tests {
             }],
             wallets: vec![WalletConfig {
                 wallet_id: "wallet_main".parse().expect("valid wallet id"),
-                address: "0x000000000000000000000000000000000000dead".to_owned(),
-                subject_kind: WalletSubjectKind::EvmAddress,
+                subject: WalletSubject::new(
+                    "0x000000000000000000000000000000000000dead",
+                    WalletSubjectKind::EvmAddress,
+                )
+                .expect("valid wallet subject"),
                 network_id: "ethereum-mainnet".parse().expect("valid network id"),
                 implementation: WalletImplementationConfig::AddressOnly {},
                 symbol_ids: vec!["eth.native.ethereum-mainnet"
@@ -697,7 +702,7 @@ mod tests {
                             .parse()
                             .expect("valid priced symbol id"),
                         reader: ValuationReaderConfig::FixedUnitPrice {
-                            unit_price_dec: "1800.00".to_owned(),
+                            unit_price_dec: "1800.00".parse().expect("valid unit price"),
                         },
                     }],
                 },

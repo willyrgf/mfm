@@ -30,6 +30,14 @@ pub enum PortfolioScalarError {
         /// Rejected scalar value.
         value: String,
     },
+    /// A scalar was not a non-negative decimal string.
+    #[error("{kind} `{value}` must be a non-negative decimal string")]
+    InvalidDecimalString {
+        /// Human-readable scalar kind.
+        kind: &'static str,
+        /// Rejected scalar value.
+        value: String,
+    },
 }
 
 macro_rules! portfolio_id_type {
@@ -328,5 +336,113 @@ impl TryFrom<&str> for NormalizedEvmAddress {
 impl From<NormalizedEvmAddress> for String {
     fn from(value: NormalizedEvmAddress) -> Self {
         value.raw
+    }
+}
+
+/// Non-negative decimal string authority for portfolio unit-price config.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, MfmValue)]
+#[serde(try_from = "String", into = "String")]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "unit-price-decimal",
+    schema = "mfm.portfolio.decimal.unit_price",
+    transparent_string
+)]
+pub struct UnitPriceDecimal {
+    raw: String,
+}
+
+impl UnitPriceDecimal {
+    /// Creates a checked non-negative decimal string.
+    pub fn new(value: impl Into<String>) -> Result<Self, PortfolioScalarError> {
+        let raw = value.into();
+        if !is_non_negative_decimal_string(&raw) {
+            return Err(PortfolioScalarError::InvalidDecimalString {
+                kind: "unit_price_dec",
+                value: raw,
+            });
+        }
+        Ok(Self { raw })
+    }
+
+    /// Returns the canonical string representation.
+    pub fn as_str(&self) -> &str {
+        &self.raw
+    }
+
+    /// Consumes this authority into its string representation.
+    pub fn into_string(self) -> String {
+        self.raw
+    }
+}
+
+impl AsRef<str> for UnitPriceDecimal {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl Deref for UnitPriceDecimal {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for UnitPriceDecimal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for UnitPriceDecimal {
+    type Err = PortfolioScalarError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<String> for UnitPriceDecimal {
+    type Error = PortfolioScalarError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<&str> for UnitPriceDecimal {
+    type Error = PortfolioScalarError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<UnitPriceDecimal> for String {
+    fn from(value: UnitPriceDecimal) -> Self {
+        value.raw
+    }
+}
+
+fn is_non_negative_decimal_string(raw: &str) -> bool {
+    if raw.is_empty() || raw.trim() != raw || raw.starts_with(['+', '-']) {
+        return false;
+    }
+    let mut parts = raw.split('.');
+    let Some(integer) = parts.next() else {
+        return false;
+    };
+    let fraction = parts.next();
+    if parts.next().is_some()
+        || integer.is_empty()
+        || !integer.bytes().all(|ch| ch.is_ascii_digit())
+    {
+        return false;
+    }
+    match fraction {
+        Some(fraction) => !fraction.is_empty() && fraction.bytes().all(|ch| ch.is_ascii_digit()),
+        None => true,
     }
 }

@@ -11,7 +11,7 @@ use thiserror::Error;
 use crate::aave::AaveProtocolPositionConfig;
 use crate::ids::{
     NetworkId, NormalizedEvmAddress, OracleKindId, PortfolioScalarError, ProtocolId,
-    ProtocolReaderId, SymbolId, ValuationSourceId,
+    ProtocolReaderId, SymbolId, UnitPriceDecimal, ValuationSourceId,
 };
 
 /// Supported quote codes for the canonical portfolio snapshot surface.
@@ -438,7 +438,7 @@ pub enum ValuationReaderConfig {
     /// Fixed unit price encoded as a decimal string.
     FixedUnitPrice {
         /// Decimal string for the unit price.
-        unit_price_dec: String,
+        unit_price_dec: UnitPriceDecimal,
     },
     /// Direct unit price from one source.
     DirectPrice {
@@ -639,12 +639,6 @@ pub enum SymbolConfigError {
         /// Underlying scalar validation failure.
         source: PortfolioScalarError,
     },
-    /// `fixed_unit_price.unit_price_dec` was empty.
-    #[error("fixed_unit_price.unit_price_dec must be non-empty for quote `{quote}`")]
-    EmptyFixedUnitPrice {
-        /// Quote whose route was invalid.
-        quote: QuoteCode,
-    },
     /// Derived price source quotes did not match.
     #[error(
         "derived_unit_price quotes must match for quote `{quote}` (got `{numerator_quote}` and `{denominator_quote}`)"
@@ -767,11 +761,7 @@ fn validate_valuation_reader_config(
     reader: &ValuationReaderConfig,
 ) -> Result<(), SymbolConfigError> {
     match reader {
-        ValuationReaderConfig::FixedUnitPrice { unit_price_dec } => {
-            if unit_price_dec.trim().is_empty() {
-                return Err(SymbolConfigError::EmptyFixedUnitPrice { quote });
-            }
-        }
+        ValuationReaderConfig::FixedUnitPrice { .. } => {}
         ValuationReaderConfig::DirectPrice { .. } => {}
         ValuationReaderConfig::DerivedUnitPrice {
             numerator,

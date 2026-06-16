@@ -203,7 +203,10 @@ fn portfolio_payload() -> serde_json::Value {
             "wallets": [
                 {
                     "wallet_id": "wallet_local",
-                    "address": "0x000000000000000000000000000000000000dead",
+                    "subject": {
+                        "kind": "evm_address",
+                        "address": "0x000000000000000000000000000000000000dead"
+                    },
                     "implementation": {
                         "kind": "address_only"
                     },

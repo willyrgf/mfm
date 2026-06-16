@@ -32,7 +32,10 @@ fn canonical_portfolio_snapshot_payload(
             "wallets": [
                 {
                     "wallet_id": "wallet_mainnet",
-                    "address": wallet_address,
+                    "subject": {
+                        "kind": "evm_address",
+                        "address": wallet_address
+                    },
                     "implementation": {
                         "kind": "address_only"
                     },

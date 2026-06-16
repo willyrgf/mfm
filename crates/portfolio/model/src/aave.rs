@@ -628,7 +628,7 @@ mod tests {
             quote: QuoteCode::Usd,
             priced_symbol_id: priced_symbol_id.parse().expect("valid priced symbol id"),
             reader: ValuationReaderConfig::FixedUnitPrice {
-                unit_price_dec: "1.00".to_string(),
+                unit_price_dec: "1.00".parse().expect("valid unit price"),
             },
         }
     }

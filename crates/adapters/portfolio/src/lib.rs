@@ -803,12 +803,7 @@ impl EvmCapabilityPortfolioBackend {
     ) -> Result<(U256, u8), PortfolioReadError> {
         match &config.symbol().balance_reader {
             mfm_portfolio_model::symbol::BalanceReaderConfig::NativeBalance {} => {
-                let wallet: Address = config.wallet().address.parse().map_err(|_| {
-                    PortfolioReadError::new(
-                        "invalid_wallet_address",
-                        "wallet address was invalid for native balance read",
-                    )
-                })?;
+                let wallet = wallet_evm_address(config)?;
                 let (source_ref, policy_id) = self.route(&config.network().network_id)?;
                 let response = self
                     .evm
@@ -834,12 +829,7 @@ impl EvmCapabilityPortfolioBackend {
                         .await?
                     }
                 };
-                let wallet: Address = config.wallet().address.parse().map_err(|_| {
-                    PortfolioReadError::new(
-                        "invalid_wallet_address",
-                        "wallet address was invalid for ERC-20 balance read",
-                    )
-                })?;
+                let wallet = wallet_evm_address(config)?;
                 let token = parse_address(token_address, "token address")?;
                 let raw = self
                     .evm_call_u256(
@@ -935,6 +925,16 @@ fn parse_address(value: &str, label: &'static str) -> Result<Address, PortfolioR
             format!("{label} was invalid for portfolio EVM read"),
         )
     })
+}
+
+fn wallet_evm_address(config: &ObserveBatchConfig) -> Result<Address, PortfolioReadError> {
+    let Some(address) = config.wallet().subject.evm_address() else {
+        return Err(PortfolioReadError::new(
+            "invalid_wallet_subject",
+            "wallet subject was not an EVM address for portfolio EVM read",
+        ));
+    };
+    parse_address(address, "wallet address")
 }
 
 fn portfolio_evm_invalid_route(error: EvmCapabilityError) -> PortfolioReadError {

@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
+use std::fmt;
+use std::ops::Deref;
+use std::str::FromStr;
 
 use bs58;
-use mfm_evm_core::encoding::normalize_address;
 use mfm_program_derive::MfmValue;
 use mfm_values::string_map_secret_marker_key;
 use serde::{Deserialize, Serialize};
@@ -9,7 +11,8 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::ids::{
-    ExternalSignerId, KeystoreEntryId, NetworkId, PortfolioScalarError, SymbolId, WalletId,
+    ExternalSignerId, KeystoreEntryId, NetworkId, NormalizedEvmAddress, PortfolioScalarError,
+    SymbolId, WalletId,
 };
 
 /// Canonical subject kind selected for one wallet declaration.
@@ -30,6 +33,162 @@ pub enum WalletSubjectKind {
 
 impl mfm_values::MfmDefault for WalletSubjectKind {}
 
+/// Canonical wallet subject selected by one wallet declaration.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "wallet-subject",
+    schema = "mfm.portfolio.wallet_subject"
+)]
+pub enum WalletSubject {
+    /// EVM address subject.
+    EvmAddress {
+        /// Canonical normalized EVM address.
+        address: NormalizedEvmAddress,
+    },
+    /// Bitcoin address subject.
+    BitcoinAddress {
+        /// Canonical Bitcoin address.
+        address: BitcoinAddress,
+    },
+}
+
+impl WalletSubject {
+    /// Creates a checked wallet subject from the legacy address/kind pair.
+    pub fn new(
+        address: impl Into<String>,
+        subject_kind: WalletSubjectKind,
+    ) -> Result<Self, WalletConfigError> {
+        let address = address.into();
+        match subject_kind {
+            WalletSubjectKind::EvmAddress => {
+                let address = NormalizedEvmAddress::new(address.clone(), "wallet_address")
+                    .map_err(|_| WalletConfigError::InvalidAddress {
+                        address,
+                        subject_kind,
+                    })?;
+                Ok(Self::EvmAddress { address })
+            }
+            WalletSubjectKind::BitcoinAddress => {
+                let address = BitcoinAddress::new(address.clone()).map_err(|_| {
+                    WalletConfigError::InvalidAddress {
+                        address,
+                        subject_kind,
+                    }
+                })?;
+                Ok(Self::BitcoinAddress { address })
+            }
+        }
+    }
+
+    /// Returns the subject kind.
+    pub const fn kind(&self) -> WalletSubjectKind {
+        match self {
+            Self::EvmAddress { .. } => WalletSubjectKind::EvmAddress,
+            Self::BitcoinAddress { .. } => WalletSubjectKind::BitcoinAddress,
+        }
+    }
+
+    /// Returns the canonical address string.
+    pub fn address_str(&self) -> &str {
+        match self {
+            Self::EvmAddress { address } => address.as_str(),
+            Self::BitcoinAddress { address } => address.as_str(),
+        }
+    }
+
+    /// Returns the EVM address when this subject is EVM-backed.
+    pub fn evm_address(&self) -> Option<&NormalizedEvmAddress> {
+        match self {
+            Self::EvmAddress { address } => Some(address),
+            Self::BitcoinAddress { .. } => None,
+        }
+    }
+}
+
+/// Checked Bitcoin address authority.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, MfmValue)]
+#[serde(try_from = "String", into = "String")]
+#[mfm(
+    namespace = "mfm.portfolio",
+    name = "bitcoin-address",
+    schema = "mfm.portfolio.address.bitcoin",
+    transparent_string
+)]
+pub struct BitcoinAddress {
+    raw: String,
+}
+
+impl BitcoinAddress {
+    /// Creates a checked Bitcoin address.
+    pub fn new(value: impl Into<String>) -> Result<Self, String> {
+        let raw = value.into();
+        validate_bitcoin_address(&raw)?;
+        Ok(Self { raw })
+    }
+
+    /// Returns the canonical address string.
+    pub fn as_str(&self) -> &str {
+        &self.raw
+    }
+
+    /// Consumes this authority into its address string.
+    pub fn into_string(self) -> String {
+        self.raw
+    }
+}
+
+impl AsRef<str> for BitcoinAddress {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl Deref for BitcoinAddress {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for BitcoinAddress {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for BitcoinAddress {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<String> for BitcoinAddress {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<&str> for BitcoinAddress {
+    type Error = String;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<BitcoinAddress> for String {
+    fn from(value: BitcoinAddress) -> Self {
+        value.raw
+    }
+}
+
 /// Canonical wallet config referenced by portfolio configs.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, MfmValue)]
 #[mfm(
@@ -40,11 +199,8 @@ impl mfm_values::MfmDefault for WalletSubjectKind {}
 pub struct WalletConfig {
     /// Stable machine identifier for the wallet.
     pub wallet_id: WalletId,
-    /// Canonical wallet address.
-    pub address: String,
-    /// Subject family resolved for this wallet declaration.
-    #[serde(default)]
-    pub subject_kind: WalletSubjectKind,
+    /// Canonical wallet subject.
+    pub subject: WalletSubject,
     /// Stable network identifier.
     pub network_id: NetworkId,
     /// Wallet implementation selection.
@@ -80,8 +236,7 @@ impl WalletConfig {
             .collect::<Result<Vec<_>, _>>()?;
         Self {
             wallet_id,
-            address,
-            subject_kind,
+            subject: WalletSubject::new(address, subject_kind)?,
             network_id,
             implementation,
             symbol_ids,
@@ -201,9 +356,6 @@ pub enum WalletConfigError {
         /// Underlying scalar validation failure.
         source: PortfolioScalarError,
     },
-    /// `address` was empty.
-    #[error("address must be non-empty")]
-    EmptyAddress,
     /// `address` was invalid for the selected subject kind.
     #[error("address must be valid for subject_kind `{subject_kind:?}`: {address}")]
     InvalidAddress {
@@ -243,32 +395,6 @@ pub fn decode_wallet_config(value: &Value) -> Result<WalletConfig, WalletConfigE
 
 /// Validates a canonical wallet config.
 pub fn validate_wallet_config(cfg: &WalletConfig) -> Result<(), WalletConfigError> {
-    if cfg.address.trim().is_empty() {
-        return Err(WalletConfigError::EmptyAddress);
-    }
-    match cfg.subject_kind {
-        WalletSubjectKind::EvmAddress => {
-            let normalized =
-                normalize_address(&cfg.address).map_err(|_| WalletConfigError::InvalidAddress {
-                    address: cfg.address.clone(),
-                    subject_kind: cfg.subject_kind,
-                })?;
-            if normalized != cfg.address {
-                return Err(WalletConfigError::InvalidAddress {
-                    address: cfg.address.clone(),
-                    subject_kind: cfg.subject_kind,
-                });
-            }
-        }
-        WalletSubjectKind::BitcoinAddress => {
-            validate_bitcoin_address(&cfg.address).map_err(|_| {
-                WalletConfigError::InvalidAddress {
-                    address: cfg.address.clone(),
-                    subject_kind: cfg.subject_kind,
-                }
-            })?;
-        }
-    }
     if let Some(key) = string_map_secret_marker_key(&cfg.metadata) {
         return Err(WalletConfigError::MetadataContainsSecret {
             key: key.to_string(),

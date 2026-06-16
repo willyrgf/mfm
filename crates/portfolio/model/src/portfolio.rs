@@ -1001,11 +1001,12 @@ fn validate_portfolio_config_inner(cfg: &PortfolioConfig) -> Result<(), Portfoli
             .iter()
             .find(|network| network.network_id == wallet.network_id)
             .expect("validated network id must exist");
-        if !wallet_subject_matches_network_family(wallet.subject_kind, network.family) {
+        let wallet_subject_kind = wallet.subject.kind();
+        if !wallet_subject_matches_network_family(wallet_subject_kind, network.family) {
             return Err(PortfolioConfigError::WalletSubjectNetworkFamilyMismatch {
                 wallet_id: wallet.wallet_id.to_string(),
                 network_id: wallet.network_id.to_string(),
-                wallet_subject_kind: wallet.subject_kind,
+                wallet_subject_kind,
                 network_family: network.family,
             });
         }
@@ -1313,7 +1314,7 @@ mod tests {
         ));
         assert_eq!(cfg.wallets[0].wallet_id, "wallet_ops_arb");
         assert_eq!(
-            cfg.wallets[0].address,
+            cfg.wallets[0].subject.address_str(),
             "0x000000000000000000000000000000000000beef"
         );
         assert!(matches!(
@@ -1388,8 +1389,10 @@ mod tests {
             "wallets": [
                 {
                     "wallet_id": "wallet_main",
-                    "address": "0x000000000000000000000000000000000000dead",
-                    "subject_kind": "evm_address",
+                    "subject": {
+                        "kind": "evm_address",
+                        "address": "0x000000000000000000000000000000000000dead"
+                    },
                     "network_id": "ethereum-mainnet",
                     "implementation": {"kind": "address_only"},
                     "symbol_ids": ["eth.native.ethereum-mainnet"],
@@ -1450,7 +1453,8 @@ mod tests {
                 .portfolio()
                 .wallet("wallet_main")
                 .expect("wallet")
-                .address,
+                .subject
+                .address_str(),
             "0x000000000000000000000000000000000000dead"
         );
         assert!(bundle
@@ -1598,18 +1602,11 @@ mod tests {
     #[test]
     fn validation_rejects_non_normalized_addresses() {
         let mut wallet_address = canonical_config_json();
-        wallet_address["wallets"][0]["address"] =
+        wallet_address["wallets"][0]["subject"]["address"] =
             json!("0x000000000000000000000000000000000000DEAD");
-        assert_eq!(
-            decode_portfolio_config(&wallet_address).unwrap_err(),
-            PortfolioConfigError::InvalidWalletConfig {
-                wallet_id: "wallet_treasury_eth".to_string(),
-                source: WalletConfigError::InvalidAddress {
-                    address: "0x000000000000000000000000000000000000DEAD".to_string(),
-                    subject_kind: WalletSubjectKind::EvmAddress,
-                },
-            }
-        );
+        let err = decode_portfolio_config(&wallet_address).unwrap_err();
+        assert!(matches!(err, PortfolioConfigError::Decode(message)
+            if message.contains("normalized EVM address")));
 
         let mut token_address = canonical_config_json();
         token_address["symbol_configs"][1]["balance_reader"]["token_address"] =
@@ -1876,7 +1873,10 @@ mod tests {
             "wallets": [
                 {
                     "wallet_id": "wallet_treasury_eth",
-                    "address": "0x000000000000000000000000000000000000dead",
+                    "subject": {
+                        "kind": "evm_address",
+                        "address": "0x000000000000000000000000000000000000dead"
+                    },
                     "implementation": {
                         "kind": "address_only"
                     },
@@ -1889,7 +1889,10 @@ mod tests {
                 },
                 {
                     "wallet_id": "wallet_ops_arb",
-                    "address": "0x000000000000000000000000000000000000beef",
+                    "subject": {
+                        "kind": "evm_address",
+                        "address": "0x000000000000000000000000000000000000beef"
+                    },
                     "implementation": {
                         "kind": "address_only"
                     },
