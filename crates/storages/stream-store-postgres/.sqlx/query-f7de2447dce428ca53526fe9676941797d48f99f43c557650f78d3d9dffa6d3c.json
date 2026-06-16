@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO typed_manual_resolution_projection (run_id, projection_json) VALUES ($1,$2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f7de2447dce428ca53526fe9676941797d48f99f43c557650f78d3d9dffa6d3c"
+}

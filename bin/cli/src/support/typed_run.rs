@@ -126,9 +126,6 @@ fn command_error_from_typed_store_error(err: PostgresTypedStoreError) -> Command
         PostgresTypedStoreError::Database(message) => {
             CommandError::new("RunStoreUnavailable", message)
         }
-        PostgresTypedStoreError::DatabaseSource { context, source } => {
-            CommandError::new("RunStoreUnavailable", format!("{context}: {source}"))
-        }
         PostgresTypedStoreError::Corruption(message) => {
             CommandError::new("RunStoreCorruption", message)
         }

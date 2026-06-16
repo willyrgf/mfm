@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE typed_run_heads SET head_seq = $2 WHERE run_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4fbac666cb519650a283278e443f2c3468e29c397a4dc1e21d7bfc8b4d2b5285"
+}

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO typed_run_completion_projection (run_id, projection_json) VALUES ($1,$2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9bd16824335cb084571bcc426eb03c55151ac28758d30a0f976a0bbcea9132c0"
+}

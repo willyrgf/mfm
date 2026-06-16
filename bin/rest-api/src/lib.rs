@@ -1221,11 +1221,6 @@ fn api_error_from_typed_store_error(error: PostgresTypedStoreError) -> ApiError 
             "RunStoreUnavailable",
             message,
         ),
-        PostgresTypedStoreError::DatabaseSource { context, source } => ApiError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "RunStoreUnavailable",
-            format!("{context}: {source}"),
-        ),
         PostgresTypedStoreError::Corruption(message) => ApiError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             "RunStoreCorruption",

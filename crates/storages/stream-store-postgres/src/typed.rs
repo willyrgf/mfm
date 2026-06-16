@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::str::FromStr;
-use std::sync::Arc;
 
 use mfm_events::v1 as events;
 use mfm_ids::{
@@ -27,8 +26,9 @@ use mfm_store::v1::{
     StoreErrorInspection, StreamSeq, TypedCommitBase,
 };
 use serde_json::Value;
-use tokio::sync::Mutex;
-use tokio_postgres::{Client, Transaction};
+use sqlx::{PgPool, Postgres, Transaction};
+
+use crate::schema::{connect_pool, validate_pool};
 
 /// Error returned by the PostgreSQL typed run event store.
 #[derive(Debug)]
@@ -37,13 +37,6 @@ pub enum PostgresTypedStoreError {
     Store(StoreError),
     /// PostgreSQL operation failed.
     Database(&'static str),
-    /// PostgreSQL operation failed with a source diagnostic.
-    DatabaseSource {
-        /// Static operation context.
-        context: &'static str,
-        /// Sanitized PostgreSQL error string.
-        source: String,
-    },
     /// Persisted typed store rows are corrupt.
     Corruption(String),
 }
@@ -53,9 +46,6 @@ impl fmt::Display for PostgresTypedStoreError {
         match self {
             Self::Store(error) => write!(f, "{error}"),
             Self::Database(message) => write!(f, "postgres typed store error: {message}"),
-            Self::DatabaseSource { context, source } => {
-                write!(f, "postgres typed store error: {context}: {source}")
-            }
             Self::Corruption(message) => write!(f, "postgres typed store corruption: {message}"),
         }
     }
@@ -67,7 +57,7 @@ impl StoreErrorInspection for PostgresTypedStoreError {
     fn as_store_error(&self) -> Option<&StoreError> {
         match self {
             Self::Store(error) => Some(error),
-            Self::Database(_) | Self::DatabaseSource { .. } | Self::Corruption(_) => None,
+            Self::Database(_) | Self::Corruption(_) => None,
         }
     }
 }
@@ -103,13 +93,10 @@ impl From<CodecError> for PostgresTypedStoreError {
     }
 }
 
-type Result<T> = std::result::Result<T, PostgresTypedStoreError>;
+pub(crate) type Result<T> = std::result::Result<T, PostgresTypedStoreError>;
 
-fn database_source(context: &'static str, error: tokio_postgres::Error) -> PostgresTypedStoreError {
-    PostgresTypedStoreError::DatabaseSource {
-        context,
-        source: format!("{error:?}"),
-    }
+fn database_error(context: &'static str, _error: sqlx::Error) -> PostgresTypedStoreError {
+    PostgresTypedStoreError::Database(context)
 }
 
 /// PostgreSQL-backed typed run event store.
@@ -118,23 +105,15 @@ fn database_source(context: &'static str, error: tokio_postgres::Error) -> Postg
 /// derived projections.
 #[derive(Clone)]
 pub struct PostgresTypedRunEventStore {
-    pub(crate) client: Arc<Mutex<Client>>,
+    pub(crate) pool: PgPool,
 }
 
 impl PostgresTypedRunEventStore {
-    /// Connects to PostgreSQL, initializes the typed schema, and returns a typed store.
+    /// Connects to PostgreSQL, validates the typed schema, and returns a typed store.
     pub async fn connect(database_url: &str) -> Result<Self> {
-        let (client, connection) = tokio_postgres::connect(database_url, tokio_postgres::NoTls)
-            .await
-            .map_err(|_| PostgresTypedStoreError::Database("connect failed"))?;
-        tokio::spawn(async move {
-            let _ = connection.await;
-        });
-        let store = Self {
-            client: Arc::new(Mutex::new(client)),
-        };
-        store.init().await?;
-        Ok(store)
+        let pool = connect_pool(database_url).await?;
+        validate_pool(&pool).await?;
+        Ok(Self { pool })
     }
 
     /// Connects using the `DATABASE_URL` environment variable.
@@ -144,164 +123,9 @@ impl PostgresTypedRunEventStore {
         Self::connect(&database_url).await
     }
 
-    #[cfg(all(test, feature = "parity-tests"))]
-    pub(crate) fn from_client(client: Arc<Mutex<Client>>) -> Self {
-        Self { client }
-    }
-
-    async fn init(&self) -> Result<()> {
-        let ddl = r#"
-BEGIN;
-CREATE TABLE IF NOT EXISTS typed_run_heads (
-  run_id TEXT PRIMARY KEY,
-  head_seq BIGINT NOT NULL,
-  CONSTRAINT typed_run_heads_head_seq_nonnegative CHECK (head_seq >= 0)
-);
-
-CREATE TABLE IF NOT EXISTS typed_run_events (
-  run_id TEXT NOT NULL,
-  seq BIGINT NOT NULL,
-  ordinal INTEGER NOT NULL,
-  event_id TEXT NOT NULL,
-  event_schema_id TEXT NOT NULL,
-  spec_hash TEXT NOT NULL,
-  commit_key TEXT NOT NULL,
-  logical_key TEXT NOT NULL,
-  payload_hash TEXT NOT NULL,
-  payload_canonical_byte_len BIGINT NOT NULL,
-  payload_json JSONB NOT NULL,
-  PRIMARY KEY (run_id, seq, ordinal),
-  CONSTRAINT typed_run_events_seq_positive CHECK (seq >= 1),
-  CONSTRAINT typed_run_events_ordinal_nonnegative CHECK (ordinal >= 0),
-  CONSTRAINT typed_run_events_payload_len_nonnegative CHECK (payload_canonical_byte_len >= 0),
-  CONSTRAINT typed_run_events_run_fk FOREIGN KEY (run_id) REFERENCES typed_run_heads(run_id) ON DELETE CASCADE,
-  UNIQUE (run_id, event_id)
-);
-
-CREATE TABLE IF NOT EXISTS typed_commit_keys (
-  run_id TEXT NOT NULL,
-  commit_key TEXT NOT NULL,
-  commit_fingerprint TEXT NOT NULL,
-  seq BIGINT NOT NULL,
-  event_count INTEGER NOT NULL,
-  PRIMARY KEY (run_id, commit_key),
-  CONSTRAINT typed_commit_keys_seq_positive CHECK (seq >= 1),
-  CONSTRAINT typed_commit_keys_event_count_positive CHECK (event_count >= 1)
-);
-
-CREATE TABLE IF NOT EXISTS typed_artifacts (
-  artifact_id TEXT PRIMARY KEY,
-  digest TEXT NOT NULL,
-  byte_len BIGINT NOT NULL,
-  media_type TEXT NOT NULL,
-  schema_id TEXT NULL,
-  semantic_type_id TEXT NULL,
-  producer_node_id TEXT NULL,
-  producer_seed_id TEXT NULL,
-  artifact_role TEXT NOT NULL,
-  CONSTRAINT typed_artifacts_byte_len_nonnegative CHECK (byte_len >= 0)
-);
-
-CREATE TABLE IF NOT EXISTS typed_logical_keys (
-  run_id TEXT NOT NULL,
-  logical_key TEXT NOT NULL,
-  PRIMARY KEY (run_id, logical_key)
-);
-
-CREATE TABLE IF NOT EXISTS typed_unique_logical_payloads (
-  run_id TEXT NOT NULL,
-  logical_key TEXT NOT NULL,
-  payload_hash TEXT NOT NULL,
-  PRIMARY KEY (run_id, logical_key)
-);
-
-CREATE TABLE IF NOT EXISTS typed_run_projection (
-  run_id TEXT PRIMARY KEY,
-  run_state TEXT NOT NULL,
-  projection_json JSONB NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS typed_run_completion_projection (
-  run_id TEXT PRIMARY KEY,
-  projection_json JSONB NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS typed_saga_engagement_projection (
-  run_id TEXT PRIMARY KEY,
-  projection_json JSONB NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS typed_manual_resolution_projection (
-  run_id TEXT PRIMARY KEY,
-  projection_json JSONB NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS typed_attempt_projection (
-  run_id TEXT NOT NULL,
-  node_id TEXT NOT NULL,
-  attempt_id TEXT NOT NULL,
-  projection_json JSONB NOT NULL,
-  PRIMARY KEY (run_id, node_id, attempt_id)
-);
-
-CREATE TABLE IF NOT EXISTS typed_cell_projection (
-  run_id TEXT NOT NULL,
-  cell_id TEXT NOT NULL,
-  projection_json JSONB NOT NULL,
-  PRIMARY KEY (run_id, cell_id)
-);
-
-CREATE TABLE IF NOT EXISTS typed_fact_projection (
-  run_id TEXT NOT NULL,
-  node_id TEXT NOT NULL,
-  attempt_id TEXT NOT NULL,
-  fact_key TEXT NOT NULL,
-  projection_json JSONB NOT NULL,
-  PRIMARY KEY (run_id, node_id, attempt_id, fact_key)
-);
-
-CREATE TABLE IF NOT EXISTS typed_side_effect_projection (
-  run_id TEXT NOT NULL,
-  ledger_key TEXT NOT NULL,
-  projection_json JSONB NOT NULL,
-  PRIMARY KEY (run_id, ledger_key)
-);
-
-CREATE TABLE IF NOT EXISTS typed_resource_lane_projection (
-  namespace TEXT NOT NULL,
-  resource_key TEXT NOT NULL,
-  run_id TEXT NOT NULL,
-  ledger_key TEXT NOT NULL,
-  projection_json JSONB NOT NULL,
-  PRIMARY KEY (namespace, resource_key)
-);
-
-CREATE INDEX IF NOT EXISTS typed_resource_lane_projection_run_idx
-  ON typed_resource_lane_projection (run_id);
-
-CREATE TABLE IF NOT EXISTS typed_public_output_projection (
-  run_id TEXT NOT NULL,
-  public_schema_id TEXT NOT NULL,
-  projection_json JSONB NOT NULL,
-  PRIMARY KEY (run_id, public_schema_id)
-);
-
-COMMIT;
-"#;
-
-        self.client
-            .lock()
-            .await
-            .batch_execute(ddl)
-            .await
-            .map_err(|_| PostgresTypedStoreError::Database("init failed"))?;
-        Ok(())
-    }
-
     /// Returns the next store-owned stream sequence for a run.
     pub async fn expected_next_seq(&self, run_id: &RunId) -> Result<StreamSeq> {
-        let client = self.client.lock().await;
-        let head = read_head(&client, run_id).await?;
+        let head = read_head(&self.pool, run_id).await?;
         next_seq_from_head(head)
     }
 
@@ -314,14 +138,14 @@ COMMIT;
         let fingerprint = prepared_commit_fingerprint(&commit)?;
         let fingerprint_text = fingerprint.as_digest().as_str().to_owned();
 
-        let mut client = self.client.lock().await;
-        let tx = client
-            .transaction()
+        let mut tx = self
+            .pool
+            .begin()
             .await
-            .map_err(|_| PostgresTypedStoreError::Database("failed to start transaction"))?;
+            .map_err(|error| database_error("failed to start transaction", error))?;
 
         if let Some((stored_fingerprint, stored_seq)) =
-            read_commit_key(&tx, request.run_id(), request.commit_key().as_str()).await?
+            read_commit_key(&mut tx, request.run_id(), request.commit_key().as_str()).await?
         {
             if stored_fingerprint == fingerprint_text {
                 let batch = build_prepared_committed_batch(&commit, stored_seq)?;
@@ -336,14 +160,14 @@ COMMIT;
             .into());
         }
 
-        ensure_run_head(&tx, request.run_id()).await?;
-        let head = read_head_for_update(&tx, request.run_id()).await?;
+        ensure_run_head(&mut tx, request.run_id()).await?;
+        let head = read_head_for_update(&mut tx, request.run_id()).await?;
 
         // A same-run transaction may have inserted the key while this transaction waited for the
         // run-head lock. Re-check before sequence validation while preserving the required initial
         // commit-key lookup order.
         if let Some((stored_fingerprint, stored_seq)) =
-            read_commit_key(&tx, request.run_id(), request.commit_key().as_str()).await?
+            read_commit_key(&mut tx, request.run_id(), request.commit_key().as_str()).await?
         {
             if stored_fingerprint == fingerprint_text {
                 let batch = build_prepared_committed_batch(&commit, stored_seq)?;
@@ -358,14 +182,22 @@ COMMIT;
             .into());
         }
 
-        let mut artifacts = load_artifacts(&tx).await?;
+        let mut artifacts = load_artifacts(&mut tx, request.run_id()).await?;
         admit_artifact_evidence(&mut artifacts, commit.admitted_artifacts())?;
-        lock_resource_lanes_tx(&tx).await?;
+        lock_resource_lanes_tx(&mut tx).await?;
+        let (projections, stream_head) =
+            rebuild_projection_snapshot_with_head(&mut tx, request.run_id()).await?;
+        if stream_head != head {
+            return Err(PostgresTypedStoreError::Corruption(
+                "typed run head does not match persisted event stream".to_owned(),
+            ));
+        }
         let base = TypedCommitBase {
             artifacts,
-            logical_keys: load_logical_keys(&tx, request.run_id()).await?,
-            unique_logical_payloads: load_unique_logical_payloads(&tx, request.run_id()).await?,
-            projections: load_projection_snapshot_tx(&tx, request.run_id()).await?,
+            logical_keys: load_logical_keys(&mut tx, request.run_id()).await?,
+            unique_logical_payloads: load_unique_logical_payloads(&mut tx, request.run_id())
+                .await?,
+            projections,
             actual_next_seq: next_seq_from_head(head)?,
         };
         let staged = stage_prepared_typed_run_commit(&base, &commit)?;
@@ -373,7 +205,14 @@ COMMIT;
         let staged_projections = staged.projections().clone();
 
         for evidence in commit.admitted_artifacts() {
-            admit_artifact_evidence_tx(&tx, evidence).await?;
+            admit_artifact_evidence_tx(
+                &mut tx,
+                request.run_id(),
+                request.commit_key(),
+                batch.seq(),
+                evidence,
+            )
+            .await?;
         }
 
         for event in batch.events() {
@@ -386,101 +225,95 @@ COMMIT;
                 event.audit().payload_canonical_byte_len(),
                 "typed_run_events.payload_canonical_byte_len",
             )?;
-            tx.execute(
+            sqlx::query!(
                 "INSERT INTO typed_run_events \
                  (run_id, seq, ordinal, event_id, event_schema_id, spec_hash, commit_key, \
                   logical_key, payload_hash, payload_canonical_byte_len, payload_json) \
                  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
-                &[
-                    &event.run_id().as_str(),
-                    &seq,
-                    &ordinal,
-                    &event.event_id().as_str(),
-                    &event.event_schema_id().as_str(),
-                    &event.spec_hash().as_str(),
-                    &event.commit_key().as_str(),
-                    &event.logical_key().as_str(),
-                    &event.payload_hash().as_str(),
-                    &payload_canonical_byte_len,
-                    &payload_json,
-                ],
+                event.run_id().as_str(),
+                seq,
+                ordinal,
+                event.event_id().as_str(),
+                event.event_schema_id().as_str(),
+                event.spec_hash().as_str(),
+                event.commit_key().as_str(),
+                event.logical_key().as_str(),
+                event.payload_hash().as_str(),
+                payload_canonical_byte_len,
+                payload_json,
             )
+            .execute(&mut *tx)
             .await
-            .map_err(|error| database_source("failed to insert typed event", error))?;
+            .map_err(|error| database_error("failed to insert typed event", error))?;
         }
 
         let commit_seq = u64_to_i64(batch.seq().as_u64(), "typed_commit_keys.seq")?;
         let event_count = i32::try_from(batch.events().len())
             .map_err(|_| PostgresTypedStoreError::Corruption("event count overflow".into()))?;
-        tx.execute(
+        sqlx::query!(
             "INSERT INTO typed_commit_keys \
              (run_id, commit_key, commit_fingerprint, seq, event_count) \
             VALUES ($1,$2,$3,$4,$5)",
-            &[
-                &request.run_id().as_str(),
-                &request.commit_key().as_str(),
-                &fingerprint_text,
-                &commit_seq,
-                &event_count,
-            ],
+            request.run_id().as_str(),
+            request.commit_key().as_str(),
+            fingerprint_text,
+            commit_seq,
+            event_count,
         )
+        .execute(&mut *tx)
         .await
-        .map_err(|_| PostgresTypedStoreError::Database("failed to insert commit key"))?;
+        .map_err(|error| database_error("failed to insert commit key", error))?;
 
         for event in batch.events() {
-            tx.execute(
+            sqlx::query!(
                 "INSERT INTO typed_logical_keys (run_id, logical_key) VALUES ($1,$2) \
                  ON CONFLICT (run_id, logical_key) DO NOTHING",
-                &[&request.run_id().as_str(), &event.logical_key().as_str()],
+                request.run_id().as_str(),
+                event.logical_key().as_str(),
             )
+            .execute(&mut *tx)
             .await
-            .map_err(|_| PostgresTypedStoreError::Database("failed to insert logical key"))?;
+            .map_err(|error| database_error("failed to insert logical key", error))?;
             if is_unique_logical_key(event.logical_key()) {
-                tx.execute(
+                sqlx::query!(
                     "INSERT INTO typed_unique_logical_payloads \
                      (run_id, logical_key, payload_hash) VALUES ($1,$2,$3) \
                      ON CONFLICT (run_id, logical_key) DO UPDATE \
                     SET payload_hash = EXCLUDED.payload_hash",
-                    &[
-                        &request.run_id().as_str(),
-                        &event.logical_key().as_str(),
-                        &event.payload_hash().as_str(),
-                    ],
+                    request.run_id().as_str(),
+                    event.logical_key().as_str(),
+                    event.payload_hash().as_str(),
                 )
+                .execute(&mut *tx)
                 .await
-                .map_err(|_| {
-                    PostgresTypedStoreError::Database("failed to insert unique logical key")
-                })?;
+                .map_err(|error| database_error("failed to insert unique logical key", error))?;
             }
         }
 
-        write_projection_tables(&tx, request.run_id(), &staged_projections).await?;
-        tx.execute(
+        write_projection_tables(&mut tx, request.run_id(), &staged_projections).await?;
+        sqlx::query!(
             "UPDATE typed_run_heads SET head_seq = $2 WHERE run_id = $1",
-            &[
-                &request.run_id().as_str(),
-                &u64_to_i64(batch.seq().as_u64(), "typed_run_heads.head_seq")?,
-            ],
+            request.run_id().as_str(),
+            u64_to_i64(batch.seq().as_u64(), "typed_run_heads.head_seq")?,
         )
+        .execute(&mut *tx)
         .await
-        .map_err(|_| PostgresTypedStoreError::Database("failed to update run head"))?;
+        .map_err(|error| database_error("failed to update run head", error))?;
 
         tx.commit()
             .await
-            .map_err(|_| PostgresTypedStoreError::Database("failed to commit transaction"))?;
+            .map_err(|error| database_error("failed to commit transaction", error))?;
         Ok(CommitOutcome::Appended(batch))
     }
 
     /// Loads the current projection snapshot from projection tables.
     pub async fn projection_snapshot(&self, run_id: &RunId) -> Result<ProjectionSnapshot> {
-        let mut client = self.client.lock().await;
-        load_projection_snapshot_client(&mut client, run_id).await
+        load_projection_snapshot_client(&self.pool, run_id).await
     }
 
     /// Loads the authoritative typed run stream from persisted event rows.
     pub async fn load_run_stream(&self, run_id: &RunId) -> Result<Vec<KernelEventEnvelope>> {
-        let client = self.client.lock().await;
-        load_run_stream_client(&client, run_id).await
+        load_run_stream_client(&self.pool, run_id).await
     }
 
     /// Rebuilds projection tables from the authoritative `typed_run_events` stream.
@@ -488,16 +321,25 @@ COMMIT;
         &self,
         run_id: &RunId,
     ) -> Result<ProjectionSnapshot> {
-        let mut client = self.client.lock().await;
-        let tx = client
-            .transaction()
+        let mut tx = self
+            .pool
+            .begin()
             .await
-            .map_err(|_| PostgresTypedStoreError::Database("failed to start transaction"))?;
-        let snapshot = rebuild_projection_snapshot_from_events(&tx, run_id).await?;
-        write_projection_tables(&tx, run_id, &snapshot).await?;
+            .map_err(|error| database_error("failed to start transaction", error))?;
+        ensure_run_head(&mut tx, run_id).await?;
+        let head = read_head_for_update(&mut tx, run_id).await?;
+        lock_resource_lanes_tx(&mut tx).await?;
+        let snapshot = rebuild_projection_snapshot_from_events(&mut tx, run_id).await?;
+        let stream_head = projection_stream_head(&mut tx, run_id).await?;
+        if stream_head != head {
+            return Err(PostgresTypedStoreError::Corruption(
+                "typed run head does not match persisted event stream".to_owned(),
+            ));
+        }
+        write_projection_tables(&mut tx, run_id, &snapshot).await?;
         tx.commit()
             .await
-            .map_err(|_| PostgresTypedStoreError::Database("failed to commit transaction"))?;
+            .map_err(|error| database_error("failed to commit transaction", error))?;
         Ok(snapshot)
     }
 }
@@ -550,156 +392,193 @@ fn admit_artifact_evidence(
 }
 
 async fn admit_artifact_evidence_tx(
-    tx: &Transaction<'_>,
+    tx: &mut Transaction<'_, Postgres>,
+    run_id: &RunId,
+    commit_key: &CommitKey,
+    seq: StreamSeq,
     evidence: &ArtifactEvidenceRef,
 ) -> Result<()> {
-    let inserted = tx
-        .execute(
-            "INSERT INTO typed_artifacts \
+    let inserted = sqlx::query!(
+        "INSERT INTO typed_artifacts \
          (artifact_id, digest, byte_len, media_type, schema_id, semantic_type_id, \
           producer_node_id, producer_seed_id, artifact_role) \
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) \
          ON CONFLICT (artifact_id) DO NOTHING",
-            &[
-                &evidence.artifact_id.as_str(),
-                &evidence.digest.as_str(),
-                &u64_to_i64(evidence.byte_len, "typed_artifacts.byte_len")?,
-                &evidence.media_type.as_str(),
-                &evidence.schema_id.as_ref().map(SchemaId::as_str),
-                &evidence
-                    .semantic_type_id
-                    .as_ref()
-                    .map(SemanticTypeId::as_str),
-                &evidence.producer_node_id.as_ref().map(NodeId::as_str),
-                &evidence.producer_seed_id.as_ref().map(SeedId::as_str),
-                &artifact_role_str(evidence.artifact_role),
-            ],
-        )
-        .await
-        .map_err(|_| PostgresTypedStoreError::Database("failed to insert artifact evidence"))?;
-    if inserted == 1 {
-        return Ok(());
-    }
-
-    let row = tx
-        .query_one(
+        evidence.artifact_id.as_str(),
+        evidence.digest.as_str(),
+        u64_to_i64(evidence.byte_len, "typed_artifacts.byte_len")?,
+        evidence.media_type.as_str(),
+        evidence.schema_id.as_ref().map(SchemaId::as_str),
+        evidence
+            .semantic_type_id
+            .as_ref()
+            .map(SemanticTypeId::as_str),
+        evidence.producer_node_id.as_ref().map(NodeId::as_str),
+        evidence.producer_seed_id.as_ref().map(SeedId::as_str),
+        artifact_role_str(evidence.artifact_role),
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| database_error("failed to insert artifact evidence", error))?
+    .rows_affected();
+    if inserted == 0 {
+        let row = sqlx::query!(
             "SELECT digest, byte_len, media_type, schema_id, semantic_type_id, producer_node_id, \
              producer_seed_id, artifact_role FROM typed_artifacts WHERE artifact_id = $1",
-            &[&evidence.artifact_id.as_str()],
+            evidence.artifact_id.as_str(),
         )
+        .fetch_one(&mut **tx)
         .await
-        .map_err(|_| PostgresTypedStoreError::Database("failed to query artifact evidence"))?;
-    let stored = artifact_from_row(evidence.artifact_id.clone(), &row)?;
-    if &stored == evidence {
-        return Ok(());
+        .map_err(|error| database_error("failed to query artifact evidence", error))?;
+        let stored = artifact_from_parts(
+            evidence.artifact_id.clone(),
+            row.digest,
+            row.byte_len,
+            row.media_type,
+            row.schema_id,
+            row.semantic_type_id,
+            row.producer_node_id,
+            row.producer_seed_id,
+            row.artifact_role,
+        )?;
+        if &stored != evidence {
+            return Err(StoreError::ArtifactEvidenceMismatch {
+                artifact_id: evidence.artifact_id.clone(),
+                field: "artifact",
+            }
+            .into());
+        }
     }
-    Err(StoreError::ArtifactEvidenceMismatch {
-        artifact_id: evidence.artifact_id.clone(),
-        field: "artifact",
-    }
-    .into())
-}
 
-async fn ensure_run_head(tx: &Transaction<'_>, run_id: &RunId) -> Result<()> {
-    tx.execute(
-        "INSERT INTO typed_run_heads (run_id, head_seq) VALUES ($1, 0) \
-         ON CONFLICT (run_id) DO NOTHING",
-        &[&run_id.as_str()],
+    sqlx::query!(
+        "INSERT INTO typed_run_artifacts (run_id, artifact_id, commit_key, seq) \
+         VALUES ($1,$2,$3,$4) \
+         ON CONFLICT (run_id, artifact_id) DO NOTHING",
+        run_id.as_str(),
+        evidence.artifact_id.as_str(),
+        commit_key.as_str(),
+        u64_to_i64(seq.as_u64(), "typed_run_artifacts.seq")?,
     )
+    .execute(&mut **tx)
     .await
-    .map_err(|_| PostgresTypedStoreError::Database("failed to ensure typed run head"))?;
+    .map_err(|error| database_error("failed to insert run artifact evidence", error))?;
+
     Ok(())
 }
 
-async fn read_head(client: &Client, run_id: &RunId) -> Result<u64> {
-    let row = client
-        .query_opt(
-            "SELECT head_seq FROM typed_run_heads WHERE run_id = $1",
-            &[&run_id.as_str()],
-        )
-        .await
-        .map_err(|_| PostgresTypedStoreError::Database("failed to query typed run head"))?;
+async fn ensure_run_head(tx: &mut Transaction<'_, Postgres>, run_id: &RunId) -> Result<()> {
+    sqlx::query!(
+        "INSERT INTO typed_run_heads (run_id, head_seq) VALUES ($1, 0) \
+         ON CONFLICT (run_id) DO NOTHING",
+        run_id.as_str(),
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| database_error("failed to ensure typed run head", error))?;
+    Ok(())
+}
+
+async fn read_head(pool: &PgPool, run_id: &RunId) -> Result<u64> {
+    let row = sqlx::query!(
+        "SELECT head_seq FROM typed_run_heads WHERE run_id = $1",
+        run_id.as_str(),
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| database_error("failed to query typed run head", error))?;
     let Some(row) = row else {
         return Ok(0);
     };
-    let head: i64 = row.get(0);
-    i64_to_nonnegative_u64(head, "typed_run_heads.head_seq")
+    i64_to_nonnegative_u64(row.head_seq, "typed_run_heads.head_seq")
 }
 
-async fn read_head_for_update(tx: &Transaction<'_>, run_id: &RunId) -> Result<u64> {
-    let row = tx
-        .query_one(
-            "SELECT head_seq FROM typed_run_heads WHERE run_id = $1 FOR UPDATE",
-            &[&run_id.as_str()],
-        )
-        .await
-        .map_err(|_| PostgresTypedStoreError::Database("failed to lock typed run head"))?;
-    let head: i64 = row.get(0);
-    i64_to_nonnegative_u64(head, "typed_run_heads.head_seq")
+async fn read_head_for_update(tx: &mut Transaction<'_, Postgres>, run_id: &RunId) -> Result<u64> {
+    let row = sqlx::query!(
+        "SELECT head_seq FROM typed_run_heads WHERE run_id = $1 FOR UPDATE",
+        run_id.as_str(),
+    )
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|error| database_error("failed to lock typed run head", error))?;
+    i64_to_nonnegative_u64(row.head_seq, "typed_run_heads.head_seq")
 }
 
-async fn lock_resource_lanes_tx(tx: &Transaction<'_>) -> Result<()> {
-    tx.batch_execute("LOCK TABLE typed_resource_lane_projection IN SHARE ROW EXCLUSIVE MODE")
+async fn lock_resource_lanes_tx(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
+    sqlx::query!("LOCK TABLE typed_resource_lane_projection IN SHARE ROW EXCLUSIVE MODE")
+        .execute(&mut **tx)
         .await
-        .map_err(|_| PostgresTypedStoreError::Database("failed to lock resource lanes"))?;
+        .map_err(|error| database_error("failed to lock resource lanes", error))?;
     Ok(())
 }
 
 async fn read_commit_key(
-    tx: &Transaction<'_>,
+    tx: &mut Transaction<'_, Postgres>,
     run_id: &RunId,
     commit_key: &str,
 ) -> Result<Option<(String, StreamSeq)>> {
-    let row = tx
-        .query_opt(
-            "SELECT commit_fingerprint, seq FROM typed_commit_keys \
-             WHERE run_id = $1 AND commit_key = $2",
-            &[&run_id.as_str(), &commit_key],
-        )
-        .await
-        .map_err(|_| PostgresTypedStoreError::Database("failed to query commit key"))?;
+    let row = sqlx::query!(
+        "SELECT commit_fingerprint, seq FROM typed_commit_keys \
+         WHERE run_id = $1 AND commit_key = $2",
+        run_id.as_str(),
+        commit_key,
+    )
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| database_error("failed to query commit key", error))?;
     row.map(|row| {
-        let fingerprint: String = row.get(0);
-        let seq: i64 = row.get(1);
         Ok((
-            fingerprint,
-            StreamSeq::new(i64_to_positive_u64(seq, "typed_commit_keys.seq")?)?,
+            row.commit_fingerprint,
+            StreamSeq::new(i64_to_positive_u64(row.seq, "typed_commit_keys.seq")?)?,
         ))
     })
     .transpose()
 }
 
-async fn load_artifacts(tx: &Transaction<'_>) -> Result<BTreeMap<ArtifactId, ArtifactEvidenceRef>> {
-    let rows = tx
-        .query(
-            "SELECT artifact_id, digest, byte_len, media_type, schema_id, semantic_type_id, \
-             producer_node_id, producer_seed_id, artifact_role FROM typed_artifacts",
-            &[],
-        )
-        .await
-        .map_err(|_| PostgresTypedStoreError::Database("failed to load artifact evidence"))?;
+async fn load_artifacts(
+    tx: &mut Transaction<'_, Postgres>,
+    run_id: &RunId,
+) -> Result<BTreeMap<ArtifactId, ArtifactEvidenceRef>> {
+    let rows = sqlx::query!(
+        "SELECT a.artifact_id, a.digest, a.byte_len, a.media_type, a.schema_id, \
+         a.semantic_type_id, a.producer_node_id, a.producer_seed_id, a.artifact_role \
+         FROM typed_artifacts a \
+         INNER JOIN typed_run_artifacts ra ON ra.artifact_id = a.artifact_id \
+         WHERE ra.run_id = $1",
+        run_id.as_str(),
+    )
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| database_error("failed to load artifact evidence", error))?;
     let mut artifacts = BTreeMap::new();
     for row in rows {
-        let artifact_id: String = row.get(0);
-        let artifact_id = parse_identity::<ArtifactId>(&artifact_id)?;
-        let evidence = artifact_from_row(artifact_id.clone(), &row)?;
+        let artifact_id = parse_identity::<ArtifactId>(&row.artifact_id)?;
+        let evidence = artifact_from_parts(
+            artifact_id.clone(),
+            row.digest,
+            row.byte_len,
+            row.media_type,
+            row.schema_id,
+            row.semantic_type_id,
+            row.producer_node_id,
+            row.producer_seed_id,
+            row.artifact_role,
+        )?;
         artifacts.insert(artifact_id, evidence);
     }
     Ok(artifacts)
 }
 
-fn artifact_from_row(
+fn artifact_from_parts(
     artifact_id: ArtifactId,
-    row: &tokio_postgres::Row,
+    digest: String,
+    byte_len: i64,
+    media_type: String,
+    schema_id: Option<String>,
+    semantic_type_id: Option<String>,
+    producer_node_id: Option<String>,
+    producer_seed_id: Option<String>,
+    artifact_role: String,
 ) -> Result<ArtifactEvidenceRef> {
-    let digest: String = row.get("digest");
-    let byte_len: i64 = row.get("byte_len");
-    let media_type: String = row.get("media_type");
-    let schema_id: Option<String> = row.get("schema_id");
-    let semantic_type_id: Option<String> = row.get("semantic_type_id");
-    let producer_node_id: Option<String> = row.get("producer_node_id");
-    let producer_seed_id: Option<String> = row.get("producer_seed_id");
-    let artifact_role: String = row.get("artifact_role");
     Ok(ArtifactEvidenceRef {
         artifact_id,
         digest: parse_identity::<ContentDigest>(&digest)?,
@@ -714,138 +593,126 @@ fn artifact_from_row(
 }
 
 async fn load_logical_keys(
-    tx: &Transaction<'_>,
+    tx: &mut Transaction<'_, Postgres>,
     run_id: &RunId,
 ) -> Result<BTreeSet<(RunId, LogicalEventKey)>> {
-    let rows = tx
-        .query(
-            "SELECT logical_key FROM typed_logical_keys WHERE run_id = $1",
-            &[&run_id.as_str()],
-        )
-        .await
-        .map_err(|_| PostgresTypedStoreError::Database("failed to load logical keys"))?;
+    let rows = sqlx::query!(
+        "SELECT logical_key FROM typed_logical_keys WHERE run_id = $1",
+        run_id.as_str(),
+    )
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| database_error("failed to load logical keys", error))?;
     let mut keys = BTreeSet::new();
     for row in rows {
-        let key: String = row.get(0);
-        keys.insert((run_id.clone(), LogicalEventKey::new(key)?));
+        keys.insert((run_id.clone(), LogicalEventKey::new(row.logical_key)?));
     }
     Ok(keys)
 }
 
 async fn load_unique_logical_payloads(
-    tx: &Transaction<'_>,
+    tx: &mut Transaction<'_, Postgres>,
     run_id: &RunId,
 ) -> Result<BTreeMap<(RunId, LogicalEventKey), ContentDigest>> {
-    let rows = tx
-        .query(
-            "SELECT logical_key, payload_hash FROM typed_unique_logical_payloads WHERE run_id = $1",
-            &[&run_id.as_str()],
-        )
-        .await
-        .map_err(|_| PostgresTypedStoreError::Database("failed to load unique logical payloads"))?;
+    let rows = sqlx::query!(
+        "SELECT logical_key, payload_hash FROM typed_unique_logical_payloads WHERE run_id = $1",
+        run_id.as_str(),
+    )
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| database_error("failed to load unique logical payloads", error))?;
     let mut payloads = BTreeMap::new();
     for row in rows {
-        let key: String = row.get(0);
-        let payload_hash: String = row.get(1);
         payloads.insert(
-            (run_id.clone(), LogicalEventKey::new(key)?),
-            parse_identity::<ContentDigest>(&payload_hash)?,
+            (run_id.clone(), LogicalEventKey::new(row.logical_key)?),
+            parse_identity::<ContentDigest>(&row.payload_hash)?,
         );
     }
     Ok(payloads)
 }
 
 async fn load_projection_snapshot_client(
-    client: &mut Client,
+    pool: &PgPool,
     run_id: &RunId,
 ) -> Result<ProjectionSnapshot> {
-    let tx = client
-        .transaction()
+    let mut tx = pool
+        .begin()
         .await
-        .map_err(|_| PostgresTypedStoreError::Database("failed to start read transaction"))?;
-    let snapshot = load_projection_snapshot_tx(&tx, run_id).await?;
+        .map_err(|error| database_error("failed to start read transaction", error))?;
+    let snapshot = load_projection_snapshot_tx(&mut tx, run_id).await?;
     tx.commit()
         .await
-        .map_err(|_| PostgresTypedStoreError::Database("failed to commit read transaction"))?;
+        .map_err(|error| database_error("failed to commit read transaction", error))?;
     Ok(snapshot)
 }
 
 async fn load_projection_snapshot_tx(
-    tx: &Transaction<'_>,
+    tx: &mut Transaction<'_, Postgres>,
     run_id: &RunId,
 ) -> Result<ProjectionSnapshot> {
     let mut run_states = BTreeMap::new();
-    for row in tx
-        .query(
-            "SELECT run_state FROM typed_run_projection WHERE run_id = $1",
-            &[&run_id.as_str()],
-        )
-        .await
-        .map_err(|_| PostgresTypedStoreError::Database("failed to load run projection"))?
+    for row in sqlx::query!(
+        "SELECT run_state FROM typed_run_projection WHERE run_id = $1",
+        run_id.as_str(),
+    )
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| database_error("failed to load run projection", error))?
     {
-        let state: String = row.get(0);
-        run_states.insert(run_id.clone(), parse_run_state(&state)?);
+        run_states.insert(run_id.clone(), parse_run_state(&row.run_state)?);
     }
 
     let mut run_completions = BTreeMap::new();
-    for row in tx
-        .query(
-            "SELECT projection_json FROM typed_run_completion_projection WHERE run_id = $1",
-            &[&run_id.as_str()],
-        )
-        .await
-        .map_err(|_| {
-            PostgresTypedStoreError::Database("failed to load run completion projection")
-        })?
+    for row in sqlx::query!(
+        "SELECT projection_json FROM typed_run_completion_projection WHERE run_id = $1",
+        run_id.as_str(),
+    )
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| database_error("failed to load run completion projection", error))?
     {
-        let json: Value = row.get(0);
-        let (projected_run_id, projection) = parse_run_completion_projection(&json)?;
+        let (projected_run_id, projection) = parse_run_completion_projection(&row.projection_json)?;
         run_completions.insert(projected_run_id, projection);
     }
 
     let mut saga_engagements = BTreeMap::new();
-    for row in tx
-        .query(
-            "SELECT projection_json FROM typed_saga_engagement_projection WHERE run_id = $1",
-            &[&run_id.as_str()],
-        )
-        .await
-        .map_err(|_| {
-            PostgresTypedStoreError::Database("failed to load saga engagement projection")
-        })?
+    for row in sqlx::query!(
+        "SELECT projection_json FROM typed_saga_engagement_projection WHERE run_id = $1",
+        run_id.as_str(),
+    )
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| database_error("failed to load saga engagement projection", error))?
     {
-        let json: Value = row.get(0);
-        let (projected_run_id, projection) = parse_saga_engagement_projection(&json)?;
+        let (projected_run_id, projection) =
+            parse_saga_engagement_projection(&row.projection_json)?;
         saga_engagements.insert(projected_run_id, projection);
     }
 
     let mut manual_resolutions = BTreeMap::new();
-    for row in tx
-        .query(
-            "SELECT projection_json FROM typed_manual_resolution_projection WHERE run_id = $1",
-            &[&run_id.as_str()],
-        )
-        .await
-        .map_err(|_| {
-            PostgresTypedStoreError::Database("failed to load manual resolution projection")
-        })?
+    for row in sqlx::query!(
+        "SELECT projection_json FROM typed_manual_resolution_projection WHERE run_id = $1",
+        run_id.as_str(),
+    )
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| database_error("failed to load manual resolution projection", error))?
     {
-        let json: Value = row.get(0);
-        let (projected_run_id, projection) = parse_manual_resolution_projection(&json)?;
+        let (projected_run_id, projection) =
+            parse_manual_resolution_projection(&row.projection_json)?;
         manual_resolutions.insert(projected_run_id, projection);
     }
 
     let mut attempts = BTreeMap::new();
-    for row in tx
-        .query(
-            "SELECT projection_json FROM typed_attempt_projection WHERE run_id = $1",
-            &[&run_id.as_str()],
-        )
-        .await
-        .map_err(|_| PostgresTypedStoreError::Database("failed to load attempt projection"))?
+    for row in sqlx::query!(
+        "SELECT projection_json FROM typed_attempt_projection WHERE run_id = $1",
+        run_id.as_str(),
+    )
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| database_error("failed to load attempt projection", error))?
     {
-        let json: Value = row.get(0);
-        let projection = parse_attempt_projection(&json)?;
+        let projection = parse_attempt_projection(&row.projection_json)?;
         attempts.insert(
             (projection.node_id.clone(), projection.attempt_id.clone()),
             projection,
@@ -853,30 +720,28 @@ async fn load_projection_snapshot_tx(
     }
 
     let mut cells = BTreeMap::new();
-    for row in tx
-        .query(
-            "SELECT projection_json FROM typed_cell_projection WHERE run_id = $1",
-            &[&run_id.as_str()],
-        )
-        .await
-        .map_err(|_| PostgresTypedStoreError::Database("failed to load cell projection"))?
+    for row in sqlx::query!(
+        "SELECT projection_json FROM typed_cell_projection WHERE run_id = $1",
+        run_id.as_str(),
+    )
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| database_error("failed to load cell projection", error))?
     {
-        let json: Value = row.get(0);
-        let (cell_id, projection) = parse_cell_projection(&json)?;
+        let (cell_id, projection) = parse_cell_projection(&row.projection_json)?;
         cells.insert(cell_id, projection);
     }
 
     let mut facts = BTreeMap::new();
-    for row in tx
-        .query(
-            "SELECT projection_json FROM typed_fact_projection WHERE run_id = $1",
-            &[&run_id.as_str()],
-        )
-        .await
-        .map_err(|_| PostgresTypedStoreError::Database("failed to load fact projection"))?
+    for row in sqlx::query!(
+        "SELECT projection_json FROM typed_fact_projection WHERE run_id = $1",
+        run_id.as_str(),
+    )
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| database_error("failed to load fact projection", error))?
     {
-        let json: Value = row.get(0);
-        let projection = parse_fact_projection(&json)?;
+        let projection = parse_fact_projection(&row.projection_json)?;
         facts.insert(
             (
                 projection.node_id.clone(),
@@ -888,16 +753,15 @@ async fn load_projection_snapshot_tx(
     }
 
     let mut side_effects = BTreeMap::new();
-    for row in tx
-        .query(
-            "SELECT projection_json FROM typed_side_effect_projection WHERE run_id = $1",
-            &[&run_id.as_str()],
-        )
-        .await
-        .map_err(|_| PostgresTypedStoreError::Database("failed to load side-effect projection"))?
+    for row in sqlx::query!(
+        "SELECT projection_json FROM typed_side_effect_projection WHERE run_id = $1",
+        run_id.as_str(),
+    )
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| database_error("failed to load side-effect projection", error))?
     {
-        let json: Value = row.get(0);
-        let projection = parse_side_effect_projection(&json)?;
+        let projection = parse_side_effect_projection(&row.projection_json)?;
         side_effects.insert(
             SideEffectLedgerRef::new(projection.run_id.clone(), projection.ledger_key.clone()),
             projection,
@@ -905,30 +769,25 @@ async fn load_projection_snapshot_tx(
     }
 
     let mut resource_lanes = BTreeMap::new();
-    for row in tx
-        .query(
-            "SELECT projection_json FROM typed_resource_lane_projection",
-            &[],
-        )
+    for row in sqlx::query!("SELECT projection_json FROM typed_resource_lane_projection",)
+        .fetch_all(&mut **tx)
         .await
-        .map_err(|_| PostgresTypedStoreError::Database("failed to load resource lanes"))?
+        .map_err(|error| database_error("failed to load resource lanes", error))?
     {
-        let json: Value = row.get(0);
-        let (lane_key, projection) = parse_resource_lane_projection(&json)?;
+        let (lane_key, projection) = parse_resource_lane_projection(&row.projection_json)?;
         resource_lanes.insert(lane_key, projection);
     }
 
     let mut public_outputs = BTreeMap::new();
-    for row in tx
-        .query(
-            "SELECT projection_json FROM typed_public_output_projection WHERE run_id = $1",
-            &[&run_id.as_str()],
-        )
-        .await
-        .map_err(|_| PostgresTypedStoreError::Database("failed to load public-output projection"))?
+    for row in sqlx::query!(
+        "SELECT projection_json FROM typed_public_output_projection WHERE run_id = $1",
+        run_id.as_str(),
+    )
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| database_error("failed to load public-output projection", error))?
     {
-        let json: Value = row.get(0);
-        let (schema_id, projection) = parse_public_output_projection(&json)?;
+        let (schema_id, projection) = parse_public_output_projection(&row.projection_json)?;
         public_outputs.insert(schema_id, projection);
     }
 
@@ -963,21 +822,19 @@ async fn load_projection_snapshot_tx(
     .map_err(PostgresTypedStoreError::Store)
 }
 
-async fn load_run_stream_client(
-    client: &Client,
-    run_id: &RunId,
-) -> Result<Vec<KernelEventEnvelope>> {
-    let rows = client
-        .query(
-            "SELECT run_id, seq, ordinal, event_id, event_schema_id, spec_hash, commit_key, \
-             logical_key, payload_hash, payload_canonical_byte_len, payload_json \
-             FROM typed_run_events WHERE run_id = $1 ORDER BY seq ASC, ordinal ASC",
-            &[&run_id.as_str()],
-        )
-        .await
-        .map_err(|_| PostgresTypedStoreError::Database("failed to load typed run stream"))?;
+async fn load_run_stream_client(pool: &PgPool, run_id: &RunId) -> Result<Vec<KernelEventEnvelope>> {
+    let rows = sqlx::query_as!(
+        TypedRunEventRow,
+        "SELECT run_id, seq, ordinal, event_id, event_schema_id, spec_hash, commit_key, \
+         logical_key, payload_hash, payload_canonical_byte_len, payload_json \
+         FROM typed_run_events WHERE run_id = $1 ORDER BY seq ASC, ordinal ASC",
+        run_id.as_str(),
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|error| database_error("failed to load typed run stream", error))?;
     let events = rows
-        .iter()
+        .into_iter()
         .map(event_envelope_from_row)
         .collect::<Result<Vec<_>>>()?;
     ProjectionSnapshot::validate_run_stream(&events)?;
@@ -985,40 +842,30 @@ async fn load_run_stream_client(
 }
 
 async fn load_run_stream_tx(
-    tx: &Transaction<'_>,
+    tx: &mut Transaction<'_, Postgres>,
     run_id: &RunId,
 ) -> Result<Vec<KernelEventEnvelope>> {
-    let rows = tx
-        .query(
-            "SELECT run_id, seq, ordinal, event_id, event_schema_id, spec_hash, commit_key, \
-             logical_key, payload_hash, payload_canonical_byte_len, payload_json \
-             FROM typed_run_events WHERE run_id = $1 ORDER BY seq ASC, ordinal ASC",
-            &[&run_id.as_str()],
-        )
-        .await
-        .map_err(|_| PostgresTypedStoreError::Database("failed to load typed run stream"))?;
+    let rows = sqlx::query_as!(
+        TypedRunEventRow,
+        "SELECT run_id, seq, ordinal, event_id, event_schema_id, spec_hash, commit_key, \
+         logical_key, payload_hash, payload_canonical_byte_len, payload_json \
+         FROM typed_run_events WHERE run_id = $1 ORDER BY seq ASC, ordinal ASC",
+        run_id.as_str(),
+    )
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| database_error("failed to load typed run stream", error))?;
     let events = rows
-        .iter()
+        .into_iter()
         .map(event_envelope_from_row)
         .collect::<Result<Vec<_>>>()?;
     ProjectionSnapshot::validate_run_stream(&events)?;
     Ok(events)
 }
 
-fn event_envelope_from_row(row: &tokio_postgres::Row) -> Result<KernelEventEnvelope> {
-    let run_id: String = row.get("run_id");
-    let seq: i64 = row.get("seq");
-    let ordinal: i32 = row.get("ordinal");
-    let event_id: String = row.get("event_id");
-    let event_schema_id: String = row.get("event_schema_id");
-    let spec_hash: String = row.get("spec_hash");
-    let commit_key: String = row.get("commit_key");
-    let logical_key: String = row.get("logical_key");
-    let payload_hash: String = row.get("payload_hash");
-    let payload_canonical_byte_len: i64 = row.get("payload_canonical_byte_len");
-    let payload_json: Value = row.get("payload_json");
-    let payload = payload_from_json_value(&payload_json)?;
-    let ordinal = u32::try_from(ordinal).map_err(|_| {
+fn event_envelope_from_row(row: TypedRunEventRow) -> Result<KernelEventEnvelope> {
+    let payload = payload_from_json_value(&row.payload_json)?;
+    let ordinal = u32::try_from(row.ordinal).map_err(|_| {
         PostgresTypedStoreError::Corruption(
             "typed_run_events.ordinal contained a negative integer".into(),
         )
@@ -1026,48 +873,44 @@ fn event_envelope_from_row(row: &tokio_postgres::Row) -> Result<KernelEventEnvel
 
     Ok(KernelEventEnvelope::from_persisted_record(
         PersistedKernelEventRecord {
-            event_id: parse_identity::<mfm_ids::EventId>(&event_id)?,
-            event_schema_id: parse_identity::<SchemaId>(&event_schema_id)?,
-            run_id: parse_identity::<RunId>(&run_id)?,
-            seq: StreamSeq::new(i64_to_positive_u64(seq, "typed_run_events.seq")?)?,
+            event_id: parse_identity::<mfm_ids::EventId>(&row.event_id)?,
+            event_schema_id: parse_identity::<SchemaId>(&row.event_schema_id)?,
+            run_id: parse_identity::<RunId>(&row.run_id)?,
+            seq: StreamSeq::new(i64_to_positive_u64(row.seq, "typed_run_events.seq")?)?,
             ordinal: CommitOrdinal::new(ordinal),
-            spec_hash: parse_identity::<mfm_ids::SpecHash>(&spec_hash)?,
-            commit_key: CommitKey::new(commit_key)?,
-            logical_key: LogicalEventKey::new(logical_key)?,
-            payload_hash: parse_identity::<ContentDigest>(&payload_hash)?,
+            spec_hash: parse_identity::<mfm_ids::SpecHash>(&row.spec_hash)?,
+            commit_key: CommitKey::new(row.commit_key)?,
+            logical_key: LogicalEventKey::new(row.logical_key)?,
+            payload_hash: parse_identity::<ContentDigest>(&row.payload_hash)?,
             payload,
             payload_canonical_byte_len: i64_to_nonnegative_u64(
-                payload_canonical_byte_len,
+                row.payload_canonical_byte_len,
                 "typed_run_events.payload_canonical_byte_len",
             )?,
         },
     )?)
 }
 
+struct TypedRunEventRow {
+    run_id: String,
+    seq: i64,
+    ordinal: i32,
+    event_id: String,
+    event_schema_id: String,
+    spec_hash: String,
+    commit_key: String,
+    logical_key: String,
+    payload_hash: String,
+    payload_canonical_byte_len: i64,
+    payload_json: Value,
+}
+
 async fn write_projection_tables(
-    tx: &Transaction<'_>,
+    tx: &mut Transaction<'_, Postgres>,
     run_id: &RunId,
     snapshot: &ProjectionSnapshot,
 ) -> Result<()> {
-    for table in [
-        "typed_run_projection",
-        "typed_run_completion_projection",
-        "typed_saga_engagement_projection",
-        "typed_manual_resolution_projection",
-        "typed_attempt_projection",
-        "typed_cell_projection",
-        "typed_fact_projection",
-        "typed_side_effect_projection",
-        "typed_resource_lane_projection",
-        "typed_public_output_projection",
-    ] {
-        tx.execute(
-            &format!("DELETE FROM {table} WHERE run_id = $1"),
-            &[&run_id.as_str()],
-        )
-        .await
-        .map_err(|_| PostgresTypedStoreError::Database("failed to clear projection table"))?;
-    }
+    clear_projection_tables(tx, run_id).await?;
 
     for (projected_run_id, state) in snapshot.run_states() {
         if projected_run_id == run_id {
@@ -1075,167 +918,263 @@ async fn write_projection_tables(
                 "run_id": projected_run_id.as_str(),
                 "run_state": run_state_str(*state),
             });
-            tx.execute(
+            sqlx::query!(
                 "INSERT INTO typed_run_projection (run_id, run_state, projection_json) \
                  VALUES ($1,$2,$3)",
-                &[&projected_run_id.as_str(), &run_state_str(*state), &json],
+                projected_run_id.as_str(),
+                run_state_str(*state),
+                json,
             )
+            .execute(&mut **tx)
             .await
-            .map_err(|_| PostgresTypedStoreError::Database("failed to write run projection"))?;
+            .map_err(|error| database_error("failed to write run projection", error))?;
         }
     }
 
     for (projected_run_id, projection) in snapshot.run_completions() {
         if projected_run_id == run_id {
             let json = run_completion_projection_json(projected_run_id, projection);
-            tx.execute(
+            sqlx::query!(
                 "INSERT INTO typed_run_completion_projection (run_id, projection_json) \
                  VALUES ($1,$2)",
-                &[&projected_run_id.as_str(), &json],
+                projected_run_id.as_str(),
+                json,
             )
+            .execute(&mut **tx)
             .await
-            .map_err(|_| {
-                PostgresTypedStoreError::Database("failed to write run completion projection")
-            })?;
+            .map_err(|error| database_error("failed to write run completion projection", error))?;
         }
     }
 
     for (projected_run_id, projection) in snapshot.saga_engagements() {
         if projected_run_id == run_id {
             let json = saga_engagement_projection_json(projected_run_id, projection);
-            tx.execute(
+            sqlx::query!(
                 "INSERT INTO typed_saga_engagement_projection (run_id, projection_json) \
                  VALUES ($1,$2)",
-                &[&projected_run_id.as_str(), &json],
+                projected_run_id.as_str(),
+                json,
             )
+            .execute(&mut **tx)
             .await
-            .map_err(|_| {
-                PostgresTypedStoreError::Database("failed to write saga engagement projection")
-            })?;
+            .map_err(|error| database_error("failed to write saga engagement projection", error))?;
         }
     }
 
     for (projected_run_id, projection) in snapshot.manual_resolutions() {
         if projected_run_id == run_id {
             let json = manual_resolution_projection_json(projected_run_id, projection);
-            tx.execute(
+            sqlx::query!(
                 "INSERT INTO typed_manual_resolution_projection (run_id, projection_json) \
                  VALUES ($1,$2)",
-                &[&projected_run_id.as_str(), &json],
+                projected_run_id.as_str(),
+                json,
             )
+            .execute(&mut **tx)
             .await
-            .map_err(|_| {
-                PostgresTypedStoreError::Database("failed to write manual resolution projection")
+            .map_err(|error| {
+                database_error("failed to write manual resolution projection", error)
             })?;
         }
     }
 
     for (_, projection) in snapshot.attempts() {
         let json = attempt_projection_json(projection);
-        tx.execute(
+        sqlx::query!(
             "INSERT INTO typed_attempt_projection (run_id, node_id, attempt_id, projection_json) \
              VALUES ($1,$2,$3,$4)",
-            &[
-                &run_id.as_str(),
-                &projection.node_id.as_str(),
-                &projection.attempt_id.as_str(),
-                &json,
-            ],
+            run_id.as_str(),
+            projection.node_id.as_str(),
+            projection.attempt_id.as_str(),
+            json,
         )
+        .execute(&mut **tx)
         .await
-        .map_err(|_| PostgresTypedStoreError::Database("failed to write attempt projection"))?;
+        .map_err(|error| database_error("failed to write attempt projection", error))?;
     }
 
     for (cell_id, projection) in snapshot.cells() {
         let json = cell_projection_json(cell_id, projection);
-        tx.execute(
+        sqlx::query!(
             "INSERT INTO typed_cell_projection (run_id, cell_id, projection_json) VALUES ($1,$2,$3)",
-            &[&run_id.as_str(), &cell_id.as_str(), &json],
+            run_id.as_str(),
+            cell_id.as_str(),
+            json,
         )
+        .execute(&mut **tx)
         .await
-        .map_err(|_| PostgresTypedStoreError::Database("failed to write cell projection"))?;
+        .map_err(|error| database_error("failed to write cell projection", error))?;
     }
 
     for (_, projection) in snapshot.facts() {
         let json = fact_projection_json(projection);
-        tx.execute(
+        sqlx::query!(
             "INSERT INTO typed_fact_projection \
              (run_id, node_id, attempt_id, fact_key, projection_json) VALUES ($1,$2,$3,$4,$5)",
-            &[
-                &run_id.as_str(),
-                &projection.node_id.as_str(),
-                &projection.attempt_id.as_str(),
-                &projection.fact_key.as_str(),
-                &json,
-            ],
+            run_id.as_str(),
+            projection.node_id.as_str(),
+            projection.attempt_id.as_str(),
+            projection.fact_key.as_str(),
+            json,
         )
+        .execute(&mut **tx)
         .await
-        .map_err(|_| PostgresTypedStoreError::Database("failed to write fact projection"))?;
+        .map_err(|error| database_error("failed to write fact projection", error))?;
     }
 
     for (ledger_ref, projection) in snapshot.side_effects() {
         if &ledger_ref.run_id == run_id {
             let json = side_effect_projection_json(projection);
-            tx.execute(
+            sqlx::query!(
                 "INSERT INTO typed_side_effect_projection (run_id, ledger_key, projection_json) \
                  VALUES ($1,$2,$3)",
-                &[
-                    &ledger_ref.run_id.as_str(),
-                    &ledger_ref.ledger_key.as_str(),
-                    &json,
-                ],
+                ledger_ref.run_id.as_str(),
+                ledger_ref.ledger_key.as_str(),
+                json,
             )
+            .execute(&mut **tx)
             .await
-            .map_err(|_| {
-                PostgresTypedStoreError::Database("failed to write side-effect projection")
-            })?;
+            .map_err(|error| database_error("failed to write side-effect projection", error))?;
         }
     }
 
     for (lane_key, projection) in snapshot.resource_lanes() {
         if &projection.holder.run_id == run_id {
             let json = resource_lane_projection_json(lane_key, projection);
-            tx.execute(
+            sqlx::query!(
                 "INSERT INTO typed_resource_lane_projection \
                  (namespace, resource_key, run_id, ledger_key, projection_json) \
                  VALUES ($1,$2,$3,$4,$5)",
-                &[
-                    &lane_key.namespace.as_str(),
-                    &lane_key.key.as_str(),
-                    &projection.holder.run_id.as_str(),
-                    &projection.holder.ledger_key.as_str(),
-                    &json,
-                ],
+                lane_key.namespace.as_str(),
+                lane_key.key.as_str(),
+                projection.holder.run_id.as_str(),
+                projection.holder.ledger_key.as_str(),
+                json,
             )
+            .execute(&mut **tx)
             .await
-            .map_err(|_| {
-                PostgresTypedStoreError::Database("failed to write resource lane projection")
-            })?;
+            .map_err(|error| database_error("failed to write resource lane projection", error))?;
         }
     }
 
     for (schema_id, projection) in snapshot.public_outputs() {
         let json = public_output_projection_json(schema_id, projection);
-        tx.execute(
+        sqlx::query!(
             "INSERT INTO typed_public_output_projection \
              (run_id, public_schema_id, projection_json) VALUES ($1,$2,$3)",
-            &[&run_id.as_str(), &schema_id.as_str(), &json],
+            run_id.as_str(),
+            schema_id.as_str(),
+            json,
         )
+        .execute(&mut **tx)
         .await
-        .map_err(|_| {
-            PostgresTypedStoreError::Database("failed to write public-output projection")
-        })?;
+        .map_err(|error| database_error("failed to write public-output projection", error))?;
     }
 
     Ok(())
 }
 
+async fn clear_projection_tables(tx: &mut Transaction<'_, Postgres>, run_id: &RunId) -> Result<()> {
+    sqlx::query!(
+        "DELETE FROM typed_run_projection WHERE run_id = $1",
+        run_id.as_str()
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| database_error("failed to clear run projection", error))?;
+    sqlx::query!(
+        "DELETE FROM typed_run_completion_projection WHERE run_id = $1",
+        run_id.as_str()
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| database_error("failed to clear run completion projection", error))?;
+    sqlx::query!(
+        "DELETE FROM typed_saga_engagement_projection WHERE run_id = $1",
+        run_id.as_str()
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| database_error("failed to clear saga engagement projection", error))?;
+    sqlx::query!(
+        "DELETE FROM typed_manual_resolution_projection WHERE run_id = $1",
+        run_id.as_str()
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| database_error("failed to clear manual resolution projection", error))?;
+    sqlx::query!(
+        "DELETE FROM typed_attempt_projection WHERE run_id = $1",
+        run_id.as_str()
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| database_error("failed to clear attempt projection", error))?;
+    sqlx::query!(
+        "DELETE FROM typed_cell_projection WHERE run_id = $1",
+        run_id.as_str()
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| database_error("failed to clear cell projection", error))?;
+    sqlx::query!(
+        "DELETE FROM typed_fact_projection WHERE run_id = $1",
+        run_id.as_str()
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| database_error("failed to clear fact projection", error))?;
+    sqlx::query!(
+        "DELETE FROM typed_side_effect_projection WHERE run_id = $1",
+        run_id.as_str()
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| database_error("failed to clear side-effect projection", error))?;
+    sqlx::query!(
+        "DELETE FROM typed_resource_lane_projection WHERE run_id = $1",
+        run_id.as_str()
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| database_error("failed to clear resource lane projection", error))?;
+    sqlx::query!(
+        "DELETE FROM typed_public_output_projection WHERE run_id = $1",
+        run_id.as_str()
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| database_error("failed to clear public-output projection", error))?;
+    Ok(())
+}
+
 async fn rebuild_projection_snapshot_from_events(
-    tx: &Transaction<'_>,
+    tx: &mut Transaction<'_, Postgres>,
     run_id: &RunId,
 ) -> Result<ProjectionSnapshot> {
     let stream = load_run_stream_tx(tx, run_id).await?;
     Ok(ProjectionSnapshot::rebuild_from_run_stream(&stream)?)
+}
+
+async fn rebuild_projection_snapshot_with_head(
+    tx: &mut Transaction<'_, Postgres>,
+    run_id: &RunId,
+) -> Result<(ProjectionSnapshot, u64)> {
+    let stream = load_run_stream_tx(tx, run_id).await?;
+    let head = stream.last().map(|event| event.seq().as_u64()).unwrap_or(0);
+    let snapshot = ProjectionSnapshot::rebuild_from_run_stream(&stream)?;
+    Ok((snapshot, head))
+}
+
+async fn projection_stream_head(tx: &mut Transaction<'_, Postgres>, run_id: &RunId) -> Result<u64> {
+    let row = sqlx::query!(
+        "SELECT COALESCE(MAX(seq), 0) as \"head!\" FROM typed_run_events WHERE run_id = $1",
+        run_id.as_str(),
+    )
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|error| database_error("failed to query typed stream head", error))?;
+    i64_to_nonnegative_u64(row.head, "typed_run_events.seq")
 }
 
 fn canonical_payload_value(payload: &events::KernelEventPayload) -> Result<Value> {
@@ -1308,7 +1247,8 @@ mod tests {
         SagaEngagementReason, SagaTerminal, SagaTerminalProof, SideEffectPhase, StoreError,
         StreamSeq,
     };
-    use tokio_postgres::NoTls;
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+    use sqlx::AssertSqlSafe;
 
     use super::*;
 
@@ -1326,33 +1266,56 @@ mod tests {
     async fn test_store() -> (PostgresTypedRunEventStore, String) {
         let database_url =
             std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for parity tests");
-        let (client, connection) = tokio_postgres::connect(&database_url, NoTls)
+        let admin_pool = PgPool::connect(&database_url)
             .await
             .expect("connect postgres");
-        tokio::spawn(async move {
-            let _ = connection.await;
-        });
 
         let schema = unique_schema();
-        client
-            .batch_execute(&format!(
-                "CREATE SCHEMA {schema}; SET search_path TO {schema};"
-            ))
+        // The schema name is generated from process/time/counter digits and never comes from user
+        // input; dynamic DDL is required because PostgreSQL does not parameterize identifiers.
+        sqlx::raw_sql(AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+            .execute(&admin_pool)
             .await
             .expect("create schema");
-        let store = PostgresTypedRunEventStore::from_client(Arc::new(Mutex::new(client)));
-        store.init().await.expect("init schema");
+        let options = PgConnectOptions::from_str(&database_url)
+            .expect("postgres URL")
+            .options([("search_path", schema.as_str())]);
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("connect schema-scoped postgres");
+        crate::schema::migrate_pool(&pool)
+            .await
+            .expect("migrate schema");
+        crate::schema::validate_pool(&pool)
+            .await
+            .expect("validate schema");
+        let store = PostgresTypedRunEventStore { pool };
         (store, schema)
     }
 
     async fn drop_schema(store: &PostgresTypedRunEventStore, schema: &str) {
-        store
-            .client
-            .lock()
+        store.pool.close().await;
+        let database_url =
+            std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for parity tests");
+        let admin_pool = PgPool::connect(&database_url)
             .await
-            .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE;"))
+            .expect("connect postgres");
+        sqlx::raw_sql(AssertSqlSafe(format!(
+            "DROP SCHEMA IF EXISTS {schema} CASCADE"
+        )))
+        .execute(&admin_pool)
+        .await
+        .expect("drop schema");
+    }
+
+    async fn clear_projection_rows(store: &PostgresTypedRunEventStore, run_id: &RunId) {
+        let mut tx = store.pool.begin().await.expect("start projection clear tx");
+        clear_projection_tables(&mut tx, run_id)
             .await
-            .expect("drop schema");
+            .expect("clear projections");
+        tx.commit().await.expect("commit projection clear tx");
     }
 
     fn digest_bytes(byte: u8) -> DigestBytes {
@@ -2091,24 +2054,7 @@ mod tests {
             before
         );
 
-        {
-            let client = store.client.lock().await;
-            client
-                .batch_execute(
-                    "DELETE FROM typed_run_projection;\
-                     DELETE FROM typed_run_completion_projection;\
-                     DELETE FROM typed_saga_engagement_projection;\
-                     DELETE FROM typed_manual_resolution_projection;\
-                     DELETE FROM typed_attempt_projection;\
-                     DELETE FROM typed_cell_projection;\
-                     DELETE FROM typed_fact_projection;\
-                     DELETE FROM typed_side_effect_projection;\
-                     DELETE FROM typed_resource_lane_projection;\
-                     DELETE FROM typed_public_output_projection;",
-                )
-                .await
-                .expect("clear projections");
-        }
+        clear_projection_rows(&store, &run).await;
         let rebuilt = store
             .rebuild_projections_from_events(&run)
             .await
@@ -2185,24 +2131,7 @@ mod tests {
             before
         );
 
-        {
-            let client = store.client.lock().await;
-            client
-                .batch_execute(
-                    "DELETE FROM typed_run_projection;\
-                     DELETE FROM typed_run_completion_projection;\
-                     DELETE FROM typed_saga_engagement_projection;\
-                     DELETE FROM typed_manual_resolution_projection;\
-                     DELETE FROM typed_attempt_projection;\
-                     DELETE FROM typed_cell_projection;\
-                     DELETE FROM typed_fact_projection;\
-                     DELETE FROM typed_side_effect_projection;\
-                     DELETE FROM typed_resource_lane_projection;\
-                     DELETE FROM typed_public_output_projection;",
-                )
-                .await
-                .expect("clear projections");
-        }
+        clear_projection_rows(&store, &run).await;
         let rebuilt = store
             .rebuild_projections_from_events(&run)
             .await
@@ -2332,24 +2261,7 @@ mod tests {
             before
         );
 
-        {
-            let client = store.client.lock().await;
-            client
-                .batch_execute(
-                    "DELETE FROM typed_run_projection;\
-                     DELETE FROM typed_run_completion_projection;\
-                     DELETE FROM typed_saga_engagement_projection;\
-                     DELETE FROM typed_manual_resolution_projection;\
-                     DELETE FROM typed_attempt_projection;\
-                     DELETE FROM typed_cell_projection;\
-                     DELETE FROM typed_fact_projection;\
-                     DELETE FROM typed_side_effect_projection;\
-                     DELETE FROM typed_resource_lane_projection;\
-                     DELETE FROM typed_public_output_projection;",
-                )
-                .await
-                .expect("clear projections");
-        }
+        clear_projection_rows(&store, &run).await;
         let rebuilt = store
             .rebuild_projections_from_events(&run)
             .await
@@ -2487,24 +2399,7 @@ mod tests {
             terminal_before
         );
 
-        {
-            let client = store.client.lock().await;
-            client
-                .batch_execute(
-                    "DELETE FROM typed_run_projection;\
-                     DELETE FROM typed_run_completion_projection;\
-                     DELETE FROM typed_saga_engagement_projection;\
-                     DELETE FROM typed_manual_resolution_projection;\
-                     DELETE FROM typed_attempt_projection;\
-                     DELETE FROM typed_cell_projection;\
-                     DELETE FROM typed_fact_projection;\
-                     DELETE FROM typed_side_effect_projection;\
-                     DELETE FROM typed_resource_lane_projection;\
-                     DELETE FROM typed_public_output_projection;",
-                )
-                .await
-                .expect("clear terminal projections");
-        }
+        clear_projection_rows(&store, &terminal_run).await;
         let terminal_rebuilt = store
             .rebuild_projections_from_events(&terminal_run)
             .await
@@ -2714,18 +2609,15 @@ mod tests {
             }
         ));
 
-        let stored_payload_hash: String = {
-            let client = store.client.lock().await;
-            client
-                .query_one(
-                    "SELECT payload_hash FROM typed_unique_logical_payloads \
-                     WHERE run_id = $1 AND logical_key = $2",
-                    &[&run.as_str(), &submission_result_key.as_str()],
-                )
-                .await
-                .expect("unique logical payload row")
-                .get("payload_hash")
-        };
+        let stored_payload_hash = sqlx::query_scalar!(
+            "SELECT payload_hash FROM typed_unique_logical_payloads \
+             WHERE run_id = $1 AND logical_key = $2",
+            run.as_str(),
+            submission_result_key.as_str(),
+        )
+        .fetch_one(&store.pool)
+        .await
+        .expect("unique logical payload row");
         assert_eq!(
             stored_payload_hash,
             observed.events()[0].payload_hash().as_str()

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO typed_run_heads (run_id, head_seq) VALUES ($1, 0) ON CONFLICT (run_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "eac5781f10fa4a633c4a0883ef856f0b1f63ca2bd84e52407e81ed5f32d5e2c4"
+}

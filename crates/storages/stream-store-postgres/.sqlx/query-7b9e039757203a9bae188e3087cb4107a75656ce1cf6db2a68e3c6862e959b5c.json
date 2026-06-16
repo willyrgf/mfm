@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT commit_fingerprint, seq FROM typed_commit_keys WHERE run_id = $1 AND commit_key = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "commit_fingerprint",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "typed_commit_keys",
+            "name": "commit_fingerprint"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "seq",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "typed_commit_keys",
+            "name": "seq"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "7b9e039757203a9bae188e3087cb4107a75656ce1cf6db2a68e3c6862e959b5c"
+}

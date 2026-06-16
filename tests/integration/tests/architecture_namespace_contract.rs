@@ -95,10 +95,17 @@ fn repository_text_entries_include_tracked_dot_config_surfaces() {
         "namespace scan must cover tracked Solidity files"
     );
     assert!(
+        entries.iter().any(|entry| {
+            entry.path
+                == "crates/storages/stream-store-postgres/migrations/0001_typed_run_event_store.sql"
+        }),
+        "namespace scan must cover tracked SQL files"
+    );
+    assert!(
         entries
             .iter()
-            .any(|entry| entry.path == "migrations/0001_typed_run_event_store.sql"),
-        "namespace scan must cover tracked SQL files"
+            .all(|entry| !entry.path.starts_with("migrations/")),
+        "Postgres migrations must live under the owning storage crate"
     );
 }
 

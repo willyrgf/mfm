@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO typed_side_effect_projection (run_id, ledger_key, projection_json) VALUES ($1,$2,$3)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "402095dfefe4344f6cb24ac86cc21feb301722f94c161c254eda269bcea42ecd"
+}

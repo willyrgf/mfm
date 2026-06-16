@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO typed_commit_keys (run_id, commit_key, commit_fingerprint, seq, event_count) VALUES ($1,$2,$3,$4,$5)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Int8",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5e7bef7d287aedfb9faed3b61358ea93468be377474f1bf90d981cb2906d4b21"
+}

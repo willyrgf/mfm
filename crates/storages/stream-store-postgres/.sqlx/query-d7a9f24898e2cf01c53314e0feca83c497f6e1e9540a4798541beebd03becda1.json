@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO typed_attempt_projection (run_id, node_id, attempt_id, projection_json) VALUES ($1,$2,$3,$4)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d7a9f24898e2cf01c53314e0feca83c497f6e1e9540a4798541beebd03becda1"
+}

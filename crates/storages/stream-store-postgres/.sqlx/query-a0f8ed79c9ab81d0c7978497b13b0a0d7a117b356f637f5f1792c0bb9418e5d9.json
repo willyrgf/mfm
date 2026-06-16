@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT head_seq FROM typed_run_heads WHERE run_id = $1 FOR UPDATE",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "head_seq",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "typed_run_heads",
+            "name": "head_seq"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a0f8ed79c9ab81d0c7978497b13b0a0d7a117b356f637f5f1792c0bb9418e5d9"
+}

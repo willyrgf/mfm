@@ -1,0 +1,112 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT digest, byte_len, media_type, schema_id, semantic_type_id, producer_node_id, producer_seed_id, artifact_role FROM typed_artifacts WHERE artifact_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "digest",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "typed_artifacts",
+            "name": "digest"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "byte_len",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "typed_artifacts",
+            "name": "byte_len"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "media_type",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "typed_artifacts",
+            "name": "media_type"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "schema_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "typed_artifacts",
+            "name": "schema_id"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "semantic_type_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "typed_artifacts",
+            "name": "semantic_type_id"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "producer_node_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "typed_artifacts",
+            "name": "producer_node_id"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "producer_seed_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "typed_artifacts",
+            "name": "producer_seed_id"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "artifact_role",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "typed_artifacts",
+            "name": "artifact_role"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "4c40e3838248ce962981372550f3ea344bfde62a1ce60d5c6d6fc060ec5753ec"
+}

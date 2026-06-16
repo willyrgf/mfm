@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM typed_resource_lane_projection WHERE run_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4c6df88a569b4248cb96a3f343e68dcc819a324f4e5120e539aaa85bfbd1f4cf"
+}

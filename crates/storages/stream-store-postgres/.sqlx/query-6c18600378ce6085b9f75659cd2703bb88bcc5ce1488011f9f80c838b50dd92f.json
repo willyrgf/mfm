@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO typed_public_output_projection (run_id, public_schema_id, projection_json) VALUES ($1,$2,$3)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6c18600378ce6085b9f75659cd2703bb88bcc5ce1488011f9f80c838b50dd92f"
+}

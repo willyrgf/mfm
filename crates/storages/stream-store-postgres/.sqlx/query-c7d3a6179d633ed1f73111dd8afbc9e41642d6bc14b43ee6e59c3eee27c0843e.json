@@ -1,0 +1,148 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT run_id, seq, ordinal, event_id, event_schema_id, spec_hash, commit_key, logical_key, payload_hash, payload_canonical_byte_len, payload_json FROM typed_run_events WHERE run_id = $1 ORDER BY seq ASC, ordinal ASC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "run_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "typed_run_events",
+            "name": "run_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "seq",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "typed_run_events",
+            "name": "seq"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "ordinal",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "typed_run_events",
+            "name": "ordinal"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "event_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "typed_run_events",
+            "name": "event_id"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "event_schema_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "typed_run_events",
+            "name": "event_schema_id"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "spec_hash",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "typed_run_events",
+            "name": "spec_hash"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "commit_key",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "typed_run_events",
+            "name": "commit_key"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "logical_key",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "typed_run_events",
+            "name": "logical_key"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "payload_hash",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "typed_run_events",
+            "name": "payload_hash"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "payload_canonical_byte_len",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "typed_run_events",
+            "name": "payload_canonical_byte_len"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "payload_json",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "typed_run_events",
+            "name": "payload_json"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "c7d3a6179d633ed1f73111dd8afbc9e41642d6bc14b43ee6e59c3eee27c0843e"
+}

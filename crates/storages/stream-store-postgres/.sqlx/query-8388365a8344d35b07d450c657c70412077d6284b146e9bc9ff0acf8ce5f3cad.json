@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO typed_resource_lane_projection (namespace, resource_key, run_id, ledger_key, projection_json) VALUES ($1,$2,$3,$4,$5)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8388365a8344d35b07d450c657c70412077d6284b146e9bc9ff0acf8ce5f3cad"
+}
