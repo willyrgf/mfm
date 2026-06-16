@@ -545,6 +545,25 @@ fn display_error(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
 
+fn typed_commit_request(
+    run_id: RunId,
+    expected_next_seq: store::StreamSeq,
+    commit_key: store::CommitKey,
+    payloads: Vec<events::KernelEventPayload>,
+    required_artifacts: Vec<store::ArtifactEvidenceRef>,
+    preconditions: store::CommitPreconditions,
+) -> Result<store::TypedCommitRequest, String> {
+    store::TypedCommitRequest::from_payloads(
+        run_id,
+        expected_next_seq,
+        commit_key,
+        payloads,
+        required_artifacts,
+        preconditions,
+    )
+    .map_err(display_error)
+}
+
 fn reference_adapter_binding() -> mfm_program::Result<AdapterBindingSpec> {
     Ok(AdapterBindingSpec {
         adapter_kind: AdapterKind::new(
@@ -1109,80 +1128,74 @@ fn append_compensated_tail_failure(
         &node.node_id,
         1,
     )?;
+    let started_request = typed_commit_request(
+        fixture.run_id.clone(),
+        store.expected_next_seq(&fixture.run_id),
+        store::CommitKey::new(format!(
+            "compensated-tail-attempt-started:{}:{}",
+            node.node_id, attempt_id
+        ))
+        .map_err(display_error)?,
+        vec![events::KernelEventPayload::StateAttemptStarted(
+            events::StateAttemptStarted {
+                spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                node_id: node.node_id.clone(),
+                attempt_id: attempt_id.clone(),
+                attempt_no: 1,
+                state_kind: node.state_kind.clone(),
+                state_version: node.state_version.clone(),
+            },
+        )],
+        Vec::new(),
+        store::CommitPreconditions {
+            required_run_state: store::RequiredRunState::NotCompleted,
+            required_cell_states: vec![store::CellStatePrecondition {
+                cell_id: node.output_cell.clone(),
+                required: store::RequiredCellState::Absent,
+            }],
+            ..store::CommitPreconditions::default()
+        },
+    )?;
     store
         .append_prepared_typed_commit(
-            store::PreparedTypedCommit::new(
-                store::TypedCommitRequest {
-                    run_id: fixture.run_id.clone(),
-                    expected_next_seq: store.expected_next_seq(&fixture.run_id),
-                    commit_key: store::CommitKey::new(format!(
-                        "compensated-tail-attempt-started:{}:{}",
-                        node.node_id, attempt_id
-                    ))
-                    .map_err(display_error)?,
-                    payloads: vec![events::KernelEventPayload::StateAttemptStarted(
-                        events::StateAttemptStarted {
-                            spec_hash: fixture.runtime_spec.spec_hash().clone(),
-                            node_id: node.node_id.clone(),
-                            attempt_id: attempt_id.clone(),
-                            attempt_no: 1,
-                            state_kind: node.state_kind.clone(),
-                            state_version: node.state_version.clone(),
-                        },
-                    )],
-                    required_artifacts: Vec::new(),
-                    preconditions: store::CommitPreconditions {
-                        required_run_state: store::RequiredRunState::NotCompleted,
-                        required_cell_states: vec![store::CellStatePrecondition {
-                            cell_id: node.output_cell.clone(),
-                            required: store::RequiredCellState::Absent,
-                        }],
-                        ..store::CommitPreconditions::default()
-                    },
-                },
-                Vec::new(),
-            )
-            .map_err(display_error)?,
+            store::PreparedTypedCommit::new(started_request, Vec::new()).map_err(display_error)?,
         )
         .map_err(display_error)?;
+    let failed_request = typed_commit_request(
+        fixture.run_id.clone(),
+        store.expected_next_seq(&fixture.run_id),
+        store::CommitKey::new(format!(
+            "compensated-tail-attempt-failed:{}:{}",
+            node.node_id, attempt_id
+        ))
+        .map_err(display_error)?,
+        vec![events::KernelEventPayload::StateAttemptFailed(
+            events::StateAttemptFailed {
+                spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                node_id: node.node_id.clone(),
+                attempt_id: attempt_id.clone(),
+                retryable: false,
+                error: side_effect_error(false),
+            },
+        )],
+        Vec::new(),
+        store::CommitPreconditions {
+            required_run_state: store::RequiredRunState::NotCompleted,
+            required_present_logical_keys: vec![store::LogicalEventKey::new(format!(
+                "attempt:{}:{}",
+                node.node_id, attempt_id
+            ))
+            .map_err(display_error)?],
+            required_cell_states: vec![store::CellStatePrecondition {
+                cell_id: node.output_cell.clone(),
+                required: store::RequiredCellState::Absent,
+            }],
+            ..store::CommitPreconditions::default()
+        },
+    )?;
     store
         .append_prepared_typed_commit(
-            store::PreparedTypedCommit::new(
-                store::TypedCommitRequest {
-                    run_id: fixture.run_id.clone(),
-                    expected_next_seq: store.expected_next_seq(&fixture.run_id),
-                    commit_key: store::CommitKey::new(format!(
-                        "compensated-tail-attempt-failed:{}:{}",
-                        node.node_id, attempt_id
-                    ))
-                    .map_err(display_error)?,
-                    payloads: vec![events::KernelEventPayload::StateAttemptFailed(
-                        events::StateAttemptFailed {
-                            spec_hash: fixture.runtime_spec.spec_hash().clone(),
-                            node_id: node.node_id.clone(),
-                            attempt_id: attempt_id.clone(),
-                            retryable: false,
-                            error: side_effect_error(false),
-                        },
-                    )],
-                    required_artifacts: Vec::new(),
-                    preconditions: store::CommitPreconditions {
-                        required_run_state: store::RequiredRunState::NotCompleted,
-                        required_present_logical_keys: vec![store::LogicalEventKey::new(format!(
-                            "attempt:{}:{}",
-                            node.node_id, attempt_id
-                        ))
-                        .map_err(display_error)?],
-                        required_cell_states: vec![store::CellStatePrecondition {
-                            cell_id: node.output_cell.clone(),
-                            required: store::RequiredCellState::Absent,
-                        }],
-                        ..store::CommitPreconditions::default()
-                    },
-                },
-                Vec::new(),
-            )
-            .map_err(display_error)?,
+            store::PreparedTypedCommit::new(failed_request, Vec::new()).map_err(display_error)?,
         )
         .map_err(display_error)?;
     Ok(())
@@ -1834,11 +1847,11 @@ fn duplicate_submit_rejected(run: &mut ReferenceRun) -> Result<bool, String> {
         producer_seed_id: None,
         artifact_role: events::ArtifactRole::Submission,
     };
-    let request = store::TypedCommitRequest {
-        run_id: run.fixture.run_id.clone(),
-        expected_next_seq: run.store.expected_next_seq(&run.fixture.run_id),
-        commit_key: store::CommitKey::new("duplicate-submit-conflict").map_err(display_error)?,
-        payloads: vec![events::KernelEventPayload::SideEffectSubmissionObserved(
+    let request = typed_commit_request(
+        run.fixture.run_id.clone(),
+        run.store.expected_next_seq(&run.fixture.run_id),
+        store::CommitKey::new("duplicate-submit-conflict").map_err(display_error)?,
+        vec![events::KernelEventPayload::SideEffectSubmissionObserved(
             events::side_effect::SubmissionObserved {
                 spec_hash: run.fixture.runtime_spec.spec_hash().clone(),
                 node_id: submission.node_id,
@@ -1851,12 +1864,12 @@ fn duplicate_submit_rejected(run: &mut ReferenceRun) -> Result<bool, String> {
                 submission_artifact_id: duplicate_artifact,
             },
         )],
-        required_artifacts: vec![evidence.clone()],
-        preconditions: store::CommitPreconditions {
+        vec![evidence.clone()],
+        store::CommitPreconditions {
             required_run_state: store::RequiredRunState::Any,
             ..store::CommitPreconditions::default()
         },
-    };
+    )?;
     let result = store::PreparedTypedCommit::new(request, vec![evidence])
         .and_then(|commit| run.store.append_prepared_typed_commit(commit));
     Ok(matches!(
@@ -2745,15 +2758,15 @@ fn append_attempt_started(
         &node.node_id,
         attempt_no,
     )?;
-    let request = store::TypedCommitRequest {
-        run_id: fixture.run_id.clone(),
-        expected_next_seq: store.expected_next_seq(&fixture.run_id),
-        commit_key: store::CommitKey::new(format!(
+    let request = typed_commit_request(
+        fixture.run_id.clone(),
+        store.expected_next_seq(&fixture.run_id),
+        store::CommitKey::new(format!(
             "drift-attempt-start:{}:{}",
             node.node_id, attempt_id
         ))
         .map_err(display_error)?,
-        payloads: vec![events::KernelEventPayload::StateAttemptStarted(
+        vec![events::KernelEventPayload::StateAttemptStarted(
             events::StateAttemptStarted {
                 spec_hash: fixture.runtime_spec.spec_hash().clone(),
                 node_id: node.node_id.clone(),
@@ -2763,8 +2776,8 @@ fn append_attempt_started(
                 state_version: node.state_version.clone(),
             },
         )],
-        required_artifacts: Vec::new(),
-        preconditions: store::CommitPreconditions {
+        Vec::new(),
+        store::CommitPreconditions {
             required_run_state: store::RequiredRunState::NotCompleted,
             required_cell_states: vec![store::CellStatePrecondition {
                 cell_id: node.output_cell.clone(),
@@ -2772,7 +2785,7 @@ fn append_attempt_started(
             }],
             ..store::CommitPreconditions::default()
         },
-    };
+    )?;
     let commit = store::PreparedTypedCommit::new(request, Vec::new()).map_err(display_error)?;
     store
         .append_prepared_typed_commit(commit)
@@ -3906,14 +3919,15 @@ mod tests {
             .map(|event| event.payload().clone())
             .collect::<Vec<_>>();
         payloads.push(payload);
-        let request = store::TypedCommitRequest {
-            run_id: run_id.clone(),
-            expected_next_seq: seq,
+        let request = typed_commit_request(
+            run_id.clone(),
+            seq,
             commit_key,
             payloads,
-            required_artifacts: Vec::new(),
-            preconditions: store::CommitPreconditions::default(),
-        };
+            Vec::new(),
+            store::CommitPreconditions::default(),
+        )
+        .expect("corrupt start commit request");
         let batch =
             store::build_committed_batch(&request, seq).expect("corrupt start commit batch");
         let mut rewritten = Vec::with_capacity(stream.len() + 1);

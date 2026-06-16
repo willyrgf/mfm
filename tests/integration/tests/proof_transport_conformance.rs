@@ -20,6 +20,25 @@ use serde::Serialize;
 type ProofArtifactRecord = (Vec<u8>, store::ArtifactEvidenceRef);
 type ProofArtifactMap = BTreeMap<ArtifactId, ProofArtifactRecord>;
 
+fn typed_commit_request(
+    run_id: RunId,
+    expected_next_seq: store::StreamSeq,
+    commit_key: store::CommitKey,
+    payloads: Vec<events::KernelEventPayload>,
+    required_artifacts: Vec<store::ArtifactEvidenceRef>,
+    preconditions: store::CommitPreconditions,
+) -> store::TypedCommitRequest {
+    store::TypedCommitRequest::from_payloads(
+        run_id,
+        expected_next_seq,
+        commit_key,
+        payloads,
+        required_artifacts,
+        preconditions,
+    )
+    .expect("typed commit request")
+}
+
 #[derive(Clone, Default)]
 struct InMemoryProofArtifacts {
     artifacts: Arc<Mutex<ProofArtifactMap>>,
@@ -844,14 +863,14 @@ fn standalone_retention_projection_history(
             .map(|event| event.payload().clone())
             .collect::<Vec<_>>();
         if !payloads.is_empty() {
-            let request = store::TypedCommitRequest {
-                run_id: run_id.clone(),
-                expected_next_seq: seq,
+            let request = typed_commit_request(
+                run_id.clone(),
+                seq,
                 commit_key,
                 payloads,
-                required_artifacts: Vec::new(),
-                preconditions: store::CommitPreconditions::default(),
-            };
+                Vec::new(),
+                store::CommitPreconditions::default(),
+            );
             let batch =
                 store::build_committed_batch(&request, seq).expect("rewritten commit batch");
             rewritten.extend(batch.events().iter().cloned());
@@ -893,17 +912,17 @@ fn remove_retention_projection_commit(
                 store::StreamSeq::new(event.seq().as_u64() + 1).expect("next stream seq")
             })
             .unwrap_or(store::StreamSeq::FIRST);
-        let request = store::TypedCommitRequest {
-            run_id: first.run_id().clone(),
-            expected_next_seq: seq,
+        let request = typed_commit_request(
+            first.run_id().clone(),
+            seq,
             commit_key,
-            payloads: commit
+            commit
                 .iter()
                 .map(|event| event.payload().clone())
                 .collect::<Vec<_>>(),
-            required_artifacts: Vec::new(),
-            preconditions: store::CommitPreconditions::default(),
-        };
+            Vec::new(),
+            store::CommitPreconditions::default(),
+        );
         let batch = store::build_committed_batch(&request, seq).expect("rewritten commit batch");
         rewritten.extend(batch.events().iter().cloned());
         index = end;
@@ -930,21 +949,20 @@ fn failed_completion_after_run_start(
         })
         .expect("run started");
     let seq = store::StreamSeq::new(start_seq.as_u64() + 1).expect("next stream seq");
-    let request = store::TypedCommitRequest {
-        run_id: run_started.run_id.clone(),
-        expected_next_seq: seq,
-        commit_key: store::CommitKey::new("failed-completion-without-framework")
-            .expect("commit key"),
-        payloads: vec![events::KernelEventPayload::RunCompleted(
+    let request = typed_commit_request(
+        run_started.run_id.clone(),
+        seq,
+        store::CommitKey::new("failed-completion-without-framework").expect("commit key"),
+        vec![events::KernelEventPayload::RunCompleted(
             events::RunCompleted {
                 run_id: run_started.run_id.clone(),
                 spec_hash: run_started.spec_hash.clone(),
                 outcome: events::RunCompletionOutcome::FailedWithoutAcdcClaim,
             },
         )],
-        required_artifacts: Vec::new(),
-        preconditions: store::CommitPreconditions::default(),
-    };
+        Vec::new(),
+        store::CommitPreconditions::default(),
+    );
     let batch = store::build_committed_batch(&request, seq).expect("failed completion batch");
     rewritten.extend(batch.events().iter().cloned());
     rewritten
@@ -969,11 +987,11 @@ fn append_post_completion_retention_refs(
         .last()
         .map(|event| store::StreamSeq::new(event.seq().as_u64() + 1).expect("next stream seq"))
         .unwrap_or(store::StreamSeq::FIRST);
-    let request = store::TypedCommitRequest {
-        run_id: run_started.run_id.clone(),
-        expected_next_seq: seq,
-        commit_key: store::CommitKey::new("post-completion-retention-ref").expect("commit key"),
-        payloads: vec![events::KernelEventPayload::RetentionRefsAppended(
+    let request = typed_commit_request(
+        run_started.run_id.clone(),
+        seq,
+        store::CommitKey::new("post-completion-retention-ref").expect("commit key"),
+        vec![events::KernelEventPayload::RetentionRefsAppended(
             events::RetentionRefsAppended {
                 run_id: run_started.run_id.clone(),
                 spec_hash: run_started.spec_hash.clone(),
@@ -981,9 +999,9 @@ fn append_post_completion_retention_refs(
                 reason: events::RetentionReason::RuntimeEvidence,
             },
         )],
-        required_artifacts: Vec::new(),
-        preconditions: store::CommitPreconditions::default(),
-    };
+        Vec::new(),
+        store::CommitPreconditions::default(),
+    );
     let batch = store::build_committed_batch(&request, seq).expect("retention refs batch");
     let mut rewritten = stream.to_vec();
     rewritten.extend(batch.events().iter().cloned());
@@ -1014,11 +1032,11 @@ fn append_post_projection_retention_refs_before_completion(
         .expect("retention ref");
     let mut rewritten = remove_completion_commit(stream);
     let retention_seq = next_seq(&rewritten);
-    let retention_request = store::TypedCommitRequest {
-        run_id: run_started.run_id.clone(),
-        expected_next_seq: retention_seq,
-        commit_key: store::CommitKey::new("post-projection-retention-ref").expect("commit key"),
-        payloads: vec![events::KernelEventPayload::RetentionRefsAppended(
+    let retention_request = typed_commit_request(
+        run_started.run_id.clone(),
+        retention_seq,
+        store::CommitKey::new("post-projection-retention-ref").expect("commit key"),
+        vec![events::KernelEventPayload::RetentionRefsAppended(
             events::RetentionRefsAppended {
                 run_id: run_started.run_id.clone(),
                 spec_hash: run_started.spec_hash.clone(),
@@ -1026,23 +1044,22 @@ fn append_post_projection_retention_refs_before_completion(
                 reason: events::RetentionReason::RuntimeEvidence,
             },
         )],
-        required_artifacts: Vec::new(),
-        preconditions: store::CommitPreconditions::default(),
-    };
+        Vec::new(),
+        store::CommitPreconditions::default(),
+    );
     let retention_batch = store::build_committed_batch(&retention_request, retention_seq)
         .expect("retention refs batch");
     rewritten.extend(retention_batch.events().iter().cloned());
 
     let completion_seq = next_seq(&rewritten);
-    let completion_request = store::TypedCommitRequest {
-        run_id: run_started.run_id.clone(),
-        expected_next_seq: completion_seq,
-        commit_key: store::CommitKey::new("completion-after-post-projection-retention")
-            .expect("commit key"),
-        payloads: vec![events::KernelEventPayload::RunCompleted(completion)],
-        required_artifacts: Vec::new(),
-        preconditions: store::CommitPreconditions::default(),
-    };
+    let completion_request = typed_commit_request(
+        run_started.run_id.clone(),
+        completion_seq,
+        store::CommitKey::new("completion-after-post-projection-retention").expect("commit key"),
+        vec![events::KernelEventPayload::RunCompleted(completion)],
+        Vec::new(),
+        store::CommitPreconditions::default(),
+    );
     let completion_batch = store::build_committed_batch(&completion_request, completion_seq)
         .expect("completion batch");
     rewritten.extend(completion_batch.events().iter().cloned());
@@ -1096,14 +1113,14 @@ fn append_extra_retention_ref_to_projection_commit(
                     reason: events::RetentionReason::RuntimeEvidence,
                 },
             ));
-            let request = store::TypedCommitRequest {
-                run_id: first.run_id().clone(),
-                expected_next_seq: seq,
+            let request = typed_commit_request(
+                first.run_id().clone(),
+                seq,
                 commit_key,
                 payloads,
-                required_artifacts: Vec::new(),
-                preconditions: store::CommitPreconditions::default(),
-            };
+                Vec::new(),
+                store::CommitPreconditions::default(),
+            );
             let batch = store::build_committed_batch(&request, seq).expect("rewritten commit");
             rewritten.extend(batch.events().iter().cloned());
             inserted = true;
@@ -1154,11 +1171,11 @@ fn append_same_sequence_sidecar_to_retention_projection(
                 .expect("projection runtime evidence retention refs");
             let sidecar_key =
                 store::CommitKey::new("forged-same-seq-retention-sidecar").expect("commit key");
-            let request = store::TypedCommitRequest {
-                run_id: first.run_id().clone(),
-                expected_next_seq: seq,
-                commit_key: sidecar_key.clone(),
-                payloads: vec![events::KernelEventPayload::RetentionRefsAppended(
+            let request = typed_commit_request(
+                first.run_id().clone(),
+                seq,
+                sidecar_key.clone(),
+                vec![events::KernelEventPayload::RetentionRefsAppended(
                     events::RetentionRefsAppended {
                         run_id: runtime_evidence.run_id.clone(),
                         spec_hash: runtime_evidence.spec_hash.clone(),
@@ -1166,9 +1183,9 @@ fn append_same_sequence_sidecar_to_retention_projection(
                         reason: events::RetentionReason::RuntimeEvidence,
                     },
                 )],
-                required_artifacts: Vec::new(),
-                preconditions: store::CommitPreconditions::default(),
-            };
+                Vec::new(),
+                store::CommitPreconditions::default(),
+            );
             let batch = store::build_committed_batch(&request, seq).expect("sidecar commit batch");
             let next_ordinal = u32::try_from(commit.len()).expect("retention commit ordinal count");
             for (offset, event) in batch.events().iter().enumerate() {
@@ -1257,14 +1274,14 @@ fn remove_completion_commit(
             continue;
         }
         let seq = next_seq(&rewritten);
-        let request = store::TypedCommitRequest {
-            run_id: first.run_id().clone(),
-            expected_next_seq: seq,
+        let request = typed_commit_request(
+            first.run_id().clone(),
+            seq,
             commit_key,
-            payloads: commit.iter().map(|event| event.payload().clone()).collect(),
-            required_artifacts: Vec::new(),
-            preconditions: store::CommitPreconditions::default(),
-        };
+            commit.iter().map(|event| event.payload().clone()).collect(),
+            Vec::new(),
+            store::CommitPreconditions::default(),
+        );
         let batch = store::build_committed_batch(&request, seq).expect("rewritten commit");
         rewritten.extend(batch.events().iter().cloned());
         index = end;
