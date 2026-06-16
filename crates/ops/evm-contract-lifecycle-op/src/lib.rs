@@ -50,14 +50,12 @@ const CONFIGURED_SEED_KEY: &str = "configured_contract";
 const PUBLIC_OUTPUT_KEY: &str = "contract";
 
 /// Aggregate full lifecycle authored config owned by the operation layer.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, MfmConfig)]
 #[mfm(
     schema = "mfm.evm.contract.operation.config.lifecycle",
     validate = "validate_contract_lifecycle_config"
 )]
 pub struct ContractLifecycleConfig {
-    /// Config contract version.
-    pub lifecycle_version: u64,
     /// Deploy phase config.
     pub deploy: DeployPhaseConfig,
     /// Configure phase config.
@@ -74,7 +72,6 @@ impl ContractLifecycleConfig {
         validate: ValidatePhaseConfig,
     ) -> Self {
         Self {
-            lifecycle_version: 1,
             deploy,
             configure,
             validate,
@@ -82,10 +79,25 @@ impl ContractLifecycleConfig {
     }
 }
 
-fn validate_contract_lifecycle_config(config: &ContractLifecycleConfig) -> Result<(), String> {
-    if config.lifecycle_version != 1 {
-        return Err("unsupported contract lifecycle config version".to_owned());
+impl<'de> Deserialize<'de> for ContractLifecycleConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawContractLifecycleConfig {
+            deploy: DeployPhaseConfig,
+            configure: ConfigurePhaseConfig,
+            validate: ValidatePhaseConfig,
+        }
+
+        let raw = RawContractLifecycleConfig::deserialize(deserializer)?;
+        Ok(Self::new(raw.deploy, raw.configure, raw.validate))
     }
+}
+
+fn validate_contract_lifecycle_config(config: &ContractLifecycleConfig) -> Result<(), String> {
     ensure_phase_networks_match(&config.deploy, &config.configure, &config.validate)
         .map_err(|error| error.to_string())
 }
@@ -820,6 +832,21 @@ mod tests {
 
     fn lifecycle_config() -> ContractLifecycleConfig {
         ContractLifecycleConfig::new(deploy_config(), configure_config(), validate_config())
+    }
+
+    #[test]
+    fn lifecycle_config_rejects_stale_version_field() {
+        let value = serde_json::json!({
+            "lifecycle_version": 1,
+            "deploy": serde_json::to_value(deploy_config()).expect("deploy json"),
+            "configure": serde_json::to_value(configure_config()).expect("configure json"),
+            "validate": serde_json::to_value(validate_config()).expect("validate json"),
+        });
+
+        let error = serde_json::from_value::<ContractLifecycleConfig>(value)
+            .expect_err("stale lifecycle version field");
+
+        assert!(error.to_string().contains("unknown field"));
     }
 
     fn deployed_contract() -> DeployedContract {

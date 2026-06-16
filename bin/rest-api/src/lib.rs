@@ -1336,7 +1336,6 @@ mod tests {
                 json!({
                     "kind": "evm_contract_lifecycle_start_v1",
                     "config": {
-                        "lifecycle_version": 1,
                         "deploy": deploy_config_json(),
                         "configure": configure_config_json(),
                         "validate": validate_config_json()

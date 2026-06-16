@@ -272,7 +272,6 @@ async fn parity_reth_contract_phase_routes_deploy_configure_and_validate_contrac
 
 fn lifecycle_config(chain_id: u64, signer: serde_json::Value) -> serde_json::Value {
     serde_json::json!({
-        "lifecycle_version": 1,
         "deploy": {
             "artifact": empty_contract_artifact(),
             "network": network_json(chain_id),
