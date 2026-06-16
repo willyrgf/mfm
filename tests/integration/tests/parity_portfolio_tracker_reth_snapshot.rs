@@ -24,6 +24,7 @@ fn canonical_portfolio_snapshot_payload(
             "networks": [
                 {
                     "network_id": NETWORK_ID,
+                    "family": "evm",
                     "chain_id": chain_id,
                     "control_scope": control_scope,
                     "metadata": {}
