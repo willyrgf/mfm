@@ -270,6 +270,109 @@ Rules:
 The generic attempt lifecycle delegates side-effect phase advancement and recovery to
 `SideEffectLifecycle` rather than hiding it in scheduler branches.
 
+## Type Enforcement And Runtime Validation
+
+The lifecycle rules should be encoded in types wherever possible. The target is not to rely on
+convention or comments for phase ordering, authority boundaries, or capability access. Types should
+make illegal control flow unrepresentable, while focused runtime validation checks facts that come
+from persisted streams, artifact bytes, certified spec contents, registries, or external evidence.
+
+### Type-Enforced Boundaries
+
+The strongest type boundaries should be:
+
+- `FrontierScheduler::decide` accepts only certified spec authority, a verified run view, and pure
+  scheduling hints. It does not receive stores, artifact stores, runners, capabilities, transports,
+  or signers.
+- Transition output is a closed `TransitionDecision` enum, not implicit control flow hidden in
+  scheduler branches.
+- Attempt execution uses typestate phases such as:
+
+```rust
+Attempt<Selected>
+Attempt<Started>
+Attempt<Invoked>
+Attempt<TerminalPlanned>
+Attempt<TerminalCommitted>
+```
+
+- Only `Attempt<Started>` can build a sealed invocation.
+- Only `Attempt<TerminalPlanned>` can stage terminal artifacts and submit terminal commit authority.
+- Runner contexts do not carry store handles or artifact-store mutation handles.
+- Runners return proposals, not committed events.
+- Terminal outcomes are closed, for example:
+
+```rust
+enum TerminalAttemptOutcome {
+    Completed,
+    Failed,
+    Interrupted,
+}
+```
+
+- Failure terminalization has a failure-safe constructor that depends only on minimal trusted
+  attempt authority, not on runner-provided output.
+- Recovery APIs require explicit authority such as `OpenAttemptAuthority`.
+- Starting unrelated work requires a `NoOpenAttempt` or equivalent witness from verified history.
+- Side-effect phases use typestate or sealed authorities such as:
+
+```rust
+SideEffect<IntentPersisted>
+SideEffect<InvocationPrepared>
+SideEffect<InvocationStarted>
+SideEffect<Submitted>
+SideEffect<Confirmed>
+SideEffect<Ambiguous>
+```
+
+- After `SideEffect<InvocationStarted>`, generic attempt failure is not constructible without
+  side-effect recovery authority proving that ordinary failure is safe.
+
+### Validation-Backed Boundaries
+
+Some invariants cannot be proven by Rust types alone because they depend on data loaded at runtime.
+They require explicit validation even when the API shape is type-safe:
+
+- The chosen `TransitionDecision` is legal for the certified spec and verified history.
+- A node is still startable at the current stream head.
+- Attempt id, attempt number, and open-attempt state match committed history.
+- Saga retry, compensation, remediation, manual resolution, public-output, retention, and
+  completion decisions match the certified spec plus stream projection.
+- Runner output proposals match the certified output cell, schema id, semantic id, value lineage,
+  capability binding, and recorded facts.
+- Artifact evidence matches bytes, digest, byte length, media type, role, schema id, semantic id,
+  and producer scope.
+- Retained artifact evidence was admitted in the run stream; orphan artifact-store bytes are not
+  authority.
+- Side-effect phase transitions are legal from the committed ledger state.
+- Resource lanes, idempotency input, claim owner, fencing token, invocation epoch, ledger purpose,
+  and replay verifier identity match certified and committed evidence.
+- Recovery evidence after process interruption or external mutation uncertainty is sufficient for
+  the requested recovery action.
+- Redacted diagnostics, terminal failure evidence, public outputs, artifacts, and errors contain no
+  secrets or bearer mutation material.
+
+The no-secret rule can be strengthened with redacted wrapper types and private constructors, but it
+still needs tests and validation because arbitrary strings and bytes can accidentally carry secret
+material.
+
+### Rule Classification
+
+| Rule | Type-enforced shape | Still requires validation |
+|---|---|---|
+| Transition decision is pure | No store, runner, artifact, transport, signer, or capability handles in the decision API | Correct decision still depends on certified spec plus verified history |
+| Transition does not write/stage/invoke | Capability-limited input type | No, if forbidden handles are absent |
+| All transition routes are explicit | Closed `TransitionDecision` enum | Legal variant depends on history and saga state |
+| Attempt start precedes handler execution | `Attempt<Started>` required to build invocation | Stream head must still allow that attempt |
+| Started attempts must terminalize or recover | `OpenAttemptAuthority` and `NoOpenAttempt` witnesses | Open attempt discovery comes from verified history |
+| Handler cannot write store | Runner context excludes store handles | No |
+| Runner returns proposals, not commits | Proposal output type distinct from prepared commits | Proposals must be validated against spec/history |
+| Terminal outcomes are closed | Closed terminal outcome enum | Terminal payload must match active attempt |
+| Failure terminalization is failure-safe | Constructor from minimal trusted attempt authority | Redacted diagnostic evidence must be valid and non-secret |
+| Orphan artifact bytes are not authority | Commit APIs accept only admitted/verified artifact evidence | Evidence must be checked against committed stream |
+| Side-effect uncertainty boundary is enforced | `SideEffect<InvocationStarted>` cannot construct generic failure | Ledger state and recovery evidence must be validated |
+| Raw signed/bearer material is not retained | Secret-bearing types are absent from semantic artifacts/events | Redaction/no-secret tests and byte/string validation remain required |
+
 ## Responsibility Split
 
 The refactor should make these components explicit:
@@ -464,15 +567,29 @@ Additional required tests:
 
 ## Open Questions
 
-- Should interruption be a new `StateAttemptInterrupted` event, or a structured
-  `StateAttemptFailed` reason?
-- Should missing runner/capability after start be terminal failure, retriable infrastructure block,
-  or policy-controlled?
-- Which framework lifecycle states, if any, deserve a documented same-commit exception?
-- Should operational audit records for pre-authority failures live in app, store, or a separate
-  diagnostics surface?
-- How much of sync/async service duplication should be removed during this refactor versus after
-  shared run views land?
+No open design questions remain for the first cut. The following decisions define the implementation
+direction:
+
+- Interruption should be a new `StateAttemptInterrupted` event, not a structured
+  `StateAttemptFailed` reason. `StateAttemptFailed` means the attempt reached a
+  semantic/runtime-evaluable failure. `StateAttemptInterrupted` means the attempt started but the
+  runtime could not observe or complete the lifecycle cleanly.
+- Missing runner or capability binding should be unrepresentable before attempt start. Constructing
+  `Attempt<Started>` should require executable and capability binding authority. If a missing
+  binding somehow becomes observable after start, terminalize it as a redacted
+  `StateAttemptFailed` with a stable configuration/binding error class; this is a code or
+  deployment fix, not a workflow retry.
+- Framework lifecycle states should not have same-commit exceptions in the first design. Bootstrap,
+  public-output rendering, retention projection, completion, and manual terminal resolution should
+  follow the same start/run/terminal lifecycle as domain states unless a later RFC justifies a
+  specific exception.
+- Pre-authority failures are not semantic runtime states. If certified runtime authority or
+  verified run history cannot be constructed, no transition, attempt, recovery, or semantic append
+  API is reachable. These failures may be reported as redacted ingress/corruption diagnostics, but
+  they do not enter the typed run stream.
+- Sync/async service collapse is not a goal of this RFC. Lifecycle components should be designed so
+  a later async-primary cleanup can share the same lifecycle semantics, but this refactor should not
+  mix lifecycle authority changes with broad service plumbing changes.
 
 ## Bottom Line
 
