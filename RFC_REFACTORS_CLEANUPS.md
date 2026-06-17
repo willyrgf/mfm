@@ -5,8 +5,11 @@ Status: draft
 This document records candidate refactors discovered during a read-only architecture pass over the
 MFM repository. It separates incremental cleanups from deeper abstraction changes. The distinction
 matters: most obvious cleanups remove drift and improve placement, but they do not fundamentally
-change the LOC profile. A 30-50% reduction is only plausible if MFM changes how typed kernel
-contracts, event transitions, and tests are authored.
+change the LOC profile.
+
+The primary success metric is fewer independently maintained copies of durable protocol truth. LOC
+reduction is a useful secondary signal only when it comes from removing real duplication without
+hiding correctness checks in opaque macros, generated files, or weaker tests.
 
 ## Executive Summary
 
@@ -28,10 +31,13 @@ The clearest architectural thesis is:
 > descriptor, artifact requirement, and fixture mutation. Move to declarative protocol
 > definitions that generate or derive the repeated code.
 
-Without that shift, the realistic LOC reduction from local refactors is closer to 5-15%. With it,
-30% may be possible across production plus tests. A 50% reduction would likely require either
-generated code being excluded from reviewed LOC, or dropping coverage/detail that currently carries
-real correctness value.
+The practical target is not "make the repo smaller at any cost." It is to author each durable
+protocol once, keep every authority boundary explicit, and make drift harder to introduce. A
+realistic near-term target is 10-20% net maintained LOC reduction if role contracts, scenario
+fixtures, shared run views, runner helpers, and service cleanup land cleanly. A 30% reduction is
+plausible only if generated code is excluded from maintained LOC and large fixture surfaces are
+rewritten without losing coverage. A 50% reduction would likely require deleting detail that
+currently carries real correctness value.
 
 ## Current LOC Shape
 
@@ -50,6 +56,65 @@ Largest concentrations:
 This suggests the biggest reduction opportunities are not in ordinary Rust factoring. They are in
 generated contracts, generic event/projection machinery, and reusable test scenario builders.
 
+## Feasibility Review
+
+This RFC treats append-only streams, content addressing, canonical JSON, replay evidence, no ambient
+IO in state logic, and no secret persistence as hard invariants. The refactors below are valuable
+only when they remove maintained duplication while preserving those invariants.
+
+Evidence from the current tree:
+
+- A 30% reduction from the local `139852` Rust LOC baseline means roughly `42k` net maintained LOC,
+  which is larger than the clearly duplicated production surfaces found in this pass.
+- `ArtifactRole::TypedSpecCertificate` exists in the event and store codec surfaces, and
+  `RunStarted` requires the certificate artifact, but the event schema role tag list appears to
+  omit `typed_spec_certificate`. That is concrete role-contract drift.
+- `VerifiedRunHistory` already exists in `crates/kernel/runtime/src/history.rs`, while replay and
+  app still rebuild or re-authorize parts of the same committed stream view. This supports a shared
+  committed-run authority view, but not a single untyped "god object".
+- Side-effect state is repeated across store ledger projection, runtime historical validation, and
+  app-level EVM runner logic. The duplication is real, but this path controls replay evidence,
+  idempotency, ambiguity, and non-persistence of signed/raw payloads.
+- `SerialTypedScheduler` currently concentrates transition decisions, invocation preparation,
+  framework lifecycle special cases, artifact staging, commit planning, resource-lane handling, and
+  manual-resolution terminal proof handling. That should become explicit transition, attempt,
+  recovery, and side-effect lifecycles.
+- Sync and async app service surfaces are materially duplicated. This is feasible cleanup, but not
+  a large LOC lever by itself.
+
+Directional maintained-LOC impact:
+
+| Rank | Bet | Feasibility | Net maintained LOC impact | Main correctness risk |
+|---:|---|---|---:|---|
+| 1 | FSM scheduler lifecycle refactor | High | `0..-1k` | Incorrect failure terminalization or side-effect recovery semantics. |
+| 2 | Scenario-based test specs | High | `-3k..-6k` | Hiding important negative assertions. |
+| 3 | `ArtifactRoleContract` table | High | `-0.5k..-2k` | Misclassifying schema, producer, or same-commit rules everywhere. |
+| 4 | Shared committed-run authority view | High | `-1k..-2.5k` | Collapsing distinct runtime, replay, app, and public-output authority boundaries. |
+| 5 | Runtime runner kit | High | `-0.2k..-0.8k` | Making invalid runner payloads easier to construct. |
+| 6 | Collapse duplicate app service surfaces | High | `-0.2k..-0.5k` | Filtering streams before full validation. |
+| 7 | Declarative kernel protocol | Medium | `-3k..-7k` | Byte stability, canonical JSON stability, descriptor drift, and opaque generated code. |
+| 8 | Generic side-effect driver | Medium | `-0.5k..-2k` | Obscuring replay uncertainty or duplicating store authority. |
+| 9 | `ProgramPackage` and `StateSpec` derive | Medium | `0..-0.8k` | Making descriptor identity and certification failures harder to audit. |
+| 10 | Certified graph typestate views | Medium | `-0.5k..-1.5k` | Adding API layers over authority that already exists. |
+| 11 | Projection persistence boundary | Low | unknown | Store repair, Postgres parity, resource lanes, and read performance. |
+
+Sequencing judgment:
+
+- Execute `RFC_REFACTOR_FSM_SCHEDULER.md` first. This makes transition, attempt, recovery, and
+  side-effect lifecycle authority explicit before larger protocol rewrites.
+- Follow with `ArtifactRoleContract` and its goldens. This is the smallest bounded protocol cleanup
+  that directly attacks real role drift.
+- Build scenario/golden infrastructure early, then convert one narrow family of existing tests.
+  This creates the safety net required before deleting handwritten protocol ceremony.
+- Introduce a shared committed-run read authority and merge duplicated app service read paths
+  around it, while keeping store, runtime, replay, and public-output authority wrappers explicit.
+- Extract the runner kit after output/artifact goldens exist.
+- Use the scheduler lifecycle refactor to establish the side-effect recovery boundary, then delay
+  the generic adapter driver until ambiguity and recovery behavior are golden-covered.
+- Keep declarative kernel protocol generation in check-only mode until descriptor, canonical JSON,
+  spec-hash, role, and runtime/replay equivalence goldens exist.
+- Move projection persistence to a separate measurement RFC.
+
 ## Fundamental Abstraction Bets
 
 The second architecture pass sharpened the thesis. MFM does not mainly suffer from bad crate
@@ -60,6 +125,9 @@ test fixtures.
 
 The goal should not be to make these contracts dynamic. The goal should be to keep the same typed
 authority model while authoring each durable protocol once.
+
+The order below is conceptual, not implementation order. Use the feasibility review and roadmap for
+sequencing.
 
 ### 1. Define The Kernel Contract Protocol Declaratively
 
@@ -1115,7 +1183,7 @@ and env sanitization.
 
 Impact: about 200-400 LOC removed across tests.
 
-## What Is Not A Good 30-50% LOC Strategy
+## What Is Not A Good Maintained-LOC Strategy
 
 ### Merging Crates
 
@@ -1144,68 +1212,103 @@ would violate the placement contract. App should assemble, not own domain execut
 1. Add or identify descriptor, canonical JSON, fixture hash, event payload, and certified spec
    goldens for the protocol surfaces that will be generated or table-driven.
 2. Add focused drift tests for artifact role tags, schema descriptors, and store codec mappings.
-3. Add old/new differential harnesses for projection folds and side-effect phase transitions.
+3. Add old/new differential harnesses for projection folds, committed-run views, public-output
+   rendering, and side-effect phase transitions.
+4. Add runtime lifecycle baselines for open attempts, terminalized failures, framework lifecycle
+   attempts, resource-lane blocking, and side-effect recovery.
 
 Expected result: the later refactors can be reviewed as authority-preserving rewrites instead of
 behavior changes.
 
-### Phase 1: Kernel Contract And Artifact Role Sources
+### Phase 1: FSM Scheduler Lifecycle Refactor
 
-1. Prototype the kernel contract declaration for a small event family.
-2. Generate or derive schema descriptors, enum tag tables, artifact requirements, and store payload
-   codecs for that family.
-3. Add `ArtifactRoleContract` behind existing artifact role APIs.
-4. Migrate one contained event/artifact family end to end and compare generated behavior against
-   existing goldens.
+Execute `RFC_REFACTOR_FSM_SCHEDULER.md`.
 
-Expected result: this is the first phase that can plausibly unlock 30%+ LOC reduction.
+1. Extract pure transition decisions from scheduler orchestration.
+2. Introduce explicit attempt, recovery, framework, and side-effect lifecycle components.
+3. Commit `StateAttemptStarted` before semantic handler execution and require terminal evidence or
+   recovery ownership for every started attempt.
+4. Reduce `SerialTypedScheduler` to a thin public facade over lifecycle dispatch.
 
-### Phase 2: Side-Effect FSM And Driver
+Expected result: runtime execution becomes a small set of named authority protocols instead of one
+broad scheduler surface.
 
-1. Define the typed side-effect FSM inside the kernel/store authority path.
-2. Route runtime, replay, and tests through the FSM for phase classification and transition rules.
-3. Define the generic side-effect driver trait surface.
-4. Port proof first, because it has a smaller side-effect surface.
-5. Port EVM lifecycle after identity, replay, and ambiguity behavior are locked.
+### Phase 2: Artifact Role Contract
 
-Expected result: large reuse for future mutation workflows, and a smaller trusted surface for
+1. Add `ArtifactRoleContract` behind existing artifact role APIs.
+2. Cover every role with a table-driven golden for tag, schema policy, semantic policy, producer
+   policy, staging class, retention class, and same-commit policy.
+3. Route event requirement generation, runtime staging classification, replay artifact
+   authorization, and artifact-store metadata validation through the role contract.
+4. Fix or deliberately version the `typed_spec_certificate` descriptor drift.
+
+Expected result: one source of role truth, fewer string/tag/producer matches, and a small but real
+authority-preserving production cleanup.
+
+### Phase 3: Scenario And Golden Infrastructure
+
+1. Build precise scenario builders for certified specs, committed streams, retained artifacts,
+   side-effect timelines, and corruption cases.
+2. Convert one narrow family of existing runtime/store/replay tests and prove generated fixtures
+   are equivalent to the current hand-written fixtures.
+3. Preserve negative assertion specificity for wrong role, wrong producer, missing artifact,
+   tampered spec/certificate, replay-with-live-capability, and secret-redaction cases.
+
+Expected result: lower test ceremony without reducing coverage, plus the safety net needed before
+larger protocol rewrites.
+
+### Phase 4: Shared Run View And App Read Paths
+
+1. Introduce `CommittedRunIndex` or `VerifiedRunHistoryView` as the shared verified stream fold.
+2. Route runtime history, replay, app status/output paths, and stream range filtering through the
+   shared view.
+3. Merge duplicated app read paths and sync/async service read behavior around the same verified
+   context.
+4. Keep replay evidence-only and keep public output render-only.
+
+Expected result: fewer duplicated correctness checks, less runtime/replay/app divergence, and one
+validated path before presentation filtering.
+
+### Phase 5: Runner Kit
+
+1. Extract typed helpers for input materialization, artifact staging, retained refs,
+   `CellProduced`, `FactRecorded`, and public-output payload construction.
+2. Compare emitted artifacts, event payloads, retention refs, and executable identities against
+   proof, portfolio, and EVM runner goldens.
+3. Move EVM lifecycle runner logic into `crates/adapters/evm-contracts` while preserving executable
+   identity or versioning it deliberately.
+
+Expected result: less adapter ceremony without weakening commit planning, schema checks, or runner
+identity authority.
+
+### Phase 6: Generic Side-Effect Driver
+
+1. Use the side-effect lifecycle boundary established by `RFC_REFACTOR_FSM_SCHEDULER.md`.
+2. Define the generic side-effect driver trait surface only after recovery and uncertainty behavior
+   are covered by goldens.
+3. Port proof first, then EVM lifecycle after identity, replay, and ambiguity behavior are locked.
+
+Expected result: large reuse for future mutation workflows and a smaller trusted surface for
 side-effect protocol correctness.
 
-### Phase 3: Shared Run And Graph Authority Views
+### Phase 7: Kernel Protocol Generation And Declarations
 
-1. Introduce `CommittedRunIndex` or `VerifiedRunHistoryView` as the shared stream fold.
-2. Route runtime history, replay, and app status/output paths through the shared view.
-3. Expand certified graph read APIs into a staged `SpecGraph<Stage>` surface.
-4. Replace repeated framework lifecycle matching with `FrameworkNodeContract`.
+1. Prototype the declarative kernel contract source in check-only mode for one small event family.
+2. Generate or derive schema descriptors, enum tag tables, artifact requirements, and store payload
+   codecs for that family.
+3. Compare generated behavior against descriptor, canonical JSON, spec-hash, role, and
+   runtime/replay equivalence goldens.
+4. Add `ProgramPackage`, `WorkflowDescriptor`, or `StateSpec` derives only after descriptor-id and
+   diagnostic goldens are in place.
 
-Expected result: fewer duplicated correctness checks, less runtime/replay divergence, and a more
-obvious authority boundary.
+Expected result: protocol declarations can replace hand-written ceremony only after they have
+proven byte-for-byte compatibility or a deliberate versioned migration.
 
-### Phase 4: Runner Kit And Workflow Declarations
+### Deferred: Projection Persistence Boundary
 
-1. Extract runner registration, input materialization, artifact staging, and output event helpers.
-2. Move EVM lifecycle runner logic into `crates/adapters/evm-contracts`.
-3. Add `ProgramPackage` or `WorkflowDescriptor` helpers for registry and certification plumbing.
-4. Add `StateSpec`/capability derive only after descriptor-id goldens are in place.
-
-Expected result: cleaner boundaries and lower per-workflow implementation cost.
-
-### Phase 5: Scenario-Based Tests
-
-1. Build runtime certified-spec fixture mutation helpers.
-2. Build side-effect timeline factories.
-3. Build stream corruption cases and backend store contract runners.
-4. Convert large tests incrementally while preserving assertion specificity.
-
-Expected result: large test LOC reduction without reducing coverage.
-
-### Phase 6: Service And Projection Simplification
-
-1. Make async app/store services primary if sync compatibility is no longer buying enough value.
-2. Route CLI and REST through shared verified run context helpers.
-3. Explore whether projections should remain ephemeral or become one compact verified read model.
-
-Expected result: lower app/store duplication after the kernel authority surfaces have stabilized.
+Projection persistence should move to a separate measurement RFC. Before any implementation, gather
+memory/Postgres projection parity, rebuild-from-events diffs, query performance baselines, and
+repair/migration requirements.
 
 ## Verification Baseline
 
@@ -1230,246 +1333,18 @@ Nixfied behavior.
 ## Bottom Line
 
 The fundamental abstraction problem is not that MFM has the wrong runtime model. It is that the
-typed kernel protocol is implemented as repeated hand-written Rust across too many layers. The
-large LOC win is to make the protocol declarative and generated/derived while preserving the same
-certified authority boundaries.
+typed kernel protocol is implemented as repeated hand-written Rust across too many layers.
 
-The second large win is to make side-effect execution a generic FSM and driver instead of requiring
-every adapter to hand-write the saga event sequence.
+The first production move should execute `RFC_REFACTOR_FSM_SCHEDULER.md` because it makes
+transition, attempt, recovery, and side-effect lifecycle authority explicit. The next bounded
+protocol move should be role-contract work because it addresses concrete drift with limited blast
+radius. The first major test move should be scenario/golden infrastructure because it makes later
+refactors reviewable as authority-preserving rewrites. The first shared-view move should be
+committed-run history because runtime, replay, app, and public-output paths already need the same
+verified stream facts.
 
-The third large win is to fold committed run streams and certified graphs into shared authority
-views that runtime, replay, app, and tests all consume.
-
-Everything else is worth doing, but it is supporting structure. The 30%+ thesis lives in contract
-declaration/codegen, side-effect protocol reuse, shared authority views, and scenario-driven tests.
-
-## Appendix A: Independent Feasibility Review
-
-This appendix records a skeptical review of the RFC's abstraction bets. It treats append-only
-streams, content addressing, canonical JSON, replay evidence, no ambient IO in state logic, and no
-secret persistence as hard invariants. The conclusion is intentionally stricter than the main RFC
-thesis: LOC reduction is useful only when it removes maintained duplication without hiding
-correctness checks in opaque macros or generated files.
-
-### Evidence Summary
-
-- The local Rust LOC baseline is about `139852` LOC. A 30% reduction therefore means roughly
-  `42k` net maintained LOC, which is larger than the clearly duplicated production surfaces found
-  in this pass.
-- The design constraints are explicit in `docs/design.md` and `docs/architecture.md`: certified
-  specs, append-only streams, canonical JSON, replay from stored evidence, and no ambient IO in
-  state logic are not optional simplification targets.
-- There is concrete role-contract drift risk already. `ArtifactRole::TypedSpecCertificate` exists
-  in `crates/kernel/events/src/lib.rs`, the store parses and emits `typed_spec_certificate`, and
-  `RunStarted` can require the certificate artifact, but the event schema role tag list appears not
-  to include `typed_spec_certificate`.
-- `VerifiedRunHistory` already exists in `crates/kernel/runtime/src/history.rs`, while
-  `ReplayBroker::from_validated_parts` in `crates/kernel/replay/src/lib.rs` still verifies, folds,
-  indexes, and authorizes a committed stream again. This supports a shared committed-run authority
-  view, but not a single untyped "god object".
-- Side-effect state is repeated across store ledger projection, runtime historical validation, and
-  app-level EVM runner logic. The duplication is real, but this path is correctness-sensitive
-  because it controls replay evidence, idempotency, ambiguity, and non-persistence of signed/raw
-  payloads.
-- Sync and async app service surfaces are materially duplicated in `crates/app/src/lib.rs`. This is
-  feasible cleanup, but it is not a large LOC lever by itself.
-
-### Ranked Feasibility Table
-
-LOC estimates are directional and count maintained Rust. If generated files are checked in and
-reviewed, they should be counted as maintained LOC.
-
-| Rank | RFC bet | Feasibility | Estimated LOC impact: production / tests / generated / net maintained | Confidence | Main correctness risk |
-|---:|---|---|---|---|---|
-| 1 | Scenario-based test specs | High | `+0.3k..+0.8k / -4k..-8k / 0..+2k / -3k..-6k` | Medium | A scenario DSL can hide important negative assertions or make corruption tests less specific. |
-| 2 | `ArtifactRoleContract` table | High | `-1.5k..-3k / +0.5k..+1.5k / 0 / -0.5k..-2k` | Medium | A centralized table bug can misclassify schema, producer, or same-commit requirements everywhere. |
-| 3 | Shared committed-run authority view | High | `-2k..-4k / +1k..+2k / 0 / -1k..-2.5k` | Medium | Runtime, replay, app, and public-output paths must not collapse distinct authority boundaries. |
-| 4 | Runtime runner kit | High | `-0.6k..-1.2k / +0.3k..+0.8k / 0 / -0.2k..-0.8k` | Medium-high | Generic builders can make invalid runner payloads easier to construct if they are too permissive. |
-| 5 | Collapse duplicate app service surfaces | High | `-0.4k..-0.8k / +0.2k..+0.4k / 0 / -0.2k..-0.5k` | High | Stream range filtering must remain after full stream validation, not before it. |
-| 6 | Declarative kernel protocol | Medium | `-4k..-8k / -2k..-5k / +5k..+12k / -3k..-7k` | Medium-low | Byte stability, canonical JSON stability, schema descriptor stability, and hidden generated code drift. |
-| 7 | Generic side-effect FSM and driver | Medium | `-1.5k..-3.5k / +1k..+2k / 0 / -0.5k..-2k` | Medium-low | The driver can obscure replay uncertainty, duplicate store authority, or accidentally persist secret-bearing payloads. |
-| 8 | `ProgramPackage` and `StateSpec` derive | Medium | `-0.8k..-1.5k / +0.8k..+1.5k / macro expansion / 0..-0.8k` | Medium | Macro indirection can make descriptor identity and certification failures harder to audit. |
-| 9 | Certified graph typestate views | Medium | `-1k..-2k / +0.5k..+1k / 0..+0.5k / -0.5k..-1.5k` | Medium | Much of the authority already exists in `CertifiedRuntimeSpec`; over-layering can add API complexity. |
-| 10 | Projection persistence boundary | Low | `0..-2k or +1k / +1k..+3k / 0 / unknown` | Low | Store repair, Postgres parity, resource-lane semantics, and read performance may become more complex. |
-
-### Bet-By-Bet Assessment
-
-#### 1. Declarative Kernel Protocol
-
-This is technically feasible, but it is the riskiest production refactor because it touches durable
-hashes, schema descriptors, codec mappings, artifact requirements, and replay validation. The RFC's
-large production LOC estimate is plausible only if generated code is not counted as maintained LOC.
-If generated Rust is checked in and reviewed, the reduction is much smaller.
-
-Required baselines:
-
-- event schema descriptor goldens
-- enum tag list goldens, including artifact roles
-- canonical JSON and spec hash goldens
-- store encode/decode round trips for every event payload
-- artifact requirement matrix by event kind
-- replay and runtime equivalence from the same committed stream
-
-#### 2. Artifact Role Contract Table
-
-This is the most actionable production cleanup. It addresses real drift, has bounded scope, and is
-useful before any larger generator work. It should encode role tag, schema descriptor, producer
-binding rules, same-commit constraints, and whether the artifact is required or optional for each
-event surface.
-
-Required baselines:
-
-- one table-driven test for every `ArtifactRole`
-- one test proving each event's retained artifacts satisfy the role contract
-- negative tests for wrong role, wrong schema, wrong producer, wrong node, wrong attempt, and wrong
-  commit binding
-
-#### 3. Generic Side-Effect FSM And Driver
-
-The FSM half is feasible and likely valuable. The generic driver half should be delayed until
-existing EVM and proof behavior is captured in goldens. The store must remain the authority for
-legal committed transitions; the driver should construct intents and evidence, not become a second
-source of truth.
-
-Required baselines:
-
-- side-effect phase transition matrix
-- resume-after-each-phase tests
-- unknown submission and ambiguity recovery tests
-- failed receipt and terminal failure tests
-- replay tests proving no live network or filesystem dependency
-- tests that raw signed transactions or secret-bearing material never appear in artifacts, events,
-  public output, or errors
-
-#### 4. Shared Committed-Run Authority View
-
-This is feasible and worth doing, but the abstraction must be a verified read view, not a relaxed
-replacement for store/runtime/replay authority. `VerifiedRunHistory` and replay's validated broker
-already show the right shape. The cleanup should remove duplicate folding and indexing while
-preserving explicit minting boundaries.
-
-Required baselines:
-
-- old/new status output equivalence
-- old/new stream output equivalence
-- old/new public output equivalence
-- old/new replay evidence equivalence
-- tampered stream, tampered artifact, tampered spec, and stale projection tests
-
-#### 5. Certified Graph Typestate Views
-
-This mostly improves consistency and API clarity. It is unlikely to remove much net LOC because the
-current certification and runtime spec authority already perform much of the staged validation. The
-best use is to prevent accidental mixing of uncertified, certified, and runtime-indexed graph
-surfaces.
-
-Required baselines:
-
-- certified spec hash goldens
-- lifecycle topology corruption tests
-- compile-time or API tests showing uncertified graphs cannot enter runtime paths
-- framework lifecycle role matrix tests
-
-#### 6. Runtime Runner Kit
-
-This is feasible and low-risk if kept as builders and helpers for known runner output shapes:
-input materialization, staged artifacts, fact events, cell events, and runner registration. It
-should not become a generic JSON escape hatch.
-
-Required baselines:
-
-- emitted event and artifact goldens for proof, portfolio, and EVM runners
-- descriptor identity goldens
-- negative tests for missing artifact hash, wrong schema, wrong cell, and wrong fact bindings
-
-#### 7. `ProgramPackage` And `StateSpec` Derive
-
-This is a maintenance improvement, not a major LOC lever. It should come after descriptor and spec
-hash goldens exist. The derive is acceptable only if generated identifiers remain obvious in source
-or diagnostics.
-
-Required baselines:
-
-- descriptor ID goldens
-- config artifact set goldens
-- public output draft goldens
-- `trybuild` diagnostics for malformed derives
-
-#### 8. Scenario-Based Tests
-
-This is the strongest net maintained LOC bet, mostly in test code. It should be built as a precise
-fixture language for certified specs, committed streams, side-effect timelines, and corruption
-cases. The goal is not fewer assertions; it is fewer hand-built copies of the same stream and spec
-ceremony.
-
-Required baselines:
-
-- equivalence between current hand-written fixtures and scenario-generated streams
-- projection equivalence
-- public output equivalence
-- replay equivalence
-- negative fixture snapshots for every corruption family
-
-#### 9. App Service Surface Collapse
-
-This is clearly feasible but small. It should probably be merged with the shared committed-run view
-work. The important rule is that CLI and REST range filtering must consume an already validated
-stream instead of becoming a partial validation path.
-
-Required baselines:
-
-- sync and async service parity tests
-- CLI and REST response parity tests
-- validation-before-filtering tests
-
-#### 10. Projection Persistence Boundary
-
-This should be cut from the main roadmap. It may be worthwhile, but it is not yet a refactor. It is
-a storage design investigation with hidden costs in Postgres parity, repair, migration, query
-performance, and resource-lane semantics.
-
-Required baselines before any implementation:
-
-- memory/Postgres projection parity tests
-- rebuild-from-events diff tests
-- query performance baselines
-- repair and migration tests
-
-### Recommended Roadmap Changes
-
-1. Start with `ArtifactRoleContract` and its goldens. This is the smallest change that directly
-   attacks real protocol drift.
-2. Build scenario/golden infrastructure next, then convert one narrow family of existing tests.
-   This creates the safety net required before deleting handwritten protocol ceremony.
-3. Introduce a shared committed-run read authority and merge the duplicated app service read paths
-   around it. Keep store, runtime, replay, and public-output authority wrappers explicit.
-
-After those three steps, extract the runner kit. Then consider the side-effect FSM. Only after those
-baselines exist should declarative kernel protocol generation move from "check-only" to replacing
-hand-written code.
-
-Recommended cuts and merges:
-
-- Treat `ArtifactRoleContract` as the first slice of the declarative kernel protocol, not as a
-  later cleanup.
-- Merge shared committed-run view work with app service surface collapse.
-- Split side-effect work into two phases: kernel/store FSM first, generic adapter driver later.
-- Demote certified graph typestate work unless concrete lifecycle drift appears in the new goldens.
-- Move projection persistence to a separate measurement RFC.
-- Do not lead with macros or derives. They need descriptor, spec-hash, and diagnostic goldens first.
-
-### Blunt Conclusion
-
-The RFC is directionally right that repeated protocol authority is the main abstraction problem.
-However, the 30-50% LOC thesis is too aggressive as a maintained-LOC claim.
-
-The realistic near-term target is **10-20% net maintained LOC reduction** if scenario fixtures,
-artifact role contracts, shared committed-run views, runner helpers, and selected service cleanup
-all land cleanly. A **30% reduction is plausible only if generated code is excluded from maintained
-LOC and large test fixtures are aggressively rewritten without losing coverage**. If generated Rust
-is checked in and reviewed, or if goldens add back the necessary coverage, the net reduction will be
-lower.
-
-The better success metric is not raw LOC. It is fewer independently maintained copies of durable
+Larger generation, derives, and generic side-effect drivers can be worthwhile, but they must earn
+their place behind byte-stability goldens, explicit authority wrappers, and negative coverage. The
+better success metric is not raw LOC. It is fewer independently maintained copies of durable
 protocol truth, with no weakening of append-only stream authority, content addressing, canonical
 hashing, replay evidence, no-ambient-IO state logic, or secret non-persistence.
