@@ -96,20 +96,54 @@ bounded commit authority.
 The run admission lifecycle exists before the FSM runtime is allowed to make transition decisions.
 Its job is to turn authored operation/state material into a certified, bound, append-only run root.
 
+Flow:
+
+```text
+authored/expanded program
+  -> certified spec + certificate bundle
+  -> admission validation
+  -> executable binding validation
+  -> atomic genesis commit
+  -> verified run authority for the FSM
+```
+
 Input:
 
 - authored operation/state material
 - deterministic expansion output
-- certified spec and certificate artifacts
+- certified spec and certificate bundle
+- persisted spec, certificate, config, and seed artifact bytes
 - configured runner, capability, and framework registries
 - staged genesis artifacts needed to establish the run root
 
+Admission validation verifies:
+
+- spec hash and certificate hash
+- registry digest used by certification
+- descriptor identities and descriptor digests
+- lowering and canonicalizer identity
+- saga policy digest
+- public-output schema authority
+- config and seed artifact content hashes
+- typed decodability and validation of config and seed artifacts
+- launch artifact evidence and artifact roles
+- no-secret constraints for admitted launch material
+
+Executable binding validation verifies:
+
+- every certified executable state has a runner binding
+- every certified capability reference can be bound to an allowed capability implementation
+- framework handlers required by the certified lifecycle are available
+- binding identities match the certified spec and deployment policy
+- bindings are runtime assembly facts, not semantic stream facts
+
 Output:
 
-- atomic run genesis authority, including `RunStarted`
+- `RunAdmissionAuthority`
 - `CertifiedRuntimeSpec`
 - `BoundRuntimeContext`
-- first verified run history view
+- atomic run genesis authority, including `RunStarted`
+- first `VerifiedRunHistory` view at the genesis head
 
 Rules:
 
@@ -121,11 +155,14 @@ Rules:
 - Bootstrap/genesis behavior belongs here, not as a scheduler exception inside the FSM.
 - If admission fails, the failure is an ingress, corruption, or deployment diagnostic. It is not a
   semantic run event.
+- `RunStarted` means the run authority was admitted. It does not mean a framework state executed.
 
 This is the replacement direction for the historical `Bootstrap` special case. Bootstrap has been
 an attractive shortcut because it can atomically seed run state, completion state, artifacts, and
 retention references. That atomicity is still useful, but it should be modeled as pre-FSM run
 admission authority rather than as a framework state that sometimes bypasses normal lifecycle rules.
+The old Bootstrap shape mixed certification/admission, seed artifact admission, and framework state
+execution. The new model keeps the first two in genesis and leaves executable behavior to the FSM.
 
 ### Bound Runtime Context
 
@@ -187,6 +224,7 @@ Rules:
 - The decision does not invoke runners, handlers, capabilities, transports, or signers.
 - Saga retry, remediation, manual-resolution, public-output, retention, and completion routing
   belongs here as explicit transition decisions.
+- Saga routing is derived through the saga projection pipeline, not by mutating run mode directly.
 - Terminal saga decisions must not imply a stronger AC/DC claim than the verified evidence proves.
   Concrete variants may split further during implementation, for example compensated completion,
   failed-without-ACDC-claim, and manually resolved terminal states.
@@ -387,12 +425,34 @@ store/runtime admission.
 Saga and AC/DC guarantees must compose with the new lifecycle split rather than sit beside it as
 scheduler special cases.
 
+The transition lifecycle should derive saga routing through an explicit pipeline:
+
+```text
+certified spec + verified history + admitted side-effect evidence
+  -> saga projection
+  -> allowed saga transition
+  -> lifecycle dispatch
+```
+
+The saga projection derives:
+
+- whether saga handling has engaged
+- whether any forward side-effect ledger has crossed `InvocationStarted`
+- whether every past-boundary forward ledger is quiescent
+- owed remediation obligations
+- manual block reason and unresolved-obligation digest
+- whether a terminal saga proof can be built from the current prefix
+
 Rules:
 
 - Saga decisions are derived from certified spec, verified run history, and admitted side-effect
   evidence.
+- `StateAttemptFailed` can engage saga only when it records a real semantic non-retryable failure
+  under certified policy.
 - `StateAttemptInterrupted` does not engage saga remediation and does not prove any terminal AC/DC
   claim.
+- Forward side-effect ambiguity engages saga only through the paired ambiguity plus non-retryable
+  attempt failure rule.
 - Operational manual recovery is not saga manual resolution. It may unblock an interrupted runtime
   lifecycle, but it must not emit `ManualResolutionRecorded` or mark a saga manually resolved.
 - Manual saga resolution requires signed, prefix-bound `ManualResolutionProofAuthority` over a
@@ -409,6 +469,27 @@ Rules:
 - Persisted diagnostics, including diagnostic artifacts, are non-authority. They affect replay,
   status, or terminal interpretation only when referenced by admitted semantic events in the same
   valid commit.
+
+The allowed transition shape is:
+
+```text
+forward runnable and saga not engaged
+  -> StartNode
+open attempt exists
+  -> ContinueAttempt or AttemptRecoveryLifecycle
+saga engaged and forward ledgers are not quiescent
+  -> ContinueAttempt only for already-past-boundary ledgers, or side-effect recovery
+owed remediation remains
+  -> StartRemediation
+manual policy requires operator decision
+  -> AwaitManualResolution
+terminal proof can be derived from the current prefix
+  -> ResolveSagaTerminal
+```
+
+This keeps `RunMode` a projection and keeps terminal saga outcomes proof-backed. The scheduler may
+route to remediation or manual resolution, but it does not append a saga-control event merely to
+declare a mode change.
 
 ## Type Enforcement And Runtime Validation
 
@@ -659,6 +740,9 @@ Add or identify tests for:
 
 - Extract the current Bootstrap/genesis behavior behind `RunAdmissionLifecycle`.
 - Preserve atomic run-root behavior while moving it out of scheduler/framework attempt semantics.
+- Verify spec hash, certificate hash, registry digest, descriptor identities/digests, saga policy
+  digest, public-output schema authority, and config/seed artifact evidence during admission.
+- Make `RunStarted` mean admitted run authority, not framework-state execution.
 - Add `BoundRuntimeContext` construction before transition or attempt execution.
 - Make missing runner/capability/framework binding fail as a redacted deployment/admission
   diagnostic, not as a semantic attempt event.
@@ -671,6 +755,8 @@ Add or identify tests for:
 - Ensure it accepts only certified spec, bound runtime context, verified history, and pure hints.
 - Make saga retry, remediation, manual-resolution, public-output, retention, completion, and
   blocked outcomes explicit `TransitionDecision` variants.
+- Introduce a saga projection step that derives engagement, quiescence, obligations, manual block,
+  and terminal proof availability from certified spec plus verified history.
 - Decide explicitly whether open-attempt exclusion is global, per node, or resource-lane scoped.
   Do not silently change current scheduling semantics while extracting the lifecycle.
 - Keep existing behavior behind the old scheduler facade.
