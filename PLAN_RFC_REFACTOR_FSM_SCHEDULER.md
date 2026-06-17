@@ -30,10 +30,14 @@ RFC's boundary.
 
 Scope:
 
-- Update `docs/design.md`, `docs/architecture.md`, `docs/saga.md`, and runtime/app docs to describe
-  the target lifecycle model before code moves.
-- State that this branch intentionally breaks old run streams and public status shapes.
-- Document that mixed-version readers are unsupported after the event-schema cut.
+- Add a high-level direction note to `docs/design.md` (and `docs/architecture.md` where it sets
+  altitude) describing the target lifecycle model and the compatibility policy. Do not pre-write the
+  detailed contract changes here — per the Working Rules, those land in the same commit as the code
+  that changes them (frontier set in Commit 4, event schema/status in Commit 5, framework order in
+  Commit 9, saga authority in Commits 11–12).
+- State that this branch intentionally breaks old run streams, old projections, and public status
+  shapes, and rejects old-model streams with a typed diagnostic. Mixed-version readers are
+  unsupported.
 - Keep the `BootstrapRun` certification migration explicitly out of scope.
 
 Verification:
@@ -50,6 +54,10 @@ Scope:
   nodes preserve the scoped independence witness, and runners cannot emit lifecycle/store authority.
 - Add negative tests for old-stream rejection where useful, instead of replaying old streams
   unchanged.
+- Pin the optimistic-concurrency invariant: a commit carries the expected next stream sequence as a
+  precondition, and a precondition conflict triggers reload + re-decide rather than failure (the
+  resource-lane retry loop is one instance of this general pattern). Liveness is never inferred from
+  the stream.
 - Capture no-secret expectations for terminal failures, diagnostic artifacts, public output, and
   status surfaces.
 
@@ -80,18 +88,26 @@ Verification:
 
 Scope:
 
-- Add `transition.rs` with closed `TransitionDecision`.
+- Add `transition.rs` with closed `TransitionDecision`, and `history.rs` for verified history/view
+  construction consumed by the pure decision.
 - Keep `FrontierScheduler::decide` pure: certified runtime spec, verified history/view, and pure hints
   only. Do not pass stores, artifact stores, registries, runners, capabilities, transports, or signers.
 - Include `node_id` and `attempt_id` in `ContinueAttempt`.
 - Make saga remediation, manual wait, saga terminal resolution, and blocked outcomes explicit.
+- Introduce the saga projection step as an explicit derivation: engagement, quiescence, owed
+  obligations, manual block, and terminal-proof availability from certified spec plus verified
+  history. Saga routing flows through this projection, not by mutating run mode.
 - Preserve serial execution with `NoOpenAttempt` plus the existing resource-lane-scoped independence
   witness; do not introduce global open-attempt exclusion.
+- Update the `docs/design.md` frontier description: the decision set is no longer exactly
+  "run / block / complete".
 
 Verification:
 
 - `cargo test -p mfm-runtime`
 - `cargo test -p mfm-store --test commit_contract`
+- test that an independent ready node still advances while another node is parked on a cross-run
+  resource lane
 
 ## Commit 5: `events: cut attempt interruption schema`
 
@@ -104,8 +120,13 @@ Scope:
   with no acquired lane and no open ledger.
 - Update store admission, projection rebuild, replay models, event codec helpers, app status models,
   CLI status, and REST status in one breaking cut.
+- Scope status work here to the wire/projection layer: add the attempt-disposition field to the store
+  projection and status models. The full public response shape and contract tests land in Commit 13;
+  do not leave the JSON contract half-defined between the two.
 - Remove old-stream compatibility expectations; readers should fail clearly on unsupported old
   schema/order when they cannot rebuild new authority.
+- Update the `docs/design.md` and `docs/saga.md` event-schema and status sections in this same slice,
+  including the attempt-disposition vs `RunMode` distinction.
 
 Verification:
 
@@ -113,6 +134,8 @@ Verification:
 - `cargo test -p mfm-store --test commit_contract`
 - `cargo test -p mfm-replay`
 - `cargo test -p mfm-app`
+- test that `StateAttemptInterrupted` does not engage saga remediation and proves no AC/DC terminal
+  outcome
 - targeted CLI/REST status tests
 - `nix run .#check`
 
@@ -137,9 +160,13 @@ Verification:
 Scope:
 
 - Add `attempt.rs` with selected, started, invoked, terminal-planned, and terminal-committed phases.
-- Route ordinary state attempts through `AttemptLifecycle`.
-- Commit `StateAttemptStarted` before materialization and runner execution.
-- Move input/config/fact materialization into `InvocationBuilder` after attempt start.
+- Route ordinary state attempts through `AttemptLifecycle` with no event-stream change yet.
+- Keep input/config/fact materialization *before* the `StateAttemptStarted` commit, matching today: a
+  materialization failure must still produce no started event. Reordering materialization to after the
+  start commit is an event-semantics change deferred to Commit 8, where the failure-safe path can
+  capture post-start materialization failures.
+- Introduce `invocation.rs` (`InvocationBuilder`) for sealed runner-context construction, still
+  invoked before the start commit in this commit.
 - Keep runner contexts sealed and without store or artifact-store mutation handles.
 
 Verification:
@@ -151,7 +178,13 @@ Verification:
 
 Scope:
 
-- Add failure-safe terminalization from minimal trusted attempt authority.
+- Add failure-safe terminalization from minimal trusted attempt authority. Add `runner_output.rs`
+  (proposal validation), `commit.rs` (prepared commit builders), and `artifacts.rs` (staging helpers)
+  as the supporting module cuts.
+- Move input/config/fact materialization to after `StateAttemptStarted` (the event-semantics change
+  deferred from Commit 7), so post-start materialization failures terminalize through the failure-safe
+  path. This is a deliberate stream-content change for failing materializations; land it with its
+  replay/projection/golden updates.
 - Convert post-start materialization errors, handler errors, invalid runner output, artifact binding
   mismatches, public-output render failures, and retention projection failures into redacted terminal
   attempt evidence when storage is available.
@@ -172,12 +205,15 @@ Verification:
 Scope:
 
 - Route `PublicOutputRender`, `ProjectRetentionManifest`, `CompleteRun`, and `ResolveSagaTerminal`
-  through the same post-admission start/run/terminal lifecycle.
+  through the same post-admission start/run/terminal lifecycle in `framework.rs` (handlers only, no
+  scheduling).
 - Replace validators that require same-commit framework start/terminal ordering.
 - Define recovery for open framework attempts by rebuilding output, manifests, and terminal proofs from
   current verified history.
 - Keep `BootstrapRun` under run admission only.
 - Update replay, public-output, retention, completion, and saga terminal tests for the new event order.
+- Update the `docs/design.md` framework-lifecycle description for the new started-before-run and
+  terminal event order.
 
 Verification:
 
@@ -216,6 +252,8 @@ Scope:
   receipt/confirmation, or ambiguity paired with non-retryable attempt failure.
 - Add forward-fence tests asserting store admission rejects new forward `InvocationStarted` after saga
   engagement.
+- Update the `docs/design.md` / `docs/saga.md` side-effect authority sections, including the
+  forward-fence authority note (store is the source of truth; runtime early-reject is convenience).
 
 Verification:
 

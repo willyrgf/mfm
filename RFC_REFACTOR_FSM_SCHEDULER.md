@@ -22,6 +22,21 @@ authored run material
 The scheduler should not be a bag of hidden runtime responsibilities. It should be a thin dispatch
 surface over named lifecycle components with narrow authority.
 
+## Compatibility Policy
+
+This is a breaking refactor on a branch that is allowed to break persisted state. There is no
+backward-compatibility obligation for old persisted run streams, old projection rows, old public
+response shapes, or mixed-version readers. The new runtime does not replay, project, or resume runs
+written under the old lifecycle/event model; it rejects them with a clear typed diagnostic. Building
+compatibility shims for old data is explicitly out of scope — it is redundant work for state this
+branch is allowed to break.
+
+The one preserved boundary is certification. `BootstrapRun` stays in the certified graph and the spec
+hash, certificate, and `RunStarted` shape are unchanged, because demoting or removing `BootstrapRun`
+is a separate certification/spec migration (see "Bootstrap Compatibility And Certification Scope").
+Breaking changes are allowed, but they stay within this RFC's boundary and must not silently perform
+the deferred certification migration.
+
 ## Change Classes
 
 This RFC is an umbrella over three distinct change classes with different blast radii and review
@@ -976,7 +991,7 @@ event-schema slices and should each land as one coordinated, test-backed change.
 | 1 Run admission + binding | M–L | `mfm-runtime` (admission, binding), `mfm-app` (assembly) | No schema/cert change; `BootstrapRun` stays certified |
 | 2 Pure transition | M | `mfm-runtime` (frontier, transition) | Decision/dispatch split; saga projection step |
 | 3 Attempt lifecycle types | M | `mfm-runtime` (attempt typestates) | Gated on the IO-free-core and serial/global decisions |
-| 4 Interruption event schema | L | `mfm-events`, `mfm-store`, `mfm-replay`, `stream-store-postgres`, `mfm-app` (+CLI/REST status) | Highest blast radius; one compatibility-aware slice |
+| 4 Interruption event schema | L | `mfm-events`, `mfm-store`, `mfm-replay`, `stream-store-postgres`, `mfm-app` (+CLI/REST status) | Highest blast radius; one coordinated breaking slice |
 | 5 Terminalize observed failures | M | `mfm-runtime`, `mfm-store` | Failure-safe path; `retryable` classification |
 | 6 Classify framework lifecycles | L | `mfm-runtime` (framework), `mfm-store`, `mfm-replay` | Framework start/terminal split; replay goldens |
 | 7 Attempt recovery lifecycle | M | `mfm-runtime`, `mfm-store` (open-attempt projection) | Resume sweep; exclusion rule from Phase 2 |
@@ -1024,7 +1039,8 @@ Add or identify tests for:
 - side-effect recovery before and after `InvocationStarted`
 - saga remediation and manual-resolution AC/DC paths
 - no secrets in terminal failure events, artifacts, public outputs, or errors
-- event-order goldens for old and new attempt lifecycle behavior
+- event-order goldens for current attempt lifecycle behavior, captured as a pre-refactor baseline to
+  measure the change against — not a compatibility contract; old goldens are replaced, not preserved
 
 ### Phase 1: Extract Run Admission And Binding Authority
 
@@ -1079,13 +1095,14 @@ Add or identify tests for:
   `Failed`, and enforce the interruption legality matrix (no standalone interruption for an attempt
   holding a resource lane or open ledger, i.e. at/after `SideEffectInvocationPrepared`).
 - Update event structs, stream store admission, projections, replay, app status, Postgres storage,
-  and tests in one compatibility-aware slice.
+  and tests in one coordinated breaking slice.
 - `KernelEventPayload` is a closed v1 enum; all readers (store admission, projection, replay, Postgres
-  codec, app status) must be upgraded to handle the new variant before any writer emits it — no
-  mixed-version readers. Gate emission behind deployment readiness if rollout is staged.
+  codec, app status) must be upgraded to handle the new variant in the same slice — no mixed-version
+  readers. Old-model streams that lack the new variant or carry the old framework order are rejected
+  with a typed diagnostic, not read (see "Compatibility Policy").
 - In Postgres storage, add the new event to the codec and the `AttemptStatus` projection variant;
-  projection tables are rebuildable indexes (no destructive migration), but rebuild must handle
-  streams with and without the new event.
+  projection tables are rebuildable indexes for the new stream model. Rebuild applies to new-model
+  streams only; old-model rows are rejected with a typed diagnostic rather than projected.
 - Implement the public-status, retryability, and resource-lane behavior for interrupted attempts as
   defined in "Terminal Attempt Outcomes": attempt-level disposition, no new public `RunMode`,
   retry/resume driven by recovery.
@@ -1117,7 +1134,8 @@ Add or identify tests for:
 - Define open-framework-attempt recovery per "Open Framework Attempts" (re-render, rebuild manifest,
   rebuild terminal proof; preserve the store's same-commit pairings).
 - Treat `mfm-replay` as a first-class surface: its verified-history reconstruction and golden
-  fixtures change with the new event order, and pre-migration streams must still replay.
+  fixtures change with the new event order. Old-model streams are not replayed; replay rejects them
+  with a typed diagnostic (see "Compatibility Policy").
 - Update replay, status, and public-output tests for the new event order.
 - Update the `docs/design.md` framework-lifecycle description for the new event order.
 
@@ -1186,8 +1204,8 @@ Additional required tests:
 - `ContinueAttempt` after saga engagement cannot cross a new `InvocationStarted` boundary
 - post-admission framework lifecycle nodes follow the same start/run/terminal model
 - Bootstrap/genesis remains covered by run admission atomicity tests
-- historical pre-migration streams (no `StateAttemptInterrupted`, old framework event order) replay
-  and project unchanged
+- old-model streams (no `StateAttemptInterrupted`, old framework event order) are rejected with a
+  typed diagnostic by replay, projection, and resume — they are not silently read
 - storage failure before terminal commit leaves recoverable open attempt state
 - invalid runner output becomes redacted failure evidence, not a panic or silent block
 - a pre-boundary side-effect attempt holding a resource lane cannot be closed by standalone
@@ -1195,8 +1213,8 @@ Additional required tests:
 - an independent node still advances while another node is parked on a cross-run resource lane
 - CLI and REST JSON status contracts cover the interrupted attempt disposition and the new framework
   event order
-- Postgres codec and projection round-trip the new event and rebuild projections for streams with and
-  without it
+- Postgres codec and projection round-trip the new event and rebuild projections for new-model
+  streams; old-model rows are rejected with a typed diagnostic
 
 ## First-Cut Decisions
 
