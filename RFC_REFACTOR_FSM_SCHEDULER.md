@@ -10,7 +10,7 @@ The design target is:
 
 ```text
 authored run material
-  -> run admission lifecycle certifies, binds, and commits run authority
+  -> run admission lifecycle verifies, binds, and commits run authority
   -> verified history + certified spec + bound runtime context
   -> transition lifecycle chooses one pure decision
   -> attempt lifecycle starts durable attempt authority
@@ -21,6 +21,30 @@ authored run material
 
 The scheduler should not be a bag of hidden runtime responsibilities. It should be a thin dispatch
 surface over named lifecycle components with narrow authority.
+
+## Change Classes
+
+This RFC is an umbrella over three distinct change classes with different blast radii and review
+obligations. They are sequenced so the low-risk work can land first and the high-risk work is never
+mislabeled as "just a scheduler refactor":
+
+- **Runtime decomposition.** Splitting `SerialTypedScheduler` into named lifecycle components behind
+  the existing facade. Backward-compatible; no event-schema, certification, or storage change. This
+  is the bulk of the RFC.
+- **Event-schema migration.** Adding `StateAttemptInterrupted` and the failure-safe terminal path.
+  Touches events, store admission/projection, replay, Postgres storage, and public status. Requires
+  the interruption legality matrix and public-status semantics (below) before any code lands.
+- **Certification/admission migration.** Anything that changes what the certified spec contains or
+  what `RunStarted` means on the wire, including demoting `BootstrapRun` from the certified graph.
+  Changes the spec hash and certificate and therefore replay/projection of persisted runs. This RFC
+  deliberately does **not** perform this migration; it only consolidates the existing genesis path
+  and records the decision boundary (see "Bootstrap Compatibility And Certification Scope").
+
+The migration phases map to these classes as:
+
+- Runtime decomposition: Phases 1, 2, 3, 7, 8, 9.
+- Event-schema migration: Phases 4, 5, 6.
+- Certification/admission migration: out of scope here; only the decision boundary is recorded.
 
 ## Problem
 
@@ -38,9 +62,12 @@ The current runtime model is architecturally sound but too much of it is concent
 - manual resolution terminal proof handling
 - public-output, retention, and completion framework paths
 
-That makes the runtime harder to audit than the design contract suggests. The design says the
-frontier scheduler is pure. The implementation should make that fact obvious in the type and module
-boundaries.
+That makes the runtime harder to audit than the design contract suggests. The frontier decision is
+already pure today (`frontier::scheduler_decision_with_blocked_nodes` takes certified spec, a
+verified view, and a blocked-node set, with no IO). The problem is not frontier purity; it is that
+dispatch, attempt orchestration, framework special cases, resource-lane retry, and manual-proof
+handling are concentrated in the scheduler facade. The refactor should isolate those responsibilities
+so each authority boundary is obvious in the type and module structure.
 
 The bigger issue is failure auditability. MFM wants complete durable evidence for every execution
 attempt that enters the semantic runtime. If a selected state attempt starts and then materialization,
@@ -52,9 +79,10 @@ evidence or be recovered later from the open attempt.
 
 - Make frontier scheduling pure and small: certified spec plus bound runtime context plus verified
   history in, one transition decision out.
-- Make transition dispatch explicit: starting a state, continuing an attempt, projecting retention,
-  rendering public output, completing, retrying, remediating, resolving saga terminal outcomes, or
-  blocking are named decisions.
+- Make transition dispatch explicit: starting a node (domain or framework), continuing an attempt,
+  remediating, awaiting manual resolution, resolving saga terminal outcomes, or blocking are named
+  decisions. Framework specialization (public output, retention, completion) is derived from the
+  selected node's `FrameworkNodeSpec`, not from a separate decision variant.
 - Make attempt execution a first-class lifecycle with fixed typed phases.
 - Persist `StateAttemptStarted` before runner/state-handler execution for every semantic attempt.
 - Require every started attempt to reach terminal evidence, interruption, or recovery ownership
@@ -91,17 +119,67 @@ SideEffectLifecycle
 These are protocols, not plugin hook chains. Each phase has typed input authority, typed output, and
 bounded commit authority.
 
+### Execution And Concurrency Model
+
+The runtime advances one run through a single active driver at a time. This RFC preserves today's
+strictly serial execution: within a run, the transition lifecycle selects exactly one action and the
+attempt lifecycle drives it before the next decision. No intra-run parallelism is introduced.
+
+- **Single writer per run.** At most one driver advances a given run at a time. Cross-driver safety
+  does not depend on inferring process liveness; it relies on store optimistic concurrency: every
+  lifecycle commit carries the expected next stream sequence as a precondition. A stale or crashed
+  driver's appends fail that precondition.
+- **Liveness is not a stream fact.** An open attempt (`StateAttemptStarted` with no terminal) is
+  indistinguishable in verified history between "currently executing" and "crashed mid-attempt." The
+  runtime never guesses. Under single-writer, a driver that loads a run and finds an open attempt it
+  did not just start may take recovery ownership, because any competing live writer would lose the
+  expected-seq race.
+- **Precondition conflict is re-decide, not failure.** A failed stream-position precondition means
+  the view is stale. The driver reloads verified history and re-runs the transition decision. The
+  resource-lane retry loop is one instance of this general pattern.
+- **Open-attempt exclusion is global per run.** If any semantic attempt is open, the only legal
+  decisions are `ContinueAttempt` for that attempt or recovery ownership; no unrelated `StartNode`.
+  The typestate witness is therefore `NoOpenAttempt` (global). A finer-grained witness (per-node or
+  resource-lane scoped) that would allow independent concurrent work is explicitly deferred and must
+  not be introduced by silently changing scheduling semantics.
+- **Cross-run resource lanes are unchanged.** Lanes remain a store-admission concern across runs; a
+  run blocks on a lane held by another run via `ResourceLaneBlocked`. That is the only cross-run
+  concurrency and it is not expanded here.
+
+### Lifecycle Entry Points
+
+Three entry points reach the lifecycle protocols. They share the same `TransitionLifecycle` and
+attempt machinery; they differ only in how verified authority is first established.
+
+- **Start (genesis).** `RunAdmissionLifecycle` verifies the certified bundle, constructs
+  `BoundRuntimeContext`, prepares the atomic genesis commit (`RunStarted` plus the bundled genesis
+  events), appends it, and returns `RunAdmissionAuthority`, `CertifiedRuntimeSpec`,
+  `BoundRuntimeContext`, and the first `VerifiedRunHistory` at the genesis head. To preserve today's
+  prepare/append separation, admission may expose verify+bind+prepare and the genesis append as two
+  steps; the post-append step is what yields the first verified history.
+- **Resume / recover.** There is no genesis. `VerifiedRunContextLoader` loads the stream and builds
+  `VerifiedRunHistory` (verifying spec/certificate/artifacts); `BoundRuntimeContextLoader` builds
+  `BoundRuntimeContext` from the registries (a missing binding here is the same redacted
+  deployment/configuration diagnostic as at admission). A recovery sweep then classifies any open
+  attempt (see "Attempt Recovery Lifecycle") before the first transition decision, so the frontier's
+  "open attempt exists" branch is well defined.
+- **Replay.** Read-only and out of this RFC's execution scope. Replay consumes the same events and
+  must accept the new event schema and ordering (see the replay surface notes in the migration plan).
+  It constructs live capabilities or signers under no circumstances.
+
+Only `RunAdmissionLifecycle` and the resume context loaders hold store/registry access; the frontier
+decision never does.
+
 ### Run Admission Lifecycle
 
 The run admission lifecycle exists before the FSM runtime is allowed to make transition decisions.
-Its job is to turn authored operation/state material into a certified, bound, append-only run root.
+Its job is to turn a verified certified bundle into a bound, append-only run root.
 
 Flow:
 
 ```text
-authored/expanded program
-  -> certified spec + certificate bundle
-  -> admission validation
+certified spec + certificate bundle (produced upstream by mfm-certify)
+  -> admission verification
   -> executable binding validation
   -> atomic genesis commit
   -> verified run authority for the FSM
@@ -109,9 +187,7 @@ authored/expanded program
 
 Input:
 
-- authored operation/state material
-- deterministic expansion output
-- certified spec and certificate bundle
+- certified spec and certificate bundle produced upstream by `mfm-certify`
 - persisted spec, certificate, config, and seed artifact bytes
 - configured runner, capability, and framework registries
 - staged genesis artifacts needed to establish the run root
@@ -149,6 +225,9 @@ Rules:
 
 - Run admission is not a state attempt.
 - Run admission does not execute domain state logic.
+- Run admission does not lower, expand, or certify. `mfm-certify` produces `CertifiedTypedSpec` and
+  the certificate upstream; admission only verifies that bundle against the production registry,
+  preserving the certify -> runtime crate boundary.
 - Run admission must verify spec/certificate material before any semantic run lifecycle exists.
 - Run admission must prove runner, capability, and framework bindings are available before the FSM
   can construct executable attempts.
@@ -157,12 +236,38 @@ Rules:
   semantic run event.
 - `RunStarted` means the run authority was admitted. It does not mean a framework state executed.
 
-This is the replacement direction for the historical `Bootstrap` special case. Bootstrap has been
-an attractive shortcut because it can atomically seed run state, completion state, artifacts, and
-retention references. That atomicity is still useful, but it should be modeled as pre-FSM run
-admission authority rather than as a framework state that sometimes bypasses normal lifecycle rules.
-The old Bootstrap shape mixed certification/admission, seed artifact admission, and framework state
-execution. The new model keeps the first two in genesis and leaves executable behavior to the FSM.
+This is the long-term direction for the historical `Bootstrap` special case, but it must be scoped
+carefully. Bootstrap atomicity is useful because it seeds run state, completion state, artifacts, and
+retention references in one commit. Today `BootstrapRun` is modeled as a certified graph node, yet it
+does not execute as an ordinary framework runner: its runner stub errors if invoked, and the genesis
+commit is synthesized by commit-planner middleware (`prepare_run_launch`). So genesis is already
+"pre-FSM" in practice while still being represented as a certified node.
+
+Because of that, this RFC consolidates the existing genesis path behind `RunAdmissionLifecycle`
+without changing the certified topology. Whether `BootstrapRun` is later demoted or removed from the
+certified graph is a separate certification/spec migration decision, scoped below.
+
+### Bootstrap Compatibility And Certification Scope
+
+`BootstrapRun` removal is a certification change, not a runtime change, and this RFC does not perform
+it. The boundary is explicit:
+
+- **Phase 1 keeps `BootstrapRun` certified.** `RunAdmissionLifecycle` first wraps and consolidates
+  the existing genesis path. The certified spec, lowering, spec hash, certificate, and `RunStarted`
+  shape are unchanged; admission is an internal reorganization of who mints genesis authority.
+- **`RunStarted` semantics are clarified, not redefined on the wire.** "Admitted run authority, not
+  framework-state execution" describes intent. The persisted `RunStarted` payload, its bundled
+  genesis attempt events, and its retention refs are preserved in Phase 1.
+- **Demoting or removing `BootstrapRun` from certified topology is deferred** to a separate
+  certification/spec migration. It must not be done implicitly while extracting admission.
+- **If `BootstrapRun` is later removed**, that migration must plan for: spec-hash change, certificate
+  re-issuance, replay verification of historical runs whose `RunStarted` pins the old spec hash,
+  projection rebuild compatibility, validators that currently require a certified `BootstrapRun` node,
+  and resume compatibility for in-flight persisted runs. Until that plan exists, `BootstrapRun` stays
+  in the certified graph.
+
+This keeps the RFC honest: genesis atomicity moves behind a named admission authority now, but the
+certified topology does not silently change.
 
 ### Bound Runtime Context
 
@@ -185,13 +290,25 @@ It proves:
 - binding identities match the certified spec and deployment policy
 
 `TransitionLifecycle` and `AttemptLifecycle` should require this bound context, not raw registries.
-That makes missing runner or capability bindings unrepresentable after run admission. A missing
-binding is a pre-authority deployment/configuration failure unless the bound context was constructed
-incorrectly, in which case the implementation has violated its own invariant.
+That makes a missing runner/capability/framework *binding* unrepresentable after run admission: a
+missing binding is a pre-authority deployment/configuration failure surfaced during admission or
+resume, unless the bound context was constructed incorrectly, in which case the implementation has
+violated its own invariant.
+
+`BoundRuntimeContext` proves only that registry/identity bindings *exist and match the certified
+spec*. It does not and cannot prove that live transport, signer, or capability *execution* will
+succeed. A bound capability can still fail at attempt time (endpoint down, signer unavailable, RPC
+error). Those are live-execution failures inside a started attempt — they become `StateAttemptFailed`
+or are owned by side-effect recovery, never pre-authority binding failures. The type proves "a
+binding was selected," not "the call will work."
 
 ### Transition Lifecycle
 
-The transition lifecycle decides what the runtime should do next.
+Deciding and dispatching are two roles. `FrontierScheduler::decide` is the pure function that maps
+certified spec, bound runtime context, verified history, and pure hints to one `TransitionDecision`.
+`TransitionLifecycle::dispatch` consumes that decision and routes it to exactly one lifecycle action
+(attempt, recovery, side-effect, or framework). This section defines the decision; dispatch targets
+are in the Responsibility Split.
 
 Input:
 
@@ -204,17 +321,30 @@ Output:
 
 ```rust
 enum TransitionDecision {
-    StartNode,
-    ContinueAttempt,
-    StartRemediation,
+    StartNode { node_id: NodeId },
+    ContinueAttempt { attempt_id: AttemptId },
+    StartRemediation { node_id: NodeId },
     AwaitManualResolution,
-    ProjectPublicOutput,
-    ProjectRetentionManifest,
     ResolveSagaTerminal,
-    CompleteRun,
     Blocked,
 }
 ```
+
+`StartNode` covers ordinary domain attempts *and* post-admission framework attempts
+(`PublicOutputRender`, `ProjectRetentionManifest`, `CompleteRun`). The framework specialization is
+derived from the selected node's `FrameworkNodeSpec`, not from a parallel decision variant, so the
+certified node stays the single source of truth for "what this node is." This avoids an earlier shape
+where `ProjectPublicOutput`/`ProjectRetentionManifest`/`CompleteRun` duplicated node identity in the
+decision enum.
+
+`StartRemediation` and `ResolveSagaTerminal` are kept explicit because they are selected by the saga
+projection (obligation classification and quiescence), not by ordinary input-readiness/topology like
+`StartNode`. They still execute as normal node attempts (`StateAttemptStarted` -> terminal); in fact
+`ResolveSagaTerminal` and the forward-success `CompleteRun` emit the same `RunCompleted` batch and
+differ only in the committed outcome. The explicit variants document the *selection authority*, not a
+different execution path: `CompleteRun` is reached via `StartNode` because forward readiness selects
+it, whereas saga-engaged terminals and remediation are selected by the saga pipeline. If saga
+selection later folds into ordinary selection, these variants can be removed.
 
 Rules:
 
@@ -222,12 +352,18 @@ Rules:
 - The decision does not write the store.
 - The decision does not stage artifacts.
 - The decision does not invoke runners, handlers, capabilities, transports, or signers.
-- Saga retry, remediation, manual-resolution, public-output, retention, and completion routing
-  belongs here as explicit transition decisions.
+- Saga retry, remediation, manual-resolution, and saga-terminal routing belong here as transition
+  decisions. Public-output, retention, and completion are ordinary `StartNode` selections specialized
+  by `FrameworkNodeSpec`, not separate decision variants.
 - Saga routing is derived through the saga projection pipeline, not by mutating run mode directly.
 - Terminal saga decisions must not imply a stronger AC/DC claim than the verified evidence proves.
   Concrete variants may split further during implementation, for example compensated completion,
   failed-without-ACDC-claim, and manually resolved terminal states.
+- Cross-run resource-lane admission is not decided here. The pure decision may *predict* a held lane
+  from the current projection and skip a blocked node, but lane ownership can change between decision
+  and commit and spans runs (`StoreError::ResourceLaneBlocked` is the authority). The lifecycle must
+  preserve: decide -> try commit -> handle `ResourceLaneBlocked` -> re-decide with that node marked
+  blocked. A `Blocked` decision is therefore provisional, not a proof that no node can ever run.
 
 The transition lifecycle dispatches exactly one lifecycle action. It does not execute state logic
 itself.
@@ -256,8 +392,10 @@ attempt outcome is committed or recovery takes ownership.
 
 Minimal preflight exists only to derive stable attempt identity, prove that the selected node is
 still startable from the verified history, and select already-bound executable authority from
-`BoundRuntimeContext`. Expensive or failure-prone work that belongs to the attempt should happen
-after `StateAttemptStarted`, so failures can be captured as terminal evidence.
+`BoundRuntimeContext`. Preflight checks input *readiness* (the required cells exist), not input
+*materialization* (loading and decoding bytes). Expensive or failure-prone work that belongs to the
+attempt, materialization included, happens after `StateAttemptStarted`, so failures can be captured
+as terminal evidence.
 
 Examples of work that should happen after attempt start:
 
@@ -283,18 +421,23 @@ Runtime validates those proposals and builds store-owned prepared commits.
 
 ### Terminal Attempt Outcomes
 
-A started attempt must eventually reach one terminal attempt outcome:
+An attempt is in one of these dispositions:
 
-- `StateAttemptCompleted`
-- `StateAttemptFailed`
-- `StateAttemptInterrupted`
+- **Open**: `StateAttemptStarted` is committed and no terminal outcome exists yet. The run may not
+  advance past it except through its own lifecycle, recovery authority, or an independence witness.
+- **Completed**: `StateAttemptCompleted` with matching terminal cell evidence.
+- **Failed**: `StateAttemptFailed` with a semantic/runtime-evaluable failure and an explicit
+  `retryable` flag.
+- **Interrupted**: `StateAttemptInterrupted`, meaning the attempt started but the runtime could not
+  observe or complete the lifecycle cleanly.
 
-`StateAttemptInterrupted` is a distinct event. It is not an alias for `StateAttemptFailed`.
-`StateAttemptFailed` means the attempt reached a semantic/runtime-evaluable failure.
-`StateAttemptInterrupted` means the attempt started but the runtime could not observe or complete
-the lifecycle cleanly.
+`Open` and `Interrupted` are distinct. Open is "not yet resolved"; Interrupted is a terminal
+disposition that records "the runtime gave up observing this attempt cleanly." Recovery decides which
+applies; a dying attempt cannot author its own interruption — `StateAttemptInterrupted` is always
+written by `AttemptRecoveryLifecycle` after observing an open attempt in verified history.
 
-Interruption terminalizes attempt bookkeeping, but it does not by itself:
+`StateAttemptInterrupted` is a distinct event, not an alias for `StateAttemptFailed`. Interruption
+terminalizes attempt bookkeeping for the attempts where it is legal, but it does not by itself:
 
 - engage saga remediation
 - prove a compensated outcome
@@ -302,20 +445,61 @@ Interruption terminalizes attempt bookkeeping, but it does not by itself:
 - close side-effect uncertainty after `InvocationStarted`
 - authorize manual saga resolution
 
+#### Interruption Legality Matrix
+
+Interruption is not legal for every open attempt. The boundary is the side-effect uncertainty
+boundary:
+
+| Open attempt kind | `StateAttemptInterrupted` legal as standalone closure? |
+|---|---|
+| Pure or read attempt | Yes |
+| Side-effect attempt before `InvocationStarted` | Yes (no external mutation could have happened) |
+| Side-effect attempt at or after `InvocationStarted` | No. The attempt stays **Open** and is owned by `SideEffectLifecycle` recovery until it proves not-submitted, recovers submission/receipt/confirmation, or records ambiguity paired with a non-retryable `StateAttemptFailed` |
+
+So "interruption terminalizes bookkeeping" applies only to the legal rows. A post-`InvocationStarted`
+side-effect attempt is never closed by interruption alone; it remains open until side-effect recovery
+reaches an evidence-backed outcome. This removes the earlier ambiguity between "interruption is always
+terminal" and "interruption cannot close a post-boundary attempt."
+
+#### Failure-Safe Terminalization
+
 Failure terminalization must use a failure-safe path. If a runner returns invalid output, runtime
-must not depend on that invalid output to terminalize the attempt. It should be able to produce a
-redacted diagnostic artifact and a `StateAttemptFailed` event from:
+must not depend on that invalid output to terminalize the attempt. It should produce a redacted
+diagnostic artifact and a `StateAttemptFailed` event from minimal trusted attempt authority:
 
 - run id
 - spec hash
 - node id
 - attempt id
 - attempt number
+- `retryable` (derived from certified policy plus runtime failure classification, never from runner
+  output)
 - redacted error class
 - optional redacted diagnostic artifact evidence
 
+`retryable` is a required trusted input, not an afterthought: `retryable: false` is exactly what
+engages saga, and the store requires it to match any paired side-effect terminal retryability in the
+same commit. A failure-safe path that cannot set `retryable` deterministically would either fail to
+engage saga when policy requires it or engage it spuriously. The failure classification (for example:
+runner contract violation and invalid output are non-retryable by classification; transient
+runtime/storage outages are not even semantic failures and go to recovery) determines `retryable`
+from trusted inputs, independent of whatever the runner returned.
+
 Terminal evidence must not contain secrets, raw signed transactions, private keys, mnemonics,
 passwords, authorization headers, local endpoint details, or bearer mutation material.
+
+#### Public Status For Interruption
+
+Interruption is an attempt-level disposition, not a run-level mode:
+
+- It does not add a variant to the public `RunMode` enum (`forward`, `remediating`, `manual_blocked`,
+  `completed`, `compensated`, `manually_resolved`, `failed_without_acdc_claim`).
+- A run with an interrupted-but-retryable attempt remains in its current `RunMode` (typically
+  `forward`); recovery re-attempts it.
+- Public status may expose attempt disposition (started / completed / failed / interrupted)
+  separately from `RunMode`, but interruption never by itself produces a terminal run outcome.
+- Retry/resume policy for interrupted attempts is driven by `AttemptRecoveryLifecycle`, not by saga.
+  Saga engagement is reserved for non-retryable `StateAttemptFailed` and forward ambiguity.
 
 ### Failure Taxonomy
 
@@ -350,6 +534,17 @@ Some failures cannot be terminalized at the moment they occur:
 
 The recovery lifecycle owns open attempts found in verified history.
 
+Recovery is not a separate frontier decision. The transition decision for an open attempt is always
+`ContinueAttempt`; the attempt lifecycle consults recovery to choose its disposition from evidence.
+Recovery is triggered two ways: a resume-time sweep that classifies open attempts before the first
+decision, and continuation of an open attempt this driver owns. Because liveness is not a stream fact
+(see "Execution And Concurrency Model"), recovery relies on single-writer ownership, not on detecting
+that a process died.
+
+`StateAttemptInterrupted` is how recovery closes an open attempt that will not be cleanly continued —
+for example, to reach a quiescent prefix with no open semantic attempts, which manual saga resolution
+requires. It is only legal where the interruption legality matrix allows it.
+
 Input:
 
 - certified spec
@@ -373,6 +568,26 @@ Rules:
 - Orphan artifact-store bytes are not authority. Only admitted run-store artifact evidence tied to
   the append-only stream is authority.
 - Recovery is evidence-driven and must not invent successful output.
+
+#### Open Framework Attempts
+
+Splitting post-admission framework nodes into started-before-run and terminal commits makes them
+crash-recoverable mid-attempt — a state the current scheduler forbids (it errors on a framework node
+found mid-attempt). Recovery must define disposition for each open framework attempt:
+
+- **`PublicOutputRender`**: re-render from verified history. The terminal commit must still pair the
+  output receipt, terminal cell, and `StateAttemptCompleted` in the same commit (the store enforces
+  this pairing).
+- **`ProjectRetentionManifest`**: rebuild the manifest from current verified evidence; do not reuse a
+  manifest computed before interruption.
+- **`CompleteRun` / `ResolveSagaTerminal`**: rebuild the terminal proof from the current verified
+  prefix before commit. No cached proof authority may carry across the interruption; a proof built
+  against a stale prefix cannot authorize terminalization (see the manual-proof cache note under "Saga
+  And ACDC Invariants").
+
+In all cases the started marker must make re-execution side-effect-free at the framework level:
+re-running a framework attempt after `StateAttemptStarted` must recompute terminal evidence, not
+double-apply it.
 
 ### Side-Effect Lifecycle
 
@@ -420,6 +635,13 @@ source of ledger law. Active-attempt checks, legal side-effect phase transitions
 confirmation-before-output rules, ambiguity pairing, and terminal failure pairing remain enforced by
 store/runtime admission.
 
+The forward fence (no new forward `InvocationStarted` boundary after saga engagement) is the clearest
+example: the store rejects forward boundary events once saga has engaged. The transition lifecycle and
+`SideEffectLifecycle` may early-reject a `ContinueAttempt`/`StartNode` that would cross a new forward
+boundary, but that is only a fail-fast convenience. Store admission remains the source of truth, and
+forward-fence tests must assert the store rejects the append, not only that the runtime declines to
+attempt it.
+
 ### Saga And ACDC Invariants
 
 Saga and AC/DC guarantees must compose with the new lifecycle split rather than sit beside it as
@@ -459,7 +681,11 @@ Rules:
   quiescent manually blocked prefix with no open semantic attempts.
 - `ResolveSagaTerminal` must rebuild its `SagaTerminalProof` from the current `VerifiedRunHistory`
   immediately before commit. A cached proof cannot authorize terminalization after the run prefix
-  changes.
+  changes. Implementation note: this requires removing the scheduler-level in-memory
+  `manual_terminal_proofs` cache, which today retains a `VerifiedManualResolutionForPrefix` keyed only
+  by run id. Runtime should rebuild and re-verify manual-resolution proof authority from the current
+  verified prefix at terminalization. (The store already re-derives the terminal completion outcome at
+  admission, so the narrow remaining freshness risk is exactly this cached manual proof.)
 - Transition decisions should use `StartRemediation` for executable recovery work. `Compensated` is
   a terminal outcome proven by admitted evidence, not a generic compensation lifecycle that can be
   started by name.
@@ -476,7 +702,7 @@ The allowed transition shape is:
 forward runnable and saga not engaged
   -> StartNode
 open attempt exists
-  -> ContinueAttempt or AttemptRecoveryLifecycle
+  -> ContinueAttempt (the attempt lifecycle consults recovery for disposition)
 saga engaged and forward ledgers are not quiescent
   -> ContinueAttempt only for already-past-boundary ledgers, or side-effect recovery
 owed remediation remains
@@ -537,7 +763,8 @@ enum TerminalAttemptOutcome {
 ```
 
 - Failure terminalization has a failure-safe constructor that depends only on minimal trusted
-  attempt authority, not on runner-provided output.
+  attempt authority — including a `retryable` flag derived from certified policy and failure
+  classification — not on runner-provided output.
 - Recovery APIs require explicit authority such as `OpenAttemptAuthority`.
 - Starting unrelated work requires a `NoOpenAttempt`, scoped independence witness, or equivalent
   proof from verified history.
@@ -656,9 +883,10 @@ This is a breaking event-order change where any current post-admission framework
 terminalizes in one commit. The new event order is more explicit and gives crash recovery the same
 model for framework and domain attempts.
 
-Bootstrap/genesis is different. It should move to `RunAdmissionLifecycle` and remain an atomic
-run-root commit unless a later RFC introduces a separate pre-run authority model. It should not be
-used as evidence that the FSM scheduler needs special-case attempt ordering.
+Bootstrap/genesis is different. Its authority moves to `RunAdmissionLifecycle` and remains an atomic
+run-root commit; `BootstrapRun` stays in the certified graph per "Bootstrap Compatibility And
+Certification Scope" unless a later certification migration removes it. It should not be used as
+evidence that the FSM scheduler needs special-case attempt ordering.
 
 ### Terminal Failure Planning
 
@@ -718,6 +946,27 @@ boundary.
 
 ## Migration Plan
 
+### Design Contract Updates
+
+`docs/design.md`, `docs/saga.md`, and `docs/architecture.md` are the authoritative contract, and
+`docs/design.md` mandates updating it whenever event schemas, store/projection authority, resume or
+replay semantics, or certified saga authority change. This RFC changes several of those, so doc
+updates are first-class migration work, landed in the same phase as the change they describe — not
+deferred to the end:
+
+- **Phase 1** updates the runtime/admission description and the meaning of `RunStarted` (admitted run
+  authority), while noting `BootstrapRun` remains certified.
+- **Phase 2** updates the documented frontier decision set (it is no longer exactly "run / block /
+  complete").
+- **Phase 4** updates typed event schemas and public status for `StateAttemptInterrupted`, including
+  the attempt-disposition vs `RunMode` distinction.
+- **Phase 6** updates the framework-node lifecycle description (started-before-run and terminal
+  commits).
+- **Phase 8** updates the side-effect/saga authority description, including the forward-fence
+  authority note and the manual-proof freshness rule.
+
+A phase that changes authority or event semantics without the matching doc update is incomplete.
+
 ### Phase 0: Baselines
 
 Add or identify tests for:
@@ -739,26 +988,34 @@ Add or identify tests for:
 ### Phase 1: Extract Run Admission And Binding Authority
 
 - Extract the current Bootstrap/genesis behavior behind `RunAdmissionLifecycle`.
+- Keep `BootstrapRun` in the certified graph. Phase 1 consolidates the genesis path only; it does not
+  change certified topology, spec hash, certificate, or the persisted `RunStarted` shape.
 - Preserve atomic run-root behavior while moving it out of scheduler/framework attempt semantics.
 - Verify spec hash, certificate hash, registry digest, descriptor identities/digests, saga policy
   digest, public-output schema authority, and config/seed artifact evidence during admission.
-- Make `RunStarted` mean admitted run authority, not framework-state execution.
-- Add `BoundRuntimeContext` construction before transition or attempt execution.
+- Clarify that `RunStarted` *means* admitted run authority (not framework-state execution). In Phase 1
+  this is an intent/documentation clarification; the persisted payload and bundled genesis events are
+  unchanged.
+- Add `BoundRuntimeContext` construction (registry/identity binding existence only) before transition
+  or attempt execution.
 - Make missing runner/capability/framework binding fail as a redacted deployment/admission
   diagnostic, not as a semantic attempt event.
 - Keep existing runtime behavior behind the old scheduler facade while the authority boundary is
   introduced.
+- Update `docs/design.md` runtime/admission sections in the same phase.
 
 ### Phase 2: Extract Pure Transition Decision
 
 - Rename or wrap the existing frontier decision as `FrontierScheduler`.
 - Ensure it accepts only certified spec, bound runtime context, verified history, and pure hints.
-- Make saga retry, remediation, manual-resolution, public-output, retention, completion, and
-  blocked outcomes explicit `TransitionDecision` variants.
+- Make remediation, manual-resolution, saga-terminal, and blocked outcomes explicit
+  `TransitionDecision` variants. Public-output, retention, and completion remain `StartNode`
+  selections specialized by `FrameworkNodeSpec` (not separate variants).
 - Introduce a saga projection step that derives engagement, quiescence, obligations, manual block,
   and terminal proof availability from certified spec plus verified history.
-- Decide explicitly whether open-attempt exclusion is global, per node, or resource-lane scoped.
-  Do not silently change current scheduling semantics while extracting the lifecycle.
+- Implement global per-run open-attempt exclusion (`NoOpenAttempt`) per the Execution And Concurrency
+  Model; finer-grained (per-node or resource-lane) witnesses are deferred. Do not silently change
+  current scheduling semantics while extracting the lifecycle.
 - Keep existing behavior behind the old scheduler facade.
 
 ### Phase 3: Introduce Attempt Lifecycle Types
@@ -771,15 +1028,26 @@ Add or identify tests for:
 ### Phase 4: Migrate Event Schema For Interruption
 
 - Add `StateAttemptInterrupted` as a durable event, not a structured failure alias.
+- Add the `Interrupted` attempt disposition to the store projection, distinct from `Open` and
+  `Failed`, and enforce the interruption legality matrix (no standalone interruption at or after
+  `InvocationStarted`).
 - Update event structs, stream store admission, projections, replay, app status, Postgres storage,
   and tests in one compatibility-aware slice.
-- Define public status, retryability, and resource-lane behavior for interrupted attempts.
+- In Postgres storage, add the new event to the codec and the `AttemptStatus` projection variant;
+  projection tables are rebuildable indexes (no destructive migration), but rebuild must handle
+  streams with and without the new event.
+- Implement the public-status, retryability, and resource-lane behavior for interrupted attempts as
+  defined in "Terminal Attempt Outcomes": attempt-level disposition, no new public `RunMode`,
+  retry/resume driven by recovery.
 - Assert that interruption does not engage saga remediation and does not prove an AC/DC terminal
   outcome.
+- Update `docs/design.md` and `docs/saga.md` event-schema and status sections in the same slice.
 
 ### Phase 5: Terminalize Observed Failures
 
 - Add the failure-safe terminalization path.
+- Derive `retryable` on the failure-safe path from certified policy plus failure classification,
+  never from runner output, and ensure it matches any paired side-effect terminal retryability.
 - Convert handler errors, materialization errors, and output validation errors inside a valid
   started attempt into redacted terminal attempt evidence.
 - Add recovery behavior for failures that happen before terminal commit succeeds.
@@ -787,12 +1055,17 @@ Add or identify tests for:
 
 ### Phase 6: Classify Framework Lifecycles
 
-- Keep Bootstrap/genesis in `RunAdmissionLifecycle`.
+- Keep Bootstrap/genesis in `RunAdmissionLifecycle` with `BootstrapRun` still certified.
 - Route public-output, retention, completion, and saga terminal framework states through the same
   post-admission attempt lifecycle where doing so preserves existing validators.
 - Split current same-commit post-admission framework attempts into started-before-run and terminal
   commits only with coordinated replay/projection/storage tests.
+- Define open-framework-attempt recovery per "Open Framework Attempts" (re-render, rebuild manifest,
+  rebuild terminal proof; preserve the store's same-commit pairings).
+- Treat `mfm-replay` as a first-class surface: its verified-history reconstruction and golden
+  fixtures change with the new event order, and pre-migration streams must still replay.
 - Update replay, status, and public-output tests for the new event order.
+- Update the `docs/design.md` framework-lifecycle description for the new event order.
 
 ### Phase 7: Attempt Recovery Lifecycle
 
@@ -810,9 +1083,13 @@ Add or identify tests for:
   not-submitted, recovers submission/receipt/confirmation, or records ambiguity with paired
   non-retryable failure.
 - Rebuild saga terminal proofs from current verified history immediately before terminal commits.
-- Add forward-fence tests so `ContinueAttempt` after saga engagement cannot cross a new
-  `InvocationStarted` boundary.
+- Remove the scheduler-level `manual_terminal_proofs` cache; rebuild and re-verify manual-resolution
+  proof authority from the current verified prefix at terminalization.
+- Add forward-fence tests so a forward `InvocationStarted` boundary after saga engagement is rejected
+  by store admission (runtime may early-reject, but the test asserts the store is the authority).
 - Add recovery tests for every uncertainty phase.
+- Update the `docs/design.md` / `docs/saga.md` side-effect and saga authority sections in the same
+  phase.
 - Only after this lands should a generic side-effect adapter driver be considered.
 
 ### Phase 9: Remove Scheduler Bulk
@@ -845,11 +1122,16 @@ Additional required tests:
 - side-effect open attempt after `InvocationStarted` cannot be generically failed without recovery
   evidence
 - side-effect ambiguity must pair with non-retryable terminal failure in the same atomic commit
+- interruption is rejected as a standalone closure for an attempt at or after `InvocationStarted`
+- failure-safe `StateAttemptFailed` sets `retryable` from policy/classification and matches paired
+  side-effect terminal retryability
 - operational manual recovery cannot emit saga manual-resolution events
 - stale `SagaTerminalProof` is rejected after the verified prefix changes
 - `ContinueAttempt` after saga engagement cannot cross a new `InvocationStarted` boundary
 - post-admission framework lifecycle nodes follow the same start/run/terminal model
 - Bootstrap/genesis remains covered by run admission atomicity tests
+- historical pre-migration streams (no `StateAttemptInterrupted`, old framework event order) replay
+  and project unchanged
 - storage failure before terminal commit leaves recoverable open attempt state
 - invalid runner output becomes redacted failure evidence, not a panic or silent block
 
@@ -861,10 +1143,14 @@ The following decisions define the first implementation direction:
   `StateAttemptFailed` reason. `StateAttemptFailed` means the attempt reached a
   semantic/runtime-evaluable failure. `StateAttemptInterrupted` means the attempt started but the
   runtime could not observe or complete the lifecycle cleanly.
-- Bootstrap/genesis belongs to `RunAdmissionLifecycle`, not the FSM attempt lifecycle.
+- Bootstrap/genesis authority belongs to `RunAdmissionLifecycle`, not the FSM attempt lifecycle. But
+  `BootstrapRun` stays in the certified graph in this RFC; demoting or removing it is a separate
+  certification/spec migration (see "Bootstrap Compatibility And Certification Scope").
 - Missing runner or capability binding should be unrepresentable after `BoundRuntimeContext`
   construction. If binding cannot be proven, run admission or resume fails with a redacted
-  deployment/configuration diagnostic before semantic attempt start.
+  deployment/configuration diagnostic before semantic attempt start. This covers binding *existence*
+  only; live transport/signer/capability execution can still fail inside a started attempt and is
+  terminalized there or owned by side-effect recovery.
 - Post-admission framework lifecycle states should move toward the same start/run/terminal model as
   domain states, but only with explicit replay, projection, store, and validator migration tests.
 - Operational manual recovery is separate from saga manual resolution. Saga manual resolution
@@ -873,9 +1159,15 @@ The following decisions define the first implementation direction:
   verified run history cannot be constructed, no transition, attempt, recovery, or semantic append
   API is reachable. These failures may be reported as redacted ingress/corruption diagnostics, but
   they do not enter the typed run stream.
-- Sync/async service collapse is not a goal of this RFC. Lifecycle components should be designed so
-  a later async-primary cleanup can share the same lifecycle semantics, but this refactor should not
-  mix lifecycle authority changes with broad service plumbing changes.
+- Sync/async service collapse is not a goal. Lifecycle authority logic (frontier decision, attempt
+  planning, invocation build, output validation, recovery classification, commit planning) is IO-free
+  and shared; only the thin driver seam that loads the stream, awaits runners, stages artifacts, and
+  appends commits remains split sync/async. A later async-primary cleanup can drop the sync driver
+  without touching lifecycle semantics.
+- Execution stays strictly serial per run with global open-attempt exclusion (`NoOpenAttempt`).
+  Single-writer-per-run plus expected-seq commit preconditions provide cross-driver safety; liveness
+  is never inferred from the stream. Finer-grained independence witnesses and intra-run concurrency
+  are deferred.
 
 ## Bottom Line
 
