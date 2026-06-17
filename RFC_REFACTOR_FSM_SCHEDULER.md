@@ -37,6 +37,24 @@ is a separate certification/spec migration (see "Bootstrap Compatibility And Cer
 Breaking changes are allowed, but they stay within this RFC's boundary and must not silently perform
 the deferred certification migration.
 
+The runtime is already single-version (everything is namespaced `v1`, content-addressed, and
+append-only), so the payoff of this policy is mostly *avoided work* in the high-blast-radius phases
+rather than deletion of an existing legacy layer. Concretely it lets the migration:
+
+- keep **single event-order readers**: the Phase 6 framework start/terminal split does not need a
+  reader that accepts both the old single-commit order and the new started-before-run order;
+- keep **single-path projection rebuild**: rebuild does not branch on "with/without the new event";
+- centralize rejection in **one ingress/load stream-model guard** that returns the typed diagnostic,
+  instead of per-reader tolerance branches;
+- make fields **required rather than optional** where an `Option` existed only to tolerate absence in
+  older data (audit per field during implementation — do not assume every `Option` is compat-driven);
+- skip **migration tooling, staged-rollout/feature-flag gating, and dual goldens**: old goldens are
+  deleted and replaced, not maintained alongside new ones.
+
+This cleanup does not extend to the deferred certification migration: the bundled bootstrap
+`StateAttemptStarted`/`StateAttemptCompleted` legacy evidence stays, and the deliberate sync/async
+driver seam (see "First-Cut Decisions") is unaffected.
+
 ## Change Classes
 
 This RFC is an umbrella over three distinct change classes with different blast radii and review

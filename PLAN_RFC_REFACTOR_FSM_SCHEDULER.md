@@ -125,6 +125,10 @@ Scope:
   do not leave the JSON contract half-defined between the two.
 - Remove old-stream compatibility expectations; readers should fail clearly on unsupported old
   schema/order when they cannot rebuild new authority.
+- Centralize rejection in one ingress/load stream-model guard that emits the typed diagnostic, rather
+  than scattering per-reader tolerance branches.
+- Audit `Option`-typed event/projection fields and make required any field that was optional only to
+  tolerate absence in older data (confirm per field; do not assume every `Option` is compat-driven).
 - Update the `docs/design.md` and `docs/saga.md` event-schema and status sections in this same slice,
   including the attempt-disposition vs `RunMode` distinction.
 
@@ -146,6 +150,8 @@ Scope:
 - Update `stream-store-postgres` codec and projection storage for interrupted attempts.
 - Remove old projection compatibility paths. Projection tables are rebuildable indexes for the new
   stream model.
+- Keep rebuild single-path: do not branch on "with/without the new event"; rebuild assumes the new
+  stream model and rejects anything else.
 - Add schema drift and codec/projection round-trip tests for the new event.
 - Make unsupported old stream rows fail fast with a typed diagnostic.
 
@@ -208,6 +214,8 @@ Scope:
   through the same post-admission start/run/terminal lifecycle in `framework.rs` (handlers only, no
   scheduling).
 - Replace validators that require same-commit framework start/terminal ordering.
+- Keep replay/projection on a single event-order model: do not add a reader that accepts both the old
+  single-commit order and the new started-before-run order.
 - Define recovery for open framework attempts by rebuilding output, manifests, and terminal proofs from
   current verified history.
 - Keep `BootstrapRun` under run admission only.
@@ -302,8 +310,13 @@ Scope:
 
 - Reduce `SerialTypedScheduler` to thin orchestration over admission/loading, transition dispatch,
   attempt lifecycle, recovery lifecycle, side-effect lifecycle, and commit planning.
-- Delete duplicated sync/async scheduler branches where lifecycle authority logic is shared.
+- Delete duplicated sync/async scheduler branches where lifecycle authority logic is shared. Keep the
+  thin sync/async driver seam (loads stream, awaits runners, stages artifacts, appends commits) per
+  the RFC's First-Cut Decision; collapsing it is not in scope.
 - Remove obsolete helper APIs, compatibility branches, and stale tests.
+- Sweep for leftover compat scaffolding: tolerance branches, migration helpers, staged-rollout gates,
+  and dual old/new goldens. Confirm no dual-version reader remains and that old goldens were replaced,
+  not kept alongside new ones.
 - Update `crates/kernel/runtime/README.md` module descriptions.
 
 Verification:
