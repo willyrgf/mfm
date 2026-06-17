@@ -1,6 +1,6 @@
 # RFC: Refactor Runtime Scheduler Into Explicit FSM Lifecycles
 
-Status: draft
+Status: reviewed
 
 This RFC proposes a breaking refactor of the typed runtime scheduler. The goal is to make runtime
 execution easier to reason about by splitting the current broad scheduler orchestration into small,
@@ -945,6 +945,30 @@ Names can change during implementation. The important part is that each module h
 boundary.
 
 ## Migration Plan
+
+### Phasing, Sizing, And Ownership
+
+Rough effort and owning surfaces, to help sequencing. Effort is relative (S/M/L), not a commitment.
+Phases 1–3 are the backward-compatible runtime decomposition and can proceed once the two judgment
+calls (IO-free core, serial/global exclusion) are accepted. Phases 4 and 6 are the high-blast-radius
+event-schema slices and should each land as one coordinated, test-backed change.
+
+| Phase | Effort | Primary owning surfaces | Notes |
+|---|---|---|---|
+| 0 Baselines | M | `mfm-runtime`, `mfm-store`, `mfm-replay`, `mfm-app` tests | Golden + behavior baselines before any move |
+| 1 Run admission + binding | M–L | `mfm-runtime` (admission, binding), `mfm-app` (assembly) | No schema/cert change; `BootstrapRun` stays certified |
+| 2 Pure transition | M | `mfm-runtime` (frontier, transition) | Decision/dispatch split; saga projection step |
+| 3 Attempt lifecycle types | M | `mfm-runtime` (attempt typestates) | Gated on the IO-free-core and serial/global decisions |
+| 4 Interruption event schema | L | `mfm-events`, `mfm-store`, `mfm-replay`, `stream-store-postgres`, `mfm-app` (+CLI/REST status) | Highest blast radius; one compatibility-aware slice |
+| 5 Terminalize observed failures | M | `mfm-runtime`, `mfm-store` | Failure-safe path; `retryable` classification |
+| 6 Classify framework lifecycles | L | `mfm-runtime` (framework), `mfm-store`, `mfm-replay` | Framework start/terminal split; replay goldens |
+| 7 Attempt recovery lifecycle | M | `mfm-runtime`, `mfm-store` (open-attempt projection) | Resume sweep; global exclusion from Phase 2 |
+| 8 Side-effect + saga/ACDC boundary | L | `mfm-runtime`, `mfm-store`, `mfm-replay`, `mfm-manual-auth` | Most subtle; proof freshness, forward fence, recovery |
+| 9 Remove scheduler bulk | S–M | `mfm-runtime`, docs | Facade reduction; delete duplicated driver seam |
+
+Critical path: 1 → 2 → 3 unblock the decomposition; 4 must precede 5–8 (they depend on the
+interruption disposition and the failure-safe path); 6 and 8 carry the replay/storage migration
+weight.
 
 ### Design Contract Updates
 
