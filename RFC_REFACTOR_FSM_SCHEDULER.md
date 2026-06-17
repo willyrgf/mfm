@@ -137,11 +137,15 @@ attempt lifecycle drives it before the next decision. No intra-run parallelism i
 - **Precondition conflict is re-decide, not failure.** A failed stream-position precondition means
   the view is stale. The driver reloads verified history and re-runs the transition decision. The
   resource-lane retry loop is one instance of this general pattern.
-- **Open-attempt exclusion is global per run.** If any semantic attempt is open, the only legal
-  decisions are `ContinueAttempt` for that attempt or recovery ownership; no unrelated `StartNode`.
-  The typestate witness is therefore `NoOpenAttempt` (global). A finer-grained witness (per-node or
-  resource-lane scoped) that would allow independent concurrent work is explicitly deferred and must
-  not be introduced by silently changing scheduling semantics.
+- **Open-attempt exclusion is the default, with one preserved exception.** While a semantic attempt
+  is open, the scheduler continues that attempt and does not start unrelated work — except a node
+  parked on a cross-run resource lane (`ResourceLaneBlocked`) is temporarily skipped so independent
+  ready nodes can advance within the same drive pass. This matches today's behavior: the lane-blocked
+  skip is the only interleaving; there is no other intra-run parallelism. The typestate witnesses are
+  `NoOpenAttempt` for the default case plus a resource-lane-scoped independence witness for the skip.
+  Finer-grained (per-node) parallelism beyond the lane skip remains deferred. A global `NoOpenAttempt`
+  rule is explicitly rejected: it would stall a run that today progresses on independent nodes while
+  one node waits on a lane held by another run.
 - **Cross-run resource lanes are unchanged.** Lanes remain a store-admission concern across runs; a
   run blocks on a lane held by another run via `ResourceLaneBlocked`. That is the only cross-run
   concurrency and it is not expanded here.
@@ -257,7 +261,10 @@ it. The boundary is explicit:
   shape are unchanged; admission is an internal reorganization of who mints genesis authority.
 - **`RunStarted` semantics are clarified, not redefined on the wire.** "Admitted run authority, not
   framework-state execution" describes intent. The persisted `RunStarted` payload, its bundled
-  genesis attempt events, and its retention refs are preserved in Phase 1.
+  genesis attempt events, and its retention refs are preserved in Phase 1. Those bundled bootstrap
+  `StateAttemptStarted`/`StateAttemptCompleted` events are legacy compatibility evidence, not
+  new-model FSM state attempts; the "run admission is not a state attempt" rule describes the new
+  lifecycle, and reconciling the two is part of the deferred certification migration.
 - **Demoting or removing `BootstrapRun` from certified topology is deferred** to a separate
   certification/spec migration. It must not be done implicitly while extracting admission.
 - **If `BootstrapRun` is later removed**, that migration must plan for: spec-hash change, certificate
@@ -310,19 +317,22 @@ certified spec, bound runtime context, verified history, and pure hints to one `
 (attempt, recovery, side-effect, or framework). This section defines the decision; dispatch targets
 are in the Responsibility Split.
 
-Input:
+Input (to the pure decision):
 
 - `CertifiedRuntimeSpec`
 - `VerifiedRunHistory` or a shared verified run view
-- `BoundRuntimeContext`
 - currently blocked resource-lane hints, if any
+
+Binding existence is an admission invariant, so the pure decision does not consult
+`BoundRuntimeContext`; the attempt lifecycle (dispatch) uses it when constructing the selected
+attempt.
 
 Output:
 
 ```rust
 enum TransitionDecision {
     StartNode { node_id: NodeId },
-    ContinueAttempt { attempt_id: AttemptId },
+    ContinueAttempt { node_id: NodeId, attempt_id: AttemptId },
     StartRemediation { node_id: NodeId },
     AwaitManualResolution,
     ResolveSagaTerminal,
@@ -447,19 +457,22 @@ terminalizes attempt bookkeeping for the attempts where it is legal, but it does
 
 #### Interruption Legality Matrix
 
-Interruption is not legal for every open attempt. The boundary is the side-effect uncertainty
-boundary:
+Interruption is not legal for every open attempt. The boundary is lane/ledger acquisition, not the
+later `InvocationStarted` boundary: a side-effect attempt acquires a resource lane and an open ledger
+at `SideEffectInvocationPrepared`, before `InvocationStarted`. Standalone interruption must never
+leave a lane held or a ledger open.
 
 | Open attempt kind | `StateAttemptInterrupted` legal as standalone closure? |
 |---|---|
 | Pure or read attempt | Yes |
-| Side-effect attempt before `InvocationStarted` | Yes (no external mutation could have happened) |
-| Side-effect attempt at or after `InvocationStarted` | No. The attempt stays **Open** and is owned by `SideEffectLifecycle` recovery until it proves not-submitted, recovers submission/receipt/confirmation, or records ambiguity paired with a non-retryable `StateAttemptFailed` |
+| Side-effect attempt holding no resource lane and no open ledger (before `SideEffectInvocationPrepared`) | Yes (nothing to release) |
+| Side-effect attempt that has acquired a lane or open ledger (at/after `SideEffectInvocationPrepared`, including past `InvocationStarted`) | No. It stays **Open** and is owned by `SideEffectLifecycle` recovery, which records the terminal side-effect evidence that releases the lane — pre-boundary: not-submitted/terminal failure; post-boundary: the full recovery outcomes |
 
-So "interruption terminalizes bookkeeping" applies only to the legal rows. A post-`InvocationStarted`
-side-effect attempt is never closed by interruption alone; it remains open until side-effect recovery
-reaches an evidence-backed outcome. This removes the earlier ambiguity between "interruption is always
-terminal" and "interruption cannot close a post-boundary attempt."
+So "interruption terminalizes bookkeeping" applies only to the legal rows. A side-effect attempt that
+holds a lane or open ledger is never closed by interruption alone; it remains open until side-effect
+recovery records the terminal evidence that releases the lane. This removes the earlier ambiguity
+between "interruption is always terminal" and "interruption cannot close a lane/ledger-holding
+attempt."
 
 #### Failure-Safe Terminalization
 
@@ -494,10 +507,11 @@ Interruption is an attempt-level disposition, not a run-level mode:
 
 - It does not add a variant to the public `RunMode` enum (`forward`, `remediating`, `manual_blocked`,
   `completed`, `compensated`, `manually_resolved`, `failed_without_acdc_claim`).
-- A run with an interrupted-but-retryable attempt remains in its current `RunMode` (typically
-  `forward`); recovery re-attempts it.
-- Public status may expose attempt disposition (started / completed / failed / interrupted)
-  separately from `RunMode`, but interruption never by itself produces a terminal run outcome.
+- Interruption is retryable by definition: the run remains in its current `RunMode` (typically
+  `forward`) and recovery re-attempts the node. A terminal, non-retryable outcome is always
+  `StateAttemptFailed`, never interruption; the interrupted event carries no `retryable` flag.
+- Public status exposes attempt disposition (started / completed / failed / interrupted) separately
+  from `RunMode`; interruption never by itself produces a terminal run outcome.
 - Retry/resume policy for interrupted attempts is driven by `AttemptRecoveryLifecycle`, not by saga.
   Saga engagement is reserved for non-retryable `StateAttemptFailed` and forward ambiguity.
 
@@ -613,8 +627,10 @@ Rules:
 - `InvocationStarted` remains the durable uncertainty boundary.
 - After that boundary, generic runtime failure cannot simply become ordinary `StateAttemptFailed`
   unless recovery evidence proves no external mutation ambiguity remains.
-- `StateAttemptInterrupted` cannot close an attempt that crossed `InvocationStarted` by itself.
-  Recovery must first prove one of the side-effect outcomes below.
+- `StateAttemptInterrupted` cannot close a side-effect attempt that holds a resource lane or open
+  ledger (anything at/after `SideEffectInvocationPrepared`, including past `InvocationStarted`).
+  Recovery must record the terminal side-effect evidence that releases the lane before, or as part of,
+  closing the attempt.
 - Signed raw transactions and bearer mutation material remain transient and must not be retained as
   typed semantic artifacts.
 - Resource lanes, idempotency input, claim owner, fencing token, invocation epoch, ledger purpose,
@@ -732,9 +748,10 @@ The strongest type boundaries should be:
   genesis authority.
 - `BoundRuntimeContext::construct` is the only path from raw runner/capability/framework registries
   to executable runtime authority.
-- `FrontierScheduler::decide` accepts only certified spec authority, bound runtime authority, a
-  verified run view, and pure scheduling hints. It does not receive stores, artifact stores,
-  runners, capabilities, transports, or signers.
+- `FrontierScheduler::decide` accepts only certified spec authority, a verified run view, and pure
+  scheduling hints. It does not receive `BoundRuntimeContext`, stores, artifact stores, runners,
+  capabilities, transports, or signers; binding existence is an admission invariant the pure decision
+  does not re-check.
 - Transition output is a closed `TransitionDecision` enum, not implicit control flow hidden in
   scheduler branches.
 - Attempt execution uses typestate phases such as:
@@ -835,7 +852,7 @@ The refactor should make these components explicit:
 
 | Component | Owns | Must not own |
 |---|---|---|
-| `RunAdmissionLifecycle` | Certify authored run material, bind executable authority, commit atomic run genesis | Domain state execution, transition decisions |
+| `RunAdmissionLifecycle` | Verify the certified bundle, bind executable authority, commit atomic run genesis | Certification/lowering, domain state execution, transition decisions |
 | `BoundRuntimeContextLoader` | Construct executable runner/capability/framework binding authority from certified spec and registries | Store writes, transition decisions, handler execution |
 | `VerifiedRunContextLoader` | Load stream, verify spec/certificate/artifacts, construct verified history view | Runner execution, transition decisions |
 | `FrontierScheduler` | Pure transition decision from certified spec, bound runtime context, and verified history | Store writes, artifact staging, live IO |
@@ -950,7 +967,7 @@ boundary.
 
 Rough effort and owning surfaces, to help sequencing. Effort is relative (S/M/L), not a commitment.
 Phases 1–3 are the backward-compatible runtime decomposition and can proceed once the two judgment
-calls (IO-free core, serial/global exclusion) are accepted. Phases 4 and 6 are the high-blast-radius
+calls (IO-free core, serial execution with lane-scoped exclusion) are accepted. Phases 4 and 6 are the high-blast-radius
 event-schema slices and should each land as one coordinated, test-backed change.
 
 | Phase | Effort | Primary owning surfaces | Notes |
@@ -962,7 +979,7 @@ event-schema slices and should each land as one coordinated, test-backed change.
 | 4 Interruption event schema | L | `mfm-events`, `mfm-store`, `mfm-replay`, `stream-store-postgres`, `mfm-app` (+CLI/REST status) | Highest blast radius; one compatibility-aware slice |
 | 5 Terminalize observed failures | M | `mfm-runtime`, `mfm-store` | Failure-safe path; `retryable` classification |
 | 6 Classify framework lifecycles | L | `mfm-runtime` (framework), `mfm-store`, `mfm-replay` | Framework start/terminal split; replay goldens |
-| 7 Attempt recovery lifecycle | M | `mfm-runtime`, `mfm-store` (open-attempt projection) | Resume sweep; global exclusion from Phase 2 |
+| 7 Attempt recovery lifecycle | M | `mfm-runtime`, `mfm-store` (open-attempt projection) | Resume sweep; exclusion rule from Phase 2 |
 | 8 Side-effect + saga/ACDC boundary | L | `mfm-runtime`, `mfm-store`, `mfm-replay`, `mfm-manual-auth` | Most subtle; proof freshness, forward fence, recovery |
 | 9 Remove scheduler bulk | S–M | `mfm-runtime`, docs | Facade reduction; delete duplicated driver seam |
 
@@ -1037,26 +1054,35 @@ Add or identify tests for:
   selections specialized by `FrameworkNodeSpec` (not separate variants).
 - Introduce a saga projection step that derives engagement, quiescence, obligations, manual block,
   and terminal proof availability from certified spec plus verified history.
-- Implement global per-run open-attempt exclusion (`NoOpenAttempt`) per the Execution And Concurrency
-  Model; finer-grained (per-node or resource-lane) witnesses are deferred. Do not silently change
-  current scheduling semantics while extracting the lifecycle.
+- Preserve today's open-attempt exclusion: `NoOpenAttempt` for unrelated work, plus the
+  resource-lane-scoped independence witness that lets independent nodes advance while a node is parked
+  on a lane. Do not introduce global exclusion; it would change current scheduling semantics.
 - Keep existing behavior behind the old scheduler facade.
 
 ### Phase 3: Introduce Attempt Lifecycle Types
 
 - Add `AttemptLifecycle`, `AttemptStart`, `AttemptInvocation`, `AttemptTerminalPlan`, and
   `AttemptTerminalCommit` types.
-- Route ordinary state attempts through the lifecycle with no intended event-shape change yet.
+- Route ordinary state attempts through the lifecycle with no event-stream change yet. In particular,
+  keep input/config materialization *before* the `StateAttemptStarted` commit in this phase, matching
+  today: a materialization failure must still produce no started event. Reordering materialization to
+  after the start commit is an event-semantics change deferred to Phase 5.
 - Keep store writes in `CommitPlanner` and store admission APIs.
 
 ### Phase 4: Migrate Event Schema For Interruption
 
 - Add `StateAttemptInterrupted` as a durable event, not a structured failure alias.
+- Define as mandatory contracts (not optional): the `StateAttemptInterrupted` payload fields, the
+  `AttemptStatus::Interrupted` projection, and the public attempt-disposition field. Interruption is
+  retryable by definition and carries no `retryable` flag.
 - Add the `Interrupted` attempt disposition to the store projection, distinct from `Open` and
-  `Failed`, and enforce the interruption legality matrix (no standalone interruption at or after
-  `InvocationStarted`).
+  `Failed`, and enforce the interruption legality matrix (no standalone interruption for an attempt
+  holding a resource lane or open ledger, i.e. at/after `SideEffectInvocationPrepared`).
 - Update event structs, stream store admission, projections, replay, app status, Postgres storage,
   and tests in one compatibility-aware slice.
+- `KernelEventPayload` is a closed v1 enum; all readers (store admission, projection, replay, Postgres
+  codec, app status) must be upgraded to handle the new variant before any writer emits it — no
+  mixed-version readers. Gate emission behind deployment readiness if rollout is staged.
 - In Postgres storage, add the new event to the codec and the `AttemptStatus` projection variant;
   projection tables are rebuildable indexes (no destructive migration), but rebuild must handle
   streams with and without the new event.
@@ -1070,6 +1096,10 @@ Add or identify tests for:
 ### Phase 5: Terminalize Observed Failures
 
 - Add the failure-safe terminalization path.
+- Move input/config materialization to after `StateAttemptStarted` (the event-semantics change
+  deferred from Phase 3), now that failure-safe terminalization can capture post-start materialization
+  failures. This is a deliberate stream-content change for failing materializations and must land with
+  its replay/projection/golden updates.
 - Derive `retryable` on the failure-safe path from certified policy plus failure classification,
   never from runner output, and ensure it matches any paired side-effect terminal retryability.
 - Convert handler errors, materialization errors, and output validation errors inside a valid
@@ -1094,7 +1124,8 @@ Add or identify tests for:
 ### Phase 7: Attempt Recovery Lifecycle
 
 - Detect open attempts from verified history.
-- Enforce the chosen open-attempt exclusion rule from Phase 2.
+- Enforce the open-attempt exclusion rule from Phase 2 (`NoOpenAttempt` plus the resource-lane-scoped
+  independence witness).
 - Resume, terminalize, mark interrupted, or delegate to side-effect recovery based on certified
   state effect and recorded evidence.
 - Keep operational manual recovery separate from saga manual resolution.
@@ -1146,7 +1177,8 @@ Additional required tests:
 - side-effect open attempt after `InvocationStarted` cannot be generically failed without recovery
   evidence
 - side-effect ambiguity must pair with non-retryable terminal failure in the same atomic commit
-- interruption is rejected as a standalone closure for an attempt at or after `InvocationStarted`
+- interruption is rejected as a standalone closure for an attempt holding a resource lane or open
+  ledger (at/after `SideEffectInvocationPrepared`)
 - failure-safe `StateAttemptFailed` sets `retryable` from policy/classification and matches paired
   side-effect terminal retryability
 - operational manual recovery cannot emit saga manual-resolution events
@@ -1158,6 +1190,13 @@ Additional required tests:
   and project unchanged
 - storage failure before terminal commit leaves recoverable open attempt state
 - invalid runner output becomes redacted failure evidence, not a panic or silent block
+- a pre-boundary side-effect attempt holding a resource lane cannot be closed by standalone
+  interruption; recovery releases the lane via terminal side-effect evidence
+- an independent node still advances while another node is parked on a cross-run resource lane
+- CLI and REST JSON status contracts cover the interrupted attempt disposition and the new framework
+  event order
+- Postgres codec and projection round-trip the new event and rebuild projections for streams with and
+  without it
 
 ## First-Cut Decisions
 
@@ -1188,10 +1227,12 @@ The following decisions define the first implementation direction:
   and shared; only the thin driver seam that loads the stream, awaits runners, stages artifacts, and
   appends commits remains split sync/async. A later async-primary cleanup can drop the sync driver
   without touching lifecycle semantics.
-- Execution stays strictly serial per run with global open-attempt exclusion (`NoOpenAttempt`).
-  Single-writer-per-run plus expected-seq commit preconditions provide cross-driver safety; liveness
-  is never inferred from the stream. Finer-grained independence witnesses and intra-run concurrency
-  are deferred.
+- Execution stays serial per run: one attempt is driven at a time, with the one preserved exception
+  that a node parked on a cross-run resource lane is skipped so independent ready nodes advance
+  (today's behavior). Open-attempt exclusion is `NoOpenAttempt` plus a resource-lane-scoped
+  independence witness, not global exclusion. Single-writer-per-run plus expected-seq commit
+  preconditions provide cross-driver safety; liveness is never inferred from the stream. Finer-grained
+  per-node parallelism is deferred.
 
 ## Bottom Line
 
