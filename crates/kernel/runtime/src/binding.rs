@@ -102,6 +102,19 @@ impl BoundRuntimeContext {
         &self.runner_executables
     }
 
+    pub(crate) fn validate_run_started_executables(
+        &self,
+        run_started: &events::RunStarted,
+    ) -> Result<()> {
+        if run_started.runner_executables != self.runner_executables {
+            return Err(RuntimeError::RunnerBinding(
+                "RunStarted runner executable identities do not match bound runtime context"
+                    .to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Returns the bound capability authority for a certified node.
     pub fn capability_authority_for(&self, node_id: &NodeId) -> Option<&BoundCapabilityAuthority> {
         self.capability_authorities.get(node_id)

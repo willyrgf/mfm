@@ -38,6 +38,7 @@ use crate::{
 pub(crate) struct RuntimeRunView {
     pub(crate) stream: Vec<store::KernelEventEnvelope>,
     pub(crate) projections: store::ProjectionSnapshot,
+    pub(crate) run_started: events::RunStarted,
     pub(crate) seed_cells: BTreeMap<CellId, events::SeedCellRef>,
     pub(crate) config_artifacts: BTreeMap<String, store::ArtifactEvidenceRef>,
     pub(crate) artifact_refs: BTreeMap<ArtifactId, CommittedArtifactReference>,
@@ -215,6 +216,7 @@ impl VerifiedRunContextLoader {
     ) -> Result<VerifiedRunContext> {
         let bound_context = self.runtime_contexts.load(runtime_spec)?;
         let view = RuntimeRunView::from_committed_stream(runtime_spec, &committed)?;
+        bound_context.validate_run_started_executables(&view.run_started)?;
         Ok(VerifiedRunContext {
             run_id: committed.run_id().clone(),
             spec_hash: runtime_spec.spec_hash().clone(),
@@ -391,6 +393,7 @@ impl RuntimeRunView {
         Ok(Self {
             stream: stream.to_vec(),
             projections,
+            run_started,
             seed_cells,
             config_artifacts,
             artifact_refs,

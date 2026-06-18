@@ -3260,6 +3260,19 @@ async fn run_admission_returns_bound_context_with_capability_and_framework_autho
         framework.kind(),
         BoundFrameworkHandlerKind::PublicOutputRender
     );
+
+    let run_started = store
+        .load_run_stream(&fixture.run_id)
+        .into_iter()
+        .find_map(|event| match event.payload().clone() {
+            events::KernelEventPayload::RunStarted(payload) => Some(payload),
+            _ => None,
+        })
+        .expect("RunStarted payload");
+    assert_eq!(
+        run_started.runner_executables,
+        authority.bound_context().runner_executables()
+    );
 }
 
 #[tokio::test]
@@ -3298,6 +3311,58 @@ async fn resume_rejects_missing_downstream_binding_before_attempt_start() {
     assert!(
         matches!(error, RuntimeError::RunnerBinding(message) if message.contains("missing runner binding"))
     );
+    assert_eq!(
+        store.load_run_stream(&fixture.run_id).len(),
+        stream_len_before
+    );
+}
+
+#[tokio::test]
+async fn resume_rejects_runner_executable_identity_mismatch_before_attempt_start() {
+    let fixture = fixture();
+    let launch_scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &launch_scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    let stream_len_before = store.load_run_stream(&fixture.run_id).len();
+
+    let mut changed_registry = ErasedRunnerRegistry::new();
+    let mut changed_a = binding(
+        fixture.descriptor_a.clone(),
+        "pure",
+        RecordingRunner {
+            expected_caps: Vec::new(),
+            output_artifact: artifact(0xa1),
+            output_digest: content(0xa2),
+        },
+    );
+    changed_a.executable.binary_digest = content(0xee);
+    changed_registry.register(changed_a).expect("binding a");
+    changed_registry
+        .register(binding(
+            fixture.descriptor_b.clone(),
+            "read",
+            RecordingRunner {
+                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                output_artifact: artifact(0xb1),
+                output_digest: content(0xb2),
+            },
+        ))
+        .expect("binding b");
+    let resume_scheduler = test_scheduler(changed_registry);
+    let error = resume_scheduler
+        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+        .await
+        .expect_err("changed executable identity should reject bound context");
+
+    assert!(matches!(error, RuntimeError::RunnerBinding(message)
+            if message.contains("runner executable identities")));
     assert_eq!(
         store.load_run_stream(&fixture.run_id).len(),
         stream_len_before

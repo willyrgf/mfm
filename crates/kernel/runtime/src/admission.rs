@@ -71,6 +71,7 @@ impl RunAdmissionLifecycle {
     ) -> Result<RunAdmissionAuthority> {
         bound_context.validate_admission_authority(runtime_spec)?;
         let view = RuntimeRunView::from_stream(runtime_spec, run_id, stream)?;
+        bound_context.validate_run_started_executables(&view.run_started)?;
         Ok(RunAdmissionAuthority {
             run_id: run_id.clone(),
             spec_hash: runtime_spec.spec_hash().clone(),
