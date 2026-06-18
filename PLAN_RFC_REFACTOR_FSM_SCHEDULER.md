@@ -1,6 +1,6 @@
 # Plan: Implement RFC_REFACTOR_FSM_SCHEDULER
 
-Status: completed; local validation passed, full Nix CI blocked by local disk capacity
+Status: completed and validated
 
 Completion notes, 2026-06-18:
 
@@ -31,17 +31,17 @@ Completion notes, 2026-06-18:
   - `cargo test -p mfm-replay`
   - `cargo test -p mfm-stream-store-postgres --all-features --no-run`
 - `nix run .#ci` evidence:
-  - Default state attempt failed before tests with `REGISTRY_CORRUPT` because the existing Nixfied
-    registry metadata did not match the selected identity.
-  - Retried with an isolated `NIXFIED_STATE_DIR`. That run passed `ci.check.fmt`,
-    `ci.check.clippy`, `ci.check.cargo-metadata-contract`, and
-    `ci.check.architecture-namespace-contract`, then failed during
-    `ci.test.workspace-tests.nextest-run` because the filesystem was full (`No space left on
-    device`; `/` was 100% used with about 8 MB free). This is recorded as an environmental CI
-    blockage, not a passing full CI run.
-- Live Postgres parity tests remain unrun outside Nix because no `DATABASE_URL` is configured in this
-  shell. The Postgres crate compiles with parity tests enabled via
-  `cargo test -p mfm-stream-store-postgres --all-features --no-run`.
+  - Passed on 2026-06-18 with isolated state:
+    `NIXFIED_STATE_DIR=/tmp/mfm-nixfied-ci.UkFW4I`.
+  - Run id: `run-806297-1781792642754687448`.
+  - Passed nodes: `ci.check.fmt`, `ci.check.clippy`, `ci.check.cargo-metadata-contract`,
+    `ci.check.architecture-namespace-contract`, `ci.test.workspace-tests.nextest-run`,
+    `ci.test.workspace-tests.doc-tests`, `ci.parity-cli-keystore`,
+    `ci.test-db.postgres-sqlx-check`, `ci.test-db.parity-postgres-state-events`,
+    `ci.test-db.parity-postgres-rest-api`, `ci.parity-reth-contracts`, and
+    `ci.parity-reth-portfolio`.
+  - The managed Postgres and Reth parity suites are therefore evidenced by the Nix CI run; no
+    external `DATABASE_URL` was required in this shell.
 
 This plan divides `RFC_REFACTOR_FSM_SCHEDULER.md` into reviewable commits for this branch. The
 branch is allowed to make breaking changes. Do not add compatibility shims for old persisted streams,
