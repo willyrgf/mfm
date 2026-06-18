@@ -1348,8 +1348,107 @@ mod tests {
             let value = response_json(response).await;
             assert_eq!(value["status"], "success");
             assert_eq!(value["data"]["run"]["run_mode"], "forward");
+            assert!(
+                value["data"]["run"]["attempt_dispositions"].is_array(),
+                "route {route} must expose attempt-level dispositions"
+            );
             assert_eq!(value["data"]["public_output"], serde_json::Value::Null);
         }
+    }
+
+    #[test]
+    fn success_response_preserves_run_status_attempt_and_saga_contract() {
+        let response = ok(json!({
+            "run": {
+                "run_id": "run:sha256-jcs-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "spec_hash": "spec:sha256-jcs-v1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "run_mode": "failed_without_acdc_claim",
+                "saga": {
+                    "policy": {
+                        "variant": "compensate_completed",
+                        "manual_authorization": null,
+                        "on_remediation_unresolved": "manual_resolution"
+                    },
+                    "obligations": [],
+                    "resource_ledgers": [],
+                    "resource_lanes": [{
+                        "namespace": "mfm.test.account_nonce",
+                        "key": "wallet-1",
+                        "holding_run_id": "run:sha256-jcs-v1:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                        "holding_ledger_key": "ledger-forward",
+                        "holding_ledger_purpose": "forward",
+                        "holding_forward_ledger_key": null,
+                        "holding_node_id": "node:sha256-jcs-v1:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                        "holding_attempt_id": "attempt:sha256-jcs-v1:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                        "invocation_epoch": 1
+                    }],
+                    "manual_block_reason": "remediation_ambiguous",
+                    "required_manual_authorization": null,
+                    "terminal_resolution": {
+                        "outcome": "failed_without_acdc_claim",
+                        "claim": "none"
+                    }
+                },
+                "attempt_dispositions": [
+                    {
+                        "node_id": "node:sha256-jcs-v1:1111111111111111111111111111111111111111111111111111111111111111",
+                        "attempt_id": "attempt:sha256-jcs-v1:2222222222222222222222222222222222222222222222222222222222222222",
+                        "disposition": "started",
+                        "attempt_no": 1,
+                        "retryable": null,
+                        "output_cell_id": null
+                    },
+                    {
+                        "node_id": "node:sha256-jcs-v1:3333333333333333333333333333333333333333333333333333333333333333",
+                        "attempt_id": "attempt:sha256-jcs-v1:4444444444444444444444444444444444444444444444444444444444444444",
+                        "disposition": "interrupted",
+                        "attempt_no": null,
+                        "retryable": null,
+                        "output_cell_id": null
+                    },
+                    {
+                        "node_id": "node:sha256-jcs-v1:5555555555555555555555555555555555555555555555555555555555555555",
+                        "attempt_id": "attempt:sha256-jcs-v1:6666666666666666666666666666666666666666666666666666666666666666",
+                        "disposition": "failed",
+                        "attempt_no": null,
+                        "retryable": false,
+                        "output_cell_id": null
+                    },
+                    {
+                        "node_id": "node:sha256-jcs-v1:7777777777777777777777777777777777777777777777777777777777777777",
+                        "attempt_id": "attempt:sha256-jcs-v1:8888888888888888888888888888888888888888888888888888888888888888",
+                        "disposition": "completed",
+                        "attempt_no": null,
+                        "retryable": null,
+                        "output_cell_id": "cell:sha256-jcs-v1:9999999999999999999999999999999999999999999999999999999999999999"
+                    }
+                ],
+                "scheduler_status": "blocked",
+                "head_seq": 42
+            }
+        }));
+
+        assert_eq!(response["status"], "success");
+        let dispositions = response["data"]["run"]["attempt_dispositions"]
+            .as_array()
+            .expect("attempt dispositions");
+        assert_eq!(dispositions.len(), 4);
+        assert_eq!(dispositions[0]["disposition"], "started");
+        assert_eq!(dispositions[1]["disposition"], "interrupted");
+        assert_eq!(dispositions[2]["disposition"], "failed");
+        assert_eq!(dispositions[3]["disposition"], "completed");
+        assert_eq!(
+            response["data"]["run"]["saga"]["resource_lanes"][0]["key"],
+            "wallet-1"
+        );
+        assert_eq!(
+            response["data"]["run"]["saga"]["manual_block_reason"],
+            "remediation_ambiguous"
+        );
+        assert_eq!(
+            response["data"]["run"]["saga"]["terminal_resolution"]["outcome"],
+            "failed_without_acdc_claim"
+        );
     }
 
     #[tokio::test]

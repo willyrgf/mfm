@@ -12,12 +12,12 @@ use mfm_spec::v1::{
 };
 use mfm_store::v1::{
     build_committed_batch, event_artifact_requirements, payload_canonical_json,
-    payload_from_json_value, ArtifactEvidenceRef, AttemptTerminal, CellTerminalProjection,
-    CommitArtifactEvidenceSet, CommitKey, CommitOrdinal, CommitOutcome, CommitPreconditions,
-    CommittedRunStream, EventArtifactReferenceSource, ForwardLedgerClassification,
-    InMemoryTypedRunStore, KernelEventEnvelope, ManualBlockReason, ManualResolutionProjection,
-    NonEmptyPayloadBatch, PersistedKernelEventRecord, PreparedCommit, PreparedCommitPlan,
-    PreparedTypedCommit, ProjectionSnapshot, RequiredRunState, ResourceLaneKey,
+    payload_from_json_value, ArtifactEvidenceRef, AttemptStatus, AttemptTerminal,
+    CellTerminalProjection, CommitArtifactEvidenceSet, CommitKey, CommitOrdinal, CommitOutcome,
+    CommitPreconditions, CommittedRunStream, EventArtifactReferenceSource,
+    ForwardLedgerClassification, InMemoryTypedRunStore, KernelEventEnvelope, ManualBlockReason,
+    ManualResolutionProjection, NonEmptyPayloadBatch, PersistedKernelEventRecord, PreparedCommit,
+    PreparedCommitPlan, PreparedTypedCommit, ProjectionSnapshot, RequiredRunState, ResourceLaneKey,
     RunCompletionProjection, RunMode, RunStart, RunState, SagaAdmitToken, SagaEngagementProjection,
     SagaEngagementReason, SagaTerminal, SagaTerminalProof, SideEffectLedgerPhase, SideEffectPhase,
     StateAttemptStarted, StoreError, StreamSeq, TypedCommitRequest, TypedProjectionRead,
@@ -186,6 +186,14 @@ fn state_attempt_completed() -> KernelEventPayload {
         node_id: node_id(20),
         attempt_id: attempt_id(23),
         output_cell_id: cell_id(21),
+    })
+}
+
+fn state_attempt_interrupted() -> KernelEventPayload {
+    KernelEventPayload::StateAttemptInterrupted(events::StateAttemptInterrupted {
+        spec_hash: spec_hash(1),
+        node_id: node_id(20),
+        attempt_id: attempt_id(23),
     })
 }
 
@@ -2207,6 +2215,163 @@ fn duplicate_attempt_lifecycle_events_are_rejected() {
         duplicate_terminal,
         StoreError::DuplicateLogicalKey { .. } | StoreError::ProjectionConflict { .. }
     ));
+}
+
+#[test]
+fn state_attempt_interrupted_projects_retryable_terminal_without_saga_engagement() {
+    let run_id = run_id(60);
+    let mut store = InMemoryTypedRunStore::new();
+    store
+        .append_prepared_commit(run_start_request(run_id.clone(), "run-start"))
+        .expect("append run start");
+    store
+        .append_prepared_commit(typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("attempt-start").expect("commit key"),
+            payloads: vec![state_attempt_started()],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("append attempt start");
+    store
+        .append_prepared_commit(typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("attempt-interrupt").expect("commit key"),
+            payloads: vec![state_attempt_interrupted()],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("append attempt interruption");
+
+    let projection = store.projection_snapshot();
+    let attempt = projection
+        .attempts()
+        .find_map(|((projected_node_id, projected_attempt_id), projection)| {
+            if *projected_node_id == node_id(20) && *projected_attempt_id == attempt_id(23) {
+                Some(projection)
+            } else {
+                None
+            }
+        })
+        .expect("attempt projection");
+    assert!(matches!(&attempt.status, AttemptStatus::Interrupted));
+    assert!(projection.saga_engagement(&run_id).is_none());
+    assert_projection_codecs_round_trip(projection);
+}
+
+#[test]
+fn state_attempt_interrupted_rejects_duplicate_terminal_event() {
+    let run_id = run_id(61);
+    let mut store = InMemoryTypedRunStore::new();
+    store
+        .append_prepared_commit(run_start_request(run_id.clone(), "run-start"))
+        .expect("append run start");
+    store
+        .append_prepared_commit(typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("attempt-start").expect("commit key"),
+            payloads: vec![state_attempt_started()],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("append attempt start");
+    store
+        .append_prepared_commit(typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("attempt-interrupt").expect("commit key"),
+            payloads: vec![state_attempt_interrupted()],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("append attempt interruption");
+
+    let duplicate = store
+        .append_prepared_commit(typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("attempt-interrupt-2").expect("commit key"),
+            payloads: vec![state_attempt_interrupted()],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect_err("duplicate interruption rejects");
+    assert!(matches!(duplicate, StoreError::ProjectionConflict { .. }));
+}
+
+#[test]
+fn state_attempt_interrupted_rejects_after_side_effect_authority() {
+    let run_id = run_id(62);
+    let mut store = InMemoryTypedRunStore::new();
+    store
+        .append_prepared_commit(run_start_request(run_id.clone(), "run-start"))
+        .expect("append run start");
+    append_side_effect_prepare(&mut store, &run_id);
+
+    let error = store
+        .append_prepared_commit(typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("sidefx-attempt-interrupt").expect("commit key"),
+            payloads: vec![KernelEventPayload::StateAttemptInterrupted(
+                events::StateAttemptInterrupted {
+                    spec_hash: spec_hash(1),
+                    node_id: node_id(70),
+                    attempt_id: attempt_id(72),
+                },
+            )],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect_err("interruption after side-effect authority rejects");
+    assert!(matches!(error, StoreError::ProjectionConflict { .. }));
+}
+
+#[test]
+fn state_attempt_failed_rejects_after_side_effect_authority_without_terminal_evidence() {
+    let run_id = run_id(63);
+    let mut store = InMemoryTypedRunStore::new();
+    store
+        .append_prepared_commit(run_start_request(run_id.clone(), "run-start"))
+        .expect("append run start");
+    append_side_effect_prepare(&mut store, &run_id);
+
+    let error = store
+        .append_prepared_commit(typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("sidefx-attempt-failed-alone").expect("commit key"),
+            payloads: vec![side_effect_attempt_failed(true)],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect_err("failure after side-effect authority rejects without terminal evidence");
+    assert_projection_conflict_contains(
+        error,
+        "side-effect attempt failure requires terminal side-effect evidence",
+    );
+
+    let request = typed_commit_request! {
+        run_id: run_id.clone(),
+        expected_next_seq: store.expected_next_seq(&run_id),
+        commit_key: CommitKey::new("forged-sidefx-attempt-failed-alone").expect("commit key"),
+        payloads: vec![side_effect_attempt_failed(true)],
+        required_artifacts: Vec::new(),
+        preconditions: CommitPreconditions::default(),
+    };
+    let batch =
+        build_committed_batch(&request, store.expected_next_seq(&run_id)).expect("forged batch");
+    let mut stream = store.load_run_stream(&run_id);
+    stream.extend(batch.events().iter().cloned());
+    let rebuild = ProjectionSnapshot::rebuild_from_run_stream(&stream)
+        .expect_err("projection rebuild rejects forged generic failure");
+    assert_projection_conflict_contains(
+        rebuild,
+        "side-effect attempt failure requires terminal side-effect evidence",
+    );
 }
 
 #[test]

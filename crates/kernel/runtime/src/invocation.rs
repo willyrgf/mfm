@@ -9,7 +9,10 @@ use mfm_ids::{
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 
-use crate::CertifiedRuntimeSpec;
+use crate::history::{
+    committed_config_artifact, materialize_inputs, recorded_facts_for_attempt, RuntimeRunView,
+};
+use crate::{CertifiedRuntimeSpec, Result};
 
 /// Prepared, store-verified invocation supplied to an erased node runner.
 ///
@@ -101,6 +104,95 @@ impl<'a> PreparedRunnerInvocation<'a> {
 
     pub(crate) fn run_stream(&self) -> &'a [store::KernelEventEnvelope] {
         self.run_stream
+    }
+}
+
+/// Builder for sealed runner invocation authority.
+pub(crate) struct InvocationBuilder<'a> {
+    runtime_spec: &'a CertifiedRuntimeSpec,
+    run_id: &'a RunId,
+    node: &'a spec::NodeSpec,
+    descriptor: &'a spec::StateDescriptorIdentity,
+    output_cell: &'a spec::CellSpec,
+    attempt_id: &'a AttemptId,
+    attempt_no: u32,
+    view: &'a RuntimeRunView,
+}
+
+/// Certified inputs needed to construct a sealed runner invocation.
+pub(crate) struct InvocationBuilderInput<'a> {
+    /// Runtime authority wrapper for the certified spec.
+    pub(crate) runtime_spec: &'a CertifiedRuntimeSpec,
+    /// Run id being executed.
+    pub(crate) run_id: &'a RunId,
+    /// Certified node being invoked.
+    pub(crate) node: &'a spec::NodeSpec,
+    /// Certified state descriptor for the node.
+    pub(crate) descriptor: &'a spec::StateDescriptorIdentity,
+    /// Certified output cell for the node.
+    pub(crate) output_cell: &'a spec::CellSpec,
+    /// Store-owned attempt id.
+    pub(crate) attempt_id: &'a AttemptId,
+    /// Attempt number for this node.
+    pub(crate) attempt_no: u32,
+    /// Verified latest run view used for materialization.
+    pub(crate) view: &'a RuntimeRunView,
+}
+
+impl<'a> InvocationBuilder<'a> {
+    /// Creates an invocation builder for one certified node attempt.
+    pub(crate) fn new(input: InvocationBuilderInput<'a>) -> Self {
+        let InvocationBuilderInput {
+            runtime_spec,
+            run_id,
+            node,
+            descriptor,
+            output_cell,
+            attempt_id,
+            attempt_no,
+            view,
+        } = input;
+        Self {
+            runtime_spec,
+            run_id,
+            node,
+            descriptor,
+            output_cell,
+            attempt_id,
+            attempt_no,
+            view,
+        }
+    }
+
+    /// Builds the sealed invocation from certified spec and verified run-stream state.
+    pub(crate) fn build(self) -> Result<PreparedRunnerInvocation<'a>> {
+        let config_artifact = committed_config_artifact(self.node, self.view)?;
+        let inputs = materialize_inputs(self.runtime_spec, self.node, self.view)?;
+        let caps = CertifiedRuntimeCapabilities::new(
+            self.node.node_id.clone(),
+            self.node.capability_bindings.clone(),
+        );
+        let recorded_facts = recorded_facts_for_attempt(
+            &self.view.projections,
+            &self.node.node_id,
+            self.attempt_id,
+        )?;
+        Ok(PreparedRunnerInvocation {
+            runtime_spec: self.runtime_spec,
+            run_id: self.run_id,
+            spec_hash: self.runtime_spec.spec_hash(),
+            node: self.node,
+            descriptor: self.descriptor,
+            output_cell: self.output_cell,
+            attempt_id: self.attempt_id,
+            attempt_no: self.attempt_no,
+            config_artifact,
+            inputs,
+            caps,
+            recorded_facts,
+            projections: &self.view.projections,
+            run_stream: &self.view.stream,
+        })
     }
 }
 

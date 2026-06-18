@@ -243,6 +243,9 @@ Remediation ledgers use the same side-effect protocol as forward ledgers and car
 
 Public status reports semantic `RunMode`: `forward`, `remediating`, `manual_blocked`,
 `completed`, `compensated`, `manually_resolved`, or `failed_without_acdc_claim`.
+Attempt lifecycle is reported separately as committed attempt dispositions: `started`, `completed`,
+`failed`, or `interrupted`. Interruption is retryable attempt bookkeeping, not a run mode, saga
+engagement, compensated outcome, AC/DC claim, or manual-resolution authority.
 `Compensated` is never a vacuous outcome; it requires owed obligations closed by certified remedial
 evidence. `FailedWithoutAcdcClaim` is the honest terminal result when policy permits failure
 without a compensation or AC/DC-equivalence proof.
@@ -289,7 +292,7 @@ corruption, or low-level storage contract fixtures.
 
 The authoritative event stream contains:
 
-- run start and attempt lifecycle events
+- run start and attempt lifecycle events, including interrupted-attempt terminal bookkeeping
 - seed/config/fact/artifact evidence
 - cell terminal events
 - side-effect ledger events
@@ -355,30 +358,38 @@ verified run history, it returns exactly one decision: run a certified node, blo
 frontier is executable, or complete because all certified terminal conditions are satisfied. It does
 not write the store, stage artifacts, construct live capabilities, or call runners.
 
-For a runnable node, runtime materializes state inputs from certified binding trees and prior typed
-cell evidence, checks runner identity and capability availability, and constructs a sealed runner
-invocation. Runners receive only scoped typed inputs, allowed capabilities, and erased context
-surfaces. They return typed payload intent, staged artifacts, side-effect evidence, or sealed handles
-but cannot append to the run stream.
+For a new ordinary runnable node attempt, runtime first appends `StateAttemptStarted` from
+certified attempt authority. It then materializes state inputs from certified binding trees and
+prior typed cell evidence, checks runner identity and capability availability, and constructs a
+sealed runner invocation. If post-start materialization or runner-output validation fails inside a
+valid started attempt, runtime stages a redacted diagnostic artifact and records a non-retryable
+`StateAttemptFailed` plus runtime-evidence retention from minimal trusted attempt authority. Corrupt
+history, missing deployment bindings, store errors, artifact-store outages, and side-effect attempts
+with acquired ledger authority remain non-semantic runtime or recovery concerns. Runners receive
+only scoped typed inputs, allowed capabilities, and erased context surfaces. They return typed
+payload intent, staged artifacts, side-effect evidence, or sealed handles but cannot append to the
+run stream.
 
 The commit planner owns all production execution appends. Bootstrap verifies and stages launch
 material, executes the sealed `BootstrapRun` genesis state, and commits `RunStarted`, bootstrap
 attempt lifecycle, launch artifact references, retention refs, and admitted artifact evidence in one
 purpose-specific prepared store commit. Ordinary states, `PublicOutputRender`,
-`ProjectRetentionManifest`, and `CompleteRun` use the same guarded commit path: staged artifacts are
-persisted before the prepared commit, output and reference bindings are checked against the
-certified graph, side-effect protocol rules are enforced, commit preconditions are built, and
-run-store artifact evidence is admitted only in the commit that first references it. Production
-callers submit `PreparedCommit<Purpose>` values through `PreparedCommitPlan`; the store treats the
-inner `PreparedTypedCommit` as a typed batch representation and rejects purpose mismatches, missing
-`SagaAdmitToken`, missing `SagaTerminalProof`, or artifact evidence that was not admitted in the
-same commit. Failed commits may leave orphan artifact-store bytes, but orphan run-store evidence is
-not authority.
+`ProjectRetentionManifest`, `CompleteRun`, and `ResolveSagaTerminal` append
+`StateAttemptStarted` before sealed invocation construction, then use the same guarded terminal
+commit path: staged artifacts are persisted before the prepared commit, output and reference
+bindings are checked against the certified graph, side-effect protocol rules are enforced, commit
+preconditions are built, and run-store artifact evidence is admitted only in the commit that first
+references it. Production callers submit `PreparedCommit<Purpose>` values through
+`PreparedCommitPlan`; the store treats the inner `PreparedTypedCommit` as a typed batch
+representation and rejects purpose mismatches, missing `SagaAdmitToken`, missing
+`SagaTerminalProof`, or artifact evidence that was not admitted in the same commit. Failed commits
+may leave orphan artifact-store bytes, but orphan run-store evidence is not authority.
 
 Framework lifecycle work is represented by certified graph nodes, not ad hoc runtime side effects.
-`BootstrapRun`, `PublicOutputRender`, `ProjectRetentionManifest`, and `CompleteRun` are sealed
-framework runners with the same append-only stream, rebuilt projection, deterministic scheduler,
-and guarded commit rules as domain states.
+`BootstrapRun` remains the genesis run-admission state. `PublicOutputRender`,
+`ProjectRetentionManifest`, `CompleteRun`, and `ResolveSagaTerminal` are sealed framework runners
+with the same append-only stream, rebuilt projection, deterministic scheduler, started-before-run
+attempt lifecycle, and guarded commit rules as domain states.
 
 Resume loads the stored certified spec, rebuilds the verified history and projection from the run
 stream, verifies completed cell and side-effect evidence against the spec, then advances only from a
@@ -394,7 +405,8 @@ digests, the canonical proof claim matches the event and prefix exactly, signatu
 belong to the certified authority snapshot, and quorum is satisfied. Runtime and replay build this
 through `ManualResolutionPrefixAuthority` and `ManualResolutionProofAuthority`; only a
 `VerifiedManualResolutionForPrefix` can authorize the corresponding manual-resolution commit or
-terminal saga proof.
+terminal saga proof. Terminal saga proof construction re-verifies that authority from the current
+verified prefix and retained artifacts; scheduler-local proof caches are not authority.
 
 ## Side Effects
 
@@ -417,6 +429,8 @@ execution, resume, and replay. The store exposes legal phase information through
 `SideEffectLedgerState`, so transition admission is a typed state-machine check instead of an
 optional-field projection heuristic. Forward side-effect ambiguity is admissible only when paired in
 the same commit with the non-retryable attempt failure that engages saga handling.
+The store is the source of truth for forward-fence admission after saga engagement; runtime
+early-rejects are scheduling convenience and cannot substitute for store validation.
 
 Prepared-invocation artifacts may retain unsigned mutation plans, expected hashes, and non-secret
 signer references. Signed raw transactions are bearer mutation material and remain transient

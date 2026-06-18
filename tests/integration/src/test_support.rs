@@ -2324,6 +2324,7 @@ fn replay_artifacts_for(
             | events::KernelEventPayload::PublicOutputRenderFailed(_)
             | events::KernelEventPayload::StateAttemptCompleted(_)
             | events::KernelEventPayload::StateAttemptFailed(_)
+            | events::KernelEventPayload::StateAttemptInterrupted(_)
             | events::KernelEventPayload::RunCompleted(_)
             | events::KernelEventPayload::RetentionRefsAppended(_) => {}
         }

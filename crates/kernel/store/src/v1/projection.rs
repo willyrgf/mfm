@@ -15,6 +15,9 @@ pub(super) fn apply_projection(
         KernelEventPayload::StateAttemptCompleted(payload) => {
             apply_attempt_completed(projections, &envelope.event_id, payload)?;
         }
+        KernelEventPayload::StateAttemptInterrupted(payload) => {
+            apply_attempt_interrupted(projections, &envelope.event_id, payload)?;
+        }
         KernelEventPayload::StateAttemptFailed(payload) => {
             apply_attempt_failed(projections, envelope, payload)?;
         }
@@ -174,6 +177,21 @@ fn apply_attempt_completed(
     )
 }
 
+fn apply_attempt_interrupted(
+    projections: &mut ProjectionSnapshot,
+    event_id: &EventId,
+    payload: &events::StateAttemptInterrupted,
+) -> Result<()> {
+    require_no_side_effect_authority_for_interruption(projections, payload)?;
+    update_attempt_terminal_projection(
+        projections,
+        &payload.node_id,
+        &payload.attempt_id,
+        event_id.clone(),
+        AttemptStatus::Interrupted,
+    )
+}
+
 fn apply_attempt_failed(
     projections: &mut ProjectionSnapshot,
     envelope: &KernelEventEnvelope,
@@ -201,6 +219,24 @@ fn apply_attempt_failed(
                 },
             },
         );
+    }
+    Ok(())
+}
+
+fn require_no_side_effect_authority_for_interruption(
+    projections: &ProjectionSnapshot,
+    payload: &events::StateAttemptInterrupted,
+) -> Result<()> {
+    let has_side_effect = projections.side_effects.values().any(|side_effect| {
+        side_effect.intent.node_id == payload.node_id
+            && side_effect.intent.attempt_id == payload.attempt_id
+    });
+    if has_side_effect {
+        return Err(StoreError::ProjectionConflict {
+            key: format!("attempt:{}:{}", payload.node_id, payload.attempt_id),
+            message: "interruption is not legal after side-effect authority was acquired"
+                .to_owned(),
+        });
     }
     Ok(())
 }

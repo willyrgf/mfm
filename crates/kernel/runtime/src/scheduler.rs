@@ -1,31 +1,32 @@
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex};
+use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use mfm_events::v1 as events;
-use mfm_ids::{AttemptId, NodeId, RunId};
-use mfm_manual_auth::VerifiedManualResolutionForPrefix;
-use mfm_spec::v1 as spec;
+use mfm_ids::{NodeId, RunId};
 use mfm_store::v1 as store;
 
+use crate::admission::{RunAdmissionAuthority, RunAdmissionLifecycle};
 use crate::artifacts::RuntimeArtifactStore;
+use crate::attempt::{
+    async_error_is_stale_expected_next_seq, store_error_is_stale_expected_next_seq,
+    AttemptLifecycle, AttemptRunStatus,
+};
+use crate::binding::{BoundRuntimeContext, BoundRuntimeContextLoader};
 use crate::commit::{
-    CommitPlanner, PreparedRunLaunch, PreparedStagedArtifact, RunLaunchEvidence,
-    RunnerOutputCommitInput,
+    AttemptInterruptionCommitInput, CommitPlanner, PreparedRunLaunch, PreparedStagedArtifact,
+    RunLaunchEvidence,
 };
 use crate::error::async_store_error;
-use crate::frontier::{
-    scheduler_decision_with_blocked_nodes, AttemptPlan, RunnableNode, SchedulerDecision,
-};
-use crate::history::{
-    committed_config_artifact, materialize_inputs, recorded_facts_for_attempt, RuntimeRunView,
-};
-use crate::invocation::{CertifiedRuntimeCapabilities, ErasedRunCtx, PreparedRunnerInvocation};
+use crate::framework_lifecycle::FrameworkAttemptLifecycle;
+use crate::history::RuntimeRunView;
 use crate::manual_resolution::{
-    build_manual_resolution_prefix_authority, prepare_manual_resolution_commit,
-    verify_manual_resolution_for_prefix, ManualResolutionEvidenceArtifact,
+    build_manual_resolution_prefix_authority, certified_manual_resolution_spec,
+    prepare_manual_resolution_commit, verify_manual_resolution_for_prefix,
+    ManualResolutionEvidenceArtifact,
 };
-use crate::runners::{ErasedRunnerBinding, ErasedRunnerRegistry};
-use crate::{attempt_id, CertifiedRuntimeSpec, Result, RuntimeError};
+use crate::runners::ErasedRunnerRegistry;
+use crate::transition::{TransitionAttempt, TransitionDecision, TransitionLifecycle};
+use crate::{CertifiedRuntimeSpec, Result};
 
 /// Result of one serial scheduler drive call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,120 +52,19 @@ pub struct ManualResolutionRequest {
     pub note: Option<events::ManualResolutionNote>,
 }
 
-struct RunnerInvocationInput<'a> {
-    runtime_spec: &'a CertifiedRuntimeSpec,
-    run_id: &'a RunId,
-    node: &'a spec::NodeSpec,
-    descriptor: &'a spec::StateDescriptorIdentity,
-    output_cell: &'a spec::CellSpec,
-    attempt_id: &'a AttemptId,
-    attempt_no: u32,
-    view: &'a RuntimeRunView,
-}
-
-struct FrameworkNodeAttemptInput<'a> {
-    runtime_spec: &'a CertifiedRuntimeSpec,
-    run_id: &'a RunId,
-    view: &'a RuntimeRunView,
-    runnable: RunnableNode<'a>,
-    descriptor: &'a spec::StateDescriptorIdentity,
-    output_cell: &'a spec::CellSpec,
-    binding: ErasedRunnerBinding,
-}
-
 enum DriveStepStatus {
     Advanced,
+    StaleView,
     Blocked,
     PublicOutputProjected,
     BlockedOnResourceLane { node_id: NodeId, advanced: bool },
 }
 
-enum NodeRunStatus {
-    Advanced,
-    BlockedOnResourceLane { node_id: NodeId, advanced: bool },
-}
-
-fn prepare_runner_invocation<'a>(
-    input: RunnerInvocationInput<'a>,
-) -> Result<PreparedRunnerInvocation<'a>> {
-    let RunnerInvocationInput {
-        runtime_spec,
-        run_id,
-        node,
-        descriptor,
-        output_cell,
-        attempt_id,
-        attempt_no,
-        view,
-    } = input;
-    let config_artifact = committed_config_artifact(node, view)?;
-    let inputs = materialize_inputs(runtime_spec, node, view)?;
-    let caps =
-        CertifiedRuntimeCapabilities::new(node.node_id.clone(), node.capability_bindings.clone());
-    let recorded_facts = recorded_facts_for_attempt(&view.projections, &node.node_id, attempt_id)?;
-    Ok(PreparedRunnerInvocation {
-        runtime_spec,
-        run_id,
-        spec_hash: runtime_spec.spec_hash(),
-        node,
-        descriptor,
-        output_cell,
-        attempt_id,
-        attempt_no,
-        config_artifact,
-        inputs,
-        caps,
-        recorded_facts,
-        projections: &view.projections,
-        run_stream: &view.stream,
-    })
-}
-
-fn resource_lane_block_for_request(
-    projections: &store::ProjectionSnapshot,
-    request: &store::TypedCommitRequest,
-) -> Option<store::ResourceLaneKey> {
-    request.payloads().iter().find_map(|payload| {
-        let events::KernelEventPayload::SideEffectInvocationPrepared(payload) = payload else {
-            return None;
-        };
-        let resource_key = payload.resource_key.as_ref()?;
-        let lane_key = store::ResourceLaneKey::from_evidence(resource_key);
-        let holder =
-            store::SideEffectLedgerRef::new(request.run_id().clone(), payload.ledger_key.clone());
-        projections
-            .resource_lane(&lane_key)
-            .filter(|projection| projection.holder != holder)
-            .map(|_| lane_key)
-    })
-}
-
-fn request_has_resource_lane_prepare(request: &store::TypedCommitRequest) -> bool {
-    request.payloads().iter().any(|payload| {
-        matches!(
-            payload,
-            events::KernelEventPayload::SideEffectInvocationPrepared(payload)
-                if payload.resource_key.is_some()
-        )
-    })
-}
-
-fn store_error_is_resource_lane_block(error: &store::StoreError) -> bool {
-    matches!(error, store::StoreError::ResourceLaneBlocked { .. })
-}
-
-fn async_error_is_resource_lane_block(error: &impl store::StoreErrorInspection) -> bool {
-    error
-        .as_store_error()
-        .is_some_and(store_error_is_resource_lane_block)
-}
-
 /// Serial typed scheduler.
 #[derive(Clone)]
 pub struct SerialTypedScheduler {
-    runners: ErasedRunnerRegistry,
+    runtime_contexts: BoundRuntimeContextLoader,
     artifact_store: Arc<dyn RuntimeArtifactStore>,
-    manual_terminal_proofs: Arc<Mutex<BTreeMap<RunId, VerifiedManualResolutionForPrefix>>>,
 }
 
 impl SerialTypedScheduler {
@@ -174,9 +74,8 @@ impl SerialTypedScheduler {
         artifact_store: Arc<dyn RuntimeArtifactStore>,
     ) -> Self {
         Self {
-            runners,
+            runtime_contexts: BoundRuntimeContextLoader::new(runners),
             artifact_store,
-            manual_terminal_proofs: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -188,12 +87,13 @@ impl SerialTypedScheduler {
         evidence: RunLaunchEvidence,
         expected_next_seq: store::StreamSeq,
     ) -> Result<PreparedRunLaunch> {
-        CommitPlanner::prepare_run_launch(
-            &self.runners,
+        let bound_context = self.runtime_contexts.load(runtime_spec)?;
+        RunAdmissionLifecycle::prepare_run_launch(
             runtime_spec,
             run_id,
             evidence,
             expected_next_seq,
+            &bound_context,
         )
     }
 
@@ -208,6 +108,22 @@ impl SerialTypedScheduler {
         Ok(store.append_prepared_commit_plan(launch.commit.into())?)
     }
 
+    /// Appends genesis and reloads verified admission authority for the run.
+    pub async fn start_run_admitted<S: store::TypedRunEventStore + ?Sized>(
+        &self,
+        store: &mut S,
+        runtime_spec: &CertifiedRuntimeSpec,
+        launch: PreparedRunLaunch,
+    ) -> Result<RunAdmissionAuthority> {
+        let run_id = launch.commit.request().run_id().clone();
+        self.stage_prepared_artifacts(&launch.artifacts_to_stage)
+            .await?;
+        store.append_prepared_commit_plan(launch.commit.into())?;
+        let stream = store.load_run_stream(&run_id);
+        let bound_context = self.runtime_contexts.load(runtime_spec)?;
+        RunAdmissionLifecycle::admitted_run_authority(runtime_spec, &run_id, &stream, bound_context)
+    }
+
     /// Appends the prepared typed genesis commit through an async typed store.
     pub async fn start_run_async<S: store::AsyncTypedRunEventStore + ?Sized>(
         &self,
@@ -220,6 +136,28 @@ impl SerialTypedScheduler {
             .append_prepared_commit_plan(launch.commit.into())
             .await
             .map_err(async_store_error)
+    }
+
+    /// Appends async genesis and reloads verified admission authority for the run.
+    pub async fn start_run_admitted_async<S: store::AsyncTypedRunEventStore + ?Sized>(
+        &self,
+        store: &S,
+        runtime_spec: &CertifiedRuntimeSpec,
+        launch: PreparedRunLaunch,
+    ) -> Result<RunAdmissionAuthority> {
+        let run_id = launch.commit.request().run_id().clone();
+        self.stage_prepared_artifacts(&launch.artifacts_to_stage)
+            .await?;
+        store
+            .append_prepared_commit_plan(launch.commit.into())
+            .await
+            .map_err(async_store_error)?;
+        let stream = store
+            .load_run_stream(&run_id)
+            .await
+            .map_err(async_store_error)?;
+        let bound_context = self.runtime_contexts.load(runtime_spec)?;
+        RunAdmissionLifecycle::admitted_run_authority(runtime_spec, &run_id, &stream, bound_context)
     }
 
     /// Appends a verified manual resolution after staging evidence and authorization artifacts.
@@ -241,10 +179,6 @@ impl SerialTypedScheduler {
             build_manual_resolution_prefix_authority(store, runtime_spec, run_id, manual.clone())?;
         let verified =
             verify_manual_resolution_for_prefix(prefix, outcome, &evidence_artifact, proof_bytes)?;
-        self.manual_terminal_proofs
-            .lock()
-            .map_err(|_| RuntimeError::Store("manual proof cache lock was poisoned".to_owned()))?
-            .insert(run_id.clone(), verified.clone());
         let stream = store.load_run_stream(run_id);
         let saga = store
             .projection_snapshot()
@@ -277,6 +211,7 @@ impl SerialTypedScheduler {
                 .await?
             {
                 DriveStepStatus::Advanced => return Ok(SchedulerStatus::Advanced),
+                DriveStepStatus::StaleView => continue,
                 DriveStepStatus::Blocked => return Ok(SchedulerStatus::Blocked),
                 DriveStepStatus::PublicOutputProjected => {
                     return Ok(SchedulerStatus::PublicOutputProjected);
@@ -306,6 +241,7 @@ impl SerialTypedScheduler {
                 .await?
             {
                 DriveStepStatus::Advanced => advanced = true,
+                DriveStepStatus::StaleView => continue,
                 DriveStepStatus::BlockedOnResourceLane {
                     node_id,
                     advanced: step_advanced,
@@ -336,6 +272,7 @@ impl SerialTypedScheduler {
                 .await?
             {
                 DriveStepStatus::Advanced => return Ok(SchedulerStatus::Advanced),
+                DriveStepStatus::StaleView => continue,
                 DriveStepStatus::Blocked => return Ok(SchedulerStatus::Blocked),
                 DriveStepStatus::PublicOutputProjected => {
                     return Ok(SchedulerStatus::PublicOutputProjected);
@@ -365,6 +302,7 @@ impl SerialTypedScheduler {
                 .await?
             {
                 DriveStepStatus::Advanced => advanced = true,
+                DriveStepStatus::StaleView => continue,
                 DriveStepStatus::BlockedOnResourceLane {
                     node_id,
                     advanced: step_advanced,
@@ -388,21 +326,30 @@ impl SerialTypedScheduler {
         run_id: &RunId,
         blocked_nodes: &BTreeSet<NodeId>,
     ) -> Result<DriveStepStatus> {
+        let bound_context = self.runtime_contexts.load(runtime_spec)?;
         let view = RuntimeRunView::from_store(runtime_spec, run_id, store)?;
-        match scheduler_decision_with_blocked_nodes(runtime_spec, run_id, &view, blocked_nodes)? {
-            SchedulerDecision::Run(runnable) => {
+        match TransitionLifecycle::decide(runtime_spec, run_id, &view, blocked_nodes)? {
+            TransitionDecision::StartNode(attempt)
+            | TransitionDecision::StartRemediation(attempt)
+            | TransitionDecision::ResolveSagaTerminal(attempt)
+            | TransitionDecision::ContinueAttempt(attempt) => {
                 match self
-                    .run_node_attempt(store, runtime_spec, run_id, &view, runnable)
+                    .run_node_attempt(store, runtime_spec, run_id, &view, &bound_context, attempt)
                     .await?
                 {
-                    NodeRunStatus::Advanced => Ok(DriveStepStatus::Advanced),
-                    NodeRunStatus::BlockedOnResourceLane { node_id, advanced } => {
+                    AttemptRunStatus::Advanced => Ok(DriveStepStatus::Advanced),
+                    AttemptRunStatus::StaleView => Ok(DriveStepStatus::StaleView),
+                    AttemptRunStatus::BlockedOnResourceLane { node_id, advanced } => {
                         Ok(DriveStepStatus::BlockedOnResourceLane { node_id, advanced })
                     }
                 }
             }
-            SchedulerDecision::Blocked => Ok(DriveStepStatus::Blocked),
-            SchedulerDecision::Completed => Ok(DriveStepStatus::PublicOutputProjected),
+            TransitionDecision::InterruptAttempt(attempt) => {
+                self.interrupt_attempt(store, runtime_spec, run_id, &view, attempt)
+            }
+            TransitionDecision::AwaitManualResolution => Ok(DriveStepStatus::Blocked),
+            TransitionDecision::Blocked => Ok(DriveStepStatus::Blocked),
+            TransitionDecision::PublicOutputProjected => Ok(DriveStepStatus::PublicOutputProjected),
         }
     }
 
@@ -413,25 +360,102 @@ impl SerialTypedScheduler {
         run_id: &RunId,
         blocked_nodes: &BTreeSet<NodeId>,
     ) -> Result<DriveStepStatus> {
+        let bound_context = self.runtime_contexts.load(runtime_spec)?;
         let stream = store
             .load_run_stream(run_id)
             .await
             .map_err(async_store_error)?;
         let view = RuntimeRunView::from_stream(runtime_spec, run_id, &stream)?;
-        match scheduler_decision_with_blocked_nodes(runtime_spec, run_id, &view, blocked_nodes)? {
-            SchedulerDecision::Run(runnable) => {
+        match TransitionLifecycle::decide(runtime_spec, run_id, &view, blocked_nodes)? {
+            TransitionDecision::StartNode(attempt)
+            | TransitionDecision::StartRemediation(attempt)
+            | TransitionDecision::ResolveSagaTerminal(attempt)
+            | TransitionDecision::ContinueAttempt(attempt) => {
                 match self
-                    .run_node_attempt_async(store, runtime_spec, run_id, &view, runnable)
+                    .run_node_attempt_async(
+                        store,
+                        runtime_spec,
+                        run_id,
+                        &view,
+                        &bound_context,
+                        attempt,
+                    )
                     .await?
                 {
-                    NodeRunStatus::Advanced => Ok(DriveStepStatus::Advanced),
-                    NodeRunStatus::BlockedOnResourceLane { node_id, advanced } => {
+                    AttemptRunStatus::Advanced => Ok(DriveStepStatus::Advanced),
+                    AttemptRunStatus::StaleView => Ok(DriveStepStatus::StaleView),
+                    AttemptRunStatus::BlockedOnResourceLane { node_id, advanced } => {
                         Ok(DriveStepStatus::BlockedOnResourceLane { node_id, advanced })
                     }
                 }
             }
-            SchedulerDecision::Blocked => Ok(DriveStepStatus::Blocked),
-            SchedulerDecision::Completed => Ok(DriveStepStatus::PublicOutputProjected),
+            TransitionDecision::InterruptAttempt(attempt) => {
+                self.interrupt_attempt_async(store, runtime_spec, run_id, &view, attempt)
+                    .await
+            }
+            TransitionDecision::AwaitManualResolution => Ok(DriveStepStatus::Blocked),
+            TransitionDecision::Blocked => Ok(DriveStepStatus::Blocked),
+            TransitionDecision::PublicOutputProjected => Ok(DriveStepStatus::PublicOutputProjected),
+        }
+    }
+
+    fn interrupt_attempt<S: store::TypedRunEventStore + ?Sized>(
+        &self,
+        store: &mut S,
+        runtime_spec: &CertifiedRuntimeSpec,
+        run_id: &RunId,
+        view: &RuntimeRunView,
+        attempt: TransitionAttempt<'_>,
+    ) -> Result<DriveStepStatus> {
+        let attempt_id = attempt.attempt_id.as_ref().ok_or_else(|| {
+            crate::RuntimeError::InvalidRunStream(format!(
+                "recovery interruption for node {} lacked an open attempt id",
+                attempt.node.node_id
+            ))
+        })?;
+        let commit = CommitPlanner::prepare_attempt_interruption(AttemptInterruptionCommitInput {
+            runtime_spec,
+            run_id,
+            node: attempt.node,
+            attempt_id,
+            view,
+        })?;
+        match store.append_prepared_commit_plan(commit) {
+            Ok(_) => Ok(DriveStepStatus::Advanced),
+            Err(error) if store_error_is_stale_expected_next_seq(&error) => {
+                Ok(DriveStepStatus::StaleView)
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    async fn interrupt_attempt_async<S: store::AsyncTypedRunEventStore + ?Sized>(
+        &self,
+        store: &S,
+        runtime_spec: &CertifiedRuntimeSpec,
+        run_id: &RunId,
+        view: &RuntimeRunView,
+        attempt: TransitionAttempt<'_>,
+    ) -> Result<DriveStepStatus> {
+        let attempt_id = attempt.attempt_id.as_ref().ok_or_else(|| {
+            crate::RuntimeError::InvalidRunStream(format!(
+                "recovery interruption for node {} lacked an open attempt id",
+                attempt.node.node_id
+            ))
+        })?;
+        let commit = CommitPlanner::prepare_attempt_interruption(AttemptInterruptionCommitInput {
+            runtime_spec,
+            run_id,
+            node: attempt.node,
+            attempt_id,
+            view,
+        })?;
+        match store.append_prepared_commit_plan(commit).await {
+            Ok(_) => Ok(DriveStepStatus::Advanced),
+            Err(error) if async_error_is_stale_expected_next_seq(&error) => {
+                Ok(DriveStepStatus::StaleView)
+            }
+            Err(error) => Err(async_store_error(error)),
         }
     }
 
@@ -441,199 +465,17 @@ impl SerialTypedScheduler {
         runtime_spec: &CertifiedRuntimeSpec,
         run_id: &RunId,
         view: &RuntimeRunView,
-        runnable: RunnableNode<'_>,
-    ) -> Result<NodeRunStatus> {
-        let node = runnable.node;
-        let descriptor = runtime_spec.state_descriptor_for_node(node)?;
-        let output_cell = runtime_spec.cell(&node.output_cell).ok_or_else(|| {
-            RuntimeError::InvalidSpec(format!(
-                "node {} output cell {} is missing",
-                node.node_id, node.output_cell
-            ))
-        })?;
-        let binding = self.runners.resolve(node, descriptor)?;
-        if matches!(
-            &node.framework,
-            Some(
-                spec::FrameworkNodeSpec::ProjectRetentionManifest(_)
-                    | spec::FrameworkNodeSpec::CompleteRun(_)
-                    | spec::FrameworkNodeSpec::ResolveSagaTerminal(_)
-            )
-        ) {
-            return self
-                .run_started_framework_node_attempt(
-                    store,
-                    FrameworkNodeAttemptInput {
-                        runtime_spec,
-                        run_id,
-                        view,
-                        runnable,
-                        descriptor,
-                        output_cell,
-                        binding,
-                    },
-                )
+        bound_context: &BoundRuntimeContext,
+        attempt: TransitionAttempt<'_>,
+    ) -> Result<AttemptRunStatus> {
+        if FrameworkAttemptLifecycle::owns_node(attempt.node) {
+            return FrameworkAttemptLifecycle::new(self.artifact_store.as_ref())
+                .run(store, runtime_spec, run_id, view, bound_context, attempt)
                 .await;
         }
-        let mut advanced = false;
-        let (attempt_id, attempt_no) = match runnable.attempt {
-            AttemptPlan::StartNew { attempt_no } => {
-                let attempt_id =
-                    attempt_id(run_id, runtime_spec.spec_hash(), &node.node_id, attempt_no)?;
-                prepare_runner_invocation(RunnerInvocationInput {
-                    runtime_spec,
-                    run_id,
-                    node,
-                    descriptor,
-                    output_cell,
-                    attempt_id: &attempt_id,
-                    attempt_no,
-                    view,
-                })?;
-                let start_commit = CommitPlanner::prepare_attempt_start(
-                    runtime_spec,
-                    run_id,
-                    node,
-                    &attempt_id,
-                    attempt_no,
-                    view,
-                )?;
-                store.append_prepared_commit_plan(start_commit.into())?;
-                advanced = true;
-                (attempt_id, attempt_no)
-            }
-            AttemptPlan::Continue {
-                attempt_id,
-                attempt_no,
-            } => (attempt_id, attempt_no),
-        };
-
-        let latest_stream = store.load_run_stream(run_id);
-        let latest_view = RuntimeRunView::from_stream(runtime_spec, run_id, &latest_stream)?;
-        let invocation = prepare_runner_invocation(RunnerInvocationInput {
-            runtime_spec,
-            run_id,
-            node,
-            descriptor,
-            output_cell,
-            attempt_id: &attempt_id,
-            attempt_no,
-            view: &latest_view,
-        })?;
-        let output = binding
-            .runner
-            .run_erased(ErasedRunCtx::from_prepared(&invocation))
-            .await?;
-        let terminal_output = CommitPlanner::prepare_runner_output(RunnerOutputCommitInput {
-            runtime_spec,
-            run_id,
-            node,
-            attempt_id: &attempt_id,
-            caps: invocation.caps(),
-            recorded_facts: invocation.recorded_facts(),
-            view: &latest_view,
-            saga_terminal_proof: None,
-            output,
-        })?;
-        if resource_lane_block_for_request(
-            store.projection_snapshot(),
-            terminal_output.commit.request(),
-        )
-        .is_some()
-        {
-            return Ok(NodeRunStatus::BlockedOnResourceLane {
-                node_id: node.node_id.clone(),
-                advanced,
-            });
-        }
-        let has_resource_lane_prepare =
-            request_has_resource_lane_prepare(terminal_output.commit.request());
-        self.stage_prepared_artifacts(&terminal_output.artifacts_to_stage)
-            .await?;
-        match store.append_prepared_commit_plan(terminal_output.commit) {
-            Ok(_) => Ok(NodeRunStatus::Advanced),
-            Err(error)
-                if has_resource_lane_prepare && store_error_is_resource_lane_block(&error) =>
-            {
-                Ok(NodeRunStatus::BlockedOnResourceLane {
-                    node_id: node.node_id.clone(),
-                    advanced,
-                })
-            }
-            Err(error) => Err(error.into()),
-        }
-    }
-
-    async fn run_started_framework_node_attempt<S: store::TypedRunEventStore + ?Sized>(
-        &self,
-        store: &mut S,
-        input: FrameworkNodeAttemptInput<'_>,
-    ) -> Result<NodeRunStatus> {
-        let FrameworkNodeAttemptInput {
-            runtime_spec,
-            run_id,
-            view,
-            runnable,
-            descriptor,
-            output_cell,
-            binding,
-        } = input;
-        let node = runnable.node;
-        let AttemptPlan::StartNew { attempt_no } = runnable.attempt else {
-            return Err(RuntimeError::InvalidRunStream(format!(
-                "framework lifecycle node {} attempt was split across commits",
-                node.node_id
-            )));
-        };
-        let attempt_id = attempt_id(run_id, runtime_spec.spec_hash(), &node.node_id, attempt_no)?;
-        let invocation = prepare_runner_invocation(RunnerInvocationInput {
-            runtime_spec,
-            run_id,
-            node,
-            descriptor,
-            output_cell,
-            attempt_id: &attempt_id,
-            attempt_no,
-            view,
-        })?;
-        let output = binding
-            .runner
-            .run_erased(ErasedRunCtx::from_prepared(&invocation))
-            .await?;
-        let proof = if matches!(
-            &node.framework,
-            Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_))
-        ) {
-            let manual = self
-                .verified_manual_resolution_for_terminal(runtime_spec, run_id, &view.stream)
-                .await?;
-            Some(crate::framework::saga_terminal_proof(
-                runtime_spec,
-                run_id,
-                &view.projections,
-                manual,
-            )?)
-        } else {
-            None
-        };
-        let terminal_output = CommitPlanner::prepare_started_runner_output(
-            RunnerOutputCommitInput {
-                runtime_spec,
-                run_id,
-                node,
-                attempt_id: &attempt_id,
-                caps: invocation.caps(),
-                recorded_facts: invocation.recorded_facts(),
-                view,
-                saga_terminal_proof: proof,
-                output,
-            },
-            attempt_no,
-        )?;
-        self.stage_prepared_artifacts(&terminal_output.artifacts_to_stage)
-            .await?;
-        store.append_prepared_commit_plan(terminal_output.commit)?;
-        Ok(NodeRunStatus::Advanced)
+        AttemptLifecycle::new(self.artifact_store.as_ref())
+            .run(store, runtime_spec, run_id, view, bound_context, attempt)
+            .await
     }
 
     async fn run_node_attempt_async<S: store::AsyncTypedRunEventStore + ?Sized>(
@@ -642,202 +484,17 @@ impl SerialTypedScheduler {
         runtime_spec: &CertifiedRuntimeSpec,
         run_id: &RunId,
         view: &RuntimeRunView,
-        runnable: RunnableNode<'_>,
-    ) -> Result<NodeRunStatus> {
-        let node = runnable.node;
-        let descriptor = runtime_spec.state_descriptor_for_node(node)?;
-        let output_cell = runtime_spec.cell(&node.output_cell).ok_or_else(|| {
-            RuntimeError::InvalidSpec(format!(
-                "node {} output cell {} is missing",
-                node.node_id, node.output_cell
-            ))
-        })?;
-        let binding = self.runners.resolve(node, descriptor)?;
-        if matches!(
-            &node.framework,
-            Some(
-                spec::FrameworkNodeSpec::ProjectRetentionManifest(_)
-                    | spec::FrameworkNodeSpec::CompleteRun(_)
-                    | spec::FrameworkNodeSpec::ResolveSagaTerminal(_)
-            )
-        ) {
-            return self
-                .run_started_framework_node_attempt_async(
-                    store,
-                    FrameworkNodeAttemptInput {
-                        runtime_spec,
-                        run_id,
-                        view,
-                        runnable,
-                        descriptor,
-                        output_cell,
-                        binding,
-                    },
-                )
+        bound_context: &BoundRuntimeContext,
+        attempt: TransitionAttempt<'_>,
+    ) -> Result<AttemptRunStatus> {
+        if FrameworkAttemptLifecycle::owns_node(attempt.node) {
+            return FrameworkAttemptLifecycle::new(self.artifact_store.as_ref())
+                .run_async(store, runtime_spec, run_id, view, bound_context, attempt)
                 .await;
         }
-        let mut advanced = false;
-        let (attempt_id, attempt_no) = match runnable.attempt {
-            AttemptPlan::StartNew { attempt_no } => {
-                let attempt_id =
-                    attempt_id(run_id, runtime_spec.spec_hash(), &node.node_id, attempt_no)?;
-                prepare_runner_invocation(RunnerInvocationInput {
-                    runtime_spec,
-                    run_id,
-                    node,
-                    descriptor,
-                    output_cell,
-                    attempt_id: &attempt_id,
-                    attempt_no,
-                    view,
-                })?;
-                let start_commit = CommitPlanner::prepare_attempt_start(
-                    runtime_spec,
-                    run_id,
-                    node,
-                    &attempt_id,
-                    attempt_no,
-                    view,
-                )?;
-                store
-                    .append_prepared_commit_plan(start_commit.into())
-                    .await
-                    .map_err(async_store_error)?;
-                advanced = true;
-                (attempt_id, attempt_no)
-            }
-            AttemptPlan::Continue {
-                attempt_id,
-                attempt_no,
-            } => (attempt_id, attempt_no),
-        };
-
-        let latest_stream = store
-            .load_run_stream(run_id)
+        AttemptLifecycle::new(self.artifact_store.as_ref())
+            .run_async(store, runtime_spec, run_id, view, bound_context, attempt)
             .await
-            .map_err(async_store_error)?;
-        let latest_view = RuntimeRunView::from_stream(runtime_spec, run_id, &latest_stream)?;
-        let invocation = prepare_runner_invocation(RunnerInvocationInput {
-            runtime_spec,
-            run_id,
-            node,
-            descriptor,
-            output_cell,
-            attempt_id: &attempt_id,
-            attempt_no,
-            view: &latest_view,
-        })?;
-        let output = binding
-            .runner
-            .run_erased(ErasedRunCtx::from_prepared(&invocation))
-            .await?;
-        let terminal_output = CommitPlanner::prepare_runner_output(RunnerOutputCommitInput {
-            runtime_spec,
-            run_id,
-            node,
-            attempt_id: &attempt_id,
-            caps: invocation.caps(),
-            recorded_facts: invocation.recorded_facts(),
-            view: &latest_view,
-            saga_terminal_proof: None,
-            output,
-        })?;
-        let has_resource_lane_prepare =
-            request_has_resource_lane_prepare(terminal_output.commit.request());
-        self.stage_prepared_artifacts(&terminal_output.artifacts_to_stage)
-            .await?;
-        match store
-            .append_prepared_commit_plan(terminal_output.commit)
-            .await
-        {
-            Ok(_) => Ok(NodeRunStatus::Advanced),
-            Err(error)
-                if has_resource_lane_prepare && async_error_is_resource_lane_block(&error) =>
-            {
-                Ok(NodeRunStatus::BlockedOnResourceLane {
-                    node_id: node.node_id.clone(),
-                    advanced,
-                })
-            }
-            Err(error) => Err(async_store_error(error)),
-        }
-    }
-
-    async fn run_started_framework_node_attempt_async<
-        S: store::AsyncTypedRunEventStore + ?Sized,
-    >(
-        &self,
-        store: &S,
-        input: FrameworkNodeAttemptInput<'_>,
-    ) -> Result<NodeRunStatus> {
-        let FrameworkNodeAttemptInput {
-            runtime_spec,
-            run_id,
-            view,
-            runnable,
-            descriptor,
-            output_cell,
-            binding,
-        } = input;
-        let node = runnable.node;
-        let AttemptPlan::StartNew { attempt_no } = runnable.attempt else {
-            return Err(RuntimeError::InvalidRunStream(format!(
-                "framework lifecycle node {} attempt was split across commits",
-                node.node_id
-            )));
-        };
-        let attempt_id = attempt_id(run_id, runtime_spec.spec_hash(), &node.node_id, attempt_no)?;
-        let invocation = prepare_runner_invocation(RunnerInvocationInput {
-            runtime_spec,
-            run_id,
-            node,
-            descriptor,
-            output_cell,
-            attempt_id: &attempt_id,
-            attempt_no,
-            view,
-        })?;
-        let output = binding
-            .runner
-            .run_erased(ErasedRunCtx::from_prepared(&invocation))
-            .await?;
-        let proof = if matches!(
-            &node.framework,
-            Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_))
-        ) {
-            let manual = self
-                .verified_manual_resolution_for_terminal(runtime_spec, run_id, &view.stream)
-                .await?;
-            Some(crate::framework::saga_terminal_proof(
-                runtime_spec,
-                run_id,
-                &view.projections,
-                manual,
-            )?)
-        } else {
-            None
-        };
-        let terminal_output = CommitPlanner::prepare_started_runner_output(
-            RunnerOutputCommitInput {
-                runtime_spec,
-                run_id,
-                node,
-                attempt_id: &attempt_id,
-                caps: invocation.caps(),
-                recorded_facts: invocation.recorded_facts(),
-                view,
-                saga_terminal_proof: proof,
-                output,
-            },
-            attempt_no,
-        )?;
-        self.stage_prepared_artifacts(&terminal_output.artifacts_to_stage)
-            .await?;
-        store
-            .append_prepared_commit_plan(terminal_output.commit)
-            .await
-            .map_err(async_store_error)?;
-        Ok(NodeRunStatus::Advanced)
     }
 
     async fn stage_prepared_artifacts(&self, artifacts: &[PreparedStagedArtifact]) -> Result<()> {
@@ -847,163 +504,5 @@ impl SerialTypedScheduler {
                 .await?;
         }
         Ok(())
-    }
-
-    async fn verified_manual_resolution_for_terminal(
-        &self,
-        runtime_spec: &CertifiedRuntimeSpec,
-        run_id: &RunId,
-        stream: &[store::KernelEventEnvelope],
-    ) -> Result<Option<mfm_manual_auth::VerifiedManualResolutionForPrefix>> {
-        if let Some(proof) = self
-            .manual_terminal_proofs
-            .lock()
-            .map_err(|_| RuntimeError::Store("manual proof cache lock was poisoned".to_owned()))?
-            .get(run_id)
-            .cloned()
-        {
-            return Ok(Some(proof));
-        }
-
-        let Some((manual_index, manual_payload)) =
-            stream
-                .iter()
-                .enumerate()
-                .find_map(|(index, event)| match event.payload() {
-                    events::KernelEventPayload::ManualResolutionRecorded(payload)
-                        if &payload.run_id == run_id =>
-                    {
-                        Some((index, payload))
-                    }
-                    _ => None,
-                })
-        else {
-            return Ok(None);
-        };
-
-        let prefix_stream = stream.get(..manual_index).ok_or_else(|| {
-            RuntimeError::InvalidRunStream(
-                "manual resolution prefix index was outside the run stream".to_owned(),
-            )
-        })?;
-        let prefix_projection = store::ProjectionSnapshot::rebuild_from_run_stream(prefix_stream)?;
-        let prefix_saga =
-            prefix_projection.derive_saga_projection(run_id, &runtime_spec.spec().saga);
-        if prefix_saga.run_mode != store::RunMode::ManualBlocked {
-            return Err(RuntimeError::InvalidRunStream(format!(
-                "manual resolution prefix requires ManualBlocked saga mode, found {}",
-                prefix_saga.run_mode.as_str()
-            )));
-        }
-        let reason = prefix_saga.manual_block_reason.ok_or_else(|| {
-            RuntimeError::InvalidRunStream("manual resolution prefix lacks block reason".to_owned())
-        })?;
-        let manual = certified_manual_resolution_spec(&runtime_spec.spec().saga)?.clone();
-        let prefix = mfm_manual_auth::ManualResolutionPrefixAuthority::new(
-            run_id.clone(),
-            runtime_spec.spec_hash().clone(),
-            stream[manual_index].seq().as_u64(),
-            crate::manual_resolution::manual_resolution_stream_prefix_digest(prefix_stream)?,
-            crate::manual_resolution::manual_resolution_block_reason(reason),
-            crate::manual_resolution::unresolved_manual_obligations_digest(&prefix_saga)?,
-            manual,
-        )
-        .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
-
-        let requirements = store::event_artifact_requirements(
-            &events::KernelEventPayload::ManualResolutionRecorded(manual_payload.clone()),
-        );
-        let evidence_requirement = requirements
-            .iter()
-            .find(|requirement| requirement.artifact_id == manual_payload.evidence_artifact_id)
-            .cloned()
-            .ok_or_else(|| {
-                RuntimeError::InvalidRunStream(
-                    "manual resolution evidence artifact requirement was missing".to_owned(),
-                )
-            })?;
-        let authorization_requirement = requirements
-            .iter()
-            .find(|requirement| requirement.artifact_id == manual_payload.authorization_artifact_id)
-            .cloned()
-            .ok_or_else(|| {
-                RuntimeError::InvalidRunStream(
-                    "manual resolution authorization artifact requirement was missing".to_owned(),
-                )
-            })?;
-        let evidence = self
-            .artifact_store
-            .read_retained_artifact(&evidence_requirement)
-            .await?;
-        let authorization = self
-            .artifact_store
-            .read_retained_artifact(&authorization_requirement)
-            .await?;
-        let evidence_media_type = evidence.evidence().media_type.clone();
-        let evidence_artifact = ManualResolutionEvidenceArtifact {
-            bytes: evidence.into_bytes(),
-            media_type: evidence_media_type,
-        };
-        let verified = verify_manual_resolution_for_prefix(
-            prefix,
-            manual_payload.outcome,
-            &evidence_artifact,
-            authorization.into_bytes(),
-        )?;
-        self.manual_terminal_proofs
-            .lock()
-            .map_err(|_| RuntimeError::Store("manual proof cache lock was poisoned".to_owned()))?
-            .insert(run_id.clone(), verified.clone());
-        Ok(Some(verified))
-    }
-}
-
-fn certified_manual_resolution_spec(
-    saga: &spec::SagaPolicySpec,
-) -> Result<&spec::ManualResolutionEvidenceSpec> {
-    match saga {
-        spec::SagaPolicySpec::ManualResolution { manual } => Ok(manual),
-        spec::SagaPolicySpec::CompensateCompleted {
-            on_remediation_unresolved: spec::RemediationUnresolvedSpec::ManualResolution { manual },
-        } => Ok(manual.as_ref()),
-        _ => Err(RuntimeError::InvalidRunStream(
-            "manual resolution requires certified manual policy".to_owned(),
-        )),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use mfm_ids::{DigestAlgorithm, DigestBytes};
-    use mfm_spec::v1::ResourceNamespace;
-
-    #[test]
-    fn resource_lane_block_detection_uses_typed_store_error() {
-        let lane_key = store::ResourceLaneKey {
-            namespace: ResourceNamespace::new("mfm.test.account_nonce").expect("namespace"),
-            key: events::ResourceKey::new("wallet-1").expect("resource key"),
-        };
-        let holder = store::SideEffectLedgerRef::new(
-            RunId::from_digest(
-                DigestAlgorithm::Sha256JcsV1,
-                DigestBytes::from_array([0x7a; 32]),
-            ),
-            events::SideEffectLedgerKey::new("ledger-key-1").expect("ledger key"),
-        );
-
-        let typed = store::StoreError::ResourceLaneBlocked {
-            lane_key: Box::new(lane_key),
-            holder: Box::new(holder),
-        };
-        assert!(store_error_is_resource_lane_block(&typed));
-        assert!(async_error_is_resource_lane_block(&typed));
-
-        let prose = store::StoreError::ProjectionConflict {
-            key: "resource_lane:mfm.test.account_nonce:wallet-1".to_owned(),
-            message: "resource lane already held by a different display message".to_owned(),
-        };
-        assert!(!store_error_is_resource_lane_block(&prose));
-        assert!(!async_error_is_resource_lane_block(&prose));
     }
 }

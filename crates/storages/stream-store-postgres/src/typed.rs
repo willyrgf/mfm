@@ -1248,10 +1248,10 @@ mod tests {
         ResourceNamespace, SagaPolicySpec, ValueLineageRef,
     };
     use mfm_store::v1::{
-        ArtifactEvidenceRef, CellTerminalProjection, CommitArtifactEvidenceSet, CommitKey,
-        CommitOutcome, CommitPreconditions, PreparedCommit, RequiredRunState, ResourceLaneKey,
-        SagaEngagementReason, SagaTerminal, SagaTerminalProof, SideEffectPhase, StoreError,
-        StreamSeq,
+        ArtifactEvidenceRef, AttemptStatus, CellTerminalProjection, CommitArtifactEvidenceSet,
+        CommitKey, CommitOutcome, CommitPreconditions, PreparedCommit, RequiredRunState,
+        ResourceLaneKey, SagaEngagementReason, SagaTerminal, SagaTerminalProof, SideEffectPhase,
+        StoreError, StreamSeq,
     };
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
     use sqlx::AssertSqlSafe;
@@ -1444,6 +1444,14 @@ mod tests {
             node_id: node_id(20),
             attempt_id: attempt_id(23),
             output_cell_id: cell_id(21),
+        })
+    }
+
+    fn state_attempt_interrupted() -> KernelEventPayload {
+        KernelEventPayload::StateAttemptInterrupted(events::StateAttemptInterrupted {
+            spec_hash: spec_hash(1),
+            node_id: node_id(20),
+            attempt_id: attempt_id(23),
         })
     }
 
@@ -2066,6 +2074,67 @@ mod tests {
             .await
             .expect("rebuild projections");
         assert_eq!(rebuilt, before);
+
+        drop_schema(&store, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn typed_interrupted_attempt_projection_persists_and_rebuilds_from_events() {
+        let (store, schema) = test_store().await;
+        let run = run_id(17);
+
+        append_prepared(
+            &store,
+            request(run.clone(), 1, "run-start", vec![run_started(run.clone())]),
+            vec![spec_artifact_ref(), certificate_artifact_ref()],
+        )
+        .await
+        .expect("run start");
+        append_prepared(
+            &store,
+            request(
+                run.clone(),
+                2,
+                "attempt-start",
+                vec![state_attempt_started()],
+            ),
+            Vec::new(),
+        )
+        .await
+        .expect("attempt start");
+        append_prepared(
+            &store,
+            request(
+                run.clone(),
+                3,
+                "attempt-interrupted",
+                vec![state_attempt_interrupted()],
+            ),
+            Vec::new(),
+        )
+        .await
+        .expect("attempt interrupted");
+
+        let before = store.projection_snapshot(&run).await.expect("projection");
+        let attempt = before
+            .attempt(&node_id(20), &attempt_id(23))
+            .expect("attempt projection");
+        assert!(matches!(&attempt.status, AttemptStatus::Interrupted));
+        assert!(before.saga_engagement(&run).is_none());
+
+        clear_projection_rows(&store, &run).await;
+        let rebuilt = store
+            .rebuild_projections_from_events(&run)
+            .await
+            .expect("rebuild projections");
+        assert_eq!(rebuilt, before);
+        assert!(matches!(
+            &rebuilt
+                .attempt(&node_id(20), &attempt_id(23))
+                .expect("rebuilt attempt projection")
+                .status,
+            AttemptStatus::Interrupted
+        ));
 
         drop_schema(&store, &schema).await;
     }

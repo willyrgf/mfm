@@ -626,6 +626,23 @@ pub struct TypedResourceLaneHolderStatus {
     pub invocation_epoch: u32,
 }
 
+/// Public attempt lifecycle disposition derived from committed attempt projections.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypedAttemptDispositionStatus {
+    /// Node id that owns the attempt.
+    pub node_id: String,
+    /// Attempt id.
+    pub attempt_id: String,
+    /// Attempt disposition: `started`, `completed`, `failed`, or `interrupted`.
+    pub disposition: String,
+    /// Attempt number when the attempt is still open.
+    pub attempt_no: Option<u32>,
+    /// Retryability for failed attempts.
+    pub retryable: Option<bool>,
+    /// Output cell id for completed attempts.
+    pub output_cell_id: Option<String>,
+}
+
 /// Public terminal resolution summary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TypedTerminalResolutionStatus {
@@ -646,6 +663,8 @@ pub struct TypedRunResponse {
     pub run_mode: TypedRunMode,
     /// Derived saga status.
     pub saga: TypedSagaStatus,
+    /// Attempt-level dispositions, distinct from semantic run mode.
+    pub attempt_dispositions: Vec<TypedAttemptDispositionStatus>,
     /// Last scheduler status observed by the app dispatch loop.
     pub scheduler_status: String,
     /// Current typed run-stream head sequence.
@@ -791,6 +810,8 @@ pub struct TypedReplayResponse {
     pub run_mode: TypedRunMode,
     /// Derived saga status.
     pub saga: TypedSagaStatus,
+    /// Attempt-level dispositions, distinct from semantic run mode.
+    pub attempt_dispositions: Vec<TypedAttemptDispositionStatus>,
     /// Current typed run-stream head sequence.
     pub head_seq: u64,
     /// Retained artifact evidence entries supplied to the replay broker.
@@ -1241,6 +1262,7 @@ where
             spec_hash: broker.certified_spec().spec_hash.as_str().to_owned(),
             run_mode: typed_run_mode(saga.run_mode),
             saga: typed_saga_status_with_resources(runtime_spec.spec(), projection, &saga),
+            attempt_dispositions: typed_attempt_dispositions(projection),
             head_seq: stream_head(stream),
             retained_artifacts,
         })
@@ -1875,6 +1897,7 @@ pub fn typed_run_status_from_stream(
         spec_hash: spec_hash.as_str().to_owned(),
         run_mode: typed_run_mode(saga.run_mode),
         saga: typed_saga_status_with_resources(runtime_spec.spec(), &projection, &saga),
+        attempt_dispositions: typed_attempt_dispositions(&projection),
         scheduler_status: "observed".to_owned(),
         head_seq: stream_head(stream),
     })
@@ -2312,6 +2335,7 @@ fn typed_run_response_from_stream(
         spec_hash: runtime_spec.spec_hash().as_str().to_owned(),
         run_mode: typed_run_mode(saga.run_mode),
         saga: typed_saga_status_with_resources(runtime_spec.spec(), &projection, &saga),
+        attempt_dispositions: typed_attempt_dispositions(&projection),
         scheduler_status: scheduler_status_str(status).to_owned(),
         head_seq: stream_head(stream),
     })
@@ -2333,6 +2357,39 @@ fn stream_head(stream: &[store::KernelEventEnvelope]) -> u64 {
 
 fn typed_run_mode(mode: store::RunMode) -> TypedRunMode {
     mode.into()
+}
+
+fn typed_attempt_dispositions(
+    projection: &store::ProjectionSnapshot,
+) -> Vec<TypedAttemptDispositionStatus> {
+    projection
+        .attempts()
+        .map(|(_key, attempt)| typed_attempt_disposition(attempt))
+        .collect()
+}
+
+fn typed_attempt_disposition(attempt: &store::AttemptProjection) -> TypedAttemptDispositionStatus {
+    let (disposition, attempt_no, retryable, output_cell_id) = match &attempt.status {
+        store::AttemptStatus::Started { attempt_no, .. } => {
+            ("started", Some(*attempt_no), None, None)
+        }
+        store::AttemptStatus::Completed { output_cell_id } => (
+            "completed",
+            None,
+            None,
+            Some(output_cell_id.as_str().to_owned()),
+        ),
+        store::AttemptStatus::Failed { retryable, .. } => ("failed", None, Some(*retryable), None),
+        store::AttemptStatus::Interrupted => ("interrupted", None, None, None),
+    };
+    TypedAttemptDispositionStatus {
+        node_id: attempt.node_id.as_str().to_owned(),
+        attempt_id: attempt.attempt_id.as_str().to_owned(),
+        disposition: disposition.to_owned(),
+        attempt_no,
+        retryable,
+        output_cell_id,
+    }
 }
 
 #[cfg(test)]
@@ -2943,6 +3000,75 @@ mod tests {
                 .expect("terminal")
                 .claim,
             "compensation"
+        );
+    }
+
+    #[test]
+    fn attempt_disposition_statuses_are_distinct_from_run_mode() {
+        let started = typed_attempt_disposition(&store::AttemptProjection {
+            node_id: node_id(0xb0),
+            attempt_id: attempt_id(0xb1),
+            event_id: EventId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xb2)),
+            status: store::AttemptStatus::Started {
+                attempt_no: 2,
+                state_kind: StateKind::new(
+                    "mfm.test",
+                    "state",
+                    DigestAlgorithm::Sha256JcsV1,
+                    digest(0xbd),
+                )
+                .expect("state kind"),
+                state_version: StateVersion::new("mfm.test.state.v1").expect("state version"),
+            },
+        });
+        assert_eq!(started.disposition, "started");
+        assert_eq!(started.attempt_no, Some(2));
+        assert_eq!(started.retryable, None);
+
+        let completed = typed_attempt_disposition(&store::AttemptProjection {
+            node_id: node_id(0xb3),
+            attempt_id: attempt_id(0xb4),
+            event_id: EventId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xb5)),
+            status: store::AttemptStatus::Completed {
+                output_cell_id: cell_id(0xb6),
+            },
+        });
+        assert_eq!(completed.disposition, "completed");
+        assert_eq!(
+            completed.output_cell_id.as_deref(),
+            Some(cell_id(0xb6).as_str())
+        );
+
+        let failed = typed_attempt_disposition(&store::AttemptProjection {
+            node_id: node_id(0xb7),
+            attempt_id: attempt_id(0xb8),
+            event_id: EventId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xb9)),
+            status: store::AttemptStatus::Failed {
+                retryable: false,
+                error: Box::new(events::MfmErrorInfo {
+                    code: events::ErrorCode::new("mfm.test.failed").expect("error code"),
+                    category: events::ErrorCategory::Runtime,
+                    retryable: false,
+                    safe_message: "redacted failure".to_owned(),
+                    public_details: None,
+                    diagnostic_ref: None,
+                }),
+            },
+        });
+        assert_eq!(failed.disposition, "failed");
+        assert_eq!(failed.retryable, Some(false));
+
+        let interrupted = typed_attempt_disposition(&store::AttemptProjection {
+            node_id: node_id(0xba),
+            attempt_id: attempt_id(0xbb),
+            event_id: EventId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xbc)),
+            status: store::AttemptStatus::Interrupted,
+        });
+        assert_eq!(interrupted.disposition, "interrupted");
+        assert_eq!(interrupted.retryable, None);
+        assert_eq!(
+            typed_run_mode(store::RunMode::Forward),
+            TypedRunMode::Forward
         );
     }
 

@@ -22,12 +22,9 @@ use crate::history::{
     validate_certificate_artifact, validate_config_artifacts, validate_seed_cells,
     validate_spec_artifact, RuntimeRunView,
 };
-use crate::runners::{ErasedRunnerOutput, ErasedRunnerRegistry, RunnerEventPayload};
-use crate::side_effects::{
-    side_effect_artifact_binding, side_effect_projection_for_attempt,
-    validate_runner_side_effect_payload, validate_side_effect_resume_output,
-    validate_side_effect_terminal_evidence,
-};
+use crate::runners::{ErasedRunnerOutput, RunnerEventPayload};
+use crate::side_effect_lifecycle::SideEffectLifecycle;
+use crate::side_effects::{side_effect_artifact_binding, validate_runner_side_effect_payload};
 use crate::{
     attempt_id, config_artifact_reference_payloads, content_digest_json, require_adapter,
     require_attempt, require_capability, retention_ref_for_artifact, validate_public_output,
@@ -90,12 +87,31 @@ pub(crate) struct RunnerOutputCommitInput<'a> {
     pub(crate) output: ErasedRunnerOutput,
 }
 
+pub(crate) struct AttemptFailureCommitInput<'a> {
+    pub(crate) runtime_spec: &'a CertifiedRuntimeSpec,
+    pub(crate) run_id: &'a RunId,
+    pub(crate) node: &'a spec::NodeSpec,
+    pub(crate) attempt_id: &'a AttemptId,
+    pub(crate) view: &'a RuntimeRunView,
+    pub(crate) error: events::MfmErrorInfo,
+    pub(crate) diagnostic_artifact: Option<PreparedStagedArtifact>,
+}
+
+pub(crate) struct AttemptInterruptionCommitInput<'a> {
+    pub(crate) runtime_spec: &'a CertifiedRuntimeSpec,
+    pub(crate) run_id: &'a RunId,
+    pub(crate) node: &'a spec::NodeSpec,
+    pub(crate) attempt_id: &'a AttemptId,
+    pub(crate) view: &'a RuntimeRunView,
+}
+
 /// Validation input for a sealed terminal lifecycle commit batch.
 ///
-/// `CompleteRun` and `ResolveSagaTerminal` both emit the same five-event sealed batch
-/// (`StateAttemptStarted`, `CellProduced`, `StateAttemptCompleted`, `ArtifactReferenced`,
-/// `RunCompleted`); they differ only in the committed completion outcome and the diagnostic
-/// label. A single validator over this input keeps the two terminal paths from drifting.
+/// `CompleteRun` and `ResolveSagaTerminal` both append `StateAttemptStarted` before running and
+/// then emit the same four-event terminal batch (`CellProduced`, `StateAttemptCompleted`,
+/// `ArtifactReferenced`, `RunCompleted`); they differ only in the committed completion outcome and
+/// the diagnostic label. A single validator over this input keeps the two terminal paths from
+/// drifting.
 pub(crate) struct SealedTerminalCommitValidation<'a> {
     pub(crate) label: &'static str,
     pub(crate) run_id: &'a RunId,
@@ -123,11 +139,11 @@ pub(crate) struct CommitPlanner;
 
 impl CommitPlanner {
     pub(crate) fn prepare_run_launch(
-        runners: &ErasedRunnerRegistry,
         runtime_spec: &CertifiedRuntimeSpec,
         run_id: RunId,
         evidence: RunLaunchEvidence,
         expected_next_seq: store::StreamSeq,
+        runner_executables: Vec<events::ExecutableIdentity>,
     ) -> Result<PreparedRunLaunch> {
         let spec_input = evidence.spec_artifact;
         verify_artifact_bytes(&spec_input.bytes, &spec_input.evidence)?;
@@ -158,7 +174,6 @@ impl CommitPlanner {
         let seed_cells = validate_seed_cells(runtime_spec, &seed_cell_refs)?;
         let seed_staged_artifacts =
             validate_launch_seed_artifacts(seed_inputs, seed_cells.values())?;
-        let runner_executables = runners.executables_for_spec(runtime_spec)?;
         let bootstrap_node = certified_bootstrap_run_node(runtime_spec)?;
         let bootstrap_output_cell =
             runtime_spec
@@ -373,20 +388,6 @@ impl CommitPlanner {
     pub(crate) fn prepare_runner_output(
         input: RunnerOutputCommitInput<'_>,
     ) -> Result<PreparedRunnerOutput> {
-        Self::prepare_runner_output_with_start(input, None)
-    }
-
-    pub(crate) fn prepare_started_runner_output(
-        input: RunnerOutputCommitInput<'_>,
-        attempt_no: u32,
-    ) -> Result<PreparedRunnerOutput> {
-        Self::prepare_runner_output_with_start(input, Some(attempt_no))
-    }
-
-    fn prepare_runner_output_with_start(
-        input: RunnerOutputCommitInput<'_>,
-        started_in_same_commit: Option<u32>,
-    ) -> Result<PreparedRunnerOutput> {
         let ErasedRunnerOutput {
             staged_artifacts,
             staged_retention_refs,
@@ -445,20 +446,7 @@ impl CommitPlanner {
             &runner_payloads,
             &payload_bound_artifacts,
         )?;
-        let mut payloads = if let Some(attempt_no) = started_in_same_commit {
-            vec![events::KernelEventPayload::StateAttemptStarted(
-                events::StateAttemptStarted {
-                    spec_hash: input.runtime_spec.spec_hash().clone(),
-                    node_id: input.node.node_id.clone(),
-                    attempt_id: input.attempt_id.clone(),
-                    attempt_no,
-                    state_kind: input.node.state_kind.clone(),
-                    state_version: input.node.state_version.clone(),
-                },
-            )]
-        } else {
-            Vec::new()
-        };
+        let mut payloads = Vec::new();
         payloads.extend(runner_payloads);
         if let Some(manifest) = retention_manifest {
             payloads.extend(retention_manifest_payloads(
@@ -512,7 +500,7 @@ impl CommitPlanner {
             input.attempt_id,
             &input.view.projections,
             &payloads,
-            started_in_same_commit.is_none(),
+            true,
         )?;
         let request = store::TypedCommitRequest::from_payloads(
             input.run_id.clone(),
@@ -531,6 +519,179 @@ impl CommitPlanner {
             commit,
             artifacts_to_stage,
         })
+    }
+
+    pub(crate) fn prepare_attempt_failure(
+        input: AttemptFailureCommitInput<'_>,
+    ) -> Result<PreparedRunnerOutput> {
+        let diagnostic_artifact = input
+            .diagnostic_artifact
+            .map(|artifact| validate_attempt_failure_diagnostic_artifact(input.node, artifact))
+            .transpose()?;
+        let mut error = input.error;
+        match &diagnostic_artifact {
+            Some(artifact) => {
+                error.diagnostic_ref = Some(event_artifact_ref_from_store(&artifact.evidence)?);
+            }
+            None if error.diagnostic_ref.is_some() => {
+                return Err(RuntimeError::InvalidRunnerOutput(format!(
+                    "node {} failure diagnostic ref lacks staged diagnostic artifact",
+                    input.node.node_id
+                )));
+            }
+            None => {}
+        }
+        let failure = events::StateAttemptFailed {
+            spec_hash: input.runtime_spec.spec_hash().clone(),
+            node_id: input.node.node_id.clone(),
+            attempt_id: input.attempt_id.clone(),
+            retryable: error.retryable,
+            error,
+        };
+        let commit_fragment = attempt_failure_commit_fragment(&failure)?;
+        let mut payloads = Vec::new();
+        payloads.push(events::KernelEventPayload::StateAttemptFailed(failure));
+        let (required_artifacts, admitted_artifacts, artifacts_to_stage) =
+            if let Some(artifact) = diagnostic_artifact {
+                let event_ref = event_artifact_ref_from_store(&artifact.evidence)?;
+                payloads.push(events::KernelEventPayload::ArtifactReferenced(
+                    events::ArtifactReferenced {
+                        spec_hash: input.runtime_spec.spec_hash().clone(),
+                        node_id: Some(input.node.node_id.clone()),
+                        attempt_id: Some(input.attempt_id.clone()),
+                        artifact_ref: event_ref,
+                    },
+                ));
+                payloads.push(events::KernelEventPayload::RetentionRefsAppended(
+                    events::RetentionRefsAppended {
+                        run_id: input.run_id.clone(),
+                        spec_hash: input.runtime_spec.spec_hash().clone(),
+                        refs: vec![retention_ref_for_artifact(&artifact.evidence)],
+                        reason: events::RetentionReason::RuntimeEvidence,
+                    },
+                ));
+                let evidence = artifact.evidence.clone();
+                (vec![evidence.clone()], vec![evidence], vec![artifact])
+            } else {
+                (Vec::new(), Vec::new(), Vec::new())
+            };
+        let mut preconditions = store::CommitPreconditions {
+            required_run_state: store::RequiredRunState::NotCompleted,
+            required_cell_states: vec![store::CellStatePrecondition {
+                cell_id: input.node.output_cell.clone(),
+                required: store::RequiredCellState::Absent,
+            }],
+            required_present_logical_keys: vec![store::LogicalEventKey::new(format!(
+                "attempt:{}:{}",
+                input.node.node_id, input.attempt_id
+            ))?],
+            ..store::CommitPreconditions::default()
+        };
+        if input.node.side_effect.is_some() {
+            if let Some(projection) = SideEffectLifecycle::projection_for_attempt(
+                &input.view.projections,
+                input.node,
+                input.attempt_id,
+            )? {
+                return Err(RuntimeError::InvalidRunnerOutput(format!(
+                    "side-effect node {} attempt {} has acquired side-effect authority for ledger {}",
+                    input.node.node_id, input.attempt_id, projection.ledger_key
+                )));
+            }
+        }
+        preconditions
+            .required_cell_states
+            .extend(node_cell_preconditions(input.runtime_spec, input.node)?);
+        let required_artifacts =
+            required_artifacts_for_payloads(input.view, required_artifacts, &payloads)?;
+        let request = store::TypedCommitRequest::from_payloads(
+            input.run_id.clone(),
+            input.view.next_seq,
+            store::CommitKey::new(format!(
+                "attempt-failure:{}:{}:{}",
+                input.node.node_id, input.attempt_id, commit_fragment
+            ))?,
+            payloads,
+            required_artifacts.clone(),
+            preconditions,
+        )?;
+        let commit = prepare_runner_output_commit_plan(
+            request,
+            store::CommitArtifactEvidenceSet::new(required_artifacts, admitted_artifacts)?,
+            None,
+        )?;
+        Ok(PreparedRunnerOutput {
+            commit,
+            artifacts_to_stage,
+        })
+    }
+
+    pub(crate) fn prepare_attempt_interruption(
+        input: AttemptInterruptionCommitInput<'_>,
+    ) -> Result<store::PreparedCommitPlan> {
+        let Some(attempt) = input
+            .view
+            .projections
+            .attempt(&input.node.node_id, input.attempt_id)
+        else {
+            return Err(RuntimeError::InvalidRunStream(format!(
+                "cannot interrupt missing attempt {} for node {}",
+                input.attempt_id, input.node.node_id
+            )));
+        };
+        if !matches!(attempt.status, store::AttemptStatus::Started { .. }) {
+            return Err(RuntimeError::InvalidRunStream(format!(
+                "cannot interrupt terminal attempt {} for node {}",
+                input.attempt_id, input.node.node_id
+            )));
+        }
+        if input.node.side_effect.is_some()
+            && SideEffectLifecycle::projection_for_attempt(
+                &input.view.projections,
+                input.node,
+                input.attempt_id,
+            )?
+            .is_some()
+        {
+            return Err(RuntimeError::InvalidRunStream(format!(
+                "side-effect node {} attempt {} has acquired side-effect authority and cannot be interrupted generically",
+                input.node.node_id, input.attempt_id
+            )));
+        }
+
+        let payload =
+            events::KernelEventPayload::StateAttemptInterrupted(events::StateAttemptInterrupted {
+                spec_hash: input.runtime_spec.spec_hash().clone(),
+                node_id: input.node.node_id.clone(),
+                attempt_id: input.attempt_id.clone(),
+            });
+        let mut preconditions = store::CommitPreconditions {
+            required_run_state: store::RequiredRunState::NotCompleted,
+            required_cell_states: vec![store::CellStatePrecondition {
+                cell_id: input.node.output_cell.clone(),
+                required: store::RequiredCellState::Absent,
+            }],
+            required_present_logical_keys: vec![store::LogicalEventKey::new(format!(
+                "attempt:{}:{}",
+                input.node.node_id, input.attempt_id
+            ))?],
+            ..store::CommitPreconditions::default()
+        };
+        preconditions
+            .required_cell_states
+            .extend(node_cell_preconditions(input.runtime_spec, input.node)?);
+        let request = store::TypedCommitRequest::from_payloads(
+            input.run_id.clone(),
+            input.view.next_seq,
+            store::CommitKey::new(format!(
+                "attempt-interruption:{}:{}",
+                input.node.node_id, input.attempt_id
+            ))?,
+            vec![payload],
+            Vec::new(),
+            preconditions,
+        )?;
+        prepare_runner_output_commit_plan(request, store::CommitArtifactEvidenceSet::empty(), None)
     }
 }
 
@@ -801,8 +962,52 @@ fn runner_output_commit_fragment(payload: &events::KernelEventPayload) -> String
         events::KernelEventPayload::RunStarted(_)
         | events::KernelEventPayload::ManualResolutionRecorded(_)
         | events::KernelEventPayload::RunCompleted(_)
-        | events::KernelEventPayload::StateAttemptStarted(_) => "scheduler-owned".to_owned(),
+        | events::KernelEventPayload::StateAttemptStarted(_)
+        | events::KernelEventPayload::StateAttemptInterrupted(_) => "scheduler-owned".to_owned(),
     }
+}
+
+fn attempt_failure_commit_fragment(payload: &events::StateAttemptFailed) -> Result<String> {
+    Ok(content_digest_json(serde_json::json!({
+        "code": payload.error.code.as_str(),
+        "retryable": payload.retryable,
+    }))?
+    .to_string())
+}
+
+fn validate_attempt_failure_diagnostic_artifact(
+    node: &spec::NodeSpec,
+    artifact: PreparedStagedArtifact,
+) -> Result<PreparedStagedArtifact> {
+    verify_artifact_bytes(&artifact.bytes, &artifact.evidence)?;
+    if artifact.evidence.artifact_role != events::ArtifactRole::RedactedDiagnostic {
+        return Err(RuntimeError::InvalidRunnerOutput(format!(
+            "node {} failure diagnostic artifact has role {}",
+            node.node_id,
+            artifact_role_name(artifact.evidence.artifact_role)
+        )));
+    }
+    if artifact.evidence.producer_node_id.as_ref() != Some(&node.node_id)
+        || artifact.evidence.producer_seed_id.is_some()
+    {
+        return Err(RuntimeError::InvalidRunnerOutput(format!(
+            "node {} failure diagnostic artifact {} has invalid producer evidence",
+            node.node_id, artifact.evidence.artifact_id
+        )));
+    }
+    if artifact.evidence.schema_id.is_none() || artifact.evidence.semantic_type_id.is_some() {
+        return Err(RuntimeError::InvalidRunnerOutput(format!(
+            "node {} failure diagnostic artifact {} has invalid typing evidence",
+            node.node_id, artifact.evidence.artifact_id
+        )));
+    }
+    if artifact.evidence.media_type != spec::MediaType::new("application/json")? {
+        return Err(RuntimeError::InvalidRunnerOutput(format!(
+            "node {} failure diagnostic artifact {} has unsupported media type",
+            node.node_id, artifact.evidence.artifact_id
+        )));
+    }
+    Ok(artifact)
 }
 
 fn validate_staged_artifacts(
@@ -1247,6 +1452,7 @@ fn staged_payload_artifact_requirements(
             | events::KernelEventPayload::RetentionManifestProjected(_)
             | events::KernelEventPayload::StateAttemptStarted(_)
             | events::KernelEventPayload::StateAttemptCompleted(_)
+            | events::KernelEventPayload::StateAttemptInterrupted(_)
             | events::KernelEventPayload::CellSkipped(_)
             | events::KernelEventPayload::SideEffectClaimed(_)
             | events::KernelEventPayload::SideEffectClaimTakenOver(_)
@@ -1586,13 +1792,14 @@ fn runner_output_preconditions(
     }
 
     if requires_terminal_confirmation {
-        let projection = side_effect_projection_for_attempt(projections, node, attempt_id)?
-            .ok_or_else(|| {
-                RuntimeError::InvalidRunnerOutput(format!(
-                    "side-effect node {} attempted output without ledger evidence",
-                    node.node_id
-                ))
-            })?;
+        let projection =
+            SideEffectLifecycle::projection_for_attempt(projections, node, attempt_id)?
+                .ok_or_else(|| {
+                    RuntimeError::InvalidRunnerOutput(format!(
+                        "side-effect node {} attempted output without ledger evidence",
+                        node.node_id
+                    ))
+                })?;
         preconditions
             .required_side_effect_states
             .push(store::SideEffectStatePrecondition {
@@ -1783,6 +1990,12 @@ fn validate_runner_output(input: RunnerOutputValidation<'_>) -> Result<()> {
                 attempt_failure_retryable = Some(payload.retryable);
                 failed = true;
             }
+            events::KernelEventPayload::StateAttemptInterrupted(_) => {
+                return Err(RuntimeError::InvalidRunnerOutput(format!(
+                    "runner for node {} returned recovery-owned StateAttemptInterrupted",
+                    node.node_id
+                )));
+            }
             events::KernelEventPayload::CellProduced(payload) => {
                 require_attempt(node, attempt_id, &payload.node_id, &payload.attempt_id)?;
                 let cell = runtime_spec.cell(&payload.cell_id).ok_or_else(|| {
@@ -1913,7 +2126,7 @@ fn validate_runner_output(input: RunnerOutputValidation<'_>) -> Result<()> {
         }
     }
     if node.side_effect.is_some() {
-        validate_side_effect_resume_output(projections, node, attempt_id, payloads)?;
+        SideEffectLifecycle::validate_resume_output(projections, node, attempt_id, payloads)?;
         if failed {
             if !side_effect_terminal_failure {
                 return Err(RuntimeError::InvalidRunnerOutput(format!(
@@ -1956,7 +2169,7 @@ fn validate_runner_output(input: RunnerOutputValidation<'_>) -> Result<()> {
                 node.node_id
             )));
         }
-        validate_side_effect_terminal_evidence(projections, node, attempt_id)
+        SideEffectLifecycle::validate_terminal_evidence(projections, node, attempt_id)
             .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))?;
         if public_output_produced && !completed {
             return Err(RuntimeError::InvalidRunnerOutput(format!(

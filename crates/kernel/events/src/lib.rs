@@ -349,6 +349,8 @@ pub mod v1 {
         PublicOutputRenderFailed(PublicOutputRenderFailed),
         /// State attempt completed event.
         StateAttemptCompleted(StateAttemptCompleted),
+        /// State attempt interrupted event.
+        StateAttemptInterrupted(StateAttemptInterrupted),
         /// State attempt failed event.
         StateAttemptFailed(StateAttemptFailed),
         /// Manual saga resolution recorded event.
@@ -386,6 +388,7 @@ pub mod v1 {
                 Self::PublicOutputProduced(_) => PUBLIC_OUTPUT_PRODUCED_SCHEMA,
                 Self::PublicOutputRenderFailed(_) => PUBLIC_OUTPUT_RENDER_FAILED_SCHEMA,
                 Self::StateAttemptCompleted(_) => STATE_ATTEMPT_COMPLETED_SCHEMA,
+                Self::StateAttemptInterrupted(_) => STATE_ATTEMPT_INTERRUPTED_SCHEMA,
                 Self::StateAttemptFailed(_) => STATE_ATTEMPT_FAILED_SCHEMA,
                 Self::ManualResolutionRecorded(_) => MANUAL_RESOLUTION_RECORDED_SCHEMA,
                 Self::RunCompleted(_) => RUN_COMPLETED_SCHEMA,
@@ -438,6 +441,7 @@ pub mod v1 {
                 Self::PublicOutputProduced(payload) => &payload.spec_hash,
                 Self::PublicOutputRenderFailed(payload) => &payload.spec_hash,
                 Self::StateAttemptCompleted(payload) => &payload.spec_hash,
+                Self::StateAttemptInterrupted(payload) => &payload.spec_hash,
                 Self::StateAttemptFailed(payload) => &payload.spec_hash,
                 Self::ManualResolutionRecorded(payload) => &payload.spec_hash,
                 Self::RunCompleted(payload) => &payload.spec_hash,
@@ -779,6 +783,17 @@ pub mod v1 {
         pub attempt_id: AttemptId,
         /// Output cell id produced by the attempt.
         pub output_cell_id: CellId,
+    }
+
+    /// State attempt interrupted event payload.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct StateAttemptInterrupted {
+        /// Certified typed spec hash.
+        pub spec_hash: SpecHash,
+        /// Interrupted node id.
+        pub node_id: NodeId,
+        /// Interrupted attempt id.
+        pub attempt_id: AttemptId,
     }
 
     /// State attempt failed event payload.
@@ -1401,7 +1416,8 @@ pub mod v1 {
             | KernelEventPayload::SideEffectClaimed(_)
             | KernelEventPayload::SideEffectClaimTakenOver(_)
             | KernelEventPayload::SideEffectInvocationStarted(_)
-            | KernelEventPayload::StateAttemptCompleted(_) => {}
+            | KernelEventPayload::StateAttemptCompleted(_)
+            | KernelEventPayload::StateAttemptInterrupted(_) => {}
         }
         requirements
     }
@@ -2659,6 +2675,7 @@ pub mod v1 {
             PUBLIC_OUTPUT_PRODUCED_SCHEMA,
             PUBLIC_OUTPUT_RENDER_FAILED_SCHEMA,
             STATE_ATTEMPT_COMPLETED_SCHEMA,
+            STATE_ATTEMPT_INTERRUPTED_SCHEMA,
             STATE_ATTEMPT_FAILED_SCHEMA,
             MANUAL_RESOLUTION_RECORDED_SCHEMA,
             RUN_COMPLETED_SCHEMA,
@@ -3044,6 +3061,17 @@ pub mod v1 {
         ],
     };
 
+    const STATE_ATTEMPT_INTERRUPTED_SCHEMA: EventSchemaDescriptor = EventSchemaDescriptor {
+        schema_name: "mfm.events.v1.state_attempt_interrupted",
+        rust_type_path: "mfm_events::v1::StateAttemptInterrupted",
+        schema_version: EVENT_SCHEMA_VERSION,
+        fields: fields![
+            EventFieldDescriptor::required("spec_hash", "SpecHash"),
+            EventFieldDescriptor::required("node_id", "NodeId"),
+            EventFieldDescriptor::required("attempt_id", "AttemptId"),
+        ],
+    };
+
     const STATE_ATTEMPT_FAILED_SCHEMA: EventSchemaDescriptor = EventSchemaDescriptor {
         schema_name: "mfm.events.v1.state_attempt_failed",
         rust_type_path: "mfm_events::v1::StateAttemptFailed",
@@ -3287,7 +3315,7 @@ pub mod v1 {
                 .collect::<Vec<_>>()
                 .join("\n");
 
-            assert_eq!(all_event_schema_descriptors().len(), 26);
+            assert_eq!(all_event_schema_descriptors().len(), 27);
             assert_eq!(
                 rows,
                 "mfm_events::v1::RunStarted schema:mfm.events.v1.run_started:1:sha256-jcs-v1:0f0bac31971e6a13a205439875771471e79a2580cf9a764927566dadb59c1de3\n\
@@ -3311,6 +3339,7 @@ mfm_events::v1::side_effect::Failed schema:mfm.events.v1.side_effect.failed:1:sh
 mfm_events::v1::PublicOutputProduced schema:mfm.events.v1.public_output_produced:1:sha256-jcs-v1:00d2531467818398553aa59e62c034fa0cd054e7856b89f425aeb4510f9c6776\n\
 mfm_events::v1::PublicOutputRenderFailed schema:mfm.events.v1.public_output_render_failed:1:sha256-jcs-v1:d6248427c0a4a64f05dc0cd40ddd1b45804554f532433af1d0c1a54f03cd7a53\n\
 mfm_events::v1::StateAttemptCompleted schema:mfm.events.v1.state_attempt_completed:1:sha256-jcs-v1:36800f9d3ae748d407bc2ea24339049471c8ffe40aa86c53b35b6c7c6cd6ee80\n\
+mfm_events::v1::StateAttemptInterrupted schema:mfm.events.v1.state_attempt_interrupted:1:sha256-jcs-v1:a01ea4960dfa7c42cd9da4a572a2748513cae4107b99ac1f04afc37b7a4e9e14\n\
 mfm_events::v1::StateAttemptFailed schema:mfm.events.v1.state_attempt_failed:1:sha256-jcs-v1:4a954ff6afcc56bae0b9417032e54e8cd87867bc37100392072a00da64ee7b6f\n\
 mfm_events::v1::ManualResolutionRecorded schema:mfm.events.v1.manual_resolution_recorded:1:sha256-jcs-v1:b2b4122abfda77f0a8d087ea929189cd7735ea3e2ffa963e2f600e4ae74c0293\n\
 mfm_events::v1::RunCompleted schema:mfm.events.v1.run_completed:1:sha256-jcs-v1:cda37495cb3c733164ce1a91f58ff6d27bdcfbf9b1f9efe5a7fd48ae68eba479\n\
@@ -3411,7 +3440,7 @@ mfm_events::v1::RetentionManifestProjected schema:mfm.events.v1.retention_manife
             schema_names.sort_unstable();
             schema_names.dedup();
 
-            assert_eq!(original_len, 26);
+            assert_eq!(original_len, 27);
             assert_eq!(schema_names.len(), original_len);
         }
 

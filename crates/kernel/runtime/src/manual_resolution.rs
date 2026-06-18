@@ -321,7 +321,7 @@ fn manual_resolution_authorization_ref(
     })
 }
 
-fn certified_manual_resolution_spec(
+pub(crate) fn certified_manual_resolution_spec(
     saga: &spec::SagaPolicySpec,
 ) -> Result<&spec::ManualResolutionEvidenceSpec> {
     match saga {

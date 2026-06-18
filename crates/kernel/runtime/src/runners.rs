@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -12,9 +12,7 @@ use crate::framework::{
     framework_public_output_binding, framework_resolve_saga_terminal_binding,
     framework_retention_manifest_binding,
 };
-use crate::{
-    CertifiedRuntimeSpec, ErasedRunCtx, Result, RuntimeError, StagedArtifact, StagedRetentionRefs,
-};
+use crate::{ErasedRunCtx, Result, RuntimeError, StagedArtifact, StagedRetentionRefs};
 
 /// Boxed future returned by an erased typed runner.
 pub type ErasedRunnerFuture<'a> =
@@ -267,31 +265,5 @@ impl ErasedRunnerRegistry {
             )));
         }
         Ok(binding.clone())
-    }
-
-    pub(crate) fn executables_for_spec(
-        &self,
-        runtime_spec: &CertifiedRuntimeSpec,
-    ) -> Result<Vec<events::ExecutableIdentity>> {
-        let mut seen = BTreeSet::new();
-        let mut executables = Vec::new();
-        for node_id in runtime_spec.topological_order() {
-            let node = runtime_spec.node(node_id).expect("topological node exists");
-            let descriptor = runtime_spec.state_descriptor_for_node(node)?;
-            let binding = self.resolve(node, descriptor)?;
-            let key = binding.executable.factory_id.as_str().to_owned();
-            if seen.insert(key) {
-                executables.push(binding.executable.clone());
-            }
-        }
-        for (_, node) in runtime_spec.remediations() {
-            let descriptor = runtime_spec.state_descriptor_for_node(node)?;
-            let binding = self.resolve(node, descriptor)?;
-            let key = binding.executable.factory_id.as_str().to_owned();
-            if seen.insert(key) {
-                executables.push(binding.executable.clone());
-            }
-        }
-        Ok(executables)
     }
 }

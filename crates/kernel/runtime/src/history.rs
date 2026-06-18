@@ -19,11 +19,11 @@ use crate::framework::{
     retention_manifest_receipt_json, run_completion_evidence, saga_terminal_completion_outcome,
     GenesisContext,
 };
+use crate::recovery::AttemptRecoveryLifecycle;
 use crate::side_effects::{
     side_effect_payload_ref, validate_atomic_side_effect_failure_pairs,
     validate_historical_side_effect_confirmation, validate_historical_side_effect_failure,
-    validate_historical_side_effect_payload, validate_recovery_frontier,
-    HistoricalSideEffectLedger,
+    validate_historical_side_effect_payload, HistoricalSideEffectLedger,
 };
 use crate::{
     attempt_id, config_artifact_reference_payloads, config_ref_key, require_adapter,
@@ -721,6 +721,20 @@ fn validate_historical_run_stream(
                     )));
                 }
             }
+            events::KernelEventPayload::StateAttemptInterrupted(payload) => {
+                runtime_spec.node(&payload.node_id).ok_or_else(|| {
+                    RuntimeError::InvalidRunStream(format!(
+                        "attempt interrupted for uncertified node {}",
+                        payload.node_id
+                    ))
+                })?;
+                if !active_attempts.remove(&(payload.node_id.clone(), payload.attempt_id.clone())) {
+                    return Err(RuntimeError::InvalidRunStream(format!(
+                        "attempt interruption for node {} attempt {} was not preceded by an active attempt",
+                        payload.node_id, payload.attempt_id
+                    )));
+                }
+            }
             events::KernelEventPayload::StateAttemptFailed(payload) => {
                 runtime_spec.node(&payload.node_id).ok_or_else(|| {
                     RuntimeError::InvalidRunStream(format!(
@@ -904,7 +918,7 @@ fn validate_historical_run_stream(
     validate_historical_retention_manifest_batches(runtime_spec, stream, history)?;
     validate_historical_terminal_tail(runtime_spec, run_id, stream)?;
     validate_atomic_side_effect_failure_pairs(runtime_spec, stream)?;
-    validate_recovery_frontier(runtime_spec, projections)?;
+    AttemptRecoveryLifecycle::validate_frontier(runtime_spec, projections)?;
     Ok(())
 }
 
@@ -1925,23 +1939,15 @@ fn validate_historical_retention_manifest_batch(
         ));
     }
 
-    let started_count = commit
-        .iter()
-        .filter(|event| {
-            matches!(
-                event.payload(),
-                events::KernelEventPayload::StateAttemptStarted(payload)
-                    if payload.node_id == retention_node.node_id
-                        && payload.attempt_id == produced.attempt_id
-                        && payload.spec_hash == *runtime_spec.spec_hash()
-                        && payload.state_kind == retention_node.state_kind
-                        && payload.state_version == retention_node.state_version
-            )
-        })
-        .count();
-    if started_count != 1 {
+    let pre_projection = store::ProjectionSnapshot::rebuild_from_run_stream(pre_projection_stream)?;
+    if !matches!(
+        pre_projection
+            .attempt(&retention_node.node_id, &produced.attempt_id)
+            .map(|attempt| &attempt.status),
+        Some(store::AttemptStatus::Started { .. })
+    ) {
         return Err(RuntimeError::InvalidRunStream(
-            "retention manifest projection lacks matching framework StateAttemptStarted in the same commit"
+            "retention manifest projection lacks matching started framework attempt in the prefix"
                 .to_owned(),
         ));
     }
@@ -2061,7 +2067,6 @@ fn validate_retention_projection_commit_payload_set(
     receipt_digest: &ContentDigest,
     manifest_artifact_id: &ArtifactId,
 ) -> Result<()> {
-    let mut started = 0_usize;
     let mut produced = 0_usize;
     let mut completed = 0_usize;
     let mut artifact_referenced = 0_usize;
@@ -2070,11 +2075,6 @@ fn validate_retention_projection_commit_payload_set(
 
     for event in commit {
         match event.payload() {
-            events::KernelEventPayload::StateAttemptStarted(payload)
-                if payload.node_id == *retention_node_id && payload.attempt_id == *attempt_id =>
-            {
-                started += 1;
-            }
             events::KernelEventPayload::CellProduced(payload)
                 if payload.node_id == *retention_node_id
                     && payload.attempt_id == *attempt_id
@@ -2137,13 +2137,12 @@ fn validate_retention_projection_commit_payload_set(
         }
     }
 
-    if started == 1
-        && produced == 1
+    if produced == 1
         && completed == 1
         && artifact_referenced == 1
         && manifest_projected == 1
         && retention_refs == 2
-        && commit.len() == 7
+        && commit.len() == 6
     {
         Ok(())
     } else {
@@ -2185,12 +2184,12 @@ fn validate_historical_terminal_tail(
         if has_retention_projection {
             last_retention_commit_end = Some(end);
         }
-        let has_completion_node_payload = commit
-            .iter()
-            .any(|event| payload_targets_node(event.payload(), &completion_node.node_id));
+        let has_completion_node_payload = commit.iter().any(|event| {
+            payload_targets_node_after_start(event.payload(), &completion_node.node_id)
+        });
         let has_resolve_node_payload = commit
             .iter()
-            .any(|event| payload_targets_node(event.payload(), &resolve_node.node_id));
+            .any(|event| payload_targets_node_after_start(event.payload(), &resolve_node.node_id));
         let run_completed_payloads = commit
             .iter()
             .filter_map(|event| match event.payload() {
@@ -2238,7 +2237,10 @@ fn validate_historical_terminal_tail(
 
     match (last_retention_commit_end, terminal_commit) {
         (Some(retention_end), Some((terminal_start, terminal_end, TerminalCommitKind::CompleteRun)))
-            if retention_end == terminal_start =>
+            if framework_start_gap_is_allowed(
+                &stream[retention_end..terminal_start],
+                &completion_node.node_id,
+            ) =>
         {
             validate_historical_complete_run_batch(
                 runtime_spec,
@@ -2266,7 +2268,14 @@ fn validate_historical_terminal_tail(
                 &stream[terminal_start..terminal_end],
             )
         }
-        (Some(retention_end), None) if retention_end == stream.len() => Ok(()),
+        (Some(retention_end), None)
+            if framework_start_gap_is_allowed(
+                &stream[retention_end..],
+                &completion_node.node_id,
+            ) =>
+        {
+            Ok(())
+        }
         (Some(_), None) => Err(RuntimeError::InvalidRunStream(
             "run stream contains events after retention manifest projection outside sealed CompleteRun commit"
                 .to_owned(),
@@ -2288,6 +2297,7 @@ fn payload_targets_node(payload: &events::KernelEventPayload, node_id: &NodeId) 
     match payload {
         events::KernelEventPayload::StateAttemptStarted(payload) => payload.node_id == *node_id,
         events::KernelEventPayload::StateAttemptCompleted(payload) => payload.node_id == *node_id,
+        events::KernelEventPayload::StateAttemptInterrupted(payload) => payload.node_id == *node_id,
         events::KernelEventPayload::StateAttemptFailed(payload) => payload.node_id == *node_id,
         events::KernelEventPayload::CellProduced(payload) => payload.node_id == *node_id,
         events::KernelEventPayload::CellSkipped(payload) => payload.node_id == *node_id,
@@ -2303,6 +2313,29 @@ fn payload_targets_node(payload: &events::KernelEventPayload, node_id: &NodeId) 
             .map(|(payload_node_id, _, _, _)| payload_node_id == node_id)
             .unwrap_or(false),
     }
+}
+
+fn payload_targets_node_after_start(
+    payload: &events::KernelEventPayload,
+    node_id: &NodeId,
+) -> bool {
+    !matches!(
+        payload,
+        events::KernelEventPayload::StateAttemptStarted(started) if started.node_id == *node_id
+    ) && payload_targets_node(payload, node_id)
+}
+
+fn framework_start_gap_is_allowed(gap: &[store::KernelEventEnvelope], node_id: &NodeId) -> bool {
+    gap.is_empty()
+        || matches!(
+            gap,
+            [event]
+                if matches!(
+                    event.payload(),
+                    events::KernelEventPayload::StateAttemptStarted(payload)
+                        if payload.node_id == *node_id
+                )
+        )
 }
 
 fn validate_historical_complete_run_batch(
@@ -2363,6 +2396,16 @@ fn validate_historical_complete_run_batch(
     {
         return Err(RuntimeError::InvalidRunStream(
             "CompleteRun receipt cell does not match the sealed completion evidence".to_owned(),
+        ));
+    }
+    if !matches!(
+        pre_completion_projection
+            .attempt(&completion_node.node_id, &produced.attempt_id)
+            .map(|attempt| &attempt.status),
+        Some(store::AttemptStatus::Started { .. })
+    ) {
+        return Err(RuntimeError::InvalidRunStream(
+            "CompleteRun commit lacks matching started framework attempt in the prefix".to_owned(),
         ));
     }
     let completion_cell = runtime_spec
@@ -2461,6 +2504,17 @@ fn validate_historical_resolve_saga_terminal_batch(
                 .to_owned(),
         ));
     }
+    if !matches!(
+        pre_resolution_projection
+            .attempt(&resolve_node.node_id, &produced.attempt_id)
+            .map(|attempt| &attempt.status),
+        Some(store::AttemptStatus::Started { .. })
+    ) {
+        return Err(RuntimeError::InvalidRunStream(
+            "ResolveSagaTerminal commit lacks matching started framework attempt in the prefix"
+                .to_owned(),
+        ));
+    }
     let resolve_cell = runtime_spec
         .cell(&resolve_node.output_cell)
         .ok_or_else(|| {
@@ -2517,15 +2571,10 @@ fn validate_sealed_terminal_commit_batch(
             "{label} commit does not match the sealed framework batch"
         ))
     };
-    if commit.len() != 5 {
+    if commit.len() != 4 {
         return Err(mismatch());
     }
     match commit[0].payload() {
-        events::KernelEventPayload::StateAttemptStarted(payload)
-            if payload.node_id == *node_id && payload.attempt_id == *attempt_id => {}
-        _ => return Err(mismatch()),
-    }
-    match commit[1].payload() {
         events::KernelEventPayload::CellProduced(payload)
             if payload.node_id == *node_id
                 && payload.attempt_id == *attempt_id
@@ -2534,21 +2583,21 @@ fn validate_sealed_terminal_commit_batch(
                 && payload.content_digest == *receipt_digest => {}
         _ => return Err(mismatch()),
     }
-    match commit[2].payload() {
+    match commit[1].payload() {
         events::KernelEventPayload::StateAttemptCompleted(payload)
             if payload.node_id == *node_id
                 && payload.attempt_id == *attempt_id
                 && payload.output_cell_id == *receipt_cell_id => {}
         _ => return Err(mismatch()),
     }
-    match commit[3].payload() {
+    match commit[2].payload() {
         events::KernelEventPayload::ArtifactReferenced(payload)
             if payload.node_id.as_ref() == Some(node_id)
                 && payload.attempt_id.as_ref() == Some(attempt_id)
                 && payload.artifact_ref == *expected_receipt_ref => {}
         _ => return Err(mismatch()),
     }
-    match commit[4].payload() {
+    match commit[3].payload() {
         events::KernelEventPayload::RunCompleted(payload)
             if payload.run_id == *run_id
                 && payload.spec_hash == *spec_hash

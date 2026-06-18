@@ -19,23 +19,35 @@ use mfm_ids::CellId;
 #[cfg(test)]
 use std::collections::BTreeSet;
 
+mod admission;
 mod artifacts;
+mod attempt;
+mod binding;
 mod commit;
 mod error;
 mod framework;
+mod framework_lifecycle;
 mod frontier;
 mod history;
 mod invocation;
 mod manual_resolution;
+mod recovery;
 mod runners;
 mod scheduler;
+mod side_effect_lifecycle;
 mod side_effects;
 mod spec_authority;
+mod transition;
 
+pub use admission::RunAdmissionAuthority;
 pub use artifacts::{
     RuntimeArtifactStageFuture, RuntimeArtifactStager, RuntimeArtifactStore, StagedArtifact,
     StagedArtifactBindingKind, StagedArtifactHandle, StagedRetentionRefs,
     StagedSideEffectArtifactPhase,
+};
+pub use binding::{
+    BoundCapabilityAuthority, BoundFrameworkHandlerAuthority, BoundFrameworkHandlerKind,
+    BoundRuntimeContext, BoundRuntimeContextLoader,
 };
 pub use commit::{PreparedRunLaunch, RunLaunchArtifact, RunLaunchEvidence, RunLaunchSeedCell};
 pub use error::RuntimeError;
@@ -75,7 +87,7 @@ use history::validate_historical_bootstrap_run_batch;
 #[cfg(test)]
 use history::RuntimeRunView;
 #[cfg(test)]
-use side_effects::side_effect_projection_for_attempt;
+use side_effect_lifecycle::side_effect_projection_for_attempt;
 
 /// Result type for typed runtime operations.
 pub type Result<T> = std::result::Result<T, RuntimeError>;

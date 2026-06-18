@@ -934,6 +934,9 @@ pub mod v1 {
                         self.node(&payload.node_id)?;
                         self.authorize_event_artifacts(envelope.payload())?;
                     }
+                    KernelEventPayload::StateAttemptInterrupted(payload) => {
+                        self.node(&payload.node_id)?;
+                    }
                     KernelEventPayload::StateAttemptCompleted(payload) => {
                         self.verify_state_attempt_completed_against_spec(payload)?;
                     }

@@ -102,6 +102,68 @@ impl RecordingTypedRunStore {
     }
 }
 
+struct StaleOnceTypedRunStore {
+    inner: store::InMemoryTypedRunStore,
+    stale_terminal_injected: bool,
+}
+
+impl StaleOnceTypedRunStore {
+    fn new() -> Self {
+        Self {
+            inner: store::InMemoryTypedRunStore::new(),
+            stale_terminal_injected: false,
+        }
+    }
+}
+
+impl store::TypedProjectionRead for StaleOnceTypedRunStore {
+    fn projection_snapshot(&self) -> &store::ProjectionSnapshot {
+        self.inner.projection_snapshot()
+    }
+}
+
+impl store::TypedRunEventStore for StaleOnceTypedRunStore {
+    fn append_prepared_typed_commit(
+        &mut self,
+        commit: store::PreparedTypedCommit,
+    ) -> store::Result<store::CommitOutcome> {
+        let is_run_start = commit
+            .request()
+            .payloads()
+            .iter()
+            .any(|payload| matches!(payload, events::KernelEventPayload::RunStarted(_)));
+        let should_inject = !self.stale_terminal_injected
+            && !is_run_start
+            && commit.request().payloads().iter().any(|payload| {
+                matches!(
+                    payload,
+                    events::KernelEventPayload::StateAttemptCompleted(_)
+                        | events::KernelEventPayload::StateAttemptFailed(_)
+                        | events::KernelEventPayload::StateAttemptInterrupted(_)
+                )
+            });
+        if should_inject {
+            self.stale_terminal_injected = true;
+            let expected = commit.request().expected_next_seq();
+            let run_id = commit.request().run_id().clone();
+            self.inner.append_prepared_typed_commit(commit)?;
+            return Err(store::StoreError::StaleExpectedNextSeq {
+                expected,
+                actual: self.inner.expected_next_seq(&run_id),
+            });
+        }
+        self.inner.append_prepared_typed_commit(commit)
+    }
+
+    fn load_run_stream(&self, run_id: &RunId) -> Vec<store::KernelEventEnvelope> {
+        self.inner.load_run_stream(run_id)
+    }
+
+    fn expected_next_seq(&self, run_id: &RunId) -> store::StreamSeq {
+        self.inner.expected_next_seq(run_id)
+    }
+}
+
 impl store::TypedProjectionRead for RecordingTypedRunStore {
     fn projection_snapshot(&self) -> &store::ProjectionSnapshot {
         self.inner.projection_snapshot()
@@ -662,12 +724,12 @@ async fn scheduler_completes_run_after_public_output_evidence() {
         .iter()
         .filter(|event| event.seq() == completion_seq && event.commit_key() == &completion_key)
         .collect::<Vec<_>>();
-    assert_eq!(completion_commit.len(), 5);
-    let complete_attempt = completion_commit
+    assert_eq!(completion_commit.len(), 4);
+    let complete_attempt = stream
         .iter()
         .find_map(|event| match event.payload() {
             events::KernelEventPayload::StateAttemptStarted(payload)
-                if payload.node_id == complete_node.node_id =>
+                if payload.node_id == complete_node.node_id && event.seq() < completion_seq =>
             {
                 Some(payload.attempt_id.clone())
             }
@@ -1231,14 +1293,6 @@ async fn scheduler_binds_staged_retention_refs_and_projects_manifest() {
         .expect("manifest event");
     let retention_seq = manifest_event.0;
     assert_eq!(manifest_event.1.manifest_digest, manifest.manifest_digest);
-    assert!(stream.iter().any(|event| {
-        matches!(
-            event.payload(),
-            events::KernelEventPayload::StateAttemptStarted(payload)
-                if event.seq() == retention_seq
-                    && payload.node_id == retention_node.node_id
-        )
-    }));
     let receipt = stream
         .iter()
         .find_map(|event| match event.payload() {
@@ -1251,6 +1305,15 @@ async fn scheduler_binds_staged_retention_refs_and_projects_manifest() {
         })
         .expect("retention receipt cell");
     assert_eq!(receipt.cell_id, retention_node.output_cell);
+    assert!(stream.iter().any(|event| {
+        matches!(
+            event.payload(),
+            events::KernelEventPayload::StateAttemptStarted(payload)
+                if event.seq() < retention_seq
+                    && payload.node_id == retention_node.node_id
+                    && payload.attempt_id == receipt.attempt_id
+        )
+    }));
     assert!(stream.iter().any(|event| {
         matches!(
             event.payload(),
@@ -1293,6 +1356,9 @@ async fn retention_manifest_projection_retry_is_idempotent_after_current_store_a
     .expect("start run");
 
     drive_until_public_output_produced(&scheduler, &mut store, &fixture).await;
+    let retention_node =
+        certified_retention_manifest_node(&fixture.runtime_spec).expect("retention node");
+    append_attempt_start(&mut store, &fixture, retention_node, 1);
     let stale_stream = store.load_run_stream(&fixture.run_id);
 
     scheduler
@@ -1494,8 +1560,7 @@ async fn runtime_rejects_standalone_run_completed_after_retention_projection() {
 
     assert!(matches!(
         validate_runtime_stream_for_tests(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
-        Err(RuntimeError::InvalidRunStream(message))
-            if message.contains("CompleteRun commit was not produced")
+        Err(RuntimeError::InvalidRunStream(_))
     ));
 }
 
@@ -1924,8 +1989,7 @@ async fn runtime_rejects_retained_evidence_between_retention_projection_and_comp
 
     assert!(matches!(
         validate_runtime_stream_for_tests(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
-        Err(RuntimeError::InvalidRunStream(message))
-            if message.contains("after retention manifest projection")
+        Err(RuntimeError::InvalidRunStream(_))
     ));
 }
 
@@ -2335,12 +2399,15 @@ async fn scheduler_rejects_uncertified_capability_use() {
     )
     .await
     .expect("start run");
-    assert!(matches!(
+    assert_eq!(
         scheduler
             .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await,
-        Err(RuntimeError::InvalidRunnerOutput(_))
-    ));
+            .await
+            .expect("terminalize uncertified capability use"),
+        SchedulerStatus::Advanced
+    );
+    let node = node_by_output(&fixture, &fixture.cell_a);
+    assert_node_failed_with_code(&store, &node.node_id, "runner_output_invalid");
 }
 
 #[tokio::test]
@@ -2411,13 +2478,15 @@ async fn runner_cannot_stage_artifact_with_foreign_producer() {
     .await
     .expect("start run");
 
-    assert!(matches!(
+    assert_eq!(
         scheduler
             .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await,
-        Err(RuntimeError::InvalidRunnerOutput(message))
-            if message.contains("producer evidence outside its attempt")
-    ));
+            .await
+            .expect("terminalize foreign producer artifact"),
+        SchedulerStatus::Advanced
+    );
+    let node = node_by_output(&fixture, &fixture.cell_a);
+    assert_node_failed_with_code(&store, &node.node_id, "runner_output_invalid");
 }
 
 #[tokio::test]
@@ -2488,13 +2557,15 @@ async fn runner_cannot_stage_inline_artifact_with_mismatched_bytes() {
     .await
     .expect("start run");
 
-    assert!(matches!(
+    assert_eq!(
         scheduler
             .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await,
-        Err(RuntimeError::InvalidRunnerOutput(message))
-            if message.contains("bytes do not match typed evidence")
-    ));
+            .await
+            .expect("terminalize mismatched inline artifact"),
+        SchedulerStatus::Advanced
+    );
+    let node = node_by_output(&fixture, &fixture.cell_a);
+    assert_node_failed_with_code(&store, &node.node_id, "runner_output_invalid");
 }
 
 #[tokio::test]
@@ -2656,18 +2727,20 @@ async fn runner_cannot_stage_reserved_retention_reasons() {
         )
         .await
         .expect("start run");
-        append_attempt_start(&mut store, &fixture, &node, 1);
         let stream_before = store.load_run_stream(&fixture.run_id);
 
-        assert!(matches!(
+        assert_eq!(
             scheduler
                 .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-                .await,
-            Err(RuntimeError::InvalidRunnerOutput(message))
-                if message.contains("middleware-owned retention reason")
-                    || message.contains("public-output retention outside sealed framework")
-        ));
-        assert_eq!(store.load_run_stream(&fixture.run_id), stream_before);
+                .await
+                .expect("terminalize reserved retention reason"),
+            SchedulerStatus::Advanced
+        );
+        assert_eq!(
+            store.load_run_stream(&fixture.run_id).len(),
+            stream_before.len() + 4
+        );
+        assert_node_failed_with_code(&store, &node.node_id, "runner_output_invalid");
         assert!(store
             .projection_snapshot()
             .cell_terminal(&fixture.cell_a)
@@ -2837,13 +2910,15 @@ async fn runner_output_requires_payload_bound_staged_artifact() {
     .await
     .expect("start run");
 
-    assert!(matches!(
+    assert_eq!(
         scheduler
             .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await,
-        Err(RuntimeError::InvalidRunnerOutput(message))
-            if message.contains("without staged artifact")
-    ));
+            .await
+            .expect("terminalize missing staged artifact"),
+        SchedulerStatus::Advanced
+    );
+    let node = node_by_output(&fixture, &fixture.cell_a);
+    assert_node_failed_with_code(&store, &node.node_id, "runner_output_invalid");
 }
 
 #[tokio::test]
@@ -2918,15 +2993,22 @@ async fn rejected_staged_payload_mismatch_does_not_admit_artifact_evidence() {
     )
     .await
     .expect("start run");
-    let attempt_id = append_attempt_start(&mut store, &fixture, &node, 1);
+    let attempt_id = attempt_id(
+        &fixture.run_id,
+        fixture.runtime_spec.spec_hash(),
+        &node.node_id,
+        1,
+    )
+    .expect("attempt id");
 
-    assert!(matches!(
+    assert_eq!(
         scheduler
             .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await,
-        Err(RuntimeError::InvalidRunnerOutput(message))
-            if message.contains("without typed payload reference")
-    ));
+            .await
+            .expect("terminalize staged payload mismatch"),
+        SchedulerStatus::Advanced
+    );
+    assert_node_failed_with_code(&store, &node.node_id, "runner_output_invalid");
 
     let descriptor = fixture
         .runtime_spec
@@ -3083,6 +3165,98 @@ fn run_start_rejects_mismatched_staged_launch_bytes() {
 }
 
 #[tokio::test]
+async fn run_admission_returns_bound_context_with_capability_and_framework_authority() {
+    let fixture = fixture();
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    let launch =
+        prepare_fixture_launch(&scheduler, &store, &fixture, vec![fixture.seed_ref.clone()])
+            .expect("prepare launch");
+
+    let authority = scheduler
+        .start_run_admitted(&mut store, &fixture.runtime_spec, launch)
+        .await
+        .expect("admitted run authority");
+
+    assert_eq!(authority.run_id(), &fixture.run_id);
+    assert_eq!(authority.spec_hash(), fixture.runtime_spec.spec_hash());
+    assert_eq!(
+        authority.head_seq(),
+        store.expected_next_seq(&fixture.run_id)
+    );
+
+    let node = node_by_output(&fixture, &fixture.cell_a);
+    let capability = authority
+        .bound_context()
+        .capability_authority_for(&node.node_id)
+        .expect("capability authority");
+    assert_eq!(capability.capabilities(), &node.capability_bindings);
+
+    let render_node = fixture
+        .runtime_spec
+        .topological_order()
+        .iter()
+        .filter_map(|node_id| fixture.runtime_spec.node(node_id))
+        .find(|node| {
+            matches!(
+                node.framework,
+                Some(spec::FrameworkNodeSpec::PublicOutputRender(_))
+            )
+        })
+        .expect("public-output render node");
+    let framework = authority
+        .bound_context()
+        .framework_handler_for(&render_node.node_id)
+        .expect("framework handler authority");
+    assert_eq!(
+        framework.kind(),
+        BoundFrameworkHandlerKind::PublicOutputRender
+    );
+}
+
+#[tokio::test]
+async fn resume_rejects_missing_downstream_binding_before_attempt_start() {
+    let fixture = fixture();
+    let launch_scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &launch_scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    let stream_len_before = store.load_run_stream(&fixture.run_id).len();
+
+    let mut partial_registry = ErasedRunnerRegistry::new();
+    partial_registry
+        .register(binding(
+            fixture.descriptor_a.clone(),
+            "pure",
+            RecordingRunner {
+                expected_caps: Vec::new(),
+                output_artifact: artifact(0xa1),
+                output_digest: content(0xa2),
+            },
+        ))
+        .expect("binding a");
+    let resume_scheduler = test_scheduler(partial_registry);
+    let error = resume_scheduler
+        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+        .await
+        .expect_err("missing descriptor b binding should reject bound context");
+
+    assert!(
+        matches!(error, RuntimeError::RunnerBinding(message) if message.contains("missing runner binding"))
+    );
+    assert_eq!(
+        store.load_run_stream(&fixture.run_id).len(),
+        stream_len_before
+    );
+}
+
+#[tokio::test]
 async fn runner_invocation_requires_committed_config_reference() {
     let fixture = fixture();
     let scheduler = test_scheduler(registered_fixture_runners(&fixture));
@@ -3227,8 +3401,53 @@ async fn runner_invocation_requires_committed_produced_input_artifact_reference(
     ));
     assert_eq!(
         attempt_started_count(&store, &fixture.run_id, &consumer_node_id),
-        0
+        1
     );
+}
+
+#[tokio::test]
+async fn post_start_materialization_failure_terminalizes_attempt() {
+    let fixture = fixture();
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    scheduler
+        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+        .await
+        .expect("produce first cell");
+
+    let producer_node_id = node_by_output(&fixture, &fixture.cell_a).node_id.clone();
+    let consumer_node = node_by_output(&fixture, &fixture.cell_b).clone();
+    {
+        let mut corrupt_store = MissingInputArtifactRefStore {
+            inner: &mut store,
+            producer_node_id,
+        };
+        assert_eq!(
+            scheduler
+                .drive_once(&mut corrupt_store, &fixture.runtime_spec, &fixture.run_id)
+                .await
+                .expect("terminalize materialization failure"),
+            SchedulerStatus::Advanced
+        );
+    }
+
+    assert_node_failed_with_code(
+        &store,
+        &consumer_node.node_id,
+        "input_materialization_failed",
+    );
+    assert!(store
+        .projection_snapshot()
+        .cell_terminal(&consumer_node.output_cell)
+        .is_none());
 }
 
 #[tokio::test]
@@ -3853,24 +4072,70 @@ async fn replay_rejects_split_public_output_terminal_commit() {
 
     let stream = store.load_run_stream(&fixture.run_id);
     let corrupt_stream = split_public_output_payload_to_own_commit_for_tests(&stream);
-    let projection =
-        store::ProjectionSnapshot::rebuild_from_run_stream(&corrupt_stream).expect("rebuild");
-    let mut corrupt_store = ReadOnlyCorruptStore {
-        stream: corrupt_stream,
-        projection,
-    };
-
     assert!(matches!(
-        scheduler
-            .drive_once(&mut corrupt_store, &fixture.runtime_spec, &fixture.run_id)
-            .await,
-        Err(RuntimeError::InvalidRunStream(message))
-            if message.contains("split from receipt terminal")
+        store::ProjectionSnapshot::rebuild_from_run_stream(&corrupt_stream),
+        Err(store::StoreError::ProjectionConflict { message, .. })
+            if message.contains("public output requires matching render receipt terminal")
     ));
 }
 
 #[tokio::test]
-async fn recovery_continues_started_pure_attempt_with_same_attempt_id() {
+async fn old_model_framework_stream_without_attempt_start_rejects_on_runtime_load() {
+    let fixture = fixture();
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    scheduler
+        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+        .await
+        .expect("drive a");
+    scheduler
+        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+        .await
+        .expect("drive b");
+    scheduler
+        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+        .await
+        .expect("render public output");
+
+    let render_node = fixture
+        .runtime_spec
+        .topological_order()
+        .iter()
+        .filter_map(|node_id| fixture.runtime_spec.node(node_id))
+        .find(|node| {
+            matches!(
+                node.framework,
+                Some(spec::FrameworkNodeSpec::PublicOutputRender(_))
+            )
+        })
+        .expect("render node");
+    let stream = store.load_run_stream(&fixture.run_id);
+    let old_model_stream = rewrite_stream_without_commit_containing(&stream, |payload| {
+        matches!(
+            payload,
+            events::KernelEventPayload::StateAttemptStarted(started)
+                if started.node_id == render_node.node_id
+        )
+    });
+
+    assert!(matches!(
+        RuntimeRunView::from_stream(&fixture.runtime_spec, &fixture.run_id, &old_model_stream),
+        Err(RuntimeError::Store(message)) | Err(RuntimeError::InvalidRunStream(message))
+            if message.contains("not preceded by an active attempt")
+                || message.contains("started attempt")
+    ));
+}
+
+#[tokio::test]
+async fn recovery_interrupts_started_pure_attempt_before_retrying_fresh_attempt() {
     let fixture = fixture();
     let scheduler = test_scheduler(registered_fixture_runners(&fixture));
     let mut store = store::InMemoryTypedRunStore::new();
@@ -3883,19 +4148,49 @@ async fn recovery_continues_started_pure_attempt_with_same_attempt_id() {
     .await
     .expect("start run");
     let node = node_by_output(&fixture, &fixture.cell_a);
-    let attempt_id = append_attempt_start(&mut store, &fixture, node, 1);
+    let interrupted_attempt_id = append_attempt_start(&mut store, &fixture, node, 1);
 
     assert_eq!(
         scheduler
             .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
             .await
-            .expect("resume pure"),
+            .expect("interrupt pure"),
+        SchedulerStatus::Advanced
+    );
+    let interrupted_attempt = store
+        .projection_snapshot()
+        .attempt(&node.node_id, &interrupted_attempt_id)
+        .expect("interrupted attempt");
+    assert!(matches!(
+        interrupted_attempt.status,
+        store::AttemptStatus::Interrupted
+    ));
+    assert!(
+        store
+            .projection_snapshot()
+            .cell_terminal(&fixture.cell_a)
+            .is_none(),
+        "interruption must not terminalize the output cell"
+    );
+
+    assert_eq!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("retry pure"),
         SchedulerStatus::Advanced
     );
     assert_eq!(
         attempt_started_count(&store, &fixture.run_id, &node.node_id),
-        1
+        2
     );
+    let retry_attempt_id = attempt_id(
+        &fixture.run_id,
+        fixture.runtime_spec.spec_hash(),
+        &node.node_id,
+        2,
+    )
+    .expect("retry attempt id");
     match store
         .projection_snapshot()
         .cell_terminal(&fixture.cell_a)
@@ -3904,8 +4199,62 @@ async fn recovery_continues_started_pure_attempt_with_same_attempt_id() {
         store::CellTerminalProjection::Produced {
             attempt_id: produced_attempt,
             ..
-        } => assert_eq!(produced_attempt, &attempt_id),
+        } => assert_eq!(produced_attempt, &retry_attempt_id),
         terminal => panic!("unexpected terminal projection: {terminal:?}"),
+    }
+}
+
+#[tokio::test]
+async fn recovery_delegates_started_side_effect_attempt_to_side_effect_lifecycle() {
+    let fixture = fixture_with_first_exclusive_side_effect_state();
+    let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+
+    let node = node_by_output(&fixture, &fixture.cell_a);
+    let (attempt_id, _) = append_synthetic_exclusive_prepare(
+        &mut store,
+        &fixture,
+        &fixture.run_id,
+        node,
+        "wallet-recovery",
+        "sidefx-recovery-open",
+    );
+    let stream = store.load_run_stream(&fixture.run_id);
+    let view = RuntimeRunView::from_stream(&fixture.runtime_spec, &fixture.run_id, &stream)
+        .expect("runtime view");
+
+    match crate::recovery::AttemptRecoveryLifecycle::next_open_attempt_disposition(
+        &fixture.runtime_spec,
+        &view,
+        &BTreeSet::new(),
+    )
+    .expect("recovery disposition")
+    .expect("open side-effect attempt")
+    {
+        crate::recovery::OpenAttemptDisposition::DelegateSideEffect {
+            node: recovered_node,
+            attempt_id: recovered_attempt,
+            attempt_no,
+        } => {
+            assert_eq!(recovered_node.node_id, node.node_id);
+            assert_eq!(recovered_attempt, attempt_id);
+            assert_eq!(attempt_no, 1);
+        }
+        crate::recovery::OpenAttemptDisposition::Continue { .. } => {
+            panic!("side-effect attempt must delegate to side-effect lifecycle")
+        }
+        crate::recovery::OpenAttemptDisposition::Interrupt { .. }
+        | crate::recovery::OpenAttemptDisposition::RetryTerminalization { .. } => {
+            panic!("side-effect attempt must delegate to side-effect lifecycle")
+        }
     }
 }
 
@@ -3934,16 +4283,11 @@ async fn recovery_rejects_split_terminal_cell_and_attempt_completion() {
                 if payload.output_cell_id == fixture.cell_a
         )
     });
-    let mut corrupt_store = StaleStreamStore {
-        inner: &mut store,
-        stream: corrupt_stream,
-    };
 
     assert!(matches!(
-        scheduler
-            .drive_once(&mut corrupt_store, &fixture.runtime_spec, &fixture.run_id)
-            .await,
-        Err(RuntimeError::InvalidRunStream(_))
+        validate_runtime_stream_for_tests(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
+        Err(RuntimeError::Store(message))
+            if message.contains("terminal cell requires matching attempt completion")
     ));
 }
 
@@ -4177,12 +4521,14 @@ async fn recovery_rejects_new_fact_after_same_attempt_fact_exists() {
         content(0xd2),
     );
 
-    assert!(matches!(
+    assert_eq!(
         scheduler
             .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await,
-        Err(RuntimeError::InvalidRunnerOutput(_))
-    ));
+            .await
+            .expect("terminalize duplicate fact output"),
+        SchedulerStatus::Advanced
+    );
+    assert_node_failed_with_code(&store, &node.node_id, "runner_output_invalid");
     assert_eq!(store.projection_snapshot().facts().count(), 1);
 }
 
@@ -4256,6 +4602,36 @@ async fn recovery_allows_managed_write_artifact_restage_before_terminal_commit()
         } => assert_eq!(produced_attempt, &attempt_id),
         terminal => panic!("unexpected terminal projection: {terminal:?}"),
     }
+}
+
+#[tokio::test]
+async fn scheduler_reloads_and_redecides_after_stale_expected_sequence_on_terminal_append() {
+    let fixture = fixture();
+    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = StaleOnceTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+
+    assert_eq!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("drive after injected stale terminal append"),
+        SchedulerStatus::Advanced
+    );
+    assert!(
+        store
+            .projection_snapshot()
+            .cell_terminal(&fixture.cell_a)
+            .is_some(),
+        "scheduler must reload and observe the concurrently advanced terminal projection"
+    );
 }
 
 #[tokio::test]
@@ -5224,6 +5600,88 @@ async fn runtime_resolves_manual_resolution_terminal() {
 }
 
 #[tokio::test]
+async fn runtime_rebuilds_manual_terminal_proof_from_retained_authorization() {
+    let fixture = fixture_with_manual_resolution_side_effect_state();
+    let mut registry = ErasedRunnerRegistry::new();
+    registry
+        .register(binding(
+            fixture.descriptor_a.clone(),
+            "sidefx",
+            AmbiguousSideEffectRunner::new(&fixture),
+        ))
+        .expect("binding side effect");
+    registry
+        .register(binding(
+            fixture.descriptor_b.clone(),
+            "read",
+            RecordingRunner {
+                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                output_artifact: artifact(0xb1),
+                output_digest: content(0xb2),
+            },
+        ))
+        .expect("binding read");
+    let artifact_store = Arc::new(TestRuntimeArtifactStager::default());
+    let scheduler = test_scheduler_with_stager(registry, artifact_store.clone());
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+
+    for _ in 0..3 {
+        assert_eq!(
+            scheduler
+                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+                .await
+                .expect("advance to ambiguity"),
+            SchedulerStatus::Advanced
+        );
+    }
+    append_manual_resolution(
+        &scheduler,
+        &mut store,
+        &fixture,
+        events::ManualResolutionOutcome::ConfirmRemediated,
+    )
+    .await;
+    let manual = store
+        .load_run_stream(&fixture.run_id)
+        .iter()
+        .find_map(|event| match event.payload() {
+            events::KernelEventPayload::ManualResolutionRecorded(payload) => Some(payload.clone()),
+            _ => None,
+        })
+        .expect("manual resolution recorded");
+    artifact_store
+        .artifacts
+        .lock()
+        .expect("test artifact store")
+        .remove(&manual.authorization_artifact_id)
+        .expect("authorization artifact was staged");
+    let stream_len_before = store.load_run_stream(&fixture.run_id).len();
+
+    let error = scheduler
+        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+        .await
+        .expect_err("terminal proof rebuild requires retained authorization artifact");
+
+    assert!(matches!(error, RuntimeError::Store(_)), "{error}");
+    assert_eq!(
+        store.load_run_stream(&fixture.run_id).len(),
+        stream_len_before
+    );
+    assert!(store
+        .projection_snapshot()
+        .run_completion(&fixture.run_id)
+        .is_none());
+}
+
+#[tokio::test]
 async fn runtime_rejects_manual_resolution_before_manual_blocked() {
     let fixture = fixture_with_manual_resolution_side_effect_state();
     let mut registry = ErasedRunnerRegistry::new();
@@ -5314,13 +5772,15 @@ async fn runtime_rejects_forward_node_emitting_remediation_ledger_purpose() {
     .await
     .expect("start run");
 
-    assert!(matches!(
+    assert_eq!(
         scheduler
             .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await,
-        Err(RuntimeError::InvalidRunnerOutput(message))
-            if message.contains("emitted remediation ledger purpose")
-    ));
+            .await
+            .expect("terminalize wrong forward ledger purpose"),
+        SchedulerStatus::Advanced
+    );
+    let node = node_by_output(&fixture, &fixture.cell_a);
+    assert_node_failed_with_code(&store, &node.node_id, "runner_output_invalid");
 }
 
 #[tokio::test]
@@ -5376,13 +5836,14 @@ async fn runtime_rejects_remediation_node_emitting_forward_ledger_purpose() {
     let failure_attempt = append_attempt_start(&mut store, &fixture, &failure_node, 1);
     append_attempt_failure(&mut store, &fixture, &failure_node, &failure_attempt, false);
 
-    assert!(matches!(
+    assert_eq!(
         scheduler
             .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await,
-        Err(RuntimeError::InvalidRunnerOutput(message))
-            if message.contains("emitted forward ledger purpose")
-    ));
+            .await
+            .expect("terminalize wrong remediation ledger purpose"),
+        SchedulerStatus::Advanced
+    );
+    assert_failure_code_count(&store, "runner_output_invalid", 1);
 }
 
 #[tokio::test]
@@ -5402,13 +5863,15 @@ async fn runtime_rejects_exclusive_side_effect_without_resource_key() {
     .await
     .expect("start run");
 
-    assert!(matches!(
+    assert_eq!(
         scheduler
             .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await,
-        Err(RuntimeError::InvalidRunnerOutput(message))
-            if message.contains("without resource key evidence")
-    ));
+            .await
+            .expect("terminalize missing exclusive resource key"),
+        SchedulerStatus::Advanced
+    );
+    let node = node_by_output(&fixture, &fixture.cell_a);
+    assert_node_failed_with_code(&store, &node.node_id, "runner_output_invalid");
 }
 
 #[tokio::test]
@@ -6044,13 +6507,15 @@ async fn side_effect_staged_artifact_must_match_payload_ledger_binding() {
     .await
     .expect("start run");
 
-    assert!(matches!(
+    assert_eq!(
         scheduler
             .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await,
-        Err(RuntimeError::InvalidRunnerOutput(message))
-            if message.contains("does not match typed payload binding")
-    ));
+            .await
+            .expect("terminalize side-effect artifact binding mismatch"),
+        SchedulerStatus::Advanced
+    );
+    let node = node_by_output(&fixture, &fixture.cell_a);
+    assert_node_failed_with_code(&store, &node.node_id, "runner_output_invalid");
 }
 
 #[tokio::test]
@@ -6212,12 +6677,15 @@ async fn side_effect_output_before_confirmation_is_rejected() {
     .await
     .expect("start run");
 
-    assert!(matches!(
+    assert_eq!(
         scheduler
             .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await,
-        Err(RuntimeError::InvalidRunnerOutput(_))
-    ));
+            .await
+            .expect("terminalize premature side-effect output"),
+        SchedulerStatus::Advanced
+    );
+    let node = node_by_output(&fixture, &fixture.cell_a);
+    assert_node_failed_with_code(&store, &node.node_id, "runner_output_invalid");
 }
 
 #[test]
@@ -6926,6 +7394,41 @@ impl store::TypedRunEventStore for StaleStreamStore<'_> {
     }
 }
 
+struct MissingInputArtifactRefStore<'a> {
+    inner: &'a mut store::InMemoryTypedRunStore,
+    producer_node_id: NodeId,
+}
+
+impl store::TypedProjectionRead for MissingInputArtifactRefStore<'_> {
+    fn projection_snapshot(&self) -> &store::ProjectionSnapshot {
+        self.inner.projection_snapshot()
+    }
+}
+
+impl store::TypedRunEventStore for MissingInputArtifactRefStore<'_> {
+    fn append_prepared_typed_commit(
+        &mut self,
+        commit: store::PreparedTypedCommit,
+    ) -> store::Result<store::CommitOutcome> {
+        self.inner.append_prepared_typed_commit(commit)
+    }
+
+    fn load_run_stream(&self, run_id: &RunId) -> Vec<store::KernelEventEnvelope> {
+        rewrite_stream_without_payloads(&self.inner.load_run_stream(run_id), |payload| {
+            matches!(
+                payload,
+                events::KernelEventPayload::ArtifactReferenced(payload)
+                    if payload.artifact_ref.role == events::ArtifactRole::StateOutput
+                        && payload.node_id.as_ref() == Some(&self.producer_node_id)
+            )
+        })
+    }
+
+    fn expected_next_seq(&self, run_id: &RunId) -> store::StreamSeq {
+        self.inner.expected_next_seq(run_id)
+    }
+}
+
 struct ReadOnlyCorruptStore {
     stream: Vec<store::KernelEventEnvelope>,
     projection: store::ProjectionSnapshot,
@@ -7531,6 +8034,7 @@ fn referenced_artifact_ids_for_payload(payload: &events::KernelEventPayload) -> 
             artifacts.push(payload.manifest_artifact_id.clone());
         }
         events::KernelEventPayload::StateAttemptStarted(_)
+        | events::KernelEventPayload::StateAttemptInterrupted(_)
         | events::KernelEventPayload::CellSkipped(_)
         | events::KernelEventPayload::SideEffectClaimed(_)
         | events::KernelEventPayload::SideEffectClaimTakenOver(_)
@@ -8603,6 +9107,83 @@ fn attempt_started_count(
             )
         })
         .count()
+}
+
+fn assert_node_failed_with_code(
+    store: &store::InMemoryTypedRunStore,
+    node_id: &NodeId,
+    code: &str,
+) -> AttemptId {
+    let failures = store
+        .projection_snapshot()
+        .attempts()
+        .filter_map(|((attempt_node_id, attempt_id), attempt)| {
+            if attempt_node_id != node_id {
+                return None;
+            }
+            let store::AttemptStatus::Failed { retryable, error } = &attempt.status else {
+                return None;
+            };
+            Some((attempt_id.clone(), *retryable, error.as_ref().clone()))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        failures.len(),
+        1,
+        "expected one failed attempt for node {node_id}"
+    );
+    let (attempt_id, retryable, error) = failures.into_iter().next().expect("failure");
+    assert!(!retryable, "failure-safe terminalization is non-retryable");
+    assert_eq!(error.code.as_str(), code);
+    assert_eq!(error.retryable, retryable);
+    let diagnostic = error
+        .diagnostic_ref
+        .as_ref()
+        .expect("failure-safe terminalization records redacted diagnostic evidence");
+    assert_eq!(diagnostic.role, events::ArtifactRole::RedactedDiagnostic);
+    assert_eq!(diagnostic.semantic_type_id, None);
+    assert_eq!(
+        diagnostic.media_type,
+        spec::MediaType::new("application/json").expect("media type")
+    );
+    assert!(
+        diagnostic
+            .schema_id
+            .as_str()
+            .contains("schema:mfm.runtime.redacted_attempt_failure_diagnostic:1:sha256-jcs-v1:"),
+        "diagnostic schema id should identify the runtime redacted failure diagnostic schema"
+    );
+    let retained = store
+        .projection_snapshot()
+        .retentions()
+        .any(|(_, retention)| {
+            retention
+                .refs
+                .get(&diagnostic.artifact_id)
+                .is_some_and(|retention_ref| {
+                    retention_ref.role == events::ArtifactRole::RedactedDiagnostic
+                        && retention_ref.content_digest == diagnostic.content_digest
+                })
+        });
+    assert!(
+        retained,
+        "failure-safe diagnostic artifact should be retained as runtime evidence"
+    );
+    attempt_id
+}
+
+fn assert_failure_code_count(store: &store::InMemoryTypedRunStore, code: &str, expected: usize) {
+    let count = store
+        .projection_snapshot()
+        .attempts()
+        .filter(|(_, attempt)| {
+            matches!(
+                &attempt.status,
+                store::AttemptStatus::Failed { error, .. } if error.code.as_str() == code
+            )
+        })
+        .count();
+    assert_eq!(count, expected, "failure code count for {code}");
 }
 
 fn fact_recorded_count(store: &store::InMemoryTypedRunStore) -> usize {

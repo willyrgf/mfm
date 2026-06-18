@@ -3626,6 +3626,8 @@ pub mod v1 {
             /// Redaction-safe error information.
             error: Box<events::MfmErrorInfo>,
         },
+        /// Attempt was interrupted and may be retried.
+        Interrupted,
     }
 
     /// Fact projection derived from committed read-fact events.
@@ -3922,8 +3924,19 @@ pub mod v1 {
         pub fn rebuild_from_run_stream(events: &[KernelEventEnvelope]) -> Result<Self> {
             Self::validate_run_stream(events)?;
             let mut snapshot = Self::default();
-            for event in events {
-                projection::apply_projection(&mut snapshot, event)?;
+            for commit in committed_run_stream_commits(events) {
+                let payloads = commit
+                    .events
+                    .iter()
+                    .map(|event| event.payload().clone())
+                    .collect::<Vec<_>>();
+                validate_terminal_attempt_cell_pairs(&payloads)?;
+                validate_terminal_side_effect_evidence_pairs(&payloads)?;
+                validate_side_effect_attempt_failures_have_terminal_evidence(&snapshot, &payloads)?;
+                validate_retention_manifest_pairs(&payloads)?;
+                for event in commit.events {
+                    projection::apply_projection(&mut snapshot, &event)?;
+                }
             }
             Ok(snapshot)
         }
@@ -4964,6 +4977,10 @@ pub mod v1 {
 
         validate_terminal_attempt_cell_pairs(&request.payloads)?;
         validate_terminal_side_effect_evidence_pairs(&request.payloads)?;
+        validate_side_effect_attempt_failures_have_terminal_evidence(
+            &base.projections,
+            &request.payloads,
+        )?;
         validate_retention_manifest_pairs(&request.payloads)?;
 
         let verifier = InMemoryTypedRunStore {
@@ -5734,6 +5751,7 @@ pub mod v1 {
         matches!(
             payload,
             KernelEventPayload::StateAttemptCompleted(_)
+                | KernelEventPayload::StateAttemptInterrupted(_)
                 | KernelEventPayload::StateAttemptFailed(_)
                 | KernelEventPayload::CellProduced(_)
                 | KernelEventPayload::CellSkipped(_)
@@ -6008,6 +6026,62 @@ pub mod v1 {
         Ok(())
     }
 
+    fn validate_side_effect_attempt_failures_have_terminal_evidence(
+        projections: &ProjectionSnapshot,
+        payloads: &[KernelEventPayload],
+    ) -> Result<()> {
+        let mut current_side_effect_authority = BTreeSet::new();
+        let mut terminal_side_effect_evidence = BTreeSet::new();
+        let mut attempt_failures = Vec::new();
+        for payload in payloads {
+            if let Some(side_effect) = payload.side_effect_ref() {
+                let key = (side_effect.node_id.clone(), side_effect.attempt_id.clone());
+                current_side_effect_authority.insert(key.clone());
+                if matches!(
+                    side_effect.kind,
+                    events::SideEffectEventKind::Ambiguous | events::SideEffectEventKind::Failed
+                ) {
+                    terminal_side_effect_evidence.insert(key);
+                }
+            }
+            if let KernelEventPayload::StateAttemptFailed(payload) = payload {
+                attempt_failures.push((payload.node_id.clone(), payload.attempt_id.clone()));
+            }
+        }
+
+        for (node_id, attempt_id) in attempt_failures {
+            let key = (node_id.clone(), attempt_id.clone());
+            if terminal_side_effect_evidence.contains(&key) {
+                continue;
+            }
+            let prior_side_effect = projections.side_effects().find_map(|(_, projection)| {
+                if projection.intent.node_id == node_id
+                    && projection.intent.attempt_id == attempt_id
+                {
+                    Some(projection)
+                } else {
+                    None
+                }
+            });
+            if prior_side_effect
+                .map(|projection| projection.ledger_state().map(|state| state.is_confirmed()))
+                .transpose()?
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            if prior_side_effect.is_some() || current_side_effect_authority.contains(&key) {
+                return Err(StoreError::ProjectionConflict {
+                    key: format!("attempt:{node_id}:{attempt_id}"),
+                    message:
+                        "side-effect attempt failure requires terminal side-effect evidence in the same commit"
+                            .to_owned(),
+                });
+            }
+        }
+        Ok(())
+    }
+
     fn insert_terminal_side_effect_pair(
         pairs: &mut BTreeMap<(NodeId, AttemptId), TerminalSideEffectEvidencePair>,
         pair: TerminalSideEffectEvidencePair,
@@ -6155,6 +6229,9 @@ pub mod v1 {
                 format!("attempt:{}:{}", payload.node_id, payload.attempt_id)
             }
             KernelEventPayload::StateAttemptCompleted(payload) => {
+                format!("attempt:{}:{}", payload.node_id, payload.attempt_id)
+            }
+            KernelEventPayload::StateAttemptInterrupted(payload) => {
                 format!("attempt:{}:{}", payload.node_id, payload.attempt_id)
             }
             KernelEventPayload::StateAttemptFailed(payload) => {
@@ -6628,6 +6705,12 @@ pub mod v1 {
                 "output_cell_id": payload.output_cell_id.as_str(),
                 "spec_hash": payload.spec_hash.as_str(),
                 "variant": "StateAttemptCompleted",
+            }),
+            KernelEventPayload::StateAttemptInterrupted(payload) => serde_json::json!({
+                "attempt_id": payload.attempt_id.as_str(),
+                "node_id": payload.node_id.as_str(),
+                "spec_hash": payload.spec_hash.as_str(),
+                "variant": "StateAttemptInterrupted",
             }),
             KernelEventPayload::StateAttemptFailed(payload) => serde_json::json!({
                 "attempt_id": payload.attempt_id.as_str(),
@@ -7146,6 +7229,13 @@ pub mod v1 {
                     node_id: parse_identity(required_str(json, "node_id")?)?,
                     attempt_id: parse_identity(required_str(json, "attempt_id")?)?,
                     output_cell_id: parse_identity(required_str(json, "output_cell_id")?)?,
+                },
+            )),
+            "StateAttemptInterrupted" => Ok(KernelEventPayload::StateAttemptInterrupted(
+                events::StateAttemptInterrupted {
+                    spec_hash: parse_identity(required_str(json, "spec_hash")?)?,
+                    node_id: parse_identity(required_str(json, "node_id")?)?,
+                    attempt_id: parse_identity(required_str(json, "attempt_id")?)?,
                 },
             )),
             "StateAttemptFailed" => Ok(KernelEventPayload::StateAttemptFailed(
@@ -8073,6 +8163,9 @@ pub mod v1 {
                 "retryable": retryable,
                 "error": error_info_json(error),
             }),
+            AttemptStatus::Interrupted => serde_json::json!({
+                "variant": "interrupted",
+            }),
         };
         serde_json::json!({
             "attempt_id": projection.attempt_id.as_str(),
@@ -8100,6 +8193,7 @@ pub mod v1 {
                 retryable: required_bool(status_json, "retryable")?,
                 error: Box::new(parse_error_info(required_obj(status_json, "error")?)?),
             },
+            "interrupted" => AttemptStatus::Interrupted,
             other => {
                 return Err(CodecError::Identity(format!(
                     "unknown attempt status {other}"
