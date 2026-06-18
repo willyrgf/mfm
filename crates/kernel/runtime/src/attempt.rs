@@ -333,6 +333,17 @@ impl<'a> AttemptLifecycle<'a> {
                 .await;
             }
         };
+        if resource_lane_block_for_request(
+            &latest_view.projections,
+            terminal_output.commit.request(),
+        )
+        .is_some()
+        {
+            return Ok(AttemptRunStatus::BlockedOnResourceLane {
+                node_id: node.node_id.clone(),
+                advanced,
+            });
+        }
         let has_resource_lane_prepare =
             request_has_resource_lane_prepare(terminal_output.commit.request());
         stage_prepared_artifacts(self.artifact_store, &terminal_output.artifacts_to_stage).await?;

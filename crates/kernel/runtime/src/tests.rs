@@ -116,6 +116,65 @@ impl StaleOnceTypedRunStore {
     }
 }
 
+struct AsyncInMemoryTypedRunStore {
+    inner: Mutex<store::InMemoryTypedRunStore>,
+}
+
+impl AsyncInMemoryTypedRunStore {
+    fn new(inner: store::InMemoryTypedRunStore) -> Self {
+        Self {
+            inner: Mutex::new(inner),
+        }
+    }
+
+    fn with_inner<R>(&self, f: impl FnOnce(&store::InMemoryTypedRunStore) -> R) -> R {
+        let inner = self.inner.lock().expect("async in-memory store lock");
+        f(&inner)
+    }
+}
+
+impl store::AsyncTypedRunEventStore for AsyncInMemoryTypedRunStore {
+    type Error = store::StoreError;
+
+    fn append_prepared_typed_commit<'a>(
+        &'a self,
+        commit: store::PreparedTypedCommit,
+    ) -> store::AsyncStoreFuture<'a, store::CommitOutcome, Self::Error> {
+        Box::pin(async move {
+            self.inner
+                .lock()
+                .expect("async in-memory store lock")
+                .append_prepared_typed_commit(commit)
+        })
+    }
+
+    fn load_run_stream<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> store::AsyncStoreFuture<'a, Vec<store::KernelEventEnvelope>, Self::Error> {
+        Box::pin(async move {
+            Ok(self
+                .inner
+                .lock()
+                .expect("async in-memory store lock")
+                .load_run_stream(run_id))
+        })
+    }
+
+    fn expected_next_seq<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> store::AsyncStoreFuture<'a, store::StreamSeq, Self::Error> {
+        Box::pin(async move {
+            Ok(self
+                .inner
+                .lock()
+                .expect("async in-memory store lock")
+                .expected_next_seq(run_id))
+        })
+    }
+}
+
 impl store::TypedProjectionRead for StaleOnceTypedRunStore {
     fn projection_snapshot(&self) -> &store::ProjectionSnapshot {
         self.inner.projection_snapshot()
@@ -6081,6 +6140,87 @@ async fn runtime_sequences_two_runs_on_same_exclusive_lane_until_release() {
         &node.node_id
     )
     .is_some());
+}
+
+#[tokio::test]
+async fn async_runtime_blocks_exclusive_lane_before_staging_artifact() {
+    let fixture = fixture_with_first_exclusive_side_effect_state();
+    let holder_run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, DA);
+    let runner = side_effect_runner_with_resource_keys(
+        &fixture,
+        resource_keys_for_all_side_effects(&fixture, "wallet-async"),
+    );
+    let staged = Arc::new(Mutex::new(Vec::new()));
+    let artifacts = Arc::new(Mutex::new(TestArtifactMap::new()));
+    let scheduler = test_scheduler_with_stager(
+        registered_first_side_effect_runners_with(&fixture, runner),
+        Arc::new(RecordingRuntimeArtifactStager {
+            staged: Arc::clone(&staged),
+            artifacts,
+        }),
+    );
+    let node = node_by_output(&fixture, &fixture.cell_a).clone();
+    let mut inner = store::InMemoryTypedRunStore::new();
+    append_synthetic_run_started(
+        &mut inner,
+        &fixture,
+        &holder_run_id,
+        "async-holder-run-start",
+    );
+    append_synthetic_exclusive_prepare(
+        &mut inner,
+        &fixture,
+        &holder_run_id,
+        &node,
+        "wallet-async",
+        "async-holder-prepare",
+    );
+    let store = AsyncInMemoryTypedRunStore::new(inner);
+    let launch = scheduler
+        .prepare_run_launch(
+            &fixture.runtime_spec,
+            fixture.run_id.clone(),
+            run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
+            store::StreamSeq::FIRST,
+        )
+        .expect("prepare async peer launch");
+    scheduler
+        .start_run_async(&store, launch)
+        .await
+        .expect("start async peer run");
+    let staged_before_block = staged.lock().expect("staged lock").len();
+
+    assert_eq!(
+        scheduler
+            .drive_until_blocked_async(&store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("async peer blocks on lane"),
+        SchedulerStatus::Advanced
+    );
+    assert_eq!(
+        staged.lock().expect("staged lock").len(),
+        staged_before_block
+    );
+    store.with_inner(|inner| {
+        assert!(side_effect_projection_for_run_node(
+            inner.projection_snapshot(),
+            &fixture.run_id,
+            &node.node_id
+        )
+        .is_none());
+    });
+
+    assert_eq!(
+        scheduler
+            .drive_until_blocked_async(&store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("async peer remains blocked on lane"),
+        SchedulerStatus::Blocked
+    );
+    assert_eq!(
+        staged.lock().expect("staged lock").len(),
+        staged_before_block
+    );
 }
 
 #[tokio::test]
