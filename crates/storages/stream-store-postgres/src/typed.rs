@@ -1256,7 +1256,7 @@ mod tests {
         sqlx::query("UPDATE typed_cell_projection SET projection_json = $2 WHERE run_id = $1")
             .bind(run_id.as_str())
             .bind(serde_json::json!({
-                "cell_id": cell_id(999).as_str(),
+                "cell_id": cell_id(199).as_str(),
                 "poisoned": true,
             }))
             .execute(&store.pool)
