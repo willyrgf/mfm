@@ -209,6 +209,10 @@ supplies replay implementations backed only by recorded facts, typed artifacts, 
 evidence. Adapters translate state-owned intent into capability calls and evidence phases without
 moving protocol IO or signer material into state code.
 
+Runtime admission binds each certified capability descriptor to a registered non-secret
+implementation identity before the run can start or resume. Missing or mismatched implementation
+bindings are deployment/ingress failures, not semantic attempt outcomes.
+
 Replay and resume semantics follow the effect class:
 
 - Pure states replay by recomputing deterministic state behavior.
@@ -360,10 +364,11 @@ committed stream/view authority with `BoundRuntimeContext` runner, capability, a
 authority before any transition is selected.
 
 The deterministic frontier scheduler is pure. Given the static certified transition graph and
-verified run history, it returns one closed transition decision: start a node, continue or interrupt
-an open attempt, start remediation, wait for manual resolution, resolve saga terminal state, report
-blocked, or report projected public output completion. It does not write the store, stage artifacts,
-construct live capabilities, or call runners.
+verified run history, it returns one closed transition decision: start a node, continue an open
+attempt, start remediation, wait for manual resolution, resolve saga terminal state, report blocked,
+or report projected public output completion. Open-attempt recovery, including legal interruption,
+is handled by the attempt recovery lifecycle when the continued attempt is dispatched. The frontier
+decision does not write the store, stage artifacts, construct live capabilities, or call runners.
 
 For a new ordinary runnable node attempt, runtime first appends `StateAttemptStarted` from
 certified attempt authority. It then materializes state inputs from certified binding trees and

@@ -1,0 +1,96 @@
+{
+  "runId": "run-1003492-1781795941626317257",
+  "computedModelHash": "d6fdf033ef9f6dce4b2236d94c27c96cffb7d1ec57cd7189dcf4cb8e56aca34a",
+  "nodes": [
+    {
+      "nodeId": "ci.check.fmt",
+      "taskId": "fmt",
+      "exitCode": 0,
+      "success": true
+    },
+    {
+      "nodeId": "ci.check.clippy",
+      "taskId": "clippy",
+      "exitCode": 0,
+      "success": true
+    },
+    {
+      "nodeId": "ci.check.cargo-metadata-contract",
+      "taskId": "cargo-metadata-contract",
+      "exitCode": 0,
+      "success": true
+    },
+    {
+      "nodeId": "ci.check.architecture-namespace-contract",
+      "taskId": "architecture-namespace-contract",
+      "exitCode": 0,
+      "success": true
+    },
+    {
+      "nodeId": "ci.test.workspace-tests.nextest-run",
+      "taskId": "nextest-run",
+      "exitCode": 0,
+      "success": true
+    },
+    {
+      "nodeId": "ci.test.workspace-tests.doc-tests",
+      "taskId": "doc-tests",
+      "exitCode": 0,
+      "success": true
+    },
+    {
+      "nodeId": "ci.parity-cli-keystore",
+      "taskId": "parity-cli-keystore",
+      "exitCode": 0,
+      "success": true
+    },
+    {
+      "nodeId": "ci.test-db.postgres-sqlx-check",
+      "taskId": "postgres-sqlx-check",
+      "exitCode": 0,
+      "success": true
+    },
+    {
+      "nodeId": "ci.test-db.parity-postgres-state-events",
+      "taskId": "parity-postgres-state-events",
+      "exitCode": 0,
+      "success": true
+    },
+    {
+      "nodeId": "ci.test-db.parity-postgres-rest-api",
+      "taskId": "parity-postgres-rest-api",
+      "exitCode": 0,
+      "success": true
+    },
+    {
+      "nodeId": "ci.parity-reth-contracts",
+      "taskId": "parity-reth-contracts",
+      "exitCode": 0,
+      "success": true
+    },
+    {
+      "nodeId": "ci.parity-reth-portfolio",
+      "taskId": "parity-reth-portfolio",
+      "exitCode": 0,
+      "success": true
+    }
+  ],
+  "services": [
+    {
+      "serviceId": "postgres",
+      "selectedEndpoint": {
+        "endpointId": "postgres-tcp",
+        "host": "127.0.0.1",
+        "port": 28080
+      }
+    },
+    {
+      "serviceId": "reth",
+      "selectedEndpoint": {
+        "endpointId": "reth-http",
+        "host": "127.0.0.1",
+        "port": 28082
+      }
+    }
+  ]
+}

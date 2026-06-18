@@ -11,11 +11,16 @@ Completion notes, 2026-06-18:
 - `ProjectionSnapshot::validate_run_stream` is the centralized ingress guard for old lifecycle
   streams. Runtime, replay, and Postgres projection rebuild/load paths reject attempt-bound terminal
   payloads that are not preceded by a separate `StateAttemptStarted` commit.
-- `TransitionDecision` is explicit for started/continued/interrupted attempts, remediation starts,
-  manual waits, saga terminal resolution, blocked status, and public-output completion.
-- Framework attempts that have already started terminalize safe observed post-start failures,
-  including output planning and artifact staging failures, into redacted diagnostic evidence and
-  non-retryable `StateAttemptFailed` records.
+- `TransitionDecision` is explicit for started attempts, continued open attempts, remediation starts,
+  manual waits, saga terminal resolution, blocked status, and public-output completion. Legal
+  interruption is classified and committed by `AttemptRecoveryLifecycle` when a continued open
+  attempt is dispatched.
+- Framework and ordinary attempts that have already started terminalize safe observed post-start
+  semantic/runtime validation failures into redacted diagnostic evidence and non-retryable
+  `StateAttemptFailed` records. Storage and artifact-authority failures before durable terminal
+  evidence commits remain recovery/ingress failures and leave the attempt open.
+- `BoundRuntimeContext` now proves every certified capability descriptor is bound to a registered
+  non-secret capability implementation identity before admission or resume can proceed.
 - Saga terminal proofs now bind the exact prefix `next_seq`; `ResolveSagaTerminal` mints proof from
   the current post-start prefix, and store validation rejects stale proof/request prefixes.
 - PostgreSQL `projection_snapshot()` now rebuilds the selected run snapshot from authoritative event
@@ -23,25 +28,11 @@ Completion notes, 2026-06-18:
   persisted projection rows.
 - The async attempt path checks already-held resource lanes before staging runner artifacts, matching
   the sync path for known-blocked lanes.
-- Local validation at this head:
-  - `cargo fmt --all -- --check`
-  - `cargo check --workspace`
-  - `cargo test -p mfm-runtime`
-  - `cargo test -p mfm-store --test commit_contract`
-  - `cargo test -p mfm-replay`
-  - `cargo test -p mfm-stream-store-postgres --all-features --no-run`
-- `nix run .#ci` evidence:
-  - Passed on 2026-06-18 with isolated state:
-    `NIXFIED_STATE_DIR=/tmp/mfm-nixfied-ci.UkFW4I`.
-  - Run id: `run-806297-1781792642754687448`.
-  - Passed nodes: `ci.check.fmt`, `ci.check.clippy`, `ci.check.cargo-metadata-contract`,
-    `ci.check.architecture-namespace-contract`, `ci.test.workspace-tests.nextest-run`,
-    `ci.test.workspace-tests.doc-tests`, `ci.parity-cli-keystore`,
-    `ci.test-db.postgres-sqlx-check`, `ci.test-db.parity-postgres-state-events`,
-    `ci.test-db.parity-postgres-rest-api`, `ci.parity-reth-contracts`, and
-    `ci.parity-reth-portfolio`.
-  - The managed Postgres and Reth parity suites are therefore evidenced by the Nix CI run; no
-    external `DATABASE_URL` was required in this shell.
+- The `RunnerOutputPlanner` responsibility from the RFC is implemented by
+  `CommitPlanner::prepare_runner_output` and framework lifecycle planning rather than by a separate
+  `runner_output.rs` module; the proposal-validation boundary is still covered by runtime tests.
+- Durable validation evidence, including the final `nix run .#ci` run summary, is recorded in
+  `docs/validation/fsm-scheduler-closeout-2026-06-18.md`.
 
 This plan divides `RFC_REFACTOR_FSM_SCHEDULER.md` into reviewable commits for this branch. The
 branch is allowed to make breaking changes. Do not add compatibility shims for old persisted streams,

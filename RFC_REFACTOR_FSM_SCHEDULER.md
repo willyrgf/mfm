@@ -894,7 +894,7 @@ The refactor should make these components explicit:
 | `AttemptRecoveryLifecycle` | Resolve open attempts after interruption | Inventing output or bypassing side-effect evidence |
 | `InvocationBuilder` | Materialized inputs, config, recorded facts, sealed runner context from bound authority | Store commits, registry binding lookup |
 | `RunnerExecutor` | Call one sealed runner/state handler | Event validation, store writes |
-| `RunnerOutputPlanner` | Validate runner proposals against certified spec and history | Live IO, artifact persistence |
+| `RunnerOutputPlanner` responsibility (`CommitPlanner::prepare_runner_output` in the current implementation) | Validate runner proposals against certified spec and history | Live IO, artifact persistence |
 | `ArtifactStager` | Stage verified artifact bytes before commit | Admitting run-store evidence independently |
 | `CommitPlanner` | Build purpose-specific prepared commits | Executing handlers |
 | `SideEffectLifecycle` | Orchestrate mutation phase recovery through store/runtime ledger validators | Generic scheduler decisions, independent ledger law |
@@ -984,7 +984,7 @@ crates/kernel/runtime/src/
   recovery.rs               // AttemptRecoveryLifecycle
   side_effect_lifecycle.rs  // SideEffectLifecycle wrapper over store ledger authority
   invocation.rs             // sealed runner context construction
-  runner_output.rs          // runner proposal validation
+  runner_output.rs          // runner proposal validation, or equivalent commit planner module
   commit.rs                 // prepared commit builders
   artifacts.rs              // artifact evidence/staging helpers
   framework.rs              // framework node handlers, no scheduling
