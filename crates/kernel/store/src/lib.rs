@@ -1135,6 +1135,7 @@ pub mod v1 {
     #[derive(Debug, Clone)]
     pub struct SagaTerminalProof {
         run_id: RunId,
+        prefix_next_seq: StreamSeq,
         saga_policy_digest: ContentDigest,
         kind: SagaTerminalProofKind,
     }
@@ -1152,6 +1153,7 @@ pub mod v1 {
         pub fn new(
             policy: &SagaPolicySpec,
             saga: &SagaProjection,
+            prefix_next_seq: StreamSeq,
             manual: Option<VerifiedManualResolutionForPrefix>,
         ) -> Result<Self> {
             let saga_policy_digest = policy
@@ -1202,6 +1204,7 @@ pub mod v1 {
             };
             Ok(Self {
                 run_id: saga.run_id.clone(),
+                prefix_next_seq,
                 saga_policy_digest,
                 kind,
             })
@@ -1210,6 +1213,11 @@ pub mod v1 {
         /// Returns the run id this proof was minted for.
         pub fn run_id(&self) -> &RunId {
             &self.run_id
+        }
+
+        /// Returns the stream sequence immediately after the prefix this proof was minted from.
+        pub const fn prefix_next_seq(&self) -> StreamSeq {
+            self.prefix_next_seq
         }
 
         /// Returns the saga policy digest this proof was minted under.
@@ -5703,6 +5711,12 @@ pub mod v1 {
             return Err(invalid_prepared_commit_purpose(
                 SagaTerminal::NAME,
                 "SagaTerminalProof run id does not match terminal request",
+            ));
+        }
+        if proof.prefix_next_seq() != request.expected_next_seq() {
+            return Err(invalid_prepared_commit_purpose(
+                SagaTerminal::NAME,
+                "SagaTerminalProof prefix does not match terminal request expected next sequence",
             ));
         }
         if proof.saga_policy_digest() != token.saga_policy_digest() {

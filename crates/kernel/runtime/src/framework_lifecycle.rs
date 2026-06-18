@@ -64,9 +64,6 @@ impl<'a> FrameworkAttemptLifecycle<'a> {
             output_cell,
             binding,
         } = self.prepare(runtime_spec, bound_context, attempt)?;
-        let pre_start_saga_terminal_proof = self
-            .pre_start_saga_terminal_proof(runtime_spec, run_id, view, node, &selected_attempt_id)
-            .await?;
         let attempt_id = match selected_attempt_id {
             Some(attempt_id) => attempt_id,
             None => {
@@ -110,7 +107,6 @@ impl<'a> FrameworkAttemptLifecycle<'a> {
                 attempt_id: &attempt_id,
                 attempt_no,
                 latest_view: &latest_view,
-                pre_start_saga_terminal_proof,
             })
             .await
         {
@@ -163,9 +159,6 @@ impl<'a> FrameworkAttemptLifecycle<'a> {
             output_cell,
             binding,
         } = self.prepare(runtime_spec, bound_context, attempt)?;
-        let pre_start_saga_terminal_proof = self
-            .pre_start_saga_terminal_proof(runtime_spec, run_id, view, node, &selected_attempt_id)
-            .await?;
         let attempt_id = match selected_attempt_id {
             Some(attempt_id) => attempt_id,
             None => {
@@ -212,7 +205,6 @@ impl<'a> FrameworkAttemptLifecycle<'a> {
                 attempt_id: &attempt_id,
                 attempt_no,
                 latest_view: &latest_view,
-                pre_start_saga_terminal_proof,
             })
             .await
         {
@@ -279,24 +271,6 @@ impl<'a> FrameworkAttemptLifecycle<'a> {
         })
     }
 
-    async fn pre_start_saga_terminal_proof(
-        &self,
-        runtime_spec: &CertifiedRuntimeSpec,
-        run_id: &RunId,
-        view: &RuntimeRunView,
-        node: &spec::NodeSpec,
-        selected_attempt_id: &Option<AttemptId>,
-    ) -> Result<Option<store::SagaTerminalProof>> {
-        if selected_attempt_id.is_none() && is_resolve_saga_terminal(node) {
-            Ok(Some(
-                self.saga_terminal_proof_for_view(runtime_spec, run_id, view)
-                    .await?,
-            ))
-        } else {
-            Ok(None)
-        }
-    }
-
     async fn prepare_terminal_output(
         &self,
         input: FrameworkTerminalOutputInput<'_>,
@@ -311,7 +285,6 @@ impl<'a> FrameworkAttemptLifecycle<'a> {
             attempt_id,
             attempt_no,
             latest_view,
-            pre_start_saga_terminal_proof,
         } = input;
         let invocation = InvocationBuilder::new(InvocationBuilderInput {
             runtime_spec,
@@ -328,13 +301,13 @@ impl<'a> FrameworkAttemptLifecycle<'a> {
             .runner
             .run_erased(ErasedRunCtx::from_prepared(&invocation))
             .await?;
-        let proof = match pre_start_saga_terminal_proof {
-            Some(proof) => Some(proof),
-            None if is_resolve_saga_terminal(node) => Some(
+        let proof = if is_resolve_saga_terminal(node) {
+            Some(
                 self.saga_terminal_proof_for_view(runtime_spec, run_id, latest_view)
                     .await?,
-            ),
-            None => None,
+            )
+        } else {
+            None
         };
         CommitPlanner::prepare_runner_output(RunnerOutputCommitInput {
             runtime_spec,
@@ -452,7 +425,13 @@ impl<'a> FrameworkAttemptLifecycle<'a> {
         let manual = self
             .verified_manual_resolution_for_terminal(runtime_spec, run_id, &view.stream)
             .await?;
-        crate::framework::saga_terminal_proof(runtime_spec, run_id, &view.projections, manual)
+        crate::framework::saga_terminal_proof(
+            runtime_spec,
+            run_id,
+            &view.projections,
+            view.next_seq,
+            manual,
+        )
     }
 }
 
@@ -475,7 +454,6 @@ struct FrameworkTerminalOutputInput<'a> {
     attempt_id: &'a AttemptId,
     attempt_no: u32,
     latest_view: &'a RuntimeRunView,
-    pre_start_saga_terminal_proof: Option<store::SagaTerminalProof>,
 }
 
 fn is_resolve_saga_terminal(node: &spec::NodeSpec) -> bool {

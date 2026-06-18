@@ -2532,8 +2532,16 @@ mod tests {
             .expect("terminal projection before completion");
         let terminal_saga =
             terminal_before_completion.derive_saga_projection(&terminal_run, &terminal_policy);
-        let terminal_proof =
-            SagaTerminalProof::new(&terminal_policy, &terminal_saga, None).expect("terminal proof");
+        let terminal_proof = SagaTerminalProof::new(
+            &terminal_policy,
+            &terminal_saga,
+            store
+                .expected_next_seq(&terminal_run)
+                .await
+                .expect("terminal next seq"),
+            None,
+        )
+        .expect("terminal proof");
         let terminal_request = request(
             terminal_run.clone(),
             5,

@@ -1507,6 +1507,18 @@ pub mod v1 {
                 events::RunCompletionOutcome::Compensated
                 | events::RunCompletionOutcome::ManuallyResolved
                 | events::RunCompletionOutcome::FailedWithoutAcdcClaim => {
+                    let prefix_next_seq = self.stream[..terminal_start]
+                        .last()
+                        .map(|event| {
+                            let next = event
+                                .seq()
+                                .as_u64()
+                                .checked_add(1)
+                                .ok_or(store::StoreError::SequenceOverflow)?;
+                            store::StreamSeq::new(next)
+                        })
+                        .transpose()?
+                        .unwrap_or(store::StreamSeq::FIRST);
                     let prefix_projection = ProjectionSnapshot::rebuild_from_run_stream(
                         &self.stream[..terminal_start],
                     )?;
@@ -1517,6 +1529,7 @@ pub mod v1 {
                     let proof = store::SagaTerminalProof::new(
                         &self.certified_spec.spec.saga,
                         &saga,
+                        prefix_next_seq,
                         self.manual_resolutions.get(&self.run_id.run_id).cloned(),
                     )
                     .map_err(|error| {

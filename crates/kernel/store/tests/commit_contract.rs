@@ -4091,8 +4091,9 @@ fn saga_run_completed_requires_terminal_proof() {
     let saga = store
         .projection_snapshot()
         .derive_saga_projection(&run_id, &policy);
-    let proof_error = SagaTerminalProof::new(&policy, &saga, None)
-        .expect_err("proof rejects before terminal saga mode");
+    let proof_error =
+        SagaTerminalProof::new(&policy, &saga, store.expected_next_seq(&run_id), None)
+            .expect_err("proof rejects before terminal saga mode");
     assert_projection_conflict_contains(proof_error, "requires terminal saga mode");
     let error = store
         .append_prepared_commit(typed_commit_request! {
@@ -4122,8 +4123,13 @@ fn saga_run_completed_requires_terminal_proof() {
     let saga = forged
         .projection_snapshot()
         .derive_saga_projection(&run_id, &forged_policy);
-    let proof_error = SagaTerminalProof::new(&forged_policy, &saga, None)
-        .expect_err("manual terminal rejects before manual resolution");
+    let proof_error = SagaTerminalProof::new(
+        &forged_policy,
+        &saga,
+        forged.expected_next_seq(&run_id),
+        None,
+    )
+    .expect_err("manual terminal rejects before manual resolution");
     assert_projection_conflict_contains(proof_error, "requires terminal saga mode");
     let error = forged
         .append_prepared_commit(typed_commit_request! {
@@ -4151,8 +4157,13 @@ fn saga_run_completed_requires_terminal_proof() {
     let saga = forged
         .projection_snapshot()
         .derive_saga_projection(&run_id, &forged_policy);
-    let proof_error = SagaTerminalProof::new(&forged_policy, &saga, None)
-        .expect_err("manual terminal requires verified proof authority");
+    let proof_error = SagaTerminalProof::new(
+        &forged_policy,
+        &saga,
+        forged.expected_next_seq(&run_id),
+        None,
+    )
+    .expect_err("manual terminal requires verified proof authority");
     assert_projection_conflict_contains(proof_error, "requires verified manual resolution proof");
 }
 
@@ -4172,8 +4183,8 @@ fn saga_terminal_prepared_commit_requires_matching_proof() {
     let saga = store
         .projection_snapshot()
         .derive_saga_projection(&run_id, &policy);
-    let proof =
-        SagaTerminalProof::new(&policy, &saga, None).expect("failed terminal proof authority");
+    let proof = SagaTerminalProof::new(&policy, &saga, store.expected_next_seq(&run_id), None)
+        .expect("failed terminal proof authority");
     let request = typed_commit_request! {
         run_id: run_id.clone(),
         expected_next_seq: store.expected_next_seq(&run_id),
@@ -4222,8 +4233,13 @@ fn saga_terminal_prepared_commit_rejects_cross_run_proof() {
     let proof_saga = proof_store
         .projection_snapshot()
         .derive_saga_projection(&proof_run, &policy);
-    let proof =
-        SagaTerminalProof::new(&policy, &proof_saga, None).expect("terminal proof authority");
+    let proof = SagaTerminalProof::new(
+        &policy,
+        &proof_saga,
+        proof_store.expected_next_seq(&proof_run),
+        None,
+    )
+    .expect("terminal proof authority");
 
     let request = typed_commit_request! {
         run_id: request_run.clone(),
@@ -4258,7 +4274,8 @@ fn saga_terminal_prepared_commit_rejects_policy_digest_mismatch() {
     let saga = store
         .projection_snapshot()
         .derive_saga_projection(&run_id, &policy);
-    let proof = SagaTerminalProof::new(&policy, &saga, None).expect("terminal proof authority");
+    let proof = SagaTerminalProof::new(&policy, &saga, store.expected_next_seq(&run_id), None)
+        .expect("terminal proof authority");
 
     let request = typed_commit_request! {
         run_id: run_id.clone(),
@@ -4278,7 +4295,7 @@ fn saga_terminal_prepared_commit_rejects_policy_digest_mismatch() {
 }
 
 #[test]
-fn saga_terminal_append_rechecks_current_projection() {
+fn saga_terminal_prepared_commit_rejects_stale_prefix_proof() {
     let run_id = run_id(126);
     let policy = SagaPolicySpec::FailWithoutAcdcClaim;
     let mut proof_store = InMemoryTypedRunStore::new();
@@ -4297,8 +4314,13 @@ fn saga_terminal_append_rechecks_current_projection() {
     let proof_saga = proof_store
         .projection_snapshot()
         .derive_saga_projection(&run_id, &policy);
-    let proof =
-        SagaTerminalProof::new(&policy, &proof_saga, None).expect("terminal proof authority");
+    let proof = SagaTerminalProof::new(
+        &policy,
+        &proof_saga,
+        proof_store.expected_next_seq(&run_id),
+        None,
+    )
+    .expect("terminal proof authority");
 
     let mut store = InMemoryTypedRunStore::new();
     store
@@ -4319,13 +4341,10 @@ fn saga_terminal_append_rechecks_current_projection() {
         required_artifacts: Vec::new(),
         preconditions: saga_preconditions(&run_id, policy),
     };
-    let prepared =
+    let error =
         PreparedCommit::<SagaTerminal>::new(request, CommitArtifactEvidenceSet::empty(), &proof)
-            .expect("proof-backed commit can be prepared");
-    let error = store
-        .append_prepared_commit_plan(prepared.into())
-        .expect_err("append rechecks current projection");
-    assert_projection_conflict_contains(error, "requires terminal saga mode");
+            .expect_err("stale proof rejects");
+    assert_invalid_prepared_commit_contains(error, "prefix");
 }
 
 #[test]
