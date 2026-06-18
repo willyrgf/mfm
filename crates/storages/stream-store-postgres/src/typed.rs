@@ -9,21 +9,17 @@ use mfm_ids::{
 use mfm_spec::v1::MediaType;
 use mfm_store::v1::codec::{
     artifact_role_str, attempt_projection_json, cell_projection_json, fact_projection_json,
-    manual_resolution_projection_json, parse_artifact_role, parse_attempt_projection,
-    parse_cell_projection, parse_fact_projection, parse_identity,
-    parse_manual_resolution_projection, parse_public_output_projection,
-    parse_resource_lane_projection, parse_run_completion_projection, parse_run_state,
-    parse_saga_engagement_projection, parse_side_effect_projection, public_output_projection_json,
-    resource_lane_projection_json, run_completion_projection_json, run_state_str,
-    saga_engagement_projection_json, side_effect_projection_json,
+    manual_resolution_projection_json, parse_artifact_role, parse_identity,
+    public_output_projection_json, resource_lane_projection_json, run_completion_projection_json,
+    run_state_str, saga_engagement_projection_json, side_effect_projection_json,
 };
 use mfm_store::v1::{
     build_prepared_committed_batch, payload_from_json_value, prepared_commit_fingerprint,
     stage_prepared_typed_run_commit, ArtifactEvidenceRef, AsyncStoreFuture,
     AsyncTypedRunEventStore, CodecError, CommitKey, CommitOrdinal, CommitOutcome,
     KernelEventEnvelope, LogicalEventKey, PersistedKernelEventRecord, PreparedTypedCommit,
-    ProjectionSnapshot, ProjectionSnapshotParts, SideEffectLedgerRef, StoreError,
-    StoreErrorInspection, StreamSeq, TypedCommitBase,
+    ProjectionSnapshot, ProjectionSnapshotParts, ResourceLaneKey, ResourceLaneProjection,
+    StoreError, StoreErrorInspection, StreamSeq, TypedCommitBase,
 };
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, Transaction};
@@ -645,185 +641,108 @@ async fn load_projection_snapshot_client(
         .begin()
         .await
         .map_err(|error| database_error("failed to start read transaction", error))?;
-    let snapshot = load_projection_snapshot_tx(&mut tx, run_id).await?;
+    let snapshot = load_stream_authoritative_projection_snapshot_tx(&mut tx, run_id).await?;
     tx.commit()
         .await
         .map_err(|error| database_error("failed to commit read transaction", error))?;
     Ok(snapshot)
 }
 
-async fn load_projection_snapshot_tx(
+async fn load_stream_authoritative_projection_snapshot_tx(
     tx: &mut Transaction<'_, Postgres>,
     run_id: &RunId,
 ) -> Result<ProjectionSnapshot> {
-    let mut run_states = BTreeMap::new();
-    for row in sqlx::query!(
-        "SELECT run_state FROM typed_run_projection WHERE run_id = $1",
-        run_id.as_str(),
-    )
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(|error| database_error("failed to load run projection", error))?
-    {
-        run_states.insert(run_id.clone(), parse_run_state(&row.run_state)?);
-    }
+    let stream = load_run_stream_tx(tx, run_id).await?;
+    let snapshot = ProjectionSnapshot::rebuild_from_run_stream(&stream)?;
+    let resource_lanes = rebuild_global_resource_lanes_from_events_tx(tx).await?;
+    projection_snapshot_with_resource_lanes(&snapshot, resource_lanes)
+}
 
-    let mut run_completions = BTreeMap::new();
-    for row in sqlx::query!(
-        "SELECT projection_json FROM typed_run_completion_projection WHERE run_id = $1",
-        run_id.as_str(),
-    )
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(|error| database_error("failed to load run completion projection", error))?
-    {
-        let (projected_run_id, projection) = parse_run_completion_projection(&row.projection_json)?;
-        run_completions.insert(projected_run_id, projection);
-    }
-
-    let mut saga_engagements = BTreeMap::new();
-    for row in sqlx::query!(
-        "SELECT projection_json FROM typed_saga_engagement_projection WHERE run_id = $1",
-        run_id.as_str(),
-    )
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(|error| database_error("failed to load saga engagement projection", error))?
-    {
-        let (projected_run_id, projection) =
-            parse_saga_engagement_projection(&row.projection_json)?;
-        saga_engagements.insert(projected_run_id, projection);
-    }
-
-    let mut manual_resolutions = BTreeMap::new();
-    for row in sqlx::query!(
-        "SELECT projection_json FROM typed_manual_resolution_projection WHERE run_id = $1",
-        run_id.as_str(),
-    )
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(|error| database_error("failed to load manual resolution projection", error))?
-    {
-        let (projected_run_id, projection) =
-            parse_manual_resolution_projection(&row.projection_json)?;
-        manual_resolutions.insert(projected_run_id, projection);
-    }
-
-    let mut attempts = BTreeMap::new();
-    for row in sqlx::query!(
-        "SELECT projection_json FROM typed_attempt_projection WHERE run_id = $1",
-        run_id.as_str(),
-    )
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(|error| database_error("failed to load attempt projection", error))?
-    {
-        let projection = parse_attempt_projection(&row.projection_json)?;
-        attempts.insert(
-            (projection.node_id.clone(), projection.attempt_id.clone()),
-            projection,
-        );
-    }
-
-    let mut cells = BTreeMap::new();
-    for row in sqlx::query!(
-        "SELECT projection_json FROM typed_cell_projection WHERE run_id = $1",
-        run_id.as_str(),
-    )
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(|error| database_error("failed to load cell projection", error))?
-    {
-        let (cell_id, projection) = parse_cell_projection(&row.projection_json)?;
-        cells.insert(cell_id, projection);
-    }
-
-    let mut facts = BTreeMap::new();
-    for row in sqlx::query!(
-        "SELECT projection_json FROM typed_fact_projection WHERE run_id = $1",
-        run_id.as_str(),
-    )
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(|error| database_error("failed to load fact projection", error))?
-    {
-        let projection = parse_fact_projection(&row.projection_json)?;
-        facts.insert(
-            (
-                projection.node_id.clone(),
-                projection.attempt_id.clone(),
-                projection.fact_key.clone(),
-            ),
-            projection,
-        );
-    }
-
-    let mut side_effects = BTreeMap::new();
-    for row in sqlx::query!(
-        "SELECT projection_json FROM typed_side_effect_projection WHERE run_id = $1",
-        run_id.as_str(),
-    )
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(|error| database_error("failed to load side-effect projection", error))?
-    {
-        let projection = parse_side_effect_projection(&row.projection_json)?;
-        side_effects.insert(
-            SideEffectLedgerRef::new(projection.run_id.clone(), projection.ledger_key.clone()),
-            projection,
-        );
-    }
-
+async fn rebuild_global_resource_lanes_from_events_tx(
+    tx: &mut Transaction<'_, Postgres>,
+) -> Result<BTreeMap<ResourceLaneKey, ResourceLaneProjection>> {
     let mut resource_lanes = BTreeMap::new();
-    for row in sqlx::query!("SELECT projection_json FROM typed_resource_lane_projection",)
-        .fetch_all(&mut **tx)
-        .await
-        .map_err(|error| database_error("failed to load resource lanes", error))?
-    {
-        let (lane_key, projection) = parse_resource_lane_projection(&row.projection_json)?;
-        resource_lanes.insert(lane_key, projection);
+    for run_id in load_all_stream_run_ids_tx(tx).await? {
+        let stream = load_run_stream_tx(tx, &run_id).await?;
+        let snapshot = ProjectionSnapshot::rebuild_from_run_stream(&stream)?;
+        for (lane_key, projection) in snapshot.resource_lanes() {
+            if resource_lanes
+                .insert(lane_key.clone(), projection.clone())
+                .is_some()
+            {
+                return Err(PostgresTypedStoreError::Corruption(
+                    "authoritative streams contain duplicate active resource lane".to_owned(),
+                ));
+            }
+        }
     }
+    Ok(resource_lanes)
+}
 
-    let mut public_outputs = BTreeMap::new();
-    for row in sqlx::query!(
-        "SELECT projection_json FROM typed_public_output_projection WHERE run_id = $1",
-        run_id.as_str(),
+async fn load_all_stream_run_ids_tx(tx: &mut Transaction<'_, Postgres>) -> Result<Vec<RunId>> {
+    let rows = sqlx::query_scalar::<_, String>(
+        "SELECT run_id FROM typed_run_heads \
+         UNION SELECT DISTINCT run_id FROM typed_run_events \
+         ORDER BY run_id",
     )
     .fetch_all(&mut **tx)
     .await
-    .map_err(|error| database_error("failed to load public-output projection", error))?
-    {
-        let (schema_id, projection) = parse_public_output_projection(&row.projection_json)?;
-        public_outputs.insert(schema_id, projection);
-    }
+    .map_err(|error| database_error("failed to load typed stream run ids", error))?;
+    rows.into_iter()
+        .map(|run_id| parse_identity::<RunId>(&run_id).map_err(Into::into))
+        .collect()
+}
 
-    let rebuilt_projection = rebuild_projection_snapshot_from_events(tx, run_id).await?;
-    let saga_policy_digests = rebuilt_projection
-        .saga_policy_digests()
-        .map(|(run_id, digest)| (run_id.clone(), digest.clone()))
-        .collect();
-    let retention = rebuilt_projection
-        .retention(run_id)
-        .cloned()
-        .unwrap_or_default();
-    let mut retentions = BTreeMap::new();
-    if !retention.refs.is_empty() || retention.manifest.is_some() {
-        retentions.insert(run_id.clone(), retention);
-    }
-
+fn projection_snapshot_with_resource_lanes(
+    snapshot: &ProjectionSnapshot,
+    resource_lanes: BTreeMap<ResourceLaneKey, ResourceLaneProjection>,
+) -> Result<ProjectionSnapshot> {
     ProjectionSnapshot::from_parts(ProjectionSnapshotParts {
-        run_states,
-        saga_policy_digests,
-        run_completions,
-        saga_engagements,
-        manual_resolutions,
-        attempts,
-        cells,
-        facts,
-        side_effects,
+        run_states: snapshot
+            .run_states()
+            .map(|(run_id, state)| (run_id.clone(), *state))
+            .collect(),
+        saga_policy_digests: snapshot
+            .saga_policy_digests()
+            .map(|(run_id, digest)| (run_id.clone(), digest.clone()))
+            .collect(),
+        run_completions: snapshot
+            .run_completions()
+            .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
+            .collect(),
+        saga_engagements: snapshot
+            .saga_engagements()
+            .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
+            .collect(),
+        manual_resolutions: snapshot
+            .manual_resolutions()
+            .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
+            .collect(),
+        attempts: snapshot
+            .attempts()
+            .map(|(key, projection)| (key.clone(), projection.clone()))
+            .collect(),
+        cells: snapshot
+            .cells()
+            .map(|(cell_id, projection)| (cell_id.clone(), projection.clone()))
+            .collect(),
+        facts: snapshot
+            .facts()
+            .map(|(key, projection)| (key.clone(), projection.clone()))
+            .collect(),
+        side_effects: snapshot
+            .side_effects()
+            .map(|(ledger_ref, projection)| (ledger_ref.clone(), projection.clone()))
+            .collect(),
         resource_lanes,
-        public_outputs,
-        retentions,
+        public_outputs: snapshot
+            .public_outputs()
+            .map(|(schema_id, projection)| (schema_id.clone(), projection.clone()))
+            .collect(),
+        retentions: snapshot
+            .retentions()
+            .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
+            .collect(),
     })
     .map_err(PostgresTypedStoreError::Store)
 }
@@ -1250,8 +1169,8 @@ mod tests {
     use mfm_store::v1::{
         build_committed_batch, ArtifactEvidenceRef, AttemptStatus, CellTerminalProjection,
         CommitArtifactEvidenceSet, CommitKey, CommitOutcome, CommitPreconditions, PreparedCommit,
-        RequiredRunState, ResourceLaneKey, SagaEngagementReason, SagaTerminal, SagaTerminalProof,
-        SideEffectPhase, StoreError, StreamSeq,
+        RequiredRunState, ResourceLaneKey, RunState, SagaEngagementReason, SagaTerminal,
+        SagaTerminalProof, SideEffectPhase, StoreError, StreamSeq,
     };
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
     use sqlx::AssertSqlSafe;
@@ -1322,6 +1241,27 @@ mod tests {
             .await
             .expect("clear projections");
         tx.commit().await.expect("commit projection clear tx");
+    }
+
+    async fn poison_run_projection_state(store: &PostgresTypedRunEventStore, run_id: &RunId) {
+        sqlx::query("UPDATE typed_run_projection SET run_state = $2 WHERE run_id = $1")
+            .bind(run_id.as_str())
+            .bind(run_state_str(RunState::Completed))
+            .execute(&store.pool)
+            .await
+            .expect("poison run projection");
+    }
+
+    async fn poison_cell_projection_json(store: &PostgresTypedRunEventStore, run_id: &RunId) {
+        sqlx::query("UPDATE typed_cell_projection SET projection_json = $2 WHERE run_id = $1")
+            .bind(run_id.as_str())
+            .bind(serde_json::json!({
+                "cell_id": cell_id(999).as_str(),
+                "poisoned": true,
+            }))
+            .execute(&store.pool)
+            .await
+            .expect("poison cell projection");
     }
 
     async fn insert_persisted_events_direct(
@@ -2128,7 +2068,24 @@ mod tests {
             before
         );
 
+        poison_run_projection_state(&store, &run).await;
+        poison_cell_projection_json(&store, &run).await;
+        assert_eq!(
+            store
+                .projection_snapshot(&run)
+                .await
+                .expect("stream-authoritative projection ignores poisoned rows"),
+            before
+        );
+
         clear_projection_rows(&store, &run).await;
+        assert_eq!(
+            store
+                .projection_snapshot(&run)
+                .await
+                .expect("stream-authoritative projection ignores deleted rows"),
+            before
+        );
         let rebuilt = store
             .rebuild_projections_from_events(&run)
             .await
@@ -2308,7 +2265,44 @@ mod tests {
             before
         );
 
+        let peer_run = run_id(24);
+        append_prepared(
+            &store,
+            request(
+                peer_run.clone(),
+                1,
+                "resource-peer-run-start",
+                vec![run_started(peer_run.clone())],
+            ),
+            vec![spec_artifact_ref(), certificate_artifact_ref()],
+        )
+        .await
+        .expect("peer run start");
+        let peer_before = store
+            .projection_snapshot(&peer_run)
+            .await
+            .expect("peer projection");
+        let peer_lane = peer_before
+            .resource_lane(&lane_key)
+            .expect("peer snapshot includes cross-run lane");
+        assert_eq!(&peer_lane.holder.run_id, &run);
+
         clear_projection_rows(&store, &run).await;
+        let peer_after_deleted = store
+            .projection_snapshot(&peer_run)
+            .await
+            .expect("peer stream-authoritative projection");
+        let peer_lane = peer_after_deleted
+            .resource_lane(&lane_key)
+            .expect("peer snapshot rebuilds cross-run lane from stream");
+        assert_eq!(&peer_lane.holder.run_id, &run);
+        assert_eq!(
+            store
+                .projection_snapshot(&run)
+                .await
+                .expect("holder stream-authoritative projection ignores deleted lane row"),
+            before
+        );
         let rebuilt = store
             .rebuild_projections_from_events(&run)
             .await
