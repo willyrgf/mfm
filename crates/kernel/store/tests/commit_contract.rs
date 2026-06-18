@@ -2369,8 +2369,140 @@ fn state_attempt_interrupted_rejects_duplicate_terminal_event() {
 }
 
 #[test]
-fn state_attempt_interrupted_rejects_after_side_effect_authority() {
+fn state_attempt_interrupted_allows_side_effect_intent_before_invocation_prepared() {
     let run_id = run_id(62);
+    let artifact_id = artifact_id(81);
+    let artifact_digest = content_digest(82);
+    let mut store = InMemoryTypedRunStore::new();
+    store
+        .append_prepared_commit(run_start_request(run_id.clone(), "run-start"))
+        .expect("append run start");
+    store
+        .append_prepared_commit(typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("sidefx-attempt-start").expect("commit key"),
+            payloads: vec![side_effect_attempt_started()],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("append sidefx attempt start");
+    store
+        .append_prepared_commit(typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("sidefx-intent").expect("commit key"),
+            payloads: vec![side_effect_intent(
+                artifact_id.clone(),
+                artifact_digest.clone(),
+            )],
+            required_artifacts: vec![intent_artifact_ref(artifact_id, artifact_digest)],
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("append sidefx intent");
+
+    store
+        .append_prepared_commit(typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("sidefx-attempt-interrupt").expect("commit key"),
+            payloads: vec![KernelEventPayload::StateAttemptInterrupted(
+                events::StateAttemptInterrupted {
+                    spec_hash: spec_hash(1),
+                    node_id: node_id(70),
+                    attempt_id: attempt_id(72),
+                },
+            )],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("interruption before sidefx prepare admits");
+
+    let projection = store.projection_snapshot();
+    let attempt = projection
+        .attempt(&node_id(70), &attempt_id(72))
+        .expect("attempt projection");
+    assert!(matches!(attempt.status, AttemptStatus::Interrupted));
+    assert!(matches!(
+        projection
+            .side_effect(&side_effect_ledger_key())
+            .expect("side-effect projection")
+            .ledger_state()
+            .expect("ledger state")
+            .phase(),
+        SideEffectLedgerPhase::IntentPersisted { .. }
+    ));
+}
+
+#[test]
+fn state_attempt_interrupted_allows_side_effect_claim_before_invocation_prepared() {
+    let run_id = run_id(63);
+    let artifact_id = artifact_id(83);
+    let artifact_digest = content_digest(84);
+    let mut store = InMemoryTypedRunStore::new();
+    store
+        .append_prepared_commit(run_start_request(run_id.clone(), "run-start"))
+        .expect("append run start");
+    store
+        .append_prepared_commit(typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("sidefx-attempt-start").expect("commit key"),
+            payloads: vec![side_effect_attempt_started()],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("append sidefx attempt start");
+    store
+        .append_prepared_commit(typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("sidefx-claim").expect("commit key"),
+            payloads: vec![
+                side_effect_intent(artifact_id.clone(), artifact_digest.clone()),
+                side_effect_claim(),
+            ],
+            required_artifacts: vec![intent_artifact_ref(artifact_id, artifact_digest)],
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("append sidefx claim");
+
+    store
+        .append_prepared_commit(typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("sidefx-attempt-interrupt").expect("commit key"),
+            payloads: vec![KernelEventPayload::StateAttemptInterrupted(
+                events::StateAttemptInterrupted {
+                    spec_hash: spec_hash(1),
+                    node_id: node_id(70),
+                    attempt_id: attempt_id(72),
+                },
+            )],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("interruption before sidefx prepare admits");
+
+    let projection = store.projection_snapshot();
+    let attempt = projection
+        .attempt(&node_id(70), &attempt_id(72))
+        .expect("attempt projection");
+    assert!(matches!(attempt.status, AttemptStatus::Interrupted));
+    assert!(matches!(
+        projection
+            .side_effect(&side_effect_ledger_key())
+            .expect("side-effect projection")
+            .ledger_state()
+            .expect("ledger state")
+            .phase(),
+        SideEffectLedgerPhase::Claimed { .. }
+    ));
+}
+
+#[test]
+fn state_attempt_interrupted_rejects_after_side_effect_invocation_prepared() {
+    let run_id = run_id(64);
     let mut store = InMemoryTypedRunStore::new();
     store
         .append_prepared_commit(run_start_request(run_id.clone(), "run-start"))
@@ -2392,13 +2524,13 @@ fn state_attempt_interrupted_rejects_after_side_effect_authority() {
             required_artifacts: Vec::new(),
             preconditions: CommitPreconditions::default(),
         })
-        .expect_err("interruption after side-effect authority rejects");
+        .expect_err("interruption after side-effect prepare rejects");
     assert!(matches!(error, StoreError::ProjectionConflict { .. }));
 }
 
 #[test]
 fn state_attempt_failed_rejects_after_side_effect_authority_without_terminal_evidence() {
-    let run_id = run_id(63);
+    let run_id = run_id(65);
     let mut store = InMemoryTypedRunStore::new();
     store
         .append_prepared_commit(run_start_request(run_id.clone(), "run-start"))

@@ -182,7 +182,7 @@ fn apply_attempt_interrupted(
     event_id: &EventId,
     payload: &events::StateAttemptInterrupted,
 ) -> Result<()> {
-    require_no_side_effect_authority_for_interruption(projections, payload)?;
+    require_no_prepared_side_effect_authority_for_interruption(projections, payload)?;
     update_attempt_terminal_projection(
         projections,
         &payload.node_id,
@@ -223,22 +223,33 @@ fn apply_attempt_failed(
     Ok(())
 }
 
-fn require_no_side_effect_authority_for_interruption(
+fn require_no_prepared_side_effect_authority_for_interruption(
     projections: &ProjectionSnapshot,
     payload: &events::StateAttemptInterrupted,
 ) -> Result<()> {
-    let has_side_effect = projections.side_effects.values().any(|side_effect| {
-        side_effect.intent.node_id == payload.node_id
-            && side_effect.intent.attempt_id == payload.attempt_id
-    });
-    if has_side_effect {
-        return Err(StoreError::ProjectionConflict {
-            key: format!("attempt:{}:{}", payload.node_id, payload.attempt_id),
-            message: "interruption is not legal after side-effect authority was acquired"
-                .to_owned(),
-        });
+    for side_effect in projections.side_effects.values() {
+        if side_effect.intent.node_id != payload.node_id
+            || side_effect.intent.attempt_id != payload.attempt_id
+        {
+            continue;
+        }
+        let ledger_state = side_effect.ledger_state()?;
+        if side_effect_phase_blocks_standalone_interruption(ledger_state.phase()) {
+            return Err(StoreError::ProjectionConflict {
+                key: format!("attempt:{}:{}", payload.node_id, payload.attempt_id),
+                message: "interruption is not legal after side-effect invocation was prepared"
+                    .to_owned(),
+            });
+        }
     }
     Ok(())
+}
+
+fn side_effect_phase_blocks_standalone_interruption(phase: SideEffectLedgerPhase<'_>) -> bool {
+    !matches!(
+        phase,
+        SideEffectLedgerPhase::IntentPersisted { .. } | SideEffectLedgerPhase::Claimed { .. }
+    )
 }
 
 fn apply_side_effect_intent_persisted(
