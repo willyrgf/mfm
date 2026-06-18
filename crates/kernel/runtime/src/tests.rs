@@ -4574,10 +4574,92 @@ async fn recovery_delegates_started_side_effect_attempt_to_side_effect_lifecycle
             panic!("side-effect attempt must delegate to side-effect lifecycle")
         }
         crate::recovery::OpenAttemptDisposition::Interrupt { .. }
-        | crate::recovery::OpenAttemptDisposition::RetryTerminalization { .. } => {
+        | crate::recovery::OpenAttemptDisposition::RetryTerminalization { .. }
+        | crate::recovery::OpenAttemptDisposition::OperationalBlock { .. } => {
             panic!("side-effect attempt must delegate to side-effect lifecycle")
         }
     }
+}
+
+#[tokio::test]
+async fn recovery_interrupts_side_effect_attempt_after_intent_before_prepare() {
+    assert_prepared_boundary_side_effect_recovery_interrupts(false).await;
+}
+
+#[tokio::test]
+async fn recovery_interrupts_side_effect_attempt_after_claim_before_prepare() {
+    assert_prepared_boundary_side_effect_recovery_interrupts(true).await;
+}
+
+async fn assert_prepared_boundary_side_effect_recovery_interrupts(emit_claim: bool) {
+    let fixture = fixture_with_first_side_effect_state();
+    let scheduler = test_scheduler(registered_first_side_effect_runners_with(
+        &fixture,
+        PrePreparedSideEffectRunner { emit_claim },
+    ));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    let node = node_by_output(&fixture, &fixture.cell_a).clone();
+
+    assert_eq!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("append pre-prepared side-effect evidence"),
+        SchedulerStatus::Advanced
+    );
+    let stream = store.load_run_stream(&fixture.run_id);
+    let view = RuntimeRunView::from_stream(&fixture.runtime_spec, &fixture.run_id, &stream)
+        .expect("runtime view");
+    let attempt_id = attempt_id(
+        &fixture.run_id,
+        fixture.runtime_spec.spec_hash(),
+        &node.node_id,
+        1,
+    )
+    .expect("attempt id");
+    match crate::recovery::AttemptRecoveryLifecycle::next_open_attempt_disposition(
+        &fixture.runtime_spec,
+        &view,
+        &BTreeSet::new(),
+    )
+    .expect("recovery disposition")
+    .expect("open side-effect attempt")
+    {
+        crate::recovery::OpenAttemptDisposition::Interrupt {
+            node: recovered_node,
+            attempt_id: recovered_attempt,
+            attempt_no,
+        } => {
+            assert_eq!(recovered_node.node_id, node.node_id);
+            assert_eq!(recovered_attempt, attempt_id);
+            assert_eq!(attempt_no, 1);
+        }
+        _ => panic!("pre-prepared side-effect attempt must interrupt"),
+    }
+
+    assert_eq!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("interrupt pre-prepared side-effect attempt"),
+        SchedulerStatus::Advanced
+    );
+    assert!(matches!(
+        store
+            .projection_snapshot()
+            .attempt(&node.node_id, &attempt_id)
+            .expect("attempt projection")
+            .status,
+        store::AttemptStatus::Interrupted
+    ));
 }
 
 #[tokio::test]
@@ -7467,6 +7549,80 @@ impl DeterministicSideEffectRunner {
                 side_effect_claimed(&ctx, ledger.clone(), 1, 1),
                 self.prepared(&ctx, ledger, 1, 1),
             ],
+        })
+    }
+}
+
+struct PrePreparedSideEffectRunner {
+    emit_claim: bool,
+}
+
+impl ErasedNodeRunner for PrePreparedSideEffectRunner {
+    fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+        Box::pin(async move {
+            if side_effect_projection_for_attempt(ctx.projections(), ctx.node(), ctx.attempt_id())?
+                .is_some()
+            {
+                return Err(RuntimeError::Blocked(
+                    "pre-prepared side-effect runner should not resume".to_owned(),
+                ));
+            }
+            let ledger = side_effect_ledger_key_for_ctx(&ctx);
+            let (intent_artifact_id, intent_hash) =
+                side_effect_fixture_artifact_pair(&ctx, "intent");
+            let staged_artifact = staged_side_effect_artifact(
+                &ctx,
+                side_effect_artifact(
+                    &ctx,
+                    intent_artifact_id.clone(),
+                    intent_hash.clone(),
+                    events::ArtifactRole::SideEffectIntent,
+                ),
+                ledger.clone(),
+                1,
+            )?;
+            let mut payloads = vec![RunnerEventPayload::SideEffectIntentPersisted(
+                events::side_effect::IntentPersisted {
+                    spec_hash: ctx.spec_hash().clone(),
+                    node_id: ctx.node().node_id.clone(),
+                    scope_id: ctx.node().scope_id.clone(),
+                    attempt_id: ctx.attempt_id().clone(),
+                    ledger_key: ledger.clone(),
+                    ledger_purpose: side_effect_ledger_purpose_for_ctx(&ctx),
+                    invocation_epoch: 1,
+                    intent_schema_id: ctx.node().config_ref.schema_id.clone(),
+                    intent_hash,
+                    intent_artifact_id,
+                    idempotency_input_schema_id: ctx.node().config_ref.schema_id.clone(),
+                    idempotency_input_hash: side_effect_fixture_digest(&ctx, "idempotency"),
+                    idempotency_key: events::IdempotencyKeyRef::new("idem-1")
+                        .expect("idempotency key"),
+                    capability_kind: side_effect_capability_kind(),
+                    capability_version: side_effect_capability_version(),
+                    adapter_kind: ctx
+                        .node()
+                        .adapter_bindings
+                        .first()
+                        .expect("side-effect adapter")
+                        .adapter_kind
+                        .clone(),
+                    adapter_version: ctx
+                        .node()
+                        .adapter_bindings
+                        .first()
+                        .expect("side-effect adapter")
+                        .adapter_version
+                        .clone(),
+                },
+            )];
+            if self.emit_claim {
+                payloads.push(side_effect_claimed(&ctx, ledger, 1, 1));
+            }
+            Ok(ErasedRunnerOutput {
+                staged_artifacts: vec![staged_artifact],
+                staged_retention_refs: Vec::new(),
+                payloads,
+            })
         })
     }
 }

@@ -14,7 +14,9 @@ use crate::error::async_store_error;
 use crate::framework_lifecycle::FrameworkAttemptLifecycle;
 use crate::frontier::node_inputs_ready;
 use crate::history::RuntimeRunView;
-use crate::side_effect_lifecycle::{SideEffectLifecycle, SideEffectOpenAttemptDisposition};
+use crate::side_effect_lifecycle::{
+    SideEffectLifecycle, SideEffectOpenAttemptDisposition, SideEffectOperationalBlockReason,
+};
 use crate::side_effects::validate_terminal_cell_has_completed_attempt;
 use crate::{CertifiedRuntimeSpec, Result, RuntimeError};
 
@@ -56,6 +58,34 @@ pub(crate) enum OpenAttemptDisposition<'a> {
         /// Original attempt number.
         attempt_no: u32,
     },
+    /// Recovery cannot safely advance the open attempt without operational intervention.
+    OperationalBlock {
+        /// Certified node whose attempt remains open.
+        node: &'a spec::NodeSpec,
+        /// Open attempt id projected from the verified stream.
+        attempt_id: AttemptId,
+        /// Original attempt number.
+        attempt_no: u32,
+        /// Reason the attempt is operationally blocked.
+        reason: OperationalBlockReason,
+    },
+}
+
+/// Explicit operational block reasons produced by attempt recovery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OperationalBlockReason {
+    /// A side-effect ledger is terminal while the attempt remains started.
+    SideEffectTerminalLedgerWithoutAttemptTerminal,
+}
+
+impl From<SideEffectOperationalBlockReason> for OperationalBlockReason {
+    fn from(reason: SideEffectOperationalBlockReason) -> Self {
+        match reason {
+            SideEffectOperationalBlockReason::TerminalLedgerWithoutAttemptTerminal => {
+                Self::SideEffectTerminalLedgerWithoutAttemptTerminal
+            }
+        }
+    }
 }
 
 /// Recovery lifecycle for open-attempt disposition checks.
@@ -241,11 +271,34 @@ impl AttemptRecoveryLifecycle {
                 node,
                 &attempt_id,
             )? {
-                SideEffectOpenAttemptDisposition::DelegateRecovery => {
+                SideEffectOpenAttemptDisposition::ContinueBeforeLedger => {
+                    return Ok(OpenAttemptDisposition::Continue {
+                        node,
+                        attempt_id,
+                        attempt_no,
+                    });
+                }
+                SideEffectOpenAttemptDisposition::InterruptBeforeInvocationPrepared => {
+                    return Ok(OpenAttemptDisposition::Interrupt {
+                        node,
+                        attempt_id,
+                        attempt_no,
+                    });
+                }
+                SideEffectOpenAttemptDisposition::DelegateRecovery { phase } => {
+                    let _ = phase;
                     return Ok(OpenAttemptDisposition::DelegateSideEffect {
                         node,
                         attempt_id,
                         attempt_no,
+                    });
+                }
+                SideEffectOpenAttemptDisposition::OperationalBlock { reason } => {
+                    return Ok(OpenAttemptDisposition::OperationalBlock {
+                        node,
+                        attempt_id,
+                        attempt_no,
+                        reason: reason.into(),
                     });
                 }
             }

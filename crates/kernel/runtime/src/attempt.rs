@@ -6,14 +6,19 @@ use mfm_store::v1 as store;
 use crate::artifacts::RuntimeArtifactStager;
 use crate::binding::BoundRuntimeContext;
 use crate::commit::{
-    AttemptFailureCommitInput, CommitPlanner, PreparedStagedArtifact, RunnerOutputCommitInput,
+    AttemptFailureCommitInput, CommitPlanner, PreparedRunnerOutput, PreparedStagedArtifact,
+    RunnerOutputCommitInput,
 };
 use crate::error::async_store_error;
 use crate::history::RuntimeRunView;
-use crate::invocation::{ErasedRunCtx, InvocationBuilder, InvocationBuilderInput};
+use crate::invocation::{
+    ErasedRunCtx, InvocationBuilder, InvocationBuilderInput, PreparedRunnerInvocation,
+};
 use crate::side_effect_lifecycle::SideEffectLifecycle;
 use crate::transition::TransitionAttempt;
-use crate::{attempt_id, canonical_json, CertifiedRuntimeSpec, Result, RuntimeError};
+use crate::{
+    attempt_id, canonical_json, CertifiedRuntimeSpec, ErasedRunnerOutput, Result, RuntimeError,
+};
 
 /// Result of running one ordinary attempt lifecycle.
 pub(crate) enum AttemptRunStatus {
@@ -28,6 +33,11 @@ pub(crate) enum AttemptRunStatus {
         /// Whether the attempt-start commit advanced before the lane block.
         advanced: bool,
     },
+    /// Recovery cannot safely continue without operational intervention.
+    OperationalBlock {
+        /// Node whose open attempt is operationally blocked.
+        node_id: NodeId,
+    },
 }
 
 /// Ordinary node-attempt lifecycle.
@@ -39,6 +49,37 @@ pub(crate) enum AttemptRunStatus {
 pub(crate) struct AttemptLifecycle<'a> {
     artifact_store: &'a dyn RuntimeArtifactStager,
 }
+
+struct Attempt<P> {
+    phase: P,
+}
+
+struct Selected<'a> {
+    node: &'a spec::NodeSpec,
+    selected_attempt_id: Option<AttemptId>,
+    attempt_no: u32,
+}
+
+struct Started<'a> {
+    node: &'a spec::NodeSpec,
+    attempt_id: &'a AttemptId,
+    attempt_no: u32,
+    view: &'a RuntimeRunView,
+}
+
+struct Invoked<'a> {
+    node: &'a spec::NodeSpec,
+    attempt_id: &'a AttemptId,
+    view: &'a RuntimeRunView,
+    invocation: PreparedRunnerInvocation<'a>,
+    output: ErasedRunnerOutput,
+}
+
+struct TerminalPlanned {
+    terminal_output: PreparedRunnerOutput,
+}
+
+struct TerminalCommitted;
 
 /// Trusted context for terminalizing an observed post-start attempt failure.
 #[derive(Clone, Copy)]
@@ -76,25 +117,38 @@ impl<'a> AttemptLifecycle<'a> {
             attempt_id: selected_attempt_id,
             attempt_no,
         } = attempt;
-        let descriptor = runtime_spec.state_descriptor_for_node(node)?;
-        let output_cell = runtime_spec.cell(&node.output_cell).ok_or_else(|| {
-            RuntimeError::InvalidSpec(format!(
-                "node {} output cell {} is missing",
-                node.node_id, node.output_cell
-            ))
-        })?;
-        let binding = bound_context.runner_binding_for(node)?;
+        let selected_attempt = Attempt {
+            phase: Selected {
+                node,
+                selected_attempt_id,
+                attempt_no,
+            },
+        };
+        let descriptor = runtime_spec.state_descriptor_for_node(selected_attempt.phase.node)?;
+        let output_cell = runtime_spec
+            .cell(&selected_attempt.phase.node.output_cell)
+            .ok_or_else(|| {
+                RuntimeError::InvalidSpec(format!(
+                    "node {} output cell {} is missing",
+                    selected_attempt.phase.node.node_id, selected_attempt.phase.node.output_cell
+                ))
+            })?;
+        let binding = bound_context.runner_binding_for(selected_attempt.phase.node)?;
         let mut advanced = false;
-        let (attempt_id, attempt_no) = match selected_attempt_id {
+        let (attempt_id, attempt_no) = match selected_attempt.phase.selected_attempt_id {
             None => {
-                let attempt_id =
-                    attempt_id(run_id, runtime_spec.spec_hash(), &node.node_id, attempt_no)?;
+                let attempt_id = attempt_id(
+                    run_id,
+                    runtime_spec.spec_hash(),
+                    &selected_attempt.phase.node.node_id,
+                    selected_attempt.phase.attempt_no,
+                )?;
                 let start_commit = CommitPlanner::prepare_attempt_start(
                     runtime_spec,
                     run_id,
-                    node,
+                    selected_attempt.phase.node,
                     &attempt_id,
-                    attempt_no,
+                    selected_attempt.phase.attempt_no,
                     view,
                 )?;
                 match store.append_prepared_commit_plan(start_commit.into()) {
@@ -105,29 +159,37 @@ impl<'a> AttemptLifecycle<'a> {
                     Err(error) => return Err(error.into()),
                 }
                 advanced = true;
-                (attempt_id, attempt_no)
+                (attempt_id, selected_attempt.phase.attempt_no)
             }
-            Some(attempt_id) => (attempt_id, attempt_no),
+            Some(attempt_id) => (attempt_id, selected_attempt.phase.attempt_no),
         };
 
         let latest_stream = store.load_run_stream(run_id);
         let latest_view = RuntimeRunView::from_stream(runtime_spec, run_id, &latest_stream)?;
+        let started_attempt = Attempt {
+            phase: Started {
+                node: selected_attempt.phase.node,
+                attempt_id: &attempt_id,
+                attempt_no,
+                view: &latest_view,
+            },
+        };
         let failure_context = ObservedFailureContext {
             runtime_spec,
             run_id,
-            node,
-            attempt_id: &attempt_id,
-            view: &latest_view,
+            node: started_attempt.phase.node,
+            attempt_id: started_attempt.phase.attempt_id,
+            view: started_attempt.phase.view,
         };
         let invocation = match InvocationBuilder::new(InvocationBuilderInput {
             runtime_spec,
             run_id,
-            node,
+            node: started_attempt.phase.node,
             descriptor,
             output_cell,
-            attempt_id: &attempt_id,
-            attempt_no,
-            view: &latest_view,
+            attempt_id: started_attempt.phase.attempt_id,
+            attempt_no: started_attempt.phase.attempt_no,
+            view: started_attempt.phase.view,
         })
         .build()
         {
@@ -158,14 +220,30 @@ impl<'a> AttemptLifecycle<'a> {
                 .await;
             }
         };
+        let invoked_attempt = Attempt {
+            phase: Invoked {
+                node: started_attempt.phase.node,
+                attempt_id: started_attempt.phase.attempt_id,
+                view: started_attempt.phase.view,
+                invocation,
+                output,
+            },
+        };
+        let Invoked {
+            node,
+            attempt_id,
+            view,
+            invocation,
+            output,
+        } = invoked_attempt.phase;
         let terminal_output = match CommitPlanner::prepare_runner_output(RunnerOutputCommitInput {
             runtime_spec,
             run_id,
             node,
-            attempt_id: &attempt_id,
+            attempt_id,
             caps: invocation.caps(),
             recorded_facts: invocation.recorded_facts(),
-            view: &latest_view,
+            view,
             saga_terminal_proof: None,
             output,
         }) {
@@ -180,9 +258,16 @@ impl<'a> AttemptLifecycle<'a> {
                 .await;
             }
         };
+        let terminal_planned_attempt = Attempt {
+            phase: TerminalPlanned { terminal_output },
+        };
         if resource_lane_block_for_request(
             store.projection_snapshot(),
-            terminal_output.commit.request(),
+            terminal_planned_attempt
+                .phase
+                .terminal_output
+                .commit
+                .request(),
         )
         .is_some()
         {
@@ -191,11 +276,22 @@ impl<'a> AttemptLifecycle<'a> {
                 advanced,
             });
         }
-        let has_resource_lane_prepare =
-            request_has_resource_lane_prepare(terminal_output.commit.request());
+        let has_resource_lane_prepare = request_has_resource_lane_prepare(
+            terminal_planned_attempt
+                .phase
+                .terminal_output
+                .commit
+                .request(),
+        );
+        let terminal_output = terminal_planned_attempt.phase.terminal_output;
         stage_prepared_artifacts(self.artifact_store, &terminal_output.artifacts_to_stage).await?;
         match store.append_prepared_commit_plan(terminal_output.commit) {
-            Ok(_) => Ok(AttemptRunStatus::Advanced),
+            Ok(_) => {
+                let _terminal_committed_attempt = Attempt {
+                    phase: TerminalCommitted,
+                };
+                Ok(AttemptRunStatus::Advanced)
+            }
             Err(error) if store_error_is_stale_expected_next_seq(&error) => {
                 Ok(AttemptRunStatus::StaleView)
             }
@@ -226,25 +322,38 @@ impl<'a> AttemptLifecycle<'a> {
             attempt_id: selected_attempt_id,
             attempt_no,
         } = attempt;
-        let descriptor = runtime_spec.state_descriptor_for_node(node)?;
-        let output_cell = runtime_spec.cell(&node.output_cell).ok_or_else(|| {
-            RuntimeError::InvalidSpec(format!(
-                "node {} output cell {} is missing",
-                node.node_id, node.output_cell
-            ))
-        })?;
-        let binding = bound_context.runner_binding_for(node)?;
+        let selected_attempt = Attempt {
+            phase: Selected {
+                node,
+                selected_attempt_id,
+                attempt_no,
+            },
+        };
+        let descriptor = runtime_spec.state_descriptor_for_node(selected_attempt.phase.node)?;
+        let output_cell = runtime_spec
+            .cell(&selected_attempt.phase.node.output_cell)
+            .ok_or_else(|| {
+                RuntimeError::InvalidSpec(format!(
+                    "node {} output cell {} is missing",
+                    selected_attempt.phase.node.node_id, selected_attempt.phase.node.output_cell
+                ))
+            })?;
+        let binding = bound_context.runner_binding_for(selected_attempt.phase.node)?;
         let mut advanced = false;
-        let (attempt_id, attempt_no) = match selected_attempt_id {
+        let (attempt_id, attempt_no) = match selected_attempt.phase.selected_attempt_id {
             None => {
-                let attempt_id =
-                    attempt_id(run_id, runtime_spec.spec_hash(), &node.node_id, attempt_no)?;
+                let attempt_id = attempt_id(
+                    run_id,
+                    runtime_spec.spec_hash(),
+                    &selected_attempt.phase.node.node_id,
+                    selected_attempt.phase.attempt_no,
+                )?;
                 let start_commit = CommitPlanner::prepare_attempt_start(
                     runtime_spec,
                     run_id,
-                    node,
+                    selected_attempt.phase.node,
                     &attempt_id,
-                    attempt_no,
+                    selected_attempt.phase.attempt_no,
                     view,
                 )?;
                 match store.append_prepared_commit_plan(start_commit.into()).await {
@@ -255,9 +364,9 @@ impl<'a> AttemptLifecycle<'a> {
                     Err(error) => return Err(async_store_error(error)),
                 }
                 advanced = true;
-                (attempt_id, attempt_no)
+                (attempt_id, selected_attempt.phase.attempt_no)
             }
-            Some(attempt_id) => (attempt_id, attempt_no),
+            Some(attempt_id) => (attempt_id, selected_attempt.phase.attempt_no),
         };
 
         let latest_stream = store
@@ -265,22 +374,30 @@ impl<'a> AttemptLifecycle<'a> {
             .await
             .map_err(async_store_error)?;
         let latest_view = RuntimeRunView::from_stream(runtime_spec, run_id, &latest_stream)?;
+        let started_attempt = Attempt {
+            phase: Started {
+                node: selected_attempt.phase.node,
+                attempt_id: &attempt_id,
+                attempt_no,
+                view: &latest_view,
+            },
+        };
         let failure_context = ObservedFailureContext {
             runtime_spec,
             run_id,
-            node,
-            attempt_id: &attempt_id,
-            view: &latest_view,
+            node: started_attempt.phase.node,
+            attempt_id: started_attempt.phase.attempt_id,
+            view: started_attempt.phase.view,
         };
         let invocation = match InvocationBuilder::new(InvocationBuilderInput {
             runtime_spec,
             run_id,
-            node,
+            node: started_attempt.phase.node,
             descriptor,
             output_cell,
-            attempt_id: &attempt_id,
-            attempt_no,
-            view: &latest_view,
+            attempt_id: started_attempt.phase.attempt_id,
+            attempt_no: started_attempt.phase.attempt_no,
+            view: started_attempt.phase.view,
         })
         .build()
         {
@@ -311,14 +428,30 @@ impl<'a> AttemptLifecycle<'a> {
                 .await;
             }
         };
+        let invoked_attempt = Attempt {
+            phase: Invoked {
+                node: started_attempt.phase.node,
+                attempt_id: started_attempt.phase.attempt_id,
+                view: started_attempt.phase.view,
+                invocation,
+                output,
+            },
+        };
+        let Invoked {
+            node,
+            attempt_id,
+            view,
+            invocation,
+            output,
+        } = invoked_attempt.phase;
         let terminal_output = match CommitPlanner::prepare_runner_output(RunnerOutputCommitInput {
             runtime_spec,
             run_id,
             node,
-            attempt_id: &attempt_id,
+            attempt_id,
             caps: invocation.caps(),
             recorded_facts: invocation.recorded_facts(),
-            view: &latest_view,
+            view,
             saga_terminal_proof: None,
             output,
         }) {
@@ -333,9 +466,16 @@ impl<'a> AttemptLifecycle<'a> {
                 .await;
             }
         };
+        let terminal_planned_attempt = Attempt {
+            phase: TerminalPlanned { terminal_output },
+        };
         if resource_lane_block_for_request(
             &latest_view.projections,
-            terminal_output.commit.request(),
+            terminal_planned_attempt
+                .phase
+                .terminal_output
+                .commit
+                .request(),
         )
         .is_some()
         {
@@ -344,14 +484,25 @@ impl<'a> AttemptLifecycle<'a> {
                 advanced,
             });
         }
-        let has_resource_lane_prepare =
-            request_has_resource_lane_prepare(terminal_output.commit.request());
+        let has_resource_lane_prepare = request_has_resource_lane_prepare(
+            terminal_planned_attempt
+                .phase
+                .terminal_output
+                .commit
+                .request(),
+        );
+        let terminal_output = terminal_planned_attempt.phase.terminal_output;
         stage_prepared_artifacts(self.artifact_store, &terminal_output.artifacts_to_stage).await?;
         match store
             .append_prepared_commit_plan(terminal_output.commit)
             .await
         {
-            Ok(_) => Ok(AttemptRunStatus::Advanced),
+            Ok(_) => {
+                let _terminal_committed_attempt = Attempt {
+                    phase: TerminalCommitted,
+                };
+                Ok(AttemptRunStatus::Advanced)
+            }
             Err(error) if async_error_is_stale_expected_next_seq(&error) => {
                 Ok(AttemptRunStatus::StaleView)
             }

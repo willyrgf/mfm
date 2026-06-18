@@ -83,6 +83,12 @@ impl TransitionLifecycle {
                     node,
                     attempt_id,
                     attempt_no,
+                }
+                | OpenAttemptDisposition::OperationalBlock {
+                    node,
+                    attempt_id,
+                    attempt_no,
+                    ..
                 } => {
                     return Ok(TransitionDecision::ContinueAttempt(TransitionAttempt {
                         node,

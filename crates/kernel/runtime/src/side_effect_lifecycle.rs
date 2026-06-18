@@ -10,8 +10,46 @@ pub(crate) struct SideEffectLifecycle;
 
 /// Recovery disposition for an open side-effect attempt.
 pub(crate) enum SideEffectOpenAttemptDisposition {
+    /// Continue the same attempt because no side-effect ledger evidence exists yet.
+    ContinueBeforeLedger,
+    /// Close the open attempt with standalone interruption before invocation preparation.
+    InterruptBeforeInvocationPrepared,
     /// Re-enter the runner with the existing attempt id and store-projected ledger state.
-    DelegateRecovery,
+    DelegateRecovery {
+        /// Store-owned side-effect phase that recovery will resume from.
+        phase: SideEffectRecoveryPhase,
+    },
+    /// Recovery cannot safely continue without operational intervention.
+    OperationalBlock {
+        /// Reason the side-effect lifecycle cannot advance.
+        reason: SideEffectOperationalBlockReason,
+    },
+}
+
+/// Side-effect phase classes that can be resumed by the side-effect lifecycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SideEffectRecoveryPhase {
+    /// Invocation preparation recorded the resource boundary.
+    Prepared,
+    /// Invocation start crossed the external uncertainty boundary.
+    Started,
+    /// Recovery proved the invocation was not submitted.
+    NotSubmitted,
+    /// Submission evidence was recovered.
+    SubmissionObserved,
+    /// Submission status remains unknown and must be recovered.
+    SubmissionUnknown,
+    /// Receipt evidence was recovered.
+    ReceiptObserved,
+    /// Confirmation evidence is present and attempt terminalization can be retried.
+    Confirmed,
+}
+
+/// Operational block reasons produced by side-effect recovery classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SideEffectOperationalBlockReason {
+    /// Terminal side-effect evidence exists but the attempt remains open.
+    TerminalLedgerWithoutAttemptTerminal,
 }
 
 impl SideEffectLifecycle {
@@ -43,6 +81,24 @@ impl SideEffectLifecycle {
         validate_side_effect_resume_output(projections, node, attempt_id, payloads)
     }
 
+    /// Returns whether standalone interruption can close this attempt without ledger recovery.
+    pub(crate) fn standalone_interruption_allowed(
+        projections: &store::ProjectionSnapshot,
+        node: &spec::NodeSpec,
+        attempt_id: &AttemptId,
+    ) -> Result<bool> {
+        let Some(projection) = side_effect_projection_for_attempt(projections, node, attempt_id)?
+        else {
+            return Ok(true);
+        };
+        let state = projection
+            .ledger_state()
+            .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
+        Ok(side_effect_phase_is_before_invocation_prepared(
+            state.phase(),
+        ))
+    }
+
     /// Classifies an open side-effect attempt from store-owned ledger typestate.
     pub(crate) fn open_attempt_disposition(
         projections: &store::ProjectionSnapshot,
@@ -51,19 +107,72 @@ impl SideEffectLifecycle {
     ) -> Result<SideEffectOpenAttemptDisposition> {
         let Some(projection) = side_effect_projection_for_attempt(projections, node, attempt_id)?
         else {
-            return Ok(SideEffectOpenAttemptDisposition::DelegateRecovery);
+            return Ok(SideEffectOpenAttemptDisposition::ContinueBeforeLedger);
         };
         let state = projection
             .ledger_state()
             .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
-        if state.is_ambiguous() || state.is_failed() {
-            return Err(RuntimeError::InvalidRunStream(format!(
-                "side-effect node {} attempt {} has terminal ledger evidence while the attempt remains started",
-                node.node_id, attempt_id
-            )));
+        match state.phase() {
+            store::SideEffectLedgerPhase::IntentPersisted { .. }
+            | store::SideEffectLedgerPhase::Claimed { .. } => {
+                Ok(SideEffectOpenAttemptDisposition::InterruptBeforeInvocationPrepared)
+            }
+            store::SideEffectLedgerPhase::Prepared { .. } => {
+                Ok(SideEffectOpenAttemptDisposition::DelegateRecovery {
+                    phase: SideEffectRecoveryPhase::Prepared,
+                })
+            }
+            store::SideEffectLedgerPhase::Started { .. } => {
+                Ok(SideEffectOpenAttemptDisposition::DelegateRecovery {
+                    phase: SideEffectRecoveryPhase::Started,
+                })
+            }
+            store::SideEffectLedgerPhase::SubmissionKnown {
+                status: store::SideEffectSubmissionState::NotSubmitted,
+                ..
+            } => Ok(SideEffectOpenAttemptDisposition::DelegateRecovery {
+                phase: SideEffectRecoveryPhase::NotSubmitted,
+            }),
+            store::SideEffectLedgerPhase::SubmissionKnown {
+                status: store::SideEffectSubmissionState::Observed { .. },
+                ..
+            } => Ok(SideEffectOpenAttemptDisposition::DelegateRecovery {
+                phase: SideEffectRecoveryPhase::SubmissionObserved,
+            }),
+            store::SideEffectLedgerPhase::SubmissionKnown {
+                status: store::SideEffectSubmissionState::Unknown,
+                ..
+            } => Ok(SideEffectOpenAttemptDisposition::DelegateRecovery {
+                phase: SideEffectRecoveryPhase::SubmissionUnknown,
+            }),
+            store::SideEffectLedgerPhase::ReceiptObserved { .. } => {
+                Ok(SideEffectOpenAttemptDisposition::DelegateRecovery {
+                    phase: SideEffectRecoveryPhase::ReceiptObserved,
+                })
+            }
+            store::SideEffectLedgerPhase::Confirmed { .. } => {
+                Ok(SideEffectOpenAttemptDisposition::DelegateRecovery {
+                    phase: SideEffectRecoveryPhase::Confirmed,
+                })
+            }
+            store::SideEffectLedgerPhase::Ambiguous { .. }
+            | store::SideEffectLedgerPhase::Failed { .. } => {
+                Ok(SideEffectOpenAttemptDisposition::OperationalBlock {
+                    reason: SideEffectOperationalBlockReason::TerminalLedgerWithoutAttemptTerminal,
+                })
+            }
         }
-        Ok(SideEffectOpenAttemptDisposition::DelegateRecovery)
     }
+}
+
+fn side_effect_phase_is_before_invocation_prepared(
+    phase: store::SideEffectLedgerPhase<'_>,
+) -> bool {
+    matches!(
+        phase,
+        store::SideEffectLedgerPhase::IntentPersisted { .. }
+            | store::SideEffectLedgerPhase::Claimed { .. }
+    )
 }
 
 pub(crate) fn side_effect_projection_for_attempt<'a>(

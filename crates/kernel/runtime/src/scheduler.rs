@@ -53,6 +53,7 @@ enum DriveStepStatus {
     Blocked,
     PublicOutputProjected,
     BlockedOnResourceLane { node_id: NodeId, advanced: bool },
+    OperationalBlock { node_id: NodeId },
 }
 
 /// Serial typed scheduler.
@@ -208,6 +209,10 @@ impl SerialTypedScheduler {
                 DriveStepStatus::Advanced => return Ok(SchedulerStatus::Advanced),
                 DriveStepStatus::StaleView => continue,
                 DriveStepStatus::Blocked => return Ok(SchedulerStatus::Blocked),
+                DriveStepStatus::OperationalBlock { node_id } => {
+                    let _ = node_id;
+                    return Ok(SchedulerStatus::Blocked);
+                }
                 DriveStepStatus::PublicOutputProjected => {
                     return Ok(SchedulerStatus::PublicOutputProjected);
                 }
@@ -246,6 +251,14 @@ impl SerialTypedScheduler {
                 }
                 DriveStepStatus::Blocked if advanced => return Ok(SchedulerStatus::Advanced),
                 DriveStepStatus::Blocked => return Ok(SchedulerStatus::Blocked),
+                DriveStepStatus::OperationalBlock { node_id } if advanced => {
+                    let _ = node_id;
+                    return Ok(SchedulerStatus::Advanced);
+                }
+                DriveStepStatus::OperationalBlock { node_id } => {
+                    let _ = node_id;
+                    return Ok(SchedulerStatus::Blocked);
+                }
                 DriveStepStatus::PublicOutputProjected => {
                     return Ok(SchedulerStatus::PublicOutputProjected);
                 }
@@ -269,6 +282,10 @@ impl SerialTypedScheduler {
                 DriveStepStatus::Advanced => return Ok(SchedulerStatus::Advanced),
                 DriveStepStatus::StaleView => continue,
                 DriveStepStatus::Blocked => return Ok(SchedulerStatus::Blocked),
+                DriveStepStatus::OperationalBlock { node_id } => {
+                    let _ = node_id;
+                    return Ok(SchedulerStatus::Blocked);
+                }
                 DriveStepStatus::PublicOutputProjected => {
                     return Ok(SchedulerStatus::PublicOutputProjected);
                 }
@@ -307,6 +324,14 @@ impl SerialTypedScheduler {
                 }
                 DriveStepStatus::Blocked if advanced => return Ok(SchedulerStatus::Advanced),
                 DriveStepStatus::Blocked => return Ok(SchedulerStatus::Blocked),
+                DriveStepStatus::OperationalBlock { node_id } if advanced => {
+                    let _ = node_id;
+                    return Ok(SchedulerStatus::Advanced);
+                }
+                DriveStepStatus::OperationalBlock { node_id } => {
+                    let _ = node_id;
+                    return Ok(SchedulerStatus::Blocked);
+                }
                 DriveStepStatus::PublicOutputProjected => {
                     return Ok(SchedulerStatus::PublicOutputProjected);
                 }
@@ -337,6 +362,9 @@ impl SerialTypedScheduler {
                     AttemptRunStatus::StaleView => Ok(DriveStepStatus::StaleView),
                     AttemptRunStatus::BlockedOnResourceLane { node_id, advanced } => {
                         Ok(DriveStepStatus::BlockedOnResourceLane { node_id, advanced })
+                    }
+                    AttemptRunStatus::OperationalBlock { node_id } => {
+                        Ok(DriveStepStatus::OperationalBlock { node_id })
                     }
                 }
             }
@@ -380,6 +408,9 @@ impl SerialTypedScheduler {
                     AttemptRunStatus::BlockedOnResourceLane { node_id, advanced } => {
                         Ok(DriveStepStatus::BlockedOnResourceLane { node_id, advanced })
                     }
+                    AttemptRunStatus::OperationalBlock { node_id } => {
+                        Ok(DriveStepStatus::OperationalBlock { node_id })
+                    }
                 }
             }
             TransitionDecision::AwaitManualResolution => Ok(DriveStepStatus::Blocked),
@@ -414,6 +445,12 @@ impl SerialTypedScheduler {
                         attempt.node,
                         attempt_id,
                     );
+                }
+                OpenAttemptDisposition::OperationalBlock { reason, .. } => {
+                    let _ = reason;
+                    return Ok(AttemptRunStatus::OperationalBlock {
+                        node_id: attempt.node.node_id.clone(),
+                    });
                 }
                 OpenAttemptDisposition::Continue { .. }
                 | OpenAttemptDisposition::RetryTerminalization { .. }
@@ -457,6 +494,12 @@ impl SerialTypedScheduler {
                         attempt_id,
                     )
                     .await;
+                }
+                OpenAttemptDisposition::OperationalBlock { reason, .. } => {
+                    let _ = reason;
+                    return Ok(AttemptRunStatus::OperationalBlock {
+                        node_id: attempt.node.node_id.clone(),
+                    });
                 }
                 OpenAttemptDisposition::Continue { .. }
                 | OpenAttemptDisposition::RetryTerminalization { .. }

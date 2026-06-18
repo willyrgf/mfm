@@ -646,15 +646,14 @@ impl CommitPlanner {
             )));
         }
         if input.node.side_effect.is_some()
-            && SideEffectLifecycle::projection_for_attempt(
+            && !SideEffectLifecycle::standalone_interruption_allowed(
                 &input.view.projections,
                 input.node,
                 input.attempt_id,
             )?
-            .is_some()
         {
             return Err(RuntimeError::InvalidRunStream(format!(
-                "side-effect node {} attempt {} has acquired side-effect authority and cannot be interrupted generically",
+                "side-effect node {} attempt {} has prepared side-effect invocation authority and cannot be interrupted generically",
                 input.node.node_id, input.attempt_id
             )));
         }
