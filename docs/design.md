@@ -369,6 +369,10 @@ attempt, start remediation, wait for manual resolution, resolve saga terminal st
 or report projected public output completion. Open-attempt recovery, including legal interruption,
 is handled by the attempt recovery lifecycle when the continued attempt is dispatched. The frontier
 decision does not write the store, stage artifacts, construct live capabilities, or call runners.
+Open-attempt recovery classifies verified open attempts into continue, retry terminalization,
+interrupt, side-effect recovery, or operational block dispositions. Operational blocks are runtime
+recovery states such as terminal side-effect ledger evidence without matching attempt-terminal
+evidence; they block scheduling without minting semantic terminal events.
 
 For a new ordinary runnable node attempt, runtime first appends `StateAttemptStarted` from
 certified attempt authority. It then materializes state inputs from certified binding trees and
@@ -444,6 +448,12 @@ optional-field projection heuristic. Forward side-effect ambiguity is admissible
 the same commit with the non-retryable attempt failure that engages saga handling.
 The store is the source of truth for forward-fence admission after saga engagement; runtime
 early-rejects are scheduling convenience and cannot substitute for store validation.
+Standalone interruption is legal for a side-effect attempt only before
+`SideEffectInvocationPrepared`. No projection, `SideEffectIntentPersisted`, and
+`SideEffectClaimed` are pre-prepare phases and do not by themselves hold a resource lane/open ledger
+that must be released by side-effect recovery. `SideEffectInvocationPrepared` and every later phase
+are owned by `SideEffectLifecycle`; recovery either resumes from the concrete ledger phase,
+records evidence-backed terminal side-effect outcome, or reports an operational block.
 
 Prepared-invocation artifacts may retain unsigned mutation plans, expected hashes, and non-secret
 signer references. Signed raw transactions are bearer mutation material and remain transient

@@ -28,6 +28,15 @@ Completion notes, 2026-06-18:
   persisted projection rows.
 - The async attempt path checks already-held resource lanes before staging runner artifacts, matching
   the sync path for known-blocked lanes.
+- Side-effect standalone interruption is now phase-aware in both runtime and store validation:
+  interruption is allowed for no side-effect projection, `SideEffectIntentPersisted`, and
+  `SideEffectClaimed`, and rejected once `SideEffectInvocationPrepared` or any later ledger phase is
+  present.
+- Ordinary attempts now flow through concrete internal phase witnesses for selected, started,
+  invoked, terminal-planned, and terminal-committed states in both sync and async paths.
+- Open-attempt recovery now has an explicit operational-block disposition, and
+  `SideEffectLifecycle` classifies pre-prepare interruption, resumable side-effect recovery phases,
+  and terminal-ledger operational blocks separately.
 - The `RunnerOutputPlanner` responsibility from the RFC is implemented by
   `CommitPlanner::prepare_runner_output` and framework lifecycle planning rather than by a separate
   `runner_output.rs` module; the proposal-validation boundary is still covered by runtime tests.
@@ -149,7 +158,8 @@ Scope:
 - Add `AttemptStatus::Interrupted` to store projections.
 - Define interruption as retryable by construction; do not add a `retryable` field to the event.
 - Enforce that standalone interruption is legal only for pure/read attempts and side-effect attempts
-  with no acquired lane and no open ledger.
+  before `SideEffectInvocationPrepared`; an intent-only or claimed side-effect ledger has not yet
+  acquired the resource lane/open-ledger authority that requires side-effect recovery.
 - Update store admission, projection rebuild, replay models, event codec helpers, app status models,
   CLI status, and REST status in one breaking cut.
 - Scope status work here to the wire/projection layer: add the attempt-disposition field to the store
@@ -286,8 +296,9 @@ Scope:
 
 - Add `side_effect_lifecycle.rs`.
 - Keep store ledger typestate as the transition authority.
-- Reject generic interruption/failure once a side-effect attempt has acquired a lane or open ledger,
-  unless side-effect recovery records terminal evidence that releases the lane.
+- Reject generic interruption/failure once a side-effect attempt has reached
+  `SideEffectInvocationPrepared` and acquired a lane or open ledger, unless side-effect recovery
+  records terminal evidence that releases the lane.
 - Enforce post-`InvocationStarted` recovery outcomes: not-submitted proof, recovered submission/
   receipt/confirmation, or ambiguity paired with non-retryable attempt failure.
 - Add forward-fence tests asserting store admission rejects new forward `InvocationStarted` after saga

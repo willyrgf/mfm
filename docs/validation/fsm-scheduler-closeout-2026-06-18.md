@@ -57,3 +57,20 @@ Passed nodes:
 
 The managed Postgres and Reth parity suites are evidenced by the Nix CI run; no external
 `DATABASE_URL` was required in this shell.
+
+## Prepared-boundary closeout addendum
+
+Additional focused validation after closing the prepared-boundary and public-status coverage gaps:
+
+- `cargo fmt --all -- --check`
+- `cargo clippy -p mfm-runtime -p mfm-app --all-targets -- -D warnings`
+- `cargo test -p mfm-runtime`
+- `cargo test -p mfm-store --test commit_contract`
+- `cargo test -p mfm-app`
+- `cargo test -p mfm-integration-tests --test rest_api_run_control`
+
+These checks cover phase-aware side-effect interruption before `SideEffectInvocationPrepared`,
+explicit open-attempt recovery operational blocks, concrete side-effect recovery classifications,
+ordinary attempt phase witnesses, live REST run-status coverage, and store-backed resource-lane
+public status projection. They are focused Cargo checks for this addendum; they do not replace the
+earlier recorded Nix CI run.
