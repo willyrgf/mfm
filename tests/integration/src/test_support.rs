@@ -32,11 +32,11 @@ use mfm_program::{
 use mfm_program_derive::{MfmConfig, MfmValue, PublicOutputs};
 use mfm_replay::v1 as replay;
 use mfm_runtime::{
-    CertifiedRuntimeSpec, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerBinding, ErasedRunnerFuture,
-    ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCellTerminal, MaterializedInputNode,
-    RunLaunchArtifact, RunLaunchEvidence, RunLaunchSeedCell, RunnerEventPayload,
-    RuntimeArtifactStageFuture, RuntimeArtifactStager, RuntimeError, SchedulerStatus,
-    SerialTypedScheduler, StagedArtifact, StagedRetentionRefs,
+    CapabilityImplementationId, CertifiedRuntimeSpec, ErasedNodeRunner, ErasedRunCtx,
+    ErasedRunnerBinding, ErasedRunnerFuture, ErasedRunnerOutput, ErasedRunnerRegistry,
+    MaterializedCellTerminal, MaterializedInputNode, RunLaunchArtifact, RunLaunchEvidence,
+    RunLaunchSeedCell, RunnerEventPayload, RuntimeArtifactStageFuture, RuntimeArtifactStager,
+    RuntimeError, SchedulerStatus, SerialTypedScheduler, StagedArtifact, StagedRetentionRefs,
 };
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
@@ -1077,6 +1077,7 @@ fn compensated_reference_registry(
     fixture: &CompensatedReferenceFixture,
 ) -> Result<ErasedRunnerRegistry, String> {
     let mut registry = ErasedRunnerRegistry::new();
+    register_reference_capabilities(&mut registry, &fixture.runtime_spec)?;
     for descriptor in &fixture.side_effect_descriptors {
         registry
             .register(binding(
@@ -1217,6 +1218,7 @@ fn reference_registry_with_side_effect<R: ErasedNodeRunner + 'static>(
     side_effect_runner: R,
 ) -> Result<ErasedRunnerRegistry, String> {
     let mut registry = ErasedRunnerRegistry::new();
+    register_reference_capabilities(&mut registry, &fixture.runtime_spec)?;
     registry
         .register(binding(
             fixture.pure_descriptor.clone(),
@@ -1261,6 +1263,26 @@ fn reference_registry_with_side_effect<R: ErasedNodeRunner + 'static>(
         )?)
         .map_err(display_error)?;
     Ok(registry)
+}
+
+fn register_reference_capabilities(
+    registry: &mut ErasedRunnerRegistry,
+    runtime_spec: &CertifiedRuntimeSpec,
+) -> Result<(), String> {
+    let implementation_id =
+        CapabilityImplementationId::new("mfm.integration.typed-slice.runtime.v1")
+            .map_err(display_error)?;
+    for node in runtime_spec
+        .spec()
+        .nodes
+        .iter()
+        .chain(runtime_spec.spec().remediations.values())
+    {
+        registry
+            .register_capability_set(&node.capability_bindings, implementation_id.clone())
+            .map_err(display_error)?;
+    }
+    Ok(())
 }
 
 fn binding<R: ErasedNodeRunner + 'static>(

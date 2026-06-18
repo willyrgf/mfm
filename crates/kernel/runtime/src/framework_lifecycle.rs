@@ -121,11 +121,7 @@ impl<'a> FrameworkAttemptLifecycle<'a> {
                 .await;
             }
         };
-        if let Err(error) =
-            stage_prepared_artifacts(self.artifact_store, &terminal_output.artifacts_to_stage).await
-        {
-            return Err(error);
-        }
+        stage_prepared_artifacts(self.artifact_store, &terminal_output.artifacts_to_stage).await?;
         match store.append_prepared_commit_plan(terminal_output.commit) {
             Ok(_) => Ok(AttemptRunStatus::Advanced),
             Err(error) if store_error_is_stale_expected_next_seq(&error) => {
@@ -213,11 +209,7 @@ impl<'a> FrameworkAttemptLifecycle<'a> {
                 .await;
             }
         };
-        if let Err(error) =
-            stage_prepared_artifacts(self.artifact_store, &terminal_output.artifacts_to_stage).await
-        {
-            return Err(error);
-        }
+        stage_prepared_artifacts(self.artifact_store, &terminal_output.artifacts_to_stage).await?;
         match store
             .append_prepared_commit_plan(terminal_output.commit)
             .await
