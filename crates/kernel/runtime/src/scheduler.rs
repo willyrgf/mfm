@@ -7,15 +7,9 @@ use mfm_store::v1 as store;
 
 use crate::admission::{RunAdmissionAuthority, RunAdmissionLifecycle};
 use crate::artifacts::RuntimeArtifactStore;
-use crate::attempt::{
-    async_error_is_stale_expected_next_seq, store_error_is_stale_expected_next_seq,
-    AttemptLifecycle, AttemptRunStatus,
-};
+use crate::attempt::{AttemptLifecycle, AttemptRunStatus};
 use crate::binding::{BoundRuntimeContext, BoundRuntimeContextLoader};
-use crate::commit::{
-    AttemptInterruptionCommitInput, CommitPlanner, PreparedRunLaunch, PreparedStagedArtifact,
-    RunLaunchEvidence,
-};
+use crate::commit::{PreparedRunLaunch, PreparedStagedArtifact, RunLaunchEvidence};
 use crate::error::async_store_error;
 use crate::framework_lifecycle::FrameworkAttemptLifecycle;
 use crate::history::{RuntimeRunView, VerifiedRunContextLoader};
@@ -24,6 +18,7 @@ use crate::manual_resolution::{
     prepare_manual_resolution_commit, verify_manual_resolution_for_prefix,
     ManualResolutionEvidenceArtifact,
 };
+use crate::recovery::{AttemptRecoveryLifecycle, OpenAttemptDisposition};
 use crate::runners::ErasedRunnerRegistry;
 use crate::transition::{TransitionAttempt, TransitionDecision, TransitionLifecycle};
 use crate::{CertifiedRuntimeSpec, Result};
@@ -345,9 +340,6 @@ impl SerialTypedScheduler {
                     }
                 }
             }
-            TransitionDecision::InterruptAttempt(attempt) => {
-                self.interrupt_attempt(store, runtime_spec, run_id, view, attempt)
-            }
             TransitionDecision::AwaitManualResolution => Ok(DriveStepStatus::Blocked),
             TransitionDecision::Blocked => Ok(DriveStepStatus::Blocked),
             TransitionDecision::PublicOutputProjected => Ok(DriveStepStatus::PublicOutputProjected),
@@ -390,73 +382,9 @@ impl SerialTypedScheduler {
                     }
                 }
             }
-            TransitionDecision::InterruptAttempt(attempt) => {
-                self.interrupt_attempt_async(store, runtime_spec, run_id, view, attempt)
-                    .await
-            }
             TransitionDecision::AwaitManualResolution => Ok(DriveStepStatus::Blocked),
             TransitionDecision::Blocked => Ok(DriveStepStatus::Blocked),
             TransitionDecision::PublicOutputProjected => Ok(DriveStepStatus::PublicOutputProjected),
-        }
-    }
-
-    fn interrupt_attempt<S: store::TypedRunEventStore + ?Sized>(
-        &self,
-        store: &mut S,
-        runtime_spec: &CertifiedRuntimeSpec,
-        run_id: &RunId,
-        view: &RuntimeRunView,
-        attempt: TransitionAttempt<'_>,
-    ) -> Result<DriveStepStatus> {
-        let attempt_id = attempt.attempt_id.as_ref().ok_or_else(|| {
-            crate::RuntimeError::InvalidRunStream(format!(
-                "recovery interruption for node {} lacked an open attempt id",
-                attempt.node.node_id
-            ))
-        })?;
-        let commit = CommitPlanner::prepare_attempt_interruption(AttemptInterruptionCommitInput {
-            runtime_spec,
-            run_id,
-            node: attempt.node,
-            attempt_id,
-            view,
-        })?;
-        match store.append_prepared_commit_plan(commit) {
-            Ok(_) => Ok(DriveStepStatus::Advanced),
-            Err(error) if store_error_is_stale_expected_next_seq(&error) => {
-                Ok(DriveStepStatus::StaleView)
-            }
-            Err(error) => Err(error.into()),
-        }
-    }
-
-    async fn interrupt_attempt_async<S: store::AsyncTypedRunEventStore + ?Sized>(
-        &self,
-        store: &S,
-        runtime_spec: &CertifiedRuntimeSpec,
-        run_id: &RunId,
-        view: &RuntimeRunView,
-        attempt: TransitionAttempt<'_>,
-    ) -> Result<DriveStepStatus> {
-        let attempt_id = attempt.attempt_id.as_ref().ok_or_else(|| {
-            crate::RuntimeError::InvalidRunStream(format!(
-                "recovery interruption for node {} lacked an open attempt id",
-                attempt.node.node_id
-            ))
-        })?;
-        let commit = CommitPlanner::prepare_attempt_interruption(AttemptInterruptionCommitInput {
-            runtime_spec,
-            run_id,
-            node: attempt.node,
-            attempt_id,
-            view,
-        })?;
-        match store.append_prepared_commit_plan(commit).await {
-            Ok(_) => Ok(DriveStepStatus::Advanced),
-            Err(error) if async_error_is_stale_expected_next_seq(&error) => {
-                Ok(DriveStepStatus::StaleView)
-            }
-            Err(error) => Err(async_store_error(error)),
         }
     }
 
@@ -469,6 +397,29 @@ impl SerialTypedScheduler {
         bound_context: &BoundRuntimeContext,
         attempt: TransitionAttempt<'_>,
     ) -> Result<AttemptRunStatus> {
+        if let Some(attempt_id) = attempt.attempt_id.as_ref() {
+            match AttemptRecoveryLifecycle::open_attempt_disposition_for_attempt(
+                runtime_spec,
+                view,
+                attempt.node,
+                attempt_id,
+                attempt.attempt_no,
+            )? {
+                OpenAttemptDisposition::Interrupt { .. } => {
+                    return AttemptRecoveryLifecycle::interrupt_attempt(
+                        store,
+                        runtime_spec,
+                        run_id,
+                        view,
+                        attempt.node,
+                        attempt_id,
+                    );
+                }
+                OpenAttemptDisposition::Continue { .. }
+                | OpenAttemptDisposition::RetryTerminalization { .. }
+                | OpenAttemptDisposition::DelegateSideEffect { .. } => {}
+            }
+        }
         if FrameworkAttemptLifecycle::owns_node(attempt.node) {
             return FrameworkAttemptLifecycle::new(self.artifact_store.as_ref())
                 .run(store, runtime_spec, run_id, view, bound_context, attempt)
@@ -488,6 +439,30 @@ impl SerialTypedScheduler {
         bound_context: &BoundRuntimeContext,
         attempt: TransitionAttempt<'_>,
     ) -> Result<AttemptRunStatus> {
+        if let Some(attempt_id) = attempt.attempt_id.as_ref() {
+            match AttemptRecoveryLifecycle::open_attempt_disposition_for_attempt(
+                runtime_spec,
+                view,
+                attempt.node,
+                attempt_id,
+                attempt.attempt_no,
+            )? {
+                OpenAttemptDisposition::Interrupt { .. } => {
+                    return AttemptRecoveryLifecycle::interrupt_attempt_async(
+                        store,
+                        runtime_spec,
+                        run_id,
+                        view,
+                        attempt.node,
+                        attempt_id,
+                    )
+                    .await;
+                }
+                OpenAttemptDisposition::Continue { .. }
+                | OpenAttemptDisposition::RetryTerminalization { .. }
+                | OpenAttemptDisposition::DelegateSideEffect { .. } => {}
+            }
+        }
         if FrameworkAttemptLifecycle::owns_node(attempt.node) {
             return FrameworkAttemptLifecycle::new(self.artifact_store.as_ref())
                 .run_async(store, runtime_spec, run_id, view, bound_context, attempt)

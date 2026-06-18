@@ -15,10 +15,8 @@ use crate::{CertifiedRuntimeSpec, Result};
 pub(crate) enum TransitionDecision<'a> {
     /// Start a new ordinary certified node attempt.
     StartNode(TransitionAttempt<'a>),
-    /// Continue an open attempt for a certified node.
+    /// Continue or recover an open attempt for a certified node.
     ContinueAttempt(TransitionAttempt<'a>),
-    /// Interrupt a recoverable open attempt before a later fresh retry.
-    InterruptAttempt(TransitionAttempt<'a>),
     /// Start a remediation attempt selected by saga obligation authority.
     StartRemediation(TransitionAttempt<'a>),
     /// Wait for certified operator/manual resolution evidence.
@@ -75,7 +73,7 @@ impl TransitionLifecycle {
                     attempt_id,
                     attempt_no,
                 } => {
-                    return Ok(TransitionDecision::InterruptAttempt(TransitionAttempt {
+                    return Ok(TransitionDecision::ContinueAttempt(TransitionAttempt {
                         node,
                         attempt_id: Some(attempt_id),
                         attempt_no,
