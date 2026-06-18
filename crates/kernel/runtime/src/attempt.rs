@@ -40,13 +40,19 @@ pub(crate) struct AttemptLifecycle<'a> {
     artifact_store: &'a dyn RuntimeArtifactStager,
 }
 
+/// Trusted context for terminalizing an observed post-start attempt failure.
 #[derive(Clone, Copy)]
-struct ObservedFailureContext<'a> {
-    runtime_spec: &'a CertifiedRuntimeSpec,
-    run_id: &'a RunId,
-    node: &'a spec::NodeSpec,
-    attempt_id: &'a AttemptId,
-    view: &'a RuntimeRunView,
+pub(crate) struct ObservedFailureContext<'a> {
+    /// Certified runtime spec for the attempt.
+    pub(crate) runtime_spec: &'a CertifiedRuntimeSpec,
+    /// Run id for the attempt.
+    pub(crate) run_id: &'a RunId,
+    /// Attempted node.
+    pub(crate) node: &'a spec::NodeSpec,
+    /// Started attempt id.
+    pub(crate) attempt_id: &'a AttemptId,
+    /// Verified view after the attempt start commit.
+    pub(crate) view: &'a RuntimeRunView,
 }
 
 impl<'a> AttemptLifecycle<'a> {
@@ -127,9 +133,13 @@ impl<'a> AttemptLifecycle<'a> {
         {
             Ok(invocation) => invocation,
             Err(error) => {
-                return self
-                    .terminalize_observed_failure(store, failure_context, error)
-                    .await;
+                return terminalize_observed_failure(
+                    self.artifact_store,
+                    store,
+                    failure_context,
+                    error,
+                )
+                .await;
             }
         };
         let output = match binding
@@ -139,9 +149,13 @@ impl<'a> AttemptLifecycle<'a> {
         {
             Ok(output) => output,
             Err(error) => {
-                return self
-                    .terminalize_observed_failure(store, failure_context, error)
-                    .await;
+                return terminalize_observed_failure(
+                    self.artifact_store,
+                    store,
+                    failure_context,
+                    error,
+                )
+                .await;
             }
         };
         let terminal_output = match CommitPlanner::prepare_runner_output(RunnerOutputCommitInput {
@@ -157,9 +171,13 @@ impl<'a> AttemptLifecycle<'a> {
         }) {
             Ok(output) => output,
             Err(error) => {
-                return self
-                    .terminalize_observed_failure(store, failure_context, error)
-                    .await;
+                return terminalize_observed_failure(
+                    self.artifact_store,
+                    store,
+                    failure_context,
+                    error,
+                )
+                .await;
             }
         };
         if resource_lane_block_for_request(
@@ -268,9 +286,13 @@ impl<'a> AttemptLifecycle<'a> {
         {
             Ok(invocation) => invocation,
             Err(error) => {
-                return self
-                    .terminalize_observed_failure_async(store, failure_context, error)
-                    .await;
+                return terminalize_observed_failure_async(
+                    self.artifact_store,
+                    store,
+                    failure_context,
+                    error,
+                )
+                .await;
             }
         };
         let output = match binding
@@ -280,9 +302,13 @@ impl<'a> AttemptLifecycle<'a> {
         {
             Ok(output) => output,
             Err(error) => {
-                return self
-                    .terminalize_observed_failure_async(store, failure_context, error)
-                    .await;
+                return terminalize_observed_failure_async(
+                    self.artifact_store,
+                    store,
+                    failure_context,
+                    error,
+                )
+                .await;
             }
         };
         let terminal_output = match CommitPlanner::prepare_runner_output(RunnerOutputCommitInput {
@@ -298,9 +324,13 @@ impl<'a> AttemptLifecycle<'a> {
         }) {
             Ok(output) => output,
             Err(error) => {
-                return self
-                    .terminalize_observed_failure_async(store, failure_context, error)
-                    .await;
+                return terminalize_observed_failure_async(
+                    self.artifact_store,
+                    store,
+                    failure_context,
+                    error,
+                )
+                .await;
             }
         };
         let has_resource_lane_prepare =
@@ -325,95 +355,97 @@ impl<'a> AttemptLifecycle<'a> {
             Err(error) => Err(async_store_error(error)),
         }
     }
+}
 
-    async fn terminalize_observed_failure<S: store::TypedRunEventStore + ?Sized>(
-        &self,
-        store: &mut S,
-        context: ObservedFailureContext<'_>,
-        error: RuntimeError,
-    ) -> Result<AttemptRunStatus> {
-        let ObservedFailureContext {
-            runtime_spec,
-            run_id,
-            node,
-            attempt_id,
-            view,
-        } = context;
-        let Some(error_info) = observed_attempt_failure_info(&error)? else {
-            return Err(error);
-        };
-        if !can_terminalize_observed_failure(node, attempt_id, view)? {
-            return Err(error);
-        }
-        let diagnostic_artifact = redacted_attempt_failure_diagnostic_artifact(
-            runtime_spec,
-            run_id,
-            node,
-            attempt_id,
-            &error_info,
-        )?;
-        let failure = CommitPlanner::prepare_attempt_failure(AttemptFailureCommitInput {
-            runtime_spec,
-            run_id,
-            node,
-            attempt_id,
-            view,
-            error: error_info,
-            diagnostic_artifact: Some(diagnostic_artifact),
-        })?;
-        stage_prepared_artifacts(self.artifact_store, &failure.artifacts_to_stage).await?;
-        match store.append_prepared_commit_plan(failure.commit) {
-            Ok(_) => Ok(AttemptRunStatus::Advanced),
-            Err(error) if store_error_is_stale_expected_next_seq(&error) => {
-                Ok(AttemptRunStatus::StaleView)
-            }
-            Err(error) => Err(error.into()),
-        }
+pub(crate) async fn terminalize_observed_failure<S: store::TypedRunEventStore + ?Sized>(
+    artifact_store: &dyn RuntimeArtifactStager,
+    store: &mut S,
+    context: ObservedFailureContext<'_>,
+    error: RuntimeError,
+) -> Result<AttemptRunStatus> {
+    let ObservedFailureContext {
+        runtime_spec,
+        run_id,
+        node,
+        attempt_id,
+        view,
+    } = context;
+    let Some(error_info) = observed_attempt_failure_info(&error)? else {
+        return Err(error);
+    };
+    if !can_terminalize_observed_failure(node, attempt_id, view)? {
+        return Err(error);
     }
+    let diagnostic_artifact = redacted_attempt_failure_diagnostic_artifact(
+        runtime_spec,
+        run_id,
+        node,
+        attempt_id,
+        &error_info,
+    )?;
+    let failure = CommitPlanner::prepare_attempt_failure(AttemptFailureCommitInput {
+        runtime_spec,
+        run_id,
+        node,
+        attempt_id,
+        view,
+        error: error_info,
+        diagnostic_artifact: Some(diagnostic_artifact),
+    })?;
+    stage_prepared_artifacts(artifact_store, &failure.artifacts_to_stage).await?;
+    match store.append_prepared_commit_plan(failure.commit) {
+        Ok(_) => Ok(AttemptRunStatus::Advanced),
+        Err(error) if store_error_is_stale_expected_next_seq(&error) => {
+            Ok(AttemptRunStatus::StaleView)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
 
-    async fn terminalize_observed_failure_async<S: store::AsyncTypedRunEventStore + ?Sized>(
-        &self,
-        store: &S,
-        context: ObservedFailureContext<'_>,
-        error: RuntimeError,
-    ) -> Result<AttemptRunStatus> {
-        let ObservedFailureContext {
-            runtime_spec,
-            run_id,
-            node,
-            attempt_id,
-            view,
-        } = context;
-        let Some(error_info) = observed_attempt_failure_info(&error)? else {
-            return Err(error);
-        };
-        if !can_terminalize_observed_failure(node, attempt_id, view)? {
-            return Err(error);
+pub(crate) async fn terminalize_observed_failure_async<
+    S: store::AsyncTypedRunEventStore + ?Sized,
+>(
+    artifact_store: &dyn RuntimeArtifactStager,
+    store: &S,
+    context: ObservedFailureContext<'_>,
+    error: RuntimeError,
+) -> Result<AttemptRunStatus> {
+    let ObservedFailureContext {
+        runtime_spec,
+        run_id,
+        node,
+        attempt_id,
+        view,
+    } = context;
+    let Some(error_info) = observed_attempt_failure_info(&error)? else {
+        return Err(error);
+    };
+    if !can_terminalize_observed_failure(node, attempt_id, view)? {
+        return Err(error);
+    }
+    let diagnostic_artifact = redacted_attempt_failure_diagnostic_artifact(
+        runtime_spec,
+        run_id,
+        node,
+        attempt_id,
+        &error_info,
+    )?;
+    let failure = CommitPlanner::prepare_attempt_failure(AttemptFailureCommitInput {
+        runtime_spec,
+        run_id,
+        node,
+        attempt_id,
+        view,
+        error: error_info,
+        diagnostic_artifact: Some(diagnostic_artifact),
+    })?;
+    stage_prepared_artifacts(artifact_store, &failure.artifacts_to_stage).await?;
+    match store.append_prepared_commit_plan(failure.commit).await {
+        Ok(_) => Ok(AttemptRunStatus::Advanced),
+        Err(error) if async_error_is_stale_expected_next_seq(&error) => {
+            Ok(AttemptRunStatus::StaleView)
         }
-        let diagnostic_artifact = redacted_attempt_failure_diagnostic_artifact(
-            runtime_spec,
-            run_id,
-            node,
-            attempt_id,
-            &error_info,
-        )?;
-        let failure = CommitPlanner::prepare_attempt_failure(AttemptFailureCommitInput {
-            runtime_spec,
-            run_id,
-            node,
-            attempt_id,
-            view,
-            error: error_info,
-            diagnostic_artifact: Some(diagnostic_artifact),
-        })?;
-        stage_prepared_artifacts(self.artifact_store, &failure.artifacts_to_stage).await?;
-        match store.append_prepared_commit_plan(failure.commit).await {
-            Ok(_) => Ok(AttemptRunStatus::Advanced),
-            Err(error) if async_error_is_stale_expected_next_seq(&error) => {
-                Ok(AttemptRunStatus::StaleView)
-            }
-            Err(error) => Err(async_store_error(error)),
-        }
+        Err(error) => Err(async_store_error(error)),
     }
 }
 
@@ -452,6 +484,22 @@ fn observed_attempt_failure_info(error: &RuntimeError) -> Result<Option<events::
             category: events::ErrorCategory::Validation,
             retryable: false,
             safe_message: "runner output failed validation".to_owned(),
+            public_details: None,
+            diagnostic_ref: None,
+        },
+        RuntimeError::InvalidRunStream(_) => events::MfmErrorInfo {
+            code: events::ErrorCode::new("runtime_validation_failed")?,
+            category: events::ErrorCategory::Validation,
+            retryable: false,
+            safe_message: "runtime validation failed while handling attempt".to_owned(),
+            public_details: None,
+            diagnostic_ref: None,
+        },
+        RuntimeError::Store(_) => events::MfmErrorInfo {
+            code: events::ErrorCode::new("runtime_store_failure")?,
+            category: events::ErrorCategory::Storage,
+            retryable: false,
+            safe_message: "runtime storage failed while handling attempt".to_owned(),
             public_details: None,
             diagnostic_ref: None,
         },

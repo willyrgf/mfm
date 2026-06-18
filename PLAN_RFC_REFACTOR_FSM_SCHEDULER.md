@@ -1,6 +1,20 @@
 # Plan: Implement RFC_REFACTOR_FSM_SCHEDULER
 
-Status: implementation plan
+Status: completed and validated
+
+Completion notes, 2026-06-18:
+
+- Scheduler drive paths load `VerifiedRunContext` through `VerifiedRunContextLoader`, which combines
+  `BoundRuntimeContext` authority with store-owned committed stream/view authority.
+- `ProjectionSnapshot::validate_run_stream` is the centralized ingress guard for old lifecycle
+  streams. Runtime, replay, and Postgres projection rebuild/load paths reject attempt-bound terminal
+  payloads that are not preceded by a separate `StateAttemptStarted` commit.
+- `TransitionDecision` is explicit for started/continued/interrupted attempts, remediation starts,
+  manual waits, saga terminal resolution, blocked status, and public-output completion.
+- Framework attempts that have already started terminalize safe observed post-start failures,
+  including output planning and artifact staging failures, into redacted diagnostic evidence and
+  non-retryable `StateAttemptFailed` records.
+- Final validation for this completion includes the focused Cargo gates and `nix run .#ci`.
 
 This plan divides `RFC_REFACTOR_FSM_SCHEDULER.md` into reviewable commits for this branch. The
 branch is allowed to make breaking changes. Do not add compatibility shims for old persisted streams,

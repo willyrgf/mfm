@@ -3917,7 +3917,8 @@ pub mod v1 {
 
         /// Validates that a loaded run stream is ordered and contiguous.
         pub fn validate_run_stream(events: &[KernelEventEnvelope]) -> Result<()> {
-            validate_run_stream_order(events)
+            validate_run_stream_order(events)?;
+            validate_supported_stream_model(events)
         }
 
         /// Rebuilds projections from store-owned event envelopes.
@@ -5916,6 +5917,77 @@ pub mod v1 {
             }
         }
         Ok(())
+    }
+
+    fn validate_supported_stream_model(events: &[KernelEventEnvelope]) -> Result<()> {
+        let mut started_attempts = BTreeMap::<(NodeId, AttemptId), StreamSeq>::new();
+        let mut run_start_seqs = BTreeSet::<StreamSeq>::new();
+        for event in events {
+            if matches!(event.payload(), KernelEventPayload::RunStarted(_)) {
+                run_start_seqs.insert(event.seq());
+            }
+            if let KernelEventPayload::StateAttemptStarted(payload) = event.payload() {
+                started_attempts.insert(
+                    (payload.node_id.clone(), payload.attempt_id.clone()),
+                    event.seq(),
+                );
+            }
+        }
+        for event in events {
+            for (node_id, attempt_id) in payload_required_started_attempts(event.payload()) {
+                let key = (node_id.clone(), attempt_id.clone());
+                let Some(start_seq) = started_attempts.get(&key) else {
+                    return Err(StoreError::ProjectionConflict {
+                        key: format!("stream_model:{node_id}:{attempt_id}"),
+                        message: "unsupported old stream model: attempt-bound payload is not preceded by a StateAttemptStarted commit".to_owned(),
+                    });
+                };
+                if *start_seq > event.seq()
+                    || (*start_seq == event.seq() && !run_start_seqs.contains(&event.seq()))
+                {
+                    return Err(StoreError::ProjectionConflict {
+                        key: format!("stream_model:{node_id}:{attempt_id}"),
+                        message: "unsupported old stream model: StateAttemptStarted must be committed before attempt-bound terminal payloads".to_owned(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn payload_required_started_attempts(payload: &KernelEventPayload) -> Vec<(NodeId, AttemptId)> {
+        match payload {
+            KernelEventPayload::StateAttemptCompleted(payload) => {
+                vec![(payload.node_id.clone(), payload.attempt_id.clone())]
+            }
+            KernelEventPayload::StateAttemptInterrupted(payload) => {
+                vec![(payload.node_id.clone(), payload.attempt_id.clone())]
+            }
+            KernelEventPayload::StateAttemptFailed(payload) => {
+                vec![(payload.node_id.clone(), payload.attempt_id.clone())]
+            }
+            KernelEventPayload::CellProduced(payload) => {
+                vec![(payload.node_id.clone(), payload.attempt_id.clone())]
+            }
+            KernelEventPayload::CellSkipped(payload) => {
+                vec![(payload.node_id.clone(), payload.attempt_id.clone())]
+            }
+            KernelEventPayload::FactRecorded(payload) => {
+                vec![(payload.node_id.clone(), payload.attempt_id.clone())]
+            }
+            KernelEventPayload::PublicOutputProduced(payload) => {
+                vec![(payload.node_id.clone(), payload.attempt_id.clone())]
+            }
+            KernelEventPayload::PublicOutputRenderFailed(payload) => {
+                vec![(payload.node_id.clone(), payload.attempt_id.clone())]
+            }
+            payload => payload
+                .side_effect_ref()
+                .map(|side_effect| {
+                    vec![(side_effect.node_id.clone(), side_effect.attempt_id.clone())]
+                })
+                .unwrap_or_default(),
+        }
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]

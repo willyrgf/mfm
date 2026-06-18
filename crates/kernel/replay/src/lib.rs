@@ -2541,6 +2541,40 @@ pub mod v1 {
         }
 
         #[test]
+        fn replay_rejects_old_model_terminal_attempt_without_start() {
+            let fixture = Fixture::new();
+            let request = TypedCommitRequest::from_payloads(
+                fixture.stream[0].run_id().clone(),
+                StreamSeq::new(2).expect("old terminal seq"),
+                CommitKey::new("old-terminal-without-start").expect("commit key"),
+                vec![KernelEventPayload::StateAttemptFailed(
+                    events::StateAttemptFailed {
+                        spec_hash: fixture.envelope.spec_hash.clone(),
+                        node_id: fixture.node_id.clone(),
+                        attempt_id: fixture.attempt_id.clone(),
+                        retryable: false,
+                        error: test_error(false),
+                    },
+                )],
+                Vec::new(),
+                CommitPreconditions::default(),
+            )
+            .expect("typed commit request");
+            let old_terminal =
+                build_committed_batch(&request, StreamSeq::new(2).expect("old terminal seq"))
+                    .expect("old terminal batch");
+            let mut old_stream = vec![fixture.stream[0].clone()];
+            old_stream.extend(old_terminal.events().iter().cloned());
+
+            let error =
+                ReplayBroker::from_validated_parts(fixture.authority_for_stream(&old_stream))
+                    .expect_err("old model stream rejects");
+            assert_eq!(error.kind, ReplayErrorKind::InvalidRunStream);
+            assert!(error.message.contains("unsupported old stream model"));
+            assert!(error.message.contains("StateAttemptStarted"));
+        }
+
+        #[test]
         fn replay_rejects_receipt_verifier_or_artifact_mismatch() {
             let fixture = Fixture::new();
             let broker = fixture.broker();

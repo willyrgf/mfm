@@ -298,6 +298,66 @@ struct FailingAfterRuntimeArtifactStager {
     artifacts: Mutex<TestArtifactMap>,
 }
 
+struct FailingNodeStateOutputArtifactStager {
+    failed_node_id: NodeId,
+    artifacts: Mutex<TestArtifactMap>,
+}
+
+impl FailingNodeStateOutputArtifactStager {
+    fn new(failed_node_id: NodeId) -> Self {
+        Self {
+            failed_node_id,
+            artifacts: Mutex::new(BTreeMap::new()),
+        }
+    }
+}
+
+impl RuntimeArtifactStager for FailingNodeStateOutputArtifactStager {
+    fn stage_verified_artifact<'a>(
+        &'a self,
+        bytes: Vec<u8>,
+        evidence: store::ArtifactEvidenceRef,
+    ) -> RuntimeArtifactStageFuture<'a> {
+        Box::pin(async move {
+            verify_artifact_bytes(&bytes, &evidence)?;
+            if evidence.artifact_role == events::ArtifactRole::StateOutput
+                && evidence.producer_node_id.as_ref() == Some(&self.failed_node_id)
+            {
+                return Err(RuntimeError::Store(
+                    "test node state-output staging failure".to_owned(),
+                ));
+            }
+            self.artifacts
+                .lock()
+                .expect("node-failing artifact stager lock")
+                .insert(evidence.artifact_id.clone(), (bytes, evidence));
+            Ok(())
+        })
+    }
+}
+
+impl store::RetainedArtifactReadProvider for FailingNodeStateOutputArtifactStager {
+    fn read_retained_artifact<'a>(
+        &'a self,
+        requirement: &'a store::EventArtifactRequirement,
+    ) -> store::RetainedArtifactReadFuture<'a> {
+        Box::pin(async move {
+            let (bytes, evidence) = self
+                .artifacts
+                .lock()
+                .map_err(|_| store::StoreError::ArtifactReadFailed {
+                    artifact_id: requirement.artifact_id.clone(),
+                })?
+                .get(&requirement.artifact_id)
+                .cloned()
+                .ok_or_else(|| store::StoreError::MissingArtifact {
+                    artifact_id: requirement.artifact_id.clone(),
+                })?;
+            store::VerifiedRunArtifactBytes::new(bytes, evidence, requirement)
+        })
+    }
+}
+
 impl FailingAfterRuntimeArtifactStager {
     fn after(successes: usize) -> Self {
         Self {
@@ -1181,13 +1241,12 @@ async fn runtime_rejects_run_start_without_bootstrap_attempt() {
 }
 
 #[tokio::test]
-async fn public_output_receipt_staging_failure_prevents_commit() {
+async fn public_output_receipt_staging_failure_terminalizes_attempt() {
     let fixture = fixture();
-    let launch_artifact_count = 3 + fixture.runtime_spec.spec().config_refs.len() + 1;
     let scheduler = test_scheduler_with_stager(
         registered_fixture_runners(&fixture),
-        Arc::new(FailingAfterRuntimeArtifactStager::after(
-            launch_artifact_count,
+        Arc::new(FailingNodeStateOutputArtifactStager::new(
+            fixture.render_node.clone(),
         )),
     );
     let mut store = store::InMemoryTypedRunStore::new();
@@ -1208,13 +1267,13 @@ async fn public_output_receipt_staging_failure_prevents_commit() {
         .await
         .expect("drive b");
 
-    assert!(matches!(
+    assert_eq!(
         scheduler
             .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await,
-        Err(RuntimeError::Store(message))
-            if message.contains("test artifact staging failure")
-    ));
+            .await
+            .expect("render staging failure terminalizes"),
+        SchedulerStatus::Advanced
+    );
     assert!(store
         .projection_snapshot()
         .cell_terminal(&fixture.render_cell)
@@ -1225,6 +1284,7 @@ async fn public_output_receipt_staging_failure_prevents_commit() {
             events::KernelEventPayload::PublicOutputProduced(_)
         )
     }));
+    assert_node_failed_with_code(&store, &fixture.render_node, "runtime_store_failure");
 }
 
 #[tokio::test]
@@ -1939,19 +1999,24 @@ async fn runtime_rejects_retained_evidence_between_retention_projection_and_comp
     let mut corrupt_stream = rewrite_stream_without_commit_containing(&valid_stream, |payload| {
         matches!(payload, events::KernelEventPayload::RunCompleted(_))
     });
+    append_payload_commit_for_tests(
+        &mut corrupt_stream,
+        &fixture.run_id,
+        "retained-evidence-attempt-start",
+        events::KernelEventPayload::StateAttemptStarted(events::StateAttemptStarted {
+            spec_hash: fixture.runtime_spec.spec_hash().clone(),
+            node_id: retention_node.node_id.clone(),
+            attempt_id: attempt_id.clone(),
+            attempt_no: 100,
+            state_kind: retention_node.state_kind.clone(),
+            state_version: retention_node.state_version.clone(),
+        }),
+    );
     append_payloads_commit_for_tests(
         &mut corrupt_stream,
         &fixture.run_id,
         "retained-evidence-after-retention-projection",
         vec![
-            events::KernelEventPayload::StateAttemptStarted(events::StateAttemptStarted {
-                spec_hash: fixture.runtime_spec.spec_hash().clone(),
-                node_id: retention_node.node_id.clone(),
-                attempt_id: attempt_id.clone(),
-                attempt_no: 100,
-                state_kind: retention_node.state_kind.clone(),
-                state_version: retention_node.state_version.clone(),
-            }),
             events::KernelEventPayload::ArtifactReferenced(events::ArtifactReferenced {
                 spec_hash: fixture.runtime_spec.spec_hash().clone(),
                 node_id: Some(retention_node.node_id.clone()),
@@ -2032,32 +2097,15 @@ async fn runtime_rejects_extra_attempt_evidence_in_retention_projection_commit()
     let valid_stream = store.load_run_stream(&fixture.run_id);
     let corrupt_stream = prepend_payloads_to_retention_projection_commit_for_tests(
         &valid_stream,
-        vec![
-            events::KernelEventPayload::StateAttemptStarted(events::StateAttemptStarted {
-                spec_hash: fixture.runtime_spec.spec_hash().clone(),
-                node_id: retention_node.node_id.clone(),
-                attempt_id: attempt_id.clone(),
-                attempt_no: 100,
-                state_kind: retention_node.state_kind.clone(),
-                state_version: retention_node.state_version.clone(),
-            }),
-            events::KernelEventPayload::ArtifactReferenced(events::ArtifactReferenced {
+        Vec::new(),
+        vec![events::KernelEventPayload::ArtifactReferenced(
+            events::ArtifactReferenced {
                 spec_hash: fixture.runtime_spec.spec_hash().clone(),
                 node_id: Some(retention_node.node_id.clone()),
                 attempt_id: Some(attempt_id.clone()),
                 artifact_ref: diagnostic_ref.clone(),
-            }),
-            events::KernelEventPayload::StateAttemptFailed(events::StateAttemptFailed {
-                spec_hash: fixture.runtime_spec.spec_hash().clone(),
-                node_id: retention_node.node_id.clone(),
-                attempt_id,
-                retryable: false,
-                error: events::MfmErrorInfo {
-                    diagnostic_ref: Some(diagnostic_ref),
-                    ..public_output_error()
-                },
-            }),
-        ],
+            },
+        )],
     );
 
     assert!(matches!(
@@ -4126,11 +4174,18 @@ async fn old_model_framework_stream_without_attempt_start_rejects_on_runtime_loa
         )
     });
 
+    let old_model_store = ReadOnlyCorruptStore {
+        stream: old_model_stream,
+        projection: store::ProjectionSnapshot::default(),
+    };
+    let loader = crate::history::VerifiedRunContextLoader::new(
+        crate::binding::BoundRuntimeContextLoader::new(registered_fixture_runners(&fixture)),
+    );
     assert!(matches!(
-        RuntimeRunView::from_stream(&fixture.runtime_spec, &fixture.run_id, &old_model_stream),
-        Err(RuntimeError::Store(message)) | Err(RuntimeError::InvalidRunStream(message))
-            if message.contains("not preceded by an active attempt")
-                || message.contains("started attempt")
+        loader.load(&fixture.runtime_spec, &fixture.run_id, &old_model_store),
+        Err(RuntimeError::Store(message))
+            if message.contains("unsupported old stream model")
+                && message.contains("StateAttemptStarted")
     ));
 }
 
@@ -7623,18 +7678,66 @@ where
 
 fn prepend_payloads_to_retention_projection_commit_for_tests(
     stream: &[store::KernelEventEnvelope],
+    prelude_payloads: Vec<events::KernelEventPayload>,
     prefix_payloads: Vec<events::KernelEventPayload>,
 ) -> Vec<store::KernelEventEnvelope> {
-    let mut rewritten = Vec::with_capacity(stream.len() + prefix_payloads.len());
+    if prelude_payloads.is_empty() {
+        let mut rewritten = Vec::with_capacity(stream.len() + prefix_payloads.len());
+        let mut inserted = false;
+        let mut index = 0;
+        while index < stream.len() {
+            let first = &stream[index];
+            let seq = first.seq();
+            let commit_key = first.commit_key().clone();
+            let mut end = index + 1;
+            while end < stream.len()
+                && stream[end].seq() == seq
+                && stream[end].commit_key() == &commit_key
+            {
+                end += 1;
+            }
+            let commit = &stream[index..end];
+            if commit.iter().any(|event| {
+                matches!(
+                    event.payload(),
+                    events::KernelEventPayload::RetentionManifestProjected(_)
+                )
+            }) {
+                let mut payloads = prefix_payloads.clone();
+                payloads.extend(commit.iter().map(|event| event.payload().clone()));
+                let request = store_typed_commit_request! {
+                    run_id: first.run_id().clone(),
+                    expected_next_seq: seq,
+                    commit_key: commit_key,
+                    payloads: payloads,
+                    required_artifacts: Vec::new(),
+                    preconditions: store::CommitPreconditions::default(),
+                };
+                let batch = store::build_committed_batch(&request, seq)
+                    .expect("rewritten retention projection batch");
+                rewritten.extend(batch.events().iter().cloned());
+                inserted = true;
+            } else {
+                rewritten.extend(commit.iter().cloned());
+            }
+            index = end;
+        }
+        assert!(inserted, "retention projection commit exists");
+        return rewritten;
+    }
+
+    let mut rewritten =
+        Vec::with_capacity(stream.len() + prelude_payloads.len() + prefix_payloads.len());
     let mut inserted = false;
+    let mut next_seq = store::StreamSeq::FIRST;
     let mut index = 0;
     while index < stream.len() {
         let first = &stream[index];
-        let seq = first.seq();
+        let original_seq = first.seq();
         let commit_key = first.commit_key().clone();
         let mut end = index + 1;
         while end < stream.len()
-            && stream[end].seq() == seq
+            && stream[end].seq() == original_seq
             && stream[end].commit_key() == &commit_key
         {
             end += 1;
@@ -7646,22 +7749,49 @@ fn prepend_payloads_to_retention_projection_commit_for_tests(
                 events::KernelEventPayload::RetentionManifestProjected(_)
             )
         }) {
+            if !prelude_payloads.is_empty() {
+                let request = store_typed_commit_request! {
+                    run_id: first.run_id().clone(),
+                    expected_next_seq: next_seq,
+                    commit_key: store::CommitKey::new("retention-projection-prelude")
+                        .expect("commit key"),
+                    payloads: prelude_payloads.clone(),
+                    required_artifacts: Vec::new(),
+                    preconditions: store::CommitPreconditions::default(),
+                };
+                let batch = store::build_committed_batch(&request, next_seq)
+                    .expect("retention projection prelude batch");
+                rewritten.extend(batch.events().iter().cloned());
+                next_seq = increment_stream_seq_for_tests(next_seq);
+            }
             let mut payloads = prefix_payloads.clone();
             payloads.extend(commit.iter().map(|event| event.payload().clone()));
             let request = store_typed_commit_request! {
                 run_id: first.run_id().clone(),
-                expected_next_seq: seq,
+                expected_next_seq: next_seq,
                 commit_key: commit_key,
-            payloads: payloads,
+                payloads: payloads,
                 required_artifacts: Vec::new(),
                 preconditions: store::CommitPreconditions::default(),
             };
-            let batch = store::build_committed_batch(&request, seq)
+            let batch = store::build_committed_batch(&request, next_seq)
                 .expect("rewritten retention projection batch");
             rewritten.extend(batch.events().iter().cloned());
+            next_seq = increment_stream_seq_for_tests(next_seq);
             inserted = true;
         } else {
-            rewritten.extend(commit.iter().cloned());
+            let request = store_typed_commit_request! {
+                run_id: first.run_id().clone(),
+                expected_next_seq: next_seq,
+                commit_key: commit_key,
+                payloads: commit.iter().map(|event| event.payload().clone()).collect(),
+                required_artifacts: Vec::new(),
+                preconditions: store::CommitPreconditions::default(),
+            };
+            let batch =
+                store::build_committed_batch(&request, next_seq).expect("shifted commit batch");
+            rewritten.extend(batch.events().iter().cloned());
+            next_seq = increment_stream_seq_for_tests(next_seq);
         }
         index = end;
     }

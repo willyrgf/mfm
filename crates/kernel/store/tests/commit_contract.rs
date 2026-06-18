@@ -1858,6 +1858,72 @@ fn projection_rebuild_rejects_mixed_commit_keys_for_one_sequence() {
 }
 
 #[test]
+fn projection_rebuild_rejects_old_model_terminal_attempt_without_start() {
+    let run_id = run_id(45);
+    let first = build_committed_batch(
+        &run_start_request(run_id.clone(), "run-start"),
+        StreamSeq::FIRST,
+    )
+    .expect("first batch");
+    let old_terminal = build_committed_batch(
+        &typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: StreamSeq::new(2).expect("next seq"),
+            commit_key: CommitKey::new("old-terminal-without-start").expect("commit key"),
+            payloads: terminal_cell_commit_payloads(artifact_id(46), content_digest(47)),
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        },
+        StreamSeq::new(2).expect("terminal seq"),
+    )
+    .expect("old terminal batch");
+    let mut events = first.events().to_vec();
+    events.extend(old_terminal.events().iter().cloned());
+
+    let error = ProjectionSnapshot::rebuild_from_run_stream(&events)
+        .expect_err("old terminal attempt model rejects");
+    assert_projection_conflict_contains(
+        error,
+        "unsupported old stream model: attempt-bound payload is not preceded by a StateAttemptStarted commit",
+    );
+}
+
+#[test]
+fn projection_rebuild_rejects_old_model_start_and_terminal_in_same_commit() {
+    let run_id = run_id(48);
+    let first = build_committed_batch(
+        &run_start_request(run_id.clone(), "run-start"),
+        StreamSeq::FIRST,
+    )
+    .expect("first batch");
+    let old_combined = build_committed_batch(
+        &typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: StreamSeq::new(2).expect("next seq"),
+            commit_key: CommitKey::new("old-combined-framework").expect("commit key"),
+            payloads: {
+                let mut payloads = vec![state_attempt_started()];
+                payloads.extend(terminal_cell_commit_payloads(artifact_id(49), content_digest(50)));
+                payloads
+            },
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        },
+        StreamSeq::new(2).expect("combined seq"),
+    )
+    .expect("old combined batch");
+    let mut events = first.events().to_vec();
+    events.extend(old_combined.events().iter().cloned());
+
+    let error = CommittedRunStream::from_events(run_id, events)
+        .expect_err("old combined framework model rejects");
+    assert_projection_conflict_contains(
+        error,
+        "unsupported old stream model: StateAttemptStarted must be committed before attempt-bound terminal payloads",
+    );
+}
+
+#[test]
 fn required_artifact_precondition_is_atomic_with_append() {
     let artifact_id = artifact_id(50);
     let artifact_digest = content_digest(51);

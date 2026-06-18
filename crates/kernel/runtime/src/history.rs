@@ -8,6 +8,7 @@ use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 
 use crate::artifacts::{artifact_role_name, staged_artifact_binding_kind, verify_artifact_bytes};
+use crate::binding::{BoundRuntimeContext, BoundRuntimeContextLoader};
 use crate::commit::SealedTerminalCommitValidation;
 use crate::error::async_store_error;
 use crate::framework::{
@@ -109,6 +110,121 @@ pub struct VerifiedRunHistory {
     artifacts: store::VerifiedRunArtifactStore,
 }
 
+/// Scheduler-owned verified run context for transition and attempt dispatch.
+///
+/// This authority combines the bound runtime context for the certified spec with the store-owned
+/// committed stream and runtime view. Scheduler drive paths use this loader as their typed
+/// ingress boundary instead of rebuilding raw stream views directly.
+#[derive(Clone)]
+pub struct VerifiedRunContext {
+    run_id: RunId,
+    spec_hash: SpecHash,
+    bound_context: BoundRuntimeContext,
+    committed: store::CommittedRunStream,
+    view: RuntimeRunView,
+}
+
+impl VerifiedRunContext {
+    /// Run id covered by this verified context.
+    pub fn run_id(&self) -> &RunId {
+        &self.run_id
+    }
+
+    /// Certified spec hash covered by this verified context.
+    pub fn spec_hash(&self) -> &SpecHash {
+        &self.spec_hash
+    }
+
+    /// Next store-owned sequence for the committed stream.
+    pub fn head_seq(&self) -> store::StreamSeq {
+        self.committed.next_seq()
+    }
+
+    /// Bound runner/capability/framework authority for this scheduler step.
+    pub fn bound_context(&self) -> &BoundRuntimeContext {
+        &self.bound_context
+    }
+
+    /// Store-owned committed stream authority for this scheduler step.
+    pub fn committed_stream(&self) -> &store::CommittedRunStream {
+        &self.committed
+    }
+
+    pub(crate) fn view(&self) -> &RuntimeRunView {
+        &self.view
+    }
+}
+
+/// Loader for scheduler-owned verified run context.
+#[derive(Clone)]
+pub struct VerifiedRunContextLoader {
+    runtime_contexts: BoundRuntimeContextLoader,
+}
+
+impl VerifiedRunContextLoader {
+    /// Creates a verified run-context loader over bound runtime context authority.
+    pub fn new(runtime_contexts: BoundRuntimeContextLoader) -> Self {
+        Self { runtime_contexts }
+    }
+
+    /// Loads bound runtime context for admission-time authority.
+    pub fn load_bound_context(
+        &self,
+        runtime_spec: &CertifiedRuntimeSpec,
+    ) -> Result<BoundRuntimeContext> {
+        self.runtime_contexts.load(runtime_spec)
+    }
+
+    /// Loads and verifies scheduler context from a sync typed store.
+    pub fn load<S>(
+        &self,
+        runtime_spec: &CertifiedRuntimeSpec,
+        run_id: &RunId,
+        store: &S,
+    ) -> Result<VerifiedRunContext>
+    where
+        S: store::TypedRunEventStore + ?Sized,
+    {
+        let committed =
+            store::CommittedRunStream::from_events(run_id.clone(), store.load_run_stream(run_id))?;
+        self.load_committed_stream(runtime_spec, committed)
+    }
+
+    /// Loads and verifies scheduler context from an async typed store.
+    pub async fn load_async<S>(
+        &self,
+        runtime_spec: &CertifiedRuntimeSpec,
+        run_id: &RunId,
+        store: &S,
+    ) -> Result<VerifiedRunContext>
+    where
+        S: store::AsyncTypedRunEventStore + ?Sized,
+    {
+        let stream = store
+            .load_run_stream(run_id)
+            .await
+            .map_err(async_store_error)?;
+        let committed = store::CommittedRunStream::from_events(run_id.clone(), stream)?;
+        self.load_committed_stream(runtime_spec, committed)
+    }
+
+    fn load_committed_stream(
+        &self,
+        runtime_spec: &CertifiedRuntimeSpec,
+        committed: store::CommittedRunStream,
+    ) -> Result<VerifiedRunContext> {
+        let bound_context = self.runtime_contexts.load(runtime_spec)?;
+        let view = RuntimeRunView::from_committed_stream(runtime_spec, &committed)?;
+        Ok(VerifiedRunContext {
+            run_id: committed.run_id().clone(),
+            spec_hash: runtime_spec.spec_hash().clone(),
+            bound_context,
+            committed,
+            view,
+        })
+    }
+}
+
 impl VerifiedRunHistory {
     /// Loads the authoritative run stream from a typed store and validates it against certified
     /// runtime authority and verified retained artifact evidence.
@@ -196,6 +312,7 @@ impl VerifiedRunHistory {
 }
 
 impl RuntimeRunView {
+    #[cfg(test)]
     pub(crate) fn from_store<S: store::TypedRunEventStore + ?Sized>(
         runtime_spec: &CertifiedRuntimeSpec,
         run_id: &RunId,

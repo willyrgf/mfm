@@ -7,7 +7,8 @@ use mfm_store::v1 as store;
 use crate::artifacts::RuntimeArtifactStore;
 use crate::attempt::{
     async_error_is_stale_expected_next_seq, store_error_is_stale_expected_next_seq,
-    AttemptRunStatus,
+    terminalize_observed_failure, terminalize_observed_failure_async, AttemptRunStatus,
+    ObservedFailureContext,
 };
 use crate::binding::BoundRuntimeContext;
 use crate::commit::{CommitPlanner, PreparedStagedArtifact, RunnerOutputCommitInput};
@@ -91,7 +92,14 @@ impl<'a> FrameworkAttemptLifecycle<'a> {
         };
         let latest_stream = store.load_run_stream(run_id);
         let latest_view = RuntimeRunView::from_stream(runtime_spec, run_id, &latest_stream)?;
-        let terminal_output = self
+        let failure_context = ObservedFailureContext {
+            runtime_spec,
+            run_id,
+            node,
+            attempt_id: &attempt_id,
+            view: &latest_view,
+        };
+        let terminal_output = match self
             .prepare_terminal_output(FrameworkTerminalOutputInput {
                 runtime_spec,
                 run_id,
@@ -104,8 +112,30 @@ impl<'a> FrameworkAttemptLifecycle<'a> {
                 latest_view: &latest_view,
                 pre_start_saga_terminal_proof,
             })
-            .await?;
-        stage_prepared_artifacts(self.artifact_store, &terminal_output.artifacts_to_stage).await?;
+            .await
+        {
+            Ok(output) => output,
+            Err(error) => {
+                return terminalize_observed_failure(
+                    self.artifact_store,
+                    store,
+                    failure_context,
+                    error,
+                )
+                .await;
+            }
+        };
+        if let Err(error) =
+            stage_prepared_artifacts(self.artifact_store, &terminal_output.artifacts_to_stage).await
+        {
+            return terminalize_observed_failure(
+                self.artifact_store,
+                store,
+                failure_context,
+                error,
+            )
+            .await;
+        }
         match store.append_prepared_commit_plan(terminal_output.commit) {
             Ok(_) => Ok(AttemptRunStatus::Advanced),
             Err(error) if store_error_is_stale_expected_next_seq(&error) => {
@@ -164,7 +194,14 @@ impl<'a> FrameworkAttemptLifecycle<'a> {
             .await
             .map_err(async_store_error)?;
         let latest_view = RuntimeRunView::from_stream(runtime_spec, run_id, &latest_stream)?;
-        let terminal_output = self
+        let failure_context = ObservedFailureContext {
+            runtime_spec,
+            run_id,
+            node,
+            attempt_id: &attempt_id,
+            view: &latest_view,
+        };
+        let terminal_output = match self
             .prepare_terminal_output(FrameworkTerminalOutputInput {
                 runtime_spec,
                 run_id,
@@ -177,8 +214,30 @@ impl<'a> FrameworkAttemptLifecycle<'a> {
                 latest_view: &latest_view,
                 pre_start_saga_terminal_proof,
             })
-            .await?;
-        stage_prepared_artifacts(self.artifact_store, &terminal_output.artifacts_to_stage).await?;
+            .await
+        {
+            Ok(output) => output,
+            Err(error) => {
+                return terminalize_observed_failure_async(
+                    self.artifact_store,
+                    store,
+                    failure_context,
+                    error,
+                )
+                .await;
+            }
+        };
+        if let Err(error) =
+            stage_prepared_artifacts(self.artifact_store, &terminal_output.artifacts_to_stage).await
+        {
+            return terminalize_observed_failure_async(
+                self.artifact_store,
+                store,
+                failure_context,
+                error,
+            )
+            .await;
+        }
         match store
             .append_prepared_commit_plan(terminal_output.commit)
             .await

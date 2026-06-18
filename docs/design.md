@@ -346,29 +346,37 @@ After launch, runtime advances only from the append-only run stream authority. I
 delegates spec-independent ordering and projection checks to `mfm-store`, then performs
 runtime-owned spec-aware validation of seeds, configs, artifacts, completed cells, side-effect
 ledger evidence, public-output events, retention events, and terminal run state. The rebuilt
-projection is derived from the stream; it is not independent semantic authority.
+projection is derived from the stream; it is not independent semantic authority. Store-owned stream
+validation is also the centralized old-model ingress guard: loaded streams and projection rebuilds
+reject attempt-bound payloads that are not preceded by a separate `StateAttemptStarted` commit, so
+runtime, replay, and Postgres-backed loads fail before trusting old lifecycle rows.
 
 Read, resume, replay, and status paths must construct `VerifiedRunHistory` from a
 `CommittedRunStream` plus `VerifiedRunArtifactStore` before trusting history. Replay authority is
 minted from that verified history and certified runtime authority; raw event vectors or retained
-artifact bytes without committed evidence do not cross the runtime/replay boundary.
+artifact bytes without committed evidence do not cross the runtime/replay boundary. Scheduler drive
+paths construct `VerifiedRunContext` through `VerifiedRunContextLoader`, which combines the same
+committed stream/view authority with `BoundRuntimeContext` runner, capability, and framework-handler
+authority before any transition is selected.
 
 The deterministic frontier scheduler is pure. Given the static certified transition graph and
-verified run history, it returns exactly one decision: run a certified node, block because no valid
-frontier is executable, or complete because all certified terminal conditions are satisfied. It does
-not write the store, stage artifacts, construct live capabilities, or call runners.
+verified run history, it returns one closed transition decision: start a node, continue or interrupt
+an open attempt, start remediation, wait for manual resolution, resolve saga terminal state, report
+blocked, or report projected public output completion. It does not write the store, stage artifacts,
+construct live capabilities, or call runners.
 
 For a new ordinary runnable node attempt, runtime first appends `StateAttemptStarted` from
 certified attempt authority. It then materializes state inputs from certified binding trees and
 prior typed cell evidence, checks runner identity and capability availability, and constructs a
-sealed runner invocation. If post-start materialization or runner-output validation fails inside a
-valid started attempt, runtime stages a redacted diagnostic artifact and records a non-retryable
-`StateAttemptFailed` plus runtime-evidence retention from minimal trusted attempt authority. Corrupt
-history, missing deployment bindings, store errors, artifact-store outages, and side-effect attempts
-with acquired ledger authority remain non-semantic runtime or recovery concerns. Runners receive
-only scoped typed inputs, allowed capabilities, and erased context surfaces. They return typed
-payload intent, staged artifacts, side-effect evidence, or sealed handles but cannot append to the
-run stream.
+sealed runner invocation. If post-start materialization, runner-output validation, runtime
+validation, or storage/artifact staging fails inside a valid started attempt and no side-effect
+authority has been acquired, runtime stages a redacted diagnostic artifact and records a
+non-retryable `StateAttemptFailed` plus runtime-evidence retention from minimal trusted attempt
+authority. Corrupt history before a valid attempt context, missing deployment bindings, and
+side-effect attempts with acquired ledger authority remain non-semantic runtime or recovery
+concerns. Runners receive only scoped typed inputs, allowed capabilities, and erased context
+surfaces. They return typed payload intent, staged artifacts, side-effect evidence, or sealed
+handles but cannot append to the run stream.
 
 The commit planner owns all production execution appends. Bootstrap verifies and stages launch
 material, executes the sealed `BootstrapRun` genesis state, and commits `RunStarted`, bootstrap

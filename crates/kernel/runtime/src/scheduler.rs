@@ -18,7 +18,7 @@ use crate::commit::{
 };
 use crate::error::async_store_error;
 use crate::framework_lifecycle::FrameworkAttemptLifecycle;
-use crate::history::RuntimeRunView;
+use crate::history::{RuntimeRunView, VerifiedRunContextLoader};
 use crate::manual_resolution::{
     build_manual_resolution_prefix_authority, certified_manual_resolution_spec,
     prepare_manual_resolution_commit, verify_manual_resolution_for_prefix,
@@ -63,7 +63,7 @@ enum DriveStepStatus {
 /// Serial typed scheduler.
 #[derive(Clone)]
 pub struct SerialTypedScheduler {
-    runtime_contexts: BoundRuntimeContextLoader,
+    run_contexts: VerifiedRunContextLoader,
     artifact_store: Arc<dyn RuntimeArtifactStore>,
 }
 
@@ -74,7 +74,7 @@ impl SerialTypedScheduler {
         artifact_store: Arc<dyn RuntimeArtifactStore>,
     ) -> Self {
         Self {
-            runtime_contexts: BoundRuntimeContextLoader::new(runners),
+            run_contexts: VerifiedRunContextLoader::new(BoundRuntimeContextLoader::new(runners)),
             artifact_store,
         }
     }
@@ -87,7 +87,7 @@ impl SerialTypedScheduler {
         evidence: RunLaunchEvidence,
         expected_next_seq: store::StreamSeq,
     ) -> Result<PreparedRunLaunch> {
-        let bound_context = self.runtime_contexts.load(runtime_spec)?;
+        let bound_context = self.run_contexts.load_bound_context(runtime_spec)?;
         RunAdmissionLifecycle::prepare_run_launch(
             runtime_spec,
             run_id,
@@ -120,7 +120,7 @@ impl SerialTypedScheduler {
             .await?;
         store.append_prepared_commit_plan(launch.commit.into())?;
         let stream = store.load_run_stream(&run_id);
-        let bound_context = self.runtime_contexts.load(runtime_spec)?;
+        let bound_context = self.run_contexts.load_bound_context(runtime_spec)?;
         RunAdmissionLifecycle::admitted_run_authority(runtime_spec, &run_id, &stream, bound_context)
     }
 
@@ -156,7 +156,7 @@ impl SerialTypedScheduler {
             .load_run_stream(&run_id)
             .await
             .map_err(async_store_error)?;
-        let bound_context = self.runtime_contexts.load(runtime_spec)?;
+        let bound_context = self.run_contexts.load_bound_context(runtime_spec)?;
         RunAdmissionLifecycle::admitted_run_authority(runtime_spec, &run_id, &stream, bound_context)
     }
 
@@ -326,15 +326,16 @@ impl SerialTypedScheduler {
         run_id: &RunId,
         blocked_nodes: &BTreeSet<NodeId>,
     ) -> Result<DriveStepStatus> {
-        let bound_context = self.runtime_contexts.load(runtime_spec)?;
-        let view = RuntimeRunView::from_store(runtime_spec, run_id, store)?;
-        match TransitionLifecycle::decide(runtime_spec, run_id, &view, blocked_nodes)? {
+        let context = self.run_contexts.load(runtime_spec, run_id, store)?;
+        let bound_context = context.bound_context();
+        let view = context.view();
+        match TransitionLifecycle::decide(runtime_spec, run_id, view, blocked_nodes)? {
             TransitionDecision::StartNode(attempt)
             | TransitionDecision::StartRemediation(attempt)
             | TransitionDecision::ResolveSagaTerminal(attempt)
             | TransitionDecision::ContinueAttempt(attempt) => {
                 match self
-                    .run_node_attempt(store, runtime_spec, run_id, &view, &bound_context, attempt)
+                    .run_node_attempt(store, runtime_spec, run_id, view, bound_context, attempt)
                     .await?
                 {
                     AttemptRunStatus::Advanced => Ok(DriveStepStatus::Advanced),
@@ -345,7 +346,7 @@ impl SerialTypedScheduler {
                 }
             }
             TransitionDecision::InterruptAttempt(attempt) => {
-                self.interrupt_attempt(store, runtime_spec, run_id, &view, attempt)
+                self.interrupt_attempt(store, runtime_spec, run_id, view, attempt)
             }
             TransitionDecision::AwaitManualResolution => Ok(DriveStepStatus::Blocked),
             TransitionDecision::Blocked => Ok(DriveStepStatus::Blocked),
@@ -360,13 +361,13 @@ impl SerialTypedScheduler {
         run_id: &RunId,
         blocked_nodes: &BTreeSet<NodeId>,
     ) -> Result<DriveStepStatus> {
-        let bound_context = self.runtime_contexts.load(runtime_spec)?;
-        let stream = store
-            .load_run_stream(run_id)
-            .await
-            .map_err(async_store_error)?;
-        let view = RuntimeRunView::from_stream(runtime_spec, run_id, &stream)?;
-        match TransitionLifecycle::decide(runtime_spec, run_id, &view, blocked_nodes)? {
+        let context = self
+            .run_contexts
+            .load_async(runtime_spec, run_id, store)
+            .await?;
+        let bound_context = context.bound_context();
+        let view = context.view();
+        match TransitionLifecycle::decide(runtime_spec, run_id, view, blocked_nodes)? {
             TransitionDecision::StartNode(attempt)
             | TransitionDecision::StartRemediation(attempt)
             | TransitionDecision::ResolveSagaTerminal(attempt)
@@ -376,8 +377,8 @@ impl SerialTypedScheduler {
                         store,
                         runtime_spec,
                         run_id,
-                        &view,
-                        &bound_context,
+                        view,
+                        bound_context,
                         attempt,
                     )
                     .await?
@@ -390,7 +391,7 @@ impl SerialTypedScheduler {
                 }
             }
             TransitionDecision::InterruptAttempt(attempt) => {
-                self.interrupt_attempt_async(store, runtime_spec, run_id, &view, attempt)
+                self.interrupt_attempt_async(store, runtime_spec, run_id, view, attempt)
                     .await
             }
             TransitionDecision::AwaitManualResolution => Ok(DriveStepStatus::Blocked),

@@ -1248,10 +1248,10 @@ mod tests {
         ResourceNamespace, SagaPolicySpec, ValueLineageRef,
     };
     use mfm_store::v1::{
-        ArtifactEvidenceRef, AttemptStatus, CellTerminalProjection, CommitArtifactEvidenceSet,
-        CommitKey, CommitOutcome, CommitPreconditions, PreparedCommit, RequiredRunState,
-        ResourceLaneKey, SagaEngagementReason, SagaTerminal, SagaTerminalProof, SideEffectPhase,
-        StoreError, StreamSeq,
+        build_committed_batch, ArtifactEvidenceRef, AttemptStatus, CellTerminalProjection,
+        CommitArtifactEvidenceSet, CommitKey, CommitOutcome, CommitPreconditions, PreparedCommit,
+        RequiredRunState, ResourceLaneKey, SagaEngagementReason, SagaTerminal, SagaTerminalProof,
+        SideEffectPhase, StoreError, StreamSeq,
     };
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
     use sqlx::AssertSqlSafe;
@@ -1322,6 +1322,66 @@ mod tests {
             .await
             .expect("clear projections");
         tx.commit().await.expect("commit projection clear tx");
+    }
+
+    async fn insert_persisted_events_direct(
+        store: &PostgresTypedRunEventStore,
+        run_id: &RunId,
+        events: &[KernelEventEnvelope],
+    ) -> Result<()> {
+        let mut tx = store.pool.begin().await.expect("start direct insert tx");
+        let head_seq = events
+            .last()
+            .map(|event| event.seq().as_u64())
+            .unwrap_or_default();
+        sqlx::query("INSERT INTO typed_run_heads (run_id, head_seq) VALUES ($1, $2)")
+            .bind(run_id.as_str())
+            .bind(u64_to_i64(head_seq, "typed_run_heads.head_seq")?)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| database_error("failed to insert typed run head", error))?;
+        for event in events {
+            let payload_json = canonical_payload_value(event.payload())?;
+            let ordinal = i32::try_from(event.ordinal().as_u32()).map_err(|_| {
+                PostgresTypedStoreError::Corruption("typed_run_events.ordinal overflow".to_owned())
+            })?;
+            sqlx::query(
+                "INSERT INTO typed_run_events \
+                 (run_id, seq, ordinal, event_id, event_schema_id, spec_hash, commit_key, \
+                  logical_key, payload_hash, payload_canonical_byte_len, payload_json) \
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+            )
+            .bind(event.run_id().as_str())
+            .bind(u64_to_i64(event.seq().as_u64(), "typed_run_events.seq")?)
+            .bind(ordinal)
+            .bind(event.event_id().as_str())
+            .bind(event.event_schema_id().as_str())
+            .bind(event.spec_hash().as_str())
+            .bind(event.commit_key().as_str())
+            .bind(event.logical_key().as_str())
+            .bind(event.payload_hash().as_str())
+            .bind(u64_to_i64(
+                event.audit().payload_canonical_byte_len(),
+                "typed_run_events.payload_canonical_byte_len",
+            )?)
+            .bind(payload_json)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| database_error("failed to insert typed event", error))?;
+        }
+        tx.commit()
+            .await
+            .map_err(|error| database_error("failed to commit direct insert", error))?;
+        Ok(())
+    }
+
+    fn assert_old_model_rejection(error: PostgresTypedStoreError) {
+        assert!(matches!(
+            error,
+            PostgresTypedStoreError::Store(StoreError::ProjectionConflict { message, .. })
+                if message.contains("unsupported old stream model")
+                    && message.contains("StateAttemptStarted")
+        ));
     }
 
     fn digest_bytes(byte: u8) -> DigestBytes {
@@ -2135,6 +2195,48 @@ mod tests {
                 .status,
             AttemptStatus::Interrupted
         ));
+
+        drop_schema(&store, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn typed_old_model_persisted_rows_reject_on_load_and_rebuild() {
+        let (store, schema) = test_store().await;
+        let run = run_id(18);
+        let run_start = build_committed_batch(
+            &request(run.clone(), 1, "run-start", vec![run_started(run.clone())]),
+            StreamSeq::FIRST,
+        )
+        .expect("run start batch");
+        let old_terminal = build_committed_batch(
+            &request(
+                run.clone(),
+                2,
+                "old-terminal-without-start",
+                vec![
+                    cell_produced(artifact_id(19), content_digest(20)),
+                    state_attempt_completed(),
+                ],
+            ),
+            StreamSeq::new(2).expect("terminal seq"),
+        )
+        .expect("old terminal batch");
+        let mut events = run_start.events().to_vec();
+        events.extend(old_terminal.events().iter().cloned());
+        insert_persisted_events_direct(&store, &run, &events)
+            .await
+            .expect("insert old rows");
+
+        let load_error = store
+            .load_run_stream(&run)
+            .await
+            .expect_err("old model rows reject on load");
+        assert_old_model_rejection(load_error);
+        let rebuild_error = store
+            .rebuild_projections_from_events(&run)
+            .await
+            .expect_err("old model rows reject on rebuild");
+        assert_old_model_rejection(rebuild_error);
 
         drop_schema(&store, &schema).await;
     }
