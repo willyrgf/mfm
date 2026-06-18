@@ -2796,8 +2796,11 @@ mod tests {
     use super::*;
     use mfm_artifact_store_fs::TypedArtifactDescriptor;
     use mfm_capabilities::{NoCaps, Pure};
-    use mfm_ids::{AttemptId, DescriptorId, StateKind, StateVersion};
-    use mfm_ids::{CellId, ContentDigest, DigestBytes, NodeId, ScopeId, SeedId, SemanticTypeId};
+    use mfm_ids::{
+        AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind, CapabilityVersion,
+        CellId, ContentDigest, DescriptorId, DigestBytes, LoweringVersion, NodeId, ScopeId, SeedId,
+        SemanticTypeId, SpecHash, SpecVersion, StateKind, StateVersion,
+    };
     use mfm_program::{
         build_root_with_registries, CanonicalSeed, PublicOutputKey, PureState, RootBuilder,
         ScopeKey, SeedKey, StateKey, StateRegistryBuilder, StateResult, StateSpec,
@@ -2807,7 +2810,7 @@ mod tests {
         ErasedNodeRunner, ErasedRunCtx, ErasedRunnerBinding, ErasedRunnerFuture,
         ErasedRunnerOutput, RunnerEventPayload, StagedArtifact, StagedRetentionRefs,
     };
-    use mfm_store::v1::{AsyncTypedRunEventStore, TypedRunEventStore};
+    use mfm_store::v1::{AsyncTypedRunEventStore, TypedProjectionRead, TypedRunEventStore};
     use serde::{Deserialize, Serialize};
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::Path;
@@ -3070,6 +3073,221 @@ mod tests {
             typed_run_mode(store::RunMode::Forward),
             TypedRunMode::Forward
         );
+    }
+
+    #[test]
+    fn semantic_status_exposes_resource_lanes_from_store_projection() {
+        let run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xc0));
+        let spec_hash = SpecHash::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xc1));
+        let node_id = node_id(0xc2);
+        let attempt_id = attempt_id(0xc3);
+        let ledger_key =
+            events::SideEffectLedgerKey::new("ledger-public-status").expect("ledger key");
+        let resource_key = events::ResourceKeyEvidence {
+            namespace: spec::ResourceNamespace::new("mfm.test.account_nonce")
+                .expect("resource namespace"),
+            key_schema_id: schema_id("mfm.test.resource_key", 0xc4),
+            key: events::ResourceKey::new("wallet-public-status").expect("resource key"),
+        };
+        let lane_key = store::ResourceLaneKey::from_evidence(&resource_key);
+        let spec_artifact = store::ArtifactEvidenceRef {
+            artifact_id: ArtifactId::from_digest(spec_hash.algorithm(), *spec_hash.digest()),
+            digest: ContentDigest::from_digest(spec_hash.algorithm(), *spec_hash.digest()),
+            byte_len: 128,
+            media_type: spec::MediaType::new(spec::MEDIA_TYPE).expect("spec media type"),
+            schema_id: None,
+            semantic_type_id: None,
+            producer_node_id: None,
+            producer_seed_id: None::<SeedId>,
+            artifact_role: events::ArtifactRole::TypedExecutionSpec,
+        };
+        let certificate_artifact = store::ArtifactEvidenceRef {
+            artifact_id: ArtifactId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xc5)),
+            digest: content_digest(0xc5),
+            byte_len: 64,
+            media_type: spec::MediaType::new(mfm_certify::CERTIFICATE_MEDIA_TYPE)
+                .expect("certificate media type"),
+            schema_id: None,
+            semantic_type_id: None,
+            producer_node_id: None,
+            producer_seed_id: None::<SeedId>,
+            artifact_role: events::ArtifactRole::TypedSpecCertificate,
+        };
+        let intent_artifact = store::ArtifactEvidenceRef {
+            artifact_id: ArtifactId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xc6)),
+            digest: content_digest(0xc6),
+            byte_len: 32,
+            media_type: spec::MediaType::new("application/json").expect("intent media type"),
+            schema_id: Some(schema_id("mfm.test.side_effect_intent", 0xc7)),
+            semantic_type_id: None,
+            producer_node_id: Some(node_id.clone()),
+            producer_seed_id: None::<SeedId>,
+            artifact_role: events::ArtifactRole::SideEffectIntent,
+        };
+        let mut store = store::InMemoryTypedRunStore::new();
+
+        append_test_commit(
+            &mut store,
+            store::TypedCommitRequest::from_payloads(
+                run_id.clone(),
+                store::StreamSeq::FIRST,
+                store::CommitKey::new("public-status-run-start").expect("commit key"),
+                vec![events::KernelEventPayload::RunStarted(events::RunStarted {
+                    run_id: run_id.clone(),
+                    spec_hash: spec_hash.clone(),
+                    spec_artifact_id: spec_artifact.artifact_id.clone(),
+                    certificate_artifact_id: certificate_artifact.artifact_id.clone(),
+                    certificate_artifact_digest: certificate_artifact.digest.clone(),
+                    certificate_media_type: certificate_artifact.media_type.clone(),
+                    spec_media_type: spec_artifact.media_type.clone(),
+                    spec_version: SpecVersion::new(spec::SPEC_VERSION).expect("spec version"),
+                    lowering_version: LoweringVersion::new(spec::LOWERING_VERSION)
+                        .expect("lowering version"),
+                    public_output_schema_id: schema_id("mfm.test.public_output", 0xc8),
+                    saga_policy_digest: spec::SagaPolicySpec::NoSideEffects
+                        .saga_policy_digest()
+                        .expect("saga policy digest"),
+                    descriptor_identities: Vec::new(),
+                    runner_executables: Vec::new(),
+                    adapter_executables: Vec::new(),
+                    canonicalizer_identity: spec::CanonicalizerIdentity::new("mfm.jcs.v1")
+                        .expect("canonicalizer"),
+                    framework_version: events::FrameworkVersion::new("mfm.test.framework")
+                        .expect("framework version"),
+                    source_revision: events::SourceRevision::new("test-source")
+                        .expect("source revision"),
+                    seed_cells: Vec::new(),
+                })],
+                vec![spec_artifact.clone(), certificate_artifact.clone()],
+                store::CommitPreconditions {
+                    required_run_state: store::RequiredRunState::Absent,
+                    ..store::CommitPreconditions::default()
+                },
+            )
+            .expect("run start request"),
+        );
+        let side_effect_expected_next_seq = store.expected_next_seq(&run_id);
+        append_test_commit(
+            &mut store,
+            store::TypedCommitRequest::from_payloads(
+                run_id.clone(),
+                side_effect_expected_next_seq,
+                store::CommitKey::new("public-status-side-effect-prepare").expect("commit key"),
+                vec![
+                    events::KernelEventPayload::StateAttemptStarted(events::StateAttemptStarted {
+                        spec_hash: spec_hash.clone(),
+                        node_id: node_id.clone(),
+                        attempt_id: attempt_id.clone(),
+                        attempt_no: 1,
+                        state_kind: StateKind::new(
+                            "mfm.test",
+                            "side_effect_state",
+                            DigestAlgorithm::Sha256JcsV1,
+                            digest(0xc9),
+                        )
+                        .expect("state kind"),
+                        state_version: StateVersion::new("mfm.test.side_effect_state.v1")
+                            .expect("state version"),
+                    }),
+                    events::KernelEventPayload::SideEffectIntentPersisted(
+                        events::side_effect::IntentPersisted {
+                            spec_hash: spec_hash.clone(),
+                            node_id: node_id.clone(),
+                            scope_id: scope_id(0xca),
+                            attempt_id: attempt_id.clone(),
+                            ledger_key: ledger_key.clone(),
+                            ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                            invocation_epoch: 1,
+                            intent_schema_id: intent_artifact
+                                .schema_id
+                                .clone()
+                                .expect("intent schema"),
+                            intent_hash: intent_artifact.digest.clone(),
+                            intent_artifact_id: intent_artifact.artifact_id.clone(),
+                            idempotency_input_schema_id: schema_id("mfm.test.idempotency", 0xcb),
+                            idempotency_input_hash: content_digest(0xcc),
+                            idempotency_key: events::IdempotencyKeyRef::new("idem-public-status")
+                                .expect("idempotency key"),
+                            capability_kind: CapabilityKind::new(
+                                "mfm.test",
+                                "side_effect",
+                                DigestAlgorithm::Sha256JcsV1,
+                                digest(0xcd),
+                            )
+                            .expect("capability kind"),
+                            capability_version: CapabilityVersion::new("mfm.test.side_effect.v1")
+                                .expect("capability version"),
+                            adapter_kind: AdapterKind::new(
+                                "mfm.test",
+                                "adapter",
+                                DigestAlgorithm::Sha256JcsV1,
+                                digest(0xce),
+                            )
+                            .expect("adapter kind"),
+                            adapter_version: AdapterVersion::new("mfm.test.adapter.v1")
+                                .expect("adapter version"),
+                        },
+                    ),
+                    events::KernelEventPayload::SideEffectClaimed(events::side_effect::Claimed {
+                        spec_hash: spec_hash.clone(),
+                        node_id: node_id.clone(),
+                        attempt_id: attempt_id.clone(),
+                        ledger_key: ledger_key.clone(),
+                        ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                        claim_owner: events::RunnerInvocationId::new("owner-public-status")
+                            .expect("claim owner"),
+                        invocation_epoch: 1,
+                        claim_generation: 1,
+                        claim_fencing_token: events::side_effect::ClaimFencingToken::new(
+                            "token-public-status",
+                        )
+                        .expect("fencing token"),
+                    }),
+                    events::KernelEventPayload::SideEffectInvocationPrepared(
+                        events::side_effect::InvocationPrepared {
+                            spec_hash: spec_hash.clone(),
+                            node_id: node_id.clone(),
+                            attempt_id: attempt_id.clone(),
+                            ledger_key: ledger_key.clone(),
+                            ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                            invocation_epoch: 1,
+                            claim_generation: 1,
+                            claim_fencing_token: events::side_effect::ClaimFencingToken::new(
+                                "token-public-status",
+                            )
+                            .expect("fencing token"),
+                            prepared_artifact_id: None,
+                            prepared_hash: None,
+                            resource_key: Some(resource_key),
+                        },
+                    ),
+                ],
+                vec![intent_artifact.clone()],
+                store::CommitPreconditions::default(),
+            )
+            .expect("side-effect prepare request"),
+        );
+
+        let projection = store.projection_snapshot();
+        let saga = projection.derive_saga_projection(&run_id, &spec::SagaPolicySpec::NoSideEffects);
+        let status = typed_saga_status_inner(
+            &spec::SagaPolicySpec::NoSideEffects,
+            None,
+            Some(projection),
+            &saga,
+        );
+
+        assert_eq!(status.resource_lanes.len(), 1);
+        let lane = &status.resource_lanes[0];
+        assert_eq!(lane.namespace, lane_key.namespace.as_str());
+        assert_eq!(lane.key, "wallet-public-status");
+        assert_eq!(lane.holding_run_id, run_id.as_str());
+        assert_eq!(lane.holding_ledger_key, ledger_key.as_str());
+        assert_eq!(lane.holding_ledger_purpose, "forward");
+        assert_eq!(lane.holding_forward_ledger_key, None);
+        assert_eq!(lane.holding_node_id, node_id.as_str());
+        assert_eq!(lane.holding_attempt_id, attempt_id.as_str());
+        assert_eq!(lane.invocation_epoch, 1);
     }
 
     #[test]
@@ -4920,6 +5138,18 @@ mod tests {
 
     fn digest(byte: u8) -> DigestBytes {
         DigestBytes::from_array([byte; 32])
+    }
+
+    fn append_test_commit(
+        store: &mut store::InMemoryTypedRunStore,
+        request: store::TypedCommitRequest,
+    ) {
+        let admitted_artifacts = request.required_artifacts().to_vec();
+        let commit = store::PreparedTypedCommit::new(request, admitted_artifacts)
+            .expect("prepared typed commit");
+        store
+            .append_prepared_typed_commit(commit)
+            .expect("append prepared typed commit");
     }
 
     fn content_digest(byte: u8) -> ContentDigest {

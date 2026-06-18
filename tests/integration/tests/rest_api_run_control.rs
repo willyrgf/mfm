@@ -386,6 +386,33 @@ async fn proof_http_start_replay_uses_certified_bundle_evidence() {
         start_body["data"]["spec_hash"],
         certified.spec_hash().as_str()
     );
+    let status = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/runs/{run_id}/status"))
+                .body(Body::empty())
+                .expect("status request"),
+        )
+        .await
+        .expect("status response");
+    assert_eq!(status.status(), StatusCode::OK);
+    let status_body = response_json(status).await;
+    assert_eq!(status_body["status"], "success");
+    assert_eq!(status_body["data"]["run_id"], run_id);
+    assert_eq!(
+        status_body["data"]["spec_hash"],
+        start_body["data"]["spec_hash"]
+    );
+    assert_eq!(status_body["data"]["run_mode"], "completed");
+    assert_eq!(status_body["data"]["scheduler_status"], "observed");
+    assert!(
+        status_body["data"]["attempt_dispositions"]
+            .as_array()
+            .is_some_and(|attempts| !attempts.is_empty()),
+        "status route must expose attempt dispositions"
+    );
 
     let replay = app
         .clone()
