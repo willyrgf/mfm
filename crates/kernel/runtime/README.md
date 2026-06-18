@@ -36,9 +36,15 @@ checks, and capability scoping. The commit planner verifies typed payloads, side
 rules, staged artifacts, references, retention bindings, and commit preconditions before building
 purpose-specific `PreparedCommit<Purpose>` values and submitting them through `PreparedCommitPlan`.
 
-Launch, ordinary state attempts, public-output rendering, retention projection, and completion all
-use the same authority path. `RunStarted` is emitted only by the sealed `BootstrapRun` genesis batch,
-and `RunCompleted` is derived only from the sealed `CompleteRun` framework state.
+Launch is a pre-FSM admission lifecycle, not a scheduler-dispatched state attempt.
+`RunAdmissionLifecycle` verifies the certified spec, launch artifacts, seeds, configs, executable
+availability, and capability availability before minting the `RunStarted` commit. That commit still
+carries legacy bundled bootstrap evidence for compatibility with the persisted event contract, but
+`BootstrapRun` is not executed as a post-admission framework runner. Ordinary state attempts,
+public-output rendering, retention projection, and terminal framework work then use the shared
+started-before-run authority path. `RunCompleted` is derived from the sealed `CompleteRun`
+framework state for successful public-output completion, or from `ResolveSagaTerminal` when the
+saga terminal path resolves compensation, manual resolution, or failure without an AC/DC claim.
 
 Module roles:
 
@@ -48,8 +54,9 @@ Module roles:
 - `history`: spec-aware verified history and input materialization
 - `frontier`: pure scheduler decision and attempt planning
 - `transition`: closed transition decisions over certified spec and verified history
-- `attempt`: ordinary and public-output render attempt lifecycle from selection through terminal commit
-- `framework_lifecycle`: started-before-run framework attempt lifecycle for retention and terminal states
+- `attempt`: ordinary attempt lifecycle from selection through terminal commit
+- `framework_lifecycle`: started-before-run framework attempt lifecycle for public-output rendering,
+  retention, and terminal states
 - `recovery`: open-attempt recovery frontier validation
 - `side_effect_lifecycle`: side-effect attempt uncertainty and recovery evidence guards
 - `scheduler`: serial orchestration over admission, transition, lifecycle dispatch, and store

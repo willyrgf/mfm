@@ -10,7 +10,7 @@ pub(super) fn apply_projection(
             apply_run_completed(projections, &envelope.event_id, payload)?;
         }
         KernelEventPayload::StateAttemptStarted(payload) => {
-            apply_attempt_started(projections, &envelope.event_id, payload)?;
+            apply_attempt_started(projections, envelope.run_id(), &envelope.event_id, payload)?
         }
         KernelEventPayload::StateAttemptCompleted(payload) => {
             apply_attempt_completed(projections, &envelope.event_id, payload)?;
@@ -135,6 +135,7 @@ fn apply_run_completed(
 
 fn apply_attempt_started(
     projections: &mut ProjectionSnapshot,
+    run_id: &RunId,
     event_id: &EventId,
     payload: &events::StateAttemptStarted,
 ) -> Result<()> {
@@ -148,6 +149,7 @@ fn apply_attempt_started(
     projections.attempts.insert(
         key,
         AttemptProjection {
+            run_id: run_id.clone(),
             node_id: payload.node_id.clone(),
             attempt_id: payload.attempt_id.clone(),
             event_id: event_id.clone(),
@@ -631,6 +633,10 @@ fn apply_side_effect_ambiguous(
         },
         |state| state.mark_ambiguous(envelope.event_id.clone(), payload),
     )?;
+    release_resource_lane_for_holder(
+        projections,
+        &SideEffectLedgerRef::new(envelope.run_id().clone(), payload.ledger_key.clone()),
+    );
     if matches!(
         payload.ledger_purpose,
         events::SideEffectLedgerPurpose::Forward
@@ -797,6 +803,7 @@ fn apply_manual_resolution_recorded(
             message: "manual resolution already recorded".to_owned(),
         });
     }
+    projections.require_no_open_semantic_attempts_for_run(&payload.run_id)?;
     require_forward_quiescence(projections, &payload.run_id)?;
     projections.manual_resolutions.insert(
         payload.run_id.clone(),

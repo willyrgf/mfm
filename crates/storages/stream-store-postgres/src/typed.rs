@@ -181,13 +181,15 @@ impl PostgresTypedRunEventStore {
         let mut artifacts = load_artifacts(&mut tx, request.run_id()).await?;
         admit_artifact_evidence(&mut artifacts, commit.admitted_artifacts())?;
         lock_resource_lanes_tx(&mut tx).await?;
-        let (projections, stream_head) =
+        let (run_projection, stream_head) =
             rebuild_projection_snapshot_with_head(&mut tx, request.run_id()).await?;
         if stream_head != head {
             return Err(PostgresTypedStoreError::Corruption(
                 "typed run head does not match persisted event stream".to_owned(),
             ));
         }
+        let resource_lanes = rebuild_global_resource_lanes_from_events_tx(&mut tx).await?;
+        let projections = projection_snapshot_with_resource_lanes(&run_projection, resource_lanes)?;
         let base = TypedCommitBase {
             artifacts,
             logical_keys: load_logical_keys(&mut tx, request.run_id()).await?,
@@ -365,6 +367,13 @@ impl AsyncTypedRunEventStore for PostgresTypedRunEventStore {
     ) -> AsyncStoreFuture<'a, StreamSeq, Self::Error> {
         Box::pin(async move { PostgresTypedRunEventStore::expected_next_seq(self, run_id).await })
     }
+
+    fn status_projection_snapshot<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> AsyncStoreFuture<'a, ProjectionSnapshot, Self::Error> {
+        Box::pin(async move { PostgresTypedRunEventStore::projection_snapshot(self, run_id).await })
+    }
 }
 
 fn admit_artifact_evidence(
@@ -501,6 +510,8 @@ async fn read_head_for_update(tx: &mut Transaction<'_, Postgres>, run_id: &RunId
 }
 
 async fn lock_resource_lanes_tx(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
+    // This table lock is the cross-run resource-lane admission mutex. Lane authority is rebuilt
+    // from typed_run_events, so the contents of projection rows are not trusted during admission.
     sqlx::query!("LOCK TABLE typed_resource_lane_projection IN SHARE ROW EXCLUSIVE MODE")
         .execute(&mut **tx)
         .await
@@ -966,6 +977,15 @@ async fn write_projection_tables(
     for (lane_key, projection) in snapshot.resource_lanes() {
         if &projection.holder.run_id == run_id {
             let json = resource_lane_projection_json(lane_key, projection);
+            sqlx::query(
+                "DELETE FROM typed_resource_lane_projection \
+                 WHERE namespace = $1 AND resource_key = $2",
+            )
+            .bind(lane_key.namespace.as_str())
+            .bind(lane_key.key.as_str())
+            .execute(&mut **tx)
+            .await
+            .map_err(|error| database_error("failed to clear resource lane key", error))?;
             sqlx::query!(
                 "INSERT INTO typed_resource_lane_projection \
                  (namespace, resource_key, run_id, ledger_key, projection_json) \
@@ -1159,8 +1179,8 @@ mod tests {
     use mfm_events::v1::{self as events, ArtifactRole, KernelEventPayload};
     use mfm_ids::{
         AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind, CapabilityVersion,
-        CellId, ContentDigest, DigestAlgorithm, DigestBytes, LoweringVersion, NodeId, RunId,
-        SchemaId, ScopeId, SemanticTypeId, SpecHash, SpecVersion, StateKind, StateVersion,
+        CellId, ContentDigest, DigestAlgorithm, DigestBytes, EventId, LoweringVersion, NodeId,
+        RunId, SchemaId, ScopeId, SemanticTypeId, SpecHash, SpecVersion, StateKind, StateVersion,
     };
     use mfm_spec::v1::{
         self as spec, CanonicalizerIdentity, ManualResolutionEvidenceSpec, MediaType,
@@ -1173,7 +1193,7 @@ mod tests {
         SagaTerminalProof, SideEffectPhase, StoreError, StreamSeq,
     };
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-    use sqlx::AssertSqlSafe;
+    use sqlx::{AssertSqlSafe, Row};
 
     use super::*;
 
@@ -1262,6 +1282,81 @@ mod tests {
             .execute(&store.pool)
             .await
             .expect("poison cell projection");
+    }
+
+    async fn poison_resource_lane_projection_row(
+        store: &PostgresTypedRunEventStore,
+        lane_key: &ResourceLaneKey,
+        poisoned_run: &RunId,
+    ) {
+        let poisoned_ledger = side_effect_ledger_key();
+        let updated = sqlx::query(
+            "UPDATE typed_resource_lane_projection \
+             SET run_id = $3, ledger_key = $4, projection_json = $5 \
+             WHERE namespace = $1 AND resource_key = $2",
+        )
+        .bind(lane_key.namespace.as_str())
+        .bind(lane_key.key.as_str())
+        .bind(poisoned_run.as_str())
+        .bind(poisoned_ledger.as_str())
+        .bind(serde_json::json!({
+            "poisoned": true,
+            "run_id": poisoned_run.as_str(),
+        }))
+        .execute(&store.pool)
+        .await
+        .expect("poison resource lane projection");
+        assert_eq!(updated.rows_affected(), 1);
+    }
+
+    async fn insert_stale_resource_lane_projection_row(
+        store: &PostgresTypedRunEventStore,
+        lane_key: &ResourceLaneKey,
+        stale_run: &RunId,
+    ) {
+        let stale_ledger = side_effect_ledger_key();
+        let projection = ResourceLaneProjection {
+            event_id: EventId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(40)),
+            holder: mfm_store::v1::SideEffectLedgerRef::new(
+                stale_run.clone(),
+                stale_ledger.clone(),
+            ),
+            ledger_purpose: side_effect_ledger_purpose(),
+            node_id: node_id(70),
+            attempt_id: attempt_id(72),
+            invocation_epoch: 1,
+        };
+        sqlx::query(
+            "INSERT INTO typed_resource_lane_projection \
+             (namespace, resource_key, run_id, ledger_key, projection_json) \
+             VALUES ($1,$2,$3,$4,$5)",
+        )
+        .bind(lane_key.namespace.as_str())
+        .bind(lane_key.key.as_str())
+        .bind(stale_run.as_str())
+        .bind(stale_ledger.as_str())
+        .bind(resource_lane_projection_json(lane_key, &projection))
+        .execute(&store.pool)
+        .await
+        .expect("insert stale resource lane projection");
+    }
+
+    async fn assert_resource_lane_projection_row_holder(
+        store: &PostgresTypedRunEventStore,
+        lane_key: &ResourceLaneKey,
+        expected_run: &RunId,
+    ) {
+        let row = sqlx::query(
+            "SELECT run_id FROM typed_resource_lane_projection \
+             WHERE namespace = $1 AND resource_key = $2",
+        )
+        .bind(lane_key.namespace.as_str())
+        .bind(lane_key.key.as_str())
+        .fetch_one(&store.pool)
+        .await
+        .expect("resource lane projection row");
+        let run_id: String = row.try_get("run_id").expect("run_id column");
+        assert_eq!(run_id, expected_run.as_str());
     }
 
     async fn insert_persisted_events_direct(
@@ -1939,6 +2034,71 @@ mod tests {
         store.append_prepared_typed_commit(commit).await
     }
 
+    async fn append_run_start(
+        store: &PostgresTypedRunEventStore,
+        run_id: &RunId,
+        commit_key: &str,
+    ) -> Result<CommitOutcome> {
+        append_prepared(
+            store,
+            request(
+                run_id.clone(),
+                1,
+                commit_key,
+                vec![run_started(run_id.clone())],
+            ),
+            vec![spec_artifact_ref(), certificate_artifact_ref()],
+        )
+        .await
+    }
+
+    async fn append_resource_lane_prepare(
+        store: &PostgresTypedRunEventStore,
+        run_id: &RunId,
+        commit_key: &str,
+        lane_value: &str,
+        artifact_byte: u8,
+    ) -> Result<CommitOutcome> {
+        let intent_artifact = artifact_id(artifact_byte);
+        let intent_digest = content_digest(artifact_byte + 1);
+        append_prepared(
+            store,
+            request(
+                run_id.clone(),
+                2,
+                commit_key,
+                vec![
+                    side_effect_attempt_started(),
+                    side_effect_intent(intent_artifact.clone(), intent_digest.clone()),
+                    side_effect_claim(),
+                    side_effect_prepared_with_resource_key(resource_key(lane_value, 201)),
+                ],
+            ),
+            vec![side_effect_artifact_ref(
+                intent_artifact,
+                intent_digest,
+                schema_id("mfm.test.side_effect_intent", 70),
+                ArtifactRole::SideEffectIntent,
+            )],
+        )
+        .await
+    }
+
+    fn assert_resource_lane_blocked(
+        error: PostgresTypedStoreError,
+        expected_lane_key: &ResourceLaneKey,
+        expected_holder_run: &RunId,
+    ) {
+        let PostgresTypedStoreError::Store(StoreError::ResourceLaneBlocked { lane_key, holder }) =
+            error
+        else {
+            panic!("expected typed resource lane block, got {error:?}");
+        };
+        assert_eq!(&*lane_key, expected_lane_key);
+        assert_eq!(&holder.run_id, expected_holder_run);
+        assert_eq!(holder.ledger_key, side_effect_ledger_key());
+    }
+
     #[tokio::test]
     async fn typed_prepared_commit_idempotency_fingerprint_includes_admitted_artifacts() {
         let (store, schema) = test_store().await;
@@ -2286,8 +2446,10 @@ mod tests {
             .resource_lane(&lane_key)
             .expect("peer snapshot includes cross-run lane");
         assert_eq!(&peer_lane.holder.run_id, &run);
+        assert_eq!(peer_before.resource_lanes().count(), 1);
 
         clear_projection_rows(&store, &run).await;
+        clear_projection_rows(&store, &peer_run).await;
         let peer_after_deleted = store
             .projection_snapshot(&peer_run)
             .await
@@ -2296,6 +2458,8 @@ mod tests {
             .resource_lane(&lane_key)
             .expect("peer snapshot rebuilds cross-run lane from stream");
         assert_eq!(&peer_lane.holder.run_id, &run);
+        assert_eq!(&peer_lane.holder.ledger_key, &side_effect_ledger_key());
+        assert_eq!(peer_after_deleted.run_state(&peer_run), RunState::Started);
         assert_eq!(
             store
                 .projection_snapshot(&run)
@@ -2312,6 +2476,188 @@ mod tests {
             rebuilt.resource_lane(&lane_key).is_some(),
             "rebuilt projection must retain non-terminal lane"
         );
+
+        clear_projection_rows(&store, &peer_run).await;
+        store
+            .rebuild_projections_from_events(&peer_run)
+            .await
+            .expect("rebuild peer projections");
+        let peer_after_rebuild = store
+            .projection_snapshot(&peer_run)
+            .await
+            .expect("peer status projection after rebuild");
+        let peer_lane = peer_after_rebuild
+            .resource_lane(&lane_key)
+            .expect("peer rebuilt status projection includes cross-run lane");
+        assert_eq!(&peer_lane.holder.run_id, &run);
+        assert_eq!(&peer_lane.holder.ledger_key, &side_effect_ledger_key());
+
+        drop_schema(&store, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn typed_resource_lane_append_admission_uses_stream_authority_after_projection_damage() {
+        let (store, schema) = test_store().await;
+        let holder_run = run_id(25);
+        let deleted_projection_contender = run_id(26);
+        let poisoned_projection_contender = run_id(27);
+        let lane_value = "wallet-admission";
+        let lane_key = resource_lane_key(lane_value);
+
+        append_run_start(&store, &holder_run, "admission-holder-run-start")
+            .await
+            .expect("holder run start");
+        append_resource_lane_prepare(
+            &store,
+            &holder_run,
+            "admission-holder-prepare",
+            lane_value,
+            28,
+        )
+        .await
+        .expect("holder resource lane prepare");
+        let holder_projection = store
+            .projection_snapshot(&holder_run)
+            .await
+            .expect("holder projection");
+        assert_eq!(
+            holder_projection
+                .resource_lane(&lane_key)
+                .expect("holder resource lane")
+                .holder
+                .run_id,
+            holder_run
+        );
+
+        append_run_start(
+            &store,
+            &deleted_projection_contender,
+            "deleted-contender-run-start",
+        )
+        .await
+        .expect("deleted contender run start");
+        let deleted_stream_before = store
+            .load_run_stream(&deleted_projection_contender)
+            .await
+            .expect("deleted contender stream before conflict");
+        clear_projection_rows(&store, &holder_run).await;
+        let deleted_projection_error = append_resource_lane_prepare(
+            &store,
+            &deleted_projection_contender,
+            "deleted-contender-prepare",
+            lane_value,
+            30,
+        )
+        .await
+        .expect_err("deleted resource lane projection row still blocks from stream authority");
+        assert_resource_lane_blocked(deleted_projection_error, &lane_key, &holder_run);
+        assert_eq!(
+            store
+                .load_run_stream(&deleted_projection_contender)
+                .await
+                .expect("deleted contender stream after conflict"),
+            deleted_stream_before
+        );
+        assert_eq!(
+            store
+                .expected_next_seq(&deleted_projection_contender)
+                .await
+                .expect("deleted contender next seq"),
+            StreamSeq::new(2).expect("deleted contender prepare seq")
+        );
+
+        store
+            .rebuild_projections_from_events(&holder_run)
+            .await
+            .expect("restore holder resource lane projection row");
+        append_run_start(
+            &store,
+            &poisoned_projection_contender,
+            "poisoned-contender-run-start",
+        )
+        .await
+        .expect("poisoned contender run start");
+        let poisoned_stream_before = store
+            .load_run_stream(&poisoned_projection_contender)
+            .await
+            .expect("poisoned contender stream before conflict");
+        poison_resource_lane_projection_row(&store, &lane_key, &poisoned_projection_contender)
+            .await;
+        let poisoned_projection_error = append_resource_lane_prepare(
+            &store,
+            &poisoned_projection_contender,
+            "poisoned-contender-prepare",
+            lane_value,
+            32,
+        )
+        .await
+        .expect_err("poisoned resource lane projection row still blocks from stream authority");
+        assert_resource_lane_blocked(poisoned_projection_error, &lane_key, &holder_run);
+        assert_eq!(
+            store
+                .load_run_stream(&poisoned_projection_contender)
+                .await
+                .expect("poisoned contender stream after conflict"),
+            poisoned_stream_before
+        );
+        assert_eq!(
+            store
+                .expected_next_seq(&poisoned_projection_contender)
+                .await
+                .expect("poisoned contender next seq"),
+            StreamSeq::new(2).expect("poisoned contender prepare seq")
+        );
+
+        drop_schema(&store, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn typed_resource_lane_projection_writer_repairs_stale_free_lane_rows() {
+        let (store, schema) = test_store().await;
+        let stale_projection_run = run_id(33);
+        let contender_run = run_id(34);
+        let lane_value = "wallet-stale-free-lane";
+        let lane_key = resource_lane_key(lane_value);
+
+        append_run_start(&store, &stale_projection_run, "stale-free-row-run-start")
+            .await
+            .expect("stale projection run start");
+        insert_stale_resource_lane_projection_row(&store, &lane_key, &stale_projection_run).await;
+        assert_resource_lane_projection_row_holder(&store, &lane_key, &stale_projection_run).await;
+
+        append_run_start(&store, &contender_run, "stale-free-contender-run-start")
+            .await
+            .expect("contender run start");
+        append_resource_lane_prepare(
+            &store,
+            &contender_run,
+            "stale-free-contender-prepare",
+            lane_value,
+            35,
+        )
+        .await
+        .expect("stale projection row must not veto stream-free lane");
+        let projection = store
+            .projection_snapshot(&contender_run)
+            .await
+            .expect("contender projection");
+        let lane = projection
+            .resource_lane(&lane_key)
+            .expect("contender acquired lane");
+        assert_eq!(&lane.holder.run_id, &contender_run);
+        assert_resource_lane_projection_row_holder(&store, &lane_key, &contender_run).await;
+
+        poison_resource_lane_projection_row(&store, &lane_key, &stale_projection_run).await;
+        assert_resource_lane_projection_row_holder(&store, &lane_key, &stale_projection_run).await;
+        let rebuilt = store
+            .rebuild_projections_from_events(&contender_run)
+            .await
+            .expect("rebuild repairs stale free-lane row");
+        let rebuilt_lane = rebuilt
+            .resource_lane(&lane_key)
+            .expect("rebuilt contender lane");
+        assert_eq!(&rebuilt_lane.holder.run_id, &contender_run);
+        assert_resource_lane_projection_row_holder(&store, &lane_key, &contender_run).await;
 
         drop_schema(&store, &schema).await;
     }

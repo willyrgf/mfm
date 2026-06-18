@@ -365,14 +365,21 @@ authority before any transition is selected.
 
 The deterministic frontier scheduler is pure. Given the static certified transition graph and
 verified run history, it returns one closed transition decision: start a node, continue an open
-attempt, start remediation, wait for manual resolution, resolve saga terminal state, report blocked,
-or report projected public output completion. Open-attempt recovery, including legal interruption,
-is handled by the attempt recovery lifecycle when the continued attempt is dispatched. The frontier
-decision does not write the store, stage artifacts, construct live capabilities, or call runners.
-Open-attempt recovery classifies verified open attempts into continue, retry terminalization,
-interrupt, side-effect recovery, or operational block dispositions. Operational blocks are runtime
-recovery states such as terminal side-effect ledger evidence without matching attempt-terminal
-evidence; they block scheduling without minting semantic terminal events.
+attempt, start remediation, wait for manual resolution, resolve saga terminal state, or report
+blocked. Public-output, retention, and completion work are ordinary certified
+framework node selections; an already projected public output is a scheduler facade status, not a
+frontier transition decision. Open-attempt recovery, including legal interruption, is handled by the
+attempt recovery lifecycle when the continued attempt is dispatched. The frontier decision does not
+write the store, stage artifacts, construct live capabilities, or call runners. Open-attempt recovery
+classifies verified open attempts into continue, retry terminalization, interrupt, side-effect
+recovery, or operational block dispositions. Operational blocks are runtime recovery states such as
+terminal side-effect ledger evidence without matching attempt-terminal evidence; they block
+scheduling without minting semantic terminal events.
+
+Sync and async drive paths may remain separate IO wrappers. Shared lifecycle authority belongs in
+pure helpers for transition/recovery classification, attempt planning, invocation build, output
+validation, and commit planning. Full sync/async driver collapse is deferred to a later async-primary
+cleanup and must not change lifecycle semantics.
 
 For a new ordinary runnable node attempt, runtime first appends `StateAttemptStarted` from
 certified attempt authority. It then materializes state inputs from certified binding trees and
@@ -387,10 +394,10 @@ recovery concerns. Runners receive only scoped typed inputs, allowed capabilitie
 context surfaces. They return typed payload intent, staged artifacts, side-effect evidence, or
 sealed handles but cannot append to the run stream.
 
-The commit planner owns all production execution appends. Bootstrap verifies and stages launch
-material, executes the sealed `BootstrapRun` genesis state, and commits `RunStarted`, bootstrap
-attempt lifecycle, launch artifact references, retention refs, and admitted artifact evidence in one
-purpose-specific prepared store commit. Ordinary states, `PublicOutputRender`,
+The commit planner owns all production execution appends. `RunAdmissionLifecycle` verifies and
+stages launch material, then commits `RunStarted`, legacy bundled bootstrap evidence, launch
+artifact references, retention refs, and admitted artifact evidence in one purpose-specific
+prepared store commit. Ordinary states, `PublicOutputRender`,
 `ProjectRetentionManifest`, `CompleteRun`, and `ResolveSagaTerminal` append
 `StateAttemptStarted` before sealed invocation construction, then use the same guarded terminal
 commit path: staged artifacts are persisted before the prepared commit, output and reference
@@ -403,7 +410,8 @@ representation and rejects purpose mismatches, missing `SagaAdmitToken`, missing
 may leave orphan artifact-store bytes, but orphan run-store evidence is not authority.
 
 Framework lifecycle work is represented by certified graph nodes, not ad hoc runtime side effects.
-`BootstrapRun` remains the genesis run-admission state. `PublicOutputRender`,
+`BootstrapRun` remains certified run-admission authority and is not dispatched as a post-admission
+framework attempt. `PublicOutputRender`,
 `ProjectRetentionManifest`, `CompleteRun`, and `ResolveSagaTerminal` are sealed framework runners
 with the same append-only stream, rebuilt projection, deterministic scheduler, started-before-run
 attempt lifecycle, and guarded commit rules as domain states.
@@ -448,6 +456,11 @@ optional-field projection heuristic. Forward side-effect ambiguity is admissible
 the same commit with the non-retryable attempt failure that engages saga handling.
 The store is the source of truth for forward-fence admission after saga engagement; runtime
 early-rejects are scheduling convenience and cannot substitute for store validation.
+Resource-lane scheduling remains conservative. A lane-blocked attempt may be skipped only with a
+scoped independence witness. If another side-effect node has concrete lane evidence, the witness is
+compared against that concrete key. If the node has not yet reached invocation preparation, the
+runtime knows only the certified resource namespace, so same-namespace work waits until the parked
+lane releases or concrete evidence exists. Different namespaces may still advance.
 Standalone interruption is legal for a side-effect attempt only before
 `SideEffectInvocationPrepared`. No projection, `SideEffectIntentPersisted`, and
 `SideEffectClaimed` are pre-prepare phases and do not by themselves hold a resource lane/open ledger

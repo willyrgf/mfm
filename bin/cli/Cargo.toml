@@ -35,8 +35,12 @@ rpassword = "7.0"
 zeroize = "1.7"
 
 [dev-dependencies]
+mfm-certify = { path = "../../crates/kernel/certify" }
+mfm-events = { path = "../../crates/kernel/events" }
 mfm-op-proof = { path = "../../crates/ops/proof-op" }
+mfm-program = { path = "../../crates/kernel/program" }
 mfm-spec = { path = "../../crates/kernel/spec" }
+mfm-store = { path = "../../crates/kernel/store" }
 tempfile = "3.0"
 assert_cmd = "2.0"
 predicates = "3.0"

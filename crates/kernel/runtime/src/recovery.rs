@@ -7,7 +7,7 @@ use mfm_store::v1 as store;
 
 use crate::attempt::{
     async_error_is_stale_expected_next_seq, store_error_is_stale_expected_next_seq,
-    AttemptRunStatus,
+    AttemptRunStatus, ResourceLaneBlockWitness,
 };
 use crate::commit::{AttemptInterruptionCommitInput, CommitPlanner};
 use crate::error::async_store_error;
@@ -18,6 +18,7 @@ use crate::side_effect_lifecycle::{
     SideEffectLifecycle, SideEffectOpenAttemptDisposition, SideEffectOperationalBlockReason,
 };
 use crate::side_effects::validate_terminal_cell_has_completed_attempt;
+use crate::transition::TransitionAttempt;
 use crate::{CertifiedRuntimeSpec, Result, RuntimeError};
 
 /// Recovery disposition for one projected open attempt.
@@ -88,6 +89,17 @@ impl From<SideEffectOperationalBlockReason> for OperationalBlockReason {
     }
 }
 
+enum OpenAttemptDispatch<'a> {
+    RunLifecycle,
+    Interrupt {
+        node: &'a spec::NodeSpec,
+        attempt_id: AttemptId,
+    },
+    OperationalBlock {
+        node_id: NodeId,
+    },
+}
+
 /// Recovery lifecycle for open-attempt disposition checks.
 pub(crate) struct AttemptRecoveryLifecycle;
 
@@ -96,13 +108,15 @@ impl AttemptRecoveryLifecycle {
     pub(crate) fn next_open_attempt_disposition<'a>(
         runtime_spec: &'a CertifiedRuntimeSpec,
         view: &RuntimeRunView,
-        blocked_nodes: &BTreeSet<NodeId>,
+        blocked_lanes: &BTreeSet<ResourceLaneBlockWitness>,
     ) -> Result<Option<OpenAttemptDisposition<'a>>> {
-        for node_id in runtime_spec.topological_order() {
-            if blocked_nodes.contains(node_id) {
+        for node in recoverable_nodes(runtime_spec) {
+            if blocked_lanes
+                .iter()
+                .any(|witness| witness.blocks_node(&view.projections, node))
+            {
                 continue;
             }
-            let node = runtime_spec.node(node_id).expect("topological node exists");
             let Some((attempt_id, attempt_no)) = open_started_attempt_for_node(node, view)? else {
                 continue;
             };
@@ -134,6 +148,49 @@ impl AttemptRecoveryLifecycle {
             )));
         }
         Self::classify_open_attempt(runtime_spec, view, node, open_attempt_id, open_attempt_no)
+    }
+
+    /// Dispatches recovery-owned sync work for a selected open attempt.
+    pub(crate) fn dispatch_open_attempt_for_attempt<S: store::TypedRunEventStore + ?Sized>(
+        store: &mut S,
+        runtime_spec: &CertifiedRuntimeSpec,
+        run_id: &RunId,
+        view: &RuntimeRunView,
+        attempt: &TransitionAttempt<'_>,
+    ) -> Result<Option<AttemptRunStatus>> {
+        match Self::open_attempt_dispatch_for_attempt(runtime_spec, view, attempt)? {
+            OpenAttemptDispatch::RunLifecycle => Ok(None),
+            OpenAttemptDispatch::Interrupt { node, attempt_id } => {
+                Self::interrupt_attempt(store, runtime_spec, run_id, view, node, &attempt_id)
+                    .map(Some)
+            }
+            OpenAttemptDispatch::OperationalBlock { node_id } => {
+                Ok(Some(AttemptRunStatus::OperationalBlock { node_id }))
+            }
+        }
+    }
+
+    /// Dispatches recovery-owned async work for a selected open attempt.
+    pub(crate) async fn dispatch_open_attempt_for_attempt_async<
+        S: store::AsyncTypedRunEventStore + ?Sized,
+    >(
+        store: &S,
+        runtime_spec: &CertifiedRuntimeSpec,
+        run_id: &RunId,
+        view: &RuntimeRunView,
+        attempt: &TransitionAttempt<'_>,
+    ) -> Result<Option<AttemptRunStatus>> {
+        match Self::open_attempt_dispatch_for_attempt(runtime_spec, view, attempt)? {
+            OpenAttemptDispatch::RunLifecycle => Ok(None),
+            OpenAttemptDispatch::Interrupt { node, attempt_id } => {
+                Self::interrupt_attempt_async(store, runtime_spec, run_id, view, node, &attempt_id)
+                    .await
+                    .map(Some)
+            }
+            OpenAttemptDispatch::OperationalBlock { node_id } => {
+                Ok(Some(AttemptRunStatus::OperationalBlock { node_id }))
+            }
+        }
     }
 
     /// Appends the recovery-owned interruption evidence for a resumable sync store.
@@ -191,8 +248,7 @@ impl AttemptRecoveryLifecycle {
         runtime_spec: &CertifiedRuntimeSpec,
         projections: &store::ProjectionSnapshot,
     ) -> Result<()> {
-        for node_id in runtime_spec.topological_order() {
-            let node = runtime_spec.node(node_id).expect("topological node exists");
+        for node in recoverable_nodes(runtime_spec) {
             if let Some(terminal) = projections.cell_terminal(&node.output_cell) {
                 let attempt_id = validate_terminal_cell_has_completed_attempt(
                     runtime_spec,
@@ -318,6 +374,38 @@ impl AttemptRecoveryLifecycle {
             attempt_no,
         })
     }
+
+    fn open_attempt_dispatch_for_attempt<'a>(
+        runtime_spec: &'a CertifiedRuntimeSpec,
+        view: &RuntimeRunView,
+        attempt: &TransitionAttempt<'a>,
+    ) -> Result<OpenAttemptDispatch<'a>> {
+        let Some(attempt_id) = attempt.attempt_id.as_ref() else {
+            return Ok(OpenAttemptDispatch::RunLifecycle);
+        };
+        match Self::open_attempt_disposition_for_attempt(
+            runtime_spec,
+            view,
+            attempt.node,
+            attempt_id,
+            attempt.attempt_no,
+        )? {
+            OpenAttemptDisposition::Interrupt {
+                node, attempt_id, ..
+            } => Ok(OpenAttemptDispatch::Interrupt { node, attempt_id }),
+            OpenAttemptDisposition::OperationalBlock { node, reason, .. } => {
+                let _ = reason;
+                Ok(OpenAttemptDispatch::OperationalBlock {
+                    node_id: node.node_id.clone(),
+                })
+            }
+            OpenAttemptDisposition::Continue { .. }
+            | OpenAttemptDisposition::RetryTerminalization { .. }
+            | OpenAttemptDisposition::DelegateSideEffect { .. } => {
+                Ok(OpenAttemptDispatch::RunLifecycle)
+            }
+        }
+    }
 }
 
 fn open_started_attempt_for_node(
@@ -376,4 +464,14 @@ fn node_requires_same_attempt_recovery(node: &spec::NodeSpec) -> bool {
                 CapabilityRole::ManagedPlatformWrite | CapabilityRole::ExternalMutationAuthority
             )
         })
+}
+
+fn recoverable_nodes<'a>(
+    runtime_spec: &'a CertifiedRuntimeSpec,
+) -> impl Iterator<Item = &'a spec::NodeSpec> + 'a {
+    runtime_spec
+        .topological_order()
+        .iter()
+        .map(|node_id| runtime_spec.node(node_id).expect("topological node exists"))
+        .chain(runtime_spec.remediations().map(|(_, node)| node))
 }

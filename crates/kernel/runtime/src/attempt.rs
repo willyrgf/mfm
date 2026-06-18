@@ -28,8 +28,8 @@ pub(crate) enum AttemptRunStatus {
     StaleView,
     /// Attempt was blocked by an exclusive resource lane.
     BlockedOnResourceLane {
-        /// Node that was blocked.
-        node_id: NodeId,
+        /// Scoped witness proving which resource lane blocked the node.
+        witness: ResourceLaneBlockWitness,
         /// Whether the attempt-start commit advanced before the lane block.
         advanced: bool,
     },
@@ -38,6 +38,34 @@ pub(crate) enum AttemptRunStatus {
         /// Node whose open attempt is operationally blocked.
         node_id: NodeId,
     },
+}
+
+/// Scoped resource-lane block carried between scheduler decisions.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct ResourceLaneBlockWitness {
+    /// Node whose attempt observed the lane block.
+    pub(crate) node_id: NodeId,
+    /// Resource lane that blocked the attempt.
+    pub(crate) lane_key: store::ResourceLaneKey,
+}
+
+impl ResourceLaneBlockWitness {
+    /// Returns true when this witness prevents starting or recovering the node.
+    pub(crate) fn blocks_node(
+        &self,
+        projections: &store::ProjectionSnapshot,
+        node: &spec::NodeSpec,
+    ) -> bool {
+        if node.node_id.as_str() == self.node_id.as_str() {
+            return true;
+        }
+        if !node_resource_claims_lane_namespace(node, &self.lane_key) {
+            return false;
+        }
+        projected_started_attempt_lane_key(projections, node)
+            .map(|lane_key| lane_key == self.lane_key)
+            .unwrap_or(true)
+    }
 }
 
 /// Ordinary node-attempt lifecycle.
@@ -94,6 +122,42 @@ pub(crate) struct ObservedFailureContext<'a> {
     pub(crate) attempt_id: &'a AttemptId,
     /// Verified view after the attempt start commit.
     pub(crate) view: &'a RuntimeRunView,
+    /// Trusted retryability policy derived from certified runtime authority.
+    pub(crate) retryability: ObservedFailureRetryabilityPolicy,
+}
+
+/// Trusted retryability policy for runtime-owned failure-safe terminalization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ObservedFailureRetryabilityPolicy {
+    input_materialization_retryable: bool,
+}
+
+impl ObservedFailureRetryabilityPolicy {
+    /// Derives retryability policy from certified saga and node authority.
+    pub(crate) fn for_attempt(runtime_spec: &CertifiedRuntimeSpec, node: &spec::NodeSpec) -> Self {
+        Self {
+            input_materialization_retryable: matches!(
+                &runtime_spec.spec().saga,
+                spec::SagaPolicySpec::NoSideEffects
+            ) && node.side_effect.is_none(),
+        }
+    }
+
+    fn retryable_for(self, failure_class: ObservedFailureClass) -> bool {
+        match failure_class {
+            ObservedFailureClass::InputMaterialization => self.input_materialization_retryable,
+            ObservedFailureClass::InvalidRunnerOutput | ObservedFailureClass::RuntimeValidation => {
+                false
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ObservedFailureClass {
+    InputMaterialization,
+    InvalidRunnerOutput,
+    RuntimeValidation,
 }
 
 impl<'a> AttemptLifecycle<'a> {
@@ -180,6 +244,10 @@ impl<'a> AttemptLifecycle<'a> {
             node: started_attempt.phase.node,
             attempt_id: started_attempt.phase.attempt_id,
             view: started_attempt.phase.view,
+            retryability: ObservedFailureRetryabilityPolicy::for_attempt(
+                runtime_spec,
+                started_attempt.phase.node,
+            ),
         };
         let invocation = match InvocationBuilder::new(InvocationBuilderInput {
             runtime_spec,
@@ -261,20 +329,15 @@ impl<'a> AttemptLifecycle<'a> {
         let terminal_planned_attempt = Attempt {
             phase: TerminalPlanned { terminal_output },
         };
-        if resource_lane_block_for_request(
+        if let Some(witness) = resource_lane_block_for_request(
             store.projection_snapshot(),
             terminal_planned_attempt
                 .phase
                 .terminal_output
                 .commit
                 .request(),
-        )
-        .is_some()
-        {
-            return Ok(AttemptRunStatus::BlockedOnResourceLane {
-                node_id: node.node_id.clone(),
-                advanced,
-            });
+        ) {
+            return Ok(AttemptRunStatus::BlockedOnResourceLane { witness, advanced });
         }
         let has_resource_lane_prepare = request_has_resource_lane_prepare(
             terminal_planned_attempt
@@ -296,12 +359,13 @@ impl<'a> AttemptLifecycle<'a> {
                 Ok(AttemptRunStatus::StaleView)
             }
             Err(error)
-                if has_resource_lane_prepare && store_error_is_resource_lane_block(&error) =>
+                if has_resource_lane_prepare
+                    && resource_lane_block_witness_from_store_error(&node.node_id, &error)
+                        .is_some() =>
             {
-                Ok(AttemptRunStatus::BlockedOnResourceLane {
-                    node_id: node.node_id.clone(),
-                    advanced,
-                })
+                let witness = resource_lane_block_witness_from_store_error(&node.node_id, &error)
+                    .expect("resource lane block witness");
+                Ok(AttemptRunStatus::BlockedOnResourceLane { witness, advanced })
             }
             Err(error) => Err(error.into()),
         }
@@ -388,6 +452,10 @@ impl<'a> AttemptLifecycle<'a> {
             node: started_attempt.phase.node,
             attempt_id: started_attempt.phase.attempt_id,
             view: started_attempt.phase.view,
+            retryability: ObservedFailureRetryabilityPolicy::for_attempt(
+                runtime_spec,
+                started_attempt.phase.node,
+            ),
         };
         let invocation = match InvocationBuilder::new(InvocationBuilderInput {
             runtime_spec,
@@ -469,20 +537,15 @@ impl<'a> AttemptLifecycle<'a> {
         let terminal_planned_attempt = Attempt {
             phase: TerminalPlanned { terminal_output },
         };
-        if resource_lane_block_for_request(
+        if let Some(witness) = resource_lane_block_for_request(
             &latest_view.projections,
             terminal_planned_attempt
                 .phase
                 .terminal_output
                 .commit
                 .request(),
-        )
-        .is_some()
-        {
-            return Ok(AttemptRunStatus::BlockedOnResourceLane {
-                node_id: node.node_id.clone(),
-                advanced,
-            });
+        ) {
+            return Ok(AttemptRunStatus::BlockedOnResourceLane { witness, advanced });
         }
         let has_resource_lane_prepare = request_has_resource_lane_prepare(
             terminal_planned_attempt
@@ -507,12 +570,12 @@ impl<'a> AttemptLifecycle<'a> {
                 Ok(AttemptRunStatus::StaleView)
             }
             Err(error)
-                if has_resource_lane_prepare && async_error_is_resource_lane_block(&error) =>
+                if has_resource_lane_prepare
+                    && async_resource_lane_block_witness(&node.node_id, &error).is_some() =>
             {
-                Ok(AttemptRunStatus::BlockedOnResourceLane {
-                    node_id: node.node_id.clone(),
-                    advanced,
-                })
+                let witness = async_resource_lane_block_witness(&node.node_id, &error)
+                    .expect("resource lane block witness");
+                Ok(AttemptRunStatus::BlockedOnResourceLane { witness, advanced })
             }
             Err(error) => Err(async_store_error(error)),
         }
@@ -531,8 +594,9 @@ pub(crate) async fn terminalize_observed_failure<S: store::TypedRunEventStore + 
         node,
         attempt_id,
         view,
+        retryability,
     } = context;
-    let Some(error_info) = observed_attempt_failure_info(&error)? else {
+    let Some(error_info) = observed_attempt_failure_info(&error, retryability)? else {
         return Err(error);
     };
     if !can_terminalize_observed_failure(node, attempt_id, view)? {
@@ -578,8 +642,9 @@ pub(crate) async fn terminalize_observed_failure_async<
         node,
         attempt_id,
         view,
+        retryability,
     } = context;
-    let Some(error_info) = observed_attempt_failure_info(&error)? else {
+    let Some(error_info) = observed_attempt_failure_info(&error, retryability)? else {
         return Err(error);
     };
     if !can_terminalize_observed_failure(node, attempt_id, view)? {
@@ -631,35 +696,50 @@ fn can_terminalize_observed_failure(
     Ok(true)
 }
 
-fn observed_attempt_failure_info(error: &RuntimeError) -> Result<Option<events::MfmErrorInfo>> {
-    let failure = match error {
-        RuntimeError::InputMaterialization(_) => events::MfmErrorInfo {
+fn observed_attempt_failure_info(
+    error: &RuntimeError,
+    retryability: ObservedFailureRetryabilityPolicy,
+) -> Result<Option<events::MfmErrorInfo>> {
+    let Some(failure_class) = observed_failure_class(error) else {
+        return Ok(None);
+    };
+    let retryable = retryability.retryable_for(failure_class);
+    let failure = match failure_class {
+        ObservedFailureClass::InputMaterialization => events::MfmErrorInfo {
             code: events::ErrorCode::new("input_materialization_failed")?,
             category: events::ErrorCategory::Validation,
-            retryable: false,
+            retryable,
             safe_message: "attempt input materialization failed".to_owned(),
             public_details: None,
             diagnostic_ref: None,
         },
-        RuntimeError::InvalidRunnerOutput(_) => events::MfmErrorInfo {
+        ObservedFailureClass::InvalidRunnerOutput => events::MfmErrorInfo {
             code: events::ErrorCode::new("runner_output_invalid")?,
             category: events::ErrorCategory::Validation,
-            retryable: false,
+            retryable,
             safe_message: "runner output failed validation".to_owned(),
             public_details: None,
             diagnostic_ref: None,
         },
-        RuntimeError::InvalidRunStream(_) => events::MfmErrorInfo {
+        ObservedFailureClass::RuntimeValidation => events::MfmErrorInfo {
             code: events::ErrorCode::new("runtime_validation_failed")?,
             category: events::ErrorCategory::Validation,
-            retryable: false,
+            retryable,
             safe_message: "runtime validation failed while handling attempt".to_owned(),
             public_details: None,
             diagnostic_ref: None,
         },
-        _ => return Ok(None),
     };
     Ok(Some(failure))
+}
+
+fn observed_failure_class(error: &RuntimeError) -> Option<ObservedFailureClass> {
+    match error {
+        RuntimeError::InputMaterialization(_) => Some(ObservedFailureClass::InputMaterialization),
+        RuntimeError::InvalidRunnerOutput(_) => Some(ObservedFailureClass::InvalidRunnerOutput),
+        RuntimeError::RuntimeValidation(_) => Some(ObservedFailureClass::RuntimeValidation),
+        _ => None,
+    }
 }
 
 fn redacted_attempt_failure_diagnostic_artifact(
@@ -728,7 +808,7 @@ fn redacted_attempt_failure_diagnostic_schema_id() -> Result<SchemaId> {
 fn resource_lane_block_for_request(
     projections: &store::ProjectionSnapshot,
     request: &store::TypedCommitRequest,
-) -> Option<store::ResourceLaneKey> {
+) -> Option<ResourceLaneBlockWitness> {
     request.payloads().iter().find_map(|payload| {
         let events::KernelEventPayload::SideEffectInvocationPrepared(payload) = payload else {
             return None;
@@ -740,7 +820,10 @@ fn resource_lane_block_for_request(
         projections
             .resource_lane(&lane_key)
             .filter(|projection| projection.holder != holder)
-            .map(|_| lane_key)
+            .map(|_| ResourceLaneBlockWitness {
+                node_id: payload.node_id.clone(),
+                lane_key,
+            })
     })
 }
 
@@ -754,14 +837,77 @@ fn request_has_resource_lane_prepare(request: &store::TypedCommitRequest) -> boo
     })
 }
 
+#[cfg(test)]
 fn store_error_is_resource_lane_block(error: &store::StoreError) -> bool {
     matches!(error, store::StoreError::ResourceLaneBlocked { .. })
 }
 
+fn resource_lane_block_witness_from_store_error(
+    node_id: &NodeId,
+    error: &store::StoreError,
+) -> Option<ResourceLaneBlockWitness> {
+    match error {
+        store::StoreError::ResourceLaneBlocked { lane_key, .. } => Some(ResourceLaneBlockWitness {
+            node_id: node_id.clone(),
+            lane_key: (**lane_key).clone(),
+        }),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
 fn async_error_is_resource_lane_block(error: &impl store::StoreErrorInspection) -> bool {
     error
         .as_store_error()
         .is_some_and(store_error_is_resource_lane_block)
+}
+
+fn async_resource_lane_block_witness(
+    node_id: &NodeId,
+    error: &impl store::StoreErrorInspection,
+) -> Option<ResourceLaneBlockWitness> {
+    error
+        .as_store_error()
+        .and_then(|error| resource_lane_block_witness_from_store_error(node_id, error))
+}
+
+fn node_resource_claims_lane_namespace(
+    node: &spec::NodeSpec,
+    lane_key: &store::ResourceLaneKey,
+) -> bool {
+    let Some(side_effect) = &node.side_effect else {
+        return false;
+    };
+    match &side_effect.resource_claim {
+        spec::ResourceClaimSpec::Exclusive { namespace, .. }
+        | spec::ResourceClaimSpec::ExactTouchedSet { namespace, .. } => {
+            namespace == &lane_key.namespace
+        }
+        spec::ResourceClaimSpec::ManualOnly => false,
+    }
+}
+
+fn projected_started_attempt_lane_key(
+    projections: &store::ProjectionSnapshot,
+    node: &spec::NodeSpec,
+) -> Option<store::ResourceLaneKey> {
+    for ((attempt_node_id, attempt_id), attempt) in projections.attempts() {
+        if attempt_node_id != &node.node_id
+            || !matches!(attempt.status, store::AttemptStatus::Started { .. })
+        {
+            continue;
+        }
+        let Some(resource_key) = projections.side_effects().find_map(|(_, projection)| {
+            (projection.intent.node_id == node.node_id
+                && projection.intent.attempt_id == *attempt_id)
+                .then_some(projection.resource_key.as_ref())
+                .flatten()
+        }) else {
+            continue;
+        };
+        return Some(store::ResourceLaneKey::from_evidence(resource_key));
+    }
+    None
 }
 
 pub(crate) fn store_error_is_stale_expected_next_seq(error: &store::StoreError) -> bool {
@@ -821,5 +967,20 @@ mod tests {
         };
         assert!(!store_error_is_resource_lane_block(&prose));
         assert!(!async_error_is_resource_lane_block(&prose));
+    }
+
+    #[test]
+    fn observed_failure_retryability_follows_policy_and_failure_class() {
+        let retry_materialization = ObservedFailureRetryabilityPolicy {
+            input_materialization_retryable: true,
+        };
+        let terminal_materialization = ObservedFailureRetryabilityPolicy {
+            input_materialization_retryable: false,
+        };
+
+        assert!(retry_materialization.retryable_for(ObservedFailureClass::InputMaterialization));
+        assert!(!terminal_materialization.retryable_for(ObservedFailureClass::InputMaterialization));
+        assert!(!retry_materialization.retryable_for(ObservedFailureClass::InvalidRunnerOutput));
+        assert!(!retry_materialization.retryable_for(ObservedFailureClass::RuntimeValidation));
     }
 }

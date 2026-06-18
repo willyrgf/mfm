@@ -8,7 +8,7 @@ use crate::artifacts::RuntimeArtifactStore;
 use crate::attempt::{
     async_error_is_stale_expected_next_seq, store_error_is_stale_expected_next_seq,
     terminalize_observed_failure, terminalize_observed_failure_async, AttemptRunStatus,
-    ObservedFailureContext,
+    ObservedFailureContext, ObservedFailureRetryabilityPolicy,
 };
 use crate::binding::BoundRuntimeContext;
 use crate::commit::{CommitPlanner, PreparedStagedArtifact, RunnerOutputCommitInput};
@@ -95,6 +95,7 @@ impl<'a> FrameworkAttemptLifecycle<'a> {
             node,
             attempt_id: &attempt_id,
             view: &latest_view,
+            retryability: ObservedFailureRetryabilityPolicy::for_attempt(runtime_spec, node),
         };
         let terminal_output = match self
             .prepare_terminal_output(FrameworkTerminalOutputInput {
@@ -183,6 +184,7 @@ impl<'a> FrameworkAttemptLifecycle<'a> {
             node,
             attempt_id: &attempt_id,
             view: &latest_view,
+            retryability: ObservedFailureRetryabilityPolicy::for_attempt(runtime_spec, node),
         };
         let terminal_output = match self
             .prepare_terminal_output(FrameworkTerminalOutputInput {

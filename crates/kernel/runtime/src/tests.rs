@@ -173,6 +173,20 @@ impl store::AsyncTypedRunEventStore for AsyncInMemoryTypedRunStore {
                 .expected_next_seq(run_id))
         })
     }
+
+    fn status_projection_snapshot<'a>(
+        &'a self,
+        _run_id: &'a RunId,
+    ) -> store::AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
+        Box::pin(async move {
+            Ok(self
+                .inner
+                .lock()
+                .expect("async in-memory store lock")
+                .projection_snapshot()
+                .clone())
+        })
+    }
 }
 
 impl store::TypedProjectionRead for StaleOnceTypedRunStore {
@@ -721,6 +735,16 @@ impl ErasedNodeRunner for BlockingRunner {
                 ctx.node().node_id
             )))
         })
+    }
+}
+
+struct ErrorRunner {
+    error: RuntimeError,
+}
+
+impl ErasedNodeRunner for ErrorRunner {
+    fn run_erased<'a>(&'a self, _ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+        Box::pin(async move { Err(self.error.clone()) })
     }
 }
 
@@ -3754,15 +3778,126 @@ async fn post_start_materialization_failure_terminalizes_attempt() {
         );
     }
 
-    assert_node_failed_with_code(
+    assert_node_failed_with_code_and_retryable(
         &store,
         &consumer_node.node_id,
         "input_materialization_failed",
+        true,
     );
     assert!(store
         .projection_snapshot()
         .cell_terminal(&consumer_node.output_cell)
         .is_none());
+}
+
+#[tokio::test]
+async fn post_start_runtime_validation_failure_terminalizes_attempt() {
+    let fixture = fixture();
+    let mut registry = ErasedRunnerRegistry::new();
+    registry
+        .register(binding(
+            fixture.descriptor_a.clone(),
+            "pure",
+            ErrorRunner {
+                error: RuntimeError::RuntimeValidation(
+                    "synthetic post-start validation failure".to_owned(),
+                ),
+            },
+        ))
+        .expect("binding a");
+    registry
+        .register(binding(
+            fixture.descriptor_b.clone(),
+            "read",
+            RecordingRunner {
+                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                output_artifact: artifact(0xb1),
+                output_digest: content(0xb2),
+            },
+        ))
+        .expect("binding b");
+    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+
+    assert_eq!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("terminalize runtime validation failure"),
+        SchedulerStatus::Advanced
+    );
+
+    let node = node_by_output(&fixture, &fixture.cell_a);
+    assert_node_failed_with_code(&store, &node.node_id, "runtime_validation_failed");
+}
+
+#[tokio::test]
+async fn post_start_invalid_run_stream_failure_does_not_terminalize_attempt() {
+    let fixture = fixture();
+    let mut registry = ErasedRunnerRegistry::new();
+    registry
+        .register(binding(
+            fixture.descriptor_a.clone(),
+            "pure",
+            ErrorRunner {
+                error: RuntimeError::InvalidRunStream(
+                    "synthetic corrupt stream authority".to_owned(),
+                ),
+            },
+        ))
+        .expect("binding a");
+    registry
+        .register(binding(
+            fixture.descriptor_b.clone(),
+            "read",
+            RecordingRunner {
+                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                output_artifact: artifact(0xb1),
+                output_digest: content(0xb2),
+            },
+        ))
+        .expect("binding b");
+    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+
+    assert!(matches!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await,
+        Err(RuntimeError::InvalidRunStream(message))
+            if message.contains("synthetic corrupt stream authority")
+    ));
+
+    let node = node_by_output(&fixture, &fixture.cell_a);
+    let attempts = store
+        .projection_snapshot()
+        .attempts()
+        .filter(|((node_id, _), _)| node_id == &node.node_id)
+        .map(|(_, attempt)| attempt)
+        .collect::<Vec<_>>();
+    assert_eq!(attempts.len(), 1);
+    assert!(matches!(
+        attempts[0].status,
+        store::AttemptStatus::Started { .. }
+    ));
+    assert_failure_code_count(&store, "runtime_validation_failed", 0);
+    assert_failure_code_count(&store, "runner_output_invalid", 0);
 }
 
 #[tokio::test]
@@ -4577,6 +4712,81 @@ async fn recovery_delegates_started_side_effect_attempt_to_side_effect_lifecycle
         | crate::recovery::OpenAttemptDisposition::RetryTerminalization { .. }
         | crate::recovery::OpenAttemptDisposition::OperationalBlock { .. } => {
             panic!("side-effect attempt must delegate to side-effect lifecycle")
+        }
+    }
+}
+
+#[tokio::test]
+async fn recovery_sweep_includes_open_remediation_attempts() {
+    let fixture = fixture_with_two_side_effects_and_failing_tail();
+    let scheduler = compensated_saga_scheduler(&fixture);
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+
+    for _ in 0..12 {
+        assert_eq!(
+            scheduler
+                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+                .await
+                .expect("drive forward side-effect phase"),
+            SchedulerStatus::Advanced
+        );
+    }
+    assert!(store
+        .projection_snapshot()
+        .cell_terminal(&fixture.cell_a)
+        .is_some());
+    assert!(store
+        .projection_snapshot()
+        .cell_terminal(&fixture.cell_b)
+        .is_some());
+
+    let failure_node = node_by_output(
+        &fixture,
+        fixture.cell_c.as_ref().expect("failing output cell"),
+    )
+    .clone();
+    let failure_attempt = append_attempt_start(&mut store, &fixture, &failure_node, 1);
+    append_attempt_failure(&mut store, &fixture, &failure_node, &failure_attempt, false);
+    let forward_b = node_by_output(&fixture, &fixture.cell_b).clone();
+    let remediation = fixture
+        .runtime_spec
+        .remediation_for_forward_node(&forward_b.node_id)
+        .expect("remediation for forward b");
+    let remediation_attempt = append_attempt_start(&mut store, &fixture, remediation, 1);
+
+    let stream = store.load_run_stream(&fixture.run_id);
+    let view = RuntimeRunView::from_stream(&fixture.runtime_spec, &fixture.run_id, &stream)
+        .expect("runtime view");
+    match crate::recovery::AttemptRecoveryLifecycle::next_open_attempt_disposition(
+        &fixture.runtime_spec,
+        &view,
+        &BTreeSet::new(),
+    )
+    .expect("recovery disposition")
+    .expect("open remediation attempt")
+    {
+        crate::recovery::OpenAttemptDisposition::Continue {
+            node,
+            attempt_id,
+            attempt_no,
+        } => {
+            assert_eq!(node.node_id, remediation.node_id);
+            assert_eq!(attempt_id, remediation_attempt);
+            assert_eq!(attempt_no, 1);
+        }
+        crate::recovery::OpenAttemptDisposition::DelegateSideEffect { .. }
+        | crate::recovery::OpenAttemptDisposition::Interrupt { .. }
+        | crate::recovery::OpenAttemptDisposition::RetryTerminalization { .. }
+        | crate::recovery::OpenAttemptDisposition::OperationalBlock { .. } => {
+            panic!("remediation attempt before ledger should continue through attempt lifecycle")
         }
     }
 }
@@ -6010,6 +6220,174 @@ async fn runtime_resolves_manual_resolution_terminal() {
 }
 
 #[tokio::test]
+async fn runtime_rejects_manual_resolution_prefix_with_open_attempt() {
+    let fixture = fixture_with_manual_resolution_side_effect_state();
+    let mut registry = ErasedRunnerRegistry::new();
+    registry
+        .register(binding(
+            fixture.descriptor_a.clone(),
+            "sidefx",
+            AmbiguousSideEffectRunner::new(&fixture),
+        ))
+        .expect("binding side effect");
+    registry
+        .register(binding(
+            fixture.descriptor_b.clone(),
+            "read",
+            RecordingRunner {
+                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                output_artifact: artifact(0xb1),
+                output_digest: content(0xb2),
+            },
+        ))
+        .expect("binding read");
+    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+
+    for _ in 0..3 {
+        assert_eq!(
+            scheduler
+                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+                .await
+                .expect("advance to manual block"),
+            SchedulerStatus::Advanced
+        );
+    }
+    let saga = store
+        .projection_snapshot()
+        .derive_saga_projection(&fixture.run_id, &fixture.runtime_spec.spec().saga);
+    assert_eq!(saga.run_mode, store::RunMode::ManualBlocked);
+
+    let node_b = fixture
+        .runtime_spec
+        .spec()
+        .nodes
+        .iter()
+        .find(|node| node.descriptor_id == fixture.descriptor_b)
+        .expect("node b")
+        .clone();
+    append_attempt_start(&mut store, &fixture, &node_b, 2);
+
+    let spec::SagaPolicySpec::ManualResolution { manual } = &fixture.runtime_spec.spec().saga
+    else {
+        panic!("manual resolution fixture policy");
+    };
+    let error = build_manual_resolution_prefix_authority(
+        &store,
+        &fixture.runtime_spec,
+        &fixture.run_id,
+        manual.clone(),
+    )
+    .expect_err("manual prefix rejects open attempt");
+    assert!(
+        matches!(&error, RuntimeError::InvalidRunStream(message) if message.contains("requires no open semantic attempts")),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn runtime_rejects_historical_manual_resolution_with_open_attempt_prefix() {
+    let fixture = fixture_with_manual_resolution_side_effect_state();
+    let mut registry = ErasedRunnerRegistry::new();
+    registry
+        .register(binding(
+            fixture.descriptor_a.clone(),
+            "sidefx",
+            AmbiguousSideEffectRunner::new(&fixture),
+        ))
+        .expect("binding side effect");
+    registry
+        .register(binding(
+            fixture.descriptor_b.clone(),
+            "read",
+            RecordingRunner {
+                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                output_artifact: artifact(0xb1),
+                output_digest: content(0xb2),
+            },
+        ))
+        .expect("binding read");
+    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+
+    for _ in 0..3 {
+        assert_eq!(
+            scheduler
+                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+                .await
+                .expect("advance to manual block"),
+            SchedulerStatus::Advanced
+        );
+    }
+
+    let mut manual_payload_store = store.clone();
+    append_manual_resolution(
+        &scheduler,
+        &mut manual_payload_store,
+        &fixture,
+        events::ManualResolutionOutcome::ConfirmRemediated,
+    )
+    .await;
+    let manual_payload = manual_payload_store
+        .load_run_stream(&fixture.run_id)
+        .into_iter()
+        .find_map(|event| match event.payload().clone() {
+            events::KernelEventPayload::ManualResolutionRecorded(payload) => Some(payload),
+            _ => None,
+        })
+        .expect("manual resolution payload");
+
+    let node_b = fixture
+        .runtime_spec
+        .spec()
+        .nodes
+        .iter()
+        .find(|node| node.descriptor_id == fixture.descriptor_b)
+        .expect("node b")
+        .clone();
+    let open_attempt = append_attempt_start(&mut store, &fixture, &node_b, 2);
+    let mut stream = store.load_run_stream(&fixture.run_id);
+    append_payload_commit_for_tests(
+        &mut stream,
+        &fixture.run_id,
+        "forged-manual-resolution-open-prefix",
+        events::KernelEventPayload::ManualResolutionRecorded(manual_payload),
+    );
+    append_payload_commit_without_prefix_validation_for_tests(
+        &mut stream,
+        &fixture.run_id,
+        "close-open-attempt-after-forged-manual",
+        events::KernelEventPayload::StateAttemptInterrupted(events::StateAttemptInterrupted {
+            spec_hash: fixture.runtime_spec.spec_hash().clone(),
+            node_id: node_b.node_id.clone(),
+            attempt_id: open_attempt,
+        }),
+    );
+
+    assert!(matches!(
+        validate_runtime_stream_for_tests(&fixture.runtime_spec, &fixture.run_id, &stream),
+        Err(RuntimeError::Store(message) | RuntimeError::InvalidRunStream(message))
+            if message.contains("requires no open semantic attempts")
+    ));
+}
+
+#[tokio::test]
 async fn runtime_missing_manual_terminal_authorization_artifact_leaves_open_attempt() {
     let fixture = fixture_with_manual_resolution_side_effect_state();
     let mut registry = ErasedRunnerRegistry::new();
@@ -6575,7 +6953,7 @@ async fn runtime_blocks_parallel_branches_of_one_run_on_held_exclusive_lane() {
     );
     assert_eq!(
         attempt_started_count(&store, &fixture.run_id, &node_b.node_id),
-        1
+        0
     );
     assert!(side_effect_projection_for_run_node(
         store.projection_snapshot(),
@@ -6589,6 +6967,311 @@ async fn runtime_blocks_parallel_branches_of_one_run_on_held_exclusive_lane() {
         &node_b.node_id
     )
     .is_none());
+}
+
+#[tokio::test]
+async fn runtime_advances_independent_node_while_resource_lane_is_parked() {
+    let base = fixture_with_independent_second_node_and_first_side_effect_state();
+    let descriptors = vec![base.descriptor_a.clone()];
+    let fixture = with_exclusive_resource_claims(base, &descriptors);
+    let holder_run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, DA);
+    let runner = side_effect_runner_with_resource_keys(
+        &fixture,
+        resource_keys_for_all_side_effects(&fixture, "wallet-parked"),
+    );
+    let scheduler = test_scheduler(registered_first_side_effect_runners_with(&fixture, runner));
+    let mut store = store::InMemoryTypedRunStore::new();
+    let blocked_node = node_by_output(&fixture, &fixture.cell_a).clone();
+    let independent_node = node_by_output(&fixture, &fixture.cell_b).clone();
+    append_synthetic_run_started(
+        &mut store,
+        &fixture,
+        &holder_run_id,
+        "independent-holder-start",
+    );
+    append_synthetic_exclusive_prepare(
+        &mut store,
+        &fixture,
+        &holder_run_id,
+        &blocked_node,
+        "wallet-parked",
+        "independent-holder-prepare",
+    );
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start independent run");
+
+    assert_eq!(
+        scheduler
+            .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("independent node advances while lane is parked"),
+        SchedulerStatus::Advanced
+    );
+    assert_eq!(
+        attempt_started_count(&store, &fixture.run_id, &blocked_node.node_id),
+        1
+    );
+    assert!(side_effect_projection_for_run_node(
+        store.projection_snapshot(),
+        &fixture.run_id,
+        &blocked_node.node_id
+    )
+    .is_none());
+    assert_eq!(
+        attempt_started_count(&store, &fixture.run_id, &independent_node.node_id),
+        1
+    );
+    assert!(store
+        .projection_snapshot()
+        .cell_terminal(&independent_node.output_cell)
+        .is_some());
+}
+
+#[tokio::test]
+async fn runtime_advances_independent_side_effect_lane_while_resource_lane_is_parked() {
+    let fixture = fixture_with_independent_exclusive_side_effect_lanes();
+    let holder_run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, DB);
+    let blocked_node = node_by_output(&fixture, &fixture.cell_a).clone();
+    let independent_node = node_by_output(&fixture, &fixture.cell_b).clone();
+    let mut resource_keys = BTreeMap::new();
+    resource_keys.insert(
+        blocked_node.node_id.clone(),
+        exclusive_resource_key(&fixture, "wallet-parked"),
+    );
+    resource_keys.insert(
+        independent_node.node_id.clone(),
+        resource_key_in_namespace(
+            &fixture,
+            independent_resource_namespace(),
+            "wallet-independent",
+        ),
+    );
+    let scheduler = test_scheduler(registered_two_side_effect_runners_with(
+        &fixture,
+        side_effect_runner_with_resource_keys(&fixture, resource_keys),
+    ));
+    let mut store = store::InMemoryTypedRunStore::new();
+    append_synthetic_run_started(
+        &mut store,
+        &fixture,
+        &holder_run_id,
+        "independent-lane-holder-start",
+    );
+    append_synthetic_exclusive_prepare(
+        &mut store,
+        &fixture,
+        &holder_run_id,
+        &blocked_node,
+        "wallet-parked",
+        "independent-lane-holder-prepare",
+    );
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start independent lane run");
+
+    assert_eq!(
+        scheduler
+            .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("independent side-effect lane advances while another lane is parked"),
+        SchedulerStatus::Advanced
+    );
+    assert_eq!(
+        attempt_started_count(&store, &fixture.run_id, &blocked_node.node_id),
+        1
+    );
+    assert!(side_effect_projection_for_run_node(
+        store.projection_snapshot(),
+        &fixture.run_id,
+        &blocked_node.node_id
+    )
+    .is_none());
+    assert!(side_effect_projection_for_run_node(
+        store.projection_snapshot(),
+        &fixture.run_id,
+        &independent_node.node_id
+    )
+    .is_some());
+    assert!(store
+        .projection_snapshot()
+        .cell_terminal(&independent_node.output_cell)
+        .is_some());
+}
+
+#[tokio::test]
+async fn runtime_parks_same_namespace_side_effect_until_blocked_lane_releases() {
+    let fixture = fixture_with_independent_exclusive_side_effects();
+    let holder_run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, DD);
+    let blocked_node = node_by_output(&fixture, &fixture.cell_a).clone();
+    let same_namespace_node = node_by_output(&fixture, &fixture.cell_b).clone();
+    let mut resource_keys = BTreeMap::new();
+    resource_keys.insert(
+        blocked_node.node_id.clone(),
+        exclusive_resource_key(&fixture, "wallet-parked"),
+    );
+    resource_keys.insert(
+        same_namespace_node.node_id.clone(),
+        exclusive_resource_key(&fixture, "wallet-other"),
+    );
+    let scheduler = test_scheduler(registered_two_side_effect_runners_with(
+        &fixture,
+        side_effect_runner_with_resource_keys(&fixture, resource_keys),
+    ));
+    let mut store = store::InMemoryTypedRunStore::new();
+    append_synthetic_run_started(
+        &mut store,
+        &fixture,
+        &holder_run_id,
+        "same-namespace-holder-start",
+    );
+    let (holder_attempt, holder_ledger) = append_synthetic_exclusive_prepare(
+        &mut store,
+        &fixture,
+        &holder_run_id,
+        &blocked_node,
+        "wallet-parked",
+        "same-namespace-holder-prepare",
+    );
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start same-namespace run");
+
+    assert_eq!(
+        scheduler
+            .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("same-namespace node waits while lane key is unknown"),
+        SchedulerStatus::Advanced
+    );
+    assert_eq!(
+        attempt_started_count(&store, &fixture.run_id, &blocked_node.node_id),
+        1
+    );
+    assert_eq!(
+        attempt_started_count(&store, &fixture.run_id, &same_namespace_node.node_id),
+        0
+    );
+
+    append_synthetic_side_effect_failed(
+        &mut store,
+        &fixture,
+        &holder_run_id,
+        &blocked_node,
+        &holder_attempt,
+        &holder_ledger,
+        "same-namespace-holder-release",
+    );
+    let status = scheduler
+        .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
+        .await
+        .expect("same-namespace node advances after lane release");
+    assert!(matches!(
+        status,
+        SchedulerStatus::Advanced | SchedulerStatus::PublicOutputProjected
+    ));
+    assert!(side_effect_projection_for_run_node(
+        store.projection_snapshot(),
+        &fixture.run_id,
+        &blocked_node.node_id
+    )
+    .is_some());
+    assert!(side_effect_projection_for_run_node(
+        store.projection_snapshot(),
+        &fixture.run_id,
+        &same_namespace_node.node_id
+    )
+    .is_some());
+}
+
+#[tokio::test]
+async fn transition_allows_same_namespace_node_with_different_projected_lane() {
+    let fixture = fixture_with_independent_exclusive_side_effects();
+    let holder_run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, DF);
+    let blocked_node = node_by_output(&fixture, &fixture.cell_a).clone();
+    let same_namespace_node = node_by_output(&fixture, &fixture.cell_b).clone();
+    let scheduler = test_scheduler(registered_two_side_effect_runners_with(
+        &fixture,
+        DeterministicSideEffectRunner::new(&fixture),
+    ));
+    let mut store = store::InMemoryTypedRunStore::new();
+    append_synthetic_run_started(
+        &mut store,
+        &fixture,
+        &holder_run_id,
+        "projected-lane-holder-start",
+    );
+    append_synthetic_exclusive_prepare(
+        &mut store,
+        &fixture,
+        &holder_run_id,
+        &blocked_node,
+        "wallet-parked",
+        "projected-lane-holder-prepare",
+    );
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start projected-lane run");
+    let (same_namespace_attempt, _) = append_synthetic_exclusive_prepare(
+        &mut store,
+        &fixture,
+        &fixture.run_id,
+        &same_namespace_node,
+        "wallet-other",
+        "projected-lane-same-namespace-prepare",
+    );
+
+    let stream = store.load_run_stream(&fixture.run_id);
+    let view = RuntimeRunView::from_stream(&fixture.runtime_spec, &fixture.run_id, &stream)
+        .expect("runtime view");
+    let blocked_lane =
+        store::ResourceLaneKey::from_evidence(&exclusive_resource_key(&fixture, "wallet-parked"));
+    let blocked_lanes = BTreeSet::from([crate::attempt::ResourceLaneBlockWitness {
+        node_id: blocked_node.node_id.clone(),
+        lane_key: blocked_lane,
+    }]);
+
+    match crate::transition::TransitionLifecycle::decide(
+        &fixture.runtime_spec,
+        &fixture.run_id,
+        &view,
+        &blocked_lanes,
+    )
+    .expect("transition decision")
+    {
+        crate::transition::TransitionDecision::ContinueAttempt(attempt) => {
+            assert_eq!(attempt.node.node_id, same_namespace_node.node_id);
+            assert_eq!(attempt.attempt_id, Some(same_namespace_attempt));
+            assert_eq!(attempt.attempt_no, 1);
+        }
+        crate::transition::TransitionDecision::StartNode(_)
+        | crate::transition::TransitionDecision::StartRemediation(_)
+        | crate::transition::TransitionDecision::AwaitManualResolution
+        | crate::transition::TransitionDecision::ResolveSagaTerminal(_)
+        | crate::transition::TransitionDecision::Blocked => {
+            panic!("same-namespace node with different projected lane should continue")
+        }
+    }
 }
 
 #[tokio::test]
@@ -6700,9 +7383,11 @@ async fn runtime_blocks_remediation_lane_until_conflicting_holder_releases() {
 }
 
 #[tokio::test]
-async fn runtime_ambiguous_holder_keeps_lane_until_terminal_resolution() {
+async fn runtime_ambiguous_holder_releases_lane_for_peer() {
     let fixture = fixture_with_first_exclusive_side_effect_state();
     let holder_run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, DE);
+    let resource_key = exclusive_resource_key(&fixture, "wallet-ambiguous");
+    let lane_key = store::ResourceLaneKey::from_evidence(&resource_key);
     let scheduler = test_scheduler(registered_first_side_effect_runners_with(
         &fixture,
         side_effect_runner_with_resource_keys(
@@ -6744,6 +7429,10 @@ async fn runtime_ambiguous_holder_keeps_lane_until_terminal_resolution() {
         &holder_ledger,
         "ambiguous-holder-evidence",
     );
+    assert!(store
+        .projection_snapshot()
+        .resource_lane(&lane_key)
+        .is_none());
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -6757,28 +7446,8 @@ async fn runtime_ambiguous_holder_keeps_lane_until_terminal_resolution() {
         scheduler
             .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
             .await
-            .expect("peer blocks on ambiguous holder"),
-        SchedulerStatus::Advanced
-    );
-    assert!(side_effect_projection_for_run_node(
-        store.projection_snapshot(),
-        &fixture.run_id,
-        &node.node_id
-    )
-    .is_none());
-
-    append_synthetic_completed_terminal(
-        &mut store,
-        &fixture,
-        &holder_run_id,
-        "ambiguous-holder-terminal",
-    );
-    assert_eq!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("peer prepares after holder terminal"),
-        SchedulerStatus::Advanced
+            .expect("peer runs after ambiguous holder releases lane"),
+        SchedulerStatus::PublicOutputProjected
     );
     assert!(side_effect_projection_for_run_node(
         store.projection_snapshot(),
@@ -8518,6 +9187,28 @@ fn append_payload_commit_for_tests(
     append_payloads_commit_for_tests(stream, run_id, commit_key, vec![payload]);
 }
 
+fn append_payload_commit_without_prefix_validation_for_tests(
+    stream: &mut Vec<store::KernelEventEnvelope>,
+    run_id: &RunId,
+    commit_key: &str,
+    payload: events::KernelEventPayload,
+) {
+    let seq = stream
+        .last()
+        .map(|event| increment_stream_seq_for_tests(event.seq()))
+        .unwrap_or(store::StreamSeq::FIRST);
+    let request = store_typed_commit_request! {
+        run_id: run_id.clone(),
+        expected_next_seq: seq,
+        commit_key: store::CommitKey::new(commit_key).expect("commit key"),
+        payloads: vec![payload],
+        required_artifacts: Vec::new(),
+        preconditions: store::CommitPreconditions::default(),
+    };
+    let batch = store::build_committed_batch(&request, seq).expect("raw appended payload batch");
+    stream.extend(batch.events().iter().cloned());
+}
+
 fn append_payloads_commit_for_tests(
     stream: &mut Vec<store::KernelEventEnvelope>,
     run_id: &RunId,
@@ -9784,6 +10475,15 @@ fn assert_node_failed_with_code(
     node_id: &NodeId,
     code: &str,
 ) -> AttemptId {
+    assert_node_failed_with_code_and_retryable(store, node_id, code, false)
+}
+
+fn assert_node_failed_with_code_and_retryable(
+    store: &store::InMemoryTypedRunStore,
+    node_id: &NodeId,
+    code: &str,
+    expected_retryable: bool,
+) -> AttemptId {
     let failures = store
         .projection_snapshot()
         .attempts()
@@ -9803,7 +10503,10 @@ fn assert_node_failed_with_code(
         "expected one failed attempt for node {node_id}"
     );
     let (attempt_id, retryable, error) = failures.into_iter().next().expect("failure");
-    assert!(!retryable, "failure-safe terminalization is non-retryable");
+    assert_eq!(
+        retryable, expected_retryable,
+        "failure-safe retryability for {code}"
+    );
     assert_eq!(error.code.as_str(), code);
     assert_eq!(error.retryable, retryable);
     let diagnostic = error
@@ -9862,6 +10565,25 @@ fn fact_recorded_count(store: &store::InMemoryTypedRunStore) -> usize {
         .facts()
         .filter(|(_, fact)| fact.fact_key.as_str() == "reused-fact")
         .count()
+}
+
+#[test]
+fn scheduler_does_not_match_open_attempt_disposition() {
+    let scheduler_source =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/scheduler.rs"))
+            .expect("scheduler source");
+    assert!(
+        !scheduler_source.contains("OpenAttemptDisposition"),
+        "scheduler facade must not match recovery dispositions directly"
+    );
+    let transition_source =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/transition.rs"))
+            .expect("transition source");
+    assert!(
+        !transition_source.contains("TransitionDecision::PublicOutputProjected")
+            && !transition_source.contains("PublicOutputProjected,"),
+        "public-output projected is a scheduler status, not a transition decision variant"
+    );
 }
 
 #[test]
@@ -11180,6 +11902,27 @@ fn fixture_with_independent_exclusive_side_effects() -> Fixture {
     with_exclusive_resource_claims(fixture, &descriptors)
 }
 
+fn fixture_with_independent_exclusive_side_effect_lanes() -> Fixture {
+    let mut fixture = fixture_with_independent_exclusive_side_effects();
+    let mut envelope = fixture.runtime_spec.envelope().clone();
+    for node in &mut envelope.spec.nodes {
+        if node.descriptor_id == fixture.descriptor_b {
+            let side_effect = node
+                .side_effect
+                .as_mut()
+                .expect("descriptor b is a side-effect node");
+            side_effect.resource_claim = spec::ResourceClaimSpec::Exclusive {
+                namespace: independent_resource_namespace(),
+                key_schema: fixture.seed_ref.schema_id.clone(),
+            };
+        }
+    }
+    let envelope = spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
+    fixture.runtime_spec =
+        CertifiedRuntimeSpec::from_verified_envelope(envelope).expect("runtime spec");
+    fixture
+}
+
 fn fixture_with_two_side_effects_and_failing_tail() -> Fixture {
     let mut fixture = fixture();
     let mut envelope = fixture.runtime_spec.envelope().clone();
@@ -11817,13 +12560,25 @@ fn exclusive_resource_namespace() -> spec::ResourceNamespace {
     spec::ResourceNamespace::new("mfm.test.wallet_nonce").expect("resource namespace")
 }
 
+fn independent_resource_namespace() -> spec::ResourceNamespace {
+    spec::ResourceNamespace::new("mfm.test.independent_wallet_nonce").expect("resource namespace")
+}
+
 fn exact_touched_set_resource_namespace() -> spec::ResourceNamespace {
     spec::ResourceNamespace::new("mfm.test.wallet_nonce").expect("resource namespace")
 }
 
 fn exclusive_resource_key(fixture: &Fixture, value: &str) -> events::ResourceKeyEvidence {
+    resource_key_in_namespace(fixture, exclusive_resource_namespace(), value)
+}
+
+fn resource_key_in_namespace(
+    fixture: &Fixture,
+    namespace: spec::ResourceNamespace,
+    value: &str,
+) -> events::ResourceKeyEvidence {
     events::ResourceKeyEvidence {
-        namespace: exclusive_resource_namespace(),
+        namespace,
         key_schema_id: fixture.seed_ref.schema_id.clone(),
         key: events::ResourceKey::new(value).expect("resource key"),
     }

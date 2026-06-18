@@ -35,9 +35,11 @@ pub fn build_manual_resolution_prefix_authority<S: store::TypedRunEventStore + ?
 ) -> Result<ManualResolutionPrefixAuthority> {
     let stream = store.load_run_stream(run_id);
     let expected_next_seq = store.expected_next_seq(run_id);
-    let saga = store
-        .projection_snapshot()
-        .derive_saga_projection(run_id, &runtime_spec.spec().saga);
+    let projection = store.projection_snapshot();
+    projection
+        .require_no_open_semantic_attempts_for_run(run_id)
+        .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
+    let saga = projection.derive_saga_projection(run_id, &runtime_spec.spec().saga);
     let reason = saga.manual_block_reason.ok_or_else(|| {
         RuntimeError::InvalidRunStream(
             "manual resolution prefix is not manually blocked".to_owned(),
@@ -217,6 +219,7 @@ pub(crate) fn prepare_manual_resolution_commit(
             vec![evidence_ref.clone(), authorization_ref.clone()],
             vec![evidence_ref.clone(), authorization_ref.clone()],
         )?,
+        &verified,
     )?;
     Ok((
         prepared,

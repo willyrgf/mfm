@@ -7,7 +7,7 @@ use mfm_store::v1 as store;
 
 use crate::admission::{RunAdmissionAuthority, RunAdmissionLifecycle};
 use crate::artifacts::RuntimeArtifactStore;
-use crate::attempt::{AttemptLifecycle, AttemptRunStatus};
+use crate::attempt::{AttemptLifecycle, AttemptRunStatus, ResourceLaneBlockWitness};
 use crate::binding::{BoundRuntimeContext, BoundRuntimeContextLoader};
 use crate::commit::{PreparedRunLaunch, PreparedStagedArtifact, RunLaunchEvidence};
 use crate::error::async_store_error;
@@ -18,7 +18,7 @@ use crate::manual_resolution::{
     prepare_manual_resolution_commit, verify_manual_resolution_for_prefix,
     ManualResolutionEvidenceArtifact,
 };
-use crate::recovery::{AttemptRecoveryLifecycle, OpenAttemptDisposition};
+use crate::recovery::AttemptRecoveryLifecycle;
 use crate::runners::ErasedRunnerRegistry;
 use crate::transition::{TransitionAttempt, TransitionDecision, TransitionLifecycle};
 use crate::{CertifiedRuntimeSpec, Result};
@@ -52,8 +52,13 @@ enum DriveStepStatus {
     StaleView,
     Blocked,
     PublicOutputProjected,
-    BlockedOnResourceLane { node_id: NodeId, advanced: bool },
-    OperationalBlock { node_id: NodeId },
+    BlockedOnResourceLane {
+        witness: ResourceLaneBlockWitness,
+        advanced: bool,
+    },
+    OperationalBlock {
+        node_id: NodeId,
+    },
 }
 
 /// Serial typed scheduler.
@@ -200,10 +205,10 @@ impl SerialTypedScheduler {
         runtime_spec: &CertifiedRuntimeSpec,
         run_id: &RunId,
     ) -> Result<SchedulerStatus> {
-        let mut blocked_nodes = BTreeSet::new();
+        let mut blocked_lanes = BTreeSet::new();
         loop {
             match self
-                .drive_once_with_blocked_nodes(store, runtime_spec, run_id, &blocked_nodes)
+                .drive_once_with_blocked_lanes(store, runtime_spec, run_id, &blocked_lanes)
                 .await?
             {
                 DriveStepStatus::Advanced => return Ok(SchedulerStatus::Advanced),
@@ -216,11 +221,11 @@ impl SerialTypedScheduler {
                 DriveStepStatus::PublicOutputProjected => {
                     return Ok(SchedulerStatus::PublicOutputProjected);
                 }
-                DriveStepStatus::BlockedOnResourceLane { node_id, advanced } => {
+                DriveStepStatus::BlockedOnResourceLane { witness, advanced } => {
                     if advanced {
                         return Ok(SchedulerStatus::Advanced);
                     }
-                    blocked_nodes.insert(node_id);
+                    blocked_lanes.insert(witness);
                 }
             }
         }
@@ -234,20 +239,20 @@ impl SerialTypedScheduler {
         run_id: &RunId,
     ) -> Result<SchedulerStatus> {
         let mut advanced = false;
-        let mut blocked_nodes = BTreeSet::new();
+        let mut blocked_lanes = BTreeSet::new();
         loop {
             match self
-                .drive_once_with_blocked_nodes(store, runtime_spec, run_id, &blocked_nodes)
+                .drive_once_with_blocked_lanes(store, runtime_spec, run_id, &blocked_lanes)
                 .await?
             {
                 DriveStepStatus::Advanced => advanced = true,
                 DriveStepStatus::StaleView => continue,
                 DriveStepStatus::BlockedOnResourceLane {
-                    node_id,
+                    witness,
                     advanced: step_advanced,
                 } => {
                     advanced |= step_advanced;
-                    blocked_nodes.insert(node_id);
+                    blocked_lanes.insert(witness);
                 }
                 DriveStepStatus::Blocked if advanced => return Ok(SchedulerStatus::Advanced),
                 DriveStepStatus::Blocked => return Ok(SchedulerStatus::Blocked),
@@ -273,10 +278,10 @@ impl SerialTypedScheduler {
         runtime_spec: &CertifiedRuntimeSpec,
         run_id: &RunId,
     ) -> Result<SchedulerStatus> {
-        let mut blocked_nodes = BTreeSet::new();
+        let mut blocked_lanes = BTreeSet::new();
         loop {
             match self
-                .drive_once_async_with_blocked_nodes(store, runtime_spec, run_id, &blocked_nodes)
+                .drive_once_async_with_blocked_lanes(store, runtime_spec, run_id, &blocked_lanes)
                 .await?
             {
                 DriveStepStatus::Advanced => return Ok(SchedulerStatus::Advanced),
@@ -289,11 +294,11 @@ impl SerialTypedScheduler {
                 DriveStepStatus::PublicOutputProjected => {
                     return Ok(SchedulerStatus::PublicOutputProjected);
                 }
-                DriveStepStatus::BlockedOnResourceLane { node_id, advanced } => {
+                DriveStepStatus::BlockedOnResourceLane { witness, advanced } => {
                     if advanced {
                         return Ok(SchedulerStatus::Advanced);
                     }
-                    blocked_nodes.insert(node_id);
+                    blocked_lanes.insert(witness);
                 }
             }
         }
@@ -307,20 +312,20 @@ impl SerialTypedScheduler {
         run_id: &RunId,
     ) -> Result<SchedulerStatus> {
         let mut advanced = false;
-        let mut blocked_nodes = BTreeSet::new();
+        let mut blocked_lanes = BTreeSet::new();
         loop {
             match self
-                .drive_once_async_with_blocked_nodes(store, runtime_spec, run_id, &blocked_nodes)
+                .drive_once_async_with_blocked_lanes(store, runtime_spec, run_id, &blocked_lanes)
                 .await?
             {
                 DriveStepStatus::Advanced => advanced = true,
                 DriveStepStatus::StaleView => continue,
                 DriveStepStatus::BlockedOnResourceLane {
-                    node_id,
+                    witness,
                     advanced: step_advanced,
                 } => {
                     advanced |= step_advanced;
-                    blocked_nodes.insert(node_id);
+                    blocked_lanes.insert(witness);
                 }
                 DriveStepStatus::Blocked if advanced => return Ok(SchedulerStatus::Advanced),
                 DriveStepStatus::Blocked => return Ok(SchedulerStatus::Blocked),
@@ -339,17 +344,17 @@ impl SerialTypedScheduler {
         }
     }
 
-    async fn drive_once_with_blocked_nodes<S: store::TypedRunEventStore + ?Sized>(
+    async fn drive_once_with_blocked_lanes<S: store::TypedRunEventStore + ?Sized>(
         &self,
         store: &mut S,
         runtime_spec: &CertifiedRuntimeSpec,
         run_id: &RunId,
-        blocked_nodes: &BTreeSet<NodeId>,
+        blocked_lanes: &BTreeSet<ResourceLaneBlockWitness>,
     ) -> Result<DriveStepStatus> {
         let context = self.run_contexts.load(runtime_spec, run_id, store)?;
         let bound_context = context.bound_context();
         let view = context.view();
-        match TransitionLifecycle::decide(runtime_spec, run_id, view, blocked_nodes)? {
+        match TransitionLifecycle::decide(runtime_spec, run_id, view, blocked_lanes)? {
             TransitionDecision::StartNode(attempt)
             | TransitionDecision::StartRemediation(attempt)
             | TransitionDecision::ResolveSagaTerminal(attempt)
@@ -360,8 +365,8 @@ impl SerialTypedScheduler {
                 {
                     AttemptRunStatus::Advanced => Ok(DriveStepStatus::Advanced),
                     AttemptRunStatus::StaleView => Ok(DriveStepStatus::StaleView),
-                    AttemptRunStatus::BlockedOnResourceLane { node_id, advanced } => {
-                        Ok(DriveStepStatus::BlockedOnResourceLane { node_id, advanced })
+                    AttemptRunStatus::BlockedOnResourceLane { witness, advanced } => {
+                        Ok(DriveStepStatus::BlockedOnResourceLane { witness, advanced })
                     }
                     AttemptRunStatus::OperationalBlock { node_id } => {
                         Ok(DriveStepStatus::OperationalBlock { node_id })
@@ -369,17 +374,26 @@ impl SerialTypedScheduler {
                 }
             }
             TransitionDecision::AwaitManualResolution => Ok(DriveStepStatus::Blocked),
+            TransitionDecision::Blocked
+                if TransitionLifecycle::public_output_projected(
+                    runtime_spec,
+                    run_id,
+                    view,
+                    blocked_lanes,
+                )? =>
+            {
+                Ok(DriveStepStatus::PublicOutputProjected)
+            }
             TransitionDecision::Blocked => Ok(DriveStepStatus::Blocked),
-            TransitionDecision::PublicOutputProjected => Ok(DriveStepStatus::PublicOutputProjected),
         }
     }
 
-    async fn drive_once_async_with_blocked_nodes<S: store::AsyncTypedRunEventStore + ?Sized>(
+    async fn drive_once_async_with_blocked_lanes<S: store::AsyncTypedRunEventStore + ?Sized>(
         &self,
         store: &S,
         runtime_spec: &CertifiedRuntimeSpec,
         run_id: &RunId,
-        blocked_nodes: &BTreeSet<NodeId>,
+        blocked_lanes: &BTreeSet<ResourceLaneBlockWitness>,
     ) -> Result<DriveStepStatus> {
         let context = self
             .run_contexts
@@ -387,7 +401,7 @@ impl SerialTypedScheduler {
             .await?;
         let bound_context = context.bound_context();
         let view = context.view();
-        match TransitionLifecycle::decide(runtime_spec, run_id, view, blocked_nodes)? {
+        match TransitionLifecycle::decide(runtime_spec, run_id, view, blocked_lanes)? {
             TransitionDecision::StartNode(attempt)
             | TransitionDecision::StartRemediation(attempt)
             | TransitionDecision::ResolveSagaTerminal(attempt)
@@ -405,8 +419,8 @@ impl SerialTypedScheduler {
                 {
                     AttemptRunStatus::Advanced => Ok(DriveStepStatus::Advanced),
                     AttemptRunStatus::StaleView => Ok(DriveStepStatus::StaleView),
-                    AttemptRunStatus::BlockedOnResourceLane { node_id, advanced } => {
-                        Ok(DriveStepStatus::BlockedOnResourceLane { node_id, advanced })
+                    AttemptRunStatus::BlockedOnResourceLane { witness, advanced } => {
+                        Ok(DriveStepStatus::BlockedOnResourceLane { witness, advanced })
                     }
                     AttemptRunStatus::OperationalBlock { node_id } => {
                         Ok(DriveStepStatus::OperationalBlock { node_id })
@@ -414,8 +428,17 @@ impl SerialTypedScheduler {
                 }
             }
             TransitionDecision::AwaitManualResolution => Ok(DriveStepStatus::Blocked),
+            TransitionDecision::Blocked
+                if TransitionLifecycle::public_output_projected(
+                    runtime_spec,
+                    run_id,
+                    view,
+                    blocked_lanes,
+                )? =>
+            {
+                Ok(DriveStepStatus::PublicOutputProjected)
+            }
             TransitionDecision::Blocked => Ok(DriveStepStatus::Blocked),
-            TransitionDecision::PublicOutputProjected => Ok(DriveStepStatus::PublicOutputProjected),
         }
     }
 
@@ -428,34 +451,14 @@ impl SerialTypedScheduler {
         bound_context: &BoundRuntimeContext,
         attempt: TransitionAttempt<'_>,
     ) -> Result<AttemptRunStatus> {
-        if let Some(attempt_id) = attempt.attempt_id.as_ref() {
-            match AttemptRecoveryLifecycle::open_attempt_disposition_for_attempt(
-                runtime_spec,
-                view,
-                attempt.node,
-                attempt_id,
-                attempt.attempt_no,
-            )? {
-                OpenAttemptDisposition::Interrupt { .. } => {
-                    return AttemptRecoveryLifecycle::interrupt_attempt(
-                        store,
-                        runtime_spec,
-                        run_id,
-                        view,
-                        attempt.node,
-                        attempt_id,
-                    );
-                }
-                OpenAttemptDisposition::OperationalBlock { reason, .. } => {
-                    let _ = reason;
-                    return Ok(AttemptRunStatus::OperationalBlock {
-                        node_id: attempt.node.node_id.clone(),
-                    });
-                }
-                OpenAttemptDisposition::Continue { .. }
-                | OpenAttemptDisposition::RetryTerminalization { .. }
-                | OpenAttemptDisposition::DelegateSideEffect { .. } => {}
-            }
+        if let Some(status) = AttemptRecoveryLifecycle::dispatch_open_attempt_for_attempt(
+            store,
+            runtime_spec,
+            run_id,
+            view,
+            &attempt,
+        )? {
+            return Ok(status);
         }
         if FrameworkAttemptLifecycle::owns_node(attempt.node) {
             return FrameworkAttemptLifecycle::new(self.artifact_store.as_ref())
@@ -476,35 +479,16 @@ impl SerialTypedScheduler {
         bound_context: &BoundRuntimeContext,
         attempt: TransitionAttempt<'_>,
     ) -> Result<AttemptRunStatus> {
-        if let Some(attempt_id) = attempt.attempt_id.as_ref() {
-            match AttemptRecoveryLifecycle::open_attempt_disposition_for_attempt(
-                runtime_spec,
-                view,
-                attempt.node,
-                attempt_id,
-                attempt.attempt_no,
-            )? {
-                OpenAttemptDisposition::Interrupt { .. } => {
-                    return AttemptRecoveryLifecycle::interrupt_attempt_async(
-                        store,
-                        runtime_spec,
-                        run_id,
-                        view,
-                        attempt.node,
-                        attempt_id,
-                    )
-                    .await;
-                }
-                OpenAttemptDisposition::OperationalBlock { reason, .. } => {
-                    let _ = reason;
-                    return Ok(AttemptRunStatus::OperationalBlock {
-                        node_id: attempt.node.node_id.clone(),
-                    });
-                }
-                OpenAttemptDisposition::Continue { .. }
-                | OpenAttemptDisposition::RetryTerminalization { .. }
-                | OpenAttemptDisposition::DelegateSideEffect { .. } => {}
-            }
+        if let Some(status) = AttemptRecoveryLifecycle::dispatch_open_attempt_for_attempt_async(
+            store,
+            runtime_spec,
+            run_id,
+            view,
+            &attempt,
+        )
+        .await?
+        {
+            return Ok(status);
         }
         if FrameworkAttemptLifecycle::owns_node(attempt.node) {
             return FrameworkAttemptLifecycle::new(self.artifact_store.as_ref())

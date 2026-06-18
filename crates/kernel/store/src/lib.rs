@@ -1372,6 +1372,21 @@ pub mod v1 {
         }
     }
 
+    const fn manual_block_reason_from_auth(
+        reason: ManualResolutionBlockReason,
+    ) -> ManualBlockReason {
+        match reason {
+            ManualResolutionBlockReason::PolicyManualResolution => {
+                ManualBlockReason::PolicyManualResolution
+            }
+            ManualResolutionBlockReason::ForwardAmbiguous => ManualBlockReason::ForwardAmbiguous,
+            ManualResolutionBlockReason::RemediationFailed => ManualBlockReason::RemediationFailed,
+            ManualResolutionBlockReason::RemediationAmbiguous => {
+                ManualBlockReason::RemediationAmbiguous
+            }
+        }
+    }
+
     /// Required run state for a typed commit.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
     pub enum RequiredRunState {
@@ -1755,6 +1770,7 @@ pub mod v1 {
             artifacts: CommitArtifactEvidenceSet,
             validate: impl FnOnce(&TypedCommitRequest) -> Result<()>,
             allow_saga_terminal: bool,
+            allow_manual_resolution: bool,
         ) -> Result<Self> {
             if artifacts.required_artifacts != request.required_artifacts {
                 return Err(invalid_prepared_commit_purpose(
@@ -1764,10 +1780,11 @@ pub mod v1 {
             }
             validate_required_artifacts_cover_payload_references(Purpose::NAME, &request)?;
             validate(&request)?;
-            let inner = PreparedTypedCommit::new_with_saga_terminal_authority(
+            let inner = PreparedTypedCommit::new_with_authority(
                 request,
                 artifacts.admitted_artifacts,
                 allow_saga_terminal,
+                allow_manual_resolution,
             )?;
             Ok(Self {
                 inner,
@@ -1780,7 +1797,7 @@ pub mod v1 {
             artifacts: CommitArtifactEvidenceSet,
             validate: impl FnOnce(&TypedCommitRequest) -> Result<()>,
         ) -> Result<Self> {
-            Self::prepare_with_authority(request, artifacts, validate, false)
+            Self::prepare_with_authority(request, artifacts, validate, false, false)
         }
 
         /// Returns the typed request sealed into this prepared commit.
@@ -1843,11 +1860,22 @@ pub mod v1 {
         "Prepares a retention projection commit.",
         validate_retention_commit
     );
-    impl_prepared_commit_new!(
-        ManualResolution,
-        "Prepares a manual-resolution commit.",
-        validate_manual_resolution_commit
-    );
+    impl PreparedCommit<ManualResolution> {
+        /// Prepares a proof-backed manual-resolution commit.
+        pub fn new(
+            request: TypedCommitRequest,
+            artifacts: CommitArtifactEvidenceSet,
+            proof: &VerifiedManualResolutionForPrefix,
+        ) -> Result<Self> {
+            Self::prepare_with_authority(
+                request,
+                artifacts,
+                |request| validate_manual_resolution_commit_with_proof(request, proof),
+                false,
+                true,
+            )
+        }
+    }
 
     impl PreparedCommit<SagaTerminal> {
         /// Prepares a saga terminal-resolution commit.
@@ -1861,6 +1889,7 @@ pub mod v1 {
                 artifacts,
                 |request| validate_saga_terminal_commit_with_proof(request, proof),
                 true,
+                false,
             )
         }
     }
@@ -1956,18 +1985,25 @@ pub mod v1 {
             request: TypedCommitRequest,
             admitted_artifacts: Vec<ArtifactEvidenceRef>,
         ) -> Result<Self> {
-            Self::new_with_saga_terminal_authority(request, admitted_artifacts, false)
+            Self::new_with_authority(request, admitted_artifacts, false, false)
         }
 
-        fn new_with_saga_terminal_authority(
+        fn new_with_authority(
             request: TypedCommitRequest,
             admitted_artifacts: Vec<ArtifactEvidenceRef>,
             allow_saga_terminal: bool,
+            allow_manual_resolution: bool,
         ) -> Result<Self> {
             if !allow_saga_terminal && request_contains_saga_terminal_outcome(&request) {
                 return Err(invalid_prepared_commit_purpose(
                     SagaTerminal::NAME,
                     "saga terminal resolution requires SagaTerminalProof",
+                ));
+            }
+            if !allow_manual_resolution && request_contains_manual_resolution(&request) {
+                return Err(invalid_prepared_commit_purpose(
+                    ManualResolution::NAME,
+                    "manual resolution requires verified manual resolution proof",
                 ));
             }
             let referenced_artifacts = referenced_artifact_ids(&request);
@@ -3600,6 +3636,8 @@ pub mod v1 {
     /// Attempt lifecycle projection derived from committed run events.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct AttemptProjection {
+        /// Run id.
+        pub run_id: RunId,
         /// Node id.
         pub node_id: NodeId,
         /// Attempt id.
@@ -3895,6 +3933,15 @@ pub mod v1 {
                 public_outputs,
                 retentions,
             } = parts;
+            for ((node_id, attempt_id), projection) in &attempts {
+                if node_id != &projection.node_id || attempt_id != &projection.attempt_id {
+                    return Err(StoreError::ProjectionConflict {
+                        key: format!("attempt:{}:{}", projection.node_id, projection.attempt_id),
+                        message: "attempt projection key does not match projection identity"
+                            .to_owned(),
+                    });
+                }
+            }
             for (ledger_ref, projection) in &side_effects {
                 if ledger_ref.run_id != projection.run_id
                     || ledger_ref.ledger_key != projection.ledger_key
@@ -4003,6 +4050,27 @@ pub mod v1 {
             self.attempts.get(&(node_id.clone(), attempt_id.clone()))
         }
 
+        /// Returns the first open semantic attempt projected for a run.
+        pub fn open_attempt_for_run(&self, run_id: &RunId) -> Option<&AttemptProjection> {
+            self.attempts.values().find(|attempt| {
+                &attempt.run_id == run_id && matches!(attempt.status, AttemptStatus::Started { .. })
+            })
+        }
+
+        /// Requires that a run prefix has no open semantic attempt.
+        pub fn require_no_open_semantic_attempts_for_run(&self, run_id: &RunId) -> Result<()> {
+            if let Some(attempt) = self.open_attempt_for_run(run_id) {
+                return Err(StoreError::ProjectionConflict {
+                    key: format!("run:{run_id}:attempts"),
+                    message: format!(
+                        "manual resolution requires no open semantic attempts; attempt {}:{} is still started",
+                        attempt.node_id, attempt.attempt_id
+                    ),
+                });
+            }
+            Ok(())
+        }
+
         /// Returns a side-effect projection.
         pub fn side_effect(
             &self,
@@ -4078,6 +4146,7 @@ pub mod v1 {
             run_id: &RunId,
             policy: &SagaPolicySpec,
         ) -> Result<()> {
+            self.require_no_open_semantic_attempts_for_run(run_id)?;
             let saga = self.derive_saga_projection(run_id, policy);
             if saga.run_mode == RunMode::ManualBlocked {
                 Ok(())
@@ -4653,9 +4722,10 @@ pub mod v1 {
 
     /// Async typed run event store commit contract for durable stores.
     ///
-    /// This is the same certified commit surface as [`TypedRunEventStore`] without exposing
-    /// implementation-owned projection state to callers. Runtime code must derive read views from
-    /// the authoritative stream returned by [`Self::load_run_stream`].
+    /// This is the same certified commit surface as [`TypedRunEventStore`]. Runtime execution code
+    /// must derive run-local read views from the authoritative stream returned by
+    /// [`Self::load_run_stream`]. App status rendering may additionally request store-owned
+    /// cross-run projection authority through [`Self::status_projection_snapshot`].
     pub trait AsyncTypedRunEventStore {
         /// Store-specific error type.
         type Error: StoreErrorInspection + fmt::Display + Send + Sync + 'static;
@@ -4686,6 +4756,16 @@ pub mod v1 {
             &'a self,
             run_id: &'a RunId,
         ) -> AsyncStoreFuture<'a, StreamSeq, Self::Error>;
+
+        /// Returns store-owned projection authority for public run status.
+        ///
+        /// Implementations that maintain cross-run projection families should include those
+        /// families here. Callers still rebuild the queried run's local projection from its
+        /// authoritative stream before rendering status.
+        fn status_projection_snapshot<'a>(
+            &'a self,
+            run_id: &'a RunId,
+        ) -> AsyncStoreFuture<'a, ProjectionSnapshot, Self::Error>;
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5658,6 +5738,93 @@ pub mod v1 {
         Ok(())
     }
 
+    fn validate_manual_resolution_commit_with_proof(
+        request: &TypedCommitRequest,
+        proof: &VerifiedManualResolutionForPrefix,
+    ) -> Result<()> {
+        validate_manual_resolution_commit(request)?;
+        let manual_resolutions = request
+            .payloads
+            .iter()
+            .filter_map(|payload| match payload {
+                KernelEventPayload::ManualResolutionRecorded(payload) => Some(payload),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if manual_resolutions.len() != 1 {
+            return Err(invalid_prepared_commit_purpose(
+                ManualResolution::NAME,
+                "manual resolution requires exactly one ManualResolutionRecorded payload",
+            ));
+        }
+        let payload = manual_resolutions[0];
+        let token = request
+            .preconditions
+            .saga_admit_token
+            .as_ref()
+            .ok_or_else(|| {
+                invalid_prepared_commit_purpose(
+                    ManualResolution::NAME,
+                    "manual resolution requires saga admit token",
+                )
+            })?;
+        let prefix = proof.prefix();
+        if prefix.run_id() != request.run_id()
+            || prefix.run_id() != &payload.run_id
+            || prefix.run_id() != token.run_id()
+        {
+            return Err(invalid_prepared_commit_purpose(
+                ManualResolution::NAME,
+                "manual proof run id does not match manual resolution request",
+            ));
+        }
+        if prefix.spec_hash() != &payload.spec_hash || prefix.spec_hash() != token.spec_hash() {
+            return Err(invalid_prepared_commit_purpose(
+                ManualResolution::NAME,
+                "manual proof spec hash does not match manual resolution request",
+            ));
+        }
+        if prefix.expected_next_seq() != request.expected_next_seq().as_u64() {
+            return Err(invalid_prepared_commit_purpose(
+                ManualResolution::NAME,
+                "manual proof prefix expected_next_seq does not match manual resolution request",
+            ));
+        }
+        if proof.outcome() != payload.outcome {
+            return Err(invalid_prepared_commit_purpose(
+                ManualResolution::NAME,
+                "ManualResolutionRecorded outcome does not match manual proof",
+            ));
+        }
+        if proof.evidence().schema_id != payload.evidence_schema_id
+            || proof.evidence().content_hash != payload.evidence_hash
+            || proof.evidence().artifact_id != payload.evidence_artifact_id
+            || proof.authorization().schema_id != payload.authorization_schema_id
+            || proof.authorization().content_hash != payload.authorization_hash
+            || proof.authorization().artifact_id != payload.authorization_artifact_id
+        {
+            return Err(invalid_prepared_commit_purpose(
+                ManualResolution::NAME,
+                "ManualResolutionRecorded artifact refs do not match manual proof",
+            ));
+        }
+        let block_reason = manual_block_reason_from_auth(prefix.manual_block_reason());
+        let certified_manual_policy =
+            manual_policy_for_block_reason(token.saga_policy(), block_reason).ok_or_else(|| {
+                invalid_prepared_commit_purpose(
+                    ManualResolution::NAME,
+                    "saga admit token policy does not permit manual proof block reason",
+                )
+            })?;
+        if certified_manual_policy != prefix.manual_policy() {
+            return Err(invalid_prepared_commit_purpose(
+                ManualResolution::NAME,
+                "manual proof policy does not match saga admit token",
+            ));
+        }
+        Ok(())
+    }
+
     fn validate_saga_terminal_commit(request: &TypedCommitRequest) -> Result<()> {
         require_purpose_payload(
             SagaTerminal::NAME,
@@ -5818,6 +5985,13 @@ pub mod v1 {
                 })
             )
         })
+    }
+
+    fn request_contains_manual_resolution(request: &TypedCommitRequest) -> bool {
+        request
+            .payloads
+            .iter()
+            .any(|payload| matches!(payload, KernelEventPayload::ManualResolutionRecorded(_)))
     }
 
     fn invalid_prepared_commit_purpose(
@@ -8257,6 +8431,7 @@ pub mod v1 {
             "attempt_id": projection.attempt_id.as_str(),
             "event_id": projection.event_id.as_str(),
             "node_id": projection.node_id.as_str(),
+            "run_id": projection.run_id.as_str(),
             "status": status,
         })
     }
@@ -8287,6 +8462,7 @@ pub mod v1 {
             }
         };
         Ok(AttemptProjection {
+            run_id: parse_identity(required_str(json, "run_id")?)?,
             node_id: parse_identity(required_str(json, "node_id")?)?,
             attempt_id: parse_identity(required_str(json, "attempt_id")?)?,
             event_id: parse_identity(required_str(json, "event_id")?)?,

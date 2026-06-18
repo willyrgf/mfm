@@ -16,7 +16,10 @@
 //! }
 //! ```
 
+use std::collections::BTreeMap;
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -53,7 +56,9 @@ use mfm_portfolio_config::{
 use mfm_spec::v1 as spec;
 use mfm_state_portfolio::PortfolioWorkflowConfig;
 use mfm_store::v1 as store;
-use mfm_store::v1::{AsyncStoreFuture, AsyncTypedRunEventStore, TypedRunEventStore};
+use mfm_store::v1::{
+    AsyncStoreFuture, AsyncTypedRunEventStore, TypedProjectionRead, TypedRunEventStore,
+};
 use mfm_stream_store_postgres::{PostgresTypedRunEventStore, PostgresTypedStoreError};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -61,6 +66,19 @@ use serde_json::json;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::trace::TraceLayer;
 use tracing::instrument;
+
+/// Boxed future returned by [`StatusProjectionRead`].
+pub type StatusProjectionFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<store::ProjectionSnapshot, ApiError>> + Send + 'a>>;
+
+/// Store capability required by REST status rendering.
+///
+/// Implementations must return a projection for the requested run while preserving any global
+/// projection families that status depends on, such as active cross-run resource lanes.
+pub trait StatusProjectionRead {
+    /// Loads the status projection for `run_id`.
+    fn status_projection<'a>(&'a self, run_id: &'a RunId) -> StatusProjectionFuture<'a>;
+}
 
 fn ok(data: serde_json::Value) -> serde_json::Value {
     json!({ "status": "success", "data": data })
@@ -192,6 +210,45 @@ impl AsyncTypedRunEventStore for InMemoryAsyncTypedRunStore {
             .expected_next_seq(run_id));
         Box::pin(std::future::ready(result))
     }
+
+    fn status_projection_snapshot<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
+        Box::pin(async move {
+            let store = self.inner.lock().expect("typed run store lock");
+            let stream = store.load_run_stream(run_id);
+            let run_projection = store::ProjectionSnapshot::rebuild_from_run_stream(&stream)?;
+            projection_with_resource_lanes(
+                &run_projection,
+                store
+                    .projection_snapshot()
+                    .resource_lanes()
+                    .map(|(lane_key, projection)| (lane_key.clone(), projection.clone()))
+                    .collect(),
+            )
+        })
+    }
+}
+
+impl StatusProjectionRead for InMemoryAsyncTypedRunStore {
+    fn status_projection<'a>(&'a self, run_id: &'a RunId) -> StatusProjectionFuture<'a> {
+        Box::pin(async move {
+            self.status_projection_snapshot(run_id)
+                .await
+                .map_err(api_error_from_store_error)
+        })
+    }
+}
+
+impl StatusProjectionRead for PostgresTypedRunEventStore {
+    fn status_projection<'a>(&'a self, run_id: &'a RunId) -> StatusProjectionFuture<'a> {
+        Box::pin(async move {
+            self.status_projection_snapshot(run_id)
+                .await
+                .map_err(api_error_from_typed_store_error)
+        })
+    }
 }
 
 /// Default production REST API state.
@@ -262,7 +319,7 @@ pub fn make_in_memory_app_state(
 /// Builds the `axum` router for the public REST API surface.
 pub fn make_app<S>(state: AppState<S>) -> Router
 where
-    S: AsyncTypedRunEventStore + Clone + Send + Sync + 'static,
+    S: AsyncTypedRunEventStore + StatusProjectionRead + Clone + Send + Sync + 'static,
 {
     let request_id_header = HeaderName::from_static("x-request-id");
     let make_span_header = request_id_header.clone();
@@ -847,10 +904,14 @@ async fn runs_status<S>(
     Path(run_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError>
 where
-    S: AsyncTypedRunEventStore + Clone + Send + Sync,
+    S: AsyncTypedRunEventStore + StatusProjectionRead + Clone + Send + Sync,
 {
     let run_id = parse_run_id(&run_id)?;
-    let data = state.services()?.run_status(&run_id).await?;
+    let projection = state.app.store.status_projection(&run_id).await?;
+    let data = state
+        .services()?
+        .run_status_with_projection(&run_id, projection)
+        .await?;
 
     json_ok(data)
 }
@@ -1227,6 +1288,70 @@ fn api_error_from_typed_store_error(error: PostgresTypedStoreError) -> ApiError 
             message,
         ),
     }
+}
+
+fn api_error_from_store_error(error: store::StoreError) -> ApiError {
+    ApiError::new(StatusCode::CONFLICT, "RunStoreRejected", error.to_string())
+}
+
+fn projection_with_resource_lanes(
+    snapshot: &store::ProjectionSnapshot,
+    resource_lanes: BTreeMap<store::ResourceLaneKey, store::ResourceLaneProjection>,
+) -> Result<store::ProjectionSnapshot, store::StoreError> {
+    store::ProjectionSnapshot::from_parts(store::ProjectionSnapshotParts {
+        run_states: snapshot
+            .run_states()
+            .map(|(run_id, state)| (run_id.clone(), *state))
+            .collect(),
+        saga_policy_digests: snapshot
+            .saga_policy_digests()
+            .map(|(run_id, digest)| (run_id.clone(), digest.clone()))
+            .collect(),
+        run_completions: snapshot
+            .run_completions()
+            .map(|(run_id, completion)| (run_id.clone(), completion.clone()))
+            .collect(),
+        saga_engagements: snapshot
+            .saga_engagements()
+            .map(|(run_id, engagement)| (run_id.clone(), engagement.clone()))
+            .collect(),
+        manual_resolutions: snapshot
+            .manual_resolutions()
+            .map(|(run_id, resolution)| (run_id.clone(), resolution.clone()))
+            .collect(),
+        attempts: snapshot
+            .attempts()
+            .map(|((node_id, attempt_id), attempt)| {
+                ((node_id.clone(), attempt_id.clone()), attempt.clone())
+            })
+            .collect(),
+        cells: snapshot
+            .cells()
+            .map(|(cell_id, cell)| (cell_id.clone(), cell.clone()))
+            .collect(),
+        facts: snapshot
+            .facts()
+            .map(|((node_id, attempt_id, fact_key), fact)| {
+                (
+                    (node_id.clone(), attempt_id.clone(), fact_key.clone()),
+                    fact.clone(),
+                )
+            })
+            .collect(),
+        side_effects: snapshot
+            .side_effects()
+            .map(|(ledger_ref, side_effect)| (ledger_ref.clone(), side_effect.clone()))
+            .collect(),
+        resource_lanes,
+        public_outputs: snapshot
+            .public_outputs()
+            .map(|(schema_id, output)| (schema_id.clone(), output.clone()))
+            .collect(),
+        retentions: snapshot
+            .retentions()
+            .map(|(run_id, retention)| (run_id.clone(), retention.clone()))
+            .collect(),
+    })
 }
 
 fn api_error_from_typed_artifact_error(error: FsTypedArtifactError) -> ApiError {

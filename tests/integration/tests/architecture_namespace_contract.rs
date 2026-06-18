@@ -110,6 +110,78 @@ fn repository_text_entries_include_tracked_dot_config_surfaces() {
 }
 
 #[test]
+fn docs_do_not_describe_bootstrap_as_executed_genesis_state() {
+    let root = repo_root();
+    let entries = repo_text_entries(&root);
+    let forbidden = [
+        "executes the sealed `BootstrapRun` genesis state",
+        "executes the sealed BootstrapRun genesis state",
+    ];
+
+    assert_forbidden_terms_are_allowlisted(
+        "bootstrap admission docs",
+        &entries,
+        &forbidden,
+        &[],
+        |path, _source| {
+            path == "docs/design.md"
+                || path == "docs/architecture.md"
+                || path == "crates/kernel/runtime/README.md"
+        },
+    );
+}
+
+#[test]
+fn runtime_docs_assign_public_output_render_to_framework_lifecycle() {
+    let root = repo_root();
+    let entries = repo_text_entries(&root);
+    let forbidden = [
+        "`attempt`: ordinary and public-output render attempt lifecycle",
+        "`framework_lifecycle`: started-before-run framework attempt lifecycle for retention and terminal states",
+    ];
+
+    assert_forbidden_terms_are_allowlisted(
+        "runtime framework lifecycle docs",
+        &entries,
+        &forbidden,
+        &[],
+        |path, _source| path == "crates/kernel/runtime/README.md",
+    );
+
+    let readme =
+        fs::read_to_string(root.join("crates/kernel/runtime/README.md")).expect("runtime README");
+    assert!(
+        readme.contains(
+            "`framework_lifecycle`: started-before-run framework attempt lifecycle for public-output rendering"
+        ),
+        "runtime README must assign public-output rendering to framework_lifecycle"
+    );
+}
+
+#[test]
+fn design_docs_do_not_make_public_output_projected_a_transition_decision() {
+    let root = repo_root();
+    let design = fs::read_to_string(root.join("docs/design.md")).expect("design doc");
+    let forbidden = [
+        "report projected public output completion",
+        "projected public output completion",
+        "projected public output is a frontier transition decision",
+        "report blocked completion",
+    ];
+
+    for phrase in forbidden {
+        assert!(
+            !design.contains(phrase),
+            "docs/design.md must not describe public-output projected status as a transition decision: {phrase}"
+        );
+    }
+    assert!(
+        design.contains("already projected public output is a scheduler facade status"),
+        "docs/design.md must scope already-projected public output to scheduler facade status"
+    );
+}
+
+#[test]
 fn namespace_guard_rejects_synthetic_stale_names() {
     let forbidden_terms = forbidden_public_name_terms();
     let stale_route_base = format!("/v1/evm/{}", stale_recipe_abbrev());

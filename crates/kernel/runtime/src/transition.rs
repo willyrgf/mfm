@@ -4,6 +4,7 @@ use mfm_ids::{AttemptId, NodeId, RunId};
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 
+use crate::attempt::ResourceLaneBlockWitness;
 use crate::frontier::{
     scheduler_decision_with_blocked_nodes, AttemptPlan, RunnableNode, SchedulerDecision,
 };
@@ -25,8 +26,6 @@ pub(crate) enum TransitionDecision<'a> {
     ResolveSagaTerminal(TransitionAttempt<'a>),
     /// No certified transition is currently runnable.
     Blocked,
-    /// Public output has already been projected.
-    PublicOutputProjected,
 }
 
 /// Node attempt selected by the pure transition lifecycle.
@@ -44,12 +43,12 @@ impl TransitionLifecycle {
         runtime_spec: &'a CertifiedRuntimeSpec,
         run_id: &RunId,
         view: &RuntimeRunView,
-        blocked_nodes: &BTreeSet<NodeId>,
+        blocked_lanes: &BTreeSet<ResourceLaneBlockWitness>,
     ) -> Result<TransitionDecision<'a>> {
         if let Some(disposition) = AttemptRecoveryLifecycle::next_open_attempt_disposition(
             runtime_spec,
             view,
-            blocked_nodes,
+            blocked_lanes,
         )? {
             match disposition {
                 OpenAttemptDisposition::Continue {
@@ -101,15 +100,56 @@ impl TransitionLifecycle {
         let saga = view
             .projections
             .derive_saga_projection(run_id, &runtime_spec.spec().saga);
-        match scheduler_decision_with_blocked_nodes(runtime_spec, run_id, view, blocked_nodes)? {
+        let blocked_nodes = blocked_node_ids(runtime_spec, view, blocked_lanes);
+        match scheduler_decision_with_blocked_nodes(runtime_spec, run_id, view, &blocked_nodes)? {
             SchedulerDecision::Run(runnable) => classify_runnable(runtime_spec, runnable),
             SchedulerDecision::Blocked if saga.run_mode == store::RunMode::ManualBlocked => {
                 Ok(TransitionDecision::AwaitManualResolution)
             }
-            SchedulerDecision::Blocked => Ok(TransitionDecision::Blocked),
-            SchedulerDecision::Completed => Ok(TransitionDecision::PublicOutputProjected),
+            SchedulerDecision::Blocked | SchedulerDecision::Completed => {
+                Ok(TransitionDecision::Blocked)
+            }
         }
     }
+
+    pub(crate) fn public_output_projected(
+        runtime_spec: &CertifiedRuntimeSpec,
+        run_id: &RunId,
+        view: &RuntimeRunView,
+        blocked_lanes: &BTreeSet<ResourceLaneBlockWitness>,
+    ) -> Result<bool> {
+        let blocked_nodes = blocked_node_ids(runtime_spec, view, blocked_lanes);
+        Ok(matches!(
+            scheduler_decision_with_blocked_nodes(runtime_spec, run_id, view, &blocked_nodes)?,
+            SchedulerDecision::Completed
+        ))
+    }
+}
+
+fn blocked_node_ids(
+    runtime_spec: &CertifiedRuntimeSpec,
+    view: &RuntimeRunView,
+    blocked_lanes: &BTreeSet<ResourceLaneBlockWitness>,
+) -> BTreeSet<NodeId> {
+    let mut blocked = BTreeSet::new();
+    for node_id in runtime_spec.topological_order() {
+        let node = runtime_spec.node(node_id).expect("topological node exists");
+        if blocked_lanes
+            .iter()
+            .any(|witness| witness.blocks_node(&view.projections, node))
+        {
+            blocked.insert(node_id.clone());
+        }
+    }
+    for (_, node) in runtime_spec.remediations() {
+        if blocked_lanes
+            .iter()
+            .any(|witness| witness.blocks_node(&view.projections, node))
+        {
+            blocked.insert(node.node_id.clone());
+        }
+    }
+    blocked
 }
 
 fn classify_runnable<'a>(

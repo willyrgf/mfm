@@ -118,7 +118,7 @@ pub(crate) fn command_error_from_app_error(err: mfm_app::AppError) -> CommandErr
     CommandError::new(err.code, err.message)
 }
 
-fn command_error_from_typed_store_error(err: PostgresTypedStoreError) -> CommandError {
+pub(crate) fn command_error_from_typed_store_error(err: PostgresTypedStoreError) -> CommandError {
     match err {
         PostgresTypedStoreError::Store(error) => {
             CommandError::new("RunStoreRejected", error.to_string())

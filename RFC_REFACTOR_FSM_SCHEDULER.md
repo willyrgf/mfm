@@ -176,7 +176,10 @@ attempt lifecycle drives it before the next decision. No intra-run parallelism i
   ready nodes can advance within the same drive pass. This matches today's behavior: the lane-blocked
   skip is the only interleaving; there is no other intra-run parallelism. The typestate witnesses are
   `NoOpenAttempt` for the default case plus a resource-lane-scoped independence witness for the skip.
-  Finer-grained (per-node) parallelism beyond the lane skip remains deferred. A global `NoOpenAttempt`
+  Because a not-yet-run side-effect node's concrete key is not known until invocation preparation,
+  the witness is key-scoped only for nodes that already have concrete lane evidence; otherwise
+  same-namespace side-effect nodes wait conservatively until the parked lane releases. Finer-grained
+  (per-node) parallelism beyond this lane/namespace skip remains deferred. A global `NoOpenAttempt`
   rule is explicitly rejected: it would stall a run that today progresses on independent nodes while
   one node waits on a lane held by another run.
 - **Cross-run resource lanes are unchanged.** Lanes remain a store-admission concern across runs; a
@@ -1014,7 +1017,7 @@ event-schema slices and should each land as one coordinated, test-backed change.
 | 6 Classify framework lifecycles | L | `mfm-runtime` (framework), `mfm-store`, `mfm-replay` | Framework start/terminal split; replay goldens |
 | 7 Attempt recovery lifecycle | M | `mfm-runtime`, `mfm-store` (open-attempt projection) | Resume sweep; exclusion rule from Phase 2 |
 | 8 Side-effect + saga/ACDC boundary | L | `mfm-runtime`, `mfm-store`, `mfm-replay`, `mfm-manual-auth` | Most subtle; proof freshness, forward fence, recovery |
-| 9 Remove scheduler bulk | S–M | `mfm-runtime`, docs | Facade reduction; delete duplicated driver seam |
+| 9 Remove scheduler bulk | S–M | `mfm-runtime`, docs | Facade reduction; delete duplicated scheduler-owned authority |
 
 Critical path: 1 → 2 → 3 unblock the decomposition; 4 must precede 5–8 (they depend on the
 interruption disposition and the failure-safe path); 6 and 8 carry the replay/storage migration
@@ -1090,7 +1093,9 @@ Add or identify tests for:
   and terminal proof availability from certified spec plus verified history.
 - Preserve today's open-attempt exclusion: `NoOpenAttempt` for unrelated work, plus the
   resource-lane-scoped independence witness that lets independent nodes advance while a node is parked
-  on a lane. Do not introduce global exclusion; it would change current scheduling semantics.
+  on a lane. The witness may conservatively park same-namespace side-effect nodes until concrete key
+  evidence exists or the lane releases. Do not introduce global exclusion; it would change current
+  scheduling semantics.
 - Keep existing behavior behind the old scheduler facade.
 
 ### Phase 3: Introduce Attempt Lifecycle Types
@@ -1161,7 +1166,7 @@ Add or identify tests for:
 
 - Detect open attempts from verified history.
 - Enforce the open-attempt exclusion rule from Phase 2 (`NoOpenAttempt` plus the resource-lane-scoped
-  independence witness).
+  independence witness, with conservative same-namespace parking before concrete key evidence).
 - Resume, terminalize, mark interrupted, or delegate to side-effect recovery based on certified
   state effect and recorded evidence.
 - Keep operational manual recovery separate from saga manual resolution.
@@ -1187,7 +1192,8 @@ Add or identify tests for:
 
 - Reduce `SerialTypedScheduler` to a public facade over context loading, transition dispatch, and
   lifecycle execution.
-- Delete duplicated sync/async orchestration paths where the shared lifecycle supports both.
+- Delete duplicated scheduler-owned recovery/transition authority. Full sync/async driver collapse is
+  deferred unless a lifecycle already has a shared IO-free core that can safely serve both callers.
 - Update runtime docs to describe the new lifecycle protocols.
 
 ## Verification
@@ -1258,17 +1264,19 @@ The following decisions define the first implementation direction:
   verified run history cannot be constructed, no transition, attempt, recovery, or semantic append
   API is reachable. These failures may be reported as redacted ingress/corruption diagnostics, but
   they do not enter the typed run stream.
-- Sync/async service collapse is not a goal. Lifecycle authority logic (frontier decision, attempt
-  planning, invocation build, output validation, recovery classification, commit planning) is IO-free
-  and shared; only the thin driver seam that loads the stream, awaits runners, stages artifacts, and
-  appends commits remains split sync/async. A later async-primary cleanup can drop the sync driver
-  without touching lifecycle semantics.
+- Sync/async service collapse is not a goal for this RFC. Lifecycle authority logic that has already
+  been factored into IO-free helpers (frontier decision, transition classification, recovery
+  classification, attempt-id/start planning, invocation build, output validation, commit planning)
+  remains shared. Existing sync/async driver loops may still duplicate the IO choreography that loads
+  streams, awaits runners, stages artifacts, and appends commits; removing that duplication is
+  deferred to a later async-primary cleanup that must not change lifecycle semantics.
 - Execution stays serial per run: one attempt is driven at a time, with the one preserved exception
   that a node parked on a cross-run resource lane is skipped so independent ready nodes advance
   (today's behavior). Open-attempt exclusion is `NoOpenAttempt` plus a resource-lane-scoped
-  independence witness, not global exclusion. Single-writer-per-run plus expected-seq commit
-  preconditions provide cross-driver safety; liveness is never inferred from the stream. Finer-grained
-  per-node parallelism is deferred.
+  independence witness, not global exclusion; before concrete key evidence exists for another
+  side-effect node, same-namespace work is conservatively parked rather than guessed independent.
+  Single-writer-per-run plus expected-seq commit preconditions provide cross-driver safety; liveness
+  is never inferred from the stream. Finer-grained per-node parallelism is deferred.
 
 ## Bottom Line
 

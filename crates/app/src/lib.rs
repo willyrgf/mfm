@@ -16,7 +16,7 @@
 //! let _services = make_in_memory_typed_services(runners, "/tmp/mfm-typed-artifacts");
 //! ```
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -131,6 +131,7 @@ impl From<mfm_runtime::RuntimeError> for AppError {
             | mfm_runtime::RuntimeError::Blocked(message)
             | mfm_runtime::RuntimeError::InputMaterialization(message)
             | mfm_runtime::RuntimeError::InvalidRunnerOutput(message)
+            | mfm_runtime::RuntimeError::RuntimeValidation(message)
             | mfm_runtime::RuntimeError::Identity(message)
             | mfm_runtime::RuntimeError::Canonical(message) => {
                 Self::new(ErrorClass::Internal, "LaunchRuntimeError", message)
@@ -932,9 +933,14 @@ where
 
     /// Returns typed run status by rebuilding projection from the authoritative run stream.
     pub async fn run_status(&self, run_id: &RunId) -> Result<TypedRunResponse, AppError> {
-        let stream = {
+        let (stream, projection) = {
             let store = self.store.lock().await;
-            store.load_run_stream(run_id)
+            let stream = store.load_run_stream(run_id);
+            let projection = status_projection_from_stream_with_resource_lanes(
+                &stream,
+                store.projection_snapshot(),
+            )?;
+            (stream, projection)
         };
         if stream.is_empty() {
             return Err(AppError::not_found(
@@ -950,7 +956,7 @@ where
         )
         .await?;
         verified_run_history_from_events(&self.artifacts, &runtime_spec, run_id, &stream).await?;
-        typed_run_status_from_stream(run_id, &runtime_spec, &stream)
+        typed_run_status_from_projection(run_id, &runtime_spec, &stream, &projection)
     }
 
     /// Returns the authoritative typed run stream.
@@ -1130,12 +1136,8 @@ where
         let status = self
             .drive_with_mode(&runtime_spec, &req.run_id, req.drive)
             .await?;
-        let stream = self
-            .store
-            .load_run_stream(&req.run_id)
-            .await
-            .map_err(async_app_store_error)?;
-        typed_run_response_from_stream(&req.run_id, &runtime_spec, &stream, status)
+        let (stream, projection) = self.status_stream_and_projection(&req.run_id).await?;
+        typed_run_response_from_projection(&req.run_id, &runtime_spec, &stream, &projection, status)
     }
 
     /// Resumes a certified typed run from its stored spec artifact.
@@ -1164,16 +1166,40 @@ where
         .await?;
         verified_run_history_from_events(&self.artifacts, &runtime_spec, run_id, &stream).await?;
         let status = self.drive_with_mode(&runtime_spec, run_id, drive).await?;
-        let stream = self
-            .store
-            .load_run_stream(run_id)
-            .await
-            .map_err(async_app_store_error)?;
-        typed_run_response_from_stream(run_id, &runtime_spec, &stream, status)
+        let (stream, projection) = self.status_stream_and_projection(run_id).await?;
+        typed_run_response_from_projection(run_id, &runtime_spec, &stream, &projection, status)
     }
 
     /// Returns typed run status by rebuilding projection from the authoritative run stream.
     pub async fn run_status(&self, run_id: &RunId) -> Result<TypedRunResponse, AppError> {
+        let (stream, projection) = self.status_stream_and_projection(run_id).await?;
+        if stream.is_empty() {
+            return Err(AppError::not_found(
+                "RunNotFound",
+                "typed run stream was not found",
+            ));
+        }
+        let runtime_spec = load_runtime_spec_for_run(
+            &self.artifacts,
+            &self.certification_registry,
+            run_id,
+            &stream,
+        )
+        .await?;
+        verified_run_history_from_events(&self.artifacts, &runtime_spec, run_id, &stream).await?;
+        typed_run_status_from_projection(run_id, &runtime_spec, &stream, &projection)
+    }
+
+    /// Returns typed run status using a caller-supplied store-owned projection snapshot.
+    ///
+    /// Durable stores that maintain cross-run resource lane projections should pass their current
+    /// projection snapshot. Run-local status is rebuilt from the verified target stream, and only
+    /// global resource-lane authority is copied from the supplied projection.
+    pub async fn run_status_with_projection(
+        &self,
+        run_id: &RunId,
+        projection: store::ProjectionSnapshot,
+    ) -> Result<TypedRunResponse, AppError> {
         let stream = self
             .store
             .load_run_stream(run_id)
@@ -1193,7 +1219,33 @@ where
         )
         .await?;
         verified_run_history_from_events(&self.artifacts, &runtime_spec, run_id, &stream).await?;
-        typed_run_status_from_stream(run_id, &runtime_spec, &stream)
+        let status_projection =
+            status_projection_from_stream_with_resource_lanes(&stream, &projection)?;
+        typed_run_status_from_projection(run_id, &runtime_spec, &stream, &status_projection)
+    }
+
+    async fn status_stream_and_projection(
+        &self,
+        run_id: &RunId,
+    ) -> Result<(Vec<store::KernelEventEnvelope>, store::ProjectionSnapshot), AppError> {
+        let stream = self
+            .store
+            .load_run_stream(run_id)
+            .await
+            .map_err(async_app_store_error)?;
+        if stream.is_empty() {
+            let projection =
+                store::ProjectionSnapshot::from_parts(store::ProjectionSnapshotParts::default())?;
+            return Ok((stream, projection));
+        }
+        let projection = self
+            .store
+            .status_projection_snapshot(run_id)
+            .await
+            .map_err(async_app_store_error)?;
+        let status_projection =
+            status_projection_from_stream_with_resource_lanes(&stream, &projection)?;
+        Ok((stream, status_projection))
     }
 
     /// Returns the authoritative typed run stream.
@@ -1891,6 +1943,38 @@ pub fn typed_run_status_from_stream(
     }
     let spec_hash = run_started_spec_hash(stream)?;
     let projection = store::ProjectionSnapshot::rebuild_from_run_stream(stream)?;
+    typed_run_status_from_projection_with_spec_hash(
+        run_id,
+        runtime_spec,
+        stream,
+        &projection,
+        &spec_hash,
+    )
+}
+
+fn typed_run_status_from_projection(
+    run_id: &RunId,
+    runtime_spec: &CertifiedRuntimeSpec,
+    stream: &[store::KernelEventEnvelope],
+    projection: &store::ProjectionSnapshot,
+) -> Result<TypedRunResponse, AppError> {
+    let spec_hash = run_started_spec_hash(stream)?;
+    typed_run_status_from_projection_with_spec_hash(
+        run_id,
+        runtime_spec,
+        stream,
+        projection,
+        &spec_hash,
+    )
+}
+
+fn typed_run_status_from_projection_with_spec_hash(
+    run_id: &RunId,
+    runtime_spec: &CertifiedRuntimeSpec,
+    stream: &[store::KernelEventEnvelope],
+    projection: &store::ProjectionSnapshot,
+    spec_hash: &SpecHash,
+) -> Result<TypedRunResponse, AppError> {
     let saga = projection.derive_saga_projection(run_id, &runtime_spec.spec().saga);
     Ok(TypedRunResponse {
         run_id: run_id.as_str().to_owned(),
@@ -2322,13 +2406,13 @@ fn validate_run_started_matches_spec(
     Ok(())
 }
 
-fn typed_run_response_from_stream(
+fn typed_run_response_from_projection(
     run_id: &RunId,
     runtime_spec: &CertifiedRuntimeSpec,
     stream: &[store::KernelEventEnvelope],
+    projection: &store::ProjectionSnapshot,
     status: SchedulerStatus,
 ) -> Result<TypedRunResponse, AppError> {
-    let projection = store::ProjectionSnapshot::rebuild_from_run_stream(stream)?;
     let saga = projection.derive_saga_projection(run_id, &runtime_spec.spec().saga);
     Ok(TypedRunResponse {
         run_id: run_id.as_str().to_owned(),
@@ -2348,7 +2432,76 @@ fn typed_run_response<S: store::TypedRunEventStore + ?Sized>(
     status: SchedulerStatus,
 ) -> Result<TypedRunResponse, AppError> {
     let stream = store.load_run_stream(run_id);
-    typed_run_response_from_stream(run_id, runtime_spec, &stream, status)
+    let projection =
+        status_projection_from_stream_with_resource_lanes(&stream, store.projection_snapshot())?;
+    typed_run_response_from_projection(run_id, runtime_spec, &stream, &projection, status)
+}
+
+fn status_projection_from_stream_with_resource_lanes(
+    stream: &[store::KernelEventEnvelope],
+    global_projection: &store::ProjectionSnapshot,
+) -> Result<store::ProjectionSnapshot, store::StoreError> {
+    let run_projection = store::ProjectionSnapshot::rebuild_from_run_stream(stream)?;
+    projection_with_resource_lanes(
+        &run_projection,
+        global_projection
+            .resource_lanes()
+            .map(|(lane_key, projection)| (lane_key.clone(), projection.clone()))
+            .collect(),
+    )
+}
+
+fn projection_with_resource_lanes(
+    snapshot: &store::ProjectionSnapshot,
+    resource_lanes: BTreeMap<store::ResourceLaneKey, store::ResourceLaneProjection>,
+) -> Result<store::ProjectionSnapshot, store::StoreError> {
+    store::ProjectionSnapshot::from_parts(store::ProjectionSnapshotParts {
+        run_states: snapshot
+            .run_states()
+            .map(|(run_id, state)| (run_id.clone(), *state))
+            .collect(),
+        saga_policy_digests: snapshot
+            .saga_policy_digests()
+            .map(|(run_id, digest)| (run_id.clone(), digest.clone()))
+            .collect(),
+        run_completions: snapshot
+            .run_completions()
+            .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
+            .collect(),
+        saga_engagements: snapshot
+            .saga_engagements()
+            .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
+            .collect(),
+        manual_resolutions: snapshot
+            .manual_resolutions()
+            .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
+            .collect(),
+        attempts: snapshot
+            .attempts()
+            .map(|(key, projection)| (key.clone(), projection.clone()))
+            .collect(),
+        cells: snapshot
+            .cells()
+            .map(|(cell_id, projection)| (cell_id.clone(), projection.clone()))
+            .collect(),
+        facts: snapshot
+            .facts()
+            .map(|(key, projection)| (key.clone(), projection.clone()))
+            .collect(),
+        side_effects: snapshot
+            .side_effects()
+            .map(|(ledger_ref, projection)| (ledger_ref.clone(), projection.clone()))
+            .collect(),
+        resource_lanes,
+        public_outputs: snapshot
+            .public_outputs()
+            .map(|(schema_id, projection)| (schema_id.clone(), projection.clone()))
+            .collect(),
+        retentions: snapshot
+            .retentions()
+            .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
+            .collect(),
+    })
 }
 
 fn stream_head(stream: &[store::KernelEventEnvelope]) -> u64 {
@@ -2424,15 +2577,19 @@ fn typed_saga_status_inner(
         obligations: saga
             .obligations
             .values()
-            .map(|obligation| typed_obligation_status(obligation, certified_spec, projection))
+            .map(|obligation| {
+                typed_obligation_status(&saga.run_id, obligation, certified_spec, projection)
+            })
             .collect(),
         resource_ledgers: match (certified_spec, projection) {
             (Some(certified_spec), Some(projection)) => {
-                typed_resource_ledgers(certified_spec, projection)
+                typed_resource_ledgers_for_run(certified_spec, projection, &saga.run_id)
             }
             _ => Vec::new(),
         },
-        resource_lanes: projection.map(typed_resource_lanes).unwrap_or_default(),
+        resource_lanes: projection
+            .map(|projection| typed_resource_lanes_for_run(projection, &saga.run_id))
+            .unwrap_or_default(),
         manual_block_reason: saga.manual_block_reason.map(manual_block_reason_str),
         required_manual_authorization: matches!(saga.run_mode, store::RunMode::ManualBlocked)
             .then(|| manual_authorization_for_policy(policy))
@@ -2525,12 +2682,15 @@ fn typed_manual_authorization_requirements(
 }
 
 fn typed_obligation_status(
+    run_id: &RunId,
     obligation: &store::SagaObligationProjection,
     certified_spec: Option<&spec::TypedExecutionSpec>,
     projection: Option<&store::ProjectionSnapshot>,
 ) -> TypedSagaObligationStatus {
     let forward_resource = projection
-        .and_then(|projection| projection.side_effect(&obligation.forward_ledger_key))
+        .and_then(|projection| {
+            projection.side_effect_for_run(run_id, &obligation.forward_ledger_key)
+        })
         .and_then(|side_effect| {
             typed_resource_ledger_status(certified_spec?, projection?, side_effect)
         });
@@ -2541,7 +2701,9 @@ fn typed_obligation_status(
         resource: forward_resource,
         remediation: obligation.remediation.as_ref().map(|remediation| {
             let remediation_resource = projection
-                .and_then(|projection| projection.side_effect(&remediation.ledger_key))
+                .and_then(|projection| {
+                    projection.side_effect_for_run(run_id, &remediation.ledger_key)
+                })
                 .and_then(|side_effect| {
                     typed_resource_ledger_status(certified_spec?, projection?, side_effect)
                 });
@@ -2572,28 +2734,33 @@ fn typed_resource_ledger_status(
         .resource_touched_set
         .as_ref()
         .map(typed_resource_touched_set_status);
-    let (active_lane, blocked_by_lane) = side_effect
-        .resource_key
-        .as_ref()
-        .and_then(|resource_key| {
-            let lane_key = store::ResourceLaneKey::from_evidence(resource_key);
-            projection
-                .resource_lane(&lane_key)
-                .map(|lane| (lane_key, lane))
-        })
-        .map(|(lane_key, lane)| {
-            let holder = typed_resource_lane_holder(&lane_key, lane);
-            let side_effect_ref = store::SideEffectLedgerRef::new(
-                side_effect.run_id.clone(),
-                side_effect.ledger_key.clone(),
-            );
-            if lane.holder == side_effect_ref {
-                (Some(holder), None)
-            } else {
-                (None, Some(holder))
-            }
-        })
-        .unwrap_or((None, None));
+    let (active_lane, blocked_by_lane) =
+        if side_effect_phase_has_live_resource_lane_interest(&side_effect.phase) {
+            side_effect
+                .resource_key
+                .as_ref()
+                .and_then(|resource_key| {
+                    let lane_key = store::ResourceLaneKey::from_evidence(resource_key);
+                    projection
+                        .resource_lane(&lane_key)
+                        .map(|lane| (lane_key, lane))
+                })
+                .map(|(lane_key, lane)| {
+                    let holder = typed_resource_lane_holder(&lane_key, lane);
+                    let side_effect_ref = store::SideEffectLedgerRef::new(
+                        side_effect.run_id.clone(),
+                        side_effect.ledger_key.clone(),
+                    );
+                    if lane.holder == side_effect_ref {
+                        (Some(holder), None)
+                    } else {
+                        (None, Some(holder))
+                    }
+                })
+                .unwrap_or((None, None))
+        } else {
+            (None, None)
+        };
     let (ledger_purpose, forward_ledger_key) =
         typed_ledger_purpose_status(&side_effect.ledger_purpose);
 
@@ -2610,25 +2777,59 @@ fn typed_resource_ledger_status(
     })
 }
 
-fn typed_resource_ledgers(
+fn typed_resource_ledgers_for_run(
     certified_spec: &spec::TypedExecutionSpec,
     projection: &store::ProjectionSnapshot,
+    run_id: &RunId,
 ) -> Vec<TypedResourceLedgerStatus> {
     projection
         .side_effects()
         .filter_map(|(_, side_effect)| {
-            typed_resource_ledger_status(certified_spec, projection, side_effect)
+            if &side_effect.run_id == run_id {
+                typed_resource_ledger_status(certified_spec, projection, side_effect)
+            } else {
+                None
+            }
         })
         .collect()
 }
 
-fn typed_resource_lanes(
+fn typed_resource_lanes_for_run(
     projection: &store::ProjectionSnapshot,
+    run_id: &RunId,
 ) -> Vec<TypedResourceLaneHolderStatus> {
+    let referenced_lane_keys = projection
+        .side_effects()
+        .filter_map(|(_, side_effect)| {
+            if &side_effect.run_id != run_id {
+                return None;
+            }
+            if !side_effect_phase_has_live_resource_lane_interest(&side_effect.phase) {
+                return None;
+            }
+            side_effect
+                .resource_key
+                .as_ref()
+                .map(store::ResourceLaneKey::from_evidence)
+        })
+        .collect::<BTreeSet<_>>();
+
     projection
         .resource_lanes()
+        .filter(|(lane_key, _lane)| referenced_lane_keys.contains(*lane_key))
         .map(|(lane_key, lane)| typed_resource_lane_holder(lane_key, lane))
         .collect()
+}
+
+fn side_effect_phase_has_live_resource_lane_interest(phase: &store::SideEffectPhase) -> bool {
+    matches!(
+        phase,
+        store::SideEffectPhase::InvocationPrepared { .. }
+            | store::SideEffectPhase::InvocationStarted { .. }
+            | store::SideEffectPhase::SubmissionObserved { .. }
+            | store::SideEffectPhase::SubmissionUnknown { .. }
+            | store::SideEffectPhase::ReceiptObserved { .. }
+    )
 }
 
 fn typed_resource_claim_status(claim: &spec::ResourceClaimSpec) -> TypedResourceClaimStatus {
@@ -3008,7 +3209,9 @@ mod tests {
 
     #[test]
     fn attempt_disposition_statuses_are_distinct_from_run_mode() {
+        let run = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xaf));
         let started = typed_attempt_disposition(&store::AttemptProjection {
+            run_id: run.clone(),
             node_id: node_id(0xb0),
             attempt_id: attempt_id(0xb1),
             event_id: EventId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xb2)),
@@ -3029,6 +3232,7 @@ mod tests {
         assert_eq!(started.retryable, None);
 
         let completed = typed_attempt_disposition(&store::AttemptProjection {
+            run_id: run.clone(),
             node_id: node_id(0xb3),
             attempt_id: attempt_id(0xb4),
             event_id: EventId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xb5)),
@@ -3043,6 +3247,7 @@ mod tests {
         );
 
         let failed = typed_attempt_disposition(&store::AttemptProjection {
+            run_id: run.clone(),
             node_id: node_id(0xb7),
             attempt_id: attempt_id(0xb8),
             event_id: EventId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xb9)),
@@ -3062,6 +3267,7 @@ mod tests {
         assert_eq!(failed.retryable, Some(false));
 
         let interrupted = typed_attempt_disposition(&store::AttemptProjection {
+            run_id: run,
             node_id: node_id(0xba),
             attempt_id: attempt_id(0xbb),
             event_id: EventId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xbc)),
@@ -3288,6 +3494,318 @@ mod tests {
         assert_eq!(lane.holding_node_id, node_id.as_str());
         assert_eq!(lane.holding_attempt_id, attempt_id.as_str());
         assert_eq!(lane.invocation_epoch, 1);
+    }
+
+    #[test]
+    fn public_status_json_filters_global_lanes_and_released_ledgers() {
+        let fixture = framework_seed_public_output_fixture();
+        let mut certified_spec = fixture.certified_spec.envelope().spec.clone();
+        let node = certified_spec
+            .nodes
+            .iter_mut()
+            .find(|node| node.node_id == fixture.value_node_id)
+            .expect("fixture value node");
+        let resource_namespace =
+            spec::ResourceNamespace::new("mfm.test.account_nonce").expect("namespace");
+        let resource_key = events::ResourceKeyEvidence {
+            namespace: resource_namespace.clone(),
+            key_schema_id: schema_id("mfm.test.resource_key", 0xd0),
+            key: events::ResourceKey::new("wallet-cross-run").expect("resource key"),
+        };
+        let unrelated_resource_key = events::ResourceKeyEvidence {
+            namespace: resource_namespace.clone(),
+            key_schema_id: schema_id("mfm.test.unrelated_resource_key", 0xe1),
+            key: events::ResourceKey::new("wallet-unrelated").expect("unrelated resource key"),
+        };
+        node.side_effect = Some(spec::SideEffectContractSpec {
+            contract_digest: content_digest(0xd1),
+            resource_claim: spec::ResourceClaimSpec::Exclusive {
+                namespace: resource_namespace,
+                key_schema: resource_key.key_schema_id.clone(),
+            },
+        });
+
+        let target_run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xd2));
+        let unrelated_run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xe2));
+        let target_ledger =
+            events::SideEffectLedgerKey::new("ledger-target").expect("target ledger");
+        let unrelated_ledger =
+            events::SideEffectLedgerKey::new("ledger-unrelated").expect("unrelated ledger");
+        let target_attempt = attempt_id(0xd4);
+        let unrelated_attempt = attempt_id(0xe3);
+        let lane_key = store::ResourceLaneKey::from_evidence(&resource_key);
+        let unrelated_lane_key = store::ResourceLaneKey::from_evidence(&unrelated_resource_key);
+        let claim_fencing_token =
+            events::side_effect::ClaimFencingToken::new("token-target").expect("token");
+        let side_effect = store::SideEffectProjection {
+            run_id: target_run_id.clone(),
+            ledger_key: target_ledger.clone(),
+            ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+            event_id: EventId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xd6)),
+            intent: store::SideEffectIntentProjection {
+                node_id: fixture.value_node_id.clone(),
+                attempt_id: target_attempt.clone(),
+                scope_id: scope_id(0xd7),
+                invocation_epoch: 1,
+                intent_schema_id: schema_id("mfm.test.intent", 0xd8),
+                intent_hash: content_digest(0xd9),
+                intent_artifact_id: artifact_id_for_digest(&content_digest(0xda)),
+                idempotency_input_schema_id: schema_id("mfm.test.idempotency", 0xdb),
+                idempotency_input_hash: content_digest(0xdc),
+                idempotency_key: events::IdempotencyKeyRef::new("idem-target").expect("idem"),
+                capability_kind: CapabilityKind::new(
+                    "mfm.test",
+                    "side_effect",
+                    DigestAlgorithm::Sha256JcsV1,
+                    digest(0xdd),
+                )
+                .expect("capability kind"),
+                capability_version: CapabilityVersion::new("mfm.test.side_effect.v1")
+                    .expect("capability version"),
+                adapter_kind: AdapterKind::new(
+                    "mfm.test",
+                    "adapter",
+                    DigestAlgorithm::Sha256JcsV1,
+                    digest(0xde),
+                )
+                .expect("adapter kind"),
+                adapter_version: AdapterVersion::new("mfm.test.adapter.v1")
+                    .expect("adapter version"),
+            },
+            prepared_invocation: None,
+            resource_key: Some(resource_key),
+            submission: None,
+            receipt: None,
+            confirmation: None,
+            resource_touched_set: None,
+            claim: Some(store::SideEffectClaimProjection {
+                node_id: fixture.value_node_id.clone(),
+                attempt_id: target_attempt.clone(),
+                claim_owner: events::RunnerInvocationId::new("owner-target").expect("owner"),
+                invocation_epoch: 1,
+                claim_generation: 1,
+                claim_fencing_token: claim_fencing_token.clone(),
+            }),
+            phase: store::SideEffectPhase::InvocationPrepared {
+                invocation_epoch: 1,
+                claim_generation: 1,
+                claim_fencing_token,
+            },
+        };
+        let projection = store::ProjectionSnapshot::from_parts(store::ProjectionSnapshotParts {
+            run_states: BTreeMap::from([(target_run_id.clone(), store::RunState::Started)]),
+            side_effects: BTreeMap::from([(
+                store::SideEffectLedgerRef::new(target_run_id.clone(), target_ledger.clone()),
+                side_effect.clone(),
+            )]),
+            resource_lanes: BTreeMap::from([
+                (
+                    lane_key.clone(),
+                    store::ResourceLaneProjection {
+                        event_id: EventId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xdf)),
+                        holder: store::SideEffectLedgerRef::new(
+                            target_run_id.clone(),
+                            target_ledger.clone(),
+                        ),
+                        ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                        node_id: fixture.value_node_id.clone(),
+                        attempt_id: target_attempt.clone(),
+                        invocation_epoch: 1,
+                    },
+                ),
+                (
+                    unrelated_lane_key,
+                    store::ResourceLaneProjection {
+                        event_id: EventId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xe4)),
+                        holder: store::SideEffectLedgerRef::new(unrelated_run_id, unrelated_ledger),
+                        ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                        node_id: node_id(0xe5),
+                        attempt_id: unrelated_attempt,
+                        invocation_epoch: 1,
+                    },
+                ),
+            ]),
+            ..store::ProjectionSnapshotParts::default()
+        })
+        .expect("projection snapshot");
+        let saga = projection.derive_saga_projection(&target_run_id, &certified_spec.saga);
+        let response = TypedRunResponse {
+            run_id: target_run_id.as_str().to_owned(),
+            spec_hash: fixture.certified_spec.spec_hash().as_str().to_owned(),
+            run_mode: typed_run_mode(saga.run_mode),
+            saga: typed_saga_status_with_resources(&certified_spec, &projection, &saga),
+            attempt_dispositions: Vec::new(),
+            scheduler_status: "blocked".to_owned(),
+            head_seq: 2,
+        };
+        let public_json = serde_json::to_value(response).expect("status json");
+        let ledger = public_json["saga"]["resource_ledgers"]
+            .as_array()
+            .expect("resource ledgers")
+            .iter()
+            .find(|ledger| ledger["ledger_key"] == target_ledger.as_str())
+            .expect("target ledger status");
+
+        assert_eq!(
+            ledger["active_lane"]["holding_run_id"],
+            target_run_id.as_str()
+        );
+        assert_eq!(
+            ledger["active_lane"]["holding_ledger_key"],
+            target_ledger.as_str()
+        );
+        assert_eq!(
+            ledger["active_lane"]["holding_attempt_id"],
+            target_attempt.as_str()
+        );
+        assert!(ledger["blocked_by_lane"].is_null());
+
+        let resource_lanes = public_json["saga"]["resource_lanes"]
+            .as_array()
+            .expect("resource lanes");
+        assert_eq!(resource_lanes.len(), 1);
+        assert_eq!(resource_lanes[0]["key"], "wallet-cross-run");
+        assert_eq!(resource_lanes[0]["holding_run_id"], target_run_id.as_str());
+        assert!(!resource_lanes
+            .iter()
+            .any(|lane| lane["key"] == "wallet-unrelated"));
+
+        let mut terminal_side_effect = side_effect;
+        terminal_side_effect.phase = store::SideEffectPhase::NotSubmittedProven {
+            invocation_epoch: 1,
+        };
+        let terminal_projection =
+            store::ProjectionSnapshot::from_parts(store::ProjectionSnapshotParts {
+                run_states: BTreeMap::from([(target_run_id.clone(), store::RunState::Started)]),
+                side_effects: BTreeMap::from([(
+                    store::SideEffectLedgerRef::new(target_run_id.clone(), target_ledger.clone()),
+                    terminal_side_effect,
+                )]),
+                resource_lanes: BTreeMap::from([(
+                    lane_key,
+                    store::ResourceLaneProjection {
+                        event_id: EventId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xe6)),
+                        holder: store::SideEffectLedgerRef::new(
+                            target_run_id.clone(),
+                            target_ledger.clone(),
+                        ),
+                        ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                        node_id: fixture.value_node_id.clone(),
+                        attempt_id: target_attempt,
+                        invocation_epoch: 1,
+                    },
+                )]),
+                ..store::ProjectionSnapshotParts::default()
+            })
+            .expect("terminal projection snapshot");
+        let terminal_saga =
+            terminal_projection.derive_saga_projection(&target_run_id, &certified_spec.saga);
+        let terminal_response = TypedRunResponse {
+            run_id: target_run_id.as_str().to_owned(),
+            spec_hash: fixture.certified_spec.spec_hash().as_str().to_owned(),
+            run_mode: typed_run_mode(terminal_saga.run_mode),
+            saga: typed_saga_status_with_resources(
+                &certified_spec,
+                &terminal_projection,
+                &terminal_saga,
+            ),
+            attempt_dispositions: Vec::new(),
+            scheduler_status: "blocked".to_owned(),
+            head_seq: 3,
+        };
+        let terminal_json = serde_json::to_value(terminal_response).expect("terminal status json");
+        let terminal_ledger = terminal_json["saga"]["resource_ledgers"]
+            .as_array()
+            .expect("terminal resource ledgers")
+            .iter()
+            .find(|ledger| ledger["ledger_key"] == target_ledger.as_str())
+            .expect("terminal target ledger status");
+        assert!(terminal_ledger["active_lane"].is_null());
+        assert!(terminal_ledger["blocked_by_lane"].is_null());
+        assert!(terminal_json["saga"]["resource_lanes"]
+            .as_array()
+            .expect("terminal resource lanes")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn async_status_with_projection_filters_unreferenced_global_resource_lanes() {
+        let (root, fixture, services, _started) =
+            start_framework_fixture_run_with_drive(DriveMode::AppendOnly, "status-lanes").await;
+        let resource_namespace =
+            spec::ResourceNamespace::new("mfm.test.account_nonce").expect("namespace");
+        let target_resource_key = events::ResourceKeyEvidence {
+            namespace: resource_namespace.clone(),
+            key_schema_id: schema_id("mfm.test.resource_key", 0xe8),
+            key: events::ResourceKey::new("wallet-target-owned").expect("target resource key"),
+        };
+        let unrelated_resource_key = events::ResourceKeyEvidence {
+            namespace: resource_namespace,
+            key_schema_id: schema_id("mfm.test.unrelated_resource_key", 0xe9),
+            key: events::ResourceKey::new("wallet-service-unrelated")
+                .expect("unrelated resource key"),
+        };
+        let target_lane_key = store::ResourceLaneKey::from_evidence(&target_resource_key);
+        let unrelated_lane_key = store::ResourceLaneKey::from_evidence(&unrelated_resource_key);
+        let target_ledger =
+            events::SideEffectLedgerKey::new("ledger-service-target").expect("target ledger");
+        let unrelated_ledger =
+            events::SideEffectLedgerKey::new("ledger-service-unrelated").expect("unrelated ledger");
+        let unrelated_run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xea));
+
+        let stream = services
+            .store()
+            .load_run_stream(&fixture.run_id)
+            .await
+            .expect("load stream");
+        let run_projection =
+            store::ProjectionSnapshot::rebuild_from_run_stream(&stream).expect("run projection");
+        let projection = projection_with_resource_lanes(
+            &run_projection,
+            BTreeMap::from([
+                (
+                    target_lane_key,
+                    store::ResourceLaneProjection {
+                        event_id: EventId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xeb)),
+                        holder: store::SideEffectLedgerRef::new(
+                            fixture.run_id.clone(),
+                            target_ledger.clone(),
+                        ),
+                        ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                        node_id: fixture.value_node_id.clone(),
+                        attempt_id: attempt_id(0xec),
+                        invocation_epoch: 1,
+                    },
+                ),
+                (
+                    unrelated_lane_key,
+                    store::ResourceLaneProjection {
+                        event_id: EventId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xed)),
+                        holder: store::SideEffectLedgerRef::new(unrelated_run_id, unrelated_ledger),
+                        ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                        node_id: node_id(0xee),
+                        attempt_id: attempt_id(0xef),
+                        invocation_epoch: 1,
+                    },
+                ),
+            ]),
+        )
+        .expect("status projection with global lanes");
+
+        let status = services
+            .run_status_with_projection(&fixture.run_id, projection)
+            .await
+            .expect("status with supplied projection");
+        let public_json = serde_json::to_value(status).expect("status json");
+        let resource_lanes = public_json["saga"]["resource_lanes"]
+            .as_array()
+            .expect("resource lanes");
+        assert!(resource_lanes.is_empty());
+        assert!(!resource_lanes
+            .iter()
+            .any(|lane| lane["key"] == "wallet-service-unrelated"));
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -3544,6 +4062,104 @@ mod tests {
             event.logical_key.starts_with("retention:")
                 && event.logical_key.ends_with(":manifest:1")
         }));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn async_status_reports_interrupted_attempt_and_framework_attempts_from_history() {
+        let (root, fixture, services, started) =
+            start_framework_fixture_run_with_drive(DriveMode::AppendOnly, "interrupted").await;
+        assert_eq!(started.run_mode, TypedRunMode::Forward);
+
+        let spec = &fixture.certified_spec.envelope().spec;
+        let node = spec
+            .nodes
+            .iter()
+            .find(|node| node.node_id == fixture.value_node_id)
+            .expect("fixture value node");
+        let interrupted_attempt_id = attempt_id(0xe1);
+        append_interrupted_attempt(
+            services.store(),
+            &fixture.run_id,
+            fixture.certified_spec.spec_hash(),
+            node,
+            &interrupted_attempt_id,
+        )
+        .await;
+
+        let resumed = services
+            .resume_stored_run(&fixture.run_id, DriveMode::UntilBlocked)
+            .await
+            .expect("resume after interrupted attempt");
+        assert_eq!(resumed.run_mode, TypedRunMode::Completed);
+
+        let status = services
+            .run_status(&fixture.run_id)
+            .await
+            .expect("status after resume");
+        let public_json = serde_json::to_value(&status).expect("status json");
+        assert_ne!(public_json["run_mode"], "interrupted");
+        let attempts = public_json["attempt_dispositions"]
+            .as_array()
+            .expect("attempt dispositions");
+        let interrupted = attempts
+            .iter()
+            .find(|attempt| {
+                attempt["attempt_id"] == interrupted_attempt_id.as_str()
+                    && attempt["disposition"] == "interrupted"
+            })
+            .expect("interrupted disposition");
+        assert!(interrupted["retryable"].is_null());
+
+        let completed_framework_kinds = spec
+            .nodes
+            .iter()
+            .filter(|node| {
+                attempts.iter().any(|attempt| {
+                    attempt["node_id"] == node.node_id.as_str()
+                        && attempt["disposition"] == "completed"
+                })
+            })
+            .filter_map(|node| match &node.framework {
+                Some(spec::FrameworkNodeSpec::PublicOutputRender(_)) => {
+                    Some("public_output_render")
+                }
+                Some(spec::FrameworkNodeSpec::ProjectRetentionManifest(_)) => {
+                    Some("project_retention_manifest")
+                }
+                Some(spec::FrameworkNodeSpec::CompleteRun(_)) => Some("complete_run"),
+                Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_)) => {
+                    Some("resolve_saga_terminal")
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            completed_framework_kinds.contains(&"public_output_render"),
+            "missing completed public-output render framework attempt"
+        );
+        assert!(
+            completed_framework_kinds.contains(&"project_retention_manifest"),
+            "missing completed retention framework attempt"
+        );
+        assert!(
+            completed_framework_kinds.contains(&"complete_run"),
+            "missing completed complete-run framework attempt"
+        );
+
+        let stream = services
+            .run_stream(&fixture.run_id)
+            .await
+            .expect("public run stream after resume");
+        let stream_json = serde_json::to_value(&stream).expect("stream json");
+        let stream_events = stream_json["events"].as_array().expect("stream events");
+        assert_framework_started_before_terminal_evidence(
+            stream_events,
+            attempts,
+            &spec.nodes,
+            &fixture.run_id,
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -4326,10 +4942,20 @@ mod tests {
         AsyncRunServices<AsyncInMemoryStore>,
         TypedRunResponse,
     ) {
-        let root = std::env::temp_dir().join(format!(
-            "mfm-app-async-framework-run-{}",
-            uuid::Uuid::new_v4()
-        ));
+        start_framework_fixture_run_with_drive(DriveMode::UntilBlocked, "framework-run").await
+    }
+
+    async fn start_framework_fixture_run_with_drive(
+        drive: DriveMode,
+        label: &str,
+    ) -> (
+        PathBuf,
+        FrameworkSeedPublicOutputFixture,
+        AsyncRunServices<AsyncInMemoryStore>,
+        TypedRunResponse,
+    ) {
+        let root =
+            std::env::temp_dir().join(format!("mfm-app-async-{label}-{}", uuid::Uuid::new_v4()));
         let artifacts = FsTypedArtifactStore::new(&root);
         let fixture = framework_seed_public_output_fixture();
         let config_inputs = config_inputs_for_fixture(&fixture);
@@ -4356,7 +4982,7 @@ mod tests {
                 run_id: fixture.run_id.clone(),
                 framework_version: "mfm.test.framework",
                 source_revision: "test-source",
-                drive: DriveMode::UntilBlocked,
+                drive,
             },
             config_inputs,
             vec![RunLaunchSeedArtifact {
@@ -4376,6 +5002,195 @@ mod tests {
 
         let started = services.launch_run(request).await.expect("start typed run");
         (root, fixture, services, started)
+    }
+
+    async fn append_interrupted_attempt(
+        store: &AsyncInMemoryStore,
+        run_id: &RunId,
+        spec_hash: &SpecHash,
+        node: &spec::NodeSpec,
+        attempt_id: &AttemptId,
+    ) {
+        let start = store::TypedCommitRequest::from_payloads(
+            run_id.clone(),
+            store
+                .expected_next_seq(run_id)
+                .await
+                .expect("expected next seq"),
+            store::CommitKey::new("test-interrupted-attempt-start").expect("commit key"),
+            vec![events::KernelEventPayload::StateAttemptStarted(
+                events::StateAttemptStarted {
+                    spec_hash: spec_hash.clone(),
+                    node_id: node.node_id.clone(),
+                    attempt_id: attempt_id.clone(),
+                    attempt_no: 1,
+                    state_kind: node.state_kind.clone(),
+                    state_version: node.state_version.clone(),
+                },
+            )],
+            Vec::new(),
+            store::CommitPreconditions {
+                required_run_state: store::RequiredRunState::NotCompleted,
+                required_cell_states: vec![store::CellStatePrecondition {
+                    cell_id: node.output_cell.clone(),
+                    required: store::RequiredCellState::Absent,
+                }],
+                ..store::CommitPreconditions::default()
+            },
+        )
+        .expect("attempt start request");
+        append_async_test_commit(store, start).await;
+
+        let interrupted = store::TypedCommitRequest::from_payloads(
+            run_id.clone(),
+            store
+                .expected_next_seq(run_id)
+                .await
+                .expect("expected next seq"),
+            store::CommitKey::new("test-interrupted-attempt-terminal").expect("commit key"),
+            vec![events::KernelEventPayload::StateAttemptInterrupted(
+                events::StateAttemptInterrupted {
+                    spec_hash: spec_hash.clone(),
+                    node_id: node.node_id.clone(),
+                    attempt_id: attempt_id.clone(),
+                },
+            )],
+            Vec::new(),
+            store::CommitPreconditions {
+                required_run_state: store::RequiredRunState::NotCompleted,
+                required_cell_states: vec![store::CellStatePrecondition {
+                    cell_id: node.output_cell.clone(),
+                    required: store::RequiredCellState::Absent,
+                }],
+                ..store::CommitPreconditions::default()
+            },
+        )
+        .expect("attempt interrupted request");
+        append_async_test_commit(store, interrupted).await;
+    }
+
+    fn assert_framework_started_before_terminal_evidence(
+        stream_events: &[serde_json::Value],
+        attempts: &[serde_json::Value],
+        nodes: &[spec::NodeSpec],
+        run_id: &RunId,
+    ) {
+        for node in nodes.iter().filter(|node| node.framework.is_some()) {
+            let required_kind = match &node.framework {
+                Some(spec::FrameworkNodeSpec::PublicOutputRender(_)) => "public_output_render",
+                Some(spec::FrameworkNodeSpec::ProjectRetentionManifest(_)) => {
+                    "project_retention_manifest"
+                }
+                Some(spec::FrameworkNodeSpec::CompleteRun(_)) => "complete_run",
+                _ => continue,
+            };
+            let attempt = attempts
+                .iter()
+                .find(|attempt| {
+                    attempt["node_id"].as_str() == Some(node.node_id.as_str())
+                        && attempt["disposition"].as_str() == Some("completed")
+                })
+                .unwrap_or_else(|| {
+                    panic!(
+                        "missing completed {required_kind} framework attempt for {}",
+                        node.node_id
+                    )
+                });
+            let attempt_id = attempt["attempt_id"].as_str().expect("attempt id");
+            let attempt_key = format!("attempt:{}:{}", node.node_id, attempt_id);
+            let start_index = stream_event_position(
+                stream_events,
+                |event| {
+                    event["logical_key"].as_str() == Some(attempt_key.as_str())
+                        && event["event_schema_id"]
+                            .as_str()
+                            .is_some_and(|schema| schema.contains("state_attempt_started"))
+                },
+                &format!("framework start {attempt_key}"),
+            );
+            let completed_index = stream_event_position(
+                stream_events,
+                |event| {
+                    event["logical_key"].as_str() == Some(attempt_key.as_str())
+                        && event["event_schema_id"]
+                            .as_str()
+                            .is_some_and(|schema| schema.contains("state_attempt_completed"))
+                },
+                &format!("framework completion {attempt_key}"),
+            );
+            assert!(
+                start_index < completed_index,
+                "framework StateAttemptStarted must precede StateAttemptCompleted for {attempt_key}"
+            );
+
+            match &node.framework {
+                Some(spec::FrameworkNodeSpec::PublicOutputRender(_)) => {
+                    let public_output_index = stream_event_position(
+                        stream_events,
+                        |event| {
+                            event["logical_key"]
+                                .as_str()
+                                .is_some_and(|key| key.starts_with("public_output:"))
+                                && event["event_schema_id"]
+                                    .as_str()
+                                    .is_some_and(|schema| schema.contains("public_output_produced"))
+                        },
+                        "public-output terminal evidence",
+                    );
+                    assert!(
+                        start_index < public_output_index,
+                        "public-output framework start must precede public output evidence"
+                    );
+                }
+                Some(spec::FrameworkNodeSpec::ProjectRetentionManifest(_)) => {
+                    let retention_prefix = format!("retention:{}:manifest:", run_id);
+                    let retention_index = stream_event_position(
+                        stream_events,
+                        |event| {
+                            event["logical_key"]
+                                .as_str()
+                                .is_some_and(|key| key.starts_with(&retention_prefix))
+                                && event["event_schema_id"].as_str().is_some_and(|schema| {
+                                    schema.contains("retention_manifest_projected")
+                                })
+                        },
+                        "retention manifest terminal evidence",
+                    );
+                    assert!(
+                        start_index < retention_index,
+                        "retention framework start must precede retention manifest evidence"
+                    );
+                }
+                Some(spec::FrameworkNodeSpec::CompleteRun(_)) => {
+                    let completed_run_index = stream_event_position(
+                        stream_events,
+                        |event| {
+                            event["logical_key"].as_str() == Some("run:complete")
+                                && event["event_schema_id"]
+                                    .as_str()
+                                    .is_some_and(|schema| schema.contains("run_completed"))
+                        },
+                        "run completion terminal evidence",
+                    );
+                    assert!(
+                        start_index < completed_run_index,
+                        "complete-run framework start must precede run completion evidence"
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn stream_event_position(
+        events: &[serde_json::Value],
+        predicate: impl Fn(&serde_json::Value) -> bool,
+        label: &str,
+    ) -> usize {
+        events
+            .iter()
+            .position(predicate)
+            .unwrap_or_else(|| panic!("missing stream event for {label}"))
     }
 
     async fn start_sync_framework_fixture_run() -> (
@@ -4852,6 +5667,16 @@ mod tests {
         ) -> store::AsyncStoreFuture<'a, store::StreamSeq, Self::Error> {
             Box::pin(std::future::ready(Ok(store::StreamSeq::FIRST)))
         }
+
+        fn status_projection_snapshot<'a>(
+            &'a self,
+            run_id: &'a RunId,
+        ) -> store::AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
+            Box::pin(async move {
+                let stream = self.load_run_stream(run_id).await?;
+                store::ProjectionSnapshot::rebuild_from_run_stream(&stream)
+            })
+        }
     }
 
     #[derive(Default)]
@@ -4886,6 +5711,25 @@ mod tests {
         ) -> store::AsyncStoreFuture<'a, store::StreamSeq, Self::Error> {
             let result = Ok(self.0.lock().expect("store lock").expected_next_seq(run_id));
             Box::pin(std::future::ready(result))
+        }
+
+        fn status_projection_snapshot<'a>(
+            &'a self,
+            run_id: &'a RunId,
+        ) -> store::AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
+            Box::pin(async move {
+                let store = self.0.lock().expect("store lock");
+                let stream = store.load_run_stream(run_id);
+                let run_projection = store::ProjectionSnapshot::rebuild_from_run_stream(&stream)?;
+                projection_with_resource_lanes(
+                    &run_projection,
+                    store
+                        .projection_snapshot()
+                        .resource_lanes()
+                        .map(|(lane_key, projection)| (lane_key.clone(), projection.clone()))
+                        .collect(),
+                )
+            })
         }
     }
 
@@ -5149,6 +5993,19 @@ mod tests {
             .expect("prepared typed commit");
         store
             .append_prepared_typed_commit(commit)
+            .expect("append prepared typed commit");
+    }
+
+    async fn append_async_test_commit(
+        store: &AsyncInMemoryStore,
+        request: store::TypedCommitRequest,
+    ) {
+        let admitted_artifacts = request.required_artifacts().to_vec();
+        let commit = store::PreparedTypedCommit::new(request, admitted_artifacts)
+            .expect("prepared typed commit");
+        store
+            .append_prepared_typed_commit(commit)
+            .await
             .expect("append prepared typed commit");
     }
 

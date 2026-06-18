@@ -3270,36 +3270,25 @@ pub mod v1 {
 
         #[test]
         fn replay_construction_rejects_manual_resolution_schema_mismatch() {
-            let evidence_schema = schema("mfm.test.manual_evidence", 0x91);
-            let fixture = Fixture::with_saga_policy(spec::SagaPolicySpec::ManualResolution {
-                manual: spec::ManualResolutionEvidenceSpec {
-                    evidence_schema: evidence_schema.clone(),
-                    authorization: manual_authorization(0x90),
+            let signed = signed_manual_resolution_case(
+                |_| {},
+                |_| {},
+                |event| {
+                    event.evidence_schema_id = schema("mfm.test.wrong_manual_evidence", 0x92);
                 },
-            });
-            let mut stream = fixture.stream.clone();
-            let run_id = stream[0].run_id().clone();
-            append_payload_to_stream(
-                &mut stream,
-                "bad-manual-resolution",
-                KernelEventPayload::ManualResolutionRecorded(events::ManualResolutionRecorded {
-                    run_id,
-                    spec_hash: fixture.envelope.spec_hash.clone(),
-                    outcome: events::ManualResolutionOutcome::ConfirmRemediated,
-                    evidence_schema_id: schema("mfm.test.wrong_manual_evidence", 0x92),
-                    evidence_hash: content(0x95),
-                    evidence_artifact_id: artifact(0x96),
-                    authorization_schema_id: schema("mfm.test.manual_authorization", 0x97),
-                    authorization_hash: content(0x98),
-                    authorization_artifact_id: artifact(0x99),
-                    note: None,
-                }),
+                |_, _| {},
             );
 
             assert_eq!(
-                ReplayBroker::from_validated_parts(fixture.authority_for_stream(&stream))
-                    .expect_err("manual schema mismatch")
-                    .kind,
+                ReplayBroker::from_validated_parts(
+                    signed.fixture.authority_for_stream_artifacts_and_bytes(
+                        &signed.stream,
+                        signed.artifacts,
+                        signed.artifact_bytes,
+                    ),
+                )
+                .expect_err("manual schema mismatch")
+                .kind,
                 ReplayErrorKind::CertifiedEvidenceMismatch
             );
         }
@@ -3315,6 +3304,15 @@ pub mod v1 {
             });
             let mut stream = fixture.stream.clone();
             let run_id = stream[0].run_id().clone();
+            append_payload_to_stream(
+                &mut stream,
+                "interrupted-before-manual-resolution",
+                KernelEventPayload::StateAttemptInterrupted(events::StateAttemptInterrupted {
+                    spec_hash: fixture.envelope.spec_hash.clone(),
+                    node_id: fixture.node_id.clone(),
+                    attempt_id: fixture.attempt_id.clone(),
+                }),
+            );
             append_payload_to_stream(
                 &mut stream,
                 "forged-manual-resolution",
@@ -3336,7 +3334,7 @@ pub mod v1 {
                 ReplayBroker::from_validated_parts(fixture.authority_for_stream(&stream))
                     .expect_err("manual resolution before manual-blocked")
                     .kind,
-                ReplayErrorKind::CertifiedEvidenceMismatch
+                ReplayErrorKind::InvalidRunStream
             );
         }
 
@@ -3356,6 +3354,55 @@ pub mod v1 {
                 .projection_snapshot()
                 .derive_saga_projection(&signed.run_id, &signed.fixture.envelope.spec.saga);
             assert_eq!(saga.run_mode, store::RunMode::ManuallyResolved);
+        }
+
+        #[test]
+        fn replay_construction_rejects_manual_resolution_with_open_attempt_prefix() {
+            let open_attempt_id = attempt(0xe0);
+            let mut signed = signed_manual_resolution_case_with_prefix_edit(
+                |stream, fixture| {
+                    let node = &fixture.envelope.spec.nodes[0];
+                    append_payload_to_stream(
+                        stream,
+                        "manual-prefix-open-attempt",
+                        KernelEventPayload::StateAttemptStarted(events::StateAttemptStarted {
+                            spec_hash: fixture.envelope.spec_hash.clone(),
+                            node_id: fixture.node_id.clone(),
+                            attempt_id: open_attempt_id.clone(),
+                            attempt_no: 2,
+                            state_kind: node.state_kind.clone(),
+                            state_version: node.state_version.clone(),
+                        }),
+                    );
+                },
+                |_| {},
+                |_| {},
+                |_| {},
+                |_| {},
+                |_, _| {},
+            );
+            append_payload_to_stream(
+                &mut signed.stream,
+                "manual-prefix-open-attempt-terminal",
+                KernelEventPayload::StateAttemptInterrupted(events::StateAttemptInterrupted {
+                    spec_hash: signed.fixture.envelope.spec_hash.clone(),
+                    node_id: signed.fixture.node_id.clone(),
+                    attempt_id: open_attempt_id,
+                }),
+            );
+
+            let error = ReplayBroker::from_validated_parts(
+                signed.fixture.authority_for_stream_artifacts_and_bytes(
+                    &signed.stream,
+                    signed.artifacts,
+                    signed.artifact_bytes,
+                ),
+            )
+            .expect_err("manual resolution with open attempt prefix rejects");
+            assert!(
+                error.message.contains("requires no open semantic attempts"),
+                "{error}"
+            );
         }
 
         #[test]
@@ -3845,6 +3892,27 @@ pub mod v1 {
                 &mut Vec<ReplayArtifactBytes>,
             ),
         ) -> SignedManualResolutionCase {
+            signed_manual_resolution_case_with_prefix_edit(
+                |_, _| {},
+                edit_claim,
+                edit_signature,
+                edit_proof,
+                edit_event,
+                edit_materials,
+            )
+        }
+
+        fn signed_manual_resolution_case_with_prefix_edit(
+            edit_prefix: impl FnOnce(&mut Vec<KernelEventEnvelope>, &Fixture),
+            edit_claim: impl FnOnce(&mut ManualResolutionAuthorizationClaim),
+            edit_signature: impl FnOnce(&mut Vec<u8>),
+            edit_proof: impl FnOnce(&mut ManualResolutionAuthorizationProof),
+            edit_event: impl FnOnce(&mut events::ManualResolutionRecorded),
+            edit_materials: impl FnOnce(
+                &mut Vec<StoredArtifactEvidenceRef>,
+                &mut Vec<ReplayArtifactBytes>,
+            ),
+        ) -> SignedManualResolutionCase {
             let signing_key = test_manual_signing_key();
             let operator_public_identity = "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf".to_owned();
             let evidence_schema = schema("mfm.test.manual_evidence", 0xd0);
@@ -3870,6 +3938,7 @@ pub mod v1 {
                     error: test_error(false),
                 }),
             );
+            edit_prefix(&mut stream, &fixture);
             let prefix_projection =
                 ProjectionSnapshot::rebuild_from_run_stream(&stream).expect("prefix projection");
             let prefix_saga =
