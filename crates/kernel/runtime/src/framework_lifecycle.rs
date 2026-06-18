@@ -124,13 +124,7 @@ impl<'a> FrameworkAttemptLifecycle<'a> {
         if let Err(error) =
             stage_prepared_artifacts(self.artifact_store, &terminal_output.artifacts_to_stage).await
         {
-            return terminalize_observed_failure(
-                self.artifact_store,
-                store,
-                failure_context,
-                error,
-            )
-            .await;
+            return Err(error);
         }
         match store.append_prepared_commit_plan(terminal_output.commit) {
             Ok(_) => Ok(AttemptRunStatus::Advanced),
@@ -222,13 +216,7 @@ impl<'a> FrameworkAttemptLifecycle<'a> {
         if let Err(error) =
             stage_prepared_artifacts(self.artifact_store, &terminal_output.artifacts_to_stage).await
         {
-            return terminalize_observed_failure_async(
-                self.artifact_store,
-                store,
-                failure_context,
-                error,
-            )
-            .await;
+            return Err(error);
         }
         match store
             .append_prepared_commit_plan(terminal_output.commit)

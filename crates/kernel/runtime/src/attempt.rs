@@ -506,14 +506,6 @@ fn observed_attempt_failure_info(error: &RuntimeError) -> Result<Option<events::
             public_details: None,
             diagnostic_ref: None,
         },
-        RuntimeError::Store(_) => events::MfmErrorInfo {
-            code: events::ErrorCode::new("runtime_store_failure")?,
-            category: events::ErrorCategory::Storage,
-            retryable: false,
-            safe_message: "runtime storage failed while handling attempt".to_owned(),
-            public_details: None,
-            diagnostic_ref: None,
-        },
         _ => return Ok(None),
     };
     Ok(Some(failure))

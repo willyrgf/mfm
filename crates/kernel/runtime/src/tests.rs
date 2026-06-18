@@ -1300,7 +1300,7 @@ async fn runtime_rejects_run_start_without_bootstrap_attempt() {
 }
 
 #[tokio::test]
-async fn public_output_receipt_staging_failure_terminalizes_attempt() {
+async fn public_output_receipt_staging_failure_leaves_open_attempt() {
     let fixture = fixture();
     let scheduler = test_scheduler_with_stager(
         registered_fixture_runners(&fixture),
@@ -1326,12 +1326,17 @@ async fn public_output_receipt_staging_failure_terminalizes_attempt() {
         .await
         .expect("drive b");
 
-    assert_eq!(
+    let stream_len_before = store.load_run_stream(&fixture.run_id).len();
+    assert!(matches!(
         scheduler
             .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("render staging failure terminalizes"),
-        SchedulerStatus::Advanced
+            .await,
+        Err(RuntimeError::Store(message))
+            if message.contains("test node state-output staging failure")
+    ));
+    assert_eq!(
+        store.load_run_stream(&fixture.run_id).len(),
+        stream_len_before + 1
     );
     assert!(store
         .projection_snapshot()
@@ -1343,7 +1348,21 @@ async fn public_output_receipt_staging_failure_terminalizes_attempt() {
             events::KernelEventPayload::PublicOutputProduced(_)
         )
     }));
-    assert_node_failed_with_code(&store, &fixture.render_node, "runtime_store_failure");
+    let render_attempt = attempt_id(
+        &fixture.run_id,
+        fixture.runtime_spec.spec_hash(),
+        &fixture.render_node,
+        1,
+    )
+    .expect("render attempt id");
+    assert!(matches!(
+        store
+            .projection_snapshot()
+            .attempt(&fixture.render_node, &render_attempt)
+            .expect("open render attempt")
+            .status,
+        store::AttemptStatus::Started { .. }
+    ));
 }
 
 #[tokio::test]
@@ -5779,7 +5798,7 @@ async fn runtime_resolves_manual_resolution_terminal() {
 }
 
 #[tokio::test]
-async fn runtime_terminalizes_missing_manual_terminal_authorization_artifact() {
+async fn runtime_missing_manual_terminal_authorization_artifact_leaves_open_attempt() {
     let fixture = fixture_with_manual_resolution_side_effect_state();
     let mut registry = ErasedRunnerRegistry::new();
     registry
@@ -5844,14 +5863,6 @@ async fn runtime_terminalizes_missing_manual_terminal_authorization_artifact() {
         .expect("authorization artifact was staged");
     let stream_len_before = store.load_run_stream(&fixture.run_id).len();
 
-    assert_eq!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("terminalize missing retained authorization artifact"),
-        SchedulerStatus::Advanced
-    );
-    assert!(store.load_run_stream(&fixture.run_id).len() > stream_len_before);
     let resolve_node = fixture
         .runtime_spec
         .spec()
@@ -5864,7 +5875,31 @@ async fn runtime_terminalizes_missing_manual_terminal_authorization_artifact() {
             )
         })
         .expect("resolve saga terminal node");
-    assert_node_failed_with_code(&store, &resolve_node.node_id, "runtime_store_failure");
+    assert!(matches!(
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await,
+        Err(RuntimeError::Store(message)) if message.contains("missing artifact")
+    ));
+    assert_eq!(
+        store.load_run_stream(&fixture.run_id).len(),
+        stream_len_before + 1
+    );
+    let resolve_attempt = attempt_id(
+        &fixture.run_id,
+        fixture.runtime_spec.spec_hash(),
+        &resolve_node.node_id,
+        1,
+    )
+    .expect("resolve attempt id");
+    assert!(matches!(
+        store
+            .projection_snapshot()
+            .attempt(&resolve_node.node_id, &resolve_attempt)
+            .expect("open resolve attempt")
+            .status,
+        store::AttemptStatus::Started { .. }
+    ));
     assert!(store
         .projection_snapshot()
         .run_completion(&fixture.run_id)

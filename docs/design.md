@@ -368,15 +368,15 @@ construct live capabilities, or call runners.
 For a new ordinary runnable node attempt, runtime first appends `StateAttemptStarted` from
 certified attempt authority. It then materializes state inputs from certified binding trees and
 prior typed cell evidence, checks runner identity and capability availability, and constructs a
-sealed runner invocation. If post-start materialization, runner-output validation, runtime
-validation, or storage/artifact staging fails inside a valid started attempt and no side-effect
-authority has been acquired, runtime stages a redacted diagnostic artifact and records a
-non-retryable `StateAttemptFailed` plus runtime-evidence retention from minimal trusted attempt
-authority. Corrupt history before a valid attempt context, missing deployment bindings, and
-side-effect attempts with acquired ledger authority remain non-semantic runtime or recovery
-concerns. Runners receive only scoped typed inputs, allowed capabilities, and erased context
-surfaces. They return typed payload intent, staged artifacts, side-effect evidence, or sealed
-handles but cannot append to the run stream.
+sealed runner invocation. If post-start materialization, runner-output validation, or runtime
+validation fails inside a valid started attempt and no side-effect authority has been acquired,
+runtime stages a redacted diagnostic artifact and records a non-retryable `StateAttemptFailed` plus
+runtime-evidence retention from minimal trusted attempt authority. Corrupt history before a valid
+attempt context, missing deployment bindings, storage/artifact outages before terminal evidence
+commits, and side-effect attempts with acquired ledger authority remain non-semantic runtime or
+recovery concerns. Runners receive only scoped typed inputs, allowed capabilities, and erased
+context surfaces. They return typed payload intent, staged artifacts, side-effect evidence, or
+sealed handles but cannot append to the run stream.
 
 The commit planner owns all production execution appends. Bootstrap verifies and stages launch
 material, executes the sealed `BootstrapRun` genesis state, and commits `RunStarted`, bootstrap
