@@ -1,11 +1,13 @@
 # Plan: Implement RFC_REFACTOR_FSM_SCHEDULER
 
-Status: completed and validated
+Status: completed; local validation passed, full Nix CI blocked by local disk capacity
 
 Completion notes, 2026-06-18:
 
 - Scheduler drive paths load `VerifiedRunContext` through `VerifiedRunContextLoader`, which combines
   `BoundRuntimeContext` authority with store-owned committed stream/view authority.
+- Runtime resume now compares the live bound runner executable identities against the `RunStarted`
+  executable evidence admitted at run start. A mismatch fails before any resumed attempt starts.
 - `ProjectionSnapshot::validate_run_stream` is the centralized ingress guard for old lifecycle
   streams. Runtime, replay, and Postgres projection rebuild/load paths reject attempt-bound terminal
   payloads that are not preceded by a separate `StateAttemptStarted` commit.
@@ -14,7 +16,32 @@ Completion notes, 2026-06-18:
 - Framework attempts that have already started terminalize safe observed post-start failures,
   including output planning and artifact staging failures, into redacted diagnostic evidence and
   non-retryable `StateAttemptFailed` records.
-- Final validation for this completion includes the focused Cargo gates and `nix run .#ci`.
+- Saga terminal proofs now bind the exact prefix `next_seq`; `ResolveSagaTerminal` mints proof from
+  the current post-start prefix, and store validation rejects stale proof/request prefixes.
+- PostgreSQL `projection_snapshot()` now rebuilds the selected run snapshot from authoritative event
+  rows and rebuilds active global resource lanes from authoritative run streams instead of trusting
+  persisted projection rows.
+- The async attempt path checks already-held resource lanes before staging runner artifacts, matching
+  the sync path for known-blocked lanes.
+- Local validation at this head:
+  - `cargo fmt --all -- --check`
+  - `cargo check --workspace`
+  - `cargo test -p mfm-runtime`
+  - `cargo test -p mfm-store --test commit_contract`
+  - `cargo test -p mfm-replay`
+  - `cargo test -p mfm-stream-store-postgres --all-features --no-run`
+- `nix run .#ci` evidence:
+  - Default state attempt failed before tests with `REGISTRY_CORRUPT` because the existing Nixfied
+    registry metadata did not match the selected identity.
+  - Retried with an isolated `NIXFIED_STATE_DIR`. That run passed `ci.check.fmt`,
+    `ci.check.clippy`, `ci.check.cargo-metadata-contract`, and
+    `ci.check.architecture-namespace-contract`, then failed during
+    `ci.test.workspace-tests.nextest-run` because the filesystem was full (`No space left on
+    device`; `/` was 100% used with about 8 MB free). This is recorded as an environmental CI
+    blockage, not a passing full CI run.
+- Live Postgres parity tests remain unrun outside Nix because no `DATABASE_URL` is configured in this
+  shell. The Postgres crate compiles with parity tests enabled via
+  `cargo test -p mfm-stream-store-postgres --all-features --no-run`.
 
 This plan divides `RFC_REFACTOR_FSM_SCHEDULER.md` into reviewable commits for this branch. The
 branch is allowed to make breaking changes. Do not add compatibility shims for old persisted streams,
