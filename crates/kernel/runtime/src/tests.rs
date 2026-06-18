@@ -5779,7 +5779,7 @@ async fn runtime_resolves_manual_resolution_terminal() {
 }
 
 #[tokio::test]
-async fn runtime_rebuilds_manual_terminal_proof_from_retained_authorization() {
+async fn runtime_terminalizes_missing_manual_terminal_authorization_artifact() {
     let fixture = fixture_with_manual_resolution_side_effect_state();
     let mut registry = ErasedRunnerRegistry::new();
     registry
@@ -5844,16 +5844,27 @@ async fn runtime_rebuilds_manual_terminal_proof_from_retained_authorization() {
         .expect("authorization artifact was staged");
     let stream_len_before = store.load_run_stream(&fixture.run_id).len();
 
-    let error = scheduler
-        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-        .await
-        .expect_err("terminal proof rebuild requires retained authorization artifact");
-
-    assert!(matches!(error, RuntimeError::Store(_)), "{error}");
     assert_eq!(
-        store.load_run_stream(&fixture.run_id).len(),
-        stream_len_before
+        scheduler
+            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .await
+            .expect("terminalize missing retained authorization artifact"),
+        SchedulerStatus::Advanced
     );
+    assert!(store.load_run_stream(&fixture.run_id).len() > stream_len_before);
+    let resolve_node = fixture
+        .runtime_spec
+        .spec()
+        .nodes
+        .iter()
+        .find(|node| {
+            matches!(
+                node.framework,
+                Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_))
+            )
+        })
+        .expect("resolve saga terminal node");
+    assert_node_failed_with_code(&store, &resolve_node.node_id, "runtime_store_failure");
     assert!(store
         .projection_snapshot()
         .run_completion(&fixture.run_id)
