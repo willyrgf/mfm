@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use mfm_canonical::PlainCanonicalJsonBytes;
-use mfm_capabilities::CapabilitySpec;
+use mfm_capabilities::{CapabilitySetDescriptor, CapabilitySpec};
 use mfm_collectors_proof::{
     proof_adapter_kind, proof_adapter_version, ProofApplyConfig, ProofApplySideEffectState,
     ProofAssembleConfig, ProofAssembleOutputState, ProofConfirmation, ProofFact, ProofFactRequest,
@@ -20,9 +20,9 @@ use mfm_events::v1::{self as events, side_effect};
 use mfm_ids::{ArtifactId, ContentDigest, DescriptorId, NodeId, SchemaId};
 use mfm_replay::v1 as replay;
 use mfm_runtime::{
-    ErasedNodeRunner, ErasedRunCtx, ErasedRunnerBinding, ErasedRunnerFuture, ErasedRunnerOutput,
-    ErasedRunnerRegistry, MaterializedCellTerminal, MaterializedInputNode, RunnerEventPayload,
-    StagedArtifact, StagedRetentionRefs,
+    CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerBinding,
+    ErasedRunnerFuture, ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCellTerminal,
+    MaterializedInputNode, RunnerEventPayload, StagedArtifact, StagedRetentionRefs,
 };
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
@@ -33,23 +33,33 @@ const READ_FACTORY: &str = "read_external";
 const SIDE_EFFECT_FACTORY: &str = "apply_side_effect";
 const PURE_FACTORY: &str = "pure";
 const REPLAY_VERIFIER_ID: &str = "mfm.proof.replay.deterministic.v1";
+const CAPABILITY_IMPLEMENTATION_ID: &str = "mfm.proof.runtime.deterministic.v1";
 
 /// Registers deterministic typed proof runners.
 pub fn register_deterministic_proof_runners(
     registry: &mut ErasedRunnerRegistry,
 ) -> mfm_runtime::Result<()> {
+    let implementation_id = CapabilityImplementationId::new(CAPABILITY_IMPLEMENTATION_ID)?;
     let read = registered_descriptor::<ProofReadFactState>()?;
     let side_effect = registered_descriptor::<ProofApplySideEffectState>()?;
     let assemble = registered_descriptor::<ProofAssembleOutputState>()?;
 
-    registry.register(binding(read, READ_FACTORY, Arc::new(ProofReadRunner))?)?;
+    registry.register_capability_set(&read.capabilities, implementation_id.clone())?;
+    registry.register_capability_set(&side_effect.capabilities, implementation_id.clone())?;
+    registry.register_capability_set(&assemble.capabilities, implementation_id)?;
+
     registry.register(binding(
-        side_effect,
+        read.descriptor_id,
+        READ_FACTORY,
+        Arc::new(ProofReadRunner),
+    )?)?;
+    registry.register(binding(
+        side_effect.descriptor_id,
         SIDE_EFFECT_FACTORY,
         Arc::new(ProofSideEffectRunner),
     )?)?;
     registry.register(binding(
-        assemble,
+        assemble.descriptor_id,
         PURE_FACTORY,
         Arc::new(ProofAssembleRunner),
     )?)?;
@@ -63,7 +73,12 @@ pub fn deterministic_proof_runner_registry() -> mfm_runtime::Result<ErasedRunner
     Ok(registry)
 }
 
-fn registered_descriptor<S>() -> mfm_runtime::Result<DescriptorId>
+struct RegisteredRuntimeDescriptor {
+    descriptor_id: DescriptorId,
+    capabilities: CapabilitySetDescriptor,
+}
+
+fn registered_descriptor<S>() -> mfm_runtime::Result<RegisteredRuntimeDescriptor>
 where
     S: mfm_program::StateSpec,
     S::Effect: mfm_program::EffectRunner<S>,
@@ -73,7 +88,10 @@ where
     let registered = states
         .register::<S>()
         .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
-    Ok(registered.descriptor().descriptor_id().clone())
+    Ok(RegisteredRuntimeDescriptor {
+        descriptor_id: registered.descriptor().descriptor_id().clone(),
+        capabilities: registered.descriptor().capabilities().clone(),
+    })
 }
 
 fn binding(

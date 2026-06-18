@@ -12,7 +12,7 @@ use mfm_adapters_evm_contracts::{
 use mfm_artifact_capabilities::{ArtifactReadProvider, ArtifactReadRequest};
 use mfm_artifact_store_fs::FsTypedArtifactStore;
 use mfm_canonical::PlainCanonicalJsonBytes;
-use mfm_capabilities::CapabilitySpec;
+use mfm_capabilities::{CapabilitySetDescriptor, CapabilitySpec};
 use mfm_events::v1::{self as events, side_effect};
 use mfm_evm_capabilities::{
     EvmCallReadCapability, EvmCallReadProvider, EvmCapabilityError, EvmChainIdentityCapability,
@@ -27,9 +27,10 @@ use mfm_evm_contract_model::{ConfiguredContract, DeployedContract};
 use mfm_ids::{ArtifactId, CapabilityKind, CapabilityVersion, ContentDigest, DescriptorId, NodeId};
 use mfm_program::{SideEffectState, StateSpec, ValidatedConfig};
 use mfm_runtime::{
-    ErasedNodeRunner, ErasedRunCtx, ErasedRunnerBinding, ErasedRunnerFuture, ErasedRunnerOutput,
-    ErasedRunnerRegistry, MaterializedCell, MaterializedCellTerminal, MaterializedInputNode,
-    RunnerEventPayload, StagedArtifact, StagedRetentionRefs,
+    CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerBinding,
+    ErasedRunnerFuture, ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCell,
+    MaterializedCellTerminal, MaterializedInputNode, RunnerEventPayload, StagedArtifact,
+    StagedRetentionRefs,
 };
 use mfm_signers_keystore::{KeystoreSignerProvider, KeystoreSignerRegistryEntry};
 use mfm_signing::{SignerRef, SigningProvider};
@@ -50,6 +51,7 @@ use uuid::Uuid;
 
 const READ_FACTORY: &str = "read_external";
 const SIDE_EFFECT_FACTORY: &str = "apply_side_effect";
+const CAPABILITY_IMPLEMENTATION_ID: &str = "mfm.evm_contracts.runtime.v1";
 const ENV_CONTRACT_SOURCE_REF: &str = "MFM_EVM_CONTRACT_SOURCE_REF";
 const ENV_CONTRACT_SOURCE_POLICY_ID: &str = "MFM_EVM_CONTRACT_SOURCE_POLICY_ID";
 const ENV_EVM_SIGNERS_JSON: &str = "MFM_EVM_SIGNERS_JSON";
@@ -200,31 +202,43 @@ fn register_contract_lifecycle_runners_with_factory(
     registry: &mut ErasedRunnerRegistry,
     factory: Arc<dyn EvmContractRuntimeFactory>,
 ) -> mfm_runtime::Result<()> {
+    let implementation_id = CapabilityImplementationId::new(CAPABILITY_IMPLEMENTATION_ID)?;
+    let deploy = registered_descriptor::<DeployContractState>()?;
+    registry.register_capability_set(&deploy.capabilities, implementation_id.clone())?;
     registry.register(binding(
-        registered_descriptor::<DeployContractState>()?,
+        deploy.descriptor_id,
         SIDE_EFFECT_FACTORY,
         Arc::new(ContractMutationRunner {
             phase: ContractMutationRunnerPhase::Deploy,
             factory: factory.clone(),
         }),
     )?)?;
+    let configure = registered_descriptor::<ConfigureContractState>()?;
+    registry.register_capability_set(&configure.capabilities, implementation_id.clone())?;
     registry.register(binding(
-        registered_descriptor::<ConfigureContractState>()?,
+        configure.descriptor_id,
         SIDE_EFFECT_FACTORY,
         Arc::new(ContractMutationRunner {
             phase: ContractMutationRunnerPhase::Configure,
             factory: factory.clone(),
         }),
     )?)?;
+    let validate = registered_descriptor::<ValidateContractState>()?;
+    registry.register_capability_set(&validate.capabilities, implementation_id)?;
     registry.register(binding(
-        registered_descriptor::<ValidateContractState>()?,
+        validate.descriptor_id,
         READ_FACTORY,
         Arc::new(ContractValidateRunner { factory }),
     )?)?;
     Ok(())
 }
 
-fn registered_descriptor<S>() -> mfm_runtime::Result<DescriptorId>
+struct RegisteredRuntimeDescriptor {
+    descriptor_id: DescriptorId,
+    capabilities: CapabilitySetDescriptor,
+}
+
+fn registered_descriptor<S>() -> mfm_runtime::Result<RegisteredRuntimeDescriptor>
 where
     S: StateSpec,
     S::Effect: mfm_program::EffectRunner<S>,
@@ -234,7 +248,10 @@ where
     let registered = states
         .register::<S>()
         .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
-    Ok(registered.descriptor().descriptor_id().clone())
+    Ok(RegisteredRuntimeDescriptor {
+        descriptor_id: registered.descriptor().descriptor_id().clone(),
+        capabilities: registered.descriptor().capabilities().clone(),
+    })
 }
 
 fn binding(

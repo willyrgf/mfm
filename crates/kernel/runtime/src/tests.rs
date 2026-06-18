@@ -488,6 +488,32 @@ fn test_scheduler_with_stager(
     SerialTypedScheduler::new(registry, artifact_stager)
 }
 
+fn register_fixture_capabilities(
+    mut registry: ErasedRunnerRegistry,
+    fixture: &Fixture,
+) -> ErasedRunnerRegistry {
+    register_spec_capabilities(&mut registry, &fixture.runtime_spec);
+    registry
+}
+
+fn register_spec_capabilities(
+    registry: &mut ErasedRunnerRegistry,
+    runtime_spec: &CertifiedRuntimeSpec,
+) {
+    let implementation_id =
+        CapabilityImplementationId::new("mfm.test.capability").expect("capability implementation");
+    for node in runtime_spec
+        .spec()
+        .nodes
+        .iter()
+        .chain(runtime_spec.spec().remediations.values())
+    {
+        registry
+            .register_capability_set(&node.capability_bindings, implementation_id.clone())
+            .expect("capability binding");
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
 #[mfm(
     namespace = "mfm.runtime.test",
@@ -724,7 +750,7 @@ async fn serial_scheduler_runs_nodes_in_certified_topological_order() {
             },
         ))
         .expect("binding b");
-    let scheduler = test_scheduler(registry);
+    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
     let mut store = store::InMemoryTypedRunStore::new();
     start_fixture_run(
         &scheduler,
@@ -959,7 +985,7 @@ async fn no_second_authority_full_run_stages_and_admits_first_artifact_reference
         .expect("binding b");
     let staged = Arc::new(Mutex::new(Vec::new()));
     let scheduler = test_scheduler_with_stager(
-        registry,
+        register_fixture_capabilities(registry, &fixture),
         Arc::new(RecordingRuntimeArtifactStager {
             staged: Arc::clone(&staged),
             artifacts: Arc::new(Mutex::new(BTreeMap::new())),
@@ -2515,7 +2541,7 @@ async fn scheduler_rejects_uncertified_capability_use() {
             },
         ))
         .expect("binding b");
-    let scheduler = test_scheduler(registry);
+    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
     let mut store = store::InMemoryTypedRunStore::new();
     start_fixture_run(
         &scheduler,
@@ -2593,7 +2619,7 @@ async fn runner_cannot_stage_artifact_with_foreign_producer() {
             },
         ))
         .expect("binding b");
-    let scheduler = test_scheduler(registry);
+    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
     let mut store = store::InMemoryTypedRunStore::new();
     start_fixture_run(
         &scheduler,
@@ -2672,7 +2698,7 @@ async fn runner_cannot_stage_inline_artifact_with_mismatched_bytes() {
             },
         ))
         .expect("binding b");
-    let scheduler = test_scheduler(registry);
+    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
     let mut store = store::InMemoryTypedRunStore::new();
     start_fixture_run(
         &scheduler,
@@ -2750,7 +2776,7 @@ async fn runner_can_commit_inline_state_output_artifact() {
             },
         ))
         .expect("binding b");
-    let scheduler = test_scheduler(registry);
+    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
     let mut store = store::InMemoryTypedRunStore::new();
     start_fixture_run(
         &scheduler,
@@ -2843,7 +2869,7 @@ async fn runner_cannot_stage_reserved_retention_reasons() {
                 },
             ))
             .expect("binding b");
-        let scheduler = test_scheduler(registry);
+        let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
         let mut store = store::InMemoryTypedRunStore::new();
         start_fixture_run(
             &scheduler,
@@ -2930,7 +2956,7 @@ async fn runtime_rejects_public_output_retention_reason_on_user_commit() {
             },
         ))
         .expect("binding b");
-    let scheduler = test_scheduler(registry);
+    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
     let mut store = store::InMemoryTypedRunStore::new();
     start_fixture_run(
         &scheduler,
@@ -3025,7 +3051,7 @@ async fn runner_output_requires_payload_bound_staged_artifact() {
             },
         ))
         .expect("binding b");
-    let scheduler = test_scheduler(registry);
+    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
     let mut store = store::InMemoryTypedRunStore::new();
     start_fixture_run(
         &scheduler,
@@ -3109,7 +3135,7 @@ async fn rejected_staged_payload_mismatch_does_not_admit_artifact_evidence() {
             },
         ))
         .expect("binding b");
-    let scheduler = test_scheduler(registry);
+    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
     let mut store = store::InMemoryTypedRunStore::new();
     start_fixture_run(
         &scheduler,
@@ -3311,12 +3337,21 @@ async fn run_admission_returns_bound_context_with_capability_and_framework_autho
         store.expected_next_seq(&fixture.run_id)
     );
 
-    let node = node_by_output(&fixture, &fixture.cell_a);
+    let node = node_by_output(&fixture, &fixture.cell_b);
     let capability = authority
         .bound_context()
         .capability_authority_for(&node.node_id)
         .expect("capability authority");
     assert_eq!(capability.capabilities(), &node.capability_bindings);
+    assert_eq!(capability.implementations().len(), 1);
+    assert_eq!(
+        capability.implementations()[0].descriptor(),
+        &node.capability_bindings.capabilities[0]
+    );
+    assert_eq!(
+        capability.implementations()[0].implementation_id().as_str(),
+        "mfm.test.capability"
+    );
 
     let render_node = fixture
         .runtime_spec
@@ -3350,6 +3385,94 @@ async fn run_admission_returns_bound_context_with_capability_and_framework_autho
     assert_eq!(
         run_started.runner_executables,
         authority.bound_context().runner_executables()
+    );
+}
+
+#[test]
+fn run_start_rejects_missing_capability_implementation() {
+    let fixture = fixture();
+    let mut registry = ErasedRunnerRegistry::new();
+    registry
+        .register(binding(
+            fixture.descriptor_a.clone(),
+            "pure",
+            RecordingRunner {
+                expected_caps: Vec::new(),
+                output_artifact: artifact(0xa1),
+                output_digest: content(0xa2),
+            },
+        ))
+        .expect("binding a");
+    registry
+        .register(binding(
+            fixture.descriptor_b.clone(),
+            "read",
+            RecordingRunner {
+                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                output_artifact: artifact(0xb1),
+                output_digest: content(0xb2),
+            },
+        ))
+        .expect("binding b");
+    let scheduler = test_scheduler(registry);
+    let store = store::InMemoryTypedRunStore::new();
+    let error =
+        prepare_fixture_launch(&scheduler, &store, &fixture, vec![fixture.seed_ref.clone()])
+            .err()
+            .expect("missing capability implementation must reject launch");
+    assert!(
+        matches!(error, RuntimeError::RunnerBinding(message) if message.contains("missing capability implementation"))
+    );
+}
+
+#[test]
+fn run_start_rejects_capability_implementation_descriptor_mismatch() {
+    let fixture = fixture();
+    let mut registry = ErasedRunnerRegistry::new();
+    let implementation_id =
+        CapabilityImplementationId::new("mfm.test.capability").expect("capability implementation");
+    registry
+        .register_capability(CapabilityImplementationBinding::new(
+            CapabilityDescriptor::new(
+                fixture.cap_kind.clone(),
+                fixture.cap_version.clone(),
+                CapabilityRole::ReadExternal,
+                "wrong-read-db",
+            )
+            .expect("wrong capability descriptor"),
+            implementation_id,
+        ))
+        .expect("capability implementation");
+    registry
+        .register(binding(
+            fixture.descriptor_a.clone(),
+            "pure",
+            RecordingRunner {
+                expected_caps: Vec::new(),
+                output_artifact: artifact(0xa1),
+                output_digest: content(0xa2),
+            },
+        ))
+        .expect("binding a");
+    registry
+        .register(binding(
+            fixture.descriptor_b.clone(),
+            "read",
+            RecordingRunner {
+                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                output_artifact: artifact(0xb1),
+                output_digest: content(0xb2),
+            },
+        ))
+        .expect("binding b");
+    let scheduler = test_scheduler(registry);
+    let store = store::InMemoryTypedRunStore::new();
+    let error =
+        prepare_fixture_launch(&scheduler, &store, &fixture, vec![fixture.seed_ref.clone()])
+            .err()
+            .expect("mismatched capability implementation must reject launch");
+    assert!(
+        matches!(error, RuntimeError::RunnerBinding(message) if message.contains("differs from certified descriptor"))
     );
 }
 
@@ -3433,7 +3556,8 @@ async fn resume_rejects_runner_executable_identity_mismatch_before_attempt_start
             },
         ))
         .expect("binding b");
-    let resume_scheduler = test_scheduler(changed_registry);
+    let resume_scheduler =
+        test_scheduler(register_fixture_capabilities(changed_registry, &fixture));
     let error = resume_scheduler
         .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
         .await
@@ -4591,7 +4715,7 @@ async fn recovery_reuses_committed_read_facts_for_same_attempt() {
             },
         ))
         .expect("binding b");
-    let scheduler = test_scheduler(registry);
+    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
     let mut store = store::InMemoryTypedRunStore::new();
     start_fixture_run(
         &scheduler,
@@ -4693,7 +4817,7 @@ async fn recovery_rejects_new_fact_after_same_attempt_fact_exists() {
             },
         ))
         .expect("binding b");
-    let scheduler = test_scheduler(registry);
+    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
     let mut store = store::InMemoryTypedRunStore::new();
     start_fixture_run(
         &scheduler,
@@ -4765,7 +4889,7 @@ async fn recovery_allows_managed_write_artifact_restage_before_terminal_commit()
             },
         ))
         .expect("binding b");
-    let scheduler = test_scheduler(registry);
+    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
     let mut store = store::InMemoryTypedRunStore::new();
     start_fixture_run(
         &scheduler,
@@ -5255,7 +5379,7 @@ async fn runtime_remediates_confirmed_forward_ledgers_in_reverse_confirmation_or
             BlockingRunner,
         ))
         .expect("binding failure node");
-    let scheduler = test_scheduler(registry);
+    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
     let mut store = store::InMemoryTypedRunStore::new();
     start_fixture_run(
         &scheduler,
@@ -5615,7 +5739,7 @@ async fn runtime_materializes_confirmed_forward_output_before_failed_without_cla
             },
         ))
         .expect("binding failure node");
-    let scheduler = test_scheduler(registry);
+    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
     let mut store = store::InMemoryTypedRunStore::new();
     start_fixture_run(
         &scheduler,
@@ -5738,7 +5862,10 @@ async fn runtime_resolves_manual_resolution_terminal() {
         ))
         .expect("binding read");
     let artifact_store = Arc::new(TestRuntimeArtifactStager::default());
-    let scheduler = test_scheduler_with_stager(registry.clone(), artifact_store.clone());
+    let scheduler = test_scheduler_with_stager(
+        register_fixture_capabilities(registry.clone(), &fixture),
+        artifact_store.clone(),
+    );
     let mut store = store::InMemoryTypedRunStore::new();
     start_fixture_run(
         &scheduler,
@@ -5779,7 +5906,10 @@ async fn runtime_resolves_manual_resolution_terminal() {
         .derive_saga_projection(&fixture.run_id, &fixture.runtime_spec.spec().saga);
     assert_eq!(saga.run_mode, store::RunMode::ManuallyResolved);
 
-    let fresh_scheduler = SerialTypedScheduler::new(registry, artifact_store);
+    let fresh_scheduler = SerialTypedScheduler::new(
+        register_fixture_capabilities(registry, &fixture),
+        artifact_store,
+    );
     assert_eq!(
         fresh_scheduler
             .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
@@ -5820,7 +5950,10 @@ async fn runtime_missing_manual_terminal_authorization_artifact_leaves_open_atte
         ))
         .expect("binding read");
     let artifact_store = Arc::new(TestRuntimeArtifactStager::default());
-    let scheduler = test_scheduler_with_stager(registry, artifact_store.clone());
+    let scheduler = test_scheduler_with_stager(
+        register_fixture_capabilities(registry, &fixture),
+        artifact_store.clone(),
+    );
     let mut store = store::InMemoryTypedRunStore::new();
     start_fixture_run(
         &scheduler,
@@ -5928,7 +6061,7 @@ async fn runtime_rejects_manual_resolution_before_manual_blocked() {
             },
         ))
         .expect("binding read");
-    let scheduler = test_scheduler(registry);
+    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
     let mut store = store::InMemoryTypedRunStore::new();
     start_fixture_run(
         &scheduler,
@@ -5986,7 +6119,7 @@ async fn runtime_rejects_forward_node_emitting_remediation_ledger_purpose() {
             },
         ))
         .expect("binding b");
-    let scheduler = test_scheduler(registry);
+    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
     let mut store = store::InMemoryTypedRunStore::new();
     start_fixture_run(
         &scheduler,
@@ -6041,7 +6174,7 @@ async fn runtime_rejects_remediation_node_emitting_forward_ledger_purpose() {
             BlockingRunner,
         ))
         .expect("binding failure node");
-    let scheduler = test_scheduler(registry);
+    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
     let mut store = store::InMemoryTypedRunStore::new();
     start_fixture_run(
         &scheduler,
@@ -6395,7 +6528,7 @@ async fn runtime_blocks_remediation_lane_until_conflicting_holder_releases() {
             BlockingRunner,
         ))
         .expect("binding failure node");
-    let scheduler = test_scheduler(registry);
+    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
     let mut store = store::InMemoryTypedRunStore::new();
     start_fixture_run(
         &scheduler,
@@ -6802,7 +6935,7 @@ async fn side_effect_staged_artifact_must_match_payload_ledger_binding() {
             },
         ))
         .expect("binding b");
-    let scheduler = test_scheduler(registry);
+    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
     let mut store = store::InMemoryTypedRunStore::new();
     start_fixture_run(
         &scheduler,
@@ -6846,7 +6979,7 @@ async fn side_effect_ambiguous_phase_blocks_resume() {
             },
         ))
         .expect("binding b");
-    let scheduler = test_scheduler(registry);
+    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
     let mut store = store::InMemoryTypedRunStore::new();
     start_fixture_run(
         &scheduler,
@@ -6909,7 +7042,7 @@ async fn side_effect_ambiguity_blocks_independent_ready_nodes() {
             },
         ))
         .expect("binding b");
-    let scheduler = test_scheduler(registry);
+    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
     let mut store = store::InMemoryTypedRunStore::new();
     start_fixture_run(
         &scheduler,
@@ -6972,7 +7105,7 @@ async fn side_effect_output_before_confirmation_is_rejected() {
             },
         ))
         .expect("binding b");
-    let scheduler = test_scheduler(registry);
+    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
     let mut store = store::InMemoryTypedRunStore::new();
     start_fixture_run(
         &scheduler,
@@ -9590,6 +9723,7 @@ fn runtime_order_is_deterministic_for_reordered_spec_nodes() {
 
 fn registered_fixture_runners(fixture: &Fixture) -> ErasedRunnerRegistry {
     let mut registry = ErasedRunnerRegistry::new();
+    register_spec_capabilities(&mut registry, &fixture.runtime_spec);
     registry
         .register(binding(
             fixture.descriptor_a.clone(),
@@ -9617,6 +9751,7 @@ fn registered_fixture_runners(fixture: &Fixture) -> ErasedRunnerRegistry {
 
 fn registered_side_effect_fixture_runners(fixture: &Fixture) -> ErasedRunnerRegistry {
     let mut registry = ErasedRunnerRegistry::new();
+    register_spec_capabilities(&mut registry, &fixture.runtime_spec);
     registry
         .register(binding(
             fixture.descriptor_a.clone(),
@@ -9643,6 +9778,7 @@ fn registered_first_side_effect_runners_with<R: ErasedNodeRunner + 'static>(
     runner: R,
 ) -> ErasedRunnerRegistry {
     let mut registry = ErasedRunnerRegistry::new();
+    register_spec_capabilities(&mut registry, &fixture.runtime_spec);
     registry
         .register(binding(fixture.descriptor_a.clone(), "sidefx", runner))
         .expect("binding a");
@@ -9665,6 +9801,7 @@ fn registered_two_side_effect_runners_with(
     runner: DeterministicSideEffectRunner,
 ) -> ErasedRunnerRegistry {
     let mut registry = ErasedRunnerRegistry::new();
+    register_spec_capabilities(&mut registry, &fixture.runtime_spec);
     registry
         .register(binding(
             fixture.descriptor_a.clone(),
@@ -9680,6 +9817,7 @@ fn registered_two_side_effect_runners_with(
 
 fn compensated_saga_scheduler(fixture: &Fixture) -> SerialTypedScheduler {
     let mut registry = ErasedRunnerRegistry::new();
+    register_spec_capabilities(&mut registry, &fixture.runtime_spec);
     registry
         .register(binding(
             fixture.descriptor_a.clone(),

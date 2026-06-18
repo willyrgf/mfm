@@ -64,8 +64,9 @@ pub use manual_resolution::{
     ManualResolutionEvidenceArtifact,
 };
 pub use runners::{
-    ErasedNodeRunner, ErasedRunnerBinding, ErasedRunnerFuture, ErasedRunnerOutput,
-    ErasedRunnerRegistry, RunnerEventPayload,
+    CapabilityImplementationBinding, CapabilityImplementationId, ErasedNodeRunner,
+    ErasedRunnerBinding, ErasedRunnerFuture, ErasedRunnerOutput, ErasedRunnerRegistry,
+    RunnerEventPayload,
 };
 pub use scheduler::{ManualResolutionRequest, SchedulerStatus, SerialTypedScheduler};
 pub use spec_authority::CertifiedRuntimeSpec;

@@ -4,7 +4,7 @@ use mfm_events::v1 as events;
 use mfm_ids::NodeId;
 use mfm_spec::v1 as spec;
 
-use crate::runners::{ErasedRunnerBinding, ErasedRunnerRegistry};
+use crate::runners::{CapabilityImplementationBinding, ErasedRunnerBinding, ErasedRunnerRegistry};
 use crate::{CertifiedRuntimeSpec, Result, RuntimeError};
 
 /// Runtime binding authority for one certified execution spec.
@@ -25,6 +25,7 @@ pub struct BoundRuntimeContext {
 pub struct BoundCapabilityAuthority {
     node_id: NodeId,
     capabilities: mfm_capabilities::CapabilitySetDescriptor,
+    implementations: Vec<CapabilityImplementationBinding>,
 }
 
 impl BoundCapabilityAuthority {
@@ -36,6 +37,11 @@ impl BoundCapabilityAuthority {
     /// Returns the certified capability descriptors available to the node.
     pub fn capabilities(&self) -> &mfm_capabilities::CapabilitySetDescriptor {
         &self.capabilities
+    }
+
+    /// Returns the runtime implementation binding for each certified capability.
+    pub fn implementations(&self) -> &[CapabilityImplementationBinding] {
+        &self.implementations
     }
 }
 
@@ -174,6 +180,25 @@ impl BoundRuntimeContext {
                 node.node_id
             )));
         }
+        if capabilities.implementations.len() != node.capability_bindings.capabilities.len() {
+            return Err(RuntimeError::RunnerBinding(format!(
+                "bound capability authority for node {} has incomplete implementation evidence",
+                node.node_id
+            )));
+        }
+        for (expected, implementation) in node
+            .capability_bindings
+            .capabilities
+            .iter()
+            .zip(capabilities.implementations.iter())
+        {
+            if implementation.descriptor() != expected {
+                return Err(RuntimeError::RunnerBinding(format!(
+                    "bound capability implementation for node {} differs from certified descriptor",
+                    node.node_id
+                )));
+            }
+        }
         if let Some(expected) = framework_handler_kind(node) {
             let Some(handler) = self.framework_handler_for(&node.node_id) else {
                 return Err(RuntimeError::RunnerBinding(format!(
@@ -227,6 +252,7 @@ fn bind_node(
 ) -> Result<()> {
     let descriptor = runtime_spec.state_descriptor_for_node(node)?;
     let binding = runners.resolve(node, descriptor)?;
+    let capability_implementations = runners.resolve_capability_implementations(node)?;
     if accumulator
         .bindings
         .insert(node.node_id.clone(), binding.clone())
@@ -244,6 +270,7 @@ fn bind_node(
             BoundCapabilityAuthority {
                 node_id: node.node_id.clone(),
                 capabilities: node.capability_bindings.clone(),
+                implementations: capability_implementations,
             },
         )
         .is_some()
