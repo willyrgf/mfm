@@ -72,13 +72,10 @@ pub(crate) async fn execute(ctx: &CommandContext, args: &ManualResolutionArgs) -
 
 async fn execute_internal(args: &ManualResolutionArgs) -> CommandResult<TypedRunResponse> {
     let run_id = parse_typed_run_id(&args.run_id)?;
-    let evidence_bytes = tokio::fs::read(&args.evidence).await.map_err(|error| {
-        CommandError::new(
+    let evidence_bytes = tokio::fs::read(&args.evidence).await.map_err(|_| {
+        CommandError::backend(
             "ManualResolutionEvidenceReadFailed",
-            format!(
-                "failed to read manual resolution evidence file {}: {error}",
-                args.evidence.display()
-            ),
+            "Failed to read manual resolution evidence file",
         )
     })?;
     let proof_bytes = read_canonical_proof_json(&args.authorization_proof).await?;
@@ -99,24 +96,18 @@ async fn execute_internal(args: &ManualResolutionArgs) -> CommandResult<TypedRun
 }
 
 async fn read_canonical_proof_json(path: &PathBuf) -> Result<Vec<u8>, CommandError> {
-    let raw = tokio::fs::read_to_string(path).await.map_err(|error| {
-        CommandError::new(
+    let raw = tokio::fs::read_to_string(path).await.map_err(|_| {
+        CommandError::backend(
             "ManualResolutionProofReadFailed",
-            format!(
-                "failed to read manual authorization proof file {}: {error}",
-                path.display()
-            ),
+            "Failed to read manual authorization proof file",
         )
     })?;
     PlainCanonicalJsonBytes::from_json_str(&raw)
         .map(|canonical| canonical.to_vec())
-        .map_err(|error| {
-            CommandError::new(
+        .map_err(|_| {
+            CommandError::backend(
                 "ManualResolutionProofInvalid",
-                format!(
-                    "failed to canonicalize manual authorization proof file {}: {error}",
-                    path.display()
-                ),
+                "Manual authorization proof file is not canonical JSON",
             )
         })
 }

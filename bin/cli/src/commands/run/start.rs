@@ -103,13 +103,10 @@ async fn execute_internal(args: &StartArgs) -> CommandResult<TypedRunResponse> {
         Some(run_id) => parse_typed_run_id(run_id)?,
         None => mfm_app::new_run_id(),
     };
-    let bundle_bytes = tokio::fs::read(&args.bundle).await.map_err(|error| {
-        CommandError::new(
+    let bundle_bytes = tokio::fs::read(&args.bundle).await.map_err(|_| {
+        CommandError::backend(
             "CertifiedBundleReadFailed",
-            format!(
-                "failed to read certified typed spec bundle file {}: {error}",
-                args.bundle.display()
-            ),
+            "Failed to read certified typed spec bundle file",
         )
     })?;
     let bundle = mfm_app::parse_certified_spec_bundle_json_bytes(&bundle_bytes)
@@ -123,7 +120,6 @@ async fn execute_internal(args: &StartArgs) -> CommandResult<TypedRunResponse> {
             &config.path,
             "LaunchConfigReadFailed",
             "LaunchConfigInvalid",
-            format!("config input {}", config.schema_id),
         )
         .await?;
         config_inputs.push(RunLaunchConfigArtifact {
@@ -134,13 +130,9 @@ async fn execute_internal(args: &StartArgs) -> CommandResult<TypedRunResponse> {
     }
     let mut seed_inputs = Vec::with_capacity(args.seeds.len());
     for seed in &args.seeds {
-        let bytes = read_canonical_json_file(
-            &seed.path,
-            "LaunchSeedReadFailed",
-            "LaunchSeedInvalid",
-            format!("seed input {}", seed.seed_id),
-        )
-        .await?;
+        let bytes =
+            read_canonical_json_file(&seed.path, "LaunchSeedReadFailed", "LaunchSeedInvalid")
+                .await?;
         seed_inputs.push(RunLaunchSeedArtifact {
             seed_id: seed.seed_id.clone(),
             bytes,
@@ -174,11 +166,8 @@ async fn execute_internal(args: &StartArgs) -> CommandResult<TypedRunResponse> {
 fn launch_unix_ms() -> Result<u64, CommandError> {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|error| {
-            CommandError::new(
-                "LaunchClockUnavailable",
-                format!("system clock is before Unix epoch: {error}"),
-            )
+        .map_err(|_| {
+            CommandError::backend("LaunchClockUnavailable", "System clock is unavailable")
         })?
         .as_millis();
     u64::try_from(millis).map_err(|_| {
@@ -193,25 +182,23 @@ async fn read_canonical_json_file(
     path: &PathBuf,
     read_code: &'static str,
     parse_code: &'static str,
-    label: String,
 ) -> Result<Vec<u8>, CommandError> {
-    let raw = tokio::fs::read_to_string(path).await.map_err(|error| {
-        CommandError::new(
-            read_code,
-            format!("failed to read {label} from {}: {error}", path.display()),
-        )
-    })?;
+    let read_message = match read_code {
+        "LaunchConfigReadFailed" => "Failed to read launch config input file",
+        "LaunchSeedReadFailed" => "Failed to read launch seed input file",
+        _ => "Failed to read launch input file",
+    };
+    let parse_message = match parse_code {
+        "LaunchConfigInvalid" => "Launch config input is not canonical JSON",
+        "LaunchSeedInvalid" => "Launch seed input is not canonical JSON",
+        _ => "Launch input is not canonical JSON",
+    };
+    let raw = tokio::fs::read_to_string(path)
+        .await
+        .map_err(|_| CommandError::backend(read_code, read_message))?;
     PlainCanonicalJsonBytes::from_json_str(&raw)
         .map(|canonical| canonical.to_vec())
-        .map_err(|error| {
-            CommandError::new(
-                parse_code,
-                format!(
-                    "failed to canonicalize {label} from {}: {error}",
-                    path.display()
-                ),
-            )
-        })
+        .map_err(|_| CommandError::backend(parse_code, parse_message))
 }
 
 #[cfg(test)]

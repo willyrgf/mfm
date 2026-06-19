@@ -368,10 +368,10 @@ pub(crate) fn sign_transaction(req: TxSignRequest) -> Result<SignedTx, CommandEr
 
     let secure_key = keystore
         .get_private_key(key_id)
-        .map_err(|err| CommandError::new("keystore_error", err.to_string()))?;
+        .map_err(|_| CommandError::backend("keystore_error", "Failed to load key material"))?;
     let from_address = secure_key
         .ethereum_address()
-        .map_err(|err| CommandError::new("signing_error", err.to_string()))?;
+        .map_err(|_| CommandError::backend("signing_error", "Failed to derive signer address"))?;
     let to_address = tx
         .to
         .map(|address| format!("{address:?}"))
@@ -382,7 +382,7 @@ pub(crate) fn sign_transaction(req: TxSignRequest) -> Result<SignedTx, CommandEr
     hash_bytes.copy_from_slice(hash.as_slice());
     let signature = secure_key
         .sign_hash_recoverable(&hash_bytes)
-        .map_err(|err| CommandError::new("signing_error", err.to_string()))?;
+        .map_err(|_| CommandError::backend("signing_error", "Failed to sign transaction"))?;
     let raw_tx_hex = encode_signed_eip1559_tx_hex(&tx, signature);
     write_raw_transaction_file(&req.out_path, &raw_tx_hex, req.out_write_mode)?;
 
@@ -445,11 +445,8 @@ fn create_keystore_if_needed(
     }
 
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|err| {
-            CommandError::new(
-                "keystore_error",
-                format!("Failed to create keystore directory: {err}"),
-            )
+        std::fs::create_dir_all(parent).map_err(|_| {
+            CommandError::backend("keystore_error", "Failed to create keystore directory")
         })?;
     }
 
@@ -459,12 +456,8 @@ fn create_keystore_if_needed(
     } else {
         KeystoreConfig::default()
     };
-    let mut keystore = Keystore::new_with_config(path, cfg).map_err(|err| {
-        CommandError::new(
-            "keystore_error",
-            format!("Failed to create keystore: {err}"),
-        )
-    })?;
+    let mut keystore = Keystore::new_with_config(path, cfg)
+        .map_err(|_| CommandError::backend("keystore_error", "Failed to create keystore"))?;
     keystore
         .unlock(password.as_str())
         .map_err(|_| CommandError::new("keystore_error", "failed to unlock keystore"))?;
@@ -484,8 +477,8 @@ fn load_unlocked_keystore_with_input(
         return Err(CommandError::new("keystore_error", "Keystore not found"));
     }
 
-    let mut keystore =
-        Keystore::new(path).map_err(|err| CommandError::new("keystore_error", err.to_string()))?;
+    let mut keystore = Keystore::new(path)
+        .map_err(|_| CommandError::backend("keystore_error", "Failed to open keystore"))?;
     let password = get_unlock_password(input)?;
     keystore.unlock(password.as_str()).map_err(|_| {
         CommandError::new("keystore_error", "invalid credential for keystore unlock")
@@ -557,7 +550,7 @@ fn read_stdin_material() -> Result<Zeroizing<String>, CommandError> {
     let mut input = Zeroizing::new(String::new());
     io::stdin()
         .read_to_string(&mut input)
-        .map_err(|err| CommandError::new("input_error", err.to_string()))?;
+        .map_err(|_| CommandError::backend("input_error", "Failed to read secret input"))?;
     finalize_stdin_secret_material(&mut input)?;
     Ok(input)
 }
@@ -577,9 +570,9 @@ fn read_password(prompt: &str) -> Result<Zeroizing<String>, CommandError> {
     print!("{prompt}");
     io::stdout()
         .flush()
-        .map_err(|err| CommandError::new("input_error", err.to_string()))?;
+        .map_err(|_| CommandError::backend("input_error", "Failed to prompt for input"))?;
     let password = rpassword::read_password()
-        .map_err(|err| CommandError::new("input_error", err.to_string()))?;
+        .map_err(|_| CommandError::backend("input_error", "Failed to read password"))?;
     Ok(Zeroizing::new(password))
 }
 
@@ -590,7 +583,7 @@ fn read_password_file(path: &str) -> Result<Zeroizing<String>, CommandError> {
 fn read_secret_file(path: &Path) -> Result<Zeroizing<String>, CommandError> {
     let mut raw = Zeroizing::new(
         std::fs::read_to_string(path)
-            .map_err(|err| CommandError::new("keystore_error", err.to_string()))?,
+            .map_err(|_| CommandError::backend("keystore_error", "Failed to read secret file"))?,
     );
     trim_line_endings(&mut raw);
     if raw.is_empty() {
@@ -640,12 +633,12 @@ fn confirm(prompt: &str) -> Result<bool, CommandError> {
         print!("{prompt} (y/N): ");
         io::stdout()
             .flush()
-            .map_err(|err| CommandError::new("input_error", err.to_string()))?;
+            .map_err(|_| CommandError::backend("input_error", "Failed to prompt for input"))?;
 
         let mut input = String::new();
-        io::stdin()
-            .read_line(&mut input)
-            .map_err(|err| CommandError::new("input_error", err.to_string()))?;
+        io::stdin().read_line(&mut input).map_err(|_| {
+            CommandError::backend("input_error", "Failed to read confirmation input")
+        })?;
         match input.trim().to_lowercase().as_str() {
             "y" | "yes" => return Ok(true),
             "n" | "no" | "" => return Ok(false),
@@ -712,7 +705,7 @@ fn resolve_key_id(
         (None, Some(label)) => {
             let keys = keystore
                 .list_keys()
-                .map_err(|err| CommandError::new("keystore_error", err.to_string()))?;
+                .map_err(|_| CommandError::backend("keystore_error", "Failed to list keys"))?;
             let matching: Vec<_> = keys
                 .iter()
                 .filter(|key| key.alias.as_deref() == Some(label))
@@ -758,10 +751,10 @@ fn validate_output_parent(path: &Path) -> Result<PathBuf, CommandError> {
         .parent()
         .filter(|candidate| !candidate.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    let metadata = std::fs::symlink_metadata(parent).map_err(|err| {
-        CommandError::new(
+    let metadata = std::fs::symlink_metadata(parent).map_err(|_| {
+        CommandError::backend(
             "file_write_error",
-            format!("Failed to inspect output parent directory: {err}"),
+            "Failed to inspect output parent directory",
         )
     })?;
     if metadata.file_type().is_symlink() {
@@ -816,10 +809,10 @@ fn validate_output_target(path: &Path, mode: OutputWriteMode) -> Result<(), Comm
             }
         }
         Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-        Err(err) => {
-            return Err(CommandError::new(
+        Err(_) => {
+            return Err(CommandError::backend(
                 "file_write_error",
-                format!("Failed to inspect output file: {err}"),
+                "Failed to inspect output file",
             ));
         }
     }
@@ -847,24 +840,18 @@ fn write_temp_output_file(path: &Path, raw_tx_hex: &str) -> Result<(), CommandEr
         options.mode(0o600);
     }
 
-    let mut file = options.open(path).map_err(|err| {
-        CommandError::new(
-            "file_write_error",
-            format!("Failed to create temporary output file: {err}"),
-        )
+    let mut file = options.open(path).map_err(|_| {
+        CommandError::backend("file_write_error", "Failed to create temporary output file")
     })?;
 
-    file.write_all(raw_tx_hex.as_bytes()).map_err(|err| {
-        CommandError::new(
+    file.write_all(raw_tx_hex.as_bytes()).map_err(|_| {
+        CommandError::backend(
             "file_write_error",
-            format!("Failed to write signed transaction file: {err}"),
+            "Failed to write signed transaction file",
         )
     })?;
-    file.sync_all().map_err(|err| {
-        CommandError::new(
-            "file_write_error",
-            format!("Failed to sync temporary output file: {err}"),
-        )
+    file.sync_all().map_err(|_| {
+        CommandError::backend("file_write_error", "Failed to sync temporary output file")
     })?;
 
     Ok(())
@@ -877,25 +864,16 @@ fn install_temp_output_file(
 ) -> Result<(), CommandError> {
     match mode {
         OutputWriteMode::CreateNew => {
-            std::fs::hard_link(temp_path, path).map_err(|err| {
-                CommandError::new(
-                    "file_write_error",
-                    format!("Failed to install new output file: {err}"),
-                )
+            std::fs::hard_link(temp_path, path).map_err(|_| {
+                CommandError::backend("file_write_error", "Failed to install new output file")
             })?;
-            std::fs::remove_file(temp_path).map_err(|err| {
-                CommandError::new(
-                    "file_write_error",
-                    format!("Failed to remove temporary output file: {err}"),
-                )
+            std::fs::remove_file(temp_path).map_err(|_| {
+                CommandError::backend("file_write_error", "Failed to remove temporary output file")
             })?;
         }
         OutputWriteMode::Overwrite => {
-            std::fs::rename(temp_path, path).map_err(|err| {
-                CommandError::new(
-                    "file_write_error",
-                    format!("Failed to replace output file: {err}"),
-                )
+            std::fs::rename(temp_path, path).map_err(|_| {
+                CommandError::backend("file_write_error", "Failed to replace output file")
             })?;
         }
     }
@@ -908,11 +886,8 @@ fn sync_parent_directory(parent: &Path) -> Result<(), CommandError> {
     {
         std::fs::File::open(parent)
             .and_then(|dir| dir.sync_all())
-            .map_err(|err| {
-                CommandError::new(
-                    "file_write_error",
-                    format!("Failed to sync output parent directory: {err}"),
-                )
+            .map_err(|_| {
+                CommandError::backend("file_write_error", "Failed to sync output parent directory")
             })?;
     }
 
@@ -934,7 +909,7 @@ fn admin_error_from_keystore(err: KeystoreError) -> CommandError {
         KeystoreError::KeyNotFound(_) => {
             CommandError::new("key_not_found", "Requested key does not exist")
         }
-        _ => CommandError::new("keystore_error", err.to_string()),
+        _ => CommandError::backend("keystore_error", "Keystore operation failed"),
     }
 }
 

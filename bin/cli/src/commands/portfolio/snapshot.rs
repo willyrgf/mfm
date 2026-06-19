@@ -74,8 +74,12 @@ pub(crate) async fn execute(ctx: &CommandContext, args: &SnapshotArgs) -> ! {
 async fn execute_internal(args: &SnapshotArgs) -> CommandResult<PortfolioSnapshotResponse> {
     let canonical = parse_request(args)?;
     let workflow_config = PortfolioWorkflowConfig::from(canonical);
-    let compiled = compile_portfolio_snapshot_program(workflow_config)
-        .map_err(|error| CommandError::new("PortfolioCompileInvalid", error.to_string()))?;
+    let compiled = compile_portfolio_snapshot_program(workflow_config).map_err(|_| {
+        CommandError::backend(
+            "PortfolioCompileInvalid",
+            "Portfolio snapshot request failed validation",
+        )
+    })?;
     let public_schema_id = compiled.public_schema_id.clone();
 
     let services = connect_run_services(&args.stores).await?;
@@ -154,11 +158,8 @@ fn parse_and_canonicalize_json(
 fn launch_unix_ms() -> Result<u64, CommandError> {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|error| {
-            CommandError::new(
-                "LaunchClockUnavailable",
-                format!("system clock is before Unix epoch: {error}"),
-            )
+        .map_err(|_| {
+            CommandError::backend("LaunchClockUnavailable", "System clock is unavailable")
         })?
         .as_millis();
     u64::try_from(millis).map_err(|_| {
@@ -196,7 +197,7 @@ fn command_error_from_portfolio_snapshot_config_error(
         | PortfolioSnapshotConfigError::Decode { .. }
         | PortfolioSnapshotConfigError::Serialize { .. }
         | PortfolioSnapshotConfigError::CanonicalJson { .. } => {
-            CommandError::new("InvalidRequest", err.to_string())
+            CommandError::backend("InvalidRequest", "Portfolio request failed validation")
         }
     }
 }

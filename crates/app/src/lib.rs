@@ -78,18 +78,65 @@ pub struct AppError {
     pub message: String,
 }
 
+/// Message text that has been selected for public CLI/REST/app surfaces.
+///
+/// This type marks the boundary where lower-level diagnostics are either intentionally exposed as
+/// caller input validation messages or replaced by fixed safe text. It does not authorize callers
+/// to forward backend `Display` output from storage, runtime, transport, signer, or provider
+/// errors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicSafeMessage(String);
+
+impl PublicSafeMessage {
+    /// Creates public-safe message text from an already reviewed string.
+    pub fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+
+    /// Creates fixed public-safe text for a lower-level backend failure.
+    pub fn backend(message: &'static str) -> Self {
+        Self(message.to_owned())
+    }
+
+    /// Consumes the reviewed message into owned text for existing public response structs.
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl From<&'static str> for PublicSafeMessage {
+    fn from(value: &'static str) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<String> for PublicSafeMessage {
+    fn from(value: String) -> Self {
+        Self::new(value)
+    }
+}
+
 impl AppError {
     /// Creates an application error from the supplied classification, code, and message.
-    pub fn new(class: ErrorClass, code: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn new(
+        class: ErrorClass,
+        code: impl Into<String>,
+        message: impl Into<PublicSafeMessage>,
+    ) -> Self {
         Self {
             class,
             code: code.into(),
-            message: message.into(),
+            message: message.into().into_string(),
         }
     }
 
+    /// Creates an application error for a lower-level failure without exposing backend details.
+    pub fn backend(class: ErrorClass, code: impl Into<String>, message: &'static str) -> Self {
+        Self::new(class, code, PublicSafeMessage::backend(message))
+    }
+
     /// Returns a generic invalid request error.
-    pub fn invalid_request(message: impl Into<String>) -> Self {
+    pub fn invalid_request(message: impl Into<PublicSafeMessage>) -> Self {
         Self::new(ErrorClass::BadRequest, "InvalidRequest", message)
     }
 
@@ -103,7 +150,7 @@ impl AppError {
     }
 
     /// Returns a not-found error with an explicit code and message.
-    pub fn not_found(code: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn not_found(code: impl Into<String>, message: impl Into<PublicSafeMessage>) -> Self {
         Self::new(ErrorClass::NotFound, code, message)
     }
 }
@@ -119,30 +166,40 @@ impl std::error::Error for AppError {}
 impl From<mfm_runtime::RuntimeError> for AppError {
     fn from(error: mfm_runtime::RuntimeError) -> Self {
         match error {
-            mfm_runtime::RuntimeError::Store(message) => {
-                Self::new(ErrorClass::Conflict, "RunStoreRejected", message)
-            }
-            mfm_runtime::RuntimeError::RunnerBinding(message) => {
-                Self::new(ErrorClass::BadRequest, "LaunchRunnerUnavailable", message)
-            }
-            mfm_runtime::RuntimeError::SpecHash(message)
-            | mfm_runtime::RuntimeError::InvalidSpec(message)
-            | mfm_runtime::RuntimeError::InvalidRunStream(message)
-            | mfm_runtime::RuntimeError::Blocked(message)
-            | mfm_runtime::RuntimeError::InputMaterialization(message)
-            | mfm_runtime::RuntimeError::InvalidRunnerOutput(message)
-            | mfm_runtime::RuntimeError::RuntimeValidation(message)
-            | mfm_runtime::RuntimeError::Identity(message)
-            | mfm_runtime::RuntimeError::Canonical(message) => {
-                Self::new(ErrorClass::Internal, "LaunchRuntimeError", message)
-            }
+            mfm_runtime::RuntimeError::Store(_) => Self::backend(
+                ErrorClass::Conflict,
+                "RunStoreRejected",
+                "Run store rejected the requested operation",
+            ),
+            mfm_runtime::RuntimeError::RunnerBinding(_) => Self::backend(
+                ErrorClass::BadRequest,
+                "LaunchRunnerUnavailable",
+                "A required typed runner is unavailable",
+            ),
+            mfm_runtime::RuntimeError::SpecHash(_)
+            | mfm_runtime::RuntimeError::InvalidSpec(_)
+            | mfm_runtime::RuntimeError::InvalidRunStream(_)
+            | mfm_runtime::RuntimeError::Blocked(_)
+            | mfm_runtime::RuntimeError::InputMaterialization(_)
+            | mfm_runtime::RuntimeError::InvalidRunnerOutput(_)
+            | mfm_runtime::RuntimeError::RuntimeValidation(_)
+            | mfm_runtime::RuntimeError::Identity(_)
+            | mfm_runtime::RuntimeError::Canonical(_) => Self::backend(
+                ErrorClass::Internal,
+                "LaunchRuntimeError",
+                "Typed runtime rejected the requested operation",
+            ),
         }
     }
 }
 
 impl From<store::StoreError> for AppError {
-    fn from(error: store::StoreError) -> Self {
-        Self::new(ErrorClass::Conflict, "RunStoreRejected", error.to_string())
+    fn from(_error: store::StoreError) -> Self {
+        Self::backend(
+            ErrorClass::Conflict,
+            "RunStoreRejected",
+            "Run store rejected the requested operation",
+        )
     }
 }
 
@@ -162,35 +219,41 @@ impl From<FsTypedArtifactError> for AppError {
             | FsTypedArtifactError::EvidenceMismatch { .. }
             | FsTypedArtifactError::InvalidEvidence { .. }
             | FsTypedArtifactError::InvalidIdentity { .. }
-            | FsTypedArtifactError::Io { .. } => {
-                Self::new(ErrorClass::Internal, "ArtifactError", error.to_string())
-            }
+            | FsTypedArtifactError::Io { .. } => Self::backend(
+                ErrorClass::Internal,
+                "ArtifactError",
+                "Typed artifact store rejected the requested operation",
+            ),
         }
     }
 }
 
 impl From<ReplayError> for AppError {
     fn from(error: ReplayError) -> Self {
-        Self::new(ErrorClass::Internal, error.code(), error.message)
+        Self::backend(
+            ErrorClass::Internal,
+            error.code(),
+            "Replay verification failed",
+        )
     }
 }
 
 impl From<mfm_spec::SpecError> for AppError {
-    fn from(error: mfm_spec::SpecError) -> Self {
-        Self::new(
+    fn from(_error: mfm_spec::SpecError) -> Self {
+        Self::backend(
             ErrorClass::Internal,
             "CertifiedSpecInvalid",
-            error.to_string(),
+            "Certified typed spec is invalid",
         )
     }
 }
 
 impl From<mfm_certify::CertifyError> for AppError {
-    fn from(error: mfm_certify::CertifyError) -> Self {
-        Self::new(
+    fn from(_error: mfm_certify::CertifyError) -> Self {
+        Self::backend(
             ErrorClass::BadRequest,
             "CertifiedBundleVerificationFailed",
-            error.to_string(),
+            "Certified typed spec bundle verification failed",
         )
     }
 }
@@ -1574,10 +1637,11 @@ fn certified_spec_launch_artifact(
     runtime_spec: &CertifiedRuntimeSpec,
 ) -> Result<RunLaunchArtifact, AppError> {
     let canonical = runtime_spec.spec().canonical_json().map_err(|error| {
-        AppError::new(
+        let _ = error;
+        AppError::backend(
             ErrorClass::Internal,
             "CertifiedSpecCanonicalError",
-            error.to_string(),
+            "Certified typed spec canonicalization failed",
         )
     })?;
     Ok(launch_artifact(
@@ -1597,18 +1661,20 @@ fn certified_spec_certificate_launch_artifact(
         .certificate()
         .canonical_json()
         .map_err(|error| {
-            AppError::new(
+            let _ = error;
+            AppError::backend(
                 ErrorClass::Internal,
                 "CertifiedCertificateCanonicalError",
-                error.to_string(),
+                "Certified typed spec certificate canonicalization failed",
             )
         })?;
     let media_type =
         spec::MediaType::new(mfm_certify::CERTIFICATE_MEDIA_TYPE).map_err(|error| {
-            AppError::new(
+            let _ = error;
+            AppError::backend(
                 ErrorClass::Internal,
                 "CertifiedCertificateMediaTypeInvalid",
-                error.to_string(),
+                "Certified typed spec certificate media type is invalid",
             )
         })?;
     Ok(launch_artifact(
@@ -1714,10 +1780,11 @@ fn framework_config_matches_ref(
         let expected =
             spec::framework_config_canonical_json(framework.config_kind(), &node.node_id).map_err(
                 |error| {
-                    AppError::new(
+                    let _ = error;
+                    AppError::backend(
                         ErrorClass::Internal,
                         "LaunchFrameworkConfigInvalid",
-                        error.to_string(),
+                        "Framework config canonicalization failed",
                     )
                 },
             )?;
@@ -1964,10 +2031,11 @@ fn public_output_rendered_artifact_requirement(
 /// Returns the default JSON media type used by typed CLI seed inputs.
 pub fn json_media_type() -> Result<spec::MediaType, AppError> {
     spec::MediaType::new("application/json").map_err(|error| {
-        AppError::new(
+        let _ = error;
+        AppError::backend(
             ErrorClass::Internal,
             "JsonMediaTypeInvalid",
-            error.to_string(),
+            "JSON media type is invalid",
         )
     })
 }
@@ -1988,10 +2056,11 @@ pub fn parse_certified_spec_bundle_json_bytes(
     bytes: &[u8],
 ) -> Result<CertifiedSpecBundle, AppError> {
     let parsed: CertifiedSpecBundleJson = serde_json::from_slice(bytes).map_err(|error| {
+        let _ = error;
         AppError::new(
             ErrorClass::BadRequest,
             "CertifiedBundleInvalid",
-            format!("invalid certified typed spec bundle JSON: {error}"),
+            "Certified typed spec bundle JSON is invalid",
         )
     })?;
     certified_spec_bundle_from_json(parsed)
@@ -2006,10 +2075,11 @@ pub fn parse_certified_spec_bundle_json_value(
 ) -> Result<CertifiedSpecBundle, AppError> {
     let parsed: CertifiedSpecBundleJson =
         serde_json::from_value(value.clone()).map_err(|error| {
+            let _ = error;
             AppError::new(
                 ErrorClass::BadRequest,
                 "CertifiedBundleInvalid",
-                format!("invalid certified typed spec bundle: {error}"),
+                "Certified typed spec bundle is invalid",
             )
         })?;
     certified_spec_bundle_from_json(parsed)
@@ -2035,19 +2105,21 @@ fn certified_spec_bundle_from_json(
 
 fn canonical_json_value_bytes(value: &Value, field: &'static str) -> Result<Vec<u8>, AppError> {
     let json = serde_json::to_string(value).map_err(|error| {
-        AppError::new(
+        let _ = (field, error);
+        AppError::backend(
             ErrorClass::Internal,
             "CertifiedBundleSerializationFailed",
-            format!("failed to serialize {field} JSON value: {error}"),
+            "Certified typed spec bundle serialization failed",
         )
     })?;
     PlainCanonicalJsonBytes::from_json_str(&json)
         .map(|canonical| canonical.to_vec())
         .map_err(|error| {
+            let _ = (field, error);
             AppError::new(
                 ErrorClass::BadRequest,
                 "CertifiedBundleInvalid",
-                format!("invalid certified typed spec bundle {field}: {error}"),
+                "Certified typed spec bundle field is not canonical JSON",
             )
         })
 }
@@ -2141,19 +2213,21 @@ pub fn prepare_certified_run_launch(
             config_artifacts,
             framework_version: events::FrameworkVersion::new(input.framework_version).map_err(
                 |error| {
+                    let _ = error;
                     AppError::new(
                         ErrorClass::BadRequest,
                         "FrameworkVersionInvalid",
-                        error.to_string(),
+                        "Framework version is invalid",
                     )
                 },
             )?,
             source_revision: events::SourceRevision::new(input.source_revision).map_err(
                 |error| {
+                    let _ = error;
                     AppError::new(
                         ErrorClass::BadRequest,
                         "SourceRevisionInvalid",
-                        error.to_string(),
+                        "Source revision is invalid",
                     )
                 },
             )?,
@@ -2165,18 +2239,23 @@ pub fn prepare_certified_run_launch(
     })
 }
 
-fn async_app_store_error(error: impl fmt::Display) -> AppError {
-    AppError::new(ErrorClass::Conflict, "RunStoreRejected", error.to_string())
+fn async_app_store_error(_error: impl fmt::Display) -> AppError {
+    AppError::backend(
+        ErrorClass::Conflict,
+        "RunStoreRejected",
+        "Run store rejected the requested operation",
+    )
 }
 
 fn manual_resolution_runtime_request(
     req: ManualResolutionRecordRequest,
 ) -> Result<ManualResolutionRequest, AppError> {
     let media_type = spec::MediaType::new(&req.evidence_media_type).map_err(|error| {
+        let _ = error;
         AppError::new(
             ErrorClass::BadRequest,
             "ManualResolutionEvidenceMediaTypeInvalid",
-            error.to_string(),
+            "Manual resolution evidence media type is invalid",
         )
     })?;
     let note = req
@@ -2184,10 +2263,11 @@ fn manual_resolution_runtime_request(
         .map(events::ManualResolutionNote::new)
         .transpose()
         .map_err(|error| {
+            let _ = error;
             AppError::new(
                 ErrorClass::BadRequest,
                 "ManualResolutionNoteInvalid",
-                error.to_string(),
+                "Manual resolution note is invalid",
             )
         })?;
     Ok(ManualResolutionRequest {
@@ -2426,10 +2506,11 @@ async fn render_public_output_json_from_authority(
         let (bytes, evidence) = artifacts.get_artifact_by_id(&cell.artifact_id).await?;
         verify_public_output_cell_evidence(cell, &evidence)?;
         let value = serde_json::from_slice(&bytes).map_err(|error| {
-            AppError::new(
+            let _ = error;
+            AppError::backend(
                 ErrorClass::Internal,
                 "PublicOutputDecodeFailed",
-                format!("typed public-output cell artifact was not JSON: {error}"),
+                "Typed public-output cell artifact was not JSON",
             )
         })?;
         insert_public_output_value(&mut root, cell.public_field_path.as_str(), value)?;
@@ -2504,10 +2585,11 @@ async fn load_public_output_json(
         payload,
     )?;
     serde_json::from_slice(&bytes).map_err(|error| {
-        AppError::new(
+        let _ = error;
+        AppError::backend(
             ErrorClass::Internal,
             "PublicOutputDecodeFailed",
-            format!("typed public-output artifact was not JSON: {error}"),
+            "Typed public-output artifact was not JSON",
         )
     })
 }
@@ -2519,10 +2601,11 @@ fn verify_public_output_rendered_artifact_evidence(
     payload: &events::PublicOutputProduced,
 ) -> Result<(), AppError> {
     let json_media_type = spec::MediaType::new("application/json").map_err(|error| {
-        AppError::new(
+        let _ = error;
+        AppError::backend(
             ErrorClass::Internal,
             "PublicOutputMediaTypeInvalid",
-            error.to_string(),
+            "Public-output JSON media type is invalid",
         )
     })?;
     validate_artifact_requirement_for_app(
@@ -4646,14 +4729,22 @@ mod tests {
             .await
             .expect_err("public output rejects uncertified history");
         assert_eq!(public_output_err.code, "LaunchRuntimeError");
-        assert!(public_output_err.message.contains("public-output payload"));
+        assert_eq!(
+            public_output_err.message,
+            "Typed runtime rejected the requested operation"
+        );
+        assert!(!public_output_err.message.contains("public-output payload"));
 
         let resume_err = corrupt_services
             .resume_stored_run(&fixture.run_id, DriveMode::AppendOnly)
             .await
             .expect_err("append-only resume rejects uncertified history");
         assert_eq!(resume_err.code, "LaunchRuntimeError");
-        assert!(resume_err.message.contains("public-output payload"));
+        assert_eq!(
+            resume_err.message,
+            "Typed runtime rejected the requested operation"
+        );
+        assert!(!resume_err.message.contains("public-output payload"));
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -4693,7 +4784,11 @@ mod tests {
             .await
             .expect_err("append-only resume rejects unauthorized manual event");
         assert_eq!(resume_err.code, "RunStoreRejected");
-        assert!(resume_err.message.contains("artifact"), "{resume_err}");
+        assert_eq!(
+            resume_err.message,
+            "Run store rejected the requested operation"
+        );
+        assert!(!resume_err.message.contains("artifact"), "{resume_err}");
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -4822,9 +4917,11 @@ mod tests {
             "LaunchRuntimeError" | "RunStoreRejected"
         ));
         assert!(
-            replay_err.message.contains("retention")
-                || replay_err.message.contains("attempt")
-                || replay_err.message.contains("terminal"),
+            matches!(
+                replay_err.message.as_str(),
+                "Typed runtime rejected the requested operation"
+                    | "Run store rejected the requested operation"
+            ),
             "{}",
             replay_err.message
         );
@@ -4860,10 +4957,9 @@ mod tests {
             .await
             .expect_err("replay rejects post-completion retention refs");
         assert_eq!(replay_err.code, "LaunchRuntimeError");
-        assert!(
-            replay_err.message.contains("RunCompleted") || replay_err.message.contains("retention"),
-            "{}",
-            replay_err.message
+        assert_eq!(
+            replay_err.message,
+            "Typed runtime rejected the requested operation"
         );
 
         let _ = std::fs::remove_dir_all(root);
@@ -4913,7 +5009,11 @@ mod tests {
         .expect_err("tampered stream rejects before render authority");
 
         assert_eq!(err.code, "LaunchRuntimeError");
-        assert!(err.message.contains("public-output payload"));
+        assert_eq!(
+            err.message,
+            "Typed runtime rejected the requested operation"
+        );
+        assert!(!err.message.contains("public-output payload"));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -5220,7 +5320,8 @@ mod tests {
         .expect_err("missing retained bytes reject verified history");
 
         assert_eq!(err.code, "RunStoreRejected");
-        assert!(err.message.contains(&removed.to_string()));
+        assert_eq!(err.message, "Run store rejected the requested operation");
+        assert!(!err.message.contains(&removed.to_string()));
         let _ = std::fs::remove_dir_all(root);
     }
 

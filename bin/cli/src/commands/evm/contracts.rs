@@ -262,11 +262,8 @@ async fn launch_compiled_contract_program(
 fn launch_unix_ms() -> Result<u64, CommandError> {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|error| {
-            CommandError::new(
-                "LaunchClockUnavailable",
-                format!("system clock is before Unix epoch: {error}"),
-            )
+        .map_err(|_| {
+            CommandError::backend("LaunchClockUnavailable", "System clock is unavailable")
         })?
         .as_millis();
     u64::try_from(millis).map_err(|_| {
@@ -315,16 +312,16 @@ fn read_json_file<T>(path: &Path) -> Result<T, CommandError>
 where
     T: DeserializeOwned,
 {
-    let raw = std::fs::read_to_string(path).map_err(|error| {
-        CommandError::new(
+    let raw = std::fs::read_to_string(path).map_err(|_| {
+        CommandError::backend(
             "InvalidEvmContractRequest",
-            format!("failed to read {}: {error}", path.display()),
+            "Failed to read EVM contract request file",
         )
     })?;
-    serde_json::from_str(&raw).map_err(|error| {
-        CommandError::new(
+    serde_json::from_str(&raw).map_err(|_| {
+        CommandError::backend(
             "InvalidEvmContractRequest",
-            format!("failed to parse {} as JSON: {error}", path.display()),
+            "Failed to parse EVM contract request JSON",
         )
     })
 }
@@ -333,24 +330,28 @@ fn canonical_value_bytes<T>(value: &T) -> Result<Vec<u8>, CommandError>
 where
     T: Serialize,
 {
-    let json = serde_json::to_string(value).map_err(|error| {
-        CommandError::new(
+    let json = serde_json::to_string(value).map_err(|_| {
+        CommandError::backend(
             "InvalidEvmContractRequest",
-            format!("failed to serialize contract launch seed: {error}"),
+            "Failed to serialize EVM contract request",
         )
     })?;
     PlainCanonicalJsonBytes::from_json_str(&json)
         .map(|canonical| canonical.to_vec())
-        .map_err(|error| {
-            CommandError::new(
+        .map_err(|_| {
+            CommandError::backend(
                 "InvalidEvmContractRequest",
-                format!("failed to canonicalize contract launch seed: {error}"),
+                "Failed to canonicalize EVM contract request",
             )
         })
 }
 
 fn command_error_from_compile(err: ContractLifecycleCompileError) -> CommandError {
-    CommandError::new("EvmContractCompileInvalid", err.to_string())
+    let _ = err;
+    CommandError::backend(
+        "EvmContractCompileInvalid",
+        "EVM contract lifecycle request failed validation",
+    )
 }
 
 #[cfg(test)]

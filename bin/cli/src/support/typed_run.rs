@@ -120,14 +120,15 @@ pub(crate) fn command_error_from_app_error(err: mfm_app::AppError) -> CommandErr
 
 pub(crate) fn command_error_from_typed_store_error(err: PostgresTypedStoreError) -> CommandError {
     match err {
-        PostgresTypedStoreError::Store(error) => {
-            CommandError::new("RunStoreRejected", error.to_string())
+        PostgresTypedStoreError::Store(_) => CommandError::backend(
+            "RunStoreRejected",
+            "Run store rejected the requested operation",
+        ),
+        PostgresTypedStoreError::Database(_) => {
+            CommandError::backend("RunStoreUnavailable", "Run store is unavailable")
         }
-        PostgresTypedStoreError::Database(message) => {
-            CommandError::new("RunStoreUnavailable", message)
-        }
-        PostgresTypedStoreError::Corruption(message) => {
-            CommandError::new("RunStoreCorruption", message)
+        PostgresTypedStoreError::Corruption(_) => {
+            CommandError::backend("RunStoreCorruption", "Run store returned invalid data")
         }
     }
 }

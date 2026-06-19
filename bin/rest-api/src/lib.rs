@@ -33,8 +33,9 @@ use axum::Router;
 use http::header::HeaderName;
 use mfm_app::{
     AppError, AsyncRunServices, DriveMode, ErrorClass, ManualResolutionDecision,
-    ManualResolutionRecordRequest, RunLaunchConfigArtifact, RunLaunchSeedArtifact,
-    TypedPublicOutputResponse, TypedRunMode, TypedRunResponse, TypedRunStreamResponse,
+    ManualResolutionRecordRequest, PublicSafeMessage, RunLaunchConfigArtifact,
+    RunLaunchSeedArtifact, TypedPublicOutputResponse, TypedRunMode, TypedRunResponse,
+    TypedRunStreamResponse,
 };
 use mfm_artifact_store_fs::{FsTypedArtifactError, FsTypedArtifactStore};
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
@@ -121,12 +122,21 @@ pub struct ApiError {
 
 impl ApiError {
     /// Creates an API error with an explicit HTTP status, code, and message.
-    pub fn new(status: StatusCode, code: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn new(
+        status: StatusCode,
+        code: impl Into<String>,
+        message: impl Into<PublicSafeMessage>,
+    ) -> Self {
         Self {
             status,
             code: code.into(),
-            message: message.into(),
+            message: message.into().into_string(),
         }
+    }
+
+    /// Creates an API error for a lower-level failure without exposing backend details.
+    pub fn backend(status: StatusCode, code: impl Into<String>, message: &'static str) -> Self {
+        Self::new(status, code, PublicSafeMessage::backend(message))
     }
 
     /// Returns the standard invalid-JSON error.
@@ -687,11 +697,11 @@ fn default_source_revision() -> String {
 fn launch_unix_ms() -> Result<u64, ApiError> {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|error| {
-            ApiError::new(
+        .map_err(|_| {
+            ApiError::backend(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "LaunchClockUnavailable",
-                format!("system clock is before Unix epoch: {error}"),
+                "System clock is unavailable",
             )
         })?
         .as_millis();
@@ -719,10 +729,11 @@ where
     let canonical = parse_portfolio_snapshot_request(&req.request)?;
     let workflow_config = PortfolioWorkflowConfig::from(canonical);
     let compiled = compile_portfolio_snapshot_program(workflow_config).map_err(|error| {
-        ApiError::new(
+        let _ = error;
+        ApiError::backend(
             StatusCode::BAD_REQUEST,
             "PortfolioCompileInvalid",
-            error.to_string(),
+            "Portfolio snapshot request failed validation",
         )
     })?;
     let public_schema_id = compiled.public_schema_id.clone();
@@ -1161,11 +1172,11 @@ fn deserialize_request_value<T>(value: &serde_json::Value) -> Result<T, ApiError
 where
     T: DeserializeOwned,
 {
-    serde_json::from_value(value.clone()).map_err(|error| {
-        ApiError::new(
+    serde_json::from_value(value.clone()).map_err(|_| {
+        ApiError::backend(
             StatusCode::BAD_REQUEST,
             "InvalidEvmContractRequest",
-            error.to_string(),
+            "Invalid EVM contract request",
         )
     })
 }
@@ -1174,29 +1185,30 @@ fn canonical_request_value_bytes<T>(value: &T) -> Result<Vec<u8>, ApiError>
 where
     T: Serialize,
 {
-    let json = serde_json::to_string(value).map_err(|error| {
-        ApiError::new(
+    let json = serde_json::to_string(value).map_err(|_| {
+        ApiError::backend(
             StatusCode::BAD_REQUEST,
             "InvalidEvmContractRequest",
-            error.to_string(),
+            "Failed to serialize EVM contract request",
         )
     })?;
     PlainCanonicalJsonBytes::from_json_str(&json)
         .map(|canonical| canonical.to_vec())
-        .map_err(|error| {
-            ApiError::new(
+        .map_err(|_| {
+            ApiError::backend(
                 StatusCode::BAD_REQUEST,
                 "InvalidEvmContractRequest",
-                error.to_string(),
+                "Failed to canonicalize EVM contract request",
             )
         })
 }
 
 fn api_error_from_contract_compile(error: ContractLifecycleCompileError) -> ApiError {
-    ApiError::new(
+    let _ = error;
+    ApiError::backend(
         StatusCode::BAD_REQUEST,
         "EvmContractCompileInvalid",
-        error.to_string(),
+        "EVM contract lifecycle request failed validation",
     )
 }
 
@@ -1260,7 +1272,13 @@ fn canonical_json_value_bytes(
     })?;
     PlainCanonicalJsonBytes::from_json_str(&json)
         .map(|canonical| canonical.to_vec())
-        .map_err(|error| ApiError::new(StatusCode::BAD_REQUEST, error_code, error.to_string()))
+        .map_err(|_| {
+            ApiError::backend(
+                StatusCode::BAD_REQUEST,
+                error_code,
+                "Request JSON is not canonical JSON",
+            )
+        })
 }
 
 fn parse_portfolio_snapshot_request(
@@ -1307,10 +1325,10 @@ fn api_error_from_portfolio_config_error(error: PortfolioSnapshotConfigError) ->
         PortfolioSnapshotConfigError::InvalidBundle(_)
         | PortfolioSnapshotConfigError::Decode { .. }
         | PortfolioSnapshotConfigError::Serialize { .. }
-        | PortfolioSnapshotConfigError::CanonicalJson { .. } => ApiError::new(
+        | PortfolioSnapshotConfigError::CanonicalJson { .. } => ApiError::backend(
             StatusCode::BAD_REQUEST,
             "InvalidPortfolioRequest",
-            error.to_string(),
+            "Portfolio request failed validation",
         ),
     }
 }
@@ -1343,11 +1361,11 @@ fn readiness_artifact_probe() -> Result<store::ArtifactEvidenceRef, ApiError> {
         artifact_id: ArtifactId::from_digest(DigestAlgorithm::Sha256JcsV1, *digest.digest()),
         digest,
         byte_len: bytes.len() as u64,
-        media_type: spec::MediaType::new("application/json").map_err(|error| {
-            ApiError::new(
+        media_type: spec::MediaType::new("application/json").map_err(|_| {
+            ApiError::backend(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "JsonMediaTypeInvalid",
-                error.to_string(),
+                "JSON media type is invalid",
             )
         })?,
         schema_id: None,
@@ -1360,24 +1378,30 @@ fn readiness_artifact_probe() -> Result<store::ArtifactEvidenceRef, ApiError> {
 
 fn api_error_from_typed_store_error(error: PostgresTypedStoreError) -> ApiError {
     match error {
-        PostgresTypedStoreError::Store(error) => {
-            ApiError::new(StatusCode::CONFLICT, "RunStoreRejected", error.to_string())
-        }
-        PostgresTypedStoreError::Database(message) => ApiError::new(
+        PostgresTypedStoreError::Store(_) => ApiError::backend(
+            StatusCode::CONFLICT,
+            "RunStoreRejected",
+            "Run store rejected the requested operation",
+        ),
+        PostgresTypedStoreError::Database(_) => ApiError::backend(
             StatusCode::SERVICE_UNAVAILABLE,
             "RunStoreUnavailable",
-            message,
+            "Run store is unavailable",
         ),
-        PostgresTypedStoreError::Corruption(message) => ApiError::new(
+        PostgresTypedStoreError::Corruption(_) => ApiError::backend(
             StatusCode::INTERNAL_SERVER_ERROR,
             "RunStoreCorruption",
-            message,
+            "Run store returned invalid data",
         ),
     }
 }
 
-fn api_error_from_store_error(error: store::StoreError) -> ApiError {
-    ApiError::new(StatusCode::CONFLICT, "RunStoreRejected", error.to_string())
+fn api_error_from_store_error(_error: store::StoreError) -> ApiError {
+    ApiError::backend(
+        StatusCode::CONFLICT,
+        "RunStoreRejected",
+        "Run store rejected the requested operation",
+    )
 }
 
 fn projection_with_resource_lanes(
@@ -1442,26 +1466,32 @@ fn projection_with_resource_lanes(
 
 fn api_error_from_typed_artifact_error(error: FsTypedArtifactError) -> ApiError {
     match error {
-        FsTypedArtifactError::NotFound { .. } => {
-            ApiError::new(StatusCode::NOT_FOUND, "ArtifactNotFound", error.to_string())
-        }
+        FsTypedArtifactError::NotFound { .. } => ApiError::backend(
+            StatusCode::NOT_FOUND,
+            "ArtifactNotFound",
+            "Typed artifact was not found",
+        ),
         FsTypedArtifactError::InvalidEvidence { .. }
         | FsTypedArtifactError::InvalidIdentity { .. }
-        | FsTypedArtifactError::EvidenceMismatch { .. } => {
-            ApiError::new(StatusCode::CONFLICT, "ArtifactRejected", error.to_string())
-        }
-        FsTypedArtifactError::RetainedArtifactRefused { .. } => {
-            ApiError::new(StatusCode::CONFLICT, "ArtifactRetained", error.to_string())
-        }
-        FsTypedArtifactError::Corruption { .. } => ApiError::new(
+        | FsTypedArtifactError::EvidenceMismatch { .. } => ApiError::backend(
+            StatusCode::CONFLICT,
+            "ArtifactRejected",
+            "Typed artifact evidence was rejected",
+        ),
+        FsTypedArtifactError::RetainedArtifactRefused { .. } => ApiError::backend(
+            StatusCode::CONFLICT,
+            "ArtifactRetained",
+            "Typed artifact is retained",
+        ),
+        FsTypedArtifactError::Corruption { .. } => ApiError::backend(
             StatusCode::INTERNAL_SERVER_ERROR,
             "ArtifactCorruption",
-            error.to_string(),
+            "Typed artifact store returned invalid data",
         ),
-        FsTypedArtifactError::Io { .. } => ApiError::new(
+        FsTypedArtifactError::Io { .. } => ApiError::backend(
             StatusCode::SERVICE_UNAVAILABLE,
             "ArtifactStoreUnavailable",
-            error.to_string(),
+            "Typed artifact store is unavailable",
         ),
     }
 }
