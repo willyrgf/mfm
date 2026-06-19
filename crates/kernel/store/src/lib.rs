@@ -5779,7 +5779,11 @@ pub mod v1 {
         validate_artifact_producer_policy(requirement, evidence, contract.producer, mode)
     }
 
-    fn validate_artifact_requirement_against_evidence(
+    /// Validates a typed event artifact requirement against retained artifact evidence.
+    ///
+    /// This applies the closed [`events::ArtifactRole`] contract for role-bearing requirements and
+    /// exact carried-field matching for schema-only requirements.
+    pub fn validate_artifact_requirement_against_evidence(
         requirement: &EventArtifactRequirement,
         evidence: &ArtifactEvidenceRef,
     ) -> Result<()> {
