@@ -571,4 +571,3 @@ Required metadata checks should assert:
   workflow changes
 - `bin/cli/README.md`: CLI command and JSON output contract
 - `bin/rest-api/README.md`: REST contract
-- `RFC_TYPED_CORE_PROPOSAL_1.md`: historical RFC for the typed-core rewrite

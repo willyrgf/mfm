@@ -531,8 +531,7 @@ Update this document when a change alters:
 - crate ownership boundaries
 - CLI or REST runtime contracts
 
-Use `docs/architecture.md` for the short contributor map and `RFC_TYPED_CORE_PROPOSAL_1.md` for the
-historical proposal that introduced this rewrite.
+Use `docs/architecture.md` for the short contributor map.
 
 The former typed-core source-scan gates and summary-key CI scripts have been deleted. Real
 guarantees now live in typed APIs, private constructors, crate dependency boundaries, Rust tests,
