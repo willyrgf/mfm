@@ -1802,7 +1802,7 @@ async fn side_effect_driver_idles_on_ambiguous_projection() {
 }
 
 #[tokio::test]
-async fn side_effect_driver_rejects_unsupported_prepared_projection() {
+async fn side_effect_driver_starts_and_submits_from_prepared_projection() {
     let fixture = fixture_with_first_exclusive_side_effect_state();
     let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
     let mut store = store::InMemoryTypedRunStore::new();
@@ -1823,18 +1823,70 @@ async fn side_effect_driver_rejects_unsupported_prepared_projection() {
         "wallet-driver-unsupported",
         "sidefx-driver-unsupported",
     );
-    let callbacks = TestSideEffectDriverCallbacks::new(&fixture, ledger_key);
+    let callbacks = TestSideEffectDriverCallbacks::new(&fixture, ledger_key.clone());
 
-    let error =
+    let output =
         drive_side_effect_driver_from_store(&fixture, &store, node, &attempt_id, &callbacks)
             .await
-            .expect_err("prepared phase unsupported");
+            .expect("driver output");
 
+    assert_eq!(output.staged_artifacts.len(), 1);
+    assert_eq!(output.payloads.len(), 2);
+    match &output.payloads[0] {
+        RunnerEventPayload::SideEffectInvocationStarted(payload) => {
+            assert_eq!(payload.ledger_key, ledger_key);
+            assert_eq!(payload.invocation_epoch, 1);
+        }
+        other => panic!("expected invocation started payload: {other:?}"),
+    }
+    match &output.payloads[1] {
+        RunnerEventPayload::SideEffectSubmissionObserved(payload) => {
+            assert_eq!(payload.ledger_key, ledger_key);
+            assert_eq!(payload.invocation_epoch, 1);
+        }
+        other => panic!("expected submission payload: {other:?}"),
+    }
+
+    let required_artifacts = output
+        .staged_artifacts
+        .iter()
+        .map(|artifact| artifact.evidence().clone())
+        .collect::<Vec<_>>();
+    let payloads = output
+        .payloads
+        .into_iter()
+        .map(events::KernelEventPayload::from)
+        .collect::<Vec<_>>();
+    store
+        .append_prepared_commit(store_typed_commit_request! {
+            run_id: fixture.run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&fixture.run_id),
+            commit_key: store::CommitKey::new("sidefx-driver-prepared-resume")
+                .expect("commit key"),
+            payloads: payloads,
+            required_artifacts: required_artifacts,
+            preconditions: store::CommitPreconditions {
+                required_run_state: store::RequiredRunState::NotCompleted,
+                required_side_effect_states: vec![store::SideEffectStatePrecondition {
+                    ledger_key: ledger_key.clone(),
+                    required: store::RequiredSideEffectState::InvocationPrepared,
+                }],
+                ..store::CommitPreconditions::default()
+            },
+        })
+        .expect("append prepared recovery output");
+
+    let projection = store
+        .projection_snapshot()
+        .side_effect_state_for_run(&fixture.run_id, &ledger_key)
+        .expect("side-effect state")
+        .expect("side-effect projection");
     assert!(matches!(
-        error,
-        RuntimeError::InvalidRunnerOutput(message)
-            if message.contains("unsupported side-effect driver phase")
-                && message.contains("prepared")
+        projection.phase(),
+        store::SideEffectLedgerPhase::SubmissionKnown {
+            status: store::SideEffectSubmissionState::Observed { .. },
+            ..
+        }
     ));
 }
 

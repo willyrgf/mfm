@@ -25,6 +25,11 @@ pub enum SideEffectProtocolAction {
         /// Invocation epoch to submit or recover.
         invocation_epoch: u32,
     },
+    /// Invocation was prepared but not marked started; start it, then submit or recover status.
+    StartPreparedAndSubmitOrRecoverSubmission {
+        /// Invocation epoch to start and submit or recover.
+        invocation_epoch: u32,
+    },
     /// Submission evidence exists; read receipt evidence.
     ReadReceipt {
         /// Invocation epoch whose submission was observed.
@@ -54,6 +59,11 @@ impl SideEffectProtocolAction {
             return Ok(Self::PrepareAndStart);
         };
         match phase {
+            store::SideEffectLedgerPhase::Prepared { claim, .. } => {
+                Ok(Self::StartPreparedAndSubmitOrRecoverSubmission {
+                    invocation_epoch: claim.invocation_epoch,
+                })
+            }
             store::SideEffectLedgerPhase::Started { claim, .. }
             | store::SideEffectLedgerPhase::SubmissionKnown {
                 claim,
@@ -82,7 +92,6 @@ impl SideEffectProtocolAction {
             } => Ok(Self::IdleAmbiguous { invocation_epoch }),
             store::SideEffectLedgerPhase::IntentPersisted { .. }
             | store::SideEffectLedgerPhase::Claimed { .. }
-            | store::SideEffectLedgerPhase::Prepared { .. }
             | store::SideEffectLedgerPhase::SubmissionKnown {
                 status: store::SideEffectSubmissionState::NotSubmitted,
                 ..
@@ -364,6 +373,12 @@ impl SideEffectDriver {
                 Self::submit_or_recover_submission(&ctx, callbacks, &view, action, invocation_epoch)
                     .await
             }
+            SideEffectProtocolAction::StartPreparedAndSubmitOrRecoverSubmission {
+                invocation_epoch,
+            } => {
+                Self::submit_or_recover_submission(&ctx, callbacks, &view, action, invocation_epoch)
+                    .await
+            }
             SideEffectProtocolAction::ReadReceipt { invocation_epoch } => {
                 let submission = observed_submission(&view)?;
                 let receipt = callbacks.read_receipt(&ctx, submission).await?;
@@ -450,20 +465,43 @@ impl SideEffectDriver {
             .await?;
         let side_effect = side_effect_binding(view, invocation_epoch)?;
         let builder = SideEffectEvidenceBuilder::new(ctx);
+        let start_claim = match action {
+            SideEffectProtocolAction::StartPreparedAndSubmitOrRecoverSubmission { .. } => {
+                Some(prepared_claim_binding(view)?)
+            }
+            _ => None,
+        };
         match decision {
-            SideEffectSubmissionDecision::Observed(submission) => {
-                builder.submission_observed(side_effect, &submission)
-            }
-            SideEffectSubmissionDecision::Unknown(evidence) => {
-                builder.submission_unknown(side_effect, &evidence)
-            }
-            SideEffectSubmissionDecision::NotSubmitted(proof) => {
-                builder.not_submitted_proven(side_effect, &proof)
-            }
+            SideEffectSubmissionDecision::Observed(submission) => match start_claim {
+                Some(claim) => {
+                    builder.start_prepared_and_submission_observed(side_effect, claim, &submission)
+                }
+                None => builder.submission_observed(side_effect, &submission),
+            },
+            SideEffectSubmissionDecision::Unknown(evidence) => match start_claim {
+                Some(claim) => {
+                    builder.start_prepared_and_submission_unknown(side_effect, claim, &evidence)
+                }
+                None => builder.submission_unknown(side_effect, &evidence),
+            },
+            SideEffectSubmissionDecision::NotSubmitted(proof) => match start_claim {
+                Some(claim) => {
+                    builder.start_prepared_and_not_submitted_proven(side_effect, claim, &proof)
+                }
+                None => builder.not_submitted_proven(side_effect, &proof),
+            },
             SideEffectSubmissionDecision::Ambiguous {
                 ambiguity_code,
                 evidence,
-            } => builder.ambiguous(side_effect, ambiguity_code, &evidence),
+            } => match start_claim {
+                Some(claim) => builder.start_prepared_and_ambiguous(
+                    side_effect,
+                    claim,
+                    ambiguity_code,
+                    &evidence,
+                ),
+                None => builder.ambiguous(side_effect, ambiguity_code, &evidence),
+            },
         }
     }
 }
@@ -490,6 +528,17 @@ fn prepared_invocation<'view>(
 ) -> Option<&'view store::SideEffectArtifactProjection> {
     view.projection()
         .and_then(|projection| projection.prepared_invocation.as_ref())
+}
+
+fn prepared_claim_binding(view: &SideEffectAttemptView<'_>) -> Result<RunnerClaimBinding> {
+    match view.phase() {
+        Some(store::SideEffectLedgerPhase::Prepared { claim, .. }) => Ok(RunnerClaimBinding {
+            claim_owner: claim.claim_owner.clone(),
+            claim_generation: claim.claim_generation,
+            claim_fencing_token: claim.claim_fencing_token.clone(),
+        }),
+        _ => Err(missing_driver_projection("prepared claim")),
+    }
 }
 
 fn observed_submission<'view>(
@@ -611,6 +660,28 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
         })
     }
 
+    /// Builds invocation-started and not-submitted proof evidence for a prepared invocation.
+    pub fn start_prepared_and_not_submitted_proven<Proof>(
+        &self,
+        side_effect: RunnerSideEffectBinding,
+        claim: RunnerClaimBinding,
+        proof: &Proof,
+    ) -> Result<ErasedRunnerOutput>
+    where
+        Proof: MfmValue,
+    {
+        let artifacts = RunnerArtifactBuilder::new(self.ctx);
+        let artifact = artifacts.not_submitted_proof(proof)?;
+        self.started_single_artifact_output(
+            side_effect,
+            claim,
+            &artifact,
+            |payloads, side_effect, artifact| {
+                payloads.side_effect_not_submitted_proven(side_effect, artifact)
+            },
+        )
+    }
+
     /// Builds submission observed evidence.
     pub fn submission_observed<Submission>(
         &self,
@@ -627,6 +698,28 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
         })
     }
 
+    /// Builds invocation-started and submission-observed evidence for a prepared invocation.
+    pub fn start_prepared_and_submission_observed<Submission>(
+        &self,
+        side_effect: RunnerSideEffectBinding,
+        claim: RunnerClaimBinding,
+        submission: &Submission,
+    ) -> Result<ErasedRunnerOutput>
+    where
+        Submission: MfmValue,
+    {
+        let artifacts = RunnerArtifactBuilder::new(self.ctx);
+        let artifact = artifacts.submission(submission)?;
+        self.started_single_artifact_output(
+            side_effect,
+            claim,
+            &artifact,
+            |payloads, side_effect, artifact| {
+                payloads.side_effect_submission_observed(side_effect, artifact)
+            },
+        )
+    }
+
     /// Builds submission unknown evidence.
     pub fn submission_unknown<Evidence>(
         &self,
@@ -641,6 +734,28 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
         self.single_artifact_output(side_effect, &artifact, |payloads, side_effect, artifact| {
             payloads.side_effect_submission_unknown(side_effect, artifact)
         })
+    }
+
+    /// Builds invocation-started and submission-unknown evidence for a prepared invocation.
+    pub fn start_prepared_and_submission_unknown<Evidence>(
+        &self,
+        side_effect: RunnerSideEffectBinding,
+        claim: RunnerClaimBinding,
+        evidence: &Evidence,
+    ) -> Result<ErasedRunnerOutput>
+    where
+        Evidence: MfmValue,
+    {
+        let artifacts = RunnerArtifactBuilder::new(self.ctx);
+        let artifact = artifacts.submission_unknown(evidence)?;
+        self.started_single_artifact_output(
+            side_effect,
+            claim,
+            &artifact,
+            |payloads, side_effect, artifact| {
+                payloads.side_effect_submission_unknown(side_effect, artifact)
+            },
+        )
     }
 
     /// Builds receipt observed evidence.
@@ -704,6 +819,29 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
         })
     }
 
+    /// Builds invocation-started and ambiguity evidence for a prepared invocation.
+    pub fn start_prepared_and_ambiguous<Evidence>(
+        &self,
+        side_effect: RunnerSideEffectBinding,
+        claim: RunnerClaimBinding,
+        ambiguity_code: events::AmbiguityCode,
+        evidence: &Evidence,
+    ) -> Result<ErasedRunnerOutput>
+    where
+        Evidence: MfmValue,
+    {
+        let artifacts = RunnerArtifactBuilder::new(self.ctx);
+        let artifact = artifacts.ambiguity_evidence(evidence)?;
+        self.started_single_artifact_output(
+            side_effect,
+            claim,
+            &artifact,
+            |payloads, side_effect, artifact| {
+                payloads.side_effect_ambiguous(side_effect, ambiguity_code, artifact)
+            },
+        )
+    }
+
     fn prepare_and_start_with_artifact<Intent, Idempotency>(
         &self,
         evidence: SideEffectPrepareEvidence<'_, Intent, Idempotency>,
@@ -764,6 +902,40 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
             &RunnerJsonArtifact,
         ) -> Result<crate::RunnerEventPayload>,
     {
+        self.single_artifact_output_with_optional_start(side_effect, None, artifact, payload)
+    }
+
+    fn started_single_artifact_output<F>(
+        &self,
+        side_effect: RunnerSideEffectBinding,
+        claim: RunnerClaimBinding,
+        artifact: &RunnerJsonArtifact,
+        payload: F,
+    ) -> Result<ErasedRunnerOutput>
+    where
+        F: FnOnce(
+            &RunnerPayloadBuilder<'_, '_>,
+            RunnerSideEffectBinding,
+            &RunnerJsonArtifact,
+        ) -> Result<crate::RunnerEventPayload>,
+    {
+        self.single_artifact_output_with_optional_start(side_effect, Some(claim), artifact, payload)
+    }
+
+    fn single_artifact_output_with_optional_start<F>(
+        &self,
+        side_effect: RunnerSideEffectBinding,
+        start_claim: Option<RunnerClaimBinding>,
+        artifact: &RunnerJsonArtifact,
+        payload: F,
+    ) -> Result<ErasedRunnerOutput>
+    where
+        F: FnOnce(
+            &RunnerPayloadBuilder<'_, '_>,
+            RunnerSideEffectBinding,
+            &RunnerJsonArtifact,
+        ) -> Result<crate::RunnerEventPayload>,
+    {
         let payloads = RunnerPayloadBuilder::new(self.ctx);
         let mut output = RunnerOutputBuilder::new(self.ctx);
         output.stage_side_effect_artifact(
@@ -772,6 +944,9 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
             side_effect.invocation_epoch,
         )?;
         output.retain_runtime_evidence(artifact);
+        if let Some(claim) = start_claim {
+            output.payload(payloads.side_effect_invocation_started(side_effect.clone(), claim));
+        }
         output.payload(payload(&payloads, side_effect, artifact)?);
         Ok(output.finish())
     }
