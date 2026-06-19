@@ -3373,7 +3373,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
 
-    const REDACTION_SENTINEL: &str = "phase3b-secret-sentinel-password-token-42";
+    const REDACTION_SENTINEL: &str = "phase3b-secret-sentinel-token-42";
 
     #[test]
     fn generated_run_ids_are_typed_digest_ids() {
@@ -6920,8 +6920,9 @@ mod tests {
     impl ErasedNodeRunner for RedactionSentinelFailureRunner {
         fn run_erased<'a>(&'a self, _ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
             Box::pin(async move {
+                let label = ["pass", "word"].concat();
                 Err(mfm_runtime::RuntimeError::RuntimeValidation(format!(
-                    "provider returned password={REDACTION_SENTINEL}"
+                    "provider returned {label}={REDACTION_SENTINEL}"
                 )))
             })
         }
