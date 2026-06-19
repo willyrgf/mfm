@@ -31,6 +31,7 @@ let
   # no append-to-inherited (the child env starts empty).
   cargoEnv = {
     CARGO_TARGET_DIR = "\${stateDir}/cargo-target";
+    CARGO_INCREMENTAL = "0";
     RUST_BACKTRACE = "1";
     TMPDIR = "\${stateDir}";
   }
