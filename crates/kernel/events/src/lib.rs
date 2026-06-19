@@ -1013,6 +1013,462 @@ pub mod v1 {
         RetentionManifest,
     }
 
+    /// Schema-field policy required for an artifact role.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub enum ArtifactSchemaPolicy {
+        /// Launch artifacts may carry a certified schema or omit it for current compatibility.
+        OptionalLaunchSchema,
+        /// Schema must equal the certified seed schema.
+        ExactSeedSchema,
+        /// Schema must equal the produced value cell schema.
+        ExactValueSchema,
+        /// Schema must equal the event evidence schema.
+        ExactEvidenceSchema,
+        /// Schema must be absent.
+        Absent,
+        /// Schema must equal the public-output schema.
+        ExactPublicSchema,
+        /// Schema must equal the redacted diagnostic schema.
+        ExactDiagnosticSchema,
+    }
+
+    impl ArtifactSchemaPolicy {
+        /// Returns the stable policy label used by contract goldens.
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                Self::OptionalLaunchSchema => "optional_launch_schema",
+                Self::ExactSeedSchema => "exact_seed_schema",
+                Self::ExactValueSchema => "exact_value_schema",
+                Self::ExactEvidenceSchema => "exact_evidence_schema",
+                Self::Absent => "absent",
+                Self::ExactPublicSchema => "exact_public_schema",
+                Self::ExactDiagnosticSchema => "exact_diagnostic_schema",
+            }
+        }
+    }
+
+    /// Semantic-type-field policy required for an artifact role.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub enum ArtifactSemanticPolicy {
+        /// Launch artifacts may carry a certified semantic type or omit it for current compatibility.
+        OptionalLaunchSemantic,
+        /// Semantic type must equal the certified seed semantic type.
+        ExactSeedSemantic,
+        /// Semantic type must equal the produced value cell semantic type.
+        ExactValueSemantic,
+        /// Semantic type must be absent.
+        Absent,
+    }
+
+    impl ArtifactSemanticPolicy {
+        /// Returns the stable policy label used by contract goldens.
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                Self::OptionalLaunchSemantic => "optional_launch_semantic",
+                Self::ExactSeedSemantic => "exact_seed_semantic",
+                Self::ExactValueSemantic => "exact_value_semantic",
+                Self::Absent => "absent",
+            }
+        }
+    }
+
+    /// Producer-scope policy required for an artifact role.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub enum ArtifactProducerScope {
+        /// Launch artifact producer may be omitted or non-seed.
+        LaunchOrGlobalNoSeed,
+        /// Producer seed id is required and node producer must be absent.
+        SeedRequired,
+        /// Producer node id is required and seed producer must be absent.
+        NodeRequired,
+        /// Producer node and seed ids must both be absent.
+        GlobalNoSeed,
+        /// Diagnostic artifacts may carry a node producer, but never a seed producer.
+        DiagnosticOptionalNodeNoSeed,
+        /// Middleware-produced artifacts must not carry node or seed producers.
+        MiddlewareNoSeed,
+    }
+
+    impl ArtifactProducerScope {
+        /// Returns the stable policy label used by contract goldens.
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                Self::LaunchOrGlobalNoSeed => "launch_or_global_no_seed",
+                Self::SeedRequired => "seed_required",
+                Self::NodeRequired => "node_required",
+                Self::GlobalNoSeed => "global_no_seed",
+                Self::DiagnosticOptionalNodeNoSeed => "diagnostic_optional_node_no_seed",
+                Self::MiddlewareNoSeed => "middleware_no_seed",
+            }
+        }
+    }
+
+    /// Runtime staging class for artifacts with a given role.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub enum ArtifactStagingClass {
+        /// Artifact is admitted as run-start authority.
+        RunAdmission,
+        /// Attempt-produced state output artifact.
+        AttemptStateOutput,
+        /// Attempt-produced fact response artifact.
+        AttemptFactResponse,
+        /// Side-effect intent artifact.
+        SideEffectIntent,
+        /// Side-effect prepared-invocation artifact.
+        SideEffectPreparedInvocation,
+        /// Side-effect not-submitted proof artifact.
+        SideEffectNotSubmittedProof,
+        /// Side-effect submission artifact.
+        SideEffectSubmission,
+        /// Side-effect submission-unknown evidence artifact.
+        SideEffectSubmissionUnknown,
+        /// Side-effect receipt artifact.
+        SideEffectReceipt,
+        /// Side-effect confirmation artifact.
+        SideEffectConfirmation,
+        /// Side-effect ambiguity evidence artifact.
+        SideEffectAmbiguity,
+        /// Manual-resolution artifact.
+        ManualResolution,
+        /// Attempt-produced public output cache artifact.
+        AttemptPublicOutput,
+        /// Attempt-produced redacted diagnostic artifact.
+        AttemptRedactedDiagnostic,
+        /// Middleware-produced retention manifest artifact.
+        MiddlewareRetentionManifest,
+    }
+
+    impl ArtifactStagingClass {
+        /// Returns the stable staging label used by contract goldens.
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                Self::RunAdmission => "run_admission",
+                Self::AttemptStateOutput => "attempt_state_output",
+                Self::AttemptFactResponse => "attempt_fact_response",
+                Self::SideEffectIntent => "side_effect_intent",
+                Self::SideEffectPreparedInvocation => "side_effect_prepared_invocation",
+                Self::SideEffectNotSubmittedProof => "side_effect_not_submitted_proof",
+                Self::SideEffectSubmission => "side_effect_submission",
+                Self::SideEffectSubmissionUnknown => "side_effect_submission_unknown",
+                Self::SideEffectReceipt => "side_effect_receipt",
+                Self::SideEffectConfirmation => "side_effect_confirmation",
+                Self::SideEffectAmbiguity => "side_effect_ambiguity",
+                Self::ManualResolution => "manual_resolution",
+                Self::AttemptPublicOutput => "attempt_public_output",
+                Self::AttemptRedactedDiagnostic => "attempt_redacted_diagnostic",
+                Self::MiddlewareRetentionManifest => "middleware_retention_manifest",
+            }
+        }
+    }
+
+    /// Retention class for artifacts with a given role.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub enum ArtifactRetentionClass {
+        /// Runtime framework does not retain this role directly.
+        FrameworkIgnored,
+        /// Ordinary value/evidence artifact.
+        ValueArtifacts,
+        /// Side-effect receipt artifact.
+        ReceiptArtifacts,
+        /// Side-effect confirmation artifact.
+        ConfirmationArtifacts,
+        /// Public-output rendered artifact.
+        PublicOutputArtifacts,
+    }
+
+    impl ArtifactRetentionClass {
+        /// Returns the stable retention label used by contract goldens.
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                Self::FrameworkIgnored => "framework_ignored",
+                Self::ValueArtifacts => "value_artifacts",
+                Self::ReceiptArtifacts => "receipt_artifacts",
+                Self::ConfirmationArtifacts => "confirmation_artifacts",
+                Self::PublicOutputArtifacts => "public_output_artifacts",
+            }
+        }
+    }
+
+    /// Same-commit policy for artifacts with a given role.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub enum ArtifactSameCommitPolicy {
+        /// Artifact evidence is embedded directly in `RunAdmitted`.
+        RunAdmittedArtifact,
+        /// Seed-cell artifact evidence is embedded in `RunAdmitted`.
+        RunAdmittedSeedCell,
+        /// Artifact must be admitted with the payload that references it.
+        PayloadRequiredArtifact,
+        /// Retention manifests must commit with their retention reference.
+        RetentionManifestRequiresRef,
+    }
+
+    impl ArtifactSameCommitPolicy {
+        /// Returns the stable same-commit label used by contract goldens.
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                Self::RunAdmittedArtifact => "run_admitted_artifact",
+                Self::RunAdmittedSeedCell => "run_admitted_seed_cell",
+                Self::PayloadRequiredArtifact => "payload_required_artifact",
+                Self::RetentionManifestRequiresRef => "retention_manifest_requires_ref",
+            }
+        }
+    }
+
+    /// Closed contract row for one artifact role.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct ArtifactRoleContract {
+        /// Artifact role.
+        pub role: ArtifactRole,
+        /// Persisted role tag.
+        pub tag: &'static str,
+        /// Schema-field policy.
+        pub schema: ArtifactSchemaPolicy,
+        /// Semantic-type-field policy.
+        pub semantic: ArtifactSemanticPolicy,
+        /// Producer-scope policy.
+        pub producer: ArtifactProducerScope,
+        /// Runtime staging class.
+        pub staging: ArtifactStagingClass,
+        /// Retention class.
+        pub retention: ArtifactRetentionClass,
+        /// Same-commit admission policy.
+        pub same_commit: ArtifactSameCommitPolicy,
+    }
+
+    impl ArtifactRole {
+        /// All v1 artifact roles in persisted schema/tag order.
+        pub const ALL: &'static [Self] = &[
+            Self::TypedExecutionSpec,
+            Self::TypedSpecCertificate,
+            Self::TypedConfig,
+            Self::SeedInput,
+            Self::StateOutput,
+            Self::FactResponse,
+            Self::SideEffectIntent,
+            Self::PreparedInvocation,
+            Self::NotSubmittedProof,
+            Self::Submission,
+            Self::SubmissionUnknownEvidence,
+            Self::Receipt,
+            Self::Confirmation,
+            Self::AmbiguityEvidence,
+            Self::ManualResolutionEvidence,
+            Self::ManualResolutionAuthorization,
+            Self::PublicOutput,
+            Self::RedactedDiagnostic,
+            Self::RetentionManifest,
+        ];
+
+        /// Returns this role's closed contract row.
+        pub const fn contract(self) -> ArtifactRoleContract {
+            match self {
+                Self::TypedExecutionSpec => ArtifactRoleContract {
+                    role: self,
+                    tag: "typed_execution_spec",
+                    schema: ArtifactSchemaPolicy::OptionalLaunchSchema,
+                    semantic: ArtifactSemanticPolicy::OptionalLaunchSemantic,
+                    producer: ArtifactProducerScope::LaunchOrGlobalNoSeed,
+                    staging: ArtifactStagingClass::RunAdmission,
+                    retention: ArtifactRetentionClass::FrameworkIgnored,
+                    same_commit: ArtifactSameCommitPolicy::RunAdmittedArtifact,
+                },
+                Self::TypedSpecCertificate => ArtifactRoleContract {
+                    role: self,
+                    tag: "typed_spec_certificate",
+                    schema: ArtifactSchemaPolicy::OptionalLaunchSchema,
+                    semantic: ArtifactSemanticPolicy::OptionalLaunchSemantic,
+                    producer: ArtifactProducerScope::LaunchOrGlobalNoSeed,
+                    staging: ArtifactStagingClass::RunAdmission,
+                    retention: ArtifactRetentionClass::FrameworkIgnored,
+                    same_commit: ArtifactSameCommitPolicy::RunAdmittedArtifact,
+                },
+                Self::TypedConfig => ArtifactRoleContract {
+                    role: self,
+                    tag: "typed_config",
+                    schema: ArtifactSchemaPolicy::OptionalLaunchSchema,
+                    semantic: ArtifactSemanticPolicy::OptionalLaunchSemantic,
+                    producer: ArtifactProducerScope::LaunchOrGlobalNoSeed,
+                    staging: ArtifactStagingClass::RunAdmission,
+                    retention: ArtifactRetentionClass::FrameworkIgnored,
+                    same_commit: ArtifactSameCommitPolicy::RunAdmittedArtifact,
+                },
+                Self::SeedInput => ArtifactRoleContract {
+                    role: self,
+                    tag: "seed_input",
+                    schema: ArtifactSchemaPolicy::ExactSeedSchema,
+                    semantic: ArtifactSemanticPolicy::ExactSeedSemantic,
+                    producer: ArtifactProducerScope::SeedRequired,
+                    staging: ArtifactStagingClass::RunAdmission,
+                    retention: ArtifactRetentionClass::FrameworkIgnored,
+                    same_commit: ArtifactSameCommitPolicy::RunAdmittedSeedCell,
+                },
+                Self::StateOutput => ArtifactRoleContract {
+                    role: self,
+                    tag: "state_output",
+                    schema: ArtifactSchemaPolicy::ExactValueSchema,
+                    semantic: ArtifactSemanticPolicy::ExactValueSemantic,
+                    producer: ArtifactProducerScope::NodeRequired,
+                    staging: ArtifactStagingClass::AttemptStateOutput,
+                    retention: ArtifactRetentionClass::ValueArtifacts,
+                    same_commit: ArtifactSameCommitPolicy::PayloadRequiredArtifact,
+                },
+                Self::FactResponse => ArtifactRoleContract {
+                    role: self,
+                    tag: "fact_response",
+                    schema: ArtifactSchemaPolicy::ExactEvidenceSchema,
+                    semantic: ArtifactSemanticPolicy::Absent,
+                    producer: ArtifactProducerScope::NodeRequired,
+                    staging: ArtifactStagingClass::AttemptFactResponse,
+                    retention: ArtifactRetentionClass::ValueArtifacts,
+                    same_commit: ArtifactSameCommitPolicy::PayloadRequiredArtifact,
+                },
+                Self::SideEffectIntent => ArtifactRoleContract {
+                    role: self,
+                    tag: "side_effect_intent",
+                    schema: ArtifactSchemaPolicy::ExactEvidenceSchema,
+                    semantic: ArtifactSemanticPolicy::Absent,
+                    producer: ArtifactProducerScope::NodeRequired,
+                    staging: ArtifactStagingClass::SideEffectIntent,
+                    retention: ArtifactRetentionClass::ValueArtifacts,
+                    same_commit: ArtifactSameCommitPolicy::PayloadRequiredArtifact,
+                },
+                Self::PreparedInvocation => ArtifactRoleContract {
+                    role: self,
+                    tag: "prepared_invocation",
+                    schema: ArtifactSchemaPolicy::Absent,
+                    semantic: ArtifactSemanticPolicy::Absent,
+                    producer: ArtifactProducerScope::NodeRequired,
+                    staging: ArtifactStagingClass::SideEffectPreparedInvocation,
+                    retention: ArtifactRetentionClass::ValueArtifacts,
+                    same_commit: ArtifactSameCommitPolicy::PayloadRequiredArtifact,
+                },
+                Self::NotSubmittedProof => ArtifactRoleContract {
+                    role: self,
+                    tag: "not_submitted_proof",
+                    schema: ArtifactSchemaPolicy::ExactEvidenceSchema,
+                    semantic: ArtifactSemanticPolicy::Absent,
+                    producer: ArtifactProducerScope::NodeRequired,
+                    staging: ArtifactStagingClass::SideEffectNotSubmittedProof,
+                    retention: ArtifactRetentionClass::ValueArtifacts,
+                    same_commit: ArtifactSameCommitPolicy::PayloadRequiredArtifact,
+                },
+                Self::Submission => ArtifactRoleContract {
+                    role: self,
+                    tag: "submission",
+                    schema: ArtifactSchemaPolicy::ExactEvidenceSchema,
+                    semantic: ArtifactSemanticPolicy::Absent,
+                    producer: ArtifactProducerScope::NodeRequired,
+                    staging: ArtifactStagingClass::SideEffectSubmission,
+                    retention: ArtifactRetentionClass::ValueArtifacts,
+                    same_commit: ArtifactSameCommitPolicy::PayloadRequiredArtifact,
+                },
+                Self::SubmissionUnknownEvidence => ArtifactRoleContract {
+                    role: self,
+                    tag: "submission_unknown_evidence",
+                    schema: ArtifactSchemaPolicy::ExactEvidenceSchema,
+                    semantic: ArtifactSemanticPolicy::Absent,
+                    producer: ArtifactProducerScope::NodeRequired,
+                    staging: ArtifactStagingClass::SideEffectSubmissionUnknown,
+                    retention: ArtifactRetentionClass::ValueArtifacts,
+                    same_commit: ArtifactSameCommitPolicy::PayloadRequiredArtifact,
+                },
+                Self::Receipt => ArtifactRoleContract {
+                    role: self,
+                    tag: "receipt",
+                    schema: ArtifactSchemaPolicy::ExactEvidenceSchema,
+                    semantic: ArtifactSemanticPolicy::Absent,
+                    producer: ArtifactProducerScope::NodeRequired,
+                    staging: ArtifactStagingClass::SideEffectReceipt,
+                    retention: ArtifactRetentionClass::ReceiptArtifacts,
+                    same_commit: ArtifactSameCommitPolicy::PayloadRequiredArtifact,
+                },
+                Self::Confirmation => ArtifactRoleContract {
+                    role: self,
+                    tag: "confirmation",
+                    schema: ArtifactSchemaPolicy::ExactEvidenceSchema,
+                    semantic: ArtifactSemanticPolicy::Absent,
+                    producer: ArtifactProducerScope::NodeRequired,
+                    staging: ArtifactStagingClass::SideEffectConfirmation,
+                    retention: ArtifactRetentionClass::ConfirmationArtifacts,
+                    same_commit: ArtifactSameCommitPolicy::PayloadRequiredArtifact,
+                },
+                Self::AmbiguityEvidence => ArtifactRoleContract {
+                    role: self,
+                    tag: "ambiguity_evidence",
+                    schema: ArtifactSchemaPolicy::ExactEvidenceSchema,
+                    semantic: ArtifactSemanticPolicy::Absent,
+                    producer: ArtifactProducerScope::NodeRequired,
+                    staging: ArtifactStagingClass::SideEffectAmbiguity,
+                    retention: ArtifactRetentionClass::ValueArtifacts,
+                    same_commit: ArtifactSameCommitPolicy::PayloadRequiredArtifact,
+                },
+                Self::ManualResolutionEvidence => ArtifactRoleContract {
+                    role: self,
+                    tag: "manual_resolution_evidence",
+                    schema: ArtifactSchemaPolicy::ExactEvidenceSchema,
+                    semantic: ArtifactSemanticPolicy::Absent,
+                    producer: ArtifactProducerScope::GlobalNoSeed,
+                    staging: ArtifactStagingClass::ManualResolution,
+                    retention: ArtifactRetentionClass::ValueArtifacts,
+                    same_commit: ArtifactSameCommitPolicy::PayloadRequiredArtifact,
+                },
+                Self::ManualResolutionAuthorization => ArtifactRoleContract {
+                    role: self,
+                    tag: "manual_resolution_authorization",
+                    schema: ArtifactSchemaPolicy::ExactEvidenceSchema,
+                    semantic: ArtifactSemanticPolicy::Absent,
+                    producer: ArtifactProducerScope::GlobalNoSeed,
+                    staging: ArtifactStagingClass::ManualResolution,
+                    retention: ArtifactRetentionClass::ValueArtifacts,
+                    same_commit: ArtifactSameCommitPolicy::PayloadRequiredArtifact,
+                },
+                Self::PublicOutput => ArtifactRoleContract {
+                    role: self,
+                    tag: "public_output",
+                    schema: ArtifactSchemaPolicy::ExactPublicSchema,
+                    semantic: ArtifactSemanticPolicy::Absent,
+                    producer: ArtifactProducerScope::NodeRequired,
+                    staging: ArtifactStagingClass::AttemptPublicOutput,
+                    retention: ArtifactRetentionClass::PublicOutputArtifacts,
+                    same_commit: ArtifactSameCommitPolicy::PayloadRequiredArtifact,
+                },
+                Self::RedactedDiagnostic => ArtifactRoleContract {
+                    role: self,
+                    tag: "redacted_diagnostic",
+                    schema: ArtifactSchemaPolicy::ExactDiagnosticSchema,
+                    semantic: ArtifactSemanticPolicy::Absent,
+                    producer: ArtifactProducerScope::DiagnosticOptionalNodeNoSeed,
+                    staging: ArtifactStagingClass::AttemptRedactedDiagnostic,
+                    retention: ArtifactRetentionClass::ValueArtifacts,
+                    same_commit: ArtifactSameCommitPolicy::PayloadRequiredArtifact,
+                },
+                Self::RetentionManifest => ArtifactRoleContract {
+                    role: self,
+                    tag: "retention_manifest",
+                    schema: ArtifactSchemaPolicy::Absent,
+                    semantic: ArtifactSemanticPolicy::Absent,
+                    producer: ArtifactProducerScope::MiddlewareNoSeed,
+                    staging: ArtifactStagingClass::MiddlewareRetentionManifest,
+                    retention: ArtifactRetentionClass::FrameworkIgnored,
+                    same_commit: ArtifactSameCommitPolicy::RetentionManifestRequiresRef,
+                },
+            }
+        }
+
+        /// Returns the stable persisted tag for this role.
+        pub const fn as_str(self) -> &'static str {
+            self.contract().tag
+        }
+
+        /// Parses a stable persisted role tag.
+        pub fn parse(value: &str) -> Option<Self> {
+            Self::ALL
+                .iter()
+                .copied()
+                .find(|role| role.as_str() == value)
+        }
+    }
+
     /// Source of an artifact reference carried by a kernel event.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub enum EventArtifactReferenceSource {
@@ -3643,6 +4099,13 @@ pub mod v1 {
                 .map(|row| row.tag.to_owned())
                 .collect::<Vec<_>>();
             assert_eq!(tags, artifact_role_schema_tags());
+            assert_eq!(
+                tags,
+                ArtifactRole::ALL
+                    .iter()
+                    .map(|role| role.as_str().to_owned())
+                    .collect::<Vec<_>>()
+            );
 
             let mut roles = artifact_role_baselines()
                 .iter()
@@ -3651,10 +4114,22 @@ pub mod v1 {
             roles.sort_unstable();
             roles.dedup();
             assert_eq!(roles.len(), artifact_role_baselines().len());
+            assert_eq!(roles.len(), ArtifactRole::ALL.len());
 
             let rows = artifact_role_baselines()
                 .iter()
                 .map(|row| {
+                    let contract = row.role.contract();
+                    assert_eq!(contract.role, row.role);
+                    assert_eq!(contract.tag, row.tag);
+                    assert_eq!(row.role.as_str(), row.tag);
+                    assert_eq!(ArtifactRole::parse(row.tag), Some(row.role));
+                    assert_eq!(contract.schema.as_str(), row.schema_policy);
+                    assert_eq!(contract.semantic.as_str(), row.semantic_policy);
+                    assert_eq!(contract.producer.as_str(), row.producer_policy);
+                    assert_eq!(contract.staging.as_str(), row.staging_class);
+                    assert_eq!(contract.retention.as_str(), row.retention_class);
+                    assert_eq!(contract.same_commit.as_str(), row.same_commit_policy);
                     format!(
                         "{} schema={} semantic={} producer={} staging={} retention={} same_commit={}",
                         row.tag,
@@ -3668,6 +4143,7 @@ pub mod v1 {
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
+            assert_eq!(ArtifactRole::parse("resource_touched_set_evidence"), None);
 
             assert_eq!(
                 rows,
