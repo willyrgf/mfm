@@ -4502,6 +4502,154 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shared_run_history_read_paths_match_for_completed_run() {
+        let (root, fixture, services, _started) = start_framework_fixture_run().await;
+        let stream = services
+            .store()
+            .load_run_stream(&fixture.run_id)
+            .await
+            .expect("load valid stream");
+        let runtime_spec = load_runtime_spec_for_run(
+            services.artifacts(),
+            services.certification_registry(),
+            &fixture.run_id,
+            &stream,
+        )
+        .await
+        .expect("runtime spec");
+        let committed =
+            store::CommittedRunStream::from_events(fixture.run_id.clone(), stream.clone())
+                .expect("committed stream");
+        let rebuilt_projection = store::ProjectionSnapshot::rebuild_from_run_stream(&stream)
+            .expect("rebuilt projection");
+        let verified_history = verified_run_history_from_events(
+            services.artifacts(),
+            &runtime_spec,
+            &fixture.run_id,
+            &stream,
+        )
+        .await
+        .expect("verified history");
+        assert_eq!(verified_history.run_id(), &fixture.run_id);
+        assert_eq!(verified_history.spec_hash(), runtime_spec.spec_hash());
+        assert_eq!(verified_history.events(), stream.as_slice());
+        assert_eq!(verified_history.committed_stream(), &committed);
+        assert_eq!(verified_history.projection_snapshot(), &rebuilt_projection);
+
+        let replay_authority =
+            replay_read_authority_for_run(services.artifacts(), &runtime_spec, &verified_history)
+                .await
+                .expect("replay authority");
+        let replay_broker =
+            ReplayBroker::from_read_authority(replay_authority).expect("replay broker");
+        assert_eq!(
+            replay_broker.projection_snapshot(),
+            verified_history.projection_snapshot()
+        );
+
+        let expected_status = typed_run_status_from_stream(&fixture.run_id, &runtime_spec, &stream)
+            .expect("status from stream");
+        let status = services.run_status(&fixture.run_id).await.expect("status");
+        assert_eq!(status, expected_status);
+
+        let stream_response = services
+            .run_stream(&fixture.run_id)
+            .await
+            .expect("stream response");
+        assert_eq!(
+            stream_response,
+            typed_run_stream_response_from_events(&fixture.run_id, stream_head(&stream), &stream)
+        );
+
+        let replay_response = services
+            .verify_replay_for_run(&fixture.run_id)
+            .await
+            .expect("replay response");
+        assert_eq!(replay_response.run_id, status.run_id);
+        assert_eq!(replay_response.spec_hash, status.spec_hash);
+        assert_eq!(replay_response.run_mode, status.run_mode);
+        assert_eq!(replay_response.saga, status.saga);
+        assert_eq!(
+            replay_response.attempt_dispositions,
+            status.attempt_dispositions
+        );
+        assert_eq!(replay_response.head_seq, status.head_seq);
+
+        let public_output = services
+            .typed_public_output(&fixture.run_id, &fixture.public_schema_id)
+            .await
+            .expect("public output");
+        let public_authority = public_output_read_authority_for_run(
+            services.artifacts(),
+            &runtime_spec,
+            &verified_history,
+            &fixture.public_schema_id,
+        )
+        .await
+        .expect("public output authority");
+        let rendered = render_typed_public_output(services.artifacts(), &public_authority)
+            .await
+            .expect("rendered public output");
+        assert_eq!(public_output, rendered);
+        assert!(public_output.json.is_some());
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn shared_run_history_read_paths_reject_corrupt_stream_cases() {
+        let (root, fixture, services, _started) = start_framework_fixture_run().await;
+        let valid_stream = services
+            .store()
+            .load_run_stream(&fixture.run_id)
+            .await
+            .expect("load valid stream");
+        let artifacts = services.artifacts().clone();
+        let registry =
+            CertificationRegistry::from_program_draft(&fixture.draft).expect("fixture registry");
+        let cases = vec![
+            (
+                "missing_retention_projection",
+                remove_retention_projection_history(&valid_stream),
+            ),
+            (
+                "post_completion_retention_refs",
+                append_post_completion_retention_refs_history(&valid_stream),
+            ),
+            (
+                "tampered_public_output_payload",
+                corrupt_public_output_history(&artifacts, &valid_stream).await,
+            ),
+        ];
+
+        for (label, stream) in cases {
+            let corrupt_services = make_async_typed_services_with_certification_registry(
+                production_typed_runner_registry(artifacts.clone())
+                    .expect("production runner registry"),
+                StaticAsyncStore {
+                    run_id: fixture.run_id.clone(),
+                    stream,
+                },
+                artifacts.clone(),
+                registry.clone(),
+            );
+            let summary = corrupt_read_path_rejection_summary(&corrupt_services, &fixture).await;
+            assert_eq!(
+                summary,
+                [
+                    "run_status:LaunchRuntimeError",
+                    "run_stream:LaunchRuntimeError",
+                    "verify_replay_for_run:LaunchRuntimeError",
+                    "typed_public_output:LaunchRuntimeError",
+                ],
+                "{label}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn production_public_surfaces_redact_runtime_failure_sentinel() {
         let (root, fixture, services, started) = launch_framework_fixture_run(
             DriveMode::UntilBlocked,
@@ -6452,6 +6600,58 @@ mod tests {
         corrupt_store.load_run_stream(&run_id)
     }
 
+    fn remove_retention_projection_history(
+        valid_stream: &[store::KernelEventEnvelope],
+    ) -> Vec<store::KernelEventEnvelope> {
+        let run_id = valid_stream
+            .first()
+            .expect("valid stream is non-empty")
+            .run_id()
+            .clone();
+        let mut rewritten = Vec::new();
+        let mut next_seq = store::StreamSeq::FIRST;
+        let mut index = 0;
+        while index < valid_stream.len() {
+            let seq = valid_stream[index].seq();
+            let commit_key = valid_stream[index].commit_key().clone();
+            let mut end = index + 1;
+            while end < valid_stream.len()
+                && valid_stream[end].seq() == seq
+                && valid_stream[end].commit_key() == &commit_key
+            {
+                end += 1;
+            }
+            let group = &valid_stream[index..end];
+            let contains_retention_projection = group.iter().any(|event| {
+                matches!(
+                    event.payload(),
+                    events::KernelEventPayload::RetentionManifestProjected(_)
+                )
+            });
+            if !contains_retention_projection {
+                let payloads = group
+                    .iter()
+                    .map(|event| event.payload().clone())
+                    .collect::<Vec<_>>();
+                let request = store::TypedCommitRequest::from_payloads(
+                    run_id.clone(),
+                    next_seq,
+                    commit_key,
+                    payloads,
+                    Vec::new(),
+                    store::CommitPreconditions::default(),
+                )
+                .expect("typed commit request");
+                let batch = store::build_committed_batch(&request, next_seq)
+                    .expect("rewritten commit batch");
+                rewritten.extend(batch.events().iter().cloned());
+                next_seq = store::StreamSeq::new(next_seq.as_u64() + 1).expect("next seq");
+            }
+            index = end;
+        }
+        rewritten
+    }
+
     fn standalone_retention_projection_history(
         valid_stream: &[store::KernelEventEnvelope],
     ) -> Vec<store::KernelEventEnvelope> {
@@ -6707,6 +6907,38 @@ mod tests {
             .join("blobs")
             .join(&digest[0..2])
             .join(artifact_id.as_str())
+    }
+
+    async fn corrupt_read_path_rejection_summary(
+        services: &AsyncRunServices<StaticAsyncStore>,
+        fixture: &FrameworkSeedPublicOutputFixture,
+    ) -> Vec<String> {
+        let status = services
+            .run_status(&fixture.run_id)
+            .await
+            .expect_err("status rejects corrupt stream");
+        let stream = services
+            .run_stream(&fixture.run_id)
+            .await
+            .expect_err("stream rejects corrupt stream");
+        let replay = services
+            .verify_replay_for_run(&fixture.run_id)
+            .await
+            .expect_err("replay rejects corrupt stream");
+        let public_output = services
+            .typed_public_output(&fixture.run_id, &fixture.public_schema_id)
+            .await
+            .expect_err("public output rejects corrupt stream");
+
+        [
+            ("run_status", status),
+            ("run_stream", stream),
+            ("verify_replay_for_run", replay),
+            ("typed_public_output", public_output),
+        ]
+        .into_iter()
+        .map(|(surface, error)| format!("{surface}:{}", error.code))
+        .collect()
     }
 
     struct StaticAsyncStore {
