@@ -17,16 +17,18 @@ use mfm_collectors_proof::{
     ProofReplayVerifier, ProofSideEffectResult, ProofSubmission, RecordedProofFacts,
 };
 use mfm_events::v1::{self as events, side_effect};
-use mfm_ids::{ArtifactId, ContentDigest, DescriptorId, NodeId, SchemaId, SemanticTypeId};
+use mfm_ids::{ContentDigest, DescriptorId, SchemaId};
 use mfm_replay::v1 as replay;
 use mfm_runtime::{
     CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerBinding,
     ErasedRunnerFuture, ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCellTerminal,
-    MaterializedInputNode, RunnerEventPayload, StagedArtifact, StagedRetentionRefs,
+    MaterializedInputNode, RunnerArtifactBuilder, RunnerCapabilityBinding, RunnerClaimBinding,
+    RunnerOutputBuilder, RunnerPayloadBuilder, RunnerPreparedInvocationBinding,
+    RunnerSideEffectBinding,
 };
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
-use mfm_values::{MfmConfig, MfmValue};
+use mfm_values::MfmConfig;
 use serde::Serialize;
 
 const READ_FACTORY: &str = "read_external";
@@ -156,50 +158,28 @@ impl ErasedNodeRunner for ProofAssembleRunner {
 
 async fn run_read(ctx: ErasedRunCtx<'_>) -> mfm_runtime::Result<ErasedRunnerOutput> {
     ensure_config::<ProofReadConfig>(&ctx.node().config_ref, &ProofReadConfig { fact_n: 1 })?;
+    let artifacts = RunnerArtifactBuilder::new(&ctx);
+    let payloads = RunnerPayloadBuilder::new(&ctx);
     let fact = ProofFact { n: 1 };
     let request = ProofFactRequest {
         source: "deterministic-proof".to_owned(),
     };
     let response = ProofFactResponse { fact: fact.clone() };
-    let request_hash = digest_value(&request)?;
-    let response_artifact = artifact_for_value(
-        &response,
-        events::ArtifactRole::FactResponse,
-        Some(ctx.node().node_id.clone()),
-    )?;
-    let output_artifact = artifact_for_value(
-        &fact,
-        events::ArtifactRole::StateOutput,
-        Some(ctx.node().node_id.clone()),
-    )?;
-    let staged_response = staged_attempt_artifact(&ctx, &response_artifact)?;
-    let staged_output = staged_attempt_artifact(&ctx, &output_artifact)?;
-    Ok(ErasedRunnerOutput {
-        staged_artifacts: vec![staged_response, staged_output],
-        staged_retention_refs: vec![
-            retention(&response_artifact.evidence),
-            retention(&output_artifact.evidence),
-        ],
-        payloads: vec![
-            RunnerEventPayload::FactRecorded(events::FactRecorded {
-                spec_hash: ctx.spec_hash().clone(),
-                node_id: ctx.node().node_id.clone(),
-                attempt_id: ctx.attempt_id().clone(),
-                capability_kind: ProofReadCapability::kind().map_err(runtime_capability_error)?,
-                capability_version: ProofReadCapability::version()
-                    .map_err(runtime_capability_error)?,
-                adapter_kind: proof_adapter_kind()?,
-                adapter_version: proof_adapter_version()?,
-                request_schema_id: ProofFactRequest::schema_id().map_err(runtime_value_error)?,
-                request_hash,
-                response_schema_id: ProofFactResponse::schema_id().map_err(runtime_value_error)?,
-                response_hash: response_artifact.evidence.digest.clone(),
-                fact_key: events::FactKey::new("mfm.proof.fact.default")?,
-                artifact_id: response_artifact.evidence.artifact_id.clone(),
-            }),
-            cell_produced(&ctx, &output_artifact.evidence),
-        ],
-    })
+    let response_artifact = artifacts.fact_response(&response)?;
+    let output_artifact = artifacts.state_output(&fact)?;
+    let mut output = RunnerOutputBuilder::new(&ctx);
+    output.stage_attempt_artifact(&response_artifact)?;
+    output.retain_runtime_evidence(&response_artifact);
+    output.stage_attempt_artifact(&output_artifact)?;
+    output.retain_runtime_evidence(&output_artifact);
+    output.payload(payloads.fact_recorded(
+        events::FactKey::new("mfm.proof.fact.default")?,
+        &request,
+        &response_artifact,
+        proof_read_binding()?,
+    )?);
+    output.payload(payloads.cell_produced(&output_artifact)?);
+    Ok(output.finish())
 }
 
 async fn run_side_effect(ctx: ErasedRunCtx<'_>) -> mfm_runtime::Result<ErasedRunnerOutput> {
@@ -237,84 +217,61 @@ async fn side_effect_prepare(
     ctx: ErasedRunCtx<'_>,
     ledger_key: events::SideEffectLedgerKey,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
+    let artifacts = RunnerArtifactBuilder::new(&ctx);
+    let payloads = RunnerPayloadBuilder::new(&ctx);
     let intent = proof_intent();
     let idem_input = proof_idempotency_input();
-    let intent_artifact = artifact_for_value(
-        &intent,
-        events::ArtifactRole::SideEffectIntent,
-        Some(ctx.node().node_id.clone()),
-    )?;
+    let intent_artifact = artifacts.side_effect_intent(&intent)?;
     let idem_hash = digest_value(&idem_input)?;
     let idempotency_key =
         events::IdempotencyKeyRef::new(format!("idem-{}", short_digest(&idem_hash)))?;
     let owner = events::RunnerInvocationId::new("mfm.proof.owner.1")?;
     let token = side_effect::ClaimFencingToken::new("mfm.proof.token.1")?;
-    let ledger_purpose = events::SideEffectLedgerPurpose::Forward;
-    let staged_artifact =
-        staged_side_effect_artifact(&ctx, &intent_artifact, ledger_key.clone(), 1)?;
-    Ok(ErasedRunnerOutput {
-        staged_artifacts: vec![staged_artifact],
-        staged_retention_refs: vec![retention(&intent_artifact.evidence)],
-        payloads: vec![
-            RunnerEventPayload::SideEffectIntentPersisted(side_effect::IntentPersisted {
-                spec_hash: ctx.spec_hash().clone(),
-                node_id: ctx.node().node_id.clone(),
-                scope_id: ctx.node().scope_id.clone(),
-                attempt_id: ctx.attempt_id().clone(),
-                ledger_key: ledger_key.clone(),
-                ledger_purpose: ledger_purpose.clone(),
-                invocation_epoch: 1,
-                intent_schema_id: ProofIntent::schema_id().map_err(runtime_value_error)?,
-                intent_hash: intent_artifact.evidence.digest.clone(),
-                intent_artifact_id: intent_artifact.evidence.artifact_id.clone(),
-                idempotency_input_schema_id: ProofIdempotencyInput::schema_id()
-                    .map_err(runtime_value_error)?,
-                idempotency_input_hash: idem_hash,
-                idempotency_key,
-                capability_kind: ProofMutationCapability::kind()
-                    .map_err(runtime_capability_error)?,
-                capability_version: ProofMutationCapability::version()
-                    .map_err(runtime_capability_error)?,
-                adapter_kind: proof_adapter_kind()?,
-                adapter_version: proof_adapter_version()?,
-            }),
-            RunnerEventPayload::SideEffectClaimed(side_effect::Claimed {
-                spec_hash: ctx.spec_hash().clone(),
-                node_id: ctx.node().node_id.clone(),
-                attempt_id: ctx.attempt_id().clone(),
-                ledger_key: ledger_key.clone(),
-                ledger_purpose: ledger_purpose.clone(),
-                claim_owner: owner.clone(),
-                invocation_epoch: 1,
-                claim_generation: 1,
-                claim_fencing_token: token.clone(),
-            }),
-            RunnerEventPayload::SideEffectInvocationPrepared(side_effect::InvocationPrepared {
-                spec_hash: ctx.spec_hash().clone(),
-                node_id: ctx.node().node_id.clone(),
-                attempt_id: ctx.attempt_id().clone(),
-                ledger_key: ledger_key.clone(),
-                ledger_purpose: ledger_purpose.clone(),
-                invocation_epoch: 1,
-                claim_generation: 1,
-                claim_fencing_token: token.clone(),
-                prepared_artifact_id: None,
-                prepared_hash: None,
-                resource_key: None,
-            }),
-            RunnerEventPayload::SideEffectInvocationStarted(side_effect::InvocationStarted {
-                spec_hash: ctx.spec_hash().clone(),
-                node_id: ctx.node().node_id.clone(),
-                attempt_id: ctx.attempt_id().clone(),
-                ledger_key,
-                ledger_purpose,
-                invocation_epoch: 1,
-                claim_owner: owner,
-                claim_generation: 1,
-                claim_fencing_token: token,
-            }),
-        ],
-    })
+    let side_effect = RunnerSideEffectBinding {
+        ledger_key,
+        ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+        invocation_epoch: 1,
+    };
+    let mut output = RunnerOutputBuilder::new(&ctx);
+    output.stage_side_effect_artifact(
+        &intent_artifact,
+        side_effect.ledger_key.clone(),
+        side_effect.invocation_epoch,
+    )?;
+    output.retain_runtime_evidence(&intent_artifact);
+    output.payload(payloads.side_effect_intent_persisted(
+        side_effect.clone(),
+        &intent_artifact,
+        &idem_input,
+        idempotency_key,
+        proof_mutation_binding()?,
+    )?);
+    output.payload(payloads.side_effect_claimed(
+        side_effect.clone(),
+        RunnerClaimBinding {
+            claim_owner: owner.clone(),
+            claim_generation: 1,
+            claim_fencing_token: token.clone(),
+        },
+    ));
+    output.payload(payloads.side_effect_invocation_prepared(
+        side_effect.clone(),
+        None,
+        RunnerPreparedInvocationBinding {
+            claim_generation: 1,
+            claim_fencing_token: token.clone(),
+            resource_key: None,
+        },
+    )?);
+    output.payload(payloads.side_effect_invocation_started(
+        side_effect,
+        RunnerClaimBinding {
+            claim_owner: owner,
+            claim_generation: 1,
+            claim_fencing_token: token,
+        },
+    ));
+    Ok(output.finish())
 }
 
 async fn side_effect_submission(
@@ -322,31 +279,24 @@ async fn side_effect_submission(
     ledger_key: events::SideEffectLedgerKey,
     invocation_epoch: u32,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
+    let artifacts = RunnerArtifactBuilder::new(&ctx);
+    let payloads = RunnerPayloadBuilder::new(&ctx);
     let submission = proof_submission()?;
-    let artifact = artifact_for_value(
-        &submission,
-        events::ArtifactRole::Submission,
-        Some(ctx.node().node_id.clone()),
+    let artifact = artifacts.submission(&submission)?;
+    let side_effect = RunnerSideEffectBinding {
+        ledger_key,
+        ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+        invocation_epoch,
+    };
+    let mut output = RunnerOutputBuilder::new(&ctx);
+    output.stage_side_effect_artifact(
+        &artifact,
+        side_effect.ledger_key.clone(),
+        side_effect.invocation_epoch,
     )?;
-    let staged_artifact =
-        staged_side_effect_artifact(&ctx, &artifact, ledger_key.clone(), invocation_epoch)?;
-    Ok(ErasedRunnerOutput {
-        staged_artifacts: vec![staged_artifact],
-        staged_retention_refs: vec![retention(&artifact.evidence)],
-        payloads: vec![RunnerEventPayload::SideEffectSubmissionObserved(
-            side_effect::SubmissionObserved {
-                spec_hash: ctx.spec_hash().clone(),
-                node_id: ctx.node().node_id.clone(),
-                attempt_id: ctx.attempt_id().clone(),
-                ledger_key,
-                ledger_purpose: events::SideEffectLedgerPurpose::Forward,
-                invocation_epoch,
-                submission_schema_id: ProofSubmission::schema_id().map_err(runtime_value_error)?,
-                submission_hash: artifact.evidence.digest,
-                submission_artifact_id: artifact.evidence.artifact_id,
-            },
-        )],
-    })
+    output.retain_runtime_evidence(&artifact);
+    output.payload(payloads.side_effect_submission_observed(side_effect, &artifact)?);
+    Ok(output.finish())
 }
 
 async fn side_effect_receipt(
@@ -354,33 +304,29 @@ async fn side_effect_receipt(
     ledger_key: events::SideEffectLedgerKey,
     invocation_epoch: u32,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
+    let artifacts = RunnerArtifactBuilder::new(&ctx);
+    let payloads = RunnerPayloadBuilder::new(&ctx);
     let receipt = proof_receipt()?;
-    let artifact = artifact_for_value(
-        &receipt,
-        events::ArtifactRole::Receipt,
-        Some(ctx.node().node_id.clone()),
+    let artifact = artifacts.receipt(&receipt)?;
+    let side_effect = RunnerSideEffectBinding {
+        ledger_key,
+        ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+        invocation_epoch,
+    };
+    let mut output = RunnerOutputBuilder::new(&ctx);
+    output.stage_side_effect_artifact(
+        &artifact,
+        side_effect.ledger_key.clone(),
+        side_effect.invocation_epoch,
     )?;
-    let staged_artifact =
-        staged_side_effect_artifact(&ctx, &artifact, ledger_key.clone(), invocation_epoch)?;
-    Ok(ErasedRunnerOutput {
-        staged_artifacts: vec![staged_artifact],
-        staged_retention_refs: vec![retention(&artifact.evidence)],
-        payloads: vec![RunnerEventPayload::SideEffectReceiptObserved(
-            side_effect::ReceiptObserved {
-                spec_hash: ctx.spec_hash().clone(),
-                node_id: ctx.node().node_id.clone(),
-                attempt_id: ctx.attempt_id().clone(),
-                ledger_key,
-                ledger_purpose: events::SideEffectLedgerPurpose::Forward,
-                invocation_epoch,
-                receipt_schema_id: ProofReceipt::schema_id().map_err(runtime_value_error)?,
-                receipt_hash: artifact.evidence.digest,
-                receipt_artifact_id: artifact.evidence.artifact_id,
-                replay_verifier_id: replay_verifier_id()?,
-                resource_touched_set: None,
-            },
-        )],
-    })
+    output.retain_runtime_evidence(&artifact);
+    output.payload(payloads.side_effect_receipt_observed(
+        side_effect,
+        &artifact,
+        replay_verifier_id()?,
+        None,
+    )?);
+    Ok(output.finish())
 }
 
 async fn side_effect_confirmation(
@@ -388,49 +334,41 @@ async fn side_effect_confirmation(
     ledger_key: events::SideEffectLedgerKey,
     invocation_epoch: u32,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
+    let artifacts = RunnerArtifactBuilder::new(&ctx);
+    let payloads = RunnerPayloadBuilder::new(&ctx);
     let confirmation = proof_confirmation()?;
-    let artifact = artifact_for_value(
-        &confirmation,
-        events::ArtifactRole::Confirmation,
-        Some(ctx.node().node_id.clone()),
+    let artifact = artifacts.confirmation(&confirmation)?;
+    let side_effect = RunnerSideEffectBinding {
+        ledger_key,
+        ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+        invocation_epoch,
+    };
+    let mut output = RunnerOutputBuilder::new(&ctx);
+    output.stage_side_effect_artifact(
+        &artifact,
+        side_effect.ledger_key.clone(),
+        side_effect.invocation_epoch,
     )?;
-    let staged_artifact =
-        staged_side_effect_artifact(&ctx, &artifact, ledger_key.clone(), invocation_epoch)?;
-    Ok(ErasedRunnerOutput {
-        staged_artifacts: vec![staged_artifact],
-        staged_retention_refs: vec![retention(&artifact.evidence)],
-        payloads: vec![RunnerEventPayload::SideEffectConfirmationObserved(
-            side_effect::ConfirmationObserved {
-                spec_hash: ctx.spec_hash().clone(),
-                node_id: ctx.node().node_id.clone(),
-                attempt_id: ctx.attempt_id().clone(),
-                ledger_key,
-                ledger_purpose: events::SideEffectLedgerPurpose::Forward,
-                invocation_epoch,
-                confirmation_schema_id: ProofConfirmation::schema_id()
-                    .map_err(runtime_value_error)?,
-                confirmation_hash: artifact.evidence.digest,
-                confirmation_artifact_id: artifact.evidence.artifact_id,
-                replay_verifier_id: replay_verifier_id()?,
-                resource_touched_set: None,
-            },
-        )],
-    })
+    output.retain_runtime_evidence(&artifact);
+    output.payload(payloads.side_effect_confirmation_observed(
+        side_effect,
+        &artifact,
+        replay_verifier_id()?,
+        None,
+    )?);
+    Ok(output.finish())
 }
 
 async fn side_effect_output(ctx: ErasedRunCtx<'_>) -> mfm_runtime::Result<ErasedRunnerOutput> {
+    let artifacts = RunnerArtifactBuilder::new(&ctx);
+    let payloads = RunnerPayloadBuilder::new(&ctx);
     let output = proof_side_effect_result()?;
-    let artifact = artifact_for_value(
-        &output,
-        events::ArtifactRole::StateOutput,
-        Some(ctx.node().node_id.clone()),
-    )?;
-    let staged_artifact = staged_attempt_artifact(&ctx, &artifact)?;
-    Ok(ErasedRunnerOutput {
-        staged_artifacts: vec![staged_artifact],
-        staged_retention_refs: vec![retention(&artifact.evidence)],
-        payloads: vec![cell_produced(&ctx, &artifact.evidence)],
-    })
+    let artifact = artifacts.state_output(&output)?;
+    let mut runner_output = RunnerOutputBuilder::new(&ctx);
+    runner_output.stage_attempt_artifact(&artifact)?;
+    runner_output.retain_runtime_evidence(&artifact);
+    runner_output.payload(payloads.cell_produced(&artifact)?);
+    Ok(runner_output.finish())
 }
 
 async fn run_assemble(ctx: ErasedRunCtx<'_>) -> mfm_runtime::Result<ErasedRunnerOutput> {
@@ -445,39 +383,14 @@ async fn run_assemble(ctx: ErasedRunCtx<'_>) -> mfm_runtime::Result<ErasedRunner
         fact: proof_fact(),
         side_effect: proof_side_effect_result()?,
     };
-    let artifact = artifact_for_value(
-        &output,
-        events::ArtifactRole::StateOutput,
-        Some(ctx.node().node_id.clone()),
-    )?;
-    let staged_artifact = staged_attempt_artifact(&ctx, &artifact)?;
-    Ok(ErasedRunnerOutput {
-        staged_artifacts: vec![staged_artifact],
-        staged_retention_refs: vec![retention(&artifact.evidence)],
-        payloads: vec![cell_produced(&ctx, &artifact.evidence)],
-    })
-}
-
-fn staged_attempt_artifact(
-    ctx: &ErasedRunCtx<'_>,
-    artifact: &ProofArtifact,
-) -> mfm_runtime::Result<StagedArtifact> {
-    StagedArtifact::inline_attempt_artifact(ctx, artifact.bytes.clone(), artifact.evidence.clone())
-}
-
-fn staged_side_effect_artifact(
-    ctx: &ErasedRunCtx<'_>,
-    artifact: &ProofArtifact,
-    ledger_key: events::SideEffectLedgerKey,
-    invocation_epoch: u32,
-) -> mfm_runtime::Result<StagedArtifact> {
-    StagedArtifact::inline_side_effect_artifact(
-        ctx,
-        artifact.bytes.clone(),
-        artifact.evidence.clone(),
-        ledger_key,
-        invocation_epoch,
-    )
+    let artifacts = RunnerArtifactBuilder::new(&ctx);
+    let payloads = RunnerPayloadBuilder::new(&ctx);
+    let artifact = artifacts.state_output(&output)?;
+    let mut runner_output = RunnerOutputBuilder::new(&ctx);
+    runner_output.stage_attempt_artifact(&artifact)?;
+    runner_output.retain_runtime_evidence(&artifact);
+    runner_output.payload(payloads.cell_produced(&artifact)?);
+    Ok(runner_output.finish())
 }
 
 fn ensure_struct_input_digest(
@@ -518,80 +431,22 @@ fn ensure_struct_input_digest(
     }
 }
 
-fn cell_produced(
-    ctx: &ErasedRunCtx<'_>,
-    artifact: &store::ArtifactEvidenceRef,
-) -> RunnerEventPayload {
-    RunnerEventPayload::CellProduced(events::CellProduced {
-        spec_hash: ctx.spec_hash().clone(),
-        node_id: ctx.node().node_id.clone(),
-        cell_id: ctx.node().output_cell.clone(),
-        scope_id: ctx.output_cell().scope_id.clone(),
-        attempt_id: ctx.attempt_id().clone(),
-        semantic_type_id: ctx.output_cell().semantic_type_id.clone(),
-        schema_id: ctx.output_cell().schema_id.clone(),
-        value_lineage: ctx.output_cell().value_lineage.clone(),
-        artifact_id: artifact.artifact_id.clone(),
-        content_digest: artifact.digest.clone(),
-        producer_state_kind: Some(ctx.node().state_kind.clone()),
-        producer_state_version: Some(ctx.node().state_version.clone()),
+fn proof_read_binding() -> mfm_runtime::Result<RunnerCapabilityBinding> {
+    Ok(RunnerCapabilityBinding {
+        capability_kind: ProofReadCapability::kind().map_err(runtime_capability_error)?,
+        capability_version: ProofReadCapability::version().map_err(runtime_capability_error)?,
+        adapter_kind: proof_adapter_kind()?,
+        adapter_version: proof_adapter_version()?,
     })
 }
 
-struct ProofArtifact {
-    bytes: Vec<u8>,
-    evidence: store::ArtifactEvidenceRef,
-}
-
-fn artifact_for_value<T>(
-    value: &T,
-    role: events::ArtifactRole,
-    producer_node_id: Option<NodeId>,
-) -> mfm_runtime::Result<ProofArtifact>
-where
-    T: MfmValue + Serialize,
-{
-    let bytes = canonical_value(value)?;
-    let digest = bytes.content_digest();
-    let evidence = store::ArtifactEvidenceRef {
-        artifact_id: ArtifactId::from_digest(digest.algorithm(), *digest.digest()),
-        digest,
-        byte_len: bytes.as_bytes().len() as u64,
-        media_type: spec::MediaType::new("application/json")?,
-        schema_id: Some(T::schema_id().map_err(runtime_value_error)?),
-        semantic_type_id: artifact_semantic_type_id_for_role::<T>(role)?,
-        producer_node_id,
-        producer_seed_id: None,
-        artifact_role: role,
-    };
-    Ok(ProofArtifact {
-        bytes: bytes.to_vec(),
-        evidence,
+fn proof_mutation_binding() -> mfm_runtime::Result<RunnerCapabilityBinding> {
+    Ok(RunnerCapabilityBinding {
+        capability_kind: ProofMutationCapability::kind().map_err(runtime_capability_error)?,
+        capability_version: ProofMutationCapability::version().map_err(runtime_capability_error)?,
+        adapter_kind: proof_adapter_kind()?,
+        adapter_version: proof_adapter_version()?,
     })
-}
-
-fn artifact_semantic_type_id_for_role<T>(
-    role: events::ArtifactRole,
-) -> mfm_runtime::Result<Option<SemanticTypeId>>
-where
-    T: MfmValue,
-{
-    match role.contract().semantic {
-        events::ArtifactSemanticPolicy::OptionalLaunchSemantic
-        | events::ArtifactSemanticPolicy::ExactSeedSemantic
-        | events::ArtifactSemanticPolicy::ExactValueSemantic => {
-            Ok(Some(T::semantic_id().map_err(runtime_value_error)?))
-        }
-        events::ArtifactSemanticPolicy::Absent => Ok(None),
-    }
-}
-
-fn retention(artifact: &store::ArtifactEvidenceRef) -> StagedRetentionRefs {
-    StagedRetentionRefs::runtime_evidence(vec![events::RetentionRef {
-        artifact_id: artifact.artifact_id.clone(),
-        role: artifact.artifact_role,
-        content_digest: artifact.digest.clone(),
-    }])
 }
 
 fn ensure_config<T>(config: &spec::ConfigRef, expected: &T) -> mfm_runtime::Result<()>
