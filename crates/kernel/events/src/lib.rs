@@ -31,6 +31,13 @@ pub enum EventError {
         /// Invalid value.
         value: String,
     },
+    /// A public diagnostic field failed redaction-safety validation.
+    InvalidPublicDiagnostic {
+        /// Field label.
+        field: &'static str,
+        /// Stable rejection reason.
+        reason: &'static str,
+    },
     /// Identity construction failed.
     Identity(String),
     /// JSON serialization failed before canonicalization.
@@ -44,6 +51,9 @@ impl fmt::Display for EventError {
         match self {
             Self::InvalidString { field, value } => {
                 write!(f, "invalid {field} string {value:?}")
+            }
+            Self::InvalidPublicDiagnostic { field, reason } => {
+                write!(f, "invalid public diagnostic {field}: {reason}")
             }
             Self::Identity(message) => write!(f, "identity error: {message}"),
             Self::Serialize(message) => write!(f, "event JSON serialization error: {message}"),
@@ -1994,6 +2004,53 @@ pub mod v1 {
         pub diagnostic_ref: Option<ArtifactEvidenceRef>,
     }
 
+    impl MfmErrorInfo {
+        /// Creates redaction-safe error information without optional details or diagnostics.
+        pub fn new(
+            code: ErrorCode,
+            category: ErrorCategory,
+            retryable: bool,
+            safe_message: impl Into<String>,
+        ) -> Result<Self> {
+            let error = Self {
+                code,
+                category,
+                retryable,
+                safe_message: safe_message.into(),
+                public_details: None,
+                diagnostic_ref: None,
+            };
+            error.validate()?;
+            Ok(error)
+        }
+
+        /// Adds a redacted public details digest after validating the full public diagnostic.
+        pub fn with_public_details(mut self, public_details: RedactedJson) -> Result<Self> {
+            self.public_details = Some(public_details);
+            self.validate()?;
+            Ok(self)
+        }
+
+        /// Adds a redacted diagnostic artifact reference after validating the full diagnostic.
+        pub fn with_diagnostic_ref(mut self, diagnostic_ref: ArtifactEvidenceRef) -> Result<Self> {
+            self.diagnostic_ref = Some(diagnostic_ref);
+            self.validate()?;
+            Ok(self)
+        }
+
+        /// Validates that persisted public diagnostics are redaction-safe.
+        pub fn validate(&self) -> Result<()> {
+            validate_public_error_text("safe_message", &self.safe_message)?;
+            if let Some(details) = &self.public_details {
+                details.validate()?;
+            }
+            if let Some(diagnostic_ref) = &self.diagnostic_ref {
+                validate_public_diagnostic_ref(diagnostic_ref)?;
+            }
+            Ok(())
+        }
+    }
+
     /// Error category.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub enum ErrorCategory {
@@ -2018,6 +2075,117 @@ pub mod v1 {
     pub struct RedactedJson {
         /// Canonical digest of the redacted public details.
         pub content_digest: ContentDigest,
+    }
+
+    impl RedactedJson {
+        /// Creates a redacted public details digest reference.
+        pub fn new(content_digest: ContentDigest) -> Self {
+            Self { content_digest }
+        }
+
+        /// Validates the public-details reference.
+        pub fn validate(&self) -> Result<()> {
+            let _ = &self.content_digest;
+            Ok(())
+        }
+    }
+
+    const MAX_PUBLIC_SAFE_MESSAGE_BYTES: usize = 512;
+    const SECRET_SHAPED_DIAGNOSTIC_MARKERS: &[&str] = &[
+        "private key",
+        "private_key",
+        "mnemonic",
+        "password",
+        "passphrase",
+        "seed phrase",
+        "seed_phrase",
+        "api key",
+        "api_key",
+        "authorization:",
+        "bearer ",
+        "raw transaction",
+        "raw_transaction",
+        "raw_tx",
+        "signed payload",
+        "signed_payload",
+        "keystore path",
+        "keystore_path",
+        "rpc url",
+        "rpc_url",
+        "secret=",
+        "token=",
+        "-----begin",
+    ];
+
+    fn validate_public_error_text(field: &'static str, value: &str) -> Result<()> {
+        if value.is_empty() {
+            return Err(EventError::InvalidPublicDiagnostic {
+                field,
+                reason: "message must not be empty",
+            });
+        }
+        if value.len() > MAX_PUBLIC_SAFE_MESSAGE_BYTES {
+            return Err(EventError::InvalidPublicDiagnostic {
+                field,
+                reason: "message exceeds public length limit",
+            });
+        }
+        if !value.bytes().all(|byte| matches!(byte, 0x20..=0x7e)) {
+            return Err(EventError::InvalidPublicDiagnostic {
+                field,
+                reason: "message must be printable ASCII",
+            });
+        }
+        if contains_secret_shaped_diagnostic(value) {
+            return Err(EventError::InvalidPublicDiagnostic {
+                field,
+                reason: "message resembles secret material",
+            });
+        }
+        Ok(())
+    }
+
+    fn contains_secret_shaped_diagnostic(value: &str) -> bool {
+        let lower = value.to_ascii_lowercase();
+        SECRET_SHAPED_DIAGNOSTIC_MARKERS
+            .iter()
+            .any(|marker| lower.contains(marker))
+            || lower
+                .split(is_public_diagnostic_token_boundary)
+                .any(|token| is_key_shaped_token(token) || is_hex_secret_shaped_token(token))
+    }
+
+    fn is_public_diagnostic_token_boundary(ch: char) -> bool {
+        !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+    }
+
+    fn is_key_shaped_token(token: &str) -> bool {
+        token.starts_with("sk_")
+            || token.starts_with("akia")
+            || token.starts_with("ghp_")
+            || token.starts_with("github_pat_")
+            || token.starts_with("xoxb-")
+    }
+
+    fn is_hex_secret_shaped_token(token: &str) -> bool {
+        let token = token.strip_prefix("0x").unwrap_or(token);
+        token.len() >= 64 && token.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }
+
+    fn validate_public_diagnostic_ref(reference: &ArtifactEvidenceRef) -> Result<()> {
+        if reference.role != ArtifactRole::RedactedDiagnostic {
+            return Err(EventError::InvalidPublicDiagnostic {
+                field: "diagnostic_ref",
+                reason: "diagnostic artifact role must be redacted_diagnostic",
+            });
+        }
+        if reference.semantic_type_id.is_some() {
+            return Err(EventError::InvalidPublicDiagnostic {
+                field: "diagnostic_ref",
+                reason: "diagnostic artifact semantic type must be absent",
+            });
+        }
+        Ok(())
     }
 
     /// Typed skip reason.
@@ -3732,6 +3900,77 @@ pub mod v1 {
                 byte_len: 64,
                 media_type: media_type("application/json"),
             }
+        }
+
+        #[test]
+        fn mfm_error_info_constructor_accepts_redacted_diagnostic_ref() {
+            let diagnostic = event_artifact_ref(
+                artifact_id(42),
+                ArtifactRole::RedactedDiagnostic,
+                schema_id("mfm.test.diagnostic", 43),
+                content_digest(44),
+            );
+
+            let error = MfmErrorInfo::new(
+                ErrorCode::new("redacted_diagnostic").expect("code"),
+                ErrorCategory::Runtime,
+                false,
+                "runtime validation failed",
+            )
+            .expect("base error")
+            .with_public_details(RedactedJson::new(content_digest(45)))
+            .expect("public details")
+            .with_diagnostic_ref(diagnostic.clone())
+            .expect("diagnostic ref");
+
+            assert_eq!(error.diagnostic_ref, Some(diagnostic));
+            assert!(error.public_details.is_some());
+        }
+
+        #[test]
+        fn mfm_error_info_rejects_secret_shaped_safe_message() {
+            let error = MfmErrorInfo::new(
+                ErrorCode::new("redacted_diagnostic").expect("code"),
+                ErrorCategory::Runtime,
+                false,
+                "provider returned bearer token=super-secret-value",
+            )
+            .expect_err("secret-shaped message rejected");
+
+            assert!(matches!(
+                error,
+                EventError::InvalidPublicDiagnostic {
+                    field: "safe_message",
+                    reason: "message resembles secret material"
+                }
+            ));
+        }
+
+        #[test]
+        fn mfm_error_info_rejects_non_redacted_diagnostic_ref() {
+            let diagnostic = event_artifact_ref(
+                artifact_id(46),
+                ArtifactRole::SideEffectIntent,
+                schema_id("mfm.test.diagnostic", 47),
+                content_digest(48),
+            );
+            let error = MfmErrorInfo::new(
+                ErrorCode::new("redacted_diagnostic").expect("code"),
+                ErrorCategory::Runtime,
+                false,
+                "runtime validation failed",
+            )
+            .expect("base error")
+            .with_diagnostic_ref(diagnostic)
+            .expect_err("wrong diagnostic role rejected");
+
+            assert!(matches!(
+                error,
+                EventError::InvalidPublicDiagnostic {
+                    field: "diagnostic_ref",
+                    reason: "diagnostic artifact role must be redacted_diagnostic"
+                }
+            ));
         }
 
         fn error_with_diagnostic(

@@ -1825,17 +1825,15 @@ pub(crate) fn runner_payloads_with_derived_lifecycle(
 fn side_effect_ambiguity_error(
     payload: &events::side_effect::Ambiguous,
 ) -> Result<events::MfmErrorInfo> {
-    Ok(events::MfmErrorInfo {
-        code: events::ErrorCode::new("side_effect_ambiguous")?,
-        category: events::ErrorCategory::SideEffect,
-        retryable: false,
-        safe_message: format!(
+    Ok(events::MfmErrorInfo::new(
+        events::ErrorCode::new("side_effect_ambiguous")?,
+        events::ErrorCategory::SideEffect,
+        false,
+        format!(
             "side-effect outcome is ambiguous: {}",
             payload.ambiguity_code
         ),
-        public_details: None,
-        diagnostic_ref: None,
-    })
+    )?)
 }
 
 struct RunnerOutputValidation<'a> {

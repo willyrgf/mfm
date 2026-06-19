@@ -462,6 +462,16 @@ fn assert_invalid_prepared_commit_contains(error: StoreError, expected: &str) {
     );
 }
 
+fn assert_event_error_contains(error: StoreError, expected: &str) {
+    assert!(
+        matches!(
+            &error,
+            StoreError::Event(message) if message.contains(expected)
+        ),
+        "unexpected error: {error:?}"
+    );
+}
+
 fn assert_resource_lane_blocked(error: StoreError, expected_lane_key: &ResourceLaneKey) {
     assert!(
         matches!(
@@ -1784,6 +1794,107 @@ fn prepared_commit_plan_accepts_explicit_terminal_attempt_authority() {
     let plan = PreparedCommitPlan::from(commit);
 
     assert!(matches!(plan, PreparedCommitPlan::AttemptTerminal(_)));
+}
+
+#[test]
+fn commit_rejects_secret_shaped_persisted_error_message() {
+    let mut store = InMemoryTypedRunStore::new();
+    let run_id = run_id(152);
+    ensure_test_run_admitted(&mut store, &run_id, "public-diagnostic-secret-run-start");
+    store
+        .append_prepared_commit(typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("public-diagnostic-secret-attempt-start").expect("commit key"),
+            payloads: vec![fact_attempt_started()],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("append attempt start");
+
+    let mut failure = fact_attempt_failed(false);
+    let KernelEventPayload::StateAttemptFailed(payload) = &mut failure else {
+        unreachable!("helper returns state attempt failure");
+    };
+    payload.error.safe_message = "provider returned bearer token=super-secret-value".to_owned();
+    let error = store
+        .append_prepared_commit(typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("public-diagnostic-secret-attempt-failed").expect("commit key"),
+            payloads: vec![failure],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect_err("secret-shaped diagnostic rejects before append");
+
+    assert_event_error_contains(error.clone(), "message resembles secret material");
+    assert!(
+        !error.to_string().contains("super-secret-value"),
+        "rejection must not echo secret-shaped diagnostic text"
+    );
+}
+
+#[test]
+fn commit_rejects_non_redacted_diagnostic_artifact_ref() {
+    let mut store = InMemoryTypedRunStore::new();
+    let run_id = run_id(153);
+    ensure_test_run_admitted(&mut store, &run_id, "public-diagnostic-artifact-run-start");
+    store
+        .append_prepared_commit(typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("public-diagnostic-artifact-attempt-start").expect("commit key"),
+            payloads: vec![fact_attempt_started()],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("append attempt start");
+
+    let artifact_id = artifact_id(154);
+    let digest = content_digest(155);
+    let schema_id = schema_id("mfm.test.diagnostic", 156);
+    let diagnostic_ref = events::ArtifactEvidenceRef {
+        artifact_id: artifact_id.clone(),
+        role: ArtifactRole::SideEffectIntent,
+        schema_id: schema_id.clone(),
+        semantic_type_id: None,
+        content_digest: digest.clone(),
+        byte_len: 64,
+        media_type: media_type("application/json"),
+    };
+    let required_artifact = ArtifactEvidenceRef {
+        artifact_id,
+        digest,
+        byte_len: 64,
+        media_type: media_type("application/json"),
+        schema_id: Some(schema_id),
+        semantic_type_id: None,
+        producer_node_id: Some(node_id(90)),
+        producer_seed_id: None::<SeedId>,
+        artifact_role: ArtifactRole::SideEffectIntent,
+    };
+    let mut failure = fact_attempt_failed(false);
+    let KernelEventPayload::StateAttemptFailed(payload) = &mut failure else {
+        unreachable!("helper returns state attempt failure");
+    };
+    payload.error.diagnostic_ref = Some(diagnostic_ref);
+
+    let error = store
+        .append_prepared_commit(typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("public-diagnostic-artifact-attempt-failed").expect("commit key"),
+            payloads: vec![failure],
+            required_artifacts: vec![required_artifact],
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect_err("non-redacted diagnostic artifact rejects before append");
+
+    assert_event_error_contains(
+        error,
+        "diagnostic artifact role must be redacted_diagnostic",
+    );
 }
 
 fn spec_artifact_ref() -> ArtifactEvidenceRef {

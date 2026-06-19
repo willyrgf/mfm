@@ -709,30 +709,24 @@ fn observed_attempt_failure_info(
     };
     let retryable = retryability.retryable_for(failure_class);
     let failure = match failure_class {
-        ObservedFailureClass::InputMaterialization => events::MfmErrorInfo {
-            code: events::ErrorCode::new("input_materialization_failed")?,
-            category: events::ErrorCategory::Validation,
+        ObservedFailureClass::InputMaterialization => events::MfmErrorInfo::new(
+            events::ErrorCode::new("input_materialization_failed")?,
+            events::ErrorCategory::Validation,
             retryable,
-            safe_message: "attempt input materialization failed".to_owned(),
-            public_details: None,
-            diagnostic_ref: None,
-        },
-        ObservedFailureClass::InvalidRunnerOutput => events::MfmErrorInfo {
-            code: events::ErrorCode::new("runner_output_invalid")?,
-            category: events::ErrorCategory::Validation,
+            "attempt input materialization failed",
+        )?,
+        ObservedFailureClass::InvalidRunnerOutput => events::MfmErrorInfo::new(
+            events::ErrorCode::new("runner_output_invalid")?,
+            events::ErrorCategory::Validation,
             retryable,
-            safe_message: "runner output failed validation".to_owned(),
-            public_details: None,
-            diagnostic_ref: None,
-        },
-        ObservedFailureClass::RuntimeValidation => events::MfmErrorInfo {
-            code: events::ErrorCode::new("runtime_validation_failed")?,
-            category: events::ErrorCategory::Validation,
+            "runner output failed validation",
+        )?,
+        ObservedFailureClass::RuntimeValidation => events::MfmErrorInfo::new(
+            events::ErrorCode::new("runtime_validation_failed")?,
+            events::ErrorCategory::Validation,
             retryable,
-            safe_message: "runtime validation failed while handling attempt".to_owned(),
-            public_details: None,
-            diagnostic_ref: None,
-        },
+            "runtime validation failed while handling attempt",
+        )?,
     };
     Ok(Some(failure))
 }

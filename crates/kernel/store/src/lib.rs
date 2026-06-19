@@ -5032,6 +5032,7 @@ pub mod v1 {
             &request.payloads,
         )?;
         validate_retention_manifest_pairs(&request.payloads)?;
+        validate_payload_public_diagnostics(&request.payloads)?;
 
         let verifier = InMemoryTypedRunStore {
             streams: BTreeMap::new(),
@@ -5848,6 +5849,20 @@ pub mod v1 {
                 artifact_id: evidence.artifact_id.clone(),
                 field: "bytes",
             });
+        }
+        Ok(())
+    }
+
+    fn validate_payload_public_diagnostics(payloads: &[KernelEventPayload]) -> Result<()> {
+        for payload in payloads {
+            match payload {
+                KernelEventPayload::PublicOutputRenderFailed(payload) => {
+                    payload.error.validate()?
+                }
+                KernelEventPayload::StateAttemptFailed(payload) => payload.error.validate()?,
+                KernelEventPayload::SideEffectFailed(payload) => payload.error.validate()?,
+                _ => {}
+            }
         }
         Ok(())
     }
@@ -8135,22 +8150,29 @@ pub mod v1 {
 
     /// Parses structured error info from canonical JSON.
     pub fn parse_error_info(json: &serde_json::Value) -> CodecResult<events::MfmErrorInfo> {
-        Ok(events::MfmErrorInfo {
-            code: events::ErrorCode::new(required_str(json, "code")?)?,
-            category: parse_error_category(required_str(json, "category")?)?,
-            retryable: required_bool(json, "retryable")?,
-            safe_message: required_str(json, "safe_message")?.to_owned(),
-            public_details: optional_obj(json, "public_details")?
-                .map(|details| {
-                    Ok::<events::RedactedJson, CodecError>(events::RedactedJson {
-                        content_digest: parse_identity(required_str(details, "content_digest")?)?,
-                    })
-                })
-                .transpose()?,
-            diagnostic_ref: optional_obj(json, "diagnostic_ref")?
-                .map(parse_event_artifact)
-                .transpose()?,
-        })
+        let public_details = optional_obj(json, "public_details")?
+            .map(|details| {
+                Ok::<events::RedactedJson, CodecError>(events::RedactedJson::new(parse_identity(
+                    required_str(details, "content_digest")?,
+                )?))
+            })
+            .transpose()?;
+        let diagnostic_ref = optional_obj(json, "diagnostic_ref")?
+            .map(parse_event_artifact)
+            .transpose()?;
+        let mut error = events::MfmErrorInfo::new(
+            events::ErrorCode::new(required_str(json, "code")?)?,
+            parse_error_category(required_str(json, "category")?)?,
+            required_bool(json, "retryable")?,
+            required_str(json, "safe_message")?,
+        )?;
+        if let Some(public_details) = public_details {
+            error = error.with_public_details(public_details)?;
+        }
+        if let Some(diagnostic_ref) = diagnostic_ref {
+            error = error.with_diagnostic_ref(diagnostic_ref)?;
+        }
+        Ok(error)
     }
 
     /// Parses a run completion outcome from canonical JSON.
