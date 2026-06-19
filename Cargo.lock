@@ -2086,6 +2086,7 @@ dependencies = [
 name = "mfm-app"
 version = "0.1.0"
 dependencies = [
+ "k256",
  "mfm-adapter-contracts",
  "mfm-adapters-evm-contracts",
  "mfm-adapters-portfolio",
@@ -2099,6 +2100,7 @@ dependencies = [
  "mfm-evm-contract-config",
  "mfm-evm-contract-model",
  "mfm-ids",
+ "mfm-manual-auth",
  "mfm-op-evm-contract-lifecycle",
  "mfm-op-portfolio-tracker",
  "mfm-op-proof",

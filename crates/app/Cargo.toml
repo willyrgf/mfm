@@ -42,6 +42,8 @@ mfm-transports-proof = { path = "../transports/proof" }
 mfm-values = { path = "../kernel/values" }
 
 [dev-dependencies]
+k256 = { version = "0.13.0", features = ["ecdsa"] }
+mfm-manual-auth = { path = "../kernel/manual-auth" }
 mfm_core = { path = "../core" }
 mfm-program-derive = { path = "../kernel/program-derive" }
 trybuild = "1.0"

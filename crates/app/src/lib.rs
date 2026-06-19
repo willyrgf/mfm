@@ -3252,22 +3252,38 @@ fn typed_event_ref(event: &store::KernelEventEnvelope) -> TypedRunEventRef {
 mod tests {
     use super::*;
     use mfm_artifact_store_fs::TypedArtifactDescriptor;
-    use mfm_capabilities::{NoCaps, Pure};
+    use mfm_capabilities::{CapabilitySpec, NoCaps, Pure};
     use mfm_ids::{
         AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind, CapabilityVersion,
         CellId, ContentDigest, DescriptorId, DigestBytes, LoweringVersion, NodeId, ScopeId, SeedId,
         SemanticTypeId, SpecHash, SpecVersion, StateKind, StateVersion,
     };
+    use mfm_manual_auth::{
+        ManualAuthorizationSignatureBytes, ManualResolutionAuthorizationProof,
+        ManualResolutionAuthorizationSignature, ManualResolutionEvidenceRef,
+    };
+    use mfm_op_proof::{
+        proof_adapter_kind, proof_adapter_version, proof_operation_registry, proof_state_registry,
+        ProofApplyConfig, ProofAssembleConfig, ProofConfirmation, ProofFact, ProofFactRequest,
+        ProofFactResponse, ProofIdempotencyInput, ProofIntent, ProofMutationCapability,
+        ProofOutput, ProofPublicOutputs, ProofReadCapability, ProofReadConfig, ProofReceipt,
+        ProofSideEffectResult, ProofSubmission, ProofWorkflowConfig, ProofWorkflowOperation,
+    };
     use mfm_program::{
-        build_root_with_registries, CanonicalSeed, PublicOutputKey, PureState, RootBuilder,
-        ScopeKey, SeedKey, StateKey, StateRegistryBuilder, StateResult, StateSpec,
+        build_root_with_registries, CanonicalSeed, ManualAuthorizationDraft,
+        ManualResolutionPolicyDraft, NonEmptyUniqueOperators, OperationKey,
+        OperatorAuthoritySnapshotDraft, PublicOutputKey, PureState, RootBuilder, ScopeKey, SeedKey,
+        SideEffectSagaPolicy, StateKey, StateRegistryBuilder, StateResult, StateSpec,
+        ThresholdQuorum,
     };
     use mfm_program_derive::{MfmConfig, MfmValue, PublicOutputs};
     use mfm_runtime::{
-        ErasedNodeRunner, ErasedRunCtx, ErasedRunnerBinding, ErasedRunnerFuture,
-        ErasedRunnerOutput, RunnerEventPayload, StagedArtifact, StagedRetentionRefs,
+        build_manual_resolution_prefix_authority, CapabilityImplementationId, ErasedNodeRunner,
+        ErasedRunCtx, ErasedRunnerBinding, ErasedRunnerFuture, ErasedRunnerOutput,
+        RunnerEventPayload, StagedArtifact, StagedRetentionRefs,
     };
     use mfm_store::v1::{AsyncTypedRunEventStore, TypedProjectionRead, TypedRunEventStore};
+    use mfm_values::MfmValue as _;
     use serde::{Deserialize, Serialize};
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::Path;
@@ -4499,6 +4515,110 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn public_status_reports_manual_resolution_terminal_fixture() {
+        let (root, fixture, services, started) = start_manual_proof_fixture_run().await;
+        assert_eq!(started.run_mode, TypedRunMode::ManualBlocked);
+        let blocked_json = serde_json::to_value(&started).expect("manual blocked public json");
+        assert_eq!(blocked_json["run_mode"], "manual_blocked");
+        assert_eq!(
+            blocked_json["saga"]["manual_block_reason"],
+            "policy_manual_resolution"
+        );
+        assert_eq!(
+            blocked_json["saga"]["required_manual_authorization"]["verifier_id"],
+            fixture.manual.authorization.verifier_id.as_str()
+        );
+
+        let proof = signed_manual_resolution_proof(
+            &services,
+            &fixture,
+            events::ManualResolutionOutcome::ConfirmRemediated,
+            &fixture.evidence_bytes,
+        )
+        .await;
+        let recorded = services
+            .record_manual_resolution(ManualResolutionRecordRequest {
+                run_id: fixture.run_id.clone(),
+                outcome: ManualResolutionDecision::ConfirmRemediated,
+                evidence_bytes: fixture.evidence_bytes.clone(),
+                evidence_media_type: "application/json".to_owned(),
+                authorization_proof_bytes: proof,
+                note: Some("operator reviewed ambiguity".to_owned()),
+                drive: DriveMode::AppendOnly,
+            })
+            .await
+            .expect("record manual resolution");
+        assert_eq!(recorded.run_mode, TypedRunMode::ManuallyResolved);
+        let recorded_json = serde_json::to_value(&recorded).expect("recorded public json");
+        assert!(recorded_json["saga"]["terminal_resolution"].is_null());
+
+        let resumed = services
+            .resume_stored_run(&fixture.run_id, DriveMode::UntilBlocked)
+            .await
+            .expect("resume after manual resolution");
+        assert_eq!(resumed.run_mode, TypedRunMode::ManuallyResolved);
+
+        let status = services
+            .run_status(&fixture.run_id)
+            .await
+            .expect("manual resolution status");
+        let public_json = serde_json::to_value(&status).expect("status json");
+        assert_eq!(public_json["run_mode"], "manually_resolved");
+        assert_eq!(
+            public_json["saga"]["terminal_resolution"]["outcome"],
+            "manually_resolved"
+        );
+        assert_eq!(
+            public_json["saga"]["terminal_resolution"]["claim"],
+            "manual_resolution"
+        );
+        assert!(public_json["saga"]["required_manual_authorization"].is_null());
+
+        let attempts = public_json["attempt_dispositions"]
+            .as_array()
+            .expect("attempt dispositions");
+        let spec = &fixture.certified_spec.envelope().spec;
+        let completed_framework_kinds = completed_framework_kinds(attempts, &spec.nodes);
+        assert!(
+            completed_framework_kinds.contains(&"resolve_saga_terminal"),
+            "missing completed resolve-saga terminal framework attempt"
+        );
+        assert!(
+            !completed_framework_kinds.contains(&"complete_run"),
+            "manual resolution must not complete through ordinary complete-run"
+        );
+
+        let stream = services
+            .run_stream(&fixture.run_id)
+            .await
+            .expect("manual resolution stream");
+        let stream_json = serde_json::to_value(&stream).expect("stream json");
+        let stream_events = stream_json["events"].as_array().expect("stream events");
+        assert_manual_resolution_terminal_ordering(stream_events, attempts, &spec.nodes);
+
+        let public_json_text = serde_json::to_string(&public_json).expect("public json text");
+        assert!(
+            !public_json_text.contains("authorization_proof"),
+            "public status must not expose authorization proof bytes"
+        );
+        assert!(
+            !public_json_text.contains("\"signatures\""),
+            "public status must not expose manual signature material"
+        );
+        assert!(
+            !public_json_text.contains("operator_note"),
+            "public status must not expose manual evidence bytes"
+        );
+        assert!(
+            !public_json_text
+                .contains("0000000000000000000000000000000000000000000000000000000000000001"),
+            "public status must not expose signer private key material"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn public_output_and_append_only_resume_validate_certified_history() {
         let (root, fixture, services, _started) = start_framework_fixture_run().await;
         let valid_stream = services
@@ -5575,6 +5695,182 @@ mod tests {
             .unwrap_or_else(|| panic!("missing stream event for {label}"))
     }
 
+    async fn signed_manual_resolution_proof(
+        services: &RunServices<store::InMemoryTypedRunStore>,
+        fixture: &ManualProofFixture,
+        outcome: events::ManualResolutionOutcome,
+        evidence_bytes: &[u8],
+    ) -> Vec<u8> {
+        let evidence_hash = content_digest_for_bytes(evidence_bytes);
+        let evidence = ManualResolutionEvidenceRef {
+            schema_id: fixture.manual.evidence_schema.clone(),
+            content_hash: evidence_hash.clone(),
+            artifact_id: artifact_id_for_digest(&evidence_hash),
+        };
+        let runtime_spec =
+            CertifiedRuntimeSpec::new(fixture.certified_spec.clone()).expect("runtime spec");
+        let store = services.store();
+        let guard = store.lock().await;
+        let prefix = build_manual_resolution_prefix_authority(
+            &*guard,
+            &runtime_spec,
+            &fixture.run_id,
+            fixture.manual.clone(),
+        )
+        .expect("manual prefix authority");
+        drop(guard);
+
+        let claim = prefix
+            .authorization_claim(outcome, evidence)
+            .expect("manual authorization claim");
+        let operator = fixture.manual.authorization.authority.operators[0].clone();
+        let claim_digest = claim.digest().expect("claim digest");
+        let proof = ManualResolutionAuthorizationProof {
+            verifier_id: fixture.manual.authorization.verifier_id.clone(),
+            signing_scheme: fixture.manual.authorization.signing_scheme.clone(),
+            claim,
+            signatures: vec![ManualResolutionAuthorizationSignature {
+                operator_id: operator.operator_id,
+                public_identity: operator.public_identity,
+                signature: ManualAuthorizationSignatureBytes::new(sign_manual_claim_digest(
+                    &test_manual_signing_key(),
+                    claim_digest.digest().as_bytes(),
+                ))
+                .expect("signature"),
+            }],
+        };
+        proof
+            .canonical_json()
+            .expect("canonical manual proof")
+            .to_vec()
+    }
+
+    fn sign_manual_claim_digest(
+        signing_key: &k256::ecdsa::SigningKey,
+        digest: &[u8; 32],
+    ) -> Vec<u8> {
+        let (signature, recovery_id) = signing_key
+            .sign_prehash_recoverable(digest)
+            .expect("manual signature");
+        let mut signature_bytes = signature.to_bytes().to_vec();
+        signature_bytes.push(u8::from(recovery_id.is_y_odd()));
+        signature_bytes
+    }
+
+    fn test_manual_signing_key() -> k256::ecdsa::SigningKey {
+        let mut key_bytes = [0u8; 32];
+        key_bytes[31] = 1;
+        let secret_key = k256::SecretKey::from_slice(&key_bytes).expect("test key");
+        k256::ecdsa::SigningKey::from(&secret_key)
+    }
+
+    fn completed_framework_kinds<'a>(
+        attempts: &[serde_json::Value],
+        nodes: &'a [spec::NodeSpec],
+    ) -> Vec<&'a str> {
+        nodes
+            .iter()
+            .filter(|node| {
+                attempts.iter().any(|attempt| {
+                    attempt["node_id"] == node.node_id.as_str()
+                        && attempt["disposition"] == "completed"
+                })
+            })
+            .filter_map(|node| match &node.framework {
+                Some(spec::FrameworkNodeSpec::PublicOutputRender(_)) => {
+                    Some("public_output_render")
+                }
+                Some(spec::FrameworkNodeSpec::ProjectRetentionManifest(_)) => {
+                    Some("project_retention_manifest")
+                }
+                Some(spec::FrameworkNodeSpec::CompleteRun(_)) => Some("complete_run"),
+                Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_)) => {
+                    Some("resolve_saga_terminal")
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn assert_manual_resolution_terminal_ordering(
+        stream_events: &[serde_json::Value],
+        attempts: &[serde_json::Value],
+        nodes: &[spec::NodeSpec],
+    ) {
+        let resolve = nodes
+            .iter()
+            .find(|node| {
+                matches!(
+                    node.framework,
+                    Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_))
+                )
+            })
+            .expect("resolve saga terminal node");
+        let resolve_attempt = attempts
+            .iter()
+            .find(|attempt| {
+                attempt["node_id"].as_str() == Some(resolve.node_id.as_str())
+                    && attempt["disposition"].as_str() == Some("completed")
+            })
+            .expect("completed resolve saga terminal attempt");
+        let attempt_id = resolve_attempt["attempt_id"].as_str().expect("attempt id");
+        let attempt_key = format!("attempt:{}:{}", resolve.node_id, attempt_id);
+
+        let manual_resolution_index = stream_event_position(
+            stream_events,
+            |event| {
+                event["logical_key"].as_str() == Some("run:manual_resolution")
+                    && event["event_schema_id"]
+                        .as_str()
+                        .is_some_and(|schema| schema.contains("manual_resolution_recorded"))
+            },
+            "manual resolution recorded",
+        );
+        let resolve_start_index = stream_event_position(
+            stream_events,
+            |event| {
+                event["logical_key"].as_str() == Some(attempt_key.as_str())
+                    && event["event_schema_id"]
+                        .as_str()
+                        .is_some_and(|schema| schema.contains("state_attempt_started"))
+            },
+            "resolve terminal start",
+        );
+        let resolve_completed_index = stream_event_position(
+            stream_events,
+            |event| {
+                event["logical_key"].as_str() == Some(attempt_key.as_str())
+                    && event["event_schema_id"]
+                        .as_str()
+                        .is_some_and(|schema| schema.contains("state_attempt_completed"))
+            },
+            "resolve terminal completion",
+        );
+        let run_completed_index = stream_event_position(
+            stream_events,
+            |event| {
+                event["logical_key"].as_str() == Some("run:complete")
+                    && event["event_schema_id"]
+                        .as_str()
+                        .is_some_and(|schema| schema.contains("run_completed"))
+            },
+            "manual run completion",
+        );
+
+        assert!(
+            manual_resolution_index < resolve_start_index,
+            "manual resolution evidence must precede resolve-saga terminal start"
+        );
+        assert!(
+            resolve_start_index < resolve_completed_index,
+            "resolve-saga terminal start must precede completion"
+        );
+        assert!(
+            resolve_completed_index < run_completed_index,
+            "resolve-saga terminal completion must precede run completion"
+        );
+    }
+
     async fn start_sync_framework_fixture_run() -> (
         PathBuf,
         FrameworkSeedPublicOutputFixture,
@@ -5630,6 +5926,136 @@ mod tests {
         (root, fixture, services, started)
     }
 
+    async fn start_manual_proof_fixture_run() -> (
+        PathBuf,
+        ManualProofFixture,
+        RunServices<store::InMemoryTypedRunStore>,
+        TypedRunResponse,
+    ) {
+        let root =
+            std::env::temp_dir().join(format!("mfm-app-manual-proof-run-{}", uuid::Uuid::new_v4()));
+        let fixture = manual_proof_fixture();
+        let config_inputs = config_inputs_for_draft_and_spec(
+            &fixture.draft,
+            &fixture.certified_spec.envelope().spec,
+        );
+        let mut registry =
+            CertificationRegistry::from_program_draft(&fixture.draft).expect("fixture registry");
+        register_manual_resolution_authority(&mut registry, &fixture.manual);
+        let request = prepare_certified_run_launch(
+            CertifiedRunLaunchInput {
+                certified_spec: fixture.certified_spec.clone(),
+                registry: &registry,
+                run_id: fixture.run_id.clone(),
+                framework_version: "mfm.test.framework",
+                source_revision: "test-source",
+                launched_at_unix_ms: 1_700_000_000_000,
+                drive: DriveMode::UntilBlocked,
+            },
+            config_inputs,
+            Vec::new(),
+        )
+        .expect("typed run request");
+        let runners = manual_proof_runner_registry(&fixture.certified_spec.envelope().spec);
+        let services =
+            make_in_memory_typed_services_with_certification_registry(runners, &root, registry);
+
+        let started = services
+            .launch_run(request)
+            .await
+            .expect("start manual proof run");
+        (root, fixture, services, started)
+    }
+
+    fn manual_proof_fixture() -> ManualProofFixture {
+        let run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xe9));
+        let manual_policy = manual_resolution_policy_for_signing_key();
+        let draft = build_root_with_registries(
+            ScopeKey::new("proof").expect("root key"),
+            proof_state_registry().expect("proof state registry"),
+            proof_operation_registry().expect("proof operation registry"),
+            |root: &mut RootBuilder<'_, '_>| {
+                root.set_saga_policy(SideEffectSagaPolicy::ManualResolution {
+                    manual: manual_policy.clone(),
+                })?;
+                let result = root.scope().call::<ProofWorkflowOperation, _>(
+                    OperationKey::new("proof_workflow")?,
+                    ProofWorkflowOperation,
+                    ProofWorkflowConfig::default(),
+                    (),
+                )?;
+                root.bind_public_outputs(
+                    PublicOutputKey::new("proof")?,
+                    &ProofPublicOutputs {
+                        output: result.output,
+                    },
+                )
+            },
+        )
+        .expect("manual proof draft");
+        let manual = manual_policy.to_spec();
+        let mut registry =
+            CertificationRegistry::from_program_draft(&draft).expect("fixture registry");
+        register_manual_resolution_authority(&mut registry, &manual);
+        let lowered = mfm_certify::lower_program_draft(&draft).expect("lower manual proof spec");
+        let certified_spec =
+            mfm_certify::certify_typed_spec(lowered, &registry).expect("certified manual spec");
+
+        ManualProofFixture {
+            draft,
+            certified_spec,
+            run_id,
+            manual,
+            evidence_bytes: br#"{"operator_note":"reviewed"}"#.to_vec(),
+        }
+    }
+
+    fn manual_resolution_policy_for_signing_key() -> ManualResolutionPolicyDraft {
+        let operator = spec::OperatorAuthorityMemberSpec {
+            operator_id: spec::OperatorId::new("mfm.app.test.manual.operator")
+                .expect("operator id"),
+            public_identity: spec::OperatorPublicIdentity::new(
+                "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf",
+            )
+            .expect("operator public identity"),
+        };
+        let authority = OperatorAuthoritySnapshotDraft::new(
+            spec::OperatorAuthorityId::new("mfm.app.test.manual.authority").expect("authority id"),
+            NonEmptyUniqueOperators::new(operator, Vec::new()).expect("operator authority"),
+        );
+        let authorization = ManualAuthorizationDraft::threshold(
+            spec::ManualAuthorizationVerifierId::new("mfm.app.test.manual.verifier")
+                .expect("verifier id"),
+            spec::ManualSigningSchemeSpec::new("mfm.manual_resolution.digest_signature.v1")
+                .expect("signing scheme"),
+            authority,
+            ThresholdQuorum::new(1).expect("quorum"),
+        )
+        .expect("manual authorization");
+        ManualResolutionPolicyDraft::new(
+            schema_id("mfm.app.test.manual_evidence", 0xea),
+            authorization,
+        )
+    }
+
+    fn register_manual_resolution_authority(
+        registry: &mut CertificationRegistry,
+        manual: &spec::ManualResolutionEvidenceSpec,
+    ) {
+        registry
+            .register_schema_role(
+                manual.evidence_schema.clone(),
+                mfm_certify::CertifiedSchemaRole::ManualResolutionEvidence,
+            )
+            .expect("register manual evidence schema role");
+        registry
+            .register_manual_authorization_verifier(manual.authorization.verifier_id.clone())
+            .expect("register manual verifier");
+        registry
+            .register_operator_authority_snapshot(manual.authorization.authority.clone())
+            .expect("register manual authority snapshot");
+    }
+
     fn framework_fixture_runner_registry(
         fixture: &FrameworkSeedPublicOutputFixture,
     ) -> ErasedRunnerRegistry {
@@ -5648,6 +6074,52 @@ mod tests {
                 .expect("runner binding"),
             )
             .expect("register runner");
+        runners
+    }
+
+    fn manual_proof_runner_registry(spec: &spec::TypedExecutionSpec) -> ErasedRunnerRegistry {
+        let mut runners = ErasedRunnerRegistry::new();
+        let implementation_id = CapabilityImplementationId::new("mfm.app.test.manual_proof_runner")
+            .expect("implementation id");
+        for node in spec.nodes.iter().filter(|node| node.framework.is_none()) {
+            let identity = spec
+                .descriptor_identities
+                .iter()
+                .find_map(|descriptor| match descriptor {
+                    spec::DescriptorIdentity::State(identity)
+                        if identity.descriptor_id == node.descriptor_id =>
+                    {
+                        Some(identity)
+                    }
+                    _ => None,
+                })
+                .expect("state descriptor identity");
+            runners
+                .register_capability_set(&identity.capabilities, implementation_id.clone())
+                .expect("register capability implementation");
+            let factory_id =
+                events::RunnerFactoryId::new(&identity.runner).expect("runner factory");
+            let runner: Arc<dyn ErasedNodeRunner> = if node.side_effect.is_some() {
+                Arc::new(ManualBlockingProofSideEffectRunner)
+            } else {
+                match node.stable_key.as_str() {
+                    "read_fact" => Arc::new(ProofReadTestRunner),
+                    "assemble_output" => Arc::new(ProofAssembleTestRunner),
+                    key => panic!("unexpected proof state key {key}"),
+                }
+            };
+            runners
+                .register(
+                    ErasedRunnerBinding::new(
+                        node.descriptor_id.clone(),
+                        factory_id.clone(),
+                        test_executable(factory_id),
+                        runner,
+                    )
+                    .expect("runner binding"),
+                )
+                .expect("register proof runner");
+        }
         runners
     }
 
@@ -6115,6 +6587,14 @@ mod tests {
         }
     }
 
+    struct ManualProofFixture {
+        draft: mfm_program::TypedProgramDraft,
+        certified_spec: CertifiedTypedSpec,
+        run_id: RunId,
+        manual: spec::ManualResolutionEvidenceSpec,
+        evidence_bytes: Vec<u8>,
+    }
+
     struct FrameworkSeedPublicOutputFixture {
         draft: mfm_program::TypedProgramDraft,
         certified_spec: CertifiedTypedSpec,
@@ -6261,6 +6741,274 @@ mod tests {
         }
     }
 
+    struct ProofReadTestRunner;
+
+    impl ErasedNodeRunner for ProofReadTestRunner {
+        fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+            Box::pin(async move { run_proof_read(ctx).await })
+        }
+    }
+
+    struct ManualBlockingProofSideEffectRunner;
+
+    impl ErasedNodeRunner for ManualBlockingProofSideEffectRunner {
+        fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+            Box::pin(async move { run_manual_blocking_proof_side_effect(ctx).await })
+        }
+    }
+
+    struct ProofAssembleTestRunner;
+
+    impl ErasedNodeRunner for ProofAssembleTestRunner {
+        fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+            Box::pin(async move { run_proof_assemble(ctx).await })
+        }
+    }
+
+    async fn run_proof_read(ctx: ErasedRunCtx<'_>) -> mfm_runtime::Result<ErasedRunnerOutput> {
+        ensure_proof_config::<ProofReadConfig>(
+            &ctx.node().config_ref,
+            &ProofReadConfig { fact_n: 1 },
+        )?;
+        let fact = proof_fact();
+        let request = ProofFactRequest {
+            source: "manual-proof-fixture".to_owned(),
+        };
+        let response = ProofFactResponse { fact: fact.clone() };
+        let request_hash = proof_digest_value(&request)?;
+        let response_artifact = proof_artifact_for_value(
+            &response,
+            events::ArtifactRole::FactResponse,
+            Some(ctx.node().node_id.clone()),
+        )?;
+        let output_artifact = proof_artifact_for_value(
+            &fact,
+            events::ArtifactRole::StateOutput,
+            Some(ctx.node().node_id.clone()),
+        )?;
+        Ok(ErasedRunnerOutput {
+            staged_artifacts: vec![
+                proof_staged_attempt_artifact(&ctx, &response_artifact)?,
+                proof_staged_attempt_artifact(&ctx, &output_artifact)?,
+            ],
+            staged_retention_refs: vec![
+                proof_retention(&response_artifact.evidence),
+                proof_retention(&output_artifact.evidence),
+            ],
+            payloads: vec![
+                RunnerEventPayload::FactRecorded(events::FactRecorded {
+                    spec_hash: ctx.spec_hash().clone(),
+                    node_id: ctx.node().node_id.clone(),
+                    attempt_id: ctx.attempt_id().clone(),
+                    capability_kind: ProofReadCapability::kind().map_err(proof_capability_error)?,
+                    capability_version: ProofReadCapability::version()
+                        .map_err(proof_capability_error)?,
+                    adapter_kind: proof_adapter_kind()?,
+                    adapter_version: proof_adapter_version()?,
+                    request_schema_id: ProofFactRequest::schema_id().map_err(proof_value_error)?,
+                    request_hash,
+                    response_schema_id: ProofFactResponse::schema_id()
+                        .map_err(proof_value_error)?,
+                    response_hash: response_artifact.evidence.digest.clone(),
+                    fact_key: events::FactKey::new("mfm.proof.fact.default")?,
+                    artifact_id: response_artifact.evidence.artifact_id.clone(),
+                }),
+                proof_cell_produced(&ctx, &output_artifact.evidence),
+            ],
+        })
+    }
+
+    async fn run_manual_blocking_proof_side_effect(
+        ctx: ErasedRunCtx<'_>,
+    ) -> mfm_runtime::Result<ErasedRunnerOutput> {
+        ensure_proof_config::<ProofApplyConfig>(
+            &ctx.node().config_ref,
+            &ProofApplyConfig::new("accept").map_err(|error| {
+                mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
+            })?,
+        )?;
+        let ledger_key = events::SideEffectLedgerKey::new("mfm.proof.ledger.default")?;
+        let phase = ctx
+            .projections()
+            .side_effect(&ledger_key)
+            .map(|projection| projection.phase.clone());
+        match phase {
+            None => proof_side_effect_prepare(ctx, ledger_key).await,
+            Some(store::SideEffectPhase::InvocationStarted {
+                invocation_epoch, ..
+            }) => proof_side_effect_ambiguous(ctx, ledger_key, invocation_epoch).await,
+            Some(store::SideEffectPhase::Ambiguous { .. }) => {
+                Ok(ErasedRunnerOutput::new(Vec::new()))
+            }
+            Some(other) => Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(format!(
+                "unsupported manual proof side-effect phase: {other:?}"
+            ))),
+        }
+    }
+
+    async fn proof_side_effect_prepare(
+        ctx: ErasedRunCtx<'_>,
+        ledger_key: events::SideEffectLedgerKey,
+    ) -> mfm_runtime::Result<ErasedRunnerOutput> {
+        let intent = proof_intent();
+        let idempotency_input = proof_idempotency_input();
+        let intent_artifact = proof_artifact_for_value(
+            &intent,
+            events::ArtifactRole::SideEffectIntent,
+            Some(ctx.node().node_id.clone()),
+        )?;
+        let idempotency_hash = proof_digest_value(&idempotency_input)?;
+        let idempotency_key = events::IdempotencyKeyRef::new(format!(
+            "idem-{}",
+            short_content_digest(&idempotency_hash)
+        ))?;
+        let owner = events::RunnerInvocationId::new("mfm.app.test.proof.owner.1")?;
+        let token = events::side_effect::ClaimFencingToken::new("mfm.app.test.proof.token.1")?;
+        let ledger_purpose = events::SideEffectLedgerPurpose::Forward;
+        Ok(ErasedRunnerOutput {
+            staged_artifacts: vec![proof_staged_side_effect_artifact(
+                &ctx,
+                &intent_artifact,
+                ledger_key.clone(),
+                1,
+            )?],
+            staged_retention_refs: vec![proof_retention(&intent_artifact.evidence)],
+            payloads: vec![
+                RunnerEventPayload::SideEffectIntentPersisted(
+                    events::side_effect::IntentPersisted {
+                        spec_hash: ctx.spec_hash().clone(),
+                        node_id: ctx.node().node_id.clone(),
+                        scope_id: ctx.node().scope_id.clone(),
+                        attempt_id: ctx.attempt_id().clone(),
+                        ledger_key: ledger_key.clone(),
+                        ledger_purpose: ledger_purpose.clone(),
+                        invocation_epoch: 1,
+                        intent_schema_id: ProofIntent::schema_id().map_err(proof_value_error)?,
+                        intent_hash: intent_artifact.evidence.digest.clone(),
+                        intent_artifact_id: intent_artifact.evidence.artifact_id.clone(),
+                        idempotency_input_schema_id: ProofIdempotencyInput::schema_id()
+                            .map_err(proof_value_error)?,
+                        idempotency_input_hash: idempotency_hash,
+                        idempotency_key,
+                        capability_kind: ProofMutationCapability::kind()
+                            .map_err(proof_capability_error)?,
+                        capability_version: ProofMutationCapability::version()
+                            .map_err(proof_capability_error)?,
+                        adapter_kind: proof_adapter_kind()?,
+                        adapter_version: proof_adapter_version()?,
+                    },
+                ),
+                RunnerEventPayload::SideEffectClaimed(events::side_effect::Claimed {
+                    spec_hash: ctx.spec_hash().clone(),
+                    node_id: ctx.node().node_id.clone(),
+                    attempt_id: ctx.attempt_id().clone(),
+                    ledger_key: ledger_key.clone(),
+                    ledger_purpose: ledger_purpose.clone(),
+                    claim_owner: owner.clone(),
+                    invocation_epoch: 1,
+                    claim_generation: 1,
+                    claim_fencing_token: token.clone(),
+                }),
+                RunnerEventPayload::SideEffectInvocationPrepared(
+                    events::side_effect::InvocationPrepared {
+                        spec_hash: ctx.spec_hash().clone(),
+                        node_id: ctx.node().node_id.clone(),
+                        attempt_id: ctx.attempt_id().clone(),
+                        ledger_key: ledger_key.clone(),
+                        ledger_purpose: ledger_purpose.clone(),
+                        invocation_epoch: 1,
+                        claim_generation: 1,
+                        claim_fencing_token: token.clone(),
+                        prepared_artifact_id: None,
+                        prepared_hash: None,
+                        resource_key: None,
+                    },
+                ),
+                RunnerEventPayload::SideEffectInvocationStarted(
+                    events::side_effect::InvocationStarted {
+                        spec_hash: ctx.spec_hash().clone(),
+                        node_id: ctx.node().node_id.clone(),
+                        attempt_id: ctx.attempt_id().clone(),
+                        ledger_key,
+                        ledger_purpose,
+                        invocation_epoch: 1,
+                        claim_owner: owner,
+                        claim_generation: 1,
+                        claim_fencing_token: token,
+                    },
+                ),
+            ],
+        })
+    }
+
+    async fn proof_side_effect_ambiguous(
+        ctx: ErasedRunCtx<'_>,
+        ledger_key: events::SideEffectLedgerKey,
+        invocation_epoch: u32,
+    ) -> mfm_runtime::Result<ErasedRunnerOutput> {
+        let evidence_bytes = br#"{"ambiguity":"unknown_submission"}"#.to_vec();
+        let evidence_hash = content_digest_for_bytes(&evidence_bytes);
+        let evidence = store::ArtifactEvidenceRef {
+            artifact_id: artifact_id_for_digest(&evidence_hash),
+            digest: evidence_hash.clone(),
+            byte_len: evidence_bytes.len() as u64,
+            media_type: spec::MediaType::new("application/json")?,
+            schema_id: Some(ctx.node().config_ref.schema_id.clone()),
+            semantic_type_id: None,
+            producer_node_id: Some(ctx.node().node_id.clone()),
+            producer_seed_id: None,
+            artifact_role: events::ArtifactRole::AmbiguityEvidence,
+        };
+        let artifact = ProofFixtureArtifact {
+            bytes: evidence_bytes,
+            evidence,
+        };
+        Ok(ErasedRunnerOutput {
+            staged_artifacts: vec![proof_staged_side_effect_artifact(
+                &ctx,
+                &artifact,
+                ledger_key.clone(),
+                invocation_epoch,
+            )?],
+            staged_retention_refs: Vec::new(),
+            payloads: vec![RunnerEventPayload::SideEffectAmbiguous(
+                events::side_effect::Ambiguous {
+                    spec_hash: ctx.spec_hash().clone(),
+                    node_id: ctx.node().node_id.clone(),
+                    attempt_id: ctx.attempt_id().clone(),
+                    ledger_key,
+                    ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                    invocation_epoch,
+                    ambiguity_code: events::AmbiguityCode::new("unknown_submission")?,
+                    evidence_schema_id: ctx.node().config_ref.schema_id.clone(),
+                    evidence_hash,
+                    evidence_artifact_id: artifact.evidence.artifact_id.clone(),
+                },
+            )],
+        })
+    }
+
+    async fn run_proof_assemble(ctx: ErasedRunCtx<'_>) -> mfm_runtime::Result<ErasedRunnerOutput> {
+        ensure_proof_config::<ProofAssembleConfig>(
+            &ctx.node().config_ref,
+            &ProofAssembleConfig {},
+        )?;
+        let output = ProofOutput {
+            fact: proof_fact(),
+            side_effect: proof_side_effect_result()?,
+        };
+        let artifact = proof_artifact_for_value(
+            &output,
+            events::ArtifactRole::StateOutput,
+            Some(ctx.node().node_id.clone()),
+        )?;
+        Ok(ErasedRunnerOutput {
+            staged_artifacts: vec![proof_staged_attempt_artifact(&ctx, &artifact)?],
+            staged_retention_refs: vec![proof_retention(&artifact.evidence)],
+            payloads: vec![proof_cell_produced(&ctx, &artifact.evidence)],
+        })
+    }
+
     fn test_executable(factory_id: events::RunnerFactoryId) -> events::ExecutableIdentity {
         events::ExecutableIdentity {
             factory_id,
@@ -6273,6 +7021,209 @@ mod tests {
             nix_derivation_hash: None,
             nix_output_hash: None,
         }
+    }
+
+    struct ProofFixtureArtifact {
+        bytes: Vec<u8>,
+        evidence: store::ArtifactEvidenceRef,
+    }
+
+    fn proof_staged_attempt_artifact(
+        ctx: &ErasedRunCtx<'_>,
+        artifact: &ProofFixtureArtifact,
+    ) -> mfm_runtime::Result<StagedArtifact> {
+        StagedArtifact::inline_attempt_artifact(
+            ctx,
+            artifact.bytes.clone(),
+            artifact.evidence.clone(),
+        )
+    }
+
+    fn proof_staged_side_effect_artifact(
+        ctx: &ErasedRunCtx<'_>,
+        artifact: &ProofFixtureArtifact,
+        ledger_key: events::SideEffectLedgerKey,
+        invocation_epoch: u32,
+    ) -> mfm_runtime::Result<StagedArtifact> {
+        StagedArtifact::inline_side_effect_artifact(
+            ctx,
+            artifact.bytes.clone(),
+            artifact.evidence.clone(),
+            ledger_key,
+            invocation_epoch,
+        )
+    }
+
+    fn proof_artifact_for_value<T>(
+        value: &T,
+        role: events::ArtifactRole,
+        producer_node_id: Option<NodeId>,
+    ) -> mfm_runtime::Result<ProofFixtureArtifact>
+    where
+        T: mfm_values::MfmValue + Serialize,
+    {
+        let bytes = proof_canonical_value(value)?;
+        let digest = bytes.content_digest();
+        let evidence = store::ArtifactEvidenceRef {
+            artifact_id: artifact_id_for_digest(&digest),
+            digest,
+            byte_len: bytes.as_bytes().len() as u64,
+            media_type: spec::MediaType::new("application/json")?,
+            schema_id: Some(T::schema_id().map_err(proof_value_error)?),
+            semantic_type_id: proof_artifact_semantic_type_id::<T>(role)?,
+            producer_node_id,
+            producer_seed_id: None,
+            artifact_role: role,
+        };
+        Ok(ProofFixtureArtifact {
+            bytes: bytes.to_vec(),
+            evidence,
+        })
+    }
+
+    fn proof_artifact_semantic_type_id<T>(
+        role: events::ArtifactRole,
+    ) -> mfm_runtime::Result<Option<SemanticTypeId>>
+    where
+        T: mfm_values::MfmValue,
+    {
+        match role.contract().semantic {
+            events::ArtifactSemanticPolicy::OptionalLaunchSemantic
+            | events::ArtifactSemanticPolicy::ExactSeedSemantic
+            | events::ArtifactSemanticPolicy::ExactValueSemantic => {
+                Ok(Some(T::semantic_id().map_err(proof_value_error)?))
+            }
+            events::ArtifactSemanticPolicy::Absent => Ok(None),
+        }
+    }
+
+    fn proof_retention(artifact: &store::ArtifactEvidenceRef) -> StagedRetentionRefs {
+        StagedRetentionRefs::runtime_evidence(vec![events::RetentionRef {
+            artifact_id: artifact.artifact_id.clone(),
+            role: artifact.artifact_role,
+            content_digest: artifact.digest.clone(),
+        }])
+    }
+
+    fn proof_cell_produced(
+        ctx: &ErasedRunCtx<'_>,
+        artifact: &store::ArtifactEvidenceRef,
+    ) -> RunnerEventPayload {
+        RunnerEventPayload::CellProduced(events::CellProduced {
+            spec_hash: ctx.spec_hash().clone(),
+            node_id: ctx.node().node_id.clone(),
+            cell_id: ctx.node().output_cell.clone(),
+            scope_id: ctx.output_cell().scope_id.clone(),
+            attempt_id: ctx.attempt_id().clone(),
+            semantic_type_id: ctx.output_cell().semantic_type_id.clone(),
+            schema_id: ctx.output_cell().schema_id.clone(),
+            value_lineage: ctx.output_cell().value_lineage.clone(),
+            artifact_id: artifact.artifact_id.clone(),
+            content_digest: artifact.digest.clone(),
+            producer_state_kind: Some(ctx.node().state_kind.clone()),
+            producer_state_version: Some(ctx.node().state_version.clone()),
+        })
+    }
+
+    fn ensure_proof_config<T>(config: &spec::ConfigRef, expected: &T) -> mfm_runtime::Result<()>
+    where
+        T: mfm_values::MfmConfig + Serialize,
+    {
+        let bytes = proof_canonical_value(expected)?;
+        let digest = bytes.content_digest();
+        let schema_id = T::schema_id().map_err(proof_value_error)?;
+        if config.schema_id == schema_id
+            && config.digest == digest
+            && config.byte_len == bytes.as_bytes().len() as u64
+        {
+            Ok(())
+        } else {
+            Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(format!(
+                "proof runner config mismatch for schema {}",
+                config.schema_id
+            )))
+        }
+    }
+
+    fn proof_canonical_value<T: Serialize>(
+        value: &T,
+    ) -> mfm_runtime::Result<mfm_canonical::PlainCanonicalJsonBytes> {
+        let json = serde_json::to_string(value)
+            .map_err(|error| mfm_runtime::RuntimeError::Canonical(error.to_string()))?;
+        mfm_canonical::PlainCanonicalJsonBytes::from_json_str(&json)
+            .map_err(|error| mfm_runtime::RuntimeError::Canonical(error.to_string()))
+    }
+
+    fn proof_digest_value<T: Serialize>(value: &T) -> mfm_runtime::Result<ContentDigest> {
+        Ok(proof_canonical_value(value)?.content_digest())
+    }
+
+    fn proof_value_error(error: mfm_values::ValueError) -> mfm_runtime::RuntimeError {
+        mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
+    }
+
+    fn proof_capability_error(
+        error: mfm_capabilities::CapabilityError,
+    ) -> mfm_runtime::RuntimeError {
+        mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
+    }
+
+    fn proof_fact() -> ProofFact {
+        ProofFact { n: 1 }
+    }
+
+    fn proof_intent() -> ProofIntent {
+        ProofIntent {
+            fact_n: 1,
+            action: "accept".to_owned(),
+        }
+    }
+
+    fn proof_idempotency_input() -> ProofIdempotencyInput {
+        ProofIdempotencyInput {
+            fact_n: 1,
+            action: "accept".to_owned(),
+        }
+    }
+
+    fn proof_submission() -> mfm_runtime::Result<ProofSubmission> {
+        Ok(ProofSubmission {
+            submission_id: "proof-submission-accept-1".to_owned(),
+            idempotency_digest: proof_digest_value(&proof_idempotency_input())?
+                .as_str()
+                .to_owned(),
+        })
+    }
+
+    fn proof_receipt() -> mfm_runtime::Result<ProofReceipt> {
+        Ok(ProofReceipt {
+            tx_hash: "0xproofaccept1".to_owned(),
+            submission_id: proof_submission()?.submission_id,
+        })
+    }
+
+    fn proof_confirmation() -> mfm_runtime::Result<ProofConfirmation> {
+        Ok(ProofConfirmation {
+            tx_hash: proof_receipt()?.tx_hash,
+            confirmations: 1,
+        })
+    }
+
+    fn proof_side_effect_result() -> mfm_runtime::Result<ProofSideEffectResult> {
+        let confirmation = proof_confirmation()?;
+        Ok(ProofSideEffectResult {
+            tx_hash: confirmation.tx_hash,
+            confirmations: confirmation.confirmations,
+            status: "confirmed".to_owned(),
+        })
+    }
+
+    fn short_content_digest(digest: &ContentDigest) -> &str {
+        digest
+            .as_str()
+            .rsplit(':')
+            .next()
+            .unwrap_or_else(|| digest.as_str())
     }
 
     fn framework_seed_public_output_fixture() -> FrameworkSeedPublicOutputFixture {
