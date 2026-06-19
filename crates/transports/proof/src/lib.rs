@@ -22,9 +22,11 @@ use mfm_replay::v1 as replay;
 use mfm_runtime::{
     CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture,
     ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCellTerminal, MaterializedInputNode,
-    RunnerArtifactBuilder, RunnerCapabilityBinding, RunnerClaimBinding, RunnerOutputBuilder,
-    RunnerPayloadBuilder, RunnerPreparedInvocationBinding, RunnerRegistrationBuilder,
-    RunnerSideEffectBinding,
+    RunnerArtifactBuilder, RunnerCapabilityBinding, RunnerOutputBuilder, RunnerPayloadBuilder,
+    RunnerRegistrationBuilder, RunnerSideEffectBinding, SideEffectClaimAuthority, SideEffectDriver,
+    SideEffectDriverCallbacks, SideEffectDriverFuture, SideEffectIntentPlan,
+    SideEffectObservedEvidence, SideEffectProtocolAction, SideEffectReplayEvidence,
+    SideEffectSubmissionDecision,
 };
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
@@ -193,229 +195,131 @@ async fn run_side_effect(ctx: ErasedRunCtx<'_>) -> mfm_runtime::Result<ErasedRun
     let config =
         ProofApplyConfig::new("accept").map_err(mfm_runtime::RuntimeError::InvalidRunnerOutput)?;
     ensure_config::<ProofApplyConfig>(&ctx.node().config_ref, &config)?;
-    let ledger_key = events::SideEffectLedgerKey::new("mfm.proof.ledger.default")?;
-    let phase = ctx
-        .projections()
-        .side_effect(&ledger_key)
-        .map(|projection| projection.phase.clone());
-    match proof_side_effect_action(phase.as_ref()) {
-        ProofSideEffectAction::PrepareAndStart => side_effect_prepare(ctx, ledger_key).await,
-        ProofSideEffectAction::Submit { invocation_epoch } => {
-            side_effect_submission(ctx, ledger_key, invocation_epoch).await
-        }
-        ProofSideEffectAction::ReadReceipt { invocation_epoch } => {
-            side_effect_receipt(ctx, ledger_key, invocation_epoch).await
-        }
-        ProofSideEffectAction::Confirm { invocation_epoch } => {
-            side_effect_confirmation(ctx, ledger_key, invocation_epoch).await
-        }
-        ProofSideEffectAction::EmitOutput => side_effect_output(ctx).await,
-        ProofSideEffectAction::IdleAmbiguous => Ok(ErasedRunnerOutput::new(Vec::new())),
-        ProofSideEffectAction::Unsupported => {
-            let other = phase.expect("unsupported side-effect action requires a projected phase");
-            Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(format!(
-                "unsupported proof side-effect phase: {other:?}"
-            )))
-        }
-    }
+    SideEffectDriver::drive(ctx, &ProofSideEffectCallbacks).await
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ProofSideEffectAction {
-    PrepareAndStart,
-    Submit { invocation_epoch: u32 },
-    ReadReceipt { invocation_epoch: u32 },
-    Confirm { invocation_epoch: u32 },
-    EmitOutput,
-    IdleAmbiguous,
-    Unsupported,
-}
+struct ProofSideEffectCallbacks;
 
-fn proof_side_effect_action(phase: Option<&store::SideEffectPhase>) -> ProofSideEffectAction {
-    match phase {
-        None => ProofSideEffectAction::PrepareAndStart,
-        Some(store::SideEffectPhase::InvocationStarted {
-            invocation_epoch, ..
+impl SideEffectDriverCallbacks for ProofSideEffectCallbacks {
+    type Intent = ProofIntent;
+    type Idempotency = ProofIdempotencyInput;
+    type PreparedInvocation = serde_json::Value;
+    type Submission = ProofSubmission;
+    type SubmissionUnknownEvidence = ProofSideEffectResult;
+    type NotSubmittedProof = ProofSideEffectResult;
+    type Receipt = ProofReceipt;
+    type Confirmation = ProofConfirmation;
+    type AmbiguityEvidence = ProofSideEffectResult;
+    type Output = ProofSideEffectResult;
+
+    fn intent_and_idempotency<'a, 'ctx>(
+        &'a self,
+        _ctx: &'a ErasedRunCtx<'ctx>,
+    ) -> SideEffectDriverFuture<'a, SideEffectIntentPlan<Self::Intent, Self::Idempotency>> {
+        Box::pin(async {
+            let idempotency = proof_idempotency_input();
+            let idem_hash = digest_value(&idempotency)?;
+            Ok(SideEffectIntentPlan {
+                side_effect: RunnerSideEffectBinding {
+                    ledger_key: events::SideEffectLedgerKey::new("mfm.proof.ledger.default")?,
+                    ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                    invocation_epoch: 1,
+                },
+                claim: SideEffectClaimAuthority {
+                    claim_owner: events::RunnerInvocationId::new("mfm.proof.owner.1")?,
+                    claim_generation: 1,
+                    claim_fencing_token: side_effect::ClaimFencingToken::new("mfm.proof.token.1")?,
+                    resource_key: None,
+                },
+                intent: proof_intent(),
+                idempotency,
+                idempotency_key: events::IdempotencyKeyRef::new(format!(
+                    "idem-{}",
+                    short_digest(&idem_hash)
+                ))?,
+                capability_binding: proof_mutation_binding()?,
+            })
         })
-        | Some(store::SideEffectPhase::SubmissionUnknown { invocation_epoch }) => {
-            ProofSideEffectAction::Submit {
-                invocation_epoch: *invocation_epoch,
-            }
-        }
-        Some(store::SideEffectPhase::SubmissionObserved { invocation_epoch }) => {
-            ProofSideEffectAction::ReadReceipt {
-                invocation_epoch: *invocation_epoch,
-            }
-        }
-        Some(store::SideEffectPhase::ReceiptObserved { invocation_epoch }) => {
-            ProofSideEffectAction::Confirm {
-                invocation_epoch: *invocation_epoch,
-            }
-        }
-        Some(store::SideEffectPhase::ConfirmationObserved { .. }) => {
-            ProofSideEffectAction::EmitOutput
-        }
-        Some(store::SideEffectPhase::Ambiguous { .. }) => ProofSideEffectAction::IdleAmbiguous,
-        Some(_) => ProofSideEffectAction::Unsupported,
+    }
+
+    fn prepare_invocation<'a, 'ctx>(
+        &'a self,
+        _ctx: &'a ErasedRunCtx<'ctx>,
+        _plan: &'a SideEffectIntentPlan<Self::Intent, Self::Idempotency>,
+    ) -> SideEffectDriverFuture<'a, Option<Self::PreparedInvocation>> {
+        Box::pin(async { Ok(None) })
+    }
+
+    fn reconstruct_prepared_invocation<'a, 'ctx>(
+        &'a self,
+        _ctx: &'a ErasedRunCtx<'ctx>,
+        _prepared: &'a store::SideEffectArtifactProjection,
+    ) -> SideEffectDriverFuture<'a, Self::PreparedInvocation> {
+        Box::pin(async {
+            Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(
+                "deterministic proof side effect does not use prepared invocation evidence"
+                    .to_owned(),
+            ))
+        })
+    }
+
+    fn submit_or_recover_submission<'a, 'ctx>(
+        &'a self,
+        _ctx: &'a ErasedRunCtx<'ctx>,
+        _action: SideEffectProtocolAction,
+        _prepared: Option<Self::PreparedInvocation>,
+    ) -> SideEffectDriverFuture<
+        'a,
+        SideEffectSubmissionDecision<
+            Self::Submission,
+            Self::SubmissionUnknownEvidence,
+            Self::NotSubmittedProof,
+            Self::AmbiguityEvidence,
+        >,
+    > {
+        Box::pin(async { Ok(SideEffectSubmissionDecision::Observed(proof_submission()?)) })
+    }
+
+    fn read_receipt<'a, 'ctx>(
+        &'a self,
+        _ctx: &'a ErasedRunCtx<'ctx>,
+        _submission: &'a store::SideEffectArtifactProjection,
+    ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Receipt>> {
+        Box::pin(async {
+            Ok(SideEffectObservedEvidence {
+                evidence: proof_receipt()?,
+                replay: proof_replay_evidence()?,
+            })
+        })
+    }
+
+    fn build_confirmation<'a, 'ctx>(
+        &'a self,
+        _ctx: &'a ErasedRunCtx<'ctx>,
+        _receipt: &'a store::SideEffectArtifactProjection,
+    ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Confirmation>> {
+        Box::pin(async {
+            Ok(SideEffectObservedEvidence {
+                evidence: proof_confirmation()?,
+                replay: proof_replay_evidence()?,
+            })
+        })
+    }
+
+    fn map_confirmation_to_output<'a, 'ctx>(
+        &'a self,
+        _ctx: &'a ErasedRunCtx<'ctx>,
+        _confirmation: &'a store::SideEffectArtifactProjection,
+    ) -> SideEffectDriverFuture<'a, Self::Output> {
+        Box::pin(async { proof_side_effect_result() })
     }
 }
 
-async fn side_effect_prepare(
-    ctx: ErasedRunCtx<'_>,
-    ledger_key: events::SideEffectLedgerKey,
-) -> mfm_runtime::Result<ErasedRunnerOutput> {
-    let artifacts = RunnerArtifactBuilder::new(&ctx);
-    let payloads = RunnerPayloadBuilder::new(&ctx);
-    let intent = proof_intent();
-    let idem_input = proof_idempotency_input();
-    let intent_artifact = artifacts.side_effect_intent(&intent)?;
-    let idem_hash = digest_value(&idem_input)?;
-    let idempotency_key =
-        events::IdempotencyKeyRef::new(format!("idem-{}", short_digest(&idem_hash)))?;
-    let owner = events::RunnerInvocationId::new("mfm.proof.owner.1")?;
-    let token = side_effect::ClaimFencingToken::new("mfm.proof.token.1")?;
-    let side_effect = RunnerSideEffectBinding {
-        ledger_key,
-        ledger_purpose: events::SideEffectLedgerPurpose::Forward,
-        invocation_epoch: 1,
-    };
-    let mut output = RunnerOutputBuilder::new(&ctx);
-    output.stage_side_effect_artifact(
-        &intent_artifact,
-        side_effect.ledger_key.clone(),
-        side_effect.invocation_epoch,
-    )?;
-    output.retain_runtime_evidence(&intent_artifact);
-    output.payload(payloads.side_effect_intent_persisted(
-        side_effect.clone(),
-        &intent_artifact,
-        &idem_input,
-        idempotency_key,
-        proof_mutation_binding()?,
-    )?);
-    output.payload(payloads.side_effect_claimed(
-        side_effect.clone(),
-        RunnerClaimBinding {
-            claim_owner: owner.clone(),
-            claim_generation: 1,
-            claim_fencing_token: token.clone(),
-        },
-    ));
-    output.payload(payloads.side_effect_invocation_prepared(
-        side_effect.clone(),
-        None,
-        RunnerPreparedInvocationBinding {
-            claim_generation: 1,
-            claim_fencing_token: token.clone(),
-            resource_key: None,
-        },
-    )?);
-    output.payload(payloads.side_effect_invocation_started(
-        side_effect,
-        RunnerClaimBinding {
-            claim_owner: owner,
-            claim_generation: 1,
-            claim_fencing_token: token,
-        },
-    ));
-    Ok(output.finish())
-}
-
-async fn side_effect_submission(
-    ctx: ErasedRunCtx<'_>,
-    ledger_key: events::SideEffectLedgerKey,
-    invocation_epoch: u32,
-) -> mfm_runtime::Result<ErasedRunnerOutput> {
-    let artifacts = RunnerArtifactBuilder::new(&ctx);
-    let payloads = RunnerPayloadBuilder::new(&ctx);
-    let submission = proof_submission()?;
-    let artifact = artifacts.submission(&submission)?;
-    let side_effect = RunnerSideEffectBinding {
-        ledger_key,
-        ledger_purpose: events::SideEffectLedgerPurpose::Forward,
-        invocation_epoch,
-    };
-    let mut output = RunnerOutputBuilder::new(&ctx);
-    output.stage_side_effect_artifact(
-        &artifact,
-        side_effect.ledger_key.clone(),
-        side_effect.invocation_epoch,
-    )?;
-    output.retain_runtime_evidence(&artifact);
-    output.payload(payloads.side_effect_submission_observed(side_effect, &artifact)?);
-    Ok(output.finish())
-}
-
-async fn side_effect_receipt(
-    ctx: ErasedRunCtx<'_>,
-    ledger_key: events::SideEffectLedgerKey,
-    invocation_epoch: u32,
-) -> mfm_runtime::Result<ErasedRunnerOutput> {
-    let artifacts = RunnerArtifactBuilder::new(&ctx);
-    let payloads = RunnerPayloadBuilder::new(&ctx);
-    let receipt = proof_receipt()?;
-    let artifact = artifacts.receipt(&receipt)?;
-    let side_effect = RunnerSideEffectBinding {
-        ledger_key,
-        ledger_purpose: events::SideEffectLedgerPurpose::Forward,
-        invocation_epoch,
-    };
-    let mut output = RunnerOutputBuilder::new(&ctx);
-    output.stage_side_effect_artifact(
-        &artifact,
-        side_effect.ledger_key.clone(),
-        side_effect.invocation_epoch,
-    )?;
-    output.retain_runtime_evidence(&artifact);
-    output.payload(payloads.side_effect_receipt_observed(
-        side_effect,
-        &artifact,
-        replay_verifier_id()?,
-        None,
-    )?);
-    Ok(output.finish())
-}
-
-async fn side_effect_confirmation(
-    ctx: ErasedRunCtx<'_>,
-    ledger_key: events::SideEffectLedgerKey,
-    invocation_epoch: u32,
-) -> mfm_runtime::Result<ErasedRunnerOutput> {
-    let artifacts = RunnerArtifactBuilder::new(&ctx);
-    let payloads = RunnerPayloadBuilder::new(&ctx);
-    let confirmation = proof_confirmation()?;
-    let artifact = artifacts.confirmation(&confirmation)?;
-    let side_effect = RunnerSideEffectBinding {
-        ledger_key,
-        ledger_purpose: events::SideEffectLedgerPurpose::Forward,
-        invocation_epoch,
-    };
-    let mut output = RunnerOutputBuilder::new(&ctx);
-    output.stage_side_effect_artifact(
-        &artifact,
-        side_effect.ledger_key.clone(),
-        side_effect.invocation_epoch,
-    )?;
-    output.retain_runtime_evidence(&artifact);
-    output.payload(payloads.side_effect_confirmation_observed(
-        side_effect,
-        &artifact,
-        replay_verifier_id()?,
-        None,
-    )?);
-    Ok(output.finish())
-}
-
-async fn side_effect_output(ctx: ErasedRunCtx<'_>) -> mfm_runtime::Result<ErasedRunnerOutput> {
-    let artifacts = RunnerArtifactBuilder::new(&ctx);
-    let payloads = RunnerPayloadBuilder::new(&ctx);
-    let output = proof_side_effect_result()?;
-    let artifact = artifacts.state_output(&output)?;
-    let mut runner_output = RunnerOutputBuilder::new(&ctx);
-    runner_output.stage_attempt_artifact(&artifact)?;
-    runner_output.retain_runtime_evidence(&artifact);
-    runner_output.payload(payloads.cell_produced(&artifact)?);
-    Ok(runner_output.finish())
+fn proof_replay_evidence() -> mfm_runtime::Result<SideEffectReplayEvidence> {
+    Ok(SideEffectReplayEvidence {
+        replay_verifier_id: replay_verifier_id()?,
+        resource_touched_set: None,
+    })
 }
 
 async fn run_assemble(ctx: ErasedRunCtx<'_>) -> mfm_runtime::Result<ErasedRunnerOutput> {
@@ -973,28 +877,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn side_effect_phase_policy_summary_matches_golden() {
-        assert_eq!(
-            side_effect_phase_policy_summary(),
-            [
-                "none->prepare_and_start",
-                "intent_persisted->unsupported:intent_persisted",
-                "claimed->unsupported:claimed",
-                "invocation_prepared->unsupported:invocation_prepared",
-                "invocation_started->submit:epoch=7",
-                "submission_observed->read_receipt:epoch=7",
-                "not_submitted_proven->unsupported:not_submitted_proven",
-                "submission_unknown->submit:epoch=7",
-                "receipt_observed->confirm:epoch=7",
-                "confirmation_observed->emit_output",
-                "ambiguous->idle_ambiguous",
-                "failed_before_invocation_started->unsupported:failed",
-                "failed_after_not_submitted_proven->unsupported:failed",
-            ]
-        );
-    }
-
     fn executable_identity_summary(factories: [&str; 3]) -> Vec<String> {
         factories
             .into_iter()
@@ -1015,132 +897,5 @@ mod tests {
                 )
             })
             .collect()
-    }
-
-    fn side_effect_phase_policy_summary() -> Vec<String> {
-        side_effect_phase_cases()
-            .into_iter()
-            .map(|(label, phase)| {
-                let action = proof_side_effect_action(phase.as_ref());
-                match (&phase, action) {
-                    (None, ProofSideEffectAction::PrepareAndStart) => {
-                        format!("{label}->prepare_and_start")
-                    }
-                    (_, ProofSideEffectAction::Submit { invocation_epoch }) => {
-                        format!("{label}->submit:epoch={invocation_epoch}")
-                    }
-                    (_, ProofSideEffectAction::ReadReceipt { invocation_epoch }) => {
-                        format!("{label}->read_receipt:epoch={invocation_epoch}")
-                    }
-                    (_, ProofSideEffectAction::Confirm { invocation_epoch }) => {
-                        format!("{label}->confirm:epoch={invocation_epoch}")
-                    }
-                    (_, ProofSideEffectAction::EmitOutput) => format!("{label}->emit_output"),
-                    (_, ProofSideEffectAction::IdleAmbiguous) => {
-                        format!("{label}->idle_ambiguous")
-                    }
-                    (Some(phase), ProofSideEffectAction::Unsupported) => {
-                        format!("{label}->unsupported:{}", phase.as_str())
-                    }
-                    (None, ProofSideEffectAction::Unsupported) => {
-                        format!("{label}->unsupported:none")
-                    }
-                    (_, ProofSideEffectAction::PrepareAndStart) => {
-                        format!("{label}->prepare_and_start")
-                    }
-                }
-            })
-            .collect()
-    }
-
-    fn side_effect_phase_cases() -> Vec<(&'static str, Option<store::SideEffectPhase>)> {
-        let claim_owner = events::RunnerInvocationId::new("proof-owner").expect("claim owner");
-        let claim_fencing_token =
-            side_effect::ClaimFencingToken::new("proof-token").expect("claim token");
-        vec![
-            ("none", None),
-            (
-                "intent_persisted",
-                Some(store::SideEffectPhase::IntentPersisted {
-                    invocation_epoch: 7,
-                }),
-            ),
-            (
-                "claimed",
-                Some(store::SideEffectPhase::Claimed {
-                    claim_owner: claim_owner.clone(),
-                    invocation_epoch: 7,
-                    claim_generation: 3,
-                    claim_fencing_token: claim_fencing_token.clone(),
-                }),
-            ),
-            (
-                "invocation_prepared",
-                Some(store::SideEffectPhase::InvocationPrepared {
-                    invocation_epoch: 7,
-                    claim_generation: 3,
-                    claim_fencing_token: claim_fencing_token.clone(),
-                }),
-            ),
-            (
-                "invocation_started",
-                Some(store::SideEffectPhase::InvocationStarted {
-                    claim_owner,
-                    invocation_epoch: 7,
-                    claim_generation: 3,
-                    claim_fencing_token,
-                }),
-            ),
-            (
-                "submission_observed",
-                Some(store::SideEffectPhase::SubmissionObserved {
-                    invocation_epoch: 7,
-                }),
-            ),
-            (
-                "not_submitted_proven",
-                Some(store::SideEffectPhase::NotSubmittedProven {
-                    invocation_epoch: 7,
-                }),
-            ),
-            (
-                "submission_unknown",
-                Some(store::SideEffectPhase::SubmissionUnknown {
-                    invocation_epoch: 7,
-                }),
-            ),
-            (
-                "receipt_observed",
-                Some(store::SideEffectPhase::ReceiptObserved {
-                    invocation_epoch: 7,
-                }),
-            ),
-            (
-                "confirmation_observed",
-                Some(store::SideEffectPhase::ConfirmationObserved {
-                    invocation_epoch: 7,
-                }),
-            ),
-            (
-                "ambiguous",
-                Some(store::SideEffectPhase::Ambiguous {
-                    invocation_epoch: 7,
-                }),
-            ),
-            (
-                "failed_before_invocation_started",
-                Some(store::SideEffectPhase::Failed {
-                    invocation_epoch: 7,
-                    failure_phase: side_effect::FailurePhase::BeforeInvocationStarted,
-                }),
-            ),
-            (
-                "failed_after_not_submitted_proven",
-                Some(store::SideEffectPhase::Failed {
-                    invocation_epoch: 7,
-                    failure_phase: side_effect::FailurePhase::AfterNotSubmittedProven,
-                }),
-            ),
-        ]
     }
 }
