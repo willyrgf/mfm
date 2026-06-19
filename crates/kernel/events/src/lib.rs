@@ -3346,6 +3346,24 @@ pub mod v1 {
         };
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct EventSchemaDeclaration {
+        schema_name: &'static str,
+        rust_type_path: &'static str,
+        fields: &'static [EventFieldDescriptor],
+    }
+
+    impl EventSchemaDeclaration {
+        const fn schema_descriptor(self) -> EventSchemaDescriptor {
+            EventSchemaDescriptor {
+                schema_name: self.schema_name,
+                rust_type_path: self.rust_type_path,
+                schema_version: EVENT_SCHEMA_VERSION,
+                fields: self.fields,
+            }
+        }
+    }
+
     const RUN_ADMITTED_SCHEMA: EventSchemaDescriptor = EventSchemaDescriptor {
         schema_name: "mfm.events.v1.run_admitted",
         rust_type_path: "mfm_events::v1::RunAdmitted",
@@ -3385,10 +3403,9 @@ pub mod v1 {
         ],
     };
 
-    const FACT_RECORDED_SCHEMA: EventSchemaDescriptor = EventSchemaDescriptor {
+    const FACT_RECORDED_SCHEMA_DECLARATION: EventSchemaDeclaration = EventSchemaDeclaration {
         schema_name: "mfm.events.v1.fact_recorded",
         rust_type_path: "mfm_events::v1::FactRecorded",
-        schema_version: EVENT_SCHEMA_VERSION,
         fields: fields![
             EventFieldDescriptor::required("spec_hash", "SpecHash"),
             EventFieldDescriptor::required("node_id", "NodeId"),
@@ -3405,6 +3422,9 @@ pub mod v1 {
             EventFieldDescriptor::required("artifact_id", "ArtifactId"),
         ],
     };
+
+    const FACT_RECORDED_SCHEMA: EventSchemaDescriptor =
+        FACT_RECORDED_SCHEMA_DECLARATION.schema_descriptor();
 
     const ARTIFACT_REFERENCED_SCHEMA: EventSchemaDescriptor = EventSchemaDescriptor {
         schema_name: "mfm.events.v1.artifact_referenced",
@@ -3807,20 +3827,13 @@ pub mod v1 {
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         struct EventFamilyDeclaration {
             variant_tag: &'static str,
-            schema_name: &'static str,
-            rust_type_path: &'static str,
-            fields: &'static [EventFieldDescriptor],
+            schema: EventSchemaDeclaration,
             artifact_lenses: &'static [ArtifactLensDeclaration],
         }
 
         impl EventFamilyDeclaration {
             fn schema_descriptor(self) -> EventSchemaDescriptor {
-                EventSchemaDescriptor {
-                    schema_name: self.schema_name,
-                    rust_type_path: self.rust_type_path,
-                    schema_version: EVENT_SCHEMA_VERSION,
-                    fields: self.fields,
-                }
+                self.schema.schema_descriptor()
             }
         }
 
@@ -3840,23 +3853,7 @@ pub mod v1 {
 
         const FACT_RECORDED_EVENT_DECLARATION: EventFamilyDeclaration = EventFamilyDeclaration {
             variant_tag: "FactRecorded",
-            schema_name: "mfm.events.v1.fact_recorded",
-            rust_type_path: "mfm_events::v1::FactRecorded",
-            fields: fields![
-                EventFieldDescriptor::required("spec_hash", "SpecHash"),
-                EventFieldDescriptor::required("node_id", "NodeId"),
-                EventFieldDescriptor::required("attempt_id", "AttemptId"),
-                EventFieldDescriptor::required("capability_kind", "CapabilityKind"),
-                EventFieldDescriptor::required("capability_version", "CapabilityVersion"),
-                EventFieldDescriptor::required("adapter_kind", "AdapterKind"),
-                EventFieldDescriptor::required("adapter_version", "AdapterVersion"),
-                EventFieldDescriptor::required("request_schema_id", "SchemaId"),
-                EventFieldDescriptor::required("request_hash", "ContentDigest"),
-                EventFieldDescriptor::required("response_schema_id", "SchemaId"),
-                EventFieldDescriptor::required("response_hash", "ContentDigest"),
-                EventFieldDescriptor::required("fact_key", "FactKey"),
-                EventFieldDescriptor::required("artifact_id", "ArtifactId"),
-            ],
+            schema: FACT_RECORDED_SCHEMA_DECLARATION,
             artifact_lenses: &[ArtifactLensDeclaration {
                 source: EventArtifactReferenceSource::FactResponse,
                 artifact_id_field: "artifact_id",
@@ -3874,16 +3871,18 @@ pub mod v1 {
         const STATE_ATTEMPT_STARTED_EVENT_DECLARATION: EventFamilyDeclaration =
             EventFamilyDeclaration {
                 variant_tag: "StateAttemptStarted",
-                schema_name: "mfm.events.v1.state_attempt_started",
-                rust_type_path: "mfm_events::v1::StateAttemptStarted",
-                fields: fields![
-                    EventFieldDescriptor::required("spec_hash", "SpecHash"),
-                    EventFieldDescriptor::required("node_id", "NodeId"),
-                    EventFieldDescriptor::required("attempt_id", "AttemptId"),
-                    EventFieldDescriptor::required("attempt_no", "u32"),
-                    EventFieldDescriptor::required("state_kind", "StateKind"),
-                    EventFieldDescriptor::required("state_version", "StateVersion"),
-                ],
+                schema: EventSchemaDeclaration {
+                    schema_name: "mfm.events.v1.state_attempt_started",
+                    rust_type_path: "mfm_events::v1::StateAttemptStarted",
+                    fields: fields![
+                        EventFieldDescriptor::required("spec_hash", "SpecHash"),
+                        EventFieldDescriptor::required("node_id", "NodeId"),
+                        EventFieldDescriptor::required("attempt_id", "AttemptId"),
+                        EventFieldDescriptor::required("attempt_no", "u32"),
+                        EventFieldDescriptor::required("state_kind", "StateKind"),
+                        EventFieldDescriptor::required("state_version", "StateVersion"),
+                    ],
+                },
                 artifact_lenses: &[],
             };
 
