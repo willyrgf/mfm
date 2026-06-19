@@ -1715,6 +1715,94 @@ fn fact_recorded_protocol_baselines_cover_codec_requirements_and_projection() {
 }
 
 #[test]
+fn fact_recorded_codec_declaration_view_matches_handwritten_codec() {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct EventCodecDeclaration {
+        variant_tag: &'static str,
+        fields: &'static [&'static str],
+    }
+
+    const FACT_RECORDED_CODEC_DECLARATION: EventCodecDeclaration = EventCodecDeclaration {
+        variant_tag: "FactRecorded",
+        fields: &[
+            "adapter_kind",
+            "adapter_version",
+            "artifact_id",
+            "attempt_id",
+            "capability_kind",
+            "capability_version",
+            "fact_key",
+            "node_id",
+            "request_hash",
+            "request_schema_id",
+            "response_hash",
+            "response_schema_id",
+            "spec_hash",
+        ],
+    };
+
+    fn declared_json(payload: &events::FactRecorded) -> serde_json::Value {
+        assert_eq!(FACT_RECORDED_CODEC_DECLARATION.variant_tag, "FactRecorded");
+        assert_eq!(
+            FACT_RECORDED_CODEC_DECLARATION.fields,
+            [
+                "adapter_kind",
+                "adapter_version",
+                "artifact_id",
+                "attempt_id",
+                "capability_kind",
+                "capability_version",
+                "fact_key",
+                "node_id",
+                "request_hash",
+                "request_schema_id",
+                "response_hash",
+                "response_schema_id",
+                "spec_hash",
+            ]
+        );
+        serde_json::json!({
+            "adapter_kind": payload.adapter_kind.as_str(),
+            "adapter_version": payload.adapter_version.as_str(),
+            "artifact_id": payload.artifact_id.as_str(),
+            "attempt_id": payload.attempt_id.as_str(),
+            "capability_kind": payload.capability_kind.as_str(),
+            "capability_version": payload.capability_version.as_str(),
+            "fact_key": payload.fact_key.as_str(),
+            "node_id": payload.node_id.as_str(),
+            "request_hash": payload.request_hash.as_str(),
+            "request_schema_id": payload.request_schema_id.as_str(),
+            "response_hash": payload.response_hash.as_str(),
+            "response_schema_id": payload.response_schema_id.as_str(),
+            "spec_hash": payload.spec_hash.as_str(),
+            "variant": FACT_RECORDED_CODEC_DECLARATION.variant_tag,
+        })
+    }
+
+    let payload = fact_recorded(artifact_id(63), content_digest(64));
+    let KernelEventPayload::FactRecorded(fact) = &payload else {
+        unreachable!("helper returns fact payload");
+    };
+    let declared = declared_json(fact);
+    let declared_canonical =
+        PlainCanonicalJsonBytes::from_json_str(&declared.to_string()).expect("declared canonical");
+
+    assert_eq!(declared, payload_json_value(&payload));
+    assert_eq!(
+        declared_canonical,
+        payload_canonical_json(&payload).expect("handwritten canonical")
+    );
+    assert_eq!(
+        declared_canonical.content_digest(),
+        mfm_store::v1::payload_hash(&payload).expect("handwritten payload hash")
+    );
+    assert_eq!(
+        payload_from_json_value(&declared).expect("declared payload decode"),
+        payload
+    );
+}
+
+#[test]
 fn committed_run_stream_exposes_store_owned_authority() {
     let run_id = run_id(141);
     let mut store = InMemoryTypedRunStore::new();
