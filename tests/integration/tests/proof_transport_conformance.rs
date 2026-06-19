@@ -167,6 +167,23 @@ async fn deterministic_proof_transport_conforms_from_test_support_fixture() {
 }
 
 #[tokio::test]
+async fn deterministic_proof_runner_output_summary_matches_golden() {
+    let (_, stream, _) = conformance_stream().await;
+    assert_eq!(
+        proof_runner_output_summary(&stream),
+        [
+            "attempt-output:mfm.proof/read_fact:fact_recorded+cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+artifact_referenced[role=fact_response]+retention_refs_appended[roles=fact_response]+retention_refs_appended[roles=state_output]",
+            "attempt-output:mfm.proof/apply_side_effect:side_effect.intent_persisted+side_effect.claimed+side_effect.invocation_prepared+side_effect.invocation_started+retention_refs_appended[roles=side_effect_intent]",
+            "attempt-output:mfm.proof/apply_side_effect:side_effect.submission_observed+retention_refs_appended[roles=submission]",
+            "attempt-output:mfm.proof/apply_side_effect:side_effect.receipt_observed+retention_refs_appended[roles=receipt]",
+            "attempt-output:mfm.proof/apply_side_effect:side_effect.confirmation_observed+retention_refs_appended[roles=confirmation]",
+            "attempt-output:mfm.proof/apply_side_effect:cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+retention_refs_appended[roles=state_output]",
+            "attempt-output:mfm.proof/assemble_output:cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+retention_refs_appended[roles=state_output]",
+        ]
+    );
+}
+
+#[tokio::test]
 async fn conformance_start_rejects_draft_not_bound_to_certified_spec() {
     let certified =
         certified_proof_spec(ProofWorkflowConfig::default()).expect("certified proof spec");
@@ -886,6 +903,109 @@ fn stream_shape(stream: &[store::KernelEventEnvelope]) -> String {
         "events={};commits={commit_count};max_width={max_width};duplicate_seqs={duplicate_seqs};retention_projected={retention_projected};runtime_retention_refs={runtime_retention_refs};manifest_retention_refs={manifest_retention_refs};run_completed={run_completed};projection={projection_commit};last={last_commit}",
         stream.len()
     )
+}
+
+fn proof_runner_output_summary(stream: &[store::KernelEventEnvelope]) -> Vec<String> {
+    attempt_output_commit_summaries(stream)
+}
+
+fn attempt_output_commit_summaries(stream: &[store::KernelEventEnvelope]) -> Vec<String> {
+    let state_kinds_by_node = state_kinds_by_node(stream);
+    let mut summaries = Vec::new();
+    let mut index = 0;
+    while index < stream.len() {
+        let first = &stream[index];
+        let seq = first.seq();
+        let commit_key = first.commit_key();
+        let mut end = index + 1;
+        while end < stream.len()
+            && stream[end].seq() == seq
+            && stream[end].commit_key() == commit_key
+        {
+            end += 1;
+        }
+        if commit_key.as_str().starts_with("attempt-output:") {
+            let state_kind = runner_output_node_id(&stream[index..end])
+                .and_then(|node_id| state_kinds_by_node.get(node_id.as_str()))
+                .map(String::as_str)
+                .unwrap_or("unknown");
+            let payloads = stream[index..end]
+                .iter()
+                .map(|event| runner_payload_summary(event.payload()))
+                .collect::<Vec<_>>()
+                .join("+");
+            if !state_kind.starts_with("mfm.framework/") {
+                summaries.push(format!(
+                    "{}:{state_kind}:{payloads}",
+                    commit_key_class(commit_key.as_str())
+                ));
+            }
+        }
+        index = end;
+    }
+    summaries
+}
+
+fn state_kinds_by_node(stream: &[store::KernelEventEnvelope]) -> BTreeMap<String, String> {
+    stream
+        .iter()
+        .filter_map(|event| match event.payload() {
+            events::KernelEventPayload::StateAttemptStarted(payload) => Some((
+                payload.node_id.as_str().to_owned(),
+                payload
+                    .state_kind
+                    .canonical_name()
+                    .unwrap_or_else(|| payload.state_kind.as_str())
+                    .to_owned(),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+fn runner_output_node_id(events: &[store::KernelEventEnvelope]) -> Option<&mfm_ids::NodeId> {
+    events.iter().find_map(|event| match event.payload() {
+        events::KernelEventPayload::FactRecorded(payload) => Some(&payload.node_id),
+        events::KernelEventPayload::CellProduced(payload) => Some(&payload.node_id),
+        events::KernelEventPayload::CellSkipped(payload) => Some(&payload.node_id),
+        events::KernelEventPayload::SideEffectIntentPersisted(payload) => Some(&payload.node_id),
+        events::KernelEventPayload::SideEffectClaimed(payload) => Some(&payload.node_id),
+        events::KernelEventPayload::SideEffectClaimTakenOver(payload) => Some(&payload.node_id),
+        events::KernelEventPayload::SideEffectInvocationPrepared(payload) => Some(&payload.node_id),
+        events::KernelEventPayload::SideEffectInvocationStarted(payload) => Some(&payload.node_id),
+        events::KernelEventPayload::SideEffectNotSubmittedProven(payload) => Some(&payload.node_id),
+        events::KernelEventPayload::SideEffectSubmissionObserved(payload) => Some(&payload.node_id),
+        events::KernelEventPayload::SideEffectSubmissionUnknown(payload) => Some(&payload.node_id),
+        events::KernelEventPayload::SideEffectReceiptObserved(payload) => Some(&payload.node_id),
+        events::KernelEventPayload::SideEffectConfirmationObserved(payload) => {
+            Some(&payload.node_id)
+        }
+        events::KernelEventPayload::SideEffectAmbiguous(payload) => Some(&payload.node_id),
+        events::KernelEventPayload::SideEffectFailed(payload) => Some(&payload.node_id),
+        events::KernelEventPayload::StateAttemptCompleted(payload) => Some(&payload.node_id),
+        _ => None,
+    })
+}
+
+fn runner_payload_summary(payload: &events::KernelEventPayload) -> String {
+    match payload {
+        events::KernelEventPayload::ArtifactReferenced(payload) => {
+            format!(
+                "artifact_referenced[role={}]",
+                payload.artifact_ref.role.as_str()
+            )
+        }
+        events::KernelEventPayload::RetentionRefsAppended(payload) => {
+            let roles = payload
+                .refs
+                .iter()
+                .map(|retention| retention.role.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("retention_refs_appended[roles={roles}]")
+        }
+        _ => payload_schema_name(payload).to_owned(),
+    }
 }
 
 fn payload_schema_name(payload: &events::KernelEventPayload) -> &str {

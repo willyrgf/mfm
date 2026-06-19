@@ -151,6 +151,7 @@ mod tests {
     use mfm_store::v1::{self as store, TypedRunEventStore};
     use serde::Serialize;
     use serde_json::json;
+    use std::collections::BTreeMap;
     use std::sync::Mutex;
 
     const TEST_SIGNER_HEX: &str =
@@ -599,6 +600,22 @@ mod tests {
             let store = store.lock().await;
             store.load_run_stream(&run_id)
         };
+        assert_eq!(
+            contract_lifecycle_runner_output_summary(&stream),
+            [
+                "attempt-output:mfm.evm.contract/deploy:side_effect.intent_persisted+side_effect.claimed+side_effect.invocation_prepared+side_effect.invocation_started+retention_refs_appended[roles=side_effect_intent]+retention_refs_appended[roles=prepared_invocation]",
+                "attempt-output:mfm.evm.contract/deploy:side_effect.submission_observed+retention_refs_appended[roles=submission]",
+                "attempt-output:mfm.evm.contract/deploy:side_effect.receipt_observed+retention_refs_appended[roles=receipt]",
+                "attempt-output:mfm.evm.contract/deploy:side_effect.confirmation_observed+retention_refs_appended[roles=confirmation]",
+                "attempt-output:mfm.evm.contract/deploy:cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+retention_refs_appended[roles=state_output]",
+                "attempt-output:mfm.evm.contract/configure:side_effect.intent_persisted+side_effect.claimed+side_effect.invocation_prepared+side_effect.invocation_started+retention_refs_appended[roles=side_effect_intent]+retention_refs_appended[roles=prepared_invocation]",
+                "attempt-output:mfm.evm.contract/configure:side_effect.submission_observed+retention_refs_appended[roles=submission]",
+                "attempt-output:mfm.evm.contract/configure:side_effect.receipt_observed+retention_refs_appended[roles=receipt]",
+                "attempt-output:mfm.evm.contract/configure:side_effect.confirmation_observed+retention_refs_appended[roles=confirmation]",
+                "attempt-output:mfm.evm.contract/configure:cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+retention_refs_appended[roles=state_output]",
+                "attempt-output:mfm.evm.contract/validate:fact_recorded+cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+artifact_referenced[role=fact_response]+retention_refs_appended[roles=fact_response]+retention_refs_appended[roles=state_output]",
+            ]
+        );
         let mut prepared_artifact_ids = Vec::new();
         for event in &stream {
             let payload_debug = format!("{:?}", event.payload());
@@ -1127,6 +1144,160 @@ mod tests {
             configure_tx_hashes: Vec::new(),
             configure_receipt_evidence: Vec::new(),
             configured_block_number: Some(1),
+        }
+    }
+
+    fn contract_lifecycle_runner_output_summary(
+        stream: &[store::KernelEventEnvelope],
+    ) -> Vec<String> {
+        attempt_output_commit_summaries(stream, "mfm.evm.contract/")
+    }
+
+    fn attempt_output_commit_summaries(
+        stream: &[store::KernelEventEnvelope],
+        state_kind_prefix: &str,
+    ) -> Vec<String> {
+        let state_kinds_by_node = state_kinds_by_node(stream);
+        let mut summaries = Vec::new();
+        let mut index = 0;
+        while index < stream.len() {
+            let first = &stream[index];
+            let seq = first.seq();
+            let commit_key = first.commit_key();
+            let mut end = index + 1;
+            while end < stream.len()
+                && stream[end].seq() == seq
+                && stream[end].commit_key() == commit_key
+            {
+                end += 1;
+            }
+            if commit_key.as_str().starts_with("attempt-output:") {
+                let state_kind = runner_output_node_id(&stream[index..end])
+                    .and_then(|node_id| state_kinds_by_node.get(&node_id))
+                    .map(String::as_str)
+                    .unwrap_or("unknown");
+                if state_kind.starts_with(state_kind_prefix) {
+                    let payloads = stream[index..end]
+                        .iter()
+                        .map(|event| runner_payload_summary(event.payload()))
+                        .collect::<Vec<_>>()
+                        .join("+");
+                    summaries.push(format!(
+                        "{}:{state_kind}:{payloads}",
+                        commit_key_class(commit_key.as_str())
+                    ));
+                }
+            }
+            index = end;
+        }
+        summaries
+    }
+
+    fn state_kinds_by_node(stream: &[store::KernelEventEnvelope]) -> BTreeMap<String, String> {
+        stream
+            .iter()
+            .filter_map(|event| match event.payload() {
+                events::KernelEventPayload::StateAttemptStarted(payload) => Some((
+                    payload.node_id.as_str().to_owned(),
+                    payload
+                        .state_kind
+                        .canonical_name()
+                        .unwrap_or_else(|| payload.state_kind.as_str())
+                        .to_owned(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn runner_output_node_id(events: &[store::KernelEventEnvelope]) -> Option<String> {
+        events.iter().find_map(|event| match event.payload() {
+            events::KernelEventPayload::FactRecorded(payload) => {
+                Some(payload.node_id.as_str().to_owned())
+            }
+            events::KernelEventPayload::CellProduced(payload) => {
+                Some(payload.node_id.as_str().to_owned())
+            }
+            events::KernelEventPayload::CellSkipped(payload) => {
+                Some(payload.node_id.as_str().to_owned())
+            }
+            events::KernelEventPayload::SideEffectIntentPersisted(payload) => {
+                Some(payload.node_id.as_str().to_owned())
+            }
+            events::KernelEventPayload::SideEffectClaimed(payload) => {
+                Some(payload.node_id.as_str().to_owned())
+            }
+            events::KernelEventPayload::SideEffectClaimTakenOver(payload) => {
+                Some(payload.node_id.as_str().to_owned())
+            }
+            events::KernelEventPayload::SideEffectInvocationPrepared(payload) => {
+                Some(payload.node_id.as_str().to_owned())
+            }
+            events::KernelEventPayload::SideEffectInvocationStarted(payload) => {
+                Some(payload.node_id.as_str().to_owned())
+            }
+            events::KernelEventPayload::SideEffectNotSubmittedProven(payload) => {
+                Some(payload.node_id.as_str().to_owned())
+            }
+            events::KernelEventPayload::SideEffectSubmissionObserved(payload) => {
+                Some(payload.node_id.as_str().to_owned())
+            }
+            events::KernelEventPayload::SideEffectSubmissionUnknown(payload) => {
+                Some(payload.node_id.as_str().to_owned())
+            }
+            events::KernelEventPayload::SideEffectReceiptObserved(payload) => {
+                Some(payload.node_id.as_str().to_owned())
+            }
+            events::KernelEventPayload::SideEffectConfirmationObserved(payload) => {
+                Some(payload.node_id.as_str().to_owned())
+            }
+            events::KernelEventPayload::SideEffectAmbiguous(payload) => {
+                Some(payload.node_id.as_str().to_owned())
+            }
+            events::KernelEventPayload::SideEffectFailed(payload) => {
+                Some(payload.node_id.as_str().to_owned())
+            }
+            events::KernelEventPayload::StateAttemptCompleted(payload) => {
+                Some(payload.node_id.as_str().to_owned())
+            }
+            _ => None,
+        })
+    }
+
+    fn runner_payload_summary(payload: &events::KernelEventPayload) -> String {
+        match payload {
+            events::KernelEventPayload::ArtifactReferenced(payload) => {
+                format!(
+                    "artifact_referenced[role={}]",
+                    payload.artifact_ref.role.as_str()
+                )
+            }
+            events::KernelEventPayload::RetentionRefsAppended(payload) => {
+                let roles = payload
+                    .refs
+                    .iter()
+                    .map(|retention| retention.role.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!("retention_refs_appended[roles={roles}]")
+            }
+            _ => payload_schema_name(payload).to_owned(),
+        }
+    }
+
+    fn payload_schema_name(payload: &events::KernelEventPayload) -> &str {
+        payload
+            .schema_descriptor()
+            .schema_name
+            .strip_prefix("mfm.events.v1.")
+            .unwrap_or_else(|| payload.schema_descriptor().schema_name)
+    }
+
+    fn commit_key_class(commit_key: &str) -> &str {
+        if commit_key.starts_with("attempt-output:") {
+            "attempt-output"
+        } else {
+            commit_key
         }
     }
 }

@@ -3184,6 +3184,17 @@ mod tests {
         )
     }
 
+    #[test]
+    fn executable_identity_summary_matches_golden() {
+        assert_eq!(
+            executable_identity_summary([SIDE_EFFECT_FACTORY, READ_FACTORY]),
+            [
+                "factory=apply_side_effect;source=mfm-adapters-evm-contracts-built-in;package=mfm-adapters-evm-contracts;version=0.1.0;cargo_digest=content:sha256-jcs-v1:685edb3e7cd5decfb0f17613a76568a2c5c572024d6db20bf0803d61ee0657e4;binary_digest=content:sha256-jcs-v1:4a583ef5eb9bb2ce3f01767ddffc34e0744290d029bde3d69967b272a74f302f;nix_derivation=false;nix_output=false",
+                "factory=read_external;source=mfm-adapters-evm-contracts-built-in;package=mfm-adapters-evm-contracts;version=0.1.0;cargo_digest=content:sha256-jcs-v1:685edb3e7cd5decfb0f17613a76568a2c5c572024d6db20bf0803d61ee0657e4;binary_digest=content:sha256-jcs-v1:4a583ef5eb9bb2ce3f01767ddffc34e0744290d029bde3d69967b272a74f302f;nix_derivation=false;nix_output=false",
+            ]
+        );
+    }
+
     #[tokio::test]
     async fn deploy_preparation_defaults_to_eip1559_contract_creation() {
         let route = route();
@@ -3537,5 +3548,27 @@ mod tests {
                 "adapter source contains forbidden coupling {forbidden}"
             );
         }
+    }
+
+    fn executable_identity_summary(factories: [&str; 2]) -> Vec<String> {
+        factories
+            .into_iter()
+            .map(|factory| {
+                let identity =
+                    executable(events::RunnerFactoryId::new(factory).expect("factory id"))
+                        .expect("executable identity");
+                format!(
+                    "factory={};source={};package={};version={};cargo_digest={};binary_digest={};nix_derivation={};nix_output={}",
+                    identity.factory_id,
+                    identity.source_revision,
+                    identity.cargo_package_name,
+                    identity.cargo_package_version,
+                    identity.cargo_package_digest,
+                    identity.binary_digest,
+                    identity.nix_derivation_hash.is_some(),
+                    identity.nix_output_hash.is_some()
+                )
+            })
+            .collect()
     }
 }
