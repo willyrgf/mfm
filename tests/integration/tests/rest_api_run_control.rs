@@ -711,6 +711,29 @@ async fn stream_validates_sequence_range_before_reading() {
     assert_eq!(v["error"]["code"], "InvalidSequenceRange");
 }
 
+#[test]
+fn stream_filters_range_after_authoritative_run_stream_validation() {
+    let source = include_str!("../../../bin/rest-api/src/lib.rs");
+    let start = source
+        .find("async fn runs_stream")
+        .expect("runs_stream handler");
+    let end = source[start..]
+        .find("async fn runs_replay")
+        .map(|offset| start + offset)
+        .expect("next handler");
+    let body = &source[start..end];
+    let range_validation = body
+        .find("validate_sequence_range(query.from_seq, query.to_seq)")
+        .expect("range validation");
+    let authoritative_read = body
+        .find(".run_stream(&run_id)")
+        .expect("authoritative stream read");
+    let range_filter = body.find(".filter(|event|").expect("range filter");
+
+    assert!(range_validation < authoritative_read);
+    assert!(authoritative_read < range_filter);
+}
+
 fn config_bodies_for_draft_and_spec(
     draft: &mfm_program::TypedProgramDraft,
     typed_spec: &spec::TypedExecutionSpec,

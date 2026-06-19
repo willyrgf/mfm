@@ -33,6 +33,21 @@ fn verify_error_response(output: &str) -> ErrorResponse {
 }
 
 #[test]
+fn run_stream_command_filters_range_after_authoritative_run_stream_validation() {
+    let source = include_str!("../src/commands/run/stream.rs");
+    let range_validation = source
+        .find("if args.from_seq == 0")
+        .expect("range validation");
+    let authoritative_read = source
+        .find(".run_stream(&run_id)")
+        .expect("authoritative stream read");
+    let range_filter = source.find(".filter(|event|").expect("range filter");
+
+    assert!(range_validation < authoritative_read);
+    assert!(authoritative_read < range_filter);
+}
+
+#[test]
 fn test_keystore_list_json_output_empty() {
     let temp_dir = setup_temp_keystore();
     let keystore_path = temp_dir.path().join("test.keystore");

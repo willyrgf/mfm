@@ -4303,28 +4303,64 @@ mod tests {
             registry,
         );
 
-        for error in [
-            corrupt_services
-                .run_status(&fixture.run_id)
-                .await
-                .expect_err("status rejects tampered RunAdmitted"),
-            corrupt_services
-                .run_stream(&fixture.run_id)
-                .await
-                .expect_err("stream read rejects tampered RunAdmitted"),
-            corrupt_services
-                .resume_stored_run(&fixture.run_id, DriveMode::AppendOnly)
-                .await
-                .expect_err("resume rejects tampered RunAdmitted"),
-            corrupt_services
-                .typed_public_output(&fixture.run_id, &fixture.public_schema_id)
-                .await
-                .expect_err("public output rejects tampered RunAdmitted"),
-            corrupt_services
-                .verify_replay_for_run(&fixture.run_id)
-                .await
-                .expect_err("replay rejects tampered RunAdmitted"),
-        ] {
+        let rejections = [
+            (
+                "run_status",
+                corrupt_services
+                    .run_status(&fixture.run_id)
+                    .await
+                    .expect_err("status rejects tampered RunAdmitted"),
+            ),
+            (
+                "run_stream",
+                corrupt_services
+                    .run_stream(&fixture.run_id)
+                    .await
+                    .expect_err("stream read rejects tampered RunAdmitted"),
+            ),
+            (
+                "resume_stored_run",
+                corrupt_services
+                    .resume_stored_run(&fixture.run_id, DriveMode::AppendOnly)
+                    .await
+                    .expect_err("resume rejects tampered RunAdmitted"),
+            ),
+            (
+                "typed_public_output",
+                corrupt_services
+                    .typed_public_output(&fixture.run_id, &fixture.public_schema_id)
+                    .await
+                    .expect_err("public output rejects tampered RunAdmitted"),
+            ),
+            (
+                "verify_replay_for_run",
+                corrupt_services
+                    .verify_replay_for_run(&fixture.run_id)
+                    .await
+                    .expect_err("replay rejects tampered RunAdmitted"),
+            ),
+        ];
+        let rejection_summary = rejections
+            .iter()
+            .map(|(surface, error)| {
+                format!(
+                    "{surface}:{}:{}",
+                    error.code,
+                    error.message.contains("RunAdmitted evidence")
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rejection_summary,
+            [
+                "run_status:CertifiedSpecArtifactMismatch:true",
+                "run_stream:CertifiedSpecArtifactMismatch:true",
+                "resume_stored_run:CertifiedSpecArtifactMismatch:true",
+                "typed_public_output:CertifiedSpecArtifactMismatch:true",
+                "verify_replay_for_run:CertifiedSpecArtifactMismatch:true",
+            ]
+        );
+        for (_, error) in rejections {
             assert_eq!(error.code, "CertifiedSpecArtifactMismatch");
             assert!(
                 error.message.contains("RunAdmitted evidence"),
