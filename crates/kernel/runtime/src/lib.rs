@@ -75,6 +75,7 @@ pub use runners::{
     RunnerEventPayload,
 };
 pub use scheduler::{ManualResolutionRequest, SchedulerStatus, SerialTypedScheduler};
+pub use side_effect_lifecycle::SideEffectAttemptView;
 pub use spec_authority::CertifiedRuntimeSpec;
 
 #[cfg(test)]

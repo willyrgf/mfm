@@ -3,7 +3,92 @@ use mfm_ids::AttemptId;
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 
+use crate::history::VerifiedRunContext;
+use crate::invocation::ErasedRunCtx;
 use crate::{Result, RuntimeError};
+
+/// Store-verified side-effect ledger view for one certified node attempt.
+///
+/// This view is minted only from runtime-owned verified context. It wraps the canonical
+/// side-effect projection lookup and validates the projected ledger typestate before exposing it
+/// to side-effect protocol helpers.
+pub struct SideEffectAttemptView<'a> {
+    projection: Option<&'a store::SideEffectProjection>,
+    ledger_state: Option<store::SideEffectLedgerState<'a>>,
+}
+
+impl<'a> SideEffectAttemptView<'a> {
+    /// Builds a side-effect attempt view from a prepared runner context.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn from_erased_context(ctx: &'a ErasedRunCtx<'_>) -> Result<Self> {
+        Self::from_verified_parts(ctx.projections(), ctx.node(), ctx.attempt_id())
+    }
+
+    /// Builds a side-effect attempt view from a scheduler-owned verified run context.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn from_verified_context(
+        ctx: &'a VerifiedRunContext,
+        node: &spec::NodeSpec,
+        attempt_id: &AttemptId,
+    ) -> Result<Self> {
+        Self::from_verified_parts(&ctx.view().projections, node, attempt_id)
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn from_verified_parts(
+        projections: &'a store::ProjectionSnapshot,
+        node: &spec::NodeSpec,
+        attempt_id: &AttemptId,
+    ) -> Result<Self> {
+        let projection =
+            SideEffectLifecycle::projection_for_attempt(projections, node, attempt_id)?;
+        let ledger_state = projection
+            .map(|projection| {
+                projection
+                    .ledger_state()
+                    .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))
+            })
+            .transpose()?;
+        Ok(Self {
+            projection,
+            ledger_state,
+        })
+    }
+
+    /// Returns the backing side-effect projection, when this attempt has persisted ledger evidence.
+    pub fn projection(&self) -> Option<&'a store::SideEffectProjection> {
+        self.projection
+    }
+
+    /// Returns the validated ledger state, when this attempt has persisted ledger evidence.
+    pub fn ledger_state(&self) -> Option<&store::SideEffectLedgerState<'a>> {
+        self.ledger_state.as_ref()
+    }
+
+    /// Returns the validated ledger phase, when this attempt has persisted ledger evidence.
+    pub fn phase(&self) -> Option<store::SideEffectLedgerPhase<'a>> {
+        self.ledger_state
+            .as_ref()
+            .map(store::SideEffectLedgerState::phase)
+    }
+
+    /// Returns the side-effect ledger key, when this attempt has persisted ledger evidence.
+    pub fn ledger_key(&self) -> Option<&'a events::SideEffectLedgerKey> {
+        self.projection.map(|projection| &projection.ledger_key)
+    }
+
+    /// Returns the side-effect ledger purpose, when this attempt has persisted ledger evidence.
+    pub fn ledger_purpose(&self) -> Option<&'a events::SideEffectLedgerPurpose> {
+        self.ledger_state
+            .as_ref()
+            .map(store::SideEffectLedgerState::ledger_purpose)
+    }
+
+    /// Returns true when this attempt has no side-effect ledger projection yet.
+    pub fn is_empty(&self) -> bool {
+        self.projection.is_none()
+    }
+}
 
 /// Runtime lifecycle guard for side-effect attempt uncertainty and recovery evidence.
 pub(crate) struct SideEffectLifecycle;

@@ -5154,6 +5154,119 @@ async fn recovery_delegates_started_side_effect_attempt_to_side_effect_lifecycle
     }
 }
 
+#[test]
+fn side_effect_attempt_view_from_erased_context_is_empty_before_ledger() {
+    let fixture = fixture_with_first_side_effect_state();
+    let node = node_by_output(&fixture, &fixture.cell_a);
+    let descriptor = fixture
+        .runtime_spec
+        .state_descriptor_for_node(node)
+        .expect("state descriptor");
+    let output_cell = fixture
+        .runtime_spec
+        .cell(&node.output_cell)
+        .expect("output cell");
+    let attempt_id = attempt_id(
+        &fixture.run_id,
+        fixture.runtime_spec.spec_hash(),
+        &node.node_id,
+        1,
+    )
+    .expect("attempt id");
+    let config_artifact = config_artifact(&fixture.runtime_spec, &node.config_ref).evidence;
+    let projections = store::ProjectionSnapshot::default();
+    let run_stream = Vec::new();
+    let invocation = PreparedRunnerInvocation {
+        runtime_spec: &fixture.runtime_spec,
+        run_id: &fixture.run_id,
+        spec_hash: fixture.runtime_spec.spec_hash(),
+        node,
+        descriptor,
+        output_cell,
+        attempt_id: &attempt_id,
+        attempt_no: 1,
+        config_artifact,
+        inputs: MaterializedInputs {
+            input_schema_id: node.input_bindings.input_schema_id.clone(),
+            root: MaterializedInputNode::Unit,
+        },
+        caps: CertifiedRuntimeCapabilities::new(
+            node.node_id.clone(),
+            node.capability_bindings.clone(),
+        ),
+        recorded_facts: RecordedFacts::default(),
+        projections: &projections,
+        run_stream: &run_stream,
+    };
+    let ctx = ErasedRunCtx::from_prepared(&invocation);
+    let view = SideEffectAttemptView::from_erased_context(&ctx).expect("side-effect view");
+
+    assert!(view.is_empty());
+    assert!(view.projection().is_none());
+    assert!(view.ledger_state().is_none());
+    assert!(view.phase().is_none());
+    assert!(view.ledger_key().is_none());
+    assert!(view.ledger_purpose().is_none());
+}
+
+#[tokio::test]
+async fn side_effect_attempt_view_from_verified_context_exposes_ledger_state() {
+    let fixture = fixture_with_first_exclusive_side_effect_state();
+    let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+
+    let node = node_by_output(&fixture, &fixture.cell_a);
+    let (attempt_id, ledger_key) = append_synthetic_exclusive_prepare(
+        &mut store,
+        &fixture,
+        &fixture.run_id,
+        node,
+        "wallet-view",
+        "sidefx-view-open",
+    );
+    let loader = crate::history::VerifiedRunContextLoader::new(
+        crate::binding::BoundRuntimeContextLoader::new(registered_side_effect_fixture_runners(
+            &fixture,
+        )),
+    );
+    let context = loader
+        .load(&fixture.runtime_spec, &fixture.run_id, &store)
+        .expect("verified context");
+
+    let view = SideEffectAttemptView::from_verified_context(&context, node, &attempt_id)
+        .expect("side-effect view");
+    assert!(!view.is_empty());
+    assert_eq!(view.ledger_key(), Some(&ledger_key));
+    assert_eq!(
+        view.ledger_purpose(),
+        Some(&events::SideEffectLedgerPurpose::Forward)
+    );
+    assert_eq!(
+        view.projection().expect("projection").intent.attempt_id,
+        attempt_id
+    );
+    match view.phase().expect("ledger phase") {
+        store::SideEffectLedgerPhase::Prepared {
+            claim,
+            resource_key,
+            ..
+        } => {
+            assert_eq!(claim.attempt_id, attempt_id);
+            assert_eq!(claim.invocation_epoch, 1);
+            assert!(resource_key.is_some());
+        }
+        other => panic!("unexpected side-effect phase: {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn recovery_sweep_includes_open_remediation_attempts() {
     let fixture = fixture_with_two_side_effects_and_failing_tail();
