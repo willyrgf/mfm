@@ -257,12 +257,16 @@ phase. `run_mode` is one of `forward`, `remediating`, `manual_blocked`, `complet
 policy, derived per-forward-ledger obligations, linked remediation ledgers, manual-block reason and
 manual authorization requirements when applicable, terminal resolution claim when present,
 projected resource ledgers with declared claim/key/touched-set evidence, and active exclusive lane
-holders. `attempt_dispositions` reports committed attempt-level lifecycle status separately from
-`run_mode`; each entry has `node_id`, `attempt_id`, `disposition` (`started`, `completed`, `failed`,
-or `interrupted`), and status-specific fields such as `attempt_no`, `retryable`, or
-`output_cell_id`. Manual authorization requirements include the required evidence schema, signing scheme,
-authority id, allowed operator public identities or a safe summary, and quorum. They never expose
-signer runtime sources, keystore paths, password paths, passwords, or other secrets.
+holders referenced by the target run's persisted live side-effect ledgers. Status does not serialize
+unrelated global lane holders or scheduler waiters that blocked before appending lane evidence.
+`attempt_dispositions` reports committed attempt-level lifecycle status separately from `run_mode`;
+each entry has `node_id`, `attempt_id`, `disposition` (`started`, `completed`, `failed`, or
+`interrupted`), and status-specific fields such as `attempt_no`, `retryable`, or `output_cell_id`.
+`scheduler_status` is read-only `observed` for `GET /v1/runs/:run_id/status`; start/resume responses
+set it to `advanced`, `blocked`, or `public_output_projected` according to the app dispatch loop.
+Manual authorization requirements include the required evidence schema, signing scheme, authority id,
+allowed operator public identities or a safe summary, and quorum. They never expose signer runtime
+sources, keystore paths, password paths, passwords, or other secrets.
 
 ## Removed Dynamic Surfaces
 

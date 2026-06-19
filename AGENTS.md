@@ -37,7 +37,7 @@ It is inspired by the practices used in large Rust codebases: modular crates, st
 
 Key invariants to preserve (high risk if violated):
 
-- Append-only stream families, with `run:*` carrying machine events (no mutation of past records).
+- Append-only stream families, with `run:*` carrying typed run events (no mutation of past records).
 - Per-append atomicity in stream stores: each append is all-or-nothing.
 - Content addressing for manifests, snapshots, facts, and outputs.
 - Canonical JSON for hashing structured data (target semantics: RFC 8785 / JCS-style).
@@ -68,8 +68,9 @@ run the focused Cargo test with explicit environment variables such as `DATABASE
 - `docs/architecture.md`: taxonomy, placement rules, and architecture boundaries.
 - `docs/design.md`: full design contract (authoritative).
 - `bin/cli/README.md`: CLI behavior and JSON output contract.
-- `crates/machine/README.md`: state machine concepts and usage.
-- `crates/machine-derive/README.md`: proc-macro notes.
+- `crates/kernel/runtime/README.md`: typed runtime scheduler and recovery concepts.
+- `crates/kernel/program/README.md`: typed program authoring concepts.
+- `crates/kernel/program-derive/README.md`: proc-macro notes.
 
 
 ## Key Design Principles
@@ -227,18 +228,17 @@ Run locally:
 cargo run -p mfm -- --help
 ```
 
-### State Machine (`crates/machine/`)
+### Typed Runtime (`crates/kernel/runtime/`)
 
-The state machine is async and uses a typed tag/label system.
+The typed runtime is async, event-sourced, and drives certified specs through the FSM scheduler.
 
-- Keep states deterministic unless explicitly tagged as side-effecting.
+- Keep scheduler/recovery logic deterministic unless it delegates to an explicit side-effect runner.
 - Do not block the async runtime:
   - use async I/O where possible
   - use `tokio::task::spawn_blocking` for CPU-bound or blocking work
-- Prefer `TypedContextExt::{read_typed, write_typed}` over ad-hoc JSON.
 - If you change scheduling/recovery semantics, add tests that assert behavior.
 
-### Proc-Macros (`crates/machine-derive/`)
+### Proc-Macros (`crates/kernel/program-derive/`)
 
 - Optimize for clear compile-time errors.
 - Avoid expanding to surprising code (keep generated impls small and idiomatic).

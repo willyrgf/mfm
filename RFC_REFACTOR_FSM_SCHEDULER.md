@@ -1,10 +1,12 @@
 # RFC: Refactor Runtime Scheduler Into Explicit FSM Lifecycles
 
-Status: reviewed
+Status: implemented; merge-readiness review identified follow-up items
 
-This RFC proposes a breaking refactor of the typed runtime scheduler. The goal is to make runtime
-execution easier to reason about by splitting the current broad scheduler orchestration into small,
-explicit lifecycle protocols.
+This RFC records the breaking refactor of the typed runtime scheduler on the
+`refact-fsm-scheduler` branch. The goal was to make runtime execution easier to reason about by
+splitting the broad scheduler orchestration into small, explicit lifecycle protocols. The closeout
+record for the final implementation is `PLAN_RFC_REFACTOR_FSM_SCHEDULER.md`; the authoritative
+design contract is `docs/design.md`.
 
 The design target is:
 
@@ -20,7 +22,9 @@ authored run material
 ```
 
 The scheduler should not be a bag of hidden runtime responsibilities. It should be a thin dispatch
-surface over named lifecycle components with narrow authority.
+surface over named lifecycle components with narrow authority. The final branch implements that shape,
+with remaining merge-readiness items tracked in the closeout plan rather than this historical RFC
+body.
 
 ## Compatibility Policy
 
@@ -68,14 +72,15 @@ mislabeled as "just a scheduler refactor":
   what `RunAdmitted` means on the wire, including removing the old synthetic admission node from the
   certified graph.
   Changes the spec hash and certificate and therefore replay/projection of persisted runs. This RFC
-  deliberately does **not** perform this migration; it only consolidates the existing admission path
-  and records the decision boundary later superseded by flat admission.
+  originally did **not** perform this migration; the final branch superseded that scope with flat
+  `RunAdmitted` root semantics and no synthetic admission attempt evidence.
 
 The migration phases map to these classes as:
 
 - Runtime decomposition: Phases 1, 2, 3, 7, 8, 9.
 - Event-schema migration: Phases 4, 5, 6.
-- Certification/admission migration: out of scope here; only the decision boundary is recorded.
+- Certification/admission migration: originally out of scope; implemented later by flat admission
+  supersession on this branch.
 
 ## Problem
 
@@ -477,12 +482,14 @@ leave a lane held or a ledger open.
 | Open attempt kind | `StateAttemptInterrupted` legal as standalone closure? |
 |---|---|
 | Pure or read attempt | Yes |
-| Side-effect attempt holding no resource lane and no open ledger (before `SideEffectInvocationPrepared`) | Yes (nothing to release) |
+| Side-effect attempt with no side-effect projection yet | Legal, but current recovery continues the same attempt because no ledger evidence has been acquired |
+| Side-effect attempt with `SideEffectIntentPersisted` or `SideEffectClaimed` before `SideEffectInvocationPrepared` | Yes (nothing to release) |
 | Side-effect attempt that has acquired a lane or open ledger (at/after `SideEffectInvocationPrepared`, including past `InvocationStarted`) | No. It stays **Open** and is owned by `SideEffectLifecycle` recovery, which records the terminal side-effect evidence that releases the lane — pre-boundary: not-submitted/terminal failure; post-boundary: the full recovery outcomes |
 
-So "interruption terminalizes bookkeeping" applies only to the legal rows. A side-effect attempt that
-holds a lane or open ledger is never closed by interruption alone; it remains open until side-effect
-recovery records the terminal evidence that releases the lane. This removes the earlier ambiguity
+So "interruption terminalizes bookkeeping" applies only to rows that recovery actually chooses to
+interrupt. A side-effect attempt with no projection continues the same attempt, and a side-effect
+attempt that holds a lane or open ledger is never closed by interruption alone; it remains open until
+side-effect recovery records the terminal evidence that releases the lane. This removes the earlier ambiguity
 between "interruption is always terminal" and "interruption cannot close a lane/ledger-holding
 attempt."
 
@@ -947,6 +954,18 @@ or cross dependent work except through that attempt's lifecycle, recovery author
 independence witness.
 ```
 
+### Public Status Nuances
+
+Public typed status separates semantic `run_mode`, attempt-level dispositions, and
+`scheduler_status`. Read-only status reports `scheduler_status: "observed"`; start/resume responses
+report the last app dispatch result (`advanced`, `blocked`, or `public_output_projected`).
+
+Resource-lane status is intentionally narrower than the scheduler's internal global lane projection.
+The runtime may consult global lane holders to block a side-effect attempt before append, but public
+`saga.resource_lanes` serializes only active lane holders referenced by the target run's persisted
+live side-effect ledger evidence. It does not expose unrelated global holders or no-append scheduler
+waiters that blocked before lane evidence existed in the target run stream.
+
 ## Proposed Module Shape
 
 One possible runtime crate layout:
@@ -972,7 +991,11 @@ crates/kernel/runtime/src/
 Names can change during implementation. The important part is that each module has one authority
 boundary.
 
-## Migration Plan
+## Historical Migration Plan
+
+This section is the original implementation sequencing record. It is not the current merge checklist.
+Use `PLAN_RFC_REFACTOR_FSM_SCHEDULER.md` for final implementation slices, known deferred scope, and
+current verification expectations.
 
 ### Phasing, Sizing, And Ownership
 
@@ -1172,7 +1195,12 @@ Add or identify tests for:
   deferred unless a lifecycle already has a shared IO-free core that can safely serve both callers.
 - Update runtime docs to describe the new lifecycle protocols.
 
-## Verification
+## Verification And Closeout
+
+This section preserves the RFC's intended verification coverage. Current branch-local closeout
+evidence and merge-readiness gaps are tracked in `PLAN_RFC_REFACTOR_FSM_SCHEDULER.md` and
+`docs/validation/fsm-scheduler-closeout-2026-06-18.md`. The service-backed `.#ci` gate has been
+rerun at HEAD after the post-review cleanup.
 
 Focused checks for implementation slices:
 

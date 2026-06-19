@@ -537,8 +537,12 @@ impl<'a> AttemptLifecycle<'a> {
         let terminal_planned_attempt = Attempt {
             phase: TerminalPlanned { terminal_output },
         };
+        let lane_projection = store
+            .status_projection_snapshot(run_id)
+            .await
+            .map_err(async_store_error)?;
         if let Some(witness) = resource_lane_block_for_request(
-            &latest_view.projections,
+            &lane_projection,
             terminal_planned_attempt
                 .phase
                 .terminal_output

@@ -474,7 +474,7 @@ pub struct TypedSagaStatus {
     pub obligations: Vec<TypedSagaObligationStatus>,
     /// Resource claims and recorded evidence for all projected side-effect ledgers.
     pub resource_ledgers: Vec<TypedResourceLedgerStatus>,
-    /// Active exclusive resource lane holders visible to this status projection.
+    /// Active exclusive resource lane holders referenced by this run's live side-effect ledgers.
     pub resource_lanes: Vec<TypedResourceLaneHolderStatus>,
     /// Manual-block reason when the derived run mode is `manual_blocked`.
     pub manual_block_reason: Option<String>,
@@ -604,7 +604,7 @@ pub struct TypedResourceTouchedSetStatus {
     pub evidence_artifact_id: String,
 }
 
-/// Public active exclusive resource lane holder.
+/// Public active exclusive resource lane holder referenced by the target run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TypedResourceLaneHolderStatus {
     /// Resource namespace.
@@ -667,6 +667,9 @@ pub struct TypedRunResponse {
     /// Attempt-level dispositions, distinct from semantic run mode.
     pub attempt_dispositions: Vec<TypedAttemptDispositionStatus>,
     /// Last scheduler status observed by the app dispatch loop.
+    ///
+    /// Read-only status reports `observed`; start/resume dispatch reports `advanced`, `blocked`, or
+    /// `public_output_projected`.
     pub scheduler_status: String,
     /// Current typed run-stream head sequence.
     pub head_seq: u64,

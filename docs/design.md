@@ -372,9 +372,11 @@ frontier transition decision. Open-attempt recovery, including legal interruptio
 attempt recovery lifecycle when the continued attempt is dispatched. The frontier decision does not
 write the store, stage artifacts, construct live capabilities, or call runners. Open-attempt recovery
 classifies verified open attempts into continue, retry terminalization, interrupt, side-effect
-recovery, or operational block dispositions. Operational blocks are runtime recovery states such as
-terminal side-effect ledger evidence without matching attempt-terminal evidence; they block
-scheduling without minting semantic terminal events.
+recovery, or operational block dispositions. Operational blocks are reserved runtime recovery states
+for malformed evidence such as terminal side-effect ledger evidence without matching
+attempt-terminal evidence; normal store/history validation rejects those malformed streams before
+scheduler recovery, and public status collapses any surviving operational block to blocked without
+minting semantic terminal events.
 
 Sync and async drive paths may remain separate IO wrappers. Shared lifecycle authority belongs in
 pure helpers for transition/recovery classification, attempt planning, invocation build, output
@@ -463,11 +465,13 @@ compared against that concrete key. If the node has not yet reached invocation p
 runtime knows only the certified resource namespace, so same-namespace work waits until the parked
 lane releases or concrete evidence exists. Different namespaces may still advance.
 Standalone interruption is legal for a side-effect attempt only before
-`SideEffectInvocationPrepared`. No projection, `SideEffectIntentPersisted`, and
+`SideEffectInvocationPrepared`. A no-projection open side-effect attempt has no acquired ledger
+evidence and recovery continues the same attempt. `SideEffectIntentPersisted` and
 `SideEffectClaimed` are pre-prepare phases and do not by themselves hold a resource lane/open ledger
-that must be released by side-effect recovery. `SideEffectInvocationPrepared` and every later phase
-are owned by `SideEffectLifecycle`; recovery either resumes from the concrete ledger phase,
-records evidence-backed terminal side-effect outcome, or reports an operational block.
+that must be released by side-effect recovery, so recovery may interrupt them with ordinary attempt
+evidence. `SideEffectInvocationPrepared` and every later phase are owned by
+`SideEffectLifecycle`; recovery either resumes from the concrete ledger phase, records
+evidence-backed terminal side-effect outcome, or reports an operational block.
 
 Prepared-invocation artifacts may retain unsigned mutation plans, expected hashes, and non-secret
 signer references. Signed raw transactions are bearer mutation material and remain transient

@@ -6800,7 +6800,8 @@ async fn async_runtime_blocks_exclusive_lane_before_staging_artifact() {
     let runner = side_effect_runner_with_resource_keys(
         &fixture,
         resource_keys_for_all_side_effects(&fixture, "wallet-async"),
-    );
+    )
+    .with_inline_prepare_artifacts();
     let staged = Arc::new(Mutex::new(Vec::new()));
     let artifacts = Arc::new(Mutex::new(TestArtifactMap::new()));
     let scheduler = test_scheduler_with_stager(
@@ -7984,6 +7985,7 @@ struct DeterministicSideEffectRunner {
     adapter_kind: AdapterKind,
     adapter_version: AdapterVersion,
     resource_keys: BTreeMap<NodeId, events::ResourceKeyEvidence>,
+    inline_prepare_artifacts: bool,
 }
 
 impl DeterministicSideEffectRunner {
@@ -7994,6 +7996,7 @@ impl DeterministicSideEffectRunner {
             adapter_kind: fixture.adapter_kind.clone(),
             adapter_version: fixture.adapter_version.clone(),
             resource_keys: BTreeMap::new(),
+            inline_prepare_artifacts: false,
         }
     }
 
@@ -8002,6 +8005,11 @@ impl DeterministicSideEffectRunner {
         resource_keys: BTreeMap<NodeId, events::ResourceKeyEvidence>,
     ) -> Self {
         self.resource_keys = resource_keys;
+        self
+    }
+
+    fn with_inline_prepare_artifacts(mut self) -> Self {
+        self.inline_prepare_artifacts = true;
         self
     }
 
@@ -8189,18 +8197,35 @@ impl DeterministicSideEffectRunner {
         ledger: events::SideEffectLedgerKey,
     ) -> Result<ErasedRunnerOutput> {
         assert!(ctx.caps().contains(&self.cap_kind, &self.cap_version));
-        let (intent_artifact_id, intent_hash) = side_effect_fixture_artifact_pair(&ctx, "intent");
-        let staged_artifact = staged_side_effect_artifact(
+        let (intent_bytes, intent_artifact_id, intent_hash) = if self.inline_prepare_artifacts {
+            let bytes = side_effect_fixture_bytes(&ctx, "intent");
+            let digest = digest_for_bytes(&bytes);
+            let artifact_id = ArtifactId::from_digest(digest.algorithm(), *digest.digest());
+            (Some(bytes), artifact_id, digest)
+        } else {
+            let (artifact_id, digest) = side_effect_fixture_artifact_pair(&ctx, "intent");
+            (None, artifact_id, digest)
+        };
+        let mut intent_evidence = side_effect_artifact(
             &ctx,
-            side_effect_artifact(
+            intent_artifact_id.clone(),
+            intent_hash.clone(),
+            events::ArtifactRole::SideEffectIntent,
+        );
+        if let Some(bytes) = &intent_bytes {
+            intent_evidence.byte_len = bytes.len() as u64;
+        }
+        let staged_artifact = if let Some(bytes) = intent_bytes {
+            StagedArtifact::inline_side_effect_artifact(
                 &ctx,
-                intent_artifact_id.clone(),
-                intent_hash.clone(),
-                events::ArtifactRole::SideEffectIntent,
-            ),
-            ledger.clone(),
-            1,
-        )?;
+                bytes,
+                intent_evidence,
+                ledger.clone(),
+                1,
+            )?
+        } else {
+            staged_side_effect_artifact(&ctx, intent_evidence, ledger.clone(), 1)?
+        };
         Ok(ErasedRunnerOutput {
             staged_artifacts: vec![staged_artifact],
             staged_retention_refs: Vec::new(),
@@ -12961,6 +12986,16 @@ fn side_effect_fixture_digest(ctx: &ErasedRunCtx<'_>, role: &str) -> ContentDige
         "role": role,
     }))
     .expect("side-effect fixture digest")
+}
+
+fn side_effect_fixture_bytes(ctx: &ErasedRunCtx<'_>, role: &str) -> Vec<u8> {
+    format!(
+        r#"{{"attempt":"{}","node":"{}","role":"{}"}}"#,
+        ctx.attempt_id(),
+        ctx.node().node_id,
+        role
+    )
+    .into_bytes()
 }
 
 fn side_effect_fixture_artifact_pair(

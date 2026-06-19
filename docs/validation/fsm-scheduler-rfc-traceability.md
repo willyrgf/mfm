@@ -1196,8 +1196,8 @@ Current evidence:
   - `cargo test -p mfm-integration-tests --test architecture_namespace_contract design_docs_do_not_make_public_output_projected_a_transition_decision`
   - `cargo test -p mfm-stream-store-postgres --features parity-tests --no-run`
   - `cargo test -p mfm --features parity-tests --test status_contract_postgres --no-run`
-- the DB-backed Postgres/CLI parity tests were compiled but not executed in this loop because
-  `DATABASE_URL` was not set.
+- after the post-review cleanup, full service-backed `.#ci` passed with managed Postgres and Reth:
+  `docs/validation/fsm-scheduler-closeout-2026-06-18.md`
 - cross-run no-append blocked-waiter status is recorded as `deferred-by-RFC` rather than claimed as
   complete, because the RFC specifies lane admission/re-decision but not persisted waiter status.
 
