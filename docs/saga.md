@@ -45,6 +45,10 @@ The kernel encodes saga authority in proof objects instead of repeated validator
 - `SagaTerminalProof` is required to commit completed, compensated, manually resolved, and
   failed-without-claim terminal saga outcomes.
 
+Manual-resolution terminalization rebuilds and re-verifies proof authority from the current
+certified prefix plus retained evidence and authorization artifacts. Scheduler-local proof caches
+must not authorize terminal saga commits.
+
 ## Certified Policy
 
 `mfm-spec::v1::TypedExecutionSpec` carries hash-defining saga policy:
@@ -71,6 +75,8 @@ After engagement, no new forward side-effect boundary crossings may be admitted.
 terminal evidence for already past-boundary forward ledgers may still arrive. Before classifying
 obligations, runtime drives every past-boundary forward ledger to a quiescent phase such as
 confirmation, not-submitted proof, failure, or ambiguity.
+The store is the source of truth for this forward fence. Runtime can reject impossible scheduling
+choices early, but every stream reader relies on store admission and projection rules.
 
 Obligation classification is over the full current stream, not the engagement event prefix. With the
 forward fence, all readers of the same stream derive the same obligation set and run mode.
@@ -86,6 +92,10 @@ Public status reports semantic `RunMode`, not raw store phase:
 - `compensated`
 - `manually_resolved`
 - `failed_without_acdc_claim`
+
+Attempt lifecycle is reported separately as attempt disposition: `started`, `completed`, `failed`,
+or `interrupted`. `interrupted` terminalizes legal attempt bookkeeping for retry/recovery, but it is
+not saga engagement, terminal run mode, compensation proof, or manual-resolution authority.
 
 `Compensated` requires a non-empty owed set with every owed obligation closed by certified remedial
 confirmation evidence. A clean failure with no past-boundary forward mutation resolves as

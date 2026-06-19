@@ -1989,6 +1989,8 @@ dependencies = [
  "mfm-app",
  "mfm-artifact-store-fs",
  "mfm-canonical",
+ "mfm-certify",
+ "mfm-events",
  "mfm-evm-contract-config",
  "mfm-evm-contract-model",
  "mfm-evm-core",
@@ -1997,7 +1999,9 @@ dependencies = [
  "mfm-op-portfolio-tracker",
  "mfm-op-proof",
  "mfm-portfolio-config",
+ "mfm-program",
  "mfm-spec",
+ "mfm-store",
  "mfm-stream-store-postgres",
  "mfm_core",
  "predicates",
@@ -2032,6 +2036,7 @@ dependencies = [
  "mfm-adapter-contracts",
  "mfm-artifact-capabilities",
  "mfm-canonical",
+ "mfm-capabilities",
  "mfm-events",
  "mfm-evm-capabilities",
  "mfm-evm-contract-config",
@@ -2042,8 +2047,11 @@ dependencies = [
  "mfm-program",
  "mfm-program-derive",
  "mfm-replay",
+ "mfm-runtime",
  "mfm-signing",
+ "mfm-spec",
  "mfm-state-evm-contracts",
+ "mfm-store",
  "mfm-values",
  "serde",
  "serde_json",
@@ -2467,6 +2475,7 @@ name = "mfm-replay"
 version = "0.1.0"
 dependencies = [
  "k256",
+ "mfm-canonical",
  "mfm-capabilities",
  "mfm-certify",
  "mfm-events",
@@ -2475,6 +2484,7 @@ dependencies = [
  "mfm-runtime",
  "mfm-spec",
  "mfm-store",
+ "serde_json",
  "trybuild",
 ]
 
@@ -2627,8 +2637,10 @@ dependencies = [
 name = "mfm-stream-store-postgres"
 version = "0.1.0"
 dependencies = [
+ "k256",
  "mfm-events",
  "mfm-ids",
+ "mfm-manual-auth",
  "mfm-spec",
  "mfm-store",
  "serde_json",

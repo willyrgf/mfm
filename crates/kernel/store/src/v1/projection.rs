@@ -5,15 +5,18 @@ pub(super) fn apply_projection(
     envelope: &KernelEventEnvelope,
 ) -> Result<()> {
     match envelope.payload() {
-        KernelEventPayload::RunStarted(payload) => apply_run_started(projections, payload)?,
+        KernelEventPayload::RunAdmitted(payload) => apply_run_admitted(projections, payload)?,
         KernelEventPayload::RunCompleted(payload) => {
             apply_run_completed(projections, &envelope.event_id, payload)?;
         }
         KernelEventPayload::StateAttemptStarted(payload) => {
-            apply_attempt_started(projections, &envelope.event_id, payload)?;
+            apply_attempt_started(projections, envelope.run_id(), &envelope.event_id, payload)?
         }
         KernelEventPayload::StateAttemptCompleted(payload) => {
             apply_attempt_completed(projections, &envelope.event_id, payload)?;
+        }
+        KernelEventPayload::StateAttemptInterrupted(payload) => {
+            apply_attempt_interrupted(projections, &envelope.event_id, payload)?;
         }
         KernelEventPayload::StateAttemptFailed(payload) => {
             apply_attempt_failed(projections, envelope, payload)?;
@@ -83,15 +86,15 @@ pub(super) fn apply_projection(
     Ok(())
 }
 
-fn apply_run_started(
+fn apply_run_admitted(
     projections: &mut ProjectionSnapshot,
-    payload: &events::RunStarted,
+    payload: &events::RunAdmitted,
 ) -> Result<()> {
     let state = projections.run_state(&payload.run_id);
     if state != RunState::Absent {
         return Err(StoreError::ProjectionConflict {
-            key: "run:start".to_owned(),
-            message: "run already started".to_owned(),
+            key: "run:admission".to_owned(),
+            message: "run already admitted".to_owned(),
         });
     }
     projections
@@ -100,7 +103,40 @@ fn apply_run_started(
     projections
         .saga_policy_digests
         .insert(payload.run_id.clone(), payload.saga_policy_digest.clone());
+    let retention = projections
+        .retentions
+        .entry(payload.run_id.clone())
+        .or_default();
+    insert_run_admission_retention(retention, &payload.spec_artifact);
+    insert_run_admission_retention(retention, &payload.certificate_artifact);
+    for artifact in &payload.config_artifacts {
+        insert_run_admission_retention(retention, artifact);
+    }
+    for seed in &payload.seed_cells {
+        retention.refs.insert(
+            seed.seed_artifact.artifact_id.clone(),
+            events::RetentionRef {
+                artifact_id: seed.seed_artifact.artifact_id.clone(),
+                role: seed.seed_artifact.role,
+                content_digest: seed.seed_artifact.content_digest.clone(),
+            },
+        );
+    }
     Ok(())
+}
+
+fn insert_run_admission_retention(
+    retention: &mut RetentionProjection,
+    artifact: &events::RunArtifactEvidenceRef,
+) {
+    retention.refs.insert(
+        artifact.artifact_id.clone(),
+        events::RetentionRef {
+            artifact_id: artifact.artifact_id.clone(),
+            role: artifact.role,
+            content_digest: artifact.content_digest.clone(),
+        },
+    );
 }
 
 fn apply_run_completed(
@@ -132,6 +168,7 @@ fn apply_run_completed(
 
 fn apply_attempt_started(
     projections: &mut ProjectionSnapshot,
+    run_id: &RunId,
     event_id: &EventId,
     payload: &events::StateAttemptStarted,
 ) -> Result<()> {
@@ -145,6 +182,7 @@ fn apply_attempt_started(
     projections.attempts.insert(
         key,
         AttemptProjection {
+            run_id: run_id.clone(),
             node_id: payload.node_id.clone(),
             attempt_id: payload.attempt_id.clone(),
             event_id: event_id.clone(),
@@ -171,6 +209,21 @@ fn apply_attempt_completed(
         AttemptStatus::Completed {
             output_cell_id: payload.output_cell_id.clone(),
         },
+    )
+}
+
+fn apply_attempt_interrupted(
+    projections: &mut ProjectionSnapshot,
+    event_id: &EventId,
+    payload: &events::StateAttemptInterrupted,
+) -> Result<()> {
+    require_no_prepared_side_effect_authority_for_interruption(projections, payload)?;
+    update_attempt_terminal_projection(
+        projections,
+        &payload.node_id,
+        &payload.attempt_id,
+        event_id.clone(),
+        AttemptStatus::Interrupted,
     )
 }
 
@@ -203,6 +256,35 @@ fn apply_attempt_failed(
         );
     }
     Ok(())
+}
+
+fn require_no_prepared_side_effect_authority_for_interruption(
+    projections: &ProjectionSnapshot,
+    payload: &events::StateAttemptInterrupted,
+) -> Result<()> {
+    for side_effect in projections.side_effects.values() {
+        if side_effect.intent.node_id != payload.node_id
+            || side_effect.intent.attempt_id != payload.attempt_id
+        {
+            continue;
+        }
+        let ledger_state = side_effect.ledger_state()?;
+        if side_effect_phase_blocks_standalone_interruption(ledger_state.phase()) {
+            return Err(StoreError::ProjectionConflict {
+                key: format!("attempt:{}:{}", payload.node_id, payload.attempt_id),
+                message: "interruption is not legal after side-effect invocation was prepared"
+                    .to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn side_effect_phase_blocks_standalone_interruption(phase: SideEffectLedgerPhase<'_>) -> bool {
+    !matches!(
+        phase,
+        SideEffectLedgerPhase::IntentPersisted { .. } | SideEffectLedgerPhase::Claimed { .. }
+    )
 }
 
 fn apply_side_effect_intent_persisted(
@@ -584,6 +666,10 @@ fn apply_side_effect_ambiguous(
         },
         |state| state.mark_ambiguous(envelope.event_id.clone(), payload),
     )?;
+    release_resource_lane_for_holder(
+        projections,
+        &SideEffectLedgerRef::new(envelope.run_id().clone(), payload.ledger_key.clone()),
+    );
     if matches!(
         payload.ledger_purpose,
         events::SideEffectLedgerPurpose::Forward
@@ -750,6 +836,7 @@ fn apply_manual_resolution_recorded(
             message: "manual resolution already recorded".to_owned(),
         });
     }
+    projections.require_no_open_semantic_attempts_for_run(&payload.run_id)?;
     require_forward_quiescence(projections, &payload.run_id)?;
     projections.manual_resolutions.insert(
         payload.run_id.clone(),

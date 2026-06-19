@@ -10,9 +10,9 @@ use mfm_ids::{
 };
 use mfm_spec::v1::{CanonicalizerIdentity, MediaType, SagaPolicySpec};
 use mfm_store::v1::{
-    ArtifactEvidenceRef, CommitKey, CommitPreconditions, InMemoryTypedRunStore,
-    PreparedTypedCommit, RequiredRunState, StreamSeq, TypedCommitRequest, TypedRunEventStore,
-    VerifiedRetentionProjectionSet,
+    ArtifactEvidenceRef, CommitArtifactEvidenceSet, CommitKey, CommitPreconditions,
+    InMemoryTypedRunStore, PreparedCommit, RequiredRunState, Retention, RunAdmission, StreamSeq,
+    TypedCommitRequest, TypedRunEventStore, VerifiedRetentionProjectionSet,
 };
 use std::path::{Path, PathBuf};
 
@@ -26,6 +26,18 @@ fn content_digest(bytes: &[u8]) -> ContentDigest {
 
 fn artifact_id(bytes: &[u8]) -> ArtifactId {
     ArtifactId::from_digest(DigestAlgorithm::Sha256JcsV1, sha256_digest_bytes(bytes))
+}
+
+fn run_artifact_ref(artifact: &ArtifactEvidenceRef) -> mfm_events::v1::RunArtifactEvidenceRef {
+    mfm_events::v1::RunArtifactEvidenceRef {
+        artifact_id: artifact.artifact_id.clone(),
+        role: artifact.artifact_role,
+        schema_id: artifact.schema_id.clone(),
+        semantic_type_id: artifact.semantic_type_id.clone(),
+        content_digest: artifact.digest.clone(),
+        byte_len: artifact.byte_len,
+        media_type: artifact.media_type.clone(),
+    }
 }
 
 fn schema_id(name: &str, byte: u8) -> SchemaId {
@@ -130,10 +142,10 @@ fn verified_retention_projection_for(
 ) -> VerifiedRetentionProjectionSet {
     let run_id = run_id(80);
     let spec_hash = spec_hash(81);
-    let spec_artifact_id =
+    let spec_artifact_root_id =
         ArtifactId::from_digest(DigestAlgorithm::Sha256JcsV1, *spec_hash.digest());
     let spec_evidence = ArtifactEvidenceRef {
-        artifact_id: spec_artifact_id.clone(),
+        artifact_id: spec_artifact_root_id.clone(),
         digest: ContentDigest::from_digest(spec_hash.algorithm(), *spec_hash.digest()),
         byte_len: 64,
         media_type: MediaType::new("application/vnd.mfm.typed-execution-spec+json;version=1")
@@ -160,30 +172,33 @@ fn verified_retention_projection_for(
         run_id.clone(),
         StreamSeq::FIRST,
         CommitKey::new("run-start").expect("commit key"),
-        vec![KernelEventPayload::RunStarted(mfm_events::v1::RunStarted {
-            run_id: run_id.clone(),
-            spec_hash: spec_hash.clone(),
-            spec_artifact_id,
-            certificate_artifact_id: certificate_evidence.artifact_id.clone(),
-            certificate_artifact_digest: certificate_evidence.digest.clone(),
-            certificate_media_type: certificate_evidence.media_type.clone(),
-            spec_media_type: spec_evidence.media_type.clone(),
-            spec_version: SpecVersion::new("mfm.typed.execution_spec.v1").expect("spec version"),
-            lowering_version: LoweringVersion::new("mfm.typed.lowering.v1")
-                .expect("lowering version"),
-            public_output_schema_id: schema_id("mfm.test.public_output", 82),
-            saga_policy_digest: SagaPolicySpec::NoSideEffects
-                .saga_policy_digest()
-                .expect("saga policy digest"),
-            descriptor_identities: Vec::new(),
-            runner_executables: Vec::new(),
-            adapter_executables: Vec::new(),
-            canonicalizer_identity: CanonicalizerIdentity::new("mfm.jcs.v1")
-                .expect("canonicalizer"),
-            framework_version: FrameworkVersion::new("mfm.test.1").expect("framework version"),
-            source_revision: SourceRevision::new("test-revision").expect("source revision"),
-            seed_cells: Vec::new(),
-        })],
+        vec![KernelEventPayload::RunAdmitted(Box::new(
+            mfm_events::v1::RunAdmitted {
+                run_id: run_id.clone(),
+                spec_hash: spec_hash.clone(),
+                spec_artifact: run_artifact_ref(&spec_evidence),
+                certificate_artifact: run_artifact_ref(&certificate_evidence),
+                config_artifacts: Vec::new(),
+                spec_version: SpecVersion::new("mfm.typed.execution_spec.v1")
+                    .expect("spec version"),
+                lowering_version: LoweringVersion::new("mfm.typed.lowering.v1")
+                    .expect("lowering version"),
+                public_output_schema_id: schema_id("mfm.test.public_output", 82),
+                saga_policy_digest: SagaPolicySpec::NoSideEffects
+                    .saga_policy_digest()
+                    .expect("saga policy digest"),
+                descriptor_identities: Vec::new(),
+                runner_executables: Vec::new(),
+                adapter_executables: Vec::new(),
+                admitted_binding_digest: content_digest(b"binding"),
+                canonicalizer_identity: CanonicalizerIdentity::new("mfm.jcs.v1")
+                    .expect("canonicalizer"),
+                framework_version: FrameworkVersion::new("mfm.test.1").expect("framework version"),
+                source_revision: SourceRevision::new("test-revision").expect("source revision"),
+                launched_at_unix_ms: 1_700_000_000_000,
+                seed_cells: Vec::new(),
+            },
+        ))],
         vec![spec_evidence, certificate_evidence],
         CommitPreconditions {
             required_run_state: RequiredRunState::Absent,
@@ -192,11 +207,14 @@ fn verified_retention_projection_for(
     )
     .expect("run start request");
     let run_start_artifacts = run_start_request.required_artifacts().to_vec();
+    let run_start_artifacts =
+        CommitArtifactEvidenceSet::new(run_start_artifacts.clone(), run_start_artifacts)
+            .expect("run start artifact evidence set");
+    let run_start_commit =
+        PreparedCommit::<RunAdmission>::new(run_start_request, run_start_artifacts)
+            .expect("prepare run start");
     run_store
-        .append_prepared_typed_commit(
-            PreparedTypedCommit::new(run_start_request, run_start_artifacts)
-                .expect("prepare run start"),
-        )
+        .append_prepared_commit_plan(run_start_commit.into())
         .expect("append run start");
     let retention_request = TypedCommitRequest::from_payloads(
         run_id.clone(),
@@ -221,11 +239,12 @@ fn verified_retention_projection_for(
         },
     )
     .expect("retention request");
+    let retention_artifacts = CommitArtifactEvidenceSet::new(Vec::new(), vec![evidence.clone()])
+        .expect("retention artifact evidence set");
+    let retention_commit = PreparedCommit::<Retention>::new(retention_request, retention_artifacts)
+        .expect("prepare retention refs");
     run_store
-        .append_prepared_typed_commit(
-            PreparedTypedCommit::new(retention_request, vec![evidence.clone()])
-                .expect("prepare retention refs"),
-        )
+        .append_prepared_commit_plan(retention_commit.into())
         .expect("append retention refs");
     let stream = run_store.load_run_stream(&run_id);
     VerifiedRetentionProjectionSet::from_synthetic_run_streams(vec![(run_id, stream.as_slice())])

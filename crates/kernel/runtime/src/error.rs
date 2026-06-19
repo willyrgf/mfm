@@ -19,6 +19,8 @@ pub enum RuntimeError {
     InputMaterialization(String),
     /// Runner output violated certified node or capability authority.
     InvalidRunnerOutput(String),
+    /// Runtime validation failed inside a valid started attempt.
+    RuntimeValidation(String),
     /// Store contract rejected a typed commit.
     Store(String),
     /// Identity construction failed.
@@ -39,6 +41,7 @@ impl fmt::Display for RuntimeError {
                 write!(f, "typed input materialization failed: {message}")
             }
             Self::InvalidRunnerOutput(message) => write!(f, "invalid runner output: {message}"),
+            Self::RuntimeValidation(message) => write!(f, "runtime validation failed: {message}"),
             Self::Store(message) => write!(f, "typed store error: {message}"),
             Self::Identity(message) => write!(f, "identity error: {message}"),
             Self::Canonical(message) => write!(f, "canonical JSON error: {message}"),

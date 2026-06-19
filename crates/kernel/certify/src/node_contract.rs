@@ -33,9 +33,6 @@ pub(super) fn validate_state_node_contract(input: StateNodeContractInput<'_>) ->
     let input_cells = validate_input_binding(&node.input_bindings, cells)?;
     let expected_node_id = match id_derivation {
         StateNodeIdDerivation::FrameworkAware => match &node.framework {
-            Some(spec::FrameworkNodeSpec::BootstrapRun(_)) => {
-                bootstrap_run_node_id_from_spec(&node.scope_id, node.stable_key.as_str())?
-            }
             Some(spec::FrameworkNodeSpec::Bridge(bridge)) => {
                 bridge_node_id_from_spec(node.stable_key.as_str(), bridge)?
             }

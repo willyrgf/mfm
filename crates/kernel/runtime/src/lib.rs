@@ -16,31 +16,41 @@ use mfm_store::v1 as store;
 
 #[cfg(test)]
 use mfm_ids::CellId;
-#[cfg(test)]
-use std::collections::BTreeSet;
 
+mod admission;
 mod artifacts;
+mod attempt;
+mod binding;
 mod commit;
 mod error;
 mod framework;
+mod framework_lifecycle;
 mod frontier;
 mod history;
 mod invocation;
 mod manual_resolution;
+mod recovery;
 mod runners;
 mod scheduler;
+mod side_effect_lifecycle;
 mod side_effects;
 mod spec_authority;
+mod transition;
 
+pub use admission::RunAdmissionAuthority;
 pub use artifacts::{
     RuntimeArtifactStageFuture, RuntimeArtifactStager, RuntimeArtifactStore, StagedArtifact,
     StagedArtifactBindingKind, StagedArtifactHandle, StagedRetentionRefs,
     StagedSideEffectArtifactPhase,
 };
+pub use binding::{
+    BoundCapabilityAuthority, BoundFrameworkHandlerAuthority, BoundFrameworkHandlerKind,
+    BoundRuntimeContext, BoundRuntimeContextLoader,
+};
 pub use commit::{PreparedRunLaunch, RunLaunchArtifact, RunLaunchEvidence, RunLaunchSeedCell};
 pub use error::RuntimeError;
 pub use framework::build_public_output_receipt_artifact;
-pub use history::VerifiedRunHistory;
+pub use history::{VerifiedRunContext, VerifiedRunContextLoader, VerifiedRunHistory};
 pub use invocation::{
     CertifiedRuntimeCapabilities, ErasedRunCtx, MaterializedCell, MaterializedCellTerminal,
     MaterializedInputNode, MaterializedInputs, NamedMaterializedInput, PreparedRunnerInvocation,
@@ -52,8 +62,9 @@ pub use manual_resolution::{
     ManualResolutionEvidenceArtifact,
 };
 pub use runners::{
-    ErasedNodeRunner, ErasedRunnerBinding, ErasedRunnerFuture, ErasedRunnerOutput,
-    ErasedRunnerRegistry, RunnerEventPayload,
+    CapabilityImplementationBinding, CapabilityImplementationId, ErasedNodeRunner,
+    ErasedRunnerBinding, ErasedRunnerFuture, ErasedRunnerOutput, ErasedRunnerRegistry,
+    RunnerEventPayload,
 };
 pub use scheduler::{ManualResolutionRequest, SchedulerStatus, SerialTypedScheduler};
 pub use spec_authority::CertifiedRuntimeSpec;
@@ -67,15 +78,15 @@ use artifacts::{staged_artifact_binding_kind, staged_side_effect_artifact_phase}
 use commit::{retention_manifest_payloads, runner_payloads_with_derived_lifecycle};
 #[cfg(test)]
 use framework::{
-    build_retention_manifest_artifact_with_producer, certified_bootstrap_run_node,
-    certified_complete_run_node, certified_retention_manifest_node,
+    build_retention_manifest_artifact_with_producer, certified_complete_run_node,
+    certified_retention_manifest_node,
 };
 #[cfg(test)]
-use history::validate_historical_bootstrap_run_batch;
+use history::validate_historical_run_admission_batch;
 #[cfg(test)]
 use history::RuntimeRunView;
 #[cfg(test)]
-use side_effects::side_effect_projection_for_attempt;
+use side_effect_lifecycle::side_effect_projection_for_attempt;
 
 /// Result type for typed runtime operations.
 pub type Result<T> = std::result::Result<T, RuntimeError>;
@@ -214,39 +225,6 @@ fn attempt_id(
         DigestAlgorithm::Sha256JcsV1,
         *canonical.content_digest().digest(),
     ))
-}
-
-fn config_artifact_reference_payloads(
-    spec_hash: &SpecHash,
-    artifacts: &[store::ArtifactEvidenceRef],
-) -> Result<Vec<events::KernelEventPayload>> {
-    artifacts
-        .iter()
-        .map(|artifact| {
-            let schema_id = artifact.schema_id.clone().ok_or_else(|| {
-                RuntimeError::InvalidRunStream(format!(
-                    "config artifact {} is missing schema id",
-                    artifact.artifact_id
-                ))
-            })?;
-            Ok(events::KernelEventPayload::ArtifactReferenced(
-                events::ArtifactReferenced {
-                    spec_hash: spec_hash.clone(),
-                    node_id: None,
-                    attempt_id: None,
-                    artifact_ref: events::ArtifactEvidenceRef {
-                        artifact_id: artifact.artifact_id.clone(),
-                        role: artifact.artifact_role,
-                        schema_id,
-                        semantic_type_id: artifact.semantic_type_id.clone(),
-                        content_digest: artifact.digest.clone(),
-                        byte_len: artifact.byte_len,
-                        media_type: artifact.media_type.clone(),
-                    },
-                },
-            ))
-        })
-        .collect()
 }
 
 fn retention_ref_for_artifact(artifact: &store::ArtifactEvidenceRef) -> events::RetentionRef {

@@ -155,7 +155,7 @@ pub mod v1 {
     pub const EVENT_SCHEMA_VERSION: &str = "1";
 
     checked_string_type!(
-        /// Framework build/version identity persisted in `RunStarted`.
+        /// Framework build/version identity persisted in `RunAdmitted`.
         FrameworkVersion,
         "framework version"
     );
@@ -308,7 +308,7 @@ pub mod v1 {
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum KernelEventPayload {
         /// Run start event.
-        RunStarted(RunStarted),
+        RunAdmitted(Box<RunAdmitted>),
         /// State attempt start event.
         StateAttemptStarted(StateAttemptStarted),
         /// Recorded read fact event.
@@ -349,6 +349,8 @@ pub mod v1 {
         PublicOutputRenderFailed(PublicOutputRenderFailed),
         /// State attempt completed event.
         StateAttemptCompleted(StateAttemptCompleted),
+        /// State attempt interrupted event.
+        StateAttemptInterrupted(StateAttemptInterrupted),
         /// State attempt failed event.
         StateAttemptFailed(StateAttemptFailed),
         /// Manual saga resolution recorded event.
@@ -365,7 +367,7 @@ pub mod v1 {
         /// Returns the schema descriptor for this payload variant.
         pub const fn schema_descriptor(&self) -> EventSchemaDescriptor {
             match self {
-                Self::RunStarted(_) => RUN_STARTED_SCHEMA,
+                Self::RunAdmitted(_) => RUN_ADMITTED_SCHEMA,
                 Self::StateAttemptStarted(_) => STATE_ATTEMPT_STARTED_SCHEMA,
                 Self::FactRecorded(_) => FACT_RECORDED_SCHEMA,
                 Self::ArtifactReferenced(_) => ARTIFACT_REFERENCED_SCHEMA,
@@ -386,6 +388,7 @@ pub mod v1 {
                 Self::PublicOutputProduced(_) => PUBLIC_OUTPUT_PRODUCED_SCHEMA,
                 Self::PublicOutputRenderFailed(_) => PUBLIC_OUTPUT_RENDER_FAILED_SCHEMA,
                 Self::StateAttemptCompleted(_) => STATE_ATTEMPT_COMPLETED_SCHEMA,
+                Self::StateAttemptInterrupted(_) => STATE_ATTEMPT_INTERRUPTED_SCHEMA,
                 Self::StateAttemptFailed(_) => STATE_ATTEMPT_FAILED_SCHEMA,
                 Self::ManualResolutionRecorded(_) => MANUAL_RESOLUTION_RECORDED_SCHEMA,
                 Self::RunCompleted(_) => RUN_COMPLETED_SCHEMA,
@@ -405,7 +408,7 @@ pub mod v1 {
         /// return `None` here.
         pub fn run_id(&self) -> Option<&RunId> {
             match self {
-                Self::RunStarted(payload) => Some(&payload.run_id),
+                Self::RunAdmitted(payload) => Some(&payload.run_id),
                 Self::ManualResolutionRecorded(payload) => Some(&payload.run_id),
                 Self::RunCompleted(payload) => Some(&payload.run_id),
                 Self::RetentionRefsAppended(payload) => Some(&payload.run_id),
@@ -417,7 +420,7 @@ pub mod v1 {
         /// Returns the certified spec hash carried by this payload.
         pub fn spec_hash(&self) -> &SpecHash {
             match self {
-                Self::RunStarted(payload) => &payload.spec_hash,
+                Self::RunAdmitted(payload) => &payload.spec_hash,
                 Self::StateAttemptStarted(payload) => &payload.spec_hash,
                 Self::FactRecorded(payload) => &payload.spec_hash,
                 Self::ArtifactReferenced(payload) => &payload.spec_hash,
@@ -438,6 +441,7 @@ pub mod v1 {
                 Self::PublicOutputProduced(payload) => &payload.spec_hash,
                 Self::PublicOutputRenderFailed(payload) => &payload.spec_hash,
                 Self::StateAttemptCompleted(payload) => &payload.spec_hash,
+                Self::StateAttemptInterrupted(payload) => &payload.spec_hash,
                 Self::StateAttemptFailed(payload) => &payload.spec_hash,
                 Self::ManualResolutionRecorded(payload) => &payload.spec_hash,
                 Self::RunCompleted(payload) => &payload.spec_hash,
@@ -553,23 +557,19 @@ pub mod v1 {
         pub kind: SideEffectEventKind,
     }
 
-    /// Run start event payload.
+    /// Run admission event payload.
     #[derive(Debug, Clone, PartialEq, Eq)]
-    pub struct RunStarted {
+    pub struct RunAdmitted {
         /// Run id bound to this event stream.
         pub run_id: RunId,
         /// Certified typed spec hash.
         pub spec_hash: SpecHash,
-        /// Artifact id containing the certified spec bytes.
-        pub spec_artifact_id: ArtifactId,
-        /// Artifact id containing the certified typed spec certificate bytes.
-        pub certificate_artifact_id: ArtifactId,
-        /// Content digest of the persisted certified typed spec certificate artifact.
-        pub certificate_artifact_digest: ContentDigest,
-        /// Certified typed spec certificate media type.
-        pub certificate_media_type: MediaType,
-        /// Certified spec media type.
-        pub spec_media_type: MediaType,
+        /// Certified spec artifact evidence.
+        pub spec_artifact: RunArtifactEvidenceRef,
+        /// Certified typed spec certificate artifact evidence.
+        pub certificate_artifact: RunArtifactEvidenceRef,
+        /// Certified config artifact evidence.
+        pub config_artifacts: Vec<RunArtifactEvidenceRef>,
         /// Certified spec version.
         pub spec_version: SpecVersion,
         /// Certified lowering version.
@@ -584,17 +584,21 @@ pub mod v1 {
         pub runner_executables: Vec<ExecutableIdentity>,
         /// Adapter executable identities.
         pub adapter_executables: Vec<ExecutableIdentity>,
+        /// Digest binding admitted runtime context and adapter executable identities.
+        pub admitted_binding_digest: ContentDigest,
         /// Canonicalizer identity used for the certified spec.
         pub canonicalizer_identity: CanonicalizerIdentity,
         /// Framework version.
         pub framework_version: FrameworkVersion,
         /// Source revision.
         pub source_revision: SourceRevision,
+        /// Caller-supplied launch time in Unix milliseconds.
+        pub launched_at_unix_ms: u64,
         /// Seed cells materialized at run start.
         pub seed_cells: Vec<SeedCellRef>,
     }
 
-    /// Seed cell evidence bound by `RunStarted`.
+    /// Seed cell evidence bound by `RunAdmitted`.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct SeedCellRef {
         /// Seed id from the certified spec.
@@ -781,6 +785,17 @@ pub mod v1 {
         pub output_cell_id: CellId,
     }
 
+    /// State attempt interrupted event payload.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct StateAttemptInterrupted {
+        /// Certified typed spec hash.
+        pub spec_hash: SpecHash,
+        /// Interrupted node id.
+        pub node_id: NodeId,
+        /// Interrupted attempt id.
+        pub attempt_id: AttemptId,
+    }
+
     /// State attempt failed event payload.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct StateAttemptFailed {
@@ -917,6 +932,25 @@ pub mod v1 {
         pub nix_output_hash: Option<NixOutputHash>,
     }
 
+    /// Artifact evidence carried directly by run admission.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct RunArtifactEvidenceRef {
+        /// Artifact id.
+        pub artifact_id: ArtifactId,
+        /// Artifact role.
+        pub role: ArtifactRole,
+        /// Artifact schema id, when schema-bearing.
+        pub schema_id: Option<SchemaId>,
+        /// Artifact semantic type id, when value-bearing.
+        pub semantic_type_id: Option<SemanticTypeId>,
+        /// Artifact content digest.
+        pub content_digest: ContentDigest,
+        /// Artifact byte length.
+        pub byte_len: u64,
+        /// Artifact media type.
+        pub media_type: MediaType,
+    }
+
     /// Artifact evidence reference persisted in events.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct ArtifactEvidenceRef {
@@ -982,11 +1016,13 @@ pub mod v1 {
     /// Source of an artifact reference carried by a kernel event.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub enum EventArtifactReferenceSource {
-        /// Typed execution spec artifact from `RunStarted`.
+        /// Typed execution spec artifact from `RunAdmitted`.
         RunSpec,
-        /// Typed spec certificate artifact from `RunStarted`.
+        /// Typed spec certificate artifact from `RunAdmitted`.
         RunCertificate,
-        /// Seed-cell artifact reference from `RunStarted`.
+        /// Certified config artifact from `RunAdmitted`.
+        RunConfig,
+        /// Seed-cell artifact reference from `RunAdmitted`.
         SeedCell,
         /// Read-fact response artifact.
         FactResponse,
@@ -1072,34 +1108,24 @@ pub mod v1 {
     fn event_artifact_requirements(payload: &KernelEventPayload) -> Vec<EventArtifactRequirement> {
         let mut requirements = Vec::new();
         match payload {
-            KernelEventPayload::RunStarted(payload) => {
-                requirements.push(EventArtifactRequirement {
-                    source: EventArtifactReferenceSource::RunSpec,
-                    artifact_id: payload.spec_artifact_id.clone(),
-                    digest: Some(ContentDigest::from_digest(
-                        payload.spec_hash.algorithm(),
-                        *payload.spec_hash.digest(),
-                    )),
-                    byte_len: None,
-                    media_type: Some(payload.spec_media_type.clone()),
-                    schema_id: None,
-                    semantic_type_id: None,
-                    producer_node_id: None,
-                    producer_seed_id: None,
-                    artifact_role: Some(ArtifactRole::TypedExecutionSpec),
-                });
-                requirements.push(EventArtifactRequirement {
-                    source: EventArtifactReferenceSource::RunCertificate,
-                    artifact_id: payload.certificate_artifact_id.clone(),
-                    digest: Some(payload.certificate_artifact_digest.clone()),
-                    byte_len: None,
-                    media_type: Some(payload.certificate_media_type.clone()),
-                    schema_id: None,
-                    semantic_type_id: None,
-                    producer_node_id: None,
-                    producer_seed_id: None,
-                    artifact_role: Some(ArtifactRole::TypedSpecCertificate),
-                });
+            KernelEventPayload::RunAdmitted(payload) => {
+                push_run_artifact(
+                    &mut requirements,
+                    EventArtifactReferenceSource::RunSpec,
+                    &payload.spec_artifact,
+                );
+                push_run_artifact(
+                    &mut requirements,
+                    EventArtifactReferenceSource::RunCertificate,
+                    &payload.certificate_artifact,
+                );
+                for artifact in &payload.config_artifacts {
+                    push_run_artifact(
+                        &mut requirements,
+                        EventArtifactReferenceSource::RunConfig,
+                        artifact,
+                    );
+                }
                 for seed in &payload.seed_cells {
                     push_event_artifact(
                         &mut requirements,
@@ -1401,9 +1427,29 @@ pub mod v1 {
             | KernelEventPayload::SideEffectClaimed(_)
             | KernelEventPayload::SideEffectClaimTakenOver(_)
             | KernelEventPayload::SideEffectInvocationStarted(_)
-            | KernelEventPayload::StateAttemptCompleted(_) => {}
+            | KernelEventPayload::StateAttemptCompleted(_)
+            | KernelEventPayload::StateAttemptInterrupted(_) => {}
         }
         requirements
+    }
+
+    fn push_run_artifact(
+        requirements: &mut Vec<EventArtifactRequirement>,
+        source: EventArtifactReferenceSource,
+        evidence: &RunArtifactEvidenceRef,
+    ) {
+        requirements.push(EventArtifactRequirement {
+            source,
+            artifact_id: evidence.artifact_id.clone(),
+            digest: Some(evidence.content_digest.clone()),
+            byte_len: Some(evidence.byte_len),
+            media_type: Some(evidence.media_type.clone()),
+            schema_id: evidence.schema_id.clone(),
+            semantic_type_id: evidence.semantic_type_id.clone(),
+            producer_node_id: None,
+            producer_seed_id: None,
+            artifact_role: Some(evidence.role),
+        });
     }
 
     fn push_event_artifact(
@@ -1542,7 +1588,7 @@ pub mod v1 {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub enum RetentionReason {
         /// Initial certified run retention.
-        RunStarted,
+        RunAdmitted,
         /// Runtime artifact retention.
         RuntimeEvidence,
         /// Public output retention.
@@ -2240,6 +2286,26 @@ pub mod v1 {
                     ),
                 ],
             ),
+            "RunArtifactEvidenceRef" => struct_type(
+                "RunArtifactEvidenceRef",
+                vec![
+                    schema_field("artifact_id", "ArtifactId", EventFieldCardinality::Required),
+                    schema_field("role", "ArtifactRole", EventFieldCardinality::Required),
+                    schema_field("schema_id", "SchemaId", EventFieldCardinality::Optional),
+                    schema_field(
+                        "semantic_type_id",
+                        "SemanticTypeId",
+                        EventFieldCardinality::Optional,
+                    ),
+                    schema_field(
+                        "content_digest",
+                        "ContentDigest",
+                        EventFieldCardinality::Required,
+                    ),
+                    schema_field("byte_len", "u64", EventFieldCardinality::Required),
+                    schema_field("media_type", "MediaType", EventFieldCardinality::Required),
+                ],
+            ),
             "ExecutableIdentity" => struct_type(
                 "ExecutableIdentity",
                 vec![
@@ -2309,6 +2375,7 @@ pub mod v1 {
                 "ArtifactRole",
                 &[
                     "typed_execution_spec",
+                    "typed_spec_certificate",
                     "typed_config",
                     "seed_input",
                     "state_output",
@@ -2485,7 +2552,7 @@ pub mod v1 {
             "RetentionReason" => unit_enum_type(
                 "RetentionReason",
                 &[
-                    "run_started",
+                    "run_admitted",
                     "runtime_evidence",
                     "public_output",
                     "manifest_projection",
@@ -2638,7 +2705,7 @@ pub mod v1 {
     /// Returns every closed v1 event schema descriptor.
     pub fn all_event_schema_descriptors() -> Vec<EventSchemaDescriptor> {
         vec![
-            RUN_STARTED_SCHEMA,
+            RUN_ADMITTED_SCHEMA,
             STATE_ATTEMPT_STARTED_SCHEMA,
             FACT_RECORDED_SCHEMA,
             ARTIFACT_REFERENCED_SCHEMA,
@@ -2659,6 +2726,7 @@ pub mod v1 {
             PUBLIC_OUTPUT_PRODUCED_SCHEMA,
             PUBLIC_OUTPUT_RENDER_FAILED_SCHEMA,
             STATE_ATTEMPT_COMPLETED_SCHEMA,
+            STATE_ATTEMPT_INTERRUPTED_SCHEMA,
             STATE_ATTEMPT_FAILED_SCHEMA,
             MANUAL_RESOLUTION_RECORDED_SCHEMA,
             RUN_COMPLETED_SCHEMA,
@@ -2673,24 +2741,27 @@ pub mod v1 {
         };
     }
 
-    const RUN_STARTED_SCHEMA: EventSchemaDescriptor = EventSchemaDescriptor {
-        schema_name: "mfm.events.v1.run_started",
-        rust_type_path: "mfm_events::v1::RunStarted",
+    const RUN_ADMITTED_SCHEMA: EventSchemaDescriptor = EventSchemaDescriptor {
+        schema_name: "mfm.events.v1.run_admitted",
+        rust_type_path: "mfm_events::v1::RunAdmitted",
         schema_version: EVENT_SCHEMA_VERSION,
         fields: fields![
             EventFieldDescriptor::required("run_id", "RunId"),
             EventFieldDescriptor::required("spec_hash", "SpecHash"),
-            EventFieldDescriptor::required("spec_artifact_id", "ArtifactId"),
-            EventFieldDescriptor::required("spec_media_type", "MediaType"),
+            EventFieldDescriptor::required("spec_artifact", "RunArtifactEvidenceRef"),
+            EventFieldDescriptor::required("certificate_artifact", "RunArtifactEvidenceRef"),
+            EventFieldDescriptor::repeated("config_artifacts", "RunArtifactEvidenceRef"),
             EventFieldDescriptor::required("spec_version", "SpecVersion"),
             EventFieldDescriptor::required("lowering_version", "LoweringVersion"),
             EventFieldDescriptor::required("public_output_schema_id", "SchemaId"),
             EventFieldDescriptor::repeated("descriptor_identities", "DescriptorIdentity"),
             EventFieldDescriptor::repeated("runner_executables", "ExecutableIdentity"),
             EventFieldDescriptor::repeated("adapter_executables", "ExecutableIdentity"),
+            EventFieldDescriptor::required("admitted_binding_digest", "ContentDigest"),
             EventFieldDescriptor::required("canonicalizer_identity", "CanonicalizerIdentity"),
             EventFieldDescriptor::required("framework_version", "FrameworkVersion"),
             EventFieldDescriptor::required("source_revision", "SourceRevision"),
+            EventFieldDescriptor::required("launched_at_unix_ms", "u64"),
             EventFieldDescriptor::repeated("seed_cells", "SeedCellRef"),
         ],
     };
@@ -3044,6 +3115,17 @@ pub mod v1 {
         ],
     };
 
+    const STATE_ATTEMPT_INTERRUPTED_SCHEMA: EventSchemaDescriptor = EventSchemaDescriptor {
+        schema_name: "mfm.events.v1.state_attempt_interrupted",
+        rust_type_path: "mfm_events::v1::StateAttemptInterrupted",
+        schema_version: EVENT_SCHEMA_VERSION,
+        fields: fields![
+            EventFieldDescriptor::required("spec_hash", "SpecHash"),
+            EventFieldDescriptor::required("node_id", "NodeId"),
+            EventFieldDescriptor::required("attempt_id", "AttemptId"),
+        ],
+    };
+
     const STATE_ATTEMPT_FAILED_SCHEMA: EventSchemaDescriptor = EventSchemaDescriptor {
         schema_name: "mfm.events.v1.state_attempt_failed",
         rust_type_path: "mfm_events::v1::StateAttemptFailed",
@@ -3198,6 +3280,23 @@ pub mod v1 {
             }
         }
 
+        fn run_artifact_ref(
+            artifact_id: ArtifactId,
+            role: ArtifactRole,
+            schema_id: Option<SchemaId>,
+            content_digest: ContentDigest,
+        ) -> RunArtifactEvidenceRef {
+            RunArtifactEvidenceRef {
+                artifact_id,
+                role,
+                schema_id,
+                semantic_type_id: None,
+                content_digest,
+                byte_len: 64,
+                media_type: media_type("application/json"),
+            }
+        }
+
         fn error_with_diagnostic(
             artifact_id: ArtifactId,
             role: ArtifactRole,
@@ -3228,19 +3327,28 @@ pub mod v1 {
             }
         }
 
-        fn run_started_payload() -> KernelEventPayload {
-            KernelEventPayload::RunStarted(RunStarted {
+        fn run_admitted_payload() -> KernelEventPayload {
+            KernelEventPayload::RunAdmitted(Box::new(RunAdmitted {
                 run_id: run_id(1),
                 spec_hash: spec_hash(2),
-                spec_artifact_id: artifact_id(3),
-                certificate_artifact_id: artifact_id(4),
-                certificate_artifact_digest: content_digest(5),
-                certificate_media_type: media_type(
-                    "application/vnd.mfm.typed-spec-certificate+json;version=1",
+                spec_artifact: run_artifact_ref(
+                    artifact_id(3),
+                    ArtifactRole::TypedExecutionSpec,
+                    None,
+                    content_digest(2),
                 ),
-                spec_media_type: media_type(
-                    "application/vnd.mfm.typed-execution-spec+json;version=1",
+                certificate_artifact: run_artifact_ref(
+                    artifact_id(4),
+                    ArtifactRole::TypedSpecCertificate,
+                    None,
+                    content_digest(5),
                 ),
+                config_artifacts: vec![run_artifact_ref(
+                    artifact_id(14),
+                    ArtifactRole::TypedConfig,
+                    Some(schema_id("mfm.test.config", 15)),
+                    content_digest(16),
+                )],
                 spec_version: SpecVersion::new("mfm.typed.execution_spec.v1")
                     .expect("spec version"),
                 lowering_version: LoweringVersion::new("mfm.typed.lowering.v1")
@@ -3252,10 +3360,12 @@ pub mod v1 {
                 descriptor_identities: Vec::new(),
                 runner_executables: Vec::new(),
                 adapter_executables: Vec::new(),
+                admitted_binding_digest: content_digest(17),
                 canonicalizer_identity: CanonicalizerIdentity::new("mfm.jcs.v1")
                     .expect("canonicalizer"),
                 framework_version: FrameworkVersion::new("mfm.test.1").expect("framework"),
                 source_revision: SourceRevision::new("test-revision").expect("source"),
+                launched_at_unix_ms: 42,
                 seed_cells: vec![SeedCellRef {
                     seed_id: seed_id(7),
                     cell_id: cell_id(8),
@@ -3270,7 +3380,7 @@ pub mod v1 {
                         content_digest(12),
                     ),
                 }],
-            })
+            }))
         }
 
         #[test]
@@ -3287,13 +3397,13 @@ pub mod v1 {
                 .collect::<Vec<_>>()
                 .join("\n");
 
-            assert_eq!(all_event_schema_descriptors().len(), 26);
+            assert_eq!(all_event_schema_descriptors().len(), 27);
             assert_eq!(
                 rows,
-                "mfm_events::v1::RunStarted schema:mfm.events.v1.run_started:1:sha256-jcs-v1:0f0bac31971e6a13a205439875771471e79a2580cf9a764927566dadb59c1de3\n\
+                "mfm_events::v1::RunAdmitted schema:mfm.events.v1.run_admitted:1:sha256-jcs-v1:867fbc43edab8e3889fcfbe2f1492791268362265d45d84828532d26ba3becc9\n\
 mfm_events::v1::StateAttemptStarted schema:mfm.events.v1.state_attempt_started:1:sha256-jcs-v1:986f35aa39938713b9862192cab7d2b9b3a37219f5872bd242f8a06e7957ff1b\n\
 mfm_events::v1::FactRecorded schema:mfm.events.v1.fact_recorded:1:sha256-jcs-v1:e708d591505935c8d5b12e833e34e6883c3e62fc548758a53ed5199e94218f70\n\
-mfm_events::v1::ArtifactReferenced schema:mfm.events.v1.artifact_referenced:1:sha256-jcs-v1:91b11de7db573b64256f1dad32df11c20ac65676ce86ef305b4add114cb45238\n\
+mfm_events::v1::ArtifactReferenced schema:mfm.events.v1.artifact_referenced:1:sha256-jcs-v1:c5965f6401628c580d907568a57b29e06638d4cf1740b1ea781eae88df4d592c\n\
 mfm_events::v1::CellProduced schema:mfm.events.v1.cell_produced:1:sha256-jcs-v1:9a2b250e7a5270bb302ae76a06091873dc50644855bace41bab97dcce311f07a\n\
 mfm_events::v1::CellSkipped schema:mfm.events.v1.cell_skipped:1:sha256-jcs-v1:e82d7230e3ca668b68f1403d3db7c07d36a3373f8e3744e9a41351a7aa5392f4\n\
 mfm_events::v1::side_effect::IntentPersisted schema:mfm.events.v1.side_effect.intent_persisted:1:sha256-jcs-v1:d2f3042ed5189e6e5081b781b205886e3c7d469e4cadb0fa4a61e460926c7cce\n\
@@ -3307,14 +3417,15 @@ mfm_events::v1::side_effect::SubmissionUnknown schema:mfm.events.v1.side_effect.
 mfm_events::v1::side_effect::ReceiptObserved schema:mfm.events.v1.side_effect.receipt_observed:1:sha256-jcs-v1:e8b248201bbd212aa5eeb8a2a6f44cb4bd245b11104fd139d2948d3725fe3450\n\
 mfm_events::v1::side_effect::ConfirmationObserved schema:mfm.events.v1.side_effect.confirmation_observed:1:sha256-jcs-v1:c6bc63539dd02ff1ea441f8313014a8d537f51504ea3ed827fc8c97a5654c601\n\
 mfm_events::v1::side_effect::Ambiguous schema:mfm.events.v1.side_effect.ambiguous:1:sha256-jcs-v1:dfc9030e0d4fbbeb1800317623cecea3fbb1256c5a1b5d0e272bcda5fa4ef823\n\
-mfm_events::v1::side_effect::Failed schema:mfm.events.v1.side_effect.failed:1:sha256-jcs-v1:5383637d64588098cf57414807ef612bce2dd3c46f18293952b05be463c650fb\n\
+mfm_events::v1::side_effect::Failed schema:mfm.events.v1.side_effect.failed:1:sha256-jcs-v1:8c7e57736bd909ecd65d435f3f91187c623d4e01ce3d5e5fcc4602a690c26a0d\n\
 mfm_events::v1::PublicOutputProduced schema:mfm.events.v1.public_output_produced:1:sha256-jcs-v1:00d2531467818398553aa59e62c034fa0cd054e7856b89f425aeb4510f9c6776\n\
-mfm_events::v1::PublicOutputRenderFailed schema:mfm.events.v1.public_output_render_failed:1:sha256-jcs-v1:d6248427c0a4a64f05dc0cd40ddd1b45804554f532433af1d0c1a54f03cd7a53\n\
+mfm_events::v1::PublicOutputRenderFailed schema:mfm.events.v1.public_output_render_failed:1:sha256-jcs-v1:38c7cf4189e8525be1c51f1d0601c024b69769e961b6cf5fd43193211e143d9d\n\
 mfm_events::v1::StateAttemptCompleted schema:mfm.events.v1.state_attempt_completed:1:sha256-jcs-v1:36800f9d3ae748d407bc2ea24339049471c8ffe40aa86c53b35b6c7c6cd6ee80\n\
-mfm_events::v1::StateAttemptFailed schema:mfm.events.v1.state_attempt_failed:1:sha256-jcs-v1:4a954ff6afcc56bae0b9417032e54e8cd87867bc37100392072a00da64ee7b6f\n\
+mfm_events::v1::StateAttemptInterrupted schema:mfm.events.v1.state_attempt_interrupted:1:sha256-jcs-v1:a01ea4960dfa7c42cd9da4a572a2748513cae4107b99ac1f04afc37b7a4e9e14\n\
+mfm_events::v1::StateAttemptFailed schema:mfm.events.v1.state_attempt_failed:1:sha256-jcs-v1:1b2012da2f5e92c932aa69b3ba36df77905c43cded4fb3c21d71f2d7627eb897\n\
 mfm_events::v1::ManualResolutionRecorded schema:mfm.events.v1.manual_resolution_recorded:1:sha256-jcs-v1:b2b4122abfda77f0a8d087ea929189cd7735ea3e2ffa963e2f600e4ae74c0293\n\
 mfm_events::v1::RunCompleted schema:mfm.events.v1.run_completed:1:sha256-jcs-v1:cda37495cb3c733164ce1a91f58ff6d27bdcfbf9b1f9efe5a7fd48ae68eba479\n\
-mfm_events::v1::RetentionRefsAppended schema:mfm.events.v1.retention_refs_appended:1:sha256-jcs-v1:af3b02a4fd05d983a07f2456a2031e3d6d2ffc602b73aae091acf22f4909c7eb\n\
+mfm_events::v1::RetentionRefsAppended schema:mfm.events.v1.retention_refs_appended:1:sha256-jcs-v1:a3a48ef21a004f9405c5585f0bdc6a9cc6c61dae616e06892ddefcfb61ae2a11\n\
 mfm_events::v1::RetentionManifestProjected schema:mfm.events.v1.retention_manifest_projected:1:sha256-jcs-v1:269a96fc12c7c5004aa4592139f84cd0e4b617e04e494522ce639aeae0b9fed1"
             );
         }
@@ -3411,15 +3522,15 @@ mfm_events::v1::RetentionManifestProjected schema:mfm.events.v1.retention_manife
             schema_names.sort_unstable();
             schema_names.dedup();
 
-            assert_eq!(original_len, 26);
+            assert_eq!(original_len, 27);
             assert_eq!(schema_names.len(), original_len);
         }
 
         #[test]
         fn payload_accessors_expose_authority_fields_without_serialization_changes() {
-            let run_started = run_started_payload();
-            assert_eq!(run_started.run_id(), Some(&run_id(1)));
-            assert_eq!(run_started.spec_hash(), &spec_hash(2));
+            let run_admitted = run_admitted_payload();
+            assert_eq!(run_admitted.run_id(), Some(&run_id(1)));
+            assert_eq!(run_admitted.spec_hash(), &spec_hash(2));
 
             let side_effect =
                 KernelEventPayload::SideEffectSubmissionObserved(side_effect::SubmissionObserved {
@@ -3449,10 +3560,11 @@ mfm_events::v1::RetentionManifestProjected schema:mfm.events.v1.retention_manife
         fn artifact_requirement_accessor_covers_artifact_bearing_variants() {
             let cases = vec![
                 (
-                    run_started_payload(),
+                    run_admitted_payload(),
                     vec![
                         EventArtifactReferenceSource::RunSpec,
                         EventArtifactReferenceSource::RunCertificate,
+                        EventArtifactReferenceSource::RunConfig,
                         EventArtifactReferenceSource::SeedCell,
                     ],
                 ),
@@ -3820,10 +3932,10 @@ mfm_events::v1::RetentionManifestProjected schema:mfm.events.v1.retention_manife
         }
 
         #[test]
-        fn run_started_v1_summary_key_is_canonical() {
-            let keys = ["v1_event_schema_golden", "run_started_v1_present"];
-            assert!(keys.contains(&"run_started_v1_present"));
-            assert!(!keys.contains(&"run_started_v2_present"));
+        fn run_admitted_v1_summary_key_is_canonical() {
+            let keys = ["v1_event_schema_golden", "run_admitted_v1_present"];
+            assert!(keys.contains(&"run_admitted_v1_present"));
+            assert!(!keys.contains(&"run_admitted_v2_present"));
         }
     }
 }

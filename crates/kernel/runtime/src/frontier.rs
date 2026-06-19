@@ -7,10 +7,8 @@ use mfm_store::v1 as store;
 
 use crate::framework::public_output_is_produced;
 use crate::history::RuntimeRunView;
-use crate::side_effects::{
-    side_effect_projection_for_attempt, validate_side_effect_terminal_evidence,
-    validate_terminal_cell_has_completed_attempt,
-};
+use crate::side_effect_lifecycle::SideEffectLifecycle;
+use crate::side_effects::validate_terminal_cell_has_completed_attempt;
 use crate::{CertifiedRuntimeSpec, Result, RuntimeError};
 
 pub(crate) struct RunnableNode<'a> {
@@ -270,7 +268,7 @@ fn continuing_side_effect_node_if<'a>(
             continue;
         }
         let Some(projection) =
-            side_effect_projection_for_attempt(&view.projections, node, attempt_id)?
+            SideEffectLifecycle::projection_for_attempt(&view.projections, node, attempt_id)?
         else {
             continue;
         };
@@ -421,6 +419,7 @@ fn non_side_effect_attempt_plan(
                     return Ok(None);
                 }
             }
+            store::AttemptStatus::Interrupted => {}
         }
     }
 
@@ -448,7 +447,7 @@ fn side_effect_attempt_plan(
             node,
             cell_terminal,
         )?;
-        validate_side_effect_terminal_evidence(&view.projections, node, &attempt_id)?;
+        SideEffectLifecycle::validate_terminal_evidence(&view.projections, node, &attempt_id)?;
         return Ok(None);
     }
 
@@ -469,22 +468,7 @@ fn side_effect_attempt_plan(
                         attempt_id, node.node_id
                     )));
                 }
-                if let Some(projection) =
-                    side_effect_projection_for_attempt(&view.projections, node, attempt_id)?
-                {
-                    let state = projection
-                        .ledger_state()
-                        .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
-                    if state.is_ambiguous() {
-                        return Ok(None);
-                    }
-                    if state.is_failed() {
-                        return Err(RuntimeError::InvalidRunStream(format!(
-                                "side-effect ledger {} failed while attempt {} for node {} remained started",
-                                projection.ledger_key, attempt_id, node.node_id
-                            )));
-                    }
-                }
+                SideEffectLifecycle::open_attempt_disposition(&view.projections, node, attempt_id)?;
                 if started.replace((attempt_id.clone(), *attempt_no)).is_some() {
                     return Err(RuntimeError::InvalidRunStream(format!(
                         "node {} has multiple non-terminal side-effect attempts",
@@ -505,6 +489,7 @@ fn side_effect_attempt_plan(
                     return Ok(None);
                 }
             }
+            store::AttemptStatus::Interrupted => {}
         }
     }
 
@@ -520,7 +505,7 @@ fn side_effect_attempt_plan(
     }
 }
 
-fn node_inputs_ready(
+pub(crate) fn node_inputs_ready(
     runtime_spec: &CertifiedRuntimeSpec,
     node: &spec::NodeSpec,
     view: &RuntimeRunView,

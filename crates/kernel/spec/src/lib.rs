@@ -123,43 +123,6 @@ pub fn public_output_receipt_semantic_type_id() -> Result<SemanticTypeId> {
     )?)
 }
 
-/// Returns the framework-owned schema id for bootstrap-run receipts.
-pub fn bootstrap_run_receipt_schema_id() -> Result<SchemaId> {
-    let digest = content_digest(serde_json::json!({
-        "fields": [
-            "spec_hash",
-            "typed_spec_artifact_id",
-            "typed_spec_certificate_artifact_id",
-            "seed_cells",
-            "config_artifacts",
-        ],
-        "name": "mfm.framework.bootstrap_run_receipt",
-        "version": "1",
-    }))?;
-    Ok(SchemaId::new(
-        "mfm.framework.bootstrap_run_receipt",
-        "1",
-        DigestAlgorithm::Sha256JcsV1,
-        *digest.digest(),
-    )?)
-}
-
-/// Returns the framework-owned semantic type id for bootstrap-run receipts.
-pub fn bootstrap_run_receipt_semantic_type_id() -> Result<SemanticTypeId> {
-    let digest = content_digest(serde_json::json!({
-        "meaning": "framework bootstrap run receipt",
-        "schema_id": bootstrap_run_receipt_schema_id()?.as_str(),
-        "version": "1",
-    }))?;
-    Ok(SemanticTypeId::new(
-        "mfm.framework.bootstrap_run",
-        "receipt",
-        "1",
-        DigestAlgorithm::Sha256JcsV1,
-        *digest.digest(),
-    )?)
-}
-
 /// Returns the framework-owned schema id for retention-manifest projection receipts.
 pub fn retention_manifest_receipt_schema_id() -> Result<SchemaId> {
     let digest = content_digest(serde_json::json!({
@@ -418,16 +381,6 @@ pub mod v1 {
     /// Returns the v1 framework-owned semantic type id for public-output render receipts.
     pub fn public_output_receipt_semantic_type_id() -> Result<SemanticTypeId> {
         super::public_output_receipt_semantic_type_id()
-    }
-
-    /// Returns the v1 framework-owned schema id for bootstrap-run receipts.
-    pub fn bootstrap_run_receipt_schema_id() -> Result<SchemaId> {
-        super::bootstrap_run_receipt_schema_id()
-    }
-
-    /// Returns the v1 framework-owned semantic type id for bootstrap-run receipts.
-    pub fn bootstrap_run_receipt_semantic_type_id() -> Result<SemanticTypeId> {
-        super::bootstrap_run_receipt_semantic_type_id()
     }
 
     /// Returns the v1 framework-owned schema id for retention-manifest projection receipts.
@@ -893,7 +846,7 @@ pub mod v1 {
         ///
         /// The returned value is reconstructed through checked typed constructors and can be
         /// re-hashed through [`Self::spec_hash`]. Callers that load a run-start artifact must
-        /// compare the recomputed hash with the `RunStarted.spec_hash` stored in the typed stream.
+        /// compare the recomputed hash with the `RunAdmitted.spec_hash` stored in the typed stream.
         pub fn from_json_str(input: &str) -> Result<Self> {
             Self::validate_persisted_json_shape(input)?;
             let input_canonical = PlainCanonicalJsonBytes::from_json_str(input)
@@ -1819,8 +1772,6 @@ pub mod v1 {
     /// Framework node metadata.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum FrameworkNodeSpec {
-        /// Bootstrap run lifecycle framework node.
-        BootstrapRun(BootstrapRunNodeSpec),
         /// Same-value bridge framework node.
         Bridge(BridgeNodeSpec),
         /// Public-output render framework node.
@@ -1837,7 +1788,6 @@ pub mod v1 {
         /// Returns the deterministic framework config kind persisted for this node.
         pub fn config_kind(&self) -> &'static str {
             match self {
-                Self::BootstrapRun(_) => "bootstrap_run",
                 Self::Bridge(_) => "bridge_same_value",
                 Self::PublicOutputRender(_) => "public_output_render",
                 Self::ProjectRetentionManifest(_) => "project_retention_manifest",
@@ -1848,10 +1798,6 @@ pub mod v1 {
 
         fn json(&self) -> Result<serde_json::Value> {
             Ok(match self {
-                Self::BootstrapRun(spec) => serde_json::json!({
-                    "bootstrap_run": spec.json(),
-                    "kind": "bootstrap_run",
-                }),
                 Self::Bridge(spec) => serde_json::json!({
                     "bridge": spec.json(),
                     "kind": "bridge",
@@ -1873,16 +1819,6 @@ pub mod v1 {
                     "resolve_saga_terminal": spec.json(),
                 }),
             })
-        }
-    }
-
-    /// Bootstrap run lifecycle framework node metadata.
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub struct BootstrapRunNodeSpec {}
-
-    impl BootstrapRunNodeSpec {
-        fn json(&self) -> serde_json::Value {
-            serde_json::json!({})
         }
     }
 
@@ -3121,9 +3057,6 @@ pub mod v1 {
     ) -> Result<FrameworkNodeSpec> {
         let object = object(value, "framework node")?;
         match required_str(object, "kind")? {
-            "bootstrap_run" => Ok(FrameworkNodeSpec::BootstrapRun(parse_bootstrap_run_node(
-                required(object, "bootstrap_run")?,
-            )?)),
             "bridge" => Ok(FrameworkNodeSpec::Bridge(parse_bridge_node(required(
                 object, "bridge",
             )?)?)),
@@ -3147,11 +3080,6 @@ pub mod v1 {
             )),
             kind => Err(json_error(format!("unsupported framework kind {kind:?}"))),
         }
-    }
-
-    fn parse_bootstrap_run_node(value: &serde_json::Value) -> Result<BootstrapRunNodeSpec> {
-        object(value, "bootstrap-run node")?;
-        Ok(BootstrapRunNodeSpec {})
     }
 
     fn parse_bridge_node(value: &serde_json::Value) -> Result<BridgeNodeSpec> {
@@ -4451,7 +4379,6 @@ pub mod v1 {
         #[test]
         fn lifecycle_framework_node_json_round_trips_through_checked_parser() {
             let mut variants = Vec::new();
-            variants.push(FrameworkNodeSpec::BootstrapRun(BootstrapRunNodeSpec {}));
             variants.push(FrameworkNodeSpec::ProjectRetentionManifest(
                 ProjectRetentionManifestNodeSpec {
                     public_schema_id: schema("mfm.spec.test.lifecycle_public", 0x70),
@@ -4477,29 +4404,6 @@ pub mod v1 {
 
                 assert_eq!(parsed, spec);
             }
-        }
-
-        #[test]
-        fn bootstrap_framework_json_rejects_post_hash_fields() {
-            let mut spec = test_spec();
-            spec.nodes[0].framework =
-                Some(FrameworkNodeSpec::BootstrapRun(BootstrapRunNodeSpec {}));
-            let mut value: serde_json::Value =
-                serde_json::from_str(spec.canonical_json().expect("canonical spec").as_str())
-                    .expect("spec JSON");
-            value["nodes"][0]["framework"]["bootstrap_run"]
-                .as_object_mut()
-                .expect("bootstrap framework object")
-                .insert(
-                    "run_id".to_owned(),
-                    serde_json::json!("run:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000"),
-                );
-            let input = serde_json::to_string(&value).expect("JSON");
-
-            let err = TypedExecutionSpec::from_json_str(&input)
-                .expect_err("post-hash bootstrap field rejects");
-
-            assert!(matches!(err, SpecError::Json(message) if message.contains("unknown")));
         }
 
         #[test]

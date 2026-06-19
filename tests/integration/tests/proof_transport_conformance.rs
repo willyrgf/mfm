@@ -425,21 +425,21 @@ async fn verify_conformance_replay(
     .map_err(|error| {
         replay::ReplayError::new(replay::ReplayErrorKind::InvalidRunStream, error.to_string())
     })?;
-    let run_started = verified_history
+    let run_admitted = verified_history
         .events()
         .iter()
         .find_map(|event| match event.payload() {
-            events::KernelEventPayload::RunStarted(payload) => Some(payload),
+            events::KernelEventPayload::RunAdmitted(payload) => Some(payload),
             _ => None,
         })
         .ok_or_else(|| {
             replay::ReplayError::new(
-                replay::ReplayErrorKind::RunStartedMissing,
+                replay::ReplayErrorKind::RunAdmittedMissing,
                 "proof conformance stream has no run-start event",
             )
         })?;
     let projection = verified_history.projection_snapshot();
-    let _retention = projection.retention(&run_started.run_id).ok_or_else(|| {
+    let _retention = projection.retention(&run_admitted.run_id).ok_or_else(|| {
         replay::ReplayError::new(
             replay::ReplayErrorKind::ArtifactMissing,
             "proof conformance stream has no retained artifact evidence",
@@ -450,7 +450,7 @@ async fn verify_conformance_replay(
     let broker = replay::ReplayBroker::from_read_authority(authority)?;
     let proof_verified = mfm_transports_proof::verify_deterministic_proof_replay(&broker)?;
     Ok(proof_verified
-        && broker.projection_snapshot().run_state(&run_started.run_id)
+        && broker.projection_snapshot().run_state(&run_admitted.run_id)
             == store::RunState::Completed)
 }
 
@@ -624,6 +624,7 @@ fn run_start_evidence(
         config_artifacts: conformance_config_launch_artifacts(draft, runtime_spec.spec())?,
         framework_version: events::FrameworkVersion::new("mfm.proof.typed.v1")?,
         source_revision: events::SourceRevision::new("mfm-integration-tests-proof")?,
+        launched_at_unix_ms: 1_700_000_000_000,
         adapter_executables: vec![executable(events::RunnerFactoryId::new(
             "deterministic-proof-adapter",
         )?)?],
@@ -725,7 +726,7 @@ async fn verify_conformance_replay_stream(
         .map(|event| event.run_id().clone())
         .ok_or_else(|| {
             replay::ReplayError::new(
-                replay::ReplayErrorKind::RunStartedMissing,
+                replay::ReplayErrorKind::RunAdmittedMissing,
                 "proof conformance stream is empty",
             )
         })?;
@@ -748,9 +749,9 @@ impl store::TypedProjectionRead for StaticRunStore {
 }
 
 impl store::TypedRunEventStore for StaticRunStore {
-    fn append_prepared_typed_commit(
+    fn append_prepared_commit_plan(
         &mut self,
-        _commit: store::PreparedTypedCommit,
+        _plan: store::PreparedCommitPlan,
     ) -> store::Result<store::CommitOutcome> {
         Err(store::StoreError::Event(
             "static replay test store is read-only".to_owned(),
@@ -940,22 +941,22 @@ fn failed_completion_after_run_start(
         .take_while(|event| event.seq() == start_seq && event.commit_key() == &start_key)
         .cloned()
         .collect::<Vec<_>>();
-    let run_started = rewritten
+    let run_admitted = rewritten
         .iter()
         .find_map(|event| match event.payload() {
-            events::KernelEventPayload::RunStarted(payload) => Some(payload),
+            events::KernelEventPayload::RunAdmitted(payload) => Some(payload),
             _ => None,
         })
         .expect("run started");
     let seq = store::StreamSeq::new(start_seq.as_u64() + 1).expect("next stream seq");
     let request = typed_commit_request(
-        run_started.run_id.clone(),
+        run_admitted.run_id.clone(),
         seq,
         store::CommitKey::new("failed-completion-without-framework").expect("commit key"),
         vec![events::KernelEventPayload::RunCompleted(
             events::RunCompleted {
-                run_id: run_started.run_id.clone(),
-                spec_hash: run_started.spec_hash.clone(),
+                run_id: run_admitted.run_id.clone(),
+                spec_hash: run_admitted.spec_hash.clone(),
                 outcome: events::RunCompletionOutcome::FailedWithoutAcdcClaim,
             },
         )],
@@ -970,16 +971,16 @@ fn failed_completion_after_run_start(
 fn append_post_completion_retention_refs(
     stream: &[store::KernelEventEnvelope],
 ) -> Vec<store::KernelEventEnvelope> {
-    let run_started = stream
+    let run_admitted = stream
         .iter()
         .find_map(|event| match event.payload() {
-            events::KernelEventPayload::RunStarted(payload) => Some(payload),
+            events::KernelEventPayload::RunAdmitted(payload) => Some(payload),
             _ => None,
         })
         .expect("run started");
     let retention = store::ProjectionSnapshot::rebuild_from_run_stream(stream)
         .expect("valid projection")
-        .retention(&run_started.run_id)
+        .retention(&run_admitted.run_id)
         .and_then(|projection| projection.refs.values().next().cloned())
         .expect("retention ref");
     let seq = stream
@@ -987,13 +988,13 @@ fn append_post_completion_retention_refs(
         .map(|event| store::StreamSeq::new(event.seq().as_u64() + 1).expect("next stream seq"))
         .unwrap_or(store::StreamSeq::FIRST);
     let request = typed_commit_request(
-        run_started.run_id.clone(),
+        run_admitted.run_id.clone(),
         seq,
         store::CommitKey::new("post-completion-retention-ref").expect("commit key"),
         vec![events::KernelEventPayload::RetentionRefsAppended(
             events::RetentionRefsAppended {
-                run_id: run_started.run_id.clone(),
-                spec_hash: run_started.spec_hash.clone(),
+                run_id: run_admitted.run_id.clone(),
+                spec_hash: run_admitted.spec_hash.clone(),
                 refs: vec![retention],
                 reason: events::RetentionReason::RuntimeEvidence,
             },
@@ -1010,10 +1011,10 @@ fn append_post_completion_retention_refs(
 fn append_post_projection_retention_refs_before_completion(
     stream: &[store::KernelEventEnvelope],
 ) -> Vec<store::KernelEventEnvelope> {
-    let run_started = stream
+    let run_admitted = stream
         .iter()
         .find_map(|event| match event.payload() {
-            events::KernelEventPayload::RunStarted(payload) => Some(payload),
+            events::KernelEventPayload::RunAdmitted(payload) => Some(payload),
             _ => None,
         })
         .expect("run started");
@@ -1026,19 +1027,19 @@ fn append_post_projection_retention_refs_before_completion(
         .expect("run completed");
     let retention = store::ProjectionSnapshot::rebuild_from_run_stream(stream)
         .expect("valid projection")
-        .retention(&run_started.run_id)
+        .retention(&run_admitted.run_id)
         .and_then(|projection| projection.refs.values().next().cloned())
         .expect("retention ref");
     let mut rewritten = remove_completion_commit(stream);
     let retention_seq = next_seq(&rewritten);
     let retention_request = typed_commit_request(
-        run_started.run_id.clone(),
+        run_admitted.run_id.clone(),
         retention_seq,
         store::CommitKey::new("post-projection-retention-ref").expect("commit key"),
         vec![events::KernelEventPayload::RetentionRefsAppended(
             events::RetentionRefsAppended {
-                run_id: run_started.run_id.clone(),
-                spec_hash: run_started.spec_hash.clone(),
+                run_id: run_admitted.run_id.clone(),
+                spec_hash: run_admitted.spec_hash.clone(),
                 refs: vec![retention],
                 reason: events::RetentionReason::RuntimeEvidence,
             },
@@ -1052,7 +1053,7 @@ fn append_post_projection_retention_refs_before_completion(
 
     let completion_seq = next_seq(&rewritten);
     let completion_request = typed_commit_request(
-        run_started.run_id.clone(),
+        run_admitted.run_id.clone(),
         completion_seq,
         store::CommitKey::new("completion-after-post-projection-retention").expect("commit key"),
         vec![events::KernelEventPayload::RunCompleted(completion)],

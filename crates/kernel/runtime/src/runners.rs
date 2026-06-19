@@ -1,20 +1,19 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{btree_map::Entry, BTreeMap};
+use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use mfm_capabilities::{CapabilityDescriptor, CapabilitySetDescriptor};
 use mfm_events::v1 as events;
 use mfm_ids::DescriptorId;
 use mfm_spec::v1 as spec;
 
 use crate::framework::{
-    framework_bootstrap_run_binding, framework_complete_run_binding,
-    framework_public_output_binding, framework_resolve_saga_terminal_binding,
-    framework_retention_manifest_binding,
+    framework_complete_run_binding, framework_public_output_binding,
+    framework_resolve_saga_terminal_binding, framework_retention_manifest_binding,
 };
-use crate::{
-    CertifiedRuntimeSpec, ErasedRunCtx, Result, RuntimeError, StagedArtifact, StagedRetentionRefs,
-};
+use crate::{ErasedRunCtx, Result, RuntimeError, StagedArtifact, StagedRetentionRefs};
 
 /// Boxed future returned by an erased typed runner.
 pub type ErasedRunnerFuture<'a> =
@@ -187,10 +186,69 @@ impl ErasedRunnerBinding {
     }
 }
 
+/// Non-secret runtime identifier for one concrete capability implementation.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CapabilityImplementationId(String);
+
+impl CapabilityImplementationId {
+    /// Creates a checked runtime capability implementation id.
+    pub fn new(value: impl Into<String>) -> Result<Self> {
+        let value = value.into();
+        if !is_valid_runtime_binding_id(&value) {
+            return Err(RuntimeError::RunnerBinding(format!(
+                "invalid capability implementation id {value:?}"
+            )));
+        }
+        Ok(Self(value))
+    }
+
+    /// Returns the stable runtime implementation id string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for CapabilityImplementationId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Registered runtime binding between a certified capability descriptor and its implementation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityImplementationBinding {
+    descriptor: CapabilityDescriptor,
+    implementation_id: CapabilityImplementationId,
+}
+
+impl CapabilityImplementationBinding {
+    /// Creates capability implementation binding evidence.
+    pub fn new(
+        descriptor: CapabilityDescriptor,
+        implementation_id: CapabilityImplementationId,
+    ) -> Self {
+        Self {
+            descriptor,
+            implementation_id,
+        }
+    }
+
+    /// Certified capability descriptor covered by this binding.
+    pub fn descriptor(&self) -> &CapabilityDescriptor {
+        &self.descriptor
+    }
+
+    /// Non-secret runtime implementation id selected for this capability.
+    pub fn implementation_id(&self) -> &CapabilityImplementationId {
+        &self.implementation_id
+    }
+}
+
 /// Registry of erased runners keyed by certified state descriptor id.
 #[derive(Clone, Default)]
 pub struct ErasedRunnerRegistry {
     bindings: BTreeMap<DescriptorId, ErasedRunnerBinding>,
+    capability_implementations: BTreeMap<(String, String), CapabilityImplementationBinding>,
 }
 
 impl ErasedRunnerRegistry {
@@ -213,17 +271,44 @@ impl ErasedRunnerRegistry {
         Ok(())
     }
 
+    /// Registers one concrete capability implementation binding.
+    pub fn register_capability(&mut self, binding: CapabilityImplementationBinding) -> Result<()> {
+        let key = capability_implementation_key(binding.descriptor());
+        match self.capability_implementations.entry(key) {
+            Entry::Vacant(entry) => {
+                entry.insert(binding);
+                Ok(())
+            }
+            Entry::Occupied(entry) if entry.get() == &binding => Ok(()),
+            Entry::Occupied(entry) => Err(RuntimeError::RunnerBinding(format!(
+                "duplicate capability implementation for {}:{} conflicts with registered implementation {}",
+                binding.descriptor.kind,
+                binding.descriptor.version,
+                entry.get().implementation_id
+            ))),
+        }
+    }
+
+    /// Registers one implementation id for every descriptor in a capability set.
+    pub fn register_capability_set(
+        &mut self,
+        capabilities: &CapabilitySetDescriptor,
+        implementation_id: CapabilityImplementationId,
+    ) -> Result<()> {
+        for descriptor in &capabilities.capabilities {
+            self.register_capability(CapabilityImplementationBinding::new(
+                descriptor.clone(),
+                implementation_id.clone(),
+            ))?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn resolve(
         &self,
         node: &spec::NodeSpec,
         descriptor: &spec::StateDescriptorIdentity,
     ) -> Result<ErasedRunnerBinding> {
-        if matches!(
-            &node.framework,
-            Some(spec::FrameworkNodeSpec::BootstrapRun(_))
-        ) {
-            return framework_bootstrap_run_binding(node, descriptor);
-        }
         if matches!(
             &node.framework,
             Some(spec::FrameworkNodeSpec::PublicOutputRender(_))
@@ -269,29 +354,45 @@ impl ErasedRunnerRegistry {
         Ok(binding.clone())
     }
 
-    pub(crate) fn executables_for_spec(
+    pub(crate) fn resolve_capability_implementations(
         &self,
-        runtime_spec: &CertifiedRuntimeSpec,
-    ) -> Result<Vec<events::ExecutableIdentity>> {
-        let mut seen = BTreeSet::new();
-        let mut executables = Vec::new();
-        for node_id in runtime_spec.topological_order() {
-            let node = runtime_spec.node(node_id).expect("topological node exists");
-            let descriptor = runtime_spec.state_descriptor_for_node(node)?;
-            let binding = self.resolve(node, descriptor)?;
-            let key = binding.executable.factory_id.as_str().to_owned();
-            if seen.insert(key) {
-                executables.push(binding.executable.clone());
+        node: &spec::NodeSpec,
+    ) -> Result<Vec<CapabilityImplementationBinding>> {
+        let mut bindings = Vec::with_capacity(node.capability_bindings.capabilities.len());
+        for descriptor in &node.capability_bindings.capabilities {
+            let key = capability_implementation_key(descriptor);
+            let binding = self.capability_implementations.get(&key).ok_or_else(|| {
+                RuntimeError::RunnerBinding(format!(
+                    "missing capability implementation for node {} capability {}:{}",
+                    node.node_id, descriptor.kind, descriptor.version
+                ))
+            })?;
+            if binding.descriptor() != descriptor {
+                return Err(RuntimeError::RunnerBinding(format!(
+                    "capability implementation {} for node {} differs from certified descriptor {}:{}",
+                    binding.implementation_id(),
+                    node.node_id,
+                    descriptor.kind,
+                    descriptor.version
+                )));
             }
+            bindings.push(binding.clone());
         }
-        for (_, node) in runtime_spec.remediations() {
-            let descriptor = runtime_spec.state_descriptor_for_node(node)?;
-            let binding = self.resolve(node, descriptor)?;
-            let key = binding.executable.factory_id.as_str().to_owned();
-            if seen.insert(key) {
-                executables.push(binding.executable.clone());
-            }
-        }
-        Ok(executables)
+        Ok(bindings)
     }
+}
+
+fn capability_implementation_key(descriptor: &CapabilityDescriptor) -> (String, String) {
+    (
+        descriptor.kind.as_str().to_owned(),
+        descriptor.version.as_str().to_owned(),
+    )
+}
+
+fn is_valid_runtime_binding_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '/' | ':'))
 }

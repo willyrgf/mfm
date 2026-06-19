@@ -6,20 +6,28 @@ use mfm_ids::{
     RunId, SchemaId, ScopeId, SeedId, SemanticTypeId, SpecHash, SpecVersion, StateKind,
     StateVersion,
 };
+use mfm_manual_auth::{
+    manual_authorization_proof_schema_id, ManualAuthorizationSignatureBytes,
+    ManualResolutionAuthorizationClaim, ManualResolutionAuthorizationProof,
+    ManualResolutionAuthorizationSignature, ManualResolutionBlockReason,
+    ManualResolutionEvidenceRef, ManualResolutionPrefixAuthority, ManualResolutionProofAuthority,
+    VerifiedManualResolutionForPrefix,
+};
 use mfm_spec::v1::{
     self as spec, CanonicalizerIdentity, CellProducer, ManualResolutionEvidenceSpec, MediaType,
     PublicFieldPath, RemediationUnresolvedSpec, ResourceNamespace, SagaPolicySpec, ValueLineageRef,
 };
 use mfm_store::v1::{
     build_committed_batch, event_artifact_requirements, payload_canonical_json,
-    payload_from_json_value, ArtifactEvidenceRef, AttemptTerminal, CellTerminalProjection,
-    CommitArtifactEvidenceSet, CommitKey, CommitOrdinal, CommitOutcome, CommitPreconditions,
-    CommittedRunStream, EventArtifactReferenceSource, ForwardLedgerClassification,
-    InMemoryTypedRunStore, KernelEventEnvelope, ManualBlockReason, ManualResolutionProjection,
-    NonEmptyPayloadBatch, PersistedKernelEventRecord, PreparedCommit, PreparedCommitPlan,
-    PreparedTypedCommit, ProjectionSnapshot, RequiredRunState, ResourceLaneKey,
-    RunCompletionProjection, RunMode, RunStart, RunState, SagaAdmitToken, SagaEngagementProjection,
-    SagaEngagementReason, SagaTerminal, SagaTerminalProof, SideEffectLedgerPhase, SideEffectPhase,
+    payload_from_json_value, ArtifactEvidenceRef, AttemptStatus, AttemptTerminal,
+    CellTerminalProjection, CommitArtifactEvidenceSet, CommitKey, CommitOrdinal, CommitOutcome,
+    CommitPreconditions, CommittedRunStream, EventArtifactReferenceSource,
+    ForwardLedgerClassification, InMemoryTypedRunStore, KernelEventEnvelope, ManualBlockReason,
+    ManualResolution, ManualResolutionProjection, NonEmptyPayloadBatch, PersistedKernelEventRecord,
+    PreparedCommit, PreparedCommitPlan, ProjectionSnapshot, RequiredRunState, ResourceLaneKey,
+    Retention, RunAdmission, RunCompletionProjection, RunMode, RunState, SagaAdmitToken,
+    SagaEngagementProjection, SagaEngagementReason, SagaTerminal, SagaTerminalProof,
+    SideEffectLedgerPhase, SideEffectPhase, SideEffectProgress, SideEffectTerminal,
     StateAttemptStarted, StoreError, StreamSeq, TypedCommitRequest, TypedProjectionRead,
     TypedRunEventStore, VerifiedRetentionProjection, VerifiedRetentionProjectionSet,
 };
@@ -140,19 +148,22 @@ fn media_type(value: &str) -> MediaType {
     MediaType::new(value).expect("media type")
 }
 
-fn run_started(run_id: RunId) -> KernelEventPayload {
-    run_started_with_saga_policy(run_id, &SagaPolicySpec::NoSideEffects)
+fn run_admitted(run_id: RunId) -> KernelEventPayload {
+    run_admitted_with_saga_policy(run_id, &SagaPolicySpec::NoSideEffects)
 }
 
-fn run_started_with_saga_policy(run_id: RunId, saga_policy: &SagaPolicySpec) -> KernelEventPayload {
-    KernelEventPayload::RunStarted(events::RunStarted {
+fn run_admitted_with_saga_policy(
+    run_id: RunId,
+    saga_policy: &SagaPolicySpec,
+) -> KernelEventPayload {
+    let spec_artifact = spec_artifact_ref();
+    let certificate_artifact = certificate_artifact_ref();
+    KernelEventPayload::RunAdmitted(Box::new(events::RunAdmitted {
         run_id,
         spec_hash: spec_hash(1),
-        spec_artifact_id: artifact_id(2),
-        certificate_artifact_id: artifact_id(4),
-        certificate_artifact_digest: content_digest(4),
-        certificate_media_type: media_type(mfm_certify::CERTIFICATE_MEDIA_TYPE),
-        spec_media_type: media_type(SPEC_MEDIA_TYPE),
+        spec_artifact: run_artifact_ref(&spec_artifact),
+        certificate_artifact: run_artifact_ref(&certificate_artifact),
+        config_artifacts: Vec::new(),
         spec_version: SpecVersion::new("mfm.typed.execution_spec.v1").expect("spec version"),
         lowering_version: LoweringVersion::new("mfm.typed.lowering.v1").expect("lowering version"),
         public_output_schema_id: schema_id("mfm.test.public_output", 3),
@@ -162,11 +173,13 @@ fn run_started_with_saga_policy(run_id: RunId, saga_policy: &SagaPolicySpec) -> 
         descriptor_identities: Vec::new(),
         runner_executables: Vec::new(),
         adapter_executables: Vec::new(),
+        admitted_binding_digest: content_digest(9),
         canonicalizer_identity: CanonicalizerIdentity::new("mfm.jcs.v1").expect("canonicalizer"),
         framework_version: events::FrameworkVersion::new("mfm.test.1").expect("framework version"),
         source_revision: events::SourceRevision::new("test-revision").expect("source revision"),
+        launched_at_unix_ms: 1_700_000_000_000,
         seed_cells: Vec::new(),
-    })
+    }))
 }
 
 fn state_attempt_started() -> KernelEventPayload {
@@ -186,6 +199,14 @@ fn state_attempt_completed() -> KernelEventPayload {
         node_id: node_id(20),
         attempt_id: attempt_id(23),
         output_cell_id: cell_id(21),
+    })
+}
+
+fn state_attempt_interrupted() -> KernelEventPayload {
+    KernelEventPayload::StateAttemptInterrupted(events::StateAttemptInterrupted {
+        spec_hash: spec_hash(1),
+        node_id: node_id(20),
+        attempt_id: attempt_id(23),
     })
 }
 
@@ -883,6 +904,245 @@ fn manual_resolution_request(
     .expect("manual resolution request")
 }
 
+fn proof_manual_saga_policy() -> SagaPolicySpec {
+    SagaPolicySpec::ManualResolution {
+        manual: proof_manual_evidence_spec(),
+    }
+}
+
+fn proof_manual_evidence_spec() -> ManualResolutionEvidenceSpec {
+    ManualResolutionEvidenceSpec {
+        evidence_schema: schema_id("mfm.test.manual_evidence", 201),
+        authorization: spec::ManualResolutionAuthorizationSpec {
+            verifier_id: spec::ManualAuthorizationVerifierId::new("mfm.test.manual.verifier.proof")
+                .expect("verifier id"),
+            signing_scheme: spec::ManualSigningSchemeSpec::new(
+                "mfm.manual_resolution.digest_signature.v1",
+            )
+            .expect("signing scheme"),
+            authority: spec::OperatorAuthoritySnapshotSpec {
+                authority_id: spec::OperatorAuthorityId::new("mfm.test.manual.authority.proof")
+                    .expect("authority id"),
+                operators: vec![spec::OperatorAuthorityMemberSpec {
+                    operator_id: spec::OperatorId::new("operator.proof").expect("operator id"),
+                    public_identity: spec::OperatorPublicIdentity::new(
+                        "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf",
+                    )
+                    .expect("operator public identity"),
+                }],
+            },
+            quorum: spec::ManualAuthorizationQuorumSpec::new(1).expect("quorum"),
+        },
+    }
+}
+
+fn proof_manual_evidence_ref() -> ManualResolutionEvidenceRef {
+    ManualResolutionEvidenceRef {
+        schema_id: schema_id("mfm.test.manual_evidence", 201),
+        content_hash: content_digest(201),
+        artifact_id: artifact_id(201),
+    }
+}
+
+fn verified_manual_resolution_for_seq(expected_next_seq: u64) -> VerifiedManualResolutionForPrefix {
+    let prefix = ManualResolutionPrefixAuthority::new(
+        run_id(220),
+        spec_hash(1),
+        expected_next_seq,
+        content_digest(250),
+        ManualResolutionBlockReason::PolicyManualResolution,
+        content_digest(251),
+        proof_manual_evidence_spec(),
+    )
+    .expect("manual prefix authority");
+    let evidence = proof_manual_evidence_ref();
+    let claim = prefix
+        .authorization_claim(
+            events::ManualResolutionOutcome::ConfirmRemediated,
+            evidence.clone(),
+        )
+        .expect("manual authorization claim");
+    for signature in manual_signature_candidates(expected_next_seq, &claim) {
+        let authorization = manual_authorization_ref(signature.proof_bytes.as_bytes());
+        if let Ok(verified) = ManualResolutionProofAuthority::new(
+            prefix.clone(),
+            claim.outcome,
+            evidence.clone(),
+            authorization,
+            signature.proof_bytes.to_vec(),
+        )
+        .and_then(ManualResolutionProofAuthority::verify)
+        {
+            return verified;
+        }
+    }
+    panic!("no manual signature fixture verified for sequence {expected_next_seq}");
+}
+
+struct ManualSignatureCandidate {
+    proof_bytes: PlainCanonicalJsonBytes,
+}
+
+fn manual_signature_candidates(
+    expected_next_seq: u64,
+    claim: &ManualResolutionAuthorizationClaim,
+) -> Vec<ManualSignatureCandidate> {
+    let (r_hex, s_hex, normalized_s_hex) = match expected_next_seq {
+        7 => (
+            "a380063901f4c963898f2f997bd0ffa1b54cd07d1c8ec8800c395bcce745c54c",
+            "e26f1b7d09fb4faf752e566187aa835583d36a747a488c34ab441491849f239d",
+            "1d90e482f604b0508ad1a99e78557ca936db727235001407148e49fb4b971da4",
+        ),
+        8 => (
+            "3e7e3a08374ccd3e3bc9d4b63ac4b7b167feceb2f9208f9367770906eadced20",
+            "02260e1cc68113c6d29a5b2f7efe88e7f5bcc78c9855290a973545800c0ff060",
+            "02260e1cc68113c6d29a5b2f7efe88e7f5bcc78c9855290a973545800c0ff060",
+        ),
+        9 => (
+            "5b5d0a504ca7952abf53ba2eb4d1c5904e11882caac055d3cd95a88e1c37fff7",
+            "22f2c34f3ccefe5ed956db06e43046024f6a1c371574db19a2a60e7c84f76a93",
+            "22f2c34f3ccefe5ed956db06e43046024f6a1c371574db19a2a60e7c84f76a93",
+        ),
+        other => panic!("missing manual signature fixture for sequence {other}"),
+    };
+    let policy = proof_manual_evidence_spec().authorization;
+    let operator = policy.authority.operators[0].clone();
+    [s_hex, normalized_s_hex]
+        .into_iter()
+        .flat_map(|s| {
+            [0_u8, 1]
+                .into_iter()
+                .map(move |recovery_id| (s, recovery_id))
+        })
+        .map(|(s, recovery_id)| {
+            let mut signature = hex_to_bytes(r_hex);
+            signature.extend(hex_to_bytes(s));
+            signature.push(recovery_id);
+            let proof = ManualResolutionAuthorizationProof {
+                verifier_id: policy.verifier_id.clone(),
+                signing_scheme: policy.signing_scheme.clone(),
+                claim: claim.clone(),
+                signatures: vec![ManualResolutionAuthorizationSignature {
+                    operator_id: operator.operator_id.clone(),
+                    public_identity: operator.public_identity.clone(),
+                    signature: ManualAuthorizationSignatureBytes::new(signature)
+                        .expect("manual signature bytes"),
+                }],
+            };
+            ManualSignatureCandidate {
+                proof_bytes: proof.canonical_json().expect("manual proof canonical json"),
+            }
+        })
+        .collect()
+}
+
+fn hex_to_bytes(value: &str) -> Vec<u8> {
+    assert_eq!(value.len() % 2, 0, "hex string length");
+    (0..value.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&value[index..index + 2], 16).expect("hex byte"))
+        .collect()
+}
+
+fn manual_authorization_ref(proof_bytes: &[u8]) -> ManualResolutionEvidenceRef {
+    let content_hash = PlainCanonicalJsonBytes::from_canonical_json_slice(proof_bytes)
+        .expect("canonical proof bytes")
+        .content_digest();
+    ManualResolutionEvidenceRef {
+        schema_id: manual_authorization_proof_schema_id().expect("manual authorization schema"),
+        artifact_id: ArtifactId::from_digest(content_hash.algorithm(), *content_hash.digest()),
+        content_hash,
+    }
+}
+
+fn manual_resolution_payload_from_verified(
+    verified: &VerifiedManualResolutionForPrefix,
+) -> KernelEventPayload {
+    let claim = verified.claim();
+    let authorization = verified.authorization();
+    KernelEventPayload::ManualResolutionRecorded(events::ManualResolutionRecorded {
+        run_id: claim.run_id.clone(),
+        spec_hash: claim.spec_hash.clone(),
+        outcome: claim.outcome,
+        evidence_schema_id: claim.evidence.schema_id.clone(),
+        evidence_hash: claim.evidence.content_hash.clone(),
+        evidence_artifact_id: claim.evidence.artifact_id.clone(),
+        authorization_schema_id: authorization.schema_id.clone(),
+        authorization_hash: authorization.content_hash.clone(),
+        authorization_artifact_id: authorization.artifact_id.clone(),
+        note: None,
+    })
+}
+
+fn manual_resolution_artifacts_from_verified(
+    verified: &VerifiedManualResolutionForPrefix,
+) -> Vec<ArtifactEvidenceRef> {
+    let claim = verified.claim();
+    let authorization = verified.authorization();
+    vec![
+        ArtifactEvidenceRef {
+            artifact_id: claim.evidence.artifact_id.clone(),
+            digest: claim.evidence.content_hash.clone(),
+            byte_len: 128,
+            media_type: media_type("application/json"),
+            schema_id: Some(claim.evidence.schema_id.clone()),
+            semantic_type_id: None,
+            producer_node_id: None,
+            producer_seed_id: None::<SeedId>,
+            artifact_role: ArtifactRole::ManualResolutionEvidence,
+        },
+        ArtifactEvidenceRef {
+            artifact_id: authorization.artifact_id.clone(),
+            digest: authorization.content_hash.clone(),
+            byte_len: verified.proof_bytes().len() as u64,
+            media_type: media_type("application/json"),
+            schema_id: Some(authorization.schema_id.clone()),
+            semantic_type_id: None,
+            producer_node_id: None,
+            producer_seed_id: None::<SeedId>,
+            artifact_role: ArtifactRole::ManualResolutionAuthorization,
+        },
+    ]
+}
+
+fn manual_resolution_request_from_verified(
+    verified: &VerifiedManualResolutionForPrefix,
+    expected_next_seq: StreamSeq,
+    commit_key: &str,
+    policy: SagaPolicySpec,
+) -> TypedCommitRequest {
+    TypedCommitRequest::from_payloads(
+        verified.claim().run_id.clone(),
+        expected_next_seq,
+        CommitKey::new(commit_key).expect("commit key"),
+        vec![manual_resolution_payload_from_verified(verified)],
+        manual_resolution_artifacts_from_verified(verified),
+        CommitPreconditions {
+            required_run_state: RequiredRunState::NotCompleted,
+            ..saga_preconditions(&verified.claim().run_id, policy)
+        },
+    )
+    .expect("manual resolution request")
+}
+
+fn prepared_manual_resolution_commit(
+    verified: &VerifiedManualResolutionForPrefix,
+    expected_next_seq: StreamSeq,
+    commit_key: &str,
+    policy: SagaPolicySpec,
+) -> PreparedCommit<ManualResolution> {
+    let request =
+        manual_resolution_request_from_verified(verified, expected_next_seq, commit_key, policy);
+    let artifacts = manual_resolution_artifacts_from_verified(verified);
+    PreparedCommit::<ManualResolution>::new(
+        request,
+        CommitArtifactEvidenceSet::new(artifacts.clone(), artifacts)
+            .expect("manual artifact evidence set"),
+        verified,
+    )
+    .expect("proof-backed manual resolution prepared commit")
+}
+
 fn set_remediation_purpose(
     payload: &mut KernelEventPayload,
     ledger_key: events::SideEffectLedgerKey,
@@ -1196,7 +1456,7 @@ fn non_empty_payload_batch_rejects_empty_batches() {
         NonEmptyPayloadBatch::new(Vec::new()),
         Err(StoreError::EmptyCommit)
     ));
-    let batch = NonEmptyPayloadBatch::new(vec![run_started(run_id(144))]).expect("payload batch");
+    let batch = NonEmptyPayloadBatch::new(vec![run_admitted(run_id(144))]).expect("payload batch");
     assert_eq!(batch.as_slice().len(), 1);
     assert_eq!(batch.into_vec().len(), 1);
 }
@@ -1210,8 +1470,8 @@ fn prepared_commit_plan_mints_valid_run_start_authority() {
         request.required_artifacts().to_vec(),
     )
     .expect("artifact evidence set");
-    let commit =
-        PreparedCommit::<RunStart>::new(request.clone(), artifacts).expect("run-start authority");
+    let commit = PreparedCommit::<RunAdmission>::new(request.clone(), artifacts)
+        .expect("run-start authority");
     let plan = PreparedCommitPlan::from(commit);
 
     assert_eq!(plan.request().run_id(), &run_id);
@@ -1242,7 +1502,7 @@ fn prepared_commit_authority_rejects_invalid_request_shapes() {
             base_run_id.clone(),
             StreamSeq::FIRST,
             CommitKey::new("purpose-mixed-run").expect("commit key"),
-            vec![run_started(run_id(147))],
+            vec![run_admitted(run_id(147))],
             Vec::new(),
             CommitPreconditions::default(),
         ),
@@ -1259,7 +1519,7 @@ fn prepared_commit_authority_rejects_invalid_request_shapes() {
             base_run_id.clone(),
             StreamSeq::FIRST,
             CommitKey::new("purpose-mixed-spec").expect("commit key"),
-            vec![run_started(base_run_id.clone()), foreign_spec_payload],
+            vec![run_admitted(base_run_id.clone()), foreign_spec_payload],
             Vec::new(),
             CommitPreconditions::default(),
         ),
@@ -1270,7 +1530,7 @@ fn prepared_commit_authority_rejects_invalid_request_shapes() {
         base_run_id.clone(),
         StreamSeq::FIRST,
         CommitKey::new("purpose-missing-artifact").expect("commit key"),
-        vec![run_started(base_run_id.clone())],
+        vec![run_admitted(base_run_id.clone())],
         vec![spec_artifact_ref()],
         CommitPreconditions::default(),
     )
@@ -1281,9 +1541,9 @@ fn prepared_commit_authority_rejects_invalid_request_shapes() {
     )
     .expect("artifact evidence set");
     assert!(matches!(
-        PreparedCommit::<RunStart>::new(missing_artifact, missing_artifact_set),
+        PreparedCommit::<RunAdmission>::new(missing_artifact, missing_artifact_set),
         Err(StoreError::InvalidPreparedCommitPurpose {
-            purpose: "run_start",
+            purpose: "run_admission",
             ..
         })
     ));
@@ -1360,6 +1620,18 @@ fn certificate_artifact_ref() -> ArtifactEvidenceRef {
     }
 }
 
+fn run_artifact_ref(artifact: &ArtifactEvidenceRef) -> events::RunArtifactEvidenceRef {
+    events::RunArtifactEvidenceRef {
+        artifact_id: artifact.artifact_id.clone(),
+        role: artifact.artifact_role,
+        schema_id: artifact.schema_id.clone(),
+        semantic_type_id: artifact.semantic_type_id.clone(),
+        content_digest: artifact.digest.clone(),
+        byte_len: artifact.byte_len,
+        media_type: artifact.media_type.clone(),
+    }
+}
+
 trait TestPreparedCommitExt {
     fn append_prepared_commit(
         &mut self,
@@ -1379,8 +1651,8 @@ impl TestPreparedCommitExt for InMemoryTypedRunStore {
         request: TypedCommitRequest,
     ) -> mfm_store::v1::Result<CommitOutcome> {
         let admitted_artifacts = request.required_artifacts().to_vec();
-        let commit = PreparedTypedCommit::new(request, admitted_artifacts)?;
-        self.append_prepared_typed_commit(commit)
+        let plan = test_prepared_commit_plan(request, admitted_artifacts)?;
+        self.append_prepared_commit_plan(plan)
     }
 
     fn append_prepared_commit_with_artifacts(
@@ -1388,9 +1660,105 @@ impl TestPreparedCommitExt for InMemoryTypedRunStore {
         request: TypedCommitRequest,
         admitted_artifacts: Vec<ArtifactEvidenceRef>,
     ) -> mfm_store::v1::Result<CommitOutcome> {
-        let commit = PreparedTypedCommit::new(request, admitted_artifacts)?;
-        self.append_prepared_typed_commit(commit)
+        let plan = test_prepared_commit_plan(request, admitted_artifacts)?;
+        self.append_prepared_commit_plan(plan)
     }
+}
+
+fn test_prepared_commit_plan(
+    request: TypedCommitRequest,
+    admitted_artifacts: Vec<ArtifactEvidenceRef>,
+) -> mfm_store::v1::Result<PreparedCommitPlan> {
+    let artifacts =
+        CommitArtifactEvidenceSet::new(request.required_artifacts().to_vec(), admitted_artifacts)?;
+    if request
+        .payloads()
+        .iter()
+        .all(|payload| matches!(payload, KernelEventPayload::RunAdmitted(_)))
+    {
+        return PreparedCommit::<RunAdmission>::new(request, artifacts)
+            .map(PreparedCommitPlan::from);
+    }
+    if request
+        .payloads()
+        .iter()
+        .all(|payload| matches!(payload, KernelEventPayload::StateAttemptStarted(_)))
+    {
+        let mut preconditions = request.preconditions().clone();
+        preconditions.required_run_state = RequiredRunState::NotCompleted;
+        let request = request.with_preconditions(preconditions);
+        return PreparedCommit::<StateAttemptStarted>::new(request, artifacts)
+            .map(PreparedCommitPlan::from);
+    }
+    if request
+        .payloads()
+        .iter()
+        .any(|payload| matches!(payload, KernelEventPayload::ManualResolutionRecorded(_)))
+    {
+        return Err(StoreError::InvalidPreparedCommitPurpose {
+            purpose: "manual_resolution",
+            message: "manual resolution commits requires verified manual resolution proof".into(),
+        });
+    }
+    if request.payloads().iter().any(test_is_saga_terminal_payload) {
+        return Err(StoreError::InvalidPreparedCommitPurpose {
+            purpose: "saga_terminal",
+            message: "saga terminal commits requires SagaTerminalProof".into(),
+        });
+    }
+    if request
+        .payloads()
+        .iter()
+        .any(test_is_side_effect_terminal_payload)
+    {
+        return PreparedCommit::<SideEffectTerminal>::new(request, artifacts)
+            .map(PreparedCommitPlan::from);
+    }
+    if request
+        .payloads()
+        .iter()
+        .any(|payload| payload.side_effect_ref().is_some())
+    {
+        return PreparedCommit::<SideEffectProgress>::new(request, artifacts)
+            .map(PreparedCommitPlan::from);
+    }
+    if request.payloads().iter().any(test_is_retention_payload) {
+        return PreparedCommit::<Retention>::new(request, artifacts).map(PreparedCommitPlan::from);
+    }
+    PreparedCommit::<AttemptTerminal>::new(request, artifacts).map(PreparedCommitPlan::from)
+}
+
+fn test_is_retention_payload(payload: &KernelEventPayload) -> bool {
+    matches!(
+        payload,
+        KernelEventPayload::RetentionRefsAppended(_)
+            | KernelEventPayload::RetentionManifestProjected(_)
+    )
+}
+
+fn test_is_side_effect_terminal_payload(payload: &KernelEventPayload) -> bool {
+    matches!(
+        payload,
+        KernelEventPayload::SideEffectNotSubmittedProven(_)
+            | KernelEventPayload::SideEffectSubmissionObserved(_)
+            | KernelEventPayload::SideEffectSubmissionUnknown(_)
+            | KernelEventPayload::SideEffectReceiptObserved(_)
+            | KernelEventPayload::SideEffectConfirmationObserved(_)
+            | KernelEventPayload::SideEffectAmbiguous(_)
+            | KernelEventPayload::SideEffectFailed(_)
+    )
+}
+
+fn test_is_saga_terminal_payload(payload: &KernelEventPayload) -> bool {
+    matches!(
+        payload,
+        KernelEventPayload::RunCompleted(events::RunCompleted {
+            outcome: events::RunCompletionOutcome::Compensated
+                | events::RunCompletionOutcome::ManuallyResolved
+                | events::RunCompletionOutcome::FailedWithoutAcdcClaim,
+            ..
+        })
+    )
 }
 
 fn run_start_request(run_id: RunId, commit_key: &str) -> TypedCommitRequest {
@@ -1406,7 +1774,7 @@ fn run_start_request_with_saga_policy(
         run_id.clone(),
         StreamSeq::FIRST,
         CommitKey::new(commit_key).expect("commit key"),
-        vec![run_started_with_saga_policy(run_id, saga_policy)],
+        vec![run_admitted_with_saga_policy(run_id, saga_policy)],
         vec![spec_artifact_ref(), certificate_artifact_ref()],
         CommitPreconditions {
             required_run_state: RequiredRunState::Absent,
@@ -1416,7 +1784,16 @@ fn run_start_request_with_saga_policy(
     .expect("run start request")
 }
 
+fn ensure_test_run_admitted(store: &mut InMemoryTypedRunStore, run_id: &RunId, commit_key: &str) {
+    if store.expected_next_seq(run_id) == StreamSeq::FIRST {
+        store
+            .append_prepared_commit(run_start_request(run_id.clone(), commit_key))
+            .expect("append fixture run admission");
+    }
+}
+
 fn append_side_effect_prepare(store: &mut InMemoryTypedRunStore, run_id: &RunId) {
+    ensure_test_run_admitted(store, run_id, "sidefx-fixture-run-start");
     let artifact_id = artifact_id(81);
     let artifact_digest = content_digest(82);
     let intent_evidence = intent_artifact_ref(artifact_id.clone(), artifact_digest.clone());
@@ -1480,6 +1857,7 @@ fn append_side_effect_prepare_for_ledger_on_attempt(
     node_id: NodeId,
     attempt_id: AttemptId,
 ) {
+    ensure_test_run_admitted(store, run_id, "sidefx-ledger-fixture-run-start");
     if start_attempt {
         store
             .append_prepared_commit(typed_commit_request! {
@@ -1543,6 +1921,7 @@ fn append_generic_nonretryable_failure(
     run_id: &RunId,
     key_prefix: &str,
 ) {
+    ensure_test_run_admitted(store, run_id, &format!("{key_prefix}-fixture-run-start"));
     store
         .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
@@ -1758,7 +2137,7 @@ fn store_owns_envelope_sequence_ordinal_and_event_id() {
     assert_eq!(first_event.seq(), StreamSeq::FIRST);
     assert_eq!(first_event.ordinal().as_u32(), 0);
     assert_eq!(first_event.commit_key().as_str(), "run-start");
-    assert_eq!(first_event.logical_key().as_str(), "run:start");
+    assert_eq!(first_event.logical_key().as_str(), "run:admission");
 
     let second = store
         .append_prepared_commit(typed_commit_request! {
@@ -1850,6 +2229,72 @@ fn projection_rebuild_rejects_mixed_commit_keys_for_one_sequence() {
 }
 
 #[test]
+fn projection_rebuild_rejects_old_model_terminal_attempt_without_start() {
+    let run_id = run_id(45);
+    let first = build_committed_batch(
+        &run_start_request(run_id.clone(), "run-start"),
+        StreamSeq::FIRST,
+    )
+    .expect("first batch");
+    let old_terminal = build_committed_batch(
+        &typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: StreamSeq::new(2).expect("next seq"),
+            commit_key: CommitKey::new("old-terminal-without-start").expect("commit key"),
+            payloads: terminal_cell_commit_payloads(artifact_id(46), content_digest(47)),
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        },
+        StreamSeq::new(2).expect("terminal seq"),
+    )
+    .expect("old terminal batch");
+    let mut events = first.events().to_vec();
+    events.extend(old_terminal.events().iter().cloned());
+
+    let error = ProjectionSnapshot::rebuild_from_run_stream(&events)
+        .expect_err("old terminal attempt model rejects");
+    assert_projection_conflict_contains(
+        error,
+        "unsupported old stream model: attempt-bound payload is not preceded by a StateAttemptStarted commit",
+    );
+}
+
+#[test]
+fn projection_rebuild_rejects_old_model_start_and_terminal_in_same_commit() {
+    let run_id = run_id(48);
+    let first = build_committed_batch(
+        &run_start_request(run_id.clone(), "run-start"),
+        StreamSeq::FIRST,
+    )
+    .expect("first batch");
+    let old_combined = build_committed_batch(
+        &typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: StreamSeq::new(2).expect("next seq"),
+            commit_key: CommitKey::new("old-combined-framework").expect("commit key"),
+            payloads: {
+                let mut payloads = vec![state_attempt_started()];
+                payloads.extend(terminal_cell_commit_payloads(artifact_id(49), content_digest(50)));
+                payloads
+            },
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        },
+        StreamSeq::new(2).expect("combined seq"),
+    )
+    .expect("old combined batch");
+    let mut events = first.events().to_vec();
+    events.extend(old_combined.events().iter().cloned());
+
+    let error = CommittedRunStream::from_events(run_id, events)
+        .expect_err("old combined framework model rejects");
+    assert_projection_conflict_contains(
+        error,
+        "unsupported old stream model: StateAttemptStarted must be committed before attempt-bound terminal payloads",
+    );
+}
+
+#[test]
 fn required_artifact_precondition_is_atomic_with_append() {
     let artifact_id = artifact_id(50);
     let artifact_digest = content_digest(51);
@@ -1875,9 +2320,13 @@ fn required_artifact_precondition_is_atomic_with_append() {
         preconditions: CommitPreconditions::default(),
     };
 
-    let commit = PreparedTypedCommit::new(request, Vec::new()).expect("prepare missing artifact");
+    let artifacts =
+        CommitArtifactEvidenceSet::new(request.required_artifacts().to_vec(), Vec::new())
+            .expect("missing artifact evidence set");
+    let commit = PreparedCommit::<AttemptTerminal>::new(request, artifacts)
+        .expect("prepare missing artifact");
     let error = store
-        .append_prepared_typed_commit(commit)
+        .append_prepared_commit_plan(commit.into())
         .expect_err("missing artifact rejects commit");
     assert!(matches!(error, StoreError::MissingArtifact { .. }));
     assert!(store.load_run_stream(&run_id).is_empty());
@@ -1948,22 +2397,26 @@ fn prepared_commit_rejects_unreferenced_admitted_artifact_without_persisting_it(
     ));
     assert!(store.load_run_stream(&run_id).is_empty());
 
+    let missing_evidence = store_artifact_ref(artifact_id.clone(), artifact_digest.clone());
     let error = store
-        .append_prepared_commit(typed_commit_request! {
-            run_id: run_id.clone(),
-            expected_next_seq: StreamSeq::FIRST,
-            commit_key: CommitKey::new("artifact-still-missing").expect("commit key"),
-            payloads: vec![KernelEventPayload::ArtifactReferenced(
-                events::ArtifactReferenced {
-                    spec_hash: spec_hash(1),
-                    node_id: Some(node_id(20)),
-                    attempt_id: Some(attempt_id(23)),
-                    artifact_ref: event_artifact_ref(artifact_id, artifact_digest),
-                },
-            )],
-            required_artifacts: Vec::new(),
-            preconditions: CommitPreconditions::default(),
-        })
+        .append_prepared_commit_with_artifacts(
+            typed_commit_request! {
+                run_id: run_id.clone(),
+                expected_next_seq: StreamSeq::FIRST,
+                commit_key: CommitKey::new("artifact-still-missing").expect("commit key"),
+                payloads: vec![KernelEventPayload::ArtifactReferenced(
+                    events::ArtifactReferenced {
+                        spec_hash: spec_hash(1),
+                        node_id: Some(node_id(20)),
+                        attempt_id: Some(attempt_id(23)),
+                        artifact_ref: event_artifact_ref(artifact_id, artifact_digest),
+                    },
+                )],
+                required_artifacts: vec![missing_evidence],
+                preconditions: CommitPreconditions::default(),
+            },
+            Vec::new(),
+        )
         .expect_err("rejected unreferenced evidence must not leak into store");
     assert!(matches!(error, StoreError::MissingArtifact { .. }));
 }
@@ -2027,22 +2480,26 @@ fn admitted_artifacts_are_rolled_back_when_commit_validation_fails() {
     assert!(matches!(error, StoreError::ProjectionConflict { .. }));
     assert!(store.load_run_stream(&run_id).is_empty());
 
+    let missing_evidence = store_artifact_ref(artifact_id.clone(), artifact_digest.clone());
     let error = store
-        .append_prepared_commit(typed_commit_request! {
-            run_id: run_id,
-            expected_next_seq: StreamSeq::FIRST,
-            commit_key: CommitKey::new("artifact-not-leaked").expect("commit key"),
-            payloads: vec![KernelEventPayload::ArtifactReferenced(
-                events::ArtifactReferenced {
-                    spec_hash: spec_hash(1),
-                    node_id: Some(node_id(20)),
-                    attempt_id: Some(attempt_id(23)),
-                    artifact_ref: event_artifact_ref(artifact_id, artifact_digest),
-                },
-            )],
-            required_artifacts: Vec::new(),
-            preconditions: CommitPreconditions::default(),
-        })
+        .append_prepared_commit_with_artifacts(
+            typed_commit_request! {
+                run_id: run_id,
+                expected_next_seq: StreamSeq::FIRST,
+                commit_key: CommitKey::new("artifact-not-leaked").expect("commit key"),
+                payloads: vec![KernelEventPayload::ArtifactReferenced(
+                    events::ArtifactReferenced {
+                        spec_hash: spec_hash(1),
+                        node_id: Some(node_id(20)),
+                        attempt_id: Some(attempt_id(23)),
+                        artifact_ref: event_artifact_ref(artifact_id, artifact_digest),
+                    },
+                )],
+                required_artifacts: vec![missing_evidence],
+                preconditions: CommitPreconditions::default(),
+            },
+            Vec::new(),
+        )
         .expect_err("failed commit must not persist admitted artifact evidence");
     assert!(matches!(error, StoreError::MissingArtifact { .. }));
 }
@@ -2069,7 +2526,10 @@ fn payload_artifact_byte_len_media_type_and_producer_mismatches_are_rejected() {
                 artifact_ref: evidence,
             },
         )],
-        required_artifacts: Vec::new(),
+        required_artifacts: vec![store_artifact_ref(
+            first_artifact_id.clone(),
+            first_artifact_digest.clone(),
+        )],
         preconditions: CommitPreconditions::default(),
     };
 
@@ -2105,7 +2565,10 @@ fn payload_artifact_byte_len_media_type_and_producer_mismatches_are_rejected() {
                 artifact_ref: evidence,
             },
         )],
-        required_artifacts: Vec::new(),
+        required_artifacts: vec![store_artifact_ref(
+            media_artifact_id.clone(),
+            media_artifact_digest.clone(),
+        )],
         preconditions: CommitPreconditions::default(),
     };
     let error = store
@@ -2131,8 +2594,14 @@ fn payload_artifact_byte_len_media_type_and_producer_mismatches_are_rejected() {
         run_id: second_run_id.clone(),
         expected_next_seq: StreamSeq::FIRST,
         commit_key: CommitKey::new("artifact-producer").expect("commit key"),
-        payloads: terminal_cell_commit_payloads(second_artifact_id, second_artifact_digest),
-        required_artifacts: Vec::new(),
+        payloads: terminal_cell_commit_payloads(
+            second_artifact_id.clone(),
+            second_artifact_digest.clone(),
+        ),
+        required_artifacts: vec![store_artifact_ref(
+            second_artifact_id,
+            second_artifact_digest,
+        )],
         preconditions: CommitPreconditions::default(),
     };
 
@@ -2157,9 +2626,12 @@ fn duplicate_attempt_lifecycle_events_are_rejected() {
     let mut store = InMemoryTypedRunStore::new();
     let artifact = store_artifact_ref(artifact_id.clone(), artifact_digest.clone());
     store
+        .append_prepared_commit(run_start_request(run_id.clone(), "duplicate-run-start"))
+        .expect("append run start");
+    store
         .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
-            expected_next_seq: StreamSeq::FIRST,
+            expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("attempt-start").expect("commit key"),
             payloads: vec![state_attempt_started()],
             required_artifacts: Vec::new(),
@@ -2188,7 +2660,7 @@ fn duplicate_attempt_lifecycle_events_are_rejected() {
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("attempt-complete").expect("commit key"),
             payloads: terminal_cell_commit_payloads(artifact_id.clone(), artifact_digest.clone()),
-            required_artifacts: vec![artifact],
+            required_artifacts: vec![artifact.clone()],
             preconditions: CommitPreconditions::default(),
         })
         .expect("append attempt complete");
@@ -2199,7 +2671,7 @@ fn duplicate_attempt_lifecycle_events_are_rejected() {
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("attempt-complete-2").expect("commit key"),
             payloads: terminal_cell_commit_payloads(artifact_id, artifact_digest),
-            required_artifacts: Vec::new(),
+            required_artifacts: vec![artifact],
             preconditions: CommitPreconditions::default(),
         })
         .expect_err("duplicate attempt terminal rejects");
@@ -2210,13 +2682,305 @@ fn duplicate_attempt_lifecycle_events_are_rejected() {
 }
 
 #[test]
+fn state_attempt_interrupted_projects_retryable_terminal_without_saga_engagement() {
+    let run_id = run_id(60);
+    let mut store = InMemoryTypedRunStore::new();
+    store
+        .append_prepared_commit(run_start_request(run_id.clone(), "run-start"))
+        .expect("append run start");
+    store
+        .append_prepared_commit(typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("attempt-start").expect("commit key"),
+            payloads: vec![state_attempt_started()],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("append attempt start");
+    store
+        .append_prepared_commit(typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("attempt-interrupt").expect("commit key"),
+            payloads: vec![state_attempt_interrupted()],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("append attempt interruption");
+
+    let projection = store.projection_snapshot();
+    let attempt = projection
+        .attempts()
+        .find_map(|((projected_node_id, projected_attempt_id), projection)| {
+            if *projected_node_id == node_id(20) && *projected_attempt_id == attempt_id(23) {
+                Some(projection)
+            } else {
+                None
+            }
+        })
+        .expect("attempt projection");
+    assert!(matches!(&attempt.status, AttemptStatus::Interrupted));
+    assert!(projection.saga_engagement(&run_id).is_none());
+    assert_projection_codecs_round_trip(projection);
+}
+
+#[test]
+fn state_attempt_interrupted_rejects_duplicate_terminal_event() {
+    let run_id = run_id(61);
+    let mut store = InMemoryTypedRunStore::new();
+    store
+        .append_prepared_commit(run_start_request(run_id.clone(), "run-start"))
+        .expect("append run start");
+    store
+        .append_prepared_commit(typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("attempt-start").expect("commit key"),
+            payloads: vec![state_attempt_started()],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("append attempt start");
+    store
+        .append_prepared_commit(typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("attempt-interrupt").expect("commit key"),
+            payloads: vec![state_attempt_interrupted()],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("append attempt interruption");
+
+    let duplicate = store
+        .append_prepared_commit(typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("attempt-interrupt-2").expect("commit key"),
+            payloads: vec![state_attempt_interrupted()],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect_err("duplicate interruption rejects");
+    assert!(matches!(duplicate, StoreError::ProjectionConflict { .. }));
+}
+
+#[test]
+fn state_attempt_interrupted_allows_side_effect_intent_before_invocation_prepared() {
+    let run_id = run_id(62);
+    let artifact_id = artifact_id(81);
+    let artifact_digest = content_digest(82);
+    let mut store = InMemoryTypedRunStore::new();
+    store
+        .append_prepared_commit(run_start_request(run_id.clone(), "run-start"))
+        .expect("append run start");
+    store
+        .append_prepared_commit(typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("sidefx-attempt-start").expect("commit key"),
+            payloads: vec![side_effect_attempt_started()],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("append sidefx attempt start");
+    store
+        .append_prepared_commit(typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("sidefx-intent").expect("commit key"),
+            payloads: vec![side_effect_intent(
+                artifact_id.clone(),
+                artifact_digest.clone(),
+            )],
+            required_artifacts: vec![intent_artifact_ref(artifact_id, artifact_digest)],
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("append sidefx intent");
+
+    store
+        .append_prepared_commit(typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("sidefx-attempt-interrupt").expect("commit key"),
+            payloads: vec![KernelEventPayload::StateAttemptInterrupted(
+                events::StateAttemptInterrupted {
+                    spec_hash: spec_hash(1),
+                    node_id: node_id(70),
+                    attempt_id: attempt_id(72),
+                },
+            )],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("interruption before sidefx prepare admits");
+
+    let projection = store.projection_snapshot();
+    let attempt = projection
+        .attempt(&node_id(70), &attempt_id(72))
+        .expect("attempt projection");
+    assert!(matches!(attempt.status, AttemptStatus::Interrupted));
+    assert!(matches!(
+        projection
+            .side_effect(&side_effect_ledger_key())
+            .expect("side-effect projection")
+            .ledger_state()
+            .expect("ledger state")
+            .phase(),
+        SideEffectLedgerPhase::IntentPersisted { .. }
+    ));
+}
+
+#[test]
+fn state_attempt_interrupted_allows_side_effect_claim_before_invocation_prepared() {
+    let run_id = run_id(63);
+    let artifact_id = artifact_id(83);
+    let artifact_digest = content_digest(84);
+    let mut store = InMemoryTypedRunStore::new();
+    store
+        .append_prepared_commit(run_start_request(run_id.clone(), "run-start"))
+        .expect("append run start");
+    store
+        .append_prepared_commit(typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("sidefx-attempt-start").expect("commit key"),
+            payloads: vec![side_effect_attempt_started()],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("append sidefx attempt start");
+    store
+        .append_prepared_commit(typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("sidefx-claim").expect("commit key"),
+            payloads: vec![
+                side_effect_intent(artifact_id.clone(), artifact_digest.clone()),
+                side_effect_claim(),
+            ],
+            required_artifacts: vec![intent_artifact_ref(artifact_id, artifact_digest)],
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("append sidefx claim");
+
+    store
+        .append_prepared_commit(typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("sidefx-attempt-interrupt").expect("commit key"),
+            payloads: vec![KernelEventPayload::StateAttemptInterrupted(
+                events::StateAttemptInterrupted {
+                    spec_hash: spec_hash(1),
+                    node_id: node_id(70),
+                    attempt_id: attempt_id(72),
+                },
+            )],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("interruption before sidefx prepare admits");
+
+    let projection = store.projection_snapshot();
+    let attempt = projection
+        .attempt(&node_id(70), &attempt_id(72))
+        .expect("attempt projection");
+    assert!(matches!(attempt.status, AttemptStatus::Interrupted));
+    assert!(matches!(
+        projection
+            .side_effect(&side_effect_ledger_key())
+            .expect("side-effect projection")
+            .ledger_state()
+            .expect("ledger state")
+            .phase(),
+        SideEffectLedgerPhase::Claimed { .. }
+    ));
+}
+
+#[test]
+fn state_attempt_interrupted_rejects_after_side_effect_invocation_prepared() {
+    let run_id = run_id(64);
+    let mut store = InMemoryTypedRunStore::new();
+    store
+        .append_prepared_commit(run_start_request(run_id.clone(), "run-start"))
+        .expect("append run start");
+    append_side_effect_prepare(&mut store, &run_id);
+
+    let error = store
+        .append_prepared_commit(typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("sidefx-attempt-interrupt").expect("commit key"),
+            payloads: vec![KernelEventPayload::StateAttemptInterrupted(
+                events::StateAttemptInterrupted {
+                    spec_hash: spec_hash(1),
+                    node_id: node_id(70),
+                    attempt_id: attempt_id(72),
+                },
+            )],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect_err("interruption after side-effect prepare rejects");
+    assert!(matches!(error, StoreError::ProjectionConflict { .. }));
+}
+
+#[test]
+fn state_attempt_failed_rejects_after_side_effect_authority_without_terminal_evidence() {
+    let run_id = run_id(65);
+    let mut store = InMemoryTypedRunStore::new();
+    store
+        .append_prepared_commit(run_start_request(run_id.clone(), "run-start"))
+        .expect("append run start");
+    append_side_effect_prepare(&mut store, &run_id);
+
+    let error = store
+        .append_prepared_commit(typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("sidefx-attempt-failed-alone").expect("commit key"),
+            payloads: vec![side_effect_attempt_failed(true)],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect_err("failure after side-effect authority rejects without terminal evidence");
+    assert_projection_conflict_contains(
+        error,
+        "side-effect attempt failure requires terminal side-effect evidence",
+    );
+
+    let request = typed_commit_request! {
+        run_id: run_id.clone(),
+        expected_next_seq: store.expected_next_seq(&run_id),
+        commit_key: CommitKey::new("forged-sidefx-attempt-failed-alone").expect("commit key"),
+        payloads: vec![side_effect_attempt_failed(true)],
+        required_artifacts: Vec::new(),
+        preconditions: CommitPreconditions::default(),
+    };
+    let batch =
+        build_committed_batch(&request, store.expected_next_seq(&run_id)).expect("forged batch");
+    let mut stream = store.load_run_stream(&run_id);
+    stream.extend(batch.events().iter().cloned());
+    let rebuild = ProjectionSnapshot::rebuild_from_run_stream(&stream)
+        .expect_err("projection rebuild rejects forged generic failure");
+    assert_projection_conflict_contains(
+        rebuild,
+        "side-effect attempt failure requires terminal side-effect evidence",
+    );
+}
+
+#[test]
 fn attempt_terminal_and_cell_terminal_must_commit_together() {
     let run_id = run_id(62);
     let mut store = InMemoryTypedRunStore::new();
     store
+        .append_prepared_commit(run_start_request(run_id.clone(), "terminal-pair-run-start"))
+        .expect("append run start");
+    store
         .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
-            expected_next_seq: StreamSeq::FIRST,
+            expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("attempt-start").expect("commit key"),
             payloads: vec![state_attempt_started()],
             required_artifacts: Vec::new(),
@@ -2245,7 +3009,7 @@ fn attempt_terminal_and_cell_terminal_must_commit_together() {
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("cell-only").expect("commit key"),
             payloads: vec![cell_produced(artifact_id(63), content_digest(64))],
-            required_artifacts: Vec::new(),
+            required_artifacts: vec![store_artifact_ref(artifact_id(63), content_digest(64))],
             preconditions: CommitPreconditions::default(),
         })
         .expect_err("terminal cell without completion rejects");
@@ -2260,9 +3024,12 @@ fn public_output_must_commit_with_render_receipt_terminal() {
     let mut store = InMemoryTypedRunStore::new();
     let artifact = store_artifact_ref(artifact_id.clone(), artifact_digest.clone());
     store
+        .append_prepared_commit(run_start_request(run_id.clone(), "public-output-run-start"))
+        .expect("append run start");
+    store
         .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
-            expected_next_seq: StreamSeq::FIRST,
+            expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("attempt-start").expect("commit key"),
             payloads: vec![state_attempt_started()],
             required_artifacts: Vec::new(),
@@ -2285,8 +3052,11 @@ fn public_output_must_commit_with_render_receipt_terminal() {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("split-public-output").expect("commit key"),
-            payloads: vec![public_output_produced(artifact_id, artifact_digest)],
-            required_artifacts: Vec::new(),
+            payloads: vec![public_output_produced(
+                artifact_id.clone(),
+                artifact_digest.clone(),
+            )],
+            required_artifacts: vec![store_artifact_ref(artifact_id, artifact_digest)],
             preconditions: CommitPreconditions::default(),
         })
         .expect_err("public output split from terminal commit rejects");
@@ -2304,9 +3074,15 @@ fn side_effect_transition_mismatches_are_rejected() {
     let mut store = InMemoryTypedRunStore::new();
     let intent_evidence = intent_artifact_ref(artifact_id.clone(), artifact_digest.clone());
     store
+        .append_prepared_commit(run_start_request(
+            run_id.clone(),
+            "sidefx-transition-run-start",
+        ))
+        .expect("append run start");
+    store
         .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
-            expected_next_seq: StreamSeq::FIRST,
+            expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("sidefx-attempt-start").expect("commit key"),
             payloads: vec![side_effect_attempt_started()],
             required_artifacts: Vec::new(),
@@ -2541,13 +3317,22 @@ fn resource_lane_rejects_same_key_for_other_ledgers_same_run_and_cross_run() {
             .append_prepared_commit(typed_commit_request! {
                 run_id: run_a.clone(),
                 expected_next_seq: store.expected_next_seq(&run_a),
+                commit_key: CommitKey::new("resource-a-conflict-attempt-start")
+                    .expect("commit key"),
+                payloads: vec![side_effect_attempt_started_for(
+                    branch_node.clone(),
+                    branch_attempt.clone(),
+                )],
+                required_artifacts: Vec::new(),
+                preconditions: CommitPreconditions::default(),
+            })
+            .expect("append branch attempt start");
+        store
+            .append_prepared_commit(typed_commit_request! {
+                run_id: run_a.clone(),
+                expected_next_seq: store.expected_next_seq(&run_a),
                 commit_key: CommitKey::new("resource-a-conflict").expect("commit key"),
-                payloads: vec![
-                    side_effect_attempt_started_for(branch_node.clone(), branch_attempt),
-                    intent,
-                    claim,
-                    prepared,
-                ],
+                payloads: vec![intent, claim, prepared],
                 required_artifacts: vec![intent_artifact_ref_for_node(
                     artifact_id(22),
                     content_digest(23),
@@ -2578,13 +3363,22 @@ fn resource_lane_rejects_same_key_for_other_ledgers_same_run_and_cross_run() {
             .append_prepared_commit(typed_commit_request! {
                 run_id: run_b.clone(),
                 expected_next_seq: store.expected_next_seq(&run_b),
+                commit_key: CommitKey::new("resource-b-conflict-attempt-start")
+                    .expect("commit key"),
+                payloads: vec![side_effect_attempt_started_for(
+                    branch_node.clone(),
+                    branch_attempt.clone(),
+                )],
+                required_artifacts: Vec::new(),
+                preconditions: CommitPreconditions::default(),
+            })
+            .expect("append branch attempt start");
+        store
+            .append_prepared_commit(typed_commit_request! {
+                run_id: run_b.clone(),
+                expected_next_seq: store.expected_next_seq(&run_b),
                 commit_key: CommitKey::new("resource-b-conflict").expect("commit key"),
-                payloads: vec![
-                    side_effect_attempt_started_for(branch_node.clone(), branch_attempt),
-                    intent,
-                    claim,
-                    prepared,
-                ],
+                payloads: vec![intent, claim, prepared],
                 required_artifacts: vec![intent_artifact_ref_for_node(
                     artifact_id(24),
                     content_digest(25),
@@ -2628,41 +3422,48 @@ fn resource_lane_holder_identity_includes_run_for_same_ledger_key_across_runs() 
         true,
     );
 
+    let artifact_id = artifact_id(30);
+    let artifact_digest = content_digest(31);
+    let branch_node = node_id(78);
+    let branch_attempt = attempt_id(79);
+    let mut intent = side_effect_intent(artifact_id.clone(), artifact_digest.clone());
+    let mut claim = side_effect_claim();
+    let mut prepared =
+        side_effect_prepared_with_resource_key(1, "token-1", resource_key("wallet-6", 213));
+    for payload in [&mut intent, &mut claim, &mut prepared] {
+        set_side_effect_ledger(
+            payload,
+            shared_ledger.clone(),
+            events::SideEffectLedgerPurpose::Forward,
+        );
+        set_side_effect_node_attempt(payload, branch_node.clone(), branch_attempt.clone());
+    }
+    store
+        .append_prepared_commit(typed_commit_request! {
+            run_id: run_b.clone(),
+            expected_next_seq: store.expected_next_seq(&run_b),
+            commit_key: CommitKey::new("resource-same-ledger-b-conflict-attempt-start")
+                .expect("commit key"),
+            payloads: vec![side_effect_attempt_started_for(
+                branch_node.clone(),
+                branch_attempt.clone(),
+            )],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("append branch attempt start");
     let cross_run_same_resource_error = store
-        .append_prepared_commit({
-            let artifact_id = artifact_id(30);
-            let artifact_digest = content_digest(31);
-            let branch_node = node_id(78);
-            let branch_attempt = attempt_id(79);
-            let mut intent = side_effect_intent(artifact_id.clone(), artifact_digest.clone());
-            let mut claim = side_effect_claim();
-            let mut prepared =
-                side_effect_prepared_with_resource_key(1, "token-1", resource_key("wallet-6", 213));
-            for payload in [&mut intent, &mut claim, &mut prepared] {
-                set_side_effect_ledger(
-                    payload,
-                    shared_ledger.clone(),
-                    events::SideEffectLedgerPurpose::Forward,
-                );
-                set_side_effect_node_attempt(payload, branch_node.clone(), branch_attempt.clone());
-            }
-            typed_commit_request! {
-                run_id: run_b.clone(),
-                expected_next_seq: store.expected_next_seq(&run_b),
-                commit_key: CommitKey::new("resource-same-ledger-b-conflict").expect("commit key"),
-                payloads: vec![
-                    side_effect_attempt_started_for(branch_node.clone(), branch_attempt),
-                    intent,
-                    claim,
-                    prepared,
-                ],
-                required_artifacts: vec![intent_artifact_ref_for_node(
-                    artifact_id,
-                    artifact_digest,
-                    branch_node,
-                )],
-                preconditions: CommitPreconditions::default(),
-            }
+        .append_prepared_commit(typed_commit_request! {
+            run_id: run_b.clone(),
+            expected_next_seq: store.expected_next_seq(&run_b),
+            commit_key: CommitKey::new("resource-same-ledger-b-conflict").expect("commit key"),
+            payloads: vec![intent, claim, prepared],
+            required_artifacts: vec![intent_artifact_ref_for_node(
+                artifact_id,
+                artifact_digest,
+                branch_node,
+            )],
+            preconditions: CommitPreconditions::default(),
         })
         .expect_err("same resource remains exclusive across runs");
     assert_resource_lane_blocked(cross_run_same_resource_error, &lane_a);
@@ -2768,7 +3569,7 @@ fn resource_lane_allows_same_ledger_refresh_with_same_key_only() {
 }
 
 #[test]
-fn resource_lane_releases_on_ledger_terminals_manual_resolution_and_run_terminal() {
+fn resource_lane_releases_on_ledger_terminals_and_run_terminal() {
     let run = run_id(204);
     let lane_key = resource_lane_key("wallet-4");
 
@@ -2976,25 +3777,38 @@ fn resource_lane_releases_on_ledger_terminals_manual_resolution_and_run_terminal
             )],
             preconditions: CommitPreconditions::default(),
         })
-        .expect("append ambiguous ledger");
-    assert!(manual_store
-        .projection_snapshot()
-        .resource_lane(&lane_key)
-        .is_some());
-    manual_store
-        .append_prepared_commit(typed_commit_request! {
-            run_id: run.clone(),
-            expected_next_seq: manual_store.expected_next_seq(&run),
-            commit_key: CommitKey::new("resource-manual-release").expect("commit key"),
-            payloads: vec![manual_resolution_recorded_for_run(run.clone(), 46)],
-            required_artifacts: manual_resolution_artifacts(46),
-            preconditions: saga_preconditions(&run, manual_saga_policy(46)),
-        })
-        .expect("manual resolution releases lane");
+        .expect("ambiguous terminal evidence releases lane");
     assert!(manual_store
         .projection_snapshot()
         .resource_lane(&lane_key)
         .is_none());
+    let rebuilt = ProjectionSnapshot::rebuild_from_run_stream(&manual_store.load_run_stream(&run))
+        .expect("rebuild ambiguous terminal stream");
+    assert!(rebuilt.resource_lane(&lane_key).is_none());
+
+    let second_run = run_id(209);
+    manual_store
+        .append_prepared_commit(run_start_request(
+            second_run.clone(),
+            "resource-second-run-start",
+        ))
+        .expect("append second run");
+    append_side_effect_prepare_for_ledger_on_attempt(
+        &mut manual_store,
+        &second_run,
+        "resource-second-run-prepare",
+        side_effect_ledger_key_with_suffix(10),
+        resource_key("wallet-4", 204),
+        50,
+        true,
+        node_id(82),
+        attempt_id(83),
+    );
+    let lane = manual_store
+        .projection_snapshot()
+        .resource_lane(&lane_key)
+        .expect("second run acquired released lane");
+    assert_eq!(lane.holder.run_id, second_run);
 
     let run = run_id(208);
     let mut terminal_store = InMemoryTypedRunStore::new();
@@ -3313,9 +4127,12 @@ fn side_effect_ledger_purpose_cannot_change_after_intent() {
     let artifact_digest = content_digest(94);
     let mut store = InMemoryTypedRunStore::new();
     store
+        .append_prepared_commit(run_start_request(run_id.clone(), "purpose-run-start"))
+        .expect("append run start");
+    store
         .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
-            expected_next_seq: StreamSeq::FIRST,
+            expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("purpose-attempt-start").expect("commit key"),
             payloads: vec![side_effect_attempt_started()],
             required_artifacts: Vec::new(),
@@ -3677,28 +4494,30 @@ fn remediation_intent_requires_engaged_confirmed_forward_and_unique_link() {
 
 #[test]
 fn manual_resolution_requires_manual_blocked_prefix_and_is_unique() {
-    let run_id = run_id(120);
+    let run_id = run_id(220);
     let mut non_quiescent = InMemoryTypedRunStore::new();
     non_quiescent
         .append_prepared_commit(run_start_request_with_saga_policy(
             run_id.clone(),
             "manual-quiescence-run-start",
-            &manual_saga_policy(150),
+            &proof_manual_saga_policy(),
         ))
         .expect("append run start");
     append_side_effect_prepare(&mut non_quiescent, &run_id);
     append_side_effect_started(&mut non_quiescent, &run_id);
     append_generic_nonretryable_failure(&mut non_quiescent, &run_id, "manual-quiescence");
+    let verified =
+        verified_manual_resolution_for_seq(non_quiescent.expected_next_seq(&run_id).as_u64());
+    let prepared = prepared_manual_resolution_commit(
+        &verified,
+        non_quiescent.expected_next_seq(&run_id),
+        "manual-non-quiescent",
+        proof_manual_saga_policy(),
+    );
     let error = non_quiescent
-        .append_prepared_commit(manual_resolution_request(
-            &run_id,
-            non_quiescent.expected_next_seq(&run_id),
-            "manual-non-quiescent",
-            150,
-            manual_saga_policy(150),
-        ))
-        .expect_err("manual resolution rejects outside manual-blocked mode");
-    assert_projection_conflict_contains(error, "requires prefix-derived manual_blocked");
+        .append_prepared_commit_plan(prepared.into())
+        .expect_err("manual resolution rejects with open non-quiescent attempt");
+    assert_projection_conflict_contains(error, "requires no open semantic attempts");
 
     let mut remediating = InMemoryTypedRunStore::new();
     remediating
@@ -3719,35 +4538,57 @@ fn manual_resolution_requires_manual_blocked_prefix_and_is_unique() {
             compensate_saga_policy(),
         ))
         .expect_err("manual resolution rejects while remediating");
-    assert_projection_conflict_contains(error, "requires prefix-derived manual_blocked");
+    assert_invalid_prepared_commit_contains(error, "requires verified manual resolution proof");
+
+    let raw_error = remediating
+        .append_prepared_commit(manual_resolution_request(
+            &run_id,
+            remediating.expected_next_seq(&run_id),
+            "manual-raw-without-proof",
+            151,
+            compensate_saga_policy(),
+        ))
+        .expect_err("raw manual resolution rejects without proof");
+    assert_invalid_prepared_commit_contains(raw_error, "requires verified manual resolution proof");
 
     let mut store = InMemoryTypedRunStore::new();
     store
         .append_prepared_commit(run_start_request_with_saga_policy(
             run_id.clone(),
             "manual-run-start",
-            &manual_saga_policy(152),
+            &proof_manual_saga_policy(),
         ))
         .expect("append run start");
     append_forward_confirmation(&mut store, &run_id);
-    append_generic_nonretryable_failure(&mut store, &run_id, "manual-clean-failure");
     store
-        .append_prepared_commit(manual_resolution_request(
-            &run_id,
-            store.expected_next_seq(&run_id),
-            "manual-recorded",
-            152,
-            manual_saga_policy(152),
-        ))
+        .append_prepared_commit(typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("manual-clean-sidefx-failure").expect("commit key"),
+            payloads: vec![side_effect_attempt_failed(false)],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("append confirmed side-effect attempt failure");
+    let verified = verified_manual_resolution_for_seq(store.expected_next_seq(&run_id).as_u64());
+    let prepared = prepared_manual_resolution_commit(
+        &verified,
+        store.expected_next_seq(&run_id),
+        "manual-recorded",
+        proof_manual_saga_policy(),
+    );
+    store
+        .append_prepared_commit_plan(prepared.into())
         .expect("manual resolution admitted in manual-blocked mode");
+    let verified = verified_manual_resolution_for_seq(store.expected_next_seq(&run_id).as_u64());
+    let prepared = prepared_manual_resolution_commit(
+        &verified,
+        store.expected_next_seq(&run_id),
+        "manual-duplicate",
+        proof_manual_saga_policy(),
+    );
     let error = store
-        .append_prepared_commit(manual_resolution_request(
-            &run_id,
-            store.expected_next_seq(&run_id),
-            "manual-duplicate",
-            154,
-            manual_saga_policy(152),
-        ))
+        .append_prepared_commit_plan(prepared.into())
         .expect_err("duplicate manual resolution rejects");
     match error {
         StoreError::LogicalKeyConflict { .. } | StoreError::DuplicateLogicalKey { .. } => {}
@@ -3758,29 +4599,278 @@ fn manual_resolution_requires_manual_blocked_prefix_and_is_unique() {
 }
 
 #[test]
+fn manual_resolution_prepared_commit_requires_matching_verified_proof() {
+    let expected_next_seq = StreamSeq::new(7).expect("stream seq");
+    let verified = verified_manual_resolution_for_seq(expected_next_seq.as_u64());
+    let request = manual_resolution_request_from_verified(
+        &verified,
+        expected_next_seq,
+        "manual-without-proof",
+        proof_manual_saga_policy(),
+    );
+    let artifacts = manual_resolution_artifacts_from_verified(&verified);
+    let error = test_prepared_commit_plan(request.clone(), artifacts.clone())
+        .expect_err("manual resolution rejects without proof authority");
+    assert_invalid_prepared_commit_contains(error, "requires verified manual resolution proof");
+
+    let stale_request = manual_resolution_request_from_verified(
+        &verified,
+        StreamSeq::new(8).expect("stream seq"),
+        "manual-stale-proof",
+        proof_manual_saga_policy(),
+    );
+    let error = PreparedCommit::<ManualResolution>::new(
+        stale_request,
+        CommitArtifactEvidenceSet::new(artifacts.clone(), artifacts.clone())
+            .expect("manual artifact evidence set"),
+        &verified,
+    )
+    .expect_err("stale proof rejects");
+    assert_invalid_prepared_commit_contains(error, "expected_next_seq");
+
+    let mut mismatched_payload = manual_resolution_payload_from_verified(&verified);
+    let KernelEventPayload::ManualResolutionRecorded(payload) = &mut mismatched_payload else {
+        unreachable!("helper returns manual resolution payload");
+    };
+    payload.evidence_hash = content_digest(202);
+    let mut mismatched_artifacts = manual_resolution_artifacts_from_verified(&verified);
+    mismatched_artifacts[0].digest = content_digest(202);
+    let mismatched_request = TypedCommitRequest::from_payloads(
+        verified.claim().run_id.clone(),
+        expected_next_seq,
+        CommitKey::new("manual-mismatched-proof").expect("commit key"),
+        vec![mismatched_payload],
+        mismatched_artifacts.clone(),
+        CommitPreconditions {
+            required_run_state: RequiredRunState::NotCompleted,
+            ..saga_preconditions(&verified.claim().run_id, proof_manual_saga_policy())
+        },
+    )
+    .expect("manual resolution request");
+    let error = PreparedCommit::<ManualResolution>::new(
+        mismatched_request,
+        CommitArtifactEvidenceSet::new(mismatched_artifacts.clone(), mismatched_artifacts)
+            .expect("manual artifact evidence set"),
+        &verified,
+    )
+    .expect_err("mismatched proof rejects");
+    assert_invalid_prepared_commit_contains(error, "artifact refs do not match manual proof");
+}
+
+#[test]
+fn manual_resolution_rejects_with_same_run_open_attempt() {
+    let run_id = run_id(220);
+    let mut store = InMemoryTypedRunStore::new();
+    store
+        .append_prepared_commit(run_start_request_with_saga_policy(
+            run_id.clone(),
+            "manual-open-attempt-run-start",
+            &proof_manual_saga_policy(),
+        ))
+        .expect("append run start");
+    append_forward_confirmation(&mut store, &run_id);
+    store
+        .append_prepared_commit(typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("manual-open-attempt-sidefx-failure").expect("commit key"),
+            payloads: vec![side_effect_attempt_failed(false)],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("append confirmed side-effect attempt failure");
+    store
+        .append_prepared_commit(typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("manual-unrelated-open-attempt").expect("commit key"),
+            payloads: vec![fact_attempt_started()],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("append unrelated open attempt");
+
+    let verified = verified_manual_resolution_for_seq(store.expected_next_seq(&run_id).as_u64());
+    let prepared = prepared_manual_resolution_commit(
+        &verified,
+        store.expected_next_seq(&run_id),
+        "manual-open-attempt-reject",
+        proof_manual_saga_policy(),
+    );
+    let error = store
+        .append_prepared_commit_plan(prepared.into())
+        .expect_err("manual resolution rejects open attempt");
+    assert_projection_conflict_contains(error, "requires no open semantic attempts");
+}
+
+#[test]
+fn manual_resolution_admits_with_unrelated_run_open_attempt() {
+    let manual_run_id = run_id(220);
+    let other_run_id = run_id(221);
+    let mut store = InMemoryTypedRunStore::new();
+    store
+        .append_prepared_commit(run_start_request_with_saga_policy(
+            manual_run_id.clone(),
+            "manual-cross-run-start",
+            &proof_manual_saga_policy(),
+        ))
+        .expect("append manual run start");
+    append_forward_confirmation(&mut store, &manual_run_id);
+    store
+        .append_prepared_commit(typed_commit_request! {
+            run_id: manual_run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&manual_run_id),
+            commit_key: CommitKey::new("manual-cross-run-sidefx-failure").expect("commit key"),
+            payloads: vec![side_effect_attempt_failed(false)],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("append confirmed side-effect attempt failure");
+
+    store
+        .append_prepared_commit(run_start_request_with_saga_policy(
+            other_run_id.clone(),
+            "manual-cross-run-other-start",
+            &proof_manual_saga_policy(),
+        ))
+        .expect("append other run start");
+    store
+        .append_prepared_commit(typed_commit_request! {
+            run_id: other_run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&other_run_id),
+            commit_key: CommitKey::new("manual-cross-run-other-open-attempt").expect("commit key"),
+            payloads: vec![fact_attempt_started()],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("append other run open attempt");
+    assert!(store
+        .projection_snapshot()
+        .open_attempt_for_run(&other_run_id)
+        .is_some());
+    assert!(store
+        .projection_snapshot()
+        .open_attempt_for_run(&manual_run_id)
+        .is_none());
+
+    let verified =
+        verified_manual_resolution_for_seq(store.expected_next_seq(&manual_run_id).as_u64());
+    let prepared = prepared_manual_resolution_commit(
+        &verified,
+        store.expected_next_seq(&manual_run_id),
+        "manual-cross-run-admit",
+        proof_manual_saga_policy(),
+    );
+    store
+        .append_prepared_commit_plan(prepared.into())
+        .expect("manual resolution ignores unrelated run open attempt");
+    assert!(store
+        .projection_snapshot()
+        .manual_resolution(&manual_run_id)
+        .is_some());
+    assert!(store
+        .projection_snapshot()
+        .open_attempt_for_run(&other_run_id)
+        .is_some());
+}
+
+#[test]
+fn manual_resolution_rejects_open_side_effect_lane_without_releasing_it() {
+    let run_id = run_id(220);
+    let lane_key = resource_lane_key("wallet-open");
+    let open_ledger = side_effect_ledger_key_with_suffix(31);
+    let mut store = InMemoryTypedRunStore::new();
+    store
+        .append_prepared_commit(run_start_request_with_saga_policy(
+            run_id.clone(),
+            "manual-open-lane-run-start",
+            &proof_manual_saga_policy(),
+        ))
+        .expect("append run start");
+    append_forward_confirmation(&mut store, &run_id);
+    append_side_effect_prepare_for_ledger_on_attempt(
+        &mut store,
+        &run_id,
+        "manual-open-lane-prepare",
+        open_ledger.clone(),
+        resource_key("wallet-open", 220),
+        70,
+        true,
+        node_id(80),
+        attempt_id(81),
+    );
+    store
+        .append_prepared_commit(typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("manual-open-lane-sidefx-failure").expect("commit key"),
+            payloads: vec![side_effect_attempt_failed(false)],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("append confirmed side-effect attempt failure");
+    assert!(store
+        .projection_snapshot()
+        .resource_lane(&lane_key)
+        .is_some());
+
+    let verified = verified_manual_resolution_for_seq(store.expected_next_seq(&run_id).as_u64());
+    let prepared = prepared_manual_resolution_commit(
+        &verified,
+        store.expected_next_seq(&run_id),
+        "manual-open-lane-reject",
+        proof_manual_saga_policy(),
+    );
+    let error = store
+        .append_prepared_commit_plan(prepared.into())
+        .expect_err("manual resolution rejects open side-effect lane attempt");
+    assert_projection_conflict_contains(error, "requires no open semantic attempts");
+    let lane = store
+        .projection_snapshot()
+        .resource_lane(&lane_key)
+        .expect("open lane remains held after rejected manual resolution");
+    assert_eq!(lane.holder.ledger_key, open_ledger);
+}
+
+#[test]
 fn saga_admit_token_must_match_run_start_policy_digest() {
-    let run_id = run_id(121);
+    let run_id = run_id(220);
     let mut store = InMemoryTypedRunStore::new();
     store
         .append_prepared_commit(run_start_request_with_saga_policy(
             run_id.clone(),
             "saga-token-run-start",
-            &manual_saga_policy(170),
+            &proof_manual_saga_policy(),
         ))
         .expect("append run start");
     append_forward_confirmation(&mut store, &run_id);
-    append_generic_nonretryable_failure(&mut store, &run_id, "saga-token-failure");
+    store
+        .append_prepared_commit(typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("saga-token-sidefx-failure").expect("commit key"),
+            payloads: vec![side_effect_attempt_failed(false)],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("append confirmed side-effect attempt failure");
 
-    let error = store
-        .append_prepared_commit(manual_resolution_request(
-            &run_id,
-            store.expected_next_seq(&run_id),
-            "saga-token-mismatch",
-            170,
-            manual_saga_policy(171),
-        ))
-        .expect_err("mismatched saga token rejects");
-    assert_projection_conflict_contains(error, "digest does not match run start");
+    let verified = verified_manual_resolution_for_seq(store.expected_next_seq(&run_id).as_u64());
+    let request = manual_resolution_request_from_verified(
+        &verified,
+        store.expected_next_seq(&run_id),
+        "saga-token-mismatch",
+        manual_saga_policy(171),
+    );
+    let artifacts = manual_resolution_artifacts_from_verified(&verified);
+    let error = PreparedCommit::<ManualResolution>::new(
+        request,
+        CommitArtifactEvidenceSet::new(artifacts.clone(), artifacts)
+            .expect("manual artifact evidence set"),
+        &verified,
+    )
+    .expect_err("mismatched saga token rejects before admission");
+    assert_invalid_prepared_commit_contains(error, "policy does not match saga admit token");
 }
 
 #[test]
@@ -3790,29 +4880,47 @@ fn manual_resolution_artifacts_require_dedicated_roles() {
         mut mutate: impl FnMut(&mut Vec<ArtifactEvidenceRef>),
         expected_field: &'static str,
     ) {
-        let run_id = run_id(120);
+        let run_id = run_id(220);
         let mut store = InMemoryTypedRunStore::new();
         store
             .append_prepared_commit(run_start_request_with_saga_policy(
                 run_id.clone(),
                 "manual-artifact-role-run-start",
-                &manual_saga_policy(156),
+                &proof_manual_saga_policy(),
             ))
             .expect("append run start");
         append_forward_confirmation(&mut store, &run_id);
-        append_generic_nonretryable_failure(&mut store, &run_id, "manual-artifact-role-failure");
-        let mut artifacts = manual_resolution_artifacts(156);
-        mutate(&mut artifacts);
-        let request = manual_resolution_request(
-            &run_id,
+        store
+            .append_prepared_commit(typed_commit_request! {
+                run_id: run_id.clone(),
+                expected_next_seq: store.expected_next_seq(&run_id),
+                commit_key: CommitKey::new(format!("{commit_key}-sidefx-failure"))
+                    .expect("commit key"),
+                payloads: vec![side_effect_attempt_failed(false)],
+                required_artifacts: Vec::new(),
+                preconditions: CommitPreconditions::default(),
+            })
+            .expect("append confirmed side-effect attempt failure");
+        let verified =
+            verified_manual_resolution_for_seq(store.expected_next_seq(&run_id).as_u64());
+        let request = manual_resolution_request_from_verified(
+            &verified,
             store.expected_next_seq(&run_id),
             commit_key,
-            156,
-            manual_saga_policy(156),
+            proof_manual_saga_policy(),
+        );
+        let required_artifacts = manual_resolution_artifacts_from_verified(&verified);
+        let mut admitted_artifacts = required_artifacts.clone();
+        mutate(&mut admitted_artifacts);
+        let prepared = PreparedCommit::<ManualResolution>::new(
+            request,
+            CommitArtifactEvidenceSet::new(required_artifacts, admitted_artifacts)
+                .expect("manual artifact evidence set"),
+            &verified,
         )
-        .with_required_artifacts(artifacts);
+        .expect("proof-backed manual resolution prepared commit");
         let error = store
-            .append_prepared_commit(request)
+            .append_prepared_commit_plan(prepared.into())
             .expect_err("manual artifact mismatch rejects");
         assert!(matches!(
             error,
@@ -3837,91 +4945,115 @@ fn manual_resolution_artifacts_require_dedicated_roles() {
     );
     reject_with(
         "manual-wrong-evidence-digest",
-        |artifacts| artifacts[0].digest = content_digest(201),
+        |artifacts| artifacts[0].digest = content_digest(202),
         "digest",
     );
 }
 
 #[test]
 fn saga_run_completed_requires_terminal_proof() {
-    let run_id = run_id(120);
+    let terminal_run = run_id(120);
     let mut store = InMemoryTypedRunStore::new();
     let policy = manual_saga_policy(160);
     store
         .append_prepared_commit(run_start_request_with_saga_policy(
-            run_id.clone(),
+            terminal_run.clone(),
             "terminal-quiescence-run-start",
             &policy,
         ))
         .expect("append run start");
-    append_side_effect_prepare(&mut store, &run_id);
-    append_side_effect_started(&mut store, &run_id);
-    append_generic_nonretryable_failure(&mut store, &run_id, "terminal-quiescence");
+    append_side_effect_prepare(&mut store, &terminal_run);
+    append_side_effect_started(&mut store, &terminal_run);
+    append_generic_nonretryable_failure(&mut store, &terminal_run, "terminal-quiescence");
     let saga = store
         .projection_snapshot()
-        .derive_saga_projection(&run_id, &policy);
-    let proof_error = SagaTerminalProof::new(&policy, &saga, None)
-        .expect_err("proof rejects before terminal saga mode");
+        .derive_saga_projection(&terminal_run, &policy);
+    let proof_error =
+        SagaTerminalProof::new(&policy, &saga, store.expected_next_seq(&terminal_run), None)
+            .expect_err("proof rejects before terminal saga mode");
     assert_projection_conflict_contains(proof_error, "requires terminal saga mode");
     let error = store
         .append_prepared_commit(typed_commit_request! {
-            run_id: run_id.clone(),
-            expected_next_seq: store.expected_next_seq(&run_id),
+            run_id: terminal_run.clone(),
+            expected_next_seq: store.expected_next_seq(&terminal_run),
             commit_key: CommitKey::new("terminal-non-quiescent").expect("commit key"),
             payloads: vec![run_completed(
                 events::RunCompletionOutcome::FailedWithoutAcdcClaim,
             )],
             required_artifacts: Vec::new(),
-            preconditions: saga_preconditions(&run_id, policy.clone()),
+            preconditions: saga_preconditions(&terminal_run, policy.clone()),
         })
         .expect_err("raw terminal completion rejects without proof");
     assert_invalid_prepared_commit_contains(error, "requires SagaTerminalProof");
 
     let mut forged = InMemoryTypedRunStore::new();
-    let forged_policy = manual_saga_policy(162);
+    let forged_run = run_id(220);
+    let forged_policy = proof_manual_saga_policy();
     forged
         .append_prepared_commit(run_start_request_with_saga_policy(
-            run_id.clone(),
+            forged_run.clone(),
             "terminal-forged-run-start",
             &forged_policy,
         ))
         .expect("append run start");
-    append_forward_confirmation(&mut forged, &run_id);
-    append_generic_nonretryable_failure(&mut forged, &run_id, "terminal-forged-failure");
+    append_forward_confirmation(&mut forged, &forged_run);
+    forged
+        .append_prepared_commit(typed_commit_request! {
+            run_id: forged_run.clone(),
+            expected_next_seq: forged.expected_next_seq(&forged_run),
+            commit_key: CommitKey::new("terminal-forged-sidefx-failure").expect("commit key"),
+            payloads: vec![side_effect_attempt_failed(false)],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("append confirmed side-effect attempt failure");
     let saga = forged
         .projection_snapshot()
-        .derive_saga_projection(&run_id, &forged_policy);
-    let proof_error = SagaTerminalProof::new(&forged_policy, &saga, None)
-        .expect_err("manual terminal rejects before manual resolution");
+        .derive_saga_projection(&forged_run, &forged_policy);
+    let proof_error = SagaTerminalProof::new(
+        &forged_policy,
+        &saga,
+        forged.expected_next_seq(&forged_run),
+        None,
+    )
+    .expect_err("manual terminal rejects before manual resolution");
     assert_projection_conflict_contains(proof_error, "requires terminal saga mode");
     let error = forged
         .append_prepared_commit(typed_commit_request! {
-            run_id: run_id.clone(),
-            expected_next_seq: forged.expected_next_seq(&run_id),
+            run_id: forged_run.clone(),
+            expected_next_seq: forged.expected_next_seq(&forged_run),
             commit_key: CommitKey::new("terminal-forged-manual").expect("commit key"),
-            payloads: vec![run_completed(
+            payloads: vec![run_completed_for_run(
+                forged_run.clone(),
                 events::RunCompletionOutcome::ManuallyResolved,
             )],
             required_artifacts: Vec::new(),
-            preconditions: saga_preconditions(&run_id, forged_policy.clone()),
+            preconditions: saga_preconditions(&forged_run, forged_policy.clone()),
         })
         .expect_err("raw forged manual terminal rejects without proof");
     assert_invalid_prepared_commit_contains(error, "requires SagaTerminalProof");
 
+    let verified =
+        verified_manual_resolution_for_seq(forged.expected_next_seq(&forged_run).as_u64());
+    let prepared = prepared_manual_resolution_commit(
+        &verified,
+        forged.expected_next_seq(&forged_run),
+        "terminal-manual-recorded",
+        forged_policy.clone(),
+    );
     forged
-        .append_prepared_commit(manual_resolution_request(
-            &run_id,
-            forged.expected_next_seq(&run_id),
-            "terminal-manual-recorded",
-            162,
-            forged_policy.clone(),
-        ))
+        .append_prepared_commit_plan(prepared.into())
         .expect("manual resolution admitted");
     let saga = forged
         .projection_snapshot()
-        .derive_saga_projection(&run_id, &forged_policy);
-    let proof_error = SagaTerminalProof::new(&forged_policy, &saga, None)
-        .expect_err("manual terminal requires verified proof authority");
+        .derive_saga_projection(&forged_run, &forged_policy);
+    let proof_error = SagaTerminalProof::new(
+        &forged_policy,
+        &saga,
+        forged.expected_next_seq(&forged_run),
+        None,
+    )
+    .expect_err("manual terminal requires verified proof authority");
     assert_projection_conflict_contains(proof_error, "requires verified manual resolution proof");
 }
 
@@ -3941,8 +5073,8 @@ fn saga_terminal_prepared_commit_requires_matching_proof() {
     let saga = store
         .projection_snapshot()
         .derive_saga_projection(&run_id, &policy);
-    let proof =
-        SagaTerminalProof::new(&policy, &saga, None).expect("failed terminal proof authority");
+    let proof = SagaTerminalProof::new(&policy, &saga, store.expected_next_seq(&run_id), None)
+        .expect("failed terminal proof authority");
     let request = typed_commit_request! {
         run_id: run_id.clone(),
         expected_next_seq: store.expected_next_seq(&run_id),
@@ -3991,8 +5123,13 @@ fn saga_terminal_prepared_commit_rejects_cross_run_proof() {
     let proof_saga = proof_store
         .projection_snapshot()
         .derive_saga_projection(&proof_run, &policy);
-    let proof =
-        SagaTerminalProof::new(&policy, &proof_saga, None).expect("terminal proof authority");
+    let proof = SagaTerminalProof::new(
+        &policy,
+        &proof_saga,
+        proof_store.expected_next_seq(&proof_run),
+        None,
+    )
+    .expect("terminal proof authority");
 
     let request = typed_commit_request! {
         run_id: request_run.clone(),
@@ -4027,7 +5164,8 @@ fn saga_terminal_prepared_commit_rejects_policy_digest_mismatch() {
     let saga = store
         .projection_snapshot()
         .derive_saga_projection(&run_id, &policy);
-    let proof = SagaTerminalProof::new(&policy, &saga, None).expect("terminal proof authority");
+    let proof = SagaTerminalProof::new(&policy, &saga, store.expected_next_seq(&run_id), None)
+        .expect("terminal proof authority");
 
     let request = typed_commit_request! {
         run_id: run_id.clone(),
@@ -4047,7 +5185,7 @@ fn saga_terminal_prepared_commit_rejects_policy_digest_mismatch() {
 }
 
 #[test]
-fn saga_terminal_append_rechecks_current_projection() {
+fn saga_terminal_prepared_commit_rejects_stale_prefix_proof() {
     let run_id = run_id(126);
     let policy = SagaPolicySpec::FailWithoutAcdcClaim;
     let mut proof_store = InMemoryTypedRunStore::new();
@@ -4066,8 +5204,13 @@ fn saga_terminal_append_rechecks_current_projection() {
     let proof_saga = proof_store
         .projection_snapshot()
         .derive_saga_projection(&run_id, &policy);
-    let proof =
-        SagaTerminalProof::new(&policy, &proof_saga, None).expect("terminal proof authority");
+    let proof = SagaTerminalProof::new(
+        &policy,
+        &proof_saga,
+        proof_store.expected_next_seq(&run_id),
+        None,
+    )
+    .expect("terminal proof authority");
 
     let mut store = InMemoryTypedRunStore::new();
     store
@@ -4088,13 +5231,10 @@ fn saga_terminal_append_rechecks_current_projection() {
         required_artifacts: Vec::new(),
         preconditions: saga_preconditions(&run_id, policy),
     };
-    let prepared =
+    let error =
         PreparedCommit::<SagaTerminal>::new(request, CommitArtifactEvidenceSet::empty(), &proof)
-            .expect("proof-backed commit can be prepared");
-    let error = store
-        .append_prepared_commit_plan(prepared.into())
-        .expect_err("append rechecks current projection");
-    assert_projection_conflict_contains(error, "requires terminal saga mode");
+            .expect_err("stale proof rejects");
+    assert_invalid_prepared_commit_contains(error, "prefix");
 }
 
 #[test]

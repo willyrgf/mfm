@@ -520,3 +520,107 @@ fn test_json_response_structure_consistency() {
     assert_eq!(error_json["error"]["code"], "ErrorCode");
     assert_eq!(error_json["error"]["message"], "Error message");
 }
+
+#[test]
+fn test_run_status_json_contract_exposes_attempt_dispositions_and_saga_blocks() {
+    let status_payload = json!({
+        "run_id": "run:sha256-jcs-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "spec_hash": "spec:sha256-jcs-v1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "run_mode": "manual_blocked",
+        "saga": {
+            "policy": {
+                "variant": "compensate_completed",
+                "manual_authorization": null,
+                "on_remediation_unresolved": "manual_resolution"
+            },
+            "obligations": [],
+            "resource_ledgers": [],
+            "resource_lanes": [{
+                "namespace": "mfm.test.account_nonce",
+                "key": "wallet-1",
+                "holding_run_id": "run:sha256-jcs-v1:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "holding_ledger_key": "ledger-forward",
+                "holding_ledger_purpose": "forward",
+                "holding_forward_ledger_key": null,
+                "holding_node_id": "node:sha256-jcs-v1:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                "holding_attempt_id": "attempt:sha256-jcs-v1:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                "invocation_epoch": 1
+            }],
+            "manual_block_reason": "policy_manual_resolution",
+            "required_manual_authorization": {
+                "evidence_schema_id": "mfm.test.manual:1:sha256-jcs-v1:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                "verifier_id": "mfm.test.manual.verifier",
+                "signing_scheme": "mfm.manual_resolution.digest_signature.v1",
+                "authority_id": "mfm.test.manual.authority",
+                "operator_public_identities": ["0x0000000000000000000000000000000000000001"],
+                "quorum_required_signatures": 1
+            },
+            "terminal_resolution": {
+                "outcome": "manually_resolved",
+                "claim": "manual_resolution"
+            }
+        },
+        "attempt_dispositions": [
+            {
+                "node_id": "node:sha256-jcs-v1:1111111111111111111111111111111111111111111111111111111111111111",
+                "attempt_id": "attempt:sha256-jcs-v1:2222222222222222222222222222222222222222222222222222222222222222",
+                "disposition": "started",
+                "attempt_no": 1,
+                "retryable": null,
+                "output_cell_id": null
+            },
+            {
+                "node_id": "node:sha256-jcs-v1:3333333333333333333333333333333333333333333333333333333333333333",
+                "attempt_id": "attempt:sha256-jcs-v1:4444444444444444444444444444444444444444444444444444444444444444",
+                "disposition": "interrupted",
+                "attempt_no": null,
+                "retryable": null,
+                "output_cell_id": null
+            },
+            {
+                "node_id": "node:sha256-jcs-v1:5555555555555555555555555555555555555555555555555555555555555555",
+                "attempt_id": "attempt:sha256-jcs-v1:6666666666666666666666666666666666666666666666666666666666666666",
+                "disposition": "failed",
+                "attempt_no": null,
+                "retryable": false,
+                "output_cell_id": null
+            },
+            {
+                "node_id": "node:sha256-jcs-v1:7777777777777777777777777777777777777777777777777777777777777777",
+                "attempt_id": "attempt:sha256-jcs-v1:8888888888888888888888888888888888888888888888888888888888888888",
+                "disposition": "completed",
+                "attempt_no": null,
+                "retryable": null,
+                "output_cell_id": "cell:sha256-jcs-v1:9999999999999999999999999999999999999999999999999999999999999999"
+            }
+        ],
+        "scheduler_status": "blocked",
+        "head_seq": 42
+    });
+
+    let response = SuccessResponse::new(status_payload);
+    let value = serde_json::to_value(response).expect("serialize response");
+
+    assert_eq!(value["status"], "success");
+    assert_eq!(
+        value["data"]["attempt_dispositions"]
+            .as_array()
+            .expect("attempt dispositions")
+            .iter()
+            .map(|item| item["disposition"].as_str().expect("disposition"))
+            .collect::<Vec<_>>(),
+        vec!["started", "interrupted", "failed", "completed"]
+    );
+    assert_eq!(
+        value["data"]["saga"]["resource_lanes"][0]["key"],
+        "wallet-1"
+    );
+    assert_eq!(
+        value["data"]["saga"]["manual_block_reason"],
+        "policy_manual_resolution"
+    );
+    assert_eq!(
+        value["data"]["saga"]["terminal_resolution"]["outcome"],
+        "manually_resolved"
+    );
+}

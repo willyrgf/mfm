@@ -16,6 +16,5 @@ metadata, and the typed spec itself against the registry. Hash match alone is no
 already-lowered descriptor identities, but persisted spec descriptors are not trusted registry input
 until the bundle verifier has accepted the spec/certificate pair.
 
-`docs/design.md` is the normative typed-core authority contract; `RFC_TYPED_CORE_PROPOSAL_1.md` is
-historical. This crate is framework-owned and must remain domain-free. It must not depend on old
-dynamic machine or SDK crates.
+`docs/design.md` is the normative typed-core authority contract. This crate is framework-owned and
+must remain domain-free. It must not depend on old dynamic machine or SDK crates.

@@ -28,7 +28,7 @@ const TEMPORARY_TYPED_FIELD_ALLOWLIST: &[(&str, &str, usize)] = &[
     ("crates/app/src/lib.rs", "authorization", 51),
     ("crates/kernel/certify/src/lib.rs", "authorization", 79),
     ("crates/kernel/program/src/lib.rs", "authorization", 15),
-    ("crates/kernel/runtime/src/tests.rs", "authorization", 8),
+    ("crates/kernel/runtime/src/tests.rs", "authorization", 11),
     ("tests/integration/src/test_support.rs", "authorization", 6),
     ("tests/integration/src/test_support.rs", "rpc_url", 4),
     (
@@ -107,6 +107,154 @@ fn repository_text_entries_include_tracked_dot_config_surfaces() {
             .all(|entry| !entry.path.starts_with("migrations/")),
         "Postgres migrations must live under the owning storage crate"
     );
+}
+
+#[test]
+fn docs_do_not_describe_synthetic_admission_as_executed_genesis_state() {
+    let root = repo_root();
+    let entries = repo_text_entries(&root);
+    let forbidden = [
+        "executes the sealed `BootstrapRun` genesis state",
+        "executes the sealed BootstrapRun genesis state",
+        "`BootstrapRun` remains certified",
+        "BootstrapRun remains certified",
+        "legacy bundled bootstrap evidence",
+        "bundled bootstrap evidence",
+    ];
+
+    assert_forbidden_terms_are_allowlisted(
+        "stale admission docs",
+        &entries,
+        &forbidden,
+        &[],
+        |path, _source| path != "tests/integration/tests/architecture_namespace_contract.rs",
+    );
+}
+
+#[test]
+fn repository_does_not_expose_raw_prepared_commit_escape_hatch_names() {
+    let root = repo_root();
+    let entries = repo_text_entries(&root);
+    let forbidden = [
+        "PreparedTypedCommit",
+        "append_prepared_typed_commit",
+        "stage_prepared_typed_run_commit",
+        "build_prepared_committed_batch",
+        "prepared_commit_fingerprint",
+        "into_typed_commit",
+    ];
+
+    assert_forbidden_terms_are_allowlisted(
+        "raw prepared commit escape hatch",
+        &entries,
+        &forbidden,
+        &[],
+        |path, _source| path != "tests/integration/tests/architecture_namespace_contract.rs",
+    );
+}
+
+#[test]
+fn runtime_docs_assign_public_output_render_to_framework_lifecycle() {
+    let root = repo_root();
+    let entries = repo_text_entries(&root);
+    let forbidden = [
+        "`attempt`: ordinary and public-output render attempt lifecycle",
+        "`framework_lifecycle`: started-before-run framework attempt lifecycle for retention and terminal states",
+    ];
+
+    assert_forbidden_terms_are_allowlisted(
+        "runtime framework lifecycle docs",
+        &entries,
+        &forbidden,
+        &[],
+        |path, _source| path == "crates/kernel/runtime/README.md",
+    );
+
+    let readme =
+        fs::read_to_string(root.join("crates/kernel/runtime/README.md")).expect("runtime README");
+    assert!(
+        readme.contains(
+            "`framework_lifecycle`: started-before-run framework attempt lifecycle for public-output rendering"
+        ),
+        "runtime README must assign public-output rendering to framework_lifecycle"
+    );
+}
+
+#[test]
+fn design_docs_do_not_make_public_output_projected_a_transition_decision() {
+    let root = repo_root();
+    let design = fs::read_to_string(root.join("docs/design.md")).expect("design doc");
+    let forbidden = [
+        "report projected public output completion",
+        "projected public output completion",
+        "projected public output is a frontier transition decision",
+        "report blocked completion",
+    ];
+
+    for phrase in forbidden {
+        assert!(
+            !design.contains(phrase),
+            "docs/design.md must not describe public-output projected status as a transition decision: {phrase}"
+        );
+    }
+    assert!(
+        design.contains("already projected public output is a scheduler facade status"),
+        "docs/design.md must scope already-projected public output to scheduler facade status"
+    );
+}
+
+#[test]
+fn evm_contract_lifecycle_runners_live_in_adapter_not_app() {
+    let root = repo_root();
+    let app = fs::read_to_string(root.join("crates/app/src/evm_contracts.rs"))
+        .expect("app evm contracts source");
+    let adapter = fs::read_to_string(root.join("crates/adapters/evm-contracts/src/lib.rs"))
+        .expect("evm contract adapter source");
+
+    for forbidden in [
+        "impl ErasedNodeRunner",
+        "ErasedRunnerBinding",
+        "register_capability_set",
+        "ContractMutationRunner",
+        "ContractValidateRunner",
+        "run_deploy_mutation",
+        "run_configure_mutation",
+        "run_validate",
+        "side_effect_prepare",
+        "mfm-app-evm-contract-lifecycle",
+    ] {
+        assert!(
+            !app.contains(forbidden),
+            "app EVM wiring must not own contract lifecycle runner behavior: {forbidden}"
+        );
+    }
+
+    for required in [
+        "pub fn register_contract_lifecycle_runners_with_factory",
+        "impl ErasedNodeRunner for ContractMutationRunner",
+        "impl ErasedNodeRunner for ContractValidateRunner",
+        "mfm-adapters-evm-contracts-built-in",
+    ] {
+        assert!(
+            adapter.contains(required),
+            "EVM contract adapter must own runner behavior: {required}"
+        );
+    }
+
+    for forbidden in [
+        "FsTypedArtifactStore",
+        "EvmJsonRpcClient",
+        "KeystoreSignerProvider",
+        "KeystoreSignerRegistryEntry",
+        "MFM_EVM_SIGNERS_JSON",
+        "RuntimeSignerConfig",
+        "from_env_sources",
+    ] {
+        assert!(
+            !adapter.contains(forbidden),
+            "EVM contract adapter must not own concrete process wiring: {forbidden}"
+        );
+    }
 }
 
 #[test]

@@ -1,7 +1,7 @@
 use mfm_events::v1 as events;
 use mfm_runtime::RunnerEventPayload;
 
-fn run_started() -> events::RunStarted {
+fn run_admitted() -> events::RunAdmitted {
     unimplemented!()
 }
 
@@ -30,7 +30,7 @@ fn retention_manifest() -> events::RetentionManifestProjected {
 }
 
 fn main() {
-    let _ = RunnerEventPayload::RunStarted(run_started());
+    let _ = RunnerEventPayload::RunAdmitted(run_admitted());
     let _ = RunnerEventPayload::StateAttemptStarted(attempt_started());
     let _ = RunnerEventPayload::StateAttemptCompleted(completed());
     let _ = RunnerEventPayload::StateAttemptFailed(failed());

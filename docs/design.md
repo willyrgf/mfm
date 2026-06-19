@@ -209,6 +209,10 @@ supplies replay implementations backed only by recorded facts, typed artifacts, 
 evidence. Adapters translate state-owned intent into capability calls and evidence phases without
 moving protocol IO or signer material into state code.
 
+Runtime admission binds each certified capability descriptor to a registered non-secret
+implementation identity before the run can start or resume. Missing or mismatched implementation
+bindings are deployment/ingress failures, not semantic attempt outcomes.
+
 Replay and resume semantics follow the effect class:
 
 - Pure states replay by recomputing deterministic state behavior.
@@ -243,6 +247,9 @@ Remediation ledgers use the same side-effect protocol as forward ledgers and car
 
 Public status reports semantic `RunMode`: `forward`, `remediating`, `manual_blocked`,
 `completed`, `compensated`, `manually_resolved`, or `failed_without_acdc_claim`.
+Attempt lifecycle is reported separately as committed attempt dispositions: `started`, `completed`,
+`failed`, or `interrupted`. Interruption is retryable attempt bookkeeping, not a run mode, saga
+engagement, compensated outcome, AC/DC claim, or manual-resolution authority.
 `Compensated` is never a vacuous outcome; it requires owed obligations closed by certified remedial
 evidence. `FailedWithoutAcdcClaim` is the honest terminal result when policy permits failure
 without a compensation or AC/DC-equivalence proof.
@@ -289,7 +296,7 @@ corruption, or low-level storage contract fixtures.
 
 The authoritative event stream contains:
 
-- run start and attempt lifecycle events
+- run start and attempt lifecycle events, including interrupted-attempt terminal bookkeeping
 - seed/config/fact/artifact evidence
 - cell terminal events
 - side-effect ledger events
@@ -331,7 +338,7 @@ hash-only envelope. Authoring and persistence move through explicit stages:
 non-forgeable `CertifiedTypedSpec`. Persisted nodes and renderers refer to descriptor authority by
 `DescriptorRef`; `CertifiedDescriptorSet` and `CertifiedFrameworkLifecycle` are the certified views
 runtime consumes. `CertifiedRuntimeSpec` is the runtime view of the static certified transition
-graph. Before `RunStarted`, the assembly/runtime boundary verifies:
+graph. Before `RunAdmitted`, the assembly/runtime boundary verifies:
 
 - spec hash and schema/version fields
 - staged spec/certificate/config/seed artifact bytes and typed evidence
@@ -343,49 +350,81 @@ After launch, runtime advances only from the append-only run stream authority. I
 delegates spec-independent ordering and projection checks to `mfm-store`, then performs
 runtime-owned spec-aware validation of seeds, configs, artifacts, completed cells, side-effect
 ledger evidence, public-output events, retention events, and terminal run state. The rebuilt
-projection is derived from the stream; it is not independent semantic authority.
+projection is derived from the stream; it is not independent semantic authority. Store-owned stream
+validation is also the centralized old-model ingress guard: loaded streams and projection rebuilds
+reject attempt-bound payloads that are not preceded by a separate `StateAttemptStarted` commit, so
+runtime, replay, and Postgres-backed loads fail before trusting old lifecycle rows.
 
 Read, resume, replay, and status paths must construct `VerifiedRunHistory` from a
 `CommittedRunStream` plus `VerifiedRunArtifactStore` before trusting history. Replay authority is
 minted from that verified history and certified runtime authority; raw event vectors or retained
-artifact bytes without committed evidence do not cross the runtime/replay boundary.
+artifact bytes without committed evidence do not cross the runtime/replay boundary. Scheduler drive
+paths construct `VerifiedRunContext` through `VerifiedRunContextLoader`, which combines the same
+committed stream/view authority with `BoundRuntimeContext` runner, capability, and framework-handler
+authority before any transition is selected.
 
 The deterministic frontier scheduler is pure. Given the static certified transition graph and
-verified run history, it returns exactly one decision: run a certified node, block because no valid
-frontier is executable, or complete because all certified terminal conditions are satisfied. It does
-not write the store, stage artifacts, construct live capabilities, or call runners.
+verified run history, it returns one closed transition decision: start a node, continue an open
+attempt, start remediation, wait for manual resolution, resolve saga terminal state, or report
+blocked. Public-output, retention, and completion work are ordinary certified
+framework node selections; an already projected public output is a scheduler facade status, not a
+frontier transition decision. Open-attempt recovery, including legal interruption, is handled by the
+attempt recovery lifecycle when the continued attempt is dispatched. The frontier decision does not
+write the store, stage artifacts, construct live capabilities, or call runners. Open-attempt recovery
+classifies verified open attempts into continue, retry terminalization, interrupt, side-effect
+recovery, or operational block dispositions. Operational blocks are reserved runtime recovery states
+for malformed evidence such as terminal side-effect ledger evidence without matching
+attempt-terminal evidence; normal store/history validation rejects those malformed streams before
+scheduler recovery, and public status collapses any surviving operational block to blocked without
+minting semantic terminal events.
 
-For a runnable node, runtime materializes state inputs from certified binding trees and prior typed
-cell evidence, checks runner identity and capability availability, and constructs a sealed runner
-invocation. Runners receive only scoped typed inputs, allowed capabilities, and erased context
-surfaces. They return typed payload intent, staged artifacts, side-effect evidence, or sealed handles
-but cannot append to the run stream.
+Sync and async drive paths may remain separate IO wrappers. Shared lifecycle authority belongs in
+pure helpers for transition/recovery classification, attempt planning, invocation build, output
+validation, and commit planning. Full sync/async driver collapse is deferred to a later async-primary
+cleanup and must not change lifecycle semantics.
 
-The commit planner owns all production execution appends. Bootstrap verifies and stages launch
-material, executes the sealed `BootstrapRun` genesis state, and commits `RunStarted`, bootstrap
-attempt lifecycle, launch artifact references, retention refs, and admitted artifact evidence in one
-purpose-specific prepared store commit. Ordinary states, `PublicOutputRender`,
-`ProjectRetentionManifest`, and `CompleteRun` use the same guarded commit path: staged artifacts are
-persisted before the prepared commit, output and reference bindings are checked against the
-certified graph, side-effect protocol rules are enforced, commit preconditions are built, and
-run-store artifact evidence is admitted only in the commit that first references it. Production
-callers submit `PreparedCommit<Purpose>` values through `PreparedCommitPlan`; the store treats the
-inner `PreparedTypedCommit` as a typed batch representation and rejects purpose mismatches, missing
-`SagaAdmitToken`, missing `SagaTerminalProof`, or artifact evidence that was not admitted in the
-same commit. Failed commits may leave orphan artifact-store bytes, but orphan run-store evidence is
-not authority.
+For a new ordinary runnable node attempt, runtime first appends `StateAttemptStarted` from
+certified attempt authority. It then materializes state inputs from certified binding trees and
+prior typed cell evidence, checks runner identity and capability availability, and constructs a
+sealed runner invocation. If post-start materialization, runner-output validation, or runtime
+validation fails inside a valid started attempt and no side-effect authority has been acquired,
+runtime stages a redacted diagnostic artifact and records a non-retryable `StateAttemptFailed` plus
+runtime-evidence retention from minimal trusted attempt authority. Corrupt history before a valid
+attempt context, missing deployment bindings, storage/artifact outages before terminal evidence
+commits, and side-effect attempts with acquired ledger authority remain non-semantic runtime or
+recovery concerns. Runners receive only scoped typed inputs, allowed capabilities, and erased
+context surfaces. They return typed payload intent, staged artifacts, side-effect evidence, or
+sealed handles but cannot append to the run stream.
+
+The commit planner owns all production execution appends. `RunAdmissionLifecycle` verifies and
+stages launch material, then commits exactly one `RunAdmitted` root event with certified spec,
+certificate, config, seed, executable, binding-digest, framework, source, and caller launch-time
+evidence. Root artifact retention is projection-derived from `RunAdmitted`; launch does not append
+attempt, cell, artifact-reference, or retention-ref payloads. Ordinary states, `PublicOutputRender`,
+`ProjectRetentionManifest`, `CompleteRun`, and `ResolveSagaTerminal` append
+`StateAttemptStarted` before sealed invocation construction, then use the same guarded terminal
+commit path: staged artifacts are persisted before the prepared commit, output and reference
+bindings are checked against the certified graph, side-effect protocol rules are enforced, commit
+preconditions are built, and run-store artifact evidence is admitted only in the commit that first
+references it. Production callers submit `PreparedCommit<Purpose>` values through
+`PreparedCommitPlan`; stores do not expose or accept a raw typed-batch escape hatch. Purpose
+constructors reject purpose mismatches, missing `SagaAdmitToken`, missing
+`SagaTerminalProof`, or artifact evidence that was not admitted in the same commit. Failed commits
+may leave orphan artifact-store bytes, but orphan run-store evidence is not authority.
 
 Framework lifecycle work is represented by certified graph nodes, not ad hoc runtime side effects.
-`BootstrapRun`, `PublicOutputRender`, `ProjectRetentionManifest`, and `CompleteRun` are sealed
-framework runners with the same append-only stream, rebuilt projection, deterministic scheduler,
-and guarded commit rules as domain states.
+Run admission is the sole pre-attempt root authority and is not represented by a certified graph
+node. `PublicOutputRender`, `ProjectRetentionManifest`, `CompleteRun`, and
+`ResolveSagaTerminal` are sealed framework runners with the same append-only stream, rebuilt
+projection, deterministic scheduler, started-before-run attempt lifecycle, and guarded commit rules
+as domain states.
 
 Resume loads the stored certified spec, rebuilds the verified history and projection from the run
 stream, verifies completed cell and side-effect evidence against the spec, then advances only from a
 type-valid frontier.
 
 Replay loads the stored certified spec and certificate artifacts, verifies them against the
-production registry, compares the hashes to `RunStarted`, rebuilds stream evidence, and uses replay
+production registry, compares the hashes to `RunAdmitted`, rebuilds stream evidence, and uses replay
 adapters only. Live capability construction during replay is a contract violation.
 
 Manual-resolution replay additionally verifies that the stream prefix derives `ManualBlocked`, the
@@ -394,7 +433,8 @@ digests, the canonical proof claim matches the event and prefix exactly, signatu
 belong to the certified authority snapshot, and quorum is satisfied. Runtime and replay build this
 through `ManualResolutionPrefixAuthority` and `ManualResolutionProofAuthority`; only a
 `VerifiedManualResolutionForPrefix` can authorize the corresponding manual-resolution commit or
-terminal saga proof.
+terminal saga proof. Terminal saga proof construction re-verifies that authority from the current
+verified prefix and retained artifacts; scheduler-local proof caches are not authority.
 
 ## Side Effects
 
@@ -417,6 +457,21 @@ execution, resume, and replay. The store exposes legal phase information through
 `SideEffectLedgerState`, so transition admission is a typed state-machine check instead of an
 optional-field projection heuristic. Forward side-effect ambiguity is admissible only when paired in
 the same commit with the non-retryable attempt failure that engages saga handling.
+The store is the source of truth for forward-fence admission after saga engagement; runtime
+early-rejects are scheduling convenience and cannot substitute for store validation.
+Resource-lane scheduling remains conservative. A lane-blocked attempt may be skipped only with a
+scoped independence witness. If another side-effect node has concrete lane evidence, the witness is
+compared against that concrete key. If the node has not yet reached invocation preparation, the
+runtime knows only the certified resource namespace, so same-namespace work waits until the parked
+lane releases or concrete evidence exists. Different namespaces may still advance.
+Standalone interruption is legal for a side-effect attempt only before
+`SideEffectInvocationPrepared`. A no-projection open side-effect attempt has no acquired ledger
+evidence and recovery continues the same attempt. `SideEffectIntentPersisted` and
+`SideEffectClaimed` are pre-prepare phases and do not by themselves hold a resource lane/open ledger
+that must be released by side-effect recovery, so recovery may interrupt them with ordinary attempt
+evidence. `SideEffectInvocationPrepared` and every later phase are owned by
+`SideEffectLifecycle`; recovery either resumes from the concrete ledger phase, records
+evidence-backed terminal side-effect outcome, or reports an operational block.
 
 Prepared-invocation artifacts may retain unsigned mutation plans, expected hashes, and non-secret
 signer references. Signed raw transactions are bearer mutation material and remain transient
@@ -476,8 +531,7 @@ Update this document when a change alters:
 - crate ownership boundaries
 - CLI or REST runtime contracts
 
-Use `docs/architecture.md` for the short contributor map and `RFC_TYPED_CORE_PROPOSAL_1.md` for the
-historical proposal that introduced this rewrite.
+Use `docs/architecture.md` for the short contributor map.
 
 The former typed-core source-scan gates and summary-key CI scripts have been deleted. Real
 guarantees now live in typed APIs, private constructors, crate dependency boundaries, Rust tests,
