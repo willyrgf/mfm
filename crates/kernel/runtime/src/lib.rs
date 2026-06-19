@@ -33,6 +33,7 @@ mod recovery;
 mod runner_kit;
 mod runners;
 mod scheduler;
+mod side_effect_driver;
 mod side_effect_lifecycle;
 mod side_effects;
 mod spec_authority;
@@ -75,6 +76,10 @@ pub use runners::{
     RunnerEventPayload,
 };
 pub use scheduler::{ManualResolutionRequest, SchedulerStatus, SerialTypedScheduler};
+pub use side_effect_driver::{
+    SideEffectClaimAuthority, SideEffectEvidenceBuilder, SideEffectPrepareEvidence,
+    SideEffectPreparedInvocationEvidence, SideEffectReplayEvidence,
+};
 pub use side_effect_lifecycle::SideEffectAttemptView;
 pub use spec_authority::CertifiedRuntimeSpec;
 

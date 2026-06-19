@@ -1142,6 +1142,265 @@ fn runner_kit_builders_create_context_bound_artifacts_payloads_and_output() {
 }
 
 #[test]
+fn side_effect_evidence_builder_prepares_and_stages_claimed_invocation() {
+    let fixture = fixture();
+    let ledger_key = events::SideEffectLedgerKey::new("mfm.test.side_effect_builder.ledger")
+        .expect("ledger key");
+    let owner =
+        events::RunnerInvocationId::new("mfm.test.side_effect_builder.owner").expect("claim owner");
+    let token = events::side_effect::ClaimFencingToken::new("mfm.test.side_effect_builder.token")
+        .expect("token");
+    let resource_key = exclusive_resource_key(&fixture, "wallet-builder");
+    let idempotency_key = events::IdempotencyKeyRef::new("mfm.test.side_effect_builder.idem")
+        .expect("idempotency key");
+    let capability_binding = RunnerCapabilityBinding {
+        capability_kind: fixture.cap_kind.clone(),
+        capability_version: fixture.cap_version.clone(),
+        adapter_kind: fixture.adapter_kind.clone(),
+        adapter_version: fixture.adapter_version.clone(),
+    };
+    let intent = CertifierValue { amount: 7 };
+    let idempotency = CertifierValue { amount: 11 };
+    let prepared = serde_json::json!({"prepared": true});
+
+    with_runner_erased_ctx(&fixture, &fixture.cell_a, |ctx| {
+        let output = SideEffectEvidenceBuilder::new(&ctx)
+            .prepare_invocation_and_start(SideEffectPreparedInvocationEvidence {
+                side_effect: RunnerSideEffectBinding {
+                    ledger_key: ledger_key.clone(),
+                    ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                    invocation_epoch: 3,
+                },
+                claim: SideEffectClaimAuthority {
+                    claim_owner: owner.clone(),
+                    claim_generation: 9,
+                    claim_fencing_token: token.clone(),
+                    resource_key: Some(resource_key.clone()),
+                },
+                intent: &intent,
+                idempotency: &idempotency,
+                idempotency_key: idempotency_key.clone(),
+                capability_binding,
+                prepared_invocation: &prepared,
+            })
+            .expect("prepare side-effect evidence");
+
+        assert_eq!(output.staged_artifacts.len(), 2);
+        assert_eq!(output.staged_retention_refs.len(), 2);
+        assert_eq!(output.payloads.len(), 4);
+        match &output.payloads[0] {
+            RunnerEventPayload::SideEffectIntentPersisted(payload) => {
+                assert_eq!(payload.ledger_key, ledger_key);
+                assert_eq!(
+                    payload.ledger_purpose,
+                    events::SideEffectLedgerPurpose::Forward
+                );
+                assert_eq!(payload.invocation_epoch, 3);
+                assert_eq!(payload.idempotency_key, idempotency_key);
+                assert_eq!(payload.capability_kind, fixture.cap_kind);
+                assert_eq!(payload.adapter_kind, fixture.adapter_kind);
+            }
+            other => panic!("expected side-effect intent payload: {other:?}"),
+        }
+        match &output.payloads[1] {
+            RunnerEventPayload::SideEffectClaimed(payload) => {
+                assert_eq!(payload.claim_owner, owner);
+                assert_eq!(payload.claim_generation, 9);
+                assert_eq!(payload.claim_fencing_token, token);
+            }
+            other => panic!("expected side-effect claimed payload: {other:?}"),
+        }
+        match &output.payloads[2] {
+            RunnerEventPayload::SideEffectInvocationPrepared(payload) => {
+                assert!(payload.prepared_artifact_id.is_some());
+                assert!(payload.prepared_hash.is_some());
+                assert_eq!(payload.claim_generation, 9);
+                assert_eq!(payload.claim_fencing_token, token);
+                assert_eq!(payload.resource_key.as_ref(), Some(&resource_key));
+            }
+            other => panic!("expected side-effect prepared payload: {other:?}"),
+        }
+        match &output.payloads[3] {
+            RunnerEventPayload::SideEffectInvocationStarted(payload) => {
+                assert_eq!(payload.claim_owner, owner);
+                assert_eq!(payload.claim_generation, 9);
+                assert_eq!(payload.claim_fencing_token, token);
+            }
+            other => panic!("expected side-effect started payload: {other:?}"),
+        }
+    });
+}
+
+#[test]
+fn side_effect_evidence_builder_builds_progress_evidence_with_replay_and_resources() {
+    let fixture = fixture();
+    let ledger_key = events::SideEffectLedgerKey::new("mfm.test.side_effect_builder.progress")
+        .expect("ledger key");
+    let verifier =
+        events::ReplayVerifierId::new("mfm.test.side_effect_builder.verifier").expect("verifier");
+    let touched_set = events::ResourceTouchedSetEvidence {
+        namespace: exact_touched_set_resource_namespace(),
+        evidence_schema_id: fixture.seed_ref.schema_id.clone(),
+        evidence_hash: content(0xd1),
+        evidence_artifact_id: artifact(0xd2),
+    };
+    let value = CertifierValue { amount: 17 };
+
+    with_runner_erased_ctx(&fixture, &fixture.cell_a, |ctx| {
+        let builder = SideEffectEvidenceBuilder::new(&ctx);
+        let side_effect = RunnerSideEffectBinding {
+            ledger_key: ledger_key.clone(),
+            ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+            invocation_epoch: 4,
+        };
+
+        match single_side_effect_payload(
+            &builder
+                .submission_observed(side_effect.clone(), &value)
+                .expect("submission evidence"),
+        ) {
+            RunnerEventPayload::SideEffectSubmissionObserved(payload) => {
+                assert_eq!(payload.ledger_key, ledger_key);
+                assert_eq!(payload.invocation_epoch, 4);
+            }
+            other => panic!("expected submission observed payload: {other:?}"),
+        }
+        match single_side_effect_payload(
+            &builder
+                .submission_unknown(side_effect.clone(), &value)
+                .expect("submission unknown evidence"),
+        ) {
+            RunnerEventPayload::SideEffectSubmissionUnknown(payload) => {
+                assert_eq!(payload.ledger_key, ledger_key);
+                assert_eq!(payload.invocation_epoch, 4);
+            }
+            other => panic!("expected submission unknown payload: {other:?}"),
+        }
+        match single_side_effect_payload(
+            &builder
+                .not_submitted_proven(side_effect.clone(), &value)
+                .expect("not-submitted evidence"),
+        ) {
+            RunnerEventPayload::SideEffectNotSubmittedProven(payload) => {
+                assert_eq!(payload.ledger_key, ledger_key);
+                assert_eq!(payload.invocation_epoch, 4);
+            }
+            other => panic!("expected not-submitted payload: {other:?}"),
+        }
+        match single_side_effect_payload(
+            &builder
+                .receipt_observed(
+                    side_effect.clone(),
+                    &value,
+                    SideEffectReplayEvidence {
+                        replay_verifier_id: verifier.clone(),
+                        resource_touched_set: Some(touched_set.clone()),
+                    },
+                )
+                .expect("receipt evidence"),
+        ) {
+            RunnerEventPayload::SideEffectReceiptObserved(payload) => {
+                assert_eq!(payload.ledger_key, ledger_key);
+                assert_eq!(payload.invocation_epoch, 4);
+                assert_eq!(payload.replay_verifier_id, verifier);
+                assert_eq!(payload.resource_touched_set.as_ref(), Some(&touched_set));
+            }
+            other => panic!("expected receipt payload: {other:?}"),
+        }
+        match single_side_effect_payload(
+            &builder
+                .confirmation_observed(
+                    side_effect.clone(),
+                    &value,
+                    SideEffectReplayEvidence {
+                        replay_verifier_id: verifier.clone(),
+                        resource_touched_set: Some(touched_set.clone()),
+                    },
+                )
+                .expect("confirmation evidence"),
+        ) {
+            RunnerEventPayload::SideEffectConfirmationObserved(payload) => {
+                assert_eq!(payload.ledger_key, ledger_key);
+                assert_eq!(payload.invocation_epoch, 4);
+                assert_eq!(payload.replay_verifier_id, verifier);
+                assert_eq!(payload.resource_touched_set.as_ref(), Some(&touched_set));
+            }
+            other => panic!("expected confirmation payload: {other:?}"),
+        }
+        match single_side_effect_payload(
+            &builder
+                .ambiguous(
+                    side_effect,
+                    events::AmbiguityCode::new("side_effect_builder_test").expect("ambiguity code"),
+                    &value,
+                )
+                .expect("ambiguity evidence"),
+        ) {
+            RunnerEventPayload::SideEffectAmbiguous(payload) => {
+                assert_eq!(payload.ledger_key, ledger_key);
+                assert_eq!(payload.invocation_epoch, 4);
+            }
+            other => panic!("expected ambiguity payload: {other:?}"),
+        }
+    });
+}
+
+fn with_runner_erased_ctx<R, F>(fixture: &Fixture, cell_id: &CellId, test: F) -> R
+where
+    F: for<'a> FnOnce(ErasedRunCtx<'a>) -> R,
+{
+    let node = node_by_output(fixture, cell_id);
+    let descriptor = fixture
+        .runtime_spec
+        .state_descriptor_for_node(node)
+        .expect("state descriptor");
+    let output_cell = fixture
+        .runtime_spec
+        .cell(&node.output_cell)
+        .expect("output cell");
+    let attempt_id = attempt_id(
+        &fixture.run_id,
+        fixture.runtime_spec.spec_hash(),
+        &node.node_id,
+        1,
+    )
+    .expect("attempt id");
+    let config_artifact = config_artifact(&fixture.runtime_spec, &node.config_ref).evidence;
+    let projections = store::ProjectionSnapshot::default();
+    let run_stream = Vec::new();
+    let invocation = PreparedRunnerInvocation {
+        runtime_spec: &fixture.runtime_spec,
+        run_id: &fixture.run_id,
+        spec_hash: fixture.runtime_spec.spec_hash(),
+        node,
+        descriptor,
+        output_cell,
+        attempt_id: &attempt_id,
+        attempt_no: 1,
+        config_artifact,
+        inputs: MaterializedInputs {
+            input_schema_id: node.input_bindings.input_schema_id.clone(),
+            root: MaterializedInputNode::Unit,
+        },
+        caps: CertifiedRuntimeCapabilities::new(
+            node.node_id.clone(),
+            node.capability_bindings.clone(),
+        ),
+        recorded_facts: RecordedFacts::default(),
+        projections: &projections,
+        run_stream: &run_stream,
+    };
+    test(ErasedRunCtx::from_prepared(&invocation))
+}
+
+fn single_side_effect_payload(output: &ErasedRunnerOutput) -> &RunnerEventPayload {
+    assert_eq!(output.staged_artifacts.len(), 1);
+    assert_eq!(output.staged_retention_refs.len(), 1);
+    assert_eq!(output.payloads.len(), 1);
+    &output.payloads[0]
+}
+
+#[test]
 fn runner_registration_builder_preserves_explicit_binding_authority() {
     let fixture = fixture();
     let node = node_by_output(&fixture, &fixture.cell_b);
