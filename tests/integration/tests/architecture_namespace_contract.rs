@@ -204,6 +204,60 @@ fn design_docs_do_not_make_public_output_projected_a_transition_decision() {
 }
 
 #[test]
+fn evm_contract_lifecycle_runners_live_in_adapter_not_app() {
+    let root = repo_root();
+    let app = fs::read_to_string(root.join("crates/app/src/evm_contracts.rs"))
+        .expect("app evm contracts source");
+    let adapter = fs::read_to_string(root.join("crates/adapters/evm-contracts/src/lib.rs"))
+        .expect("evm contract adapter source");
+
+    for forbidden in [
+        "impl ErasedNodeRunner",
+        "ErasedRunnerBinding",
+        "register_capability_set",
+        "ContractMutationRunner",
+        "ContractValidateRunner",
+        "run_deploy_mutation",
+        "run_configure_mutation",
+        "run_validate",
+        "side_effect_prepare",
+        "mfm-app-evm-contract-lifecycle",
+    ] {
+        assert!(
+            !app.contains(forbidden),
+            "app EVM wiring must not own contract lifecycle runner behavior: {forbidden}"
+        );
+    }
+
+    for required in [
+        "pub fn register_contract_lifecycle_runners_with_factory",
+        "impl ErasedNodeRunner for ContractMutationRunner",
+        "impl ErasedNodeRunner for ContractValidateRunner",
+        "mfm-adapters-evm-contracts-built-in",
+    ] {
+        assert!(
+            adapter.contains(required),
+            "EVM contract adapter must own runner behavior: {required}"
+        );
+    }
+
+    for forbidden in [
+        "FsTypedArtifactStore",
+        "EvmJsonRpcClient",
+        "KeystoreSignerProvider",
+        "KeystoreSignerRegistryEntry",
+        "MFM_EVM_SIGNERS_JSON",
+        "RuntimeSignerConfig",
+        "from_env_sources",
+    ] {
+        assert!(
+            !adapter.contains(forbidden),
+            "EVM contract adapter must not own concrete process wiring: {forbidden}"
+        );
+    }
+}
+
+#[test]
 fn namespace_guard_rejects_synthetic_stale_names() {
     let forbidden_terms = forbidden_public_name_terms();
     let stale_route_base = format!("/v1/evm/{}", stale_recipe_abbrev());

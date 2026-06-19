@@ -165,7 +165,7 @@ mod tests {
     #[tokio::test]
     async fn app_runner_resumes_replays_and_renders_validate_only_lifecycle_run() {
         let root = std::env::temp_dir().join(format!(
-            "mfm-app-evm-contract-validate-{}",
+            "mfm-evm-contract-validate-{}",
             uuid::Uuid::new_v4()
         ));
         let artifacts = FsTypedArtifactStore::new(&root);
@@ -260,7 +260,7 @@ mod tests {
     #[tokio::test]
     async fn app_runner_records_distinct_validation_capability_facts() {
         let root = std::env::temp_dir().join(format!(
-            "mfm-app-evm-contract-validation-facts-{}",
+            "mfm-evm-contract-validation-facts-{}",
             uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&root).expect("root dir");
@@ -362,10 +362,8 @@ mod tests {
 
     #[tokio::test]
     async fn app_runner_resumes_replays_and_renders_deploy_lifecycle_run() {
-        let root = std::env::temp_dir().join(format!(
-            "mfm-app-evm-contract-deploy-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("mfm-evm-contract-deploy-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).expect("root dir");
         let artifacts = FsTypedArtifactStore::new(&root);
         let signer = test_contract_signer();
@@ -454,7 +452,7 @@ mod tests {
     #[tokio::test]
     async fn app_runner_resumes_replays_and_renders_full_lifecycle_run() {
         let root = std::env::temp_dir().join(format!(
-            "mfm-app-evm-contract-lifecycle-{}",
+            "mfm-evm-contract-lifecycle-{}",
             uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&root).expect("root dir");
