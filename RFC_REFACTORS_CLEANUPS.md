@@ -7,6 +7,19 @@ MFM repository. It separates incremental cleanups from deeper abstraction change
 matters: most obvious cleanups remove drift and improve placement, but they do not fundamentally
 change the LOC profile.
 
+Current planning status:
+
+- The FSM scheduler lifecycle refactor has landed. Its detailed historical RFC and validation
+  artifacts were removed by commit `c8c742510ab2070cdaea688264a293aaf2a7309f` after closeout.
+  Current authority for that work lives in `docs/design.md`, `docs/architecture.md`, and
+  `crates/kernel/runtime/README.md`.
+- This RFC now starts from the post-FSM tree. The next production cleanup is the artifact-role
+  contract, followed by scenario/golden infrastructure and shared verified run views.
+- FSM-adjacent follow-up work is classified below. Some items belong in this cleanup RFC
+  (sync/async driver collapse, public `ResolveSagaTerminal` fixture coverage, and no-secret
+  provenance hardening); public no-append resource-lane waiter status should remain a separate
+  design/API RFC candidate unless product needs that public diagnostic surface.
+
 The primary success metric is fewer independently maintained copies of durable protocol truth. LOC
 reduction is a useful secondary signal only when it comes from removing real duplication without
 hiding correctness checks in opaque macros, generated files, or weaker tests.
@@ -41,17 +54,21 @@ currently carries real correctness value.
 
 ## Current LOC Shape
 
-Approximate local measurement: `139852` Rust LOC.
+Approximate local measurement after the FSM refactor: `149639` Rust source lines, measured with
+`rg --files -g '*.rs' | xargs wc -l`. This is a rough planning signal rather than a maintained-LOC
+definition.
 
 Largest concentrations:
 
-- `crates/kernel/runtime`: about 22k LOC, including an 11k LOC test file
+- `crates/kernel/runtime`: about 26.8k LOC, including a 13.3k LOC test file
 - `crates/kernel/certify`: about 9.7k LOC
-- `crates/kernel/store`: about 8.7k LOC plus 5.3k LOC store contract tests
-- `crates/kernel/program`: about 7.7k LOC
+- `crates/kernel/store`: about 17.6k LOC plus a 6.5k LOC store contract test
+- `crates/kernel/program`: about 8.7k LOC
 - `crates/app`: about 7.4k LOC
 - `crates/kernel/spec` and `crates/kernel/events`: about 8.3k LOC combined
 - `tests/integration/src/test_support.rs`: about 3.9k LOC
+- `crates/adapters/evm-contracts`: about 3.4k LOC after moving EVM lifecycle runner behavior out
+  of `crates/app`
 
 This suggests the biggest reduction opportunities are not in ordinary Rust factoring. They are in
 generated contracts, generic event/projection machinery, and reusable test scenario builders.
@@ -64,53 +81,55 @@ only when they remove maintained duplication while preserving those invariants.
 
 Evidence from the current tree:
 
-- A 30% reduction from the local `139852` Rust LOC baseline means roughly `42k` net maintained LOC,
+- A 30% reduction from the rough `149639` Rust source-line snapshot means roughly `45k` lines,
   which is larger than the clearly duplicated production surfaces found in this pass.
 - `ArtifactRole::TypedSpecCertificate` exists in the event and store codec surfaces, and
-  `RunStarted` requires the certificate artifact, but the event schema role tag list appears to
-  omit `typed_spec_certificate`. That is concrete role-contract drift.
+  the event schema role tag list now includes `typed_spec_certificate`. The concrete drift called
+  out in the earlier pass is closed, but role truth is still hand-maintained across event schemas,
+  store codecs, runtime artifact classification, framework rendering, replay authorization, and
+  tests.
 - `VerifiedRunHistory` already exists in `crates/kernel/runtime/src/history.rs`, while replay and
   app still rebuild or re-authorize parts of the same committed stream view. This supports a shared
   committed-run authority view, but not a single untyped "god object".
-- Side-effect state is repeated across store ledger projection, runtime historical validation, and
-  app-level EVM runner logic. The duplication is real, but this path controls replay evidence,
-  idempotency, ambiguity, and non-persistence of signed/raw payloads.
-- `SerialTypedScheduler` currently concentrates transition decisions, invocation preparation,
-  framework lifecycle special cases, artifact staging, commit planning, resource-lane handling, and
-  manual-resolution terminal proof handling. That should become explicit transition, attempt,
-  recovery, and side-effect lifecycles.
+- Side-effect state is repeated across store ledger projection, runtime historical validation,
+  replay verification, adapter runner logic, and tests. The duplication is real, but this path
+  controls replay evidence, idempotency, ambiguity, and non-persistence of signed/raw payloads.
+- The FSM scheduler refactor split scheduler authority into admission, binding, transition,
+  attempt, framework, recovery, side-effect, invocation, and commit modules. Remaining runtime
+  cleanup should build on those boundaries rather than reopen scheduler design.
 - Sync and async app service surfaces are materially duplicated. This is feasible cleanup, but not
-  a large LOC lever by itself.
+  a large LOC lever by itself and was explicitly deferred by the FSM RFC.
 
 Directional maintained-LOC impact:
 
-| Rank | Bet | Feasibility | Net maintained LOC impact | Main correctness risk |
-|---:|---|---|---:|---|
-| 1 | FSM scheduler lifecycle refactor | High | `0..-1k` | Incorrect failure terminalization or side-effect recovery semantics. |
-| 2 | Scenario-based test specs | High | `-3k..-6k` | Hiding important negative assertions. |
-| 3 | `ArtifactRoleContract` table | High | `-0.5k..-2k` | Misclassifying schema, producer, or same-commit rules everywhere. |
-| 4 | Shared committed-run authority view | High | `-1k..-2.5k` | Collapsing distinct runtime, replay, app, and public-output authority boundaries. |
-| 5 | Runtime runner kit | High | `-0.2k..-0.8k` | Making invalid runner payloads easier to construct. |
-| 6 | Collapse duplicate app service surfaces | High | `-0.2k..-0.5k` | Filtering streams before full validation. |
-| 7 | Declarative kernel protocol | Medium | `-3k..-7k` | Byte stability, canonical JSON stability, descriptor drift, and opaque generated code. |
-| 8 | Generic side-effect driver | Medium | `-0.5k..-2k` | Obscuring replay uncertainty or duplicating store authority. |
-| 9 | `ProgramPackage` and `StateSpec` derive | Medium | `0..-0.8k` | Making descriptor identity and certification failures harder to audit. |
-| 10 | Certified graph typestate views | Medium | `-0.5k..-1.5k` | Adding API layers over authority that already exists. |
-| 11 | Projection persistence boundary | Low | unknown | Store repair, Postgres parity, resource lanes, and read performance. |
+| Rank | Bet | Status | Feasibility | Net maintained LOC impact | Main correctness risk |
+|---:|---|---|---|---:|---|
+| 0 | FSM scheduler lifecycle refactor | Done | High | prerequisite | Incorrect failure terminalization or side-effect recovery semantics. |
+| 1 | `ArtifactRoleContract` table | Next | High | `-0.5k..-2k` | Misclassifying schema, producer, or same-commit rules everywhere. |
+| 2 | Scenario-based test specs | Next | High | `-3k..-6k` | Hiding important negative assertions. |
+| 3 | Persisted/public no-secret provenance | FSM-adjacent hardening | High | `0..-0.3k` | Treating scans or naming conventions as proof instead of typed surface tests. |
+| 4 | Shared committed-run authority view | Next | High | `-1k..-2.5k` | Collapsing distinct runtime, replay, app, and public-output authority boundaries. |
+| 5 | Full sync/async driver and service collapse | FSM-adjacent cleanup | High | `-0.2k..-0.7k` | Filtering streams before full validation or changing lifecycle semantics. |
+| 6 | Runtime runner kit | Active candidate | High | `-0.2k..-0.8k` | Making invalid runner payloads easier to construct. |
+| 7 | Declarative kernel protocol | Later | Medium | `-3k..-7k` | Byte stability, canonical JSON stability, descriptor drift, and opaque generated code. |
+| 8 | Generic side-effect driver | Later | Medium | `-0.5k..-2k` | Obscuring replay uncertainty or duplicating store authority. |
+| 9 | `ProgramPackage` and `StateSpec` derive | Later | Medium | `0..-0.8k` | Making descriptor identity and certification failures harder to audit. |
+| 10 | Certified graph typestate views | Later | Medium | `-0.5k..-1.5k` | Adding API layers over authority that already exists. |
+| 11 | Projection persistence boundary | Separate RFC | Low | unknown | Store repair, Postgres parity, resource lanes, and read performance. |
 
 Sequencing judgment:
 
-- Execute `RFC_REFACTOR_FSM_SCHEDULER.md` first. This makes transition, attempt, recovery, and
-  side-effect lifecycle authority explicit before larger protocol rewrites.
-- Follow with `ArtifactRoleContract` and its goldens. This is the smallest bounded protocol cleanup
+- Treat the landed FSM scheduler lifecycle refactor as the prerequisite that made transition,
+  attempt, recovery, framework, and side-effect lifecycle authority explicit.
+- Start with `ArtifactRoleContract` and its goldens. This is the smallest bounded protocol cleanup
   that directly attacks real role drift.
 - Build scenario/golden infrastructure early, then convert one narrow family of existing tests.
   This creates the safety net required before deleting handwritten protocol ceremony.
 - Introduce a shared committed-run read authority and merge duplicated app service read paths
   around it, while keeping store, runtime, replay, and public-output authority wrappers explicit.
 - Extract the runner kit after output/artifact goldens exist.
-- Use the scheduler lifecycle refactor to establish the side-effect recovery boundary, then delay
-  the generic adapter driver until ambiguity and recovery behavior are golden-covered.
+- Use the side-effect recovery boundary established by the FSM refactor, but delay the generic
+  adapter driver until ambiguity and recovery behavior are golden-covered.
 - Keep declarative kernel protocol generation in check-only mode until descriptor, canonical JSON,
   spec-hash, role, and runtime/replay equivalence goldens exist.
 - Move projection persistence to a separate measurement RFC.
@@ -143,9 +162,11 @@ Current evidence:
   of the same payload contracts.
 - Tests hand-build many event payloads again.
 
-One concrete drift signal from the review: `TypedSpecCertificate` exists as an artifact role in the
-event and store codec surfaces, while the event schema role tag list appears to omit
-`typed_spec_certificate`. That is exactly the kind of issue a single contract source should prevent.
+One concrete drift signal from the earlier review was closed during the FSM work:
+`TypedSpecCertificate` exists as an artifact role in the event and store codec surfaces, and the
+event schema role tag list now includes `typed_spec_certificate`. That fix is useful evidence for
+the next step: a single contract source should make this kind of drift mechanically harder to
+reintroduce.
 
 Proposed direction:
 
@@ -238,7 +259,8 @@ Current evidence:
 
 - Side-effect event variants are generic, but phase legality is repeated in events, runtime, store,
   replay, and tests.
-- EVM lifecycle runner phase logic is currently in `crates/app/src/evm_contracts.rs`.
+- EVM lifecycle runner phase logic now lives in `crates/adapters/evm-contracts`; app-owned wiring
+  is limited to environment/runtime factory assembly.
 - Proof implements a similar protocol in `crates/transports/proof/src/lib.rs`.
 - `SideEffectState` already models domain associated types such as intent, idempotency input,
   submission, receipt, and confirmation, but runners still manually assemble most saga events.
@@ -537,10 +559,12 @@ Verification:
 - `cargo test -p mfm-integration-tests --test proof_transport_conformance`
 - affected trybuild tests with no unexpected `.stderr` churn
 
-### 9. Collapse Duplicate Service Surfaces
+### 9. Collapse Duplicate Sync/Async Driver And Service Surfaces
 
 Current evidence:
 
+- The completed FSM scheduler refactor intentionally left some sync/async runtime driver IO
+  choreography duplicated after sharing the authority-bearing lifecycle logic.
 - `RunServices` and `AsyncRunServices` duplicate app behavior.
 - Sync and async store surfaces create a repeated architectural axis.
 - CLI and REST repeat launch-and-render, stream range filtering, and response-envelope logic.
@@ -548,8 +572,9 @@ Current evidence:
 
 Proposed direction:
 
-Make async services primary and provide an async in-memory store adapter. Move common
-transport-neutral behavior into `mfm-app`:
+Make async execution and app services primary, with thin compatibility wrappers or narrowly scoped
+store adapters where sync entry points remain useful. Move common transport-neutral behavior into
+`mfm-app` and common runtime driver choreography behind shared lifecycle entry points:
 
 - production service builder
 - verified run context loader
@@ -557,12 +582,14 @@ transport-neutral behavior into `mfm-app`:
 - stream range filter
 - public output rendering helper
 - response envelope types if a shared public JSON contract is desired
+- drive/load/stage/append orchestration where sync and async paths can share an async-primary core
 
 Expected impact:
 
-- Removes about 300-700 LOC.
+- Removes about 300-900 LOC.
 - More importantly, keeps CLI and REST output semantics aligned and forces all routes through one
-  verified authority path.
+  verified authority path, while preventing future side-effect-driver work from integrating with two
+  ordinary execution paths.
 
 Correctness requirements:
 
@@ -570,11 +597,14 @@ Correctness requirements:
 - Public output remains render-only authority.
 - Do not leak HTTP status concerns into CLI JSON.
 - Async locking and memory-store behavior must stay explicit.
+- Do not change lifecycle semantics, introduce intra-run parallelism, infer liveness from streams,
+  weaken expected-seq concurrency, or move domain execution logic into `mfm-app`.
 
 Verification:
 
 - `cargo test -p mfm-app`
 - `cargo test -p mfm`
+- targeted runtime parity tests for sync vs async `drive_once` and `drive_until_blocked`
 - REST integration tests
 
 ### 10. Reconsider Projection Persistence Boundaries
@@ -686,8 +716,8 @@ Open questions:
   build-time generator?
 - should ownership live in `mfm-events`, a new kernel contract crate, or split event/spec
   declarations?
-- should the `typed_spec_certificate` descriptor omission be corrected in v1 with golden churn, or
-  treated as a v2 schema migration?
+- should the current v1 role/tag set be frozen with goldens first, or should the contract table
+  introduce an explicit versioned contract surface immediately?
 - how much projection behavior should be generated versus only generating typed transition inputs?
 
 ### Deep Dive: Artifact Role Contract Table
@@ -700,9 +730,9 @@ and event requirement matching.
 
 | Role group | Schema / semantic contract | Producer scope | Runtime / replay contract |
 |---|---|---|---|
-| `typed_execution_spec`, `typed_spec_certificate` | no value semantic id; schema absent today | none | launch evidence from `RunStarted`; retained as run-start authority |
+| `typed_execution_spec`, `typed_spec_certificate` | no value semantic id; schema absent today | none | launch evidence from `RunAdmitted`; retained as run admission authority |
 | `typed_config` | schema required; semantic absent | none | launch/config `ArtifactReferenced`; materialized only after certified verification |
-| `seed_input` | schema and semantic required | seed only | `RunStarted.seed_cells`; seed materialization |
+| `seed_input` | schema and semantic required | seed only | admitted seed authority; seed materialization |
 | `state_output` | schema and semantic required | node only | staged state output; `CellProduced` plus same-commit terminal attempt completion |
 | `fact_response` | response schema required; semantic absent | node only | read evidence from `FactRecorded`; replay reads recorded fact only |
 | `public_output` | public schema required; semantic absent | render node | rendered cache artifact; not resume/replay authority by itself |
@@ -772,8 +802,8 @@ Ownership boundary:
 - live providers remain in adapters/transports
 - replay uses only retained evidence
 - raw signed transactions and secret material remain transient below typed surfaces
-- app may assemble runners, but EVM lifecycle execution logic belongs in
-  `crates/adapters/evm-contracts`
+- app may assemble runtime factories and registries, but adapter lifecycle execution logic belongs in
+  adapter crates such as `crates/adapters/evm-contracts`
 
 Migration slice:
 
@@ -781,8 +811,7 @@ Migration slice:
 2. Add FSM transition tests over existing side-effect ledger phases.
 3. Port deterministic proof side-effect runner to the driver and compare emitted event/artifact
    goldens.
-4. Move EVM lifecycle runners from app into the EVM adapter and preserve executable identity, or
-   version it deliberately.
+4. Preserve current EVM lifecycle runner executable identity as a golden before any driver port.
 5. Port EVM deploy/configure to the driver, including resume from started, unknown, submission,
    receipt, and confirmation phases.
 6. Add not-submitted, ambiguity, touched-set, and remediation cases before using the driver for new
@@ -837,8 +866,8 @@ Migration slice:
 
 Hard invariants:
 
-- spec hash, run id, committed artifact requirements, retained bytes, and `RunStarted` evidence
-  agree before authority is minted
+- spec hash, run id, committed artifact requirements, retained bytes, and `RunAdmitted` evidence
+  agree before read authority is minted
 - raw event vectors should not cross runtime/replay/app boundaries as trusted input
 - projections remain derived
 - validation diagnostics are stable enough for tests, but not necessarily public API unless
@@ -1031,7 +1060,7 @@ Open questions:
 - how many old hand-written tests remain as permanent parity sentinels after scenario conversion?
 - should generated compile-fail matrices be checked in or generated during test setup?
 
-### Deep Dive: Duplicate Service Surface Collapse
+### Deep Dive: Sync/Async Driver And Service Surface Collapse
 
 Target shape:
 
@@ -1041,6 +1070,8 @@ Target shape:
 - extract transport-neutral helpers for production service construction, verified run context
   loading, launch-and-drive, stream filtering, replay verification, public-output authority, and
   status rendering
+- collapse duplicated runtime sync/async IO choreography around loading, driving, staging, awaiting,
+  and appending after shared run-view and lifecycle parity goldens exist
 
 Ownership boundary:
 
@@ -1048,6 +1079,9 @@ Ownership boundary:
   capability bindings
 - CLI and REST map inputs/outputs and error classes around the same app helpers
 - HTTP status mapping stays outside shared CLI JSON contracts
+- store remains the commit/projection authority; runtime prepares and submits commits but does not
+  bypass store admission
+- domain execution logic stays in runtime/adapters/states, not app
 
 Migration slice:
 
@@ -1056,7 +1090,9 @@ Migration slice:
    spec authority, verifies retained artifacts, and returns the shared run view.
 3. Port sync and async methods to the helper.
 4. Move CLI and REST to the unified service.
-5. Remove or deprecate the sync facade after route parity.
+5. Collapse runtime driver IO choreography where an async-primary core can preserve lifecycle
+   semantics.
+6. Remove or deprecate the sync facade after route parity.
 
 Hard invariants:
 
@@ -1064,10 +1100,16 @@ Hard invariants:
 - public output is minted only through public-output read authority
 - output schemas and CLI JSON remain stable unless changed deliberately
 - async locking and transaction boundaries stay explicit
+- `StateAttemptStarted`, open-attempt recovery, side-effect uncertainty, expected-seq reload, and
+  resource-lane behavior remain byte-for-byte equivalent before and after the collapse
+- no intra-run parallel execution, stream-liveness inference, or public resource-lane waiter API is
+  introduced by this cleanup
 
 Open questions:
 
 - should shared response envelope types live in app or stay per transport?
+- should runtime sync compatibility be a wrapper over an async in-memory adapter, or remain as a
+  narrow store boundary for tests that need synchronous ownership?
 - is a temporary sync compatibility wrapper worth keeping?
 - should drive/resume use borrowed store handles or owned async service methods only?
 
@@ -1207,7 +1249,7 @@ would violate the placement contract. App should assemble, not own domain execut
 
 ## Recommended Roadmap
 
-### Phase 0: Golden Baselines Before Refactoring
+### Phase 0: Baselines For Each Refactor Slice
 
 1. Add or identify descriptor, canonical JSON, fixture hash, event payload, and certified spec
    goldens for the protocol surfaces that will be generated or table-driven.
@@ -1220,18 +1262,225 @@ would violate the placement contract. App should assemble, not own domain execut
 Expected result: the later refactors can be reviewed as authority-preserving rewrites instead of
 behavior changes.
 
-### Phase 1: FSM Scheduler Lifecycle Refactor
+Current status: FSM-specific baselines and closeout checks were produced during the scheduler
+refactor. Keep adding slice-specific baselines before changing artifact roles, scenario fixtures,
+shared run views, runner helpers, or generated protocol declarations.
 
-Execute `RFC_REFACTOR_FSM_SCHEDULER.md`.
+### Phase 1: Completed FSM Scheduler Lifecycle Refactor
 
-1. Extract pure transition decisions from scheduler orchestration.
-2. Introduce explicit attempt, recovery, framework, and side-effect lifecycle components.
-3. Commit `StateAttemptStarted` before semantic handler execution and require terminal evidence or
-   recovery ownership for every started attempt.
-4. Reduce `SerialTypedScheduler` to a thin public facade over lifecycle dispatch.
+Status: completed before this roadmap update. The detailed historical RFC and validation artifacts
+were deleted by commit `c8c742510ab2070cdaea688264a293aaf2a7309f`; use current design/runtime docs
+as the source of truth.
+
+Completed outcomes:
+
+1. Pure transition decisions were extracted from scheduler orchestration.
+2. Attempt, recovery, framework, and side-effect lifecycle components were introduced.
+3. `StateAttemptStarted` now precedes semantic handler execution, with terminal evidence or recovery
+   ownership required for every started attempt.
+4. `SerialTypedScheduler` is now a public facade over context loading, transition dispatch, and
+   lifecycle execution.
+
+Deferred outside Phase 1 completion, then classified below:
+
+1. Full sync/async driver collapse.
+2. Public no-append resource-lane waiter status.
+3. Dedicated public `ResolveSagaTerminal` fixture coverage.
+4. Broader persisted/public no-secret hardening.
 
 Expected result: runtime execution becomes a small set of named authority protocols instead of one
-broad scheduler surface.
+broad scheduler surface. This prerequisite is now available for the remaining cleanup phases.
+
+### FSM-Adjacent Follow-Up Work
+
+The completed FSM refactor intentionally left several adjacent items outside its merge criteria.
+They should stay visible in this cleanup RFC, but they do not all belong to the same implementation
+track.
+
+#### Full Sync/Async Driver Collapse
+
+Classification: cleanup, not a Phase 1 completion gap.
+
+The FSM refactor shared lifecycle authority first and left some sync/async IO choreography
+duplicated. That was the right sequencing: transition decisions, recovery classification,
+attempt-start planning, invocation construction, output validation, artifact staging rules, and
+commit planning are the authority-bearing pieces. The remaining cleanup target is duplicated
+driver/service ceremony around loading, driving, staging, awaiting, and appending.
+
+Roadmap placement:
+
+1. Does not block Phase 2 `ArtifactRoleContract`.
+2. Should wait until Phase 3 scenario/golden infrastructure covers runtime lifecycle parity.
+3. Should follow Phase 4 shared run view/app read-path cleanup, because drive paths need one verified
+   stream/context loader before they can safely converge.
+4. Should land before broad generic side-effect driver work, so future side-effect abstractions have
+   one ordinary execution path to integrate with.
+
+Prerequisites:
+
+- runtime lifecycle goldens for ordinary attempts, framework attempts, open-attempt recovery,
+  resource-lane blocking, side-effect recovery, public-output rendering, and failure
+  terminalization
+- sync/async parity tests comparing emitted stream events, staged artifact refs, projections,
+  replay results, public status, and public JSON
+- an async in-memory store adapter suitable for runtime/app tests
+- a shared verified run context or committed-run view used before status rendering, stream range
+  filtering, replay, and public-output rendering
+
+Non-goals and invariants:
+
+- do not change lifecycle semantics, introduce intra-run parallel execution, infer liveness from
+  streams, weaken expected-seq optimistic concurrency, or move domain execution logic into `mfm-app`
+- do not collapse store, replay, runtime, and public-output authority into one untyped service object
+- `StateAttemptStarted` still commits before semantic runner execution for ordinary and framework
+  attempts, and every started attempt is terminalized by normal execution or owned by recovery
+- full authoritative stream validation happens before projection, range filtering, replay, or public
+  output rendering
+
+Verification:
+
+- `cargo test -p mfm-runtime`
+- targeted runtime parity tests for sync vs async `drive_once` and `drive_until_blocked`
+- `cargo test -p mfm-app`
+- CLI/REST route parity tests for launch, resume, status, stream, replay, and typed public output
+- `cargo test -p mfm-store --test commit_contract side_effect`
+- `cargo test -p mfm-integration-tests --test architecture_namespace_contract`
+
+#### Public ResolveSagaTerminal Fixture Coverage
+
+Classification: test/golden cleanup, not a production refactor.
+
+The FSM refactor made `ResolveSagaTerminal` a normal post-admission framework lifecycle with durable
+attempt start, terminal evidence, and recovery semantics. Runtime/store/replay already cover much of
+the authority path, but the public contract should also have a dedicated fixture proving saga
+terminal resolution remains visible and stable through app, CLI, REST, status, and stream surfaces
+before shared run-view and scenario-DSL refactors reshape those paths.
+
+Roadmap placement: Phase 3, scenario and golden infrastructure. Treat it as one of the first narrow
+scenario conversions after a minimal scenario helper skeleton exists and before Phase 4 shared run
+view/app read-path cleanup. It should not block Phase 2.
+
+Scope:
+
+- add a dedicated public fixture that drives a real run through manual block, manual resolution
+  recording, and `ResolveSagaTerminal` completion
+- assert stable public JSON for `run_mode`, manual block/terminal saga fields, and completed
+  framework attempt disposition for the certified `ResolveSagaTerminal` node
+- assert public stream/event ordering shows the framework attempt started before terminal evidence
+- assert the terminal outcome is saga terminal authority, not ordinary forward `CompleteRun`
+  authority
+- assert no authorization proof bytes, signer material, or secret-bearing diagnostics appear in
+  public JSON
+
+Non-goals and invariants:
+
+- do not add public fields only for this fixture, change saga terminal selection or proof
+  construction, collapse `ResolveSagaTerminal` into `CompleteRun`, or replace lower-level
+  runtime/store/replay negative tests
+- `ResolveSagaTerminal` is selected from saga projection state, not ordinary forward topology
+- `SagaTerminalProof` is rebuilt from current `VerifiedRunHistory` immediately before terminal commit
+- manual resolution remains signed, prefix-bound, and admissible only for a quiescent manually
+  blocked prefix with no open semantic attempts
+
+Verification:
+
+- focused app/public-status fixture coverage
+- CLI JSON and REST contract tests using the same logical scenario
+- lower-level checks such as `cargo test -p mfm-runtime manual_resolution`,
+  `cargo test -p mfm-store --test commit_contract saga_terminal`, `cargo test -p mfm-app`,
+  `cargo test -p mfm --test json_output_integration`, and
+  `cargo test -p mfm-integration-tests --test rest_api_run_control`
+
+#### Persisted/Public No-Secret Provenance Hardening
+
+Classification: security hardening and protocol-boundary cleanup.
+
+MFM treats "no secrets in persisted or public surfaces" as a design invariant, but the proof is
+still spread across type choices, targeted tests, and source scans. The cleanup value is to make that
+invariant reviewable at the same level as artifact roles, event schemas, public outputs, and replay
+authority: each persisted/public surface should have an explicit owner, allowed payload classes,
+validation path, and no-secret verification.
+
+Roadmap placement: start with a docs-only surface inventory in Phase 0, then implement after Phase 3
+scenario/golden infrastructure and before broad shared-run-view or runner-kit rewrites. It should
+not block `ArtifactRoleContract`, but it should gate larger rewrites that touch public-output
+rendering, retained artifacts, replay evidence, CLI/REST output, or side-effect evidence.
+
+Prerequisites:
+
+- artifact-role contract goldens for retained artifact classification
+- scenario/golden builders capable of constructing secret-redaction, tampered evidence, and
+  public-output cases
+- current design invariant that secrets remain below typed semantic boundaries and public JSON is
+  render-only
+
+Non-goals and invariants:
+
+- do not introduce runtime secret scanning as semantic authority, treat source scans as proof,
+  redesign keystore/signer internals, or persist signed raw transactions, decrypted material,
+  mnemonics, private keys, passwords, or raw signing buffers in redacted form
+- typed values, typed configs, event payloads, facts, artifacts, context snapshots, public outputs,
+  error details, fixtures, and logs must not contain secret material
+- secret-bearing systems are referenced only through non-secret labels, content hashes, capability
+  ids, verifier ids, or evidence handles
+- public outputs remain render surfaces, not replay/resume authority
+- intentionally retained evidence declares provenance: producer, artifact role, schema policy,
+  semantic policy, retention class, and public/private exposure class
+
+Verification:
+
+- persisted/public surface inventory covering events, artifacts, facts, context snapshots,
+  projections, CLI JSON, REST JSON, public outputs, error payloads, and fixtures
+- scenario goldens for secret-bearing runner inputs proving only non-secret handles/evidence reach
+  persisted or public surfaces
+- regression tests for side-effect paths proving signed/raw payloads stay below typed
+  runtime/store/replay surfaces
+- CLI/REST/public-output golden checks for redacted errors and stable non-secret schemas
+- targeted `rg` scans as defense-in-depth only, paired with typed tests over production entry points
+
+#### Public No-Append Resource-Lane Waiter Status
+
+Classification: separate design/API RFC candidate, not cleanup-refactor work.
+
+A no-append resource-lane waiter is an operational observation: runtime attempted to advance a
+candidate side-effect node, store admission reported that the cross-run resource lane was held, and
+the runtime re-decided without appending new evidence to the waiting run. Today this is intentionally
+not public run authority. Public status exposes semantic `RunMode`, committed attempt dispositions,
+and resource-lane holders backed by the target run's persisted live side-effect ledger evidence; it
+does not expose unrelated global lane holders or scheduler waiters that left no stream evidence.
+
+This should stay out of the cleanup implementation path because exposing it publicly would add a new
+API/status surface rather than remove duplicated protocol truth. If product or operator needs make
+this visibility necessary, write a focused design/API RFC that defines the authority source, privacy
+model, stability contract, and CLI/REST response shape.
+
+Prerequisites before it becomes implementation work:
+
+- shared verified run view/status cleanup has landed
+- resource-lane read semantics are explicitly modeled as operational diagnostics, not semantic run
+  evidence
+- CLI and REST status contracts define whether this is stable public API, operator-only diagnostic
+  output, or debug-only telemetry
+- privacy review covers cross-run leakage: a waiting run must not expose another run's identifiers,
+  resource keys, tenant data, signer identity, or capability details unless that exposure is an
+  explicit product contract
+
+Non-goals and invariants:
+
+- do not append synthetic "waiting" events, add a `RunMode`, treat no-append waiters as attempt
+  dispositions, make global resource-lane projections semantic resume/replay authority, or expose
+  unrelated global lane holders through ordinary run status
+- append-only stream authority remains unchanged; no-append waiter state is not run evidence
+- `StoreError::ResourceLaneBlocked` remains the admission authority at the attempted append boundary
+- public status must clearly distinguish committed stream facts from operational diagnostics
+
+Verification if implemented later:
+
+- runtime tests showing a lane-blocked no-append waiter does not create events, attempts, cells,
+  artifacts, side-effect ledger entries, or run-mode changes
+- status tests showing committed lane holders and no-append waiters render through distinct fields
+- CLI/REST JSON contract tests for redaction, absence of unrelated run ids, and stable field names
+- replay/resume tests proving no-append waiter diagnostics are ignored by semantic reconstruction
 
 ### Phase 2: Artifact Role Contract
 
@@ -1240,7 +1489,7 @@ broad scheduler surface.
    policy, staging class, retention class, and same-commit policy.
 3. Route event requirement generation, runtime staging classification, replay artifact
    authorization, and artifact-store metadata validation through the role contract.
-4. Fix or deliberately version the `typed_spec_certificate` descriptor drift.
+4. Preserve the now-fixed `typed_spec_certificate` descriptor tag with regression coverage.
 
 Expected result: one source of role truth, fewer string/tag/producer matches, and a small but real
 authority-preserving production cleanup.
@@ -1253,9 +1502,25 @@ authority-preserving production cleanup.
    are equivalent to the current hand-written fixtures.
 3. Preserve negative assertion specificity for wrong role, wrong producer, missing artifact,
    tampered spec/certificate, replay-with-live-capability, and secret-redaction cases.
+4. Add dedicated public `ResolveSagaTerminal` fixture coverage as an early scenario conversion before
+   shared run-view and public-status paths are rewritten.
 
 Expected result: lower test ceremony without reducing coverage, plus the safety net needed before
 larger protocol rewrites.
+
+### Phase 3b: Persisted/Public No-Secret Provenance Hardening
+
+1. Inventory persisted and public surfaces: events, artifacts, facts, context snapshots,
+   projections, CLI JSON, REST JSON, public outputs, error payloads, logs, and fixtures.
+2. Add scenario goldens for secret-bearing runner inputs proving only non-secret handles/evidence
+   reach persisted or public surfaces.
+3. Add side-effect path regression tests proving signed/raw payloads stay below typed
+   runtime/store/replay surfaces.
+4. Keep source scans as defense-in-depth only; typed tests over production entry points are the
+   authority.
+
+Expected result: the no-secret invariant becomes reviewable before broader rewrites touch public
+output rendering, retained artifacts, replay evidence, CLI/REST output, or side-effect evidence.
 
 ### Phase 4: Shared Run View And App Read Paths
 
@@ -1269,21 +1534,34 @@ larger protocol rewrites.
 Expected result: fewer duplicated correctness checks, less runtime/replay/app divergence, and one
 validated path before presentation filtering.
 
-### Phase 5: Runner Kit
+### Phase 5: Full Sync/Async Driver And Service Collapse
+
+1. Make async execution and app services primary once shared run view/status authority exists.
+2. Add sync/async parity tests for emitted events, staged artifact refs, projections, replay results,
+   public status, and public JSON.
+3. Collapse duplicated runtime driver IO choreography where an async-primary core can preserve
+   lifecycle semantics.
+4. Move CLI and REST paths through the unified service without leaking HTTP concerns into CLI JSON.
+5. Retain sync compatibility only as a thin wrapper or narrowly justified store adapter boundary.
+
+Expected result: one ordinary execution/service path for future runner-kit and side-effect-driver
+work, without changing lifecycle semantics.
+
+### Phase 6: Runner Kit
 
 1. Extract typed helpers for input materialization, artifact staging, retained refs,
    `CellProduced`, `FactRecorded`, and public-output payload construction.
 2. Compare emitted artifacts, event payloads, retention refs, and executable identities against
    proof, portfolio, and EVM runner goldens.
-3. Move EVM lifecycle runner logic into `crates/adapters/evm-contracts` while preserving executable
-   identity or versioning it deliberately.
+3. Keep EVM lifecycle runner logic in `crates/adapters/evm-contracts`; if helper extraction changes
+   executable identity, version it deliberately.
 
 Expected result: less adapter ceremony without weakening commit planning, schema checks, or runner
 identity authority.
 
-### Phase 6: Generic Side-Effect Driver
+### Phase 7: Generic Side-Effect Driver
 
-1. Use the side-effect lifecycle boundary established by `RFC_REFACTOR_FSM_SCHEDULER.md`.
+1. Use the side-effect lifecycle boundary established by the completed FSM scheduler refactor.
 2. Define the generic side-effect driver trait surface only after recovery and uncertainty behavior
    are covered by goldens.
 3. Port proof first, then EVM lifecycle after identity, replay, and ambiguity behavior are locked.
@@ -1291,7 +1569,7 @@ identity authority.
 Expected result: large reuse for future mutation workflows and a smaller trusted surface for
 side-effect protocol correctness.
 
-### Phase 7: Kernel Protocol Generation And Declarations
+### Phase 8: Kernel Protocol Generation And Declarations
 
 1. Prototype the declarative kernel contract source in check-only mode for one small event family.
 2. Generate or derive schema descriptors, enum tag tables, artifact requirements, and store payload
@@ -1335,11 +1613,11 @@ Nixfied behavior.
 The fundamental abstraction problem is not that MFM has the wrong runtime model. It is that the
 typed kernel protocol is implemented as repeated hand-written Rust across too many layers.
 
-The first production move should execute `RFC_REFACTOR_FSM_SCHEDULER.md` because it makes
-transition, attempt, recovery, and side-effect lifecycle authority explicit. The next bounded
-protocol move should be role-contract work because it addresses concrete drift with limited blast
-radius. The first major test move should be scenario/golden infrastructure because it makes later
-refactors reviewable as authority-preserving rewrites. The first shared-view move should be
+The first production move, the FSM scheduler lifecycle refactor, is complete. It made transition,
+attempt, recovery, framework, and side-effect lifecycle authority explicit. The next bounded
+protocol move should be role-contract work because it addresses durable role drift with limited
+blast radius. The first major test move should be scenario/golden infrastructure because it makes
+later refactors reviewable as authority-preserving rewrites. The first shared-view move should be
 committed-run history because runtime, replay, app, and public-output paths already need the same
 verified stream facts.
 
