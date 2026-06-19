@@ -77,8 +77,10 @@ pub use runners::{
 };
 pub use scheduler::{ManualResolutionRequest, SchedulerStatus, SerialTypedScheduler};
 pub use side_effect_driver::{
-    SideEffectClaimAuthority, SideEffectEvidenceBuilder, SideEffectPrepareEvidence,
-    SideEffectPreparedInvocationEvidence, SideEffectReplayEvidence,
+    SideEffectClaimAuthority, SideEffectDriver, SideEffectDriverCallbacks, SideEffectDriverFuture,
+    SideEffectEvidenceBuilder, SideEffectIntentPlan, SideEffectObservedEvidence,
+    SideEffectPrepareEvidence, SideEffectPreparedInvocationEvidence, SideEffectProtocolAction,
+    SideEffectReplayEvidence, SideEffectSubmissionDecision,
 };
 pub use side_effect_lifecycle::SideEffectAttemptView;
 pub use spec_authority::CertifiedRuntimeSpec;

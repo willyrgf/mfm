@@ -1345,6 +1345,501 @@ fn side_effect_evidence_builder_builds_progress_evidence_with_replay_and_resourc
     });
 }
 
+#[derive(Clone)]
+enum TestSubmissionDecision {
+    Observed,
+    Unknown,
+    NotSubmitted,
+    Ambiguous,
+}
+
+#[derive(Clone)]
+struct TestSideEffectDriverCallbacks {
+    cap_kind: CapabilityKind,
+    cap_version: CapabilityVersion,
+    adapter_kind: AdapterKind,
+    adapter_version: AdapterVersion,
+    ledger_key: events::SideEffectLedgerKey,
+    submission_decision: TestSubmissionDecision,
+}
+
+impl TestSideEffectDriverCallbacks {
+    fn new(fixture: &Fixture, ledger_key: events::SideEffectLedgerKey) -> Self {
+        Self {
+            cap_kind: side_effect_capability_kind(),
+            cap_version: side_effect_capability_version(),
+            adapter_kind: fixture.adapter_kind.clone(),
+            adapter_version: fixture.adapter_version.clone(),
+            ledger_key,
+            submission_decision: TestSubmissionDecision::Observed,
+        }
+    }
+
+    fn with_submission_decision(mut self, decision: TestSubmissionDecision) -> Self {
+        self.submission_decision = decision;
+        self
+    }
+}
+
+impl SideEffectDriverCallbacks for TestSideEffectDriverCallbacks {
+    type Intent = CertifierValue;
+    type Idempotency = CertifierValue;
+    type PreparedInvocation = serde_json::Value;
+    type Submission = CertifierValue;
+    type SubmissionUnknownEvidence = CertifierValue;
+    type NotSubmittedProof = CertifierValue;
+    type Receipt = CertifierValue;
+    type Confirmation = CertifierValue;
+    type AmbiguityEvidence = CertifierValue;
+    type Output = CertifierValue;
+
+    fn intent_and_idempotency<'a, 'ctx>(
+        &'a self,
+        _ctx: &'a ErasedRunCtx<'ctx>,
+    ) -> SideEffectDriverFuture<'a, SideEffectIntentPlan<Self::Intent, Self::Idempotency>> {
+        let ledger_key = self.ledger_key.clone();
+        let cap_kind = self.cap_kind.clone();
+        let cap_version = self.cap_version.clone();
+        let adapter_kind = self.adapter_kind.clone();
+        let adapter_version = self.adapter_version.clone();
+        Box::pin(async move {
+            Ok(SideEffectIntentPlan {
+                side_effect: RunnerSideEffectBinding {
+                    ledger_key,
+                    ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                    invocation_epoch: 1,
+                },
+                claim: SideEffectClaimAuthority {
+                    claim_owner: events::RunnerInvocationId::new("mfm.test.driver.owner")
+                        .expect("claim owner"),
+                    claim_generation: 1,
+                    claim_fencing_token: events::side_effect::ClaimFencingToken::new(
+                        "mfm.test.driver.token",
+                    )
+                    .expect("fencing token"),
+                    resource_key: None,
+                },
+                intent: CertifierValue { amount: 21 },
+                idempotency: CertifierValue { amount: 34 },
+                idempotency_key: events::IdempotencyKeyRef::new("mfm.test.driver.idem")
+                    .expect("idempotency key"),
+                capability_binding: RunnerCapabilityBinding {
+                    capability_kind: cap_kind,
+                    capability_version: cap_version,
+                    adapter_kind,
+                    adapter_version,
+                },
+            })
+        })
+    }
+
+    fn prepare_invocation<'a, 'ctx>(
+        &'a self,
+        _ctx: &'a ErasedRunCtx<'ctx>,
+        _plan: &'a SideEffectIntentPlan<Self::Intent, Self::Idempotency>,
+    ) -> SideEffectDriverFuture<'a, Option<Self::PreparedInvocation>> {
+        Box::pin(async {
+            Ok(Some(serde_json::json!({
+                "prepared": true
+            })))
+        })
+    }
+
+    fn reconstruct_prepared_invocation<'a, 'ctx>(
+        &'a self,
+        _ctx: &'a ErasedRunCtx<'ctx>,
+        prepared: &'a store::SideEffectArtifactProjection,
+    ) -> SideEffectDriverFuture<'a, Self::PreparedInvocation> {
+        let prepared_artifact_id = prepared.artifact_id.clone();
+        Box::pin(async move {
+            Ok(serde_json::json!({
+                "prepared_artifact_id": prepared_artifact_id.as_str()
+            }))
+        })
+    }
+
+    fn submit_or_recover_submission<'a, 'ctx>(
+        &'a self,
+        _ctx: &'a ErasedRunCtx<'ctx>,
+        _action: SideEffectProtocolAction,
+        _prepared: Option<Self::PreparedInvocation>,
+    ) -> SideEffectDriverFuture<
+        'a,
+        SideEffectSubmissionDecision<
+            Self::Submission,
+            Self::SubmissionUnknownEvidence,
+            Self::NotSubmittedProof,
+            Self::AmbiguityEvidence,
+        >,
+    > {
+        let decision = self.submission_decision.clone();
+        Box::pin(async move {
+            Ok(match decision {
+                TestSubmissionDecision::Observed => {
+                    SideEffectSubmissionDecision::Observed(CertifierValue { amount: 55 })
+                }
+                TestSubmissionDecision::Unknown => {
+                    SideEffectSubmissionDecision::Unknown(CertifierValue { amount: 56 })
+                }
+                TestSubmissionDecision::NotSubmitted => {
+                    SideEffectSubmissionDecision::NotSubmitted(CertifierValue { amount: 57 })
+                }
+                TestSubmissionDecision::Ambiguous => SideEffectSubmissionDecision::Ambiguous {
+                    ambiguity_code: events::AmbiguityCode::new("mfm_test_driver_ambiguous")
+                        .expect("ambiguity code"),
+                    evidence: CertifierValue { amount: 58 },
+                },
+            })
+        })
+    }
+
+    fn read_receipt<'a, 'ctx>(
+        &'a self,
+        _ctx: &'a ErasedRunCtx<'ctx>,
+        _submission: &'a store::SideEffectArtifactProjection,
+    ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Receipt>> {
+        Box::pin(async {
+            Ok(SideEffectObservedEvidence {
+                evidence: CertifierValue { amount: 89 },
+                replay: test_driver_replay_evidence(),
+            })
+        })
+    }
+
+    fn build_confirmation<'a, 'ctx>(
+        &'a self,
+        _ctx: &'a ErasedRunCtx<'ctx>,
+        _receipt: &'a store::SideEffectArtifactProjection,
+    ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Confirmation>> {
+        Box::pin(async {
+            Ok(SideEffectObservedEvidence {
+                evidence: CertifierValue { amount: 144 },
+                replay: test_driver_replay_evidence(),
+            })
+        })
+    }
+
+    fn map_confirmation_to_output<'a, 'ctx>(
+        &'a self,
+        _ctx: &'a ErasedRunCtx<'ctx>,
+        _confirmation: &'a store::SideEffectArtifactProjection,
+    ) -> SideEffectDriverFuture<'a, Self::Output> {
+        Box::pin(async { Ok(CertifierValue { amount: 233 }) })
+    }
+}
+
+fn test_driver_replay_evidence() -> SideEffectReplayEvidence {
+    SideEffectReplayEvidence {
+        replay_verifier_id: events::ReplayVerifierId::new("mfm.test.driver.verifier")
+            .expect("verifier"),
+        resource_touched_set: None,
+    }
+}
+
+#[tokio::test]
+async fn side_effect_driver_prepares_and_starts_one_step() {
+    let fixture = fixture_with_first_side_effect_state();
+    let ledger_key =
+        events::SideEffectLedgerKey::new("mfm.test.driver.prepare").expect("ledger key");
+    let callbacks = TestSideEffectDriverCallbacks::new(&fixture, ledger_key.clone());
+
+    let output = drive_side_effect_driver_empty(&fixture, &fixture.cell_a, &callbacks)
+        .await
+        .expect("driver output");
+
+    assert_eq!(output.staged_artifacts.len(), 2);
+    assert_eq!(output.payloads.len(), 4);
+    assert!(matches!(
+        output.payloads[0],
+        RunnerEventPayload::SideEffectIntentPersisted(_)
+    ));
+    assert!(matches!(
+        output.payloads[1],
+        RunnerEventPayload::SideEffectClaimed(_)
+    ));
+    assert!(matches!(
+        output.payloads[2],
+        RunnerEventPayload::SideEffectInvocationPrepared(_)
+    ));
+    assert!(matches!(
+        output.payloads[3],
+        RunnerEventPayload::SideEffectInvocationStarted(_)
+    ));
+    match &output.payloads[0] {
+        RunnerEventPayload::SideEffectIntentPersisted(payload) => {
+            assert_eq!(payload.ledger_key, ledger_key);
+        }
+        other => panic!("expected intent payload: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn side_effect_driver_submits_from_started_projection() {
+    let fixture = fixture_with_first_exclusive_side_effect_state();
+    let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    let node = node_by_output(&fixture, &fixture.cell_a);
+    let (attempt_id, ledger_key) = append_synthetic_exclusive_prepare(
+        &mut store,
+        &fixture,
+        &fixture.run_id,
+        node,
+        "wallet-driver-submit",
+        "sidefx-driver-submit",
+    );
+    append_synthetic_invocation_started(
+        &mut store,
+        &fixture,
+        &fixture.run_id,
+        node,
+        &attempt_id,
+        &ledger_key,
+        "sidefx-driver-submit-started",
+    );
+    let callbacks = TestSideEffectDriverCallbacks::new(&fixture, ledger_key.clone());
+
+    let output =
+        drive_side_effect_driver_from_store(&fixture, &store, node, &attempt_id, &callbacks)
+            .await
+            .expect("driver output");
+
+    assert_eq!(output.payloads.len(), 1);
+    match &output.payloads[0] {
+        RunnerEventPayload::SideEffectSubmissionObserved(payload) => {
+            assert_eq!(payload.ledger_key, ledger_key);
+            assert_eq!(payload.invocation_epoch, 1);
+        }
+        other => panic!("expected submission payload: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn side_effect_driver_persists_submission_recovery_decisions() {
+    let fixture = fixture_with_first_exclusive_side_effect_state();
+    let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    let node = node_by_output(&fixture, &fixture.cell_a);
+    let (attempt_id, ledger_key) = append_synthetic_exclusive_prepare(
+        &mut store,
+        &fixture,
+        &fixture.run_id,
+        node,
+        "wallet-driver-recovery",
+        "sidefx-driver-recovery",
+    );
+    append_synthetic_invocation_started(
+        &mut store,
+        &fixture,
+        &fixture.run_id,
+        node,
+        &attempt_id,
+        &ledger_key,
+        "sidefx-driver-recovery-started",
+    );
+
+    for (decision, expected) in [
+        (
+            TestSubmissionDecision::Unknown,
+            "side_effect.submission_unknown",
+        ),
+        (
+            TestSubmissionDecision::NotSubmitted,
+            "side_effect.not_submitted_proven",
+        ),
+        (TestSubmissionDecision::Ambiguous, "side_effect.ambiguous"),
+    ] {
+        let callbacks = TestSideEffectDriverCallbacks::new(&fixture, ledger_key.clone())
+            .with_submission_decision(decision);
+        let output =
+            drive_side_effect_driver_from_store(&fixture, &store, node, &attempt_id, &callbacks)
+                .await
+                .expect("driver output");
+        let actual = match &output.payloads[0] {
+            RunnerEventPayload::SideEffectSubmissionUnknown(_) => "side_effect.submission_unknown",
+            RunnerEventPayload::SideEffectNotSubmittedProven(_) => {
+                "side_effect.not_submitted_proven"
+            }
+            RunnerEventPayload::SideEffectAmbiguous(_) => "side_effect.ambiguous",
+            other => panic!("unexpected recovery payload: {other:?}"),
+        };
+        assert_eq!(actual, expected);
+    }
+}
+
+#[tokio::test]
+async fn side_effect_driver_maps_confirmation_to_state_output() {
+    let fixture = fixture_with_first_exclusive_side_effect_state();
+    let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    let node = node_by_output(&fixture, &fixture.cell_a);
+    let (attempt_id, ledger_key) = append_synthetic_exclusive_prepare(
+        &mut store,
+        &fixture,
+        &fixture.run_id,
+        node,
+        "wallet-driver-output",
+        "sidefx-driver-output",
+    );
+    append_synthetic_invocation_started(
+        &mut store,
+        &fixture,
+        &fixture.run_id,
+        node,
+        &attempt_id,
+        &ledger_key,
+        "sidefx-driver-output-started",
+    );
+    append_synthetic_submission_observed(
+        &mut store,
+        &fixture,
+        node,
+        &attempt_id,
+        &ledger_key,
+        "sidefx-driver-output-submission",
+    );
+    append_synthetic_receipt_observed(
+        &mut store,
+        &fixture,
+        node,
+        &attempt_id,
+        &ledger_key,
+        "sidefx-driver-output-receipt",
+    );
+    append_synthetic_confirmation_observed(
+        &mut store,
+        &fixture,
+        node,
+        &attempt_id,
+        &ledger_key,
+        "sidefx-driver-output-confirmation",
+    );
+    let callbacks = TestSideEffectDriverCallbacks::new(&fixture, ledger_key);
+
+    let output =
+        drive_side_effect_driver_from_store(&fixture, &store, node, &attempt_id, &callbacks)
+            .await
+            .expect("driver output");
+
+    assert_eq!(output.staged_artifacts.len(), 1);
+    assert_eq!(output.payloads.len(), 1);
+    assert!(matches!(
+        output.payloads[0],
+        RunnerEventPayload::CellProduced(_)
+    ));
+}
+
+#[tokio::test]
+async fn side_effect_driver_idles_on_ambiguous_projection() {
+    let fixture = fixture_with_first_exclusive_side_effect_state();
+    let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    let node = node_by_output(&fixture, &fixture.cell_a);
+    let (attempt_id, ledger_key) = append_synthetic_exclusive_prepare(
+        &mut store,
+        &fixture,
+        &fixture.run_id,
+        node,
+        "wallet-driver-ambiguous",
+        "sidefx-driver-ambiguous",
+    );
+    append_synthetic_invocation_started(
+        &mut store,
+        &fixture,
+        &fixture.run_id,
+        node,
+        &attempt_id,
+        &ledger_key,
+        "sidefx-driver-ambiguous-started",
+    );
+    append_synthetic_ambiguous(
+        &mut store,
+        &fixture,
+        &fixture.run_id,
+        node,
+        &attempt_id,
+        &ledger_key,
+        "sidefx-driver-ambiguous-terminal",
+    );
+    let callbacks = TestSideEffectDriverCallbacks::new(&fixture, ledger_key);
+
+    let output =
+        drive_side_effect_driver_from_store(&fixture, &store, node, &attempt_id, &callbacks)
+            .await
+            .expect("driver output");
+
+    assert!(output.payloads.is_empty());
+    assert!(output.staged_artifacts.is_empty());
+}
+
+#[tokio::test]
+async fn side_effect_driver_rejects_unsupported_prepared_projection() {
+    let fixture = fixture_with_first_exclusive_side_effect_state();
+    let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
+    let mut store = store::InMemoryTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    let node = node_by_output(&fixture, &fixture.cell_a);
+    let (attempt_id, ledger_key) = append_synthetic_exclusive_prepare(
+        &mut store,
+        &fixture,
+        &fixture.run_id,
+        node,
+        "wallet-driver-unsupported",
+        "sidefx-driver-unsupported",
+    );
+    let callbacks = TestSideEffectDriverCallbacks::new(&fixture, ledger_key);
+
+    let error =
+        drive_side_effect_driver_from_store(&fixture, &store, node, &attempt_id, &callbacks)
+            .await
+            .expect_err("prepared phase unsupported");
+
+    assert!(matches!(
+        error,
+        RuntimeError::InvalidRunnerOutput(message)
+            if message.contains("unsupported side-effect driver phase")
+                && message.contains("prepared")
+    ));
+}
+
 fn with_runner_erased_ctx<R, F>(fixture: &Fixture, cell_id: &CellId, test: F) -> R
 where
     F: for<'a> FnOnce(ErasedRunCtx<'a>) -> R,
@@ -1391,6 +1886,104 @@ where
         run_stream: &run_stream,
     };
     test(ErasedRunCtx::from_prepared(&invocation))
+}
+
+async fn drive_side_effect_driver_empty<C>(
+    fixture: &Fixture,
+    cell_id: &CellId,
+    callbacks: &C,
+) -> Result<ErasedRunnerOutput>
+where
+    C: SideEffectDriverCallbacks + ?Sized,
+{
+    let node = node_by_output(fixture, cell_id);
+    let descriptor = fixture
+        .runtime_spec
+        .state_descriptor_for_node(node)
+        .expect("state descriptor");
+    let output_cell = fixture
+        .runtime_spec
+        .cell(&node.output_cell)
+        .expect("output cell");
+    let attempt_id = attempt_id(
+        &fixture.run_id,
+        fixture.runtime_spec.spec_hash(),
+        &node.node_id,
+        1,
+    )
+    .expect("attempt id");
+    let config_artifact = config_artifact(&fixture.runtime_spec, &node.config_ref).evidence;
+    let projections = store::ProjectionSnapshot::default();
+    let run_stream = Vec::new();
+    let invocation = PreparedRunnerInvocation {
+        runtime_spec: &fixture.runtime_spec,
+        run_id: &fixture.run_id,
+        spec_hash: fixture.runtime_spec.spec_hash(),
+        node,
+        descriptor,
+        output_cell,
+        attempt_id: &attempt_id,
+        attempt_no: 1,
+        config_artifact,
+        inputs: MaterializedInputs {
+            input_schema_id: node.input_bindings.input_schema_id.clone(),
+            root: MaterializedInputNode::Unit,
+        },
+        caps: CertifiedRuntimeCapabilities::new(
+            node.node_id.clone(),
+            node.capability_bindings.clone(),
+        ),
+        recorded_facts: RecordedFacts::default(),
+        projections: &projections,
+        run_stream: &run_stream,
+    };
+    SideEffectDriver::drive(ErasedRunCtx::from_prepared(&invocation), callbacks).await
+}
+
+async fn drive_side_effect_driver_from_store<C>(
+    fixture: &Fixture,
+    store: &store::InMemoryTypedRunStore,
+    node: &spec::NodeSpec,
+    attempt_id: &AttemptId,
+    callbacks: &C,
+) -> Result<ErasedRunnerOutput>
+where
+    C: SideEffectDriverCallbacks + ?Sized,
+{
+    let descriptor = fixture
+        .runtime_spec
+        .state_descriptor_for_node(node)
+        .expect("state descriptor");
+    let output_cell = fixture
+        .runtime_spec
+        .cell(&node.output_cell)
+        .expect("output cell");
+    let config_artifact = config_artifact(&fixture.runtime_spec, &node.config_ref).evidence;
+    let projections = store.projection_snapshot().clone();
+    let run_stream = store.load_run_stream(&fixture.run_id);
+    let invocation = PreparedRunnerInvocation {
+        runtime_spec: &fixture.runtime_spec,
+        run_id: &fixture.run_id,
+        spec_hash: fixture.runtime_spec.spec_hash(),
+        node,
+        descriptor,
+        output_cell,
+        attempt_id,
+        attempt_no: 1,
+        config_artifact,
+        inputs: MaterializedInputs {
+            input_schema_id: node.input_bindings.input_schema_id.clone(),
+            root: MaterializedInputNode::Unit,
+        },
+        caps: CertifiedRuntimeCapabilities::new(
+            node.node_id.clone(),
+            node.capability_bindings.clone(),
+        ),
+        recorded_facts: RecordedFacts::default(),
+        projections: &projections,
+        run_stream: &run_stream,
+    };
+    SideEffectDriver::drive(ErasedRunCtx::from_prepared(&invocation), callbacks).await
 }
 
 fn single_side_effect_payload(output: &ErasedRunnerOutput) -> &RunnerEventPayload {
@@ -10906,6 +11499,172 @@ fn append_synthetic_invocation_started(
             },
         })
         .expect("append synthetic invocation started");
+}
+
+fn append_synthetic_submission_observed(
+    store: &mut store::InMemoryTypedRunStore,
+    fixture: &Fixture,
+    node: &spec::NodeSpec,
+    attempt_id: &AttemptId,
+    ledger: &events::SideEffectLedgerKey,
+    commit_key: &str,
+) {
+    let artifact_id = artifact(0xd7);
+    let digest = content(0xd8);
+    let evidence = side_effect_evidence(
+        node,
+        artifact_id.clone(),
+        digest.clone(),
+        events::ArtifactRole::Submission,
+    );
+    store
+        .append_prepared_commit(store_typed_commit_request! {
+            run_id: fixture.run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&fixture.run_id),
+            commit_key: store::CommitKey::new(commit_key).expect("commit key"),
+            payloads: vec![events::KernelEventPayload::SideEffectSubmissionObserved(
+                events::side_effect::SubmissionObserved {
+                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                    node_id: node.node_id.clone(),
+                    attempt_id: attempt_id.clone(),
+                    ledger_key: ledger.clone(),
+                    ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                    invocation_epoch: 1,
+                    submission_schema_id: node.config_ref.schema_id.clone(),
+                    submission_hash: digest,
+                    submission_artifact_id: artifact_id,
+                },
+            )],
+            required_artifacts: vec![evidence],
+            preconditions: store::CommitPreconditions {
+                required_run_state: store::RequiredRunState::NotCompleted,
+                required_side_effect_states: vec![store::SideEffectStatePrecondition {
+                    ledger_key: ledger.clone(),
+                    required: store::RequiredSideEffectState::InvocationStarted,
+                }],
+                ..store::CommitPreconditions::default()
+            },
+        })
+        .expect("append synthetic submission observed");
+}
+
+fn append_synthetic_receipt_observed(
+    store: &mut store::InMemoryTypedRunStore,
+    fixture: &Fixture,
+    node: &spec::NodeSpec,
+    attempt_id: &AttemptId,
+    ledger: &events::SideEffectLedgerKey,
+    commit_key: &str,
+) {
+    let artifact_id = artifact(0xd9);
+    let digest = content(0xda);
+    let evidence = side_effect_evidence(
+        node,
+        artifact_id.clone(),
+        digest.clone(),
+        events::ArtifactRole::Receipt,
+    );
+    store
+        .append_prepared_commit(store_typed_commit_request! {
+            run_id: fixture.run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&fixture.run_id),
+            commit_key: store::CommitKey::new(commit_key).expect("commit key"),
+            payloads: vec![events::KernelEventPayload::SideEffectReceiptObserved(
+                events::side_effect::ReceiptObserved {
+                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                    node_id: node.node_id.clone(),
+                    attempt_id: attempt_id.clone(),
+                    ledger_key: ledger.clone(),
+                    ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                    invocation_epoch: 1,
+                    receipt_schema_id: node.config_ref.schema_id.clone(),
+                    receipt_hash: digest,
+                    receipt_artifact_id: artifact_id,
+                    replay_verifier_id: events::ReplayVerifierId::new("mfm.test.driver.replay")
+                        .expect("replay verifier"),
+                    resource_touched_set: None,
+                },
+            )],
+            required_artifacts: vec![evidence],
+            preconditions: store::CommitPreconditions {
+                required_run_state: store::RequiredRunState::NotCompleted,
+                required_side_effect_states: vec![store::SideEffectStatePrecondition {
+                    ledger_key: ledger.clone(),
+                    required: store::RequiredSideEffectState::SubmissionResult,
+                }],
+                ..store::CommitPreconditions::default()
+            },
+        })
+        .expect("append synthetic receipt observed");
+}
+
+fn append_synthetic_confirmation_observed(
+    store: &mut store::InMemoryTypedRunStore,
+    fixture: &Fixture,
+    node: &spec::NodeSpec,
+    attempt_id: &AttemptId,
+    ledger: &events::SideEffectLedgerKey,
+    commit_key: &str,
+) {
+    let artifact_id = artifact(0xdb);
+    let digest = content(0xdc);
+    let evidence = side_effect_evidence(
+        node,
+        artifact_id.clone(),
+        digest.clone(),
+        events::ArtifactRole::Confirmation,
+    );
+    store
+        .append_prepared_commit(store_typed_commit_request! {
+            run_id: fixture.run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&fixture.run_id),
+            commit_key: store::CommitKey::new(commit_key).expect("commit key"),
+            payloads: vec![events::KernelEventPayload::SideEffectConfirmationObserved(
+                events::side_effect::ConfirmationObserved {
+                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                    node_id: node.node_id.clone(),
+                    attempt_id: attempt_id.clone(),
+                    ledger_key: ledger.clone(),
+                    ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                    invocation_epoch: 1,
+                    confirmation_schema_id: node.config_ref.schema_id.clone(),
+                    confirmation_hash: digest,
+                    confirmation_artifact_id: artifact_id,
+                    replay_verifier_id: events::ReplayVerifierId::new("mfm.test.driver.replay")
+                        .expect("replay verifier"),
+                    resource_touched_set: None,
+                },
+            )],
+            required_artifacts: vec![evidence],
+            preconditions: store::CommitPreconditions {
+                required_run_state: store::RequiredRunState::NotCompleted,
+                required_side_effect_states: vec![store::SideEffectStatePrecondition {
+                    ledger_key: ledger.clone(),
+                    required: store::RequiredSideEffectState::ReceiptObserved,
+                }],
+                ..store::CommitPreconditions::default()
+            },
+        })
+        .expect("append synthetic confirmation observed");
+}
+
+fn side_effect_evidence(
+    node: &spec::NodeSpec,
+    artifact_id: ArtifactId,
+    digest: ContentDigest,
+    role: events::ArtifactRole,
+) -> store::ArtifactEvidenceRef {
+    store::ArtifactEvidenceRef {
+        artifact_id,
+        digest,
+        byte_len: 19,
+        media_type: spec::MediaType::new("application/json").expect("media"),
+        schema_id: Some(node.config_ref.schema_id.clone()),
+        semantic_type_id: None,
+        producer_node_id: Some(node.node_id.clone()),
+        producer_seed_id: None,
+        artifact_role: role,
+    }
 }
 
 fn append_synthetic_side_effect_failed(
