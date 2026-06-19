@@ -247,9 +247,9 @@ impl VerifiedRunHistory {
     where
         S: store::TypedRunEventStore + ?Sized,
     {
-        let committed =
-            store::CommittedRunStream::from_events(run_id.clone(), store.load_run_stream(run_id))?;
-        Self::from_committed_stream(runtime_spec, committed, artifacts)
+        Ok(Self {
+            view: VerifiedRunHistoryView::from_store(runtime_spec, run_id, store, artifacts)?,
+        })
     }
 
     /// Loads the authoritative run stream from an async typed store and validates it against
@@ -263,14 +263,10 @@ impl VerifiedRunHistory {
     where
         S: store::AsyncTypedRunEventStore + ?Sized,
     {
-        let committed = store::CommittedRunStream::from_events(
-            run_id.clone(),
-            store
-                .load_run_stream(run_id)
-                .await
-                .map_err(async_store_error)?,
-        )?;
-        Self::from_committed_stream(runtime_spec, committed, artifacts)
+        Ok(Self {
+            view: VerifiedRunHistoryView::from_async_store(runtime_spec, run_id, store, artifacts)
+                .await?,
+        })
     }
 
     /// Validates a committed stream against certified runtime authority and verified retained
@@ -326,6 +322,39 @@ impl VerifiedRunHistory {
 }
 
 impl VerifiedRunHistoryView {
+    fn from_store<S>(
+        runtime_spec: &CertifiedRuntimeSpec,
+        run_id: &RunId,
+        store: &S,
+        artifacts: store::VerifiedRunArtifactStore,
+    ) -> Result<Self>
+    where
+        S: store::TypedRunEventStore + ?Sized,
+    {
+        let committed =
+            store::CommittedRunStream::from_events(run_id.clone(), store.load_run_stream(run_id))?;
+        Self::from_committed_stream(runtime_spec, committed, artifacts)
+    }
+
+    async fn from_async_store<S>(
+        runtime_spec: &CertifiedRuntimeSpec,
+        run_id: &RunId,
+        store: &S,
+        artifacts: store::VerifiedRunArtifactStore,
+    ) -> Result<Self>
+    where
+        S: store::AsyncTypedRunEventStore + ?Sized,
+    {
+        let committed = store::CommittedRunStream::from_events(
+            run_id.clone(),
+            store
+                .load_run_stream(run_id)
+                .await
+                .map_err(async_store_error)?,
+        )?;
+        Self::from_committed_stream(runtime_spec, committed, artifacts)
+    }
+
     /// Validates a committed stream against certified runtime authority and verified retained
     /// artifact evidence.
     pub fn from_committed_stream(
