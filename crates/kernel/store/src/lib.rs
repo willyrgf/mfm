@@ -7941,30 +7941,8 @@ pub mod v1 {
 
     /// Parses an artifact role tag.
     pub fn parse_artifact_role(value: &str) -> CodecResult<ArtifactRole> {
-        match value {
-            "typed_execution_spec" => Ok(ArtifactRole::TypedExecutionSpec),
-            "typed_spec_certificate" => Ok(ArtifactRole::TypedSpecCertificate),
-            "typed_config" => Ok(ArtifactRole::TypedConfig),
-            "seed_input" => Ok(ArtifactRole::SeedInput),
-            "state_output" => Ok(ArtifactRole::StateOutput),
-            "fact_response" => Ok(ArtifactRole::FactResponse),
-            "side_effect_intent" => Ok(ArtifactRole::SideEffectIntent),
-            "prepared_invocation" => Ok(ArtifactRole::PreparedInvocation),
-            "not_submitted_proof" => Ok(ArtifactRole::NotSubmittedProof),
-            "submission" => Ok(ArtifactRole::Submission),
-            "submission_unknown_evidence" => Ok(ArtifactRole::SubmissionUnknownEvidence),
-            "receipt" => Ok(ArtifactRole::Receipt),
-            "confirmation" => Ok(ArtifactRole::Confirmation),
-            "ambiguity_evidence" => Ok(ArtifactRole::AmbiguityEvidence),
-            "manual_resolution_evidence" => Ok(ArtifactRole::ManualResolutionEvidence),
-            "manual_resolution_authorization" => Ok(ArtifactRole::ManualResolutionAuthorization),
-            "public_output" => Ok(ArtifactRole::PublicOutput),
-            "redacted_diagnostic" => Ok(ArtifactRole::RedactedDiagnostic),
-            "retention_manifest" => Ok(ArtifactRole::RetentionManifest),
-            other => Err(CodecError::Identity(format!(
-                "unknown artifact role {other}"
-            ))),
-        }
+        ArtifactRole::parse(value)
+            .ok_or_else(|| CodecError::Identity(format!("unknown artifact role {value}")))
     }
 
     fn parse_capability_role(value: &str) -> Result<CapabilityRole> {
@@ -9144,27 +9122,7 @@ pub mod v1 {
 
     /// Returns the canonical tag for an artifact role.
     pub fn artifact_role_str(role: ArtifactRole) -> &'static str {
-        match role {
-            ArtifactRole::TypedExecutionSpec => "typed_execution_spec",
-            ArtifactRole::TypedSpecCertificate => "typed_spec_certificate",
-            ArtifactRole::TypedConfig => "typed_config",
-            ArtifactRole::SeedInput => "seed_input",
-            ArtifactRole::StateOutput => "state_output",
-            ArtifactRole::FactResponse => "fact_response",
-            ArtifactRole::SideEffectIntent => "side_effect_intent",
-            ArtifactRole::PreparedInvocation => "prepared_invocation",
-            ArtifactRole::NotSubmittedProof => "not_submitted_proof",
-            ArtifactRole::Submission => "submission",
-            ArtifactRole::SubmissionUnknownEvidence => "submission_unknown_evidence",
-            ArtifactRole::Receipt => "receipt",
-            ArtifactRole::Confirmation => "confirmation",
-            ArtifactRole::AmbiguityEvidence => "ambiguity_evidence",
-            ArtifactRole::ManualResolutionEvidence => "manual_resolution_evidence",
-            ArtifactRole::ManualResolutionAuthorization => "manual_resolution_authorization",
-            ArtifactRole::PublicOutput => "public_output",
-            ArtifactRole::RedactedDiagnostic => "redacted_diagnostic",
-            ArtifactRole::RetentionManifest => "retention_manifest",
-        }
+        role.as_str()
     }
 
     /// Returns the canonical tag for an error category.
