@@ -175,19 +175,28 @@ pub mod v1 {
             runtime_spec: &mfm_runtime::CertifiedRuntimeSpec,
             verified_history: &mfm_runtime::VerifiedRunHistory,
         ) -> Result<Self> {
-            if runtime_spec.spec_hash() != verified_history.spec_hash() {
+            Self::from_verified_run_history_view(runtime_spec, verified_history.view())
+        }
+
+        /// Mints replay read authority from certifier-backed runtime authority and a shared
+        /// verified run-history view.
+        pub fn from_verified_run_history_view(
+            runtime_spec: &mfm_runtime::CertifiedRuntimeSpec,
+            verified_view: &mfm_runtime::VerifiedRunHistoryView,
+        ) -> Result<Self> {
+            if runtime_spec.spec_hash() != verified_view.spec_hash() {
                 return Err(ReplayError::new(
                     ReplayErrorKind::SpecHashMismatch,
                     "verified history spec hash does not match certified runtime spec",
                 ));
             }
-            let run_admitted = run_admitted_payload(verified_history.events())?;
-            let artifact_evidence = verified_history
+            let run_admitted = verified_view.run_admitted();
+            let artifact_evidence = verified_view
                 .artifact_store()
                 .artifacts()
                 .map(|(_, artifact)| artifact.evidence().clone())
                 .collect::<Vec<_>>();
-            let artifact_bytes = verified_history
+            let artifact_bytes = verified_view
                 .artifact_store()
                 .artifacts()
                 .map(|(artifact_id, artifact)| ReplayArtifactBytes {
@@ -197,10 +206,10 @@ pub mod v1 {
                 .collect::<Vec<_>>();
             let artifacts = artifact_map(artifact_evidence.clone())?;
             let artifact_bytes = artifact_bytes_map(artifact_bytes)?;
-            verify_replay_artifact_authority(verified_history, &artifacts)?;
+            verify_replay_artifact_authority(verified_view, &artifacts)?;
             Ok(Self {
                 certified_spec: runtime_spec.envelope().clone(),
-                stream: verified_history.events().to_vec(),
+                stream: verified_view.events().to_vec(),
                 canonicalizer_identity: runtime_spec
                     .envelope()
                     .spec
@@ -208,8 +217,8 @@ pub mod v1 {
                     .renderer_descriptor
                     .canonicalizer_identity
                     .clone(),
-                runner_executables: run_admitted.runner_executables,
-                adapter_executables: run_admitted.adapter_executables,
+                runner_executables: run_admitted.runner_executables.clone(),
+                adapter_executables: run_admitted.adapter_executables.clone(),
                 artifact_evidence,
                 artifact_bytes,
             })
@@ -2039,10 +2048,10 @@ pub mod v1 {
     }
 
     fn verify_replay_artifact_authority(
-        verified_history: &mfm_runtime::VerifiedRunHistory,
+        verified_view: &mfm_runtime::VerifiedRunHistoryView,
         artifacts: &BTreeMap<ArtifactId, StoredArtifactEvidenceRef>,
     ) -> Result<()> {
-        let verified_artifacts = verified_history.artifact_store();
+        let verified_artifacts = verified_view.artifact_store();
         for (artifact_id, artifact) in verified_artifacts.artifacts() {
             let evidence = artifacts.get(artifact_id).ok_or_else(|| {
                 ReplayError::new(
