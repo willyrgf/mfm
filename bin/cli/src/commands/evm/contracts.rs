@@ -1,5 +1,6 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Args, Subcommand};
 use mfm_app::{
@@ -129,15 +130,15 @@ pub(crate) struct ContractLaunchArgs {
     #[command(flatten)]
     pub stores: TypedRunStoresArgs,
 
-    /// Framework version evidence recorded in RunStarted.
+    /// Framework version evidence recorded in RunAdmitted.
     #[arg(long, default_value = "mfm.cli.evm_contracts.typed.v1")]
     pub framework_version: String,
 
-    /// Source revision evidence recorded in RunStarted.
+    /// Source revision evidence recorded in RunAdmitted.
     #[arg(long, env = "MFM_SOURCE_REVISION", default_value = "unknown")]
     pub source_revision: String,
 
-    /// Scheduler drive policy after the typed RunStarted event is committed.
+    /// Scheduler drive policy after the typed RunAdmitted event is committed.
     #[arg(long, value_enum, default_value_t = TypedDriveArg::UntilBlocked)]
     pub drive: TypedDriveArg,
 }
@@ -231,6 +232,7 @@ async fn launch_compiled_contract_program(
             run_id: run_id.clone(),
             framework_version: &launch.framework_version,
             source_revision: &launch.source_revision,
+            launched_at_unix_ms: launch_unix_ms()?,
             drive: drive_mode(launch.drive),
         },
         run_launch_config_artifacts(compiled.config_artifacts),
@@ -255,6 +257,24 @@ async fn launch_compiled_contract_program(
         run,
         public_output,
     }))
+}
+
+fn launch_unix_ms() -> Result<u64, CommandError> {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| {
+            CommandError::new(
+                "LaunchClockUnavailable",
+                format!("system clock is before Unix epoch: {error}"),
+            )
+        })?
+        .as_millis();
+    u64::try_from(millis).map_err(|_| {
+        CommandError::new(
+            "LaunchClockOverflow",
+            "current Unix timestamp in milliseconds does not fit in u64",
+        )
+    })
 }
 
 fn run_launch_config_artifacts(

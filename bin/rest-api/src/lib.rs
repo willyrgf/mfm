@@ -16,9 +16,12 @@
 //! }
 //! ```
 
+use std::collections::BTreeMap;
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::body::Bytes;
 use axum::extract::rejection::{JsonRejection, QueryRejection};
@@ -53,7 +56,9 @@ use mfm_portfolio_config::{
 use mfm_spec::v1 as spec;
 use mfm_state_portfolio::PortfolioWorkflowConfig;
 use mfm_store::v1 as store;
-use mfm_store::v1::{AsyncStoreFuture, AsyncTypedRunEventStore, TypedRunEventStore};
+use mfm_store::v1::{
+    AsyncStoreFuture, AsyncTypedRunEventStore, TypedProjectionRead, TypedRunEventStore,
+};
 use mfm_stream_store_postgres::{PostgresTypedRunEventStore, PostgresTypedStoreError};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -61,6 +66,19 @@ use serde_json::json;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::trace::TraceLayer;
 use tracing::instrument;
+
+/// Boxed future returned by [`StatusProjectionRead`].
+pub type StatusProjectionFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<store::ProjectionSnapshot, ApiError>> + Send + 'a>>;
+
+/// Store capability required by REST status rendering.
+///
+/// Implementations must return a projection for the requested run while preserving any global
+/// projection families that status depends on, such as active cross-run resource lanes.
+pub trait StatusProjectionRead {
+    /// Loads the status projection for `run_id`.
+    fn status_projection<'a>(&'a self, run_id: &'a RunId) -> StatusProjectionFuture<'a>;
+}
 
 fn ok(data: serde_json::Value) -> serde_json::Value {
     json!({ "status": "success", "data": data })
@@ -157,15 +175,15 @@ pub struct InMemoryAsyncTypedRunStore {
 impl AsyncTypedRunEventStore for InMemoryAsyncTypedRunStore {
     type Error = store::StoreError;
 
-    fn append_prepared_typed_commit<'a>(
+    fn append_prepared_commit_plan<'a>(
         &'a self,
-        commit: store::PreparedTypedCommit,
+        plan: store::PreparedCommitPlan,
     ) -> AsyncStoreFuture<'a, store::CommitOutcome, Self::Error> {
         let result = self
             .inner
             .lock()
             .expect("typed run store lock")
-            .append_prepared_typed_commit(commit);
+            .append_prepared_commit_plan(plan);
         Box::pin(std::future::ready(result))
     }
 
@@ -191,6 +209,45 @@ impl AsyncTypedRunEventStore for InMemoryAsyncTypedRunStore {
             .expect("typed run store lock")
             .expected_next_seq(run_id));
         Box::pin(std::future::ready(result))
+    }
+
+    fn status_projection_snapshot<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
+        Box::pin(async move {
+            let store = self.inner.lock().expect("typed run store lock");
+            let stream = store.load_run_stream(run_id);
+            let run_projection = store::ProjectionSnapshot::rebuild_from_run_stream(&stream)?;
+            projection_with_resource_lanes(
+                &run_projection,
+                store
+                    .projection_snapshot()
+                    .resource_lanes()
+                    .map(|(lane_key, projection)| (lane_key.clone(), projection.clone()))
+                    .collect(),
+            )
+        })
+    }
+}
+
+impl StatusProjectionRead for InMemoryAsyncTypedRunStore {
+    fn status_projection<'a>(&'a self, run_id: &'a RunId) -> StatusProjectionFuture<'a> {
+        Box::pin(async move {
+            self.status_projection_snapshot(run_id)
+                .await
+                .map_err(api_error_from_store_error)
+        })
+    }
+}
+
+impl StatusProjectionRead for PostgresTypedRunEventStore {
+    fn status_projection<'a>(&'a self, run_id: &'a RunId) -> StatusProjectionFuture<'a> {
+        Box::pin(async move {
+            self.status_projection_snapshot(run_id)
+                .await
+                .map_err(api_error_from_typed_store_error)
+        })
     }
 }
 
@@ -262,7 +319,7 @@ pub fn make_in_memory_app_state(
 /// Builds the `axum` router for the public REST API surface.
 pub fn make_app<S>(state: AppState<S>) -> Router
 where
-    S: AsyncTypedRunEventStore + Clone + Send + Sync + 'static,
+    S: AsyncTypedRunEventStore + StatusProjectionRead + Clone + Send + Sync + 'static,
 {
     let request_id_header = HeaderName::from_static("x-request-id");
     let make_span_header = request_id_header.clone();
@@ -598,6 +655,26 @@ fn default_source_revision() -> String {
     std::env::var("MFM_SOURCE_REVISION").unwrap_or_else(|_| "unknown".to_owned())
 }
 
+fn launch_unix_ms() -> Result<u64, ApiError> {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "LaunchClockUnavailable",
+                format!("system clock is before Unix epoch: {error}"),
+            )
+        })?
+        .as_millis();
+    u64::try_from(millis).map_err(|_| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "LaunchClockOverflow",
+            "current Unix timestamp in milliseconds does not fit in u64",
+        )
+    })
+}
+
 #[instrument(level = "info", skip(state, body))]
 async fn portfolio_snapshot<S>(
     State(state): State<RouterState<S>>,
@@ -631,6 +708,7 @@ where
             run_id: run_id.clone(),
             framework_version: &req.framework_version,
             source_revision: &req.source_revision,
+            launched_at_unix_ms: launch_unix_ms()?,
             drive: req.drive.into_app(),
         },
         config_inputs,
@@ -812,6 +890,7 @@ where
             run_id,
             framework_version: &req.framework_version,
             source_revision: &req.source_revision,
+            launched_at_unix_ms: launch_unix_ms()?,
             drive: req.drive.into_app(),
         },
         configs,
@@ -847,10 +926,14 @@ async fn runs_status<S>(
     Path(run_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError>
 where
-    S: AsyncTypedRunEventStore + Clone + Send + Sync,
+    S: AsyncTypedRunEventStore + StatusProjectionRead + Clone + Send + Sync,
 {
     let run_id = parse_run_id(&run_id)?;
-    let data = state.services()?.run_status(&run_id).await?;
+    let projection = state.app.store.status_projection(&run_id).await?;
+    let data = state
+        .services()?
+        .run_status_with_projection(&run_id, projection)
+        .await?;
 
     json_ok(data)
 }
@@ -956,6 +1039,7 @@ where
             run_id: run_id.clone(),
             framework_version: &framework_version,
             source_revision: &source_revision,
+            launched_at_unix_ms: launch_unix_ms()?,
             drive: drive.into_app(),
         },
         evm_contract_config_artifacts(compiled.config_artifacts),
@@ -1229,6 +1313,70 @@ fn api_error_from_typed_store_error(error: PostgresTypedStoreError) -> ApiError 
     }
 }
 
+fn api_error_from_store_error(error: store::StoreError) -> ApiError {
+    ApiError::new(StatusCode::CONFLICT, "RunStoreRejected", error.to_string())
+}
+
+fn projection_with_resource_lanes(
+    snapshot: &store::ProjectionSnapshot,
+    resource_lanes: BTreeMap<store::ResourceLaneKey, store::ResourceLaneProjection>,
+) -> Result<store::ProjectionSnapshot, store::StoreError> {
+    store::ProjectionSnapshot::from_parts(store::ProjectionSnapshotParts {
+        run_states: snapshot
+            .run_states()
+            .map(|(run_id, state)| (run_id.clone(), *state))
+            .collect(),
+        saga_policy_digests: snapshot
+            .saga_policy_digests()
+            .map(|(run_id, digest)| (run_id.clone(), digest.clone()))
+            .collect(),
+        run_completions: snapshot
+            .run_completions()
+            .map(|(run_id, completion)| (run_id.clone(), completion.clone()))
+            .collect(),
+        saga_engagements: snapshot
+            .saga_engagements()
+            .map(|(run_id, engagement)| (run_id.clone(), engagement.clone()))
+            .collect(),
+        manual_resolutions: snapshot
+            .manual_resolutions()
+            .map(|(run_id, resolution)| (run_id.clone(), resolution.clone()))
+            .collect(),
+        attempts: snapshot
+            .attempts()
+            .map(|((node_id, attempt_id), attempt)| {
+                ((node_id.clone(), attempt_id.clone()), attempt.clone())
+            })
+            .collect(),
+        cells: snapshot
+            .cells()
+            .map(|(cell_id, cell)| (cell_id.clone(), cell.clone()))
+            .collect(),
+        facts: snapshot
+            .facts()
+            .map(|((node_id, attempt_id, fact_key), fact)| {
+                (
+                    (node_id.clone(), attempt_id.clone(), fact_key.clone()),
+                    fact.clone(),
+                )
+            })
+            .collect(),
+        side_effects: snapshot
+            .side_effects()
+            .map(|(ledger_ref, side_effect)| (ledger_ref.clone(), side_effect.clone()))
+            .collect(),
+        resource_lanes,
+        public_outputs: snapshot
+            .public_outputs()
+            .map(|(schema_id, output)| (schema_id.clone(), output.clone()))
+            .collect(),
+        retentions: snapshot
+            .retentions()
+            .map(|(run_id, retention)| (run_id.clone(), retention.clone()))
+            .collect(),
+    })
+}
+
 fn api_error_from_typed_artifact_error(error: FsTypedArtifactError) -> ApiError {
     match error {
         FsTypedArtifactError::NotFound { .. } => {
@@ -1348,8 +1496,107 @@ mod tests {
             let value = response_json(response).await;
             assert_eq!(value["status"], "success");
             assert_eq!(value["data"]["run"]["run_mode"], "forward");
+            assert!(
+                value["data"]["run"]["attempt_dispositions"].is_array(),
+                "route {route} must expose attempt-level dispositions"
+            );
             assert_eq!(value["data"]["public_output"], serde_json::Value::Null);
         }
+    }
+
+    #[test]
+    fn success_response_preserves_run_status_attempt_and_saga_contract() {
+        let response = ok(json!({
+            "run": {
+                "run_id": "run:sha256-jcs-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "spec_hash": "spec:sha256-jcs-v1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "run_mode": "failed_without_acdc_claim",
+                "saga": {
+                    "policy": {
+                        "variant": "compensate_completed",
+                        "manual_authorization": null,
+                        "on_remediation_unresolved": "manual_resolution"
+                    },
+                    "obligations": [],
+                    "resource_ledgers": [],
+                    "resource_lanes": [{
+                        "namespace": "mfm.test.account_nonce",
+                        "key": "wallet-1",
+                        "holding_run_id": "run:sha256-jcs-v1:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                        "holding_ledger_key": "ledger-forward",
+                        "holding_ledger_purpose": "forward",
+                        "holding_forward_ledger_key": null,
+                        "holding_node_id": "node:sha256-jcs-v1:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                        "holding_attempt_id": "attempt:sha256-jcs-v1:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                        "invocation_epoch": 1
+                    }],
+                    "manual_block_reason": "remediation_ambiguous",
+                    "required_manual_authorization": null,
+                    "terminal_resolution": {
+                        "outcome": "failed_without_acdc_claim",
+                        "claim": "none"
+                    }
+                },
+                "attempt_dispositions": [
+                    {
+                        "node_id": "node:sha256-jcs-v1:1111111111111111111111111111111111111111111111111111111111111111",
+                        "attempt_id": "attempt:sha256-jcs-v1:2222222222222222222222222222222222222222222222222222222222222222",
+                        "disposition": "started",
+                        "attempt_no": 1,
+                        "retryable": null,
+                        "output_cell_id": null
+                    },
+                    {
+                        "node_id": "node:sha256-jcs-v1:3333333333333333333333333333333333333333333333333333333333333333",
+                        "attempt_id": "attempt:sha256-jcs-v1:4444444444444444444444444444444444444444444444444444444444444444",
+                        "disposition": "interrupted",
+                        "attempt_no": null,
+                        "retryable": null,
+                        "output_cell_id": null
+                    },
+                    {
+                        "node_id": "node:sha256-jcs-v1:5555555555555555555555555555555555555555555555555555555555555555",
+                        "attempt_id": "attempt:sha256-jcs-v1:6666666666666666666666666666666666666666666666666666666666666666",
+                        "disposition": "failed",
+                        "attempt_no": null,
+                        "retryable": false,
+                        "output_cell_id": null
+                    },
+                    {
+                        "node_id": "node:sha256-jcs-v1:7777777777777777777777777777777777777777777777777777777777777777",
+                        "attempt_id": "attempt:sha256-jcs-v1:8888888888888888888888888888888888888888888888888888888888888888",
+                        "disposition": "completed",
+                        "attempt_no": null,
+                        "retryable": null,
+                        "output_cell_id": "cell:sha256-jcs-v1:9999999999999999999999999999999999999999999999999999999999999999"
+                    }
+                ],
+                "scheduler_status": "blocked",
+                "head_seq": 42
+            }
+        }));
+
+        assert_eq!(response["status"], "success");
+        let dispositions = response["data"]["run"]["attempt_dispositions"]
+            .as_array()
+            .expect("attempt dispositions");
+        assert_eq!(dispositions.len(), 4);
+        assert_eq!(dispositions[0]["disposition"], "started");
+        assert_eq!(dispositions[1]["disposition"], "interrupted");
+        assert_eq!(dispositions[2]["disposition"], "failed");
+        assert_eq!(dispositions[3]["disposition"], "completed");
+        assert_eq!(
+            response["data"]["run"]["saga"]["resource_lanes"][0]["key"],
+            "wallet-1"
+        );
+        assert_eq!(
+            response["data"]["run"]["saga"]["manual_block_reason"],
+            "remediation_ambiguous"
+        );
+        assert_eq!(
+            response["data"]["run"]["saga"]["terminal_resolution"]["outcome"],
+            "failed_without_acdc_claim"
+        );
     }
 
     #[tokio::test]

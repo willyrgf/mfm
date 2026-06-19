@@ -2,7 +2,12 @@
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use mfm_events::v1 as events;
+use mfm_ids::{AttemptId, DigestAlgorithm, DigestBytes, RunId, SpecHash};
 use mfm_spec::v1 as spec;
+use mfm_store::v1 as store;
+use mfm_store::v1::AsyncTypedRunEventStore;
+use serde_json::Value;
 use tower::ServiceExt;
 
 const VALID_RUN_ID: &str =
@@ -50,6 +55,16 @@ fn test_app() -> axum::Router {
     std::fs::create_dir_all(&root).expect("artifact root");
     let state = mfm_rest_api::make_in_memory_app_state(root);
     mfm_rest_api::make_app(state)
+}
+
+fn in_memory_state_with_root() -> (
+    std::path::PathBuf,
+    mfm_rest_api::AppState<mfm_rest_api::InMemoryAsyncTypedRunStore>,
+) {
+    let root = std::env::temp_dir().join(format!("mfm-rest-api-test-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).expect("artifact root");
+    let state = mfm_rest_api::make_in_memory_app_state(root.clone());
+    (root, state)
 }
 
 #[tokio::test]
@@ -386,6 +401,33 @@ async fn proof_http_start_replay_uses_certified_bundle_evidence() {
         start_body["data"]["spec_hash"],
         certified.spec_hash().as_str()
     );
+    let status = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/runs/{run_id}/status"))
+                .body(Body::empty())
+                .expect("status request"),
+        )
+        .await
+        .expect("status response");
+    assert_eq!(status.status(), StatusCode::OK);
+    let status_body = response_json(status).await;
+    assert_eq!(status_body["status"], "success");
+    assert_eq!(status_body["data"]["run_id"], run_id);
+    assert_eq!(
+        status_body["data"]["spec_hash"],
+        start_body["data"]["spec_hash"]
+    );
+    assert_eq!(status_body["data"]["run_mode"], "completed");
+    assert_eq!(status_body["data"]["scheduler_status"], "observed");
+    assert!(
+        status_body["data"]["attempt_dispositions"]
+            .as_array()
+            .is_some_and(|attempts| !attempts.is_empty()),
+        "status route must expose attempt dispositions"
+    );
 
     let replay = app
         .clone()
@@ -429,6 +471,151 @@ async fn proof_http_start_replay_uses_certified_bundle_evidence() {
     assert_eq!(
         public_body["data"]["json"]["output"]["side_effect"]["status"],
         "confirmed"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn status_route_reports_interrupted_attempt_and_framework_attempts_from_history() {
+    let (root, state) = in_memory_state_with_root();
+    let proof_config = mfm_op_proof::ProofWorkflowConfig::default();
+    let draft = mfm_op_proof::proof_program_draft(proof_config.clone()).expect("proof draft");
+    let certified = mfm_op_proof::certified_proof_spec(proof_config).expect("proof spec");
+    let configs = config_bodies_for_draft_and_spec(&draft, &certified.envelope().spec);
+    let bundle = certified.bundle().expect("proof bundle");
+    let run_id = mfm_app::new_run_id();
+    let app = mfm_rest_api::make_app(state.clone());
+
+    let start = app
+        .clone()
+        .oneshot(json_post(
+            "/v1/runs/start",
+            serde_json::json!({
+                "kind": "typed_run_start_v1",
+                "run_id": run_id.as_str(),
+                "bundle": certified_bundle_json(bundle.spec_bytes(), bundle.certificate_bytes()),
+                "configs": configs,
+                "framework_version": "mfm.integration.rest.proof.typed.v1",
+                "source_revision": "integration-test",
+                "drive": "append_only"
+            }),
+        ))
+        .await
+        .expect("start response");
+    assert_eq!(start.status(), StatusCode::OK);
+    let start_body = response_json(start).await;
+    assert_eq!(start_body["status"], "success");
+    assert_eq!(start_body["data"]["run_mode"], "forward");
+
+    let interrupted_node = certified
+        .envelope()
+        .spec
+        .nodes
+        .iter()
+        .find(|node| node.framework.is_none())
+        .expect("domain node");
+    let interrupted_attempt_id = fixed_attempt_id(0x41);
+    append_interrupted_attempt(
+        &state.store,
+        &run_id,
+        certified.spec_hash(),
+        interrupted_node,
+        &interrupted_attempt_id,
+    )
+    .await;
+
+    let resume = app
+        .clone()
+        .oneshot(empty_post(&format!("/v1/runs/{run_id}/resume")))
+        .await
+        .expect("resume response");
+    assert_eq!(resume.status(), StatusCode::OK);
+    let resume_body = response_json(resume).await;
+    assert_eq!(resume_body["status"], "success");
+    assert_eq!(resume_body["data"]["run_mode"], "completed");
+
+    let status = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/runs/{run_id}/status"))
+                .body(Body::empty())
+                .expect("status request"),
+        )
+        .await
+        .expect("status response");
+    assert_eq!(status.status(), StatusCode::OK);
+    let status_body = response_json(status).await;
+    assert_eq!(status_body["status"], "success");
+    assert_ne!(status_body["data"]["run_mode"], "interrupted");
+    let attempts = status_body["data"]["attempt_dispositions"]
+        .as_array()
+        .expect("attempt dispositions");
+    let interrupted = attempts
+        .iter()
+        .find(|attempt| {
+            attempt["attempt_id"] == interrupted_attempt_id.as_str()
+                && attempt["disposition"] == "interrupted"
+        })
+        .expect("interrupted attempt disposition");
+    assert!(interrupted["retryable"].is_null());
+
+    let completed_framework_kinds = certified
+        .envelope()
+        .spec
+        .nodes
+        .iter()
+        .filter(|node| {
+            attempts.iter().any(|attempt| {
+                attempt["node_id"] == node.node_id.as_str() && attempt["disposition"] == "completed"
+            })
+        })
+        .filter_map(|node| match &node.framework {
+            Some(spec::FrameworkNodeSpec::PublicOutputRender(_)) => Some("public_output_render"),
+            Some(spec::FrameworkNodeSpec::ProjectRetentionManifest(_)) => {
+                Some("project_retention_manifest")
+            }
+            Some(spec::FrameworkNodeSpec::CompleteRun(_)) => Some("complete_run"),
+            Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_)) => Some("resolve_saga_terminal"),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        completed_framework_kinds.contains(&"public_output_render"),
+        "missing completed public-output render framework attempt"
+    );
+    assert!(
+        completed_framework_kinds.contains(&"project_retention_manifest"),
+        "missing completed retention framework attempt"
+    );
+    assert!(
+        completed_framework_kinds.contains(&"complete_run"),
+        "missing completed complete-run framework attempt"
+    );
+
+    let stream = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/runs/{run_id}/stream"))
+                .body(Body::empty())
+                .expect("stream request"),
+        )
+        .await
+        .expect("stream response");
+    assert_eq!(stream.status(), StatusCode::OK);
+    let stream_body = response_json(stream).await;
+    assert_eq!(stream_body["status"], "success");
+    let stream_events = stream_body["data"]["events"]
+        .as_array()
+        .expect("stream events");
+    assert_framework_started_before_terminal_evidence(
+        stream_events,
+        attempts,
+        &certified.envelope().spec.nodes,
+        &run_id,
     );
 
     let _ = std::fs::remove_dir_all(root);
@@ -559,4 +746,229 @@ fn config_body(schema_id: &str, bytes: &[u8]) -> serde_json::Value {
         "schema_id": schema_id,
         "json": serde_json::from_slice::<serde_json::Value>(bytes).expect("config JSON"),
     })
+}
+
+async fn append_interrupted_attempt(
+    store: &mfm_rest_api::InMemoryAsyncTypedRunStore,
+    run_id: &RunId,
+    spec_hash: &SpecHash,
+    node: &spec::NodeSpec,
+    attempt_id: &AttemptId,
+) {
+    let start = store::TypedCommitRequest::from_payloads(
+        run_id.clone(),
+        store
+            .expected_next_seq(run_id)
+            .await
+            .expect("expected next seq"),
+        store::CommitKey::new("rest-interrupted-attempt-start").expect("commit key"),
+        vec![events::KernelEventPayload::StateAttemptStarted(
+            events::StateAttemptStarted {
+                spec_hash: spec_hash.clone(),
+                node_id: node.node_id.clone(),
+                attempt_id: attempt_id.clone(),
+                attempt_no: 1,
+                state_kind: node.state_kind.clone(),
+                state_version: node.state_version.clone(),
+            },
+        )],
+        Vec::new(),
+        store::CommitPreconditions {
+            required_run_state: store::RequiredRunState::NotCompleted,
+            required_cell_states: vec![store::CellStatePrecondition {
+                cell_id: node.output_cell.clone(),
+                required: store::RequiredCellState::Absent,
+            }],
+            ..store::CommitPreconditions::default()
+        },
+    )
+    .expect("attempt start request");
+    append_typed_commit(store, start).await;
+
+    let interrupted = store::TypedCommitRequest::from_payloads(
+        run_id.clone(),
+        store
+            .expected_next_seq(run_id)
+            .await
+            .expect("expected next seq"),
+        store::CommitKey::new("rest-interrupted-attempt-terminal").expect("commit key"),
+        vec![events::KernelEventPayload::StateAttemptInterrupted(
+            events::StateAttemptInterrupted {
+                spec_hash: spec_hash.clone(),
+                node_id: node.node_id.clone(),
+                attempt_id: attempt_id.clone(),
+            },
+        )],
+        Vec::new(),
+        store::CommitPreconditions {
+            required_run_state: store::RequiredRunState::NotCompleted,
+            required_cell_states: vec![store::CellStatePrecondition {
+                cell_id: node.output_cell.clone(),
+                required: store::RequiredCellState::Absent,
+            }],
+            ..store::CommitPreconditions::default()
+        },
+    )
+    .expect("attempt interrupted request");
+    append_typed_commit(store, interrupted).await;
+}
+
+async fn append_typed_commit(
+    store: &mfm_rest_api::InMemoryAsyncTypedRunStore,
+    request: store::TypedCommitRequest,
+) {
+    let admitted_artifacts = request.required_artifacts().to_vec();
+    let artifacts = store::CommitArtifactEvidenceSet::new(
+        request.required_artifacts().to_vec(),
+        admitted_artifacts,
+    )
+    .expect("artifact evidence set");
+    let plan = if request
+        .payloads()
+        .iter()
+        .all(|payload| matches!(payload, events::KernelEventPayload::StateAttemptStarted(_)))
+    {
+        store::PreparedCommit::<store::StateAttemptStarted>::new(request, artifacts)
+            .expect("prepared attempt-start commit")
+            .into()
+    } else {
+        store::PreparedCommit::<store::AttemptTerminal>::new(request, artifacts)
+            .expect("prepared attempt-terminal commit")
+            .into()
+    };
+    store
+        .append_prepared_commit_plan(plan)
+        .await
+        .expect("append typed commit");
+}
+
+fn fixed_attempt_id(byte: u8) -> AttemptId {
+    AttemptId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        DigestBytes::from_array([byte; 32]),
+    )
+}
+
+fn assert_framework_started_before_terminal_evidence(
+    stream_events: &[Value],
+    attempts: &[Value],
+    nodes: &[spec::NodeSpec],
+    run_id: &RunId,
+) {
+    for node in nodes.iter().filter(|node| node.framework.is_some()) {
+        let required_kind = match &node.framework {
+            Some(spec::FrameworkNodeSpec::PublicOutputRender(_)) => "public_output_render",
+            Some(spec::FrameworkNodeSpec::ProjectRetentionManifest(_)) => {
+                "project_retention_manifest"
+            }
+            Some(spec::FrameworkNodeSpec::CompleteRun(_)) => "complete_run",
+            _ => continue,
+        };
+        let attempt = attempts
+            .iter()
+            .find(|attempt| {
+                attempt["node_id"].as_str() == Some(node.node_id.as_str())
+                    && attempt["disposition"].as_str() == Some("completed")
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "missing completed {required_kind} framework attempt for {}",
+                    node.node_id
+                )
+            });
+        let attempt_id = attempt["attempt_id"].as_str().expect("attempt id");
+        let attempt_key = format!("attempt:{}:{}", node.node_id, attempt_id);
+        let start_index = stream_event_position(
+            stream_events,
+            |event| {
+                event["logical_key"].as_str() == Some(attempt_key.as_str())
+                    && event["event_schema_id"]
+                        .as_str()
+                        .is_some_and(|schema| schema.contains("state_attempt_started"))
+            },
+            &format!("framework start {attempt_key}"),
+        );
+        let completed_index = stream_event_position(
+            stream_events,
+            |event| {
+                event["logical_key"].as_str() == Some(attempt_key.as_str())
+                    && event["event_schema_id"]
+                        .as_str()
+                        .is_some_and(|schema| schema.contains("state_attempt_completed"))
+            },
+            &format!("framework completion {attempt_key}"),
+        );
+        assert!(
+            start_index < completed_index,
+            "framework StateAttemptStarted must precede StateAttemptCompleted for {attempt_key}"
+        );
+
+        match &node.framework {
+            Some(spec::FrameworkNodeSpec::PublicOutputRender(_)) => {
+                let public_output_index = stream_event_position(
+                    stream_events,
+                    |event| {
+                        event["logical_key"]
+                            .as_str()
+                            .is_some_and(|key| key.starts_with("public_output:"))
+                            && event["event_schema_id"]
+                                .as_str()
+                                .is_some_and(|schema| schema.contains("public_output_produced"))
+                    },
+                    "public-output terminal evidence",
+                );
+                assert!(
+                    start_index < public_output_index,
+                    "public-output framework start must precede public output evidence"
+                );
+            }
+            Some(spec::FrameworkNodeSpec::ProjectRetentionManifest(_)) => {
+                let retention_prefix = format!("retention:{}:manifest:", run_id);
+                let retention_index = stream_event_position(
+                    stream_events,
+                    |event| {
+                        event["logical_key"]
+                            .as_str()
+                            .is_some_and(|key| key.starts_with(&retention_prefix))
+                            && event["event_schema_id"].as_str().is_some_and(|schema| {
+                                schema.contains("retention_manifest_projected")
+                            })
+                    },
+                    "retention manifest terminal evidence",
+                );
+                assert!(
+                    start_index < retention_index,
+                    "retention framework start must precede retention manifest evidence"
+                );
+            }
+            Some(spec::FrameworkNodeSpec::CompleteRun(_)) => {
+                let completed_run_index = stream_event_position(
+                    stream_events,
+                    |event| {
+                        event["logical_key"].as_str() == Some("run:complete")
+                            && event["event_schema_id"]
+                                .as_str()
+                                .is_some_and(|schema| schema.contains("run_completed"))
+                    },
+                    "run completion terminal evidence",
+                );
+                assert!(
+                    start_index < completed_run_index,
+                    "complete-run framework start must precede run completion evidence"
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+fn stream_event_position(
+    events: &[Value],
+    predicate: impl Fn(&Value) -> bool,
+    label: &str,
+) -> usize {
+    events
+        .iter()
+        .position(predicate)
+        .unwrap_or_else(|| panic!("missing stream event for {label}"))
 }

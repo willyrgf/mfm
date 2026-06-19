@@ -252,6 +252,22 @@ in
       env = postgresEnv;
       requires = [ "postgres" ];
     };
+    parity-cli-postgres-status = cargoLeaf {
+      run = [
+        "cargo"
+        "test"
+        "-p"
+        "mfm"
+        "--features"
+        "parity-tests"
+        "--test"
+        "status_contract_postgres"
+        "--"
+        "--nocapture"
+      ];
+      env = postgresEnv;
+      requires = [ "postgres" ];
+    };
     parity-postgres-state-events = cargoLeaf {
       run = [
         "cargo"
@@ -335,6 +351,10 @@ in
         parity-postgres-rest-api = {
           task = "parity-postgres-rest-api";
           dependsOn = [ "parity-postgres-state-events" ];
+        };
+        parity-cli-postgres-status = {
+          task = "parity-cli-postgres-status";
+          dependsOn = [ "parity-postgres-rest-api" ];
         };
       };
     };

@@ -3,11 +3,11 @@ use std::sync::Arc;
 
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_events::v1 as events;
-use mfm_ids::{ArtifactId, AttemptId, ContentDigest, NodeId, RunId, SchemaId, SemanticTypeId};
+use mfm_ids::{ArtifactId, ContentDigest, NodeId, RunId};
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 
-use crate::artifacts::{artifact_role_name, StagedArtifact, StagedRetentionRefs};
+use crate::artifacts::{StagedArtifact, StagedRetentionRefs};
 use crate::invocation::ErasedRunCtx;
 use crate::runners::{
     ErasedNodeRunner, ErasedRunnerBinding, ErasedRunnerFuture, ErasedRunnerOutput,
@@ -17,70 +17,6 @@ use crate::{
     canonical_json, content_digest_json, retention_ref_for_artifact, validate_public_output,
     CertifiedRuntimeSpec, Result, RuntimeError,
 };
-
-pub(crate) fn framework_bootstrap_run_binding(
-    node: &spec::NodeSpec,
-    descriptor: &spec::StateDescriptorIdentity,
-) -> Result<ErasedRunnerBinding> {
-    let Some(spec::FrameworkNodeSpec::BootstrapRun(_)) = &node.framework else {
-        return Err(RuntimeError::RunnerBinding(format!(
-            "node {} is not a bootstrap framework node",
-            node.node_id
-        )));
-    };
-    if descriptor.name != "mfm.framework.bootstrap_run" {
-        return Err(RuntimeError::RunnerBinding(format!(
-            "bootstrap node {} has non-framework descriptor {}",
-            node.node_id, descriptor.name
-        )));
-    }
-    let factory_id = events::RunnerFactoryId::new(descriptor.runner.as_str())?;
-    ErasedRunnerBinding::new(
-        node.descriptor_id.clone(),
-        factory_id.clone(),
-        framework_bootstrap_run_executable(factory_id)?,
-        Arc::new(FrameworkBootstrapRunner),
-    )
-}
-
-fn framework_bootstrap_run_executable(
-    factory_id: events::RunnerFactoryId,
-) -> Result<events::ExecutableIdentity> {
-    let package_digest = content_digest_json(serde_json::json!({
-        "crate": "mfm-runtime",
-        "runner": "framework_bootstrap_run",
-        "version": env!("CARGO_PKG_VERSION"),
-    }))?;
-    let binary_digest = content_digest_json(serde_json::json!({
-        "crate": "mfm-runtime",
-        "factory_id": factory_id.as_str(),
-        "runner": "framework_bootstrap_run",
-        "version": env!("CARGO_PKG_VERSION"),
-    }))?;
-    Ok(events::ExecutableIdentity {
-        factory_id,
-        source_revision: events::SourceRevision::new("mfm-runtime-built-in")?,
-        cargo_package_name: events::PackageName::new("mfm-runtime")?,
-        cargo_package_version: events::PackageVersion::new(env!("CARGO_PKG_VERSION"))?,
-        cargo_package_digest: package_digest,
-        binary_digest,
-        nix_derivation_hash: None,
-        nix_output_hash: None,
-    })
-}
-
-struct FrameworkBootstrapRunner;
-
-impl ErasedNodeRunner for FrameworkBootstrapRunner {
-    fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
-        Box::pin(async move {
-            Err(RuntimeError::InvalidRunnerOutput(format!(
-                "bootstrap node {} must execute through genesis middleware",
-                ctx.node().node_id
-            )))
-        })
-    }
-}
 
 pub(crate) fn framework_public_output_binding(
     node: &spec::NodeSpec,
@@ -636,10 +572,11 @@ pub(crate) fn saga_terminal_proof(
     runtime_spec: &CertifiedRuntimeSpec,
     run_id: &RunId,
     projections: &store::ProjectionSnapshot,
+    prefix_next_seq: store::StreamSeq,
     manual: Option<mfm_manual_auth::VerifiedManualResolutionForPrefix>,
 ) -> Result<store::SagaTerminalProof> {
     let saga = projections.derive_saga_projection(run_id, &runtime_spec.spec().saga);
-    store::SagaTerminalProof::new(&runtime_spec.spec().saga, &saga, manual)
+    store::SagaTerminalProof::new(&runtime_spec.spec().saga, &saga, prefix_next_seq, manual)
         .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))
 }
 
@@ -727,86 +664,6 @@ pub(crate) fn framework_run_completed_payload(
             outcome,
         },
     )))
-}
-
-pub(crate) fn bootstrap_run_receipt_artifact(
-    ctx: &GenesisContext<'_>,
-) -> Result<(PlainCanonicalJsonBytes, store::ArtifactEvidenceRef)> {
-    let bytes = bootstrap_run_receipt_json(ctx)?;
-    let digest = bytes.content_digest();
-    let evidence = store::ArtifactEvidenceRef {
-        artifact_id: ArtifactId::from_digest(digest.algorithm(), *digest.digest()),
-        digest,
-        byte_len: bytes.as_bytes().len() as u64,
-        media_type: spec::MediaType::new("application/json")?,
-        schema_id: Some(ctx.output_cell.schema_id.clone()),
-        semantic_type_id: Some(ctx.output_cell.semantic_type_id.clone()),
-        producer_node_id: Some(ctx.node.node_id.clone()),
-        producer_seed_id: None,
-        artifact_role: events::ArtifactRole::StateOutput,
-    };
-    Ok((bytes, evidence))
-}
-
-fn bootstrap_run_receipt_json(ctx: &GenesisContext<'_>) -> Result<PlainCanonicalJsonBytes> {
-    canonical_json(serde_json::json!({
-        "adapter_executables": ctx.run_started.adapter_executables.iter().map(executable_json).collect::<Vec<_>>(),
-        "attempt_id": ctx.attempt_id.as_str(),
-        "canonicalizer_identity": ctx.run_started.canonicalizer_identity.as_str(),
-        "certificate_artifact": {
-            "artifact_id": ctx.run_started.certificate_artifact_id.as_str(),
-            "content_digest": ctx.run_started.certificate_artifact_digest.as_str(),
-            "media_type": ctx.run_started.certificate_media_type.as_str(),
-        },
-        "config_artifacts": ctx.config_artifacts.iter().map(config_evidence_json).collect::<Vec<_>>(),
-        "framework_version": ctx.run_started.framework_version.as_str(),
-        "node_id": ctx.node.node_id.as_str(),
-        "output_cell": ctx.node.output_cell.as_str(),
-        "public_output_schema_id": ctx.run_started.public_output_schema_id.as_str(),
-        "run_id": ctx.run_id.as_str(),
-        "runner_executables": ctx.run_started.runner_executables.iter().map(executable_json).collect::<Vec<_>>(),
-        "seed_cells": ctx.run_started.seed_cells.iter().map(seed_cell_json).collect::<Vec<_>>(),
-        "source_revision": ctx.run_started.source_revision.as_str(),
-        "spec_artifact": {
-            "artifact_id": ctx.run_started.spec_artifact_id.as_str(),
-            "media_type": ctx.run_started.spec_media_type.as_str(),
-        },
-        "spec_hash": ctx.runtime_spec.spec_hash().as_str(),
-    }))
-}
-
-fn seed_cell_json(seed: &events::SeedCellRef) -> serde_json::Value {
-    serde_json::json!({
-        "artifact": artifact_evidence_ref_json(&seed.seed_artifact),
-        "cell_id": seed.cell_id.as_str(),
-        "content_digest": seed.digest.as_str(),
-        "schema_id": seed.schema_id.as_str(),
-        "scope_id": seed.scope_id.as_str(),
-        "seed_id": seed.seed_id.as_str(),
-        "semantic_type_id": seed.semantic_type_id.as_str(),
-    })
-}
-
-fn config_evidence_json(config: &store::ArtifactEvidenceRef) -> serde_json::Value {
-    serde_json::json!({
-        "artifact_id": config.artifact_id.as_str(),
-        "byte_len": config.byte_len,
-        "content_digest": config.digest.as_str(),
-        "media_type": config.media_type.as_str(),
-        "schema_id": config.schema_id.as_ref().map(SchemaId::as_str),
-    })
-}
-
-fn artifact_evidence_ref_json(artifact: &events::ArtifactEvidenceRef) -> serde_json::Value {
-    serde_json::json!({
-        "artifact_id": artifact.artifact_id.as_str(),
-        "byte_len": artifact.byte_len,
-        "content_digest": artifact.content_digest.as_str(),
-        "media_type": artifact.media_type.as_str(),
-        "role": artifact_role_name(artifact.role),
-        "schema_id": artifact.schema_id.as_str(),
-        "semantic_type_id": artifact.semantic_type_id.as_ref().map(SemanticTypeId::as_str),
-    })
 }
 
 pub(crate) fn public_output_receipt_digest(
@@ -899,7 +756,7 @@ pub fn build_public_output_receipt_artifact(
 fn retention_manifest_json(
     runtime_spec: &CertifiedRuntimeSpec,
     run_id: &RunId,
-    run_started: &events::RunStarted,
+    run_admitted: &events::RunAdmitted,
     manifest_seq: u64,
     previous_manifest_digest: Option<&ContentDigest>,
     retained_refs: &[&events::RetentionRef],
@@ -922,13 +779,13 @@ fn retention_manifest_json(
         .collect::<Vec<_>>();
     let retained_by_role = retained_refs_by_role(retained_refs);
     canonical_json(serde_json::json!({
-        "adapter_executables": run_started.adapter_executables.iter().map(executable_json).collect::<Vec<_>>(),
-        "canonicalizer_identity": run_started.canonicalizer_identity.as_str(),
+        "adapter_executables": run_admitted.adapter_executables.iter().map(executable_json).collect::<Vec<_>>(),
+        "canonicalizer_identity": run_admitted.canonicalizer_identity.as_str(),
         "certificate_artifact": {
-            "artifact_id": run_started.certificate_artifact_id.as_str(),
+            "artifact_id": run_admitted.certificate_artifact.artifact_id.as_str(),
             "byte_len": certificate_canonical.as_bytes().len(),
-            "content_digest": run_started.certificate_artifact_digest.as_str(),
-            "media_type": run_started.certificate_media_type.as_str(),
+            "content_digest": run_admitted.certificate_artifact.content_digest.as_str(),
+            "media_type": run_admitted.certificate_artifact.media_type.as_str(),
         },
         "config_artifacts": runtime_spec.spec().config_refs.iter().map(config_artifact_json).collect::<Vec<_>>(),
         "descriptor_digests": runtime_spec.spec().descriptor_identities.iter().map(descriptor_digest_json).collect::<Vec<_>>(),
@@ -941,12 +798,12 @@ fn retention_manifest_json(
         "confirmation_artifacts": retained_by_role.confirmation_artifacts,
         "retained_refs": retained_refs.iter().map(|retention_ref| retention_ref_json(retention_ref)).collect::<Vec<_>>(),
         "run_id": run_id.as_str(),
-        "runner_executables": run_started.runner_executables.iter().map(executable_json).collect::<Vec<_>>(),
+        "runner_executables": run_admitted.runner_executables.iter().map(executable_json).collect::<Vec<_>>(),
         "spec_artifact": {
-            "artifact_id": run_started.spec_artifact_id.as_str(),
+            "artifact_id": run_admitted.spec_artifact.artifact_id.as_str(),
             "byte_len": spec_canonical.as_bytes().len(),
             "content_digest": spec_digest.as_str(),
-            "media_type": run_started.spec_media_type.as_str(),
+            "media_type": run_admitted.spec_artifact.media_type.as_str(),
         },
         "spec_hash": runtime_spec.spec_hash().as_str(),
         "value_artifacts": retained_by_role.value_artifacts,
@@ -1098,7 +955,7 @@ fn retention_role_str(role: events::ArtifactRole) -> &'static str {
 
 pub(crate) fn retention_reason_str(reason: events::RetentionReason) -> &'static str {
     match reason {
-        events::RetentionReason::RunStarted => "run_started",
+        events::RetentionReason::RunAdmitted => "run_admitted",
         events::RetentionReason::RuntimeEvidence => "runtime_evidence",
         events::RetentionReason::PublicOutput => "public_output",
         events::RetentionReason::ManifestProjection => "manifest_projection",
@@ -1116,16 +973,6 @@ fn cell_producer_json(producer: &spec::CellProducer) -> serde_json::Value {
             "node_id": node_id.as_str(),
         }),
     }
-}
-
-pub(crate) struct GenesisContext<'a> {
-    pub(crate) runtime_spec: &'a CertifiedRuntimeSpec,
-    pub(crate) run_id: &'a RunId,
-    pub(crate) node: &'a spec::NodeSpec,
-    pub(crate) output_cell: &'a spec::CellSpec,
-    pub(crate) attempt_id: &'a AttemptId,
-    pub(crate) run_started: &'a events::RunStarted,
-    pub(crate) config_artifacts: &'a [store::ArtifactEvidenceRef],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1155,18 +1002,18 @@ pub(crate) fn build_retention_manifest_artifact_with_producer(
 ) -> Result<RetentionManifestArtifact> {
     store::ProjectionSnapshot::validate_run_stream(stream)?;
     let projection = store::ProjectionSnapshot::rebuild_from_run_stream(stream)?;
-    let run_started = stream
+    let run_admitted = stream
         .iter()
         .find_map(|event| match event.payload() {
-            events::KernelEventPayload::RunStarted(payload) => Some(payload),
+            events::KernelEventPayload::RunAdmitted(payload) => Some(payload),
             _ => None,
         })
         .ok_or_else(|| {
             RuntimeError::InvalidRunStream(
-                "retention manifest requires RunStarted evidence".to_owned(),
+                "retention manifest requires RunAdmitted evidence".to_owned(),
             )
         })?;
-    if &run_started.run_id != run_id || &run_started.spec_hash != runtime_spec.spec_hash() {
+    if &run_admitted.run_id != run_id || &run_admitted.spec_hash != runtime_spec.spec_hash() {
         return Err(RuntimeError::InvalidRunStream(
             "retention manifest run-start evidence does not match certified run".to_owned(),
         ));
@@ -1190,7 +1037,7 @@ pub(crate) fn build_retention_manifest_artifact_with_producer(
     let manifest_json = retention_manifest_json(
         runtime_spec,
         run_id,
-        run_started,
+        run_admitted,
         manifest_seq,
         previous_manifest_digest.as_ref(),
         &retained_refs,
@@ -1216,29 +1063,6 @@ pub(crate) fn build_retention_manifest_artifact_with_producer(
         },
         manifest_seq,
         previous_manifest_digest,
-    })
-}
-
-pub(crate) fn certified_bootstrap_run_node(
-    runtime_spec: &CertifiedRuntimeSpec,
-) -> Result<&spec::NodeSpec> {
-    let mut bootstrap_node = None;
-    for node_id in runtime_spec.topological_order() {
-        let node = runtime_spec.node(node_id).expect("topological node exists");
-        if matches!(
-            &node.framework,
-            Some(spec::FrameworkNodeSpec::BootstrapRun(_))
-        ) && bootstrap_node.replace(node).is_some()
-        {
-            return Err(RuntimeError::InvalidRunStream(
-                "multiple certified bootstrap framework nodes".to_owned(),
-            ));
-        }
-    }
-    bootstrap_node.ok_or_else(|| {
-        RuntimeError::InvalidRunStream(
-            "RunStarted lacks a certified BootstrapRun framework node".to_owned(),
-        )
     })
 }
 

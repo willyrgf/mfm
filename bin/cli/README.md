@@ -271,7 +271,7 @@ or resume certified typed runs, and they do not route through the removed legacy
 Starts a certified typed run from a certified typed spec bundle JSON file. The command treats the
 bundle as untrusted transport data, verifies the contained spec and certificate against the
 production certification registry, canonicalizes supplied config and seed JSON, hands launch bytes
-to runtime middleware for staging, appends `RunStarted` through the prepared commit boundary, and
+to runtime middleware for staging, appends `RunAdmitted` through the prepared commit boundary, and
 optionally drives the typed scheduler.
 
 **Usage:**
@@ -284,9 +284,9 @@ mfm_cli run start --bundle <PATH> [--config <SCHEMA_ID=PATH>]... [--seed <SEED_I
 - `--run-id <RUN_ID>`: Optional typed run id. If omitted, a new typed digest id is generated.
 - `--config <SCHEMA_ID=PATH>`: JSON config input for a config reference declared by the certified spec.
 - `--seed <SEED_ID=PATH>`: Canonical JSON seed input for a seed declared by the certified spec.
-- `--framework-version <VALUE>`: Framework version evidence recorded in `RunStarted`.
-- `--source-revision <VALUE>`: Source revision evidence recorded in `RunStarted` (or `MFM_SOURCE_REVISION`).
-- `--drive <append-only|once|until-blocked>`: Scheduler drive policy after `RunStarted`.
+- `--framework-version <VALUE>`: Framework version evidence recorded in `RunAdmitted`.
+- `--source-revision <VALUE>`: Source revision evidence recorded in `RunAdmitted` (or `MFM_SOURCE_REVISION`).
+- `--drive <append-only|once|until-blocked>`: Scheduler drive policy after `RunAdmitted`.
 - `--database-url <URL>`: PostgreSQL connection string (default: `$DATABASE_URL`)
 - `--typed-artifact-root <PATH>`: Typed artifact store root directory
 
@@ -304,7 +304,7 @@ Bundle shape:
 }
 ```
 
-Run start always resolves runner executable identities before `RunStarted`, because those identities
+Run start always resolves runner executable identities before `RunAdmitted`, because those identities
 are replay authority. `--drive append-only` suppresses post-start execution only; it does not bypass
 runner resolution. Specs that reference unported domain state descriptors fail with
 `LaunchRunnerUnavailable` before any typed run event is written. The current production CLI registry
@@ -324,7 +324,7 @@ Stable launch errors include:
 
 ### `run resume`
 
-Resumes a certified typed run by loading the spec and certificate artifacts bound by `RunStarted`,
+Resumes a certified typed run by loading the spec and certificate artifacts bound by `RunAdmitted`,
 verifying them against the production registry, rebuilding stream evidence, and driving the typed
 scheduler according to `--drive`.
 
@@ -343,8 +343,15 @@ Shows certified typed run status without executing states. JSON output uses sema
 `manually_resolved`, or `failed_without_acdc_claim`. The `saga` object reports the certified policy,
 derived obligations per forward ledger, linked remediation ledgers, manual-block reason and manual
 authorization requirements when applicable, terminal resolution claim when present, projected
-resource ledgers with declared claim/key/touched-set evidence, and active exclusive lane holders.
-Manual authorization requirements include the required evidence schema, signing scheme, authority id,
+resource ledgers with declared claim/key/touched-set evidence, and active exclusive lane holders
+referenced by the target run's persisted live side-effect ledgers. It does not serialize unrelated
+global lane holders or scheduler waiters that blocked before appending lane evidence.
+`attempt_dispositions` reports committed attempt-level lifecycle status separately from `run_mode`;
+each entry has `node_id`, `attempt_id`, `disposition` (`started`, `completed`, `failed`, or
+`interrupted`), and status-specific fields such as `attempt_no`, `retryable`, or `output_cell_id`.
+`scheduler_status` is read-only `observed` for `run status`; start/resume responses set it to
+`advanced`, `blocked`, or `public_output_projected` according to the app dispatch loop. Manual
+authorization requirements include the required evidence schema, signing scheme, authority id,
 allowed operator public identities or a safe summary, and quorum. They never expose signer runtime
 sources, keystore paths, password paths, passwords, or other secrets.
 
@@ -380,7 +387,7 @@ mfm_cli run public-output <RUN_ID> --schema-id <SCHEMA_ID> [OPTIONS]
 ### `run replay`
 
 Verifies replay authority for a certified typed run by loading the stored certified spec and
-certificate artifacts, comparing them to `RunStarted`, verifying them against the production
+certificate artifacts, comparing them to `RunAdmitted`, verifying them against the production
 registry, loading retained artifact evidence, and then constructing the typed replay broker. The
 command rejects missing retained evidence, executable identity drift, and live-capability fallback.
 Domain replay execution is available only after the corresponding typed runner/replay adapter is
@@ -433,9 +440,9 @@ mfm_cli evm contracts lifecycle --config-file <LIFECYCLE_CONFIG_JSON> [OPTIONS]
 ```
 
 **Common Options:**
-- `--drive <append-only|once|until-blocked>`: Scheduler drive policy after `RunStarted`
-- `--framework-version <VALUE>`: Framework version evidence recorded in `RunStarted`
-- `--source-revision <VALUE>`: Source revision evidence recorded in `RunStarted` (or `MFM_SOURCE_REVISION`)
+- `--drive <append-only|once|until-blocked>`: Scheduler drive policy after `RunAdmitted`
+- `--framework-version <VALUE>`: Framework version evidence recorded in `RunAdmitted`
+- `--source-revision <VALUE>`: Source revision evidence recorded in `RunAdmitted` (or `MFM_SOURCE_REVISION`)
 - `--typed-artifact-root <PATH>`: Typed artifact root
 - `--database-url <URL>`: PostgreSQL typed run-event store URL
 
@@ -464,7 +471,7 @@ mfm_cli portfolio snapshot --request-json '<REQUEST_JSON>' [OPTIONS]
 **Key Options:**
 - `--request-file <PATH>`: Path to an authored request file in JSON or TOML
 - `--request-json <JSON>`: Inline canonical request JSON payload
-- `--drive <append-only|once|until-blocked>`: Scheduler drive policy after `RunStarted`
+- `--drive <append-only|once|until-blocked>`: Scheduler drive policy after `RunAdmitted`
 - `--typed-artifact-root <PATH>`: Typed artifact root
 - `--database-url <URL>`: PostgreSQL typed run-event store URL
 

@@ -10,6 +10,5 @@ Parsed persisted typed spec bytes are typed data only and remain hostile until v
 `mfm-certify` against a registry and certificate. Hash matches, audit metadata, summaries, or
 source scans do not certify this data.
 
-`docs/design.md` is the normative typed-core authority contract; `RFC_TYPED_CORE_PROPOSAL_1.md` is
-historical. This crate is framework-owned and must remain domain-free. It must not depend on old
-dynamic machine or SDK crates.
+`docs/design.md` is the normative typed-core authority contract. This crate is framework-owned and
+must remain domain-free. It must not depend on old dynamic machine or SDK crates.

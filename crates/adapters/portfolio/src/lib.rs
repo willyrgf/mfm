@@ -10,7 +10,7 @@ use std::sync::Arc;
 use alloy_primitives::{Address, U256};
 use mfm_artifact_capabilities::{ArtifactReadProvider, ArtifactReadRequest};
 use mfm_canonical::PlainCanonicalJsonBytes;
-use mfm_capabilities::CapabilitySpec;
+use mfm_capabilities::{CapabilitySetDescriptor, CapabilitySpec};
 use mfm_events::v1 as events;
 use mfm_evm_capabilities::{
     EvmBalanceReadProvider, EvmBalanceReadRequest, EvmBlockReadProvider, EvmBlockReadRequest,
@@ -22,9 +22,9 @@ use mfm_evm_core::hex::hex_to_bytes;
 use mfm_ids::{ArtifactId, ContentDigest, DescriptorId, NodeId};
 use mfm_program::{StateSpec, ValidatedConfig};
 use mfm_runtime::{
-    ErasedNodeRunner, ErasedRunCtx, ErasedRunnerBinding, ErasedRunnerFuture, ErasedRunnerOutput,
-    ErasedRunnerRegistry, MaterializedCellTerminal, MaterializedInputNode, RunnerEventPayload,
-    StagedArtifact, StagedRetentionRefs,
+    CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerBinding,
+    ErasedRunnerFuture, ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCellTerminal,
+    MaterializedInputNode, RunnerEventPayload, StagedArtifact, StagedRetentionRefs,
 };
 use mfm_spec::v1 as spec;
 use mfm_state_portfolio::{
@@ -46,6 +46,7 @@ use serde::Serialize;
 
 const READ_FACTORY: &str = "read_external";
 const PURE_FACTORY: &str = "pure";
+const CAPABILITY_IMPLEMENTATION_ID: &str = "mfm.portfolio.runtime.v1";
 
 /// EVM read capabilities required by portfolio adapter runners.
 pub trait PortfolioEvmProvider:
@@ -127,68 +128,92 @@ pub fn register_portfolio_runners(
     registry: &mut ErasedRunnerRegistry,
     capabilities: PortfolioRunnerCapabilities,
 ) -> mfm_runtime::Result<()> {
+    let implementation_id = CapabilityImplementationId::new(CAPABILITY_IMPLEMENTATION_ID)?;
     let artifacts = capabilities.artifacts();
     let evm = capabilities.evm();
+    let prepare_sources = registered_descriptor::<PrepareSourcesState>()?;
+    registry.register_capability_set(&prepare_sources.capabilities, implementation_id.clone())?;
     registry.register(binding(
-        registered_descriptor::<PrepareSourcesState>()?,
+        prepare_sources.descriptor_id,
         READ_FACTORY,
         Arc::new(PrepareSourcesRunner {
             artifacts: artifacts.clone(),
         }),
     )?)?;
+    let resolve_subjects = registered_descriptor::<ResolveSubjectsState>()?;
+    registry.register_capability_set(&resolve_subjects.capabilities, implementation_id.clone())?;
     registry.register(binding(
-        registered_descriptor::<ResolveSubjectsState>()?,
+        resolve_subjects.descriptor_id,
         PURE_FACTORY,
         Arc::new(ResolveSubjectsRunner {
             artifacts: artifacts.clone(),
         }),
     )?)?;
+    let pin_views = registered_descriptor::<PinViewsState>()?;
+    registry.register_capability_set(&pin_views.capabilities, implementation_id.clone())?;
     registry.register(binding(
-        registered_descriptor::<PinViewsState>()?,
+        pin_views.descriptor_id,
         READ_FACTORY,
         Arc::new(PinViewsRunner {
             artifacts: artifacts.clone(),
             evm: evm.clone(),
         }),
     )?)?;
+    let resolve_valuations = registered_descriptor::<ResolveValuationsState>()?;
+    registry
+        .register_capability_set(&resolve_valuations.capabilities, implementation_id.clone())?;
     registry.register(binding(
-        registered_descriptor::<ResolveValuationsState>()?,
+        resolve_valuations.descriptor_id,
         PURE_FACTORY,
         Arc::new(ResolveValuationsRunner {
             artifacts: artifacts.clone(),
         }),
     )?)?;
+    let observe_batch = registered_descriptor::<ObserveBatchState>()?;
+    registry.register_capability_set(&observe_batch.capabilities, implementation_id.clone())?;
     registry.register(binding(
-        registered_descriptor::<ObserveBatchState>()?,
+        observe_batch.descriptor_id,
         READ_FACTORY,
         Arc::new(ObserveBatchRunner {
             artifacts: artifacts.clone(),
             evm,
         }),
     )?)?;
+    let merge_observations = registered_descriptor::<MergeObservationsState>()?;
+    registry
+        .register_capability_set(&merge_observations.capabilities, implementation_id.clone())?;
     registry.register(binding(
-        registered_descriptor::<MergeObservationsState>()?,
+        merge_observations.descriptor_id,
         PURE_FACTORY,
         Arc::new(MergeObservationsRunner {
             artifacts: artifacts.clone(),
         }),
     )?)?;
+    let assemble_snapshot = registered_descriptor::<AssembleSnapshotState>()?;
+    registry.register_capability_set(&assemble_snapshot.capabilities, implementation_id.clone())?;
     registry.register(binding(
-        registered_descriptor::<AssembleSnapshotState>()?,
+        assemble_snapshot.descriptor_id,
         PURE_FACTORY,
         Arc::new(AssembleSnapshotRunner {
             artifacts: artifacts.clone(),
         }),
     )?)?;
+    let project_report = registered_descriptor::<ProjectReportState>()?;
+    registry.register_capability_set(&project_report.capabilities, implementation_id)?;
     registry.register(binding(
-        registered_descriptor::<ProjectReportState>()?,
+        project_report.descriptor_id,
         PURE_FACTORY,
         Arc::new(ProjectReportRunner { artifacts }),
     )?)?;
     Ok(())
 }
 
-fn registered_descriptor<S>() -> mfm_runtime::Result<DescriptorId>
+struct RegisteredRuntimeDescriptor {
+    descriptor_id: DescriptorId,
+    capabilities: CapabilitySetDescriptor,
+}
+
+fn registered_descriptor<S>() -> mfm_runtime::Result<RegisteredRuntimeDescriptor>
 where
     S: StateSpec,
     S::Effect: mfm_program::EffectRunner<S>,
@@ -198,7 +223,10 @@ where
     let registered = states
         .register::<S>()
         .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
-    Ok(registered.descriptor().descriptor_id().clone())
+    Ok(RegisteredRuntimeDescriptor {
+        descriptor_id: registered.descriptor().descriptor_id().clone(),
+        capabilities: registered.descriptor().capabilities().clone(),
+    })
 }
 
 fn binding(

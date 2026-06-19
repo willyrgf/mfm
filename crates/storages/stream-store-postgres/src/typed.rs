@@ -9,21 +9,17 @@ use mfm_ids::{
 use mfm_spec::v1::MediaType;
 use mfm_store::v1::codec::{
     artifact_role_str, attempt_projection_json, cell_projection_json, fact_projection_json,
-    manual_resolution_projection_json, parse_artifact_role, parse_attempt_projection,
-    parse_cell_projection, parse_fact_projection, parse_identity,
-    parse_manual_resolution_projection, parse_public_output_projection,
-    parse_resource_lane_projection, parse_run_completion_projection, parse_run_state,
-    parse_saga_engagement_projection, parse_side_effect_projection, public_output_projection_json,
-    resource_lane_projection_json, run_completion_projection_json, run_state_str,
-    saga_engagement_projection_json, side_effect_projection_json,
+    manual_resolution_projection_json, parse_artifact_role, parse_identity,
+    public_output_projection_json, resource_lane_projection_json, run_completion_projection_json,
+    run_state_str, saga_engagement_projection_json, side_effect_projection_json,
 };
 use mfm_store::v1::{
-    build_prepared_committed_batch, payload_from_json_value, prepared_commit_fingerprint,
-    stage_prepared_typed_run_commit, ArtifactEvidenceRef, AsyncStoreFuture,
-    AsyncTypedRunEventStore, CodecError, CommitKey, CommitOrdinal, CommitOutcome,
-    KernelEventEnvelope, LogicalEventKey, PersistedKernelEventRecord, PreparedTypedCommit,
-    ProjectionSnapshot, ProjectionSnapshotParts, SideEffectLedgerRef, StoreError,
-    StoreErrorInspection, StreamSeq, TypedCommitBase,
+    build_prepared_commit_plan_batch, payload_from_json_value, prepared_commit_plan_fingerprint,
+    stage_prepared_commit_plan, ArtifactEvidenceRef, AsyncStoreFuture, AsyncTypedRunEventStore,
+    CodecError, CommitKey, CommitOrdinal, CommitOutcome, KernelEventEnvelope, LogicalEventKey,
+    PersistedKernelEventRecord, PreparedCommitPlan, ProjectionSnapshot, ProjectionSnapshotParts,
+    ResourceLaneKey, ResourceLaneProjection, StoreError, StoreErrorInspection, StreamSeq,
+    TypedCommitBase,
 };
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, Transaction};
@@ -130,12 +126,12 @@ impl PostgresTypedRunEventStore {
     }
 
     /// Atomically admits artifact evidence and appends one typed run commit.
-    pub async fn append_prepared_typed_commit(
+    pub async fn append_prepared_commit_plan(
         &self,
-        commit: PreparedTypedCommit,
+        plan: PreparedCommitPlan,
     ) -> Result<CommitOutcome> {
-        let request = commit.request();
-        let fingerprint = prepared_commit_fingerprint(&commit)?;
+        let request = plan.request();
+        let fingerprint = prepared_commit_plan_fingerprint(&plan)?;
         let fingerprint_text = fingerprint.as_digest().as_str().to_owned();
 
         let mut tx = self
@@ -148,7 +144,7 @@ impl PostgresTypedRunEventStore {
             read_commit_key(&mut tx, request.run_id(), request.commit_key().as_str()).await?
         {
             if stored_fingerprint == fingerprint_text {
-                let batch = build_prepared_committed_batch(&commit, stored_seq)?;
+                let batch = build_prepared_commit_plan_batch(&plan, stored_seq)?;
                 tx.commit().await.map_err(|_| {
                     PostgresTypedStoreError::Database("failed to commit transaction")
                 })?;
@@ -170,7 +166,7 @@ impl PostgresTypedRunEventStore {
             read_commit_key(&mut tx, request.run_id(), request.commit_key().as_str()).await?
         {
             if stored_fingerprint == fingerprint_text {
-                let batch = build_prepared_committed_batch(&commit, stored_seq)?;
+                let batch = build_prepared_commit_plan_batch(&plan, stored_seq)?;
                 tx.commit().await.map_err(|_| {
                     PostgresTypedStoreError::Database("failed to commit transaction")
                 })?;
@@ -183,15 +179,17 @@ impl PostgresTypedRunEventStore {
         }
 
         let mut artifacts = load_artifacts(&mut tx, request.run_id()).await?;
-        admit_artifact_evidence(&mut artifacts, commit.admitted_artifacts())?;
+        admit_artifact_evidence(&mut artifacts, plan.admitted_artifacts())?;
         lock_resource_lanes_tx(&mut tx).await?;
-        let (projections, stream_head) =
+        let (run_projection, stream_head) =
             rebuild_projection_snapshot_with_head(&mut tx, request.run_id()).await?;
         if stream_head != head {
             return Err(PostgresTypedStoreError::Corruption(
                 "typed run head does not match persisted event stream".to_owned(),
             ));
         }
+        let resource_lanes = rebuild_global_resource_lanes_from_events_tx(&mut tx).await?;
+        let projections = projection_snapshot_with_resource_lanes(&run_projection, resource_lanes)?;
         let base = TypedCommitBase {
             artifacts,
             logical_keys: load_logical_keys(&mut tx, request.run_id()).await?,
@@ -200,11 +198,11 @@ impl PostgresTypedRunEventStore {
             projections,
             actual_next_seq: next_seq_from_head(head)?,
         };
-        let staged = stage_prepared_typed_run_commit(&base, &commit)?;
+        let staged = stage_prepared_commit_plan(&base, &plan)?;
         let batch = staged.batch().clone();
         let staged_projections = staged.projections().clone();
 
-        for evidence in commit.admitted_artifacts() {
+        for evidence in plan.admitted_artifacts() {
             admit_artifact_evidence_tx(
                 &mut tx,
                 request.run_id(),
@@ -347,12 +345,12 @@ impl PostgresTypedRunEventStore {
 impl AsyncTypedRunEventStore for PostgresTypedRunEventStore {
     type Error = PostgresTypedStoreError;
 
-    fn append_prepared_typed_commit<'a>(
+    fn append_prepared_commit_plan<'a>(
         &'a self,
-        commit: PreparedTypedCommit,
+        plan: PreparedCommitPlan,
     ) -> AsyncStoreFuture<'a, CommitOutcome, Self::Error> {
         Box::pin(async move {
-            PostgresTypedRunEventStore::append_prepared_typed_commit(self, commit).await
+            PostgresTypedRunEventStore::append_prepared_commit_plan(self, plan).await
         })
     }
 
@@ -368,6 +366,13 @@ impl AsyncTypedRunEventStore for PostgresTypedRunEventStore {
         run_id: &'a RunId,
     ) -> AsyncStoreFuture<'a, StreamSeq, Self::Error> {
         Box::pin(async move { PostgresTypedRunEventStore::expected_next_seq(self, run_id).await })
+    }
+
+    fn status_projection_snapshot<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> AsyncStoreFuture<'a, ProjectionSnapshot, Self::Error> {
+        Box::pin(async move { PostgresTypedRunEventStore::projection_snapshot(self, run_id).await })
     }
 }
 
@@ -505,6 +510,8 @@ async fn read_head_for_update(tx: &mut Transaction<'_, Postgres>, run_id: &RunId
 }
 
 async fn lock_resource_lanes_tx(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
+    // This table lock is the cross-run resource-lane admission mutex. Lane authority is rebuilt
+    // from typed_run_events, so the contents of projection rows are not trusted during admission.
     sqlx::query!("LOCK TABLE typed_resource_lane_projection IN SHARE ROW EXCLUSIVE MODE")
         .execute(&mut **tx)
         .await
@@ -645,185 +652,108 @@ async fn load_projection_snapshot_client(
         .begin()
         .await
         .map_err(|error| database_error("failed to start read transaction", error))?;
-    let snapshot = load_projection_snapshot_tx(&mut tx, run_id).await?;
+    let snapshot = load_stream_authoritative_projection_snapshot_tx(&mut tx, run_id).await?;
     tx.commit()
         .await
         .map_err(|error| database_error("failed to commit read transaction", error))?;
     Ok(snapshot)
 }
 
-async fn load_projection_snapshot_tx(
+async fn load_stream_authoritative_projection_snapshot_tx(
     tx: &mut Transaction<'_, Postgres>,
     run_id: &RunId,
 ) -> Result<ProjectionSnapshot> {
-    let mut run_states = BTreeMap::new();
-    for row in sqlx::query!(
-        "SELECT run_state FROM typed_run_projection WHERE run_id = $1",
-        run_id.as_str(),
-    )
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(|error| database_error("failed to load run projection", error))?
-    {
-        run_states.insert(run_id.clone(), parse_run_state(&row.run_state)?);
-    }
+    let stream = load_run_stream_tx(tx, run_id).await?;
+    let snapshot = ProjectionSnapshot::rebuild_from_run_stream(&stream)?;
+    let resource_lanes = rebuild_global_resource_lanes_from_events_tx(tx).await?;
+    projection_snapshot_with_resource_lanes(&snapshot, resource_lanes)
+}
 
-    let mut run_completions = BTreeMap::new();
-    for row in sqlx::query!(
-        "SELECT projection_json FROM typed_run_completion_projection WHERE run_id = $1",
-        run_id.as_str(),
-    )
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(|error| database_error("failed to load run completion projection", error))?
-    {
-        let (projected_run_id, projection) = parse_run_completion_projection(&row.projection_json)?;
-        run_completions.insert(projected_run_id, projection);
-    }
-
-    let mut saga_engagements = BTreeMap::new();
-    for row in sqlx::query!(
-        "SELECT projection_json FROM typed_saga_engagement_projection WHERE run_id = $1",
-        run_id.as_str(),
-    )
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(|error| database_error("failed to load saga engagement projection", error))?
-    {
-        let (projected_run_id, projection) =
-            parse_saga_engagement_projection(&row.projection_json)?;
-        saga_engagements.insert(projected_run_id, projection);
-    }
-
-    let mut manual_resolutions = BTreeMap::new();
-    for row in sqlx::query!(
-        "SELECT projection_json FROM typed_manual_resolution_projection WHERE run_id = $1",
-        run_id.as_str(),
-    )
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(|error| database_error("failed to load manual resolution projection", error))?
-    {
-        let (projected_run_id, projection) =
-            parse_manual_resolution_projection(&row.projection_json)?;
-        manual_resolutions.insert(projected_run_id, projection);
-    }
-
-    let mut attempts = BTreeMap::new();
-    for row in sqlx::query!(
-        "SELECT projection_json FROM typed_attempt_projection WHERE run_id = $1",
-        run_id.as_str(),
-    )
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(|error| database_error("failed to load attempt projection", error))?
-    {
-        let projection = parse_attempt_projection(&row.projection_json)?;
-        attempts.insert(
-            (projection.node_id.clone(), projection.attempt_id.clone()),
-            projection,
-        );
-    }
-
-    let mut cells = BTreeMap::new();
-    for row in sqlx::query!(
-        "SELECT projection_json FROM typed_cell_projection WHERE run_id = $1",
-        run_id.as_str(),
-    )
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(|error| database_error("failed to load cell projection", error))?
-    {
-        let (cell_id, projection) = parse_cell_projection(&row.projection_json)?;
-        cells.insert(cell_id, projection);
-    }
-
-    let mut facts = BTreeMap::new();
-    for row in sqlx::query!(
-        "SELECT projection_json FROM typed_fact_projection WHERE run_id = $1",
-        run_id.as_str(),
-    )
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(|error| database_error("failed to load fact projection", error))?
-    {
-        let projection = parse_fact_projection(&row.projection_json)?;
-        facts.insert(
-            (
-                projection.node_id.clone(),
-                projection.attempt_id.clone(),
-                projection.fact_key.clone(),
-            ),
-            projection,
-        );
-    }
-
-    let mut side_effects = BTreeMap::new();
-    for row in sqlx::query!(
-        "SELECT projection_json FROM typed_side_effect_projection WHERE run_id = $1",
-        run_id.as_str(),
-    )
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(|error| database_error("failed to load side-effect projection", error))?
-    {
-        let projection = parse_side_effect_projection(&row.projection_json)?;
-        side_effects.insert(
-            SideEffectLedgerRef::new(projection.run_id.clone(), projection.ledger_key.clone()),
-            projection,
-        );
-    }
-
+async fn rebuild_global_resource_lanes_from_events_tx(
+    tx: &mut Transaction<'_, Postgres>,
+) -> Result<BTreeMap<ResourceLaneKey, ResourceLaneProjection>> {
     let mut resource_lanes = BTreeMap::new();
-    for row in sqlx::query!("SELECT projection_json FROM typed_resource_lane_projection",)
-        .fetch_all(&mut **tx)
-        .await
-        .map_err(|error| database_error("failed to load resource lanes", error))?
-    {
-        let (lane_key, projection) = parse_resource_lane_projection(&row.projection_json)?;
-        resource_lanes.insert(lane_key, projection);
+    for run_id in load_all_stream_run_ids_tx(tx).await? {
+        let stream = load_run_stream_tx(tx, &run_id).await?;
+        let snapshot = ProjectionSnapshot::rebuild_from_run_stream(&stream)?;
+        for (lane_key, projection) in snapshot.resource_lanes() {
+            if resource_lanes
+                .insert(lane_key.clone(), projection.clone())
+                .is_some()
+            {
+                return Err(PostgresTypedStoreError::Corruption(
+                    "authoritative streams contain duplicate active resource lane".to_owned(),
+                ));
+            }
+        }
     }
+    Ok(resource_lanes)
+}
 
-    let mut public_outputs = BTreeMap::new();
-    for row in sqlx::query!(
-        "SELECT projection_json FROM typed_public_output_projection WHERE run_id = $1",
-        run_id.as_str(),
+async fn load_all_stream_run_ids_tx(tx: &mut Transaction<'_, Postgres>) -> Result<Vec<RunId>> {
+    let rows = sqlx::query_scalar::<_, String>(
+        "SELECT run_id FROM typed_run_heads \
+         UNION SELECT DISTINCT run_id FROM typed_run_events \
+         ORDER BY run_id",
     )
     .fetch_all(&mut **tx)
     .await
-    .map_err(|error| database_error("failed to load public-output projection", error))?
-    {
-        let (schema_id, projection) = parse_public_output_projection(&row.projection_json)?;
-        public_outputs.insert(schema_id, projection);
-    }
+    .map_err(|error| database_error("failed to load typed stream run ids", error))?;
+    rows.into_iter()
+        .map(|run_id| parse_identity::<RunId>(&run_id).map_err(Into::into))
+        .collect()
+}
 
-    let rebuilt_projection = rebuild_projection_snapshot_from_events(tx, run_id).await?;
-    let saga_policy_digests = rebuilt_projection
-        .saga_policy_digests()
-        .map(|(run_id, digest)| (run_id.clone(), digest.clone()))
-        .collect();
-    let retention = rebuilt_projection
-        .retention(run_id)
-        .cloned()
-        .unwrap_or_default();
-    let mut retentions = BTreeMap::new();
-    if !retention.refs.is_empty() || retention.manifest.is_some() {
-        retentions.insert(run_id.clone(), retention);
-    }
-
+fn projection_snapshot_with_resource_lanes(
+    snapshot: &ProjectionSnapshot,
+    resource_lanes: BTreeMap<ResourceLaneKey, ResourceLaneProjection>,
+) -> Result<ProjectionSnapshot> {
     ProjectionSnapshot::from_parts(ProjectionSnapshotParts {
-        run_states,
-        saga_policy_digests,
-        run_completions,
-        saga_engagements,
-        manual_resolutions,
-        attempts,
-        cells,
-        facts,
-        side_effects,
+        run_states: snapshot
+            .run_states()
+            .map(|(run_id, state)| (run_id.clone(), *state))
+            .collect(),
+        saga_policy_digests: snapshot
+            .saga_policy_digests()
+            .map(|(run_id, digest)| (run_id.clone(), digest.clone()))
+            .collect(),
+        run_completions: snapshot
+            .run_completions()
+            .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
+            .collect(),
+        saga_engagements: snapshot
+            .saga_engagements()
+            .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
+            .collect(),
+        manual_resolutions: snapshot
+            .manual_resolutions()
+            .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
+            .collect(),
+        attempts: snapshot
+            .attempts()
+            .map(|(key, projection)| (key.clone(), projection.clone()))
+            .collect(),
+        cells: snapshot
+            .cells()
+            .map(|(cell_id, projection)| (cell_id.clone(), projection.clone()))
+            .collect(),
+        facts: snapshot
+            .facts()
+            .map(|(key, projection)| (key.clone(), projection.clone()))
+            .collect(),
+        side_effects: snapshot
+            .side_effects()
+            .map(|(ledger_ref, projection)| (ledger_ref.clone(), projection.clone()))
+            .collect(),
         resource_lanes,
-        public_outputs,
-        retentions,
+        public_outputs: snapshot
+            .public_outputs()
+            .map(|(schema_id, projection)| (schema_id.clone(), projection.clone()))
+            .collect(),
+        retentions: snapshot
+            .retentions()
+            .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
+            .collect(),
     })
     .map_err(PostgresTypedStoreError::Store)
 }
@@ -1047,6 +977,15 @@ async fn write_projection_tables(
     for (lane_key, projection) in snapshot.resource_lanes() {
         if &projection.holder.run_id == run_id {
             let json = resource_lane_projection_json(lane_key, projection);
+            sqlx::query(
+                "DELETE FROM typed_resource_lane_projection \
+                 WHERE namespace = $1 AND resource_key = $2",
+            )
+            .bind(lane_key.namespace.as_str())
+            .bind(lane_key.key.as_str())
+            .execute(&mut **tx)
+            .await
+            .map_err(|error| database_error("failed to clear resource lane key", error))?;
             sqlx::query!(
                 "INSERT INTO typed_resource_lane_projection \
                  (namespace, resource_key, run_id, ledger_key, projection_json) \
@@ -1240,21 +1179,29 @@ mod tests {
     use mfm_events::v1::{self as events, ArtifactRole, KernelEventPayload};
     use mfm_ids::{
         AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind, CapabilityVersion,
-        CellId, ContentDigest, DigestAlgorithm, DigestBytes, LoweringVersion, NodeId, RunId,
-        SchemaId, ScopeId, SemanticTypeId, SpecHash, SpecVersion, StateKind, StateVersion,
+        CellId, ContentDigest, DigestAlgorithm, DigestBytes, EventId, LoweringVersion, NodeId,
+        RunId, SchemaId, ScopeId, SemanticTypeId, SpecHash, SpecVersion, StateKind, StateVersion,
+    };
+    use mfm_manual_auth::{
+        manual_authorization_proof_schema_id, ManualAuthorizationSignatureBytes,
+        ManualResolutionAuthorizationProof, ManualResolutionAuthorizationSignature,
+        ManualResolutionBlockReason, ManualResolutionEvidenceRef, ManualResolutionPrefixAuthority,
+        ManualResolutionProofAuthority, VerifiedManualResolutionForPrefix,
     };
     use mfm_spec::v1::{
         self as spec, CanonicalizerIdentity, ManualResolutionEvidenceSpec, MediaType,
         ResourceNamespace, SagaPolicySpec, ValueLineageRef,
     };
     use mfm_store::v1::{
-        ArtifactEvidenceRef, CellTerminalProjection, CommitArtifactEvidenceSet, CommitKey,
-        CommitOutcome, CommitPreconditions, PreparedCommit, RequiredRunState, ResourceLaneKey,
-        SagaEngagementReason, SagaTerminal, SagaTerminalProof, SideEffectPhase, StoreError,
-        StreamSeq,
+        build_committed_batch, ArtifactEvidenceRef, AttemptStatus, AttemptTerminal,
+        CellTerminalProjection, CommitArtifactEvidenceSet, CommitKey, CommitOutcome,
+        CommitPreconditions, ManualResolution, PreparedCommit, PreparedCommitPlan,
+        RequiredRunState, ResourceLaneKey, Retention, RunAdmission, RunState, SagaEngagementReason,
+        SagaTerminal, SagaTerminalProof, SideEffectPhase, SideEffectProgress, SideEffectTerminal,
+        StateAttemptStarted, StoreError, StreamSeq,
     };
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-    use sqlx::AssertSqlSafe;
+    use sqlx::{AssertSqlSafe, Row};
 
     use super::*;
 
@@ -1324,6 +1271,162 @@ mod tests {
         tx.commit().await.expect("commit projection clear tx");
     }
 
+    async fn poison_run_projection_state(store: &PostgresTypedRunEventStore, run_id: &RunId) {
+        sqlx::query("UPDATE typed_run_projection SET run_state = $2 WHERE run_id = $1")
+            .bind(run_id.as_str())
+            .bind(run_state_str(RunState::Completed))
+            .execute(&store.pool)
+            .await
+            .expect("poison run projection");
+    }
+
+    async fn poison_cell_projection_json(store: &PostgresTypedRunEventStore, run_id: &RunId) {
+        sqlx::query("UPDATE typed_cell_projection SET projection_json = $2 WHERE run_id = $1")
+            .bind(run_id.as_str())
+            .bind(serde_json::json!({
+                "cell_id": cell_id(199).as_str(),
+                "poisoned": true,
+            }))
+            .execute(&store.pool)
+            .await
+            .expect("poison cell projection");
+    }
+
+    async fn poison_resource_lane_projection_row(
+        store: &PostgresTypedRunEventStore,
+        lane_key: &ResourceLaneKey,
+        poisoned_run: &RunId,
+    ) {
+        let poisoned_ledger = side_effect_ledger_key();
+        let updated = sqlx::query(
+            "UPDATE typed_resource_lane_projection \
+             SET run_id = $3, ledger_key = $4, projection_json = $5 \
+             WHERE namespace = $1 AND resource_key = $2",
+        )
+        .bind(lane_key.namespace.as_str())
+        .bind(lane_key.key.as_str())
+        .bind(poisoned_run.as_str())
+        .bind(poisoned_ledger.as_str())
+        .bind(serde_json::json!({
+            "poisoned": true,
+            "run_id": poisoned_run.as_str(),
+        }))
+        .execute(&store.pool)
+        .await
+        .expect("poison resource lane projection");
+        assert_eq!(updated.rows_affected(), 1);
+    }
+
+    async fn insert_stale_resource_lane_projection_row(
+        store: &PostgresTypedRunEventStore,
+        lane_key: &ResourceLaneKey,
+        stale_run: &RunId,
+    ) {
+        let stale_ledger = side_effect_ledger_key();
+        let projection = ResourceLaneProjection {
+            event_id: EventId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(40)),
+            holder: mfm_store::v1::SideEffectLedgerRef::new(
+                stale_run.clone(),
+                stale_ledger.clone(),
+            ),
+            ledger_purpose: side_effect_ledger_purpose(),
+            node_id: node_id(70),
+            attempt_id: attempt_id(72),
+            invocation_epoch: 1,
+        };
+        sqlx::query(
+            "INSERT INTO typed_resource_lane_projection \
+             (namespace, resource_key, run_id, ledger_key, projection_json) \
+             VALUES ($1,$2,$3,$4,$5)",
+        )
+        .bind(lane_key.namespace.as_str())
+        .bind(lane_key.key.as_str())
+        .bind(stale_run.as_str())
+        .bind(stale_ledger.as_str())
+        .bind(resource_lane_projection_json(lane_key, &projection))
+        .execute(&store.pool)
+        .await
+        .expect("insert stale resource lane projection");
+    }
+
+    async fn assert_resource_lane_projection_row_holder(
+        store: &PostgresTypedRunEventStore,
+        lane_key: &ResourceLaneKey,
+        expected_run: &RunId,
+    ) {
+        let row = sqlx::query(
+            "SELECT run_id FROM typed_resource_lane_projection \
+             WHERE namespace = $1 AND resource_key = $2",
+        )
+        .bind(lane_key.namespace.as_str())
+        .bind(lane_key.key.as_str())
+        .fetch_one(&store.pool)
+        .await
+        .expect("resource lane projection row");
+        let run_id: String = row.try_get("run_id").expect("run_id column");
+        assert_eq!(run_id, expected_run.as_str());
+    }
+
+    async fn insert_persisted_events_direct(
+        store: &PostgresTypedRunEventStore,
+        run_id: &RunId,
+        events: &[KernelEventEnvelope],
+    ) -> Result<()> {
+        let mut tx = store.pool.begin().await.expect("start direct insert tx");
+        let head_seq = events
+            .last()
+            .map(|event| event.seq().as_u64())
+            .unwrap_or_default();
+        sqlx::query("INSERT INTO typed_run_heads (run_id, head_seq) VALUES ($1, $2)")
+            .bind(run_id.as_str())
+            .bind(u64_to_i64(head_seq, "typed_run_heads.head_seq")?)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| database_error("failed to insert typed run head", error))?;
+        for event in events {
+            let payload_json = canonical_payload_value(event.payload())?;
+            let ordinal = i32::try_from(event.ordinal().as_u32()).map_err(|_| {
+                PostgresTypedStoreError::Corruption("typed_run_events.ordinal overflow".to_owned())
+            })?;
+            sqlx::query(
+                "INSERT INTO typed_run_events \
+                 (run_id, seq, ordinal, event_id, event_schema_id, spec_hash, commit_key, \
+                  logical_key, payload_hash, payload_canonical_byte_len, payload_json) \
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+            )
+            .bind(event.run_id().as_str())
+            .bind(u64_to_i64(event.seq().as_u64(), "typed_run_events.seq")?)
+            .bind(ordinal)
+            .bind(event.event_id().as_str())
+            .bind(event.event_schema_id().as_str())
+            .bind(event.spec_hash().as_str())
+            .bind(event.commit_key().as_str())
+            .bind(event.logical_key().as_str())
+            .bind(event.payload_hash().as_str())
+            .bind(u64_to_i64(
+                event.audit().payload_canonical_byte_len(),
+                "typed_run_events.payload_canonical_byte_len",
+            )?)
+            .bind(payload_json)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| database_error("failed to insert typed event", error))?;
+        }
+        tx.commit()
+            .await
+            .map_err(|error| database_error("failed to commit direct insert", error))?;
+        Ok(())
+    }
+
+    fn assert_old_model_rejection(error: PostgresTypedStoreError) {
+        assert!(matches!(
+            error,
+            PostgresTypedStoreError::Store(StoreError::ProjectionConflict { message, .. })
+                if message.contains("unsupported old stream model")
+                    && message.contains("StateAttemptStarted")
+        ));
+    }
+
     fn digest_bytes(byte: u8) -> DigestBytes {
         DigestBytes::from_array([byte; 32])
     }
@@ -1390,24 +1493,22 @@ mod tests {
         MediaType::new(value).expect("media type")
     }
 
-    fn run_started(run_id: RunId) -> KernelEventPayload {
-        run_started_with_saga_policy(run_id, &SagaPolicySpec::NoSideEffects)
+    fn run_admitted(run_id: RunId) -> KernelEventPayload {
+        run_admitted_with_saga_policy(run_id, &SagaPolicySpec::NoSideEffects)
     }
 
-    fn run_started_with_saga_policy(
+    fn run_admitted_with_saga_policy(
         run_id: RunId,
         saga_policy: &SagaPolicySpec,
     ) -> KernelEventPayload {
-        KernelEventPayload::RunStarted(events::RunStarted {
+        let spec_artifact = spec_artifact_ref();
+        let certificate_artifact = certificate_artifact_ref();
+        KernelEventPayload::RunAdmitted(Box::new(events::RunAdmitted {
             run_id,
             spec_hash: spec_hash(1),
-            spec_artifact_id: artifact_id(2),
-            spec_media_type: media_type("application/vnd.mfm.typed-execution-spec+json;version=1"),
-            certificate_artifact_id: artifact_id(4),
-            certificate_artifact_digest: content_digest(5),
-            certificate_media_type: media_type(
-                "application/vnd.mfm.typed-spec-certificate+json;version=1",
-            ),
+            spec_artifact: run_artifact_ref(&spec_artifact),
+            certificate_artifact: run_artifact_ref(&certificate_artifact),
+            config_artifacts: Vec::new(),
             spec_version: SpecVersion::new("mfm.typed.execution_spec.v1").expect("spec version"),
             lowering_version: LoweringVersion::new("mfm.typed.lowering.v1")
                 .expect("lowering version"),
@@ -1418,13 +1519,15 @@ mod tests {
             descriptor_identities: Vec::new(),
             runner_executables: Vec::new(),
             adapter_executables: Vec::new(),
+            admitted_binding_digest: content_digest(9),
             canonicalizer_identity: CanonicalizerIdentity::new("mfm.jcs.v1")
                 .expect("canonicalizer"),
             framework_version: events::FrameworkVersion::new("mfm.test.1")
                 .expect("framework version"),
             source_revision: events::SourceRevision::new("test-revision").expect("source revision"),
+            launched_at_unix_ms: 1_700_000_000_000,
             seed_cells: Vec::new(),
-        })
+        }))
     }
 
     fn state_attempt_started() -> KernelEventPayload {
@@ -1444,6 +1547,14 @@ mod tests {
             node_id: node_id(20),
             attempt_id: attempt_id(23),
             output_cell_id: cell_id(21),
+        })
+    }
+
+    fn state_attempt_interrupted() -> KernelEventPayload {
+        KernelEventPayload::StateAttemptInterrupted(events::StateAttemptInterrupted {
+            spec_hash: spec_hash(1),
+            node_id: node_id(20),
+            attempt_id: attempt_id(23),
         })
     }
 
@@ -1516,40 +1627,48 @@ mod tests {
         })
     }
 
-    fn manual_resolution_recorded(run_id: RunId, byte: u8) -> KernelEventPayload {
+    fn manual_resolution_recorded(
+        verified: &VerifiedManualResolutionForPrefix,
+    ) -> KernelEventPayload {
+        let claim = verified.claim();
+        let authorization = verified.authorization();
         KernelEventPayload::ManualResolutionRecorded(events::ManualResolutionRecorded {
-            run_id,
-            spec_hash: spec_hash(1),
-            outcome: events::ManualResolutionOutcome::ConfirmRemediated,
-            evidence_schema_id: schema_id("mfm.test.manual_evidence", byte + 1),
-            evidence_hash: content_digest(byte + 1),
-            evidence_artifact_id: artifact_id(byte + 1),
-            authorization_schema_id: schema_id("mfm.test.manual_authorization", byte + 2),
-            authorization_hash: content_digest(byte + 2),
-            authorization_artifact_id: artifact_id(byte + 2),
+            run_id: claim.run_id.clone(),
+            spec_hash: claim.spec_hash.clone(),
+            outcome: claim.outcome,
+            evidence_schema_id: claim.evidence.schema_id.clone(),
+            evidence_hash: claim.evidence.content_hash.clone(),
+            evidence_artifact_id: claim.evidence.artifact_id.clone(),
+            authorization_schema_id: authorization.schema_id.clone(),
+            authorization_hash: authorization.content_hash.clone(),
+            authorization_artifact_id: authorization.artifact_id.clone(),
             note: Some(events::ManualResolutionNote::new("reviewed evidence").expect("note")),
         })
     }
 
-    fn manual_resolution_artifacts(byte: u8) -> Vec<ArtifactEvidenceRef> {
+    fn manual_resolution_artifacts(
+        verified: &VerifiedManualResolutionForPrefix,
+    ) -> Vec<ArtifactEvidenceRef> {
+        let claim = verified.claim();
+        let authorization = verified.authorization();
         vec![
             ArtifactEvidenceRef {
-                artifact_id: artifact_id(byte + 1),
-                digest: content_digest(byte + 1),
+                artifact_id: claim.evidence.artifact_id.clone(),
+                digest: claim.evidence.content_hash.clone(),
                 byte_len: 128,
                 media_type: media_type("application/json"),
-                schema_id: Some(schema_id("mfm.test.manual_evidence", byte + 1)),
+                schema_id: Some(claim.evidence.schema_id.clone()),
                 semantic_type_id: None,
                 producer_node_id: None,
                 producer_seed_id: None,
                 artifact_role: ArtifactRole::ManualResolutionEvidence,
             },
             ArtifactEvidenceRef {
-                artifact_id: artifact_id(byte + 2),
-                digest: content_digest(byte + 2),
-                byte_len: 128,
+                artifact_id: authorization.artifact_id.clone(),
+                digest: authorization.content_hash.clone(),
+                byte_len: verified.proof_bytes().len() as u64,
                 media_type: media_type("application/json"),
-                schema_id: Some(schema_id("mfm.test.manual_authorization", byte + 2)),
+                schema_id: Some(authorization.schema_id.clone()),
                 semantic_type_id: None,
                 producer_node_id: None,
                 producer_seed_id: None,
@@ -1585,14 +1704,112 @@ mod tests {
                 operators: vec![spec::OperatorAuthorityMemberSpec {
                     operator_id: spec::OperatorId::new(format!("operator.{byte}"))
                         .expect("operator id"),
-                    public_identity: spec::OperatorPublicIdentity::new(format!(
-                        "operator-public-{byte}"
-                    ))
+                    public_identity: spec::OperatorPublicIdentity::new(
+                        "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf",
+                    )
                     .expect("operator public identity"),
                 }],
             },
             quorum: spec::ManualAuthorizationQuorumSpec::new(1).expect("quorum"),
         }
+    }
+
+    fn verified_manual_resolution_for_seq(
+        run_id: &RunId,
+        expected_next_seq: u64,
+        byte: u8,
+    ) -> VerifiedManualResolutionForPrefix {
+        let SagaPolicySpec::ManualResolution { manual } = manual_saga_policy(byte) else {
+            unreachable!("manual_saga_policy builds manual policy")
+        };
+        let prefix = ManualResolutionPrefixAuthority::new(
+            run_id.clone(),
+            spec_hash(1),
+            expected_next_seq,
+            content_digest(byte + 3),
+            ManualResolutionBlockReason::PolicyManualResolution,
+            content_digest(byte + 4),
+            manual.clone(),
+        )
+        .expect("manual prefix authority");
+        let evidence = ManualResolutionEvidenceRef {
+            schema_id: manual.evidence_schema.clone(),
+            content_hash: content_digest(byte + 1),
+            artifact_id: artifact_id(byte + 1),
+        };
+        let claim = prefix
+            .authorization_claim(
+                events::ManualResolutionOutcome::ConfirmRemediated,
+                evidence.clone(),
+            )
+            .expect("manual authorization claim");
+        let proof = signed_manual_resolution_proof(&manual.authorization, claim.clone());
+        let proof_bytes = proof
+            .canonical_json()
+            .expect("manual proof canonical json")
+            .to_vec();
+        let authorization = manual_authorization_ref(&proof_bytes);
+        ManualResolutionProofAuthority::new(
+            prefix,
+            claim.outcome,
+            evidence,
+            authorization,
+            proof_bytes,
+        )
+        .and_then(ManualResolutionProofAuthority::verify)
+        .expect("verified manual resolution")
+    }
+
+    fn signed_manual_resolution_proof(
+        policy: &spec::ManualResolutionAuthorizationSpec,
+        claim: mfm_manual_auth::ManualResolutionAuthorizationClaim,
+    ) -> ManualResolutionAuthorizationProof {
+        let operator = policy.authority.operators[0].clone();
+        let claim_digest = claim.digest().expect("manual claim digest");
+        ManualResolutionAuthorizationProof {
+            verifier_id: policy.verifier_id.clone(),
+            signing_scheme: policy.signing_scheme.clone(),
+            claim,
+            signatures: vec![ManualResolutionAuthorizationSignature {
+                operator_id: operator.operator_id,
+                public_identity: operator.public_identity,
+                signature: ManualAuthorizationSignatureBytes::new(sign_manual_claim_digest(
+                    &test_manual_signing_key(),
+                    claim_digest.digest().as_bytes(),
+                ))
+                .expect("manual signature bytes"),
+            }],
+        }
+    }
+
+    fn manual_authorization_ref(proof_bytes: &[u8]) -> ManualResolutionEvidenceRef {
+        let proof = ManualResolutionAuthorizationProof::from_json_slice(proof_bytes)
+            .expect("manual authorization proof");
+        let content_hash = proof.content_digest().expect("manual proof content digest");
+        ManualResolutionEvidenceRef {
+            schema_id: manual_authorization_proof_schema_id().expect("manual authorization schema"),
+            artifact_id: ArtifactId::from_digest(content_hash.algorithm(), *content_hash.digest()),
+            content_hash,
+        }
+    }
+
+    fn test_manual_signing_key() -> k256::ecdsa::SigningKey {
+        let mut key_bytes = [0u8; 32];
+        key_bytes[31] = 1;
+        let secret_key = k256::SecretKey::from_slice(&key_bytes).expect("test key");
+        k256::ecdsa::SigningKey::from(&secret_key)
+    }
+
+    fn sign_manual_claim_digest(
+        signing_key: &k256::ecdsa::SigningKey,
+        digest: &[u8; 32],
+    ) -> Vec<u8> {
+        let (signature, recovery_id) = signing_key
+            .sign_prehash_recoverable(digest)
+            .expect("manual signature");
+        let mut signature_bytes = signature.to_bytes().to_vec();
+        signature_bytes.push(u8::from(recovery_id.is_y_odd()));
+        signature_bytes
     }
 
     fn saga_preconditions(run_id: &RunId, policy: SagaPolicySpec) -> CommitPreconditions {
@@ -1905,6 +2122,18 @@ mod tests {
         }
     }
 
+    fn run_artifact_ref(artifact: &ArtifactEvidenceRef) -> events::RunArtifactEvidenceRef {
+        events::RunArtifactEvidenceRef {
+            artifact_id: artifact.artifact_id.clone(),
+            role: artifact.artifact_role,
+            schema_id: artifact.schema_id.clone(),
+            semantic_type_id: artifact.semantic_type_id.clone(),
+            content_digest: artifact.digest.clone(),
+            byte_len: artifact.byte_len,
+            media_type: artifact.media_type.clone(),
+        }
+    }
+
     fn request(
         run_id: RunId,
         seq: u64,
@@ -1924,11 +2153,157 @@ mod tests {
 
     async fn append_prepared(
         store: &PostgresTypedRunEventStore,
-        request: mfm_store::v1::TypedCommitRequest,
+        mut request: mfm_store::v1::TypedCommitRequest,
         artifacts: Vec<ArtifactEvidenceRef>,
     ) -> Result<CommitOutcome> {
-        let commit = PreparedTypedCommit::new(request, artifacts)?;
-        store.append_prepared_typed_commit(commit).await
+        if request.required_artifacts().is_empty() && !artifacts.is_empty() {
+            request = request.with_required_artifacts(artifacts.clone());
+        }
+        let plan = test_prepared_commit_plan(request, artifacts)?;
+        store.append_prepared_commit_plan(plan).await
+    }
+
+    fn test_prepared_commit_plan(
+        request: mfm_store::v1::TypedCommitRequest,
+        artifacts: Vec<ArtifactEvidenceRef>,
+    ) -> mfm_store::v1::Result<PreparedCommitPlan> {
+        let artifact_set =
+            CommitArtifactEvidenceSet::new(request.required_artifacts().to_vec(), artifacts)?;
+        let payloads = request.payloads();
+        if payloads
+            .iter()
+            .all(|payload| matches!(payload, KernelEventPayload::RunAdmitted(_)))
+        {
+            let mut preconditions = request.preconditions().clone();
+            preconditions.required_run_state = RequiredRunState::Absent;
+            let request = request.with_preconditions(preconditions);
+            return Ok(PreparedCommit::<RunAdmission>::new(request, artifact_set)?.into());
+        }
+        if payloads
+            .iter()
+            .all(|payload| matches!(payload, KernelEventPayload::StateAttemptStarted(_)))
+        {
+            let mut preconditions = request.preconditions().clone();
+            preconditions.required_run_state = RequiredRunState::NotCompleted;
+            let request = request.with_preconditions(preconditions);
+            return Ok(PreparedCommit::<StateAttemptStarted>::new(request, artifact_set)?.into());
+        }
+        if payloads.iter().any(test_is_side_effect_terminal_payload) {
+            return Ok(PreparedCommit::<SideEffectTerminal>::new(request, artifact_set)?.into());
+        }
+        if payloads
+            .iter()
+            .any(|payload| payload.side_effect_ref().is_some())
+        {
+            return Ok(PreparedCommit::<SideEffectProgress>::new(request, artifact_set)?.into());
+        }
+        if payloads.iter().any(test_is_retention_payload) {
+            return Ok(PreparedCommit::<Retention>::new(request, artifact_set)?.into());
+        }
+        Ok(PreparedCommit::<AttemptTerminal>::new(request, artifact_set)?.into())
+    }
+
+    fn test_is_retention_payload(payload: &KernelEventPayload) -> bool {
+        matches!(
+            payload,
+            KernelEventPayload::RetentionRefsAppended(_)
+                | KernelEventPayload::RetentionManifestProjected(_)
+        )
+    }
+
+    fn test_is_side_effect_terminal_payload(payload: &KernelEventPayload) -> bool {
+        matches!(
+            payload,
+            KernelEventPayload::SideEffectNotSubmittedProven(_)
+                | KernelEventPayload::SideEffectSubmissionObserved(_)
+                | KernelEventPayload::SideEffectSubmissionUnknown(_)
+                | KernelEventPayload::SideEffectReceiptObserved(_)
+                | KernelEventPayload::SideEffectConfirmationObserved(_)
+                | KernelEventPayload::SideEffectAmbiguous(_)
+                | KernelEventPayload::SideEffectFailed(_)
+        )
+    }
+
+    async fn append_run_start(
+        store: &PostgresTypedRunEventStore,
+        run_id: &RunId,
+        commit_key: &str,
+    ) -> Result<CommitOutcome> {
+        append_prepared(
+            store,
+            request(
+                run_id.clone(),
+                1,
+                commit_key,
+                vec![run_admitted(run_id.clone())],
+            ),
+            vec![spec_artifact_ref(), certificate_artifact_ref()],
+        )
+        .await
+    }
+
+    async fn append_resource_lane_attempt_start(
+        store: &PostgresTypedRunEventStore,
+        run_id: &RunId,
+        commit_key: &str,
+    ) -> Result<CommitOutcome> {
+        append_prepared(
+            store,
+            request(
+                run_id.clone(),
+                2,
+                commit_key,
+                vec![side_effect_attempt_started()],
+            ),
+            Vec::new(),
+        )
+        .await
+    }
+
+    async fn append_resource_lane_prepare(
+        store: &PostgresTypedRunEventStore,
+        run_id: &RunId,
+        commit_key: &str,
+        lane_value: &str,
+        artifact_byte: u8,
+    ) -> Result<CommitOutcome> {
+        let intent_artifact = artifact_id(artifact_byte);
+        let intent_digest = content_digest(artifact_byte + 1);
+        append_prepared(
+            store,
+            request(
+                run_id.clone(),
+                3,
+                commit_key,
+                vec![
+                    side_effect_intent(intent_artifact.clone(), intent_digest.clone()),
+                    side_effect_claim(),
+                    side_effect_prepared_with_resource_key(resource_key(lane_value, 201)),
+                ],
+            ),
+            vec![side_effect_artifact_ref(
+                intent_artifact,
+                intent_digest,
+                schema_id("mfm.test.side_effect_intent", 70),
+                ArtifactRole::SideEffectIntent,
+            )],
+        )
+        .await
+    }
+
+    fn assert_resource_lane_blocked(
+        error: PostgresTypedStoreError,
+        expected_lane_key: &ResourceLaneKey,
+        expected_holder_run: &RunId,
+    ) {
+        let PostgresTypedStoreError::Store(StoreError::ResourceLaneBlocked { lane_key, holder }) =
+            error
+        else {
+            panic!("expected typed resource lane block, got {error:?}");
+        };
+        assert_eq!(&*lane_key, expected_lane_key);
+        assert_eq!(&holder.run_id, expected_holder_run);
+        assert_eq!(holder.ledger_key, side_effect_ledger_key());
     }
 
     #[tokio::test]
@@ -1943,7 +2318,7 @@ mod tests {
         conflicting_evidence.byte_len += 1;
         append_prepared(
             &store,
-            request(run.clone(), 1, "run-start", vec![run_started(run.clone())]),
+            request(run.clone(), 1, "run-start", vec![run_admitted(run.clone())]),
             vec![spec_artifact_ref(), certificate_artifact_ref()],
         )
         .await
@@ -1990,7 +2365,7 @@ mod tests {
 
         append_prepared(
             &store,
-            request(run.clone(), 1, "run-start", vec![run_started(run.clone())]),
+            request(run.clone(), 1, "run-start", vec![run_admitted(run.clone())]),
             vec![spec_artifact_ref(), certificate_artifact_ref()],
         )
         .await
@@ -2060,12 +2435,132 @@ mod tests {
             before
         );
 
+        poison_run_projection_state(&store, &run).await;
+        poison_cell_projection_json(&store, &run).await;
+        assert_eq!(
+            store
+                .projection_snapshot(&run)
+                .await
+                .expect("stream-authoritative projection ignores poisoned rows"),
+            before
+        );
+
+        clear_projection_rows(&store, &run).await;
+        assert_eq!(
+            store
+                .projection_snapshot(&run)
+                .await
+                .expect("stream-authoritative projection ignores deleted rows"),
+            before
+        );
+        let rebuilt = store
+            .rebuild_projections_from_events(&run)
+            .await
+            .expect("rebuild projections");
+        assert_eq!(rebuilt, before);
+
+        drop_schema(&store, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn typed_interrupted_attempt_projection_persists_and_rebuilds_from_events() {
+        let (store, schema) = test_store().await;
+        let run = run_id(17);
+
+        append_prepared(
+            &store,
+            request(run.clone(), 1, "run-start", vec![run_admitted(run.clone())]),
+            vec![spec_artifact_ref(), certificate_artifact_ref()],
+        )
+        .await
+        .expect("run start");
+        append_prepared(
+            &store,
+            request(
+                run.clone(),
+                2,
+                "attempt-start",
+                vec![state_attempt_started()],
+            ),
+            Vec::new(),
+        )
+        .await
+        .expect("attempt start");
+        append_prepared(
+            &store,
+            request(
+                run.clone(),
+                3,
+                "attempt-interrupted",
+                vec![state_attempt_interrupted()],
+            ),
+            Vec::new(),
+        )
+        .await
+        .expect("attempt interrupted");
+
+        let before = store.projection_snapshot(&run).await.expect("projection");
+        let attempt = before
+            .attempt(&node_id(20), &attempt_id(23))
+            .expect("attempt projection");
+        assert!(matches!(&attempt.status, AttemptStatus::Interrupted));
+        assert!(before.saga_engagement(&run).is_none());
+
         clear_projection_rows(&store, &run).await;
         let rebuilt = store
             .rebuild_projections_from_events(&run)
             .await
             .expect("rebuild projections");
         assert_eq!(rebuilt, before);
+        assert!(matches!(
+            &rebuilt
+                .attempt(&node_id(20), &attempt_id(23))
+                .expect("rebuilt attempt projection")
+                .status,
+            AttemptStatus::Interrupted
+        ));
+
+        drop_schema(&store, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn typed_old_model_persisted_rows_reject_on_load_and_rebuild() {
+        let (store, schema) = test_store().await;
+        let run = run_id(18);
+        let run_start = build_committed_batch(
+            &request(run.clone(), 1, "run-start", vec![run_admitted(run.clone())]),
+            StreamSeq::FIRST,
+        )
+        .expect("run start batch");
+        let old_terminal = build_committed_batch(
+            &request(
+                run.clone(),
+                2,
+                "old-terminal-without-start",
+                vec![
+                    cell_produced(artifact_id(19), content_digest(20)),
+                    state_attempt_completed(),
+                ],
+            ),
+            StreamSeq::new(2).expect("terminal seq"),
+        )
+        .expect("old terminal batch");
+        let mut events = run_start.events().to_vec();
+        events.extend(old_terminal.events().iter().cloned());
+        insert_persisted_events_direct(&store, &run, &events)
+            .await
+            .expect("insert old rows");
+
+        let load_error = store
+            .load_run_stream(&run)
+            .await
+            .expect_err("old model rows reject on load");
+        assert_old_model_rejection(load_error);
+        let rebuild_error = store
+            .rebuild_projections_from_events(&run)
+            .await
+            .expect_err("old model rows reject on rebuild");
+        assert_old_model_rejection(rebuild_error);
 
         drop_schema(&store, &schema).await;
     }
@@ -2084,7 +2579,7 @@ mod tests {
                 run.clone(),
                 1,
                 "resource-run-start",
-                vec![run_started(run.clone())],
+                vec![run_admitted(run.clone())],
             ),
             vec![spec_artifact_ref(), certificate_artifact_ref()],
         )
@@ -2137,7 +2632,48 @@ mod tests {
             before
         );
 
+        let peer_run = run_id(24);
+        append_prepared(
+            &store,
+            request(
+                peer_run.clone(),
+                1,
+                "resource-peer-run-start",
+                vec![run_admitted(peer_run.clone())],
+            ),
+            vec![spec_artifact_ref(), certificate_artifact_ref()],
+        )
+        .await
+        .expect("peer run start");
+        let peer_before = store
+            .projection_snapshot(&peer_run)
+            .await
+            .expect("peer projection");
+        let peer_lane = peer_before
+            .resource_lane(&lane_key)
+            .expect("peer snapshot includes cross-run lane");
+        assert_eq!(&peer_lane.holder.run_id, &run);
+        assert_eq!(peer_before.resource_lanes().count(), 1);
+
         clear_projection_rows(&store, &run).await;
+        clear_projection_rows(&store, &peer_run).await;
+        let peer_after_deleted = store
+            .projection_snapshot(&peer_run)
+            .await
+            .expect("peer stream-authoritative projection");
+        let peer_lane = peer_after_deleted
+            .resource_lane(&lane_key)
+            .expect("peer snapshot rebuilds cross-run lane from stream");
+        assert_eq!(&peer_lane.holder.run_id, &run);
+        assert_eq!(&peer_lane.holder.ledger_key, &side_effect_ledger_key());
+        assert_eq!(peer_after_deleted.run_state(&peer_run), RunState::Started);
+        assert_eq!(
+            store
+                .projection_snapshot(&run)
+                .await
+                .expect("holder stream-authoritative projection ignores deleted lane row"),
+            before
+        );
         let rebuilt = store
             .rebuild_projections_from_events(&run)
             .await
@@ -2148,6 +2684,212 @@ mod tests {
             "rebuilt projection must retain non-terminal lane"
         );
 
+        clear_projection_rows(&store, &peer_run).await;
+        store
+            .rebuild_projections_from_events(&peer_run)
+            .await
+            .expect("rebuild peer projections");
+        let peer_after_rebuild = store
+            .projection_snapshot(&peer_run)
+            .await
+            .expect("peer status projection after rebuild");
+        let peer_lane = peer_after_rebuild
+            .resource_lane(&lane_key)
+            .expect("peer rebuilt status projection includes cross-run lane");
+        assert_eq!(&peer_lane.holder.run_id, &run);
+        assert_eq!(&peer_lane.holder.ledger_key, &side_effect_ledger_key());
+
+        drop_schema(&store, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn typed_resource_lane_append_admission_uses_stream_authority_after_projection_damage() {
+        let (store, schema) = test_store().await;
+        let holder_run = run_id(25);
+        let deleted_projection_contender = run_id(26);
+        let poisoned_projection_contender = run_id(27);
+        let lane_value = "wallet-admission";
+        let lane_key = resource_lane_key(lane_value);
+
+        append_run_start(&store, &holder_run, "admission-holder-run-start")
+            .await
+            .expect("holder run start");
+        append_resource_lane_attempt_start(&store, &holder_run, "admission-holder-attempt-start")
+            .await
+            .expect("holder attempt start");
+        append_resource_lane_prepare(
+            &store,
+            &holder_run,
+            "admission-holder-prepare",
+            lane_value,
+            28,
+        )
+        .await
+        .expect("holder resource lane prepare");
+        let holder_projection = store
+            .projection_snapshot(&holder_run)
+            .await
+            .expect("holder projection");
+        assert_eq!(
+            holder_projection
+                .resource_lane(&lane_key)
+                .expect("holder resource lane")
+                .holder
+                .run_id,
+            holder_run
+        );
+
+        append_run_start(
+            &store,
+            &deleted_projection_contender,
+            "deleted-contender-run-start",
+        )
+        .await
+        .expect("deleted contender run start");
+        append_resource_lane_attempt_start(
+            &store,
+            &deleted_projection_contender,
+            "deleted-contender-attempt-start",
+        )
+        .await
+        .expect("deleted contender attempt start");
+        let deleted_stream_before = store
+            .load_run_stream(&deleted_projection_contender)
+            .await
+            .expect("deleted contender stream before conflict");
+        clear_projection_rows(&store, &holder_run).await;
+        let deleted_projection_error = append_resource_lane_prepare(
+            &store,
+            &deleted_projection_contender,
+            "deleted-contender-prepare",
+            lane_value,
+            30,
+        )
+        .await
+        .expect_err("deleted resource lane projection row still blocks from stream authority");
+        assert_resource_lane_blocked(deleted_projection_error, &lane_key, &holder_run);
+        assert_eq!(
+            store
+                .load_run_stream(&deleted_projection_contender)
+                .await
+                .expect("deleted contender stream after conflict"),
+            deleted_stream_before
+        );
+        assert_eq!(
+            store
+                .expected_next_seq(&deleted_projection_contender)
+                .await
+                .expect("deleted contender next seq"),
+            StreamSeq::new(3).expect("deleted contender prepare seq")
+        );
+
+        store
+            .rebuild_projections_from_events(&holder_run)
+            .await
+            .expect("restore holder resource lane projection row");
+        append_run_start(
+            &store,
+            &poisoned_projection_contender,
+            "poisoned-contender-run-start",
+        )
+        .await
+        .expect("poisoned contender run start");
+        append_resource_lane_attempt_start(
+            &store,
+            &poisoned_projection_contender,
+            "poisoned-contender-attempt-start",
+        )
+        .await
+        .expect("poisoned contender attempt start");
+        let poisoned_stream_before = store
+            .load_run_stream(&poisoned_projection_contender)
+            .await
+            .expect("poisoned contender stream before conflict");
+        poison_resource_lane_projection_row(&store, &lane_key, &poisoned_projection_contender)
+            .await;
+        let poisoned_projection_error = append_resource_lane_prepare(
+            &store,
+            &poisoned_projection_contender,
+            "poisoned-contender-prepare",
+            lane_value,
+            32,
+        )
+        .await
+        .expect_err("poisoned resource lane projection row still blocks from stream authority");
+        assert_resource_lane_blocked(poisoned_projection_error, &lane_key, &holder_run);
+        assert_eq!(
+            store
+                .load_run_stream(&poisoned_projection_contender)
+                .await
+                .expect("poisoned contender stream after conflict"),
+            poisoned_stream_before
+        );
+        assert_eq!(
+            store
+                .expected_next_seq(&poisoned_projection_contender)
+                .await
+                .expect("poisoned contender next seq"),
+            StreamSeq::new(3).expect("poisoned contender prepare seq")
+        );
+
+        drop_schema(&store, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn typed_resource_lane_projection_writer_repairs_stale_free_lane_rows() {
+        let (store, schema) = test_store().await;
+        let stale_projection_run = run_id(33);
+        let contender_run = run_id(34);
+        let lane_value = "wallet-stale-free-lane";
+        let lane_key = resource_lane_key(lane_value);
+
+        append_run_start(&store, &stale_projection_run, "stale-free-row-run-start")
+            .await
+            .expect("stale projection run start");
+        insert_stale_resource_lane_projection_row(&store, &lane_key, &stale_projection_run).await;
+        assert_resource_lane_projection_row_holder(&store, &lane_key, &stale_projection_run).await;
+
+        append_run_start(&store, &contender_run, "stale-free-contender-run-start")
+            .await
+            .expect("contender run start");
+        append_resource_lane_attempt_start(
+            &store,
+            &contender_run,
+            "stale-free-contender-attempt-start",
+        )
+        .await
+        .expect("contender attempt start");
+        append_resource_lane_prepare(
+            &store,
+            &contender_run,
+            "stale-free-contender-prepare",
+            lane_value,
+            35,
+        )
+        .await
+        .expect("stale projection row must not veto stream-free lane");
+        let projection = store
+            .projection_snapshot(&contender_run)
+            .await
+            .expect("contender projection");
+        let lane = projection
+            .resource_lane(&lane_key)
+            .expect("contender acquired lane");
+        assert_eq!(&lane.holder.run_id, &contender_run);
+        assert_resource_lane_projection_row_holder(&store, &lane_key, &contender_run).await;
+
+        poison_resource_lane_projection_row(&store, &lane_key, &stale_projection_run).await;
+        assert_resource_lane_projection_row_holder(&store, &lane_key, &stale_projection_run).await;
+        let rebuilt = store
+            .rebuild_projections_from_events(&contender_run)
+            .await
+            .expect("rebuild repairs stale free-lane row");
+        let rebuilt_lane = rebuilt
+            .resource_lane(&lane_key)
+            .expect("rebuilt contender lane");
+        assert_eq!(&rebuilt_lane.holder.run_id, &contender_run);
+        assert_resource_lane_projection_row_holder(&store, &lane_key, &contender_run).await;
+
         drop_schema(&store, &schema).await;
     }
 
@@ -2155,6 +2897,7 @@ mod tests {
     async fn typed_saga_projection_tables_persist_and_rebuild_from_events() {
         let (store, schema) = test_store().await;
         let run = run_id(41);
+        let saga_policy = manual_saga_policy(42);
 
         append_prepared(
             &store,
@@ -2162,10 +2905,7 @@ mod tests {
                 run.clone(),
                 1,
                 "saga-run-start",
-                vec![run_started_with_saga_policy(
-                    run.clone(),
-                    &manual_saga_policy(42),
-                )],
+                vec![run_admitted_with_saga_policy(run.clone(), &saga_policy)],
             ),
             vec![spec_artifact_ref(), certificate_artifact_ref()],
         )
@@ -2229,14 +2969,29 @@ mod tests {
         )
         .await
         .expect("side-effect ambiguous");
-        let manual_request = request(
+        let verified = verified_manual_resolution_for_seq(&run, 5, 42);
+        let manual_artifacts = manual_resolution_artifacts(&verified);
+        let manual_request = mfm_store::v1::TypedCommitRequest::from_payloads(
             run.clone(),
-            5,
-            "saga-manual-resolution",
-            vec![manual_resolution_recorded(run.clone(), 42)],
+            StreamSeq::new(5).expect("manual resolution seq"),
+            CommitKey::new("saga-manual-resolution").expect("commit key"),
+            vec![manual_resolution_recorded(&verified)],
+            manual_artifacts.clone(),
+            CommitPreconditions {
+                required_run_state: RequiredRunState::NotCompleted,
+                ..saga_preconditions(&run, saga_policy)
+            },
         )
-        .with_preconditions(saga_preconditions(&run, manual_saga_policy(42)));
-        append_prepared(&store, manual_request, manual_resolution_artifacts(42))
+        .expect("manual resolution request");
+        let manual_commit = PreparedCommit::<ManualResolution>::new(
+            manual_request,
+            CommitArtifactEvidenceSet::new(manual_artifacts.clone(), manual_artifacts)
+                .expect("manual artifact evidence set"),
+            &verified,
+        )
+        .expect("proof-backed manual resolution prepared commit");
+        store
+            .append_prepared_commit_plan(manual_commit.into())
             .await
             .expect("manual resolution");
         let before = store.projection_snapshot(&run).await.expect("projection");
@@ -2282,7 +3037,7 @@ mod tests {
                 terminal_run.clone(),
                 1,
                 "saga-terminal-run-start",
-                vec![run_started_with_saga_policy(
+                vec![run_admitted_with_saga_policy(
                     terminal_run.clone(),
                     &terminal_policy,
                 )],
@@ -2361,8 +3116,16 @@ mod tests {
             .expect("terminal projection before completion");
         let terminal_saga =
             terminal_before_completion.derive_saga_projection(&terminal_run, &terminal_policy);
-        let terminal_proof =
-            SagaTerminalProof::new(&terminal_policy, &terminal_saga, None).expect("terminal proof");
+        let terminal_proof = SagaTerminalProof::new(
+            &terminal_policy,
+            &terminal_saga,
+            store
+                .expected_next_seq(&terminal_run)
+                .await
+                .expect("terminal next seq"),
+            None,
+        )
+        .expect("terminal proof");
         let terminal_request = request(
             terminal_run.clone(),
             5,
@@ -2381,7 +3144,7 @@ mod tests {
         )
         .expect("proof-backed terminal commit");
         store
-            .append_prepared_typed_commit(terminal_commit.into_typed_commit())
+            .append_prepared_commit_plan(terminal_commit.into())
             .await
             .expect("terminal run completed");
 
@@ -2421,7 +3184,7 @@ mod tests {
         let run = run_id(10);
         append_prepared(
             &store,
-            request(run.clone(), 1, "run-start", vec![run_started(run.clone())]),
+            request(run.clone(), 1, "run-start", vec![run_admitted(run.clone())]),
             vec![spec_artifact_ref(), certificate_artifact_ref()],
         )
         .await
@@ -2441,6 +3204,11 @@ mod tests {
 
         let missing_artifact = artifact_id(11);
         let missing_digest = content_digest(12);
+        let missing_ref = store_artifact_ref(
+            missing_artifact.clone(),
+            missing_digest.clone(),
+            ArtifactRole::FactResponse,
+        );
         let fact_request = request(
             run.clone(),
             3,
@@ -2454,6 +3222,7 @@ mod tests {
             required_run_state: RequiredRunState::Started,
             ..CommitPreconditions::default()
         });
+        let fact_request = fact_request.with_required_artifacts(vec![missing_ref.clone()]);
         let err = append_prepared(&store, fact_request.clone(), Vec::new())
             .await
             .expect_err("missing fact artifact");
@@ -2466,17 +3235,9 @@ mod tests {
             StreamSeq::new(3).expect("seq")
         );
 
-        append_prepared(
-            &store,
-            fact_request,
-            vec![store_artifact_ref(
-                missing_artifact.clone(),
-                missing_digest,
-                ArtifactRole::FactResponse,
-            )],
-        )
-        .await
-        .expect("fact commit after artifact");
+        append_prepared(&store, fact_request, vec![missing_ref])
+            .await
+            .expect("fact commit after artifact");
         let projection = store.projection_snapshot(&run).await.expect("projection");
         assert!(projection
             .fact(
@@ -2494,13 +3255,21 @@ mod tests {
         let (store, schema) = test_store().await;
         let run = run_id(13);
 
+        append_prepared(
+            &store,
+            request(run.clone(), 1, "run-start", vec![run_admitted(run.clone())]),
+            vec![spec_artifact_ref(), certificate_artifact_ref()],
+        )
+        .await
+        .expect("run start");
+
         let intent_artifact = artifact_id(14);
         let intent_digest = content_digest(15);
         append_prepared(
             &store,
             request(
                 run.clone(),
-                1,
+                2,
                 "sidefx-attempt-start",
                 vec![side_effect_attempt_started()],
             ),
@@ -2512,7 +3281,7 @@ mod tests {
             &store,
             request(
                 run.clone(),
-                2,
+                3,
                 "sidefx-prepare",
                 vec![
                     side_effect_intent(intent_artifact.clone(), intent_digest.clone()),
@@ -2533,7 +3302,7 @@ mod tests {
             &store,
             request(
                 run.clone(),
-                3,
+                4,
                 "sidefx-started",
                 vec![side_effect_started()],
             ),
@@ -2548,7 +3317,7 @@ mod tests {
             &store,
             request(
                 run.clone(),
-                4,
+                5,
                 "sidefx-submission-unknown",
                 vec![side_effect_submission_unknown(
                     unknown_artifact.clone(),
@@ -2581,7 +3350,7 @@ mod tests {
             &store,
             request(
                 run.clone(),
-                5,
+                6,
                 "sidefx-submission-observed-after-unknown",
                 vec![side_effect_submission_observed(
                     submission_artifact.clone(),

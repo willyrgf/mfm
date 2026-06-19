@@ -11,16 +11,21 @@ Typed application assembly for certified MFM runs.
 - typed start/resume/replay dispatch
 - typed public-output read authority and rendering
 
+Domain runner behavior lives in adapter crates. For EVM contract lifecycles,
+`mfm-app` only wires concrete process resources such as JSON-RPC clients,
+artifact stores, and keystore-backed signer providers into the adapter runner
+factory.
+
 It does not depend on old dynamic machine or SDK crates, dynamic DAG planning, context snapshots,
 or generic IO providers.
 
 Generic start parses certified bundle JSON as untrusted transport data, verifies the spec and
 certificate through `mfm-certify`, verifies config and seed inputs against the certified spec, and
 hands typed launch material to runtime middleware. The runtime stages the referenced artifacts and
-admits their evidence in the same prepared start commit that appends `RunStarted`. Domain start
+admits their evidence in the same prepared start commit that appends `RunAdmitted`. Domain start
 routes may accept domain inputs, but they build typed drafts and certify them before runtime start.
 Resume and replay reload stored spec/certificate artifacts, verify them against the production
-registry, compare them to `RunStarted`, and rebuild stream evidence before constructing runtime or
+registry, compare them to `RunAdmitted`, and rebuild stream evidence before constructing runtime or
 replay authority.
 
 Run status exposes manual-resolution requirements from certified policy only: evidence schema,
