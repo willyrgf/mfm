@@ -3754,6 +3754,7 @@ impl DeterministicSideEffectRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mfm_kernel_scenario_data::replay_artifacts;
 
     #[tokio::test]
     async fn typed_certified_slice_acceptance_passes_required_contract() {
@@ -3911,34 +3912,283 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replay_artifacts_reject_missing_state_output_reference() {
+    async fn replay_artifact_negative_cases_match_scenario_data() {
         let run = run_reference_certified_workflow()
             .await
             .expect("reference workflow");
-        let stream = run.store.load_run_stream(&run.fixture.run_id);
-        let mut removed = false;
-        let corrupt_stream = stream
-            .into_iter()
-            .filter(|event| {
-                if !removed
-                    && matches!(
-                        event.payload(),
-                        events::KernelEventPayload::ArtifactReferenced(payload)
-                            if payload.artifact_ref.role == events::ArtifactRole::StateOutput
-                    )
-                {
-                    removed = true;
-                    return false;
-                }
-                true
-            })
-            .collect::<Vec<_>>();
-        assert!(removed, "reference workflow emitted state output reference");
 
-        assert!(matches!(
-            replay_artifacts(&run.fixture, &corrupt_stream),
-            Err(message) if message.contains("lacks a committed artifact reference")
-        ));
+        for case in replay_artifacts::NEGATIVE_CASE_SCENARIO.corruption_cases {
+            let actual = replay_artifact_negative_case_kind(&run, case.name)
+                .await
+                .unwrap_or_else(|error| panic!("{} failed: {error}", case.name));
+            assert_eq!(
+                actual, case.expected_error_kind,
+                "unexpected replay artifact negative kind for {}",
+                case.name
+            );
+        }
+    }
+
+    async fn replay_artifact_negative_case_kind(
+        run: &ReferenceRun,
+        case_name: &str,
+    ) -> Result<&'static str, String> {
+        let stream = run.store.load_run_stream(&run.fixture.run_id);
+        match case_name {
+            "wrong_role" => {
+                let (corrupt_stream, replaced) = rewrite_first_artifact_reference(
+                    &stream,
+                    events::ArtifactRole::StateOutput,
+                    |payload| {
+                        payload.artifact_ref.role = events::ArtifactRole::PublicOutput;
+                    },
+                );
+                if !replaced {
+                    return Err("missing state output reference for wrong-role case".to_owned());
+                }
+                replay_artifacts(&run.fixture, &corrupt_stream)
+                    .expect_err("wrong-role artifact reference rejects");
+                Ok("invalid_run_stream")
+            }
+            "wrong_producer" => {
+                let wrong_node = NodeId::from_digest(DigestAlgorithm::Sha256JcsV1, bytes(0xf1));
+                let (corrupt_stream, replaced) = rewrite_first_artifact_reference(
+                    &stream,
+                    events::ArtifactRole::StateOutput,
+                    |payload| {
+                        payload.node_id = Some(wrong_node.clone());
+                    },
+                );
+                if !replaced {
+                    return Err("missing state output reference for wrong-producer case".to_owned());
+                }
+                replay_artifacts(&run.fixture, &corrupt_stream)
+                    .expect_err("wrong-producer artifact reference rejects");
+                Ok("invalid_run_stream")
+            }
+            "missing_committed_artifact_reference" => {
+                let (corrupt_stream, removed) =
+                    remove_first_artifact_reference(&stream, events::ArtifactRole::StateOutput);
+                if !removed {
+                    return Err(
+                        "reference workflow emitted no state output reference to remove".to_owned(),
+                    );
+                }
+                let error = replay_artifacts(&run.fixture, &corrupt_stream)
+                    .expect_err("missing state output reference rejects");
+                if !error.contains("lacks a committed artifact reference") {
+                    return Err(format!("unexpected missing-reference error: {error}"));
+                }
+                Ok("artifact_missing")
+            }
+            "tampered_spec" => {
+                let corrupt_stream = rewrite_run_admitted(&stream, |payload| {
+                    payload.spec_artifact.artifact_id = artifact(0xe1);
+                    payload.spec_artifact.content_digest = content(0xe1);
+                })?;
+                replay_artifact_stream_error_kind(run, corrupt_stream).await
+            }
+            "tampered_certificate" => {
+                let corrupt_stream = rewrite_run_admitted(&stream, |payload| {
+                    payload.certificate_artifact.artifact_id = artifact(0xe2);
+                    payload.certificate_artifact.content_digest = content(0xe2);
+                })?;
+                replay_artifact_stream_error_kind(run, corrupt_stream).await
+            }
+            "replay_with_live_capability" => replay_artifact_stream_error_kind(run, stream).await,
+            other => Err(format!("unknown replay artifact negative case {other}")),
+        }
+    }
+
+    async fn replay_artifact_stream_error_kind(
+        run: &ReferenceRun,
+        stream: Vec<store::KernelEventEnvelope>,
+    ) -> Result<&'static str, String> {
+        let error = replay_stream_without_live_capabilities(
+            &run.fixture.runtime_spec,
+            stream,
+            &run.artifacts,
+        )
+        .await
+        .expect_err("replay artifact negative case rejects");
+        Ok(replay_error_kind_label(error.kind))
+    }
+
+    fn replay_error_kind_label(kind: replay::ReplayErrorKind) -> &'static str {
+        match kind {
+            replay::ReplayErrorKind::InvalidRunStream => "invalid_run_stream",
+            replay::ReplayErrorKind::ArtifactMissing => "artifact_missing",
+            replay::ReplayErrorKind::LiveCapabilityRequest => "live_capability_request",
+            _ => "other",
+        }
+    }
+
+    async fn replay_stream_without_live_capabilities(
+        runtime_spec: &CertifiedRuntimeSpec,
+        stream: Vec<store::KernelEventEnvelope>,
+        artifacts: &TestRuntimeArtifactStore,
+    ) -> replay::Result<()> {
+        let run_admitted = stream
+            .iter()
+            .find_map(|event| match event.payload() {
+                events::KernelEventPayload::RunAdmitted(payload) => Some(payload.clone()),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                replay::ReplayError::new(
+                    replay::ReplayErrorKind::RunAdmittedMissing,
+                    "missing RunAdmitted for replay artifact case",
+                )
+            })?;
+        let committed = store::CommittedRunStream::from_events(run_admitted.run_id.clone(), stream)
+            .map_err(|error| {
+                replay::ReplayError::new(
+                    replay::ReplayErrorKind::InvalidRunStream,
+                    error.to_string(),
+                )
+            })?;
+        let retained_artifacts =
+            store::VerifiedRunArtifactStore::from_committed_stream(&committed, artifacts)
+                .await
+                .map_err(|error| {
+                    replay::ReplayError::new(
+                        replay::ReplayErrorKind::ArtifactMissing,
+                        error.to_string(),
+                    )
+                })?;
+        let verified_history = mfm_runtime::VerifiedRunHistory::from_committed_stream(
+            runtime_spec,
+            committed,
+            retained_artifacts,
+        )
+        .map_err(|error| {
+            replay::ReplayError::new(replay::ReplayErrorKind::InvalidRunStream, error.to_string())
+        })?;
+        let authority = replay::ReplayReadAuthority::from_verified_run_history(
+            runtime_spec,
+            &verified_history,
+        )?;
+        let broker = replay::ReplayBroker::from_read_authority(authority)?;
+        broker.reject_live_capability_request()
+    }
+
+    fn rewrite_first_artifact_reference(
+        stream: &[store::KernelEventEnvelope],
+        role: events::ArtifactRole,
+        mutate: impl FnOnce(&mut events::ArtifactReferenced),
+    ) -> (Vec<store::KernelEventEnvelope>, bool) {
+        let mut mutate = Some(mutate);
+        rewrite_commits(stream, |payloads| {
+            if mutate.is_none() {
+                return false;
+            }
+            for payload in payloads {
+                let events::KernelEventPayload::ArtifactReferenced(reference) = payload else {
+                    continue;
+                };
+                if reference.artifact_ref.role == role {
+                    let mutate = mutate.take().expect("mutation is used once");
+                    mutate(reference);
+                    return true;
+                }
+            }
+            false
+        })
+    }
+
+    fn remove_first_artifact_reference(
+        stream: &[store::KernelEventEnvelope],
+        role: events::ArtifactRole,
+    ) -> (Vec<store::KernelEventEnvelope>, bool) {
+        let mut removed = false;
+        let (rewritten, changed) = rewrite_commits(stream, |payloads| {
+            if removed {
+                return false;
+            }
+            let Some(index) = payloads.iter().position(|payload| {
+                matches!(
+                    payload,
+                    events::KernelEventPayload::ArtifactReferenced(reference)
+                        if reference.artifact_ref.role == role
+                )
+            }) else {
+                return false;
+            };
+            payloads.remove(index);
+            removed = true;
+            true
+        });
+        (rewritten, changed)
+    }
+
+    fn rewrite_run_admitted(
+        stream: &[store::KernelEventEnvelope],
+        mutate: impl FnOnce(&mut events::RunAdmitted),
+    ) -> Result<Vec<store::KernelEventEnvelope>, String> {
+        let mut mutate = Some(mutate);
+        let (rewritten, changed) = rewrite_commits(stream, |payloads| {
+            if mutate.is_none() {
+                return false;
+            }
+            for payload in payloads {
+                let events::KernelEventPayload::RunAdmitted(run_admitted) = payload else {
+                    continue;
+                };
+                let mutate = mutate.take().expect("mutation is used once");
+                mutate(run_admitted);
+                return true;
+            }
+            false
+        });
+        if changed {
+            Ok(rewritten)
+        } else {
+            Err("missing RunAdmitted payload".to_owned())
+        }
+    }
+
+    fn rewrite_commits(
+        stream: &[store::KernelEventEnvelope],
+        mut mutate_payloads: impl FnMut(&mut Vec<events::KernelEventPayload>) -> bool,
+    ) -> (Vec<store::KernelEventEnvelope>, bool) {
+        let mut rewritten = Vec::with_capacity(stream.len());
+        let mut changed = false;
+        let mut index = 0;
+        while index < stream.len() {
+            let first = &stream[index];
+            let seq = first.seq();
+            let commit_key = first.commit_key().clone();
+            let mut end = index + 1;
+            while end < stream.len()
+                && stream[end].seq() == seq
+                && stream[end].commit_key() == &commit_key
+            {
+                end += 1;
+            }
+            let mut payloads = stream[index..end]
+                .iter()
+                .map(|event| event.payload().clone())
+                .collect::<Vec<_>>();
+            if mutate_payloads(&mut payloads) {
+                let request = typed_commit_request(
+                    first.run_id().clone(),
+                    seq,
+                    commit_key,
+                    payloads,
+                    Vec::new(),
+                    store::CommitPreconditions::default(),
+                )
+                .expect("rewritten replay artifact commit request");
+                let batch = store::build_committed_batch(&request, seq)
+                    .expect("rewritten replay artifact commit batch");
+                rewritten.extend(batch.events().iter().cloned());
+                changed = true;
+            } else {
+                rewritten.extend(stream[index..end].iter().cloned());
+            }
+            index = end;
+        }
+        (rewritten, changed)
     }
 
     fn append_payload_to_start_commit(

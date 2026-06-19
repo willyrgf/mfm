@@ -58,14 +58,14 @@ pub const CORRUPTION_CASES: [CorruptionCaseDescriptor; 6] = [
         name: "tampered_spec",
         family: CorruptionCaseFamily::ReplayArtifactEvidence,
         mutation: "tamper_typed_execution_spec",
-        expected_error_kind: "invalid_run_stream",
+        expected_error_kind: "artifact_missing",
         artifact_role_tag: Some("typed_execution_spec"),
     },
     CorruptionCaseDescriptor {
         name: "tampered_certificate",
         family: CorruptionCaseFamily::ReplayArtifactEvidence,
         mutation: "tamper_typed_spec_certificate",
-        expected_error_kind: "invalid_run_stream",
+        expected_error_kind: "artifact_missing",
         artifact_role_tag: Some("typed_spec_certificate"),
     },
     CorruptionCaseDescriptor {
