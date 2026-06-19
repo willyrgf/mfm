@@ -2504,6 +2504,10 @@ pub mod v1 {
         })
     }
 
+    fn artifact_role_schema_variants() -> Vec<&'static str> {
+        ArtifactRole::ALL.iter().map(|role| role.as_str()).collect()
+    }
+
     fn enum_type(name: &'static str, variants: Vec<serde_json::Value>) -> serde_json::Value {
         serde_json::json!({
             "kind": "enum",
@@ -2827,30 +2831,7 @@ pub mod v1 {
                     schema_field("media_type", "MediaType", EventFieldCardinality::Required),
                 ],
             ),
-            "ArtifactRole" => unit_enum_type(
-                "ArtifactRole",
-                &[
-                    "typed_execution_spec",
-                    "typed_spec_certificate",
-                    "typed_config",
-                    "seed_input",
-                    "state_output",
-                    "fact_response",
-                    "side_effect_intent",
-                    "prepared_invocation",
-                    "not_submitted_proof",
-                    "submission",
-                    "submission_unknown_evidence",
-                    "receipt",
-                    "confirmation",
-                    "ambiguity_evidence",
-                    "manual_resolution_evidence",
-                    "manual_resolution_authorization",
-                    "public_output",
-                    "redacted_diagnostic",
-                    "retention_manifest",
-                ],
-            ),
+            "ArtifactRole" => unit_enum_type("ArtifactRole", &artifact_role_schema_variants()),
             "ResourceKeyEvidence" => struct_type(
                 "ResourceKeyEvidence",
                 vec![
