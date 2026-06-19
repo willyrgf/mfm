@@ -747,6 +747,400 @@ impl ErasedNodeRunner for ErrorRunner {
     }
 }
 
+#[test]
+fn runner_kit_builders_create_context_bound_artifacts_payloads_and_output() {
+    let fixture = fixture();
+    let node = node_by_output(&fixture, &fixture.cell_a);
+    let descriptor = fixture
+        .runtime_spec
+        .state_descriptor_for_node(node)
+        .expect("state descriptor");
+    let output_cell = fixture
+        .runtime_spec
+        .cell(&node.output_cell)
+        .expect("output cell");
+    let attempt_id = attempt_id(
+        &fixture.run_id,
+        fixture.runtime_spec.spec_hash(),
+        &node.node_id,
+        1,
+    )
+    .expect("attempt id");
+    let config_artifact = config_artifact(&fixture.runtime_spec, &node.config_ref).evidence;
+    let projections = store::ProjectionSnapshot::default();
+    let run_stream = Vec::new();
+    let invocation = PreparedRunnerInvocation {
+        runtime_spec: &fixture.runtime_spec,
+        run_id: &fixture.run_id,
+        spec_hash: fixture.runtime_spec.spec_hash(),
+        node,
+        descriptor,
+        output_cell,
+        attempt_id: &attempt_id,
+        attempt_no: 1,
+        config_artifact,
+        inputs: MaterializedInputs {
+            input_schema_id: node.input_bindings.input_schema_id.clone(),
+            root: MaterializedInputNode::Unit,
+        },
+        caps: CertifiedRuntimeCapabilities::new(
+            node.node_id.clone(),
+            node.capability_bindings.clone(),
+        ),
+        recorded_facts: RecordedFacts::default(),
+        projections: &projections,
+        run_stream: &run_stream,
+    };
+    let ctx = ErasedRunCtx::from_prepared(&invocation);
+    let artifacts = RunnerArtifactBuilder::new(&ctx);
+    let payloads = RunnerPayloadBuilder::new(&ctx);
+    let value = CertifierValue { amount: 42 };
+    let binding = RunnerCapabilityBinding {
+        capability_kind: fixture.cap_kind.clone(),
+        capability_version: fixture.cap_version.clone(),
+        adapter_kind: fixture.adapter_kind.clone(),
+        adapter_version: fixture.adapter_version.clone(),
+    };
+
+    let state = artifacts.state_output(&value).expect("state output");
+    assert_eq!(
+        state.evidence().artifact_role,
+        events::ArtifactRole::StateOutput
+    );
+    assert_eq!(
+        state.evidence().producer_node_id.as_ref(),
+        Some(&ctx.node().node_id)
+    );
+    assert_eq!(
+        artifacts.content_digest(&value).expect("content digest"),
+        state.evidence().digest
+    );
+
+    let cell = payloads.cell_produced(&state).expect("cell payload");
+    match &cell {
+        RunnerEventPayload::CellProduced(payload) => {
+            assert_eq!(payload.spec_hash, *ctx.spec_hash());
+            assert_eq!(payload.node_id, ctx.node().node_id);
+            assert_eq!(payload.cell_id, ctx.node().output_cell);
+            assert_eq!(payload.schema_id, ctx.output_cell().schema_id);
+            assert_eq!(payload.semantic_type_id, ctx.output_cell().semantic_type_id);
+            assert_eq!(payload.artifact_id, state.evidence().artifact_id);
+            assert_eq!(payload.content_digest, state.evidence().digest);
+        }
+        _ => panic!("expected cell produced payload"),
+    }
+
+    let response = artifacts.fact_response(&value).expect("fact response");
+    let fact = payloads
+        .fact_recorded(
+            events::FactKey::new("mfm.test.runner_kit.fact").expect("fact key"),
+            &value,
+            &response,
+            binding.clone(),
+        )
+        .expect("fact payload");
+    match &fact {
+        RunnerEventPayload::FactRecorded(payload) => {
+            assert_eq!(payload.node_id, ctx.node().node_id);
+            assert_eq!(payload.attempt_id, *ctx.attempt_id());
+            assert_eq!(payload.request_hash, state.evidence().digest);
+            assert_eq!(payload.response_hash, response.evidence().digest);
+            assert_eq!(payload.artifact_id, response.evidence().artifact_id);
+        }
+        _ => panic!("expected fact recorded payload"),
+    }
+
+    let ledger_key =
+        events::SideEffectLedgerKey::new("mfm.test.runner_kit.ledger").expect("ledger key");
+    let side_effect = RunnerSideEffectBinding {
+        ledger_key: ledger_key.clone(),
+        ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+        invocation_epoch: 1,
+    };
+    let idempotency_key =
+        events::IdempotencyKeyRef::new("mfm.test.runner_kit.idem").expect("idempotency key");
+    let owner = events::RunnerInvocationId::new("mfm.test.runner_kit.owner").expect("claim owner");
+    let next_owner =
+        events::RunnerInvocationId::new("mfm.test.runner_kit.owner.next").expect("claim owner");
+    let token =
+        events::side_effect::ClaimFencingToken::new("mfm.test.runner_kit.token").expect("token");
+    let next_token = events::side_effect::ClaimFencingToken::new("mfm.test.runner_kit.token.next")
+        .expect("next token");
+    let verifier = events::ReplayVerifierId::new("mfm.test.runner_kit.verifier").expect("verifier");
+
+    let intent = artifacts
+        .side_effect_intent(&value)
+        .expect("side-effect intent");
+    let intent_payload = payloads
+        .side_effect_intent_persisted(
+            side_effect.clone(),
+            &intent,
+            &value,
+            idempotency_key,
+            binding,
+        )
+        .expect("intent payload");
+    match &intent_payload {
+        RunnerEventPayload::SideEffectIntentPersisted(payload) => {
+            assert_eq!(payload.ledger_key, ledger_key);
+            assert_eq!(payload.intent_hash, intent.evidence().digest);
+            assert_eq!(payload.intent_artifact_id, intent.evidence().artifact_id);
+            assert_eq!(payload.idempotency_input_hash, state.evidence().digest);
+        }
+        _ => panic!("expected side-effect intent payload"),
+    }
+
+    let claim = payloads.side_effect_claimed(
+        side_effect.clone(),
+        RunnerClaimBinding {
+            claim_owner: owner.clone(),
+            claim_generation: 1,
+            claim_fencing_token: token.clone(),
+        },
+    );
+    match &claim {
+        RunnerEventPayload::SideEffectClaimed(payload) => {
+            assert_eq!(payload.claim_owner, owner);
+            assert_eq!(payload.claim_generation, 1);
+            assert_eq!(payload.claim_fencing_token, token);
+        }
+        _ => panic!("expected side-effect claimed payload"),
+    }
+
+    let takeover = payloads.side_effect_claim_taken_over(
+        side_effect.clone(),
+        RunnerClaimTakeoverBinding {
+            previous_claim_owner: owner.clone(),
+            new_claim_owner: next_owner.clone(),
+            previous_claim_generation: 1,
+            claim_generation: 2,
+            claim_fencing_token: next_token.clone(),
+        },
+    );
+    match &takeover {
+        RunnerEventPayload::SideEffectClaimTakenOver(payload) => {
+            assert_eq!(payload.previous_claim_owner, owner);
+            assert_eq!(payload.new_claim_owner, next_owner);
+            assert_eq!(payload.previous_claim_generation, 1);
+            assert_eq!(payload.claim_generation, 2);
+            assert_eq!(payload.claim_fencing_token, next_token);
+        }
+        _ => panic!("expected side-effect claim takeover payload"),
+    }
+
+    let prepared = artifacts
+        .prepared_invocation(&serde_json::json!({"prepared": true}))
+        .expect("prepared invocation");
+    assert_eq!(
+        prepared.evidence().artifact_role,
+        events::ArtifactRole::PreparedInvocation
+    );
+    assert!(prepared.evidence().schema_id.is_none());
+    let prepared_payload = payloads
+        .side_effect_invocation_prepared(
+            side_effect.clone(),
+            Some(&prepared),
+            RunnerPreparedInvocationBinding {
+                claim_generation: 2,
+                claim_fencing_token: next_token.clone(),
+                resource_key: None,
+            },
+        )
+        .expect("prepared payload");
+    match &prepared_payload {
+        RunnerEventPayload::SideEffectInvocationPrepared(payload) => {
+            assert_eq!(
+                payload.prepared_artifact_id.as_ref(),
+                Some(&prepared.evidence().artifact_id)
+            );
+            assert_eq!(
+                payload.prepared_hash.as_ref(),
+                Some(&prepared.evidence().digest)
+            );
+            assert_eq!(payload.claim_generation, 2);
+        }
+        _ => panic!("expected side-effect invocation prepared payload"),
+    }
+
+    let started = payloads.side_effect_invocation_started(
+        side_effect.clone(),
+        RunnerClaimBinding {
+            claim_owner: next_owner.clone(),
+            claim_generation: 2,
+            claim_fencing_token: next_token.clone(),
+        },
+    );
+    match &started {
+        RunnerEventPayload::SideEffectInvocationStarted(payload) => {
+            assert_eq!(payload.claim_owner, next_owner);
+            assert_eq!(payload.claim_generation, 2);
+            assert_eq!(payload.claim_fencing_token, next_token);
+        }
+        _ => panic!("expected side-effect invocation started payload"),
+    }
+
+    let not_submitted = artifacts
+        .not_submitted_proof(&value)
+        .expect("not-submitted proof");
+    let not_submitted_payload = payloads
+        .side_effect_not_submitted_proven(side_effect.clone(), &not_submitted)
+        .expect("not-submitted payload");
+    match &not_submitted_payload {
+        RunnerEventPayload::SideEffectNotSubmittedProven(payload) => {
+            assert_eq!(payload.proof_hash, not_submitted.evidence().digest);
+            assert_eq!(
+                payload.proof_artifact_id,
+                not_submitted.evidence().artifact_id
+            );
+        }
+        _ => panic!("expected side-effect not-submitted payload"),
+    }
+
+    let submission = artifacts.submission(&value).expect("submission");
+    let submission_payload = payloads
+        .side_effect_submission_observed(side_effect.clone(), &submission)
+        .expect("submission payload");
+    match &submission_payload {
+        RunnerEventPayload::SideEffectSubmissionObserved(payload) => {
+            assert_eq!(payload.submission_hash, submission.evidence().digest);
+            assert_eq!(
+                payload.submission_artifact_id,
+                submission.evidence().artifact_id
+            );
+        }
+        _ => panic!("expected side-effect submission payload"),
+    }
+
+    let submission_unknown = artifacts
+        .submission_unknown(&value)
+        .expect("submission unknown evidence");
+    let submission_unknown_payload = payloads
+        .side_effect_submission_unknown(side_effect.clone(), &submission_unknown)
+        .expect("submission unknown payload");
+    match &submission_unknown_payload {
+        RunnerEventPayload::SideEffectSubmissionUnknown(payload) => {
+            assert_eq!(payload.evidence_hash, submission_unknown.evidence().digest);
+            assert_eq!(
+                payload.evidence_artifact_id,
+                submission_unknown.evidence().artifact_id
+            );
+        }
+        _ => panic!("expected side-effect submission unknown payload"),
+    }
+
+    let receipt = artifacts.receipt(&value).expect("receipt");
+    let receipt_payload = payloads
+        .side_effect_receipt_observed(side_effect.clone(), &receipt, verifier.clone(), None)
+        .expect("receipt payload");
+    match &receipt_payload {
+        RunnerEventPayload::SideEffectReceiptObserved(payload) => {
+            assert_eq!(payload.receipt_hash, receipt.evidence().digest);
+            assert_eq!(payload.receipt_artifact_id, receipt.evidence().artifact_id);
+            assert_eq!(payload.replay_verifier_id, verifier);
+        }
+        _ => panic!("expected side-effect receipt payload"),
+    }
+
+    let confirmation = artifacts.confirmation(&value).expect("confirmation");
+    let confirmation_payload = payloads
+        .side_effect_confirmation_observed(
+            side_effect.clone(),
+            &confirmation,
+            verifier.clone(),
+            None,
+        )
+        .expect("confirmation payload");
+    match &confirmation_payload {
+        RunnerEventPayload::SideEffectConfirmationObserved(payload) => {
+            assert_eq!(payload.confirmation_hash, confirmation.evidence().digest);
+            assert_eq!(
+                payload.confirmation_artifact_id,
+                confirmation.evidence().artifact_id
+            );
+            assert_eq!(payload.replay_verifier_id, verifier);
+        }
+        _ => panic!("expected side-effect confirmation payload"),
+    }
+
+    let ambiguity = artifacts
+        .ambiguity_evidence(&value)
+        .expect("ambiguity evidence");
+    let ambiguity_payload = payloads
+        .side_effect_ambiguous(
+            side_effect.clone(),
+            events::AmbiguityCode::new("runner_kit_test").expect("ambiguity code"),
+            &ambiguity,
+        )
+        .expect("ambiguity payload");
+    match &ambiguity_payload {
+        RunnerEventPayload::SideEffectAmbiguous(payload) => {
+            assert_eq!(payload.evidence_hash, ambiguity.evidence().digest);
+            assert_eq!(
+                payload.evidence_artifact_id,
+                ambiguity.evidence().artifact_id
+            );
+        }
+        _ => panic!("expected side-effect ambiguous payload"),
+    }
+
+    let failed = payloads.side_effect_failed(
+        side_effect.clone(),
+        events::side_effect::FailurePhase::BeforeInvocationStarted,
+        true,
+        events::MfmErrorInfo::new(
+            events::ErrorCode::new("runner_kit_failure").expect("error code"),
+            events::ErrorCategory::Runtime,
+            true,
+            "runner kit failure",
+        )
+        .expect("error info"),
+    );
+    match &failed {
+        RunnerEventPayload::SideEffectFailed(payload) => {
+            assert_eq!(payload.ledger_key, ledger_key);
+            assert_eq!(
+                payload.failure_phase,
+                events::side_effect::FailurePhase::BeforeInvocationStarted
+            );
+            assert!(payload.retryable);
+            assert_eq!(payload.error.safe_message, "runner kit failure");
+        }
+        _ => panic!("expected side-effect failed payload"),
+    }
+
+    let role_mismatch = payloads
+        .cell_produced(&response)
+        .expect_err("fact response cannot produce a cell");
+    assert!(matches!(
+        role_mismatch,
+        RuntimeError::InvalidRunnerOutput(message)
+            if message.contains("fact_response")
+                && message.contains("state_output")
+    ));
+
+    let mut state_output = RunnerOutputBuilder::new(&ctx);
+    state_output
+        .stage_attempt_artifact(&state)
+        .expect("stage state output")
+        .retain_runtime_evidence(&state)
+        .payload(cell.clone());
+    let state_output = state_output.finish();
+    assert_eq!(state_output.staged_artifacts.len(), 1);
+    assert_eq!(state_output.staged_retention_refs.len(), 1);
+    assert_eq!(state_output.payloads, vec![cell]);
+
+    let mut side_effect_output = RunnerOutputBuilder::new(&ctx);
+    side_effect_output
+        .stage_side_effect_artifact(&intent, ledger_key, 1)
+        .expect("stage side-effect artifact")
+        .retain_runtime_evidence(&intent)
+        .payload(intent_payload);
+    let side_effect_output = side_effect_output.finish();
+    assert_eq!(side_effect_output.staged_artifacts.len(), 1);
+    assert_eq!(side_effect_output.staged_retention_refs.len(), 1);
+    assert_eq!(side_effect_output.payloads.len(), 1);
+}
+
 #[tokio::test]
 async fn serial_scheduler_runs_nodes_in_certified_topological_order() {
     let fixture = fixture();

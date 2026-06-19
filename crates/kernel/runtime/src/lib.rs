@@ -30,6 +30,7 @@ mod history;
 mod invocation;
 mod manual_resolution;
 mod recovery;
+mod runner_kit;
 mod runners;
 mod scheduler;
 mod side_effect_lifecycle;
@@ -62,6 +63,11 @@ pub use manual_resolution::{
     build_manual_resolution_prefix_authority, manual_resolution_block_reason,
     manual_resolution_stream_prefix_digest, unresolved_manual_obligations_digest,
     ManualResolutionEvidenceArtifact,
+};
+pub use runner_kit::{
+    RunnerArtifactBuilder, RunnerCapabilityBinding, RunnerClaimBinding, RunnerClaimTakeoverBinding,
+    RunnerJsonArtifact, RunnerOutputBuilder, RunnerPayloadBuilder, RunnerPreparedInvocationBinding,
+    RunnerSideEffectBinding,
 };
 pub use runners::{
     CapabilityImplementationBinding, CapabilityImplementationId, ErasedNodeRunner,
