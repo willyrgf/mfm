@@ -1318,6 +1318,80 @@ fn retention_manifest_commit_payloads(
     ]
 }
 
+fn artifact_role_tag_baselines() -> &'static [(ArtifactRole, &'static str)] {
+    &[
+        (ArtifactRole::TypedExecutionSpec, "typed_execution_spec"),
+        (ArtifactRole::TypedSpecCertificate, "typed_spec_certificate"),
+        (ArtifactRole::TypedConfig, "typed_config"),
+        (ArtifactRole::SeedInput, "seed_input"),
+        (ArtifactRole::StateOutput, "state_output"),
+        (ArtifactRole::FactResponse, "fact_response"),
+        (ArtifactRole::SideEffectIntent, "side_effect_intent"),
+        (ArtifactRole::PreparedInvocation, "prepared_invocation"),
+        (ArtifactRole::NotSubmittedProof, "not_submitted_proof"),
+        (ArtifactRole::Submission, "submission"),
+        (
+            ArtifactRole::SubmissionUnknownEvidence,
+            "submission_unknown_evidence",
+        ),
+        (ArtifactRole::Receipt, "receipt"),
+        (ArtifactRole::Confirmation, "confirmation"),
+        (ArtifactRole::AmbiguityEvidence, "ambiguity_evidence"),
+        (
+            ArtifactRole::ManualResolutionEvidence,
+            "manual_resolution_evidence",
+        ),
+        (
+            ArtifactRole::ManualResolutionAuthorization,
+            "manual_resolution_authorization",
+        ),
+        (ArtifactRole::PublicOutput, "public_output"),
+        (ArtifactRole::RedactedDiagnostic, "redacted_diagnostic"),
+        (ArtifactRole::RetentionManifest, "retention_manifest"),
+    ]
+}
+
+#[test]
+fn artifact_role_store_codec_roundtrips_current_tags() {
+    let rows = artifact_role_tag_baselines()
+        .iter()
+        .map(|(role, tag)| {
+            assert_eq!(mfm_store::v1::codec::artifact_role_str(*role), *tag);
+            assert_eq!(
+                mfm_store::v1::codec::parse_artifact_role(tag).expect("parse artifact role"),
+                *role
+            );
+            format!("{tag} -> {role:?}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert_eq!(
+        rows,
+        "typed_execution_spec -> TypedExecutionSpec\n\
+typed_spec_certificate -> TypedSpecCertificate\n\
+typed_config -> TypedConfig\n\
+seed_input -> SeedInput\n\
+state_output -> StateOutput\n\
+fact_response -> FactResponse\n\
+side_effect_intent -> SideEffectIntent\n\
+prepared_invocation -> PreparedInvocation\n\
+not_submitted_proof -> NotSubmittedProof\n\
+submission -> Submission\n\
+submission_unknown_evidence -> SubmissionUnknownEvidence\n\
+receipt -> Receipt\n\
+confirmation -> Confirmation\n\
+ambiguity_evidence -> AmbiguityEvidence\n\
+manual_resolution_evidence -> ManualResolutionEvidence\n\
+manual_resolution_authorization -> ManualResolutionAuthorization\n\
+public_output -> PublicOutput\n\
+redacted_diagnostic -> RedactedDiagnostic\n\
+retention_manifest -> RetentionManifest"
+    );
+
+    assert!(mfm_store::v1::codec::parse_artifact_role("resource_touched_set_evidence").is_err());
+}
+
 #[test]
 fn event_artifact_requirements_mark_filterable_sources() {
     let cell_requirements =

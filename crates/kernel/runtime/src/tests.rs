@@ -9658,6 +9658,110 @@ fn digest_for_bytes(bytes: &[u8]) -> ContentDigest {
     ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, sha256_digest_bytes(bytes))
 }
 
+fn runtime_staging_class(role: events::ArtifactRole) -> &'static str {
+    match staged_artifact_binding_kind(role) {
+        Some(StagedArtifactBindingKind::StateOutput) => "attempt_state_output",
+        Some(StagedArtifactBindingKind::FactResponse) => "attempt_fact_response",
+        Some(StagedArtifactBindingKind::PublicOutput) => "attempt_public_output",
+        Some(StagedArtifactBindingKind::RedactedDiagnostic) => "attempt_redacted_diagnostic",
+        Some(StagedArtifactBindingKind::RetentionManifest) => "middleware_retention_manifest",
+        Some(StagedArtifactBindingKind::SideEffectEvidence { .. }) => {
+            unreachable!("side-effect bindings need ledger context")
+        }
+        None => match staged_side_effect_artifact_phase(role) {
+            Some(StagedSideEffectArtifactPhase::Intent) => "side_effect_intent",
+            Some(StagedSideEffectArtifactPhase::PreparedInvocation) => {
+                "side_effect_prepared_invocation"
+            }
+            Some(StagedSideEffectArtifactPhase::NotSubmittedProof) => {
+                "side_effect_not_submitted_proof"
+            }
+            Some(StagedSideEffectArtifactPhase::Submission) => "side_effect_submission",
+            Some(StagedSideEffectArtifactPhase::SubmissionUnknownEvidence) => {
+                "side_effect_submission_unknown"
+            }
+            Some(StagedSideEffectArtifactPhase::Receipt) => "side_effect_receipt",
+            Some(StagedSideEffectArtifactPhase::Confirmation) => "side_effect_confirmation",
+            Some(StagedSideEffectArtifactPhase::AmbiguityEvidence) => "side_effect_ambiguity",
+            None => match role {
+                events::ArtifactRole::TypedExecutionSpec
+                | events::ArtifactRole::TypedSpecCertificate
+                | events::ArtifactRole::TypedConfig
+                | events::ArtifactRole::SeedInput => "run_admission",
+                events::ArtifactRole::ManualResolutionEvidence
+                | events::ArtifactRole::ManualResolutionAuthorization => "manual_resolution",
+                events::ArtifactRole::RetentionManifest => "middleware_retention_manifest",
+                events::ArtifactRole::StateOutput
+                | events::ArtifactRole::FactResponse
+                | events::ArtifactRole::SideEffectIntent
+                | events::ArtifactRole::PreparedInvocation
+                | events::ArtifactRole::NotSubmittedProof
+                | events::ArtifactRole::Submission
+                | events::ArtifactRole::SubmissionUnknownEvidence
+                | events::ArtifactRole::Receipt
+                | events::ArtifactRole::Confirmation
+                | events::ArtifactRole::AmbiguityEvidence
+                | events::ArtifactRole::PublicOutput
+                | events::ArtifactRole::RedactedDiagnostic => {
+                    unreachable!("staged role not classified")
+                }
+            },
+        },
+    }
+}
+
+#[test]
+fn artifact_role_runtime_staging_baseline_matches_current_helpers() {
+    let rows = [
+        events::ArtifactRole::TypedExecutionSpec,
+        events::ArtifactRole::TypedSpecCertificate,
+        events::ArtifactRole::TypedConfig,
+        events::ArtifactRole::SeedInput,
+        events::ArtifactRole::StateOutput,
+        events::ArtifactRole::FactResponse,
+        events::ArtifactRole::SideEffectIntent,
+        events::ArtifactRole::PreparedInvocation,
+        events::ArtifactRole::NotSubmittedProof,
+        events::ArtifactRole::Submission,
+        events::ArtifactRole::SubmissionUnknownEvidence,
+        events::ArtifactRole::Receipt,
+        events::ArtifactRole::Confirmation,
+        events::ArtifactRole::AmbiguityEvidence,
+        events::ArtifactRole::ManualResolutionEvidence,
+        events::ArtifactRole::ManualResolutionAuthorization,
+        events::ArtifactRole::PublicOutput,
+        events::ArtifactRole::RedactedDiagnostic,
+        events::ArtifactRole::RetentionManifest,
+    ]
+    .into_iter()
+    .map(|role| format!("{role:?} -> {}", runtime_staging_class(role)))
+    .collect::<Vec<_>>()
+    .join("\n");
+
+    assert_eq!(
+        rows,
+        "TypedExecutionSpec -> run_admission\n\
+TypedSpecCertificate -> run_admission\n\
+TypedConfig -> run_admission\n\
+SeedInput -> run_admission\n\
+StateOutput -> attempt_state_output\n\
+FactResponse -> attempt_fact_response\n\
+SideEffectIntent -> side_effect_intent\n\
+PreparedInvocation -> side_effect_prepared_invocation\n\
+NotSubmittedProof -> side_effect_not_submitted_proof\n\
+Submission -> side_effect_submission\n\
+SubmissionUnknownEvidence -> side_effect_submission_unknown\n\
+Receipt -> side_effect_receipt\n\
+Confirmation -> side_effect_confirmation\n\
+AmbiguityEvidence -> side_effect_ambiguity\n\
+ManualResolutionEvidence -> manual_resolution\n\
+ManualResolutionAuthorization -> manual_resolution\n\
+PublicOutput -> attempt_public_output\n\
+RedactedDiagnostic -> attempt_redacted_diagnostic\n\
+RetentionManifest -> middleware_retention_manifest"
+    );
+}
+
 fn staged_attempt_artifact(
     ctx: &ErasedRunCtx<'_>,
     evidence: store::ArtifactEvidenceRef,

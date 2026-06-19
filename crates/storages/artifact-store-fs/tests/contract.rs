@@ -538,6 +538,198 @@ async fn typed_seed_artifacts_require_seed_producer() {
     ));
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ProducerPolicyBaseline {
+    role: ArtifactRole,
+    accepts_no_producer: bool,
+    accepts_node_producer: bool,
+    accepts_seed_producer: bool,
+}
+
+fn artifact_store_producer_policy_baselines() -> &'static [ProducerPolicyBaseline] {
+    &[
+        ProducerPolicyBaseline {
+            role: ArtifactRole::TypedExecutionSpec,
+            accepts_no_producer: true,
+            accepts_node_producer: true,
+            accepts_seed_producer: false,
+        },
+        ProducerPolicyBaseline {
+            role: ArtifactRole::TypedSpecCertificate,
+            accepts_no_producer: true,
+            accepts_node_producer: true,
+            accepts_seed_producer: false,
+        },
+        ProducerPolicyBaseline {
+            role: ArtifactRole::TypedConfig,
+            accepts_no_producer: true,
+            accepts_node_producer: true,
+            accepts_seed_producer: false,
+        },
+        ProducerPolicyBaseline {
+            role: ArtifactRole::SeedInput,
+            accepts_no_producer: false,
+            accepts_node_producer: false,
+            accepts_seed_producer: true,
+        },
+        ProducerPolicyBaseline {
+            role: ArtifactRole::StateOutput,
+            accepts_no_producer: false,
+            accepts_node_producer: true,
+            accepts_seed_producer: false,
+        },
+        ProducerPolicyBaseline {
+            role: ArtifactRole::FactResponse,
+            accepts_no_producer: false,
+            accepts_node_producer: true,
+            accepts_seed_producer: false,
+        },
+        ProducerPolicyBaseline {
+            role: ArtifactRole::SideEffectIntent,
+            accepts_no_producer: false,
+            accepts_node_producer: true,
+            accepts_seed_producer: false,
+        },
+        ProducerPolicyBaseline {
+            role: ArtifactRole::PreparedInvocation,
+            accepts_no_producer: false,
+            accepts_node_producer: true,
+            accepts_seed_producer: false,
+        },
+        ProducerPolicyBaseline {
+            role: ArtifactRole::NotSubmittedProof,
+            accepts_no_producer: false,
+            accepts_node_producer: true,
+            accepts_seed_producer: false,
+        },
+        ProducerPolicyBaseline {
+            role: ArtifactRole::Submission,
+            accepts_no_producer: false,
+            accepts_node_producer: true,
+            accepts_seed_producer: false,
+        },
+        ProducerPolicyBaseline {
+            role: ArtifactRole::SubmissionUnknownEvidence,
+            accepts_no_producer: false,
+            accepts_node_producer: true,
+            accepts_seed_producer: false,
+        },
+        ProducerPolicyBaseline {
+            role: ArtifactRole::Receipt,
+            accepts_no_producer: false,
+            accepts_node_producer: true,
+            accepts_seed_producer: false,
+        },
+        ProducerPolicyBaseline {
+            role: ArtifactRole::Confirmation,
+            accepts_no_producer: false,
+            accepts_node_producer: true,
+            accepts_seed_producer: false,
+        },
+        ProducerPolicyBaseline {
+            role: ArtifactRole::AmbiguityEvidence,
+            accepts_no_producer: false,
+            accepts_node_producer: true,
+            accepts_seed_producer: false,
+        },
+        ProducerPolicyBaseline {
+            role: ArtifactRole::ManualResolutionEvidence,
+            accepts_no_producer: true,
+            accepts_node_producer: true,
+            accepts_seed_producer: false,
+        },
+        ProducerPolicyBaseline {
+            role: ArtifactRole::ManualResolutionAuthorization,
+            accepts_no_producer: true,
+            accepts_node_producer: true,
+            accepts_seed_producer: false,
+        },
+        ProducerPolicyBaseline {
+            role: ArtifactRole::PublicOutput,
+            accepts_no_producer: false,
+            accepts_node_producer: true,
+            accepts_seed_producer: false,
+        },
+        ProducerPolicyBaseline {
+            role: ArtifactRole::RedactedDiagnostic,
+            accepts_no_producer: true,
+            accepts_node_producer: true,
+            accepts_seed_producer: false,
+        },
+        ProducerPolicyBaseline {
+            role: ArtifactRole::RetentionManifest,
+            accepts_no_producer: true,
+            accepts_node_producer: true,
+            accepts_seed_producer: false,
+        },
+    ]
+}
+
+fn producer_policy_evidence(
+    role: ArtifactRole,
+    bytes: &[u8],
+    producer_node_id: Option<NodeId>,
+    producer_seed_id: Option<SeedId>,
+) -> ArtifactEvidenceRef {
+    ArtifactEvidenceRef {
+        artifact_id: artifact_id(bytes),
+        digest: content_digest(bytes),
+        byte_len: bytes.len() as u64,
+        media_type: json_media_type(),
+        schema_id: Some(schema_id("mfm.test.artifact", 34)),
+        semantic_type_id: None,
+        producer_node_id,
+        producer_seed_id,
+        artifact_role: role,
+    }
+}
+
+#[tokio::test]
+async fn typed_artifact_store_producer_policy_matrix_matches_current_roles() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = FsTypedArtifactStore::new(dir.path());
+
+    for (role_index, baseline) in artifact_store_producer_policy_baselines()
+        .iter()
+        .enumerate()
+    {
+        let cases = [
+            ("no_producer", baseline.accepts_no_producer, None, None),
+            (
+                "node_producer",
+                baseline.accepts_node_producer,
+                Some(node_id(30)),
+                None,
+            ),
+            (
+                "seed_producer",
+                baseline.accepts_seed_producer,
+                None,
+                Some(seed_id(31)),
+            ),
+            (
+                "node_and_seed_producer",
+                false,
+                Some(node_id(32)),
+                Some(seed_id(33)),
+            ),
+        ];
+
+        for (case, should_accept, producer_node_id, producer_seed_id) in cases {
+            let bytes = format!("producer-policy-{role_index}-{case}").into_bytes();
+            let evidence =
+                producer_policy_evidence(baseline.role, &bytes, producer_node_id, producer_seed_id);
+            let result = store.put_verified_artifact(bytes, evidence).await;
+            assert_eq!(
+                result.is_ok(),
+                should_accept,
+                "unexpected producer policy result for {:?} {case}: {result:?}",
+                baseline.role
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn typed_non_seed_value_artifacts_require_node_producer() {
     let dir = tempfile::tempdir().expect("tempdir");

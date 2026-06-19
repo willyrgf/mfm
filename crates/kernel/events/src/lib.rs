@@ -3383,6 +3383,316 @@ pub mod v1 {
             }))
         }
 
+        #[derive(Debug, Clone, Copy)]
+        struct ArtifactRoleBaseline {
+            role: ArtifactRole,
+            tag: &'static str,
+            schema_policy: &'static str,
+            semantic_policy: &'static str,
+            producer_policy: &'static str,
+            staging_class: &'static str,
+            retention_class: &'static str,
+            same_commit_policy: &'static str,
+        }
+
+        fn artifact_role_baselines() -> &'static [ArtifactRoleBaseline] {
+            &[
+                ArtifactRoleBaseline {
+                    role: ArtifactRole::TypedExecutionSpec,
+                    tag: "typed_execution_spec",
+                    schema_policy: "optional_launch_schema",
+                    semantic_policy: "optional_launch_semantic",
+                    producer_policy: "launch_or_global_no_seed",
+                    staging_class: "run_admission",
+                    retention_class: "framework_ignored",
+                    same_commit_policy: "run_admitted_artifact",
+                },
+                ArtifactRoleBaseline {
+                    role: ArtifactRole::TypedSpecCertificate,
+                    tag: "typed_spec_certificate",
+                    schema_policy: "optional_launch_schema",
+                    semantic_policy: "optional_launch_semantic",
+                    producer_policy: "launch_or_global_no_seed",
+                    staging_class: "run_admission",
+                    retention_class: "framework_ignored",
+                    same_commit_policy: "run_admitted_artifact",
+                },
+                ArtifactRoleBaseline {
+                    role: ArtifactRole::TypedConfig,
+                    tag: "typed_config",
+                    schema_policy: "optional_launch_schema",
+                    semantic_policy: "optional_launch_semantic",
+                    producer_policy: "launch_or_global_no_seed",
+                    staging_class: "run_admission",
+                    retention_class: "framework_ignored",
+                    same_commit_policy: "run_admitted_artifact",
+                },
+                ArtifactRoleBaseline {
+                    role: ArtifactRole::SeedInput,
+                    tag: "seed_input",
+                    schema_policy: "exact_seed_schema",
+                    semantic_policy: "exact_seed_semantic",
+                    producer_policy: "seed_required",
+                    staging_class: "run_admission",
+                    retention_class: "framework_ignored",
+                    same_commit_policy: "run_admitted_seed_cell",
+                },
+                ArtifactRoleBaseline {
+                    role: ArtifactRole::StateOutput,
+                    tag: "state_output",
+                    schema_policy: "exact_value_schema",
+                    semantic_policy: "exact_value_semantic",
+                    producer_policy: "node_required",
+                    staging_class: "attempt_state_output",
+                    retention_class: "value_artifacts",
+                    same_commit_policy: "payload_required_artifact",
+                },
+                ArtifactRoleBaseline {
+                    role: ArtifactRole::FactResponse,
+                    tag: "fact_response",
+                    schema_policy: "exact_evidence_schema",
+                    semantic_policy: "absent",
+                    producer_policy: "node_required",
+                    staging_class: "attempt_fact_response",
+                    retention_class: "value_artifacts",
+                    same_commit_policy: "payload_required_artifact",
+                },
+                ArtifactRoleBaseline {
+                    role: ArtifactRole::SideEffectIntent,
+                    tag: "side_effect_intent",
+                    schema_policy: "exact_evidence_schema",
+                    semantic_policy: "absent",
+                    producer_policy: "node_required",
+                    staging_class: "side_effect_intent",
+                    retention_class: "value_artifacts",
+                    same_commit_policy: "payload_required_artifact",
+                },
+                ArtifactRoleBaseline {
+                    role: ArtifactRole::PreparedInvocation,
+                    tag: "prepared_invocation",
+                    schema_policy: "absent",
+                    semantic_policy: "absent",
+                    producer_policy: "node_required",
+                    staging_class: "side_effect_prepared_invocation",
+                    retention_class: "value_artifacts",
+                    same_commit_policy: "payload_required_artifact",
+                },
+                ArtifactRoleBaseline {
+                    role: ArtifactRole::NotSubmittedProof,
+                    tag: "not_submitted_proof",
+                    schema_policy: "exact_evidence_schema",
+                    semantic_policy: "absent",
+                    producer_policy: "node_required",
+                    staging_class: "side_effect_not_submitted_proof",
+                    retention_class: "value_artifacts",
+                    same_commit_policy: "payload_required_artifact",
+                },
+                ArtifactRoleBaseline {
+                    role: ArtifactRole::Submission,
+                    tag: "submission",
+                    schema_policy: "exact_evidence_schema",
+                    semantic_policy: "absent",
+                    producer_policy: "node_required",
+                    staging_class: "side_effect_submission",
+                    retention_class: "value_artifacts",
+                    same_commit_policy: "payload_required_artifact",
+                },
+                ArtifactRoleBaseline {
+                    role: ArtifactRole::SubmissionUnknownEvidence,
+                    tag: "submission_unknown_evidence",
+                    schema_policy: "exact_evidence_schema",
+                    semantic_policy: "absent",
+                    producer_policy: "node_required",
+                    staging_class: "side_effect_submission_unknown",
+                    retention_class: "value_artifacts",
+                    same_commit_policy: "payload_required_artifact",
+                },
+                ArtifactRoleBaseline {
+                    role: ArtifactRole::Receipt,
+                    tag: "receipt",
+                    schema_policy: "exact_evidence_schema",
+                    semantic_policy: "absent",
+                    producer_policy: "node_required",
+                    staging_class: "side_effect_receipt",
+                    retention_class: "receipt_artifacts",
+                    same_commit_policy: "payload_required_artifact",
+                },
+                ArtifactRoleBaseline {
+                    role: ArtifactRole::Confirmation,
+                    tag: "confirmation",
+                    schema_policy: "exact_evidence_schema",
+                    semantic_policy: "absent",
+                    producer_policy: "node_required",
+                    staging_class: "side_effect_confirmation",
+                    retention_class: "confirmation_artifacts",
+                    same_commit_policy: "payload_required_artifact",
+                },
+                ArtifactRoleBaseline {
+                    role: ArtifactRole::AmbiguityEvidence,
+                    tag: "ambiguity_evidence",
+                    schema_policy: "exact_evidence_schema",
+                    semantic_policy: "absent",
+                    producer_policy: "node_required",
+                    staging_class: "side_effect_ambiguity",
+                    retention_class: "value_artifacts",
+                    same_commit_policy: "payload_required_artifact",
+                },
+                ArtifactRoleBaseline {
+                    role: ArtifactRole::ManualResolutionEvidence,
+                    tag: "manual_resolution_evidence",
+                    schema_policy: "exact_evidence_schema",
+                    semantic_policy: "absent",
+                    producer_policy: "global_no_seed",
+                    staging_class: "manual_resolution",
+                    retention_class: "value_artifacts",
+                    same_commit_policy: "payload_required_artifact",
+                },
+                ArtifactRoleBaseline {
+                    role: ArtifactRole::ManualResolutionAuthorization,
+                    tag: "manual_resolution_authorization",
+                    schema_policy: "exact_evidence_schema",
+                    semantic_policy: "absent",
+                    producer_policy: "global_no_seed",
+                    staging_class: "manual_resolution",
+                    retention_class: "value_artifacts",
+                    same_commit_policy: "payload_required_artifact",
+                },
+                ArtifactRoleBaseline {
+                    role: ArtifactRole::PublicOutput,
+                    tag: "public_output",
+                    schema_policy: "exact_public_schema",
+                    semantic_policy: "absent",
+                    producer_policy: "node_required",
+                    staging_class: "attempt_public_output",
+                    retention_class: "public_output_artifacts",
+                    same_commit_policy: "payload_required_artifact",
+                },
+                ArtifactRoleBaseline {
+                    role: ArtifactRole::RedactedDiagnostic,
+                    tag: "redacted_diagnostic",
+                    schema_policy: "exact_diagnostic_schema",
+                    semantic_policy: "absent",
+                    producer_policy: "diagnostic_optional_node_no_seed",
+                    staging_class: "attempt_redacted_diagnostic",
+                    retention_class: "value_artifacts",
+                    same_commit_policy: "payload_required_artifact",
+                },
+                ArtifactRoleBaseline {
+                    role: ArtifactRole::RetentionManifest,
+                    tag: "retention_manifest",
+                    schema_policy: "absent",
+                    semantic_policy: "absent",
+                    producer_policy: "middleware_no_seed",
+                    staging_class: "middleware_retention_manifest",
+                    retention_class: "framework_ignored",
+                    same_commit_policy: "retention_manifest_requires_ref",
+                },
+            ]
+        }
+
+        fn artifact_role_schema_tags() -> Vec<String> {
+            let schema = ARTIFACT_REFERENCED_SCHEMA
+                .canonical_json()
+                .expect("artifact schema json");
+            let json: serde_json::Value =
+                serde_json::from_str(schema.as_str()).expect("schema json value");
+            find_artifact_role_variants(&json).expect("artifact role variants")
+        }
+
+        fn find_artifact_role_variants(value: &serde_json::Value) -> Option<Vec<String>> {
+            if let Some(array) = value.as_array() {
+                for nested in array {
+                    if let Some(variants) = find_artifact_role_variants(nested) {
+                        return Some(variants);
+                    }
+                }
+                return None;
+            }
+            let object = value.as_object()?;
+            if object.get("kind").and_then(serde_json::Value::as_str) == Some("enum")
+                && object.get("name").and_then(serde_json::Value::as_str) == Some("ArtifactRole")
+            {
+                return object
+                    .get("variants")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|variants| {
+                        variants
+                            .iter()
+                            .map(|variant| {
+                                variant
+                                    .get("name")
+                                    .and_then(serde_json::Value::as_str)
+                                    .expect("variant name")
+                                    .to_owned()
+                            })
+                            .collect()
+                    });
+            }
+            for nested in object.values() {
+                if let Some(variants) = find_artifact_role_variants(nested) {
+                    return Some(variants);
+                }
+            }
+            None
+        }
+
+        #[test]
+        fn artifact_role_policy_baseline_covers_schema_tags() {
+            let tags = artifact_role_baselines()
+                .iter()
+                .map(|row| row.tag.to_owned())
+                .collect::<Vec<_>>();
+            assert_eq!(tags, artifact_role_schema_tags());
+
+            let mut roles = artifact_role_baselines()
+                .iter()
+                .map(|row| row.role)
+                .collect::<Vec<_>>();
+            roles.sort_unstable();
+            roles.dedup();
+            assert_eq!(roles.len(), artifact_role_baselines().len());
+
+            let rows = artifact_role_baselines()
+                .iter()
+                .map(|row| {
+                    format!(
+                        "{} schema={} semantic={} producer={} staging={} retention={} same_commit={}",
+                        row.tag,
+                        row.schema_policy,
+                        row.semantic_policy,
+                        row.producer_policy,
+                        row.staging_class,
+                        row.retention_class,
+                        row.same_commit_policy
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            assert_eq!(
+                rows,
+                "typed_execution_spec schema=optional_launch_schema semantic=optional_launch_semantic producer=launch_or_global_no_seed staging=run_admission retention=framework_ignored same_commit=run_admitted_artifact\n\
+typed_spec_certificate schema=optional_launch_schema semantic=optional_launch_semantic producer=launch_or_global_no_seed staging=run_admission retention=framework_ignored same_commit=run_admitted_artifact\n\
+typed_config schema=optional_launch_schema semantic=optional_launch_semantic producer=launch_or_global_no_seed staging=run_admission retention=framework_ignored same_commit=run_admitted_artifact\n\
+seed_input schema=exact_seed_schema semantic=exact_seed_semantic producer=seed_required staging=run_admission retention=framework_ignored same_commit=run_admitted_seed_cell\n\
+state_output schema=exact_value_schema semantic=exact_value_semantic producer=node_required staging=attempt_state_output retention=value_artifacts same_commit=payload_required_artifact\n\
+fact_response schema=exact_evidence_schema semantic=absent producer=node_required staging=attempt_fact_response retention=value_artifacts same_commit=payload_required_artifact\n\
+side_effect_intent schema=exact_evidence_schema semantic=absent producer=node_required staging=side_effect_intent retention=value_artifacts same_commit=payload_required_artifact\n\
+prepared_invocation schema=absent semantic=absent producer=node_required staging=side_effect_prepared_invocation retention=value_artifacts same_commit=payload_required_artifact\n\
+not_submitted_proof schema=exact_evidence_schema semantic=absent producer=node_required staging=side_effect_not_submitted_proof retention=value_artifacts same_commit=payload_required_artifact\n\
+submission schema=exact_evidence_schema semantic=absent producer=node_required staging=side_effect_submission retention=value_artifacts same_commit=payload_required_artifact\n\
+submission_unknown_evidence schema=exact_evidence_schema semantic=absent producer=node_required staging=side_effect_submission_unknown retention=value_artifacts same_commit=payload_required_artifact\n\
+receipt schema=exact_evidence_schema semantic=absent producer=node_required staging=side_effect_receipt retention=receipt_artifacts same_commit=payload_required_artifact\n\
+confirmation schema=exact_evidence_schema semantic=absent producer=node_required staging=side_effect_confirmation retention=confirmation_artifacts same_commit=payload_required_artifact\n\
+ambiguity_evidence schema=exact_evidence_schema semantic=absent producer=node_required staging=side_effect_ambiguity retention=value_artifacts same_commit=payload_required_artifact\n\
+manual_resolution_evidence schema=exact_evidence_schema semantic=absent producer=global_no_seed staging=manual_resolution retention=value_artifacts same_commit=payload_required_artifact\n\
+manual_resolution_authorization schema=exact_evidence_schema semantic=absent producer=global_no_seed staging=manual_resolution retention=value_artifacts same_commit=payload_required_artifact\n\
+public_output schema=exact_public_schema semantic=absent producer=node_required staging=attempt_public_output retention=public_output_artifacts same_commit=payload_required_artifact\n\
+redacted_diagnostic schema=exact_diagnostic_schema semantic=absent producer=diagnostic_optional_node_no_seed staging=attempt_redacted_diagnostic retention=value_artifacts same_commit=payload_required_artifact\n\
+retention_manifest schema=absent semantic=absent producer=middleware_no_seed staging=middleware_retention_manifest retention=framework_ignored same_commit=retention_manifest_requires_ref"
+            );
+        }
+
         #[test]
         fn v1_event_schema_golden() {
             let rows = all_event_schema_descriptors()
