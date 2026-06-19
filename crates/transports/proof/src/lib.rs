@@ -17,7 +17,7 @@ use mfm_collectors_proof::{
     ProofReplayVerifier, ProofSideEffectResult, ProofSubmission, RecordedProofFacts,
 };
 use mfm_events::v1::{self as events, side_effect};
-use mfm_ids::{ArtifactId, ContentDigest, DescriptorId, NodeId, SchemaId};
+use mfm_ids::{ArtifactId, ContentDigest, DescriptorId, NodeId, SchemaId, SemanticTypeId};
 use mfm_replay::v1 as replay;
 use mfm_runtime::{
     CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerBinding,
@@ -559,7 +559,7 @@ where
         byte_len: bytes.as_bytes().len() as u64,
         media_type: spec::MediaType::new("application/json")?,
         schema_id: Some(T::schema_id().map_err(runtime_value_error)?),
-        semantic_type_id: Some(T::semantic_id().map_err(runtime_value_error)?),
+        semantic_type_id: artifact_semantic_type_id_for_role::<T>(role)?,
         producer_node_id,
         producer_seed_id: None,
         artifact_role: role,
@@ -568,6 +568,22 @@ where
         bytes: bytes.to_vec(),
         evidence,
     })
+}
+
+fn artifact_semantic_type_id_for_role<T>(
+    role: events::ArtifactRole,
+) -> mfm_runtime::Result<Option<SemanticTypeId>>
+where
+    T: MfmValue,
+{
+    match role.contract().semantic {
+        events::ArtifactSemanticPolicy::OptionalLaunchSemantic
+        | events::ArtifactSemanticPolicy::ExactSeedSemantic
+        | events::ArtifactSemanticPolicy::ExactValueSemantic => {
+            Ok(Some(T::semantic_id().map_err(runtime_value_error)?))
+        }
+        events::ArtifactSemanticPolicy::Absent => Ok(None),
+    }
 }
 
 fn retention(artifact: &store::ArtifactEvidenceRef) -> StagedRetentionRefs {

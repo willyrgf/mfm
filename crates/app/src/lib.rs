@@ -1551,22 +1551,13 @@ fn config_launch_artifacts_for_spec(
                 format!("missing config input for {}", config_ref.schema_id),
             )
         })?;
-        if artifact.evidence.artifact_id != config_ref.artifact_id
-            || artifact.evidence.digest != config_ref.digest
-            || artifact.evidence.byte_len != config_ref.byte_len
-            || artifact.evidence.media_type != config_ref.media_type
-            || artifact.evidence.schema_id.as_ref() != Some(&config_ref.schema_id)
-            || artifact.evidence.semantic_type_id.is_some()
-            || artifact.evidence.producer_node_id.is_some()
-            || artifact.evidence.producer_seed_id.is_some()
-            || artifact.evidence.artifact_role != events::ArtifactRole::TypedConfig
-        {
-            return Err(AppError::new(
-                ErrorClass::BadRequest,
-                "LaunchConfigArtifactMismatch",
-                "typed config input does not match the certified spec",
-            ));
-        }
+        validate_artifact_requirement_for_app(
+            config_ref_artifact_requirement(config_ref),
+            &artifact.evidence,
+            ErrorClass::BadRequest,
+            "LaunchConfigArtifactMismatch",
+            "typed config input does not match the certified spec",
+        )?;
         if registry
             .validate_config_ref_bytes(config_ref, &artifact.bytes)?
             .is_none()
@@ -1652,6 +1643,13 @@ fn seed_launch_cells_for_spec(
             Some(seed_spec.seed_id.clone()),
             events::ArtifactRole::SeedInput,
         );
+        validate_artifact_requirement_for_app(
+            seed_artifact_requirement(seed_spec, &artifact.evidence),
+            &artifact.evidence,
+            ErrorClass::BadRequest,
+            "LaunchSeedArtifactMismatch",
+            "seed input artifact metadata does not match the certified spec",
+        )?;
         if let Some(required_digest) = &seed_spec.required_digest {
             if &artifact.evidence.digest != required_digest {
                 return Err(AppError::new(
@@ -1728,6 +1726,124 @@ fn artifact_id_for_digest(digest: &ContentDigest) -> ArtifactId {
 
 fn config_input_key(schema_id: &SchemaId, digest: &ContentDigest) -> String {
     format!("{schema_id}:{digest}")
+}
+
+fn validate_artifact_requirement_for_app(
+    requirement: store::EventArtifactRequirement,
+    evidence: &store::ArtifactEvidenceRef,
+    class: ErrorClass,
+    code: &'static str,
+    message: &'static str,
+) -> Result<(), AppError> {
+    store::validate_artifact_requirement_against_evidence(&requirement, evidence).map_err(|error| {
+        match error {
+            store::StoreError::ArtifactEvidenceMismatch { .. } => {
+                AppError::new(class, code, message)
+            }
+            error => error.into(),
+        }
+    })
+}
+
+fn run_artifact_requirement(
+    source: store::EventArtifactReferenceSource,
+    expected: &events::RunArtifactEvidenceRef,
+    role: events::ArtifactRole,
+) -> store::EventArtifactRequirement {
+    store::EventArtifactRequirement {
+        source,
+        artifact_id: expected.artifact_id.clone(),
+        digest: Some(expected.content_digest.clone()),
+        byte_len: Some(expected.byte_len),
+        media_type: Some(expected.media_type.clone()),
+        schema_id: expected.schema_id.clone(),
+        semantic_type_id: expected.semantic_type_id.clone(),
+        producer_node_id: None,
+        producer_seed_id: None,
+        artifact_role: Some(role),
+    }
+}
+
+fn config_ref_artifact_requirement(
+    config_ref: &spec::ConfigRef,
+) -> store::EventArtifactRequirement {
+    store::EventArtifactRequirement {
+        source: store::EventArtifactReferenceSource::RunConfig,
+        artifact_id: config_ref.artifact_id.clone(),
+        digest: Some(config_ref.digest.clone()),
+        byte_len: Some(config_ref.byte_len),
+        media_type: Some(config_ref.media_type.clone()),
+        schema_id: Some(config_ref.schema_id.clone()),
+        semantic_type_id: None,
+        producer_node_id: None,
+        producer_seed_id: None,
+        artifact_role: Some(events::ArtifactRole::TypedConfig),
+    }
+}
+
+fn seed_artifact_requirement(
+    seed_spec: &spec::SeedSpec,
+    evidence: &store::ArtifactEvidenceRef,
+) -> store::EventArtifactRequirement {
+    store::EventArtifactRequirement {
+        source: store::EventArtifactReferenceSource::SeedCell,
+        artifact_id: evidence.artifact_id.clone(),
+        digest: Some(evidence.digest.clone()),
+        byte_len: Some(evidence.byte_len),
+        media_type: Some(evidence.media_type.clone()),
+        schema_id: Some(seed_spec.schema_id.clone()),
+        semantic_type_id: Some(seed_spec.semantic_type_id.clone()),
+        producer_node_id: None,
+        producer_seed_id: Some(seed_spec.seed_id.clone()),
+        artifact_role: Some(events::ArtifactRole::SeedInput),
+    }
+}
+
+fn public_output_cell_artifact_requirement(
+    cell: &events::NamedTypedCellRef,
+) -> store::EventArtifactRequirement {
+    let (artifact_role, producer_node_id, producer_seed_id) = match &cell.producer {
+        spec::CellProducer::Node(node_id) => (
+            events::ArtifactRole::StateOutput,
+            Some(node_id.clone()),
+            None,
+        ),
+        spec::CellProducer::Seed(seed_id) => {
+            (events::ArtifactRole::SeedInput, None, Some(seed_id.clone()))
+        }
+    };
+    store::EventArtifactRequirement {
+        source: store::EventArtifactReferenceSource::PublicOutputCell,
+        artifact_id: cell.artifact_id.clone(),
+        digest: Some(cell.content_digest.clone()),
+        byte_len: None,
+        media_type: None,
+        schema_id: Some(cell.schema_id.clone()),
+        semantic_type_id: Some(cell.semantic_type_id.clone()),
+        producer_node_id,
+        producer_seed_id,
+        artifact_role: Some(artifact_role),
+    }
+}
+
+fn public_output_rendered_artifact_requirement(
+    payload: &events::PublicOutputProduced,
+    artifact_id: &ArtifactId,
+    rendered_digest: &ContentDigest,
+    media_type: spec::MediaType,
+) -> store::EventArtifactRequirement {
+    store::EventArtifactRequirement {
+        source: store::EventArtifactReferenceSource::PublicOutputRendered,
+        artifact_id: artifact_id.clone(),
+        digest: Some(rendered_digest.clone()),
+        byte_len: None,
+        media_type: Some(media_type),
+        schema_id: Some(payload.public_schema_id.clone()),
+        semantic_type_id: None,
+        producer_node_id: Some(payload.node_id.clone()),
+        producer_seed_id: None,
+        artifact_role: Some(events::ArtifactRole::PublicOutput),
+    }
 }
 
 /// Returns the default JSON media type used by typed CLI seed inputs.
@@ -2178,40 +2294,13 @@ fn verify_public_output_cell_evidence(
     cell: &events::NamedTypedCellRef,
     evidence: &store::ArtifactEvidenceRef,
 ) -> Result<(), AppError> {
-    if evidence.artifact_id != cell.artifact_id
-        || evidence.digest != cell.content_digest
-        || evidence.schema_id.as_ref() != Some(&cell.schema_id)
-        || evidence.semantic_type_id.as_ref() != Some(&cell.semantic_type_id)
-    {
-        return Err(public_output_artifact_mismatch(
-            "typed public-output cell artifact evidence does not match the event cell reference",
-        ));
-    }
-
-    match &cell.producer {
-        spec::CellProducer::Node(node_id) => {
-            if evidence.artifact_role != events::ArtifactRole::StateOutput
-                || evidence.producer_node_id.as_ref() != Some(node_id)
-                || evidence.producer_seed_id.is_some()
-            {
-                return Err(public_output_artifact_mismatch(
-                    "typed public-output node cell artifact evidence has the wrong producer or role",
-                ));
-            }
-        }
-        spec::CellProducer::Seed(seed_id) => {
-            if evidence.artifact_role != events::ArtifactRole::SeedInput
-                || evidence.producer_seed_id.as_ref() != Some(seed_id)
-                || evidence.producer_node_id.is_some()
-            {
-                return Err(public_output_artifact_mismatch(
-                    "typed public-output seed cell artifact evidence has the wrong producer or role",
-                ));
-            }
-        }
-    }
-
-    Ok(())
+    validate_artifact_requirement_for_app(
+        public_output_cell_artifact_requirement(cell),
+        evidence,
+        ErrorClass::Internal,
+        "PublicOutputArtifactMismatch",
+        "typed public-output cell artifact evidence does not match the event cell reference",
+    )
 }
 
 fn insert_public_output_value(
@@ -2289,20 +2378,18 @@ fn verify_public_output_rendered_artifact_evidence(
             error.to_string(),
         )
     })?;
-    if evidence.artifact_id != *artifact_id
-        || evidence.digest != *rendered_digest
-        || evidence.media_type != json_media_type
-        || evidence.schema_id.as_ref() != Some(&payload.public_schema_id)
-        || evidence.semantic_type_id.is_some()
-        || evidence.producer_node_id.as_ref() != Some(&payload.node_id)
-        || evidence.producer_seed_id.is_some()
-        || evidence.artifact_role != events::ArtifactRole::PublicOutput
-    {
-        return Err(public_output_artifact_mismatch(
-            "typed public-output cache artifact evidence does not match the produced event",
-        ));
-    }
-    Ok(())
+    validate_artifact_requirement_for_app(
+        public_output_rendered_artifact_requirement(
+            payload,
+            artifact_id,
+            rendered_digest,
+            json_media_type,
+        ),
+        evidence,
+        ErrorClass::Internal,
+        "PublicOutputArtifactMismatch",
+        "typed public-output cache artifact evidence does not match the produced event",
+    )
 }
 
 fn public_output_artifact_mismatch(message: &'static str) -> AppError {
@@ -2347,22 +2434,27 @@ fn validate_spec_artifact_evidence(
     run_admitted: &events::RunAdmitted,
     evidence: &store::ArtifactEvidenceRef,
 ) -> Result<(), AppError> {
+    if run_admitted.spec_artifact.role != events::ArtifactRole::TypedExecutionSpec {
+        return Err(AppError::new(
+            ErrorClass::Internal,
+            "CertifiedSpecArtifactMismatch",
+            "typed execution spec artifact metadata does not match RunAdmitted evidence",
+        ));
+    }
+    validate_artifact_requirement_for_app(
+        run_artifact_requirement(
+            store::EventArtifactReferenceSource::RunSpec,
+            &run_admitted.spec_artifact,
+            events::ArtifactRole::TypedExecutionSpec,
+        ),
+        evidence,
+        ErrorClass::Internal,
+        "CertifiedSpecArtifactMismatch",
+        "typed execution spec artifact metadata does not match RunAdmitted evidence",
+    )?;
     let expected_spec_hash =
         SpecHash::from_digest(evidence.digest.algorithm(), *evidence.digest.digest());
-    if evidence.artifact_id != run_admitted.spec_artifact.artifact_id
-        || expected_spec_hash != run_admitted.spec_hash
-        || evidence.digest != run_admitted.spec_artifact.content_digest
-        || evidence.byte_len != run_admitted.spec_artifact.byte_len
-        || evidence.media_type != run_admitted.spec_artifact.media_type
-        || evidence.schema_id != run_admitted.spec_artifact.schema_id
-        || evidence.semantic_type_id != run_admitted.spec_artifact.semantic_type_id
-        || evidence.schema_id.is_some()
-        || evidence.semantic_type_id.is_some()
-        || evidence.producer_node_id.is_some()
-        || evidence.producer_seed_id.is_some()
-        || evidence.artifact_role != run_admitted.spec_artifact.role
-        || evidence.artifact_role != events::ArtifactRole::TypedExecutionSpec
-    {
+    if expected_spec_hash != run_admitted.spec_hash {
         return Err(AppError::new(
             ErrorClass::Internal,
             "CertifiedSpecArtifactMismatch",
@@ -2376,25 +2468,24 @@ fn validate_certificate_artifact_evidence(
     run_admitted: &events::RunAdmitted,
     evidence: &store::ArtifactEvidenceRef,
 ) -> Result<(), AppError> {
-    if evidence.artifact_id != run_admitted.certificate_artifact.artifact_id
-        || evidence.digest != run_admitted.certificate_artifact.content_digest
-        || evidence.byte_len != run_admitted.certificate_artifact.byte_len
-        || evidence.media_type != run_admitted.certificate_artifact.media_type
-        || evidence.schema_id != run_admitted.certificate_artifact.schema_id
-        || evidence.semantic_type_id != run_admitted.certificate_artifact.semantic_type_id
-        || evidence.schema_id.is_some()
-        || evidence.semantic_type_id.is_some()
-        || evidence.producer_node_id.is_some()
-        || evidence.producer_seed_id.is_some()
-        || evidence.artifact_role != run_admitted.certificate_artifact.role
-        || evidence.artifact_role != events::ArtifactRole::TypedSpecCertificate
-    {
+    if run_admitted.certificate_artifact.role != events::ArtifactRole::TypedSpecCertificate {
         return Err(AppError::new(
             ErrorClass::Internal,
             "CertifiedCertificateArtifactMismatch",
             "typed spec certificate artifact metadata does not match RunAdmitted evidence",
         ));
     }
+    validate_artifact_requirement_for_app(
+        run_artifact_requirement(
+            store::EventArtifactReferenceSource::RunCertificate,
+            &run_admitted.certificate_artifact,
+            events::ArtifactRole::TypedSpecCertificate,
+        ),
+        evidence,
+        ErrorClass::Internal,
+        "CertifiedCertificateArtifactMismatch",
+        "typed spec certificate artifact metadata does not match RunAdmitted evidence",
+    )?;
     Ok(())
 }
 
