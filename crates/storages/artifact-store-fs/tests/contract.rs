@@ -1,8 +1,9 @@
 use mfm_artifact_store_fs::{FsTypedArtifactError, FsTypedArtifactStore, TypedArtifactDescriptor};
 use mfm_canonical::sha256_digest_bytes;
 use mfm_events::v1::{
-    ArtifactEvidenceRef as EventArtifactEvidenceRef, ArtifactRole, FrameworkVersion,
-    KernelEventPayload, RetentionReason, SeedCellRef, SourceRevision,
+    ArtifactEvidenceRef as EventArtifactEvidenceRef, ArtifactProducerScope, ArtifactRole,
+    ArtifactSchemaPolicy, ArtifactSemanticPolicy, FrameworkVersion, KernelEventPayload,
+    RetentionReason, SeedCellRef, SourceRevision,
 };
 use mfm_ids::{
     ArtifactId, CellId, ContentDigest, DigestAlgorithm, DigestBytes, LoweringVersion, NodeId,
@@ -232,15 +233,16 @@ fn verified_retention_projection_for(
                 reason: RetentionReason::RuntimeEvidence,
             },
         )],
-        Vec::new(),
+        vec![evidence.clone()],
         CommitPreconditions {
             required_run_state: RequiredRunState::Started,
             ..CommitPreconditions::default()
         },
     )
     .expect("retention request");
-    let retention_artifacts = CommitArtifactEvidenceSet::new(Vec::new(), vec![evidence.clone()])
-        .expect("retention artifact evidence set");
+    let retention_artifacts =
+        CommitArtifactEvidenceSet::new(vec![evidence.clone()], vec![evidence.clone()])
+            .expect("retention artifact evidence set");
     let retention_commit = PreparedCommit::<Retention>::new(retention_request, retention_artifacts)
         .expect("prepare retention refs");
     run_store
@@ -308,8 +310,24 @@ async fn typed_artifact_store_rejects_mismatched_evidence() {
         }
     ));
 
-    let mut wrong_role = evidence;
-    wrong_role.artifact_role = ArtifactRole::PublicOutput;
+    let side_effect_bytes = b"side-effect-evidence".to_vec();
+    let side_effect_evidence = ArtifactEvidenceRef {
+        artifact_id: artifact_id(&side_effect_bytes),
+        digest: content_digest(&side_effect_bytes),
+        byte_len: side_effect_bytes.len() as u64,
+        media_type: json_media_type(),
+        schema_id: Some(schema_id("mfm.test.side_effect", 10)),
+        semantic_type_id: None,
+        producer_node_id: Some(node_id(11)),
+        producer_seed_id: None,
+        artifact_role: ArtifactRole::SideEffectIntent,
+    };
+    store
+        .put_verified_artifact(side_effect_bytes.clone(), side_effect_evidence.clone())
+        .await
+        .expect("put side-effect evidence");
+    let mut wrong_role = side_effect_evidence;
+    wrong_role.artifact_role = ArtifactRole::Submission;
     let error = store
         .get_artifact(&wrong_role)
         .await
@@ -546,123 +564,31 @@ struct ProducerPolicyBaseline {
     accepts_seed_producer: bool,
 }
 
-fn artifact_store_producer_policy_baselines() -> &'static [ProducerPolicyBaseline] {
-    &[
-        ProducerPolicyBaseline {
-            role: ArtifactRole::TypedExecutionSpec,
-            accepts_no_producer: true,
-            accepts_node_producer: true,
-            accepts_seed_producer: false,
-        },
-        ProducerPolicyBaseline {
-            role: ArtifactRole::TypedSpecCertificate,
-            accepts_no_producer: true,
-            accepts_node_producer: true,
-            accepts_seed_producer: false,
-        },
-        ProducerPolicyBaseline {
-            role: ArtifactRole::TypedConfig,
-            accepts_no_producer: true,
-            accepts_node_producer: true,
-            accepts_seed_producer: false,
-        },
-        ProducerPolicyBaseline {
-            role: ArtifactRole::SeedInput,
-            accepts_no_producer: false,
-            accepts_node_producer: false,
-            accepts_seed_producer: true,
-        },
-        ProducerPolicyBaseline {
-            role: ArtifactRole::StateOutput,
-            accepts_no_producer: false,
-            accepts_node_producer: true,
-            accepts_seed_producer: false,
-        },
-        ProducerPolicyBaseline {
-            role: ArtifactRole::FactResponse,
-            accepts_no_producer: false,
-            accepts_node_producer: true,
-            accepts_seed_producer: false,
-        },
-        ProducerPolicyBaseline {
-            role: ArtifactRole::SideEffectIntent,
-            accepts_no_producer: false,
-            accepts_node_producer: true,
-            accepts_seed_producer: false,
-        },
-        ProducerPolicyBaseline {
-            role: ArtifactRole::PreparedInvocation,
-            accepts_no_producer: false,
-            accepts_node_producer: true,
-            accepts_seed_producer: false,
-        },
-        ProducerPolicyBaseline {
-            role: ArtifactRole::NotSubmittedProof,
-            accepts_no_producer: false,
-            accepts_node_producer: true,
-            accepts_seed_producer: false,
-        },
-        ProducerPolicyBaseline {
-            role: ArtifactRole::Submission,
-            accepts_no_producer: false,
-            accepts_node_producer: true,
-            accepts_seed_producer: false,
-        },
-        ProducerPolicyBaseline {
-            role: ArtifactRole::SubmissionUnknownEvidence,
-            accepts_no_producer: false,
-            accepts_node_producer: true,
-            accepts_seed_producer: false,
-        },
-        ProducerPolicyBaseline {
-            role: ArtifactRole::Receipt,
-            accepts_no_producer: false,
-            accepts_node_producer: true,
-            accepts_seed_producer: false,
-        },
-        ProducerPolicyBaseline {
-            role: ArtifactRole::Confirmation,
-            accepts_no_producer: false,
-            accepts_node_producer: true,
-            accepts_seed_producer: false,
-        },
-        ProducerPolicyBaseline {
-            role: ArtifactRole::AmbiguityEvidence,
-            accepts_no_producer: false,
-            accepts_node_producer: true,
-            accepts_seed_producer: false,
-        },
-        ProducerPolicyBaseline {
-            role: ArtifactRole::ManualResolutionEvidence,
-            accepts_no_producer: true,
-            accepts_node_producer: true,
-            accepts_seed_producer: false,
-        },
-        ProducerPolicyBaseline {
-            role: ArtifactRole::ManualResolutionAuthorization,
-            accepts_no_producer: true,
-            accepts_node_producer: true,
-            accepts_seed_producer: false,
-        },
-        ProducerPolicyBaseline {
-            role: ArtifactRole::PublicOutput,
-            accepts_no_producer: false,
-            accepts_node_producer: true,
-            accepts_seed_producer: false,
-        },
-        ProducerPolicyBaseline {
-            role: ArtifactRole::RedactedDiagnostic,
-            accepts_no_producer: true,
-            accepts_node_producer: true,
-            accepts_seed_producer: false,
-        },
-        ProducerPolicyBaseline {
-            role: ArtifactRole::RetentionManifest,
-            accepts_no_producer: true,
-            accepts_node_producer: true,
-            accepts_seed_producer: false,
-        },
-    ]
+fn artifact_store_producer_policy_baselines() -> Vec<ProducerPolicyBaseline> {
+    ArtifactRole::ALL
+        .iter()
+        .copied()
+        .map(|role| {
+            let producer = role.contract().producer;
+            ProducerPolicyBaseline {
+                role,
+                accepts_no_producer: matches!(
+                    producer,
+                    ArtifactProducerScope::LaunchOrGlobalNoSeed
+                        | ArtifactProducerScope::GlobalNoSeed
+                        | ArtifactProducerScope::DiagnosticOptionalNodeNoSeed
+                        | ArtifactProducerScope::MiddlewareNoSeed
+                ),
+                accepts_node_producer: matches!(
+                    producer,
+                    ArtifactProducerScope::LaunchOrGlobalNoSeed
+                        | ArtifactProducerScope::NodeRequired
+                        | ArtifactProducerScope::DiagnosticOptionalNodeNoSeed
+                ),
+                accepts_seed_producer: matches!(producer, ArtifactProducerScope::SeedRequired),
+            }
+        })
+        .collect()
 }
 
 fn producer_policy_evidence(
@@ -676,11 +602,31 @@ fn producer_policy_evidence(
         digest: content_digest(bytes),
         byte_len: bytes.len() as u64,
         media_type: json_media_type(),
-        schema_id: Some(schema_id("mfm.test.artifact", 34)),
-        semantic_type_id: None,
+        schema_id: schema_id_for_role(role),
+        semantic_type_id: semantic_type_id_for_role(role),
         producer_node_id,
         producer_seed_id,
         artifact_role: role,
+    }
+}
+
+fn schema_id_for_role(role: ArtifactRole) -> Option<SchemaId> {
+    match role.contract().schema {
+        ArtifactSchemaPolicy::OptionalLaunchSchema | ArtifactSchemaPolicy::Absent => None,
+        ArtifactSchemaPolicy::ExactSeedSchema
+        | ArtifactSchemaPolicy::ExactValueSchema
+        | ArtifactSchemaPolicy::ExactEvidenceSchema
+        | ArtifactSchemaPolicy::ExactPublicSchema
+        | ArtifactSchemaPolicy::ExactDiagnosticSchema => Some(schema_id("mfm.test.artifact", 34)),
+    }
+}
+
+fn semantic_type_id_for_role(role: ArtifactRole) -> Option<SemanticTypeId> {
+    match role.contract().semantic {
+        ArtifactSemanticPolicy::OptionalLaunchSemantic | ArtifactSemanticPolicy::Absent => None,
+        ArtifactSemanticPolicy::ExactSeedSemantic | ArtifactSemanticPolicy::ExactValueSemantic => {
+            Some(semantic_id("mfm.test.artifact", 35))
+        }
     }
 }
 
