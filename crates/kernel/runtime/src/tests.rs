@@ -188,79 +188,6 @@ impl StaleOnceTypedRunStore {
     }
 }
 
-struct AsyncInMemoryTypedRunStore {
-    inner: Mutex<store::InMemoryTypedRunStore>,
-}
-
-impl AsyncInMemoryTypedRunStore {
-    fn new(inner: store::InMemoryTypedRunStore) -> Self {
-        Self {
-            inner: Mutex::new(inner),
-        }
-    }
-
-    fn with_inner<R>(&self, f: impl FnOnce(&store::InMemoryTypedRunStore) -> R) -> R {
-        let inner = self.inner.lock().expect("async in-memory store lock");
-        f(&inner)
-    }
-}
-
-impl store::AsyncTypedRunEventStore for AsyncInMemoryTypedRunStore {
-    type Error = store::StoreError;
-
-    fn append_prepared_commit_plan<'a>(
-        &'a self,
-        plan: store::PreparedCommitPlan,
-    ) -> store::AsyncStoreFuture<'a, store::CommitOutcome, Self::Error> {
-        Box::pin(async move {
-            self.inner
-                .lock()
-                .expect("async in-memory store lock")
-                .append_prepared_commit_plan(plan)
-        })
-    }
-
-    fn load_run_stream<'a>(
-        &'a self,
-        run_id: &'a RunId,
-    ) -> store::AsyncStoreFuture<'a, Vec<store::KernelEventEnvelope>, Self::Error> {
-        Box::pin(async move {
-            Ok(self
-                .inner
-                .lock()
-                .expect("async in-memory store lock")
-                .load_run_stream(run_id))
-        })
-    }
-
-    fn expected_next_seq<'a>(
-        &'a self,
-        run_id: &'a RunId,
-    ) -> store::AsyncStoreFuture<'a, store::StreamSeq, Self::Error> {
-        Box::pin(async move {
-            Ok(self
-                .inner
-                .lock()
-                .expect("async in-memory store lock")
-                .expected_next_seq(run_id))
-        })
-    }
-
-    fn status_projection_snapshot<'a>(
-        &'a self,
-        _run_id: &'a RunId,
-    ) -> store::AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
-        Box::pin(async move {
-            Ok(self
-                .inner
-                .lock()
-                .expect("async in-memory store lock")
-                .projection_snapshot()
-                .clone())
-        })
-    }
-}
-
 impl store::TypedProjectionRead for StaleOnceTypedRunStore {
     fn projection_snapshot(&self) -> &store::ProjectionSnapshot {
         self.inner.projection_snapshot()
@@ -6856,7 +6783,7 @@ async fn async_runtime_blocks_exclusive_lane_before_staging_artifact() {
         "wallet-async",
         "async-holder-prepare",
     );
-    let store = AsyncInMemoryTypedRunStore::new(inner);
+    let store = store::AsyncInMemoryTypedRunStore::from_store(inner);
     let launch = scheduler
         .prepare_run_launch(
             &fixture.runtime_spec,
@@ -6882,14 +6809,16 @@ async fn async_runtime_blocks_exclusive_lane_before_staging_artifact() {
         staged.lock().expect("staged lock").len(),
         staged_before_block
     );
-    store.with_inner(|inner| {
-        assert!(side_effect_projection_for_run_node(
-            inner.projection_snapshot(),
-            &fixture.run_id,
-            &node.node_id
-        )
-        .is_none());
-    });
+    store
+        .with_inner(|inner| {
+            assert!(side_effect_projection_for_run_node(
+                inner.projection_snapshot(),
+                &fixture.run_id,
+                &node.node_id
+            )
+            .is_none());
+        })
+        .expect("read async in-memory store");
 
     assert_eq!(
         scheduler

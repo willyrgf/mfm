@@ -98,7 +98,10 @@ impl SerialTypedScheduler {
         )
     }
 
-    /// Appends the prepared typed admission commit after staging middleware-owned artifacts.
+    /// Appends the prepared typed admission commit to a sync typed store.
+    ///
+    /// This entry point remains for compatibility and focused runtime tests. Production app,
+    /// CLI, and REST surfaces should prefer [`Self::start_run_async`].
     pub async fn start_run<S: store::TypedRunEventStore + ?Sized>(
         &self,
         store: &mut S,
@@ -109,7 +112,10 @@ impl SerialTypedScheduler {
         Ok(store.append_prepared_commit_plan(launch.commit.into())?)
     }
 
-    /// Appends admission and reloads verified admission authority for the run.
+    /// Appends admission to a sync typed store and reloads verified admission authority.
+    ///
+    /// This entry point remains for compatibility and focused runtime tests. Production app,
+    /// CLI, and REST surfaces should prefer [`Self::start_run_admitted_async`].
     pub async fn start_run_admitted<S: store::TypedRunEventStore + ?Sized>(
         &self,
         store: &mut S,
@@ -161,7 +167,10 @@ impl SerialTypedScheduler {
         RunAdmissionLifecycle::admitted_run_authority(runtime_spec, &run_id, &stream, bound_context)
     }
 
-    /// Appends a verified manual resolution after staging evidence and authorization artifacts.
+    /// Appends a verified manual resolution to a sync typed store.
+    ///
+    /// This entry point remains for compatibility and focused runtime tests. Production app,
+    /// CLI, and REST surfaces should prefer [`Self::record_manual_resolution_async`].
     pub async fn record_manual_resolution<S: store::TypedRunEventStore + ?Sized>(
         &self,
         store: &mut S,
@@ -246,7 +255,10 @@ impl SerialTypedScheduler {
             .map_err(async_store_error)
     }
 
-    /// Runs one deterministic runnable node, if any.
+    /// Runs one deterministic runnable node against a sync typed store, if any.
+    ///
+    /// This entry point remains for compatibility and focused runtime tests. Production app,
+    /// CLI, and REST surfaces should prefer [`Self::drive_once_async`].
     pub async fn drive_once<S: store::TypedRunEventStore + ?Sized>(
         &self,
         store: &mut S,
@@ -279,7 +291,10 @@ impl SerialTypedScheduler {
         }
     }
 
-    /// Runs deterministic runnable nodes until no node is runnable or public output is projected.
+    /// Runs deterministic runnable nodes against a sync typed store until blocked.
+    ///
+    /// This entry point remains for compatibility and focused runtime tests. Production app,
+    /// CLI, and REST surfaces should prefer [`Self::drive_until_blocked_async`].
     pub async fn drive_until_blocked<S: store::TypedRunEventStore + ?Sized>(
         &self,
         store: &mut S,
