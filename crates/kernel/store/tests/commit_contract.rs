@@ -1803,6 +1803,136 @@ fn fact_recorded_codec_declaration_view_matches_handwritten_codec() {
 }
 
 #[test]
+fn fact_recorded_projection_transition_descriptor_matches_rebuilt_projection() {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct FactRecordedProjectionTransitionDeclaration {
+        requires_started_attempt: bool,
+        unique_key: &'static [&'static str],
+        projected_fields: &'static [&'static str],
+    }
+
+    const FACT_RECORDED_PROJECTION: FactRecordedProjectionTransitionDeclaration =
+        FactRecordedProjectionTransitionDeclaration {
+            requires_started_attempt: true,
+            unique_key: &["node_id", "attempt_id", "fact_key"],
+            projected_fields: &[
+                "event_id",
+                "node_id",
+                "attempt_id",
+                "fact_key",
+                "request_schema_id",
+                "request_hash",
+                "response_schema_id",
+                "response_hash",
+                "artifact_id",
+                "capability_kind",
+                "capability_version",
+                "adapter_kind",
+                "adapter_version",
+            ],
+        };
+
+    let run_id = run_id(251);
+    let fact_artifact_id = artifact_id(63);
+    let fact_digest = content_digest(64);
+    let mut store = InMemoryTypedRunStore::new();
+    store
+        .append_prepared_commit(run_start_request(
+            run_id.clone(),
+            "fact-projection-run-start",
+        ))
+        .expect("append run start");
+    store
+        .append_prepared_commit(typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("fact-projection-attempt-start").expect("commit key"),
+            payloads: vec![fact_attempt_started()],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions {
+                required_run_state: RequiredRunState::NotCompleted,
+                ..CommitPreconditions::default()
+            },
+        })
+        .expect("append fact attempt start");
+    store
+        .append_prepared_commit(typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("fact-projection-recorded").expect("commit key"),
+            payloads: vec![fact_recorded(fact_artifact_id.clone(), fact_digest.clone())],
+            required_artifacts: vec![fact_artifact_ref(fact_artifact_id, fact_digest)],
+            preconditions: CommitPreconditions {
+                required_run_state: RequiredRunState::NotCompleted,
+                ..CommitPreconditions::default()
+            },
+        })
+        .expect("append fact recorded");
+
+    let stream = store.load_run_stream(&run_id);
+    let snapshot = ProjectionSnapshot::rebuild_from_run_stream(&stream).expect("rebuild stream");
+    let projection = snapshot
+        .fact(
+            &node_id(90),
+            &attempt_id(91),
+            &events::FactKey::new("fact-key-1").expect("fact key"),
+        )
+        .expect("fact projection");
+
+    assert!(FACT_RECORDED_PROJECTION.requires_started_attempt);
+    assert_eq!(
+        FACT_RECORDED_PROJECTION.unique_key,
+        ["node_id", "attempt_id", "fact_key"]
+    );
+    assert_eq!(
+        FACT_RECORDED_PROJECTION.projected_fields,
+        [
+            "event_id",
+            "node_id",
+            "attempt_id",
+            "fact_key",
+            "request_schema_id",
+            "request_hash",
+            "response_schema_id",
+            "response_hash",
+            "artifact_id",
+            "capability_kind",
+            "capability_version",
+            "adapter_kind",
+            "adapter_version",
+        ]
+    );
+    assert_eq!(projection.event_id, stream[2].event_id().clone());
+    assert_eq!(projection.node_id, node_id(90));
+    assert_eq!(projection.attempt_id, attempt_id(91));
+    assert_eq!(
+        projection.fact_key,
+        events::FactKey::new("fact-key-1").expect("fact key")
+    );
+    assert_eq!(
+        projection.request_schema_id,
+        schema_id("mfm.test.fact_request", 94)
+    );
+    assert_eq!(projection.request_hash, content_digest(95));
+    assert_eq!(
+        projection.response_schema_id,
+        schema_id("mfm.test.fact_response", 96)
+    );
+    assert_eq!(projection.response_hash, content_digest(64));
+    assert_eq!(projection.artifact_id, artifact_id(63));
+    assert_eq!(projection.capability_kind, capability_kind(92));
+    assert_eq!(
+        projection.capability_version,
+        CapabilityVersion::new("mfm.test.fact.v1").expect("capability version")
+    );
+    assert_eq!(projection.adapter_kind, adapter_kind(93));
+    assert_eq!(
+        projection.adapter_version,
+        AdapterVersion::new("mfm.test.adapter.v1").expect("adapter version")
+    );
+}
+
+#[test]
 fn committed_run_stream_exposes_store_owned_authority() {
     let run_id = run_id(141);
     let mut store = InMemoryTypedRunStore::new();
