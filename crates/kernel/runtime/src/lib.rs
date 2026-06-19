@@ -50,7 +50,9 @@ pub use binding::{
 pub use commit::{PreparedRunLaunch, RunLaunchArtifact, RunLaunchEvidence, RunLaunchSeedCell};
 pub use error::RuntimeError;
 pub use framework::build_public_output_receipt_artifact;
-pub use history::{VerifiedRunContext, VerifiedRunContextLoader, VerifiedRunHistory};
+pub use history::{
+    VerifiedRunContext, VerifiedRunContextLoader, VerifiedRunHistory, VerifiedRunHistoryView,
+};
 pub use invocation::{
     CertifiedRuntimeCapabilities, ErasedRunCtx, MaterializedCell, MaterializedCellTerminal,
     MaterializedInputNode, MaterializedInputs, NamedMaterializedInput, PreparedRunnerInvocation,

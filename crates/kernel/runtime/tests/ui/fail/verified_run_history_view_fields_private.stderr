@@ -1,0 +1,5 @@
+error[E0616]: field `committed` of struct `VerifiedRunHistoryView` is private
+ --> tests/ui/fail/verified_run_history_view_fields_private.rs:6:29
+  |
+6 |     let _ = verified_view().committed;
+  |                             ^^^^^^^^^ private field
