@@ -1,6 +1,17 @@
 # RFC: Refactors, Cleanups, And Larger Abstraction Bets
 
-Status: draft
+Status: planning RFC
+
+This RFC approves the problem framing, sequencing, and review gates for the refactor/cleanup
+program. It is not blanket authorization to implement every abstraction listed here.
+
+Engineering may begin Phase 0 baseline work and prepare Phase 2 `ArtifactRoleContract` as the first
+execution slice. Each later phase requires a phase-local execution plan with exact scope, crate/API
+changes, acceptance tests, public/persisted-format impact, and invariant checks before
+implementation starts.
+
+Items classified as separate RFC candidates or deferred are out of scope for implementation under
+this RFC.
 
 This document records candidate refactors discovered during a read-only architecture pass over the
 MFM repository. It separates incremental cleanups from deeper abstraction changes. The distinction
@@ -200,7 +211,6 @@ Correctness requirements:
 - Event names, field names, enum variants, and string encodings must be byte-stable unless a
   deliberate persisted-format migration is made.
 - Generated code must be reviewable. If generated code is committed, CI should check it is fresh.
-- The schema source must be treated as typed kernel authority, not as loose metadata.
 
 Verification:
 
@@ -330,8 +340,8 @@ Current evidence:
 
 Proposed direction:
 
-Expose a reusable `CommittedRunIndex` or `VerifiedRunHistoryView` built by folding committed
-envelopes once. It should include:
+Expose a sealed `VerifiedRunHistoryView` in `mfm-runtime`, built from `CertifiedRuntimeSpec`,
+`CommittedRunStream`, and `VerifiedRunArtifactStore`. It should include:
 
 - config, spec, and certificate refs
 - artifact indexes
@@ -489,7 +499,7 @@ Add two related surfaces:
    - version
    - effect
    - config/input/output schema
-   - adapter binding
+   - explicit neutral adapter contract paths
    - capability kind
 
 Expected impact:
@@ -648,8 +658,9 @@ Verification:
 ## Deep-Dive Exploration Backlog
 
 This section expands the ten bets into implementation-shape notes. The intent is to make each bet
-ready to become a smaller focused RFC. These notes are still docs-only planning; they deliberately
-avoid committing to concrete APIs before golden baselines exist.
+ready to become a smaller focused RFC. These notes are still docs-only planning; except where a
+decision is explicitly marked resolved, they deliberately avoid committing to concrete APIs before
+golden baselines exist.
 
 ### Cross-Cutting Acceptance Gates
 
@@ -664,8 +675,11 @@ Any refactor in this RFC should satisfy these gates before old code is removed:
   public-output rendering
 - public outputs remain render surfaces, not authority
 - projections remain derived or verified caches, not independent authority
-- replay paths stay evidence-only and cannot acquire live providers, signers, stores, transports,
-  registries, or app builders
+- replay core stays evidence-only after app/runtime ingress mints sealed replay input; it must not
+  construct or retain store handles, mutate stores, call certification/verifier registries, bind
+  runners/capabilities/signers, construct transports, or acquire live capabilities
+- app-owned replay ingress may read typed stores/artifact stores and call the trusted certification
+  registry only to verify persisted authority before minting sealed replay input
 - app continues to assemble services and capabilities, not own domain execution semantics
 - no helper crate weakens architecture namespace or cargo metadata contracts
 - no generated fixture or scenario data contains floats in hash-defining surfaces or secrets in
@@ -675,8 +689,8 @@ Any refactor in this RFC should satisfy these gates before old code is removed:
 
 Target shape:
 
-- one v1 kernel protocol declaration treated as typed authority for event payload families, spec
-  DTOs, nested schema descriptors, artifact lenses, role tags, store codecs, and projection inputs
+- one v1 kernel protocol declaration for event payload families, spec DTOs, nested schema
+  descriptors, artifact lenses, role tags, store codecs, and projection inputs
 - generated or derived Rust, not a replacement of Rust types with loose schema data
 - declaration-owned event tags, field names, cardinality, enum variants, canonical JSON
   encoder/parser contracts, event-to-artifact requirement lenses, store payload codecs, projection
@@ -743,23 +757,31 @@ and event requirement matching.
 
 Ownership boundary:
 
+- Phase 2 owner: `mfm-events::v1`, beside `ArtifactRole`. The role enum, stable tags, event schema
+  descriptors, and event artifact requirement extraction already live at this layer.
 - the table describes evidence contracts; it does not make artifact metadata independent authority
 - artifact stores verify bytes and metadata, but the append-only stream remains authority for
   whether evidence is admissible
-- runtime staging, store admission, replay authorization, artifact capability requests, and
-  filesystem artifact-store metadata parsing should use the same table
+- `mfm-store`, runtime, replay, app, artifact capabilities, and filesystem artifact-store metadata
+  parsing should consume the same table
+- `mfm-store` keeps commit admission, same-commit append legality, and context-specific policy
+  checks; the role table is policy data, not store admission authority
 - role exceptions should be table rows, not scattered `match` fallthroughs
 
 Migration slice:
 
-1. Add the table behind existing role string APIs and assert identical tags.
-2. Add a role matrix golden covering tag, schema policy, semantic policy, producer scope, staging
+1. Add the table in `mfm-events::v1` behind existing role string APIs and assert identical tags.
+2. Generate the event schema role tag list from `ArtifactRole::ALL`, preserving
+   `typed_spec_certificate`.
+3. Convert `mfm-store::v1::codec` role parse/string helpers into compatibility wrappers around
+   `mfm-events`.
+4. Add a role matrix golden covering tag, schema policy, semantic policy, producer scope, staging
    class, retention class, and same-commit policy.
-3. Route event requirement generation through role contracts.
-4. Route runtime staging and side-effect phase classification through role contracts.
-5. Route replay artifact authorization and artifact-store metadata validation through role
+5. Route event requirement generation through role contracts.
+6. Route runtime staging and side-effect phase classification through role contracts.
+7. Route replay artifact authorization and artifact-store metadata validation through role
    contracts.
-6. Remove duplicate role string parsers and role classification matches after differential tests
+8. Remove duplicate role string parsers and role classification matches after differential tests
    pass.
 
 Hard invariants:
@@ -770,13 +792,13 @@ Hard invariants:
 - config, spec, certificate, manual-resolution, diagnostic, and retention exceptions stay explicit
 - signed raw transactions and bearer mutation material never become retained typed artifacts
 
-Open questions:
+Resolved decisions:
 
-- should `ArtifactRoleContract` live in `mfm-events` with role tags, or closer to `mfm-store`
-  admission rules?
-- should schema policy distinguish `absent`, `required`, `optional`, and `phase-derived`?
-- should retention categories be part of this table now, or added after retention manifest
-  generation?
+- `ArtifactRoleContract` lives in `mfm-events::v1`; a new kernel crate is deferred until artifact
+  evidence grows enough to justify crate-layout churn.
+- schema policy distinguishes at least `absent`, `required`, `optional`, and `phase-derived`.
+- retention categories are part of the Phase 2 role matrix so retention exceptions are table rows
+  instead of scattered `match` fallthroughs.
 
 ### Deep Dive: Side-Effect FSM And Driver
 
@@ -784,8 +806,9 @@ Target shape:
 
 - `SideEffectFsm`: framework-owned transition model derived from the same legal phases as
   `mfm-store::SideEffectLedgerState`; no IO, no commits, no domain callbacks
-- `SideEffectDriver<S, A>`: adapter-facing helper that inspects current ledger projection and
-  returns runner output proposals
+- `SideEffectDriver<S, A>`: adapter-facing helper that consumes a runtime-minted verified
+  side-effect ledger view derived from the committed run stream and returns deterministic runner
+  output proposals
 - `SideEffectDomainAdapter<S>`: typed callbacks for prepare/reconstruct invocation, submit or
   recover submission, read receipt, build confirmation, and map domain errors
 - `SideEffectEvidenceBuilder`: canonical artifact and payload builder for intent, prepared
@@ -799,6 +822,8 @@ Ownership boundary:
 - the driver proposes runner payloads only; runtime/store still validate, stage, and commit
 - the FSM must not become a parallel authority; it should wrap or be generated beside store
   typestate
+- the driver must not read persisted projection rows, arbitrary projection snapshots, or
+  adapter-local ledger state as authority
 - live providers remain in adapters/transports
 - replay uses only retained evidence
 - raw signed transactions and secret material remain transient below typed surfaces
@@ -827,10 +852,11 @@ Hard invariants:
 - resource lanes and saga engagement remain store/runtime owned
 - canonical JSON hashes, schema ids, semantic ids, and artifact roles remain byte-stable
 
-Open questions:
+Resolved decisions and open questions:
 
-- should claim owner and fencing token generation move fully behind runtime/store APIs, or stay as
-  deterministic driver proposals validated by store?
+- claim owner, fencing token, ledger key, and epoch generation move behind runtime/store APIs; the
+  driver may request the next protocol action, but authority-bearing identifiers come from
+  runtime/store and are validated again by store admission
 - should prepared-invocation artifacts require schema ids everywhere?
 - should v1 support one ledger per side-effect node attempt, or multiple ledgers before a concrete
   use case lands?
@@ -842,7 +868,8 @@ Open questions:
 Target shape:
 
 - promote the existing committed stream plus runtime history fold into one sealed
-  `VerifiedRunHistoryView` consumed by runtime, replay, and app
+  `VerifiedRunHistoryView` in `mfm-runtime`, consumed by runtime, replay, and app through
+  purpose-specific wrappers
 - expose typed indexes for run-start evidence, config/spec/certificate refs, seed cells, artifact
   refs, facts, attempts, cells, side-effect ledgers, resource lanes, public outputs, retention,
   completion, and validation diagnostics
@@ -851,18 +878,35 @@ Ownership boundary:
 
 - store owns envelopes, sequence/ordinal order, atomic commit grouping, artifact admission, and
   projection rebuild
-- runtime adds certified-spec-aware execution and resume validation
-- replay consumes an evidence-only wrapper and must not gain live capabilities, stores, signers,
-  app builders, or transport construction
-- app receives presentation helpers only
+- runtime owns the shared verified view for this refactor because it already owns
+  `CertifiedRuntimeSpec` and the spec-aware history fold
+- store stays the owner of `CommittedRunStream`; it does not gain certified-spec-aware runtime
+  history validation
+- a new kernel history crate is deferred until certified graph/stage typestate work can remove the
+  dependency on runtime-specific authority
+- replay consumes an evidence-only wrapper minted from the verified view and must not gain live
+  capabilities, stores, signers, app builders, or transport construction
+- app receives presentation helpers and still mints public-output read authority explicitly
+
+Constructor boundary:
+
+- `VerifiedRunHistoryView` has private fields and no raw-event constructor
+- the view is minted only from `CertifiedRuntimeSpec`, `CommittedRunStream`, and
+  `VerifiedRunArtifactStore`
+- runtime scheduler, replay, and app receive purpose-specific wrappers; raw event vectors never
+  cross runtime/replay/app boundaries as trusted input
 
 Migration slice:
 
 1. Add old/new differential goldens around committed streams, runtime run views, replay broker, and
    app status/output paths.
-2. Extract a shared fold behind current APIs.
-3. Route replay and app loaders through the shared fold.
-4. Remove duplicate projection and index construction from replay and app.
+2. Promote the private runtime run view into a retained `VerifiedRunHistoryView` inside
+   `mfm-runtime`.
+3. Store that view inside `VerifiedRunHistory` instead of validating and discarding it.
+4. Route replay broker construction and app status/public-output paths through that view's
+   projection and indexes.
+5. Add compile-fail tests preventing raw `VerifiedRunHistoryView` construction.
+6. Remove duplicate projection and index construction from replay and app.
 
 Hard invariants:
 
@@ -873,9 +917,9 @@ Hard invariants:
 - validation diagnostics are stable enough for tests, but not necessarily public API unless
   deliberately promoted
 
-Open questions:
+Resolved decisions and open questions:
 
-- should the shared fold live in `mfm-runtime`, `mfm-store`, or a new kernel history crate?
+- the shared fold lives in `mfm-runtime` for this refactor
 - should resource-lane state be part of the run-local view or exposed as separate store admission
   state?
 - should diagnostics be stable public error classes or internal validation reasons?
@@ -978,13 +1022,15 @@ Target shape:
 - certifier helpers in `mfm-certify`: register package descriptors into `CertificationRegistry`,
   certify drafts, and gather launch config artifacts required by the certified spec
 - `StateSpec` derive in `mfm-program-derive`: emit stable state kind/version/name, effect, caps,
-  adapter binding ids, and default `ValidatedConfig<T>::into_inner()` construction where applicable
+  neutral adapter contract references when explicitly named, and default
+  `ValidatedConfig<T>::into_inner()` construction where applicable
 
 Ownership boundary:
 
 - package declarations belong to operation/authoring surfaces, not app, runtime, store, CLI, or REST
-- state declarations belong to state crates and may name adapter identities, but must not
-  instantiate adapters, transports, signers, stores, or live IO
+- state declarations belong to state crates and may name explicit neutral adapter contract paths, but
+  must not infer adapter identities from naming conventions or instantiate adapters, transports,
+  signers, stores, executable identities, capability implementations, or live IO
 - `mfm-program` must not depend on `mfm-certify`; certifier convenience lives in `mfm-certify` or
   op crates
 - package helpers must not infer graph semantics from naming; scope ids, operation keys, seed keys,
@@ -997,8 +1043,10 @@ Migration slice:
 2. Add hand-written `ProgramPackage` wrappers around proof first, then portfolio, then EVM, with no
    descriptor changes.
 3. Centralize descriptor registration and config artifact selection.
-4. Introduce `StateSpec` derive only after descriptor-id goldens exist.
-5. Require trybuild diagnostics and explicit opt-outs for custom constructors.
+4. Move portfolio adapter contract identity toward a neutral contract crate before deriving any
+   state declarations that name it.
+5. Introduce `StateSpec` derive only after descriptor-id goldens exist.
+6. Require trybuild diagnostics and explicit opt-outs for custom constructors.
 
 Hard invariants:
 
@@ -1006,6 +1054,8 @@ Hard invariants:
   remain byte-stable unless deliberately versioned
 - graph expansion semantics remain visible in op crates
 - generated descriptors are deterministic and sorted for golden review
+- macros derive state descriptors, not adapter execution authority; adapter crates still bind
+  runners, executable identities, and capability implementations explicitly
 - macros provide clear diagnostics for ambiguous or forbidden declarations
 
 Open questions:
@@ -1030,7 +1080,14 @@ Target shape:
 
 Ownership boundary:
 
-- scenario builders are dev/test-only; production crates must not depend on scenario crates
+- reusable data-only scenario specs and golden summaries live in a low-level test-support package
+  under `tests/`, such as `tests/kernel-scenario-data`
+- that low-level package must not depend on `mfm-store`, `mfm-runtime`, `mfm-replay`, `mfm-app`,
+  ops, adapters, transports, storages, or binaries
+- execution adapters and illegal mutation helpers stay crate-local; production crates must not depend
+  on scenario crates
+- `mfm-integration-tests` remains the high-level leaf for production-path scenarios, REST/CLI public
+  contract tests, parity tests, and live-service helpers
 - the DSL must drive `prepare_run_launch`, scheduler execution, prepared commits, store append APIs,
   replay authority, and public-output rendering
 - synthetic stream edits are allowed only for corruption, migration, repair, and low-level store
@@ -1039,11 +1096,15 @@ Ownership boundary:
 
 Migration slice:
 
-1. Add data-only scenario specs and crate-local helpers without creating dev-dependency cycles.
-2. Convert proof transport conformance corruption helpers first.
-3. Convert side-effect ledger and replay rejection tests.
-4. Convert public-output and backend store contract cases.
-5. Delete old fixture plumbing only after old/new differential tests prove equivalent streams,
+1. Add the low-level data-only scenario package with a strict dependency allowlist and metadata
+   sentinels.
+2. Add crate-local execution helpers without creating dev-dependency cycles.
+3. Convert proof transport conformance replay-corruption helpers first.
+4. Convert side-effect ledger and replay rejection tests.
+5. Convert public-output and backend store contract cases.
+6. Add dedicated public `ResolveSagaTerminal` coverage after the minimal scenario helper skeleton
+   exists, not as the first conversion.
+7. Delete old fixture plumbing only after old/new differential tests prove equivalent streams,
    projections, replay results, and public JSON.
 
 Hard invariants:
@@ -1053,11 +1114,15 @@ Hard invariants:
 - negative coverage preserves wrong role, wrong producer, missing artifact, duplicate side-effect
   transition, replay-with-live-capability, tampered spec/certificate, and secret-redaction cases
 - generated fixtures obey canonical JSON and no-float/no-secret rules
+- keep one handwritten sentinel per authority boundary: store prepared-commit purpose,
+  committed-stream corruption, runtime recovery/side-effect lifecycle, replay no-live-capability,
+  public JSON/redaction, and dependency metadata
 
-Open questions:
+Resolved decisions and open questions:
 
-- where should shared scenario crates live without creating runtime/store dev-dependency cycles?
-- how many old hand-written tests remain as permanent parity sentinels after scenario conversion?
+- shared low-level scenario data lives under `tests/` as data-only test support; execution stays
+  crate-local or in `mfm-integration-tests`
+- retain the handwritten authority sentinels listed above as permanent parity checks
 - should generated compile-fail matrices be checked in or generated during test setup?
 
 ### Deep Dive: Sync/Async Driver And Service Surface Collapse
@@ -1158,9 +1223,9 @@ Open questions:
 | Bet | Baseline before refactor | Replacement gate | Focused checks |
 |---|---|---|---|
 | Kernel contract protocol | event schema descriptors, enum tags, payload JSON, spec JSON, spec hashes | generated descriptors/codecs/lenses are byte-identical or deliberately versioned | `cargo test -p mfm-events`, `cargo test -p mfm-spec`, `cargo test -p mfm-store` |
-| Artifact role table | role tag parser/encoder behavior, schema/semantic policy, producer policy | role matrix table drives event requirements, staging, replay, and artifact-store metadata | artifact tamper tests, replay missing/wrong-role tests, store rebuild tests |
+| Artifact role table | role tag parser/encoder behavior, schema/semantic policy, producer policy | closed role matrix drives event requirements, store codecs, runtime staging, replay authorization, app read authority, and artifact-store metadata | `cargo test -p mfm-events artifact_role_contract`, `cargo test -p mfm-store --test commit_contract artifact_role_contract`, replay missing/wrong-role tests, artifact-store metadata tests |
 | Side-effect FSM/driver | side-effect transition matrix and runner output goldens | driver emits the same runner payload/artifact sequence and preserves ambiguity/recovery states | `cargo test -p mfm-store --test commit_contract side_effect`, `cargo test -p mfm-runtime side_effect` |
-| Shared run view | committed-stream folds, runtime views, replay broker behavior, app route outputs | runtime, replay, and app consume one verified fold without gaining extra authority | corruption fixtures, route parity tests, replay authority tests |
+| Shared run view | committed-stream folds, runtime views, replay broker behavior, app route outputs | runtime, replay, and app consume the sealed `mfm-runtime` view without gaining extra authority | corruption fixtures, route parity tests, replay authority tests, runtime authority UI tests |
 | Certified graph typestate | certified spec hashes, descriptor ids, framework topology | staged graph views replace raw scans without changing hash-defining bytes | `cargo test -p mfm-certify`, runtime/replay parity, authority UI tests |
 | Runner kit | proof/portfolio/EVM runner output and artifact goldens | helpers reproduce identical staged artifacts, payloads, retention refs, and executable identities | `cargo test -p mfm-transports-proof`, `cargo test -p mfm-adapters-portfolio`, `cargo test -p mfm-adapters-evm-contracts` |
 | Program/package declarations | descriptor maps, registry summaries, certified spec hashes, config artifact sets | package helpers and derives produce identical registries/specs before boilerplate removal | `cargo test -p mfm-program`, `cargo test -p mfm-program-derive`, `cargo test -p mfm-certify` |
@@ -1484,26 +1549,31 @@ Verification if implemented later:
 
 ### Phase 2: Artifact Role Contract
 
-1. Add `ArtifactRoleContract` behind existing artifact role APIs.
-2. Cover every role with a table-driven golden for tag, schema policy, semantic policy, producer
+1. Add `ArtifactRoleContract` in `mfm-events::v1` behind existing artifact role APIs.
+2. Generate the event schema role tag list from `ArtifactRole::ALL`, preserving
+   `typed_spec_certificate`.
+3. Convert store role parse/string helpers and filesystem artifact-store metadata parsing to consume
+   the events-owned contract.
+4. Cover every role with a table-driven golden for tag, schema policy, semantic policy, producer
    policy, staging class, retention class, and same-commit policy.
-3. Route event requirement generation, runtime staging classification, replay artifact
+5. Route event requirement generation, runtime staging classification, replay artifact
    authorization, and artifact-store metadata validation through the role contract.
-4. Preserve the now-fixed `typed_spec_certificate` descriptor tag with regression coverage.
+6. Keep same-commit append legality and context-specific admission checks in `mfm-store`.
 
 Expected result: one source of role truth, fewer string/tag/producer matches, and a small but real
 authority-preserving production cleanup.
 
 ### Phase 3: Scenario And Golden Infrastructure
 
-1. Build precise scenario builders for certified specs, committed streams, retained artifacts,
-   side-effect timelines, and corruption cases.
-2. Convert one narrow family of existing runtime/store/replay tests and prove generated fixtures
+1. Add a low-level data-only scenario package under `tests/` with a strict dependency allowlist.
+2. Keep execution adapters and illegal mutation helpers crate-local; keep `mfm-integration-tests` as
+   the high-level leaf for production-path scenarios.
+3. Convert proof transport conformance replay-corruption helpers first and prove generated fixtures
    are equivalent to the current hand-written fixtures.
-3. Preserve negative assertion specificity for wrong role, wrong producer, missing artifact,
+4. Preserve negative assertion specificity for wrong role, wrong producer, missing artifact,
    tampered spec/certificate, replay-with-live-capability, and secret-redaction cases.
-4. Add dedicated public `ResolveSagaTerminal` fixture coverage as an early scenario conversion before
-   shared run-view and public-status paths are rewritten.
+5. Add dedicated public `ResolveSagaTerminal` fixture coverage after the minimal scenario helper
+   skeleton exists and before shared run-view and public-status paths are rewritten.
 
 Expected result: lower test ceremony without reducing coverage, plus the safety net needed before
 larger protocol rewrites.
@@ -1524,12 +1594,16 @@ output rendering, retained artifacts, replay evidence, CLI/REST output, or side-
 
 ### Phase 4: Shared Run View And App Read Paths
 
-1. Introduce `CommittedRunIndex` or `VerifiedRunHistoryView` as the shared verified stream fold.
-2. Route runtime history, replay, app status/output paths, and stream range filtering through the
-   shared view.
-3. Merge duplicated app read paths and sync/async service read behavior around the same verified
+1. Promote the private runtime run view into a sealed `VerifiedRunHistoryView` inside
+   `mfm-runtime`.
+2. Mint the view only from `CertifiedRuntimeSpec`, `CommittedRunStream`, and
+   `VerifiedRunArtifactStore`; keep `CommittedRunStream` store-owned.
+3. Route runtime history, replay broker construction, app status/output paths, and stream range
+   filtering through purpose-specific wrappers over the shared view.
+4. Merge duplicated app read paths and sync/async service read behavior around the same verified
    context.
-4. Keep replay evidence-only and keep public output render-only.
+5. Keep replay evidence-only, keep public output render-only, and add compile-fail tests preventing
+   raw `VerifiedRunHistoryView` construction.
 
 Expected result: fewer duplicated correctness checks, less runtime/replay/app divergence, and one
 validated path before presentation filtering.
@@ -1564,7 +1638,11 @@ identity authority.
 1. Use the side-effect lifecycle boundary established by the completed FSM scheduler refactor.
 2. Define the generic side-effect driver trait surface only after recovery and uncertainty behavior
    are covered by goldens.
-3. Port proof first, then EVM lifecycle after identity, replay, and ambiguity behavior are locked.
+3. Make the driver consume a runtime-minted verified side-effect ledger view derived from the
+   committed run stream; it must not read persisted projection rows or become transition-admission
+   authority.
+4. Keep claim owner, fencing token, ledger key, and epoch generation behind runtime/store APIs.
+5. Port proof first, then EVM lifecycle after identity, replay, and ambiguity behavior are locked.
 
 Expected result: large reuse for future mutation workflows and a smaller trusted surface for
 side-effect protocol correctness.
@@ -1604,9 +1682,97 @@ cargo test -p mfm-integration-tests --test cargo_metadata_contract
 cargo test -p mfm-integration-tests --test architecture_namespace_contract
 ```
 
+Phase 2 artifact-role execution gate after the role-contract tests exist:
+
+```bash
+cargo fmt --all -- --check
+cargo check -p mfm-events -p mfm-store -p mfm-runtime -p mfm-replay -p mfm-app -p mfm-artifact-store-fs
+cargo test -p mfm-events artifact_role_contract
+cargo test -p mfm-events v1_event_schema_golden
+cargo test -p mfm-store --test commit_contract artifact_role_contract
+cargo test -p mfm-runtime artifact_role_contract
+cargo test -p mfm-replay artifact_role_contract
+cargo test -p mfm-artifact-store-fs artifact_role_contract
+cargo test -p mfm-app verified_run_history
+cargo test -p mfm-integration-tests --test cargo_metadata_contract
+cargo test -p mfm-integration-tests --test architecture_namespace_contract
+```
+
 For live parity behavior, start services manually and run focused parity tests with explicit env
 vars. Do not use Nixfied wrappers as the default gate unless the change is specifically about
 Nixfied behavior.
+
+## Appendix: LOC Ledger
+
+Use this appendix as a historical progress ledger for each completed cleanup phase or meaningful
+sub-step. LOC is a planning signal only: it should explain where duplication moved or disappeared,
+not replace authority, coverage, or behavior checks.
+
+Primary command:
+
+```bash
+loc
+```
+
+Rust component command pattern:
+
+```bash
+loc --include '.*\.rs$' -- crates/kernel/runtime
+loc --include '.*\.rs$' -- crates/kernel/store
+loc --include '.*\.rs$' -- crates/kernel/spec crates/kernel/events
+loc --include '.*\.rs$' -- crates/app crates/adapters/evm-contracts
+```
+
+The `--` separator matters when using `--include`; without it, some shells and `loc` option parsing
+can treat target paths as additional include regexes.
+
+When a phase lands:
+
+1. Capture whole-repo `loc`.
+2. Capture Rust-only `loc` for the touched crate or module group.
+3. Append a row below with the commit, RFC phase, affected scope, and interpretation.
+4. If generated code is introduced, record maintained LOC and generated LOC separately so reductions
+   are not hidden by checked-in output.
+
+### Baseline: Post-FSM RFC Snapshot
+
+Captured from the working tree on 2026-06-19 after the FSM scheduler lifecycle refactor closeout and
+before artifact-role, scenario, shared-view, no-secret, sync/async, runner-kit, or generator cleanup
+phases.
+
+Whole-repo `loc` snapshot:
+
+| Language | Files | Lines | Blank | Comment | Code |
+|---|---:|---:|---:|---:|---:|
+| Rust | 251 | 149639 | 10606 | 7803 | 131230 |
+| Markdown | 36 | 5397 | 1232 | 0 | 4165 |
+| Toml | 46 | 1248 | 164 | 5 | 1079 |
+| Nix | 3 | 512 | 20 | 30 | 462 |
+| SQL | 1 | 157 | 17 | 0 | 140 |
+| Total | 337 | 156953 | 12039 | 7838 | 137076 |
+
+Rust component snapshot:
+
+| Scope | Files | Lines | Blank | Comment | Code | Why track |
+|---|---:|---:|---:|---:|---:|---|
+| `crates/kernel/runtime` | 29 | 26821 | 1233 | 434 | 25154 | FSM, shared run view, sync/async driver collapse |
+| `crates/kernel/store` | 9 | 17554 | 979 | 804 | 15771 | artifact roles, append rules, projections, side-effect ledger |
+| `crates/kernel/spec` + `crates/kernel/events` | 2 | 8387 | 488 | 957 | 6942 | declarative protocol and artifact role contracts |
+| `crates/kernel/certify` | 9 | 9490 | 534 | 232 | 8724 | certification and descriptor authority |
+| `crates/kernel/program` | 33 | 8733 | 760 | 571 | 7402 | program/package derive and authored spec surface |
+| `crates/kernel/replay` | 6 | 5482 | 265 | 124 | 5093 | replay evidence and shared committed-run views |
+| `crates/app` | 7 | 7447 | 427 | 277 | 6743 | app read paths, CLI/REST shared service surface |
+| `crates/adapters/evm-contracts` | 1 | 3404 | 209 | 125 | 3070 | EVM lifecycle runner and future runner-kit work |
+| `bin/cli` | 35 | 7032 | 719 | 426 | 5887 | public JSON and command workflow contracts |
+| `bin/rest-api` | 2 | 1786 | 145 | 38 | 1603 | REST status/control/public-output contracts |
+| `tests/integration` | 11 | 9457 | 634 | 38 | 8785 | scenario/golden coverage and public fixtures |
+| `tests/integration/src/test_support.rs` | 1 | 3984 | 222 | 19 | 3743 | fixture-builder consolidation target |
+
+Progress ledger:
+
+| Date | Commit / ref | RFC step | Rust LOC total | Component LOC | Interpretation |
+|---|---|---|---:|---|---|
+| 2026-06-19 | working tree after FSM refactor closeout | Post-FSM RFC baseline | `149639` | runtime `26821`; store `17554`; app plus EVM adapter `10851` | Historical baseline for future phase-by-phase comparisons. |
 
 ## Bottom Line
 
