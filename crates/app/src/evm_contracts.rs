@@ -117,7 +117,8 @@ mod tests {
         RunLaunchSeedArtifact, TypedRunMode,
     };
     use mfm_adapters_evm_contracts::{
-        EvmContractRuntime, EvmContractRuntimeFactory, EvmContractRuntimeRoute,
+        ensure_prepared_invocation_public, EvmContractRuntime, EvmContractRuntimeFactory,
+        EvmContractRuntimeRoute, PreparedContractInvocation,
     };
     use mfm_canonical::PlainCanonicalJsonBytes;
     use mfm_capabilities::CapabilitySpec;
@@ -154,6 +155,56 @@ mod tests {
 
     const TEST_SIGNER_HEX: &str =
         "4c0883a69102937d6231471b5dbb6204fe512961708279c2f802d6a8ebf2d3a4";
+
+    fn evm_forbidden_runtime_terms() -> Vec<String> {
+        vec![
+            ["raw", "_transaction"].concat(),
+            ["raw", "_tx"].concat(),
+            ["signed", "_payload"].concat(),
+            "signature".to_owned(),
+            ["key", "store"].concat(),
+            ["key", "store", "_path"].concat(),
+            ["private", "_key"].concat(),
+            ["private", " key"].concat(),
+            ["pass", "word"].concat(),
+            ["mne", "monic"].concat(),
+            ["seed", "_phrase"].concat(),
+            ["rpc", "_url"].concat(),
+            ["rpc", " url"].concat(),
+            ["end", "point"].concat(),
+            ["provider", "_kind"].concat(),
+            ["provider", " kind"].concat(),
+            ["author", "ization"].concat(),
+            TEST_SIGNER_HEX.to_owned(),
+        ]
+    }
+
+    fn assert_no_evm_runtime_surface(label: &str, rendered: &str) {
+        let rendered = rendered.to_ascii_lowercase();
+        for forbidden in evm_forbidden_runtime_terms() {
+            assert!(
+                !rendered.contains(&forbidden),
+                "{label} contains forbidden EVM runtime surface"
+            );
+        }
+    }
+
+    fn assert_prepared_invocation_has_unsigned_provenance(prepared: &PreparedContractInvocation) {
+        assert!(!prepared.signer_ref.is_empty());
+        assert!(prepared.expected_signer_address.starts_with("0x"));
+        assert!(
+            !prepared.transactions.is_empty(),
+            "prepared invocation must retain transaction provenance"
+        );
+        for transaction in &prepared.transactions {
+            assert!(transaction
+                .data_digest
+                .starts_with("content:sha256-jcs-v1:"));
+            assert!(transaction.signing_digest.starts_with("0x"));
+            assert_eq!(transaction.signing_digest.len(), 66);
+            assert!(transaction.gas_limit > 0);
+        }
+    }
 
     fn canonical_value<T: Serialize>(value: &T) -> mfm_runtime::Result<PlainCanonicalJsonBytes> {
         let json = serde_json::to_string(value)
@@ -541,6 +592,55 @@ mod tests {
             rendered.to_string().contains("configure_receipt_evidence"),
             "rendered lifecycle output must contain configure receipt evidence refs: {rendered}"
         );
+        assert_no_evm_runtime_surface("contract public output", &rendered.to_string());
+
+        let stream = {
+            let store = services.store();
+            let store = store.lock().await;
+            store.load_run_stream(&run_id)
+        };
+        let mut prepared_artifact_ids = Vec::new();
+        for event in &stream {
+            let payload_debug = format!("{:?}", event.payload());
+            assert_no_evm_runtime_surface("contract event payload", &payload_debug);
+            if let events::KernelEventPayload::SideEffectInvocationPrepared(payload) =
+                event.payload()
+            {
+                prepared_artifact_ids.push(
+                    payload
+                        .prepared_artifact_id
+                        .clone()
+                        .expect("prepared invocation event has artifact id"),
+                );
+            }
+        }
+        assert_eq!(
+            prepared_artifact_ids.len(),
+            2,
+            "full lifecycle should prepare deploy and configure side effects"
+        );
+
+        for artifact_id in prepared_artifact_ids {
+            let (bytes, evidence) = services
+                .artifacts()
+                .get_artifact_by_id(&artifact_id)
+                .await
+                .expect("prepared invocation artifact");
+            assert_eq!(
+                evidence.artifact_role,
+                events::ArtifactRole::PreparedInvocation
+            );
+            assert_eq!(evidence.schema_id, None);
+            assert_eq!(evidence.semantic_type_id, None);
+            let rendered =
+                std::str::from_utf8(&bytes).expect("prepared invocation artifact is UTF-8");
+            assert_no_evm_runtime_surface("prepared invocation artifact", rendered);
+            let prepared = serde_json::from_slice::<PreparedContractInvocation>(&bytes)
+                .expect("prepared invocation json");
+            ensure_prepared_invocation_public(&prepared).expect("prepared invocation is public");
+            assert_prepared_invocation_has_unsigned_provenance(&prepared);
+        }
+        assert_no_evm_runtime_surface("contract replay broker", &format!("{replay:?}"));
 
         let _ = std::fs::remove_dir_all(root);
     }

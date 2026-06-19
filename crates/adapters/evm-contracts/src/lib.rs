@@ -1192,6 +1192,7 @@ fn created_contract_address(sender: Address, nonce: u64) -> Address {
 pub fn ensure_prepared_invocation_public(prepared: &PreparedContractInvocation) -> Result<()> {
     let json = serde_json::to_string(prepared)
         .map_err(|_| EvmContractAdapterError::InvalidPreparedInvocation)?;
+    let json = json.to_ascii_lowercase();
     for forbidden in forbidden_prepared_terms() {
         if json.contains(&forbidden) {
             return Err(EvmContractAdapterError::PreparedInvocationLeak);
@@ -1500,13 +1501,21 @@ fn replay_value_error(error: mfm_values::ValueError) -> replay::ReplayError {
 fn forbidden_prepared_terms() -> Vec<String> {
     vec![
         ["raw", "_transaction"].concat(),
+        ["raw", "_tx"].concat(),
+        ["signed", "_payload"].concat(),
         "signature".to_owned(),
         ["key", "store"].concat(),
+        ["key", "store", "_path"].concat(),
         ["private", "_key"].concat(),
+        ["private", " key"].concat(),
         ["pass", "word"].concat(),
+        ["mne", "monic"].concat(),
+        ["seed", "_phrase"].concat(),
         ["rpc", "_url"].concat(),
+        ["rpc", " url"].concat(),
         ["end", "point"].concat(),
         ["provider", "_kind"].concat(),
+        ["provider", " kind"].concat(),
         ["author", "ization"].concat(),
     ]
 }
@@ -3236,13 +3245,125 @@ mod tests {
             .expect("prepared");
 
         ensure_prepared_invocation_public(prepared.evidence()).expect("public evidence");
+        let evidence = prepared.evidence();
+        let rendered_value = serde_json::to_value(evidence).expect("json value");
+        assert_eq!(
+            sorted_json_keys(&rendered_value),
+            vec![
+                "expected_chain_id",
+                "expected_signer_address",
+                "max_receipt_polls",
+                "network_id",
+                "phase",
+                "poll_interval_ms",
+                "prepared_version",
+                "signer_ref",
+                "transactions",
+            ]
+        );
+        assert_eq!(evidence.signer_ref, "deployer");
+        assert_eq!(
+            evidence.expected_signer_address,
+            "0x0f65fe9276bc9a24ae7083ae28e2660ef72df99e"
+        );
+        let transaction = evidence.transactions.first().expect("transaction");
+        let rendered_transaction = rendered_value["transactions"][0].clone();
+        assert_eq!(
+            sorted_json_keys(&rendered_transaction),
+            vec![
+                "chain_id",
+                "data_digest",
+                "data_len",
+                "gas_limit",
+                "gas_price",
+                "index",
+                "max_fee_per_gas",
+                "max_priority_fee_per_gas",
+                "nonce",
+                "signing_digest",
+                "style",
+                "to_address",
+                "value_wei",
+            ]
+        );
+        assert_eq!(transaction.nonce, 7);
+        assert_eq!(transaction.gas_limit, 21_000);
+        assert_eq!(transaction.max_fee_per_gas.as_deref(), Some("11"));
+        assert_eq!(transaction.max_priority_fee_per_gas.as_deref(), Some("3"));
+        assert!(transaction
+            .data_digest
+            .starts_with("content:sha256-jcs-v1:"));
+        assert_eq!(transaction.data_len, 2);
+        assert!(transaction.signing_digest.starts_with("0x"));
+        assert_eq!(transaction.signing_digest.len(), 66);
+
         let rendered = serde_json::to_string(prepared.evidence()).expect("json");
+        let rendered = rendered.to_ascii_lowercase();
         for forbidden in forbidden_prepared_terms() {
             assert!(
                 !rendered.contains(&forbidden),
-                "{rendered} contains {forbidden}"
+                "prepared invocation evidence contains forbidden runtime surface"
             );
         }
+    }
+
+    #[test]
+    fn prepared_invocation_guard_rejects_forbidden_runtime_terms() {
+        for forbidden in forbidden_prepared_terms() {
+            let mut prepared = prepared_invocation_fixture();
+            prepared.signer_ref = format!("deployer-{forbidden}");
+
+            assert!(
+                matches!(
+                    ensure_prepared_invocation_public(&prepared),
+                    Err(EvmContractAdapterError::PreparedInvocationLeak)
+                ),
+                "expected forbidden prepared term {forbidden} to be rejected"
+            );
+        }
+    }
+
+    fn prepared_invocation_fixture() -> PreparedContractInvocation {
+        PreparedContractInvocation {
+            prepared_version: 1,
+            phase: ContractMutationPhase::Deploy,
+            network_id: "ethereum-mainnet".to_owned(),
+            expected_chain_id: 1,
+            signer_ref: "deployer".to_owned(),
+            expected_signer_address: "0x0f65fe9276bc9a24ae7083ae28e2660ef72df99e".to_owned(),
+            transactions: vec![PreparedContractTransactionEvidence {
+                index: 0,
+                style: PreparedContractTransactionStyle::Eip1559,
+                chain_id: 1,
+                nonce: 7,
+                to_address: None,
+                value_wei: "0".to_owned(),
+                gas_limit: 21_000,
+                max_fee_per_gas: Some("11".to_owned()),
+                max_priority_fee_per_gas: Some("3".to_owned()),
+                gas_price: None,
+                data_digest:
+                    "content:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000"
+                        .to_owned(),
+                data_len: 2,
+                signing_digest:
+                    "0x0000000000000000000000000000000000000000000000000000000000000000"
+                        .to_owned(),
+            }],
+            poll_interval_ms: 1_000,
+            max_receipt_polls: 10,
+        }
+    }
+
+    fn sorted_json_keys(value: &serde_json::Value) -> Vec<&str> {
+        let mut keys = value
+            .as_object()
+            .expect("json object")
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        keys.sort_unstable();
+        keys
     }
 
     #[test]
