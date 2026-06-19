@@ -1,6 +1,6 @@
 # Implementation Plan: RFC Refactors, Cleanups, And Larger Abstraction Bets
 
-Status: implementation planning, ready for phase execution
+Status: phase execution through Phase 8A; Phase 8B deferred to a follow-up package/derive RFC
 
 Source RFC: `RFC_REFACTORS_CLEANUPS.md`
 
@@ -30,7 +30,8 @@ Planning date: 2026-06-19
 6. Phase 5: async-primary service and driver collapse.
 7. Phase 6: runtime runner kit.
 8. Phase 7: generic side-effect driver.
-9. Phase 8: check-only kernel protocol declarations, then gated production replacement.
+9. Phase 8A: check-only kernel protocol declarations, then first gated production descriptor
+   replacement. Phase 8B package and derive work remains deferred.
 
 Phase 1 is already complete. Projection persistence remains deferred to a separate measurement RFC.
 
@@ -725,6 +726,16 @@ cargo test -p mfm-integration-tests --test parity_portfolio_tracker_reth_snapsho
 Goal: prove declarative kernel protocol definitions can reproduce existing behavior before
 deleting handwritten descriptors, codecs, lenses, or projection inputs.
 
+Status:
+
+- Phase 8A is complete through the first production event-family descriptor replacement.
+  `FactRecorded` is the first declaration-backed production descriptor and preserves the existing
+  schema id, canonical descriptor JSON, artifact requirements, codec shape, and projection
+  baselines.
+- Phase 8B is deferred. Program package baselines, handwritten package wrappers, and state
+  declaration derives introduce a separate program-authoring surface and must not be bundled with
+  the event-family descriptor replacement closeout.
+
 Entry criteria:
 
 - Phase 2 role contract is merged.
@@ -770,27 +781,49 @@ Commits:
    - Avoid side-effect/resource-lane families until the model proves simpler invariants.
 
 7. `mfm-events replace first handwritten descriptor through declaration`
+   - Status: complete for `FactRecorded` in Phase 8A.
    - Only after at least two families have byte-identical descriptor, codec, artifact, projection,
      runtime, and replay checks.
    - Treat any hash or canonical JSON change as a versioned persisted-format migration.
 
 8. `mfm-program add package declaration baselines`
+   - Status: deferred to Phase 8B.
    - Only after event-family declaration replacement is proven.
    - Capture descriptor maps, registry summaries, certified spec hashes, config artifact sets, and
      public-output schema goldens.
 
 9. `mfm-program add handwritten program package wrappers`
+   - Status: deferred to Phase 8B.
    - Start proof, then portfolio, then EVM.
    - Centralize descriptor registration and config artifact selection without changing graph
      expansion semantics.
 
 10. `mfm-program-derive add state declaration derive`
+    - Status: deferred to Phase 8B.
     - Only after descriptor-id and trybuild diagnostic goldens exist.
     - Derive descriptors, not adapter execution authority.
     - Adapter crates still bind runners, executable identities, and capability implementations
       explicitly.
 
-Exit gate:
+Phase 8A exit gate:
+
+```bash
+cargo fmt --all -- --check
+cargo check -p mfm-events -p mfm-store
+cargo test -p mfm-events
+cargo test -p mfm-store --test commit_contract
+cargo test -p mfm-integration-tests --test cargo_metadata_contract
+cargo test -p mfm-integration-tests --test architecture_namespace_contract
+```
+
+Phase 8B entry gate:
+
+- Phase 8A exit gate passes after the production `FactRecorded` descriptor replacement.
+- Program package baselines are added before any wrapper replacement.
+- `mfm-program-derive` state declaration work starts only after descriptor-id and trybuild
+  diagnostic goldens exist.
+
+Phase 8B exit gate:
 
 ```bash
 cargo fmt --all -- --check
