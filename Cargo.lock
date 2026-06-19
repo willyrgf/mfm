@@ -2347,6 +2347,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfm-kernel-scenario-data"
+version = "0.1.0"
+dependencies = [
+ "mfm-canonical",
+ "mfm-events",
+ "mfm-ids",
+ "mfm-spec",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "mfm-manual-auth"
 version = "0.1.0"
 dependencies = [
