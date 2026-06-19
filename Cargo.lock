@@ -2471,6 +2471,7 @@ name = "mfm-replay"
 version = "0.1.0"
 dependencies = [
  "k256",
+ "mfm-canonical",
  "mfm-capabilities",
  "mfm-certify",
  "mfm-events",
@@ -2479,6 +2480,7 @@ dependencies = [
  "mfm-runtime",
  "mfm-spec",
  "mfm-store",
+ "serde_json",
  "trybuild",
 ]
 
@@ -2631,8 +2633,10 @@ dependencies = [
 name = "mfm-stream-store-postgres"
 version = "0.1.0"
 dependencies = [
+ "k256",
  "mfm-events",
  "mfm-ids",
+ "mfm-manual-auth",
  "mfm-spec",
  "mfm-store",
  "serde_json",

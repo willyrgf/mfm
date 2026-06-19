@@ -38,11 +38,11 @@ purpose-specific `PreparedCommit<Purpose>` values and submitting them through `P
 
 Launch is a pre-FSM admission lifecycle, not a scheduler-dispatched state attempt.
 `RunAdmissionLifecycle` verifies the certified spec, launch artifacts, seeds, configs, executable
-availability, and capability availability before minting the `RunStarted` commit. That commit still
-carries legacy bundled bootstrap evidence for compatibility with the persisted event contract, but
-`BootstrapRun` is not executed as a post-admission framework runner. Ordinary state attempts,
-public-output rendering, retention projection, and terminal framework work then use the shared
-started-before-run authority path. `RunCompleted` is derived from the sealed `CompleteRun`
+availability, capability availability, and binding digest before minting the single-payload
+`RunAdmitted` commit. No state attempt, cell production, artifact-reference payload, or retention-ref
+payload is appended during admission. Ordinary state attempts, public-output rendering, retention
+projection, and terminal framework work then use the shared started-before-run authority path.
+`RunCompleted` is derived from the sealed `CompleteRun`
 framework state for successful public-output completion, or from `ResolveSagaTerminal` when the
 saga terminal path resolves compensation, manual resolution, or failure without an AC/DC claim.
 

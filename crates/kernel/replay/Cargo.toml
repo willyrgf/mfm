@@ -15,6 +15,7 @@ name = "mfm_replay"
 path = "src/lib.rs"
 
 [dependencies]
+mfm-canonical = { path = "../canonical" }
 mfm-capabilities = { path = "../capabilities" }
 mfm-certify = { path = "../certify" }
 mfm-events = { path = "../events" }
@@ -23,6 +24,7 @@ mfm-manual-auth = { path = "../manual-auth" }
 mfm-runtime = { path = "../runtime" }
 mfm-spec = { path = "../spec" }
 mfm-store = { path = "../store" }
+serde_json = { version = "1.0" }
 
 [dev-dependencies]
 k256 = { version = "0.13.0", features = ["ecdsa"] }

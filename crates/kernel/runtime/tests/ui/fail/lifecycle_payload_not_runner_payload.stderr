@@ -1,8 +1,8 @@
-error[E0599]: no variant, associated function, or constant named `RunStarted` found for enum `RunnerEventPayload` in the current scope
+error[E0599]: no variant, associated function, or constant named `RunAdmitted` found for enum `RunnerEventPayload` in the current scope
   --> tests/ui/fail/lifecycle_payload_not_runner_payload.rs:33:33
    |
-33 |     let _ = RunnerEventPayload::RunStarted(run_started());
-   |                                 ^^^^^^^^^^ variant, associated function, or constant not found in `RunnerEventPayload`
+33 |     let _ = RunnerEventPayload::RunAdmitted(run_admitted());
+   |                                 ^^^^^^^^^^^ variant, associated function, or constant not found in `RunnerEventPayload`
 
 error[E0599]: no variant, associated function, or constant named `StateAttemptStarted` found for enum `RunnerEventPayload` in the current scope
   --> tests/ui/fail/lifecycle_payload_not_runner_payload.rs:34:33

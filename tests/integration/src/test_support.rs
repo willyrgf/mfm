@@ -315,7 +315,7 @@ fn test_scheduler(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypedCertifiedSliceCoverage {
     typed_spec_hash_persisted: bool,
-    run_started_v1_present: bool,
+    run_admitted_v1_present: bool,
     seed_material_persisted: bool,
     cell_events_count: u64,
     side_effect_ledger_complete: bool,
@@ -338,7 +338,7 @@ impl TypedCertifiedSliceCoverage {
     fn validate_required_contract(&self) -> Result<(), String> {
         let true_keys = [
             ("typed_spec_hash_persisted", self.typed_spec_hash_persisted),
-            ("run_started_v1_present", self.run_started_v1_present),
+            ("run_admitted_v1_present", self.run_admitted_v1_present),
             ("seed_material_persisted", self.seed_material_persisted),
             (
                 "side_effect_ledger_complete",
@@ -444,9 +444,9 @@ pub async fn typed_certified_slice_coverage() -> Result<TypedCertifiedSliceCover
 
     let summary = TypedCertifiedSliceCoverage {
         typed_spec_hash_persisted: typed_spec_hash_persisted(&run, &stream),
-        run_started_v1_present: stream
+        run_admitted_v1_present: stream
             .iter()
-            .any(|event| matches!(event.payload(), events::KernelEventPayload::RunStarted(_))),
+            .any(|event| matches!(event.payload(), events::KernelEventPayload::RunAdmitted(_))),
         seed_material_persisted: seed_material_persisted(&run, &projection),
         cell_events_count: count_payloads(&stream, |payload| {
             matches!(payload, events::KernelEventPayload::CellProduced(_))
@@ -1167,10 +1167,13 @@ fn append_compensated_tail_failure(
             ..store::CommitPreconditions::default()
         },
     )?;
+    let started_commit = store::PreparedCommit::<store::StateAttemptStarted>::new(
+        started_request,
+        store::CommitArtifactEvidenceSet::empty(),
+    )
+    .map_err(display_error)?;
     store
-        .append_prepared_typed_commit(
-            store::PreparedTypedCommit::new(started_request, Vec::new()).map_err(display_error)?,
-        )
+        .append_prepared_commit_plan(started_commit.into())
         .map_err(display_error)?;
     let failed_request = typed_commit_request(
         fixture.run_id.clone(),
@@ -1204,10 +1207,13 @@ fn append_compensated_tail_failure(
             ..store::CommitPreconditions::default()
         },
     )?;
+    let failed_commit = store::PreparedCommit::<store::AttemptTerminal>::new(
+        failed_request,
+        store::CommitArtifactEvidenceSet::empty(),
+    )
+    .map_err(display_error)?;
     store
-        .append_prepared_typed_commit(
-            store::PreparedTypedCommit::new(failed_request, Vec::new()).map_err(display_error)?,
-        )
+        .append_prepared_commit_plan(failed_commit.into())
         .map_err(display_error)?;
     Ok(())
 }
@@ -1756,18 +1762,14 @@ fn compensated_reference_fixture() -> Result<CompensatedReferenceFixture, String
 
 fn typed_spec_hash_persisted(run: &ReferenceRun, stream: &[store::KernelEventEnvelope]) -> bool {
     stream.iter().any(|event| match event.payload() {
-        events::KernelEventPayload::RunStarted(payload) => {
+        events::KernelEventPayload::RunAdmitted(payload) => {
+            let spec_hash = SpecHash::from_digest(
+                payload.spec_artifact.content_digest.algorithm(),
+                *payload.spec_artifact.content_digest.digest(),
+            );
             payload.spec_hash == *run.fixture.runtime_spec.spec_hash()
-                && stream
-                    .iter()
-                    .any(|retention_event| match retention_event.payload() {
-                        events::KernelEventPayload::RetentionRefsAppended(retention) => {
-                            retention.refs.iter().any(|retention_ref| {
-                                retention_ref.role == events::ArtifactRole::TypedExecutionSpec
-                            })
-                        }
-                        _ => false,
-                    })
+                && payload.spec_hash == spec_hash
+                && payload.spec_artifact.role == events::ArtifactRole::TypedExecutionSpec
         }
         _ => false,
     })
@@ -1902,8 +1904,13 @@ fn duplicate_submit_rejected(run: &mut ReferenceRun) -> Result<bool, String> {
             ..store::CommitPreconditions::default()
         },
     )?;
-    let result = store::PreparedTypedCommit::new(request, vec![evidence])
-        .and_then(|commit| run.store.append_prepared_typed_commit(commit));
+    let artifacts = store::CommitArtifactEvidenceSet::new(
+        request.required_artifacts().to_vec(),
+        vec![evidence],
+    )
+    .map_err(display_error)?;
+    let result = store::PreparedCommit::<store::SideEffectTerminal>::new(request, artifacts)
+        .and_then(|commit| run.store.append_prepared_commit_plan(commit.into()));
     Ok(matches!(
         result,
         Err(store::StoreError::LogicalKeyConflict { .. })
@@ -1937,14 +1944,14 @@ async fn replay_without_live_capabilities_for(
     run_id: &RunId,
 ) -> Result<(), String> {
     let stream = store.load_run_stream(run_id);
-    let run_started = stream
+    let run_admitted = stream
         .iter()
         .find_map(|event| match event.payload() {
-            events::KernelEventPayload::RunStarted(payload) => Some(payload.clone()),
+            events::KernelEventPayload::RunAdmitted(payload) => Some(payload.clone()),
             _ => None,
         })
-        .ok_or_else(|| "missing RunStarted for replay fixture".to_owned())?;
-    let committed = store::CommittedRunStream::from_events(run_started.run_id.clone(), stream)
+        .ok_or_else(|| "missing RunAdmitted for replay fixture".to_owned())?;
+    let committed = store::CommittedRunStream::from_events(run_admitted.run_id.clone(), stream)
         .map_err(display_error)?;
     let retained_artifacts =
         store::VerifiedRunArtifactStore::from_committed_stream(&committed, artifacts)
@@ -2223,7 +2230,7 @@ fn replay_artifacts_for(
     }
     for event in stream {
         match event.payload() {
-            events::KernelEventPayload::RunStarted(payload) => {
+            events::KernelEventPayload::RunAdmitted(payload) => {
                 for seed in &payload.seed_cells {
                     insert_artifact(&mut artifacts, seed_artifact(seed));
                 }
@@ -2361,9 +2368,9 @@ fn referenced_artifacts_from_stream(
 ) -> Result<Vec<store::ArtifactEvidenceRef>, String> {
     let (start_seq, start_commit_key) = stream
         .iter()
-        .find(|event| matches!(event.payload(), events::KernelEventPayload::RunStarted(_)))
+        .find(|event| matches!(event.payload(), events::KernelEventPayload::RunAdmitted(_)))
         .map(|event| (event.seq(), event.commit_key().clone()))
-        .ok_or_else(|| "missing RunStarted event".to_owned())?;
+        .ok_or_else(|| "missing RunAdmitted event".to_owned())?;
     let mut artifacts = Vec::new();
     let mut config_artifacts = Vec::new();
     let mut index = 0;
@@ -2392,7 +2399,7 @@ fn referenced_artifacts_from_stream(
                     }
                     if event.seq() != start_seq || event.commit_key() != &start_commit_key {
                         return Err(
-                            "typed config artifact reference was outside RunStarted commit"
+                            "typed config artifact reference was outside RunAdmitted commit"
                                 .to_owned(),
                         );
                     }
@@ -2819,9 +2826,13 @@ fn append_attempt_started(
             ..store::CommitPreconditions::default()
         },
     )?;
-    let commit = store::PreparedTypedCommit::new(request, Vec::new()).map_err(display_error)?;
+    let commit = store::PreparedCommit::<store::StateAttemptStarted>::new(
+        request,
+        store::CommitArtifactEvidenceSet::empty(),
+    )
+    .map_err(display_error)?;
     store
-        .append_prepared_typed_commit(commit)
+        .append_prepared_commit_plan(commit.into())
         .map_err(display_error)?;
     Ok(attempt_id)
 }
@@ -2903,6 +2914,7 @@ fn run_start_evidence_for(
             .map_err(display_error)?,
         source_revision: events::SourceRevision::new("typed-certified-slice")
             .map_err(display_error)?,
+        launched_at_unix_ms: 1_700_000_000_000,
         adapter_executables: vec![executable("deterministic-local-adapter")?],
         seed_cells: seed_cells
             .into_iter()
@@ -3936,8 +3948,8 @@ mod tests {
     ) -> Vec<store::KernelEventEnvelope> {
         let start = stream
             .iter()
-            .position(|event| matches!(event.payload(), events::KernelEventPayload::RunStarted(_)))
-            .expect("RunStarted event");
+            .position(|event| matches!(event.payload(), events::KernelEventPayload::RunAdmitted(_)))
+            .expect("RunAdmitted event");
         let seq = stream[start].seq();
         let commit_key = stream[start].commit_key().clone();
         let mut end = start;

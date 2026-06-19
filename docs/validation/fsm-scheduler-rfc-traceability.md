@@ -43,21 +43,23 @@ Acceptance tests: keep the existing store/replay/Postgres old-stream rejection t
 
 Owner commit: already implemented.
 
-## Requirement: BootstrapRun remains certified and admission-owned
+## Requirement: RunAdmitted is the only admission root
 
-RFC: `RFC_REFACTOR_FSM_SCHEDULER.md:34-38`, `261-285`, `287-310`, `936-939`, `1065-1080`, `1245-1247`
+RFC: superseded by the flat admission migration.
 
 Status: met
 
-Expected behavior: run genesis is a pre-FSM admission boundary. `BootstrapRun` remains in the
-certified graph and the `RunStarted` wire shape plus bundled bootstrap evidence are preserved.
+Expected behavior: run admission is a pre-FSM boundary represented by exactly one `RunAdmitted`
+event. The certified graph contains only real executable and terminal framework nodes; admission
+does not append synthetic attempts, receipt cells, artifact-reference payloads, or retention-ref
+payloads.
 
 Expected module/API shape: `RunAdmissionLifecycle` prepares and verifies run launch authority;
-certification topology is not changed by this RFC.
+the scheduler's first candidate after admission is a real certified node.
 
 Required tests:
 - run admission atomicity
-- bootstrap remains certified
+- admission appends exactly one root payload
 - admission failure does not append semantic events
 
 Current evidence:
@@ -65,16 +67,16 @@ Current evidence:
   `crates/kernel/runtime/src/admission.rs:44`
 - launch preparation validates staged spec, certificate, config, and seed evidence:
   `crates/kernel/runtime/src/commit.rs:141`
-- launch still uses the certified bootstrap node and bundled bootstrap attempt evidence:
-  `crates/kernel/runtime/src/commit.rs:177`
-- design documents bootstrap as run admission while preserving certified topology:
+- launch commits exactly one `RunAdmitted` root payload:
+  `crates/kernel/runtime/src/commit.rs`
+- design documents run admission as a single root event outside certified topology:
   `docs/design.md:390`
 
 Blocker: none currently known.
 
 Required fix: none.
 
-Acceptance tests: keep run launch/admission and bootstrap atomicity tests green.
+Acceptance tests: keep run launch/admission atomicity tests green.
 
 Owner commit: already implemented.
 
@@ -101,7 +103,7 @@ Current evidence:
   `crates/kernel/runtime/src/admission.rs:48`
 - `admitted_run_authority` rebuilds a verified `RuntimeRunView` after append:
   `crates/kernel/runtime/src/admission.rs:66`
-- scheduler start paths reload admitted authority after genesis append:
+- scheduler start paths reload admitted authority after admission append:
   `crates/kernel/runtime/src/scheduler.rs:108`
 - `VerifiedRunContextLoader` combines committed stream authority with bound context:
   `crates/kernel/runtime/src/history.rs:159`
@@ -334,8 +336,8 @@ RFC: `RFC_REFACTOR_FSM_SCHEDULER.md:414-463`, `919-939`, `1131-1143`
 Status: met
 
 Expected behavior: every semantic attempt appends `StateAttemptStarted` before materialization,
-runner execution, validation, artifact staging, or terminal commit planning. Bootstrap/genesis is the
-RFC-preserved exception.
+runner execution, validation, artifact staging, or terminal commit planning. Run admission is not a
+semantic attempt.
 
 Expected module/API shape: attempt lifecycle has selected/started/invoked/terminal planned/terminal
 committed phases.
@@ -662,7 +664,8 @@ Expected behavior: post-admission framework attempts append `StateAttemptStarted
 mid-attempt, and recompute terminal evidence from current verified history.
 
 Expected module/API shape: framework lifecycle handles `PublicOutputRender`,
-`ProjectRetentionManifest`, `CompleteRun`, and `ResolveSagaTerminal`; bootstrap remains admission.
+`ProjectRetentionManifest`, `CompleteRun`, and `ResolveSagaTerminal`; run admission remains outside
+framework dispatch.
 
 Required tests:
 - open public-output render re-renders from verified history
@@ -1132,14 +1135,13 @@ Current evidence:
   `docs/design.md:440`
 - CLI/REST docs cover run mode and attempt dispositions:
   `bin/cli/README.md:341`, `bin/rest-api/README.md:254`
-- design documents `RunAdmissionLifecycle`, legacy bundled bootstrap evidence, and post-admission
-  framework runners:
+- design documents `RunAdmissionLifecycle`, single-root admission, and post-admission framework
+  runners:
   `docs/design.md`
-- runtime README documents `RunAdmissionLifecycle`, legacy bundled bootstrap evidence, and
-  `RunCompleted` authority from `CompleteRun` or `ResolveSagaTerminal`:
+- runtime README documents `RunAdmissionLifecycle` and `RunCompleted` authority from `CompleteRun`
+  or `ResolveSagaTerminal`:
   `crates/kernel/runtime/README.md`
-- architecture namespace contract rejects the stale "executes the sealed BootstrapRun genesis
-  state" wording:
+- architecture namespace contract rejects stale synthetic-admission wording:
   `tests/integration/tests/architecture_namespace_contract.rs`
 
 Blocker: none currently known.
@@ -1147,12 +1149,12 @@ Blocker: none currently known.
 Required fix: none.
 
 Acceptance tests:
-- docs guard test fails on stale bootstrap-only and complete-run-only wording
-- runtime test or existing contract proves direct `BootstrapRun` runner invocation is invalid while
-  admission launch succeeds
+- docs guard test fails on stale admission-only and complete-run-only wording
+- runtime tests prove admission launch succeeds with exactly one `RunAdmitted` root payload and no
+  synthetic admission attempt
 
 Owner commit:
-- docs: correct run admission and bootstrap design contract
+- docs: publish flat run admission model
 
 ## Requirement: final validation evidence is recorded
 

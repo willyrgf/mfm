@@ -287,10 +287,26 @@ async fn append_typed_commit(
     request: store::TypedCommitRequest,
 ) {
     let admitted_artifacts = request.required_artifacts().to_vec();
-    let commit =
-        store::PreparedTypedCommit::new(request, admitted_artifacts).expect("prepared commit");
+    let artifacts = store::CommitArtifactEvidenceSet::new(
+        request.required_artifacts().to_vec(),
+        admitted_artifacts,
+    )
+    .expect("artifact evidence set");
+    let plan = if request
+        .payloads()
+        .iter()
+        .all(|payload| matches!(payload, events::KernelEventPayload::StateAttemptStarted(_)))
+    {
+        store::PreparedCommit::<store::StateAttemptStarted>::new(request, artifacts)
+            .expect("prepared attempt-start commit")
+            .into()
+    } else {
+        store::PreparedCommit::<store::AttemptTerminal>::new(request, artifacts)
+            .expect("prepared attempt-terminal commit")
+            .into()
+    };
     store
-        .append_prepared_typed_commit(commit)
+        .append_prepared_commit_plan(plan)
         .await
         .expect("append typed commit");
 }

@@ -40,11 +40,11 @@ impl RunAdmissionAuthority {
 /// Run-start admission lifecycle.
 ///
 /// Admission is the pre-FSM boundary that turns certified spec authority and verified launch
-/// evidence into a prepared append-only genesis commit.
+/// evidence into a prepared append-only admission commit.
 pub struct RunAdmissionLifecycle;
 
 impl RunAdmissionLifecycle {
-    /// Prepares sealed genesis launch authority for a certified and bound run.
+    /// Prepares sealed admission launch authority for a certified and bound run.
     pub fn prepare_run_launch(
         runtime_spec: &CertifiedRuntimeSpec,
         run_id: RunId,
@@ -58,7 +58,7 @@ impl RunAdmissionLifecycle {
             run_id,
             evidence,
             expected_next_seq,
-            bound_context.runner_executables().to_vec(),
+            bound_context,
         )
     }
 
@@ -71,7 +71,7 @@ impl RunAdmissionLifecycle {
     ) -> Result<RunAdmissionAuthority> {
         bound_context.validate_admission_authority(runtime_spec)?;
         let view = RuntimeRunView::from_stream(runtime_spec, run_id, stream)?;
-        bound_context.validate_run_started_executables(&view.run_started)?;
+        bound_context.validate_run_admitted_binding(&view.run_admitted)?;
         Ok(RunAdmissionAuthority {
             run_id: run_id.clone(),
             spec_hash: runtime_spec.spec_hash().clone(),

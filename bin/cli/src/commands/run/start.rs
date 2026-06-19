@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::commands::result::{CommandError, CommandOutput, CommandResult};
 use crate::commands::CommandContext;
@@ -32,15 +33,15 @@ pub(crate) struct StartArgs {
     #[arg(long = "config", value_name = "SCHEMA_ID=PATH")]
     pub configs: Vec<ConfigInputArg>,
 
-    /// Framework version evidence recorded in RunStarted.
+    /// Framework version evidence recorded in RunAdmitted.
     #[arg(long, default_value = "mfm.cli.typed.v1")]
     pub framework_version: String,
 
-    /// Source revision evidence recorded in RunStarted.
+    /// Source revision evidence recorded in RunAdmitted.
     #[arg(long, env = "MFM_SOURCE_REVISION", default_value = "unknown")]
     pub source_revision: String,
 
-    /// Scheduler drive policy after the typed RunStarted event is committed.
+    /// Scheduler drive policy after the typed RunAdmitted event is committed.
     #[arg(long, value_enum, default_value_t = TypedDriveArg::UntilBlocked)]
     pub drive: TypedDriveArg,
 
@@ -155,6 +156,7 @@ async fn execute_internal(args: &StartArgs) -> CommandResult<TypedRunResponse> {
             run_id,
             framework_version: &args.framework_version,
             source_revision: &args.source_revision,
+            launched_at_unix_ms: launch_unix_ms()?,
             drive: drive_mode(args.drive),
         },
         config_inputs,
@@ -167,6 +169,24 @@ async fn execute_internal(args: &StartArgs) -> CommandResult<TypedRunResponse> {
         .await
         .map_err(command_error_from_app_error)?;
     Ok(CommandOutput::new(response))
+}
+
+fn launch_unix_ms() -> Result<u64, CommandError> {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| {
+            CommandError::new(
+                "LaunchClockUnavailable",
+                format!("system clock is before Unix epoch: {error}"),
+            )
+        })?
+        .as_millis();
+    u64::try_from(millis).map_err(|_| {
+        CommandError::new(
+            "LaunchClockOverflow",
+            "current Unix timestamp in milliseconds does not fit in u64",
+        )
+    })
 }
 
 async fn read_canonical_json_file(

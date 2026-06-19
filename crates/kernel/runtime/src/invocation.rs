@@ -415,7 +415,7 @@ pub struct MaterializedCell {
 /// Materialized terminal cell evidence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MaterializedCellTerminal {
-    /// Seed material from `RunStarted`.
+    /// Seed material from `RunAdmitted`.
     Seed {
         /// Seed id.
         seed_id: mfm_ids::SeedId,

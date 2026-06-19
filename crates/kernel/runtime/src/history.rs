@@ -7,18 +7,16 @@ use mfm_manual_auth::manual_authorization_proof_schema_id;
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 
-use crate::artifacts::{artifact_role_name, staged_artifact_binding_kind, verify_artifact_bytes};
+use crate::artifacts::{artifact_role_name, staged_artifact_binding_kind};
 use crate::binding::{BoundRuntimeContext, BoundRuntimeContextLoader};
 use crate::commit::SealedTerminalCommitValidation;
 use crate::error::async_store_error;
 use crate::framework::{
-    bootstrap_run_receipt_artifact, build_retention_manifest_artifact_with_producer,
-    certified_bootstrap_run_node, certified_complete_run_node,
+    build_retention_manifest_artifact_with_producer, certified_complete_run_node,
     certified_resolve_saga_terminal_node, certified_retention_manifest_node,
     complete_run_receipt_json, projected_retention_manifest, public_output_receipt_digest,
     public_output_rendered_digest, resolve_saga_terminal_receipt_json,
     retention_manifest_receipt_json, run_completion_evidence, saga_terminal_completion_outcome,
-    GenesisContext,
 };
 use crate::recovery::AttemptRecoveryLifecycle;
 use crate::side_effects::{
@@ -27,8 +25,7 @@ use crate::side_effects::{
     validate_historical_side_effect_payload, HistoricalSideEffectLedger,
 };
 use crate::{
-    attempt_id, config_artifact_reference_payloads, config_ref_key, require_adapter,
-    require_capability, retention_ref_for_artifact, validate_public_output,
+    config_ref_key, require_adapter, require_capability, validate_public_output,
     validate_public_output_render_node, CertifiedRuntimeCapabilities, CertifiedRuntimeSpec,
     MaterializedCell, MaterializedCellTerminal, MaterializedInputNode, MaterializedInputs,
     NamedMaterializedInput, RecordedFact, RecordedFacts, Result, RuntimeError,
@@ -38,7 +35,7 @@ use crate::{
 pub(crate) struct RuntimeRunView {
     pub(crate) stream: Vec<store::KernelEventEnvelope>,
     pub(crate) projections: store::ProjectionSnapshot,
-    pub(crate) run_started: events::RunStarted,
+    pub(crate) run_admitted: events::RunAdmitted,
     pub(crate) seed_cells: BTreeMap<CellId, events::SeedCellRef>,
     pub(crate) config_artifacts: BTreeMap<String, store::ArtifactEvidenceRef>,
     pub(crate) artifact_refs: BTreeMap<ArtifactId, CommittedArtifactReference>,
@@ -216,7 +213,7 @@ impl VerifiedRunContextLoader {
     ) -> Result<VerifiedRunContext> {
         let bound_context = self.runtime_contexts.load(runtime_spec)?;
         let view = RuntimeRunView::from_committed_stream(runtime_spec, &committed)?;
-        bound_context.validate_run_started_executables(&view.run_started)?;
+        bound_context.validate_run_admitted_binding(&view.run_admitted)?;
         Ok(VerifiedRunContext {
             run_id: committed.run_id().clone(),
             spec_hash: runtime_spec.spec_hash().clone(),
@@ -341,27 +338,27 @@ impl RuntimeRunView {
         let stream = committed.events();
         let history = RuntimeCommittedHistory::from_committed_stream(committed);
         let projections = committed.projection().clone();
-        let mut run_started = None;
+        let mut run_admitted = None;
         for event in stream {
             match event.payload() {
-                events::KernelEventPayload::RunStarted(payload) => {
+                events::KernelEventPayload::RunAdmitted(payload) => {
                     if &payload.run_id != committed.run_id() {
                         return Err(RuntimeError::InvalidRunStream(format!(
-                            "run stream contains RunStarted for {} while executing {}",
+                            "run stream contains RunAdmitted for {} while executing {}",
                             payload.run_id,
                             committed.run_id()
                         )));
                     }
                     if &payload.spec_hash != runtime_spec.spec_hash() {
                         return Err(RuntimeError::InvalidRunStream(format!(
-                            "RunStarted spec hash {} does not match certified {}",
+                            "RunAdmitted spec hash {} does not match certified {}",
                             payload.spec_hash,
                             runtime_spec.spec_hash()
                         )));
                     }
-                    if run_started.replace(payload.clone()).is_some() {
+                    if run_admitted.replace(payload.clone()).is_some() {
                         return Err(RuntimeError::InvalidRunStream(
-                            "run stream contains multiple RunStarted events".to_owned(),
+                            "run stream contains multiple RunAdmitted events".to_owned(),
                         ));
                     }
                 }
@@ -375,9 +372,9 @@ impl RuntimeRunView {
                 _ => {}
             }
         }
-        let Some(run_started) = run_started else {
+        let Some(run_admitted) = run_admitted else {
             return Err(RuntimeError::InvalidRunStream(
-                "run has not started with certified RunStarted evidence".to_owned(),
+                "run has not started with certified RunAdmitted evidence".to_owned(),
             ));
         };
         validate_historical_run_stream(
@@ -387,13 +384,14 @@ impl RuntimeRunView {
             &projections,
             &history,
         )?;
-        let seed_cells = validate_seed_cells(runtime_spec, &run_started.seed_cells)?;
-        let config_artifacts = config_artifacts_from_stream(runtime_spec, stream)?;
+        let seed_cells = validate_seed_cells(runtime_spec, &run_admitted.seed_cells)?;
+        let config_artifacts =
+            config_artifacts_from_run_admitted(runtime_spec, &run_admitted.config_artifacts)?;
         let artifact_refs = artifact_refs_from_stream(stream)?;
         Ok(Self {
             stream: stream.to_vec(),
             projections,
-            run_started,
+            run_admitted: (*run_admitted).clone(),
             seed_cells,
             config_artifacts,
             artifact_refs,
@@ -519,7 +517,7 @@ fn materialize_cell(
         spec::CellProducer::Seed(seed_id) => {
             let seed = view.seed_cells.get(&cell.cell_id).ok_or_else(|| {
                 RuntimeError::InputMaterialization(format!(
-                    "seed cell {} has no RunStarted evidence",
+                    "seed cell {} has no RunAdmitted evidence",
                     cell.cell_id
                 ))
             })?;
@@ -679,7 +677,7 @@ pub(crate) fn validate_seed_cells(
     for declared in &runtime_spec.spec().seeds {
         let seed = by_seed.get(&declared.seed_id).ok_or_else(|| {
             RuntimeError::InvalidRunStream(format!(
-                "missing RunStarted seed evidence for {}",
+                "missing RunAdmitted seed evidence for {}",
                 declared.seed_id
             ))
         })?;
@@ -689,14 +687,14 @@ pub(crate) fn validate_seed_cells(
             || seed.semantic_type_id != declared.semantic_type_id
         {
             return Err(RuntimeError::InvalidRunStream(format!(
-                "RunStarted seed {} metadata does not match certified seed",
+                "RunAdmitted seed {} metadata does not match certified seed",
                 declared.seed_id
             )));
         }
         if let Some(required_digest) = &declared.required_digest {
             if &seed.digest != required_digest {
                 return Err(RuntimeError::InvalidRunStream(format!(
-                    "RunStarted seed {} digest does not match certified required digest",
+                    "RunAdmitted seed {} digest does not match certified required digest",
                     declared.seed_id
                 )));
             }
@@ -707,14 +705,14 @@ pub(crate) fn validate_seed_cells(
             || seed.seed_artifact.content_digest != seed.digest
         {
             return Err(RuntimeError::InvalidRunStream(format!(
-                "RunStarted seed {} artifact evidence does not match certified seed",
+                "RunAdmitted seed {} artifact evidence does not match certified seed",
                 declared.seed_id
             )));
         }
     }
     if by_seed.len() != runtime_spec.spec().seeds.len() {
         return Err(RuntimeError::InvalidRunStream(
-            "RunStarted contains seed evidence not certified by the spec".to_owned(),
+            "RunAdmitted contains seed evidence not certified by the spec".to_owned(),
         ));
     }
     Ok(by_cell)
@@ -731,7 +729,7 @@ fn validate_historical_run_stream(
     let mut active_attempts = BTreeSet::<(NodeId, AttemptId)>::new();
     let mut side_effect_ledgers =
         BTreeMap::<events::SideEffectLedgerKey, HistoricalSideEffectLedger>::new();
-    let mut seen_run_started = false;
+    let mut seen_run_admitted = false;
     let mut produced_public_output = None::<events::PublicOutputCompletionEvidence>;
     let mut retention_manifest_projected_seq = None::<store::StreamSeq>;
     let mut completed = false;
@@ -741,21 +739,21 @@ fn validate_historical_run_stream(
                 "run stream contains events after RunCompleted".to_owned(),
             ));
         }
-        if !seen_run_started
-            && !matches!(event.payload(), events::KernelEventPayload::RunStarted(_))
+        if !seen_run_admitted
+            && !matches!(event.payload(), events::KernelEventPayload::RunAdmitted(_))
         {
             return Err(RuntimeError::InvalidRunStream(
-                "run stream events appeared before RunStarted".to_owned(),
+                "run stream events appeared before RunAdmitted".to_owned(),
             ));
         }
         match event.payload() {
-            events::KernelEventPayload::RunStarted(payload) => {
-                if seen_run_started {
+            events::KernelEventPayload::RunAdmitted(payload) => {
+                if seen_run_admitted {
                     return Err(RuntimeError::InvalidRunStream(
-                        "run stream contains multiple RunStarted events".to_owned(),
+                        "run stream contains multiple RunAdmitted events".to_owned(),
                     ));
                 }
-                seen_run_started = true;
+                seen_run_admitted = true;
                 for cell_id in validate_seed_cells(runtime_spec, &payload.seed_cells)?.into_keys() {
                     available_cells.insert(cell_id);
                 }
@@ -1033,7 +1031,7 @@ fn validate_historical_run_stream(
         }
     }
     validate_atomic_terminal_pairs(runtime_spec, stream)?;
-    validate_historical_bootstrap_run_batch(runtime_spec, run_id, stream)?;
+    validate_historical_run_admission_batch(runtime_spec, run_id, stream)?;
     validate_historical_retention_ref_batches(runtime_spec, stream, history)?;
     validate_historical_retention_manifest_batches(runtime_spec, stream, history)?;
     validate_historical_terminal_tail(runtime_spec, run_id, stream)?;
@@ -1272,20 +1270,19 @@ fn validate_historical_retention_ref_batches(
     Ok(())
 }
 
-pub(crate) fn validate_historical_bootstrap_run_batch(
+pub(crate) fn validate_historical_run_admission_batch(
     runtime_spec: &CertifiedRuntimeSpec,
     run_id: &RunId,
     stream: &[store::KernelEventEnvelope],
 ) -> Result<()> {
     let Some(first) = stream.first() else {
         return Err(RuntimeError::InvalidRunStream(
-            "run stream is missing sealed BootstrapRun genesis commit".to_owned(),
+            "run stream is missing RunAdmitted root event".to_owned(),
         ));
     };
     if first.seq() != store::StreamSeq::FIRST || first.ordinal() != store::CommitOrdinal::new(0) {
         return Err(RuntimeError::InvalidRunStream(
-            "RunStarted must be the first event in the sealed BootstrapRun genesis commit"
-                .to_owned(),
+            "RunAdmitted must be the first event in the run stream".to_owned(),
         ));
     }
     let first_seq = first.seq();
@@ -1297,265 +1294,61 @@ pub(crate) fn validate_historical_bootstrap_run_batch(
     {
         end += 1;
     }
-    validate_bootstrap_run_commit_payload_set(runtime_spec, run_id, &stream[..end])
+    if end != 1 {
+        return Err(RuntimeError::InvalidRunStream(
+            "RunAdmitted commit must contain exactly one root event".to_owned(),
+        ));
+    }
+    let events::KernelEventPayload::RunAdmitted(run_admitted) = first.payload() else {
+        return Err(RuntimeError::InvalidRunStream(
+            "run stream must start with RunAdmitted".to_owned(),
+        ));
+    };
+    validate_run_admitted_matches_certified_spec(runtime_spec, run_id, run_admitted)
 }
 
-fn validate_bootstrap_run_commit_payload_set(
+fn validate_run_admitted_matches_certified_spec(
     runtime_spec: &CertifiedRuntimeSpec,
     run_id: &RunId,
-    commit: &[store::KernelEventEnvelope],
+    run_admitted: &events::RunAdmitted,
 ) -> Result<()> {
-    let run_started = match commit.first().map(store::KernelEventEnvelope::payload) {
-        Some(events::KernelEventPayload::RunStarted(payload)) => payload,
-        _ => {
-            return Err(RuntimeError::InvalidRunStream(
-                "sealed BootstrapRun genesis commit must start with RunStarted".to_owned(),
-            ));
-        }
-    };
-    validate_run_started_matches_certified_spec(runtime_spec, run_id, run_started)?;
-
-    let config_count = runtime_spec.spec().config_refs.len();
-    let expected_len = config_count + 6;
-    if commit.len() != expected_len {
-        return Err(RuntimeError::InvalidRunStream(
-            "sealed BootstrapRun genesis commit has unexpected payload count".to_owned(),
-        ));
-    }
-
-    let mut config_artifacts = Vec::with_capacity(config_count);
-    for event in &commit[1..1 + config_count] {
-        let events::KernelEventPayload::ArtifactReferenced(payload) = event.payload() else {
-            return Err(RuntimeError::InvalidRunStream(
-                "sealed BootstrapRun genesis commit has non-config payload in config slot"
-                    .to_owned(),
-            ));
-        };
-        if payload.spec_hash != *runtime_spec.spec_hash()
-            || payload.node_id.is_some()
-            || payload.attempt_id.is_some()
-            || payload.artifact_ref.role != events::ArtifactRole::TypedConfig
-        {
-            return Err(RuntimeError::InvalidRunStream(
-                "sealed BootstrapRun genesis commit has invalid config artifact reference"
-                    .to_owned(),
-            ));
-        }
-        config_artifacts.push(store_artifact_from_event_ref(
-            &payload.artifact_ref,
-            None,
-            None,
-        ));
-    }
-    let config_artifacts = validate_config_artifacts(runtime_spec, config_artifacts)?;
-    let expected_config_payloads =
-        config_artifact_reference_payloads(runtime_spec.spec_hash(), &config_artifacts)?;
-    for (event, expected) in commit[1..1 + config_count]
-        .iter()
-        .zip(expected_config_payloads)
-    {
-        if event.payload() != &expected {
-            return Err(RuntimeError::InvalidRunStream(
-                "sealed BootstrapRun genesis commit config references do not match certified config refs"
-                    .to_owned(),
-            ));
-        }
-    }
-
-    let bootstrap_node = certified_bootstrap_run_node(runtime_spec)?;
-    let bootstrap_output_cell =
-        runtime_spec
-            .cell(&bootstrap_node.output_cell)
-            .ok_or_else(|| {
-                RuntimeError::InvalidSpec(format!(
-                    "bootstrap lifecycle node {} output cell {} is missing",
-                    bootstrap_node.node_id, bootstrap_node.output_cell
-                ))
-            })?;
-    let bootstrap_attempt_id =
-        attempt_id(run_id, runtime_spec.spec_hash(), &bootstrap_node.node_id, 1)?;
-    let genesis = GenesisContext {
-        runtime_spec,
-        run_id,
-        node: bootstrap_node,
-        output_cell: bootstrap_output_cell,
-        attempt_id: &bootstrap_attempt_id,
-        run_started,
-        config_artifacts: &config_artifacts,
-    };
-    let (bootstrap_receipt_bytes, bootstrap_receipt_artifact) =
-        bootstrap_run_receipt_artifact(&genesis)?;
-    let expected_receipt_ref = event_artifact_ref_from_store(&bootstrap_receipt_artifact)?;
-    let expected_refs = run_started_retention_refs(
-        runtime_spec,
-        run_started,
-        &config_artifacts,
-        &bootstrap_receipt_artifact,
-    )?;
-
-    let mut pos = 1 + config_count;
-    let expected_start =
-        events::KernelEventPayload::StateAttemptStarted(events::StateAttemptStarted {
-            spec_hash: runtime_spec.spec_hash().clone(),
-            node_id: bootstrap_node.node_id.clone(),
-            attempt_id: bootstrap_attempt_id.clone(),
-            attempt_no: 1,
-            state_kind: bootstrap_node.state_kind.clone(),
-            state_version: bootstrap_node.state_version.clone(),
-        });
-    if commit[pos].payload() != &expected_start {
-        return Err(RuntimeError::InvalidRunStream(
-            "sealed BootstrapRun genesis commit lacks matching StateAttemptStarted".to_owned(),
-        ));
-    }
-    pos += 1;
-
-    let expected_cell = events::KernelEventPayload::CellProduced(events::CellProduced {
-        spec_hash: runtime_spec.spec_hash().clone(),
-        node_id: bootstrap_node.node_id.clone(),
-        cell_id: bootstrap_node.output_cell.clone(),
-        scope_id: bootstrap_output_cell.scope_id.clone(),
-        attempt_id: bootstrap_attempt_id.clone(),
-        semantic_type_id: bootstrap_output_cell.semantic_type_id.clone(),
-        schema_id: bootstrap_output_cell.schema_id.clone(),
-        value_lineage: bootstrap_output_cell.value_lineage.clone(),
-        artifact_id: bootstrap_receipt_artifact.artifact_id.clone(),
-        content_digest: bootstrap_receipt_artifact.digest.clone(),
-        producer_state_kind: Some(bootstrap_node.state_kind.clone()),
-        producer_state_version: Some(bootstrap_node.state_version.clone()),
-    });
-    if commit[pos].payload() != &expected_cell {
-        return Err(RuntimeError::InvalidRunStream(
-            "sealed BootstrapRun genesis commit lacks matching receipt cell".to_owned(),
-        ));
-    }
-    pos += 1;
-
-    let expected_completed =
-        events::KernelEventPayload::StateAttemptCompleted(events::StateAttemptCompleted {
-            spec_hash: runtime_spec.spec_hash().clone(),
-            node_id: bootstrap_node.node_id.clone(),
-            attempt_id: bootstrap_attempt_id.clone(),
-            output_cell_id: bootstrap_node.output_cell.clone(),
-        });
-    if commit[pos].payload() != &expected_completed {
-        return Err(RuntimeError::InvalidRunStream(
-            "sealed BootstrapRun genesis commit lacks matching StateAttemptCompleted".to_owned(),
-        ));
-    }
-    pos += 1;
-
-    let expected_ref = events::KernelEventPayload::ArtifactReferenced(events::ArtifactReferenced {
-        spec_hash: runtime_spec.spec_hash().clone(),
-        node_id: Some(bootstrap_node.node_id.clone()),
-        attempt_id: Some(bootstrap_attempt_id.clone()),
-        artifact_ref: expected_receipt_ref,
-    });
-    if commit[pos].payload() != &expected_ref {
-        return Err(RuntimeError::InvalidRunStream(
-            "sealed BootstrapRun genesis commit lacks matching bootstrap receipt artifact reference"
-                .to_owned(),
-        ));
-    }
-    pos += 1;
-
-    match commit[pos].payload() {
-        events::KernelEventPayload::RetentionRefsAppended(payload)
-            if payload.run_id == *run_id
-                && payload.spec_hash == *runtime_spec.spec_hash()
-                && payload.reason == events::RetentionReason::RunStarted
-                && payload.refs == expected_refs =>
-        {
-            verify_artifact_bytes(
-                bootstrap_receipt_bytes.as_bytes(),
-                &bootstrap_receipt_artifact,
-            )?;
-            Ok(())
-        }
-        _ => Err(RuntimeError::InvalidRunStream(
-            "sealed BootstrapRun genesis commit lacks matching run-start retention refs".to_owned(),
-        )),
-    }
-}
-
-fn validate_run_started_matches_certified_spec(
-    runtime_spec: &CertifiedRuntimeSpec,
-    run_id: &RunId,
-    run_started: &events::RunStarted,
-) -> Result<()> {
-    if run_started.run_id != *run_id
-        || run_started.spec_hash != *runtime_spec.spec_hash()
-        || run_started.spec_artifact_id
-            != ArtifactId::from_digest(
-                runtime_spec.spec_hash().algorithm(),
-                *runtime_spec.spec_hash().digest(),
-            )
-        || run_started.spec_media_type != runtime_spec.spec().media_type
-        || run_started.spec_version != runtime_spec.spec().spec_version
-        || run_started.lowering_version != runtime_spec.spec().lowering_version
-        || run_started.public_output_schema_id
+    if run_admitted.run_id != *run_id
+        || run_admitted.spec_hash != *runtime_spec.spec_hash()
+        || run_admitted.spec_version != runtime_spec.spec().spec_version
+        || run_admitted.lowering_version != runtime_spec.spec().lowering_version
+        || run_admitted.public_output_schema_id
             != runtime_spec.spec().public_outputs.public_schema_id
-        || run_started.saga_policy_digest != runtime_spec.spec().saga.saga_policy_digest()?
-        || run_started.canonicalizer_identity
+        || run_admitted.saga_policy_digest != runtime_spec.spec().saga.saga_policy_digest()?
+        || run_admitted.canonicalizer_identity
             != runtime_spec
                 .spec()
                 .public_outputs
                 .renderer_descriptor
                 .canonicalizer_identity
-        || run_started.descriptor_identities != runtime_spec.spec().descriptor_identities
+        || run_admitted.descriptor_identities != runtime_spec.spec().descriptor_identities
     {
         return Err(RuntimeError::InvalidRunStream(
-            "RunStarted payload does not match the certified runtime spec".to_owned(),
+            "RunAdmitted payload does not match the certified runtime spec".to_owned(),
         ));
     }
-    let certificate_canonical = runtime_spec
-        .certificate()
-        .canonical_json()
-        .map_err(|error| RuntimeError::Canonical(error.to_string()))?;
-    let certificate_digest = certificate_canonical.content_digest();
-    if run_started.certificate_artifact_id
-        != ArtifactId::from_digest(certificate_digest.algorithm(), *certificate_digest.digest())
-        || run_started.certificate_artifact_digest != certificate_digest
-        || run_started.certificate_media_type
-            != spec::MediaType::new(mfm_certify::CERTIFICATE_MEDIA_TYPE)?
-    {
-        return Err(RuntimeError::InvalidRunStream(
-            "RunStarted certificate evidence does not match the certified runtime spec".to_owned(),
-        ));
-    }
-    validate_seed_cells(runtime_spec, &run_started.seed_cells)?;
+    validate_spec_artifact(
+        runtime_spec,
+        store_artifact_from_run_ref(&run_admitted.spec_artifact),
+    )?;
+    validate_certificate_artifact(
+        runtime_spec,
+        store_artifact_from_run_ref(&run_admitted.certificate_artifact),
+    )?;
+    validate_config_artifacts(
+        runtime_spec,
+        run_admitted
+            .config_artifacts
+            .iter()
+            .map(store_artifact_from_run_ref)
+            .collect(),
+    )?;
+    validate_seed_cells(runtime_spec, &run_admitted.seed_cells)?;
     Ok(())
-}
-
-fn run_started_retention_refs(
-    runtime_spec: &CertifiedRuntimeSpec,
-    run_started: &events::RunStarted,
-    config_artifacts: &[store::ArtifactEvidenceRef],
-    bootstrap_receipt_artifact: &store::ArtifactEvidenceRef,
-) -> Result<Vec<events::RetentionRef>> {
-    let mut refs = Vec::with_capacity(3 + config_artifacts.len() + run_started.seed_cells.len());
-    refs.push(events::RetentionRef {
-        artifact_id: run_started.spec_artifact_id.clone(),
-        content_digest: ContentDigest::from_digest(
-            run_started.spec_hash.algorithm(),
-            *run_started.spec_hash.digest(),
-        ),
-        role: events::ArtifactRole::TypedExecutionSpec,
-    });
-    refs.push(events::RetentionRef {
-        artifact_id: run_started.certificate_artifact_id.clone(),
-        content_digest: run_started.certificate_artifact_digest.clone(),
-        role: events::ArtifactRole::TypedSpecCertificate,
-    });
-    refs.extend(config_artifacts.iter().map(retention_ref_for_artifact));
-    let seed_cells = validate_seed_cells(runtime_spec, &run_started.seed_cells)?;
-    refs.extend(seed_cells.values().map(|seed| events::RetentionRef {
-        artifact_id: seed.seed_artifact.artifact_id.clone(),
-        content_digest: seed.seed_artifact.content_digest.clone(),
-        role: seed.seed_artifact.role,
-    }));
-    refs.push(retention_ref_for_artifact(bootstrap_receipt_artifact));
-    Ok(refs)
 }
 
 fn validate_historical_retention_ref_batch(
@@ -1569,30 +1362,6 @@ fn validate_historical_retention_ref_batch(
             _ => None,
         })
         .collect::<Vec<_>>();
-    let run_started = commit
-        .iter()
-        .filter_map(|event| match event.payload() {
-            events::KernelEventPayload::RunStarted(payload) => Some(payload),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    if run_started.len() > 1 {
-        return Err(RuntimeError::InvalidRunStream(
-            "commit contains multiple RunStarted payloads".to_owned(),
-        ));
-    }
-    if run_started.len() == 1 {
-        let run_started_refs = retention_refs
-            .iter()
-            .filter(|(_, payload)| payload.reason == events::RetentionReason::RunStarted)
-            .count();
-        if retention_refs.len() != 1 || run_started_refs != 1 {
-            return Err(RuntimeError::InvalidRunStream(
-                "RunStarted commit must include exactly one run-start retention refs append"
-                    .to_owned(),
-            ));
-        }
-    }
     if retention_refs.is_empty() {
         return Ok(());
     }
@@ -1625,25 +1394,11 @@ fn validate_historical_retention_ref_batch(
             ));
         }
         match payload.reason {
-            events::RetentionReason::RunStarted => {
-                if run_started.len() != 1 {
-                    return Err(RuntimeError::InvalidRunStream(
-                        "run-start retention refs must be appended in the RunStarted commit"
-                            .to_owned(),
-                    ));
-                }
-                let expected =
-                    run_started_retention_ref_keys(runtime_spec, run_started[0], commit)?;
-                let actual = payload
-                    .refs
-                    .iter()
-                    .map(retention_ref_key)
-                    .collect::<BTreeSet<_>>();
-                if actual != expected {
-                    return Err(RuntimeError::InvalidRunStream(
-                        "run-start retention refs do not match launch artifact evidence".to_owned(),
-                    ));
-                }
+            events::RetentionReason::RunAdmitted => {
+                return Err(RuntimeError::InvalidRunStream(
+                    "RunAdmitted retention refs are projection-derived and must not be appended"
+                        .to_owned(),
+                ));
             }
             events::RetentionReason::ManifestProjection => {
                 if !has_manifest_projection {
@@ -1933,52 +1688,6 @@ fn insert_error_diagnostic_key(error: &events::MfmErrorInfo, keys: &mut BTreeSet
     if let Some(diagnostic) = &error.diagnostic_ref {
         keys.insert(event_artifact_ref_key(diagnostic));
     }
-}
-
-fn run_started_retention_ref_keys(
-    runtime_spec: &CertifiedRuntimeSpec,
-    run_started: &events::RunStarted,
-    commit: &[store::KernelEventEnvelope],
-) -> Result<BTreeSet<RetentionRefKey>> {
-    let mut keys = BTreeSet::new();
-    keys.insert((
-        run_started.spec_artifact_id.clone(),
-        ContentDigest::from_digest(
-            run_started.spec_hash.algorithm(),
-            *run_started.spec_hash.digest(),
-        ),
-        events::ArtifactRole::TypedExecutionSpec,
-    ));
-    keys.insert((
-        run_started.certificate_artifact_id.clone(),
-        run_started.certificate_artifact_digest.clone(),
-        events::ArtifactRole::TypedSpecCertificate,
-    ));
-    for seed in &run_started.seed_cells {
-        keys.insert(event_artifact_ref_key(&seed.seed_artifact));
-    }
-    for event in commit {
-        if let events::KernelEventPayload::ArtifactReferenced(payload) = event.payload() {
-            if payload.artifact_ref.role == events::ArtifactRole::TypedConfig {
-                keys.insert(event_artifact_ref_key(&payload.artifact_ref));
-            }
-        }
-    }
-    let bootstrap_node = certified_bootstrap_run_node(runtime_spec)?;
-    for event in commit {
-        if let events::KernelEventPayload::CellProduced(payload) = event.payload() {
-            if payload.node_id == bootstrap_node.node_id
-                && payload.cell_id == bootstrap_node.output_cell
-            {
-                keys.insert((
-                    payload.artifact_id.clone(),
-                    payload.content_digest.clone(),
-                    events::ArtifactRole::StateOutput,
-                ));
-            }
-        }
-    }
-    Ok(keys)
 }
 
 fn validate_historical_retention_manifest_batch(
@@ -3160,45 +2869,17 @@ pub(crate) fn validate_config_artifacts(
     Ok(validated)
 }
 
-fn config_artifacts_from_stream(
+fn config_artifacts_from_run_admitted(
     runtime_spec: &CertifiedRuntimeSpec,
-    stream: &[store::KernelEventEnvelope],
+    config_artifacts: &[events::RunArtifactEvidenceRef],
 ) -> Result<BTreeMap<String, store::ArtifactEvidenceRef>> {
-    let (start_seq, start_commit_key) = stream
-        .iter()
-        .find(|event| matches!(event.payload(), events::KernelEventPayload::RunStarted(_)))
-        .map(|event| (event.seq(), event.commit_key().clone()))
-        .ok_or_else(|| {
-            RuntimeError::InvalidRunStream(
-                "run has not started with certified RunStarted evidence".to_owned(),
-            )
-        })?;
-    let mut referenced = Vec::new();
-    for event in stream {
-        let events::KernelEventPayload::ArtifactReferenced(payload) = event.payload() else {
-            continue;
-        };
-        if payload.artifact_ref.role != events::ArtifactRole::TypedConfig {
-            continue;
-        }
-        if payload.node_id.is_some() || payload.attempt_id.is_some() {
-            return Err(RuntimeError::InvalidRunStream(
-                "typed config artifact references must not be scoped to a runner attempt"
-                    .to_owned(),
-            ));
-        }
-        if event.seq() != start_seq || event.commit_key() != &start_commit_key {
-            return Err(RuntimeError::InvalidRunStream(
-                "typed config artifact references must be part of the RunStarted commit".to_owned(),
-            ));
-        }
-        referenced.push(store_artifact_from_event_ref(
-            &payload.artifact_ref,
-            None,
-            None,
-        ));
-    }
-    let validated = validate_config_artifacts(runtime_spec, referenced)?;
+    let validated = validate_config_artifacts(
+        runtime_spec,
+        config_artifacts
+            .iter()
+            .map(store_artifact_from_run_ref)
+            .collect(),
+    )?;
     Ok(validated
         .into_iter()
         .map(|artifact| {
@@ -3234,7 +2915,21 @@ fn artifact_refs_from_stream(
         let commit = &stream[index..end];
         for event in commit {
             match event.payload() {
-                events::KernelEventPayload::RunStarted(payload) => {
+                events::KernelEventPayload::RunAdmitted(payload) => {
+                    for artifact in std::iter::once(&payload.spec_artifact)
+                        .chain(std::iter::once(&payload.certificate_artifact))
+                        .chain(payload.config_artifacts.iter())
+                    {
+                        insert_committed_artifact(
+                            &mut artifacts,
+                            CommittedArtifactReference {
+                                evidence: store_artifact_from_run_ref(artifact),
+                                attempt_id: None,
+                                commit_seq: event.seq(),
+                                commit_key: event.commit_key().clone(),
+                            },
+                        )?;
+                    }
                     for seed in &payload.seed_cells {
                         insert_committed_artifact(
                             &mut artifacts,
@@ -3444,6 +3139,36 @@ fn store_artifact_from_event_ref(
         producer_node_id,
         producer_seed_id,
         artifact_role: evidence.role,
+    }
+}
+
+pub(crate) fn store_artifact_from_run_ref(
+    evidence: &events::RunArtifactEvidenceRef,
+) -> store::ArtifactEvidenceRef {
+    store::ArtifactEvidenceRef {
+        artifact_id: evidence.artifact_id.clone(),
+        digest: evidence.content_digest.clone(),
+        byte_len: evidence.byte_len,
+        media_type: evidence.media_type.clone(),
+        schema_id: evidence.schema_id.clone(),
+        semantic_type_id: evidence.semantic_type_id.clone(),
+        producer_node_id: None,
+        producer_seed_id: None,
+        artifact_role: evidence.role,
+    }
+}
+
+pub(crate) fn run_artifact_ref_from_store(
+    artifact: &store::ArtifactEvidenceRef,
+) -> events::RunArtifactEvidenceRef {
+    events::RunArtifactEvidenceRef {
+        artifact_id: artifact.artifact_id.clone(),
+        role: artifact.artifact_role,
+        schema_id: artifact.schema_id.clone(),
+        semantic_type_id: artifact.semantic_type_id.clone(),
+        content_digest: artifact.digest.clone(),
+        byte_len: artifact.byte_len,
+        media_type: artifact.media_type.clone(),
     }
 }
 

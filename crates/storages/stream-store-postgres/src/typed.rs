@@ -14,12 +14,12 @@ use mfm_store::v1::codec::{
     run_state_str, saga_engagement_projection_json, side_effect_projection_json,
 };
 use mfm_store::v1::{
-    build_prepared_committed_batch, payload_from_json_value, prepared_commit_fingerprint,
-    stage_prepared_typed_run_commit, ArtifactEvidenceRef, AsyncStoreFuture,
-    AsyncTypedRunEventStore, CodecError, CommitKey, CommitOrdinal, CommitOutcome,
-    KernelEventEnvelope, LogicalEventKey, PersistedKernelEventRecord, PreparedTypedCommit,
-    ProjectionSnapshot, ProjectionSnapshotParts, ResourceLaneKey, ResourceLaneProjection,
-    StoreError, StoreErrorInspection, StreamSeq, TypedCommitBase,
+    build_prepared_commit_plan_batch, payload_from_json_value, prepared_commit_plan_fingerprint,
+    stage_prepared_commit_plan, ArtifactEvidenceRef, AsyncStoreFuture, AsyncTypedRunEventStore,
+    CodecError, CommitKey, CommitOrdinal, CommitOutcome, KernelEventEnvelope, LogicalEventKey,
+    PersistedKernelEventRecord, PreparedCommitPlan, ProjectionSnapshot, ProjectionSnapshotParts,
+    ResourceLaneKey, ResourceLaneProjection, StoreError, StoreErrorInspection, StreamSeq,
+    TypedCommitBase,
 };
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, Transaction};
@@ -126,12 +126,12 @@ impl PostgresTypedRunEventStore {
     }
 
     /// Atomically admits artifact evidence and appends one typed run commit.
-    pub async fn append_prepared_typed_commit(
+    pub async fn append_prepared_commit_plan(
         &self,
-        commit: PreparedTypedCommit,
+        plan: PreparedCommitPlan,
     ) -> Result<CommitOutcome> {
-        let request = commit.request();
-        let fingerprint = prepared_commit_fingerprint(&commit)?;
+        let request = plan.request();
+        let fingerprint = prepared_commit_plan_fingerprint(&plan)?;
         let fingerprint_text = fingerprint.as_digest().as_str().to_owned();
 
         let mut tx = self
@@ -144,7 +144,7 @@ impl PostgresTypedRunEventStore {
             read_commit_key(&mut tx, request.run_id(), request.commit_key().as_str()).await?
         {
             if stored_fingerprint == fingerprint_text {
-                let batch = build_prepared_committed_batch(&commit, stored_seq)?;
+                let batch = build_prepared_commit_plan_batch(&plan, stored_seq)?;
                 tx.commit().await.map_err(|_| {
                     PostgresTypedStoreError::Database("failed to commit transaction")
                 })?;
@@ -166,7 +166,7 @@ impl PostgresTypedRunEventStore {
             read_commit_key(&mut tx, request.run_id(), request.commit_key().as_str()).await?
         {
             if stored_fingerprint == fingerprint_text {
-                let batch = build_prepared_committed_batch(&commit, stored_seq)?;
+                let batch = build_prepared_commit_plan_batch(&plan, stored_seq)?;
                 tx.commit().await.map_err(|_| {
                     PostgresTypedStoreError::Database("failed to commit transaction")
                 })?;
@@ -179,7 +179,7 @@ impl PostgresTypedRunEventStore {
         }
 
         let mut artifacts = load_artifacts(&mut tx, request.run_id()).await?;
-        admit_artifact_evidence(&mut artifacts, commit.admitted_artifacts())?;
+        admit_artifact_evidence(&mut artifacts, plan.admitted_artifacts())?;
         lock_resource_lanes_tx(&mut tx).await?;
         let (run_projection, stream_head) =
             rebuild_projection_snapshot_with_head(&mut tx, request.run_id()).await?;
@@ -198,11 +198,11 @@ impl PostgresTypedRunEventStore {
             projections,
             actual_next_seq: next_seq_from_head(head)?,
         };
-        let staged = stage_prepared_typed_run_commit(&base, &commit)?;
+        let staged = stage_prepared_commit_plan(&base, &plan)?;
         let batch = staged.batch().clone();
         let staged_projections = staged.projections().clone();
 
-        for evidence in commit.admitted_artifacts() {
+        for evidence in plan.admitted_artifacts() {
             admit_artifact_evidence_tx(
                 &mut tx,
                 request.run_id(),
@@ -345,12 +345,12 @@ impl PostgresTypedRunEventStore {
 impl AsyncTypedRunEventStore for PostgresTypedRunEventStore {
     type Error = PostgresTypedStoreError;
 
-    fn append_prepared_typed_commit<'a>(
+    fn append_prepared_commit_plan<'a>(
         &'a self,
-        commit: PreparedTypedCommit,
+        plan: PreparedCommitPlan,
     ) -> AsyncStoreFuture<'a, CommitOutcome, Self::Error> {
         Box::pin(async move {
-            PostgresTypedRunEventStore::append_prepared_typed_commit(self, commit).await
+            PostgresTypedRunEventStore::append_prepared_commit_plan(self, plan).await
         })
     }
 
@@ -1182,15 +1182,23 @@ mod tests {
         CellId, ContentDigest, DigestAlgorithm, DigestBytes, EventId, LoweringVersion, NodeId,
         RunId, SchemaId, ScopeId, SemanticTypeId, SpecHash, SpecVersion, StateKind, StateVersion,
     };
+    use mfm_manual_auth::{
+        manual_authorization_proof_schema_id, ManualAuthorizationSignatureBytes,
+        ManualResolutionAuthorizationProof, ManualResolutionAuthorizationSignature,
+        ManualResolutionBlockReason, ManualResolutionEvidenceRef, ManualResolutionPrefixAuthority,
+        ManualResolutionProofAuthority, VerifiedManualResolutionForPrefix,
+    };
     use mfm_spec::v1::{
         self as spec, CanonicalizerIdentity, ManualResolutionEvidenceSpec, MediaType,
         ResourceNamespace, SagaPolicySpec, ValueLineageRef,
     };
     use mfm_store::v1::{
-        build_committed_batch, ArtifactEvidenceRef, AttemptStatus, CellTerminalProjection,
-        CommitArtifactEvidenceSet, CommitKey, CommitOutcome, CommitPreconditions, PreparedCommit,
-        RequiredRunState, ResourceLaneKey, RunState, SagaEngagementReason, SagaTerminal,
-        SagaTerminalProof, SideEffectPhase, StoreError, StreamSeq,
+        build_committed_batch, ArtifactEvidenceRef, AttemptStatus, AttemptTerminal,
+        CellTerminalProjection, CommitArtifactEvidenceSet, CommitKey, CommitOutcome,
+        CommitPreconditions, ManualResolution, PreparedCommit, PreparedCommitPlan,
+        RequiredRunState, ResourceLaneKey, Retention, RunAdmission, RunState, SagaEngagementReason,
+        SagaTerminal, SagaTerminalProof, SideEffectPhase, SideEffectProgress, SideEffectTerminal,
+        StateAttemptStarted, StoreError, StreamSeq,
     };
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
     use sqlx::{AssertSqlSafe, Row};
@@ -1485,24 +1493,22 @@ mod tests {
         MediaType::new(value).expect("media type")
     }
 
-    fn run_started(run_id: RunId) -> KernelEventPayload {
-        run_started_with_saga_policy(run_id, &SagaPolicySpec::NoSideEffects)
+    fn run_admitted(run_id: RunId) -> KernelEventPayload {
+        run_admitted_with_saga_policy(run_id, &SagaPolicySpec::NoSideEffects)
     }
 
-    fn run_started_with_saga_policy(
+    fn run_admitted_with_saga_policy(
         run_id: RunId,
         saga_policy: &SagaPolicySpec,
     ) -> KernelEventPayload {
-        KernelEventPayload::RunStarted(events::RunStarted {
+        let spec_artifact = spec_artifact_ref();
+        let certificate_artifact = certificate_artifact_ref();
+        KernelEventPayload::RunAdmitted(Box::new(events::RunAdmitted {
             run_id,
             spec_hash: spec_hash(1),
-            spec_artifact_id: artifact_id(2),
-            spec_media_type: media_type("application/vnd.mfm.typed-execution-spec+json;version=1"),
-            certificate_artifact_id: artifact_id(4),
-            certificate_artifact_digest: content_digest(5),
-            certificate_media_type: media_type(
-                "application/vnd.mfm.typed-spec-certificate+json;version=1",
-            ),
+            spec_artifact: run_artifact_ref(&spec_artifact),
+            certificate_artifact: run_artifact_ref(&certificate_artifact),
+            config_artifacts: Vec::new(),
             spec_version: SpecVersion::new("mfm.typed.execution_spec.v1").expect("spec version"),
             lowering_version: LoweringVersion::new("mfm.typed.lowering.v1")
                 .expect("lowering version"),
@@ -1513,13 +1519,15 @@ mod tests {
             descriptor_identities: Vec::new(),
             runner_executables: Vec::new(),
             adapter_executables: Vec::new(),
+            admitted_binding_digest: content_digest(9),
             canonicalizer_identity: CanonicalizerIdentity::new("mfm.jcs.v1")
                 .expect("canonicalizer"),
             framework_version: events::FrameworkVersion::new("mfm.test.1")
                 .expect("framework version"),
             source_revision: events::SourceRevision::new("test-revision").expect("source revision"),
+            launched_at_unix_ms: 1_700_000_000_000,
             seed_cells: Vec::new(),
-        })
+        }))
     }
 
     fn state_attempt_started() -> KernelEventPayload {
@@ -1619,40 +1627,48 @@ mod tests {
         })
     }
 
-    fn manual_resolution_recorded(run_id: RunId, byte: u8) -> KernelEventPayload {
+    fn manual_resolution_recorded(
+        verified: &VerifiedManualResolutionForPrefix,
+    ) -> KernelEventPayload {
+        let claim = verified.claim();
+        let authorization = verified.authorization();
         KernelEventPayload::ManualResolutionRecorded(events::ManualResolutionRecorded {
-            run_id,
-            spec_hash: spec_hash(1),
-            outcome: events::ManualResolutionOutcome::ConfirmRemediated,
-            evidence_schema_id: schema_id("mfm.test.manual_evidence", byte + 1),
-            evidence_hash: content_digest(byte + 1),
-            evidence_artifact_id: artifact_id(byte + 1),
-            authorization_schema_id: schema_id("mfm.test.manual_authorization", byte + 2),
-            authorization_hash: content_digest(byte + 2),
-            authorization_artifact_id: artifact_id(byte + 2),
+            run_id: claim.run_id.clone(),
+            spec_hash: claim.spec_hash.clone(),
+            outcome: claim.outcome,
+            evidence_schema_id: claim.evidence.schema_id.clone(),
+            evidence_hash: claim.evidence.content_hash.clone(),
+            evidence_artifact_id: claim.evidence.artifact_id.clone(),
+            authorization_schema_id: authorization.schema_id.clone(),
+            authorization_hash: authorization.content_hash.clone(),
+            authorization_artifact_id: authorization.artifact_id.clone(),
             note: Some(events::ManualResolutionNote::new("reviewed evidence").expect("note")),
         })
     }
 
-    fn manual_resolution_artifacts(byte: u8) -> Vec<ArtifactEvidenceRef> {
+    fn manual_resolution_artifacts(
+        verified: &VerifiedManualResolutionForPrefix,
+    ) -> Vec<ArtifactEvidenceRef> {
+        let claim = verified.claim();
+        let authorization = verified.authorization();
         vec![
             ArtifactEvidenceRef {
-                artifact_id: artifact_id(byte + 1),
-                digest: content_digest(byte + 1),
+                artifact_id: claim.evidence.artifact_id.clone(),
+                digest: claim.evidence.content_hash.clone(),
                 byte_len: 128,
                 media_type: media_type("application/json"),
-                schema_id: Some(schema_id("mfm.test.manual_evidence", byte + 1)),
+                schema_id: Some(claim.evidence.schema_id.clone()),
                 semantic_type_id: None,
                 producer_node_id: None,
                 producer_seed_id: None,
                 artifact_role: ArtifactRole::ManualResolutionEvidence,
             },
             ArtifactEvidenceRef {
-                artifact_id: artifact_id(byte + 2),
-                digest: content_digest(byte + 2),
-                byte_len: 128,
+                artifact_id: authorization.artifact_id.clone(),
+                digest: authorization.content_hash.clone(),
+                byte_len: verified.proof_bytes().len() as u64,
                 media_type: media_type("application/json"),
-                schema_id: Some(schema_id("mfm.test.manual_authorization", byte + 2)),
+                schema_id: Some(authorization.schema_id.clone()),
                 semantic_type_id: None,
                 producer_node_id: None,
                 producer_seed_id: None,
@@ -1688,14 +1704,112 @@ mod tests {
                 operators: vec![spec::OperatorAuthorityMemberSpec {
                     operator_id: spec::OperatorId::new(format!("operator.{byte}"))
                         .expect("operator id"),
-                    public_identity: spec::OperatorPublicIdentity::new(format!(
-                        "operator-public-{byte}"
-                    ))
+                    public_identity: spec::OperatorPublicIdentity::new(
+                        "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf",
+                    )
                     .expect("operator public identity"),
                 }],
             },
             quorum: spec::ManualAuthorizationQuorumSpec::new(1).expect("quorum"),
         }
+    }
+
+    fn verified_manual_resolution_for_seq(
+        run_id: &RunId,
+        expected_next_seq: u64,
+        byte: u8,
+    ) -> VerifiedManualResolutionForPrefix {
+        let SagaPolicySpec::ManualResolution { manual } = manual_saga_policy(byte) else {
+            unreachable!("manual_saga_policy builds manual policy")
+        };
+        let prefix = ManualResolutionPrefixAuthority::new(
+            run_id.clone(),
+            spec_hash(1),
+            expected_next_seq,
+            content_digest(byte + 3),
+            ManualResolutionBlockReason::PolicyManualResolution,
+            content_digest(byte + 4),
+            manual.clone(),
+        )
+        .expect("manual prefix authority");
+        let evidence = ManualResolutionEvidenceRef {
+            schema_id: manual.evidence_schema.clone(),
+            content_hash: content_digest(byte + 1),
+            artifact_id: artifact_id(byte + 1),
+        };
+        let claim = prefix
+            .authorization_claim(
+                events::ManualResolutionOutcome::ConfirmRemediated,
+                evidence.clone(),
+            )
+            .expect("manual authorization claim");
+        let proof = signed_manual_resolution_proof(&manual.authorization, claim.clone());
+        let proof_bytes = proof
+            .canonical_json()
+            .expect("manual proof canonical json")
+            .to_vec();
+        let authorization = manual_authorization_ref(&proof_bytes);
+        ManualResolutionProofAuthority::new(
+            prefix,
+            claim.outcome,
+            evidence,
+            authorization,
+            proof_bytes,
+        )
+        .and_then(ManualResolutionProofAuthority::verify)
+        .expect("verified manual resolution")
+    }
+
+    fn signed_manual_resolution_proof(
+        policy: &spec::ManualResolutionAuthorizationSpec,
+        claim: mfm_manual_auth::ManualResolutionAuthorizationClaim,
+    ) -> ManualResolutionAuthorizationProof {
+        let operator = policy.authority.operators[0].clone();
+        let claim_digest = claim.digest().expect("manual claim digest");
+        ManualResolutionAuthorizationProof {
+            verifier_id: policy.verifier_id.clone(),
+            signing_scheme: policy.signing_scheme.clone(),
+            claim,
+            signatures: vec![ManualResolutionAuthorizationSignature {
+                operator_id: operator.operator_id,
+                public_identity: operator.public_identity,
+                signature: ManualAuthorizationSignatureBytes::new(sign_manual_claim_digest(
+                    &test_manual_signing_key(),
+                    claim_digest.digest().as_bytes(),
+                ))
+                .expect("manual signature bytes"),
+            }],
+        }
+    }
+
+    fn manual_authorization_ref(proof_bytes: &[u8]) -> ManualResolutionEvidenceRef {
+        let proof = ManualResolutionAuthorizationProof::from_json_slice(proof_bytes)
+            .expect("manual authorization proof");
+        let content_hash = proof.content_digest().expect("manual proof content digest");
+        ManualResolutionEvidenceRef {
+            schema_id: manual_authorization_proof_schema_id().expect("manual authorization schema"),
+            artifact_id: ArtifactId::from_digest(content_hash.algorithm(), *content_hash.digest()),
+            content_hash,
+        }
+    }
+
+    fn test_manual_signing_key() -> k256::ecdsa::SigningKey {
+        let mut key_bytes = [0u8; 32];
+        key_bytes[31] = 1;
+        let secret_key = k256::SecretKey::from_slice(&key_bytes).expect("test key");
+        k256::ecdsa::SigningKey::from(&secret_key)
+    }
+
+    fn sign_manual_claim_digest(
+        signing_key: &k256::ecdsa::SigningKey,
+        digest: &[u8; 32],
+    ) -> Vec<u8> {
+        let (signature, recovery_id) = signing_key
+            .sign_prehash_recoverable(digest)
+            .expect("manual signature");
+        let mut signature_bytes = signature.to_bytes().to_vec();
+        signature_bytes.push(u8::from(recovery_id.is_y_odd()));
+        signature_bytes
     }
 
     fn saga_preconditions(run_id: &RunId, policy: SagaPolicySpec) -> CommitPreconditions {
@@ -2008,6 +2122,18 @@ mod tests {
         }
     }
 
+    fn run_artifact_ref(artifact: &ArtifactEvidenceRef) -> events::RunArtifactEvidenceRef {
+        events::RunArtifactEvidenceRef {
+            artifact_id: artifact.artifact_id.clone(),
+            role: artifact.artifact_role,
+            schema_id: artifact.schema_id.clone(),
+            semantic_type_id: artifact.semantic_type_id.clone(),
+            content_digest: artifact.digest.clone(),
+            byte_len: artifact.byte_len,
+            media_type: artifact.media_type.clone(),
+        }
+    }
+
     fn request(
         run_id: RunId,
         seq: u64,
@@ -2027,11 +2153,75 @@ mod tests {
 
     async fn append_prepared(
         store: &PostgresTypedRunEventStore,
-        request: mfm_store::v1::TypedCommitRequest,
+        mut request: mfm_store::v1::TypedCommitRequest,
         artifacts: Vec<ArtifactEvidenceRef>,
     ) -> Result<CommitOutcome> {
-        let commit = PreparedTypedCommit::new(request, artifacts)?;
-        store.append_prepared_typed_commit(commit).await
+        if request.required_artifacts().is_empty() && !artifacts.is_empty() {
+            request = request.with_required_artifacts(artifacts.clone());
+        }
+        let plan = test_prepared_commit_plan(request, artifacts)?;
+        store.append_prepared_commit_plan(plan).await
+    }
+
+    fn test_prepared_commit_plan(
+        request: mfm_store::v1::TypedCommitRequest,
+        artifacts: Vec<ArtifactEvidenceRef>,
+    ) -> mfm_store::v1::Result<PreparedCommitPlan> {
+        let artifact_set =
+            CommitArtifactEvidenceSet::new(request.required_artifacts().to_vec(), artifacts)?;
+        let payloads = request.payloads();
+        if payloads
+            .iter()
+            .all(|payload| matches!(payload, KernelEventPayload::RunAdmitted(_)))
+        {
+            let mut preconditions = request.preconditions().clone();
+            preconditions.required_run_state = RequiredRunState::Absent;
+            let request = request.with_preconditions(preconditions);
+            return Ok(PreparedCommit::<RunAdmission>::new(request, artifact_set)?.into());
+        }
+        if payloads
+            .iter()
+            .all(|payload| matches!(payload, KernelEventPayload::StateAttemptStarted(_)))
+        {
+            let mut preconditions = request.preconditions().clone();
+            preconditions.required_run_state = RequiredRunState::NotCompleted;
+            let request = request.with_preconditions(preconditions);
+            return Ok(PreparedCommit::<StateAttemptStarted>::new(request, artifact_set)?.into());
+        }
+        if payloads.iter().any(test_is_side_effect_terminal_payload) {
+            return Ok(PreparedCommit::<SideEffectTerminal>::new(request, artifact_set)?.into());
+        }
+        if payloads
+            .iter()
+            .any(|payload| payload.side_effect_ref().is_some())
+        {
+            return Ok(PreparedCommit::<SideEffectProgress>::new(request, artifact_set)?.into());
+        }
+        if payloads.iter().any(test_is_retention_payload) {
+            return Ok(PreparedCommit::<Retention>::new(request, artifact_set)?.into());
+        }
+        Ok(PreparedCommit::<AttemptTerminal>::new(request, artifact_set)?.into())
+    }
+
+    fn test_is_retention_payload(payload: &KernelEventPayload) -> bool {
+        matches!(
+            payload,
+            KernelEventPayload::RetentionRefsAppended(_)
+                | KernelEventPayload::RetentionManifestProjected(_)
+        )
+    }
+
+    fn test_is_side_effect_terminal_payload(payload: &KernelEventPayload) -> bool {
+        matches!(
+            payload,
+            KernelEventPayload::SideEffectNotSubmittedProven(_)
+                | KernelEventPayload::SideEffectSubmissionObserved(_)
+                | KernelEventPayload::SideEffectSubmissionUnknown(_)
+                | KernelEventPayload::SideEffectReceiptObserved(_)
+                | KernelEventPayload::SideEffectConfirmationObserved(_)
+                | KernelEventPayload::SideEffectAmbiguous(_)
+                | KernelEventPayload::SideEffectFailed(_)
+        )
     }
 
     async fn append_run_start(
@@ -2045,9 +2235,27 @@ mod tests {
                 run_id.clone(),
                 1,
                 commit_key,
-                vec![run_started(run_id.clone())],
+                vec![run_admitted(run_id.clone())],
             ),
             vec![spec_artifact_ref(), certificate_artifact_ref()],
+        )
+        .await
+    }
+
+    async fn append_resource_lane_attempt_start(
+        store: &PostgresTypedRunEventStore,
+        run_id: &RunId,
+        commit_key: &str,
+    ) -> Result<CommitOutcome> {
+        append_prepared(
+            store,
+            request(
+                run_id.clone(),
+                2,
+                commit_key,
+                vec![side_effect_attempt_started()],
+            ),
+            Vec::new(),
         )
         .await
     }
@@ -2065,10 +2273,9 @@ mod tests {
             store,
             request(
                 run_id.clone(),
-                2,
+                3,
                 commit_key,
                 vec![
-                    side_effect_attempt_started(),
                     side_effect_intent(intent_artifact.clone(), intent_digest.clone()),
                     side_effect_claim(),
                     side_effect_prepared_with_resource_key(resource_key(lane_value, 201)),
@@ -2111,7 +2318,7 @@ mod tests {
         conflicting_evidence.byte_len += 1;
         append_prepared(
             &store,
-            request(run.clone(), 1, "run-start", vec![run_started(run.clone())]),
+            request(run.clone(), 1, "run-start", vec![run_admitted(run.clone())]),
             vec![spec_artifact_ref(), certificate_artifact_ref()],
         )
         .await
@@ -2158,7 +2365,7 @@ mod tests {
 
         append_prepared(
             &store,
-            request(run.clone(), 1, "run-start", vec![run_started(run.clone())]),
+            request(run.clone(), 1, "run-start", vec![run_admitted(run.clone())]),
             vec![spec_artifact_ref(), certificate_artifact_ref()],
         )
         .await
@@ -2262,7 +2469,7 @@ mod tests {
 
         append_prepared(
             &store,
-            request(run.clone(), 1, "run-start", vec![run_started(run.clone())]),
+            request(run.clone(), 1, "run-start", vec![run_admitted(run.clone())]),
             vec![spec_artifact_ref(), certificate_artifact_ref()],
         )
         .await
@@ -2321,7 +2528,7 @@ mod tests {
         let (store, schema) = test_store().await;
         let run = run_id(18);
         let run_start = build_committed_batch(
-            &request(run.clone(), 1, "run-start", vec![run_started(run.clone())]),
+            &request(run.clone(), 1, "run-start", vec![run_admitted(run.clone())]),
             StreamSeq::FIRST,
         )
         .expect("run start batch");
@@ -2372,7 +2579,7 @@ mod tests {
                 run.clone(),
                 1,
                 "resource-run-start",
-                vec![run_started(run.clone())],
+                vec![run_admitted(run.clone())],
             ),
             vec![spec_artifact_ref(), certificate_artifact_ref()],
         )
@@ -2432,7 +2639,7 @@ mod tests {
                 peer_run.clone(),
                 1,
                 "resource-peer-run-start",
-                vec![run_started(peer_run.clone())],
+                vec![run_admitted(peer_run.clone())],
             ),
             vec![spec_artifact_ref(), certificate_artifact_ref()],
         )
@@ -2507,6 +2714,9 @@ mod tests {
         append_run_start(&store, &holder_run, "admission-holder-run-start")
             .await
             .expect("holder run start");
+        append_resource_lane_attempt_start(&store, &holder_run, "admission-holder-attempt-start")
+            .await
+            .expect("holder attempt start");
         append_resource_lane_prepare(
             &store,
             &holder_run,
@@ -2536,6 +2746,13 @@ mod tests {
         )
         .await
         .expect("deleted contender run start");
+        append_resource_lane_attempt_start(
+            &store,
+            &deleted_projection_contender,
+            "deleted-contender-attempt-start",
+        )
+        .await
+        .expect("deleted contender attempt start");
         let deleted_stream_before = store
             .load_run_stream(&deleted_projection_contender)
             .await
@@ -2563,7 +2780,7 @@ mod tests {
                 .expected_next_seq(&deleted_projection_contender)
                 .await
                 .expect("deleted contender next seq"),
-            StreamSeq::new(2).expect("deleted contender prepare seq")
+            StreamSeq::new(3).expect("deleted contender prepare seq")
         );
 
         store
@@ -2577,6 +2794,13 @@ mod tests {
         )
         .await
         .expect("poisoned contender run start");
+        append_resource_lane_attempt_start(
+            &store,
+            &poisoned_projection_contender,
+            "poisoned-contender-attempt-start",
+        )
+        .await
+        .expect("poisoned contender attempt start");
         let poisoned_stream_before = store
             .load_run_stream(&poisoned_projection_contender)
             .await
@@ -2605,7 +2829,7 @@ mod tests {
                 .expected_next_seq(&poisoned_projection_contender)
                 .await
                 .expect("poisoned contender next seq"),
-            StreamSeq::new(2).expect("poisoned contender prepare seq")
+            StreamSeq::new(3).expect("poisoned contender prepare seq")
         );
 
         drop_schema(&store, &schema).await;
@@ -2628,6 +2852,13 @@ mod tests {
         append_run_start(&store, &contender_run, "stale-free-contender-run-start")
             .await
             .expect("contender run start");
+        append_resource_lane_attempt_start(
+            &store,
+            &contender_run,
+            "stale-free-contender-attempt-start",
+        )
+        .await
+        .expect("contender attempt start");
         append_resource_lane_prepare(
             &store,
             &contender_run,
@@ -2666,6 +2897,7 @@ mod tests {
     async fn typed_saga_projection_tables_persist_and_rebuild_from_events() {
         let (store, schema) = test_store().await;
         let run = run_id(41);
+        let saga_policy = manual_saga_policy(42);
 
         append_prepared(
             &store,
@@ -2673,10 +2905,7 @@ mod tests {
                 run.clone(),
                 1,
                 "saga-run-start",
-                vec![run_started_with_saga_policy(
-                    run.clone(),
-                    &manual_saga_policy(42),
-                )],
+                vec![run_admitted_with_saga_policy(run.clone(), &saga_policy)],
             ),
             vec![spec_artifact_ref(), certificate_artifact_ref()],
         )
@@ -2740,14 +2969,29 @@ mod tests {
         )
         .await
         .expect("side-effect ambiguous");
-        let manual_request = request(
+        let verified = verified_manual_resolution_for_seq(&run, 5, 42);
+        let manual_artifacts = manual_resolution_artifacts(&verified);
+        let manual_request = mfm_store::v1::TypedCommitRequest::from_payloads(
             run.clone(),
-            5,
-            "saga-manual-resolution",
-            vec![manual_resolution_recorded(run.clone(), 42)],
+            StreamSeq::new(5).expect("manual resolution seq"),
+            CommitKey::new("saga-manual-resolution").expect("commit key"),
+            vec![manual_resolution_recorded(&verified)],
+            manual_artifacts.clone(),
+            CommitPreconditions {
+                required_run_state: RequiredRunState::NotCompleted,
+                ..saga_preconditions(&run, saga_policy)
+            },
         )
-        .with_preconditions(saga_preconditions(&run, manual_saga_policy(42)));
-        append_prepared(&store, manual_request, manual_resolution_artifacts(42))
+        .expect("manual resolution request");
+        let manual_commit = PreparedCommit::<ManualResolution>::new(
+            manual_request,
+            CommitArtifactEvidenceSet::new(manual_artifacts.clone(), manual_artifacts)
+                .expect("manual artifact evidence set"),
+            &verified,
+        )
+        .expect("proof-backed manual resolution prepared commit");
+        store
+            .append_prepared_commit_plan(manual_commit.into())
             .await
             .expect("manual resolution");
         let before = store.projection_snapshot(&run).await.expect("projection");
@@ -2793,7 +3037,7 @@ mod tests {
                 terminal_run.clone(),
                 1,
                 "saga-terminal-run-start",
-                vec![run_started_with_saga_policy(
+                vec![run_admitted_with_saga_policy(
                     terminal_run.clone(),
                     &terminal_policy,
                 )],
@@ -2900,7 +3144,7 @@ mod tests {
         )
         .expect("proof-backed terminal commit");
         store
-            .append_prepared_typed_commit(terminal_commit.into_typed_commit())
+            .append_prepared_commit_plan(terminal_commit.into())
             .await
             .expect("terminal run completed");
 
@@ -2940,7 +3184,7 @@ mod tests {
         let run = run_id(10);
         append_prepared(
             &store,
-            request(run.clone(), 1, "run-start", vec![run_started(run.clone())]),
+            request(run.clone(), 1, "run-start", vec![run_admitted(run.clone())]),
             vec![spec_artifact_ref(), certificate_artifact_ref()],
         )
         .await
@@ -2960,6 +3204,11 @@ mod tests {
 
         let missing_artifact = artifact_id(11);
         let missing_digest = content_digest(12);
+        let missing_ref = store_artifact_ref(
+            missing_artifact.clone(),
+            missing_digest.clone(),
+            ArtifactRole::FactResponse,
+        );
         let fact_request = request(
             run.clone(),
             3,
@@ -2973,6 +3222,7 @@ mod tests {
             required_run_state: RequiredRunState::Started,
             ..CommitPreconditions::default()
         });
+        let fact_request = fact_request.with_required_artifacts(vec![missing_ref.clone()]);
         let err = append_prepared(&store, fact_request.clone(), Vec::new())
             .await
             .expect_err("missing fact artifact");
@@ -2985,17 +3235,9 @@ mod tests {
             StreamSeq::new(3).expect("seq")
         );
 
-        append_prepared(
-            &store,
-            fact_request,
-            vec![store_artifact_ref(
-                missing_artifact.clone(),
-                missing_digest,
-                ArtifactRole::FactResponse,
-            )],
-        )
-        .await
-        .expect("fact commit after artifact");
+        append_prepared(&store, fact_request, vec![missing_ref])
+            .await
+            .expect("fact commit after artifact");
         let projection = store.projection_snapshot(&run).await.expect("projection");
         assert!(projection
             .fact(
@@ -3013,13 +3255,21 @@ mod tests {
         let (store, schema) = test_store().await;
         let run = run_id(13);
 
+        append_prepared(
+            &store,
+            request(run.clone(), 1, "run-start", vec![run_admitted(run.clone())]),
+            vec![spec_artifact_ref(), certificate_artifact_ref()],
+        )
+        .await
+        .expect("run start");
+
         let intent_artifact = artifact_id(14);
         let intent_digest = content_digest(15);
         append_prepared(
             &store,
             request(
                 run.clone(),
-                1,
+                2,
                 "sidefx-attempt-start",
                 vec![side_effect_attempt_started()],
             ),
@@ -3031,7 +3281,7 @@ mod tests {
             &store,
             request(
                 run.clone(),
-                2,
+                3,
                 "sidefx-prepare",
                 vec![
                     side_effect_intent(intent_artifact.clone(), intent_digest.clone()),
@@ -3052,7 +3302,7 @@ mod tests {
             &store,
             request(
                 run.clone(),
-                3,
+                4,
                 "sidefx-started",
                 vec![side_effect_started()],
             ),
@@ -3067,7 +3317,7 @@ mod tests {
             &store,
             request(
                 run.clone(),
-                4,
+                5,
                 "sidefx-submission-unknown",
                 vec![side_effect_submission_unknown(
                     unknown_artifact.clone(),
@@ -3100,7 +3350,7 @@ mod tests {
             &store,
             request(
                 run.clone(),
-                5,
+                6,
                 "sidefx-submission-observed-after-unknown",
                 vec![side_effect_submission_observed(
                     submission_artifact.clone(),

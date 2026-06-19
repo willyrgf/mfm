@@ -202,14 +202,14 @@ Request notes:
 - `kind` must be `typed_run_start_v1`.
 - `bundle.kind` must be `certified_typed_spec_bundle_v1`.
 - The bundle is parsed as untrusted transport data. The server verifies the contained spec and
-  certificate against the production certification registry before `RunStarted`.
+  certificate against the production certification registry before `RunAdmitted`.
 - Hash-only spec envelopes, raw typed spec JSON, certificate bytes, and summaries are not runtime
   authority.
 - `run_id` is optional; the server generates a typed digest run id when omitted.
 - `configs[*].json` and `seeds[*].json` are canonicalized and staged by runtime middleware before
   their evidence is admitted by the same prepared start commit that first references it.
 - `drive` is `until_blocked`, `append_only`, or `once`; it defaults to `until_blocked`.
-- Specs that reference unported domain descriptors fail before `RunStarted` with
+- Specs that reference unported domain descriptors fail before `RunAdmitted` with
   `LaunchRunnerUnavailable`.
 
 Stable launch error codes:
@@ -247,7 +247,7 @@ curl -s "http://127.0.0.1:3001/v1/runs/$RUN_ID/public-output/$SCHEMA_ID"
 
 The status and stream endpoints are typed inspection views over the authoritative typed run stream.
 Resume, replay, and public-output rendering load the stored spec/certificate artifacts, verify them
-against the production registry, compare their evidence to `RunStarted`, and rebuild stream evidence
+against the production registry, compare their evidence to `RunAdmitted`, and rebuild stream evidence
 before constructing runtime, replay, or render authority. Rendered public-output JSON is an
 output/cache surface only.
 

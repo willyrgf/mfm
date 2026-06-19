@@ -16,8 +16,6 @@ use mfm_store::v1 as store;
 
 #[cfg(test)]
 use mfm_ids::CellId;
-#[cfg(test)]
-use std::collections::BTreeSet;
 
 mod admission;
 mod artifacts;
@@ -80,11 +78,11 @@ use artifacts::{staged_artifact_binding_kind, staged_side_effect_artifact_phase}
 use commit::{retention_manifest_payloads, runner_payloads_with_derived_lifecycle};
 #[cfg(test)]
 use framework::{
-    build_retention_manifest_artifact_with_producer, certified_bootstrap_run_node,
-    certified_complete_run_node, certified_retention_manifest_node,
+    build_retention_manifest_artifact_with_producer, certified_complete_run_node,
+    certified_retention_manifest_node,
 };
 #[cfg(test)]
-use history::validate_historical_bootstrap_run_batch;
+use history::validate_historical_run_admission_batch;
 #[cfg(test)]
 use history::RuntimeRunView;
 #[cfg(test)]
@@ -227,39 +225,6 @@ fn attempt_id(
         DigestAlgorithm::Sha256JcsV1,
         *canonical.content_digest().digest(),
     ))
-}
-
-fn config_artifact_reference_payloads(
-    spec_hash: &SpecHash,
-    artifacts: &[store::ArtifactEvidenceRef],
-) -> Result<Vec<events::KernelEventPayload>> {
-    artifacts
-        .iter()
-        .map(|artifact| {
-            let schema_id = artifact.schema_id.clone().ok_or_else(|| {
-                RuntimeError::InvalidRunStream(format!(
-                    "config artifact {} is missing schema id",
-                    artifact.artifact_id
-                ))
-            })?;
-            Ok(events::KernelEventPayload::ArtifactReferenced(
-                events::ArtifactReferenced {
-                    spec_hash: spec_hash.clone(),
-                    node_id: None,
-                    attempt_id: None,
-                    artifact_ref: events::ArtifactEvidenceRef {
-                        artifact_id: artifact.artifact_id.clone(),
-                        role: artifact.artifact_role,
-                        schema_id,
-                        semantic_type_id: artifact.semantic_type_id.clone(),
-                        content_digest: artifact.digest.clone(),
-                        byte_len: artifact.byte_len,
-                        media_type: artifact.media_type.clone(),
-                    },
-                },
-            ))
-        })
-        .collect()
 }
 
 fn retention_ref_for_artifact(artifact: &store::ArtifactEvidenceRef) -> events::RetentionRef {

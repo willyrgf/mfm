@@ -1,11 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use mfm_events::v1 as events;
-use mfm_ids::NodeId;
+use mfm_ids::{ContentDigest, DigestAlgorithm, NodeId};
 use mfm_spec::v1 as spec;
 
 use crate::runners::{CapabilityImplementationBinding, ErasedRunnerBinding, ErasedRunnerRegistry};
-use crate::{CertifiedRuntimeSpec, Result, RuntimeError};
+use crate::{canonical_json, CertifiedRuntimeSpec, Result, RuntimeError};
 
 /// Runtime binding authority for one certified execution spec.
 ///
@@ -48,8 +48,6 @@ impl BoundCapabilityAuthority {
 /// Bound framework handler kind for a certified lifecycle node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BoundFrameworkHandlerKind {
-    /// Admission-owned bootstrap handler.
-    BootstrapRun,
     /// Public output render handler.
     PublicOutputRender,
     /// Retention manifest projection handler.
@@ -103,19 +101,47 @@ impl BoundRuntimeContext {
         })
     }
 
-    /// Returns the runner executable identities admitted into `RunStarted` evidence.
+    /// Returns the runner executable identities admitted into `RunAdmitted` evidence.
     pub fn runner_executables(&self) -> &[events::ExecutableIdentity] {
         &self.runner_executables
     }
 
-    pub(crate) fn validate_run_started_executables(
+    pub(crate) fn validate_run_admitted_executables(
         &self,
-        run_started: &events::RunStarted,
+        run_admitted: &events::RunAdmitted,
     ) -> Result<()> {
-        if run_started.runner_executables != self.runner_executables {
+        if run_admitted.runner_executables != self.runner_executables {
             return Err(RuntimeError::RunnerBinding(
-                "RunStarted runner executable identities do not match bound runtime context"
+                "RunAdmitted runner executable identities do not match bound runtime context"
                     .to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn admitted_binding_digest(
+        &self,
+        adapter_executables: &[events::ExecutableIdentity],
+    ) -> Result<ContentDigest> {
+        let canonical = canonical_json(serde_json::json!({
+            "adapter_executables": adapter_executables.iter().map(executable_identity_json).collect::<Vec<_>>(),
+            "runner_executables": self.runner_executables.iter().map(executable_identity_json).collect::<Vec<_>>(),
+        }))?;
+        Ok(ContentDigest::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            canonical.digest_bytes(),
+        ))
+    }
+
+    pub(crate) fn validate_run_admitted_binding(
+        &self,
+        run_admitted: &events::RunAdmitted,
+    ) -> Result<()> {
+        self.validate_run_admitted_executables(run_admitted)?;
+        let digest = self.admitted_binding_digest(&run_admitted.adapter_executables)?;
+        if digest != run_admitted.admitted_binding_digest {
+            return Err(RuntimeError::RunnerBinding(
+                "RunAdmitted binding digest does not match bound runtime context".to_owned(),
             ));
         }
         Ok(())
@@ -217,6 +243,19 @@ impl BoundRuntimeContext {
     }
 }
 
+fn executable_identity_json(identity: &events::ExecutableIdentity) -> serde_json::Value {
+    serde_json::json!({
+        "binary_digest": identity.binary_digest.as_str(),
+        "cargo_package_digest": identity.cargo_package_digest.as_str(),
+        "cargo_package_name": identity.cargo_package_name.as_str(),
+        "cargo_package_version": identity.cargo_package_version.as_str(),
+        "factory_id": identity.factory_id.as_str(),
+        "nix_derivation_hash": identity.nix_derivation_hash.as_ref().map(|value| value.as_str()),
+        "nix_output_hash": identity.nix_output_hash.as_ref().map(|value| value.as_str()),
+        "source_revision": identity.source_revision.as_str(),
+    })
+}
+
 #[derive(Default)]
 struct BindingAccumulator {
     bindings: BTreeMap<NodeId, ErasedRunnerBinding>,
@@ -310,9 +349,6 @@ fn bind_node(
 
 fn framework_handler_kind(node: &spec::NodeSpec) -> Option<BoundFrameworkHandlerKind> {
     match &node.framework {
-        Some(spec::FrameworkNodeSpec::BootstrapRun(_)) => {
-            Some(BoundFrameworkHandlerKind::BootstrapRun)
-        }
         Some(spec::FrameworkNodeSpec::PublicOutputRender(_)) => {
             Some(BoundFrameworkHandlerKind::PublicOutputRender)
         }

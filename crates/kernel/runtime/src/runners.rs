@@ -10,9 +10,8 @@ use mfm_ids::DescriptorId;
 use mfm_spec::v1 as spec;
 
 use crate::framework::{
-    framework_bootstrap_run_binding, framework_complete_run_binding,
-    framework_public_output_binding, framework_resolve_saga_terminal_binding,
-    framework_retention_manifest_binding,
+    framework_complete_run_binding, framework_public_output_binding,
+    framework_resolve_saga_terminal_binding, framework_retention_manifest_binding,
 };
 use crate::{ErasedRunCtx, Result, RuntimeError, StagedArtifact, StagedRetentionRefs};
 
@@ -310,12 +309,6 @@ impl ErasedRunnerRegistry {
         node: &spec::NodeSpec,
         descriptor: &spec::StateDescriptorIdentity,
     ) -> Result<ErasedRunnerBinding> {
-        if matches!(
-            &node.framework,
-            Some(spec::FrameworkNodeSpec::BootstrapRun(_))
-        ) {
-            return framework_bootstrap_run_binding(node, descriptor);
-        }
         if matches!(
             &node.framework,
             Some(spec::FrameworkNodeSpec::PublicOutputRender(_))

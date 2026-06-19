@@ -16,7 +16,7 @@ pub mod v1 {
     use mfm_events::v1::{self as events, side_effect, ArtifactRole, KernelEventPayload};
     use mfm_ids::{
         AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind, CapabilityVersion,
-        ContentDigest, NodeId, RunId, SchemaId, SpecHash,
+        ContentDigest, DigestAlgorithm, NodeId, RunId, SchemaId, SpecHash,
     };
     use mfm_manual_auth::{
         manual_authorization_proof_schema_id, ManualResolutionEvidenceRef,
@@ -92,7 +92,7 @@ pub mod v1 {
         /// The hash-only spec envelope is invalid.
         CertifiedSpec,
         /// No authoritative run-start event was present.
-        RunStartedMissing,
+        RunAdmittedMissing,
         /// The run stream is not a valid store-owned typed stream.
         InvalidRunStream,
         /// The stream is bound to a different certified spec hash.
@@ -134,7 +134,7 @@ pub mod v1 {
         pub const fn code(self) -> &'static str {
             match self {
                 Self::CertifiedSpec => "MFM_REPLAY_CERTIFIED_SPEC_INVALID",
-                Self::RunStartedMissing => "MFM_REPLAY_RUN_STARTED_MISSING",
+                Self::RunAdmittedMissing => "MFM_REPLAY_RUN_ADMITTED_MISSING",
                 Self::InvalidRunStream => "MFM_REPLAY_STREAM_INVALID",
                 Self::SpecHashMismatch => "MFM_REPLAY_SPEC_HASH_MISMATCH",
                 Self::CanonicalizerMismatch => "MFM_REPLAY_CANONICALIZER_MISMATCH",
@@ -181,7 +181,7 @@ pub mod v1 {
                     "verified history spec hash does not match certified runtime spec",
                 ));
             }
-            let run_started = run_started_payload(verified_history.events())?;
+            let run_admitted = run_admitted_payload(verified_history.events())?;
             let artifact_evidence = verified_history
                 .artifact_store()
                 .artifacts()
@@ -208,8 +208,8 @@ pub mod v1 {
                     .renderer_descriptor
                     .canonicalizer_identity
                     .clone(),
-                runner_executables: run_started.runner_executables,
-                adapter_executables: run_started.adapter_executables,
+                runner_executables: run_admitted.runner_executables,
+                adapter_executables: run_admitted.adapter_executables,
                 artifact_evidence,
                 artifact_bytes,
             })
@@ -405,7 +405,7 @@ pub mod v1 {
     pub struct ReplayBroker {
         certified_spec: HashedSpecEnvelope,
         stream: Vec<KernelEventEnvelope>,
-        run_id: events::RunStarted,
+        run_id: events::RunAdmitted,
         projection: ProjectionSnapshot,
         retained_artifacts: BTreeMap<ArtifactId, StoredArtifactEvidenceRef>,
         artifact_bytes: BTreeMap<ArtifactId, Vec<u8>>,
@@ -431,9 +431,9 @@ pub mod v1 {
             ProjectionSnapshot::validate_run_stream(&stream)?;
             let projection = ProjectionSnapshot::rebuild_from_run_stream(&stream)?;
             let retained_artifacts = artifact_map(authority.artifact_evidence.clone())?;
-            let run_started = run_started_payload(&stream)?;
+            let run_admitted = run_admitted_payload(&stream)?;
 
-            if run_started.spec_hash != certified_spec.spec_hash {
+            if run_admitted.spec_hash != certified_spec.spec_hash {
                 return Err(ReplayError::new(
                     ReplayErrorKind::SpecHashMismatch,
                     "run-start spec hash does not match certified spec",
@@ -450,7 +450,7 @@ pub mod v1 {
             }
             verify_run_start_contract(
                 &certified_spec,
-                &run_started,
+                &run_admitted,
                 &authority,
                 &retained_artifacts,
             )?;
@@ -459,7 +459,7 @@ pub mod v1 {
             let mut broker = Self {
                 certified_spec,
                 stream: stream.clone(),
-                run_id: run_started,
+                run_id: run_admitted,
                 projection,
                 retained_artifacts,
                 artifact_bytes: authority.artifact_bytes.clone(),
@@ -484,7 +484,7 @@ pub mod v1 {
         }
 
         /// Returns the run-start payload bound to this replay broker.
-        pub fn run_started(&self) -> &events::RunStarted {
+        pub fn run_admitted(&self) -> &events::RunAdmitted {
             &self.run_id
         }
 
@@ -757,7 +757,7 @@ pub mod v1 {
             let mut resource_keys = BTreeMap::new();
             for envelope in stream {
                 match envelope.payload() {
-                    KernelEventPayload::RunStarted(payload) => {
+                    KernelEventPayload::RunAdmitted(payload) => {
                         for seed in &payload.seed_cells {
                             self.verify_seed_against_spec(seed)?;
                         }
@@ -2265,37 +2265,36 @@ pub mod v1 {
         )
     }
 
-    fn run_started_payload(stream: &[KernelEventEnvelope]) -> Result<events::RunStarted> {
-        let mut run_started = None;
+    fn run_admitted_payload(stream: &[KernelEventEnvelope]) -> Result<events::RunAdmitted> {
+        let mut run_admitted = None;
         for envelope in stream {
-            if let KernelEventPayload::RunStarted(payload) = envelope.payload() {
-                if run_started.is_some() {
+            if let KernelEventPayload::RunAdmitted(payload) = envelope.payload() {
+                if run_admitted.is_some() {
                     return Err(ReplayError::new(
                         ReplayErrorKind::InvalidRunStream,
-                        "run stream contains more than one RunStarted event",
+                        "run stream contains more than one RunAdmitted event",
                     ));
                 }
-                run_started = Some(payload.clone());
+                run_admitted = Some((**payload).clone());
             }
         }
-        run_started.ok_or_else(|| {
+        run_admitted.ok_or_else(|| {
             ReplayError::new(
-                ReplayErrorKind::RunStartedMissing,
-                "run stream contains no RunStarted event",
+                ReplayErrorKind::RunAdmittedMissing,
+                "run stream contains no RunAdmitted event",
             )
         })
     }
 
     fn verify_run_start_contract(
         certified_spec: &HashedSpecEnvelope,
-        run_started: &events::RunStarted,
+        run_admitted: &events::RunAdmitted,
         authority: &ReplayReadAuthority,
         artifacts: &BTreeMap<ArtifactId, StoredArtifactEvidenceRef>,
     ) -> Result<()> {
-        if run_started.spec_version != certified_spec.spec.spec_version
-            || run_started.spec_media_type != certified_spec.spec.media_type
-            || run_started.lowering_version != certified_spec.spec.lowering_version
-            || run_started.public_output_schema_id
+        if run_admitted.spec_version != certified_spec.spec.spec_version
+            || run_admitted.lowering_version != certified_spec.spec.lowering_version
+            || run_admitted.public_output_schema_id
                 != certified_spec.spec.public_outputs.public_schema_id
         {
             return Err(ReplayError::new(
@@ -2303,7 +2302,7 @@ pub mod v1 {
                 "run-start spec contract fields do not match certified spec",
             ));
         }
-        if run_started.descriptor_identities != certified_spec.spec.descriptor_identities {
+        if run_admitted.descriptor_identities != certified_spec.spec.descriptor_identities {
             return Err(ReplayError::new(
                 ReplayErrorKind::DescriptorIdentityMismatch,
                 "run-start descriptor identities do not match certified spec",
@@ -2314,7 +2313,7 @@ pub mod v1 {
             .public_outputs
             .renderer_descriptor
             .canonicalizer_identity;
-        if run_started.canonicalizer_identity != *renderer_canonicalizer
+        if run_admitted.canonicalizer_identity != *renderer_canonicalizer
             || authority.canonicalizer_identity != *renderer_canonicalizer
         {
             return Err(ReplayError::new(
@@ -2322,34 +2321,115 @@ pub mod v1 {
                 "run-start canonicalizer identity does not match replay authority",
             ));
         }
-        if run_started.runner_executables != authority.runner_executables {
+        if run_admitted.runner_executables != authority.runner_executables {
             return Err(ReplayError::new(
                 ReplayErrorKind::ExecutableIdentityMismatch,
                 "runner executable identities do not match replay authority",
             ));
         }
-        if run_started.adapter_executables != authority.adapter_executables {
+        if run_admitted.adapter_executables != authority.adapter_executables {
             return Err(ReplayError::new(
                 ReplayErrorKind::AdapterExecutableMismatch,
                 "adapter executable identities do not match replay authority",
             ));
         }
-        let Some(spec_artifact) = artifacts.get(&run_started.spec_artifact_id) else {
+        let binding_digest = admitted_binding_digest(
+            &authority.runner_executables,
+            &authority.adapter_executables,
+        )?;
+        if run_admitted.admitted_binding_digest != binding_digest {
             return Err(ReplayError::new(
-                ReplayErrorKind::ArtifactMissing,
-                "missing certified spec artifact evidence",
+                ReplayErrorKind::ExecutableIdentityMismatch,
+                "RunAdmitted binding digest does not match replay authority",
             ));
-        };
-        if spec_artifact.digest != spec_digest(&certified_spec.spec_hash)
-            || spec_artifact.artifact_role != ArtifactRole::TypedExecutionSpec
-            || spec_artifact.schema_id.is_some()
+        }
+        verify_run_artifact(
+            artifacts,
+            &run_admitted.spec_artifact,
+            ArtifactRole::TypedExecutionSpec,
+        )?;
+        if run_admitted.spec_artifact.content_digest != spec_digest(&certified_spec.spec_hash)
+            || run_admitted.spec_artifact.schema_id.is_some()
         {
             return Err(ReplayError::new(
                 ReplayErrorKind::ArtifactMismatch,
-                "certified spec artifact evidence does not match run start",
+                "certified spec artifact evidence does not match run admission",
+            ));
+        }
+        verify_run_artifact(
+            artifacts,
+            &run_admitted.certificate_artifact,
+            ArtifactRole::TypedSpecCertificate,
+        )?;
+        for artifact in &run_admitted.config_artifacts {
+            verify_run_artifact(artifacts, artifact, ArtifactRole::TypedConfig)?;
+        }
+        Ok(())
+    }
+
+    fn verify_run_artifact(
+        artifacts: &BTreeMap<ArtifactId, StoredArtifactEvidenceRef>,
+        expected: &events::RunArtifactEvidenceRef,
+        role: ArtifactRole,
+    ) -> Result<()> {
+        let Some(actual) = artifacts.get(&expected.artifact_id) else {
+            return Err(ReplayError::new(
+                ReplayErrorKind::ArtifactMissing,
+                format!(
+                    "missing run admission artifact evidence {}",
+                    expected.artifact_id
+                ),
+            ));
+        };
+        if actual.digest != expected.content_digest
+            || actual.byte_len != expected.byte_len
+            || actual.media_type != expected.media_type
+            || actual.schema_id != expected.schema_id
+            || actual.semantic_type_id != expected.semantic_type_id
+            || actual.artifact_role != role
+            || expected.role != role
+        {
+            return Err(ReplayError::new(
+                ReplayErrorKind::ArtifactMismatch,
+                format!(
+                    "run admission artifact evidence {} does not match retained artifact",
+                    expected.artifact_id
+                ),
             ));
         }
         Ok(())
+    }
+
+    fn admitted_binding_digest(
+        runner_executables: &[events::ExecutableIdentity],
+        adapter_executables: &[events::ExecutableIdentity],
+    ) -> Result<ContentDigest> {
+        let json = serde_json::to_string(&serde_json::json!({
+            "adapter_executables": adapter_executables.iter().map(executable_identity_json).collect::<Vec<_>>(),
+            "runner_executables": runner_executables.iter().map(executable_identity_json).collect::<Vec<_>>(),
+        }))
+        .map_err(|error| ReplayError::new(ReplayErrorKind::InvalidRunStream, error.to_string()))?;
+        let canonical =
+            mfm_canonical::PlainCanonicalJsonBytes::from_json_str(&json).map_err(|error| {
+                ReplayError::new(ReplayErrorKind::InvalidRunStream, error.to_string())
+            })?;
+        Ok(ContentDigest::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            canonical.digest_bytes(),
+        ))
+    }
+
+    fn executable_identity_json(identity: &events::ExecutableIdentity) -> serde_json::Value {
+        serde_json::json!({
+            "binary_digest": identity.binary_digest.as_str(),
+            "cargo_package_digest": identity.cargo_package_digest.as_str(),
+            "cargo_package_name": identity.cargo_package_name.as_str(),
+            "cargo_package_version": identity.cargo_package_version.as_str(),
+            "factory_id": identity.factory_id.as_str(),
+            "nix_derivation_hash": identity.nix_derivation_hash.as_ref().map(|value| value.as_str()),
+            "nix_output_hash": identity.nix_output_hash.as_ref().map(|value| value.as_str()),
+            "source_revision": identity.source_revision.as_str(),
+        })
     }
 
     fn capability_set_contains(
@@ -2414,9 +2494,10 @@ pub mod v1 {
             ManualResolutionEvidenceRef,
         };
         use mfm_store::v1::{
-            build_committed_batch, CommitKey, CommitPreconditions, InMemoryTypedRunStore,
-            PreparedTypedCommit, RequiredRunState, StreamSeq, TypedCommitRequest,
-            TypedRunEventStore,
+            build_committed_batch, CommitArtifactEvidenceSet, CommitKey, CommitPreconditions,
+            InMemoryTypedRunStore, PreparedCommit, PreparedCommitPlan, RequiredRunState, Retention,
+            RunAdmission, SideEffectProgress, SideEffectTerminal, StateAttemptStarted, StreamSeq,
+            TypedCommitRequest, TypedRunEventStore,
         };
 
         const SPEC_MEDIA_TYPE: &str = "application/vnd.mfm.typed-execution-spec+json;version=1";
@@ -4418,42 +4499,49 @@ pub mod v1 {
                     &mut artifacts,
                     &run_id,
                     "run-start",
-                    vec![KernelEventPayload::RunStarted(events::RunStarted {
-                        run_id: run_id.clone(),
-                        spec_hash: envelope.spec_hash.clone(),
-                        spec_artifact_id: spec_artifact.artifact_id.clone(),
-                        certificate_artifact_id: certificate_artifact.artifact_id.clone(),
-                        certificate_artifact_digest: certificate_digest,
-                        certificate_media_type: certificate_artifact.media_type.clone(),
-                        spec_media_type: spec::MediaType::new(SPEC_MEDIA_TYPE).expect("media"),
-                        spec_version: SpecVersion::new(spec::SPEC_VERSION).expect("spec version"),
-                        lowering_version: LoweringVersion::new(spec::LOWERING_VERSION)
-                            .expect("lowering version"),
-                        public_output_schema_id: envelope
-                            .spec
-                            .public_outputs
-                            .public_schema_id
-                            .clone(),
-                        saga_policy_digest: envelope
-                            .spec
-                            .saga
-                            .saga_policy_digest()
-                            .expect("saga policy digest"),
-                        descriptor_identities: envelope.spec.descriptor_identities.clone(),
-                        runner_executables: vec![runner.clone()],
-                        adapter_executables: vec![adapter_exec.clone()],
-                        canonicalizer_identity: envelope
-                            .spec
-                            .public_outputs
-                            .renderer_descriptor
-                            .canonicalizer_identity
-                            .clone(),
-                        framework_version: events::FrameworkVersion::new("mfm.test.1")
-                            .expect("framework"),
-                        source_revision: events::SourceRevision::new("test-revision")
-                            .expect("source"),
-                        seed_cells: Vec::new(),
-                    })],
+                    vec![KernelEventPayload::RunAdmitted(Box::new(
+                        events::RunAdmitted {
+                            run_id: run_id.clone(),
+                            spec_hash: envelope.spec_hash.clone(),
+                            spec_artifact: run_artifact_ref(&spec_artifact),
+                            certificate_artifact: run_artifact_ref(&certificate_artifact),
+                            config_artifacts: Vec::new(),
+                            spec_version: SpecVersion::new(spec::SPEC_VERSION)
+                                .expect("spec version"),
+                            lowering_version: LoweringVersion::new(spec::LOWERING_VERSION)
+                                .expect("lowering version"),
+                            public_output_schema_id: envelope
+                                .spec
+                                .public_outputs
+                                .public_schema_id
+                                .clone(),
+                            saga_policy_digest: envelope
+                                .spec
+                                .saga
+                                .saga_policy_digest()
+                                .expect("saga policy digest"),
+                            descriptor_identities: envelope.spec.descriptor_identities.clone(),
+                            runner_executables: vec![runner.clone()],
+                            adapter_executables: vec![adapter_exec.clone()],
+                            admitted_binding_digest: admitted_binding_digest(
+                                std::slice::from_ref(&runner),
+                                std::slice::from_ref(&adapter_exec),
+                            )
+                            .expect("binding digest"),
+                            canonicalizer_identity: envelope
+                                .spec
+                                .public_outputs
+                                .renderer_descriptor
+                                .canonicalizer_identity
+                                .clone(),
+                            framework_version: events::FrameworkVersion::new("mfm.test.1")
+                                .expect("framework"),
+                            source_revision: events::SourceRevision::new("test-revision")
+                                .expect("source"),
+                            launched_at_unix_ms: 1_700_000_000_000,
+                            seed_cells: Vec::new(),
+                        },
+                    ))],
                     vec![spec_artifact, certificate_artifact],
                     CommitPreconditions {
                         required_run_state: RequiredRunState::Absent,
@@ -4928,10 +5016,82 @@ pub mod v1 {
             )
             .expect("typed commit request");
             let commit =
-                PreparedTypedCommit::new(request, artifacts).expect("prepare typed commit");
+                test_prepared_commit_plan(request, artifacts).expect("prepare typed commit");
             store
-                .append_prepared_typed_commit(commit)
+                .append_prepared_commit_plan(commit)
                 .expect("append typed commit");
+        }
+
+        fn test_prepared_commit_plan(
+            request: TypedCommitRequest,
+            admitted_artifacts: Vec<StoredArtifactEvidenceRef>,
+        ) -> store::Result<PreparedCommitPlan> {
+            let artifacts = CommitArtifactEvidenceSet::new(
+                request.required_artifacts().to_vec(),
+                admitted_artifacts,
+            )?;
+            if request
+                .payloads()
+                .iter()
+                .all(|payload| matches!(payload, KernelEventPayload::RunAdmitted(_)))
+            {
+                return PreparedCommit::<RunAdmission>::new(request, artifacts)
+                    .map(PreparedCommitPlan::from);
+            }
+            if request
+                .payloads()
+                .iter()
+                .all(|payload| matches!(payload, KernelEventPayload::StateAttemptStarted(_)))
+            {
+                let mut preconditions = request.preconditions().clone();
+                preconditions.required_run_state = RequiredRunState::NotCompleted;
+                let request = request.with_preconditions(preconditions);
+                return PreparedCommit::<StateAttemptStarted>::new(request, artifacts)
+                    .map(PreparedCommitPlan::from);
+            }
+            if request
+                .payloads()
+                .iter()
+                .any(test_is_side_effect_terminal_payload)
+            {
+                return PreparedCommit::<SideEffectTerminal>::new(request, artifacts)
+                    .map(PreparedCommitPlan::from);
+            }
+            if request
+                .payloads()
+                .iter()
+                .any(|payload| payload.side_effect_ref().is_some())
+            {
+                return PreparedCommit::<SideEffectProgress>::new(request, artifacts)
+                    .map(PreparedCommitPlan::from);
+            }
+            if request.payloads().iter().any(test_is_retention_payload) {
+                return PreparedCommit::<Retention>::new(request, artifacts)
+                    .map(PreparedCommitPlan::from);
+            }
+            PreparedCommit::<store::AttemptTerminal>::new(request, artifacts)
+                .map(PreparedCommitPlan::from)
+        }
+
+        fn test_is_retention_payload(payload: &KernelEventPayload) -> bool {
+            matches!(
+                payload,
+                KernelEventPayload::RetentionRefsAppended(_)
+                    | KernelEventPayload::RetentionManifestProjected(_)
+            )
+        }
+
+        fn test_is_side_effect_terminal_payload(payload: &KernelEventPayload) -> bool {
+            matches!(
+                payload,
+                KernelEventPayload::SideEffectNotSubmittedProven(_)
+                    | KernelEventPayload::SideEffectSubmissionObserved(_)
+                    | KernelEventPayload::SideEffectSubmissionUnknown(_)
+                    | KernelEventPayload::SideEffectReceiptObserved(_)
+                    | KernelEventPayload::SideEffectConfirmationObserved(_)
+                    | KernelEventPayload::SideEffectAmbiguous(_)
+                    | KernelEventPayload::SideEffectFailed(_)
+            )
         }
 
         fn append_payload_to_stream(
@@ -5111,6 +5271,20 @@ pub mod v1 {
                 producer_node_id,
                 producer_seed_id: None::<SeedId>,
                 artifact_role: role,
+            }
+        }
+
+        fn run_artifact_ref(
+            artifact: &StoredArtifactEvidenceRef,
+        ) -> events::RunArtifactEvidenceRef {
+            events::RunArtifactEvidenceRef {
+                artifact_id: artifact.artifact_id.clone(),
+                role: artifact.artifact_role,
+                schema_id: artifact.schema_id.clone(),
+                semantic_type_id: artifact.semantic_type_id.clone(),
+                content_digest: artifact.digest.clone(),
+                byte_len: artifact.byte_len,
+                media_type: artifact.media_type.clone(),
             }
         }
 

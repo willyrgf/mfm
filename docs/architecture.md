@@ -446,8 +446,8 @@ Additional dependency rules:
 `mfm-store` defines the production commit contract. Implementations accept only
 `PreparedCommitPlan` values built from purpose-specific `PreparedCommit<Purpose>` authority for
 execution mutation. Each prepared commit carries typed payloads and artifact evidence to admit
-atomically with those payloads. `PreparedTypedCommit` is the inner typed batch representation, not
-the authority production callers should construct directly.
+atomically with those payloads. There is no public raw prepared-commit constructor or append method;
+new commit purposes must add a purpose marker and validator before stores will accept them.
 
 Stores own:
 

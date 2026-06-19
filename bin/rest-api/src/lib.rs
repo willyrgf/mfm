@@ -21,7 +21,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::body::Bytes;
 use axum::extract::rejection::{JsonRejection, QueryRejection};
@@ -175,15 +175,15 @@ pub struct InMemoryAsyncTypedRunStore {
 impl AsyncTypedRunEventStore for InMemoryAsyncTypedRunStore {
     type Error = store::StoreError;
 
-    fn append_prepared_typed_commit<'a>(
+    fn append_prepared_commit_plan<'a>(
         &'a self,
-        commit: store::PreparedTypedCommit,
+        plan: store::PreparedCommitPlan,
     ) -> AsyncStoreFuture<'a, store::CommitOutcome, Self::Error> {
         let result = self
             .inner
             .lock()
             .expect("typed run store lock")
-            .append_prepared_typed_commit(commit);
+            .append_prepared_commit_plan(plan);
         Box::pin(std::future::ready(result))
     }
 
@@ -655,6 +655,26 @@ fn default_source_revision() -> String {
     std::env::var("MFM_SOURCE_REVISION").unwrap_or_else(|_| "unknown".to_owned())
 }
 
+fn launch_unix_ms() -> Result<u64, ApiError> {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "LaunchClockUnavailable",
+                format!("system clock is before Unix epoch: {error}"),
+            )
+        })?
+        .as_millis();
+    u64::try_from(millis).map_err(|_| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "LaunchClockOverflow",
+            "current Unix timestamp in milliseconds does not fit in u64",
+        )
+    })
+}
+
 #[instrument(level = "info", skip(state, body))]
 async fn portfolio_snapshot<S>(
     State(state): State<RouterState<S>>,
@@ -688,6 +708,7 @@ where
             run_id: run_id.clone(),
             framework_version: &req.framework_version,
             source_revision: &req.source_revision,
+            launched_at_unix_ms: launch_unix_ms()?,
             drive: req.drive.into_app(),
         },
         config_inputs,
@@ -869,6 +890,7 @@ where
             run_id,
             framework_version: &req.framework_version,
             source_revision: &req.source_revision,
+            launched_at_unix_ms: launch_unix_ms()?,
             drive: req.drive.into_app(),
         },
         configs,
@@ -1017,6 +1039,7 @@ where
             run_id: run_id.clone(),
             framework_version: &framework_version,
             source_revision: &source_revision,
+            launched_at_unix_ms: launch_unix_ms()?,
             drive: drive.into_app(),
         },
         evm_contract_config_artifacts(compiled.config_artifacts),

@@ -6,7 +6,6 @@ pub(super) fn validate_framework_nodes(
     descriptors: &DescriptorIndex<'_>,
     public_outputs: &spec::PublicOutputSpec,
 ) -> Result<()> {
-    let mut bootstrap_count = 0_usize;
     let mut retention_count = 0_usize;
     let mut completion_count = 0_usize;
     let mut resolve_count = 0_usize;
@@ -24,8 +23,7 @@ pub(super) fn validate_framework_nodes(
         if matches!(
             &node.framework,
             Some(
-                spec::FrameworkNodeSpec::BootstrapRun(_)
-                    | spec::FrameworkNodeSpec::ProjectRetentionManifest(_)
+                spec::FrameworkNodeSpec::ProjectRetentionManifest(_)
                     | spec::FrameworkNodeSpec::CompleteRun(_)
                     | spec::FrameworkNodeSpec::ResolveSagaTerminal(_)
             )
@@ -40,40 +38,6 @@ pub(super) fn validate_framework_nodes(
             validate_framework_config_ref(node, framework.config_kind())?;
         }
         match &node.framework {
-            Some(spec::FrameworkNodeSpec::BootstrapRun(_)) => {
-                bootstrap_count += 1;
-                let descriptor = descriptors.state(&node.descriptor_id)?;
-                validate_framework_descriptor_name(
-                    node,
-                    descriptor,
-                    "mfm.framework.bootstrap_run",
-                )?;
-                validate_framework_output_cell(
-                    node,
-                    cells,
-                    &spec::bootstrap_run_receipt_schema_id()
-                        .map_err(|error| CertifyError::Spec(error.to_string()))?,
-                    &spec::bootstrap_run_receipt_semantic_type_id()
-                        .map_err(|error| CertifyError::Spec(error.to_string()))?,
-                    spec::StoragePolicy::ContentAddressed,
-                )?;
-                validate_framework_input_binding(
-                    node,
-                    &spec::framework_lifecycle_unit_input_binding("bootstrap_run")
-                        .map_err(|error| CertifyError::Spec(error.to_string()))?,
-                )?;
-                let input_cells = validate_input_binding(&node.input_bindings, cells)?;
-                if !input_cells.is_empty() || !node.deterministic_predecessors.is_empty() {
-                    return Err(problem(
-                        ProblemClass::InvalidTopology,
-                        format!(
-                            "bootstrap lifecycle node {} must not have inputs",
-                            node.node_id
-                        ),
-                    ));
-                }
-                validate_no_framework_receipt_consumers(node, &all_input_cells)?;
-            }
             Some(spec::FrameworkNodeSpec::Bridge(bridge)) => {
                 let descriptor = descriptors.state(&node.descriptor_id)?;
                 validate_framework_descriptor_name(
@@ -376,14 +340,6 @@ pub(super) fn validate_framework_nodes(
         ),
     ));
     }
-    if bootstrap_count != 1 {
-        return Err(problem(
-            ProblemClass::InvalidTopology,
-            format!(
-                "expected exactly one bootstrap lifecycle framework node, found {bootstrap_count}"
-            ),
-        ));
-    }
     validate_lifecycle_tail_finality(nodes, &nodes_by_id)?;
     Ok(())
 }
@@ -414,8 +370,7 @@ fn validate_lifecycle_tail_finality(
         }
         match &node.framework {
             Some(
-                spec::FrameworkNodeSpec::BootstrapRun(_)
-                | spec::FrameworkNodeSpec::ProjectRetentionManifest(_)
+                spec::FrameworkNodeSpec::ProjectRetentionManifest(_)
                 | spec::FrameworkNodeSpec::CompleteRun(_)
                 | spec::FrameworkNodeSpec::ResolveSagaTerminal(_),
             ) => {}
@@ -503,12 +458,6 @@ pub(super) fn validate_framework_descriptor_variant(
     descriptor: &spec::StateDescriptorIdentity,
 ) -> Result<()> {
     let matches_variant = match descriptor.name.as_str() {
-        "mfm.framework.bootstrap_run" => {
-            matches!(
-                &node.framework,
-                Some(spec::FrameworkNodeSpec::BootstrapRun(_))
-            )
-        }
         "mfm.framework.bridge_same_value" => {
             matches!(&node.framework, Some(spec::FrameworkNodeSpec::Bridge(_)))
         }

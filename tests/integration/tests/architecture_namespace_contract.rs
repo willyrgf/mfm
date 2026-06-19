@@ -110,24 +110,46 @@ fn repository_text_entries_include_tracked_dot_config_surfaces() {
 }
 
 #[test]
-fn docs_do_not_describe_bootstrap_as_executed_genesis_state() {
+fn docs_do_not_describe_synthetic_admission_as_executed_genesis_state() {
     let root = repo_root();
     let entries = repo_text_entries(&root);
     let forbidden = [
         "executes the sealed `BootstrapRun` genesis state",
         "executes the sealed BootstrapRun genesis state",
+        "`BootstrapRun` remains certified",
+        "BootstrapRun remains certified",
+        "legacy bundled bootstrap evidence",
+        "bundled bootstrap evidence",
     ];
 
     assert_forbidden_terms_are_allowlisted(
-        "bootstrap admission docs",
+        "stale admission docs",
         &entries,
         &forbidden,
         &[],
-        |path, _source| {
-            path == "docs/design.md"
-                || path == "docs/architecture.md"
-                || path == "crates/kernel/runtime/README.md"
-        },
+        |path, _source| path != "tests/integration/tests/architecture_namespace_contract.rs",
+    );
+}
+
+#[test]
+fn repository_does_not_expose_raw_prepared_commit_escape_hatch_names() {
+    let root = repo_root();
+    let entries = repo_text_entries(&root);
+    let forbidden = [
+        "PreparedTypedCommit",
+        "append_prepared_typed_commit",
+        "stage_prepared_typed_run_commit",
+        "build_prepared_committed_batch",
+        "prepared_commit_fingerprint",
+        "into_typed_commit",
+    ];
+
+    assert_forbidden_terms_are_allowlisted(
+        "raw prepared commit escape hatch",
+        &entries,
+        &forbidden,
+        &[],
+        |path, _source| path != "tests/integration/tests/architecture_namespace_contract.rs",
     );
 }
 

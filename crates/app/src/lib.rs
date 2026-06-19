@@ -365,7 +365,7 @@ pub fn new_run_id() -> RunId {
     )
 }
 
-/// Whether typed start/resume should run scheduler steps after appending `RunStarted`.
+/// Whether typed start/resume should run scheduler steps after appending `RunAdmitted`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DriveMode {
     /// Append only the requested lifecycle event.
@@ -383,7 +383,7 @@ pub struct RunLaunchRequest {
     pub certified_spec: CertifiedTypedSpec,
     /// Store-owned run id to bind.
     pub run_id: RunId,
-    /// Launch material that runtime middleware stages and admits with the genesis commit.
+    /// Launch material that runtime middleware stages and admits with the admission commit.
     pub evidence: RunLaunchEvidence,
     /// Scheduler drive policy after start.
     pub drive: DriveMode,
@@ -1384,21 +1384,21 @@ pub async fn load_certified_spec_for_run(
     run_id: &RunId,
     stream: &[store::KernelEventEnvelope],
 ) -> Result<CertifiedTypedSpec, AppError> {
-    let run_started = run_started_payload(run_id, stream)?;
+    let run_admitted = run_admitted_payload(run_id, stream)?;
     let (spec_bytes, spec_evidence) = artifacts
-        .get_artifact_by_id(&run_started.spec_artifact_id)
+        .get_artifact_by_id(&run_admitted.spec_artifact.artifact_id)
         .await?;
-    validate_spec_artifact_evidence(run_started, &spec_evidence)?;
+    validate_spec_artifact_evidence(run_admitted, &spec_evidence)?;
     let (certificate_bytes, certificate_evidence) = artifacts
-        .get_artifact_by_id(&run_started.certificate_artifact_id)
+        .get_artifact_by_id(&run_admitted.certificate_artifact.artifact_id)
         .await?;
-    validate_certificate_artifact_evidence(run_started, &certificate_evidence)?;
+    validate_certificate_artifact_evidence(run_admitted, &certificate_evidence)?;
     let certified = mfm_certify::verify_certified_bundle_with_trusted_registry(
         &spec_bytes,
         &certificate_bytes,
         registry,
     )?;
-    validate_run_started_matches_spec(run_started, certified.envelope())?;
+    validate_run_admitted_matches_spec(run_admitted, certified.envelope())?;
     Ok(certified)
 }
 
@@ -1832,6 +1832,8 @@ pub struct UntrustedCertifiedBundleLaunchInput<'a> {
     pub framework_version: &'a str,
     /// Source revision evidence to bind to the run start event.
     pub source_revision: &'a str,
+    /// Caller-supplied launch time in Unix milliseconds.
+    pub launched_at_unix_ms: u64,
     /// Drive mode used for the initial scheduler invocation.
     pub drive: DriveMode,
 }
@@ -1848,6 +1850,8 @@ pub struct CertifiedRunLaunchInput<'a> {
     pub framework_version: &'a str,
     /// Source revision evidence to bind to the run start event.
     pub source_revision: &'a str,
+    /// Caller-supplied launch time in Unix milliseconds.
+    pub launched_at_unix_ms: u64,
     /// Drive mode used for the initial scheduler invocation.
     pub drive: DriveMode,
 }
@@ -1874,6 +1878,7 @@ pub fn prepare_verified_bundle_launch(
             run_id: input.run_id,
             framework_version: input.framework_version,
             source_revision: input.source_revision,
+            launched_at_unix_ms: input.launched_at_unix_ms,
             drive: input.drive,
         },
         config_inputs,
@@ -1918,6 +1923,7 @@ pub fn prepare_certified_run_launch(
                     )
                 },
             )?,
+            launched_at_unix_ms: input.launched_at_unix_ms,
             adapter_executables: Vec::new(),
             seed_cells,
         },
@@ -1941,7 +1947,7 @@ pub fn typed_run_status_from_stream(
             "typed run stream was not found",
         ));
     }
-    let spec_hash = run_started_spec_hash(stream)?;
+    let spec_hash = run_admitted_spec_hash(stream)?;
     let projection = store::ProjectionSnapshot::rebuild_from_run_stream(stream)?;
     typed_run_status_from_projection_with_spec_hash(
         run_id,
@@ -1958,7 +1964,7 @@ fn typed_run_status_from_projection(
     stream: &[store::KernelEventEnvelope],
     projection: &store::ProjectionSnapshot,
 ) -> Result<TypedRunResponse, AppError> {
-    let spec_hash = run_started_spec_hash(stream)?;
+    let spec_hash = run_admitted_spec_hash(stream)?;
     typed_run_status_from_projection_with_spec_hash(
         run_id,
         runtime_spec,
@@ -1980,8 +1986,8 @@ fn typed_run_status_from_projection_with_spec_hash(
         run_id: run_id.as_str().to_owned(),
         spec_hash: spec_hash.as_str().to_owned(),
         run_mode: typed_run_mode(saga.run_mode),
-        saga: typed_saga_status_with_resources(runtime_spec.spec(), &projection, &saga),
-        attempt_dispositions: typed_attempt_dispositions(&projection),
+        saga: typed_saga_status_with_resources(runtime_spec.spec(), projection, &saga),
+        attempt_dispositions: typed_attempt_dispositions(projection),
         scheduler_status: "observed".to_owned(),
         head_seq: stream_head(stream),
     })
@@ -2304,103 +2310,112 @@ fn public_output_artifact_mismatch(message: &'static str) -> AppError {
     )
 }
 
-fn run_started_payload<'a>(
+fn run_admitted_payload<'a>(
     run_id: &RunId,
     stream: &'a [store::KernelEventEnvelope],
-) -> Result<&'a events::RunStarted, AppError> {
+) -> Result<&'a events::RunAdmitted, AppError> {
     stream
         .iter()
         .find_map(|event| match event.payload() {
-            events::KernelEventPayload::RunStarted(payload) => Some(payload),
+            events::KernelEventPayload::RunAdmitted(payload) => Some(payload.as_ref()),
             _ => None,
         })
         .ok_or_else(|| {
             AppError::new(
                 ErrorClass::Internal,
-                "RunStartedMissing",
-                "typed run stream is missing RunStarted evidence",
+                "RunAdmittedMissing",
+                "typed run stream is missing RunAdmitted evidence",
             )
         })
-        .and_then(|run_started| {
-            if &run_started.run_id == run_id {
-                Ok(run_started)
+        .and_then(|run_admitted| {
+            if &run_admitted.run_id == run_id {
+                Ok(run_admitted)
             } else {
                 Err(AppError::new(
                     ErrorClass::Internal,
-                    "RunStartedMismatch",
-                    "typed run stream RunStarted evidence is bound to a different run id",
+                    "RunAdmittedMismatch",
+                    "typed run stream RunAdmitted evidence is bound to a different run id",
                 ))
             }
         })
 }
 
 fn validate_spec_artifact_evidence(
-    run_started: &events::RunStarted,
+    run_admitted: &events::RunAdmitted,
     evidence: &store::ArtifactEvidenceRef,
 ) -> Result<(), AppError> {
     let expected_spec_hash =
         SpecHash::from_digest(evidence.digest.algorithm(), *evidence.digest.digest());
-    if evidence.artifact_id != run_started.spec_artifact_id
-        || expected_spec_hash != run_started.spec_hash
-        || evidence.media_type != run_started.spec_media_type
+    if evidence.artifact_id != run_admitted.spec_artifact.artifact_id
+        || expected_spec_hash != run_admitted.spec_hash
+        || evidence.digest != run_admitted.spec_artifact.content_digest
+        || evidence.byte_len != run_admitted.spec_artifact.byte_len
+        || evidence.media_type != run_admitted.spec_artifact.media_type
+        || evidence.schema_id != run_admitted.spec_artifact.schema_id
+        || evidence.semantic_type_id != run_admitted.spec_artifact.semantic_type_id
         || evidence.schema_id.is_some()
         || evidence.semantic_type_id.is_some()
         || evidence.producer_node_id.is_some()
         || evidence.producer_seed_id.is_some()
+        || evidence.artifact_role != run_admitted.spec_artifact.role
         || evidence.artifact_role != events::ArtifactRole::TypedExecutionSpec
     {
         return Err(AppError::new(
             ErrorClass::Internal,
             "CertifiedSpecArtifactMismatch",
-            "typed execution spec artifact metadata does not match RunStarted evidence",
+            "typed execution spec artifact metadata does not match RunAdmitted evidence",
         ));
     }
     Ok(())
 }
 
 fn validate_certificate_artifact_evidence(
-    run_started: &events::RunStarted,
+    run_admitted: &events::RunAdmitted,
     evidence: &store::ArtifactEvidenceRef,
 ) -> Result<(), AppError> {
-    if evidence.artifact_id != run_started.certificate_artifact_id
-        || evidence.digest != run_started.certificate_artifact_digest
-        || evidence.media_type != run_started.certificate_media_type
+    if evidence.artifact_id != run_admitted.certificate_artifact.artifact_id
+        || evidence.digest != run_admitted.certificate_artifact.content_digest
+        || evidence.byte_len != run_admitted.certificate_artifact.byte_len
+        || evidence.media_type != run_admitted.certificate_artifact.media_type
+        || evidence.schema_id != run_admitted.certificate_artifact.schema_id
+        || evidence.semantic_type_id != run_admitted.certificate_artifact.semantic_type_id
         || evidence.schema_id.is_some()
         || evidence.semantic_type_id.is_some()
         || evidence.producer_node_id.is_some()
         || evidence.producer_seed_id.is_some()
+        || evidence.artifact_role != run_admitted.certificate_artifact.role
         || evidence.artifact_role != events::ArtifactRole::TypedSpecCertificate
     {
         return Err(AppError::new(
             ErrorClass::Internal,
             "CertifiedCertificateArtifactMismatch",
-            "typed spec certificate artifact metadata does not match RunStarted evidence",
+            "typed spec certificate artifact metadata does not match RunAdmitted evidence",
         ));
     }
     Ok(())
 }
 
-fn validate_run_started_matches_spec(
-    run_started: &events::RunStarted,
+fn validate_run_admitted_matches_spec(
+    run_admitted: &events::RunAdmitted,
     envelope: &spec::HashedSpecEnvelope,
 ) -> Result<(), AppError> {
-    if envelope.spec_hash != run_started.spec_hash
-        || envelope.spec.media_type != run_started.spec_media_type
-        || envelope.spec.spec_version != run_started.spec_version
-        || envelope.spec.lowering_version != run_started.lowering_version
-        || envelope.spec.public_outputs.public_schema_id != run_started.public_output_schema_id
-        || envelope.spec.descriptor_identities != run_started.descriptor_identities
+    if envelope.spec_hash != run_admitted.spec_hash
+        || envelope.spec.media_type != run_admitted.spec_artifact.media_type
+        || envelope.spec.spec_version != run_admitted.spec_version
+        || envelope.spec.lowering_version != run_admitted.lowering_version
+        || envelope.spec.public_outputs.public_schema_id != run_admitted.public_output_schema_id
+        || envelope.spec.descriptor_identities != run_admitted.descriptor_identities
         || envelope
             .spec
             .public_outputs
             .renderer_descriptor
             .canonicalizer_identity
-            != run_started.canonicalizer_identity
+            != run_admitted.canonicalizer_identity
     {
         return Err(AppError::new(
             ErrorClass::Internal,
-            "RunStartedSpecMismatch",
-            "RunStarted evidence does not match the stored certified spec artifact",
+            "RunAdmittedSpecMismatch",
+            "RunAdmitted evidence does not match the stored certified spec artifact",
         ));
     }
     Ok(())
@@ -2418,8 +2433,8 @@ fn typed_run_response_from_projection(
         run_id: run_id.as_str().to_owned(),
         spec_hash: runtime_spec.spec_hash().as_str().to_owned(),
         run_mode: typed_run_mode(saga.run_mode),
-        saga: typed_saga_status_with_resources(runtime_spec.spec(), &projection, &saga),
-        attempt_dispositions: typed_attempt_dispositions(&projection),
+        saga: typed_saga_status_with_resources(runtime_spec.spec(), projection, &saga),
+        attempt_dispositions: typed_attempt_dispositions(projection),
         scheduler_status: scheduler_status_str(status).to_owned(),
         head_seq: stream_head(stream),
     })
@@ -2955,18 +2970,18 @@ fn side_effect_phase_str(phase: &store::SideEffectPhase) -> String {
     phase.as_str().to_owned()
 }
 
-fn run_started_spec_hash(stream: &[store::KernelEventEnvelope]) -> Result<SpecHash, AppError> {
+fn run_admitted_spec_hash(stream: &[store::KernelEventEnvelope]) -> Result<SpecHash, AppError> {
     stream
         .iter()
         .find_map(|event| match event.payload() {
-            events::KernelEventPayload::RunStarted(payload) => Some(payload.spec_hash.clone()),
+            events::KernelEventPayload::RunAdmitted(payload) => Some(payload.spec_hash.clone()),
             _ => None,
         })
         .ok_or_else(|| {
             AppError::new(
                 ErrorClass::Internal,
-                "RunStartedMissing",
-                "typed run stream is missing RunStarted evidence",
+                "RunAdmittedMissing",
+                "typed run stream is missing RunAdmitted evidence",
             )
         })
 }
@@ -3338,32 +3353,34 @@ mod tests {
                 run_id.clone(),
                 store::StreamSeq::FIRST,
                 store::CommitKey::new("public-status-run-start").expect("commit key"),
-                vec![events::KernelEventPayload::RunStarted(events::RunStarted {
-                    run_id: run_id.clone(),
-                    spec_hash: spec_hash.clone(),
-                    spec_artifact_id: spec_artifact.artifact_id.clone(),
-                    certificate_artifact_id: certificate_artifact.artifact_id.clone(),
-                    certificate_artifact_digest: certificate_artifact.digest.clone(),
-                    certificate_media_type: certificate_artifact.media_type.clone(),
-                    spec_media_type: spec_artifact.media_type.clone(),
-                    spec_version: SpecVersion::new(spec::SPEC_VERSION).expect("spec version"),
-                    lowering_version: LoweringVersion::new(spec::LOWERING_VERSION)
-                        .expect("lowering version"),
-                    public_output_schema_id: schema_id("mfm.test.public_output", 0xc8),
-                    saga_policy_digest: spec::SagaPolicySpec::NoSideEffects
-                        .saga_policy_digest()
-                        .expect("saga policy digest"),
-                    descriptor_identities: Vec::new(),
-                    runner_executables: Vec::new(),
-                    adapter_executables: Vec::new(),
-                    canonicalizer_identity: spec::CanonicalizerIdentity::new("mfm.jcs.v1")
-                        .expect("canonicalizer"),
-                    framework_version: events::FrameworkVersion::new("mfm.test.framework")
-                        .expect("framework version"),
-                    source_revision: events::SourceRevision::new("test-source")
-                        .expect("source revision"),
-                    seed_cells: Vec::new(),
-                })],
+                vec![events::KernelEventPayload::RunAdmitted(Box::new(
+                    events::RunAdmitted {
+                        run_id: run_id.clone(),
+                        spec_hash: spec_hash.clone(),
+                        spec_artifact: run_artifact_ref(&spec_artifact),
+                        certificate_artifact: run_artifact_ref(&certificate_artifact),
+                        config_artifacts: Vec::new(),
+                        spec_version: SpecVersion::new(spec::SPEC_VERSION).expect("spec version"),
+                        lowering_version: LoweringVersion::new(spec::LOWERING_VERSION)
+                            .expect("lowering version"),
+                        public_output_schema_id: schema_id("mfm.test.public_output", 0xc8),
+                        saga_policy_digest: spec::SagaPolicySpec::NoSideEffects
+                            .saga_policy_digest()
+                            .expect("saga policy digest"),
+                        descriptor_identities: Vec::new(),
+                        runner_executables: Vec::new(),
+                        adapter_executables: Vec::new(),
+                        admitted_binding_digest: content_digest(0xc9),
+                        canonicalizer_identity: spec::CanonicalizerIdentity::new("mfm.jcs.v1")
+                            .expect("canonicalizer"),
+                        framework_version: events::FrameworkVersion::new("mfm.test.framework")
+                            .expect("framework version"),
+                        source_revision: events::SourceRevision::new("test-source")
+                            .expect("source revision"),
+                        launched_at_unix_ms: 1_700_000_000_000,
+                        seed_cells: Vec::new(),
+                    },
+                ))],
                 vec![spec_artifact.clone(), certificate_artifact.clone()],
                 store::CommitPreconditions {
                     required_run_state: store::RequiredRunState::Absent,
@@ -3378,9 +3395,10 @@ mod tests {
             store::TypedCommitRequest::from_payloads(
                 run_id.clone(),
                 side_effect_expected_next_seq,
-                store::CommitKey::new("public-status-side-effect-prepare").expect("commit key"),
-                vec![
-                    events::KernelEventPayload::StateAttemptStarted(events::StateAttemptStarted {
+                store::CommitKey::new("public-status-side-effect-attempt-start")
+                    .expect("commit key"),
+                vec![events::KernelEventPayload::StateAttemptStarted(
+                    events::StateAttemptStarted {
                         spec_hash: spec_hash.clone(),
                         node_id: node_id.clone(),
                         attempt_id: attempt_id.clone(),
@@ -3394,7 +3412,21 @@ mod tests {
                         .expect("state kind"),
                         state_version: StateVersion::new("mfm.test.side_effect_state.v1")
                             .expect("state version"),
-                    }),
+                    },
+                )],
+                Vec::new(),
+                store::CommitPreconditions::default(),
+            )
+            .expect("side-effect attempt start request"),
+        );
+        let side_effect_prepare_next_seq = store.expected_next_seq(&run_id);
+        append_test_commit(
+            &mut store,
+            store::TypedCommitRequest::from_payloads(
+                run_id.clone(),
+                side_effect_prepare_next_seq,
+                store::CommitKey::new("public-status-side-effect-prepare").expect("commit key"),
+                vec![
                     events::KernelEventPayload::SideEffectIntentPersisted(
                         events::side_effect::IntentPersisted {
                             spec_hash: spec_hash.clone(),
@@ -3842,6 +3874,7 @@ mod tests {
                 run_id: fixture.run_id.clone(),
                 framework_version: "mfm.test.framework",
                 source_revision: "test-source",
+                launched_at_unix_ms: 1_700_000_000_000,
                 drive: DriveMode::AppendOnly,
             },
             config_inputs,
@@ -4245,14 +4278,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn app_read_paths_reject_tampered_bootstrap_genesis_history() {
+    async fn app_read_paths_reject_tampered_run_admitted_history() {
         let (root, fixture, services, _started) = start_framework_fixture_run().await;
         let valid_stream = services
             .store()
             .load_run_stream(&fixture.run_id)
             .await
             .expect("load valid stream");
-        let corrupt_stream = tamper_bootstrap_receipt_reference_history(&valid_stream);
+        let corrupt_stream = tamper_run_admitted_spec_artifact_history(&valid_stream);
         let artifacts = services.artifacts().clone();
         let registry =
             CertificationRegistry::from_program_draft(&fixture.draft).expect("fixture registry");
@@ -4271,26 +4304,30 @@ mod tests {
             corrupt_services
                 .run_status(&fixture.run_id)
                 .await
-                .expect_err("status rejects tampered bootstrap"),
+                .expect_err("status rejects tampered RunAdmitted"),
             corrupt_services
                 .run_stream(&fixture.run_id)
                 .await
-                .expect_err("stream read rejects tampered bootstrap"),
+                .expect_err("stream read rejects tampered RunAdmitted"),
             corrupt_services
                 .resume_stored_run(&fixture.run_id, DriveMode::AppendOnly)
                 .await
-                .expect_err("resume rejects tampered bootstrap"),
+                .expect_err("resume rejects tampered RunAdmitted"),
             corrupt_services
                 .typed_public_output(&fixture.run_id, &fixture.public_schema_id)
                 .await
-                .expect_err("public output rejects tampered bootstrap"),
+                .expect_err("public output rejects tampered RunAdmitted"),
             corrupt_services
                 .verify_replay_for_run(&fixture.run_id)
                 .await
-                .expect_err("replay rejects tampered bootstrap"),
+                .expect_err("replay rejects tampered RunAdmitted"),
         ] {
-            assert_eq!(error.code, "RunStoreRejected");
-            assert!(error.message.contains("artifact"), "{}", error.message);
+            assert_eq!(error.code, "CertifiedSpecArtifactMismatch");
+            assert!(
+                error.message.contains("RunAdmitted evidence"),
+                "{}",
+                error.message
+            );
         }
 
         let _ = std::fs::remove_dir_all(root);
@@ -4482,7 +4519,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn app_rejects_invalid_bundle_before_run_started() {
+    async fn app_rejects_invalid_bundle_before_run_admitted() {
         let root =
             std::env::temp_dir().join(format!("mfm-app-invalid-bundle-{}", uuid::Uuid::new_v4()));
         let artifacts = FsTypedArtifactStore::new(&root);
@@ -4502,6 +4539,7 @@ mod tests {
                 run_id: run_id.clone(),
                 framework_version: "mfm.test.framework",
                 source_revision: "test-source",
+                launched_at_unix_ms: 1_700_000_000_000,
                 drive: DriveMode::AppendOnly,
             },
             Vec::new(),
@@ -4523,12 +4561,12 @@ mod tests {
             .expect("load stream");
         assert!(!stream
             .iter()
-            .any(|event| matches!(event.payload(), events::KernelEventPayload::RunStarted(_))));
+            .any(|event| matches!(event.payload(), events::KernelEventPayload::RunAdmitted(_))));
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]
-    async fn app_rejects_certifier_invalid_runtime_shape_valid_bundle_before_run_started() {
+    async fn app_rejects_certifier_invalid_runtime_shape_valid_bundle_before_run_admitted() {
         let root = std::env::temp_dir().join(format!(
             "mfm-app-certifier-invalid-bundle-{}",
             uuid::Uuid::new_v4()
@@ -4560,6 +4598,7 @@ mod tests {
                 run_id: run_id.clone(),
                 framework_version: "mfm.test.framework",
                 source_revision: "test-source",
+                launched_at_unix_ms: 1_700_000_000_000,
                 drive: DriveMode::AppendOnly,
             },
             Vec::new(),
@@ -4581,7 +4620,7 @@ mod tests {
             .expect("load stream");
         assert!(!stream
             .iter()
-            .any(|event| matches!(event.payload(), events::KernelEventPayload::RunStarted(_))));
+            .any(|event| matches!(event.payload(), events::KernelEventPayload::RunAdmitted(_))));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -4593,11 +4632,14 @@ mod tests {
             .load_run_stream(&fixture.run_id)
             .await
             .expect("load stream");
-        let started = run_started_payload(&fixture.run_id, &stream)
+        let started = run_admitted_payload(&fixture.run_id, &stream)
             .expect("run started")
             .clone();
-        std::fs::write(artifact_blob_path(&root, &started.spec_artifact_id), b"{}")
-            .expect("tamper spec artifact");
+        std::fs::write(
+            artifact_blob_path(&root, &started.spec_artifact.artifact_id),
+            b"{}",
+        )
+        .expect("tamper spec artifact");
 
         let err = services
             .resume_stored_run(&fixture.run_id, DriveMode::AppendOnly)
@@ -4615,11 +4657,11 @@ mod tests {
             .load_run_stream(&fixture.run_id)
             .await
             .expect("load stream");
-        let started = run_started_payload(&fixture.run_id, &stream)
+        let started = run_admitted_payload(&fixture.run_id, &stream)
             .expect("run started")
             .clone();
         std::fs::write(
-            artifact_blob_path(&root, &started.certificate_artifact_id),
+            artifact_blob_path(&root, &started.certificate_artifact.artifact_id),
             b"{}",
         )
         .expect("tamper certificate artifact");
@@ -4640,11 +4682,11 @@ mod tests {
             let store = store.lock().await;
             store.load_run_stream(&fixture.run_id)
         };
-        let started = run_started_payload(&fixture.run_id, &stream)
+        let started = run_admitted_payload(&fixture.run_id, &stream)
             .expect("run started")
             .clone();
         std::fs::write(
-            artifact_blob_path(&root, &started.certificate_artifact_id),
+            artifact_blob_path(&root, &started.certificate_artifact.artifact_id),
             b"{}",
         )
         .expect("tamper certificate artifact");
@@ -4733,11 +4775,11 @@ mod tests {
             let store = store.lock().await;
             store.load_run_stream(&fixture.run_id)
         };
-        let started = run_started_payload(&fixture.run_id, &stream)
+        let started = run_admitted_payload(&fixture.run_id, &stream)
             .expect("run started")
             .clone();
         std::fs::write(
-            artifact_blob_path(&root, &started.certificate_artifact_id),
+            artifact_blob_path(&root, &started.certificate_artifact.artifact_id),
             b"{}",
         )
         .expect("tamper certificate artifact");
@@ -4758,11 +4800,11 @@ mod tests {
             .load_run_stream(&fixture.run_id)
             .await
             .expect("load stream");
-        let started = run_started_payload(&fixture.run_id, &stream)
+        let started = run_admitted_payload(&fixture.run_id, &stream)
             .expect("run started")
             .clone();
         std::fs::write(
-            artifact_blob_path(&root, &started.certificate_artifact_id),
+            artifact_blob_path(&root, &started.certificate_artifact.artifact_id),
             b"{}",
         )
         .expect("tamper certificate artifact");
@@ -4789,11 +4831,11 @@ mod tests {
             .load_run_stream(&fixture.run_id)
             .await
             .expect("load stream");
-        let started = run_started_payload(&fixture.run_id, &stream)
+        let started = run_admitted_payload(&fixture.run_id, &stream)
             .expect("run started")
             .clone();
         std::fs::write(
-            artifact_blob_path(&root, &started.certificate_artifact_id),
+            artifact_blob_path(&root, &started.certificate_artifact.artifact_id),
             b"{}",
         )
         .expect("tamper certificate artifact");
@@ -4813,7 +4855,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn async_typed_start_rejects_missing_runner_before_run_started() {
+    async fn async_typed_start_rejects_missing_runner_before_run_admitted() {
         let root = std::env::temp_dir().join(format!(
             "mfm-app-async-missing-runner-{}",
             uuid::Uuid::new_v4()
@@ -4830,6 +4872,7 @@ mod tests {
                 run_id: fixture.run_id.clone(),
                 framework_version: "mfm.test.framework",
                 source_revision: "test-source",
+                launched_at_unix_ms: 1_700_000_000_000,
                 drive: DriveMode::UntilBlocked,
             },
             config_inputs,
@@ -4888,6 +4931,7 @@ mod tests {
                 run_id: new_run_id(),
                 framework_version: "mfm.test.proof",
                 source_revision: "test-source",
+                launched_at_unix_ms: 1_700_000_000_000,
                 drive: DriveMode::UntilBlocked,
             },
             config_inputs,
@@ -4982,6 +5026,7 @@ mod tests {
                 run_id: fixture.run_id.clone(),
                 framework_version: "mfm.test.framework",
                 source_revision: "test-source",
+                launched_at_unix_ms: 1_700_000_000_000,
                 drive,
             },
             config_inputs,
@@ -5229,6 +5274,7 @@ mod tests {
                 run_id: fixture.run_id.clone(),
                 framework_version: "mfm.test.framework",
                 source_revision: "test-source",
+                launched_at_unix_ms: 1_700_000_000_000,
                 drive: DriveMode::UntilBlocked,
             },
             config_inputs,
@@ -5343,9 +5389,9 @@ mod tests {
             }
             let required_artifacts = required_artifacts_for_payloads(artifacts, &payloads).await;
             let admitted_artifacts = required_artifacts.clone();
-            let contains_run_started = payloads
+            let contains_run_admitted = payloads
                 .iter()
-                .any(|payload| matches!(payload, events::KernelEventPayload::RunStarted(_)));
+                .any(|payload| matches!(payload, events::KernelEventPayload::RunAdmitted(_)));
             let request = store::TypedCommitRequest::from_payloads(
                 run_id.clone(),
                 corrupt_store.expected_next_seq(&run_id),
@@ -5353,7 +5399,7 @@ mod tests {
                 payloads,
                 required_artifacts,
                 store::CommitPreconditions {
-                    required_run_state: if contains_run_started {
+                    required_run_state: if contains_run_admitted {
                         store::RequiredRunState::Absent
                     } else {
                         store::RequiredRunState::NotCompleted
@@ -5362,10 +5408,10 @@ mod tests {
                 },
             )
             .expect("typed commit request");
-            let commit = store::PreparedTypedCommit::new(request, admitted_artifacts)
+            let commit = test_prepared_commit_plan(request, admitted_artifacts)
                 .expect("prepare corrupt-history test commit");
             corrupt_store
-                .append_prepared_typed_commit(commit)
+                .append_prepared_commit_plan(commit)
                 .expect("append corrupt-history test commit");
             if contains_public_output {
                 break;
@@ -5445,16 +5491,16 @@ mod tests {
     fn append_post_completion_retention_refs_history(
         stream: &[store::KernelEventEnvelope],
     ) -> Vec<store::KernelEventEnvelope> {
-        let run_started = stream
+        let run_admitted = stream
             .iter()
             .find_map(|event| match event.payload() {
-                events::KernelEventPayload::RunStarted(payload) => Some(payload),
+                events::KernelEventPayload::RunAdmitted(payload) => Some(payload),
                 _ => None,
             })
             .expect("run started");
         let retention = store::ProjectionSnapshot::rebuild_from_run_stream(stream)
             .expect("valid projection")
-            .retention(&run_started.run_id)
+            .retention(&run_admitted.run_id)
             .and_then(|projection| projection.refs.values().next().cloned())
             .expect("retention ref");
         let seq = stream
@@ -5462,13 +5508,13 @@ mod tests {
             .map(|event| store::StreamSeq::new(event.seq().as_u64() + 1).expect("next stream seq"))
             .unwrap_or(store::StreamSeq::FIRST);
         let request = store::TypedCommitRequest::from_payloads(
-            run_started.run_id.clone(),
+            run_admitted.run_id.clone(),
             seq,
             store::CommitKey::new("post-completion-retention-ref").expect("commit key"),
             vec![events::KernelEventPayload::RetentionRefsAppended(
                 events::RetentionRefsAppended {
-                    run_id: run_started.run_id.clone(),
-                    spec_hash: run_started.spec_hash.clone(),
+                    run_id: run_admitted.run_id.clone(),
+                    spec_hash: run_admitted.spec_hash.clone(),
                     refs: vec![retention],
                     reason: events::RetentionReason::RuntimeEvidence,
                 },
@@ -5483,42 +5529,29 @@ mod tests {
         rewritten
     }
 
-    fn tamper_bootstrap_receipt_reference_history(
+    fn tamper_run_admitted_spec_artifact_history(
         stream: &[store::KernelEventEnvelope],
     ) -> Vec<store::KernelEventEnvelope> {
         let first = stream.first().expect("valid stream is non-empty");
         let run_id = first.run_id().clone();
         let first_seq = first.seq();
         let first_key = first.commit_key().clone();
-        let mut payloads = stream
-            .iter()
-            .take_while(|event| event.seq() == first_seq && event.commit_key() == &first_key)
-            .map(|event| event.payload().clone())
-            .collect::<Vec<_>>();
-        let mut tampered = false;
-        for payload in &mut payloads {
-            if let events::KernelEventPayload::ArtifactReferenced(reference) = payload {
-                if reference.node_id.is_some()
-                    && reference.artifact_ref.role == events::ArtifactRole::StateOutput
-                {
-                    reference.artifact_ref.byte_len += 1;
-                    tampered = true;
-                    break;
-                }
-            }
-        }
-        assert!(tampered, "bootstrap receipt artifact reference exists");
+        let events::KernelEventPayload::RunAdmitted(mut run_admitted) = first.payload().clone()
+        else {
+            panic!("valid stream starts with RunAdmitted");
+        };
+        run_admitted.spec_artifact.byte_len += 1;
         let request = store::TypedCommitRequest::from_payloads(
             run_id,
             first_seq,
             first_key.clone(),
-            payloads,
+            vec![events::KernelEventPayload::RunAdmitted(run_admitted)],
             Vec::new(),
             store::CommitPreconditions::default(),
         )
         .expect("typed commit request");
         let batch =
-            store::build_committed_batch(&request, first_seq).expect("tampered bootstrap batch");
+            store::build_committed_batch(&request, first_seq).expect("tampered admission batch");
         let mut rewritten = batch.events().to_vec();
         rewritten.extend(
             stream
@@ -5580,9 +5613,15 @@ mod tests {
         let mut artifact_ids = BTreeSet::new();
         for payload in payloads {
             match payload {
-                events::KernelEventPayload::RunStarted(started) => {
-                    artifact_ids.insert(started.spec_artifact_id.clone());
-                    artifact_ids.insert(started.certificate_artifact_id.clone());
+                events::KernelEventPayload::RunAdmitted(started) => {
+                    artifact_ids.insert(started.spec_artifact.artifact_id.clone());
+                    artifact_ids.insert(started.certificate_artifact.artifact_id.clone());
+                    artifact_ids.extend(
+                        started
+                            .config_artifacts
+                            .iter()
+                            .map(|artifact| artifact.artifact_id.clone()),
+                    );
                     artifact_ids.extend(
                         started
                             .seed_cells
@@ -5605,6 +5644,12 @@ mod tests {
                     artifact_ids.insert(fact.artifact_id.clone());
                 }
                 events::KernelEventPayload::PublicOutputProduced(public_output) => {
+                    artifact_ids.extend(
+                        public_output
+                            .cells
+                            .iter()
+                            .map(|cell| cell.artifact_id.clone()),
+                    );
                     if let Some(artifact_id) = &public_output.rendered_artifact_id {
                         artifact_ids.insert(artifact_id.clone());
                     }
@@ -5640,9 +5685,9 @@ mod tests {
     impl store::AsyncTypedRunEventStore for StaticAsyncStore {
         type Error = store::StoreError;
 
-        fn append_prepared_typed_commit<'a>(
+        fn append_prepared_commit_plan<'a>(
             &'a self,
-            _commit: store::PreparedTypedCommit,
+            _plan: store::PreparedCommitPlan,
         ) -> store::AsyncStoreFuture<'a, store::CommitOutcome, Self::Error> {
             Box::pin(std::future::ready(Err(store::StoreError::Event(
                 "static test store is read-only".to_owned(),
@@ -5685,15 +5730,15 @@ mod tests {
     impl store::AsyncTypedRunEventStore for AsyncInMemoryStore {
         type Error = store::StoreError;
 
-        fn append_prepared_typed_commit<'a>(
+        fn append_prepared_commit_plan<'a>(
             &'a self,
-            commit: store::PreparedTypedCommit,
+            plan: store::PreparedCommitPlan,
         ) -> store::AsyncStoreFuture<'a, store::CommitOutcome, Self::Error> {
             let result = self
                 .0
                 .lock()
                 .expect("store lock")
-                .append_prepared_typed_commit(commit);
+                .append_prepared_commit_plan(plan);
             Box::pin(std::future::ready(result))
         }
 
@@ -5989,10 +6034,10 @@ mod tests {
         request: store::TypedCommitRequest,
     ) {
         let admitted_artifacts = request.required_artifacts().to_vec();
-        let commit = store::PreparedTypedCommit::new(request, admitted_artifacts)
-            .expect("prepared typed commit");
+        let commit =
+            test_prepared_commit_plan(request, admitted_artifacts).expect("prepared commit plan");
         store
-            .append_prepared_typed_commit(commit)
+            .append_prepared_commit_plan(commit)
             .expect("append prepared typed commit");
     }
 
@@ -6001,12 +6046,84 @@ mod tests {
         request: store::TypedCommitRequest,
     ) {
         let admitted_artifacts = request.required_artifacts().to_vec();
-        let commit = store::PreparedTypedCommit::new(request, admitted_artifacts)
-            .expect("prepared typed commit");
+        let commit =
+            test_prepared_commit_plan(request, admitted_artifacts).expect("prepared commit plan");
         store
-            .append_prepared_typed_commit(commit)
+            .append_prepared_commit_plan(commit)
             .await
             .expect("append prepared typed commit");
+    }
+
+    fn test_prepared_commit_plan(
+        request: store::TypedCommitRequest,
+        admitted_artifacts: Vec<store::ArtifactEvidenceRef>,
+    ) -> store::Result<store::PreparedCommitPlan> {
+        let artifacts = store::CommitArtifactEvidenceSet::new(
+            request.required_artifacts().to_vec(),
+            admitted_artifacts,
+        )?;
+        if request
+            .payloads()
+            .iter()
+            .all(|payload| matches!(payload, events::KernelEventPayload::RunAdmitted(_)))
+        {
+            return store::PreparedCommit::<store::RunAdmission>::new(request, artifacts)
+                .map(store::PreparedCommitPlan::from);
+        }
+        if request
+            .payloads()
+            .iter()
+            .all(|payload| matches!(payload, events::KernelEventPayload::StateAttemptStarted(_)))
+        {
+            let mut preconditions = request.preconditions().clone();
+            preconditions.required_run_state = store::RequiredRunState::NotCompleted;
+            let request = request.with_preconditions(preconditions);
+            return store::PreparedCommit::<store::StateAttemptStarted>::new(request, artifacts)
+                .map(store::PreparedCommitPlan::from);
+        }
+        if request
+            .payloads()
+            .iter()
+            .any(test_is_side_effect_terminal_payload)
+        {
+            return store::PreparedCommit::<store::SideEffectTerminal>::new(request, artifacts)
+                .map(store::PreparedCommitPlan::from);
+        }
+        if request
+            .payloads()
+            .iter()
+            .any(|payload| payload.side_effect_ref().is_some())
+        {
+            return store::PreparedCommit::<store::SideEffectProgress>::new(request, artifacts)
+                .map(store::PreparedCommitPlan::from);
+        }
+        if request.payloads().iter().any(test_is_retention_payload) {
+            return store::PreparedCommit::<store::Retention>::new(request, artifacts)
+                .map(store::PreparedCommitPlan::from);
+        }
+        store::PreparedCommit::<store::AttemptTerminal>::new(request, artifacts)
+            .map(store::PreparedCommitPlan::from)
+    }
+
+    fn test_is_retention_payload(payload: &events::KernelEventPayload) -> bool {
+        matches!(
+            payload,
+            events::KernelEventPayload::RetentionRefsAppended(_)
+                | events::KernelEventPayload::RetentionManifestProjected(_)
+        )
+    }
+
+    fn test_is_side_effect_terminal_payload(payload: &events::KernelEventPayload) -> bool {
+        matches!(
+            payload,
+            events::KernelEventPayload::SideEffectNotSubmittedProven(_)
+                | events::KernelEventPayload::SideEffectSubmissionObserved(_)
+                | events::KernelEventPayload::SideEffectSubmissionUnknown(_)
+                | events::KernelEventPayload::SideEffectReceiptObserved(_)
+                | events::KernelEventPayload::SideEffectConfirmationObserved(_)
+                | events::KernelEventPayload::SideEffectAmbiguous(_)
+                | events::KernelEventPayload::SideEffectFailed(_)
+        )
     }
 
     fn content_digest(byte: u8) -> ContentDigest {
@@ -6019,6 +6136,18 @@ mod tests {
 
     fn artifact_id_for_digest(digest: &ContentDigest) -> ArtifactId {
         ArtifactId::from_digest(digest.algorithm(), *digest.digest())
+    }
+
+    fn run_artifact_ref(artifact: &store::ArtifactEvidenceRef) -> events::RunArtifactEvidenceRef {
+        events::RunArtifactEvidenceRef {
+            artifact_id: artifact.artifact_id.clone(),
+            role: artifact.artifact_role,
+            schema_id: artifact.schema_id.clone(),
+            semantic_type_id: artifact.semantic_type_id.clone(),
+            content_digest: artifact.digest.clone(),
+            byte_len: artifact.byte_len,
+            media_type: artifact.media_type.clone(),
+        }
     }
 
     fn node_id(byte: u8) -> NodeId {

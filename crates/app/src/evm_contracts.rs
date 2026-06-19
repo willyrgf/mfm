@@ -1591,6 +1591,7 @@ mod tests {
                 run_id: run_id.clone(),
                 framework_version: "mfm.test.contract",
                 source_revision: "test-source",
+                launched_at_unix_ms: 1_700_000_000_000,
                 drive: DriveMode::AppendOnly,
             },
             compiled
@@ -1686,6 +1687,7 @@ mod tests {
                 run_id: run_id.clone(),
                 framework_version: "mfm.test.contract",
                 source_revision: "test-source",
+                launched_at_unix_ms: 1_700_000_000_000,
                 drive: DriveMode::AppendOnly,
             },
             compiled
@@ -1779,6 +1781,7 @@ mod tests {
                 run_id: run_id.clone(),
                 framework_version: "mfm.test.contract",
                 source_revision: "test-source",
+                launched_at_unix_ms: 1_700_000_000_000,
                 drive: DriveMode::AppendOnly,
             },
             compiled
@@ -1874,6 +1877,7 @@ mod tests {
                 run_id: run_id.clone(),
                 framework_version: "mfm.test.contract",
                 source_revision: "test-source",
+                launched_at_unix_ms: 1_700_000_000_000,
                 drive: DriveMode::AppendOnly,
             },
             compiled

@@ -80,7 +80,7 @@ impl SerialTypedScheduler {
         }
     }
 
-    /// Prepares sealed genesis launch authority for a certified run.
+    /// Prepares sealed admission launch authority for a certified run.
     pub fn prepare_run_launch(
         &self,
         runtime_spec: &CertifiedRuntimeSpec,
@@ -98,7 +98,7 @@ impl SerialTypedScheduler {
         )
     }
 
-    /// Appends the prepared typed genesis commit after staging middleware-owned artifacts.
+    /// Appends the prepared typed admission commit after staging middleware-owned artifacts.
     pub async fn start_run<S: store::TypedRunEventStore + ?Sized>(
         &self,
         store: &mut S,
@@ -109,7 +109,7 @@ impl SerialTypedScheduler {
         Ok(store.append_prepared_commit_plan(launch.commit.into())?)
     }
 
-    /// Appends genesis and reloads verified admission authority for the run.
+    /// Appends admission and reloads verified admission authority for the run.
     pub async fn start_run_admitted<S: store::TypedRunEventStore + ?Sized>(
         &self,
         store: &mut S,
@@ -125,7 +125,7 @@ impl SerialTypedScheduler {
         RunAdmissionLifecycle::admitted_run_authority(runtime_spec, &run_id, &stream, bound_context)
     }
 
-    /// Appends the prepared typed genesis commit through an async typed store.
+    /// Appends the prepared typed admission commit through an async typed store.
     pub async fn start_run_async<S: store::AsyncTypedRunEventStore + ?Sized>(
         &self,
         store: &S,
@@ -139,7 +139,7 @@ impl SerialTypedScheduler {
             .map_err(async_store_error)
     }
 
-    /// Appends async genesis and reloads verified admission authority for the run.
+    /// Appends async admission and reloads verified admission authority for the run.
     pub async fn start_run_admitted_async<S: store::AsyncTypedRunEventStore + ?Sized>(
         &self,
         store: &S,

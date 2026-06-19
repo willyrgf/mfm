@@ -5,7 +5,7 @@ pub(super) fn apply_projection(
     envelope: &KernelEventEnvelope,
 ) -> Result<()> {
     match envelope.payload() {
-        KernelEventPayload::RunStarted(payload) => apply_run_started(projections, payload)?,
+        KernelEventPayload::RunAdmitted(payload) => apply_run_admitted(projections, payload)?,
         KernelEventPayload::RunCompleted(payload) => {
             apply_run_completed(projections, &envelope.event_id, payload)?;
         }
@@ -86,15 +86,15 @@ pub(super) fn apply_projection(
     Ok(())
 }
 
-fn apply_run_started(
+fn apply_run_admitted(
     projections: &mut ProjectionSnapshot,
-    payload: &events::RunStarted,
+    payload: &events::RunAdmitted,
 ) -> Result<()> {
     let state = projections.run_state(&payload.run_id);
     if state != RunState::Absent {
         return Err(StoreError::ProjectionConflict {
-            key: "run:start".to_owned(),
-            message: "run already started".to_owned(),
+            key: "run:admission".to_owned(),
+            message: "run already admitted".to_owned(),
         });
     }
     projections
@@ -103,7 +103,40 @@ fn apply_run_started(
     projections
         .saga_policy_digests
         .insert(payload.run_id.clone(), payload.saga_policy_digest.clone());
+    let retention = projections
+        .retentions
+        .entry(payload.run_id.clone())
+        .or_default();
+    insert_run_admission_retention(retention, &payload.spec_artifact);
+    insert_run_admission_retention(retention, &payload.certificate_artifact);
+    for artifact in &payload.config_artifacts {
+        insert_run_admission_retention(retention, artifact);
+    }
+    for seed in &payload.seed_cells {
+        retention.refs.insert(
+            seed.seed_artifact.artifact_id.clone(),
+            events::RetentionRef {
+                artifact_id: seed.seed_artifact.artifact_id.clone(),
+                role: seed.seed_artifact.role,
+                content_digest: seed.seed_artifact.content_digest.clone(),
+            },
+        );
+    }
     Ok(())
+}
+
+fn insert_run_admission_retention(
+    retention: &mut RetentionProjection,
+    artifact: &events::RunArtifactEvidenceRef,
+) {
+    retention.refs.insert(
+        artifact.artifact_id.clone(),
+        events::RetentionRef {
+            artifact_id: artifact.artifact_id.clone(),
+            role: artifact.role,
+            content_digest: artifact.content_digest.clone(),
+        },
+    );
 }
 
 fn apply_run_completed(

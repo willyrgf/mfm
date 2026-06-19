@@ -6,7 +6,7 @@ Completion notes, 2026-06-18:
 
 - Scheduler drive paths load `VerifiedRunContext` through `VerifiedRunContextLoader`, which combines
   `BoundRuntimeContext` authority with store-owned committed stream/view authority.
-- Runtime resume now compares the live bound runner executable identities against the `RunStarted`
+- Runtime resume now compares the live bound runner executable identities against the `RunAdmitted`
   executable evidence admitted at run start. A mismatch fails before any resumed attempt starts.
 - `ProjectionSnapshot::validate_run_stream` is the centralized ingress guard for old lifecycle
   streams. Runtime, replay, and Postgres projection rebuild/load paths reject attempt-bound terminal
@@ -49,9 +49,8 @@ old projection rows, old public response shapes, or mixed-version readers. If a 
 written with the old lifecycle/event model, the new runtime should reject it with a clear typed
 diagnostic unless a later explicit migration plan is requested.
 
-`BootstrapRun` remains certified in this RFC because the RFC scopes removing it as a separate
-certification/spec migration. Breaking changes are allowed, but they should still stay within this
-RFC's boundary.
+This plan has since been superseded for run admission by the flat `RunAdmitted` migration: admission
+is a single root event and is no longer represented by a synthetic certified lifecycle node.
 
 ## Working Rules
 
@@ -79,7 +78,7 @@ Scope:
 - State that this branch intentionally breaks old run streams, old projections, and public status
   shapes, and rejects old-model streams with a typed diagnostic. Mixed-version readers are
   unsupported.
-- Keep the `BootstrapRun` certification migration explicitly out of scope.
+- Note that the later flat admission migration supersedes the old synthetic admission-node scope.
 
 Verification:
 
@@ -113,11 +112,12 @@ Verification:
 Scope:
 
 - Add `admission.rs` and `binding.rs`.
-- Move genesis preparation/append authority behind `RunAdmissionLifecycle`.
+- Move admission preparation/append authority behind `RunAdmissionLifecycle`.
 - Add `VerifiedRunContextLoader` and `BoundRuntimeContextLoader`.
 - Make `BoundRuntimeContext` prove runner/capability/framework binding existence and identity only;
   live transport/signer/capability execution remains attempt-time behavior.
-- Keep `BootstrapRun` certified and preserve the current genesis event batch shape.
+- Preserve the current admission event batch shape only for this historical RFC phase; the later flat
+  admission migration replaces it with a single `RunAdmitted` root.
 - Move app assembly to build/load the bound context before transition or attempt execution.
 
 Verification:
@@ -260,7 +260,8 @@ Scope:
   single-commit order and the new started-before-run order.
 - Define recovery for open framework attempts by rebuilding output, manifests, and terminal proofs from
   current verified history.
-- Keep `BootstrapRun` under run admission only.
+- Keep run admission outside scheduler dispatch; the later flat admission migration removes the
+  synthetic admission lifecycle node entirely.
 - Update replay, public-output, retention, completion, and saga terminal tests for the new event order.
 - Update the `docs/design.md` framework-lifecycle description for the new started-before-run and
   terminal event order.

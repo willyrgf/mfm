@@ -1701,9 +1701,9 @@ pub mod v1 {
         }
     }
 
-    /// Sealed purpose marker for a run-start commit.
+    /// Sealed purpose marker for a run-admission commit.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub struct RunStart;
+    pub struct RunAdmission;
 
     /// Sealed purpose marker for a standalone state-attempt-start commit.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1748,7 +1748,7 @@ pub mod v1 {
         };
     }
 
-    impl_commit_purpose!(RunStart, "run_start");
+    impl_commit_purpose!(RunAdmission, "run_admission");
     impl_commit_purpose!(StateAttemptStarted, "state_attempt_started");
     impl_commit_purpose!(AttemptTerminal, "attempt_terminal");
     impl_commit_purpose!(SideEffectTerminal, "side_effect_terminal");
@@ -1760,7 +1760,7 @@ pub mod v1 {
     /// Purpose-specific prepared commit authority.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct PreparedCommit<Purpose: CommitPurpose> {
-        inner: PreparedTypedCommit,
+        inner: PreparedCommitInner,
         _purpose: PhantomData<Purpose>,
     }
 
@@ -1780,7 +1780,7 @@ pub mod v1 {
             }
             validate_required_artifacts_cover_payload_references(Purpose::NAME, &request)?;
             validate(&request)?;
-            let inner = PreparedTypedCommit::new_with_authority(
+            let inner = PreparedCommitInner::new_with_authority(
                 request,
                 artifacts.admitted_artifacts,
                 allow_saga_terminal,
@@ -1810,9 +1810,8 @@ pub mod v1 {
             self.inner.admitted_artifacts()
         }
 
-        /// Consumes this purpose authority into the low-level prepared commit.
-        pub fn into_typed_commit(self) -> PreparedTypedCommit {
-            self.inner
+        fn inner(&self) -> &PreparedCommitInner {
+            &self.inner
         }
     }
 
@@ -1831,8 +1830,8 @@ pub mod v1 {
     }
 
     impl_prepared_commit_new!(
-        RunStart,
-        "Prepares a run-start commit.",
+        RunAdmission,
+        "Prepares a run-admission commit.",
         validate_run_start_commit
     );
     impl_prepared_commit_new!(
@@ -1897,8 +1896,8 @@ pub mod v1 {
     /// Production prepared commit plan accepted by store mutation APIs.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum PreparedCommitPlan {
-        /// Run-start commit plan.
-        RunStart(PreparedCommit<RunStart>),
+        /// Run-admission commit plan.
+        RunAdmission(PreparedCommit<RunAdmission>),
         /// State-attempt-start commit plan.
         StateAttemptStarted(PreparedCommit<StateAttemptStarted>),
         /// Attempt-terminal commit plan.
@@ -1919,7 +1918,7 @@ pub mod v1 {
         /// Returns the sealed request for read-only planning decisions.
         pub fn request(&self) -> &TypedCommitRequest {
             match self {
-                Self::RunStart(commit) => commit.request(),
+                Self::RunAdmission(commit) => commit.request(),
                 Self::StateAttemptStarted(commit) => commit.request(),
                 Self::AttemptTerminal(commit) => commit.request(),
                 Self::SideEffectTerminal(commit) => commit.request(),
@@ -1930,17 +1929,21 @@ pub mod v1 {
             }
         }
 
-        /// Consumes this plan into its low-level prepared commit for storage.
-        pub fn into_typed_commit(self) -> PreparedTypedCommit {
+        /// Returns artifact evidence to admit atomically with the event batch.
+        pub fn admitted_artifacts(&self) -> &[ArtifactEvidenceRef] {
+            self.inner().admitted_artifacts()
+        }
+
+        fn inner(&self) -> &PreparedCommitInner {
             match self {
-                Self::RunStart(commit) => commit.into_typed_commit(),
-                Self::StateAttemptStarted(commit) => commit.into_typed_commit(),
-                Self::AttemptTerminal(commit) => commit.into_typed_commit(),
-                Self::SideEffectTerminal(commit) => commit.into_typed_commit(),
-                Self::SideEffectProgress(commit) => commit.into_typed_commit(),
-                Self::Retention(commit) => commit.into_typed_commit(),
-                Self::ManualResolution(commit) => commit.into_typed_commit(),
-                Self::SagaTerminal(commit) => commit.into_typed_commit(),
+                Self::RunAdmission(commit) => commit.inner(),
+                Self::StateAttemptStarted(commit) => commit.inner(),
+                Self::AttemptTerminal(commit) => commit.inner(),
+                Self::SideEffectTerminal(commit) => commit.inner(),
+                Self::SideEffectProgress(commit) => commit.inner(),
+                Self::Retention(commit) => commit.inner(),
+                Self::ManualResolution(commit) => commit.inner(),
+                Self::SagaTerminal(commit) => commit.inner(),
             }
         }
     }
@@ -1955,7 +1958,7 @@ pub mod v1 {
         };
     }
 
-    impl_prepared_commit_plan_from!(RunStart, RunStart);
+    impl_prepared_commit_plan_from!(RunAdmission, RunAdmission);
     impl_prepared_commit_plan_from!(StateAttemptStarted, StateAttemptStarted);
     impl_prepared_commit_plan_from!(AttemptTerminal, AttemptTerminal);
     impl_prepared_commit_plan_from!(SideEffectTerminal, SideEffectTerminal);
@@ -1964,30 +1967,13 @@ pub mod v1 {
     impl_prepared_commit_plan_from!(ManualResolution, ManualResolution);
     impl_prepared_commit_plan_from!(SagaTerminal, SagaTerminal);
 
-    /// Runtime-prepared atomic store mutation for typed run streams.
-    ///
-    /// A prepared commit carries both the event payload batch and the artifact evidence that must
-    /// become run authority with that batch. Stores admit the artifact evidence and append the
-    /// referencing events in one atomic mutation.
     #[derive(Debug, Clone, PartialEq, Eq)]
-    pub struct PreparedTypedCommit {
+    struct PreparedCommitInner {
         request: TypedCommitRequest,
         admitted_artifacts: Vec<ArtifactEvidenceRef>,
     }
 
-    impl PreparedTypedCommit {
-        /// Prepares an atomic typed commit from a validated payload request and artifact evidence.
-        ///
-        /// Every admitted artifact must be referenced by the commit request. The store still owns
-        /// final validation against existing artifact evidence, logical keys, preconditions, and
-        /// projection transitions.
-        pub fn new(
-            request: TypedCommitRequest,
-            admitted_artifacts: Vec<ArtifactEvidenceRef>,
-        ) -> Result<Self> {
-            Self::new_with_authority(request, admitted_artifacts, false, false)
-        }
-
+    impl PreparedCommitInner {
         fn new_with_authority(
             request: TypedCommitRequest,
             admitted_artifacts: Vec<ArtifactEvidenceRef>,
@@ -2039,19 +2025,12 @@ pub mod v1 {
             })
         }
 
-        /// Returns the typed commit request bound to this prepared mutation.
-        pub fn request(&self) -> &TypedCommitRequest {
+        fn request(&self) -> &TypedCommitRequest {
             &self.request
         }
 
-        /// Returns artifact evidence to admit atomically with the event batch.
-        pub fn admitted_artifacts(&self) -> &[ArtifactEvidenceRef] {
+        fn admitted_artifacts(&self) -> &[ArtifactEvidenceRef] {
             &self.admitted_artifacts
-        }
-
-        /// Consumes the prepared commit into owned parts.
-        pub fn into_parts(self) -> (TypedCommitRequest, Vec<ArtifactEvidenceRef>) {
-            (self.request, self.admitted_artifacts)
         }
     }
 
@@ -4702,15 +4681,6 @@ pub mod v1 {
         fn append_prepared_commit_plan(
             &mut self,
             plan: PreparedCommitPlan,
-        ) -> Result<CommitOutcome> {
-            self.append_prepared_typed_commit(plan.into_typed_commit())
-        }
-
-        /// Atomically admits artifact evidence and appends one typed run commit, or returns an
-        /// idempotent previous batch.
-        fn append_prepared_typed_commit(
-            &mut self,
-            commit: PreparedTypedCommit,
         ) -> Result<CommitOutcome>;
 
         /// Loads the authoritative run stream.
@@ -4734,15 +4704,6 @@ pub mod v1 {
         fn append_prepared_commit_plan<'a>(
             &'a self,
             plan: PreparedCommitPlan,
-        ) -> AsyncStoreFuture<'a, CommitOutcome, Self::Error> {
-            self.append_prepared_typed_commit(plan.into_typed_commit())
-        }
-
-        /// Atomically admits artifact evidence and appends one typed run commit, or returns an
-        /// idempotent previous batch.
-        fn append_prepared_typed_commit<'a>(
-            &'a self,
-            commit: PreparedTypedCommit,
         ) -> AsyncStoreFuture<'a, CommitOutcome, Self::Error>;
 
         /// Loads the authoritative run stream.
@@ -5040,16 +5001,16 @@ pub mod v1 {
         stage_typed_run_commit_with_fingerprint(base, request, fingerprint)
     }
 
-    /// Validates and stages a prepared typed commit after commit-key idempotency handling.
+    /// Validates and stages a purpose-specific prepared commit plan after commit-key idempotency handling.
     ///
     /// The returned batch fingerprint covers the full prepared mutation, including the artifact
     /// evidence admitted atomically with the event payloads.
-    pub fn stage_prepared_typed_run_commit(
+    pub fn stage_prepared_commit_plan(
         base: &TypedCommitBase,
-        commit: &PreparedTypedCommit,
+        plan: &PreparedCommitPlan,
     ) -> Result<StagedTypedCommit> {
-        let fingerprint = prepared_commit_fingerprint(commit)?;
-        stage_typed_run_commit_with_fingerprint(base, commit.request(), fingerprint)
+        let fingerprint = prepared_commit_plan_fingerprint(plan)?;
+        stage_typed_run_commit_with_fingerprint(base, plan.request(), fingerprint)
     }
 
     fn stage_typed_run_commit_with_fingerprint(
@@ -5187,16 +5148,16 @@ pub mod v1 {
         build_committed_batch_with_fingerprint(request, committed_seq, fingerprint)
     }
 
-    /// Builds a store-owned committed batch for an already persisted prepared commit.
+    /// Builds a store-owned committed batch for an already persisted prepared commit plan.
     ///
-    /// Durable stores use this after a same-fingerprint prepared commit-key hit so the idempotent
+    /// Durable stores use this after a same-fingerprint prepared plan commit-key hit so the idempotent
     /// result can return the original sequence even when the caller's `expected_next_seq` is stale.
-    pub fn build_prepared_committed_batch(
-        commit: &PreparedTypedCommit,
+    pub fn build_prepared_commit_plan_batch(
+        plan: &PreparedCommitPlan,
         committed_seq: StreamSeq,
     ) -> Result<CommittedBatch> {
-        let fingerprint = prepared_commit_fingerprint(commit)?;
-        build_committed_batch_with_fingerprint(commit.request(), committed_seq, fingerprint)
+        let fingerprint = prepared_commit_plan_fingerprint(plan)?;
+        build_committed_batch_with_fingerprint(plan.request(), committed_seq, fingerprint)
     }
 
     fn build_committed_batch_with_fingerprint(
@@ -5254,12 +5215,12 @@ pub mod v1 {
     }
 
     impl TypedRunEventStore for InMemoryTypedRunStore {
-        fn append_prepared_typed_commit(
+        fn append_prepared_commit_plan(
             &mut self,
-            commit: PreparedTypedCommit,
+            plan: PreparedCommitPlan,
         ) -> Result<CommitOutcome> {
-            let request = commit.request();
-            let fingerprint = prepared_commit_fingerprint(&commit)?;
+            let request = plan.request();
+            let fingerprint = prepared_commit_plan_fingerprint(&plan)?;
 
             if let Some(record) = self
                 .commit_keys
@@ -5274,7 +5235,7 @@ pub mod v1 {
             }
 
             let mut artifacts = self.artifacts.clone();
-            admit_artifact_evidence(&mut artifacts, commit.admitted_artifacts())?;
+            admit_artifact_evidence(&mut artifacts, plan.admitted_artifacts())?;
             let base = TypedCommitBase {
                 artifacts,
                 logical_keys: self.logical_keys.clone(),
@@ -5282,7 +5243,7 @@ pub mod v1 {
                 projections: self.projections.clone(),
                 actual_next_seq: self.expected_next_seq(&request.run_id),
             };
-            let staged = stage_prepared_typed_run_commit(&base, &commit)?;
+            let staged = stage_prepared_commit_plan(&base, &plan)?;
             let (batch, staged_logical_keys, staged_unique_payloads, staged_projections) =
                 staged.into_parts();
             self.streams
@@ -5641,16 +5602,21 @@ pub mod v1 {
     }
 
     fn validate_run_start_commit(request: &TypedCommitRequest) -> Result<()> {
-        require_purpose_payload(
-            RunStart::NAME,
-            request,
-            |payload| matches!(payload, KernelEventPayload::RunStarted(_)),
-            "missing RunStarted payload",
-        )?;
+        if request.payloads.len() != 1
+            || !matches!(
+                request.payloads.first(),
+                Some(KernelEventPayload::RunAdmitted(_))
+            )
+        {
+            return Err(invalid_prepared_commit_purpose(
+                RunAdmission::NAME,
+                "run-admission commits must contain exactly one RunAdmitted payload",
+            ));
+        }
         if request.preconditions.required_run_state != RequiredRunState::Absent {
             return Err(invalid_prepared_commit_purpose(
-                RunStart::NAME,
-                "run start requires absent-run precondition",
+                RunAdmission::NAME,
+                "run admission requires absent-run precondition",
             ));
         }
         Ok(())
@@ -5678,6 +5644,12 @@ pub mod v1 {
     }
 
     fn validate_attempt_terminal_commit(request: &TypedCommitRequest) -> Result<()> {
+        reject_wrong_purpose_payloads(
+            AttemptTerminal::NAME,
+            request,
+            is_attempt_terminal_commit_payload,
+            "attempt-terminal commits cannot contain non-attempt-terminal payloads",
+        )?;
         require_purpose_payload(
             AttemptTerminal::NAME,
             request,
@@ -5688,6 +5660,12 @@ pub mod v1 {
     }
 
     fn validate_side_effect_terminal_commit(request: &TypedCommitRequest) -> Result<()> {
+        reject_wrong_purpose_payloads(
+            SideEffectTerminal::NAME,
+            request,
+            is_side_effect_terminal_commit_payload,
+            "side-effect terminal commits cannot contain non-side-effect-terminal payloads",
+        )?;
         require_purpose_payload(
             SideEffectTerminal::NAME,
             request,
@@ -5698,6 +5676,12 @@ pub mod v1 {
     }
 
     fn validate_side_effect_progress_commit(request: &TypedCommitRequest) -> Result<()> {
+        reject_wrong_purpose_payloads(
+            SideEffectProgress::NAME,
+            request,
+            is_side_effect_progress_commit_payload,
+            "side-effect progress commits cannot contain non-side-effect-progress payloads",
+        )?;
         require_purpose_payload(
             SideEffectProgress::NAME,
             request,
@@ -5707,6 +5691,12 @@ pub mod v1 {
     }
 
     fn validate_retention_commit(request: &TypedCommitRequest) -> Result<()> {
+        reject_wrong_purpose_payloads(
+            Retention::NAME,
+            request,
+            is_retention_commit_payload,
+            "retention commits cannot contain non-retention payloads",
+        )?;
         require_purpose_payload(
             Retention::NAME,
             request,
@@ -5717,12 +5707,17 @@ pub mod v1 {
     }
 
     fn validate_manual_resolution_commit(request: &TypedCommitRequest) -> Result<()> {
-        require_purpose_payload(
-            ManualResolution::NAME,
-            request,
-            |payload| matches!(payload, KernelEventPayload::ManualResolutionRecorded(_)),
-            "missing ManualResolutionRecorded payload",
-        )?;
+        if request.payloads.len() != 1
+            || !matches!(
+                request.payloads.first(),
+                Some(KernelEventPayload::ManualResolutionRecorded(_))
+            )
+        {
+            return Err(invalid_prepared_commit_purpose(
+                ManualResolution::NAME,
+                "manual resolution commits must contain exactly one ManualResolutionRecorded payload",
+            ));
+        }
         if request.preconditions.required_run_state != RequiredRunState::NotCompleted {
             return Err(invalid_prepared_commit_purpose(
                 ManualResolution::NAME,
@@ -5826,12 +5821,24 @@ pub mod v1 {
     }
 
     fn validate_saga_terminal_commit(request: &TypedCommitRequest) -> Result<()> {
-        require_purpose_payload(
+        reject_wrong_purpose_payloads(
             SagaTerminal::NAME,
             request,
-            is_saga_terminal_payload,
-            "missing RunCompleted payload",
+            is_saga_terminal_commit_payload,
+            "saga terminal commits cannot contain non-terminal payloads",
         )?;
+        if request
+            .payloads
+            .iter()
+            .filter(|payload| is_run_completed_payload(payload))
+            .count()
+            != 1
+        {
+            return Err(invalid_prepared_commit_purpose(
+                SagaTerminal::NAME,
+                "saga terminal resolution commits must contain exactly one RunCompleted payload",
+            ));
+        }
         if request.preconditions.saga_admit_token.is_none() {
             return Err(invalid_prepared_commit_purpose(
                 SagaTerminal::NAME,
@@ -5929,6 +5936,22 @@ pub mod v1 {
         }
     }
 
+    fn reject_wrong_purpose_payloads(
+        purpose: &'static str,
+        request: &TypedCommitRequest,
+        predicate: impl Fn(&KernelEventPayload) -> bool,
+        message: &'static str,
+    ) -> Result<()> {
+        if let Some(payload) = request.payloads.iter().find(|payload| !predicate(payload)) {
+            Err(invalid_prepared_commit_purpose(
+                purpose,
+                format!("{message}: {:?}", payload.event_schema_id()),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
     fn is_attempt_terminal_payload(payload: &KernelEventPayload) -> bool {
         matches!(
             payload,
@@ -5938,10 +5961,15 @@ pub mod v1 {
                 | KernelEventPayload::CellProduced(_)
                 | KernelEventPayload::CellSkipped(_)
                 | KernelEventPayload::FactRecorded(_)
+                | KernelEventPayload::ArtifactReferenced(_)
                 | KernelEventPayload::PublicOutputProduced(_)
                 | KernelEventPayload::PublicOutputRenderFailed(_)
                 | KernelEventPayload::RunCompleted(_)
         )
+    }
+
+    fn is_attempt_terminal_commit_payload(payload: &KernelEventPayload) -> bool {
+        is_attempt_terminal_payload(payload) || is_retention_ref_payload(payload)
     }
 
     fn is_side_effect_terminal_payload(payload: &KernelEventPayload) -> bool {
@@ -5957,6 +5985,17 @@ pub mod v1 {
         )
     }
 
+    fn is_side_effect_terminal_commit_payload(payload: &KernelEventPayload) -> bool {
+        is_side_effect_payload(payload)
+            || matches!(payload, KernelEventPayload::StateAttemptFailed(_))
+            || is_retention_ref_payload(payload)
+    }
+
+    fn is_side_effect_progress_commit_payload(payload: &KernelEventPayload) -> bool {
+        (is_side_effect_payload(payload) && !is_side_effect_terminal_payload(payload))
+            || is_retention_ref_payload(payload)
+    }
+
     fn is_side_effect_payload(payload: &KernelEventPayload) -> bool {
         payload.side_effect_ref().is_some()
     }
@@ -5969,8 +6008,38 @@ pub mod v1 {
         )
     }
 
-    fn is_saga_terminal_payload(payload: &KernelEventPayload) -> bool {
+    fn is_retention_ref_payload(payload: &KernelEventPayload) -> bool {
+        matches!(payload, KernelEventPayload::RetentionRefsAppended(_))
+    }
+
+    fn is_run_completed_payload(payload: &KernelEventPayload) -> bool {
         matches!(payload, KernelEventPayload::RunCompleted(_))
+    }
+
+    fn is_completed_run_payload(payload: &KernelEventPayload) -> bool {
+        matches!(
+            payload,
+            KernelEventPayload::RunCompleted(events::RunCompleted {
+                outcome: events::RunCompletionOutcome::Completed(_),
+                ..
+            })
+        )
+    }
+
+    fn is_non_run_completed_attempt_terminal_payload(payload: &KernelEventPayload) -> bool {
+        is_attempt_terminal_payload(payload) && !is_run_completed_payload(payload)
+    }
+
+    fn is_retention_commit_payload(payload: &KernelEventPayload) -> bool {
+        is_retention_payload(payload)
+            || is_non_run_completed_attempt_terminal_payload(payload)
+            || is_completed_run_payload(payload)
+    }
+
+    fn is_saga_terminal_commit_payload(payload: &KernelEventPayload) -> bool {
+        is_run_completed_payload(payload)
+            || is_non_run_completed_attempt_terminal_payload(payload)
+            || is_retention_ref_payload(payload)
     }
 
     fn request_contains_saga_terminal_outcome(request: &TypedCommitRequest) -> bool {
@@ -6109,11 +6178,7 @@ pub mod v1 {
 
     fn validate_supported_stream_model(events: &[KernelEventEnvelope]) -> Result<()> {
         let mut started_attempts = BTreeMap::<(NodeId, AttemptId), StreamSeq>::new();
-        let mut run_start_seqs = BTreeSet::<StreamSeq>::new();
         for event in events {
-            if matches!(event.payload(), KernelEventPayload::RunStarted(_)) {
-                run_start_seqs.insert(event.seq());
-            }
             if let KernelEventPayload::StateAttemptStarted(payload) = event.payload() {
                 started_attempts.insert(
                     (payload.node_id.clone(), payload.attempt_id.clone()),
@@ -6130,9 +6195,7 @@ pub mod v1 {
                         message: "unsupported old stream model: attempt-bound payload is not preceded by a StateAttemptStarted commit".to_owned(),
                     });
                 };
-                if *start_seq > event.seq()
-                    || (*start_seq == event.seq() && !run_start_seqs.contains(&event.seq()))
-                {
+                if *start_seq >= event.seq() {
                     return Err(StoreError::ProjectionConflict {
                         key: format!("stream_model:{node_id}:{attempt_id}"),
                         message: "unsupported old stream model: StateAttemptStarted must be committed before attempt-bound terminal payloads".to_owned(),
@@ -6430,15 +6493,17 @@ pub mod v1 {
         Ok(CommitFingerprint(canonical.content_digest()))
     }
 
-    /// Computes the canonical idempotency fingerprint for a prepared typed commit.
+    /// Computes the canonical idempotency fingerprint for a purpose-specific prepared commit plan.
     ///
     /// The fingerprint intentionally excludes `expected_next_seq`, so idempotent retries can be
     /// recognized before stale sequence checks as required by the store contract. Unlike
     /// [`commit_fingerprint`], this covers the artifact evidence admitted atomically with the commit.
-    pub fn prepared_commit_fingerprint(commit: &PreparedTypedCommit) -> Result<CommitFingerprint> {
-        let request = commit.request();
+    pub fn prepared_commit_plan_fingerprint(
+        plan: &PreparedCommitPlan,
+    ) -> Result<CommitFingerprint> {
+        let request = plan.request();
         let canonical = canonical_json(serde_json::json!({
-            "admitted_artifacts": sorted_store_artifacts_json(commit.admitted_artifacts()),
+            "admitted_artifacts": sorted_store_artifacts_json(plan.admitted_artifacts()),
             "commit_key": request.commit_key.as_str(),
             "payloads": request.payloads.iter().map(payload_json).collect::<Vec<_>>(),
             "preconditions": preconditions_json(&request.preconditions),
@@ -6482,7 +6547,7 @@ pub mod v1 {
         payload_hash: &ContentDigest,
     ) -> Result<LogicalEventKey> {
         let key = match payload {
-            KernelEventPayload::RunStarted(_) => "run:start".to_owned(),
+            KernelEventPayload::RunAdmitted(_) => "run:admission".to_owned(),
             KernelEventPayload::ManualResolutionRecorded(_) => "run:manual_resolution".to_owned(),
             KernelEventPayload::RunCompleted(_) => "run:complete".to_owned(),
             KernelEventPayload::StateAttemptStarted(payload) => {
@@ -6696,14 +6761,15 @@ pub mod v1 {
 
     fn payload_json(payload: &KernelEventPayload) -> serde_json::Value {
         match payload {
-            KernelEventPayload::RunStarted(payload) => serde_json::json!({
+            KernelEventPayload::RunAdmitted(payload) => serde_json::json!({
+                "admitted_binding_digest": payload.admitted_binding_digest.as_str(),
                 "canonicalizer_identity": payload.canonicalizer_identity.as_str(),
-                "certificate_artifact_digest": payload.certificate_artifact_digest.as_str(),
-                "certificate_artifact_id": payload.certificate_artifact_id.as_str(),
-                "certificate_media_type": payload.certificate_media_type.as_str(),
+                "certificate_artifact": run_artifact_json(&payload.certificate_artifact),
+                "config_artifacts": payload.config_artifacts.iter().map(run_artifact_json).collect::<Vec<_>>(),
                 "descriptor_identities": payload.descriptor_identities.iter().map(descriptor_identity_json).collect::<Vec<_>>(),
                 "adapter_executables": payload.adapter_executables.iter().map(executable_identity_json).collect::<Vec<_>>(),
                 "framework_version": payload.framework_version.as_str(),
+                "launched_at_unix_ms": payload.launched_at_unix_ms,
                 "lowering_version": payload.lowering_version.as_str(),
                 "public_output_schema_id": payload.public_output_schema_id.as_str(),
                 "run_id": payload.run_id.as_str(),
@@ -6711,11 +6777,10 @@ pub mod v1 {
                 "saga_policy_digest": payload.saga_policy_digest.as_str(),
                 "seed_cells": payload.seed_cells.iter().map(seed_cell_ref_json).collect::<Vec<_>>(),
                 "source_revision": payload.source_revision.as_str(),
-                "spec_artifact_id": payload.spec_artifact_id.as_str(),
+                "spec_artifact": run_artifact_json(&payload.spec_artifact),
                 "spec_hash": payload.spec_hash.as_str(),
-                "spec_media_type": payload.spec_media_type.as_str(),
                 "spec_version": payload.spec_version.as_str(),
-                "variant": "RunStarted",
+                "variant": "RunAdmitted",
             }),
             KernelEventPayload::StateAttemptStarted(payload) => serde_json::json!({
                 "attempt_id": payload.attempt_id.as_str(),
@@ -7021,52 +7086,49 @@ pub mod v1 {
     /// Parses a typed kernel event payload from its store canonical JSON shape.
     pub fn payload_from_json_value(json: &serde_json::Value) -> Result<KernelEventPayload> {
         match required_str(json, "variant")? {
-            "RunStarted" => Ok(KernelEventPayload::RunStarted(events::RunStarted {
-                run_id: parse_identity(required_str(json, "run_id")?)?,
-                spec_hash: parse_identity(required_str(json, "spec_hash")?)?,
-                spec_artifact_id: parse_identity(required_str(json, "spec_artifact_id")?)?,
-                certificate_artifact_id: parse_identity(required_str(
-                    json,
-                    "certificate_artifact_id",
-                )?)?,
-                certificate_artifact_digest: parse_identity(required_str(
-                    json,
-                    "certificate_artifact_digest",
-                )?)?,
-                certificate_media_type: MediaType::new(required_str(
-                    json,
-                    "certificate_media_type",
-                )?)
-                .map_err(|error| StoreError::Identity(error.to_string()))?,
-                spec_media_type: MediaType::new(required_str(json, "spec_media_type")?)
+            "RunAdmitted" => Ok(KernelEventPayload::RunAdmitted(Box::new(
+                events::RunAdmitted {
+                    run_id: parse_identity(required_str(json, "run_id")?)?,
+                    spec_hash: parse_identity(required_str(json, "spec_hash")?)?,
+                    spec_artifact: parse_run_artifact(required_obj(json, "spec_artifact")?)?,
+                    certificate_artifact: parse_run_artifact(required_obj(
+                        json,
+                        "certificate_artifact",
+                    )?)?,
+                    config_artifacts: parse_vec(json, "config_artifacts", parse_run_artifact)?,
+                    spec_version: parse_identity(required_str(json, "spec_version")?)?,
+                    lowering_version: parse_identity(required_str(json, "lowering_version")?)?,
+                    public_output_schema_id: parse_identity(required_str(
+                        json,
+                        "public_output_schema_id",
+                    )?)?,
+                    saga_policy_digest: parse_identity(required_str(json, "saga_policy_digest")?)?,
+                    descriptor_identities: parse_vec(json, "descriptor_identities", |item| {
+                        parse_descriptor_identity(item)
+                    })?,
+                    runner_executables: parse_vec(json, "runner_executables", parse_executable)?,
+                    adapter_executables: parse_vec(json, "adapter_executables", parse_executable)?,
+                    canonicalizer_identity: CanonicalizerIdentity::new(required_str(
+                        json,
+                        "canonicalizer_identity",
+                    )?)
                     .map_err(|error| StoreError::Identity(error.to_string()))?,
-                spec_version: parse_identity(required_str(json, "spec_version")?)?,
-                lowering_version: parse_identity(required_str(json, "lowering_version")?)?,
-                public_output_schema_id: parse_identity(required_str(
-                    json,
-                    "public_output_schema_id",
-                )?)?,
-                saga_policy_digest: parse_identity(required_str(json, "saga_policy_digest")?)?,
-                descriptor_identities: parse_vec(json, "descriptor_identities", |item| {
-                    parse_descriptor_identity(item)
-                })?,
-                runner_executables: parse_vec(json, "runner_executables", parse_executable)?,
-                adapter_executables: parse_vec(json, "adapter_executables", parse_executable)?,
-                canonicalizer_identity: CanonicalizerIdentity::new(required_str(
-                    json,
-                    "canonicalizer_identity",
-                )?)
-                .map_err(|error| StoreError::Identity(error.to_string()))?,
-                framework_version: events::FrameworkVersion::new(required_str(
-                    json,
-                    "framework_version",
-                )?)?,
-                source_revision: events::SourceRevision::new(required_str(
-                    json,
-                    "source_revision",
-                )?)?,
-                seed_cells: parse_vec(json, "seed_cells", parse_seed_cell_ref)?,
-            })),
+                    framework_version: events::FrameworkVersion::new(required_str(
+                        json,
+                        "framework_version",
+                    )?)?,
+                    source_revision: events::SourceRevision::new(required_str(
+                        json,
+                        "source_revision",
+                    )?)?,
+                    admitted_binding_digest: parse_identity(required_str(
+                        json,
+                        "admitted_binding_digest",
+                    )?)?,
+                    launched_at_unix_ms: required_u64(json, "launched_at_unix_ms")?,
+                    seed_cells: parse_vec(json, "seed_cells", parse_seed_cell_ref)?,
+                },
+            ))),
             "StateAttemptStarted" => Ok(KernelEventPayload::StateAttemptStarted(
                 events::StateAttemptStarted {
                     spec_hash: parse_identity(required_str(json, "spec_hash")?)?,
@@ -7730,6 +7792,23 @@ pub mod v1 {
         })
     }
 
+    fn parse_run_artifact(json: &serde_json::Value) -> Result<events::RunArtifactEvidenceRef> {
+        Ok(events::RunArtifactEvidenceRef {
+            artifact_id: parse_identity(required_str(json, "artifact_id")?)?,
+            role: parse_artifact_role(required_str(json, "role")?)?,
+            schema_id: optional_str(json, "schema_id")?
+                .map(parse_identity)
+                .transpose()?,
+            semantic_type_id: optional_str(json, "semantic_type_id")?
+                .map(parse_identity)
+                .transpose()?,
+            content_digest: parse_identity(required_str(json, "content_digest")?)?,
+            byte_len: required_u64(json, "byte_len")?,
+            media_type: MediaType::new(required_str(json, "media_type")?)
+                .map_err(|error| StoreError::Identity(error.to_string()))?,
+        })
+    }
+
     /// Parses a cell skip reason from canonical JSON.
     pub fn parse_skip_reason(json: &serde_json::Value) -> CodecResult<events::SkipReason> {
         Ok(events::SkipReason {
@@ -7929,7 +8008,7 @@ pub mod v1 {
 
     fn parse_retention_reason(value: &str) -> Result<events::RetentionReason> {
         match value {
-            "run_started" => Ok(events::RetentionReason::RunStarted),
+            "run_admitted" => Ok(events::RetentionReason::RunAdmitted),
             "runtime_evidence" => Ok(events::RetentionReason::RuntimeEvidence),
             "public_output" => Ok(events::RetentionReason::PublicOutput),
             "manifest_projection" => Ok(events::RetentionReason::ManifestProjection),
@@ -8034,6 +8113,18 @@ pub mod v1 {
             "media_type": evidence.media_type.as_str(),
             "role": artifact_role_str(evidence.role),
             "schema_id": evidence.schema_id.as_str(),
+            "semantic_type_id": evidence.semantic_type_id.as_ref().map(SemanticTypeId::as_str),
+        })
+    }
+
+    fn run_artifact_json(evidence: &events::RunArtifactEvidenceRef) -> serde_json::Value {
+        serde_json::json!({
+            "artifact_id": evidence.artifact_id.as_str(),
+            "byte_len": evidence.byte_len,
+            "content_digest": evidence.content_digest.as_str(),
+            "media_type": evidence.media_type.as_str(),
+            "role": artifact_role_str(evidence.role),
+            "schema_id": evidence.schema_id.as_ref().map(SchemaId::as_str),
             "semantic_type_id": evidence.semantic_type_id.as_ref().map(SemanticTypeId::as_str),
         })
     }
@@ -9099,7 +9190,7 @@ pub mod v1 {
 
     fn retention_reason_str(reason: events::RetentionReason) -> &'static str {
         match reason {
-            events::RetentionReason::RunStarted => "run_started",
+            events::RetentionReason::RunAdmitted => "run_admitted",
             events::RetentionReason::RuntimeEvidence => "runtime_evidence",
             events::RetentionReason::PublicOutput => "public_output",
             events::RetentionReason::ManifestProjection => "manifest_projection",

@@ -338,7 +338,7 @@ hash-only envelope. Authoring and persistence move through explicit stages:
 non-forgeable `CertifiedTypedSpec`. Persisted nodes and renderers refer to descriptor authority by
 `DescriptorRef`; `CertifiedDescriptorSet` and `CertifiedFrameworkLifecycle` are the certified views
 runtime consumes. `CertifiedRuntimeSpec` is the runtime view of the static certified transition
-graph. Before `RunStarted`, the assembly/runtime boundary verifies:
+graph. Before `RunAdmitted`, the assembly/runtime boundary verifies:
 
 - spec hash and schema/version fields
 - staged spec/certificate/config/seed artifact bytes and typed evidence
@@ -395,33 +395,34 @@ context surfaces. They return typed payload intent, staged artifacts, side-effec
 sealed handles but cannot append to the run stream.
 
 The commit planner owns all production execution appends. `RunAdmissionLifecycle` verifies and
-stages launch material, then commits `RunStarted`, legacy bundled bootstrap evidence, launch
-artifact references, retention refs, and admitted artifact evidence in one purpose-specific
-prepared store commit. Ordinary states, `PublicOutputRender`,
+stages launch material, then commits exactly one `RunAdmitted` root event with certified spec,
+certificate, config, seed, executable, binding-digest, framework, source, and caller launch-time
+evidence. Root artifact retention is projection-derived from `RunAdmitted`; launch does not append
+attempt, cell, artifact-reference, or retention-ref payloads. Ordinary states, `PublicOutputRender`,
 `ProjectRetentionManifest`, `CompleteRun`, and `ResolveSagaTerminal` append
 `StateAttemptStarted` before sealed invocation construction, then use the same guarded terminal
 commit path: staged artifacts are persisted before the prepared commit, output and reference
 bindings are checked against the certified graph, side-effect protocol rules are enforced, commit
 preconditions are built, and run-store artifact evidence is admitted only in the commit that first
 references it. Production callers submit `PreparedCommit<Purpose>` values through
-`PreparedCommitPlan`; the store treats the inner `PreparedTypedCommit` as a typed batch
-representation and rejects purpose mismatches, missing `SagaAdmitToken`, missing
+`PreparedCommitPlan`; stores do not expose or accept a raw typed-batch escape hatch. Purpose
+constructors reject purpose mismatches, missing `SagaAdmitToken`, missing
 `SagaTerminalProof`, or artifact evidence that was not admitted in the same commit. Failed commits
 may leave orphan artifact-store bytes, but orphan run-store evidence is not authority.
 
 Framework lifecycle work is represented by certified graph nodes, not ad hoc runtime side effects.
-`BootstrapRun` remains certified run-admission authority and is not dispatched as a post-admission
-framework attempt. `PublicOutputRender`,
-`ProjectRetentionManifest`, `CompleteRun`, and `ResolveSagaTerminal` are sealed framework runners
-with the same append-only stream, rebuilt projection, deterministic scheduler, started-before-run
-attempt lifecycle, and guarded commit rules as domain states.
+Run admission is the sole pre-attempt root authority and is not represented by a certified graph
+node. `PublicOutputRender`, `ProjectRetentionManifest`, `CompleteRun`, and
+`ResolveSagaTerminal` are sealed framework runners with the same append-only stream, rebuilt
+projection, deterministic scheduler, started-before-run attempt lifecycle, and guarded commit rules
+as domain states.
 
 Resume loads the stored certified spec, rebuilds the verified history and projection from the run
 stream, verifies completed cell and side-effect evidence against the spec, then advances only from a
 type-valid frontier.
 
 Replay loads the stored certified spec and certificate artifacts, verifies them against the
-production registry, compares the hashes to `RunStarted`, rebuilds stream evidence, and uses replay
+production registry, compares the hashes to `RunAdmitted`, rebuilds stream evidence, and uses replay
 adapters only. Live capability construction during replay is a contract violation.
 
 Manual-resolution replay additionally verifies that the stream prefix derives `ManualBlocked`, the

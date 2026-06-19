@@ -31,11 +31,9 @@ written under the old lifecycle/event model; it rejects them with a clear typed 
 compatibility shims for old data is explicitly out of scope — it is redundant work for state this
 branch is allowed to break.
 
-The one preserved boundary is certification. `BootstrapRun` stays in the certified graph and the spec
-hash, certificate, and `RunStarted` shape are unchanged, because demoting or removing `BootstrapRun`
-is a separate certification/spec migration (see "Bootstrap Compatibility And Certification Scope").
-Breaking changes are allowed, but they stay within this RFC's boundary and must not silently perform
-the deferred certification migration.
+This RFC originally preserved certification topology while extracting runtime admission. That scope is
+now superseded by the flat admission migration: `RunAdmitted` is the single root event, and admission
+is no longer represented by a synthetic certified admission lifecycle node.
 
 The runtime is already single-version (everything is namespaced `v1`, content-addressed, and
 append-only), so the payoff of this policy is mostly *avoided work* in the high-blast-radius phases
@@ -51,9 +49,8 @@ rather than deletion of an existing legacy layer. Concretely it lets the migrati
 - skip **migration tooling, staged-rollout/feature-flag gating, and dual goldens**: old goldens are
   deleted and replaced, not maintained alongside new ones.
 
-This cleanup does not extend to the deferred certification migration: the bundled bootstrap
-`StateAttemptStarted`/`StateAttemptCompleted` legacy evidence stays, and the deliberate sync/async
-driver seam (see "First-Cut Decisions") is unaffected.
+This cleanup did not originally extend to the deferred certification migration. The later flat
+admission migration supersedes that scope and removes synthetic admission attempt evidence.
 
 ## Change Classes
 
@@ -68,10 +65,11 @@ mislabeled as "just a scheduler refactor":
   Touches events, store admission/projection, replay, Postgres storage, and public status. Requires
   the interruption legality matrix and public-status semantics (below) before any code lands.
 - **Certification/admission migration.** Anything that changes what the certified spec contains or
-  what `RunStarted` means on the wire, including demoting `BootstrapRun` from the certified graph.
+  what `RunAdmitted` means on the wire, including removing the old synthetic admission node from the
+  certified graph.
   Changes the spec hash and certificate and therefore replay/projection of persisted runs. This RFC
-  deliberately does **not** perform this migration; it only consolidates the existing genesis path
-  and records the decision boundary (see "Bootstrap Compatibility And Certification Scope").
+  deliberately does **not** perform this migration; it only consolidates the existing admission path
+  and records the decision boundary later superseded by flat admission.
 
 The migration phases map to these classes as:
 
@@ -191,13 +189,13 @@ attempt lifecycle drives it before the next decision. No intra-run parallelism i
 Three entry points reach the lifecycle protocols. They share the same `TransitionLifecycle` and
 attempt machinery; they differ only in how verified authority is first established.
 
-- **Start (genesis).** `RunAdmissionLifecycle` verifies the certified bundle, constructs
-  `BoundRuntimeContext`, prepares the atomic genesis commit (`RunStarted` plus the bundled genesis
-  events), appends it, and returns `RunAdmissionAuthority`, `CertifiedRuntimeSpec`,
-  `BoundRuntimeContext`, and the first `VerifiedRunHistory` at the genesis head. To preserve today's
-  prepare/append separation, admission may expose verify+bind+prepare and the genesis append as two
+- **Start/admission.** `RunAdmissionLifecycle` verifies the certified bundle, constructs
+  `BoundRuntimeContext`, prepares the atomic admission commit (the single `RunAdmitted` root),
+  appends it, and returns `RunAdmissionAuthority`, `CertifiedRuntimeSpec`,
+  `BoundRuntimeContext`, and the first `VerifiedRunHistory` at the admission head. To preserve today's
+  prepare/append separation, admission may expose verify+bind+prepare and the admission append as two
   steps; the post-append step is what yields the first verified history.
-- **Resume / recover.** There is no genesis. `VerifiedRunContextLoader` loads the stream and builds
+- **Resume / recover.** There is no fresh admission commit. `VerifiedRunContextLoader` loads the stream and builds
   `VerifiedRunHistory` (verifying spec/certificate/artifacts); `BoundRuntimeContextLoader` builds
   `BoundRuntimeContext` from the registries (a missing binding here is the same redacted
   deployment/configuration diagnostic as at admission). A recovery sweep then classifies any open
@@ -221,7 +219,7 @@ Flow:
 certified spec + certificate bundle (produced upstream by mfm-certify)
   -> admission verification
   -> executable binding validation
-  -> atomic genesis commit
+  -> atomic admission commit
   -> verified run authority for the FSM
 ```
 
@@ -230,7 +228,7 @@ Input:
 - certified spec and certificate bundle produced upstream by `mfm-certify`
 - persisted spec, certificate, config, and seed artifact bytes
 - configured runner, capability, and framework registries
-- staged genesis artifacts needed to establish the run root
+- staged admission artifacts needed to establish the run root
 
 Admission validation verifies:
 
@@ -258,8 +256,8 @@ Output:
 - `RunAdmissionAuthority`
 - `CertifiedRuntimeSpec`
 - `BoundRuntimeContext`
-- atomic run genesis authority, including `RunStarted`
-- first `VerifiedRunHistory` view at the genesis head
+- atomic run admission authority, including `RunAdmitted`
+- first `VerifiedRunHistory` view at the admission head
 
 Rules:
 
@@ -271,46 +269,24 @@ Rules:
 - Run admission must verify spec/certificate material before any semantic run lifecycle exists.
 - Run admission must prove runner, capability, and framework bindings are available before the FSM
   can construct executable attempts.
-- Bootstrap/genesis behavior belongs here, not as a scheduler exception inside the FSM.
+- Admission behavior belongs here, not as a scheduler exception inside the FSM.
 - If admission fails, the failure is an ingress, corruption, or deployment diagnostic. It is not a
   semantic run event.
-- `RunStarted` means the run authority was admitted. It does not mean a framework state executed.
+- `RunAdmitted` means the run authority was admitted. It does not mean a framework state executed.
 
-This is the long-term direction for the historical `Bootstrap` special case, but it must be scoped
-carefully. Bootstrap atomicity is useful because it seeds run state, completion state, artifacts, and
-retention references in one commit. Today `BootstrapRun` is modeled as a certified graph node, yet it
-does not execute as an ordinary framework runner: its runner stub errors if invoked, and the genesis
-commit is synthesized by commit-planner middleware (`prepare_run_launch`). So genesis is already
-"pre-FSM" in practice while still being represented as a certified node.
+This was the long-term direction for the historical synthetic admission special case. The flat admission
+migration now makes the pre-FSM boundary explicit: the root commit is synthesized by admission
+middleware (`prepare_run_launch`) and no longer appears as a certified graph node.
 
-Because of that, this RFC consolidates the existing genesis path behind `RunAdmissionLifecycle`
-without changing the certified topology. Whether `BootstrapRun` is later demoted or removed from the
-certified graph is a separate certification/spec migration decision, scoped below.
+Because of that, this RFC consolidated the existing admission path behind `RunAdmissionLifecycle`.
+The later flat admission migration changes the topology and event shape directly.
 
-### Bootstrap Compatibility And Certification Scope
+### Flat Admission Supersession
 
-`BootstrapRun` removal is a certification change, not a runtime change, and this RFC does not perform
-it. The boundary is explicit:
-
-- **Phase 1 keeps `BootstrapRun` certified.** `RunAdmissionLifecycle` first wraps and consolidates
-  the existing genesis path. The certified spec, lowering, spec hash, certificate, and `RunStarted`
-  shape are unchanged; admission is an internal reorganization of who mints genesis authority.
-- **`RunStarted` semantics are clarified, not redefined on the wire.** "Admitted run authority, not
-  framework-state execution" describes intent. The persisted `RunStarted` payload, its bundled
-  genesis attempt events, and its retention refs are preserved in Phase 1. Those bundled bootstrap
-  `StateAttemptStarted`/`StateAttemptCompleted` events are legacy compatibility evidence, not
-  new-model FSM state attempts; the "run admission is not a state attempt" rule describes the new
-  lifecycle, and reconciling the two is part of the deferred certification migration.
-- **Demoting or removing `BootstrapRun` from certified topology is deferred** to a separate
-  certification/spec migration. It must not be done implicitly while extracting admission.
-- **If `BootstrapRun` is later removed**, that migration must plan for: spec-hash change, certificate
-  re-issuance, replay verification of historical runs whose `RunStarted` pins the old spec hash,
-  projection rebuild compatibility, validators that currently require a certified `BootstrapRun` node,
-  and resume compatibility for in-flight persisted runs. Until that plan exists, `BootstrapRun` stays
-  in the certified graph.
-
-This keeps the RFC honest: genesis atomicity moves behind a named admission authority now, but the
-certified topology does not silently change.
+The current repository uses the later flat admission model. `RunAdmissionLifecycle` mints one
+`RunAdmitted` root event containing certified spec, certificate, config, seed, executable,
+binding-digest, framework, source, and caller launch-time evidence. Admission does not append
+synthetic state attempts, receipt cells, artifact-reference payloads, or retention-ref payloads.
 
 ### Bound Runtime Context
 
@@ -780,8 +756,8 @@ from persisted streams, artifact bytes, certified spec contents, registries, or 
 
 The strongest type boundaries should be:
 
-- `RunAdmissionLifecycle::admit` is the only path from authored run material to `RunStarted`
-  genesis authority.
+- `RunAdmissionLifecycle::admit` is the only path from authored run material to `RunAdmitted`
+  admission authority.
 - `BoundRuntimeContext::construct` is the only path from raw runner/capability/framework registries
   to executable runtime authority.
 - `FrontierScheduler::decide` accepts only certified spec authority, a verified run view, and pure
@@ -867,7 +843,7 @@ material.
 
 | Rule | Type-enforced shape | Still requires validation |
 |---|---|---|
-| Run authority exists before FSM execution | `RunAdmissionLifecycle` is the only constructor for run genesis authority | Spec/certificate/artifact bytes and genesis commit must be verified |
+| Run authority exists before FSM execution | `RunAdmissionLifecycle` is the only constructor for run admission authority | Spec/certificate/artifact bytes and admission commit must be verified |
 | Runtime bindings exist before attempts | `BoundRuntimeContext` required to select executable attempts | Registries and deployment policy are runtime-loaded data |
 | Transition decision is pure | No store, runner, artifact, transport, signer, or capability handles in the decision API | Correct decision still depends on certified spec, bound runtime context, and verified history |
 | Transition does not write/stage/invoke | Capability-limited input type | No, if forbidden handles are absent |
@@ -888,7 +864,7 @@ The refactor should make these components explicit:
 
 | Component | Owns | Must not own |
 |---|---|---|
-| `RunAdmissionLifecycle` | Verify the certified bundle, bind executable authority, commit atomic run genesis | Certification/lowering, domain state execution, transition decisions |
+| `RunAdmissionLifecycle` | Verify the certified bundle, bind executable authority, commit atomic run admission | Certification/lowering, domain state execution, transition decisions |
 | `BoundRuntimeContextLoader` | Construct executable runner/capability/framework binding authority from certified spec and registries | Store writes, transition decisions, handler execution |
 | `VerifiedRunContextLoader` | Load stream, verify spec/certificate/artifacts, construct verified history view | Runner execution, transition decisions |
 | `FrontierScheduler` | Pure transition decision from certified spec, bound runtime context, and verified history | Store writes, artifact staging, live IO |
@@ -901,7 +877,7 @@ The refactor should make these components explicit:
 | `ArtifactStager` | Stage verified artifact bytes before commit | Admitting run-store evidence independently |
 | `CommitPlanner` | Build purpose-specific prepared commits | Executing handlers |
 | `SideEffectLifecycle` | Orchestrate mutation phase recovery through store/runtime ledger validators | Generic scheduler decisions, independent ledger law |
-| `FrameworkLifecycle` | Public output, retention, completion, and saga terminal framework attempts after run admission | Bootstrap/genesis authority, domain state semantics |
+| `FrameworkLifecycle` | Public output, retention, completion, and saga terminal framework attempts after run admission | Admission authority, domain state semantics |
 
 `SerialTypedScheduler` can remain as a facade during migration, but its implementation should become
 thin orchestration over these components.
@@ -936,10 +912,9 @@ This is a breaking event-order change where any current post-admission framework
 terminalizes in one commit. The new event order is more explicit and gives crash recovery the same
 model for framework and domain attempts.
 
-Bootstrap/genesis is different. Its authority moves to `RunAdmissionLifecycle` and remains an atomic
-run-root commit; `BootstrapRun` stays in the certified graph per "Bootstrap Compatibility And
-Certification Scope" unless a later certification migration removes it. It should not be used as
-evidence that the FSM scheduler needs special-case attempt ordering.
+Run admission is different. Its authority belongs to `RunAdmissionLifecycle` and remains an atomic
+run-root commit, but it is outside certified scheduler attempts. It should not be used as evidence
+that the FSM scheduler needs special-case attempt ordering.
 
 ### Terminal Failure Planning
 
@@ -979,7 +954,7 @@ One possible runtime crate layout:
 ```text
 crates/kernel/runtime/src/
   scheduler.rs              // facade, thin public API
-  admission.rs              // RunAdmissionLifecycle and genesis authority
+  admission.rs              // RunAdmissionLifecycle and admission authority
   binding.rs                // BoundRuntimeContext construction
   transition.rs             // TransitionLifecycle and TransitionDecision
   frontier.rs               // pure scheduler only
@@ -1009,7 +984,7 @@ event-schema slices and should each land as one coordinated, test-backed change.
 | Phase | Effort | Primary owning surfaces | Notes |
 |---|---|---|---|
 | 0 Baselines | M | `mfm-runtime`, `mfm-store`, `mfm-replay`, `mfm-app` tests | Golden + behavior baselines before any move |
-| 1 Run admission + binding | M–L | `mfm-runtime` (admission, binding), `mfm-app` (assembly) | No schema/cert change; `BootstrapRun` stays certified |
+| 1 Run admission + binding | M–L | `mfm-runtime` (admission, binding), `mfm-app` (assembly) | Superseded by flat `RunAdmitted` root semantics |
 | 2 Pure transition | M | `mfm-runtime` (frontier, transition) | Decision/dispatch split; saga projection step |
 | 3 Attempt lifecycle types | M | `mfm-runtime` (attempt typestates) | Gated on the IO-free-core and serial/global decisions |
 | 4 Interruption event schema | L | `mfm-events`, `mfm-store`, `mfm-replay`, `stream-store-postgres`, `mfm-app` (+CLI/REST status) | Highest blast radius; one coordinated breaking slice |
@@ -1031,8 +1006,8 @@ replay semantics, or certified saga authority change. This RFC changes several o
 updates are first-class migration work, landed in the same phase as the change they describe — not
 deferred to the end:
 
-- **Phase 1** updates the runtime/admission description and the meaning of `RunStarted` (admitted run
-  authority), while noting `BootstrapRun` remains certified.
+- **Phase 1** updates the runtime/admission description and the meaning of `RunAdmitted` as admitted
+  run authority. The later flat admission migration makes it the only root event.
 - **Phase 2** updates the documented frontier decision set (it is no longer exactly "run / block /
   complete").
 - **Phase 4** updates typed event schemas and public status for `StateAttemptInterrupted`, including
@@ -1048,7 +1023,7 @@ A phase that changes authority or event semantics without the matching doc updat
 
 Add or identify tests for:
 
-- current Bootstrap/genesis event ordering and atomicity
+- current admission event ordering and atomicity
 - ordinary state success
 - ordinary state handler failure
 - invocation materialization failure after attempt start
@@ -1065,15 +1040,15 @@ Add or identify tests for:
 
 ### Phase 1: Extract Run Admission And Binding Authority
 
-- Extract the current Bootstrap/genesis behavior behind `RunAdmissionLifecycle`.
-- Keep `BootstrapRun` in the certified graph. Phase 1 consolidates the genesis path only; it does not
-  change certified topology, spec hash, certificate, or the persisted `RunStarted` shape.
+- Extract the current admission behavior behind `RunAdmissionLifecycle`.
+- Superseded by the flat admission migration, which removes the old synthetic admission node and
+  changes the persisted `RunAdmitted` shape.
 - Preserve atomic run-root behavior while moving it out of scheduler/framework attempt semantics.
 - Verify spec hash, certificate hash, registry digest, descriptor identities/digests, saga policy
   digest, public-output schema authority, and config/seed artifact evidence during admission.
-- Clarify that `RunStarted` *means* admitted run authority (not framework-state execution). In Phase 1
-  this is an intent/documentation clarification; the persisted payload and bundled genesis events are
-  unchanged.
+- Clarify that `RunAdmitted` *means* admitted run authority (not framework-state execution). In Phase 1
+  this is an intent/documentation clarification; the historical bundled admission events are
+  superseded by the flat root event.
 - Add `BoundRuntimeContext` construction (registry/identity binding existence only) before transition
   or attempt execution.
 - Make missing runner/capability/framework binding fail as a redacted deployment/admission
@@ -1149,7 +1124,8 @@ Add or identify tests for:
 
 ### Phase 6: Classify Framework Lifecycles
 
-- Keep Bootstrap/genesis in `RunAdmissionLifecycle` with `BootstrapRun` still certified.
+- Keep admission in `RunAdmissionLifecycle`; the flat admission migration removes the old synthetic
+  admission lifecycle node.
 - Route public-output, retention, completion, and saga terminal framework states through the same
   post-admission attempt lifecycle where doing so preserves existing validators.
 - Split current same-commit post-admission framework attempts into started-before-run and terminal
@@ -1227,7 +1203,7 @@ Additional required tests:
 - stale `SagaTerminalProof` is rejected after the verified prefix changes
 - `ContinueAttempt` after saga engagement cannot cross a new `InvocationStarted` boundary
 - post-admission framework lifecycle nodes follow the same start/run/terminal model
-- Bootstrap/genesis remains covered by run admission atomicity tests
+- Admission remains covered by run admission atomicity tests
 - old-model streams (no `StateAttemptInterrupted`, old framework event order) are rejected with a
   typed diagnostic by replay, projection, and resume — they are not silently read
 - storage failure before terminal commit leaves recoverable open attempt state
@@ -1248,9 +1224,8 @@ The following decisions define the first implementation direction:
   `StateAttemptFailed` reason. `StateAttemptFailed` means the attempt reached a
   semantic/runtime-evaluable failure. `StateAttemptInterrupted` means the attempt started but the
   runtime could not observe or complete the lifecycle cleanly.
-- Bootstrap/genesis authority belongs to `RunAdmissionLifecycle`, not the FSM attempt lifecycle. But
-  `BootstrapRun` stays in the certified graph in this RFC; demoting or removing it is a separate
-  certification/spec migration (see "Bootstrap Compatibility And Certification Scope").
+- Admission authority belongs to `RunAdmissionLifecycle`, not the FSM attempt lifecycle. The flat
+  admission migration removes the old synthetic admission lifecycle node.
 - Missing runner or capability binding should be unrepresentable after `BoundRuntimeContext`
   construction. If binding cannot be proven, run admission or resume fails with a redacted
   deployment/configuration diagnostic before semantic attempt start. This covers binding *existence*
