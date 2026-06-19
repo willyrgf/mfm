@@ -21,6 +21,7 @@ pub mod v1 {
     use std::future::Future;
     use std::marker::PhantomData;
     use std::pin::Pin;
+    use std::sync::{Arc, Mutex, MutexGuard};
 
     use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
     use mfm_capabilities::{CapabilityDescriptor, CapabilityRole, CapabilitySetDescriptor};
@@ -5278,6 +5279,154 @@ pub mod v1 {
                 .map(|batch| batch.seq.checked_next().unwrap_or(StreamSeq(u64::MAX)))
                 .unwrap_or(StreamSeq::FIRST)
         }
+    }
+
+    /// Non-durable async wrapper around [`InMemoryTypedRunStore`].
+    ///
+    /// This is intended for contract tests and single-process local tools that need the async typed
+    /// store API without a durable backend. It must not be used as a production persistence store.
+    #[derive(Debug, Clone, Default)]
+    pub struct AsyncInMemoryTypedRunStore {
+        inner: Arc<Mutex<InMemoryTypedRunStore>>,
+    }
+
+    impl AsyncInMemoryTypedRunStore {
+        /// Creates an empty async in-memory typed run store.
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        /// Wraps an existing in-memory typed run store.
+        pub fn from_store(store: InMemoryTypedRunStore) -> Self {
+            Self {
+                inner: Arc::new(Mutex::new(store)),
+            }
+        }
+
+        /// Reads the inner synchronous store while holding its local mutex.
+        pub fn with_inner<R>(&self, read: impl FnOnce(&InMemoryTypedRunStore) -> R) -> Result<R> {
+            let inner = self.lock_inner()?;
+            Ok(read(&inner))
+        }
+
+        /// Mutates the inner synchronous store while holding its local mutex.
+        pub fn with_inner_mut<R>(
+            &self,
+            write: impl FnOnce(&mut InMemoryTypedRunStore) -> R,
+        ) -> Result<R> {
+            let mut inner = self.lock_inner()?;
+            Ok(write(&mut inner))
+        }
+
+        fn lock_inner(&self) -> Result<MutexGuard<'_, InMemoryTypedRunStore>> {
+            self.inner.lock().map_err(|_| {
+                StoreError::Event("async in-memory typed run store lock poisoned".to_owned())
+            })
+        }
+    }
+
+    impl AsyncTypedRunEventStore for AsyncInMemoryTypedRunStore {
+        type Error = StoreError;
+
+        fn append_prepared_commit_plan<'a>(
+            &'a self,
+            plan: PreparedCommitPlan,
+        ) -> AsyncStoreFuture<'a, CommitOutcome, Self::Error> {
+            let result = self
+                .with_inner_mut(|store| store.append_prepared_commit_plan(plan))
+                .and_then(|result| result);
+            Box::pin(std::future::ready(result))
+        }
+
+        fn load_run_stream<'a>(
+            &'a self,
+            run_id: &'a RunId,
+        ) -> AsyncStoreFuture<'a, Vec<KernelEventEnvelope>, Self::Error> {
+            let result = self.with_inner(|store| store.load_run_stream(run_id));
+            Box::pin(std::future::ready(result))
+        }
+
+        fn expected_next_seq<'a>(
+            &'a self,
+            run_id: &'a RunId,
+        ) -> AsyncStoreFuture<'a, StreamSeq, Self::Error> {
+            let result = self.with_inner(|store| store.expected_next_seq(run_id));
+            Box::pin(std::future::ready(result))
+        }
+
+        fn status_projection_snapshot<'a>(
+            &'a self,
+            run_id: &'a RunId,
+        ) -> AsyncStoreFuture<'a, ProjectionSnapshot, Self::Error> {
+            let result = self
+                .with_inner(|store| {
+                    let stream = store.load_run_stream(run_id);
+                    let run_projection = ProjectionSnapshot::rebuild_from_run_stream(&stream)?;
+                    projection_with_resource_lanes(
+                        &run_projection,
+                        store
+                            .projection_snapshot()
+                            .resource_lanes()
+                            .map(|(lane_key, projection)| (lane_key.clone(), projection.clone()))
+                            .collect(),
+                    )
+                })
+                .and_then(|result| result);
+            Box::pin(std::future::ready(result))
+        }
+    }
+
+    fn projection_with_resource_lanes(
+        snapshot: &ProjectionSnapshot,
+        resource_lanes: BTreeMap<ResourceLaneKey, ResourceLaneProjection>,
+    ) -> Result<ProjectionSnapshot> {
+        ProjectionSnapshot::from_parts(ProjectionSnapshotParts {
+            run_states: snapshot
+                .run_states()
+                .map(|(run_id, state)| (run_id.clone(), *state))
+                .collect(),
+            saga_policy_digests: snapshot
+                .saga_policy_digests()
+                .map(|(run_id, digest)| (run_id.clone(), digest.clone()))
+                .collect(),
+            run_completions: snapshot
+                .run_completions()
+                .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
+                .collect(),
+            saga_engagements: snapshot
+                .saga_engagements()
+                .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
+                .collect(),
+            manual_resolutions: snapshot
+                .manual_resolutions()
+                .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
+                .collect(),
+            attempts: snapshot
+                .attempts()
+                .map(|(key, projection)| (key.clone(), projection.clone()))
+                .collect(),
+            cells: snapshot
+                .cells()
+                .map(|(cell_id, projection)| (cell_id.clone(), projection.clone()))
+                .collect(),
+            facts: snapshot
+                .facts()
+                .map(|(key, projection)| (key.clone(), projection.clone()))
+                .collect(),
+            side_effects: snapshot
+                .side_effects()
+                .map(|(ledger_ref, projection)| (ledger_ref.clone(), projection.clone()))
+                .collect(),
+            resource_lanes,
+            public_outputs: snapshot
+                .public_outputs()
+                .map(|(schema_id, projection)| (schema_id.clone(), projection.clone()))
+                .collect(),
+            retentions: snapshot
+                .retentions()
+                .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
+                .collect(),
+        })
     }
 
     fn admit_artifact_evidence(

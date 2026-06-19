@@ -1,3 +1,7 @@
+use std::future::Future;
+use std::sync::Arc;
+use std::task::{Context, Poll, Wake, Waker};
+
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_events::v1::{self as events, side_effect, ArtifactRole, KernelEventPayload};
 use mfm_ids::{
@@ -19,14 +23,15 @@ use mfm_spec::v1::{
 };
 use mfm_store::v1::{
     build_committed_batch, event_artifact_requirements, payload_canonical_json,
-    payload_from_json_value, ArtifactEvidenceRef, AttemptStatus, AttemptTerminal,
-    CellTerminalProjection, CommitArtifactEvidenceSet, CommitKey, CommitOrdinal, CommitOutcome,
-    CommitPreconditions, CommittedRunStream, EventArtifactReferenceSource,
-    ForwardLedgerClassification, InMemoryTypedRunStore, KernelEventEnvelope, ManualBlockReason,
-    ManualResolution, ManualResolutionProjection, NonEmptyPayloadBatch, PersistedKernelEventRecord,
-    PreparedCommit, PreparedCommitPlan, ProjectionSnapshot, PublicOutputProjection,
-    RequiredRunState, ResourceLaneKey, Retention, RunAdmission, RunCompletionProjection, RunMode,
-    RunState, SagaAdmitToken, SagaEngagementProjection, SagaEngagementReason, SagaTerminal,
+    payload_from_json_value, ArtifactEvidenceRef, AsyncInMemoryTypedRunStore, AsyncStoreFuture,
+    AsyncTypedRunEventStore, AttemptStatus, AttemptTerminal, CellTerminalProjection,
+    CommitArtifactEvidenceSet, CommitKey, CommitOrdinal, CommitOutcome, CommitPreconditions,
+    CommittedRunStream, EventArtifactReferenceSource, ForwardLedgerClassification,
+    InMemoryTypedRunStore, KernelEventEnvelope, ManualBlockReason, ManualResolution,
+    ManualResolutionProjection, NonEmptyPayloadBatch, PersistedKernelEventRecord, PreparedCommit,
+    PreparedCommitPlan, ProjectionSnapshot, PublicOutputProjection, RequiredRunState,
+    ResourceLaneKey, Retention, RunAdmission, RunCompletionProjection, RunMode, RunState,
+    SagaAdmitToken, SagaEngagementProjection, SagaEngagementReason, SagaTerminal,
     SagaTerminalProof, SideEffectLedgerPhase, SideEffectPhase, SideEffectProgress,
     SideEffectTerminal, StateAttemptStarted, StoreError, StreamSeq, TypedCommitRequest,
     TypedProjectionRead, TypedRunEventStore, VerifiedRetentionProjection,
@@ -54,6 +59,23 @@ macro_rules! typed_commit_request {
         )
         .expect("typed commit request")
     };
+}
+
+struct NoopWake;
+
+impl Wake for NoopWake {
+    fn wake(self: Arc<Self>) {}
+}
+
+fn poll_ready_store_future<T, E>(
+    mut future: AsyncStoreFuture<'_, T, E>,
+) -> std::result::Result<T, E> {
+    let waker = Waker::from(Arc::new(NoopWake));
+    let mut context = Context::from_waker(&waker);
+    match Future::poll(future.as_mut(), &mut context) {
+        Poll::Ready(result) => result,
+        Poll::Pending => panic!("async in-memory store future should be ready"),
+    }
 }
 
 fn digest_bytes(byte: u8) -> DigestBytes {
@@ -2406,6 +2428,70 @@ fn commit_key_idempotency_precedes_stale_expected_next_seq() {
     };
     assert_eq!(batch.seq(), StreamSeq::FIRST);
     assert_eq!(store.expected_next_seq(&run_id), StreamSeq::new(2).unwrap());
+}
+
+#[test]
+fn async_in_memory_store_exposes_commit_stream_and_status_contract() {
+    let store = AsyncInMemoryTypedRunStore::new();
+    let resource_run = run_id(43);
+    let status_run = run_id(44);
+    let lane_key = resource_lane_key("async-wallet");
+
+    let resource_request = run_start_request(resource_run.clone(), "async-resource-run-start");
+    let resource_plan = test_prepared_commit_plan(
+        resource_request.clone(),
+        resource_request.required_artifacts().to_vec(),
+    )
+    .expect("prepare resource run start");
+    let resource_outcome =
+        poll_ready_store_future(store.append_prepared_commit_plan(resource_plan))
+            .expect("append resource run start");
+    assert!(matches!(resource_outcome, CommitOutcome::Appended(_)));
+
+    store
+        .with_inner_mut(|inner| {
+            append_side_effect_prepare_for_ledger(
+                inner,
+                &resource_run,
+                "async-resource-prepare",
+                side_effect_ledger_key_with_suffix(30),
+                resource_key("async-wallet", 230),
+                170,
+                true,
+            );
+        })
+        .expect("append resource lane fixture");
+
+    let status_request = run_start_request(status_run.clone(), "async-status-run-start");
+    let status_plan = test_prepared_commit_plan(
+        status_request.clone(),
+        status_request.required_artifacts().to_vec(),
+    )
+    .expect("prepare status run start");
+    poll_ready_store_future(store.append_prepared_commit_plan(status_plan))
+        .expect("append status run start");
+
+    let stream =
+        poll_ready_store_future(store.load_run_stream(&status_run)).expect("load status stream");
+    assert_eq!(stream.len(), 1);
+    assert_eq!(stream[0].run_id(), &status_run);
+    assert_eq!(
+        poll_ready_store_future(store.expected_next_seq(&status_run)).expect("status next seq"),
+        StreamSeq::new(2).expect("next seq")
+    );
+
+    let status_projection = poll_ready_store_future(store.status_projection_snapshot(&status_run))
+        .expect("status projection");
+    assert_eq!(status_projection.run_state(&status_run), RunState::Started);
+    assert_eq!(status_projection.run_state(&resource_run), RunState::Absent);
+    let lane = status_projection
+        .resource_lane(&lane_key)
+        .expect("cross-run resource lane");
+    assert_eq!(lane.holder.run_id, resource_run);
+    assert_eq!(
+        lane.holder.ledger_key,
+        side_effect_ledger_key_with_suffix(30)
+    );
 }
 
 #[test]
