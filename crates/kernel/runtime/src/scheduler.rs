@@ -14,9 +14,9 @@ use crate::error::async_store_error;
 use crate::framework_lifecycle::FrameworkAttemptLifecycle;
 use crate::history::{RuntimeRunView, VerifiedRunContextLoader};
 use crate::manual_resolution::{
-    build_manual_resolution_prefix_authority, certified_manual_resolution_spec,
-    prepare_manual_resolution_commit, verify_manual_resolution_for_prefix,
-    ManualResolutionEvidenceArtifact,
+    build_manual_resolution_prefix_authority, build_manual_resolution_prefix_authority_from_parts,
+    certified_manual_resolution_spec, prepare_manual_resolution_commit,
+    verify_manual_resolution_for_prefix, ManualResolutionEvidenceArtifact,
 };
 use crate::recovery::AttemptRecoveryLifecycle;
 use crate::runners::ErasedRunnerRegistry;
@@ -196,6 +196,54 @@ impl SerialTypedScheduler {
         )?;
         self.stage_prepared_artifacts(&artifacts_to_stage).await?;
         Ok(store.append_prepared_commit_plan(commit.into())?)
+    }
+
+    /// Appends a verified manual resolution through an async durable typed store.
+    pub async fn record_manual_resolution_async<S: store::AsyncTypedRunEventStore + ?Sized>(
+        &self,
+        store: &S,
+        runtime_spec: &CertifiedRuntimeSpec,
+        run_id: &RunId,
+        request: ManualResolutionRequest,
+    ) -> Result<store::CommitOutcome> {
+        let ManualResolutionRequest {
+            outcome,
+            evidence_artifact,
+            proof_bytes,
+            note,
+        } = request;
+        let manual = certified_manual_resolution_spec(&runtime_spec.spec().saga)?;
+        let stream = store
+            .load_run_stream(run_id)
+            .await
+            .map_err(async_store_error)?;
+        let expected_next_seq = expected_next_seq_from_stream(&stream)?;
+        let projection = store::ProjectionSnapshot::rebuild_from_run_stream(&stream)?;
+        let prefix = build_manual_resolution_prefix_authority_from_parts(
+            runtime_spec,
+            run_id,
+            manual.clone(),
+            &stream,
+            expected_next_seq,
+            &projection,
+        )?;
+        let verified =
+            verify_manual_resolution_for_prefix(prefix, outcome, &evidence_artifact, proof_bytes)?;
+        let saga = projection.derive_saga_projection(run_id, &runtime_spec.spec().saga);
+        let (commit, artifacts_to_stage) = prepare_manual_resolution_commit(
+            runtime_spec,
+            &stream,
+            &saga,
+            expected_next_seq,
+            verified,
+            evidence_artifact,
+            note,
+        )?;
+        self.stage_prepared_artifacts(&artifacts_to_stage).await?;
+        store
+            .append_prepared_commit_plan(commit.into())
+            .await
+            .map_err(async_store_error)
     }
 
     /// Runs one deterministic runnable node, if any.
@@ -508,4 +556,21 @@ impl SerialTypedScheduler {
         }
         Ok(())
     }
+}
+
+fn expected_next_seq_from_stream(
+    stream: &[store::KernelEventEnvelope],
+) -> Result<store::StreamSeq> {
+    let next = stream
+        .last()
+        .map(|event| {
+            event.seq().as_u64().checked_add(1).ok_or_else(|| {
+                crate::RuntimeError::InvalidRunStream(
+                    "manual resolution stream sequence overflow".to_owned(),
+                )
+            })
+        })
+        .transpose()?
+        .unwrap_or(store::StreamSeq::FIRST.as_u64());
+    Ok(store::StreamSeq::new(next)?)
 }

@@ -36,6 +36,24 @@ pub fn build_manual_resolution_prefix_authority<S: store::TypedRunEventStore + ?
     let stream = store.load_run_stream(run_id);
     let expected_next_seq = store.expected_next_seq(run_id);
     let projection = store.projection_snapshot();
+    build_manual_resolution_prefix_authority_from_parts(
+        runtime_spec,
+        run_id,
+        manual,
+        &stream,
+        expected_next_seq,
+        projection,
+    )
+}
+
+pub(crate) fn build_manual_resolution_prefix_authority_from_parts(
+    runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
+    manual: spec::ManualResolutionEvidenceSpec,
+    stream: &[store::KernelEventEnvelope],
+    expected_next_seq: store::StreamSeq,
+    projection: &store::ProjectionSnapshot,
+) -> Result<ManualResolutionPrefixAuthority> {
     projection
         .require_no_open_semantic_attempts_for_run(run_id)
         .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
@@ -55,7 +73,7 @@ pub fn build_manual_resolution_prefix_authority<S: store::TypedRunEventStore + ?
         run_id.clone(),
         runtime_spec.spec_hash().clone(),
         expected_next_seq.as_u64(),
-        manual_resolution_stream_prefix_digest(&stream)?,
+        manual_resolution_stream_prefix_digest(stream)?,
         manual_resolution_block_reason(reason),
         unresolved_manual_obligations_digest(&saga)?,
         manual,

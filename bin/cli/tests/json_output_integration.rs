@@ -210,6 +210,18 @@ fn test_help_output_shows_json_format_option() {
 }
 
 #[test]
+fn run_manual_resolution_help_documents_proof_submission_flags() {
+    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+    cmd.args(["run", "manual-resolution", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--outcome"))
+        .stdout(predicate::str::contains("--evidence"))
+        .stdout(predicate::str::contains("--authorization-proof"))
+        .stdout(predicate::str::contains("--evidence-media-type"));
+}
+
+#[test]
 fn test_cli_parse_error_json_output_for_unknown_command_flag_equals() {
     let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
     let output = cmd

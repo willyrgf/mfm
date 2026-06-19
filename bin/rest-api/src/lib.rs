@@ -32,9 +32,9 @@ use axum::Json;
 use axum::Router;
 use http::header::HeaderName;
 use mfm_app::{
-    AppError, AsyncRunServices, DriveMode, ErrorClass, RunLaunchConfigArtifact,
-    RunLaunchSeedArtifact, TypedPublicOutputResponse, TypedRunMode, TypedRunResponse,
-    TypedRunStreamResponse,
+    AppError, AsyncRunServices, DriveMode, ErrorClass, ManualResolutionDecision,
+    ManualResolutionRecordRequest, RunLaunchConfigArtifact, RunLaunchSeedArtifact,
+    TypedPublicOutputResponse, TypedRunMode, TypedRunResponse, TypedRunStreamResponse,
 };
 use mfm_artifact_store_fs::{FsTypedArtifactError, FsTypedArtifactStore};
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
@@ -344,6 +344,10 @@ where
         )
         .route("/v1/runs/start", post(runs_start::<S>))
         .route("/v1/runs/:run_id/resume", post(runs_resume::<S>))
+        .route(
+            "/v1/runs/:run_id/manual-resolution",
+            post(runs_manual_resolution::<S>),
+        )
         .route("/v1/runs/:run_id/status", get(runs_status::<S>))
         .route("/v1/runs/:run_id/stream", get(runs_stream::<S>))
         .route("/v1/runs/:run_id/replay", post(runs_replay::<S>))
@@ -445,6 +449,12 @@ async fn not_found() -> (StatusCode, Json<serde_json::Value>) {
 #[serde(rename_all = "snake_case")]
 enum TypedRunStartKind {
     TypedRunStartV1,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ManualResolutionKind {
+    ManualResolutionV1,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -627,6 +637,21 @@ struct TypedRunResumeBody {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ManualResolutionBody {
+    kind: ManualResolutionKind,
+    outcome: ManualResolutionDecision,
+    evidence_json: serde_json::Value,
+    authorization_proof: serde_json::Value,
+    #[serde(default = "default_json_media_type_string")]
+    evidence_media_type: String,
+    #[serde(default)]
+    note: Option<String>,
+    #[serde(default)]
+    drive: RestDriveMode,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RunStreamQuery {
     #[serde(default = "default_from_seq")]
     from_seq: u64,
@@ -636,6 +661,10 @@ struct RunStreamQuery {
 
 fn default_from_seq() -> u64 {
     1
+}
+
+fn default_json_media_type_string() -> String {
+    "application/json".to_owned()
 }
 
 fn default_framework_version() -> String {
@@ -915,6 +944,40 @@ where
     let data = state
         .services()?
         .resume_stored_run(&run_id, req.drive.into_app())
+        .await?;
+
+    json_ok(data)
+}
+
+#[instrument(level = "info", skip(state, body), fields(run_id = run_id.as_str()))]
+async fn runs_manual_resolution<S>(
+    State(state): State<RouterState<S>>,
+    Path(run_id): Path<String>,
+    body: Result<Json<ManualResolutionBody>, JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError>
+where
+    S: AsyncTypedRunEventStore + Clone + Send + Sync,
+{
+    let run_id = parse_run_id(&run_id)?;
+    let Json(req) = body.map_err(|_| ApiError::invalid_json())?;
+    match req.kind {
+        ManualResolutionKind::ManualResolutionV1 => {}
+    }
+    let evidence_bytes =
+        canonical_json_value_bytes(&req.evidence_json, "ManualResolutionEvidenceInvalid")?;
+    let proof_bytes =
+        canonical_json_value_bytes(&req.authorization_proof, "ManualResolutionProofInvalid")?;
+    let data = state
+        .services()?
+        .record_manual_resolution(ManualResolutionRecordRequest {
+            run_id,
+            outcome: req.outcome,
+            evidence_bytes,
+            evidence_media_type: req.evidence_media_type,
+            authorization_proof_bytes: proof_bytes,
+            note: req.note,
+            drive: req.drive.into_app(),
+        })
         .await?;
 
     json_ok(data)
@@ -1502,6 +1565,56 @@ mod tests {
             );
             assert_eq!(value["data"]["public_output"], serde_json::Value::Null);
         }
+    }
+
+    #[tokio::test]
+    async fn manual_resolution_route_accepts_signed_proof_submission_shape() {
+        let run_id = mfm_app::new_run_id();
+        let response = test_app()
+            .oneshot(json_post(
+                &format!("/v1/runs/{run_id}/manual-resolution"),
+                json!({
+                    "kind": "manual_resolution_v1",
+                    "outcome": "confirm_remediated",
+                    "evidence_json": {
+                        "operator_note": "reviewed"
+                    },
+                    "authorization_proof": {
+                        "proof_version": "mfm.manual_resolution.authorization_proof.v1"
+                    },
+                    "drive": "append_only"
+                }),
+            ))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let value = response_json(response).await;
+        assert_eq!(value["status"], "error");
+        assert_eq!(value["error"]["code"], "RunNotFound");
+    }
+
+    #[tokio::test]
+    async fn manual_resolution_route_rejects_request_supplied_prefix_facts() {
+        let run_id = mfm_app::new_run_id();
+        let response = test_app()
+            .oneshot(json_post(
+                &format!("/v1/runs/{run_id}/manual-resolution"),
+                json!({
+                    "kind": "manual_resolution_v1",
+                    "outcome": "confirm_remediated",
+                    "evidence_json": {},
+                    "authorization_proof": {},
+                    "expected_next_seq": 2
+                }),
+            ))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let value = response_json(response).await;
+        assert_eq!(value["status"], "error");
+        assert_eq!(value["error"]["code"], "InvalidJson");
     }
 
     #[test]

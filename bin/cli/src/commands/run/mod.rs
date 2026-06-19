@@ -2,6 +2,8 @@ use clap::Subcommand;
 
 use super::CommandContext;
 
+/// Manual-resolution recording command implementation.
+mod manual_resolution;
 /// Typed public-output rendering command implementation.
 mod public_output;
 /// Typed replay command implementation.
@@ -48,6 +50,12 @@ pub(crate) enum RunCommand {
         #[command(flatten)]
         args: public_output::PublicOutputArgs,
     },
+    /// Record a signed manual resolution for a blocked typed run
+    ManualResolution {
+        /// Parsed arguments for the manual-resolution command.
+        #[command(flatten)]
+        args: manual_resolution::ManualResolutionArgs,
+    },
     /// Verify typed replay authority for a run
     Replay {
         /// Parsed arguments for the replay command.
@@ -65,6 +73,7 @@ impl RunCommand {
             RunCommand::Status { args } => status::execute(ctx, args).await,
             RunCommand::Stream { args } => stream::execute(ctx, args).await,
             RunCommand::PublicOutput { args } => public_output::execute(ctx, args).await,
+            RunCommand::ManualResolution { args } => manual_resolution::execute(ctx, args).await,
             RunCommand::Replay { args } => replay::execute(ctx, args).await,
         }
     }

@@ -31,9 +31,9 @@ use mfm_ids::{
 };
 use mfm_replay::v1::{ReplayBroker, ReplayError, ReplayReadAuthority};
 use mfm_runtime::{
-    CertifiedRuntimeSpec, RunLaunchArtifact, RunLaunchEvidence, RunLaunchSeedCell,
-    RuntimeArtifactStageFuture, RuntimeArtifactStager, SchedulerStatus, SerialTypedScheduler,
-    VerifiedRunHistory,
+    CertifiedRuntimeSpec, ManualResolutionEvidenceArtifact, ManualResolutionRequest,
+    RunLaunchArtifact, RunLaunchEvidence, RunLaunchSeedCell, RuntimeArtifactStageFuture,
+    RuntimeArtifactStager, SchedulerStatus, SerialTypedScheduler, VerifiedRunHistory,
 };
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
@@ -376,6 +376,31 @@ pub enum DriveMode {
     UntilBlocked,
 }
 
+/// Operator-selected manual resolution decision accepted by app ingress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManualResolutionDecision {
+    /// Confirm that unresolved obligations were remediated externally.
+    ConfirmRemediated,
+    /// Close the run without a compensation or AC/DC-equivalence claim.
+    FailWithoutAcdcClaim,
+}
+
+impl ManualResolutionDecision {
+    fn into_event(self) -> events::ManualResolutionOutcome {
+        match self {
+            Self::ConfirmRemediated => events::ManualResolutionOutcome::ConfirmRemediated,
+            Self::FailWithoutAcdcClaim => events::ManualResolutionOutcome::FailWithoutAcdcClaim,
+        }
+    }
+}
+
+impl fmt::Display for ManualResolutionDecision {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.into_event().as_str())
+    }
+}
+
 /// Request to start a certified typed run.
 #[derive(Debug, Clone)]
 pub struct RunLaunchRequest {
@@ -386,6 +411,25 @@ pub struct RunLaunchRequest {
     /// Launch material that runtime middleware stages and admits with the admission commit.
     pub evidence: RunLaunchEvidence,
     /// Scheduler drive policy after start.
+    pub drive: DriveMode,
+}
+
+/// Request to append a signed manual resolution for a manually blocked typed run.
+#[derive(Debug, Clone)]
+pub struct ManualResolutionRecordRequest {
+    /// Store-owned run id to resolve.
+    pub run_id: RunId,
+    /// Authorized manual decision to record.
+    pub outcome: ManualResolutionDecision,
+    /// Operator evidence artifact bytes bound by the signed proof claim.
+    pub evidence_bytes: Vec<u8>,
+    /// Evidence artifact media type.
+    pub evidence_media_type: String,
+    /// Canonical signed manual authorization proof bytes.
+    pub authorization_proof_bytes: Vec<u8>,
+    /// Optional redaction-safe operator note.
+    pub note: Option<String>,
+    /// Scheduler drive policy after the manual-resolution append.
     pub drive: DriveMode,
 }
 
@@ -934,6 +978,42 @@ where
         typed_run_response(&*store, &runtime_spec, run_id, status)
     }
 
+    /// Records a signed manual resolution and optionally resumes typed scheduler execution.
+    pub async fn record_manual_resolution(
+        &self,
+        req: ManualResolutionRecordRequest,
+    ) -> Result<TypedRunResponse, AppError> {
+        let run_id = req.run_id.clone();
+        let drive = req.drive;
+        let stream = {
+            let store = self.store.lock().await;
+            store.load_run_stream(&run_id)
+        };
+        if stream.is_empty() {
+            return Err(AppError::not_found(
+                "RunNotFound",
+                "typed run stream was not found",
+            ));
+        }
+        let runtime_spec = load_runtime_spec_for_run(
+            &self.artifacts,
+            &self.certification_registry,
+            &run_id,
+            &stream,
+        )
+        .await?;
+        verified_run_history_from_events(&self.artifacts, &runtime_spec, &run_id, &stream).await?;
+        let manual_request = manual_resolution_runtime_request(req)?;
+        let mut store = self.store.lock().await;
+        self.scheduler
+            .record_manual_resolution(&mut *store, &runtime_spec, &run_id, manual_request)
+            .await?;
+        let status = self
+            .drive_with_mode(&mut *store, &runtime_spec, &run_id, drive)
+            .await?;
+        typed_run_response(&*store, &runtime_spec, &run_id, status)
+    }
+
     /// Returns typed run status by rebuilding projection from the authoritative run stream.
     pub async fn run_status(&self, run_id: &RunId) -> Result<TypedRunResponse, AppError> {
         let (stream, projection) = {
@@ -1171,6 +1251,41 @@ where
         let status = self.drive_with_mode(&runtime_spec, run_id, drive).await?;
         let (stream, projection) = self.status_stream_and_projection(run_id).await?;
         typed_run_response_from_projection(run_id, &runtime_spec, &stream, &projection, status)
+    }
+
+    /// Records a signed manual resolution and optionally resumes typed scheduler execution.
+    pub async fn record_manual_resolution(
+        &self,
+        req: ManualResolutionRecordRequest,
+    ) -> Result<TypedRunResponse, AppError> {
+        let run_id = req.run_id.clone();
+        let drive = req.drive;
+        let stream = self
+            .store
+            .load_run_stream(&run_id)
+            .await
+            .map_err(async_app_store_error)?;
+        if stream.is_empty() {
+            return Err(AppError::not_found(
+                "RunNotFound",
+                "typed run stream was not found",
+            ));
+        }
+        let runtime_spec = load_runtime_spec_for_run(
+            &self.artifacts,
+            &self.certification_registry,
+            &run_id,
+            &stream,
+        )
+        .await?;
+        verified_run_history_from_events(&self.artifacts, &runtime_spec, &run_id, &stream).await?;
+        let manual_request = manual_resolution_runtime_request(req)?;
+        self.scheduler
+            .record_manual_resolution_async(&self.store, &runtime_spec, &run_id, manual_request)
+            .await?;
+        let status = self.drive_with_mode(&runtime_spec, &run_id, drive).await?;
+        let (stream, projection) = self.status_stream_and_projection(&run_id).await?;
+        typed_run_response_from_projection(&run_id, &runtime_spec, &stream, &projection, status)
     }
 
     /// Returns typed run status by rebuilding projection from the authoritative run stream.
@@ -2052,6 +2167,38 @@ pub fn prepare_certified_run_launch(
 
 fn async_app_store_error(error: impl fmt::Display) -> AppError {
     AppError::new(ErrorClass::Conflict, "RunStoreRejected", error.to_string())
+}
+
+fn manual_resolution_runtime_request(
+    req: ManualResolutionRecordRequest,
+) -> Result<ManualResolutionRequest, AppError> {
+    let media_type = spec::MediaType::new(&req.evidence_media_type).map_err(|error| {
+        AppError::new(
+            ErrorClass::BadRequest,
+            "ManualResolutionEvidenceMediaTypeInvalid",
+            error.to_string(),
+        )
+    })?;
+    let note = req
+        .note
+        .map(events::ManualResolutionNote::new)
+        .transpose()
+        .map_err(|error| {
+            AppError::new(
+                ErrorClass::BadRequest,
+                "ManualResolutionNoteInvalid",
+                error.to_string(),
+            )
+        })?;
+    Ok(ManualResolutionRequest {
+        outcome: req.outcome.into_event(),
+        evidence_artifact: ManualResolutionEvidenceArtifact {
+            bytes: req.evidence_bytes,
+            media_type,
+        },
+        proof_bytes: req.authorization_proof_bytes,
+        note,
+    })
 }
 
 /// Derives typed run status from an authoritative store-owned run stream.
@@ -3149,6 +3296,66 @@ mod tests {
             TypedRunMode::FailedWithoutAcdcClaim.to_string(),
             "failed_without_acdc_claim"
         );
+    }
+
+    #[test]
+    fn manual_resolution_ingress_request_maps_to_runtime_contract() {
+        let request = ManualResolutionRecordRequest {
+            run_id: new_run_id(),
+            outcome: ManualResolutionDecision::ConfirmRemediated,
+            evidence_bytes: br#"{"operator_note":"reviewed"}"#.to_vec(),
+            evidence_media_type: "application/json".to_owned(),
+            authorization_proof_bytes: br#"{"proof_version":"v"}"#.to_vec(),
+            note: Some("reviewed".to_owned()),
+            drive: DriveMode::AppendOnly,
+        };
+
+        let runtime = manual_resolution_runtime_request(request).expect("runtime request");
+
+        assert_eq!(
+            runtime.outcome,
+            events::ManualResolutionOutcome::ConfirmRemediated
+        );
+        assert_eq!(
+            runtime.evidence_artifact.bytes,
+            br#"{"operator_note":"reviewed"}"#
+        );
+        assert_eq!(
+            runtime.evidence_artifact.media_type.as_str(),
+            "application/json"
+        );
+        assert_eq!(runtime.proof_bytes, br#"{"proof_version":"v"}"#);
+        assert_eq!(runtime.note.expect("note").as_str(), "reviewed");
+    }
+
+    #[test]
+    fn manual_resolution_ingress_rejects_invalid_public_fields() {
+        let invalid_media = manual_resolution_runtime_request(ManualResolutionRecordRequest {
+            run_id: new_run_id(),
+            outcome: ManualResolutionDecision::FailWithoutAcdcClaim,
+            evidence_bytes: Vec::new(),
+            evidence_media_type: String::new(),
+            authorization_proof_bytes: Vec::new(),
+            note: None,
+            drive: DriveMode::AppendOnly,
+        })
+        .expect_err("invalid media type");
+        assert_eq!(
+            invalid_media.code,
+            "ManualResolutionEvidenceMediaTypeInvalid"
+        );
+
+        let invalid_note = manual_resolution_runtime_request(ManualResolutionRecordRequest {
+            run_id: new_run_id(),
+            outcome: ManualResolutionDecision::FailWithoutAcdcClaim,
+            evidence_bytes: Vec::new(),
+            evidence_media_type: "application/json".to_owned(),
+            authorization_proof_bytes: Vec::new(),
+            note: Some("not\nredaction safe".to_owned()),
+            drive: DriveMode::AppendOnly,
+        })
+        .expect_err("invalid note");
+        assert_eq!(invalid_note.code, "ManualResolutionNoteInvalid");
     }
 
     #[test]

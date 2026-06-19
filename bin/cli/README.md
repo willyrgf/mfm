@@ -336,6 +336,43 @@ mfm_cli run resume <RUN_ID> [OPTIONS]
 It rejects non-typed run ids before storage access. `--drive append-only` validates and reports the
 stored run without executing states.
 
+### `run manual-resolution`
+
+Records a signed manual resolution for a certified typed run whose current stream prefix derives
+`manual_blocked`. The command reads the evidence artifact bytes exactly as supplied, canonicalizes
+the authorization proof JSON, and submits both through `mfm-app` so runtime can derive prefix
+authority, verify signatures/quorum, stage artifacts, and append the typed manual-resolution commit.
+It does not load keystores, signer registries, password files, or other signer runtime sources.
+
+**Usage:**
+```sh
+mfm_cli run manual-resolution <RUN_ID> \
+  --outcome <confirm-remediated|fail-without-acdc-claim> \
+  --evidence <PATH> \
+  --authorization-proof <PATH> \
+  [OPTIONS]
+```
+
+**Key Options:**
+- `--outcome <confirm-remediated|fail-without-acdc-claim>`: Operator-selected resolution outcome.
+- `--evidence <PATH>`: Evidence artifact bytes covered by the signed proof claim.
+- `--authorization-proof <PATH>`: Canonical or canonicalizable manual authorization proof JSON.
+- `--evidence-media-type <TYPE>`: Evidence media type recorded with the artifact (default: `application/json`).
+- `--note <TEXT>`: Optional redaction-safe operator note.
+- `--drive <append-only|once|until-blocked>`: Scheduler drive policy after the manual-resolution event.
+- `--database-url <URL>`: PostgreSQL connection string (default: `$DATABASE_URL`)
+- `--typed-artifact-root <PATH>`: Typed artifact store root directory
+
+Stable manual-resolution errors include:
+
+- `ManualResolutionEvidenceReadFailed`: the evidence file could not be read.
+- `ManualResolutionProofReadFailed`: the authorization proof file could not be read.
+- `ManualResolutionProofInvalid`: the authorization proof JSON could not be canonicalized.
+- `ManualResolutionEvidenceMediaTypeInvalid`: the evidence media type is invalid.
+- `ManualResolutionNoteInvalid`: the optional note is not accepted by the event text contract.
+- `LaunchRuntimeError`: runtime rejected the prefix or proof binding.
+- `RunStoreRejected`: the prepared commit was stale or violated typed store admission.
+
 ### `run status`
 
 Shows certified typed run status without executing states. JSON output uses semantic saga status:
