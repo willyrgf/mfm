@@ -4488,6 +4488,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sync_async_services_match_completed_framework_read_surfaces() {
+        let (async_root, async_fixture, async_services, async_started) =
+            start_framework_fixture_run().await;
+        let (sync_root, sync_fixture, sync_services, sync_started) =
+            start_sync_framework_fixture_run().await;
+
+        assert_eq!(async_fixture.run_id, sync_fixture.run_id);
+        assert_eq!(async_started, sync_started);
+        assert_eq!(
+            async_completed_read_surface_summary(&async_services, &async_fixture).await,
+            sync_completed_read_surface_summary(&sync_services, &sync_fixture).await
+        );
+
+        let _ = std::fs::remove_dir_all(async_root);
+        let _ = std::fs::remove_dir_all(sync_root);
+    }
+
+    #[tokio::test]
+    async fn sync_async_services_match_append_only_resume_surfaces() {
+        let (async_root, async_fixture, async_services, async_started) =
+            start_framework_fixture_run_with_drive(DriveMode::AppendOnly, "append-only-async")
+                .await;
+        let (sync_root, sync_fixture, sync_services, sync_started) =
+            start_sync_framework_fixture_run_with_drive(DriveMode::AppendOnly, "append-only-sync")
+                .await;
+
+        assert_eq!(async_fixture.run_id, sync_fixture.run_id);
+        assert_eq!(async_started, sync_started);
+
+        let async_resumed = async_services
+            .resume_stored_run(&async_fixture.run_id, DriveMode::UntilBlocked)
+            .await
+            .expect("async append-only resume");
+        let sync_resumed = sync_services
+            .resume_stored_run(&sync_fixture.run_id, DriveMode::UntilBlocked)
+            .await
+            .expect("sync append-only resume");
+
+        assert_eq!(async_resumed, sync_resumed);
+        assert_eq!(
+            async_completed_read_surface_summary(&async_services, &async_fixture).await,
+            sync_completed_read_surface_summary(&sync_services, &sync_fixture).await
+        );
+
+        let _ = std::fs::remove_dir_all(async_root);
+        let _ = std::fs::remove_dir_all(sync_root);
+    }
+
+    #[tokio::test]
     async fn shared_run_history_read_paths_match_for_completed_run() {
         let (root, fixture, services, _started) = start_framework_fixture_run().await;
         let stream = services
@@ -5763,6 +5812,77 @@ mod tests {
         start_framework_fixture_run_with_drive(DriveMode::UntilBlocked, "framework-run").await
     }
 
+    #[derive(Debug, PartialEq, Eq)]
+    struct CompletedReadSurfaceSummary {
+        status: TypedRunResponse,
+        stream: TypedRunStreamResponse,
+        replay: TypedReplayResponse,
+        public_output: TypedPublicOutputResponse,
+    }
+
+    async fn async_completed_read_surface_summary(
+        services: &AsyncRunServices<AsyncInMemoryStore>,
+        fixture: &FrameworkSeedPublicOutputFixture,
+    ) -> CompletedReadSurfaceSummary {
+        CompletedReadSurfaceSummary {
+            status: services
+                .run_status(&fixture.run_id)
+                .await
+                .expect("async status"),
+            stream: services
+                .run_stream(&fixture.run_id)
+                .await
+                .expect("async stream"),
+            replay: services
+                .verify_replay_for_run(&fixture.run_id)
+                .await
+                .expect("async replay"),
+            public_output: services
+                .typed_public_output(&fixture.run_id, &fixture.public_schema_id)
+                .await
+                .expect("async public output"),
+        }
+    }
+
+    async fn sync_completed_read_surface_summary(
+        services: &RunServices<store::InMemoryTypedRunStore>,
+        fixture: &FrameworkSeedPublicOutputFixture,
+    ) -> CompletedReadSurfaceSummary {
+        let replay = services
+            .replay_broker(&fixture.run_id)
+            .await
+            .expect("sync replay broker");
+        let projection = replay.projection_snapshot();
+        let spec = &fixture.certified_spec.envelope().spec;
+        let saga = projection.derive_saga_projection(&fixture.run_id, &spec.saga);
+        CompletedReadSurfaceSummary {
+            status: services
+                .run_status(&fixture.run_id)
+                .await
+                .expect("sync status"),
+            stream: services
+                .run_stream(&fixture.run_id)
+                .await
+                .expect("sync stream"),
+            replay: TypedReplayResponse {
+                run_id: fixture.run_id.as_str().to_owned(),
+                spec_hash: replay.certified_spec().spec_hash.as_str().to_owned(),
+                run_mode: typed_run_mode(saga.run_mode),
+                saga: typed_saga_status_with_resources(spec, projection, &saga),
+                attempt_dispositions: typed_attempt_dispositions(projection),
+                head_seq: stream_head(replay.events()),
+                retained_artifacts: projection
+                    .retention(&fixture.run_id)
+                    .map(|retention| retention.refs.len())
+                    .unwrap_or_default(),
+            },
+            public_output: services
+                .typed_public_output(&fixture.run_id, &fixture.public_schema_id)
+                .await
+                .expect("sync public output"),
+        }
+    }
+
     async fn start_framework_fixture_run_with_drive(
         drive: DriveMode,
         label: &str,
@@ -6207,10 +6327,33 @@ mod tests {
         RunServices<store::InMemoryTypedRunStore>,
         TypedRunResponse,
     ) {
-        let root = std::env::temp_dir().join(format!(
-            "mfm-app-sync-framework-run-{}",
-            uuid::Uuid::new_v4()
-        ));
+        start_sync_framework_fixture_run_with_drive(DriveMode::UntilBlocked, "framework-run").await
+    }
+
+    async fn start_sync_framework_fixture_run_with_drive(
+        drive: DriveMode,
+        label: &str,
+    ) -> (
+        PathBuf,
+        FrameworkSeedPublicOutputFixture,
+        RunServices<store::InMemoryTypedRunStore>,
+        TypedRunResponse,
+    ) {
+        launch_sync_framework_fixture_run(drive, label, framework_fixture_runner_registry).await
+    }
+
+    async fn launch_sync_framework_fixture_run(
+        drive: DriveMode,
+        label: &str,
+        runner_registry: impl FnOnce(&FrameworkSeedPublicOutputFixture) -> ErasedRunnerRegistry,
+    ) -> (
+        PathBuf,
+        FrameworkSeedPublicOutputFixture,
+        RunServices<store::InMemoryTypedRunStore>,
+        TypedRunResponse,
+    ) {
+        let root =
+            std::env::temp_dir().join(format!("mfm-app-sync-{label}-{}", uuid::Uuid::new_v4()));
         let artifacts = FsTypedArtifactStore::new(&root);
         let fixture = framework_seed_public_output_fixture();
         let config_inputs = config_inputs_for_fixture(&fixture);
@@ -6238,7 +6381,7 @@ mod tests {
                 framework_version: "mfm.test.framework",
                 source_revision: "test-source",
                 launched_at_unix_ms: 1_700_000_000_000,
-                drive: DriveMode::UntilBlocked,
+                drive,
             },
             config_inputs,
             vec![RunLaunchSeedArtifact {
@@ -6248,7 +6391,7 @@ mod tests {
             }],
         )
         .expect("typed run request");
-        let runners = framework_fixture_runner_registry(&fixture);
+        let runners = runner_registry(&fixture);
         let services =
             make_in_memory_typed_services_with_certification_registry(runners, &root, registry);
 
