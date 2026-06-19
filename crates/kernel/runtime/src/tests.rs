@@ -883,6 +883,10 @@ async fn serial_scheduler_runs_nodes_in_certified_topological_order() {
         .projection_snapshot()
         .cell_terminal(&fixture.cell_b)
         .is_some());
+    assert_eq!(
+        runtime_lifecycle_summary(&store, &fixture.run_id),
+        "run=Started attempts[started=0 completed=2 failed=0 interrupted=0 total=2] cells=2 side_effects=0 lanes[run=0 total=0] public_outputs=0 retentions=1"
+    );
 }
 
 #[tokio::test]
@@ -914,6 +918,10 @@ async fn scheduler_completes_run_after_public_output_evidence() {
         .projection_snapshot()
         .cell_terminal(&fixture.render_cell)
         .is_some());
+    assert_eq!(
+        runtime_lifecycle_summary(&store, &fixture.run_id),
+        "run=Completed attempts[started=0 completed=5 failed=0 interrupted=0 total=5] cells=5 side_effects=0 lanes[run=0 total=0] public_outputs=1 retentions=1"
+    );
 
     let stream = store.load_run_stream(&fixture.run_id);
     let public_output_pos = stream
@@ -3852,6 +3860,10 @@ async fn post_start_runtime_validation_failure_terminalizes_attempt() {
 
     let node = node_by_output(&fixture, &fixture.cell_a);
     assert_node_failed_with_code(&store, &node.node_id, "runtime_validation_failed");
+    assert_eq!(
+        runtime_lifecycle_summary(&store, &fixture.run_id),
+        "run=Started attempts[started=0 completed=0 failed=1 interrupted=0 total=1] cells=0 side_effects=0 lanes[run=0 total=0] public_outputs=0 retentions=1"
+    );
 }
 
 #[tokio::test]
@@ -3913,6 +3925,10 @@ async fn post_start_invalid_run_stream_failure_does_not_terminalize_attempt() {
     ));
     assert_failure_code_count(&store, "runtime_validation_failed", 0);
     assert_failure_code_count(&store, "runner_output_invalid", 0);
+    assert_eq!(
+        runtime_lifecycle_summary(&store, &fixture.run_id),
+        "run=Started attempts[started=1 completed=0 failed=0 interrupted=0 total=1] cells=0 side_effects=0 lanes[run=0 total=0] public_outputs=0 retentions=1"
+    );
 }
 
 #[tokio::test]
@@ -4671,6 +4687,10 @@ async fn recovery_interrupts_started_pure_attempt_before_retrying_fresh_attempt(
         } => assert_eq!(produced_attempt, &retry_attempt_id),
         terminal => panic!("unexpected terminal projection: {terminal:?}"),
     }
+    assert_eq!(
+        runtime_lifecycle_summary(&store, &fixture.run_id),
+        "run=Started attempts[started=0 completed=1 failed=0 interrupted=1 total=2] cells=1 side_effects=0 lanes[run=0 total=0] public_outputs=0 retentions=1"
+    );
 }
 
 #[tokio::test]
@@ -4699,6 +4719,10 @@ async fn recovery_delegates_started_side_effect_attempt_to_side_effect_lifecycle
     let stream = store.load_run_stream(&fixture.run_id);
     let view = RuntimeRunView::from_stream(&fixture.runtime_spec, &fixture.run_id, &stream)
         .expect("runtime view");
+    assert_eq!(
+        runtime_lifecycle_summary(&store, &fixture.run_id),
+        "run=Started attempts[started=1 completed=0 failed=0 interrupted=0 total=1] cells=0 side_effects=1 lanes[run=1 total=1] public_outputs=0 retentions=1"
+    );
 
     match crate::recovery::AttemptRecoveryLifecycle::next_open_attempt_disposition(
         &fixture.runtime_spec,
@@ -6758,6 +6782,10 @@ async fn runtime_sequences_two_runs_on_same_exclusive_lane_until_release() {
     )
     .is_none());
     assert_eq!(
+        runtime_lifecycle_summary(&store, &fixture.run_id),
+        "run=Started attempts[started=1 completed=0 failed=0 interrupted=0 total=1] cells=0 side_effects=0 lanes[run=0 total=1] public_outputs=0 retentions=1"
+    );
+    assert_eq!(
         scheduler
             .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
             .await
@@ -6791,6 +6819,10 @@ async fn runtime_sequences_two_runs_on_same_exclusive_lane_until_release() {
         &node.node_id
     )
     .is_some());
+    assert_eq!(
+        runtime_lifecycle_summary(&store, &fixture.run_id),
+        "run=Started attempts[started=1 completed=0 failed=0 interrupted=0 total=1] cells=0 side_effects=1 lanes[run=1 total=1] public_outputs=0 retentions=1"
+    );
 }
 
 #[tokio::test]
@@ -10642,6 +10674,64 @@ fn attempt_started_count(
             )
         })
         .count()
+}
+
+fn runtime_lifecycle_summary(store: &store::InMemoryTypedRunStore, run_id: &RunId) -> String {
+    let projections = store.projection_snapshot();
+    let mut started = 0;
+    let mut completed = 0;
+    let mut failed = 0;
+    let mut interrupted = 0;
+    for (_, attempt) in projections
+        .attempts()
+        .filter(|(_, attempt)| &attempt.run_id == run_id)
+    {
+        match attempt.status {
+            store::AttemptStatus::Started { .. } => started += 1,
+            store::AttemptStatus::Completed { .. } => completed += 1,
+            store::AttemptStatus::Failed { .. } => failed += 1,
+            store::AttemptStatus::Interrupted => interrupted += 1,
+        }
+    }
+    let total = started + completed + failed + interrupted;
+    let run_attempts = projections
+        .attempts()
+        .filter(|(_, attempt)| &attempt.run_id == run_id)
+        .map(|((node_id, attempt_id), _)| (node_id.clone(), attempt_id.clone()))
+        .collect::<BTreeSet<_>>();
+    let cells = projections
+        .cells()
+        .filter(|(_, terminal)| match terminal {
+            store::CellTerminalProjection::Produced {
+                node_id,
+                attempt_id,
+                ..
+            }
+            | store::CellTerminalProjection::Skipped {
+                node_id,
+                attempt_id,
+                ..
+            } => run_attempts.contains(&(node_id.clone(), attempt_id.clone())),
+        })
+        .count();
+    let side_effects = projections
+        .side_effects()
+        .filter(|(_, side_effect)| &side_effect.run_id == run_id)
+        .count();
+    let lanes_total = projections.resource_lanes().count();
+    let lanes = projections
+        .resource_lanes()
+        .filter(|(_, lane)| &lane.holder.run_id == run_id)
+        .count();
+    let public_outputs = projections.public_outputs().count();
+    let retentions = projections
+        .retentions()
+        .filter(|(retention_run_id, _)| *retention_run_id == run_id)
+        .count();
+    format!(
+        "run={:?} attempts[started={started} completed={completed} failed={failed} interrupted={interrupted} total={total}] cells={cells} side_effects={side_effects} lanes[run={lanes} total={lanes_total}] public_outputs={public_outputs} retentions={retentions}",
+        projections.run_state(run_id)
+    )
 }
 
 fn assert_node_failed_with_code(
