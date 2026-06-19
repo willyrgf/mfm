@@ -24,12 +24,13 @@ use mfm_store::v1::{
     CommitPreconditions, CommittedRunStream, EventArtifactReferenceSource,
     ForwardLedgerClassification, InMemoryTypedRunStore, KernelEventEnvelope, ManualBlockReason,
     ManualResolution, ManualResolutionProjection, NonEmptyPayloadBatch, PersistedKernelEventRecord,
-    PreparedCommit, PreparedCommitPlan, ProjectionSnapshot, RequiredRunState, ResourceLaneKey,
-    Retention, RunAdmission, RunCompletionProjection, RunMode, RunState, SagaAdmitToken,
-    SagaEngagementProjection, SagaEngagementReason, SagaTerminal, SagaTerminalProof,
-    SideEffectLedgerPhase, SideEffectPhase, SideEffectProgress, SideEffectTerminal,
-    StateAttemptStarted, StoreError, StreamSeq, TypedCommitRequest, TypedProjectionRead,
-    TypedRunEventStore, VerifiedRetentionProjection, VerifiedRetentionProjectionSet,
+    PreparedCommit, PreparedCommitPlan, ProjectionSnapshot, PublicOutputProjection,
+    RequiredRunState, ResourceLaneKey, Retention, RunAdmission, RunCompletionProjection, RunMode,
+    RunState, SagaAdmitToken, SagaEngagementProjection, SagaEngagementReason, SagaTerminal,
+    SagaTerminalProof, SideEffectLedgerPhase, SideEffectPhase, SideEffectProgress,
+    SideEffectTerminal, StateAttemptStarted, StoreError, StreamSeq, TypedCommitRequest,
+    TypedProjectionRead, TypedRunEventStore, VerifiedRetentionProjection,
+    VerifiedRetentionProjectionSet,
 };
 
 const SPEC_MEDIA_TYPE: &str = "application/vnd.mfm.typed-execution-spec+json;version=1";
@@ -266,6 +267,21 @@ fn public_output_produced(artifact_id: ArtifactId, digest: ContentDigest) -> Ker
     })
 }
 
+fn public_output_produced_with_rendered_artifact(
+    artifact_id: ArtifactId,
+    digest: ContentDigest,
+    rendered_artifact_id: ArtifactId,
+    rendered_digest: ContentDigest,
+) -> KernelEventPayload {
+    let mut payload = public_output_produced(artifact_id, digest);
+    let KernelEventPayload::PublicOutputProduced(public_output) = &mut payload else {
+        unreachable!("helper returns public-output payload");
+    };
+    public_output.rendered_digest = rendered_digest;
+    public_output.rendered_artifact_id = Some(rendered_artifact_id);
+    payload
+}
+
 fn event_artifact_ref(
     artifact_id: ArtifactId,
     digest: ContentDigest,
@@ -292,6 +308,23 @@ fn store_artifact_ref(artifact_id: ArtifactId, digest: ContentDigest) -> Artifac
         producer_node_id: Some(node_id(20)),
         producer_seed_id: None::<SeedId>,
         artifact_role: ArtifactRole::StateOutput,
+    }
+}
+
+fn public_output_artifact_ref(
+    artifact_id: ArtifactId,
+    digest: ContentDigest,
+) -> ArtifactEvidenceRef {
+    ArtifactEvidenceRef {
+        artifact_id,
+        digest,
+        byte_len: 256,
+        media_type: media_type("application/json"),
+        schema_id: Some(schema_id("mfm.test.public_output", 3)),
+        semantic_type_id: None,
+        producer_node_id: Some(node_id(20)),
+        producer_seed_id: None::<SeedId>,
+        artifact_role: ArtifactRole::PublicOutput,
     }
 }
 
@@ -1316,6 +1349,94 @@ fn retention_manifest_commit_payloads(
             reason: events::RetentionReason::ManifestProjection,
         }),
     ]
+}
+
+fn projection_differential_summary(
+    store: &InMemoryTypedRunStore,
+    run_id: &RunId,
+    stream: &[KernelEventEnvelope],
+) -> String {
+    let rebuilt = ProjectionSnapshot::rebuild_from_run_stream(stream).expect("rebuild projections");
+    assert_eq!(store.projection_snapshot(), &rebuilt);
+
+    let committed =
+        CommittedRunStream::from_events(run_id.clone(), stream.to_vec()).expect("committed stream");
+    assert_eq!(committed.projection(), &rebuilt);
+
+    projection_snapshot_summary(&rebuilt, &committed)
+}
+
+fn projection_snapshot_summary(
+    snapshot: &ProjectionSnapshot,
+    committed: &CommittedRunStream,
+) -> String {
+    let run_id = committed.run_id();
+    let mut rows = Vec::new();
+    rows.push(format!(
+        "committed run_state={:?} commits={} events={} next_seq={}",
+        snapshot.run_state(run_id),
+        committed.commits().len(),
+        committed.events().len(),
+        committed.next_seq().as_u64()
+    ));
+
+    rows.extend(snapshot.facts().map(|((_node, _attempt, fact_key), fact)| {
+        format!(
+            "fact key={} schema={} artifact={}",
+            fact_key.as_str(),
+            fact.response_schema_id.as_str(),
+            fact.artifact_id.as_str()
+        )
+    }));
+
+    rows.extend(snapshot.side_effects().map(|(ledger_ref, side_effect)| {
+        format!(
+            "side_effect ledger={} phase={} prepared={} resource_key={} touched_set={}",
+            ledger_ref.ledger_key.as_str(),
+            side_effect.phase.as_str(),
+            side_effect.prepared_invocation.is_some(),
+            side_effect.resource_key.is_some(),
+            side_effect.resource_touched_set.is_some()
+        )
+    }));
+
+    rows.extend(snapshot.resource_lanes().map(|(lane_key, lane)| {
+        format!(
+            "resource_lane {}:{} holder={} phase_epoch={}",
+            lane_key.namespace.as_str(),
+            lane_key.key.as_str(),
+            lane.holder.ledger_key.as_str(),
+            lane.invocation_epoch
+        )
+    }));
+
+    rows.extend(snapshot.public_outputs().map(|(schema_id, projection)| {
+        let PublicOutputProjection::Produced {
+            rendered_artifact_id,
+            ..
+        } = projection
+        else {
+            return format!("public_output schema={} failed", schema_id.as_str());
+        };
+        format!(
+            "public_output schema={} rendered_artifact={}",
+            schema_id.as_str(),
+            rendered_artifact_id.is_some()
+        )
+    }));
+
+    rows.extend(snapshot.retentions().map(|(retention_run_id, retention)| {
+        let latest = retention.manifest.as_ref().expect("latest manifest");
+        format!(
+            "retention run={} refs={} manifests={} latest_seq={}",
+            retention_run_id.as_str(),
+            retention.refs.len(),
+            retention.manifests.len(),
+            latest.manifest_seq
+        )
+    }));
+
+    rows.join("\n")
 }
 
 fn artifact_role_tag_baselines() -> &'static [(ArtifactRole, &'static str)] {
@@ -6450,11 +6571,15 @@ fn projections_rebuild_from_authoritative_run_stream() {
     let fact_digest = content_digest(64);
     let manifest_artifact_id = artifact_id(65);
     let manifest_digest = content_digest(66);
+    let rendered_artifact_id = artifact_id(67);
+    let rendered_digest = content_digest(68);
     let mut store = InMemoryTypedRunStore::new();
     let evidence = store_artifact_ref(output_artifact_id.clone(), output_digest.clone());
     let fact_evidence = fact_artifact_ref(fact_artifact_id.clone(), fact_digest.clone());
     let manifest_evidence =
         retention_manifest_artifact_ref(manifest_artifact_id.clone(), manifest_digest.clone());
+    let rendered_evidence =
+        public_output_artifact_ref(rendered_artifact_id.clone(), rendered_digest.clone());
     store
         .append_prepared_commit(run_start_request(run_id.clone(), "run-start"))
         .expect("append run start");
@@ -6508,9 +6633,11 @@ fn projections_rebuild_from_authoritative_run_stream() {
     );
     let mut terminal_payloads =
         terminal_cell_commit_payloads(output_artifact_id.clone(), output_digest.clone());
-    terminal_payloads.push(public_output_produced(
+    terminal_payloads.push(public_output_produced_with_rendered_artifact(
         output_artifact_id.clone(),
         output_digest.clone(),
+        rendered_artifact_id,
+        rendered_digest,
     ));
     store
         .append_prepared_commit(typed_commit_request! {
@@ -6518,7 +6645,7 @@ fn projections_rebuild_from_authoritative_run_stream() {
             expected_next_seq: store.expected_next_seq(&run_id),
             commit_key: CommitKey::new("cell-produced").expect("commit key"),
             payloads: terminal_payloads,
-            required_artifacts: vec![evidence],
+            required_artifacts: vec![evidence, rendered_evidence],
             preconditions: CommitPreconditions {
                 required_run_state: RequiredRunState::NotCompleted,
                 ..CommitPreconditions::default()
@@ -6545,9 +6672,19 @@ fn projections_rebuild_from_authoritative_run_stream() {
         .expect("append retention manifest");
 
     let stream = store.load_run_stream(&run_id);
+    let summary = projection_differential_summary(&store, &run_id, &stream);
+    assert_eq!(
+        summary,
+        "committed run_state=Started commits=8 events=13 next_seq=9\n\
+fact key=fact-key-1 schema=schema:mfm.test.fact_response:1:sha256-jcs-v1:6060606060606060606060606060606060606060606060606060606060606060 artifact=artifact:sha256-jcs-v1:3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f\n\
+side_effect ledger=ledger-key-67 phase=invocation_prepared prepared=false resource_key=true touched_set=false\n\
+resource_lane mfm.test.account_nonce:account-1 holder=ledger-key-67 phase_epoch=1\n\
+public_output schema=schema:mfm.test.public_output:1:sha256-jcs-v1:0303030303030303030303030303030303030303030303030303030303030303 rendered_artifact=true\n\
+retention run=run:sha256-jcs-v1:7878787878787878787878787878787878787878787878787878787878787878 refs=3 manifests=1 latest_seq=1"
+    );
+
     let rebuilt =
         ProjectionSnapshot::rebuild_from_run_stream(&stream).expect("rebuild projections");
-    assert_eq!(store.projection_snapshot(), &rebuilt);
     assert_eq!(rebuilt.facts().count(), 1);
     assert_eq!(rebuilt.side_effects().count(), 1);
     assert_eq!(rebuilt.resource_lanes().count(), 1);
