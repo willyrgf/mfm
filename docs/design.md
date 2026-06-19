@@ -359,13 +359,14 @@ validation is also the centralized old-model ingress guard: loaded streams and p
 reject attempt-bound payloads that are not preceded by a separate `StateAttemptStarted` commit, so
 runtime, replay, and Postgres-backed loads fail before trusting old lifecycle rows.
 
-Read, resume, replay, and status paths must construct `VerifiedRunHistory` from a
-`CommittedRunStream` plus `VerifiedRunArtifactStore` before trusting history. Replay authority is
-minted from that verified history and certified runtime authority; raw event vectors or retained
-artifact bytes without committed evidence do not cross the runtime/replay boundary. Scheduler drive
-paths construct `VerifiedRunContext` through `VerifiedRunContextLoader`, which combines the same
-committed stream/view authority with `BoundRuntimeContext` runner, capability, and framework-handler
-authority before any transition is selected.
+Read, resume, replay, and status paths must construct a `VerifiedRunHistoryView` from a
+`CommittedRunStream` plus `VerifiedRunArtifactStore` before trusting history. `VerifiedRunHistory`
+wraps that view for compatibility. Replay authority is minted from the verified view and certified
+runtime authority; raw event vectors or retained artifact bytes without committed evidence do not
+cross the runtime/replay boundary. Scheduler drive paths construct `VerifiedRunContext` through
+`VerifiedRunContextLoader`, which combines the same committed stream/fold authority with
+`BoundRuntimeContext` runner, capability, and framework-handler authority before any transition is
+selected.
 
 The deterministic frontier scheduler is pure. Given the static certified transition graph and
 verified run history, it returns one closed transition decision: start a node, continue an open

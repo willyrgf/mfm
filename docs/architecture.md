@@ -54,8 +54,8 @@ The typed boundary separates data, evidence, authority, and implementation artif
 - `SagaTerminalProof` is required authority for terminal saga outcomes
 - `CommittedRunStream` is store-owned append-only stream authority
 - `VerifiedRunArtifactStore` is retained-artifact authority tied to a committed stream
-- `VerifiedRunHistory` is runtime/replay authority over a committed stream plus verified retained
-  artifact evidence
+- `VerifiedRunHistoryView` is runtime/replay read authority over a committed stream plus verified
+  retained artifact evidence; `VerifiedRunHistory` wraps that view for compatibility
 - erased runner plans are implementation artifacts
 - rendered public-output JSON is an output/cache surface only
 

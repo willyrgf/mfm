@@ -34,6 +34,7 @@ use mfm_runtime::{
     CertifiedRuntimeSpec, ManualResolutionEvidenceArtifact, ManualResolutionRequest,
     RunLaunchArtifact, RunLaunchEvidence, RunLaunchSeedCell, RuntimeArtifactStageFuture,
     RuntimeArtifactStager, SchedulerStatus, SerialTypedScheduler, VerifiedRunHistory,
+    VerifiedRunHistoryView,
 };
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
@@ -1079,78 +1080,43 @@ where
 
     /// Returns typed run status by rebuilding projection from the authoritative run stream.
     pub async fn run_status(&self, run_id: &RunId) -> Result<TypedRunResponse, AppError> {
-        let (stream, projection) = {
+        let (stream, global_projection) = {
             let store = self.store.lock().await;
             let stream = store.load_run_stream(run_id);
-            let projection = status_projection_from_stream_with_resource_lanes(
-                &stream,
-                store.projection_snapshot(),
-            )?;
+            let projection = store.projection_snapshot().clone();
             (stream, projection)
         };
-        if stream.is_empty() {
-            return Err(AppError::not_found(
-                "RunNotFound",
-                "typed run stream was not found",
-            ));
-        }
-        let runtime_spec = load_runtime_spec_for_run(
+        let context = verified_run_read_context_from_events(
             &self.artifacts,
             &self.certification_registry,
             run_id,
-            &stream,
+            stream,
         )
         .await?;
-        verified_run_history_from_events(&self.artifacts, &runtime_spec, run_id, &stream).await?;
-        typed_run_status_from_projection(run_id, &runtime_spec, &stream, &projection)
+        let projection = context.status_projection_with_resource_lanes(&global_projection)?;
+        typed_run_status_from_projection(
+            run_id,
+            context.runtime_spec(),
+            context.events(),
+            &projection,
+        )
     }
 
     /// Returns the authoritative typed run stream.
     pub async fn run_stream(&self, run_id: &RunId) -> Result<TypedRunStreamResponse, AppError> {
-        let events = {
-            let store = self.store.lock().await;
-            store.load_run_stream(run_id)
-        };
-        validate_stored_run_stream_for_read(
-            &self.artifacts,
-            &self.certification_registry,
-            run_id,
-            &events,
-        )
-        .await?;
+        let context = self.load_verified_run_read_context(run_id).await?;
+        let events = context.events();
         Ok(typed_run_stream_response_from_events(
             run_id,
-            stream_head(&events),
-            &events,
+            stream_head(events),
+            events,
         ))
     }
 
     /// Builds an evidence-only replay broker from stored certified authority and retained evidence.
     pub async fn replay_broker(&self, run_id: &RunId) -> Result<ReplayBroker, AppError> {
-        let stream = {
-            let store = self.store.lock().await;
-            store.load_run_stream(run_id)
-        };
-        if stream.is_empty() {
-            return Err(AppError::not_found(
-                "RunNotFound",
-                "typed run stream was not found",
-            ));
-        }
-        let certified = load_certified_spec_for_run(
-            &self.artifacts,
-            &self.certification_registry,
-            run_id,
-            &stream,
-        )
-        .await?;
-        let runtime_spec = CertifiedRuntimeSpec::new(certified)?;
-        let verified_history =
-            verified_run_history_from_events(&self.artifacts, &runtime_spec, run_id, &stream)
-                .await?;
-        let authority =
-            replay_read_authority_for_run(&self.artifacts, &runtime_spec, &verified_history)
-                .await?;
+        let context = self.load_verified_run_read_context(run_id).await?;
+        let authority = replay_read_authority_for_run(context.runtime_spec(), context.view())?;
         ReplayBroker::from_read_authority(authority).map_err(Into::into)
     }
 
@@ -1160,34 +1126,32 @@ where
         run_id: &RunId,
         public_schema_id: &SchemaId,
     ) -> Result<TypedPublicOutputResponse, AppError> {
-        let stream = {
-            let store = self.store.lock().await;
-            store.load_run_stream(run_id)
-        };
-        if stream.is_empty() {
-            return Err(AppError::not_found(
-                "RunNotFound",
-                "typed run stream was not found",
-            ));
-        }
-        let runtime_spec = load_runtime_spec_for_run(
-            &self.artifacts,
-            &self.certification_registry,
-            run_id,
-            &stream,
-        )
-        .await?;
-        let verified_history =
-            verified_run_history_from_events(&self.artifacts, &runtime_spec, run_id, &stream)
-                .await?;
+        let context = self.load_verified_run_read_context(run_id).await?;
         let authority = public_output_read_authority_for_run(
             &self.artifacts,
-            &runtime_spec,
-            &verified_history,
+            context.runtime_spec(),
+            context.view(),
             public_schema_id,
         )
         .await?;
         render_typed_public_output(&self.artifacts, &authority).await
+    }
+
+    async fn load_verified_run_read_context(
+        &self,
+        run_id: &RunId,
+    ) -> Result<VerifiedRunReadContext, AppError> {
+        let stream = {
+            let store = self.store.lock().await;
+            store.load_run_stream(run_id)
+        };
+        verified_run_read_context_from_events(
+            &self.artifacts,
+            &self.certification_registry,
+            run_id,
+            stream,
+        )
+        .await
     }
 
     async fn drive_with_mode(
@@ -1353,22 +1317,26 @@ where
 
     /// Returns typed run status by rebuilding projection from the authoritative run stream.
     pub async fn run_status(&self, run_id: &RunId) -> Result<TypedRunResponse, AppError> {
-        let (stream, projection) = self.status_stream_and_projection(run_id).await?;
-        if stream.is_empty() {
-            return Err(AppError::not_found(
-                "RunNotFound",
-                "typed run stream was not found",
-            ));
-        }
-        let runtime_spec = load_runtime_spec_for_run(
-            &self.artifacts,
-            &self.certification_registry,
+        let stream = self
+            .store
+            .load_run_stream(run_id)
+            .await
+            .map_err(async_app_store_error)?;
+        let context = self
+            .verified_run_read_context_from_stream(run_id, stream)
+            .await?;
+        let global_projection = self
+            .store
+            .status_projection_snapshot(run_id)
+            .await
+            .map_err(async_app_store_error)?;
+        let projection = context.status_projection_with_resource_lanes(&global_projection)?;
+        typed_run_status_from_projection(
             run_id,
-            &stream,
+            context.runtime_spec(),
+            context.events(),
+            &projection,
         )
-        .await?;
-        verified_run_history_from_events(&self.artifacts, &runtime_spec, run_id, &stream).await?;
-        typed_run_status_from_projection(run_id, &runtime_spec, &stream, &projection)
     }
 
     /// Returns typed run status using a caller-supplied store-owned projection snapshot.
@@ -1386,23 +1354,16 @@ where
             .load_run_stream(run_id)
             .await
             .map_err(async_app_store_error)?;
-        if stream.is_empty() {
-            return Err(AppError::not_found(
-                "RunNotFound",
-                "typed run stream was not found",
-            ));
-        }
-        let runtime_spec = load_runtime_spec_for_run(
-            &self.artifacts,
-            &self.certification_registry,
+        let context = self
+            .verified_run_read_context_from_stream(run_id, stream)
+            .await?;
+        let status_projection = context.status_projection_with_resource_lanes(&projection)?;
+        typed_run_status_from_projection(
             run_id,
-            &stream,
+            context.runtime_spec(),
+            context.events(),
+            &status_projection,
         )
-        .await?;
-        verified_run_history_from_events(&self.artifacts, &runtime_spec, run_id, &stream).await?;
-        let status_projection =
-            status_projection_from_stream_with_resource_lanes(&stream, &projection)?;
-        typed_run_status_from_projection(run_id, &runtime_spec, &stream, &status_projection)
     }
 
     async fn status_stream_and_projection(
@@ -1431,22 +1392,12 @@ where
 
     /// Returns the authoritative typed run stream.
     pub async fn run_stream(&self, run_id: &RunId) -> Result<TypedRunStreamResponse, AppError> {
-        let events = self
-            .store
-            .load_run_stream(run_id)
-            .await
-            .map_err(async_app_store_error)?;
-        validate_stored_run_stream_for_read(
-            &self.artifacts,
-            &self.certification_registry,
-            run_id,
-            &events,
-        )
-        .await?;
+        let context = self.load_verified_run_read_context(run_id).await?;
+        let events = context.events();
         Ok(typed_run_stream_response_from_events(
             run_id,
-            stream_head(&events),
-            &events,
+            stream_head(events),
+            events,
         ))
     }
 
@@ -1455,37 +1406,14 @@ where
         &self,
         run_id: &RunId,
     ) -> Result<TypedReplayResponse, AppError> {
-        let stream = self
-            .store
-            .load_run_stream(run_id)
-            .await
-            .map_err(async_app_store_error)?;
-        if stream.is_empty() {
-            return Err(AppError::not_found(
-                "RunNotFound",
-                "typed run stream was not found",
-            ));
-        }
-        let certified = load_certified_spec_for_run(
-            &self.artifacts,
-            &self.certification_registry,
-            run_id,
-            &stream,
-        )
-        .await?;
-        let runtime_spec = CertifiedRuntimeSpec::new(certified)?;
-        let verified_history =
-            verified_run_history_from_events(&self.artifacts, &runtime_spec, run_id, &stream)
-                .await?;
-        let authority =
-            replay_read_authority_for_run(&self.artifacts, &runtime_spec, &verified_history)
-                .await?;
+        let context = self.load_verified_run_read_context(run_id).await?;
+        let authority = replay_read_authority_for_run(context.runtime_spec(), context.view())?;
         let broker = ReplayBroker::from_read_authority(authority)?;
-        let stream = verified_history.events();
+        let stream = context.events();
         mfm_adapters_evm_contracts::verify_contract_lifecycle_replay(&broker)?;
         mfm_transports_proof::verify_deterministic_proof_replay(&broker)?;
         let projection = broker.projection_snapshot();
-        let saga = projection.derive_saga_projection(run_id, &runtime_spec.spec().saga);
+        let saga = projection.derive_saga_projection(run_id, &context.runtime_spec().spec().saga);
         let retained_artifacts = projection
             .retention(run_id)
             .map(|retention| retention.refs.len())
@@ -1494,7 +1422,11 @@ where
             run_id: run_id.as_str().to_owned(),
             spec_hash: broker.certified_spec().spec_hash.as_str().to_owned(),
             run_mode: typed_run_mode(saga.run_mode),
-            saga: typed_saga_status_with_resources(runtime_spec.spec(), projection, &saga),
+            saga: typed_saga_status_with_resources(
+                context.runtime_spec().spec(),
+                projection,
+                &saga,
+            ),
             attempt_dispositions: typed_attempt_dispositions(projection),
             head_seq: stream_head(stream),
             retained_artifacts,
@@ -1507,35 +1439,42 @@ where
         run_id: &RunId,
         public_schema_id: &SchemaId,
     ) -> Result<TypedPublicOutputResponse, AppError> {
+        let context = self.load_verified_run_read_context(run_id).await?;
+        let authority = public_output_read_authority_for_run(
+            &self.artifacts,
+            context.runtime_spec(),
+            context.view(),
+            public_schema_id,
+        )
+        .await?;
+        render_typed_public_output(&self.artifacts, &authority).await
+    }
+
+    async fn load_verified_run_read_context(
+        &self,
+        run_id: &RunId,
+    ) -> Result<VerifiedRunReadContext, AppError> {
         let stream = self
             .store
             .load_run_stream(run_id)
             .await
             .map_err(async_app_store_error)?;
-        if stream.is_empty() {
-            return Err(AppError::not_found(
-                "RunNotFound",
-                "typed run stream was not found",
-            ));
-        }
-        let runtime_spec = load_runtime_spec_for_run(
+        self.verified_run_read_context_from_stream(run_id, stream)
+            .await
+    }
+
+    async fn verified_run_read_context_from_stream(
+        &self,
+        run_id: &RunId,
+        stream: Vec<store::KernelEventEnvelope>,
+    ) -> Result<VerifiedRunReadContext, AppError> {
+        verified_run_read_context_from_events(
             &self.artifacts,
             &self.certification_registry,
             run_id,
-            &stream,
+            stream,
         )
-        .await?;
-        let verified_history =
-            verified_run_history_from_events(&self.artifacts, &runtime_spec, run_id, &stream)
-                .await?;
-        let authority = public_output_read_authority_for_run(
-            &self.artifacts,
-            &runtime_spec,
-            &verified_history,
-            public_schema_id,
-        )
-        .await?;
-        render_typed_public_output(&self.artifacts, &authority).await
+        .await
     }
 
     async fn drive_with_mode(
@@ -1556,6 +1495,58 @@ where
                 .await?),
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct VerifiedRunReadContext {
+    runtime_spec: CertifiedRuntimeSpec,
+    view: VerifiedRunHistoryView,
+}
+
+impl VerifiedRunReadContext {
+    fn runtime_spec(&self) -> &CertifiedRuntimeSpec {
+        &self.runtime_spec
+    }
+
+    fn view(&self) -> &VerifiedRunHistoryView {
+        &self.view
+    }
+
+    fn events(&self) -> &[store::KernelEventEnvelope] {
+        self.view.events()
+    }
+
+    fn status_projection_with_resource_lanes(
+        &self,
+        global_projection: &store::ProjectionSnapshot,
+    ) -> Result<store::ProjectionSnapshot, AppError> {
+        status_projection_from_verified_view_with_resource_lanes(&self.view, global_projection)
+            .map_err(Into::into)
+    }
+}
+
+async fn verified_run_read_context_from_events(
+    artifacts: &FsTypedArtifactStore,
+    registry: &CertificationRegistry,
+    run_id: &RunId,
+    stream: Vec<store::KernelEventEnvelope>,
+) -> Result<VerifiedRunReadContext, AppError> {
+    if stream.is_empty() {
+        return Err(AppError::not_found(
+            "RunNotFound",
+            "typed run stream was not found",
+        ));
+    }
+    let runtime_spec = load_runtime_spec_for_run(artifacts, registry, run_id, &stream).await?;
+    let committed = store::CommittedRunStream::from_events(run_id.clone(), stream)?;
+    let retained_artifacts =
+        store::VerifiedRunArtifactStore::from_committed_stream(&committed, artifacts).await?;
+    let view = VerifiedRunHistoryView::from_committed_stream(
+        &runtime_spec,
+        committed,
+        retained_artifacts,
+    )?;
+    Ok(VerifiedRunReadContext { runtime_spec, view })
 }
 
 /// Loads and verifies the certified spec artifact bound by a typed run stream.
@@ -1606,30 +1597,12 @@ async fn verified_run_history_from_events(
         .map_err(Into::into)
 }
 
-async fn validate_stored_run_stream_for_read(
-    artifacts: &FsTypedArtifactStore,
-    registry: &CertificationRegistry,
-    run_id: &RunId,
-    stream: &[store::KernelEventEnvelope],
-) -> Result<(), AppError> {
-    if stream.is_empty() {
-        return Err(AppError::not_found(
-            "RunNotFound",
-            "typed run stream was not found",
-        ));
-    }
-    let runtime_spec = load_runtime_spec_for_run(artifacts, registry, run_id, stream).await?;
-    verified_run_history_from_events(artifacts, &runtime_spec, run_id, stream).await?;
-    Ok(())
-}
-
-/// Builds sealed replay read authority from retained artifact evidence in verified run history.
-pub async fn replay_read_authority_for_run(
-    _artifacts: &FsTypedArtifactStore,
+/// Builds sealed replay read authority from a verified run-history view.
+pub fn replay_read_authority_for_run(
     runtime_spec: &CertifiedRuntimeSpec,
-    verified_history: &VerifiedRunHistory,
+    verified_view: &VerifiedRunHistoryView,
 ) -> Result<ReplayReadAuthority, AppError> {
-    ReplayReadAuthority::from_verified_run_history(runtime_spec, verified_history)
+    ReplayReadAuthority::from_verified_run_history_view(runtime_spec, verified_view)
         .map_err(Into::into)
 }
 
@@ -2352,22 +2325,22 @@ pub fn typed_run_stream_response_from_events(
     }
 }
 
-/// Builds typed public-output read authority from certified runtime authority, verified run
-/// history, rebuilt projection, and verified typed artifact evidence.
+/// Builds typed public-output read authority from certified runtime authority, verified run-history
+/// view, rebuilt projection, and verified typed artifact evidence.
 pub async fn public_output_read_authority_for_run(
     artifacts: &FsTypedArtifactStore,
     runtime_spec: &CertifiedRuntimeSpec,
-    verified_history: &VerifiedRunHistory,
+    verified_view: &VerifiedRunHistoryView,
     public_schema_id: &SchemaId,
 ) -> Result<PublicOutputReadAuthority, AppError> {
-    if runtime_spec.spec_hash() != verified_history.spec_hash() {
+    if runtime_spec.spec_hash() != verified_view.spec_hash() {
         return Err(AppError::new(
             ErrorClass::Internal,
             "PublicOutputAuthorityMismatch",
             "verified history spec hash does not match certified runtime authority",
         ));
     }
-    let projection = verified_history.projection_snapshot();
+    let projection = verified_view.projection_snapshot();
     let public_output = projection.public_output(public_schema_id).ok_or_else(|| {
         AppError::not_found(
             "PublicOutputNotFound",
@@ -2388,7 +2361,7 @@ pub async fn public_output_read_authority_for_run(
     };
 
     let payload =
-        public_output_payload_from_stream(verified_history.events(), event_id, public_schema_id)?;
+        public_output_payload_from_stream(verified_view.events(), event_id, public_schema_id)?;
     if &payload.spec_hash != runtime_spec.spec_hash()
         || &payload.public_schema_id != public_schema_id
         || public_schema_id != &runtime_spec.spec().public_outputs.public_schema_id
@@ -2408,7 +2381,7 @@ pub async fn public_output_read_authority_for_run(
     .await?;
 
     Ok(PublicOutputReadAuthority {
-        run_id: verified_history.run_id().clone(),
+        run_id: verified_view.run_id().clone(),
         public_schema_id: public_schema_id.clone(),
         event_id: event_id.clone(),
         rendered_digest: rendered_digest.clone(),
@@ -2783,6 +2756,19 @@ fn status_projection_from_stream_with_resource_lanes(
     let run_projection = store::ProjectionSnapshot::rebuild_from_run_stream(stream)?;
     projection_with_resource_lanes(
         &run_projection,
+        global_projection
+            .resource_lanes()
+            .map(|(lane_key, projection)| (lane_key.clone(), projection.clone()))
+            .collect(),
+    )
+}
+
+fn status_projection_from_verified_view_with_resource_lanes(
+    view: &VerifiedRunHistoryView,
+    global_projection: &store::ProjectionSnapshot,
+) -> Result<store::ProjectionSnapshot, store::StoreError> {
+    projection_with_resource_lanes(
+        view.projection_snapshot(),
         global_projection
             .resource_lanes()
             .map(|(lane_key, projection)| (lane_key.clone(), projection.clone()))
@@ -4393,7 +4379,7 @@ mod tests {
         let authority = public_output_read_authority_for_run(
             services.artifacts(),
             &runtime_spec,
-            &verified_history,
+            verified_history.view(),
             &fixture.public_schema_id,
         )
         .await
@@ -4537,8 +4523,7 @@ mod tests {
         assert_eq!(verified_history.projection_snapshot(), &rebuilt_projection);
 
         let replay_authority =
-            replay_read_authority_for_run(services.artifacts(), &runtime_spec, &verified_history)
-                .await
+            replay_read_authority_for_run(&runtime_spec, verified_history.view())
                 .expect("replay authority");
         let replay_broker =
             ReplayBroker::from_read_authority(replay_authority).expect("replay broker");
@@ -4582,7 +4567,7 @@ mod tests {
         let public_authority = public_output_read_authority_for_run(
             services.artifacts(),
             &runtime_spec,
-            &verified_history,
+            verified_history.view(),
             &fixture.public_schema_id,
         )
         .await
@@ -5231,7 +5216,7 @@ mod tests {
             public_output_read_authority_for_run(
                 services.artifacts(),
                 &runtime_spec,
-                &verified_history,
+                verified_history.view(),
                 &fixture.public_schema_id,
             )
             .await
@@ -5291,7 +5276,7 @@ mod tests {
             public_output_read_authority_for_run(
                 services.artifacts(),
                 &runtime_spec,
-                &verified_history,
+                verified_history.view(),
                 &fixture.public_schema_id,
             )
             .await
