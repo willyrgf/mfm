@@ -1,10 +1,12 @@
 #![warn(missing_docs)]
 //! EVM contract lifecycle adapter.
 //!
-//! This crate binds reusable contract lifecycle states to capability providers.
-//! It does not own JSON-RPC endpoints, signer-provider resolution, keystore
-//! loading, artifact-store implementations, binaries, or operation topology.
-//! Runtime source routing is supplied as process-local adapter input.
+//! This crate binds reusable contract lifecycle states to capability providers
+//! and owns the runtime runner bindings for deploy, configure, and validate
+//! lifecycle states. It does not own JSON-RPC endpoints, signer-provider
+//! resolution, keystore loading, artifact-store implementations, binaries, or
+//! operation topology. Runtime source routing and signing are supplied through
+//! process-local provider traits.
 //!
 //! ```rust
 //! use mfm_adapters_evm_contracts::{

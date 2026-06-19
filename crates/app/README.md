@@ -11,6 +11,11 @@ Typed application assembly for certified MFM runs.
 - typed start/resume/replay dispatch
 - typed public-output read authority and rendering
 
+Domain runner behavior lives in adapter crates. For EVM contract lifecycles,
+`mfm-app` only wires concrete process resources such as JSON-RPC clients,
+artifact stores, and keystore-backed signer providers into the adapter runner
+factory.
+
 It does not depend on old dynamic machine or SDK crates, dynamic DAG planning, context snapshots,
 or generic IO providers.
 

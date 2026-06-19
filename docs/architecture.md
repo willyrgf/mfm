@@ -431,9 +431,9 @@ Additional dependency rules:
   contracts rather than live IO implementations
 - operations may depend on typed states and domain config/model crates, but not on transports,
   signer implementations, app, binaries, runtime scheduling, or storage implementations
-- adapters may depend on states, capability contract crates, transport contracts, and signer
-  contracts as needed for runner binding, but not on workflow operation crates, app, binaries, or
-  storage implementations
+- adapters may depend on runtime runner contracts, states, capability contract crates, transport
+  contracts, and signer contracts as needed for runner binding, but not on workflow operation
+  crates, app, binaries, or storage implementations
 - transports may depend on protocol/domain support crates, capability contract crates, and kernel
   contracts, but not on workflow operation crates
 - signer providers may depend on security-sensitive core primitives, but not on workflow operation
@@ -476,7 +476,9 @@ corruption, or low-level storage contract fixtures.
 - certified start/resume/replay services
 - typed public-output rendering
 
-`crates/app` must not own workflow planning or state behavior.
+`crates/app` must not own workflow planning, state behavior, or adapter runner behavior. It may
+construct concrete process-local resources such as stores, artifact stores, protocol clients, and
+signer providers, then pass them into adapter-owned runner factories.
 
 `bin/cli` and `bin/rest-api` may:
 
