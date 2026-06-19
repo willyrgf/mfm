@@ -3693,6 +3693,118 @@ retention_manifest schema=absent semantic=absent producer=middleware_no_seed sta
             );
         }
 
+        fn descriptor_artifact_requirement_sources(schema_name: &str) -> &'static str {
+            match schema_name {
+                "mfm.events.v1.run_admitted" => "RunSpec,RunCertificate,RunConfig,SeedCell",
+                "mfm.events.v1.fact_recorded" => "FactResponse",
+                "mfm.events.v1.artifact_referenced" => "ArtifactReferenced",
+                "mfm.events.v1.cell_produced" => "StateOutput",
+                "mfm.events.v1.side_effect.intent_persisted" => "SideEffectIntent",
+                "mfm.events.v1.side_effect.invocation_prepared" => "PreparedInvocation",
+                "mfm.events.v1.side_effect.not_submitted_proven" => "NotSubmittedProof",
+                "mfm.events.v1.side_effect.submission_observed" => "Submission",
+                "mfm.events.v1.side_effect.submission_unknown" => "SubmissionUnknownEvidence",
+                "mfm.events.v1.side_effect.receipt_observed" => "Receipt,ResourceTouchedSet",
+                "mfm.events.v1.side_effect.confirmation_observed" => {
+                    "Confirmation,ResourceTouchedSet"
+                }
+                "mfm.events.v1.side_effect.ambiguous" => "AmbiguityEvidence",
+                "mfm.events.v1.side_effect.failed" => "SideEffectFailureDiagnostic",
+                "mfm.events.v1.public_output_produced" => "PublicOutputCell,PublicOutputRendered",
+                "mfm.events.v1.public_output_render_failed" => {
+                    "PublicOutputRenderFailureDiagnostic"
+                }
+                "mfm.events.v1.state_attempt_failed" => "StateAttemptFailureDiagnostic",
+                "mfm.events.v1.manual_resolution_recorded" => {
+                    "ManualResolutionEvidence,ManualResolutionAuthorization"
+                }
+                "mfm.events.v1.retention_refs_appended" => "RetentionRef",
+                "mfm.events.v1.retention_manifest_projected" => "RetentionManifest",
+                "mfm.events.v1.state_attempt_started"
+                | "mfm.events.v1.cell_skipped"
+                | "mfm.events.v1.side_effect.claimed"
+                | "mfm.events.v1.side_effect.claim_taken_over"
+                | "mfm.events.v1.side_effect.invocation_started"
+                | "mfm.events.v1.state_attempt_completed"
+                | "mfm.events.v1.state_attempt_interrupted"
+                | "mfm.events.v1.run_completed" => "",
+                other => panic!("uncovered event schema descriptor {other}"),
+            }
+        }
+
+        #[test]
+        fn event_schema_descriptor_requirement_sources_golden() {
+            let rows = all_event_schema_descriptors()
+                .into_iter()
+                .map(|descriptor| {
+                    format!(
+                        "{} {} [{}]",
+                        descriptor.schema_name,
+                        descriptor.schema_id().expect("schema id").as_str(),
+                        descriptor_artifact_requirement_sources(descriptor.schema_name)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            assert_eq!(
+                rows,
+                "mfm.events.v1.run_admitted schema:mfm.events.v1.run_admitted:1:sha256-jcs-v1:867fbc43edab8e3889fcfbe2f1492791268362265d45d84828532d26ba3becc9 [RunSpec,RunCertificate,RunConfig,SeedCell]\n\
+mfm.events.v1.state_attempt_started schema:mfm.events.v1.state_attempt_started:1:sha256-jcs-v1:986f35aa39938713b9862192cab7d2b9b3a37219f5872bd242f8a06e7957ff1b []\n\
+mfm.events.v1.fact_recorded schema:mfm.events.v1.fact_recorded:1:sha256-jcs-v1:e708d591505935c8d5b12e833e34e6883c3e62fc548758a53ed5199e94218f70 [FactResponse]\n\
+mfm.events.v1.artifact_referenced schema:mfm.events.v1.artifact_referenced:1:sha256-jcs-v1:c5965f6401628c580d907568a57b29e06638d4cf1740b1ea781eae88df4d592c [ArtifactReferenced]\n\
+mfm.events.v1.cell_produced schema:mfm.events.v1.cell_produced:1:sha256-jcs-v1:9a2b250e7a5270bb302ae76a06091873dc50644855bace41bab97dcce311f07a [StateOutput]\n\
+mfm.events.v1.cell_skipped schema:mfm.events.v1.cell_skipped:1:sha256-jcs-v1:e82d7230e3ca668b68f1403d3db7c07d36a3373f8e3744e9a41351a7aa5392f4 []\n\
+mfm.events.v1.side_effect.intent_persisted schema:mfm.events.v1.side_effect.intent_persisted:1:sha256-jcs-v1:d2f3042ed5189e6e5081b781b205886e3c7d469e4cadb0fa4a61e460926c7cce [SideEffectIntent]\n\
+mfm.events.v1.side_effect.claimed schema:mfm.events.v1.side_effect.claimed:1:sha256-jcs-v1:264b474d74a9349bbc1b126e0c13ec3b29ec63124d54db6925fa41e2a7e8ef78 []\n\
+mfm.events.v1.side_effect.claim_taken_over schema:mfm.events.v1.side_effect.claim_taken_over:1:sha256-jcs-v1:358052910361a392a93a34fbb8bcccfd3edde420caa19289e1cd6136a7421a9f []\n\
+mfm.events.v1.side_effect.invocation_prepared schema:mfm.events.v1.side_effect.invocation_prepared:1:sha256-jcs-v1:11e7ee2739d17eea6fa1957d3da20db6eec8a58e15990c5193ba4f532af57f59 [PreparedInvocation]\n\
+mfm.events.v1.side_effect.invocation_started schema:mfm.events.v1.side_effect.invocation_started:1:sha256-jcs-v1:51cbcca15a2cd022b87a78b71e7652f2928e3dcb011f47312cb5becaa8729002 []\n\
+mfm.events.v1.side_effect.not_submitted_proven schema:mfm.events.v1.side_effect.not_submitted_proven:1:sha256-jcs-v1:795bf7a92342608ce42e42335ab318b060fce28353e4bf91ca56dda72d4da0f7 [NotSubmittedProof]\n\
+mfm.events.v1.side_effect.submission_observed schema:mfm.events.v1.side_effect.submission_observed:1:sha256-jcs-v1:08c47a5f1a00a0052bdc66fdbf6273eb6dd39670ee7936b9e68c982fa333c714 [Submission]\n\
+mfm.events.v1.side_effect.submission_unknown schema:mfm.events.v1.side_effect.submission_unknown:1:sha256-jcs-v1:ed336ca8c53f4567a1f63f8d911fc82526fb59669f5f8db68ac2745ce1f67ddb [SubmissionUnknownEvidence]\n\
+mfm.events.v1.side_effect.receipt_observed schema:mfm.events.v1.side_effect.receipt_observed:1:sha256-jcs-v1:e8b248201bbd212aa5eeb8a2a6f44cb4bd245b11104fd139d2948d3725fe3450 [Receipt,ResourceTouchedSet]\n\
+mfm.events.v1.side_effect.confirmation_observed schema:mfm.events.v1.side_effect.confirmation_observed:1:sha256-jcs-v1:c6bc63539dd02ff1ea441f8313014a8d537f51504ea3ed827fc8c97a5654c601 [Confirmation,ResourceTouchedSet]\n\
+mfm.events.v1.side_effect.ambiguous schema:mfm.events.v1.side_effect.ambiguous:1:sha256-jcs-v1:dfc9030e0d4fbbeb1800317623cecea3fbb1256c5a1b5d0e272bcda5fa4ef823 [AmbiguityEvidence]\n\
+mfm.events.v1.side_effect.failed schema:mfm.events.v1.side_effect.failed:1:sha256-jcs-v1:8c7e57736bd909ecd65d435f3f91187c623d4e01ce3d5e5fcc4602a690c26a0d [SideEffectFailureDiagnostic]\n\
+mfm.events.v1.public_output_produced schema:mfm.events.v1.public_output_produced:1:sha256-jcs-v1:00d2531467818398553aa59e62c034fa0cd054e7856b89f425aeb4510f9c6776 [PublicOutputCell,PublicOutputRendered]\n\
+mfm.events.v1.public_output_render_failed schema:mfm.events.v1.public_output_render_failed:1:sha256-jcs-v1:38c7cf4189e8525be1c51f1d0601c024b69769e961b6cf5fd43193211e143d9d [PublicOutputRenderFailureDiagnostic]\n\
+mfm.events.v1.state_attempt_completed schema:mfm.events.v1.state_attempt_completed:1:sha256-jcs-v1:36800f9d3ae748d407bc2ea24339049471c8ffe40aa86c53b35b6c7c6cd6ee80 []\n\
+mfm.events.v1.state_attempt_interrupted schema:mfm.events.v1.state_attempt_interrupted:1:sha256-jcs-v1:a01ea4960dfa7c42cd9da4a572a2748513cae4107b99ac1f04afc37b7a4e9e14 []\n\
+mfm.events.v1.state_attempt_failed schema:mfm.events.v1.state_attempt_failed:1:sha256-jcs-v1:1b2012da2f5e92c932aa69b3ba36df77905c43cded4fb3c21d71f2d7627eb897 [StateAttemptFailureDiagnostic]\n\
+mfm.events.v1.manual_resolution_recorded schema:mfm.events.v1.manual_resolution_recorded:1:sha256-jcs-v1:b2b4122abfda77f0a8d087ea929189cd7735ea3e2ffa963e2f600e4ae74c0293 [ManualResolutionEvidence,ManualResolutionAuthorization]\n\
+mfm.events.v1.run_completed schema:mfm.events.v1.run_completed:1:sha256-jcs-v1:cda37495cb3c733164ce1a91f58ff6d27bdcfbf9b1f9efe5a7fd48ae68eba479 []\n\
+mfm.events.v1.retention_refs_appended schema:mfm.events.v1.retention_refs_appended:1:sha256-jcs-v1:a3a48ef21a004f9405c5585f0bdc6a9cc6c61dae616e06892ddefcfb61ae2a11 [RetentionRef]\n\
+mfm.events.v1.retention_manifest_projected schema:mfm.events.v1.retention_manifest_projected:1:sha256-jcs-v1:269a96fc12c7c5004aa4592139f84cd0e4b617e04e494522ce639aeae0b9fed1 [RetentionManifest]"
+            );
+        }
+
+        #[test]
+        fn artifact_role_schema_descriptor_tag_baseline() {
+            assert_eq!(
+                artifact_role_schema_tags().join("\n"),
+                "typed_execution_spec\n\
+typed_spec_certificate\n\
+typed_config\n\
+seed_input\n\
+state_output\n\
+fact_response\n\
+side_effect_intent\n\
+prepared_invocation\n\
+not_submitted_proof\n\
+submission\n\
+submission_unknown_evidence\n\
+receipt\n\
+confirmation\n\
+ambiguity_evidence\n\
+manual_resolution_evidence\n\
+manual_resolution_authorization\n\
+public_output\n\
+redacted_diagnostic\n\
+retention_manifest"
+            );
+        }
+
         #[test]
         fn v1_event_schema_golden() {
             let rows = all_event_schema_descriptors()
