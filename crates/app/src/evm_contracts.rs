@@ -112,7 +112,7 @@ fn runtime_signing_error(error: mfm_signing::SigningError) -> mfm_runtime::Runti
 mod tests {
     use super::*;
     use crate::{
-        make_in_memory_typed_services_with_certification_registry, new_run_id,
+        make_sync_in_memory_typed_services_with_certification_registry, new_run_id,
         prepare_certified_run_launch, CertifiedRunLaunchInput, DriveMode, RunLaunchConfigArtifact,
         RunLaunchSeedArtifact, TypedRunMode,
     };
@@ -238,7 +238,7 @@ mod tests {
             Arc::new(TestRuntimeFactory::new(artifacts.clone())),
         )
         .expect("contract runners");
-        let services = make_in_memory_typed_services_with_certification_registry(
+        let services = make_sync_in_memory_typed_services_with_certification_registry(
             runners,
             &root,
             certification,
@@ -334,7 +334,7 @@ mod tests {
             Arc::new(TestRuntimeFactory::new(artifacts.clone())),
         )
         .expect("contract runners");
-        let services = make_in_memory_typed_services_with_certification_registry(
+        let services = make_sync_in_memory_typed_services_with_certification_registry(
             runners,
             &root,
             certification,
@@ -435,7 +435,7 @@ mod tests {
             )),
         )
         .expect("contract runners");
-        let services = make_in_memory_typed_services_with_certification_registry(
+        let services = make_sync_in_memory_typed_services_with_certification_registry(
             runners,
             &root,
             certification,
@@ -531,7 +531,7 @@ mod tests {
             )),
         )
         .expect("contract runners");
-        let services = make_in_memory_typed_services_with_certification_registry(
+        let services = make_sync_in_memory_typed_services_with_certification_registry(
             runners,
             &root,
             certification,

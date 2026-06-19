@@ -42,6 +42,7 @@ use mfm_store::v1 as store;
 use serde::{Deserialize, Serialize};
 use serde_json::map::Entry;
 use serde_json::{Map, Value};
+#[cfg(test)]
 use tokio::sync::Mutex;
 
 pub use mfm_runtime::ErasedRunnerRegistry;
@@ -289,7 +290,7 @@ pub fn make_in_memory_typed_run_store() -> store::InMemoryTypedRunStore {
 pub fn make_in_memory_typed_services(
     runners: ErasedRunnerRegistry,
     artifact_root: impl Into<PathBuf>,
-) -> RunServices<store::InMemoryTypedRunStore> {
+) -> RunServices<store::AsyncInMemoryTypedRunStore> {
     make_in_memory_typed_services_with_certification_registry(
         runners,
         artifact_root,
@@ -302,9 +303,29 @@ pub fn make_in_memory_typed_services_with_certification_registry(
     runners: ErasedRunnerRegistry,
     artifact_root: impl Into<PathBuf>,
     certification_registry: CertificationRegistry,
-) -> RunServices<store::InMemoryTypedRunStore> {
+) -> RunServices<store::AsyncInMemoryTypedRunStore> {
     let artifacts = FsTypedArtifactStore::new(artifact_root);
     RunServices::new_with_certification_registry(
+        SerialTypedScheduler::new(
+            runners,
+            Arc::new(FsRuntimeArtifactStager {
+                artifacts: artifacts.clone(),
+            }),
+        ),
+        store::AsyncInMemoryTypedRunStore::default(),
+        artifacts,
+        certification_registry,
+    )
+}
+
+#[cfg(test)]
+fn make_sync_in_memory_typed_services_with_certification_registry(
+    runners: ErasedRunnerRegistry,
+    artifact_root: impl Into<PathBuf>,
+    certification_registry: CertificationRegistry,
+) -> SyncRunServices<store::InMemoryTypedRunStore> {
+    let artifacts = FsTypedArtifactStore::new(artifact_root);
+    SyncRunServices::new_with_certification_registry(
         SerialTypedScheduler::new(
             runners,
             Arc::new(FsRuntimeArtifactStager {
@@ -322,7 +343,7 @@ pub fn make_async_typed_services<S>(
     runners: ErasedRunnerRegistry,
     store: S,
     artifacts: FsTypedArtifactStore,
-) -> AsyncRunServices<S>
+) -> RunServices<S>
 where
     S: store::AsyncTypedRunEventStore + Send + Sync,
 {
@@ -340,14 +361,14 @@ pub fn make_async_typed_services_with_certification_registry<S>(
     store: S,
     artifacts: FsTypedArtifactStore,
     certification_registry: CertificationRegistry,
-) -> AsyncRunServices<S>
+) -> RunServices<S>
 where
     S: store::AsyncTypedRunEventStore + Send + Sync,
 {
     let artifact_stager = Arc::new(FsRuntimeArtifactStager {
         artifacts: artifacts.clone(),
     });
-    AsyncRunServices::new_with_certification_registry(
+    RunServices::new_with_certification_registry(
         SerialTypedScheduler::new(runners, artifact_stager),
         store,
         artifacts,
@@ -941,29 +962,21 @@ impl fmt::Display for TypedReplayResponse {
     }
 }
 
-/// Application service facade for certified typed runtime dispatch.
+/// Test-only synchronous service facade for certified typed runtime dispatch.
+#[cfg(test)]
 #[derive(Clone)]
-pub struct RunServices<S> {
+struct SyncRunServices<S> {
     scheduler: SerialTypedScheduler,
     store: Arc<Mutex<S>>,
     artifacts: FsTypedArtifactStore,
     certification_registry: CertificationRegistry,
 }
 
-impl<S> RunServices<S>
+#[cfg(test)]
+impl<S> SyncRunServices<S>
 where
     S: store::TypedRunEventStore + Send,
 {
-    /// Creates typed app services from explicit scheduler, store, and artifact store choices.
-    pub fn new(scheduler: SerialTypedScheduler, store: S, artifacts: FsTypedArtifactStore) -> Self {
-        Self::new_with_certification_registry(
-            scheduler,
-            store,
-            artifacts,
-            CertificationRegistry::new(),
-        )
-    }
-
     /// Creates typed app services with an explicit trusted certification registry.
     pub fn new_with_certification_registry(
         scheduler: SerialTypedScheduler,
@@ -1139,16 +1152,20 @@ where
     }
 }
 
-/// Application facade for durable async certified typed runtime dispatch.
+/// Application facade for certified typed runtime dispatch.
 #[derive(Clone)]
-pub struct AsyncRunServices<S> {
+pub struct RunServices<S> {
     scheduler: SerialTypedScheduler,
     store: S,
     artifacts: FsTypedArtifactStore,
     certification_registry: CertificationRegistry,
 }
 
-impl<S> AsyncRunServices<S>
+/// Deprecated compatibility alias for the async service facade.
+#[deprecated(note = "use RunServices")]
+pub type AsyncRunServices<S> = RunServices<S>;
+
+impl<S> RunServices<S>
 where
     S: store::AsyncTypedRunEventStore + Send + Sync,
 {
@@ -1464,6 +1481,7 @@ impl VerifiedStatusReadContext {
     }
 }
 
+#[cfg(test)]
 async fn load_sync_verified_run_read_context<S>(
     store: &Arc<Mutex<S>>,
     artifacts: &FsTypedArtifactStore,
@@ -1480,6 +1498,7 @@ where
     verified_run_read_context_from_events(artifacts, registry, run_id, stream).await
 }
 
+#[cfg(test)]
 async fn load_sync_verified_status_read_context<S>(
     store: &Arc<Mutex<S>>,
     artifacts: &FsTypedArtifactStore,
@@ -2760,6 +2779,7 @@ fn typed_run_response_from_projection(
     })
 }
 
+#[cfg(test)]
 fn typed_run_response<S: store::TypedRunEventStore + ?Sized>(
     store: &S,
     runtime_spec: &CertifiedRuntimeSpec,
@@ -3380,7 +3400,6 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::Path;
     use std::sync::Arc;
-    use std::sync::Mutex as StdMutex;
 
     const REDACTION_SENTINEL: &str = "phase3b-secret-sentinel-token-42";
 
@@ -5829,7 +5848,7 @@ mod tests {
     async fn start_framework_fixture_run() -> (
         PathBuf,
         FrameworkSeedPublicOutputFixture,
-        AsyncRunServices<AsyncInMemoryStore>,
+        RunServices<AsyncInMemoryStore>,
         TypedRunResponse,
     ) {
         start_framework_fixture_run_with_drive(DriveMode::UntilBlocked, "framework-run").await
@@ -5844,7 +5863,7 @@ mod tests {
     }
 
     async fn async_completed_read_surface_summary(
-        services: &AsyncRunServices<AsyncInMemoryStore>,
+        services: &RunServices<AsyncInMemoryStore>,
         fixture: &FrameworkSeedPublicOutputFixture,
     ) -> CompletedReadSurfaceSummary {
         CompletedReadSurfaceSummary {
@@ -5868,7 +5887,7 @@ mod tests {
     }
 
     async fn sync_completed_read_surface_summary(
-        services: &RunServices<store::InMemoryTypedRunStore>,
+        services: &SyncRunServices<store::InMemoryTypedRunStore>,
         fixture: &FrameworkSeedPublicOutputFixture,
     ) -> CompletedReadSurfaceSummary {
         let replay = services
@@ -5912,7 +5931,7 @@ mod tests {
     ) -> (
         PathBuf,
         FrameworkSeedPublicOutputFixture,
-        AsyncRunServices<AsyncInMemoryStore>,
+        RunServices<AsyncInMemoryStore>,
         TypedRunResponse,
     ) {
         launch_framework_fixture_run(drive, label, framework_fixture_runner_registry).await
@@ -5925,7 +5944,7 @@ mod tests {
     ) -> (
         PathBuf,
         FrameworkSeedPublicOutputFixture,
-        AsyncRunServices<AsyncInMemoryStore>,
+        RunServices<AsyncInMemoryStore>,
         TypedRunResponse,
     ) {
         let root =
@@ -6169,7 +6188,7 @@ mod tests {
     }
 
     async fn signed_manual_resolution_proof(
-        services: &RunServices<store::InMemoryTypedRunStore>,
+        services: &SyncRunServices<store::InMemoryTypedRunStore>,
         fixture: &ManualProofFixture,
         outcome: events::ManualResolutionOutcome,
         evidence_bytes: &[u8],
@@ -6347,7 +6366,7 @@ mod tests {
     async fn start_sync_framework_fixture_run() -> (
         PathBuf,
         FrameworkSeedPublicOutputFixture,
-        RunServices<store::InMemoryTypedRunStore>,
+        SyncRunServices<store::InMemoryTypedRunStore>,
         TypedRunResponse,
     ) {
         start_sync_framework_fixture_run_with_drive(DriveMode::UntilBlocked, "framework-run").await
@@ -6359,7 +6378,7 @@ mod tests {
     ) -> (
         PathBuf,
         FrameworkSeedPublicOutputFixture,
-        RunServices<store::InMemoryTypedRunStore>,
+        SyncRunServices<store::InMemoryTypedRunStore>,
         TypedRunResponse,
     ) {
         launch_sync_framework_fixture_run(drive, label, framework_fixture_runner_registry).await
@@ -6372,7 +6391,7 @@ mod tests {
     ) -> (
         PathBuf,
         FrameworkSeedPublicOutputFixture,
-        RunServices<store::InMemoryTypedRunStore>,
+        SyncRunServices<store::InMemoryTypedRunStore>,
         TypedRunResponse,
     ) {
         let root =
@@ -6415,8 +6434,9 @@ mod tests {
         )
         .expect("typed run request");
         let runners = runner_registry(&fixture);
-        let services =
-            make_in_memory_typed_services_with_certification_registry(runners, &root, registry);
+        let services = make_sync_in_memory_typed_services_with_certification_registry(
+            runners, &root, registry,
+        );
 
         let started = services.launch_run(request).await.expect("start typed run");
         (root, fixture, services, started)
@@ -6425,7 +6445,7 @@ mod tests {
     async fn start_manual_proof_fixture_run() -> (
         PathBuf,
         ManualProofFixture,
-        RunServices<store::InMemoryTypedRunStore>,
+        SyncRunServices<store::InMemoryTypedRunStore>,
         TypedRunResponse,
     ) {
         let root =
@@ -6453,8 +6473,9 @@ mod tests {
         )
         .expect("typed run request");
         let runners = manual_proof_runner_registry(&fixture.certified_spec.envelope().spec);
-        let services =
-            make_in_memory_typed_services_with_certification_registry(runners, &root, registry);
+        let services = make_sync_in_memory_typed_services_with_certification_registry(
+            runners, &root, registry,
+        );
 
         let started = services
             .launch_run(request)
@@ -7061,7 +7082,7 @@ mod tests {
     }
 
     async fn corrupt_read_path_rejection_summary(
-        services: &AsyncRunServices<StaticAsyncStore>,
+        services: &RunServices<StaticAsyncStore>,
         fixture: &FrameworkSeedPublicOutputFixture,
     ) -> Vec<String> {
         let status = services
@@ -7139,59 +7160,7 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
-    struct AsyncInMemoryStore(StdMutex<store::InMemoryTypedRunStore>);
-
-    impl store::AsyncTypedRunEventStore for AsyncInMemoryStore {
-        type Error = store::StoreError;
-
-        fn append_prepared_commit_plan<'a>(
-            &'a self,
-            plan: store::PreparedCommitPlan,
-        ) -> store::AsyncStoreFuture<'a, store::CommitOutcome, Self::Error> {
-            let result = self
-                .0
-                .lock()
-                .expect("store lock")
-                .append_prepared_commit_plan(plan);
-            Box::pin(std::future::ready(result))
-        }
-
-        fn load_run_stream<'a>(
-            &'a self,
-            run_id: &'a RunId,
-        ) -> store::AsyncStoreFuture<'a, Vec<store::KernelEventEnvelope>, Self::Error> {
-            let result = Ok(self.0.lock().expect("store lock").load_run_stream(run_id));
-            Box::pin(std::future::ready(result))
-        }
-
-        fn expected_next_seq<'a>(
-            &'a self,
-            run_id: &'a RunId,
-        ) -> store::AsyncStoreFuture<'a, store::StreamSeq, Self::Error> {
-            let result = Ok(self.0.lock().expect("store lock").expected_next_seq(run_id));
-            Box::pin(std::future::ready(result))
-        }
-
-        fn status_projection_snapshot<'a>(
-            &'a self,
-            run_id: &'a RunId,
-        ) -> store::AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
-            Box::pin(async move {
-                let store = self.0.lock().expect("store lock");
-                let stream = store.load_run_stream(run_id);
-                let run_projection = store::ProjectionSnapshot::rebuild_from_run_stream(&stream)?;
-                projection_with_resource_lanes(
-                    &run_projection,
-                    store
-                        .projection_snapshot()
-                        .resource_lanes()
-                        .map(|(lane_key, projection)| (lane_key.clone(), projection.clone()))
-                        .collect(),
-                )
-            })
-        }
-    }
+    type AsyncInMemoryStore = store::AsyncInMemoryTypedRunStore;
 
     struct ManualProofFixture {
         draft: mfm_program::TypedProgramDraft,
