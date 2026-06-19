@@ -4549,6 +4549,22 @@ mfm_events::v1::RetentionManifestProjected schema:mfm.events.v1.retention_manife
         }
 
         #[test]
+        fn fact_recorded_schema_descriptor_baseline() {
+            let canonical = FACT_RECORDED_SCHEMA
+                .canonical_json()
+                .expect("canonical fact schema");
+
+            assert_eq!(
+                canonical.as_str(),
+                r#"{"canonicalization":"sha256-jcs-v1","fields":[{"cardinality":"required","name":"spec_hash","type":{"kind":"mfm_ids_identity","name":"SpecHash","persisted_as":"string"}},{"cardinality":"required","name":"node_id","type":{"kind":"mfm_ids_identity","name":"NodeId","persisted_as":"string"}},{"cardinality":"required","name":"attempt_id","type":{"kind":"mfm_ids_identity","name":"AttemptId","persisted_as":"string"}},{"cardinality":"required","name":"capability_kind","type":{"kind":"mfm_ids_identity","name":"CapabilityKind","persisted_as":"string"}},{"cardinality":"required","name":"capability_version","type":{"kind":"mfm_ids_version","name":"CapabilityVersion","persisted_as":"string"}},{"cardinality":"required","name":"adapter_kind","type":{"kind":"mfm_ids_identity","name":"AdapterKind","persisted_as":"string"}},{"cardinality":"required","name":"adapter_version","type":{"kind":"mfm_ids_version","name":"AdapterVersion","persisted_as":"string"}},{"cardinality":"required","name":"request_schema_id","type":{"kind":"mfm_ids_identity","name":"SchemaId","persisted_as":"string"}},{"cardinality":"required","name":"request_hash","type":{"kind":"mfm_ids_identity","name":"ContentDigest","persisted_as":"string"}},{"cardinality":"required","name":"response_schema_id","type":{"kind":"mfm_ids_identity","name":"SchemaId","persisted_as":"string"}},{"cardinality":"required","name":"response_hash","type":{"kind":"mfm_ids_identity","name":"ContentDigest","persisted_as":"string"}},{"cardinality":"required","name":"fact_key","type":{"charset":"visible_ascii","kind":"checked_ascii_token","max_len":256,"name":"FactKey","non_empty":true}},{"cardinality":"required","name":"artifact_id","type":{"kind":"mfm_ids_identity","name":"ArtifactId","persisted_as":"string"}}],"schema_family":"mfm.kernel.event","schema_name":"mfm.events.v1.fact_recorded","schema_version":"1"}"#
+            );
+            assert_eq!(
+                canonical.content_digest().as_str(),
+                "content:sha256-jcs-v1:e708d591505935c8d5b12e833e34e6883c3e62fc548758a53ed5199e94218f70"
+            );
+        }
+
+        #[test]
         fn event_schema_hashes_include_nested_structural_shapes() {
             let artifact_schema = ARTIFACT_REFERENCED_SCHEMA
                 .canonical_json()

@@ -1603,6 +1603,118 @@ fn event_artifact_requirements_mark_filterable_sources() {
 }
 
 #[test]
+fn fact_recorded_protocol_baselines_cover_codec_requirements_and_projection() {
+    let payload = fact_recorded(artifact_id(63), content_digest(64));
+    let canonical = payload_canonical_json(&payload).expect("fact payload json");
+    assert_eq!(
+        canonical.as_str(),
+        r#"{"adapter_kind":"adapter:mfm.test:adapter:sha256-jcs-v1:5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d","adapter_version":"mfm.test.adapter.v1","artifact_id":"artifact:sha256-jcs-v1:3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f","attempt_id":"attempt:sha256-jcs-v1:5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b","capability_kind":"capability:mfm.test:capability:sha256-jcs-v1:5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c","capability_version":"mfm.test.fact.v1","fact_key":"fact-key-1","node_id":"node:sha256-jcs-v1:5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a","request_hash":"content:sha256-jcs-v1:5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f","request_schema_id":"schema:mfm.test.fact_request:1:sha256-jcs-v1:5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e","response_hash":"content:sha256-jcs-v1:4040404040404040404040404040404040404040404040404040404040404040","response_schema_id":"schema:mfm.test.fact_response:1:sha256-jcs-v1:6060606060606060606060606060606060606060606060606060606060606060","spec_hash":"spec:sha256-jcs-v1:0101010101010101010101010101010101010101010101010101010101010101","variant":"FactRecorded"}"#
+    );
+    assert_eq!(
+        mfm_store::v1::payload_hash(&payload)
+            .expect("fact payload hash")
+            .as_str(),
+        "content:sha256-jcs-v1:327d0e04794116c46f8ab330b071cb1b10ae862177a1b1e3a04159d742aa986b"
+    );
+    let decoded_json: serde_json::Value =
+        serde_json::from_str(canonical.as_str()).expect("payload json");
+    assert_eq!(
+        payload_from_json_value(&decoded_json).expect("payload roundtrip"),
+        payload
+    );
+
+    let requirements = event_artifact_requirements(&payload);
+    assert_eq!(requirements.len(), 1);
+    let requirement = &requirements[0];
+    assert_eq!(
+        requirement.source,
+        EventArtifactReferenceSource::FactResponse
+    );
+    assert_eq!(requirement.artifact_role, Some(ArtifactRole::FactResponse));
+    assert_eq!(requirement.artifact_id, artifact_id(63));
+    assert_eq!(requirement.digest, Some(content_digest(64)));
+    assert_eq!(requirement.byte_len, None);
+    assert_eq!(requirement.media_type, None);
+    assert_eq!(
+        requirement.schema_id,
+        Some(schema_id("mfm.test.fact_response", 96))
+    );
+    assert_eq!(requirement.semantic_type_id, None);
+    assert_eq!(requirement.producer_node_id, Some(node_id(90)));
+    assert_eq!(requirement.producer_seed_id, None);
+
+    let run_id = run_id(250);
+    let fact_artifact_id = artifact_id(63);
+    let fact_digest = content_digest(64);
+    let mut store = InMemoryTypedRunStore::new();
+    store
+        .append_prepared_commit(run_start_request(run_id.clone(), "fact-baseline-run-start"))
+        .expect("append run start");
+    store
+        .append_prepared_commit(typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("fact-baseline-attempt-start").expect("commit key"),
+            payloads: vec![fact_attempt_started()],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions {
+                required_run_state: RequiredRunState::NotCompleted,
+                ..CommitPreconditions::default()
+            },
+        })
+        .expect("append fact attempt start");
+    store
+        .append_prepared_commit(typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("fact-baseline-recorded").expect("commit key"),
+            payloads: vec![payload.clone()],
+            required_artifacts: vec![fact_artifact_ref(fact_artifact_id, fact_digest)],
+            preconditions: CommitPreconditions {
+                required_run_state: RequiredRunState::NotCompleted,
+                ..CommitPreconditions::default()
+            },
+        })
+        .expect("append fact recorded");
+    let stream = store.load_run_stream(&run_id);
+    let snapshot = ProjectionSnapshot::rebuild_from_run_stream(&stream).expect("rebuild stream");
+    let projection = snapshot
+        .fact(
+            &node_id(90),
+            &attempt_id(91),
+            &events::FactKey::new("fact-key-1").expect("fact key"),
+        )
+        .expect("fact projection");
+    assert_eq!(projection.node_id, node_id(90));
+    assert_eq!(projection.attempt_id, attempt_id(91));
+    assert_eq!(
+        projection.fact_key,
+        events::FactKey::new("fact-key-1").expect("fact key")
+    );
+    assert_eq!(
+        projection.request_schema_id,
+        schema_id("mfm.test.fact_request", 94)
+    );
+    assert_eq!(projection.request_hash, content_digest(95));
+    assert_eq!(
+        projection.response_schema_id,
+        schema_id("mfm.test.fact_response", 96)
+    );
+    assert_eq!(projection.response_hash, content_digest(64));
+    assert_eq!(projection.artifact_id, artifact_id(63));
+    assert_eq!(projection.capability_kind, capability_kind(92));
+    assert_eq!(
+        projection.capability_version,
+        CapabilityVersion::new("mfm.test.fact.v1").expect("capability version")
+    );
+    assert_eq!(projection.adapter_kind, adapter_kind(93));
+    assert_eq!(
+        projection.adapter_version,
+        AdapterVersion::new("mfm.test.adapter.v1").expect("adapter version")
+    );
+}
+
+#[test]
 fn committed_run_stream_exposes_store_owned_authority() {
     let run_id = run_id(141);
     let mut store = InMemoryTypedRunStore::new();
