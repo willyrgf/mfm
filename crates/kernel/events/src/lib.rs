@@ -3804,6 +3804,63 @@ pub mod v1 {
         use super::*;
         use mfm_ids::DigestBytes;
 
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        struct EventFamilyDeclaration {
+            variant_tag: &'static str,
+            schema_name: &'static str,
+            rust_type_path: &'static str,
+            fields: &'static [EventFieldDescriptor],
+            artifact_lenses: &'static [ArtifactLensDeclaration],
+        }
+
+        impl EventFamilyDeclaration {
+            fn schema_descriptor(self) -> EventSchemaDescriptor {
+                EventSchemaDescriptor {
+                    schema_name: self.schema_name,
+                    rust_type_path: self.rust_type_path,
+                    schema_version: EVENT_SCHEMA_VERSION,
+                    fields: self.fields,
+                }
+            }
+        }
+
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        struct ArtifactLensDeclaration {
+            source: EventArtifactReferenceSource,
+            artifact_id_field: &'static str,
+            digest_field: Option<&'static str>,
+            schema_id_field: Option<&'static str>,
+            role: ArtifactRole,
+        }
+
+        const FACT_RECORDED_EVENT_DECLARATION: EventFamilyDeclaration = EventFamilyDeclaration {
+            variant_tag: "FactRecorded",
+            schema_name: "mfm.events.v1.fact_recorded",
+            rust_type_path: "mfm_events::v1::FactRecorded",
+            fields: fields![
+                EventFieldDescriptor::required("spec_hash", "SpecHash"),
+                EventFieldDescriptor::required("node_id", "NodeId"),
+                EventFieldDescriptor::required("attempt_id", "AttemptId"),
+                EventFieldDescriptor::required("capability_kind", "CapabilityKind"),
+                EventFieldDescriptor::required("capability_version", "CapabilityVersion"),
+                EventFieldDescriptor::required("adapter_kind", "AdapterKind"),
+                EventFieldDescriptor::required("adapter_version", "AdapterVersion"),
+                EventFieldDescriptor::required("request_schema_id", "SchemaId"),
+                EventFieldDescriptor::required("request_hash", "ContentDigest"),
+                EventFieldDescriptor::required("response_schema_id", "SchemaId"),
+                EventFieldDescriptor::required("response_hash", "ContentDigest"),
+                EventFieldDescriptor::required("fact_key", "FactKey"),
+                EventFieldDescriptor::required("artifact_id", "ArtifactId"),
+            ],
+            artifact_lenses: &[ArtifactLensDeclaration {
+                source: EventArtifactReferenceSource::FactResponse,
+                artifact_id_field: "artifact_id",
+                digest_field: Some("response_hash"),
+                schema_id_field: Some("response_schema_id"),
+                role: ArtifactRole::FactResponse,
+            }],
+        };
+
         fn digest_bytes(byte: u8) -> DigestBytes {
             DigestBytes::from_array([byte; 32])
         }
@@ -4561,6 +4618,35 @@ mfm_events::v1::RetentionManifestProjected schema:mfm.events.v1.retention_manife
             assert_eq!(
                 canonical.content_digest().as_str(),
                 "content:sha256-jcs-v1:e708d591505935c8d5b12e833e34e6883c3e62fc548758a53ed5199e94218f70"
+            );
+        }
+
+        #[test]
+        fn fact_recorded_event_family_declaration_matches_handwritten_schema() {
+            let declared = FACT_RECORDED_EVENT_DECLARATION.schema_descriptor();
+            assert_eq!(declared, FACT_RECORDED_SCHEMA);
+            assert_eq!(
+                declared.canonical_json().expect("declared schema json"),
+                FACT_RECORDED_SCHEMA
+                    .canonical_json()
+                    .expect("handwritten schema json")
+            );
+            assert_eq!(
+                declared.schema_id().expect("declared schema id"),
+                FACT_RECORDED_SCHEMA
+                    .schema_id()
+                    .expect("handwritten schema id")
+            );
+            assert_eq!(FACT_RECORDED_EVENT_DECLARATION.variant_tag, "FactRecorded");
+            assert_eq!(
+                FACT_RECORDED_EVENT_DECLARATION.artifact_lenses,
+                &[ArtifactLensDeclaration {
+                    source: EventArtifactReferenceSource::FactResponse,
+                    artifact_id_field: "artifact_id",
+                    digest_field: Some("response_hash"),
+                    schema_id_field: Some("response_schema_id"),
+                    role: ArtifactRole::FactResponse,
+                }]
             );
         }
 
