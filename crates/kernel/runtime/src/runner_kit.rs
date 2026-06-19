@@ -1,8 +1,11 @@
+use std::sync::Arc;
+
 use mfm_canonical::PlainCanonicalJsonBytes;
+use mfm_capabilities::CapabilitySetDescriptor;
 use mfm_events::v1::{self as events, side_effect};
 use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, CapabilityKind, CapabilityVersion, ContentDigest,
-    SchemaId,
+    DescriptorId, SchemaId,
 };
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
@@ -10,8 +13,9 @@ use mfm_values::MfmValue;
 use serde::Serialize;
 
 use crate::{
-    ErasedRunCtx, ErasedRunnerOutput, Result, RunnerEventPayload, RuntimeError, StagedArtifact,
-    StagedRetentionRefs,
+    CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerBinding,
+    ErasedRunnerOutput, ErasedRunnerRegistry, Result, RunnerEventPayload, RuntimeError,
+    StagedArtifact, StagedRetentionRefs,
 };
 
 /// Canonical JSON artifact prepared by a typed runner before runtime staging.
@@ -708,6 +712,61 @@ impl<'a, 'ctx> RunnerOutputBuilder<'a, 'ctx> {
             staged_retention_refs: self.staged_retention_refs,
             payloads: self.payloads,
         }
+    }
+}
+
+/// Builder for registering runner bindings while keeping executable identity explicit.
+pub struct RunnerRegistrationBuilder<'a> {
+    registry: &'a mut ErasedRunnerRegistry,
+    implementation_id: CapabilityImplementationId,
+}
+
+impl<'a> RunnerRegistrationBuilder<'a> {
+    /// Creates a registration builder for one concrete capability implementation id.
+    pub fn new(
+        registry: &'a mut ErasedRunnerRegistry,
+        implementation_id: CapabilityImplementationId,
+    ) -> Self {
+        Self {
+            registry,
+            implementation_id,
+        }
+    }
+
+    /// Registers the configured implementation id for a certified capability set.
+    pub fn register_capability_set(
+        &mut self,
+        capabilities: &CapabilitySetDescriptor,
+    ) -> Result<&mut Self> {
+        self.registry
+            .register_capability_set(capabilities, self.implementation_id.clone())?;
+        Ok(self)
+    }
+
+    /// Registers one descriptor runner using caller-supplied factory and executable identity.
+    pub fn register_runner(
+        &mut self,
+        descriptor_id: DescriptorId,
+        factory_id: events::RunnerFactoryId,
+        executable: events::ExecutableIdentity,
+        runner: Arc<dyn ErasedNodeRunner>,
+    ) -> Result<&mut Self> {
+        let binding = ErasedRunnerBinding::new(descriptor_id, factory_id, executable, runner)?;
+        self.registry.register(binding)?;
+        Ok(self)
+    }
+
+    /// Registers capabilities and a runner for one certified state descriptor.
+    pub fn register_descriptor(
+        &mut self,
+        descriptor_id: DescriptorId,
+        capabilities: &CapabilitySetDescriptor,
+        factory_id: events::RunnerFactoryId,
+        executable: events::ExecutableIdentity,
+        runner: Arc<dyn ErasedNodeRunner>,
+    ) -> Result<&mut Self> {
+        self.register_capability_set(capabilities)?;
+        self.register_runner(descriptor_id, factory_id, executable, runner)
     }
 }
 

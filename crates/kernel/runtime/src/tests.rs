@@ -1141,6 +1141,90 @@ fn runner_kit_builders_create_context_bound_artifacts_payloads_and_output() {
     assert_eq!(side_effect_output.payloads.len(), 1);
 }
 
+#[test]
+fn runner_registration_builder_preserves_explicit_binding_authority() {
+    let fixture = fixture();
+    let node = node_by_output(&fixture, &fixture.cell_b);
+    let descriptor = fixture
+        .runtime_spec
+        .state_descriptor_for_node(node)
+        .expect("state descriptor");
+    let factory_id = events::RunnerFactoryId::new("read").expect("factory");
+    let executable = events::ExecutableIdentity {
+        factory_id: factory_id.clone(),
+        source_revision: events::SourceRevision::new("test-rev").expect("source"),
+        cargo_package_name: events::PackageName::new("mfm-test").expect("package"),
+        cargo_package_version: events::PackageVersion::new("0.1.0").expect("version"),
+        cargo_package_digest: content(0xe1),
+        binary_digest: content(0xe2),
+        nix_derivation_hash: None,
+        nix_output_hash: None,
+    };
+    let implementation_id = CapabilityImplementationId::new("mfm.test.runner-kit-registration")
+        .expect("implementation id");
+    let mut registry = ErasedRunnerRegistry::new();
+
+    RunnerRegistrationBuilder::new(&mut registry, implementation_id.clone())
+        .register_descriptor(
+            node.descriptor_id.clone(),
+            &node.capability_bindings,
+            factory_id.clone(),
+            executable.clone(),
+            Arc::new(RecordingRunner {
+                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                output_artifact: artifact(0xb1),
+                output_digest: content(0xb2),
+            }),
+        )
+        .expect("runner registration");
+
+    let binding = registry
+        .resolve(node, descriptor)
+        .expect("registered runner");
+    assert_eq!(binding.factory_id(), &factory_id);
+    assert_eq!(binding.executable(), &executable);
+    let capabilities = registry
+        .resolve_capability_implementations(node)
+        .expect("capability implementations");
+    assert_eq!(
+        capabilities.len(),
+        node.capability_bindings.capabilities.len()
+    );
+    for binding in capabilities {
+        assert_eq!(binding.implementation_id(), &implementation_id);
+    }
+
+    let wrong_factory = events::RunnerFactoryId::new("pure").expect("factory");
+    let mut mismatch_registry = ErasedRunnerRegistry::new();
+    let error = match RunnerRegistrationBuilder::new(
+        &mut mismatch_registry,
+        CapabilityImplementationId::new("mfm.test.runner-kit-registration-mismatch")
+            .expect("implementation id"),
+    )
+    .register_descriptor(
+        node.descriptor_id.clone(),
+        &node.capability_bindings,
+        factory_id,
+        events::ExecutableIdentity {
+            factory_id: wrong_factory,
+            ..executable
+        },
+        Arc::new(RecordingRunner {
+            expected_caps: Vec::new(),
+            output_artifact: artifact(0xc1),
+            output_digest: content(0xc2),
+        }),
+    ) {
+        Ok(_) => panic!("factory mismatch should be rejected"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        RuntimeError::RunnerBinding(message)
+            if message.contains("does not match binding factory")
+    ));
+}
+
 #[tokio::test]
 async fn serial_scheduler_runs_nodes_in_certified_topological_order() {
     let fixture = fixture();

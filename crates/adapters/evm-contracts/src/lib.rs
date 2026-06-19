@@ -66,11 +66,11 @@ use mfm_program::{SideEffectState, StateSpec, ValidatedConfig};
 use mfm_program_derive::MfmValue;
 use mfm_replay::v1 as replay;
 use mfm_runtime::{
-    CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerBinding,
-    ErasedRunnerFuture, ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCell,
-    MaterializedCellTerminal, MaterializedInputNode, RunnerArtifactBuilder,
-    RunnerCapabilityBinding, RunnerClaimBinding, RunnerOutputBuilder, RunnerPayloadBuilder,
-    RunnerPreparedInvocationBinding, RunnerSideEffectBinding,
+    CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture,
+    ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCell, MaterializedCellTerminal,
+    MaterializedInputNode, RunnerArtifactBuilder, RunnerCapabilityBinding, RunnerClaimBinding,
+    RunnerOutputBuilder, RunnerPayloadBuilder, RunnerPreparedInvocationBinding,
+    RunnerRegistrationBuilder, RunnerSideEffectBinding,
 };
 use mfm_signing::{PublicKeyBytes, SignerRef, SigningProvider};
 use mfm_state_evm_contracts::{
@@ -1614,33 +1614,37 @@ pub fn register_contract_lifecycle_runners_with_factory(
     factory: Arc<dyn EvmContractRuntimeFactory>,
 ) -> mfm_runtime::Result<()> {
     let implementation_id = CapabilityImplementationId::new(CAPABILITY_IMPLEMENTATION_ID)?;
+    let mut registrations = RunnerRegistrationBuilder::new(registry, implementation_id);
     let deploy = registered_descriptor::<DeployContractState>()?;
-    registry.register_capability_set(&deploy.capabilities, implementation_id.clone())?;
-    registry.register(binding(
+    register_runner(
+        &mut registrations,
         deploy.descriptor_id,
+        &deploy.capabilities,
         SIDE_EFFECT_FACTORY,
         Arc::new(ContractMutationRunner {
             phase: ContractMutationRunnerPhase::Deploy,
             factory: factory.clone(),
         }),
-    )?)?;
+    )?;
     let configure = registered_descriptor::<ConfigureContractState>()?;
-    registry.register_capability_set(&configure.capabilities, implementation_id.clone())?;
-    registry.register(binding(
+    register_runner(
+        &mut registrations,
         configure.descriptor_id,
+        &configure.capabilities,
         SIDE_EFFECT_FACTORY,
         Arc::new(ContractMutationRunner {
             phase: ContractMutationRunnerPhase::Configure,
             factory: factory.clone(),
         }),
-    )?)?;
+    )?;
     let validate = registered_descriptor::<ValidateContractState>()?;
-    registry.register_capability_set(&validate.capabilities, implementation_id)?;
-    registry.register(binding(
+    register_runner(
+        &mut registrations,
         validate.descriptor_id,
+        &validate.capabilities,
         READ_FACTORY,
         Arc::new(ContractValidateRunner { factory }),
-    )?)?;
+    )?;
     Ok(())
 }
 
@@ -1665,18 +1669,22 @@ where
     })
 }
 
-fn binding(
+fn register_runner(
+    registrations: &mut RunnerRegistrationBuilder<'_>,
     descriptor_id: DescriptorId,
+    capabilities: &CapabilitySetDescriptor,
     factory: &'static str,
     runner: Arc<dyn ErasedNodeRunner>,
-) -> mfm_runtime::Result<ErasedRunnerBinding> {
+) -> mfm_runtime::Result<()> {
     let factory_id = events::RunnerFactoryId::new(factory)?;
-    ErasedRunnerBinding::new(
+    registrations.register_descriptor(
         descriptor_id,
+        capabilities,
         factory_id.clone(),
         executable(factory_id)?,
         runner,
-    )
+    )?;
+    Ok(())
 }
 
 fn executable(

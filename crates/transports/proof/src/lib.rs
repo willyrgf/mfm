@@ -20,10 +20,10 @@ use mfm_events::v1::{self as events, side_effect};
 use mfm_ids::{ContentDigest, DescriptorId, SchemaId};
 use mfm_replay::v1 as replay;
 use mfm_runtime::{
-    CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerBinding,
-    ErasedRunnerFuture, ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCellTerminal,
-    MaterializedInputNode, RunnerArtifactBuilder, RunnerCapabilityBinding, RunnerClaimBinding,
-    RunnerOutputBuilder, RunnerPayloadBuilder, RunnerPreparedInvocationBinding,
+    CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture,
+    ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCellTerminal, MaterializedInputNode,
+    RunnerArtifactBuilder, RunnerCapabilityBinding, RunnerClaimBinding, RunnerOutputBuilder,
+    RunnerPayloadBuilder, RunnerPreparedInvocationBinding, RunnerRegistrationBuilder,
     RunnerSideEffectBinding,
 };
 use mfm_spec::v1 as spec;
@@ -45,26 +45,29 @@ pub fn register_deterministic_proof_runners(
     let read = registered_descriptor::<ProofReadFactState>()?;
     let side_effect = registered_descriptor::<ProofApplySideEffectState>()?;
     let assemble = registered_descriptor::<ProofAssembleOutputState>()?;
+    let mut registrations = RunnerRegistrationBuilder::new(registry, implementation_id);
 
-    registry.register_capability_set(&read.capabilities, implementation_id.clone())?;
-    registry.register_capability_set(&side_effect.capabilities, implementation_id.clone())?;
-    registry.register_capability_set(&assemble.capabilities, implementation_id)?;
-
-    registry.register(binding(
+    register_runner(
+        &mut registrations,
         read.descriptor_id,
+        &read.capabilities,
         READ_FACTORY,
         Arc::new(ProofReadRunner),
-    )?)?;
-    registry.register(binding(
+    )?;
+    register_runner(
+        &mut registrations,
         side_effect.descriptor_id,
+        &side_effect.capabilities,
         SIDE_EFFECT_FACTORY,
         Arc::new(ProofSideEffectRunner),
-    )?)?;
-    registry.register(binding(
+    )?;
+    register_runner(
+        &mut registrations,
         assemble.descriptor_id,
+        &assemble.capabilities,
         PURE_FACTORY,
         Arc::new(ProofAssembleRunner),
-    )?)?;
+    )?;
     Ok(())
 }
 
@@ -96,18 +99,22 @@ where
     })
 }
 
-fn binding(
+fn register_runner(
+    registrations: &mut RunnerRegistrationBuilder<'_>,
     descriptor_id: DescriptorId,
+    capabilities: &CapabilitySetDescriptor,
     factory: &'static str,
     runner: Arc<dyn ErasedNodeRunner>,
-) -> mfm_runtime::Result<ErasedRunnerBinding> {
+) -> mfm_runtime::Result<()> {
     let factory_id = events::RunnerFactoryId::new(factory)?;
-    ErasedRunnerBinding::new(
+    registrations.register_descriptor(
         descriptor_id,
+        capabilities,
         factory_id.clone(),
         executable(factory_id)?,
         runner,
-    )
+    )?;
+    Ok(())
 }
 
 fn executable(

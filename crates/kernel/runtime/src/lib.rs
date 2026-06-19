@@ -67,7 +67,7 @@ pub use manual_resolution::{
 pub use runner_kit::{
     RunnerArtifactBuilder, RunnerCapabilityBinding, RunnerClaimBinding, RunnerClaimTakeoverBinding,
     RunnerJsonArtifact, RunnerOutputBuilder, RunnerPayloadBuilder, RunnerPreparedInvocationBinding,
-    RunnerSideEffectBinding,
+    RunnerRegistrationBuilder, RunnerSideEffectBinding,
 };
 pub use runners::{
     CapabilityImplementationBinding, CapabilityImplementationId, ErasedNodeRunner,

@@ -22,10 +22,10 @@ use mfm_evm_core::hex::hex_to_bytes;
 use mfm_ids::{ContentDigest, DescriptorId};
 use mfm_program::{StateSpec, ValidatedConfig};
 use mfm_runtime::{
-    CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerBinding,
-    ErasedRunnerFuture, ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCellTerminal,
-    MaterializedInputNode, RunnerArtifactBuilder, RunnerCapabilityBinding, RunnerOutputBuilder,
-    RunnerPayloadBuilder,
+    CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture,
+    ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCellTerminal, MaterializedInputNode,
+    RunnerArtifactBuilder, RunnerCapabilityBinding, RunnerOutputBuilder, RunnerPayloadBuilder,
+    RunnerRegistrationBuilder,
 };
 use mfm_state_portfolio::{
     balance_reader_kind, evm_block_number_for, observe_batch_with_backend, pin_views_with_backend,
@@ -130,80 +130,87 @@ pub fn register_portfolio_runners(
     let implementation_id = CapabilityImplementationId::new(CAPABILITY_IMPLEMENTATION_ID)?;
     let artifacts = capabilities.artifacts();
     let evm = capabilities.evm();
+    let mut registrations = RunnerRegistrationBuilder::new(registry, implementation_id);
     let prepare_sources = registered_descriptor::<PrepareSourcesState>()?;
-    registry.register_capability_set(&prepare_sources.capabilities, implementation_id.clone())?;
-    registry.register(binding(
+    register_runner(
+        &mut registrations,
         prepare_sources.descriptor_id,
+        &prepare_sources.capabilities,
         READ_FACTORY,
         Arc::new(PrepareSourcesRunner {
             artifacts: artifacts.clone(),
         }),
-    )?)?;
+    )?;
     let resolve_subjects = registered_descriptor::<ResolveSubjectsState>()?;
-    registry.register_capability_set(&resolve_subjects.capabilities, implementation_id.clone())?;
-    registry.register(binding(
+    register_runner(
+        &mut registrations,
         resolve_subjects.descriptor_id,
+        &resolve_subjects.capabilities,
         PURE_FACTORY,
         Arc::new(ResolveSubjectsRunner {
             artifacts: artifacts.clone(),
         }),
-    )?)?;
+    )?;
     let pin_views = registered_descriptor::<PinViewsState>()?;
-    registry.register_capability_set(&pin_views.capabilities, implementation_id.clone())?;
-    registry.register(binding(
+    register_runner(
+        &mut registrations,
         pin_views.descriptor_id,
+        &pin_views.capabilities,
         READ_FACTORY,
         Arc::new(PinViewsRunner {
             artifacts: artifacts.clone(),
             evm: evm.clone(),
         }),
-    )?)?;
+    )?;
     let resolve_valuations = registered_descriptor::<ResolveValuationsState>()?;
-    registry
-        .register_capability_set(&resolve_valuations.capabilities, implementation_id.clone())?;
-    registry.register(binding(
+    register_runner(
+        &mut registrations,
         resolve_valuations.descriptor_id,
+        &resolve_valuations.capabilities,
         PURE_FACTORY,
         Arc::new(ResolveValuationsRunner {
             artifacts: artifacts.clone(),
         }),
-    )?)?;
+    )?;
     let observe_batch = registered_descriptor::<ObserveBatchState>()?;
-    registry.register_capability_set(&observe_batch.capabilities, implementation_id.clone())?;
-    registry.register(binding(
+    register_runner(
+        &mut registrations,
         observe_batch.descriptor_id,
+        &observe_batch.capabilities,
         READ_FACTORY,
         Arc::new(ObserveBatchRunner {
             artifacts: artifacts.clone(),
             evm,
         }),
-    )?)?;
+    )?;
     let merge_observations = registered_descriptor::<MergeObservationsState>()?;
-    registry
-        .register_capability_set(&merge_observations.capabilities, implementation_id.clone())?;
-    registry.register(binding(
+    register_runner(
+        &mut registrations,
         merge_observations.descriptor_id,
+        &merge_observations.capabilities,
         PURE_FACTORY,
         Arc::new(MergeObservationsRunner {
             artifacts: artifacts.clone(),
         }),
-    )?)?;
+    )?;
     let assemble_snapshot = registered_descriptor::<AssembleSnapshotState>()?;
-    registry.register_capability_set(&assemble_snapshot.capabilities, implementation_id.clone())?;
-    registry.register(binding(
+    register_runner(
+        &mut registrations,
         assemble_snapshot.descriptor_id,
+        &assemble_snapshot.capabilities,
         PURE_FACTORY,
         Arc::new(AssembleSnapshotRunner {
             artifacts: artifacts.clone(),
         }),
-    )?)?;
+    )?;
     let project_report = registered_descriptor::<ProjectReportState>()?;
-    registry.register_capability_set(&project_report.capabilities, implementation_id)?;
-    registry.register(binding(
+    register_runner(
+        &mut registrations,
         project_report.descriptor_id,
+        &project_report.capabilities,
         PURE_FACTORY,
         Arc::new(ProjectReportRunner { artifacts }),
-    )?)?;
+    )?;
     Ok(())
 }
 
@@ -228,18 +235,22 @@ where
     })
 }
 
-fn binding(
+fn register_runner(
+    registrations: &mut RunnerRegistrationBuilder<'_>,
     descriptor_id: DescriptorId,
+    capabilities: &CapabilitySetDescriptor,
     factory: &'static str,
     runner: Arc<dyn ErasedNodeRunner>,
-) -> mfm_runtime::Result<ErasedRunnerBinding> {
+) -> mfm_runtime::Result<()> {
     let factory_id = events::RunnerFactoryId::new(factory)?;
-    ErasedRunnerBinding::new(
+    registrations.register_descriptor(
         descriptor_id,
+        capabilities,
         factory_id.clone(),
         executable(factory_id)?,
         runner,
-    )
+    )?;
+    Ok(())
 }
 
 fn executable(
