@@ -6,7 +6,7 @@ use crate::support::typed_run::{
     make_typed_run_store, parse_typed_run_id, TypedRunStoresArgs,
 };
 use clap::Args;
-use mfm_app::{AsyncRunServices, TypedRunResponse};
+use mfm_app::{RunServices, TypedRunResponse};
 
 /// Arguments for `mfm run status`.
 #[derive(Args)]
@@ -37,13 +37,12 @@ async fn execute_internal(args: &StatusArgs) -> CommandResult<TypedRunResponse> 
         .map_err(command_error_from_app_error)?;
     let certification_registry =
         mfm_app::production_certification_registry().map_err(command_error_from_app_error)?;
-    let services: AsyncRunServices<_> =
-        mfm_app::make_async_typed_services_with_certification_registry(
-            runners,
-            store,
-            artifacts,
-            certification_registry,
-        );
+    let services: RunServices<_> = mfm_app::make_async_typed_services_with_certification_registry(
+        runners,
+        store,
+        artifacts,
+        certification_registry,
+    );
     let response = services
         .run_status_with_projection(&run_id, projection)
         .await

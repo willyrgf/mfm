@@ -1161,10 +1161,6 @@ pub struct RunServices<S> {
     certification_registry: CertificationRegistry,
 }
 
-/// Deprecated compatibility alias for the async service facade.
-#[deprecated(note = "use RunServices")]
-pub type AsyncRunServices<S> = RunServices<S>;
-
 impl<S> RunServices<S>
 where
     S: store::AsyncTypedRunEventStore + Send + Sync,

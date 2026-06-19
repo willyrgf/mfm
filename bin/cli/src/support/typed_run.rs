@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use crate::commands::result::CommandError;
 use clap::{Args, ValueEnum};
-use mfm_app::{AsyncRunServices, DriveMode};
+use mfm_app::{DriveMode, RunServices};
 use mfm_artifact_store_fs::FsTypedArtifactStore;
 use mfm_ids::{RunId, SchemaId};
 use mfm_stream_store_postgres::{PostgresTypedRunEventStore, PostgresTypedStoreError};
@@ -67,7 +67,7 @@ pub(crate) async fn make_typed_run_store(
 /// Builds typed app services for CLI commands backed by the certified typed stores.
 pub(crate) async fn connect_run_services(
     args: &TypedRunStoresArgs,
-) -> Result<AsyncRunServices<PostgresTypedRunEventStore>, CommandError> {
+) -> Result<RunServices<PostgresTypedRunEventStore>, CommandError> {
     let store = make_typed_run_store(args).await?;
     let artifacts = make_typed_artifact_store(args);
     let runners = mfm_app::production_typed_runner_registry(artifacts.clone())
