@@ -70,7 +70,10 @@ use mfm_runtime::{
     ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCell, MaterializedCellTerminal,
     MaterializedInputNode, RunnerArtifactBuilder, RunnerCapabilityBinding, RunnerClaimBinding,
     RunnerOutputBuilder, RunnerPayloadBuilder, RunnerPreparedInvocationBinding,
-    RunnerRegistrationBuilder, RunnerSideEffectBinding,
+    RunnerRegistrationBuilder, RunnerSideEffectBinding, SideEffectClaimAuthority, SideEffectDriver,
+    SideEffectDriverCallbacks, SideEffectDriverFuture, SideEffectIntentPlan,
+    SideEffectObservedEvidence, SideEffectProtocolAction, SideEffectReplayEvidence,
+    SideEffectSubmissionDecision,
 };
 use mfm_signing::{PublicKeyBytes, SignerRef, SigningProvider};
 use mfm_state_evm_contracts::{
@@ -1023,6 +1026,13 @@ pub fn replay_verifier_id() -> Result<events::ReplayVerifierId> {
         .map_err(|error| EvmContractAdapterError::Identity(error.to_string()))
 }
 
+fn contract_side_effect_replay_evidence() -> mfm_runtime::Result<SideEffectReplayEvidence> {
+    Ok(SideEffectReplayEvidence {
+        replay_verifier_id: replay_verifier_id().map_err(runtime_adapter_error)?,
+        resource_touched_set: None,
+    })
+}
+
 /// Verifies contract lifecycle side-effect replay evidence when present in a broker stream.
 ///
 /// Returns `Ok(false)` when the stream contains no contract lifecycle side-effect intent.
@@ -1769,106 +1779,215 @@ async fn run_deploy_mutation(
     factory: &dyn EvmContractRuntimeFactory,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
     let plan = deploy_mutation_plan(&ctx, factory.artifacts()).await?;
-    let phase = ctx
-        .projections()
-        .side_effect(&plan.ledger_key)
-        .map(|projection| projection.phase.clone());
-    match contract_mutation_side_effect_action(phase.as_ref()) {
-        ContractMutationSideEffectAction::PrepareAndStart => {
-            let runtime = factory.runtime_for(plan.config.as_ref().network().network_id())?;
+    let callbacks = DeploySideEffectCallbacks { factory, plan };
+    SideEffectDriver::drive(ctx, &callbacks).await
+}
+
+struct DeploySideEffectCallbacks<'a> {
+    factory: &'a dyn EvmContractRuntimeFactory,
+    plan: DeployMutationPlan,
+}
+
+impl SideEffectDriverCallbacks for DeploySideEffectCallbacks<'_> {
+    type Intent = ContractDeployIntent;
+    type Idempotency = ContractTransactionIdempotency;
+    type PreparedInvocation = PreparedContractInvocation;
+    type Submission = ContractTransactionSubmissions;
+    type SubmissionUnknownEvidence = ContractTransactionSubmissions;
+    type NotSubmittedProof = ContractTransactionSubmissions;
+    type Receipt = ContractTransactionReceipts;
+    type Confirmation = ContractDeployConfirmation;
+    type AmbiguityEvidence = ContractTransactionSubmissions;
+    type Output = DeployedContract;
+
+    fn intent_and_idempotency<'a, 'ctx>(
+        &'a self,
+        ctx: &'a ErasedRunCtx<'ctx>,
+    ) -> SideEffectDriverFuture<'a, SideEffectIntentPlan<Self::Intent, Self::Idempotency>> {
+        Box::pin(async {
+            Ok(SideEffectIntentPlan {
+                side_effect: RunnerSideEffectBinding {
+                    ledger_key: self.plan.ledger_key.clone(),
+                    ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                    invocation_epoch: 1,
+                },
+                claim: SideEffectClaimAuthority {
+                    claim_owner: runner_invocation_id(ctx, &self.plan.ledger_key)?,
+                    claim_generation: 1,
+                    claim_fencing_token: claim_fencing_token(ctx, &self.plan.ledger_key)?,
+                    resource_key: None,
+                },
+                intent: self.plan.intent.clone(),
+                idempotency: self.plan.idempotency.clone(),
+                idempotency_key: idempotency_key_ref(&self.plan.idempotency)?,
+                capability_binding: evm_transaction_submit_binding()?,
+            })
+        })
+    }
+
+    fn prepare_invocation<'a, 'ctx>(
+        &'a self,
+        _ctx: &'a ErasedRunCtx<'ctx>,
+        _plan: &'a SideEffectIntentPlan<Self::Intent, Self::Idempotency>,
+    ) -> SideEffectDriverFuture<'a, Option<Self::PreparedInvocation>> {
+        Box::pin(async {
+            let runtime = self
+                .factory
+                .runtime_for(self.plan.config.as_ref().network().network_id())?;
             let prepared = runtime
                 .adapter()
-                .prepare_deploy_invocation(&plan.config, &plan.intent)
+                .prepare_deploy_invocation(&self.plan.config, &self.plan.intent)
                 .await
                 .map_err(runtime_adapter_error)?;
-            side_effect_prepare(
-                ctx,
-                plan.ledger_key,
-                &plan.intent,
-                &plan.idempotency,
-                prepared.evidence(),
-            )
-        }
-        ContractMutationSideEffectAction::Submit { invocation_epoch } => {
-            let prepared_projection = projected_prepared_artifact(&ctx, &plan.ledger_key)?;
-            let stored_prepared = load_prepared_invocation(
-                &prepared_projection,
+            Ok(Some(prepared.evidence().clone()))
+        })
+    }
+
+    fn reconstruct_prepared_invocation<'a, 'ctx>(
+        &'a self,
+        ctx: &'a ErasedRunCtx<'ctx>,
+        prepared: &'a store::SideEffectArtifactProjection,
+    ) -> SideEffectDriverFuture<'a, Self::PreparedInvocation> {
+        Box::pin(async {
+            load_prepared_invocation(
+                prepared,
                 events::ArtifactRole::PreparedInvocation,
-                &ctx,
-                factory.artifacts(),
-            )
-            .await?;
-            let runtime = factory.runtime_for(plan.config.as_ref().network().network_id())?;
-            let prepared = runtime
-                .adapter()
-                .reconstruct_deploy_invocation(&plan.config, &plan.intent, &stored_prepared)
-                .map_err(runtime_adapter_error)?;
-            side_effect_submission(ctx, &runtime, plan.ledger_key, invocation_epoch, &prepared)
-                .await
-        }
-        ContractMutationSideEffectAction::ReadReceipt { invocation_epoch } => {
-            let prepared_projection = projected_prepared_artifact(&ctx, &plan.ledger_key)?;
-            let submission_projection = projected_submission_artifact(&ctx, &plan.ledger_key)?;
-            let runtime = factory.runtime_for(plan.config.as_ref().network().network_id())?;
-            side_effect_receipt(
                 ctx,
-                factory.artifacts(),
-                &runtime,
-                plan.ledger_key,
-                invocation_epoch,
-                &prepared_projection,
-                &submission_projection,
+                self.factory.artifacts(),
             )
             .await
-        }
-        ContractMutationSideEffectAction::Confirm { invocation_epoch } => {
-            let prepared_projection = projected_prepared_artifact(&ctx, &plan.ledger_key)?;
-            let receipt_projection = projected_receipt_artifact(&ctx, &plan.ledger_key)?;
+        })
+    }
+
+    fn submit_or_recover_submission<'a, 'ctx>(
+        &'a self,
+        _ctx: &'a ErasedRunCtx<'ctx>,
+        _action: SideEffectProtocolAction,
+        prepared: Option<Self::PreparedInvocation>,
+    ) -> SideEffectDriverFuture<
+        'a,
+        SideEffectSubmissionDecision<
+            Self::Submission,
+            Self::SubmissionUnknownEvidence,
+            Self::NotSubmittedProof,
+            Self::AmbiguityEvidence,
+        >,
+    > {
+        Box::pin(async {
+            let stored_prepared =
+                prepared.ok_or_else(|| missing_side_effect_artifact("prepared invocation"))?;
+            let runtime = self
+                .factory
+                .runtime_for(self.plan.config.as_ref().network().network_id())?;
+            let prepared = runtime
+                .adapter()
+                .reconstruct_deploy_invocation(
+                    &self.plan.config,
+                    &self.plan.intent,
+                    &stored_prepared,
+                )
+                .map_err(runtime_adapter_error)?;
+            let submissions = ContractTransactionSubmissions {
+                submissions_version: 1,
+                transactions: runtime
+                    .adapter()
+                    .submit_prepared(&prepared)
+                    .await
+                    .map_err(runtime_adapter_error)?,
+            };
+            Ok(SideEffectSubmissionDecision::Observed(submissions))
+        })
+    }
+
+    fn read_receipt<'a, 'ctx>(
+        &'a self,
+        ctx: &'a ErasedRunCtx<'ctx>,
+        submission: &'a store::SideEffectArtifactProjection,
+    ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Receipt>> {
+        Box::pin(async {
+            let prepared_projection = projected_prepared_artifact(ctx, &self.plan.ledger_key)?;
             let prepared = load_prepared_invocation(
                 &prepared_projection,
                 events::ArtifactRole::PreparedInvocation,
-                &ctx,
-                factory.artifacts(),
+                ctx,
+                self.factory.artifacts(),
+            )
+            .await?;
+            let submissions = load_side_effect_value::<ContractTransactionSubmissions>(
+                submission,
+                events::ArtifactRole::Submission,
+                ctx,
+                self.factory.artifacts(),
+            )
+            .await?;
+            let runtime = self
+                .factory
+                .runtime_for(self.plan.config.as_ref().network().network_id())?;
+            Ok(SideEffectObservedEvidence {
+                evidence: ContractTransactionReceipts {
+                    receipts_version: 1,
+                    transactions: read_receipts_with_poll(&runtime, &prepared, &submissions)
+                        .await?,
+                },
+                replay: contract_side_effect_replay_evidence()?,
+            })
+        })
+    }
+
+    fn build_confirmation<'a, 'ctx>(
+        &'a self,
+        ctx: &'a ErasedRunCtx<'ctx>,
+        receipt: &'a store::SideEffectArtifactProjection,
+    ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Confirmation>> {
+        Box::pin(async {
+            let prepared_projection = projected_prepared_artifact(ctx, &self.plan.ledger_key)?;
+            let prepared = load_prepared_invocation(
+                &prepared_projection,
+                events::ArtifactRole::PreparedInvocation,
+                ctx,
+                self.factory.artifacts(),
             )
             .await?;
             let (receipts, receipt_evidence) =
                 load_side_effect_artifact::<ContractTransactionReceipts>(
-                    &receipt_projection,
+                    receipt,
                     events::ArtifactRole::Receipt,
-                    &ctx,
-                    factory.artifacts(),
+                    ctx,
+                    self.factory.artifacts(),
                 )
                 .await?;
             let receipts = receipts_with_evidence(receipts, &receipt_evidence);
             let receipt = single_receipt(receipts)?;
-            let confirmation = ContractDeployConfirmation {
-                confirmation_version: 1,
-                contract_address: deploy_contract_address_from_prepared(&prepared)
-                    .map_err(runtime_adapter_error)?,
-                receipt,
-            };
-            side_effect_confirmation(ctx, plan.ledger_key, invocation_epoch, &confirmation)
-        }
-        ContractMutationSideEffectAction::EmitOutput => {
-            let confirmation_projection = projected_confirmation_artifact(&ctx, &plan.ledger_key)?;
+            Ok(SideEffectObservedEvidence {
+                evidence: ContractDeployConfirmation {
+                    confirmation_version: 1,
+                    contract_address: deploy_contract_address_from_prepared(&prepared)
+                        .map_err(runtime_adapter_error)?,
+                    receipt,
+                },
+                replay: contract_side_effect_replay_evidence()?,
+            })
+        })
+    }
+
+    fn map_confirmation_to_output<'a, 'ctx>(
+        &'a self,
+        ctx: &'a ErasedRunCtx<'ctx>,
+        confirmation: &'a store::SideEffectArtifactProjection,
+    ) -> SideEffectDriverFuture<'a, Self::Output> {
+        Box::pin(async {
             let confirmation = load_side_effect_value::<ContractDeployConfirmation>(
-                &confirmation_projection,
+                confirmation,
                 events::ArtifactRole::Confirmation,
-                &ctx,
-                factory.artifacts(),
+                ctx,
+                self.factory.artifacts(),
             )
             .await?;
-            let output = plan
+            self.plan
                 .state
-                .output_from_confirmation(&(), &plan.intent, &confirmation)
-                .map_err(runtime_state_error)?;
-            mutation_output(ctx, &output)
-        }
-        ContractMutationSideEffectAction::IdleAmbiguous => Ok(ErasedRunnerOutput::new(Vec::new())),
-        ContractMutationSideEffectAction::Unsupported => {
-            let other = phase.expect("unsupported side-effect action requires a projected phase");
-            unsupported_side_effect_phase("deploy", other)
-        }
+                .output_from_confirmation(&(), &self.plan.intent, &confirmation)
+                .map_err(runtime_state_error)
+        })
     }
 }
 
