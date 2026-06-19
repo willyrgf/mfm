@@ -3829,7 +3829,12 @@ pub mod v1 {
             source: EventArtifactReferenceSource,
             artifact_id_field: &'static str,
             digest_field: Option<&'static str>,
+            byte_len_field: Option<&'static str>,
+            media_type_field: Option<&'static str>,
             schema_id_field: Option<&'static str>,
+            semantic_type_id_field: Option<&'static str>,
+            producer_node_id_field: Option<&'static str>,
+            producer_seed_id_field: Option<&'static str>,
             role: ArtifactRole,
         }
 
@@ -3856,7 +3861,12 @@ pub mod v1 {
                 source: EventArtifactReferenceSource::FactResponse,
                 artifact_id_field: "artifact_id",
                 digest_field: Some("response_hash"),
+                byte_len_field: None,
+                media_type_field: None,
                 schema_id_field: Some("response_schema_id"),
+                semantic_type_id_field: None,
+                producer_node_id_field: Some("node_id"),
+                producer_seed_id_field: None,
                 role: ArtifactRole::FactResponse,
             }],
         };
@@ -4644,10 +4654,84 @@ mfm_events::v1::RetentionManifestProjected schema:mfm.events.v1.retention_manife
                     source: EventArtifactReferenceSource::FactResponse,
                     artifact_id_field: "artifact_id",
                     digest_field: Some("response_hash"),
+                    byte_len_field: None,
+                    media_type_field: None,
                     schema_id_field: Some("response_schema_id"),
+                    semantic_type_id_field: None,
+                    producer_node_id_field: Some("node_id"),
+                    producer_seed_id_field: None,
                     role: ArtifactRole::FactResponse,
                 }]
             );
+        }
+
+        #[test]
+        fn fact_recorded_declaration_generates_handwritten_artifact_requirements() {
+            let payload = FactRecorded {
+                spec_hash: spec_hash(40),
+                node_id: node_id(41),
+                attempt_id: attempt_id(42),
+                capability_kind: CapabilityKind::new(
+                    "mfm.test",
+                    "capability",
+                    DigestAlgorithm::Sha256JcsV1,
+                    digest_bytes(43),
+                )
+                .expect("capability kind"),
+                capability_version: CapabilityVersion::new("mfm.test.capability.v1")
+                    .expect("capability version"),
+                adapter_kind: AdapterKind::new(
+                    "mfm.test",
+                    "adapter",
+                    DigestAlgorithm::Sha256JcsV1,
+                    digest_bytes(44),
+                )
+                .expect("adapter kind"),
+                adapter_version: AdapterVersion::new("mfm.test.adapter.v1")
+                    .expect("adapter version"),
+                request_schema_id: schema_id("mfm.test.request", 45),
+                request_hash: content_digest(46),
+                response_schema_id: schema_id("mfm.test.response", 47),
+                response_hash: content_digest(48),
+                fact_key: FactKey::new("fact-key").expect("fact key"),
+                artifact_id: artifact_id(49),
+            };
+
+            assert_eq!(
+                fact_recorded_artifact_requirements_from_declaration(&payload),
+                KernelEventPayload::FactRecorded(payload).artifact_requirements()
+            );
+        }
+
+        fn fact_recorded_artifact_requirements_from_declaration(
+            payload: &FactRecorded,
+        ) -> Vec<EventArtifactRequirement> {
+            FACT_RECORDED_EVENT_DECLARATION
+                .artifact_lenses
+                .iter()
+                .map(|lens| {
+                    assert_eq!(lens.artifact_id_field, "artifact_id");
+                    assert_eq!(lens.digest_field, Some("response_hash"));
+                    assert_eq!(lens.byte_len_field, None);
+                    assert_eq!(lens.media_type_field, None);
+                    assert_eq!(lens.schema_id_field, Some("response_schema_id"));
+                    assert_eq!(lens.semantic_type_id_field, None);
+                    assert_eq!(lens.producer_node_id_field, Some("node_id"));
+                    assert_eq!(lens.producer_seed_id_field, None);
+                    EventArtifactRequirement {
+                        source: lens.source,
+                        artifact_id: payload.artifact_id.clone(),
+                        digest: Some(payload.response_hash.clone()),
+                        byte_len: None,
+                        media_type: None,
+                        schema_id: Some(payload.response_schema_id.clone()),
+                        semantic_type_id: None,
+                        producer_node_id: Some(payload.node_id.clone()),
+                        producer_seed_id: None,
+                        artifact_role: Some(lens.role),
+                    }
+                })
+                .collect()
         }
 
         #[test]
