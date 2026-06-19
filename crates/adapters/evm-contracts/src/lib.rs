@@ -71,7 +71,7 @@ use mfm_runtime::{
     RunnerPayloadBuilder, RunnerRegistrationBuilder, RunnerSideEffectBinding,
     SideEffectClaimAuthority, SideEffectDriver, SideEffectDriverCallbacks, SideEffectDriverFuture,
     SideEffectIntentPlan, SideEffectObservedEvidence, SideEffectProtocolAction,
-    SideEffectReplayEvidence, SideEffectSubmissionDecision,
+    SideEffectReplayEvidence, SideEffectSubmissionDecision, SideEffectSubmissionDecisionFuture,
 };
 use mfm_signing::{PublicKeyBytes, SignerRef, SigningProvider};
 use mfm_state_evm_contracts::{
@@ -1759,14 +1759,12 @@ impl SideEffectDriverCallbacks for DeploySideEffectCallbacks<'_> {
         _ctx: &'a ErasedRunCtx<'ctx>,
         _action: SideEffectProtocolAction,
         prepared: Option<Self::PreparedInvocation>,
-    ) -> SideEffectDriverFuture<
+    ) -> SideEffectSubmissionDecisionFuture<
         'a,
-        SideEffectSubmissionDecision<
-            Self::Submission,
-            Self::SubmissionUnknownEvidence,
-            Self::NotSubmittedProof,
-            Self::AmbiguityEvidence,
-        >,
+        Self::Submission,
+        Self::SubmissionUnknownEvidence,
+        Self::NotSubmittedProof,
+        Self::AmbiguityEvidence,
     > {
         Box::pin(async {
             let stored_prepared =
@@ -1980,14 +1978,12 @@ impl SideEffectDriverCallbacks for ConfigureSideEffectCallbacks<'_> {
         _ctx: &'a ErasedRunCtx<'ctx>,
         _action: SideEffectProtocolAction,
         prepared: Option<Self::PreparedInvocation>,
-    ) -> SideEffectDriverFuture<
+    ) -> SideEffectSubmissionDecisionFuture<
         'a,
-        SideEffectSubmissionDecision<
-            Self::Submission,
-            Self::SubmissionUnknownEvidence,
-            Self::NotSubmittedProof,
-            Self::AmbiguityEvidence,
-        >,
+        Self::Submission,
+        Self::SubmissionUnknownEvidence,
+        Self::NotSubmittedProof,
+        Self::AmbiguityEvidence,
     > {
         Box::pin(async {
             let stored_prepared =

@@ -238,6 +238,18 @@ pub enum SideEffectSubmissionDecision<
     },
 }
 
+/// Boxed future returned by submission recovery callbacks.
+pub type SideEffectSubmissionDecisionFuture<
+    'a,
+    Submission,
+    UnknownEvidence,
+    NotSubmittedProof,
+    AmbiguityEvidence,
+> = SideEffectDriverFuture<
+    'a,
+    SideEffectSubmissionDecision<Submission, UnknownEvidence, NotSubmittedProof, AmbiguityEvidence>,
+>;
+
 /// Observed side-effect evidence plus replay verifier metadata.
 pub struct SideEffectObservedEvidence<T> {
     /// Typed observed evidence.
@@ -299,14 +311,12 @@ pub trait SideEffectDriverCallbacks {
         ctx: &'a ErasedRunCtx<'ctx>,
         action: SideEffectProtocolAction,
         prepared: Option<Self::PreparedInvocation>,
-    ) -> SideEffectDriverFuture<
+    ) -> SideEffectSubmissionDecisionFuture<
         'a,
-        SideEffectSubmissionDecision<
-            Self::Submission,
-            Self::SubmissionUnknownEvidence,
-            Self::NotSubmittedProof,
-            Self::AmbiguityEvidence,
-        >,
+        Self::Submission,
+        Self::SubmissionUnknownEvidence,
+        Self::NotSubmittedProof,
+        Self::AmbiguityEvidence,
     >;
 
     /// Reads receipt evidence using adapter-owned artifact reads and live providers.

@@ -1463,14 +1463,12 @@ impl SideEffectDriverCallbacks for TestSideEffectDriverCallbacks {
         _ctx: &'a ErasedRunCtx<'ctx>,
         _action: SideEffectProtocolAction,
         _prepared: Option<Self::PreparedInvocation>,
-    ) -> SideEffectDriverFuture<
+    ) -> SideEffectSubmissionDecisionFuture<
         'a,
-        SideEffectSubmissionDecision<
-            Self::Submission,
-            Self::SubmissionUnknownEvidence,
-            Self::NotSubmittedProof,
-            Self::AmbiguityEvidence,
-        >,
+        Self::Submission,
+        Self::SubmissionUnknownEvidence,
+        Self::NotSubmittedProof,
+        Self::AmbiguityEvidence,
     > {
         let decision = self.submission_decision.clone();
         Box::pin(async move {

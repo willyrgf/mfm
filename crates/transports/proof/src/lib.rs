@@ -26,7 +26,7 @@ use mfm_runtime::{
     RunnerRegistrationBuilder, RunnerSideEffectBinding, SideEffectClaimAuthority, SideEffectDriver,
     SideEffectDriverCallbacks, SideEffectDriverFuture, SideEffectIntentPlan,
     SideEffectObservedEvidence, SideEffectProtocolAction, SideEffectReplayEvidence,
-    SideEffectSubmissionDecision,
+    SideEffectSubmissionDecision, SideEffectSubmissionDecisionFuture,
 };
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
@@ -268,14 +268,12 @@ impl SideEffectDriverCallbacks for ProofSideEffectCallbacks {
         _ctx: &'a ErasedRunCtx<'ctx>,
         _action: SideEffectProtocolAction,
         _prepared: Option<Self::PreparedInvocation>,
-    ) -> SideEffectDriverFuture<
+    ) -> SideEffectSubmissionDecisionFuture<
         'a,
-        SideEffectSubmissionDecision<
-            Self::Submission,
-            Self::SubmissionUnknownEvidence,
-            Self::NotSubmittedProof,
-            Self::AmbiguityEvidence,
-        >,
+        Self::Submission,
+        Self::SubmissionUnknownEvidence,
+        Self::NotSubmittedProof,
+        Self::AmbiguityEvidence,
     > {
         Box::pin(async { Ok(SideEffectSubmissionDecision::Observed(proof_submission()?)) })
     }

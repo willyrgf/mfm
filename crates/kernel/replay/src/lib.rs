@@ -486,6 +486,17 @@ pub mod v1 {
         pub producer_seed_id: Option<SeedId>,
     }
 
+    #[derive(Debug, Clone, Copy)]
+    struct ArtifactEvidenceExpectation<'a> {
+        artifact_id: &'a ArtifactId,
+        digest: &'a ContentDigest,
+        schema_id: Option<&'a SchemaId>,
+        semantic_type_id: Option<&'a SemanticTypeId>,
+        role: ArtifactRole,
+        producer_node_id: Option<&'a NodeId>,
+        producer_seed_id: Option<&'a SeedId>,
+    }
+
     type FactKey = (NodeId, AttemptId, events::FactKey);
     type SideEffectKey = (events::SideEffectLedgerKey, u32);
 
@@ -592,15 +603,15 @@ pub mod v1 {
             &self,
             request: &ArtifactReplayRequest,
         ) -> Result<StoredArtifactEvidenceRef> {
-            self.verify_artifact(
-                &request.artifact_id,
-                &request.digest,
-                request.schema_id.as_ref(),
-                request.semantic_type_id.as_ref(),
-                request.role,
-                request.producer_node_id.as_ref(),
-                request.producer_seed_id.as_ref(),
-            )
+            self.verify_artifact(ArtifactEvidenceExpectation {
+                artifact_id: &request.artifact_id,
+                digest: &request.digest,
+                schema_id: request.schema_id.as_ref(),
+                semantic_type_id: request.semantic_type_id.as_ref(),
+                role: request.role,
+                producer_node_id: request.producer_node_id.as_ref(),
+                producer_seed_id: request.producer_seed_id.as_ref(),
+            })
         }
 
         /// Returns a recorded fact from replay evidence only.
@@ -647,15 +658,15 @@ pub mod v1 {
 
             Ok(RecordedFactReplay {
                 fact: fact.clone(),
-                artifact: self.verify_artifact(
-                    &fact.artifact_id,
-                    &fact.response_hash,
-                    Some(&fact.response_schema_id),
-                    None,
-                    ArtifactRole::FactResponse,
-                    Some(&fact.node_id),
-                    None,
-                )?,
+                artifact: self.verify_artifact(ArtifactEvidenceExpectation {
+                    artifact_id: &fact.artifact_id,
+                    digest: &fact.response_hash,
+                    schema_id: Some(&fact.response_schema_id),
+                    semantic_type_id: None,
+                    role: ArtifactRole::FactResponse,
+                    producer_node_id: Some(&fact.node_id),
+                    producer_seed_id: None,
+                })?,
             })
         }
 
@@ -708,15 +719,15 @@ pub mod v1 {
             }
             Ok(SubmissionReplayEvidence {
                 submission: submission.clone(),
-                artifact: self.verify_artifact(
-                    &submission.submission_artifact_id,
-                    &submission.submission_hash,
-                    Some(&submission.submission_schema_id),
-                    None,
-                    ArtifactRole::Submission,
-                    Some(&submission.node_id),
-                    None,
-                )?,
+                artifact: self.verify_artifact(ArtifactEvidenceExpectation {
+                    artifact_id: &submission.submission_artifact_id,
+                    digest: &submission.submission_hash,
+                    schema_id: Some(&submission.submission_schema_id),
+                    semantic_type_id: None,
+                    role: ArtifactRole::Submission,
+                    producer_node_id: Some(&submission.node_id),
+                    producer_seed_id: None,
+                })?,
             })
         }
 
@@ -764,15 +775,15 @@ pub mod v1 {
             }
             Ok(ReceiptReplayEvidence {
                 receipt: receipt.clone(),
-                artifact: self.verify_artifact(
-                    &receipt.receipt_artifact_id,
-                    &receipt.receipt_hash,
-                    Some(&receipt.receipt_schema_id),
-                    None,
-                    ArtifactRole::Receipt,
-                    Some(&receipt.node_id),
-                    None,
-                )?,
+                artifact: self.verify_artifact(ArtifactEvidenceExpectation {
+                    artifact_id: &receipt.receipt_artifact_id,
+                    digest: &receipt.receipt_hash,
+                    schema_id: Some(&receipt.receipt_schema_id),
+                    semantic_type_id: None,
+                    role: ArtifactRole::Receipt,
+                    producer_node_id: Some(&receipt.node_id),
+                    producer_seed_id: None,
+                })?,
             })
         }
 
@@ -802,15 +813,15 @@ pub mod v1 {
             }
             Ok(ConfirmationReplayEvidence {
                 confirmation: confirmation.clone(),
-                artifact: self.verify_artifact(
-                    &confirmation.confirmation_artifact_id,
-                    &confirmation.confirmation_hash,
-                    Some(&confirmation.confirmation_schema_id),
-                    None,
-                    ArtifactRole::Confirmation,
-                    Some(&confirmation.node_id),
-                    None,
-                )?,
+                artifact: self.verify_artifact(ArtifactEvidenceExpectation {
+                    artifact_id: &confirmation.confirmation_artifact_id,
+                    digest: &confirmation.confirmation_hash,
+                    schema_id: Some(&confirmation.confirmation_schema_id),
+                    semantic_type_id: None,
+                    role: ArtifactRole::Confirmation,
+                    producer_node_id: Some(&confirmation.node_id),
+                    producer_seed_id: None,
+                })?,
             })
         }
 
@@ -868,15 +879,15 @@ pub mod v1 {
         fn authorize_certified_spec_artifacts(&mut self) -> Result<()> {
             let config_refs = self.certified_spec.spec.config_refs.clone();
             for config in config_refs {
-                self.authorize_artifact(
-                    &config.artifact_id,
-                    &config.digest,
-                    Some(&config.schema_id),
-                    None,
-                    ArtifactRole::TypedConfig,
-                    None,
-                    None,
-                )?;
+                self.authorize_artifact(ArtifactEvidenceExpectation {
+                    artifact_id: &config.artifact_id,
+                    digest: &config.digest,
+                    schema_id: Some(&config.schema_id),
+                    semantic_type_id: None,
+                    role: ArtifactRole::TypedConfig,
+                    producer_node_id: None,
+                    producer_seed_id: None,
+                })?;
             }
             Ok(())
         }
@@ -1120,15 +1131,15 @@ pub mod v1 {
             })?;
             Ok(SideEffectIntentReplayEvidence {
                 intent: intent.clone(),
-                artifact: self.verify_artifact(
-                    &intent.intent_artifact_id,
-                    &intent.intent_hash,
-                    Some(&intent.intent_schema_id),
-                    None,
-                    ArtifactRole::SideEffectIntent,
-                    Some(&intent.node_id),
-                    None,
-                )?,
+                artifact: self.verify_artifact(ArtifactEvidenceExpectation {
+                    artifact_id: &intent.intent_artifact_id,
+                    digest: &intent.intent_hash,
+                    schema_id: Some(&intent.intent_schema_id),
+                    semantic_type_id: None,
+                    role: ArtifactRole::SideEffectIntent,
+                    producer_node_id: Some(&intent.node_id),
+                    producer_seed_id: None,
+                })?,
             })
         }
 
@@ -1144,15 +1155,15 @@ pub mod v1 {
             };
             Ok(Some(SubmissionReplayEvidence {
                 submission: submission.clone(),
-                artifact: self.verify_artifact(
-                    &submission.submission_artifact_id,
-                    &submission.submission_hash,
-                    Some(&submission.submission_schema_id),
-                    None,
-                    ArtifactRole::Submission,
-                    Some(&submission.node_id),
-                    None,
-                )?,
+                artifact: self.verify_artifact(ArtifactEvidenceExpectation {
+                    artifact_id: &submission.submission_artifact_id,
+                    digest: &submission.submission_hash,
+                    schema_id: Some(&submission.submission_schema_id),
+                    semantic_type_id: None,
+                    role: ArtifactRole::Submission,
+                    producer_node_id: Some(&submission.node_id),
+                    producer_seed_id: None,
+                })?,
             }))
         }
 
@@ -1168,15 +1179,15 @@ pub mod v1 {
             };
             Ok(Some(ReceiptReplayEvidence {
                 receipt: receipt.clone(),
-                artifact: self.verify_artifact(
-                    &receipt.receipt_artifact_id,
-                    &receipt.receipt_hash,
-                    Some(&receipt.receipt_schema_id),
-                    None,
-                    ArtifactRole::Receipt,
-                    Some(&receipt.node_id),
-                    None,
-                )?,
+                artifact: self.verify_artifact(ArtifactEvidenceExpectation {
+                    artifact_id: &receipt.receipt_artifact_id,
+                    digest: &receipt.receipt_hash,
+                    schema_id: Some(&receipt.receipt_schema_id),
+                    semantic_type_id: None,
+                    role: ArtifactRole::Receipt,
+                    producer_node_id: Some(&receipt.node_id),
+                    producer_seed_id: None,
+                })?,
             }))
         }
 
@@ -2029,28 +2040,28 @@ pub mod v1 {
 
         fn authorize_artifact(
             &mut self,
-            artifact_id: &ArtifactId,
-            digest: &ContentDigest,
-            schema_id: Option<&SchemaId>,
-            semantic_type_id: Option<&SemanticTypeId>,
-            role: ArtifactRole,
-            producer_node_id: Option<&NodeId>,
-            producer_seed_id: Option<&SeedId>,
+            expected: ArtifactEvidenceExpectation<'_>,
         ) -> Result<StoredArtifactEvidenceRef> {
-            let evidence = self.retained_artifacts.get(artifact_id).ok_or_else(|| {
-                ReplayError::new(
-                    ReplayErrorKind::ArtifactMissing,
-                    format!("missing retained artifact evidence for {artifact_id}"),
-                )
-            })?;
+            let evidence = self
+                .retained_artifacts
+                .get(expected.artifact_id)
+                .ok_or_else(|| {
+                    ReplayError::new(
+                        ReplayErrorKind::ArtifactMissing,
+                        format!(
+                            "missing retained artifact evidence for {}",
+                            expected.artifact_id
+                        ),
+                    )
+                })?;
             verify_artifact_fields(
                 evidence,
-                digest,
-                schema_id,
-                semantic_type_id,
-                role,
-                producer_node_id,
-                producer_seed_id,
+                expected.digest,
+                expected.schema_id,
+                expected.semantic_type_id,
+                expected.role,
+                expected.producer_node_id,
+                expected.producer_seed_id,
             )?;
             let evidence = evidence.clone();
             self.insert_authorized_artifact(evidence.clone())?;
@@ -2080,28 +2091,25 @@ pub mod v1 {
 
         fn verify_artifact(
             &self,
-            artifact_id: &ArtifactId,
-            digest: &ContentDigest,
-            schema_id: Option<&SchemaId>,
-            semantic_type_id: Option<&SemanticTypeId>,
-            role: ArtifactRole,
-            producer_node_id: Option<&NodeId>,
-            producer_seed_id: Option<&SeedId>,
+            expected: ArtifactEvidenceExpectation<'_>,
         ) -> Result<StoredArtifactEvidenceRef> {
-            let evidence = self.artifacts.get(artifact_id).ok_or_else(|| {
+            let evidence = self.artifacts.get(expected.artifact_id).ok_or_else(|| {
                 ReplayError::new(
                     ReplayErrorKind::ArtifactMissing,
-                    format!("missing replay-authorized artifact evidence for {artifact_id}"),
+                    format!(
+                        "missing replay-authorized artifact evidence for {}",
+                        expected.artifact_id
+                    ),
                 )
             })?;
             verify_artifact_fields(
                 evidence,
-                digest,
-                schema_id,
-                semantic_type_id,
-                role,
-                producer_node_id,
-                producer_seed_id,
+                expected.digest,
+                expected.schema_id,
+                expected.semantic_type_id,
+                expected.role,
+                expected.producer_node_id,
+                expected.producer_seed_id,
             )?;
             Ok(evidence.clone())
         }

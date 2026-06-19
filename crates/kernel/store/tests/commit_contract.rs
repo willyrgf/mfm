@@ -1,6 +1,5 @@
 use std::future::Future;
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_events::v1::{self as events, side_effect, ArtifactRole, KernelEventPayload};
@@ -61,17 +60,11 @@ macro_rules! typed_commit_request {
     };
 }
 
-struct NoopWake;
-
-impl Wake for NoopWake {
-    fn wake(self: Arc<Self>) {}
-}
-
 fn poll_ready_store_future<T, E>(
     mut future: AsyncStoreFuture<'_, T, E>,
 ) -> std::result::Result<T, E> {
-    let waker = Waker::from(Arc::new(NoopWake));
-    let mut context = Context::from_waker(&waker);
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
     match Future::poll(future.as_mut(), &mut context) {
         Poll::Ready(result) => result,
         Poll::Pending => panic!("async in-memory store future should be ready"),
@@ -1879,7 +1872,10 @@ fn fact_recorded_projection_transition_descriptor_matches_rebuilt_projection() {
         )
         .expect("fact projection");
 
-    assert!(FACT_RECORDED_PROJECTION.requires_started_attempt);
+    assert_eq!(
+        FACT_RECORDED_PROJECTION.requires_started_attempt,
+        snapshot.attempt(&node_id(90), &attempt_id(91)).is_some()
+    );
     assert_eq!(
         FACT_RECORDED_PROJECTION.unique_key,
         ["node_id", "attempt_id", "fact_key"]
