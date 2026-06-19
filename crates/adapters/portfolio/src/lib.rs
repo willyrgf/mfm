@@ -19,14 +19,14 @@ use mfm_evm_capabilities::{
 };
 use mfm_evm_core::encoding::{encode_erc20_balance_of, encode_erc20_decimals, parse_u8_u256};
 use mfm_evm_core::hex::hex_to_bytes;
-use mfm_ids::{ArtifactId, ContentDigest, DescriptorId, NodeId, SemanticTypeId};
+use mfm_ids::{ContentDigest, DescriptorId};
 use mfm_program::{StateSpec, ValidatedConfig};
 use mfm_runtime::{
     CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerBinding,
     ErasedRunnerFuture, ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCellTerminal,
-    MaterializedInputNode, RunnerEventPayload, StagedArtifact, StagedRetentionRefs,
+    MaterializedInputNode, RunnerArtifactBuilder, RunnerCapabilityBinding, RunnerOutputBuilder,
+    RunnerPayloadBuilder,
 };
-use mfm_spec::v1 as spec;
 use mfm_state_portfolio::{
     balance_reader_kind, evm_block_number_for, observe_batch_with_backend, pin_views_with_backend,
     portfolio_adapter_kind, portfolio_adapter_version, prepare_sources_from_config,
@@ -39,7 +39,6 @@ use mfm_state_portfolio::{
     ResolveSubjectsConfig, ResolveSubjectsState, ResolveValuationsConfig, ResolveValuationsState,
     SourcePreparationRequest, SourcePreparationResponse, ViewPinRequest, ViewPinResponse,
 };
-use mfm_store::v1 as store;
 use mfm_values::{MfmConfig, MfmValue, NonEmpty};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -468,49 +467,26 @@ where
     Response: MfmValue + Serialize,
     Output: MfmValue + Serialize,
 {
-    let request_hash = digest_value(&request)?;
-    let response_artifact = artifact_for_value(
-        &response,
-        events::ArtifactRole::FactResponse,
-        Some(ctx.node().node_id.clone()),
-    )?;
-    let output_artifact = artifact_for_value(
-        &output,
-        events::ArtifactRole::StateOutput,
-        Some(ctx.node().node_id.clone()),
-    )?;
-    let staged_response = staged_attempt_artifact(&ctx, &response_artifact)?;
-    let staged_output = staged_attempt_artifact(&ctx, &output_artifact)?;
-    Ok(ErasedRunnerOutput {
-        staged_artifacts: vec![staged_response, staged_output],
-        staged_retention_refs: vec![
-            retention(&response_artifact.evidence),
-            retention(&output_artifact.evidence),
-        ],
-        payloads: vec![
-            RunnerEventPayload::FactRecorded(events::FactRecorded {
-                spec_hash: ctx.spec_hash().clone(),
-                node_id: ctx.node().node_id.clone(),
-                attempt_id: ctx.attempt_id().clone(),
-                capability_kind: PortfolioReadCapability::kind()
-                    .map_err(runtime_capability_error)?,
-                capability_version: PortfolioReadCapability::version()
-                    .map_err(runtime_capability_error)?,
-                adapter_kind: portfolio_adapter_kind()?,
-                adapter_version: portfolio_adapter_version()?,
-                request_schema_id: Request::schema_id().map_err(runtime_value_error)?,
-                request_hash,
-                response_schema_id: Response::schema_id().map_err(runtime_value_error)?,
-                response_hash: response_artifact.evidence.digest.clone(),
-                fact_key: events::FactKey::new(format!(
-                    "mfm.portfolio.fact.{}",
-                    ctx.node().node_id.as_str()
-                ))?,
-                artifact_id: response_artifact.evidence.artifact_id.clone(),
-            }),
-            cell_produced(&ctx, &output_artifact.evidence),
-        ],
-    })
+    let artifacts = RunnerArtifactBuilder::new(&ctx);
+    let payloads = RunnerPayloadBuilder::new(&ctx);
+    let response_artifact = artifacts.fact_response(&response)?;
+    let output_artifact = artifacts.state_output(&output)?;
+    let mut runner_output = RunnerOutputBuilder::new(&ctx);
+    runner_output.stage_attempt_artifact(&response_artifact)?;
+    runner_output.retain_runtime_evidence(&response_artifact);
+    runner_output.stage_attempt_artifact(&output_artifact)?;
+    runner_output.retain_runtime_evidence(&output_artifact);
+    runner_output.payload(payloads.fact_recorded(
+        events::FactKey::new(format!(
+            "mfm.portfolio.fact.{}",
+            ctx.node().node_id.as_str()
+        ))?,
+        &request,
+        &response_artifact,
+        portfolio_read_binding()?,
+    )?);
+    runner_output.payload(payloads.cell_produced(&output_artifact)?);
+    Ok(runner_output.finish())
 }
 
 async fn state_output<T>(
@@ -520,24 +496,14 @@ async fn state_output<T>(
 where
     T: MfmValue + Serialize,
 {
-    let artifact = artifact_for_value(
-        value,
-        events::ArtifactRole::StateOutput,
-        Some(ctx.node().node_id.clone()),
-    )?;
-    let staged_artifact = staged_attempt_artifact(&ctx, &artifact)?;
-    Ok(ErasedRunnerOutput {
-        staged_artifacts: vec![staged_artifact],
-        staged_retention_refs: vec![retention(&artifact.evidence)],
-        payloads: vec![cell_produced(&ctx, &artifact.evidence)],
-    })
-}
-
-fn staged_attempt_artifact(
-    ctx: &ErasedRunCtx<'_>,
-    artifact: &PortfolioArtifact,
-) -> mfm_runtime::Result<StagedArtifact> {
-    StagedArtifact::inline_attempt_artifact(ctx, artifact.bytes.clone(), artifact.evidence.clone())
+    let artifacts = RunnerArtifactBuilder::new(&ctx);
+    let payloads = RunnerPayloadBuilder::new(&ctx);
+    let artifact = artifacts.state_output(value)?;
+    let mut output = RunnerOutputBuilder::new(&ctx);
+    output.stage_attempt_artifact(&artifact)?;
+    output.retain_runtime_evidence(&artifact);
+    output.payload(payloads.cell_produced(&artifact)?);
+    Ok(output.finish())
 }
 
 async fn load_config<T>(
@@ -703,91 +669,13 @@ async fn load_cell_bytes(
     Ok(verified.into_bytes())
 }
 
-fn cell_produced(
-    ctx: &ErasedRunCtx<'_>,
-    artifact: &store::ArtifactEvidenceRef,
-) -> RunnerEventPayload {
-    RunnerEventPayload::CellProduced(events::CellProduced {
-        spec_hash: ctx.spec_hash().clone(),
-        node_id: ctx.node().node_id.clone(),
-        cell_id: ctx.node().output_cell.clone(),
-        scope_id: ctx.output_cell().scope_id.clone(),
-        attempt_id: ctx.attempt_id().clone(),
-        semantic_type_id: ctx.output_cell().semantic_type_id.clone(),
-        schema_id: ctx.output_cell().schema_id.clone(),
-        value_lineage: ctx.output_cell().value_lineage.clone(),
-        artifact_id: artifact.artifact_id.clone(),
-        content_digest: artifact.digest.clone(),
-        producer_state_kind: Some(ctx.node().state_kind.clone()),
-        producer_state_version: Some(ctx.node().state_version.clone()),
+fn portfolio_read_binding() -> mfm_runtime::Result<RunnerCapabilityBinding> {
+    Ok(RunnerCapabilityBinding {
+        capability_kind: PortfolioReadCapability::kind().map_err(runtime_capability_error)?,
+        capability_version: PortfolioReadCapability::version().map_err(runtime_capability_error)?,
+        adapter_kind: portfolio_adapter_kind()?,
+        adapter_version: portfolio_adapter_version()?,
     })
-}
-
-struct PortfolioArtifact {
-    bytes: Vec<u8>,
-    evidence: store::ArtifactEvidenceRef,
-}
-
-fn artifact_for_value<T>(
-    value: &T,
-    role: events::ArtifactRole,
-    producer_node_id: Option<NodeId>,
-) -> mfm_runtime::Result<PortfolioArtifact>
-where
-    T: MfmValue + Serialize,
-{
-    let bytes = canonical_value(value)?;
-    let digest = bytes.content_digest();
-    let evidence = store::ArtifactEvidenceRef {
-        artifact_id: ArtifactId::from_digest(digest.algorithm(), *digest.digest()),
-        digest,
-        byte_len: bytes.as_bytes().len() as u64,
-        media_type: spec::MediaType::new("application/json")?,
-        schema_id: Some(T::schema_id().map_err(runtime_value_error)?),
-        semantic_type_id: artifact_semantic_type_id_for_role::<T>(role)?,
-        producer_node_id,
-        producer_seed_id: None,
-        artifact_role: role,
-    };
-    Ok(PortfolioArtifact {
-        bytes: bytes.to_vec(),
-        evidence,
-    })
-}
-
-fn artifact_semantic_type_id_for_role<T>(
-    role: events::ArtifactRole,
-) -> mfm_runtime::Result<Option<SemanticTypeId>>
-where
-    T: MfmValue,
-{
-    match role.contract().semantic {
-        events::ArtifactSemanticPolicy::OptionalLaunchSemantic
-        | events::ArtifactSemanticPolicy::ExactSeedSemantic
-        | events::ArtifactSemanticPolicy::ExactValueSemantic => {
-            Ok(Some(T::semantic_id().map_err(runtime_value_error)?))
-        }
-        events::ArtifactSemanticPolicy::Absent => Ok(None),
-    }
-}
-
-fn retention(artifact: &store::ArtifactEvidenceRef) -> StagedRetentionRefs {
-    StagedRetentionRefs::runtime_evidence(vec![events::RetentionRef {
-        artifact_id: artifact.artifact_id.clone(),
-        role: artifact.artifact_role,
-        content_digest: artifact.digest.clone(),
-    }])
-}
-
-fn canonical_value<T: Serialize>(value: &T) -> mfm_runtime::Result<PlainCanonicalJsonBytes> {
-    let json = serde_json::to_string(value)
-        .map_err(|error| mfm_runtime::RuntimeError::Canonical(error.to_string()))?;
-    PlainCanonicalJsonBytes::from_json_str(&json)
-        .map_err(|error| mfm_runtime::RuntimeError::Canonical(error.to_string()))
-}
-
-fn digest_value<T: Serialize>(value: &T) -> mfm_runtime::Result<ContentDigest> {
-    Ok(canonical_value(value)?.content_digest())
 }
 
 fn digest_json(value: serde_json::Value) -> mfm_runtime::Result<ContentDigest> {
@@ -796,10 +684,6 @@ fn digest_json(value: serde_json::Value) -> mfm_runtime::Result<ContentDigest> {
     Ok(PlainCanonicalJsonBytes::from_json_str(&json)
         .map_err(|error| mfm_runtime::RuntimeError::Canonical(error.to_string()))?
         .content_digest())
-}
-
-fn runtime_value_error(error: mfm_values::ValueError) -> mfm_runtime::RuntimeError {
-    mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
 }
 
 fn runtime_capability_error(error: mfm_capabilities::CapabilityError) -> mfm_runtime::RuntimeError {
