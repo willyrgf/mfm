@@ -8,10 +8,10 @@ use mfm_ids::{
 };
 use mfm_spec::v1::MediaType;
 use mfm_store::v1::codec::{
-    artifact_role_str, attempt_projection_json, cell_projection_json, fact_projection_json,
-    manual_resolution_projection_json, parse_artifact_role, parse_identity,
-    public_output_projection_json, resource_lane_projection_json, run_completion_projection_json,
-    run_state_str, saga_engagement_projection_json, side_effect_projection_json,
+    attempt_projection_json, cell_projection_json, fact_projection_json,
+    manual_resolution_projection_json, parse_identity, public_output_projection_json,
+    resource_lane_projection_json, run_completion_projection_json, run_state_str,
+    saga_engagement_projection_json, side_effect_projection_json,
 };
 use mfm_store::v1::{
     build_prepared_commit_plan_batch, payload_from_json_value, prepared_commit_plan_fingerprint,
@@ -420,7 +420,7 @@ async fn admit_artifact_evidence_tx(
             .map(SemanticTypeId::as_str),
         evidence.producer_node_id.as_ref().map(NodeId::as_str),
         evidence.producer_seed_id.as_ref().map(SeedId::as_str),
-        artifact_role_str(evidence.artifact_role),
+        evidence.artifact_role.as_str(),
     )
     .execute(&mut **tx)
     .await
@@ -602,6 +602,32 @@ impl ArtifactEvidenceParts {
             producer_seed_id: parse_optional_identity(self.producer_seed_id)?,
             artifact_role: parse_artifact_role(&self.artifact_role)?,
         })
+    }
+}
+
+fn parse_artifact_role(value: &str) -> Result<events::ArtifactRole> {
+    events::ArtifactRole::parse(value)
+        .ok_or_else(|| StoreError::Identity(format!("unknown artifact role {value}")).into())
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+
+    #[test]
+    fn artifact_role_contract_postgres_tag_roundtrip_uses_events_contract() {
+        for role in events::ArtifactRole::ALL {
+            assert_eq!(
+                parse_artifact_role(role.as_str()).expect("role tag parses"),
+                *role
+            );
+        }
+
+        assert!(matches!(
+            parse_artifact_role("unknown_artifact_role"),
+            Err(PostgresTypedStoreError::Store(StoreError::Identity(message)))
+                if message.contains("unknown artifact role unknown_artifact_role")
+        ));
     }
 }
 

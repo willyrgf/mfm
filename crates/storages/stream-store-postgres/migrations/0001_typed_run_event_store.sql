@@ -46,7 +46,10 @@ CREATE TABLE typed_artifacts (
   producer_node_id TEXT NULL,
   producer_seed_id TEXT NULL,
   artifact_role TEXT NOT NULL,
-  CONSTRAINT typed_artifacts_byte_len_nonnegative CHECK (byte_len >= 0)
+  CONSTRAINT typed_artifacts_byte_len_nonnegative CHECK (byte_len >= 0),
+  CONSTRAINT typed_artifacts_single_producer CHECK (
+    producer_node_id IS NULL OR producer_seed_id IS NULL
+  )
 );
 
 CREATE TABLE typed_run_artifacts (
