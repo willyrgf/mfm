@@ -227,6 +227,42 @@ async fn conformance_replay_rejects_corrupt_stream_cases() {
     }
 }
 
+#[tokio::test]
+async fn conformance_replay_corruption_cases_match_equivalence_goldens() {
+    let (runtime_spec, stream, artifacts) = conformance_stream().await;
+    let mut actual = Vec::new();
+
+    for case in proof_transport::SCENARIO.corruption_cases {
+        let corrupt = apply_proof_replay_corruption(case.mutation, &stream);
+        let error = verify_conformance_replay_stream(&runtime_spec, corrupt.clone(), &artifacts)
+            .await
+            .expect_err(&format!("{} must reject", case.name));
+        actual.push(format!(
+            "{}|error={:?}|shape={}",
+            case.name,
+            error.kind,
+            stream_shape(&corrupt)
+        ));
+    }
+
+    assert_eq!(actual, proof_replay_corruption_equivalence_golden());
+}
+
+fn proof_replay_corruption_equivalence_golden() -> Vec<String> {
+    [
+        "completed_history_without_retention_projection|error=InvalidRunStream|shape=events=42;commits=16;max_width=7;duplicate_seqs=0;retention_projected=0;runtime_retention_refs=9;manifest_retention_refs=0;run_completed=1;projection=;last=attempt-output:cell_produced+state_attempt_completed+artifact_referenced+run_completed",
+        "standalone_retention_projection_history|error=InvalidRunStream|shape=events=44;commits=17;max_width=7;duplicate_seqs=0;retention_projected=1;runtime_retention_refs=9;manifest_retention_refs=1;run_completed=1;projection=attempt-output:retention_manifest_projected+retention_refs_appended;last=attempt-output:cell_produced+state_attempt_completed+artifact_referenced+run_completed",
+        "failed_completion_without_framework_authority|error=InvalidRunStream|shape=events=2;commits=2;max_width=1;duplicate_seqs=0;retention_projected=0;runtime_retention_refs=0;manifest_retention_refs=0;run_completed=1;projection=;last=failed-completion-without-framework:run_completed",
+        "post_completion_retention_refs|error=InvalidRunStream|shape=events=49;commits=18;max_width=7;duplicate_seqs=0;retention_projected=1;runtime_retention_refs=11;manifest_retention_refs=1;run_completed=1;projection=attempt-output:cell_produced+state_attempt_completed+retention_manifest_projected+retention_refs_appended+artifact_referenced+retention_refs_appended;last=post-completion-retention-ref:retention_refs_appended",
+        "post_projection_retention_refs_before_completion|error=InvalidRunStream|shape=events=46;commits=18;max_width=7;duplicate_seqs=0;retention_projected=1;runtime_retention_refs=11;manifest_retention_refs=1;run_completed=1;projection=attempt-output:cell_produced+state_attempt_completed+retention_manifest_projected+retention_refs_appended+artifact_referenced+retention_refs_appended;last=completion-after-post-projection-retention:run_completed",
+        "extra_payload_in_retention_projection_commit|error=InvalidRunStream|shape=events=49;commits=17;max_width=7;duplicate_seqs=0;retention_projected=1;runtime_retention_refs=11;manifest_retention_refs=1;run_completed=1;projection=attempt-output:cell_produced+state_attempt_completed+retention_manifest_projected+retention_refs_appended+artifact_referenced+retention_refs_appended+retention_refs_appended;last=attempt-output:cell_produced+state_attempt_completed+artifact_referenced+run_completed",
+        "same_sequence_sidecar_retention_projection_payload|error=InvalidRunStream|shape=events=49;commits=18;max_width=7;duplicate_seqs=1;retention_projected=1;runtime_retention_refs=11;manifest_retention_refs=1;run_completed=1;projection=attempt-output:cell_produced+state_attempt_completed+retention_manifest_projected+retention_refs_appended+artifact_referenced+retention_refs_appended;last=attempt-output:cell_produced+state_attempt_completed+artifact_referenced+run_completed",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
 async fn proof_implementation_conformance_summary(
 ) -> Result<ProofImplementationConformanceSummary, String> {
     let config = ProofWorkflowConfig::default();
@@ -783,6 +819,92 @@ fn replay_error_kind(kind: &str) -> replay::ReplayErrorKind {
         "artifact_missing" => replay::ReplayErrorKind::ArtifactMissing,
         "live_capability_request" => replay::ReplayErrorKind::LiveCapabilityRequest,
         other => panic!("unknown replay error kind {other}"),
+    }
+}
+
+fn stream_shape(stream: &[store::KernelEventEnvelope]) -> String {
+    let mut commit_count = 0usize;
+    let mut max_width = 0usize;
+    let mut run_completed = 0usize;
+    let mut retention_projected = 0usize;
+    let mut runtime_retention_refs = 0usize;
+    let mut manifest_retention_refs = 0usize;
+    let mut projection_commit = String::new();
+    let mut last_commit = String::new();
+    let mut commits_by_seq = BTreeMap::<u64, Vec<String>>::new();
+    let mut index = 0;
+    while index < stream.len() {
+        let first = &stream[index];
+        let seq = first.seq();
+        let commit_key = first.commit_key();
+        let mut end = index + 1;
+        while end < stream.len()
+            && stream[end].seq() == seq
+            && stream[end].commit_key() == commit_key
+        {
+            end += 1;
+        }
+        commit_count += 1;
+        max_width = max_width.max(end - index);
+        commits_by_seq
+            .entry(seq.as_u64())
+            .or_default()
+            .push(commit_key_class(commit_key.as_str()).to_owned());
+        let payloads = stream[index..end]
+            .iter()
+            .map(|event| {
+                match event.payload() {
+                    events::KernelEventPayload::RunCompleted(_) => run_completed += 1,
+                    events::KernelEventPayload::RetentionManifestProjected(_) => {
+                        retention_projected += 1;
+                    }
+                    events::KernelEventPayload::RetentionRefsAppended(payload) => {
+                        if payload.reason == events::RetentionReason::ManifestProjection {
+                            manifest_retention_refs += 1;
+                        } else {
+                            runtime_retention_refs += 1;
+                        }
+                    }
+                    _ => {}
+                }
+                payload_schema_name(event.payload())
+            })
+            .collect::<Vec<_>>()
+            .join("+");
+        let commit_shape = format!("{}:{}", commit_key_class(commit_key.as_str()), payloads);
+        if payloads.contains("retention_manifest_projected") {
+            projection_commit = commit_shape.clone();
+        }
+        last_commit = commit_shape;
+        index = end;
+    }
+    let duplicate_seqs = commits_by_seq
+        .values()
+        .filter(|commit_keys| commit_keys.len() > 1)
+        .count();
+    format!(
+        "events={};commits={commit_count};max_width={max_width};duplicate_seqs={duplicate_seqs};retention_projected={retention_projected};runtime_retention_refs={runtime_retention_refs};manifest_retention_refs={manifest_retention_refs};run_completed={run_completed};projection={projection_commit};last={last_commit}",
+        stream.len()
+    )
+}
+
+fn payload_schema_name(payload: &events::KernelEventPayload) -> &str {
+    payload
+        .schema_descriptor()
+        .schema_name
+        .strip_prefix("mfm.events.v1.")
+        .unwrap_or_else(|| payload.schema_descriptor().schema_name)
+}
+
+fn commit_key_class(commit_key: &str) -> &str {
+    if commit_key.starts_with("attempt-start:") {
+        "attempt-start"
+    } else if commit_key.starts_with("attempt-output:") {
+        "attempt-output"
+    } else if commit_key.starts_with("run-admission:") {
+        "run-admission"
+    } else {
+        commit_key
     }
 }
 
