@@ -17,7 +17,7 @@ use mfm_collectors_proof::{
     ProofReplayVerifier, ProofSideEffectResult, ProofSubmission, RecordedProofFacts,
 };
 use mfm_events::v1::{self as events, side_effect};
-use mfm_ids::{ContentDigest, DescriptorId, SchemaId};
+use mfm_ids::{ContentDigest, DescriptorId};
 use mfm_replay::v1 as replay;
 use mfm_runtime::{
     CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture,
@@ -706,138 +706,38 @@ impl replay::SideEffectReplayVerifier for DeterministicProofReplayVerifier {
 ///
 /// Returns `Ok(false)` when the broker stream contains no deterministic proof side-effect intent.
 pub fn verify_deterministic_proof_replay(broker: &replay::ReplayBroker) -> replay::Result<bool> {
-    let Some(frames) = proof_side_effect_replay_frames(broker.events())? else {
+    let frames = broker.side_effect_replay_frames_matching(is_deterministic_proof_intent)?;
+    if frames.is_empty() {
         return Ok(false);
-    };
+    }
+    if frames.len() > 1 {
+        return Err(replay::ReplayError::new(
+            replay::ReplayErrorKind::SideEffectMismatch,
+            "multiple deterministic proof side-effect intents in one run",
+        ));
+    }
+    let frames = frames[0];
     let verifier = DeterministicProofReplayVerifier::new().map_err(replay_runtime_error)?;
-    let Some(submission) = &frames.submission else {
+    let Some(submission_request) = frames.submission_request() else {
         return Err(proof_side_effect_missing("submission"));
     };
-    let Some(receipt) = &frames.receipt else {
+    let Some(receipt_request) = frames.receipt_request() else {
         return Err(proof_side_effect_missing("receipt"));
     };
-    let Some(confirmation) = &frames.confirmation else {
+    let Some(confirmation_request) = frames.confirmation_request() else {
         return Err(proof_side_effect_missing("confirmation"));
     };
 
-    let submission_request = side_effect_replay_request(
-        &frames.intent,
-        submission.submission_schema_id.clone(),
-        submission.submission_hash.clone(),
-        None,
-    );
     broker.verify_side_effect_submission(&submission_request, &verifier)?;
-
-    let receipt_request = side_effect_replay_request(
-        &frames.intent,
-        receipt.receipt_schema_id.clone(),
-        receipt.receipt_hash.clone(),
-        Some(receipt.replay_verifier_id.clone()),
-    );
     broker.verify_side_effect_receipt(&receipt_request, &verifier)?;
-
-    let confirmation_request = side_effect_replay_request(
-        &frames.intent,
-        confirmation.confirmation_schema_id.clone(),
-        confirmation.confirmation_hash.clone(),
-        Some(confirmation.replay_verifier_id.clone()),
-    );
     broker.verify_side_effect_confirmation(&confirmation_request, &verifier)?;
     Ok(true)
-}
-
-#[derive(Debug, Clone)]
-struct ProofSideEffectReplayFrames {
-    intent: side_effect::IntentPersisted,
-    submission: Option<side_effect::SubmissionObserved>,
-    receipt: Option<side_effect::ReceiptObserved>,
-    confirmation: Option<side_effect::ConfirmationObserved>,
-}
-
-fn proof_side_effect_replay_frames(
-    stream: &[store::KernelEventEnvelope],
-) -> replay::Result<Option<ProofSideEffectReplayFrames>> {
-    let mut frames = None::<ProofSideEffectReplayFrames>;
-    for event in stream {
-        match event.payload() {
-            events::KernelEventPayload::SideEffectIntentPersisted(payload)
-                if is_deterministic_proof_intent(payload)? =>
-            {
-                if frames.is_some() {
-                    return Err(replay::ReplayError::new(
-                        replay::ReplayErrorKind::SideEffectMismatch,
-                        "multiple deterministic proof side-effect intents in one run",
-                    ));
-                }
-                frames = Some(ProofSideEffectReplayFrames {
-                    intent: payload.clone(),
-                    submission: None,
-                    receipt: None,
-                    confirmation: None,
-                });
-            }
-            events::KernelEventPayload::SideEffectSubmissionObserved(payload) => {
-                if let Some(frames) = frames.as_mut() {
-                    if payload.ledger_key == frames.intent.ledger_key
-                        && payload.invocation_epoch == frames.intent.invocation_epoch
-                    {
-                        frames.submission = Some(payload.clone());
-                    }
-                }
-            }
-            events::KernelEventPayload::SideEffectReceiptObserved(payload) => {
-                if let Some(frames) = frames.as_mut() {
-                    if payload.ledger_key == frames.intent.ledger_key
-                        && payload.invocation_epoch == frames.intent.invocation_epoch
-                    {
-                        frames.receipt = Some(payload.clone());
-                    }
-                }
-            }
-            events::KernelEventPayload::SideEffectConfirmationObserved(payload) => {
-                if let Some(frames) = frames.as_mut() {
-                    if payload.ledger_key == frames.intent.ledger_key
-                        && payload.invocation_epoch == frames.intent.invocation_epoch
-                    {
-                        frames.confirmation = Some(payload.clone());
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    Ok(frames)
 }
 
 fn is_deterministic_proof_intent(intent: &side_effect::IntentPersisted) -> replay::Result<bool> {
     let expected_capability = ProofMutationCapability::kind().map_err(replay_capability_error)?;
     let expected_adapter = proof_adapter_kind().map_err(replay_identity_error)?;
     Ok(intent.capability_kind == expected_capability && intent.adapter_kind == expected_adapter)
-}
-
-fn side_effect_replay_request(
-    intent: &side_effect::IntentPersisted,
-    evidence_schema_id: SchemaId,
-    evidence_hash: ContentDigest,
-    replay_verifier_id: Option<events::ReplayVerifierId>,
-) -> replay::SideEffectEvidenceReplayRequest {
-    replay::SideEffectEvidenceReplayRequest {
-        ledger_key: intent.ledger_key.clone(),
-        node_id: intent.node_id.clone(),
-        attempt_id: intent.attempt_id.clone(),
-        invocation_epoch: intent.invocation_epoch,
-        intent_schema_id: intent.intent_schema_id.clone(),
-        intent_hash: intent.intent_hash.clone(),
-        idempotency_input_schema_id: intent.idempotency_input_schema_id.clone(),
-        idempotency_input_hash: intent.idempotency_input_hash.clone(),
-        capability_kind: intent.capability_kind.clone(),
-        capability_version: intent.capability_version.clone(),
-        adapter_kind: intent.adapter_kind.clone(),
-        adapter_version: intent.adapter_version.clone(),
-        evidence_schema_id,
-        evidence_hash,
-        replay_verifier_id,
-    }
 }
 
 fn proof_side_effect_missing(phase: &str) -> replay::ReplayError {

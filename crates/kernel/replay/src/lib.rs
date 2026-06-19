@@ -303,6 +303,82 @@ pub mod v1 {
         pub replay_verifier_id: Option<events::ReplayVerifierId>,
     }
 
+    /// Broker-indexed side-effect replay frame for one intent and invocation epoch.
+    ///
+    /// The frame borrows recorded, replay-authorized event payloads from [`ReplayBroker`]. Domain
+    /// verifiers still own cardinality, missing-evidence policy, and evidence interpretation.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct SideEffectReplayFrame<'a> {
+        /// Intent persisted event payload.
+        pub intent: &'a side_effect::IntentPersisted,
+        /// Submission observed event payload, when present.
+        pub submission: Option<&'a side_effect::SubmissionObserved>,
+        /// Receipt observed event payload, when present.
+        pub receipt: Option<&'a side_effect::ReceiptObserved>,
+        /// Confirmation observed event payload, when present.
+        pub confirmation: Option<&'a side_effect::ConfirmationObserved>,
+    }
+
+    impl SideEffectReplayFrame<'_> {
+        /// Builds the replay request for this frame's submission evidence, when present.
+        pub fn submission_request(&self) -> Option<SideEffectEvidenceReplayRequest> {
+            let submission = self.submission?;
+            Some(side_effect_evidence_replay_request(
+                self.intent,
+                submission.submission_schema_id.clone(),
+                submission.submission_hash.clone(),
+                None,
+            ))
+        }
+
+        /// Builds the replay request for this frame's receipt evidence, when present.
+        pub fn receipt_request(&self) -> Option<SideEffectEvidenceReplayRequest> {
+            let receipt = self.receipt?;
+            Some(side_effect_evidence_replay_request(
+                self.intent,
+                receipt.receipt_schema_id.clone(),
+                receipt.receipt_hash.clone(),
+                Some(receipt.replay_verifier_id.clone()),
+            ))
+        }
+
+        /// Builds the replay request for this frame's confirmation evidence, when present.
+        pub fn confirmation_request(&self) -> Option<SideEffectEvidenceReplayRequest> {
+            let confirmation = self.confirmation?;
+            Some(side_effect_evidence_replay_request(
+                self.intent,
+                confirmation.confirmation_schema_id.clone(),
+                confirmation.confirmation_hash.clone(),
+                Some(confirmation.replay_verifier_id.clone()),
+            ))
+        }
+    }
+
+    fn side_effect_evidence_replay_request(
+        intent: &side_effect::IntentPersisted,
+        evidence_schema_id: SchemaId,
+        evidence_hash: ContentDigest,
+        replay_verifier_id: Option<events::ReplayVerifierId>,
+    ) -> SideEffectEvidenceReplayRequest {
+        SideEffectEvidenceReplayRequest {
+            ledger_key: intent.ledger_key.clone(),
+            node_id: intent.node_id.clone(),
+            attempt_id: intent.attempt_id.clone(),
+            invocation_epoch: intent.invocation_epoch,
+            intent_schema_id: intent.intent_schema_id.clone(),
+            intent_hash: intent.intent_hash.clone(),
+            idempotency_input_schema_id: intent.idempotency_input_schema_id.clone(),
+            idempotency_input_hash: intent.idempotency_input_hash.clone(),
+            capability_kind: intent.capability_kind.clone(),
+            capability_version: intent.capability_version.clone(),
+            adapter_kind: intent.adapter_kind.clone(),
+            adapter_version: intent.adapter_version.clone(),
+            evidence_schema_id,
+            evidence_hash,
+            replay_verifier_id,
+        }
+    }
+
     /// Replay evidence returned for an observed side-effect submission.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct SubmissionReplayEvidence {
@@ -581,6 +657,33 @@ pub mod v1 {
                     None,
                 )?,
             })
+        }
+
+        /// Returns side-effect replay frames whose intent matches a domain predicate.
+        ///
+        /// This exposes broker-validated recorded evidence only. Domain verifiers remain
+        /// responsible for deciding how many frames are valid and which phases are required.
+        pub fn side_effect_replay_frames_matching<F>(
+            &self,
+            mut matches_intent: F,
+        ) -> Result<Vec<SideEffectReplayFrame<'_>>>
+        where
+            F: FnMut(&side_effect::IntentPersisted) -> Result<bool>,
+        {
+            let mut frames = Vec::new();
+            for intent in self.intents.values() {
+                if !matches_intent(intent)? {
+                    continue;
+                }
+                let key = (intent.ledger_key.clone(), intent.invocation_epoch);
+                frames.push(SideEffectReplayFrame {
+                    intent,
+                    submission: self.submissions.get(&key),
+                    receipt: self.receipts.get(&key),
+                    confirmation: self.confirmations.get(&key),
+                });
+            }
+            Ok(frames)
         }
 
         /// Returns observed side-effect submission evidence from replay records only.
@@ -2513,6 +2616,56 @@ pub mod v1 {
                 verified_confirmation.confirmation.confirmation_hash,
                 fixture.confirmation_hash
             );
+        }
+
+        #[test]
+        fn replay_broker_returns_side_effect_replay_frames_matching_intent() {
+            let fixture = Fixture::new();
+            let broker = fixture.broker();
+            let expected_adapter = fixture.adapter_kind.clone();
+
+            let frames = broker
+                .side_effect_replay_frames_matching(|intent| {
+                    Ok(intent.adapter_kind == expected_adapter)
+                })
+                .expect("side-effect frames");
+
+            assert_eq!(frames.len(), 1);
+            let frame = frames[0];
+            assert_eq!(frame.intent.ledger_key, fixture.ledger_key);
+            assert_eq!(
+                frame.submission.expect("submission").submission_hash,
+                fixture.submission_hash
+            );
+            assert_eq!(
+                frame.receipt.expect("receipt").receipt_hash,
+                fixture.receipt_hash
+            );
+            assert_eq!(
+                frame.confirmation.expect("confirmation").confirmation_hash,
+                fixture.confirmation_hash
+            );
+            assert_eq!(
+                frame.submission_request(),
+                Some(fixture.submission_request())
+            );
+            assert_eq!(frame.receipt_request(), Some(fixture.receipt_request()));
+            assert_eq!(
+                frame.confirmation_request(),
+                Some(fixture.confirmation_request())
+            );
+        }
+
+        #[test]
+        fn replay_broker_returns_empty_side_effect_replay_frames_for_no_match() {
+            let fixture = Fixture::new();
+            let broker = fixture.broker();
+
+            let frames = broker
+                .side_effect_replay_frames_matching(|_| Ok(false))
+                .expect("side-effect frames");
+
+            assert!(frames.is_empty());
         }
 
         #[test]

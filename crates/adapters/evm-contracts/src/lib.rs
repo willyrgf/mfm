@@ -23,7 +23,6 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
-use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -1036,106 +1035,36 @@ fn contract_side_effect_replay_evidence() -> mfm_runtime::Result<SideEffectRepla
 ///
 /// Returns `Ok(false)` when the stream contains no contract lifecycle side-effect intent.
 pub fn verify_contract_lifecycle_replay(broker: &replay::ReplayBroker) -> replay::Result<bool> {
-    let mut frames =
-        BTreeMap::<(events::SideEffectLedgerKey, u32), ContractLifecycleReplayFrames>::new();
-    for event in broker.events() {
-        match event.payload() {
-            events::KernelEventPayload::SideEffectIntentPersisted(payload)
-                if is_contract_lifecycle_intent(payload)? =>
-            {
-                let key = (payload.ledger_key.clone(), payload.invocation_epoch);
-                if frames
-                    .insert(
-                        key,
-                        ContractLifecycleReplayFrames {
-                            intent: payload.clone(),
-                            submission: None,
-                            receipt: None,
-                            confirmation: None,
-                        },
-                    )
-                    .is_some()
-                {
-                    return Err(replay::ReplayError::new(
-                        replay::ReplayErrorKind::SideEffectMismatch,
-                        "duplicate contract lifecycle side-effect intent",
-                    ));
-                }
-            }
-            events::KernelEventPayload::SideEffectSubmissionObserved(payload) => {
-                let key = (payload.ledger_key.clone(), payload.invocation_epoch);
-                if let Some(frames) = frames.get_mut(&key) {
-                    frames.submission = Some(payload.clone());
-                }
-            }
-            events::KernelEventPayload::SideEffectReceiptObserved(payload) => {
-                let key = (payload.ledger_key.clone(), payload.invocation_epoch);
-                if let Some(frames) = frames.get_mut(&key) {
-                    frames.receipt = Some(payload.clone());
-                }
-            }
-            events::KernelEventPayload::SideEffectConfirmationObserved(payload) => {
-                let key = (payload.ledger_key.clone(), payload.invocation_epoch);
-                if let Some(frames) = frames.get_mut(&key) {
-                    frames.confirmation = Some(payload.clone());
-                }
-            }
-            _ => {}
-        }
-    }
+    let frames = broker.side_effect_replay_frames_matching(is_contract_lifecycle_intent)?;
     if frames.is_empty() {
         return Ok(false);
     }
     let verifier =
         EvmContractLifecycleReplayVerifier::new().map_err(replay_contract_adapter_error)?;
-    for frames in frames.values() {
-        verify_contract_lifecycle_replay_frames(broker, &verifier, frames)?;
+    for frame in &frames {
+        verify_contract_lifecycle_replay_frame(broker, &verifier, frame)?;
     }
     Ok(true)
 }
 
-fn verify_contract_lifecycle_replay_frames(
+fn verify_contract_lifecycle_replay_frame(
     broker: &replay::ReplayBroker,
     verifier: &EvmContractLifecycleReplayVerifier,
-    frames: &ContractLifecycleReplayFrames,
+    frame: &replay::SideEffectReplayFrame<'_>,
 ) -> replay::Result<()> {
-    let Some(submission) = &frames.submission else {
+    let Some(submission_request) = frame.submission_request() else {
         return Err(contract_lifecycle_side_effect_missing("submission"));
     };
-    let Some(receipt) = &frames.receipt else {
+    let Some(receipt_request) = frame.receipt_request() else {
         return Err(contract_lifecycle_side_effect_missing("receipt"));
     };
-    let Some(confirmation) = &frames.confirmation else {
+    let Some(confirmation_request) = frame.confirmation_request() else {
         return Err(contract_lifecycle_side_effect_missing("confirmation"));
     };
 
-    broker.verify_side_effect_submission(
-        &side_effect_replay_request(
-            &frames.intent,
-            submission.submission_schema_id.clone(),
-            submission.submission_hash.clone(),
-            None,
-        ),
-        verifier,
-    )?;
-    broker.verify_side_effect_receipt(
-        &side_effect_replay_request(
-            &frames.intent,
-            receipt.receipt_schema_id.clone(),
-            receipt.receipt_hash.clone(),
-            Some(receipt.replay_verifier_id.clone()),
-        ),
-        verifier,
-    )?;
-    broker.verify_side_effect_confirmation(
-        &side_effect_replay_request(
-            &frames.intent,
-            confirmation.confirmation_schema_id.clone(),
-            confirmation.confirmation_hash.clone(),
-            Some(confirmation.replay_verifier_id.clone()),
-        ),
-        verifier,
-    )?;
+    broker.verify_side_effect_submission(&submission_request, verifier)?;
+    broker.verify_side_effect_receipt(&receipt_request, verifier)?;
+    broker.verify_side_effect_confirmation(&confirmation_request, verifier)?;
     Ok(())
 }
 
@@ -1209,43 +1138,10 @@ pub fn ensure_prepared_invocation_public(prepared: &PreparedContractInvocation) 
     Ok(())
 }
 
-#[derive(Debug, Clone)]
-struct ContractLifecycleReplayFrames {
-    intent: side_effect::IntentPersisted,
-    submission: Option<side_effect::SubmissionObserved>,
-    receipt: Option<side_effect::ReceiptObserved>,
-    confirmation: Option<side_effect::ConfirmationObserved>,
-}
-
 fn is_contract_lifecycle_intent(intent: &side_effect::IntentPersisted) -> replay::Result<bool> {
     let binding = evm_contract_lifecycle_adapter_binding().map_err(replay_adapter_error)?;
     Ok(intent.adapter_kind == *binding.adapter_kind()
         && intent.adapter_version == *binding.adapter_version())
-}
-
-fn side_effect_replay_request(
-    intent: &side_effect::IntentPersisted,
-    evidence_schema_id: SchemaId,
-    evidence_hash: ContentDigest,
-    replay_verifier_id: Option<events::ReplayVerifierId>,
-) -> replay::SideEffectEvidenceReplayRequest {
-    replay::SideEffectEvidenceReplayRequest {
-        ledger_key: intent.ledger_key.clone(),
-        node_id: intent.node_id.clone(),
-        attempt_id: intent.attempt_id.clone(),
-        invocation_epoch: intent.invocation_epoch,
-        intent_schema_id: intent.intent_schema_id.clone(),
-        intent_hash: intent.intent_hash.clone(),
-        idempotency_input_schema_id: intent.idempotency_input_schema_id.clone(),
-        idempotency_input_hash: intent.idempotency_input_hash.clone(),
-        capability_kind: intent.capability_kind.clone(),
-        capability_version: intent.capability_version.clone(),
-        adapter_kind: intent.adapter_kind.clone(),
-        adapter_version: intent.adapter_version.clone(),
-        evidence_schema_id,
-        evidence_hash,
-        replay_verifier_id,
-    }
 }
 
 fn contract_lifecycle_side_effect_missing(phase: &str) -> replay::ReplayError {
