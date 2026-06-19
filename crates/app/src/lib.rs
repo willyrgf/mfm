@@ -30,11 +30,12 @@ use mfm_ids::{
     SpecHash,
 };
 use mfm_replay::v1::{ReplayBroker, ReplayError, ReplayReadAuthority};
+#[cfg(test)]
+use mfm_runtime::VerifiedRunHistory;
 use mfm_runtime::{
     CertifiedRuntimeSpec, ManualResolutionEvidenceArtifact, ManualResolutionRequest,
     RunLaunchArtifact, RunLaunchEvidence, RunLaunchSeedCell, RuntimeArtifactStageFuture,
-    RuntimeArtifactStager, SchedulerStatus, SerialTypedScheduler, VerifiedRunHistory,
-    VerifiedRunHistoryView,
+    RuntimeArtifactStager, SchedulerStatus, SerialTypedScheduler, VerifiedRunHistoryView,
 };
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
@@ -1017,24 +1018,11 @@ where
         run_id: &RunId,
         drive: DriveMode,
     ) -> Result<TypedRunResponse, AppError> {
-        let stream = {
-            let store = self.store.lock().await;
-            store.load_run_stream(run_id)
-        };
-        if stream.is_empty() {
-            return Err(AppError::not_found(
-                "RunNotFound",
-                "typed run stream was not found",
-            ));
-        }
-        let runtime_spec = load_runtime_spec_for_run(
-            &self.artifacts,
-            &self.certification_registry,
-            run_id,
-            &stream,
-        )
-        .await?;
-        verified_run_history_from_events(&self.artifacts, &runtime_spec, run_id, &stream).await?;
+        let runtime_spec = self
+            .load_verified_run_read_context(run_id)
+            .await?
+            .runtime_spec()
+            .clone();
         let mut store = self.store.lock().await;
         let status = self
             .drive_with_mode(&mut *store, &runtime_spec, run_id, drive)
@@ -1049,24 +1037,11 @@ where
     ) -> Result<TypedRunResponse, AppError> {
         let run_id = req.run_id.clone();
         let drive = req.drive;
-        let stream = {
-            let store = self.store.lock().await;
-            store.load_run_stream(&run_id)
-        };
-        if stream.is_empty() {
-            return Err(AppError::not_found(
-                "RunNotFound",
-                "typed run stream was not found",
-            ));
-        }
-        let runtime_spec = load_runtime_spec_for_run(
-            &self.artifacts,
-            &self.certification_registry,
-            &run_id,
-            &stream,
-        )
-        .await?;
-        verified_run_history_from_events(&self.artifacts, &runtime_spec, &run_id, &stream).await?;
+        let runtime_spec = self
+            .load_verified_run_read_context(&run_id)
+            .await?
+            .runtime_spec()
+            .clone();
         let manual_request = manual_resolution_runtime_request(req)?;
         let mut store = self.store.lock().await;
         self.scheduler
@@ -1080,25 +1055,18 @@ where
 
     /// Returns typed run status by rebuilding projection from the authoritative run stream.
     pub async fn run_status(&self, run_id: &RunId) -> Result<TypedRunResponse, AppError> {
-        let (stream, global_projection) = {
-            let store = self.store.lock().await;
-            let stream = store.load_run_stream(run_id);
-            let projection = store.projection_snapshot().clone();
-            (stream, projection)
-        };
-        let context = verified_run_read_context_from_events(
+        let context = load_sync_verified_status_read_context(
+            &self.store,
             &self.artifacts,
             &self.certification_registry,
             run_id,
-            stream,
         )
         .await?;
-        let projection = context.status_projection_with_resource_lanes(&global_projection)?;
         typed_run_status_from_projection(
             run_id,
             context.runtime_spec(),
             context.events(),
-            &projection,
+            context.projection(),
         )
     }
 
@@ -1141,15 +1109,11 @@ where
         &self,
         run_id: &RunId,
     ) -> Result<VerifiedRunReadContext, AppError> {
-        let stream = {
-            let store = self.store.lock().await;
-            store.load_run_stream(run_id)
-        };
-        verified_run_read_context_from_events(
+        load_sync_verified_run_read_context(
+            &self.store,
             &self.artifacts,
             &self.certification_registry,
             run_id,
-            stream,
         )
         .await
     }
@@ -1256,25 +1220,11 @@ where
         run_id: &RunId,
         drive: DriveMode,
     ) -> Result<TypedRunResponse, AppError> {
-        let stream = self
-            .store
-            .load_run_stream(run_id)
-            .await
-            .map_err(async_app_store_error)?;
-        if stream.is_empty() {
-            return Err(AppError::not_found(
-                "RunNotFound",
-                "typed run stream was not found",
-            ));
-        }
-        let runtime_spec = load_runtime_spec_for_run(
-            &self.artifacts,
-            &self.certification_registry,
-            run_id,
-            &stream,
-        )
-        .await?;
-        verified_run_history_from_events(&self.artifacts, &runtime_spec, run_id, &stream).await?;
+        let runtime_spec = self
+            .load_verified_run_read_context(run_id)
+            .await?
+            .runtime_spec()
+            .clone();
         let status = self.drive_with_mode(&runtime_spec, run_id, drive).await?;
         let (stream, projection) = self.status_stream_and_projection(run_id).await?;
         typed_run_response_from_projection(run_id, &runtime_spec, &stream, &projection, status)
@@ -1287,25 +1237,11 @@ where
     ) -> Result<TypedRunResponse, AppError> {
         let run_id = req.run_id.clone();
         let drive = req.drive;
-        let stream = self
-            .store
-            .load_run_stream(&run_id)
-            .await
-            .map_err(async_app_store_error)?;
-        if stream.is_empty() {
-            return Err(AppError::not_found(
-                "RunNotFound",
-                "typed run stream was not found",
-            ));
-        }
-        let runtime_spec = load_runtime_spec_for_run(
-            &self.artifacts,
-            &self.certification_registry,
-            &run_id,
-            &stream,
-        )
-        .await?;
-        verified_run_history_from_events(&self.artifacts, &runtime_spec, &run_id, &stream).await?;
+        let runtime_spec = self
+            .load_verified_run_read_context(&run_id)
+            .await?
+            .runtime_spec()
+            .clone();
         let manual_request = manual_resolution_runtime_request(req)?;
         self.scheduler
             .record_manual_resolution_async(&self.store, &runtime_spec, &run_id, manual_request)
@@ -1317,25 +1253,18 @@ where
 
     /// Returns typed run status by rebuilding projection from the authoritative run stream.
     pub async fn run_status(&self, run_id: &RunId) -> Result<TypedRunResponse, AppError> {
-        let stream = self
-            .store
-            .load_run_stream(run_id)
-            .await
-            .map_err(async_app_store_error)?;
-        let context = self
-            .verified_run_read_context_from_stream(run_id, stream)
-            .await?;
-        let global_projection = self
-            .store
-            .status_projection_snapshot(run_id)
-            .await
-            .map_err(async_app_store_error)?;
-        let projection = context.status_projection_with_resource_lanes(&global_projection)?;
+        let context = load_async_verified_status_read_context(
+            &self.store,
+            &self.artifacts,
+            &self.certification_registry,
+            run_id,
+        )
+        .await?;
         typed_run_status_from_projection(
             run_id,
             context.runtime_spec(),
             context.events(),
-            &projection,
+            context.projection(),
         )
     }
 
@@ -1354,15 +1283,19 @@ where
             .load_run_stream(run_id)
             .await
             .map_err(async_app_store_error)?;
-        let context = self
-            .verified_run_read_context_from_stream(run_id, stream)
-            .await?;
-        let status_projection = context.status_projection_with_resource_lanes(&projection)?;
+        let context = verified_status_read_context_from_events(
+            &self.artifacts,
+            &self.certification_registry,
+            run_id,
+            stream,
+            &projection,
+        )
+        .await?;
         typed_run_status_from_projection(
             run_id,
             context.runtime_spec(),
             context.events(),
-            &status_projection,
+            context.projection(),
         )
     }
 
@@ -1454,25 +1387,11 @@ where
         &self,
         run_id: &RunId,
     ) -> Result<VerifiedRunReadContext, AppError> {
-        let stream = self
-            .store
-            .load_run_stream(run_id)
-            .await
-            .map_err(async_app_store_error)?;
-        self.verified_run_read_context_from_stream(run_id, stream)
-            .await
-    }
-
-    async fn verified_run_read_context_from_stream(
-        &self,
-        run_id: &RunId,
-        stream: Vec<store::KernelEventEnvelope>,
-    ) -> Result<VerifiedRunReadContext, AppError> {
-        verified_run_read_context_from_events(
+        load_async_verified_run_read_context(
+            &self.store,
             &self.artifacts,
             &self.certification_registry,
             run_id,
-            stream,
         )
         .await
     }
@@ -1523,6 +1442,109 @@ impl VerifiedRunReadContext {
         status_projection_from_verified_view_with_resource_lanes(&self.view, global_projection)
             .map_err(Into::into)
     }
+}
+
+#[derive(Debug, Clone)]
+struct VerifiedStatusReadContext {
+    read: VerifiedRunReadContext,
+    projection: store::ProjectionSnapshot,
+}
+
+impl VerifiedStatusReadContext {
+    fn runtime_spec(&self) -> &CertifiedRuntimeSpec {
+        self.read.runtime_spec()
+    }
+
+    fn events(&self) -> &[store::KernelEventEnvelope] {
+        self.read.events()
+    }
+
+    fn projection(&self) -> &store::ProjectionSnapshot {
+        &self.projection
+    }
+}
+
+async fn load_sync_verified_run_read_context<S>(
+    store: &Arc<Mutex<S>>,
+    artifacts: &FsTypedArtifactStore,
+    registry: &CertificationRegistry,
+    run_id: &RunId,
+) -> Result<VerifiedRunReadContext, AppError>
+where
+    S: store::TypedRunEventStore + Send,
+{
+    let stream = {
+        let store = store.lock().await;
+        store.load_run_stream(run_id)
+    };
+    verified_run_read_context_from_events(artifacts, registry, run_id, stream).await
+}
+
+async fn load_sync_verified_status_read_context<S>(
+    store: &Arc<Mutex<S>>,
+    artifacts: &FsTypedArtifactStore,
+    registry: &CertificationRegistry,
+    run_id: &RunId,
+) -> Result<VerifiedStatusReadContext, AppError>
+where
+    S: store::TypedRunEventStore + Send,
+{
+    let (stream, projection) = {
+        let store = store.lock().await;
+        (
+            store.load_run_stream(run_id),
+            store.projection_snapshot().clone(),
+        )
+    };
+    verified_status_read_context_from_events(artifacts, registry, run_id, stream, &projection).await
+}
+
+async fn load_async_verified_run_read_context<S>(
+    store: &S,
+    artifacts: &FsTypedArtifactStore,
+    registry: &CertificationRegistry,
+    run_id: &RunId,
+) -> Result<VerifiedRunReadContext, AppError>
+where
+    S: store::AsyncTypedRunEventStore + Send + Sync,
+{
+    let stream = store
+        .load_run_stream(run_id)
+        .await
+        .map_err(async_app_store_error)?;
+    verified_run_read_context_from_events(artifacts, registry, run_id, stream).await
+}
+
+async fn load_async_verified_status_read_context<S>(
+    store: &S,
+    artifacts: &FsTypedArtifactStore,
+    registry: &CertificationRegistry,
+    run_id: &RunId,
+) -> Result<VerifiedStatusReadContext, AppError>
+where
+    S: store::AsyncTypedRunEventStore + Send + Sync,
+{
+    let stream = store
+        .load_run_stream(run_id)
+        .await
+        .map_err(async_app_store_error)?;
+    let projection = store
+        .status_projection_snapshot(run_id)
+        .await
+        .map_err(async_app_store_error)?;
+    verified_status_read_context_from_events(artifacts, registry, run_id, stream, &projection).await
+}
+
+async fn verified_status_read_context_from_events(
+    artifacts: &FsTypedArtifactStore,
+    registry: &CertificationRegistry,
+    run_id: &RunId,
+    stream: Vec<store::KernelEventEnvelope>,
+    global_projection: &store::ProjectionSnapshot,
+) -> Result<VerifiedStatusReadContext, AppError> {
+    let read = verified_run_read_context_from_events(artifacts, registry, run_id, stream).await?;
+    let projection = read.status_projection_with_resource_lanes(global_projection)?;
+    Ok(VerifiedStatusReadContext { read, projection })
 }
 
 async fn verified_run_read_context_from_events(
@@ -1584,6 +1606,7 @@ async fn load_runtime_spec_for_run(
     CertifiedRuntimeSpec::new(certified).map_err(Into::into)
 }
 
+#[cfg(test)]
 async fn verified_run_history_from_events(
     artifacts: &FsTypedArtifactStore,
     runtime_spec: &CertifiedRuntimeSpec,
