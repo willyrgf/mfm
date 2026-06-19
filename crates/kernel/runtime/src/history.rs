@@ -12,7 +12,7 @@ use crate::binding::{BoundRuntimeContext, BoundRuntimeContextLoader};
 use crate::commit::SealedTerminalCommitValidation;
 use crate::error::async_store_error;
 use crate::framework::{
-    build_retention_manifest_artifact_with_producer, certified_complete_run_node,
+    build_retention_manifest_artifact, certified_complete_run_node,
     certified_resolve_saga_terminal_node, certified_retention_manifest_node,
     complete_run_receipt_json, projected_retention_manifest, public_output_receipt_digest,
     public_output_rendered_digest, resolve_saga_terminal_receipt_json,
@@ -1719,12 +1719,8 @@ fn validate_historical_retention_manifest_batch(
                 .to_owned(),
         ));
     }
-    let expected = build_retention_manifest_artifact_with_producer(
-        runtime_spec,
-        &projection.run_id,
-        pre_projection_stream,
-        Some(retention_node.node_id.clone()),
-    )?;
+    let expected =
+        build_retention_manifest_artifact(runtime_spec, &projection.run_id, pre_projection_stream)?;
     if projection.manifest_seq != expected.manifest_seq
         || projection.manifest_digest != expected.evidence.digest
         || projection.previous_manifest_digest != expected.previous_manifest_digest

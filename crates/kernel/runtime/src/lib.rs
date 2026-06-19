@@ -78,7 +78,7 @@ use artifacts::{staged_artifact_binding_kind, staged_side_effect_artifact_phase}
 use commit::{retention_manifest_payloads, runner_payloads_with_derived_lifecycle};
 #[cfg(test)]
 use framework::{
-    build_retention_manifest_artifact_with_producer, certified_complete_run_node,
+    build_retention_manifest_artifact, certified_complete_run_node,
     certified_retention_manifest_node,
 };
 #[cfg(test)]

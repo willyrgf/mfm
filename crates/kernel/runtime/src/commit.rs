@@ -14,7 +14,7 @@ use crate::artifacts::{
 };
 use crate::binding::BoundRuntimeContext;
 use crate::framework::{
-    build_retention_manifest_artifact_with_producer, framework_run_completed_payload,
+    build_retention_manifest_artifact, framework_run_completed_payload,
     projected_retention_manifest, retention_reason_str, run_completion_evidence,
     RetentionManifestArtifact,
 };
@@ -1018,12 +1018,7 @@ fn framework_retention_manifest_artifact(
             node.node_id
         )));
     };
-    let expected = build_retention_manifest_artifact_with_producer(
-        runtime_spec,
-        run_id,
-        pre_projection_stream,
-        Some(node.node_id.clone()),
-    )?;
+    let expected = build_retention_manifest_artifact(runtime_spec, run_id, pre_projection_stream)?;
     if staged.evidence != expected.evidence || bytes != expected.bytes.as_bytes() {
         return Err(RuntimeError::InvalidRunnerOutput(format!(
             "retention framework node {} staged manifest outside authoritative stream",

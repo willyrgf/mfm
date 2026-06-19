@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_events::v1 as events;
-use mfm_ids::{ArtifactId, ContentDigest, NodeId, RunId};
+use mfm_ids::{ArtifactId, ContentDigest, RunId};
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 
@@ -355,12 +355,8 @@ fn project_retention_manifest(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutpu
             ctx.node().node_id
         )));
     };
-    let manifest = build_retention_manifest_artifact_with_producer(
-        ctx.runtime_spec(),
-        ctx.run_id(),
-        ctx.run_stream(),
-        Some(ctx.node().node_id.clone()),
-    )?;
+    let manifest =
+        build_retention_manifest_artifact(ctx.runtime_spec(), ctx.run_id(), ctx.run_stream())?;
     let manifest_artifact = StagedArtifact::inline_retention_manifest_artifact(
         &ctx,
         manifest.bytes.to_vec(),
@@ -823,34 +819,20 @@ fn retained_refs_by_role(retained_refs: &[&events::RetentionRef]) -> RetainedRef
     let mut confirmation_artifacts = Vec::new();
     let mut public_output_artifacts = Vec::new();
     for retention_ref in retained_refs {
-        match retention_ref.role {
-            events::ArtifactRole::StateOutput
-            | events::ArtifactRole::FactResponse
-            | events::ArtifactRole::SideEffectIntent
-            | events::ArtifactRole::PreparedInvocation
-            | events::ArtifactRole::NotSubmittedProof
-            | events::ArtifactRole::Submission
-            | events::ArtifactRole::SubmissionUnknownEvidence
-            | events::ArtifactRole::AmbiguityEvidence
-            | events::ArtifactRole::ManualResolutionEvidence
-            | events::ArtifactRole::ManualResolutionAuthorization
-            | events::ArtifactRole::RedactedDiagnostic => {
+        match retention_ref.role.contract().retention {
+            events::ArtifactRetentionClass::ValueArtifacts => {
                 value_artifacts.push(retention_ref.artifact_id.as_str().to_owned());
             }
-            events::ArtifactRole::Receipt => {
+            events::ArtifactRetentionClass::ReceiptArtifacts => {
                 receipt_artifacts.push(retention_ref.artifact_id.as_str().to_owned());
             }
-            events::ArtifactRole::Confirmation => {
+            events::ArtifactRetentionClass::ConfirmationArtifacts => {
                 confirmation_artifacts.push(retention_ref.artifact_id.as_str().to_owned());
             }
-            events::ArtifactRole::PublicOutput => {
+            events::ArtifactRetentionClass::PublicOutputArtifacts => {
                 public_output_artifacts.push(retention_ref.artifact_id.as_str().to_owned());
             }
-            events::ArtifactRole::TypedExecutionSpec
-            | events::ArtifactRole::TypedSpecCertificate
-            | events::ArtifactRole::TypedConfig
-            | events::ArtifactRole::SeedInput
-            | events::ArtifactRole::RetentionManifest => {}
+            events::ArtifactRetentionClass::FrameworkIgnored => {}
         }
     }
     RetainedRefsByRole {
@@ -925,32 +907,8 @@ fn retention_ref_json(retention_ref: &events::RetentionRef) -> serde_json::Value
     serde_json::json!({
         "artifact_id": retention_ref.artifact_id.as_str(),
         "content_digest": retention_ref.content_digest.as_str(),
-        "role": retention_role_str(retention_ref.role),
+        "role": retention_ref.role.as_str(),
     })
-}
-
-fn retention_role_str(role: events::ArtifactRole) -> &'static str {
-    match role {
-        events::ArtifactRole::TypedExecutionSpec => "typed_execution_spec",
-        events::ArtifactRole::TypedSpecCertificate => "typed_spec_certificate",
-        events::ArtifactRole::TypedConfig => "typed_config",
-        events::ArtifactRole::SeedInput => "seed_input",
-        events::ArtifactRole::StateOutput => "state_output",
-        events::ArtifactRole::FactResponse => "fact_response",
-        events::ArtifactRole::SideEffectIntent => "side_effect_intent",
-        events::ArtifactRole::PreparedInvocation => "prepared_invocation",
-        events::ArtifactRole::NotSubmittedProof => "not_submitted_proof",
-        events::ArtifactRole::Submission => "submission",
-        events::ArtifactRole::SubmissionUnknownEvidence => "submission_unknown_evidence",
-        events::ArtifactRole::Receipt => "receipt",
-        events::ArtifactRole::Confirmation => "confirmation",
-        events::ArtifactRole::AmbiguityEvidence => "ambiguity_evidence",
-        events::ArtifactRole::ManualResolutionEvidence => "manual_resolution_evidence",
-        events::ArtifactRole::ManualResolutionAuthorization => "manual_resolution_authorization",
-        events::ArtifactRole::PublicOutput => "public_output",
-        events::ArtifactRole::RedactedDiagnostic => "redacted_diagnostic",
-        events::ArtifactRole::RetentionManifest => "retention_manifest",
-    }
 }
 
 pub(crate) fn retention_reason_str(reason: events::RetentionReason) -> &'static str {
@@ -994,11 +952,10 @@ pub(crate) fn public_output_is_produced(
     )
 }
 
-pub(crate) fn build_retention_manifest_artifact_with_producer(
+pub(crate) fn build_retention_manifest_artifact(
     runtime_spec: &CertifiedRuntimeSpec,
     run_id: &RunId,
     stream: &[store::KernelEventEnvelope],
-    producer_node_id: Option<NodeId>,
 ) -> Result<RetentionManifestArtifact> {
     store::ProjectionSnapshot::validate_run_stream(stream)?;
     let projection = store::ProjectionSnapshot::rebuild_from_run_stream(stream)?;
@@ -1057,7 +1014,7 @@ pub(crate) fn build_retention_manifest_artifact_with_producer(
             )?,
             schema_id: None,
             semantic_type_id: None,
-            producer_node_id,
+            producer_node_id: None,
             producer_seed_id: None,
             artifact_role: events::ArtifactRole::RetentionManifest,
         },

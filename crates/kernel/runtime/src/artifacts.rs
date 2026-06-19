@@ -81,6 +81,23 @@ pub enum StagedSideEffectArtifactPhase {
     AmbiguityEvidence,
 }
 
+impl StagedSideEffectArtifactPhase {
+    fn staging_class(self) -> events::ArtifactStagingClass {
+        match self {
+            Self::Intent => events::ArtifactStagingClass::SideEffectIntent,
+            Self::PreparedInvocation => events::ArtifactStagingClass::SideEffectPreparedInvocation,
+            Self::NotSubmittedProof => events::ArtifactStagingClass::SideEffectNotSubmittedProof,
+            Self::Submission => events::ArtifactStagingClass::SideEffectSubmission,
+            Self::SubmissionUnknownEvidence => {
+                events::ArtifactStagingClass::SideEffectSubmissionUnknown
+            }
+            Self::Receipt => events::ArtifactStagingClass::SideEffectReceipt,
+            Self::Confirmation => events::ArtifactStagingClass::SideEffectConfirmation,
+            Self::AmbiguityEvidence => events::ArtifactStagingClass::SideEffectAmbiguity,
+        }
+    }
+}
+
 /// Sealed finalized artifact handle bound to one run, node, attempt, and evidence role.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StagedArtifactHandle {
@@ -104,15 +121,7 @@ impl StagedArtifactHandle {
                 artifact_role_name(evidence.artifact_role)
             )));
         }
-        if evidence.producer_node_id.as_ref() != Some(&ctx.node().node_id)
-            || evidence.producer_seed_id.is_some()
-        {
-            return Err(RuntimeError::InvalidRunnerOutput(format!(
-                "node {} staged artifact {} with producer evidence outside its attempt",
-                ctx.node().node_id,
-                evidence.artifact_id
-            )));
-        }
+        validate_staged_artifact_producer(ctx, &evidence)?;
         Ok(Self {
             run_id: ctx.run_id().clone(),
             node_id: ctx.node().node_id.clone(),
@@ -145,6 +154,58 @@ impl StagedArtifactHandle {
     /// Returns the finalized artifact evidence.
     pub fn evidence(&self) -> &store::ArtifactEvidenceRef {
         &self.evidence
+    }
+}
+
+fn invalid_staged_artifact_producer(
+    ctx: &ErasedRunCtx<'_>,
+    evidence: &store::ArtifactEvidenceRef,
+) -> RuntimeError {
+    RuntimeError::InvalidRunnerOutput(format!(
+        "node {} staged artifact {} with producer evidence outside its attempt",
+        ctx.node().node_id,
+        evidence.artifact_id
+    ))
+}
+
+fn validate_staged_artifact_producer(
+    ctx: &ErasedRunCtx<'_>,
+    evidence: &store::ArtifactEvidenceRef,
+) -> Result<()> {
+    match evidence.artifact_role.contract().producer {
+        events::ArtifactProducerScope::NodeRequired => {
+            if evidence.producer_node_id.as_ref() == Some(&ctx.node().node_id)
+                && evidence.producer_seed_id.is_none()
+            {
+                Ok(())
+            } else {
+                Err(invalid_staged_artifact_producer(ctx, evidence))
+            }
+        }
+        events::ArtifactProducerScope::DiagnosticOptionalNodeNoSeed => {
+            if evidence.producer_seed_id.is_some()
+                || evidence
+                    .producer_node_id
+                    .as_ref()
+                    .is_some_and(|node_id| node_id != &ctx.node().node_id)
+            {
+                Err(invalid_staged_artifact_producer(ctx, evidence))
+            } else {
+                Ok(())
+            }
+        }
+        events::ArtifactProducerScope::GlobalNoSeed
+        | events::ArtifactProducerScope::MiddlewareNoSeed
+        | events::ArtifactProducerScope::LaunchOrGlobalNoSeed => {
+            if evidence.producer_node_id.is_none() && evidence.producer_seed_id.is_none() {
+                Ok(())
+            } else {
+                Err(invalid_staged_artifact_producer(ctx, evidence))
+            }
+        }
+        events::ArtifactProducerScope::SeedRequired => {
+            Err(invalid_staged_artifact_producer(ctx, evidence))
+        }
     }
 }
 
@@ -256,93 +317,104 @@ impl StagedArtifact {
 pub(crate) fn staged_artifact_binding_kind(
     role: events::ArtifactRole,
 ) -> Option<StagedArtifactBindingKind> {
-    match role {
-        events::ArtifactRole::StateOutput => Some(StagedArtifactBindingKind::StateOutput),
-        events::ArtifactRole::FactResponse => Some(StagedArtifactBindingKind::FactResponse),
-        events::ArtifactRole::PublicOutput => Some(StagedArtifactBindingKind::PublicOutput),
-        events::ArtifactRole::RedactedDiagnostic => {
+    match role.contract().staging {
+        events::ArtifactStagingClass::AttemptStateOutput => {
+            Some(StagedArtifactBindingKind::StateOutput)
+        }
+        events::ArtifactStagingClass::AttemptFactResponse => {
+            Some(StagedArtifactBindingKind::FactResponse)
+        }
+        events::ArtifactStagingClass::AttemptPublicOutput => {
+            Some(StagedArtifactBindingKind::PublicOutput)
+        }
+        events::ArtifactStagingClass::AttemptRedactedDiagnostic => {
             Some(StagedArtifactBindingKind::RedactedDiagnostic)
         }
-        events::ArtifactRole::TypedExecutionSpec
-        | events::ArtifactRole::TypedSpecCertificate
-        | events::ArtifactRole::TypedConfig
-        | events::ArtifactRole::SeedInput
-        | events::ArtifactRole::SideEffectIntent
-        | events::ArtifactRole::PreparedInvocation
-        | events::ArtifactRole::NotSubmittedProof
-        | events::ArtifactRole::Submission
-        | events::ArtifactRole::SubmissionUnknownEvidence
-        | events::ArtifactRole::Receipt
-        | events::ArtifactRole::Confirmation
-        | events::ArtifactRole::AmbiguityEvidence
-        | events::ArtifactRole::ManualResolutionEvidence
-        | events::ArtifactRole::ManualResolutionAuthorization
-        | events::ArtifactRole::RetentionManifest => None,
+        events::ArtifactStagingClass::RunAdmission
+        | events::ArtifactStagingClass::SideEffectIntent
+        | events::ArtifactStagingClass::SideEffectPreparedInvocation
+        | events::ArtifactStagingClass::SideEffectNotSubmittedProof
+        | events::ArtifactStagingClass::SideEffectSubmission
+        | events::ArtifactStagingClass::SideEffectSubmissionUnknown
+        | events::ArtifactStagingClass::SideEffectReceipt
+        | events::ArtifactStagingClass::SideEffectConfirmation
+        | events::ArtifactStagingClass::SideEffectAmbiguity
+        | events::ArtifactStagingClass::ManualResolution
+        | events::ArtifactStagingClass::MiddlewareRetentionManifest => None,
     }
 }
 
 pub(crate) fn staged_side_effect_artifact_phase(
     role: events::ArtifactRole,
 ) -> Option<StagedSideEffectArtifactPhase> {
-    match role {
-        events::ArtifactRole::SideEffectIntent => Some(StagedSideEffectArtifactPhase::Intent),
-        events::ArtifactRole::PreparedInvocation => {
+    match role.contract().staging {
+        events::ArtifactStagingClass::SideEffectIntent => {
+            Some(StagedSideEffectArtifactPhase::Intent)
+        }
+        events::ArtifactStagingClass::SideEffectPreparedInvocation => {
             Some(StagedSideEffectArtifactPhase::PreparedInvocation)
         }
-        events::ArtifactRole::NotSubmittedProof => {
+        events::ArtifactStagingClass::SideEffectNotSubmittedProof => {
             Some(StagedSideEffectArtifactPhase::NotSubmittedProof)
         }
-        events::ArtifactRole::Submission => Some(StagedSideEffectArtifactPhase::Submission),
-        events::ArtifactRole::SubmissionUnknownEvidence => {
+        events::ArtifactStagingClass::SideEffectSubmission => {
+            Some(StagedSideEffectArtifactPhase::Submission)
+        }
+        events::ArtifactStagingClass::SideEffectSubmissionUnknown => {
             Some(StagedSideEffectArtifactPhase::SubmissionUnknownEvidence)
         }
-        events::ArtifactRole::Receipt => Some(StagedSideEffectArtifactPhase::Receipt),
-        events::ArtifactRole::Confirmation => Some(StagedSideEffectArtifactPhase::Confirmation),
-        events::ArtifactRole::AmbiguityEvidence => {
+        events::ArtifactStagingClass::SideEffectReceipt => {
+            Some(StagedSideEffectArtifactPhase::Receipt)
+        }
+        events::ArtifactStagingClass::SideEffectConfirmation => {
+            Some(StagedSideEffectArtifactPhase::Confirmation)
+        }
+        events::ArtifactStagingClass::SideEffectAmbiguity => {
             Some(StagedSideEffectArtifactPhase::AmbiguityEvidence)
         }
-        events::ArtifactRole::TypedExecutionSpec
-        | events::ArtifactRole::TypedSpecCertificate
-        | events::ArtifactRole::TypedConfig
-        | events::ArtifactRole::SeedInput
-        | events::ArtifactRole::StateOutput
-        | events::ArtifactRole::FactResponse
-        | events::ArtifactRole::PublicOutput
-        | events::ArtifactRole::RedactedDiagnostic
-        | events::ArtifactRole::ManualResolutionEvidence
-        | events::ArtifactRole::ManualResolutionAuthorization
-        | events::ArtifactRole::RetentionManifest => None,
+        events::ArtifactStagingClass::RunAdmission
+        | events::ArtifactStagingClass::AttemptStateOutput
+        | events::ArtifactStagingClass::AttemptFactResponse
+        | events::ArtifactStagingClass::ManualResolution
+        | events::ArtifactStagingClass::AttemptPublicOutput
+        | events::ArtifactStagingClass::AttemptRedactedDiagnostic
+        | events::ArtifactStagingClass::MiddlewareRetentionManifest => None,
+    }
+}
+
+fn artifact_role_for_staging_class(staging: events::ArtifactStagingClass) -> events::ArtifactRole {
+    events::ArtifactRole::ALL
+        .iter()
+        .copied()
+        .find(|role| role.contract().staging == staging)
+        .expect("artifact role contract for runtime staging class")
+}
+
+fn staged_artifact_binding_staging_class(
+    binding: &StagedArtifactBindingKind,
+) -> events::ArtifactStagingClass {
+    match binding {
+        StagedArtifactBindingKind::StateOutput => events::ArtifactStagingClass::AttemptStateOutput,
+        StagedArtifactBindingKind::FactResponse => {
+            events::ArtifactStagingClass::AttemptFactResponse
+        }
+        StagedArtifactBindingKind::SideEffectEvidence { phase, .. } => phase.staging_class(),
+        StagedArtifactBindingKind::PublicOutput => {
+            events::ArtifactStagingClass::AttemptPublicOutput
+        }
+        StagedArtifactBindingKind::RedactedDiagnostic => {
+            events::ArtifactStagingClass::AttemptRedactedDiagnostic
+        }
+        StagedArtifactBindingKind::RetentionManifest => {
+            events::ArtifactStagingClass::MiddlewareRetentionManifest
+        }
     }
 }
 
 pub(crate) fn staged_artifact_binding_role(
     binding: &StagedArtifactBindingKind,
 ) -> events::ArtifactRole {
-    match binding {
-        StagedArtifactBindingKind::StateOutput => events::ArtifactRole::StateOutput,
-        StagedArtifactBindingKind::FactResponse => events::ArtifactRole::FactResponse,
-        StagedArtifactBindingKind::SideEffectEvidence { phase, .. } => match phase {
-            StagedSideEffectArtifactPhase::Intent => events::ArtifactRole::SideEffectIntent,
-            StagedSideEffectArtifactPhase::PreparedInvocation => {
-                events::ArtifactRole::PreparedInvocation
-            }
-            StagedSideEffectArtifactPhase::NotSubmittedProof => {
-                events::ArtifactRole::NotSubmittedProof
-            }
-            StagedSideEffectArtifactPhase::Submission => events::ArtifactRole::Submission,
-            StagedSideEffectArtifactPhase::SubmissionUnknownEvidence => {
-                events::ArtifactRole::SubmissionUnknownEvidence
-            }
-            StagedSideEffectArtifactPhase::Receipt => events::ArtifactRole::Receipt,
-            StagedSideEffectArtifactPhase::Confirmation => events::ArtifactRole::Confirmation,
-            StagedSideEffectArtifactPhase::AmbiguityEvidence => {
-                events::ArtifactRole::AmbiguityEvidence
-            }
-        },
-        StagedArtifactBindingKind::PublicOutput => events::ArtifactRole::PublicOutput,
-        StagedArtifactBindingKind::RedactedDiagnostic => events::ArtifactRole::RedactedDiagnostic,
-        StagedArtifactBindingKind::RetentionManifest => events::ArtifactRole::RetentionManifest,
-    }
+    artifact_role_for_staging_class(staged_artifact_binding_staging_class(binding))
 }
 
 pub(crate) fn verify_artifact_bytes(
@@ -365,27 +437,7 @@ pub(crate) fn verify_artifact_bytes(
 }
 
 pub(crate) fn artifact_role_name(role: events::ArtifactRole) -> &'static str {
-    match role {
-        events::ArtifactRole::TypedExecutionSpec => "typed_execution_spec",
-        events::ArtifactRole::TypedSpecCertificate => "typed_spec_certificate",
-        events::ArtifactRole::TypedConfig => "typed_config",
-        events::ArtifactRole::SeedInput => "seed_input",
-        events::ArtifactRole::StateOutput => "state_output",
-        events::ArtifactRole::FactResponse => "fact_response",
-        events::ArtifactRole::SideEffectIntent => "side_effect_intent",
-        events::ArtifactRole::PreparedInvocation => "prepared_invocation",
-        events::ArtifactRole::NotSubmittedProof => "not_submitted_proof",
-        events::ArtifactRole::Submission => "submission",
-        events::ArtifactRole::SubmissionUnknownEvidence => "submission_unknown_evidence",
-        events::ArtifactRole::Receipt => "receipt",
-        events::ArtifactRole::Confirmation => "confirmation",
-        events::ArtifactRole::AmbiguityEvidence => "ambiguity_evidence",
-        events::ArtifactRole::ManualResolutionEvidence => "manual_resolution_evidence",
-        events::ArtifactRole::ManualResolutionAuthorization => "manual_resolution_authorization",
-        events::ArtifactRole::PublicOutput => "public_output",
-        events::ArtifactRole::RedactedDiagnostic => "redacted_diagnostic",
-        events::ArtifactRole::RetentionManifest => "retention_manifest",
-    }
+    role.as_str()
 }
 
 /// Retention refs staged by a runner before the scheduler binds them to typed events.
