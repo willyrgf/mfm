@@ -6282,6 +6282,113 @@ fn retention_refs_are_projected_from_authoritative_stream() {
 }
 
 #[test]
+fn retention_refs_validate_role_contract_shape_without_repeating_exact_fields() {
+    fn reject_state_output_shape(
+        commit_key: &str,
+        mut mutate: impl FnMut(&mut ArtifactEvidenceRef),
+        expected_field: &'static str,
+    ) {
+        let run_id = run_id(120);
+        let artifact_id = artifact_id(222);
+        let digest = content_digest(223);
+        let mut evidence = store_artifact_ref(artifact_id.clone(), digest.clone());
+        mutate(&mut evidence);
+        let mut store = InMemoryTypedRunStore::new();
+        store
+            .append_prepared_commit(run_start_request(
+                run_id.clone(),
+                &format!("{commit_key}-run-start"),
+            ))
+            .expect("append run start");
+
+        let error = store
+            .append_prepared_commit(typed_commit_request! {
+                run_id: run_id.clone(),
+                expected_next_seq: store.expected_next_seq(&run_id),
+                commit_key: CommitKey::new(commit_key).expect("commit key"),
+                payloads: vec![retention_refs_appended(
+                    artifact_id,
+                    digest,
+                    ArtifactRole::StateOutput,
+                )],
+                required_artifacts: vec![evidence],
+                preconditions: CommitPreconditions {
+                    required_run_state: RequiredRunState::Started,
+                    ..CommitPreconditions::default()
+                },
+            })
+            .expect_err("invalid retention evidence shape rejects");
+        assert_invalid_prepared_commit_contains(error, expected_field);
+    }
+
+    reject_state_output_shape(
+        "retention-state-output-missing-schema",
+        |evidence| evidence.schema_id = None,
+        "schema_id",
+    );
+    reject_state_output_shape(
+        "retention-state-output-missing-semantic",
+        |evidence| evidence.semantic_type_id = None,
+        "semantic_type_id",
+    );
+    reject_state_output_shape(
+        "retention-state-output-missing-node",
+        |evidence| evidence.producer_node_id = None,
+        "producer_node_id",
+    );
+
+    fn reject_manifest_shape(
+        commit_key: &str,
+        mut mutate: impl FnMut(&mut ArtifactEvidenceRef),
+        expected_field: &'static str,
+    ) {
+        let run_id = run_id(120);
+        let artifact_id = artifact_id(224);
+        let digest = content_digest(225);
+        let mut evidence = retention_manifest_artifact_ref(artifact_id.clone(), digest.clone());
+        mutate(&mut evidence);
+        let mut store = InMemoryTypedRunStore::new();
+        store
+            .append_prepared_commit(run_start_request(
+                run_id.clone(),
+                &format!("{commit_key}-run-start"),
+            ))
+            .expect("append run start");
+
+        let error = store
+            .append_prepared_commit(typed_commit_request! {
+                run_id: run_id.clone(),
+                expected_next_seq: store.expected_next_seq(&run_id),
+                commit_key: CommitKey::new(commit_key).expect("commit key"),
+                payloads: retention_manifest_commit_payloads(
+                    1,
+                    digest,
+                    None,
+                    artifact_id,
+                ),
+                required_artifacts: vec![evidence],
+                preconditions: CommitPreconditions {
+                    required_run_state: RequiredRunState::Started,
+                    ..CommitPreconditions::default()
+                },
+            })
+            .expect_err("invalid retention manifest evidence shape rejects");
+        assert_invalid_prepared_commit_contains(error, expected_field);
+    }
+
+    reject_manifest_shape(
+        "retention-manifest-schema-present",
+        |evidence| evidence.schema_id = Some(schema_id("mfm.test.retention_manifest", 224)),
+        "schema_id",
+    );
+    reject_manifest_shape(
+        "retention-manifest-producer-present",
+        |evidence| evidence.producer_node_id = Some(node_id(224)),
+        "producer_node_id",
+    );
+}
+
+#[test]
 fn retention_manifest_projection_must_chain_append_only() {
     let run_id = run_id(120);
     let first_artifact = artifact_id(123);

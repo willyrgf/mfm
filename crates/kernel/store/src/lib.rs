@@ -5418,9 +5418,6 @@ pub mod v1 {
             .collect::<BTreeMap<_, _>>();
         for payload in &request.payloads {
             for requirement in event_artifact_requirements(payload) {
-                if requirement.source.is_retention() {
-                    continue;
-                }
                 let evidence = required.get(&requirement.artifact_id).ok_or_else(|| {
                     invalid_prepared_commit_purpose(
                         purpose,
@@ -5430,115 +5427,72 @@ pub mod v1 {
                         ),
                     )
                 })?;
-                validate_required_artifact_field(
-                    purpose,
-                    &requirement,
-                    "digest",
-                    requirement.digest.as_ref(),
-                    Some(&evidence.digest),
-                )?;
-                validate_required_artifact_field(
-                    purpose,
-                    &requirement,
-                    "byte_len",
-                    requirement.byte_len.as_ref(),
-                    Some(&evidence.byte_len),
-                )?;
-                validate_required_artifact_field(
-                    purpose,
-                    &requirement,
-                    "media_type",
-                    requirement.media_type.as_ref(),
-                    Some(&evidence.media_type),
-                )?;
-                validate_required_artifact_field(
-                    purpose,
-                    &requirement,
-                    "schema_id",
-                    requirement.schema_id.as_ref(),
-                    evidence.schema_id.as_ref(),
-                )?;
-                validate_required_artifact_field(
-                    purpose,
-                    &requirement,
-                    "semantic_type_id",
-                    requirement.semantic_type_id.as_ref(),
-                    evidence.semantic_type_id.as_ref(),
-                )?;
-                validate_required_artifact_field(
-                    purpose,
-                    &requirement,
-                    "producer_node_id",
-                    requirement.producer_node_id.as_ref(),
-                    evidence.producer_node_id.as_ref(),
-                )?;
-                validate_required_artifact_field(
-                    purpose,
-                    &requirement,
-                    "producer_seed_id",
-                    requirement.producer_seed_id.as_ref(),
-                    evidence.producer_seed_id.as_ref(),
-                )?;
-                validate_required_artifact_field(
-                    purpose,
-                    &requirement,
-                    "artifact_role",
-                    requirement.artifact_role.as_ref(),
-                    Some(&evidence.artifact_role),
-                )?;
+                validate_required_artifact_requirement(purpose, &requirement, evidence)?;
             }
         }
         Ok(())
     }
 
-    fn validate_required_artifact_field<T: PartialEq>(
+    fn validate_required_artifact_requirement(
         purpose: &'static str,
-        requirement: &EventArtifactRequirement,
-        field: &'static str,
-        expected: Option<&T>,
-        actual: Option<&T>,
-    ) -> Result<()> {
-        if expected.is_none() || expected == actual {
-            Ok(())
-        } else {
-            Err(invalid_prepared_commit_purpose(
-                purpose,
-                format!(
-                    "required artifact {} field {field} does not satisfy payload reference",
-                    requirement.artifact_id
-                ),
-            ))
-        }
-    }
-
-    fn validate_artifact_requirement_against_evidence(
         requirement: &EventArtifactRequirement,
         evidence: &ArtifactEvidenceRef,
     ) -> Result<()> {
-        if let Some(digest) = &requirement.digest {
-            compare_artifact_field(
-                &requirement.artifact_id,
-                "digest",
-                evidence.digest.as_str(),
-                digest.as_str(),
-            )?;
+        validate_artifact_requirement_against_evidence(requirement, evidence).map_err(|error| {
+            if let StoreError::ArtifactEvidenceMismatch { field, .. } = error {
+                return invalid_prepared_commit_purpose(
+                    purpose,
+                    format!(
+                        "required artifact {} field {field} does not satisfy payload reference",
+                        requirement.artifact_id
+                    ),
+                );
+            }
+            error
+        })
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ArtifactRequirementValidationMode {
+        Strict,
+        RetentionMetadata,
+    }
+
+    fn artifact_evidence_mismatch(artifact_id: &ArtifactId, field: &'static str) -> StoreError {
+        StoreError::ArtifactEvidenceMismatch {
+            artifact_id: artifact_id.clone(),
+            field,
         }
-        if let Some(byte_len) = requirement.byte_len {
-            compare_artifact_field(
-                &requirement.artifact_id,
-                "byte_len",
-                evidence.byte_len,
-                byte_len,
-            )?;
+    }
+
+    fn require_artifact_option_present(
+        artifact_id: &ArtifactId,
+        field: &'static str,
+        actual: Option<&str>,
+    ) -> Result<()> {
+        if actual.is_some() {
+            Ok(())
+        } else {
+            Err(artifact_evidence_mismatch(artifact_id, field))
         }
-        if let Some(media_type) = &requirement.media_type {
-            compare_artifact_field(
-                &requirement.artifact_id,
-                "media_type",
-                evidence.media_type.as_str(),
-                media_type.as_str(),
-            )?;
+    }
+
+    fn require_artifact_option_absent(
+        artifact_id: &ArtifactId,
+        field: &'static str,
+        actual: Option<&str>,
+    ) -> Result<()> {
+        if actual.is_none() {
+            Ok(())
+        } else {
+            Err(artifact_evidence_mismatch(artifact_id, field))
         }
+    }
+
+    fn validate_artifact_requirement_exact_fields(
+        requirement: &EventArtifactRequirement,
+        evidence: &ArtifactEvidenceRef,
+    ) -> Result<()> {
         if let Some(schema_id) = &requirement.schema_id {
             compare_artifact_option(
                 &requirement.artifact_id,
@@ -5574,6 +5528,296 @@ pub mod v1 {
                 Some(producer_seed_id.as_str()),
             )?;
         }
+        Ok(())
+    }
+
+    fn validate_artifact_schema_policy(
+        requirement: &EventArtifactRequirement,
+        evidence: &ArtifactEvidenceRef,
+        policy: events::ArtifactSchemaPolicy,
+        mode: ArtifactRequirementValidationMode,
+    ) -> Result<()> {
+        let actual = evidence.schema_id.as_ref().map(SchemaId::as_str);
+        match policy {
+            events::ArtifactSchemaPolicy::OptionalLaunchSchema => {
+                if let Some(schema_id) = &requirement.schema_id {
+                    compare_artifact_option(
+                        &requirement.artifact_id,
+                        "schema_id",
+                        actual,
+                        Some(schema_id.as_str()),
+                    )?;
+                }
+            }
+            events::ArtifactSchemaPolicy::ExactSeedSchema
+            | events::ArtifactSchemaPolicy::ExactValueSchema
+            | events::ArtifactSchemaPolicy::ExactEvidenceSchema
+            | events::ArtifactSchemaPolicy::ExactPublicSchema
+            | events::ArtifactSchemaPolicy::ExactDiagnosticSchema => {
+                if let Some(schema_id) = &requirement.schema_id {
+                    compare_artifact_option(
+                        &requirement.artifact_id,
+                        "schema_id",
+                        actual,
+                        Some(schema_id.as_str()),
+                    )?;
+                } else if mode == ArtifactRequirementValidationMode::RetentionMetadata {
+                    require_artifact_option_present(&requirement.artifact_id, "schema_id", actual)?;
+                } else {
+                    return Err(artifact_evidence_mismatch(
+                        &requirement.artifact_id,
+                        "schema_id",
+                    ));
+                }
+            }
+            events::ArtifactSchemaPolicy::Absent => {
+                if requirement.schema_id.is_some() {
+                    return Err(artifact_evidence_mismatch(
+                        &requirement.artifact_id,
+                        "schema_id",
+                    ));
+                }
+                require_artifact_option_absent(&requirement.artifact_id, "schema_id", actual)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_artifact_semantic_policy(
+        requirement: &EventArtifactRequirement,
+        evidence: &ArtifactEvidenceRef,
+        policy: events::ArtifactSemanticPolicy,
+        mode: ArtifactRequirementValidationMode,
+    ) -> Result<()> {
+        let actual = evidence
+            .semantic_type_id
+            .as_ref()
+            .map(SemanticTypeId::as_str);
+        match policy {
+            events::ArtifactSemanticPolicy::OptionalLaunchSemantic => {
+                if let Some(semantic_type_id) = &requirement.semantic_type_id {
+                    compare_artifact_option(
+                        &requirement.artifact_id,
+                        "semantic_type_id",
+                        actual,
+                        Some(semantic_type_id.as_str()),
+                    )?;
+                }
+            }
+            events::ArtifactSemanticPolicy::ExactSeedSemantic
+            | events::ArtifactSemanticPolicy::ExactValueSemantic => {
+                if let Some(semantic_type_id) = &requirement.semantic_type_id {
+                    compare_artifact_option(
+                        &requirement.artifact_id,
+                        "semantic_type_id",
+                        actual,
+                        Some(semantic_type_id.as_str()),
+                    )?;
+                } else if mode == ArtifactRequirementValidationMode::RetentionMetadata {
+                    require_artifact_option_present(
+                        &requirement.artifact_id,
+                        "semantic_type_id",
+                        actual,
+                    )?;
+                } else {
+                    return Err(artifact_evidence_mismatch(
+                        &requirement.artifact_id,
+                        "semantic_type_id",
+                    ));
+                }
+            }
+            events::ArtifactSemanticPolicy::Absent => {
+                if requirement.semantic_type_id.is_some() {
+                    return Err(artifact_evidence_mismatch(
+                        &requirement.artifact_id,
+                        "semantic_type_id",
+                    ));
+                }
+                require_artifact_option_absent(
+                    &requirement.artifact_id,
+                    "semantic_type_id",
+                    actual,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn require_producer_node_absent(
+        requirement: &EventArtifactRequirement,
+        evidence: &ArtifactEvidenceRef,
+    ) -> Result<()> {
+        if requirement.producer_node_id.is_some() {
+            return Err(artifact_evidence_mismatch(
+                &requirement.artifact_id,
+                "producer_node_id",
+            ));
+        }
+        require_artifact_option_absent(
+            &requirement.artifact_id,
+            "producer_node_id",
+            evidence.producer_node_id.as_ref().map(NodeId::as_str),
+        )
+    }
+
+    fn require_producer_seed_absent(
+        requirement: &EventArtifactRequirement,
+        evidence: &ArtifactEvidenceRef,
+    ) -> Result<()> {
+        if requirement.producer_seed_id.is_some() {
+            return Err(artifact_evidence_mismatch(
+                &requirement.artifact_id,
+                "producer_seed_id",
+            ));
+        }
+        require_artifact_option_absent(
+            &requirement.artifact_id,
+            "producer_seed_id",
+            evidence.producer_seed_id.as_ref().map(SeedId::as_str),
+        )
+    }
+
+    fn require_producer_node_exact_or_present(
+        requirement: &EventArtifactRequirement,
+        evidence: &ArtifactEvidenceRef,
+        mode: ArtifactRequirementValidationMode,
+    ) -> Result<()> {
+        let actual = evidence.producer_node_id.as_ref().map(NodeId::as_str);
+        if let Some(producer_node_id) = &requirement.producer_node_id {
+            compare_artifact_option(
+                &requirement.artifact_id,
+                "producer_node_id",
+                actual,
+                Some(producer_node_id.as_str()),
+            )
+        } else if mode == ArtifactRequirementValidationMode::RetentionMetadata {
+            require_artifact_option_present(&requirement.artifact_id, "producer_node_id", actual)
+        } else {
+            Err(artifact_evidence_mismatch(
+                &requirement.artifact_id,
+                "producer_node_id",
+            ))
+        }
+    }
+
+    fn require_producer_seed_exact_or_present(
+        requirement: &EventArtifactRequirement,
+        evidence: &ArtifactEvidenceRef,
+        mode: ArtifactRequirementValidationMode,
+    ) -> Result<()> {
+        let actual = evidence.producer_seed_id.as_ref().map(SeedId::as_str);
+        if let Some(producer_seed_id) = &requirement.producer_seed_id {
+            compare_artifact_option(
+                &requirement.artifact_id,
+                "producer_seed_id",
+                actual,
+                Some(producer_seed_id.as_str()),
+            )
+        } else if mode == ArtifactRequirementValidationMode::RetentionMetadata {
+            require_artifact_option_present(&requirement.artifact_id, "producer_seed_id", actual)
+        } else {
+            Err(artifact_evidence_mismatch(
+                &requirement.artifact_id,
+                "producer_seed_id",
+            ))
+        }
+    }
+
+    fn validate_optional_producer_node_no_seed(
+        requirement: &EventArtifactRequirement,
+        evidence: &ArtifactEvidenceRef,
+    ) -> Result<()> {
+        require_producer_seed_absent(requirement, evidence)?;
+        if let Some(producer_node_id) = &requirement.producer_node_id {
+            compare_artifact_option(
+                &requirement.artifact_id,
+                "producer_node_id",
+                evidence.producer_node_id.as_ref().map(NodeId::as_str),
+                Some(producer_node_id.as_str()),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn validate_artifact_producer_policy(
+        requirement: &EventArtifactRequirement,
+        evidence: &ArtifactEvidenceRef,
+        policy: events::ArtifactProducerScope,
+        mode: ArtifactRequirementValidationMode,
+    ) -> Result<()> {
+        match policy {
+            events::ArtifactProducerScope::LaunchOrGlobalNoSeed
+            | events::ArtifactProducerScope::DiagnosticOptionalNodeNoSeed => {
+                validate_optional_producer_node_no_seed(requirement, evidence)?;
+            }
+            events::ArtifactProducerScope::SeedRequired => {
+                require_producer_node_absent(requirement, evidence)?;
+                require_producer_seed_exact_or_present(requirement, evidence, mode)?;
+            }
+            events::ArtifactProducerScope::NodeRequired => {
+                require_producer_seed_absent(requirement, evidence)?;
+                require_producer_node_exact_or_present(requirement, evidence, mode)?;
+            }
+            events::ArtifactProducerScope::GlobalNoSeed
+            | events::ArtifactProducerScope::MiddlewareNoSeed => {
+                require_producer_node_absent(requirement, evidence)?;
+                require_producer_seed_absent(requirement, evidence)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_artifact_role_contract(
+        requirement: &EventArtifactRequirement,
+        evidence: &ArtifactEvidenceRef,
+        role: ArtifactRole,
+        mode: ArtifactRequirementValidationMode,
+    ) -> Result<()> {
+        let contract = role.contract();
+        validate_artifact_schema_policy(requirement, evidence, contract.schema, mode)?;
+        validate_artifact_semantic_policy(requirement, evidence, contract.semantic, mode)?;
+        validate_artifact_producer_policy(requirement, evidence, contract.producer, mode)
+    }
+
+    fn validate_artifact_requirement_against_evidence(
+        requirement: &EventArtifactRequirement,
+        evidence: &ArtifactEvidenceRef,
+    ) -> Result<()> {
+        let mode = if requirement.source.is_retention() {
+            ArtifactRequirementValidationMode::RetentionMetadata
+        } else {
+            ArtifactRequirementValidationMode::Strict
+        };
+        compare_artifact_field(
+            &requirement.artifact_id,
+            "artifact_id",
+            evidence.artifact_id.as_str(),
+            requirement.artifact_id.as_str(),
+        )?;
+        if let Some(digest) = &requirement.digest {
+            compare_artifact_field(
+                &requirement.artifact_id,
+                "digest",
+                evidence.digest.as_str(),
+                digest.as_str(),
+            )?;
+        }
+        if let Some(byte_len) = requirement.byte_len {
+            compare_artifact_field(
+                &requirement.artifact_id,
+                "byte_len",
+                evidence.byte_len,
+                byte_len,
+            )?;
+        }
+        if let Some(media_type) = &requirement.media_type {
+            compare_artifact_field(
+                &requirement.artifact_id,
+                "media_type",
+                evidence.media_type.as_str(),
+                media_type.as_str(),
+            )?;
+        }
         if let Some(role) = requirement.artifact_role {
             compare_artifact_field(
                 &requirement.artifact_id,
@@ -5581,6 +5825,9 @@ pub mod v1 {
                 artifact_role_str(evidence.artifact_role),
                 artifact_role_str(role),
             )?;
+            validate_artifact_role_contract(requirement, evidence, role, mode)?;
+        } else {
+            validate_artifact_requirement_exact_fields(requirement, evidence)?;
         }
         Ok(())
     }
