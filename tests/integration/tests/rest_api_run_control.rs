@@ -12,6 +12,7 @@ use tower::ServiceExt;
 
 const VALID_RUN_ID: &str =
     "run:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000001";
+const REDACTION_SENTINEL: &str = "phase3b-secret-sentinel-password-token-42";
 const VALID_SCHEMA_ID: &str =
     "schema:mfm.test.public:1:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000002";
 
@@ -237,7 +238,9 @@ async fn start_rejects_invalid_certified_bundle_before_stream_creation() {
             serde_json::json!({
                 "kind": "typed_run_start_v1",
                 "run_id": VALID_RUN_ID,
-                "bundle": {},
+                "bundle": {
+                    "password": REDACTION_SENTINEL
+                },
                 "drive": "append_only"
             }),
         ))
@@ -248,6 +251,10 @@ async fn start_rejects_invalid_certified_bundle_before_stream_creation() {
     let v = response_json(resp).await;
     assert_eq!(v["status"], "error");
     assert_eq!(v["error"]["code"], "CertifiedBundleInvalid");
+    assert!(
+        !v.to_string().contains(REDACTION_SENTINEL),
+        "REST JSON error leaked sentinel request body: {v}"
+    );
 
     let status = app
         .oneshot(

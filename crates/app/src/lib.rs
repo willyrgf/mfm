@@ -3373,6 +3373,8 @@ mod tests {
     use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
 
+    const REDACTION_SENTINEL: &str = "phase3b-secret-sentinel-password-token-42";
+
     #[test]
     fn generated_run_ids_are_typed_digest_ids() {
         let run_id = new_run_id();
@@ -4500,6 +4502,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn production_public_surfaces_redact_runtime_failure_sentinel() {
+        let (root, fixture, services, started) = launch_framework_fixture_run(
+            DriveMode::UntilBlocked,
+            "redaction-failure",
+            framework_fixture_redaction_failure_runner_registry,
+        )
+        .await;
+        assert_no_redaction_sentinel(
+            "launch response",
+            &serde_json::to_string(&started).expect("launch response json"),
+        );
+
+        let stream = services
+            .store()
+            .load_run_stream(&fixture.run_id)
+            .await
+            .expect("load redaction stream");
+        let mut diagnostic_artifact_id = None;
+        for event in &stream {
+            let payload_json =
+                store::payload_canonical_json(event.payload()).expect("payload JSON");
+            assert_no_redaction_sentinel("persisted event payload", payload_json.as_str());
+            if let events::KernelEventPayload::StateAttemptFailed(payload) = event.payload() {
+                let diagnostic = payload
+                    .error
+                    .diagnostic_ref
+                    .as_ref()
+                    .expect("runtime failure records diagnostic");
+                diagnostic_artifact_id = Some(diagnostic.artifact_id.clone());
+            }
+        }
+        let diagnostic_artifact_id =
+            diagnostic_artifact_id.expect("runtime failure diagnostic artifact id");
+
+        let status = services
+            .run_status(&fixture.run_id)
+            .await
+            .expect("status for failed run");
+        assert_no_redaction_sentinel(
+            "status response",
+            &serde_json::to_string(&status).expect("status response json"),
+        );
+        let stream_response = services
+            .run_stream(&fixture.run_id)
+            .await
+            .expect("stream response for failed run");
+        assert_no_redaction_sentinel(
+            "stream response",
+            &serde_json::to_string(&stream_response).expect("stream response json"),
+        );
+        match services.verify_replay_for_run(&fixture.run_id).await {
+            Ok(replay) => assert_no_redaction_sentinel(
+                "replay response",
+                &serde_json::to_string(&replay).expect("replay response json"),
+            ),
+            Err(error) => assert_no_redaction_sentinel("replay error", &error.message),
+        }
+        let public_output_error = services
+            .typed_public_output(&fixture.run_id, &fixture.public_schema_id)
+            .await
+            .expect_err("failed run has no rendered public output");
+        assert_no_redaction_sentinel("public-output error", &public_output_error.message);
+
+        let (diagnostic_bytes, diagnostic_evidence) = services
+            .artifacts()
+            .get_artifact_by_id(&diagnostic_artifact_id)
+            .await
+            .expect("diagnostic artifact bytes");
+        assert_eq!(
+            diagnostic_evidence.artifact_role,
+            events::ArtifactRole::RedactedDiagnostic
+        );
+        let diagnostic_json =
+            String::from_utf8(diagnostic_bytes).expect("diagnostic artifact is UTF-8 JSON");
+        assert_no_redaction_sentinel("diagnostic artifact", &diagnostic_json);
+        assert!(diagnostic_json.contains("runtime validation failed while handling attempt"));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn async_status_reports_interrupted_attempt_and_framework_attempts_from_history() {
         let (root, fixture, services, started) =
             start_framework_fixture_run_with_drive(DriveMode::AppendOnly, "interrupted").await;
@@ -5556,6 +5639,19 @@ mod tests {
         AsyncRunServices<AsyncInMemoryStore>,
         TypedRunResponse,
     ) {
+        launch_framework_fixture_run(drive, label, framework_fixture_runner_registry).await
+    }
+
+    async fn launch_framework_fixture_run(
+        drive: DriveMode,
+        label: &str,
+        runner_registry: impl FnOnce(&FrameworkSeedPublicOutputFixture) -> ErasedRunnerRegistry,
+    ) -> (
+        PathBuf,
+        FrameworkSeedPublicOutputFixture,
+        AsyncRunServices<AsyncInMemoryStore>,
+        TypedRunResponse,
+    ) {
         let root =
             std::env::temp_dir().join(format!("mfm-app-async-{label}-{}", uuid::Uuid::new_v4()));
         let artifacts = FsTypedArtifactStore::new(&root);
@@ -5595,7 +5691,7 @@ mod tests {
             }],
         )
         .expect("typed run request");
-        let runners = framework_fixture_runner_registry(&fixture);
+        let runners = runner_registry(&fixture);
         let services = make_async_typed_services_with_certification_registry(
             runners,
             AsyncInMemoryStore::default(),
@@ -6176,6 +6272,32 @@ mod tests {
             )
             .expect("register runner");
         runners
+    }
+
+    fn framework_fixture_redaction_failure_runner_registry(
+        fixture: &FrameworkSeedPublicOutputFixture,
+    ) -> ErasedRunnerRegistry {
+        let mut runners = ErasedRunnerRegistry::new();
+        let factory_id = fixture.value_runner_factory_id.clone();
+        runners
+            .register(
+                ErasedRunnerBinding::new(
+                    fixture.value_descriptor_id.clone(),
+                    factory_id.clone(),
+                    test_executable(factory_id),
+                    Arc::new(RedactionSentinelFailureRunner),
+                )
+                .expect("runner binding"),
+            )
+            .expect("register redaction failure runner");
+        runners
+    }
+
+    fn assert_no_redaction_sentinel(surface: &str, text: &str) {
+        assert!(
+            !text.contains(REDACTION_SENTINEL),
+            "{surface} leaked redaction sentinel: {text}"
+        );
     }
 
     fn manual_proof_runner_registry(spec: &spec::TypedExecutionSpec) -> ErasedRunnerRegistry {
@@ -6791,6 +6913,18 @@ mod tests {
 
     struct TestValueRunner {
         output_bytes: Vec<u8>,
+    }
+
+    struct RedactionSentinelFailureRunner;
+
+    impl ErasedNodeRunner for RedactionSentinelFailureRunner {
+        fn run_erased<'a>(&'a self, _ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+            Box::pin(async move {
+                Err(mfm_runtime::RuntimeError::RuntimeValidation(format!(
+                    "provider returned password={REDACTION_SENTINEL}"
+                )))
+            })
+        }
     }
 
     impl ErasedNodeRunner for TestValueRunner {
