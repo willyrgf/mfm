@@ -399,7 +399,8 @@ mfm_cli run status <RUN_ID> [OPTIONS]
 
 ### `run stream`
 
-Prints store-owned references for certified typed run events.
+Prints store-owned references for certified typed run events. Sequence range filters are applied
+only after the app service validates the full stored stream.
 
 **Usage:**
 ```sh

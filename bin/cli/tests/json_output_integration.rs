@@ -43,6 +43,10 @@ fn run_stream_command_filters_range_after_authoritative_run_stream_validation() 
         .expect("authoritative stream read");
     let range_filter = source.find(".filter(|event|").expect("range filter");
 
+    assert!(
+        !source.contains(".load_run_stream("),
+        "run stream command must delegate to app-level full stream validation"
+    );
     assert!(range_validation < authoritative_read);
     assert!(authoritative_read < range_filter);
 }

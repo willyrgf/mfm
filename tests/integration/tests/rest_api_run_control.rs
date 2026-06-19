@@ -737,6 +737,10 @@ fn stream_filters_range_after_authoritative_run_stream_validation() {
         .expect("authoritative stream read");
     let range_filter = body.find(".filter(|event|").expect("range filter");
 
+    assert!(
+        !body.contains(".load_run_stream("),
+        "REST stream handler must delegate to app-level full stream validation"
+    );
     assert!(range_validation < authoritative_read);
     assert!(authoritative_read < range_filter);
 }
