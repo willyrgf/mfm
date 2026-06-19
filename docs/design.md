@@ -143,6 +143,10 @@ bytes, raw signing material, and signed raw transactions must not be typed value
 artifacts, events, public outputs, error details, or fixtures. States refer to secret-bearing systems
 through non-secret labels, references, and capabilities.
 
+Persisted and public surfaces are inventoried in `docs/persisted-public-surfaces.md`; that inventory
+is the review checklist for applying this no-secret invariant to app, CLI, REST, storage, artifact,
+and diagnostic boundaries.
+
 ## Typed Program Authoring
 
 State outputs are represented by branded typed handles. Handles carry the produced Rust value type,

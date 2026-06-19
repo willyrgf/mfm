@@ -63,6 +63,10 @@ Start, resume, replay, and public-output rendering must verify stored spec/certi
 against the production registry and compare stream evidence before constructing runtime, replay, or
 render authority.
 
+Use `docs/persisted-public-surfaces.md` when reviewing data that is persisted, returned by CLI/REST,
+or exposed through app read paths. It classifies allowed data, forbidden secret classes, provenance
+authority, and tests for each surface.
+
 ## Taxonomy
 
 Every new unit must declare which category it belongs to before it gets a crate, schema namespace,
