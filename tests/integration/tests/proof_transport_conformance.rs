@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_events::v1 as events;
 use mfm_ids::{ArtifactId, ContentDigest, DigestAlgorithm, DigestBytes, EventId, RunId};
+use mfm_kernel_scenario_data::proof_transport;
 use mfm_op_proof::{
     certified_proof_spec, proof_program_draft, ProofApplyConfig, ProofConfirmation, ProofFact,
     ProofFactResponse, ProofIdempotencyInput, ProofIntent, ProofReadConfig, ProofReceipt,
@@ -208,87 +209,22 @@ async fn conformance_start_rejects_draft_not_bound_to_certified_spec() {
 }
 
 #[tokio::test]
-async fn conformance_replay_rejects_completed_history_without_retention_projection() {
+async fn conformance_replay_rejects_corrupt_stream_cases() {
     let (runtime_spec, stream, artifacts) = conformance_stream().await;
-    let corrupt = remove_retention_projection_commit(&stream);
 
-    let error = verify_conformance_replay_stream(&runtime_spec, corrupt, &artifacts)
-        .await
-        .expect_err("completed history without retention projection must reject");
+    for case in proof_transport::SCENARIO.corruption_cases {
+        let corrupt = apply_proof_replay_corruption(case.mutation, &stream);
+        let error = verify_conformance_replay_stream(&runtime_spec, corrupt, &artifacts)
+            .await
+            .expect_err(&format!("{} must reject", case.name));
 
-    assert_eq!(error.kind, replay::ReplayErrorKind::InvalidRunStream);
-}
-
-#[tokio::test]
-async fn conformance_replay_rejects_standalone_retention_projection_history() {
-    let (runtime_spec, stream, artifacts) = conformance_stream().await;
-    let corrupt = standalone_retention_projection_history(&stream);
-
-    let error = verify_conformance_replay_stream(&runtime_spec, corrupt, &artifacts)
-        .await
-        .expect_err("standalone retention projection history must reject");
-
-    assert_eq!(error.kind, replay::ReplayErrorKind::InvalidRunStream);
-}
-
-#[tokio::test]
-async fn conformance_replay_rejects_failed_completion_without_framework_authority() {
-    let (runtime_spec, stream, artifacts) = conformance_stream().await;
-    let corrupt = failed_completion_after_run_start(&stream);
-
-    let error = verify_conformance_replay_stream(&runtime_spec, corrupt, &artifacts)
-        .await
-        .expect_err("failed completion without framework authority must reject");
-
-    assert_eq!(error.kind, replay::ReplayErrorKind::InvalidRunStream);
-}
-
-#[tokio::test]
-async fn conformance_replay_rejects_post_completion_retention_refs() {
-    let (runtime_spec, stream, artifacts) = conformance_stream().await;
-    let corrupt = append_post_completion_retention_refs(&stream);
-
-    let error = verify_conformance_replay_stream(&runtime_spec, corrupt, &artifacts)
-        .await
-        .expect_err("post-completion retention refs must reject");
-
-    assert_eq!(error.kind, replay::ReplayErrorKind::InvalidRunStream);
-}
-
-#[tokio::test]
-async fn conformance_replay_rejects_post_projection_retention_refs_before_completion() {
-    let (runtime_spec, stream, artifacts) = conformance_stream().await;
-    let corrupt = append_post_projection_retention_refs_before_completion(&stream);
-
-    let error = verify_conformance_replay_stream(&runtime_spec, corrupt, &artifacts)
-        .await
-        .expect_err("post-projection retention refs before completion must reject");
-
-    assert_eq!(error.kind, replay::ReplayErrorKind::InvalidRunStream);
-}
-
-#[tokio::test]
-async fn conformance_replay_rejects_extra_payload_in_retention_projection_commit() {
-    let (runtime_spec, stream, artifacts) = conformance_stream().await;
-    let corrupt = append_extra_retention_ref_to_projection_commit(&stream);
-
-    let error = verify_conformance_replay_stream(&runtime_spec, corrupt, &artifacts)
-        .await
-        .expect_err("extra retention projection commit payload must reject");
-
-    assert_eq!(error.kind, replay::ReplayErrorKind::InvalidRunStream);
-}
-
-#[tokio::test]
-async fn conformance_replay_rejects_same_sequence_sidecar_retention_projection_payload() {
-    let (runtime_spec, stream, artifacts) = conformance_stream().await;
-    let corrupt = append_same_sequence_sidecar_to_retention_projection(&stream);
-
-    let error = verify_conformance_replay_stream(&runtime_spec, corrupt, &artifacts)
-        .await
-        .expect_err("same-sequence sidecar retention payload must reject");
-
-    assert_eq!(error.kind, replay::ReplayErrorKind::InvalidRunStream);
+        assert_eq!(
+            error.kind,
+            replay_error_kind(case.expected_error_kind),
+            "unexpected replay error kind for {}",
+            case.name
+        );
+    }
 }
 
 async fn proof_implementation_conformance_summary(
@@ -811,6 +747,43 @@ async fn conformance_stream() -> (
 
     let stream = store.load_run_stream(&run_id);
     (runtime_spec, stream, artifacts)
+}
+
+fn apply_proof_replay_corruption(
+    mutation: &str,
+    stream: &[store::KernelEventEnvelope],
+) -> Vec<store::KernelEventEnvelope> {
+    match mutation {
+        "remove_retention_projection_after_completion" => {
+            remove_retention_projection_commit(stream)
+        }
+        "retain_only_projection_payload" => standalone_retention_projection_history(stream),
+        "replace_completion_authority_with_failed_without_claim" => {
+            failed_completion_after_run_start(stream)
+        }
+        "append_retention_refs_after_completion_projection" => {
+            append_post_completion_retention_refs(stream)
+        }
+        "insert_retention_refs_after_projection_before_completion" => {
+            append_post_projection_retention_refs_before_completion(stream)
+        }
+        "add_sidecar_payload_to_retention_projection_commit" => {
+            append_extra_retention_ref_to_projection_commit(stream)
+        }
+        "add_same_sequence_sidecar_retention_projection" => {
+            append_same_sequence_sidecar_to_retention_projection(stream)
+        }
+        other => panic!("unknown proof replay corruption mutation {other}"),
+    }
+}
+
+fn replay_error_kind(kind: &str) -> replay::ReplayErrorKind {
+    match kind {
+        "invalid_run_stream" => replay::ReplayErrorKind::InvalidRunStream,
+        "artifact_missing" => replay::ReplayErrorKind::ArtifactMissing,
+        "live_capability_request" => replay::ReplayErrorKind::LiveCapabilityRequest,
+        other => panic!("unknown replay error kind {other}"),
+    }
 }
 
 fn standalone_retention_projection_history(

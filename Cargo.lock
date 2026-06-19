@@ -2321,6 +2321,7 @@ dependencies = [
  "mfm-evm-contract-config",
  "mfm-evm-contract-model",
  "mfm-ids",
+ "mfm-kernel-scenario-data",
  "mfm-op-evm-contract-lifecycle",
  "mfm-op-portfolio-tracker",
  "mfm-op-proof",
