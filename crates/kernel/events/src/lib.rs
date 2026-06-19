@@ -4074,7 +4074,7 @@ pub mod v1 {
         }
 
         #[test]
-        fn artifact_role_policy_baseline_covers_schema_tags() {
+        fn artifact_role_contract_policy_baseline_covers_schema_tags() {
             let tags = artifact_role_baselines()
                 .iter()
                 .map(|row| row.tag.to_owned())

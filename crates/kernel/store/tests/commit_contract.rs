@@ -1473,7 +1473,7 @@ fn artifact_role_tag_baselines() -> &'static [(ArtifactRole, &'static str)] {
 }
 
 #[test]
-fn artifact_role_store_codec_roundtrips_current_tags() {
+fn artifact_role_contract_store_codec_roundtrips_current_tags() {
     let rows = artifact_role_tag_baselines()
         .iter()
         .map(|(role, tag)| {
