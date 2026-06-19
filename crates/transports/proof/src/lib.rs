@@ -198,25 +198,65 @@ async fn run_side_effect(ctx: ErasedRunCtx<'_>) -> mfm_runtime::Result<ErasedRun
         .projections()
         .side_effect(&ledger_key)
         .map(|projection| projection.phase.clone());
+    match proof_side_effect_action(phase.as_ref()) {
+        ProofSideEffectAction::PrepareAndStart => side_effect_prepare(ctx, ledger_key).await,
+        ProofSideEffectAction::Submit { invocation_epoch } => {
+            side_effect_submission(ctx, ledger_key, invocation_epoch).await
+        }
+        ProofSideEffectAction::ReadReceipt { invocation_epoch } => {
+            side_effect_receipt(ctx, ledger_key, invocation_epoch).await
+        }
+        ProofSideEffectAction::Confirm { invocation_epoch } => {
+            side_effect_confirmation(ctx, ledger_key, invocation_epoch).await
+        }
+        ProofSideEffectAction::EmitOutput => side_effect_output(ctx).await,
+        ProofSideEffectAction::IdleAmbiguous => Ok(ErasedRunnerOutput::new(Vec::new())),
+        ProofSideEffectAction::Unsupported => {
+            let other = phase.expect("unsupported side-effect action requires a projected phase");
+            Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(format!(
+                "unsupported proof side-effect phase: {other:?}"
+            )))
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProofSideEffectAction {
+    PrepareAndStart,
+    Submit { invocation_epoch: u32 },
+    ReadReceipt { invocation_epoch: u32 },
+    Confirm { invocation_epoch: u32 },
+    EmitOutput,
+    IdleAmbiguous,
+    Unsupported,
+}
+
+fn proof_side_effect_action(phase: Option<&store::SideEffectPhase>) -> ProofSideEffectAction {
     match phase {
-        None => side_effect_prepare(ctx, ledger_key).await,
+        None => ProofSideEffectAction::PrepareAndStart,
         Some(store::SideEffectPhase::InvocationStarted {
             invocation_epoch, ..
         })
         | Some(store::SideEffectPhase::SubmissionUnknown { invocation_epoch }) => {
-            side_effect_submission(ctx, ledger_key, invocation_epoch).await
+            ProofSideEffectAction::Submit {
+                invocation_epoch: *invocation_epoch,
+            }
         }
         Some(store::SideEffectPhase::SubmissionObserved { invocation_epoch }) => {
-            side_effect_receipt(ctx, ledger_key, invocation_epoch).await
+            ProofSideEffectAction::ReadReceipt {
+                invocation_epoch: *invocation_epoch,
+            }
         }
         Some(store::SideEffectPhase::ReceiptObserved { invocation_epoch }) => {
-            side_effect_confirmation(ctx, ledger_key, invocation_epoch).await
+            ProofSideEffectAction::Confirm {
+                invocation_epoch: *invocation_epoch,
+            }
         }
-        Some(store::SideEffectPhase::ConfirmationObserved { .. }) => side_effect_output(ctx).await,
-        Some(store::SideEffectPhase::Ambiguous { .. }) => Ok(ErasedRunnerOutput::new(Vec::new())),
-        Some(other) => Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(format!(
-            "unsupported proof side-effect phase: {other:?}"
-        ))),
+        Some(store::SideEffectPhase::ConfirmationObserved { .. }) => {
+            ProofSideEffectAction::EmitOutput
+        }
+        Some(store::SideEffectPhase::Ambiguous { .. }) => ProofSideEffectAction::IdleAmbiguous,
+        Some(_) => ProofSideEffectAction::Unsupported,
     }
 }
 
@@ -933,6 +973,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn side_effect_phase_policy_summary_matches_golden() {
+        assert_eq!(
+            side_effect_phase_policy_summary(),
+            [
+                "none->prepare_and_start",
+                "intent_persisted->unsupported:intent_persisted",
+                "claimed->unsupported:claimed",
+                "invocation_prepared->unsupported:invocation_prepared",
+                "invocation_started->submit:epoch=7",
+                "submission_observed->read_receipt:epoch=7",
+                "not_submitted_proven->unsupported:not_submitted_proven",
+                "submission_unknown->submit:epoch=7",
+                "receipt_observed->confirm:epoch=7",
+                "confirmation_observed->emit_output",
+                "ambiguous->idle_ambiguous",
+                "failed_before_invocation_started->unsupported:failed",
+                "failed_after_not_submitted_proven->unsupported:failed",
+            ]
+        );
+    }
+
     fn executable_identity_summary(factories: [&str; 3]) -> Vec<String> {
         factories
             .into_iter()
@@ -953,5 +1015,132 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    fn side_effect_phase_policy_summary() -> Vec<String> {
+        side_effect_phase_cases()
+            .into_iter()
+            .map(|(label, phase)| {
+                let action = proof_side_effect_action(phase.as_ref());
+                match (&phase, action) {
+                    (None, ProofSideEffectAction::PrepareAndStart) => {
+                        format!("{label}->prepare_and_start")
+                    }
+                    (_, ProofSideEffectAction::Submit { invocation_epoch }) => {
+                        format!("{label}->submit:epoch={invocation_epoch}")
+                    }
+                    (_, ProofSideEffectAction::ReadReceipt { invocation_epoch }) => {
+                        format!("{label}->read_receipt:epoch={invocation_epoch}")
+                    }
+                    (_, ProofSideEffectAction::Confirm { invocation_epoch }) => {
+                        format!("{label}->confirm:epoch={invocation_epoch}")
+                    }
+                    (_, ProofSideEffectAction::EmitOutput) => format!("{label}->emit_output"),
+                    (_, ProofSideEffectAction::IdleAmbiguous) => {
+                        format!("{label}->idle_ambiguous")
+                    }
+                    (Some(phase), ProofSideEffectAction::Unsupported) => {
+                        format!("{label}->unsupported:{}", phase.as_str())
+                    }
+                    (None, ProofSideEffectAction::Unsupported) => {
+                        format!("{label}->unsupported:none")
+                    }
+                    (_, ProofSideEffectAction::PrepareAndStart) => {
+                        format!("{label}->prepare_and_start")
+                    }
+                }
+            })
+            .collect()
+    }
+
+    fn side_effect_phase_cases() -> Vec<(&'static str, Option<store::SideEffectPhase>)> {
+        let claim_owner = events::RunnerInvocationId::new("proof-owner").expect("claim owner");
+        let claim_fencing_token =
+            side_effect::ClaimFencingToken::new("proof-token").expect("claim token");
+        vec![
+            ("none", None),
+            (
+                "intent_persisted",
+                Some(store::SideEffectPhase::IntentPersisted {
+                    invocation_epoch: 7,
+                }),
+            ),
+            (
+                "claimed",
+                Some(store::SideEffectPhase::Claimed {
+                    claim_owner: claim_owner.clone(),
+                    invocation_epoch: 7,
+                    claim_generation: 3,
+                    claim_fencing_token: claim_fencing_token.clone(),
+                }),
+            ),
+            (
+                "invocation_prepared",
+                Some(store::SideEffectPhase::InvocationPrepared {
+                    invocation_epoch: 7,
+                    claim_generation: 3,
+                    claim_fencing_token: claim_fencing_token.clone(),
+                }),
+            ),
+            (
+                "invocation_started",
+                Some(store::SideEffectPhase::InvocationStarted {
+                    claim_owner,
+                    invocation_epoch: 7,
+                    claim_generation: 3,
+                    claim_fencing_token,
+                }),
+            ),
+            (
+                "submission_observed",
+                Some(store::SideEffectPhase::SubmissionObserved {
+                    invocation_epoch: 7,
+                }),
+            ),
+            (
+                "not_submitted_proven",
+                Some(store::SideEffectPhase::NotSubmittedProven {
+                    invocation_epoch: 7,
+                }),
+            ),
+            (
+                "submission_unknown",
+                Some(store::SideEffectPhase::SubmissionUnknown {
+                    invocation_epoch: 7,
+                }),
+            ),
+            (
+                "receipt_observed",
+                Some(store::SideEffectPhase::ReceiptObserved {
+                    invocation_epoch: 7,
+                }),
+            ),
+            (
+                "confirmation_observed",
+                Some(store::SideEffectPhase::ConfirmationObserved {
+                    invocation_epoch: 7,
+                }),
+            ),
+            (
+                "ambiguous",
+                Some(store::SideEffectPhase::Ambiguous {
+                    invocation_epoch: 7,
+                }),
+            ),
+            (
+                "failed_before_invocation_started",
+                Some(store::SideEffectPhase::Failed {
+                    invocation_epoch: 7,
+                    failure_phase: side_effect::FailurePhase::BeforeInvocationStarted,
+                }),
+            ),
+            (
+                "failed_after_not_submitted_proven",
+                Some(store::SideEffectPhase::Failed {
+                    invocation_epoch: 7,
+                    failure_phase: side_effect::FailurePhase::AfterNotSubmittedProven,
+                }),
+            ),
+        ]
     }
 }
