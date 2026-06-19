@@ -3871,6 +3871,22 @@ pub mod v1 {
             }],
         };
 
+        const STATE_ATTEMPT_STARTED_EVENT_DECLARATION: EventFamilyDeclaration =
+            EventFamilyDeclaration {
+                variant_tag: "StateAttemptStarted",
+                schema_name: "mfm.events.v1.state_attempt_started",
+                rust_type_path: "mfm_events::v1::StateAttemptStarted",
+                fields: fields![
+                    EventFieldDescriptor::required("spec_hash", "SpecHash"),
+                    EventFieldDescriptor::required("node_id", "NodeId"),
+                    EventFieldDescriptor::required("attempt_id", "AttemptId"),
+                    EventFieldDescriptor::required("attempt_no", "u32"),
+                    EventFieldDescriptor::required("state_kind", "StateKind"),
+                    EventFieldDescriptor::required("state_version", "StateVersion"),
+                ],
+                artifact_lenses: &[],
+            };
+
         fn digest_bytes(byte: u8) -> DigestBytes {
             DigestBytes::from_array([byte; 32])
         }
@@ -3929,6 +3945,16 @@ pub mod v1 {
                 digest_bytes(byte),
             )
             .expect("semantic id")
+        }
+
+        fn state_kind(byte: u8) -> StateKind {
+            StateKind::new(
+                "mfm.test",
+                "state",
+                DigestAlgorithm::Sha256JcsV1,
+                digest_bytes(byte),
+            )
+            .expect("state kind")
         }
 
         fn media_type(value: &str) -> MediaType {
@@ -4732,6 +4758,47 @@ mfm_events::v1::RetentionManifestProjected schema:mfm.events.v1.retention_manife
                     }
                 })
                 .collect()
+        }
+
+        #[test]
+        fn state_attempt_started_event_family_declaration_matches_handwritten_schema() {
+            let declared = STATE_ATTEMPT_STARTED_EVENT_DECLARATION.schema_descriptor();
+            assert_eq!(declared, STATE_ATTEMPT_STARTED_SCHEMA);
+            assert_eq!(
+                declared.canonical_json().expect("declared schema json"),
+                STATE_ATTEMPT_STARTED_SCHEMA
+                    .canonical_json()
+                    .expect("handwritten schema json")
+            );
+            assert_eq!(
+                declared.schema_id().expect("declared schema id"),
+                STATE_ATTEMPT_STARTED_SCHEMA
+                    .schema_id()
+                    .expect("handwritten schema id")
+            );
+            assert_eq!(
+                STATE_ATTEMPT_STARTED_EVENT_DECLARATION.variant_tag,
+                "StateAttemptStarted"
+            );
+            assert_eq!(STATE_ATTEMPT_STARTED_EVENT_DECLARATION.artifact_lenses, &[]);
+        }
+
+        #[test]
+        fn state_attempt_started_declaration_generates_no_artifact_requirements() {
+            let payload = StateAttemptStarted {
+                spec_hash: spec_hash(50),
+                node_id: node_id(51),
+                attempt_id: attempt_id(52),
+                attempt_no: 3,
+                state_kind: state_kind(53),
+                state_version: StateVersion::new("mfm.test.state.v1").expect("state version"),
+            };
+
+            assert_eq!(STATE_ATTEMPT_STARTED_EVENT_DECLARATION.artifact_lenses, &[]);
+            assert_eq!(
+                KernelEventPayload::StateAttemptStarted(payload).artifact_requirements(),
+                Vec::<EventArtifactRequirement>::new()
+            );
         }
 
         #[test]

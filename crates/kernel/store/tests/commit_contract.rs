@@ -1933,6 +1933,156 @@ fn fact_recorded_projection_transition_descriptor_matches_rebuilt_projection() {
 }
 
 #[test]
+fn state_attempt_started_codec_declaration_view_matches_handwritten_codec() {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct EventCodecDeclaration {
+        variant_tag: &'static str,
+        fields: &'static [&'static str],
+    }
+
+    const STATE_ATTEMPT_STARTED_CODEC_DECLARATION: EventCodecDeclaration = EventCodecDeclaration {
+        variant_tag: "StateAttemptStarted",
+        fields: &[
+            "attempt_id",
+            "attempt_no",
+            "node_id",
+            "spec_hash",
+            "state_kind",
+            "state_version",
+        ],
+    };
+
+    fn declared_json(payload: &events::StateAttemptStarted) -> serde_json::Value {
+        assert_eq!(
+            STATE_ATTEMPT_STARTED_CODEC_DECLARATION.variant_tag,
+            "StateAttemptStarted"
+        );
+        assert_eq!(
+            STATE_ATTEMPT_STARTED_CODEC_DECLARATION.fields,
+            [
+                "attempt_id",
+                "attempt_no",
+                "node_id",
+                "spec_hash",
+                "state_kind",
+                "state_version",
+            ]
+        );
+        serde_json::json!({
+            "attempt_id": payload.attempt_id.as_str(),
+            "attempt_no": payload.attempt_no,
+            "node_id": payload.node_id.as_str(),
+            "spec_hash": payload.spec_hash.as_str(),
+            "state_kind": payload.state_kind.as_str(),
+            "state_version": payload.state_version.as_str(),
+            "variant": STATE_ATTEMPT_STARTED_CODEC_DECLARATION.variant_tag,
+        })
+    }
+
+    let payload = fact_attempt_started();
+    let KernelEventPayload::StateAttemptStarted(attempt) = &payload else {
+        unreachable!("helper returns attempt-start payload");
+    };
+    let declared = declared_json(attempt);
+    let declared_canonical =
+        PlainCanonicalJsonBytes::from_json_str(&declared.to_string()).expect("declared canonical");
+
+    assert_eq!(declared, payload_json_value(&payload));
+    assert_eq!(
+        declared_canonical,
+        payload_canonical_json(&payload).expect("handwritten canonical")
+    );
+    assert_eq!(
+        declared_canonical.content_digest(),
+        mfm_store::v1::payload_hash(&payload).expect("handwritten payload hash")
+    );
+    assert_eq!(
+        payload_from_json_value(&declared).expect("declared payload decode"),
+        payload
+    );
+}
+
+#[test]
+fn state_attempt_started_projection_transition_descriptor_matches_rebuilt_projection() {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct StateAttemptStartedProjectionTransitionDeclaration {
+        unique_key: &'static [&'static str],
+        projected_fields: &'static [&'static str],
+    }
+
+    const STATE_ATTEMPT_STARTED_PROJECTION: StateAttemptStartedProjectionTransitionDeclaration =
+        StateAttemptStartedProjectionTransitionDeclaration {
+            unique_key: &["node_id", "attempt_id"],
+            projected_fields: &[
+                "run_id",
+                "node_id",
+                "attempt_id",
+                "event_id",
+                "attempt_no",
+                "state_kind",
+                "state_version",
+            ],
+        };
+
+    let run_id = run_id(252);
+    let mut store = InMemoryTypedRunStore::new();
+    store
+        .append_prepared_commit(run_start_request(
+            run_id.clone(),
+            "attempt-projection-run-start",
+        ))
+        .expect("append run start");
+    store
+        .append_prepared_commit(typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("attempt-projection-start").expect("commit key"),
+            payloads: vec![fact_attempt_started()],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions {
+                required_run_state: RequiredRunState::NotCompleted,
+                ..CommitPreconditions::default()
+            },
+        })
+        .expect("append attempt start");
+
+    let stream = store.load_run_stream(&run_id);
+    let snapshot = ProjectionSnapshot::rebuild_from_run_stream(&stream).expect("rebuild stream");
+    let projection = snapshot
+        .attempt(&node_id(90), &attempt_id(91))
+        .expect("attempt projection");
+
+    assert_eq!(
+        STATE_ATTEMPT_STARTED_PROJECTION.unique_key,
+        ["node_id", "attempt_id"]
+    );
+    assert_eq!(
+        STATE_ATTEMPT_STARTED_PROJECTION.projected_fields,
+        [
+            "run_id",
+            "node_id",
+            "attempt_id",
+            "event_id",
+            "attempt_no",
+            "state_kind",
+            "state_version",
+        ]
+    );
+    assert_eq!(projection.run_id, run_id);
+    assert_eq!(projection.node_id, node_id(90));
+    assert_eq!(projection.attempt_id, attempt_id(91));
+    assert_eq!(projection.event_id, stream[1].event_id().clone());
+    assert_eq!(
+        projection.status,
+        AttemptStatus::Started {
+            attempt_no: 1,
+            state_kind: state_kind(90),
+            state_version: StateVersion::new("mfm.test.fact_state.v1").expect("state version"),
+        }
+    );
+}
+
+#[test]
 fn committed_run_stream_exposes_store_owned_authority() {
     let run_id = run_id(141);
     let mut store = InMemoryTypedRunStore::new();
