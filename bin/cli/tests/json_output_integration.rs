@@ -22,6 +22,8 @@ use std::path::{Path, PathBuf};
 use std::process::Output;
 use tempfile::TempDir;
 
+const OUTPUT_FORMAT_ENV: &str = "MFM_OUTPUT_FORMAT";
+
 // This struct is local to the test module to help with deserialization.
 #[derive(Deserialize)]
 struct TestResponse<T> {
@@ -104,7 +106,7 @@ fn test_keystore_list_json_output_with_env_var() {
 
     let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
     let output = cmd
-        .env("MFM_OUTPUT_FORMAT", "json")
+        .env(OUTPUT_FORMAT_ENV, "json")
         .args([
             "keystore",
             "list",
@@ -226,7 +228,7 @@ fn test_help_output_shows_json_format_option() {
         .stdout(predicate::str::contains("--output-format"))
         .stdout(predicate::str::contains("json"))
         .stdout(predicate::str::contains("text"))
-        .stdout(predicate::str::contains("MFM_OUTPUT_FORMAT"));
+        .stdout(predicate::str::contains(OUTPUT_FORMAT_ENV));
 }
 
 #[test]
@@ -250,7 +252,7 @@ fn test_cli_parse_error_json_output_for_unknown_command_flag_equals() {
 fn test_cli_parse_error_json_output_for_unknown_command_env() {
     let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
     let output = cmd
-        .env("MFM_OUTPUT_FORMAT", "json")
+        .env(OUTPUT_FORMAT_ENV, "json")
         .arg("unknown-command")
         .output()
         .expect("Failed to execute command");
@@ -322,7 +324,7 @@ fn test_environment_variable_precedence() {
 
     let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
     let output = cmd
-        .env("MFM_OUTPUT_FORMAT", "json") // Set env var to json
+        .env(OUTPUT_FORMAT_ENV, "json")
         .args([
             "--output-format",
             "text", // Override with text via flag

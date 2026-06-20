@@ -36,10 +36,10 @@ pub async fn run() -> ! {
         Err(err) => {
             let format = commands::detect_requested_output_format_for_parse_error(
                 std::env::args_os(),
-                std::env::var_os("MFM_OUTPUT_FORMAT").as_deref(),
+                std::env::var_os(commands::OUTPUT_FORMAT_ENV).as_deref(),
             );
             presentation::output::handle_cli_parse_error(err, &format);
         }
     };
-    cli.execute().await;
+    cli.execute().await
 }

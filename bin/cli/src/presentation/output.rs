@@ -90,54 +90,47 @@ impl<T> SuccessResponse<T> {
 
 /// Print a success response in the specified format
 pub(crate) fn print_success<T: Serialize>(data: T, format: &OutputFormat) {
-    match format {
-        OutputFormat::Text => {
-            // For text format, we assume the data implements Display or similar
-            // This is handled by the calling code
-        }
-        OutputFormat::Json => {
-            let response = SuccessResponse::new(data);
-            if let Ok(json) = serde_json::to_string_pretty(&response) {
-                println!("{json}");
-            } else {
-                eprintln!(
-                    r#"{{"status":"error","error":{{"code":"SerializationError","message":"Failed to serialize response"}}}}"#
-                );
-            }
-        }
+    if !format.is_json() {
+        return;
+    }
+
+    let response = SuccessResponse::new(data);
+    if let Ok(json) = serde_json::to_string_pretty(&response) {
+        println!("{json}");
+    } else {
+        eprintln!(
+            r#"{{"status":"error","error":{{"code":"SerializationError","message":"Failed to serialize response"}}}}"#
+        );
     }
 }
 
 /// Print an error response in the specified format  
 pub(crate) fn print_error(code: &str, message: &str, format: &OutputFormat) {
-    match format {
-        OutputFormat::Text => {
-            eprintln!("Error: {message}");
-        }
-        OutputFormat::Json => {
-            let response = ErrorResponse::new(code, message);
-            if let Ok(json) = serde_json::to_string_pretty(&response) {
-                eprintln!("{json}");
-            } else {
-                eprintln!(
-                    r#"{{"status":"error","error":{{"code":"SerializationError","message":"Failed to serialize error response"}}}}"#
-                );
-            }
-        }
+    if !format.is_json() {
+        eprintln!("Error: {message}");
+        return;
+    }
+
+    let response = ErrorResponse::new(code, message);
+    if let Ok(json) = serde_json::to_string_pretty(&response) {
+        eprintln!("{json}");
+    } else {
+        eprintln!(
+            r#"{{"status":"error","error":{{"code":"SerializationError","message":"Failed to serialize error response"}}}}"#
+        );
     }
 }
 
 /// Renders a clap parse error using the requested output format and exits with clap's code.
 pub(crate) fn handle_cli_parse_error(error: clap::Error, format: &OutputFormat) -> ! {
-    match format {
-        OutputFormat::Text => error.exit(),
-        OutputFormat::Json => {
-            let exit_code = error.exit_code();
-            let message = sanitize_clap_error_message(&error.to_string());
-            print_error("CliParseError", &message, format);
-            std::process::exit(exit_code);
-        }
+    if !format.is_json() {
+        error.exit();
     }
+
+    let exit_code = error.exit_code();
+    let message = sanitize_clap_error_message(&error.to_string());
+    print_error("CliParseError", &message, format);
+    std::process::exit(exit_code);
 }
 
 fn sanitize_clap_error_message(message: &str) -> String {
@@ -264,17 +257,12 @@ where
 {
     match result {
         Ok(output) => {
-            match format {
-                OutputFormat::Text => {
-                    if let Some(message) = output.message {
-                        println!("{message}");
-                    } else {
-                        println!("{}", output.data);
-                    }
-                }
-                OutputFormat::Json => {
-                    print_success(output.data, format);
-                }
+            if format.is_json() {
+                print_success(output.data, format);
+            } else if let Some(message) = output.message {
+                println!("{message}");
+            } else {
+                println!("{}", output.data);
             }
             std::process::exit(0);
         }
