@@ -75,8 +75,8 @@ pub use runners::{
 pub use scheduler::{ManualResolutionRequest, SchedulerStatus, SerialTypedScheduler};
 pub use side_effect_driver::{
     SideEffectDriver, SideEffectDriverCallbacks, SideEffectDriverFuture, SideEffectIntentPlan,
-    SideEffectObservedEvidence, SideEffectProtocolAction, SideEffectReplayEvidence,
-    SideEffectSubmissionDecision, SideEffectSubmissionDecisionFuture,
+    SideEffectObservedEvidence, SideEffectPreparedInvocationPlan, SideEffectProtocolAction,
+    SideEffectReplayEvidence, SideEffectSubmissionDecision, SideEffectSubmissionDecisionFuture,
 };
 pub use side_effect_lifecycle::SideEffectAttemptView;
 pub use spec_authority::CertifiedRuntimeSpec;

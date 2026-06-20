@@ -68,8 +68,8 @@ use mfm_runtime::{
     MaterializedInputNode, RunnerArtifactBuilder, RunnerCapabilityBinding, RunnerOutputBuilder,
     RunnerPayloadBuilder, RunnerRegistrationBuilder, SideEffectDriver, SideEffectDriverCallbacks,
     SideEffectDriverFuture, SideEffectIntentPlan, SideEffectObservedEvidence,
-    SideEffectProtocolAction, SideEffectReplayEvidence, SideEffectSubmissionDecision,
-    SideEffectSubmissionDecisionFuture,
+    SideEffectPreparedInvocationPlan, SideEffectProtocolAction, SideEffectReplayEvidence,
+    SideEffectSubmissionDecision, SideEffectSubmissionDecisionFuture,
 };
 use mfm_signing::{PublicKeyBytes, SignerRef, SigningProvider};
 use mfm_state_evm_contracts::{
@@ -1658,7 +1658,8 @@ impl SideEffectDriverCallbacks for DeploySideEffectCallbacks<'_> {
         &'a self,
         _ctx: &'a ErasedRunCtx<'ctx>,
         _plan: &'a SideEffectIntentPlan<Self::Intent, Self::Idempotency>,
-    ) -> SideEffectDriverFuture<'a, Option<Self::PreparedInvocation>> {
+    ) -> SideEffectDriverFuture<'a, SideEffectPreparedInvocationPlan<Self::PreparedInvocation>>
+    {
         Box::pin(async {
             let runtime = self
                 .factory
@@ -1668,7 +1669,9 @@ impl SideEffectDriverCallbacks for DeploySideEffectCallbacks<'_> {
                 .prepare_deploy_invocation(&self.plan.config, &self.plan.intent)
                 .await
                 .map_err(runtime_adapter_error)?;
-            Ok(Some(prepared.evidence().clone()))
+            Ok(SideEffectPreparedInvocationPlan::with_prepared_invocation(
+                prepared.evidence().clone(),
+            ))
         })
     }
 
@@ -1862,7 +1865,8 @@ impl SideEffectDriverCallbacks for ConfigureSideEffectCallbacks<'_> {
         &'a self,
         _ctx: &'a ErasedRunCtx<'ctx>,
         _plan: &'a SideEffectIntentPlan<Self::Intent, Self::Idempotency>,
-    ) -> SideEffectDriverFuture<'a, Option<Self::PreparedInvocation>> {
+    ) -> SideEffectDriverFuture<'a, SideEffectPreparedInvocationPlan<Self::PreparedInvocation>>
+    {
         Box::pin(async {
             let runtime = self
                 .factory
@@ -1876,7 +1880,9 @@ impl SideEffectDriverCallbacks for ConfigureSideEffectCallbacks<'_> {
                 )
                 .await
                 .map_err(runtime_adapter_error)?;
-            Ok(Some(prepared.evidence().clone()))
+            Ok(SideEffectPreparedInvocationPlan::with_prepared_invocation(
+                prepared.evidence().clone(),
+            ))
         })
     }
 

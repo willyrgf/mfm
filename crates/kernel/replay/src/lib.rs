@@ -268,7 +268,7 @@ pub mod v1 {
         pub artifact: StoredArtifactEvidenceRef,
     }
 
-    /// Request for replaying side-effect submission, receipt, or confirmation evidence.
+    /// Request for replaying recorded side-effect evidence.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct SideEffectEvidenceReplayRequest {
         /// Side-effect ledger key.
@@ -317,6 +317,8 @@ pub mod v1 {
         pub receipt: Option<&'a side_effect::ReceiptObserved>,
         /// Confirmation observed event payload, when present.
         pub confirmation: Option<&'a side_effect::ConfirmationObserved>,
+        /// Ambiguity event payload, when present.
+        pub ambiguity: Option<&'a side_effect::Ambiguous>,
     }
 
     impl SideEffectReplayFrame<'_> {
@@ -350,6 +352,17 @@ pub mod v1 {
                 confirmation.confirmation_schema_id.clone(),
                 confirmation.confirmation_hash.clone(),
                 Some(confirmation.replay_verifier_id.clone()),
+            ))
+        }
+
+        /// Builds the replay request for this frame's ambiguity evidence, when present.
+        pub fn ambiguity_request(&self) -> Option<SideEffectEvidenceReplayRequest> {
+            let ambiguity = self.ambiguity?;
+            Some(side_effect_evidence_replay_request(
+                self.intent,
+                ambiguity.evidence_schema_id.clone(),
+                ambiguity.evidence_hash.clone(),
+                None,
             ))
         }
     }
@@ -403,6 +416,15 @@ pub mod v1 {
         /// Confirmation observed event payload.
         pub confirmation: side_effect::ConfirmationObserved,
         /// Retained confirmation artifact evidence.
+        pub artifact: StoredArtifactEvidenceRef,
+    }
+
+    /// Replay evidence returned for recorded side-effect ambiguity.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct AmbiguityReplayEvidence {
+        /// Ambiguous event payload.
+        pub ambiguity: side_effect::Ambiguous,
+        /// Retained ambiguity artifact evidence.
         pub artifact: StoredArtifactEvidenceRef,
     }
 
@@ -515,6 +537,7 @@ pub mod v1 {
         submissions: BTreeMap<SideEffectKey, side_effect::SubmissionObserved>,
         receipts: BTreeMap<SideEffectKey, side_effect::ReceiptObserved>,
         confirmations: BTreeMap<SideEffectKey, side_effect::ConfirmationObserved>,
+        ambiguities: BTreeMap<SideEffectKey, side_effect::Ambiguous>,
         manual_resolutions: BTreeMap<RunId, VerifiedManualResolutionForPrefix>,
     }
 
@@ -569,6 +592,7 @@ pub mod v1 {
                 submissions: BTreeMap::new(),
                 receipts: BTreeMap::new(),
                 confirmations: BTreeMap::new(),
+                ambiguities: BTreeMap::new(),
                 manual_resolutions: BTreeMap::new(),
             };
             broker.authorize_certified_spec_artifacts()?;
@@ -692,6 +716,7 @@ pub mod v1 {
                     submission: self.submissions.get(&key),
                     receipt: self.receipts.get(&key),
                     confirmation: self.confirmations.get(&key),
+                    ambiguity: self.ambiguities.get(&key),
                 });
             }
             Ok(frames)
@@ -820,6 +845,40 @@ pub mod v1 {
                     semantic_type_id: None,
                     role: ArtifactRole::Confirmation,
                     producer_node_id: Some(&confirmation.node_id),
+                    producer_seed_id: None,
+                })?,
+            })
+        }
+
+        /// Returns side-effect ambiguity evidence from replay records only.
+        pub fn side_effect_ambiguity(
+            &self,
+            request: &SideEffectEvidenceReplayRequest,
+        ) -> Result<AmbiguityReplayEvidence> {
+            self.verify_side_effect_intent(request)?;
+            let ambiguity = self
+                .ambiguities
+                .get(&(request.ledger_key.clone(), request.invocation_epoch))
+                .ok_or_else(|| {
+                    ReplayError::new(
+                        ReplayErrorKind::SideEffectMissing,
+                        format!("missing side-effect ambiguity {}", request.ledger_key),
+                    )
+                })?;
+            if ambiguity.evidence_schema_id != request.evidence_schema_id
+                || ambiguity.evidence_hash != request.evidence_hash
+            {
+                return Err(side_effect_mismatch("ambiguity evidence mismatch"));
+            }
+            Ok(AmbiguityReplayEvidence {
+                ambiguity: ambiguity.clone(),
+                artifact: self.verify_artifact(ArtifactEvidenceExpectation {
+                    artifact_id: &ambiguity.evidence_artifact_id,
+                    digest: &ambiguity.evidence_hash,
+                    schema_id: Some(&ambiguity.evidence_schema_id),
+                    semantic_type_id: None,
+                    role: ArtifactRole::AmbiguityEvidence,
+                    producer_node_id: Some(&ambiguity.node_id),
                     producer_seed_id: None,
                 })?,
             })
@@ -1053,6 +1112,13 @@ pub mod v1 {
                             &payload.attempt_id,
                         )?;
                         self.authorize_event_artifacts(envelope.payload())?;
+                        insert_unique(
+                            &mut self.ambiguities,
+                            (payload.ledger_key.clone(), payload.invocation_epoch),
+                            payload.clone(),
+                            ReplayErrorKind::InvalidRunStream,
+                            "duplicate side-effect ambiguity replay event",
+                        )?;
                     }
                     KernelEventPayload::CellProduced(payload) => {
                         self.verify_cell_produced_against_spec(payload)?;

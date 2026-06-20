@@ -25,14 +25,16 @@ use mfm_runtime::{
     ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCellTerminal, MaterializedInputNode,
     RunnerArtifactBuilder, RunnerCapabilityBinding, RunnerOutputBuilder, RunnerPayloadBuilder,
     RunnerRegistrationBuilder, SideEffectDriver, SideEffectDriverCallbacks, SideEffectDriverFuture,
-    SideEffectIntentPlan, SideEffectObservedEvidence, SideEffectProtocolAction,
-    SideEffectReplayEvidence, SideEffectSubmissionDecision, SideEffectSubmissionDecisionFuture,
+    SideEffectIntentPlan, SideEffectObservedEvidence, SideEffectPreparedInvocationPlan,
+    SideEffectProtocolAction, SideEffectReplayEvidence, SideEffectSubmissionDecision,
+    SideEffectSubmissionDecisionFuture,
 };
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 use mfm_values::MfmConfig;
 use serde::Serialize;
 
+const ACCEPT_PROOF_ACTION: &str = "accept";
 const READ_FACTORY: &str = "read_external";
 const SIDE_EFFECT_FACTORY: &str = "apply_side_effect";
 const PURE_FACTORY: &str = "pure";
@@ -152,18 +154,33 @@ async fn run_read(ctx: ErasedRunCtx<'_>) -> mfm_runtime::Result<ErasedRunnerOutp
 }
 
 async fn run_side_effect(ctx: ErasedRunCtx<'_>) -> mfm_runtime::Result<ErasedRunnerOutput> {
-    let accept =
-        ProofApplyConfig::new("accept").map_err(mfm_runtime::RuntimeError::InvalidRunnerOutput)?;
+    let accept = ProofApplyConfig::new(ACCEPT_PROOF_ACTION)
+        .map_err(mfm_runtime::RuntimeError::InvalidRunnerOutput)?;
     if ensure_config::<ProofApplyConfig>(&ctx.node().config_ref, &accept).is_ok() {
-        return SideEffectDriver::drive(ctx, &ProofSideEffectCallbacks { ambiguous: false }).await;
+        return SideEffectDriver::drive(
+            ctx,
+            &ProofSideEffectCallbacks {
+                action: ACCEPT_PROOF_ACTION,
+                ambiguous: false,
+            },
+        )
+        .await;
     }
     let manual_resolution = ProofApplyConfig::new(MANUAL_RESOLUTION_PROOF_ACTION)
         .map_err(mfm_runtime::RuntimeError::InvalidRunnerOutput)?;
     ensure_config::<ProofApplyConfig>(&ctx.node().config_ref, &manual_resolution)?;
-    SideEffectDriver::drive(ctx, &ProofSideEffectCallbacks { ambiguous: true }).await
+    SideEffectDriver::drive(
+        ctx,
+        &ProofSideEffectCallbacks {
+            action: MANUAL_RESOLUTION_PROOF_ACTION,
+            ambiguous: true,
+        },
+    )
+    .await
 }
 
 struct ProofSideEffectCallbacks {
+    action: &'static str,
     ambiguous: bool,
 }
 
@@ -183,11 +200,12 @@ impl SideEffectDriverCallbacks for ProofSideEffectCallbacks {
         &'a self,
         _ctx: &'a ErasedRunCtx<'ctx>,
     ) -> SideEffectDriverFuture<'a, SideEffectIntentPlan<Self::Intent, Self::Idempotency>> {
-        Box::pin(async {
-            let idempotency = proof_idempotency_input();
+        let action = self.action;
+        Box::pin(async move {
+            let idempotency = proof_idempotency_input(action);
             let idem_hash = digest_value(&idempotency)?;
             Ok(SideEffectIntentPlan {
-                intent: proof_intent(),
+                intent: proof_intent(action),
                 idempotency,
                 idempotency_key: events::IdempotencyKeyRef::new(format!(
                     "idem-{}",
@@ -202,8 +220,9 @@ impl SideEffectDriverCallbacks for ProofSideEffectCallbacks {
         &'a self,
         _ctx: &'a ErasedRunCtx<'ctx>,
         _plan: &'a SideEffectIntentPlan<Self::Intent, Self::Idempotency>,
-    ) -> SideEffectDriverFuture<'a, Option<Self::PreparedInvocation>> {
-        Box::pin(async { Ok(None) })
+    ) -> SideEffectDriverFuture<'a, SideEffectPreparedInvocationPlan<Self::PreparedInvocation>>
+    {
+        Box::pin(async { Ok(SideEffectPreparedInvocationPlan::none()) })
     }
 
     fn reconstruct_prepared_invocation<'a, 'ctx>(
@@ -417,22 +436,22 @@ fn proof_fact() -> ProofFact {
     ProofFact { n: 1 }
 }
 
-fn proof_intent() -> ProofIntent {
+fn proof_intent(action: &str) -> ProofIntent {
     ProofIntent {
         fact_n: 1,
-        action: "accept".to_owned(),
+        action: action.to_owned(),
     }
 }
 
-fn proof_idempotency_input() -> ProofIdempotencyInput {
+fn proof_idempotency_input(action: &str) -> ProofIdempotencyInput {
     ProofIdempotencyInput {
         fact_n: 1,
-        action: "accept".to_owned(),
+        action: action.to_owned(),
     }
 }
 
 fn proof_submission() -> mfm_runtime::Result<ProofSubmission> {
-    let idempotency_digest = digest_value(&proof_idempotency_input())?
+    let idempotency_digest = digest_value(&proof_idempotency_input(ACCEPT_PROOF_ACTION))?
         .as_str()
         .to_owned();
     Ok(ProofSubmission {
@@ -573,7 +592,12 @@ impl replay::SideEffectReplayVerifier for DeterministicProofReplayVerifier {
         ensure_digest(
             "proof intent",
             &input.intent.intent.intent_hash,
-            &proof_intent(),
+            &proof_intent(ACCEPT_PROOF_ACTION),
+        )?;
+        ensure_digest(
+            "proof idempotency",
+            &input.intent.intent.idempotency_input_hash,
+            &proof_idempotency_input(ACCEPT_PROOF_ACTION),
         )?;
         let submission = proof_submission().map_err(replay_runtime_error)?;
         ensure_digest(
@@ -588,7 +612,7 @@ impl replay::SideEffectReplayVerifier for DeterministicProofReplayVerifier {
         )?;
         ProofReplayVerifier::verify_submission(
             self,
-            &proof_intent(),
+            &proof_intent(ACCEPT_PROOF_ACTION),
             &submission,
             &RecordedProofFacts { fact: proof_fact() },
         )
@@ -599,7 +623,12 @@ impl replay::SideEffectReplayVerifier for DeterministicProofReplayVerifier {
         ensure_digest(
             "proof intent",
             &input.intent.intent.intent_hash,
-            &proof_intent(),
+            &proof_intent(ACCEPT_PROOF_ACTION),
+        )?;
+        ensure_digest(
+            "proof idempotency",
+            &input.intent.intent.idempotency_input_hash,
+            &proof_idempotency_input(ACCEPT_PROOF_ACTION),
         )?;
         if let Some(submission) = &input.submission {
             let expected_submission = proof_submission().map_err(replay_runtime_error)?;
@@ -622,7 +651,7 @@ impl replay::SideEffectReplayVerifier for DeterministicProofReplayVerifier {
         )?;
         ProofReplayVerifier::verify_receipt(
             self,
-            &proof_intent(),
+            &proof_intent(ACCEPT_PROOF_ACTION),
             &receipt,
             &RecordedProofFacts { fact: proof_fact() },
         )
@@ -636,7 +665,12 @@ impl replay::SideEffectReplayVerifier for DeterministicProofReplayVerifier {
         ensure_digest(
             "proof intent",
             &input.intent.intent.intent_hash,
-            &proof_intent(),
+            &proof_intent(ACCEPT_PROOF_ACTION),
+        )?;
+        ensure_digest(
+            "proof idempotency",
+            &input.intent.intent.idempotency_input_hash,
+            &proof_idempotency_input(ACCEPT_PROOF_ACTION),
         )?;
         let receipt = proof_receipt().map_err(replay_runtime_error)?;
         if let Some(observed_receipt) = &input.receipt {
@@ -683,27 +717,119 @@ pub fn verify_deterministic_proof_replay(broker: &replay::ReplayBroker) -> repla
         ));
     }
     let frames = frames[0];
+    match deterministic_proof_action(frames.intent)? {
+        DeterministicProofAction::Accept => verify_accepted_proof_replay(broker, &frames)?,
+        DeterministicProofAction::ManualResolution => {
+            verify_manual_resolution_proof_replay(broker, &frames)?
+        }
+    }
+    Ok(true)
+}
+
+fn verify_accepted_proof_replay(
+    broker: &replay::ReplayBroker,
+    frame: &replay::SideEffectReplayFrame<'_>,
+) -> replay::Result<()> {
+    if frame.ambiguity.is_some() {
+        return Err(replay::ReplayError::new(
+            replay::ReplayErrorKind::SideEffectMismatch,
+            "accepted deterministic proof side effect recorded ambiguity evidence",
+        ));
+    }
     let verifier = DeterministicProofReplayVerifier::new().map_err(replay_runtime_error)?;
-    let Some(submission_request) = frames.submission_request() else {
+    let Some(submission_request) = frame.submission_request() else {
         return Err(proof_side_effect_missing("submission"));
     };
-    let Some(receipt_request) = frames.receipt_request() else {
+    let Some(receipt_request) = frame.receipt_request() else {
         return Err(proof_side_effect_missing("receipt"));
     };
-    let Some(confirmation_request) = frames.confirmation_request() else {
+    let Some(confirmation_request) = frame.confirmation_request() else {
         return Err(proof_side_effect_missing("confirmation"));
     };
 
     broker.verify_side_effect_submission(&submission_request, &verifier)?;
     broker.verify_side_effect_receipt(&receipt_request, &verifier)?;
     broker.verify_side_effect_confirmation(&confirmation_request, &verifier)?;
-    Ok(true)
+    Ok(())
+}
+
+fn verify_manual_resolution_proof_replay(
+    broker: &replay::ReplayBroker,
+    frame: &replay::SideEffectReplayFrame<'_>,
+) -> replay::Result<()> {
+    if frame.submission.is_some() || frame.receipt.is_some() || frame.confirmation.is_some() {
+        return Err(replay::ReplayError::new(
+            replay::ReplayErrorKind::SideEffectMismatch,
+            "manual-resolution deterministic proof side effect recorded non-ambiguity evidence",
+        ));
+    }
+    let Some(ambiguity_request) = frame.ambiguity_request() else {
+        return Err(proof_side_effect_missing("ambiguity"));
+    };
+    let ambiguity = broker.side_effect_ambiguity(&ambiguity_request)?;
+    let expected_code =
+        events::AmbiguityCode::new("mfm.proof.manual_resolution").map_err(|error| {
+            replay::ReplayError::new(
+                replay::ReplayErrorKind::SideEffectMismatch,
+                error.to_string(),
+            )
+        })?;
+    if ambiguity.ambiguity.ambiguity_code != expected_code {
+        return Err(replay::ReplayError::new(
+            replay::ReplayErrorKind::SideEffectMismatch,
+            "manual-resolution deterministic proof ambiguity code mismatch",
+        ));
+    }
+    let expected = proof_side_effect_result().map_err(replay_runtime_error)?;
+    ensure_digest(
+        "proof ambiguity",
+        &ambiguity.ambiguity.evidence_hash,
+        &expected,
+    )?;
+    ensure_digest(
+        "proof ambiguity artifact",
+        &ambiguity.artifact.digest,
+        &expected,
+    )?;
+    Ok(())
 }
 
 fn is_deterministic_proof_intent(intent: &side_effect::IntentPersisted) -> replay::Result<bool> {
     let expected_capability = ProofMutationCapability::kind().map_err(replay_capability_error)?;
     let expected_adapter = proof_adapter_kind().map_err(replay_identity_error)?;
     Ok(intent.capability_kind == expected_capability && intent.adapter_kind == expected_adapter)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeterministicProofAction {
+    Accept,
+    ManualResolution,
+}
+
+fn deterministic_proof_action(
+    intent: &side_effect::IntentPersisted,
+) -> replay::Result<DeterministicProofAction> {
+    if proof_intent_matches_action(intent, ACCEPT_PROOF_ACTION)? {
+        return Ok(DeterministicProofAction::Accept);
+    }
+    if proof_intent_matches_action(intent, MANUAL_RESOLUTION_PROOF_ACTION)? {
+        return Ok(DeterministicProofAction::ManualResolution);
+    }
+    Err(replay::ReplayError::new(
+        replay::ReplayErrorKind::SideEffectMismatch,
+        "deterministic proof intent evidence did not match a supported action",
+    ))
+}
+
+fn proof_intent_matches_action(
+    intent: &side_effect::IntentPersisted,
+    action: &str,
+) -> replay::Result<bool> {
+    Ok(
+        intent.intent_hash == digest_value(&proof_intent(action)).map_err(replay_runtime_error)?
+            && intent.idempotency_input_hash
+                == digest_value(&proof_idempotency_input(action)).map_err(replay_runtime_error)?,
+    )
 }
 
 fn proof_side_effect_missing(phase: &str) -> replay::ReplayError {

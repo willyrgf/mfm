@@ -1612,15 +1612,23 @@ impl SideEffectDriverCallbacks for TestSideEffectDriverCallbacks {
         &'a self,
         ctx: &'a ErasedRunCtx<'ctx>,
         _plan: &'a SideEffectIntentPlan<Self::Intent, Self::Idempotency>,
-    ) -> SideEffectDriverFuture<'a, Option<Self::PreparedInvocation>> {
+    ) -> SideEffectDriverFuture<'a, SideEffectPreparedInvocationPlan<Self::PreparedInvocation>>
+    {
         let node_id = ctx.node().node_id.as_str().to_owned();
         let attempt_id = ctx.attempt_id().as_str().to_owned();
+        let resource_key = test_driver_resource_key(ctx);
         Box::pin(async move {
-            Ok(Some(serde_json::json!({
-                "attempt_id": attempt_id,
-                "node_id": node_id,
-                "prepared": true
-            })))
+            let plan =
+                SideEffectPreparedInvocationPlan::with_prepared_invocation(serde_json::json!({
+                    "attempt_id": attempt_id,
+                    "node_id": node_id,
+                    "prepared": true
+                }));
+            Ok(if let Some(resource_key) = resource_key {
+                plan.with_resource_key(resource_key)
+            } else {
+                plan
+            })
         })
     }
 
@@ -1751,6 +1759,25 @@ fn test_driver_replay_evidence() -> SideEffectReplayEvidence {
     }
 }
 
+fn test_driver_resource_key(ctx: &ErasedRunCtx<'_>) -> Option<events::ResourceKeyEvidence> {
+    let Some(spec::SideEffectContractSpec {
+        resource_claim:
+            spec::ResourceClaimSpec::Exclusive {
+                namespace,
+                key_schema,
+            },
+        ..
+    }) = &ctx.node().side_effect
+    else {
+        return None;
+    };
+    Some(events::ResourceKeyEvidence {
+        namespace: namespace.clone(),
+        key_schema_id: key_schema.clone(),
+        key: events::ResourceKey::new("mfm.test.driver.shared-resource").expect("resource key"),
+    })
+}
+
 #[tokio::test]
 async fn side_effect_driver_prepares_and_starts_one_step() {
     let fixture = fixture_with_first_side_effect_state();
@@ -1788,6 +1815,80 @@ async fn side_effect_driver_prepares_and_starts_one_step() {
         }
         other => panic!("expected intent payload: {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn side_effect_driver_preserves_concrete_exclusive_resource_key_across_runs() {
+    let fixture = fixture_with_first_exclusive_side_effect_state();
+    let mut peer = fixture.clone();
+    peer.run_id = RunId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        DigestBytes::from_array([0xf6; 32]),
+    );
+    let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
+    let mut store = TestTypedRunStore::new();
+
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start first run");
+    assert_eq!(
+        drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id,
+        )
+        .await
+        .expect("first run prepares side effect"),
+        SchedulerStatus::Advanced
+    );
+    let resource_key = store
+        .load_run_stream(&fixture.run_id)
+        .iter()
+        .find_map(|event| match event.payload() {
+            events::KernelEventPayload::SideEffectInvocationPrepared(payload) => {
+                payload.resource_key.clone()
+            }
+            _ => None,
+        })
+        .expect("first run recorded resource key");
+    assert_eq!(resource_key.key.as_str(), "mfm.test.driver.shared-resource");
+    let lane_key = store::ResourceLaneKey::from_evidence(&resource_key);
+    assert!(store
+        .projection_snapshot()
+        .resource_lane(&lane_key)
+        .is_some());
+
+    start_fixture_run(&scheduler, &mut store, &peer, vec![peer.seed_ref.clone()])
+        .await
+        .expect("start peer run");
+    assert_eq!(
+        drive_once(&scheduler, &mut store, &peer.runtime_spec, &peer.run_id)
+            .await
+            .expect("peer run starts attempt before observing lane block"),
+        SchedulerStatus::Advanced
+    );
+    assert_eq!(
+        drive_once(&scheduler, &mut store, &peer.runtime_spec, &peer.run_id)
+            .await
+            .expect("peer run blocks on same resource lane"),
+        SchedulerStatus::Blocked
+    );
+    assert!(
+        store
+            .load_run_stream(&peer.run_id)
+            .iter()
+            .all(|event| !matches!(
+                event.payload(),
+                events::KernelEventPayload::SideEffectInvocationPrepared(_)
+            )),
+        "peer run must not prepare while the cross-run resource lane is held"
+    );
 }
 
 #[tokio::test]

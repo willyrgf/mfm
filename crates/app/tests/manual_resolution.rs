@@ -64,6 +64,11 @@ async fn public_manual_resolution_scenario_records_resolution_and_hides_proof_by
 
     let blocked = services.launch_run(launch).await.expect("launch");
     assert_eq!(blocked.run_mode, TypedRunMode::ManualBlocked);
+    let blocked_replay = services
+        .verify_replay_for_run(&run_id)
+        .await
+        .expect("manual-blocked proof replay");
+    assert_eq!(blocked_replay.run_mode, TypedRunMode::ManualBlocked);
     assert_eq!(
         blocked.saga.manual_block_reason.as_deref(),
         Some("policy_manual_resolution")

@@ -220,6 +220,38 @@ pub struct SideEffectPreparedInvocationEvidence<'a, Intent, Idempotency, Prepare
     pub prepared_invocation: &'a Prepared,
 }
 
+/// Adapter-owned preparation result recorded before crossing the uncertainty boundary.
+pub struct SideEffectPreparedInvocationPlan<Prepared> {
+    /// Public prepared invocation evidence. Live or secret-bearing data must not be included.
+    pub prepared_invocation: Option<Prepared>,
+    /// Concrete exclusive resource key evidence, when required by the certified resource claim.
+    pub resource_key: Option<events::ResourceKeyEvidence>,
+}
+
+impl<Prepared> SideEffectPreparedInvocationPlan<Prepared> {
+    /// Creates a preparation result with no prepared artifact and no exclusive resource key.
+    pub fn none() -> Self {
+        Self {
+            prepared_invocation: None,
+            resource_key: None,
+        }
+    }
+
+    /// Creates a preparation result with public prepared invocation evidence.
+    pub fn with_prepared_invocation(prepared_invocation: Prepared) -> Self {
+        Self {
+            prepared_invocation: Some(prepared_invocation),
+            resource_key: None,
+        }
+    }
+
+    /// Attaches concrete exclusive resource key evidence.
+    pub fn with_resource_key(mut self, resource_key: events::ResourceKeyEvidence) -> Self {
+        self.resource_key = Some(resource_key);
+        self
+    }
+}
+
 /// Owned side-effect intent and idempotency plan returned by adapter callbacks.
 pub struct SideEffectIntentPlan<Intent, Idempotency> {
     /// Typed intent evidence.
@@ -312,7 +344,7 @@ pub trait SideEffectDriverCallbacks {
         &'a self,
         ctx: &'a ErasedRunCtx<'ctx>,
         plan: &'a SideEffectIntentPlan<Self::Intent, Self::Idempotency>,
-    ) -> SideEffectDriverFuture<'a, Option<Self::PreparedInvocation>>;
+    ) -> SideEffectDriverFuture<'a, SideEffectPreparedInvocationPlan<Self::PreparedInvocation>>;
 
     /// Reconstructs live invocation state from adapter-owned artifact reads.
     fn reconstruct_prepared_invocation<'a, 'ctx>(
@@ -439,10 +471,11 @@ impl SideEffectDriver {
     {
         let plan = callbacks.intent_and_idempotency(ctx).await?;
         let side_effect = runtime_side_effect_binding(ctx, &plan.idempotency_key)?;
-        let claim = runtime_claim_authority(ctx, &side_effect, 1)?;
         let prepared = callbacks.prepare_invocation(ctx, &plan).await?;
+        let resource_key = validate_prepared_resource_key(ctx, prepared.resource_key)?;
+        let claim = runtime_claim_authority(ctx, &side_effect, 1, resource_key)?;
         let builder = SideEffectEvidenceBuilder::new(ctx);
-        if let Some(prepared) = prepared {
+        if let Some(prepared) = prepared.prepared_invocation {
             builder.prepare_invocation_and_start(SideEffectPreparedInvocationEvidence {
                 side_effect,
                 claim,
@@ -539,12 +572,13 @@ impl SideEffectDriver {
     {
         let plan = callbacks.intent_and_idempotency(ctx).await?;
         let side_effect = side_effect_binding(view, invocation_epoch)?;
-        let claim = runtime_claim_authority(ctx, &side_effect, claim_generation)?;
         let prepared = callbacks.prepare_invocation(ctx, &plan).await?;
+        let resource_key = validate_prepared_resource_key(ctx, prepared.resource_key)?;
+        let claim = runtime_claim_authority(ctx, &side_effect, claim_generation, resource_key)?;
         SideEffectEvidenceBuilder::new(ctx).claim_prepare_and_start(
             side_effect,
             claim,
-            prepared.as_ref(),
+            prepared.prepared_invocation.as_ref(),
         )
     }
 }
@@ -643,6 +677,7 @@ fn runtime_claim_authority(
     ctx: &ErasedRunCtx<'_>,
     side_effect: &RunnerSideEffectBinding,
     claim_generation: u32,
+    resource_key: Option<events::ResourceKeyEvidence>,
 ) -> Result<RuntimeSideEffectClaimAuthority> {
     let claim_owner = runtime_claim_owner(ctx, side_effect, claim_generation)?;
     let claim_fencing_token = runtime_claim_fencing_token(ctx, side_effect, claim_generation)?;
@@ -650,7 +685,7 @@ fn runtime_claim_authority(
         claim_owner,
         claim_generation,
         claim_fencing_token,
-        resource_key: runtime_resource_key(ctx, side_effect)?,
+        resource_key,
     })
 }
 
@@ -686,35 +721,45 @@ fn runtime_claim_fencing_token(
         .map_err(Into::into)
 }
 
-fn runtime_resource_key(
+fn validate_prepared_resource_key(
     ctx: &ErasedRunCtx<'_>,
-    side_effect: &RunnerSideEffectBinding,
+    resource_key: Option<events::ResourceKeyEvidence>,
 ) -> Result<Option<events::ResourceKeyEvidence>> {
     let Some(side_effect_contract) = &ctx.node().side_effect else {
-        return Ok(None);
+        if resource_key.is_some() {
+            return Err(RuntimeError::InvalidRunnerOutput(format!(
+                "node {} recorded exclusive resource key without a side-effect contract",
+                ctx.node().node_id
+            )));
+        }
+        return Ok(resource_key);
     };
     match &side_effect_contract.resource_claim {
         spec::ResourceClaimSpec::Exclusive {
             namespace,
             key_schema,
         } => {
-            let digest = crate::content_digest_json(serde_json::json!({
-                "contract_digest": side_effect_contract.contract_digest.as_str(),
-                "ledger_key": side_effect.ledger_key.as_str(),
-                "namespace": namespace.as_str(),
-                "node_id": ctx.node().node_id.as_str(),
-                "run_id": ctx.run_id().as_str(),
-            }))?;
-            Ok(Some(events::ResourceKeyEvidence {
-                namespace: namespace.clone(),
-                key_schema_id: key_schema.clone(),
-                key: events::ResourceKey::new(format!(
-                    "mfm.runtime.resource.{}",
-                    short_digest(&digest)
-                ))?,
-            }))
+            let Some(resource_key) = resource_key else {
+                return Err(RuntimeError::InvalidRunnerOutput(format!(
+                    "exclusive side-effect node {} prepared without concrete resource key evidence",
+                    ctx.node().node_id
+                )));
+            };
+            if &resource_key.namespace != namespace || &resource_key.key_schema_id != key_schema {
+                return Err(RuntimeError::InvalidRunnerOutput(format!(
+                    "exclusive side-effect node {} prepared resource key evidence outside certified schema",
+                    ctx.node().node_id
+                )));
+            }
+            Ok(Some(resource_key))
         }
         spec::ResourceClaimSpec::ExactTouchedSet { .. } | spec::ResourceClaimSpec::ManualOnly => {
+            if resource_key.is_some() {
+                return Err(RuntimeError::InvalidRunnerOutput(format!(
+                    "side-effect node {} prepared exclusive resource key without an exclusive certified resource claim",
+                    ctx.node().node_id
+                )));
+            }
             Ok(None)
         }
     }
