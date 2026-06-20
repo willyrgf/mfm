@@ -1,5 +1,4 @@
 use std::path::PathBuf;
-use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::commands::result::{CommandError, CommandOutput, CommandResult};
@@ -9,32 +8,38 @@ use crate::support::typed_run::{
     command_error_from_app_error, connect_run_services, drive_mode, parse_typed_run_id,
     TypedDriveArg, TypedRunStoresArgs,
 };
-use clap::Args;
-use mfm_app::{RunLaunchConfigArtifact, RunLaunchSeedArtifact, TypedRunResponse};
-use mfm_canonical::PlainCanonicalJsonBytes;
-use mfm_ids::{SchemaId, SeedId};
+use clap::{Args, ValueEnum};
+use mfm_app::{
+    AuthoredConfig, ConfigFormat, EntryPointRunLaunchInput, PublicOpName,
+    TypedPublicOutputResponse, TypedRunMode, TypedRunResponse,
+};
+use serde::Serialize;
 
 /// Arguments for `mfm run start`.
 #[derive(Args)]
 pub(crate) struct StartArgs {
-    /// Certified typed spec bundle JSON file.
+    /// Public entry-point operation name.
+    #[arg(long, value_name = "NAME")]
+    pub op: String,
+
+    /// Authored operation config file.
     #[arg(long, value_name = "PATH")]
-    pub bundle: PathBuf,
+    pub config: PathBuf,
+
+    /// Optional public operation version. Defaults to the latest registered version.
+    #[arg(long, value_name = "VERSION")]
+    pub op_version: Option<u32>,
+
+    /// Authored config format.
+    #[arg(long, value_enum, default_value_t = ConfigFormatArg::Toml)]
+    pub config_format: ConfigFormatArg,
 
     /// Optional typed run id (`run:<algorithm>:<digest>`). Defaults to a generated typed id.
     #[arg(long)]
     pub run_id: Option<String>,
 
-    /// Seed input as `seed:<algorithm>:<digest>=/path/to/canonical-seed.json`.
-    #[arg(long = "seed", value_name = "SEED_ID=PATH")]
-    pub seeds: Vec<SeedInputArg>,
-
-    /// Config input as `schema:<name>:<version>:<algorithm>:<digest>=/path/to/config.json`.
-    #[arg(long = "config", value_name = "SCHEMA_ID=PATH")]
-    pub configs: Vec<ConfigInputArg>,
-
     /// Framework version evidence recorded in RunAdmitted.
-    #[arg(long, default_value = "mfm.cli.typed.v1")]
+    #[arg(long, default_value = "mfm.cli.entry_point.v1")]
     pub framework_version: String,
 
     /// Source revision evidence recorded in RunAdmitted.
@@ -50,45 +55,45 @@ pub(crate) struct StartArgs {
     pub stores: TypedRunStoresArgs,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct SeedInputArg {
-    seed_id: SeedId,
-    path: PathBuf,
+/// CLI spelling for authored config formats.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub(crate) enum ConfigFormatArg {
+    /// TOML authored config.
+    Toml,
+    /// JSON authored config.
+    Json,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct ConfigInputArg {
-    schema_id: SchemaId,
-    path: PathBuf,
-}
-
-impl FromStr for SeedInputArg {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let (seed_id, path) = value
-            .split_once('=')
-            .ok_or_else(|| "seed input must use SEED_ID=PATH".to_owned())?;
-        Ok(Self {
-            seed_id: SeedId::parse(seed_id)
-                .map_err(|_| "seed id must use the typed seed identity format".to_owned())?,
-            path: PathBuf::from(path),
-        })
+impl From<ConfigFormatArg> for ConfigFormat {
+    fn from(value: ConfigFormatArg) -> Self {
+        match value {
+            ConfigFormatArg::Toml => Self::Toml,
+            ConfigFormatArg::Json => Self::Json,
+        }
     }
 }
 
-impl FromStr for ConfigInputArg {
-    type Err = String;
+impl std::fmt::Display for ConfigFormatArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Toml => f.write_str("toml"),
+            Self::Json => f.write_str("json"),
+        }
+    }
+}
 
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let (schema_id, path) = value
-            .split_once('=')
-            .ok_or_else(|| "config input must use SCHEMA_ID=PATH".to_owned())?;
-        Ok(Self {
-            schema_id: SchemaId::parse(schema_id)
-                .map_err(|_| "schema id must use the typed schema identity format".to_owned())?,
-            path: PathBuf::from(path),
-        })
+#[derive(Debug, Clone, Serialize)]
+struct StartOutput {
+    run: TypedRunResponse,
+    public_output: Option<TypedPublicOutputResponse>,
+}
+
+impl std::fmt::Display for StartOutput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.public_output {
+            Some(public_output) => write!(f, "{public_output}"),
+            None => write!(f, "{}", self.run),
+        }
     }
 }
 
@@ -98,69 +103,73 @@ pub(crate) async fn execute(ctx: &CommandContext, args: &StartArgs) -> ! {
     handle_command_result(result, &ctx.output_format);
 }
 
-async fn execute_internal(args: &StartArgs) -> CommandResult<TypedRunResponse> {
+async fn execute_internal(args: &StartArgs) -> CommandResult<StartOutput> {
     let run_id = match &args.run_id {
         Some(run_id) => parse_typed_run_id(run_id)?,
         None => mfm_app::new_run_id(),
     };
-    let bundle_bytes = tokio::fs::read(&args.bundle).await.map_err(|_| {
-        CommandError::backend(
-            "CertifiedBundleReadFailed",
-            "Failed to read certified typed spec bundle file",
-        )
-    })?;
-    let bundle = mfm_app::parse_certified_spec_bundle_json_bytes(&bundle_bytes)
-        .map_err(command_error_from_app_error)?;
-    let registry =
+    let public_op_name = PublicOpName::new(&args.op).map_err(command_error_from_op_resolution)?;
+    let op_version = args
+        .op_version
+        .map(mfm_app::OpVersion::new)
+        .transpose()
+        .map_err(command_error_from_op_resolution)?;
+    let config_bytes = tokio::fs::read(&args.config)
+        .await
+        .map_err(|_| CommandError::backend("AuthoredConfigReadFailed", "Failed to read config"))?;
+    let authored_config = AuthoredConfig::new(args.config_format.into(), config_bytes)
+        .map_err(command_error_from_op_launch)?;
+    let entry_point_registry =
+        mfm_app::production_entry_point_op_registry().map_err(command_error_from_app_error)?;
+    let certification_registry =
         mfm_app::production_certification_registry().map_err(command_error_from_app_error)?;
-    let media_type = mfm_app::json_media_type().map_err(command_error_from_app_error)?;
-    let mut config_inputs = Vec::with_capacity(args.configs.len());
-    for config in &args.configs {
-        let bytes = read_canonical_json_file(
-            &config.path,
-            "LaunchConfigReadFailed",
-            "LaunchConfigInvalid",
-        )
-        .await?;
-        config_inputs.push(RunLaunchConfigArtifact {
-            schema_id: config.schema_id.clone(),
-            bytes,
-            media_type: media_type.clone(),
-        });
-    }
-    let mut seed_inputs = Vec::with_capacity(args.seeds.len());
-    for seed in &args.seeds {
-        let bytes =
-            read_canonical_json_file(&seed.path, "LaunchSeedReadFailed", "LaunchSeedInvalid")
-                .await?;
-        seed_inputs.push(RunLaunchSeedArtifact {
-            seed_id: seed.seed_id.clone(),
-            bytes,
-            media_type: media_type.clone(),
-        });
-    }
-
-    let request = mfm_app::prepare_verified_bundle_launch(
-        mfm_app::UntrustedCertifiedBundleLaunchInput {
-            spec_bytes: bundle.spec_bytes(),
-            certificate_bytes: bundle.certificate_bytes(),
-            registry: &registry,
-            run_id,
-            framework_version: &args.framework_version,
-            source_revision: &args.source_revision,
-            launched_at_unix_ms: launch_unix_ms()?,
-            drive: drive_mode(args.drive),
-        },
-        config_inputs,
-        seed_inputs,
-    )
+    let prepared = mfm_app::prepare_entry_point_run_launch(EntryPointRunLaunchInput {
+        entry_point_registry: &entry_point_registry,
+        public_op_name,
+        op_version,
+        authored_config,
+        certification_registry: &certification_registry,
+        run_id: run_id.clone(),
+        framework_version: &args.framework_version,
+        source_revision: &args.source_revision,
+        launched_at_unix_ms: launch_unix_ms()?,
+        drive: drive_mode(args.drive),
+    })
     .map_err(command_error_from_app_error)?;
+    let public_output_schema_id = prepared.public_output_schema_id.clone();
     let services = connect_run_services(&args.stores).await?;
-    let response = services
-        .launch_run(request)
+    let run = services
+        .launch_run(prepared.request)
         .await
         .map_err(command_error_from_app_error)?;
-    Ok(CommandOutput::new(response))
+    let public_output = if run.run_mode == TypedRunMode::Completed {
+        match public_output_schema_id {
+            Some(schema_id) => Some(
+                services
+                    .typed_public_output(&run_id, &schema_id)
+                    .await
+                    .map_err(command_error_from_app_error)?,
+            ),
+            None => None,
+        }
+    } else {
+        None
+    };
+    Ok(CommandOutput::new(StartOutput { run, public_output }))
+}
+
+fn command_error_from_op_resolution(error: mfm_app::EntryPointOpResolveError) -> CommandError {
+    CommandError::new(
+        error.code().to_owned(),
+        mfm_app::PublicSafeMessage::new(error.message().to_owned()),
+    )
+}
+
+fn command_error_from_op_launch(error: mfm_app::OpLaunchError) -> CommandError {
+    CommandError::new(
+        error.code().to_owned(),
+        mfm_app::PublicSafeMessage::new(error.message().to_owned()),
+    )
 }
 
 fn launch_unix_ms() -> Result<u64, CommandError> {
@@ -178,159 +187,141 @@ fn launch_unix_ms() -> Result<u64, CommandError> {
     })
 }
 
-async fn read_canonical_json_file(
-    path: &PathBuf,
-    read_code: &'static str,
-    parse_code: &'static str,
-) -> Result<Vec<u8>, CommandError> {
-    let read_message = match read_code {
-        "LaunchConfigReadFailed" => "Failed to read launch config input file",
-        "LaunchSeedReadFailed" => "Failed to read launch seed input file",
-        _ => "Failed to read launch input file",
-    };
-    let parse_message = match parse_code {
-        "LaunchConfigInvalid" => "Launch config input is not canonical JSON",
-        "LaunchSeedInvalid" => "Launch seed input is not canonical JSON",
-        _ => "Launch input is not canonical JSON",
-    };
-    let raw = tokio::fs::read_to_string(path)
-        .await
-        .map_err(|_| CommandError::backend(read_code, read_message))?;
-    PlainCanonicalJsonBytes::from_json_str(&raw)
-        .map(|canonical| canonical.to_vec())
-        .map_err(|_| CommandError::backend(parse_code, parse_message))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn start_rejects_invalid_bundle_before_store_connection() {
+    async fn start_rejects_unknown_op_before_store_connection() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let bundle = tmp.path().join("bundle.json");
-        std::fs::write(&bundle, "{}").expect("write invalid bundle");
+        let config = tmp.path().join("portfolio.json");
+        std::fs::write(&config, "{}").expect("write config");
 
-        let err = execute_internal(&StartArgs {
-            bundle,
-            run_id: None,
-            seeds: Vec::new(),
-            configs: Vec::new(),
-            framework_version: "mfm.cli.test".to_owned(),
-            source_revision: "test-source".to_owned(),
-            drive: TypedDriveArg::AppendOnly,
-            stores: TypedRunStoresArgs {
+        let mut args = start_args(
+            config,
+            TypedRunStoresArgs {
                 typed_artifact_root: Some(tmp.path().join("artifacts")),
                 database_url: None,
             },
-        })
-        .await
-        .expect_err("invalid bundle rejects before store construction");
+        );
+        args.op = "unknown_op".to_owned();
 
-        assert_eq!(err.code, "CertifiedBundleInvalid");
+        let err = execute_internal(&args)
+            .await
+            .expect_err("unknown op rejects before store construction");
+
+        assert_eq!(err.code, "EntryPointOpNotFound");
     }
 
     #[tokio::test]
-    async fn start_rejects_missing_config_inputs_before_store_connection() {
+    async fn start_rejects_invalid_config_before_store_connection() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let (bundle, _configs) = proof_bundle_and_configs(tmp.path());
+        let config = tmp.path().join("portfolio.json");
+        std::fs::write(&config, r#"{"portfolio":{"portfolio_id":1}}"#).expect("write config");
 
-        let err = execute_internal(&StartArgs {
-            bundle,
-            run_id: None,
-            seeds: Vec::new(),
-            configs: Vec::new(),
-            framework_version: "mfm.cli.test".to_owned(),
-            source_revision: "test-source".to_owned(),
-            drive: TypedDriveArg::AppendOnly,
-            stores: TypedRunStoresArgs {
+        let err = execute_internal(&start_args(
+            config,
+            TypedRunStoresArgs {
                 typed_artifact_root: Some(tmp.path().join("artifacts")),
                 database_url: None,
             },
-        })
+        ))
         .await
-        .expect_err("missing config inputs reject before store construction");
+        .expect_err("invalid config rejects before store construction");
 
-        assert_eq!(err.code, "MissingLaunchConfigArtifact");
+        assert_eq!(err.code, "AuthoredConfigDecodeFailed");
     }
 
     #[tokio::test]
-    async fn start_accepts_config_inputs_before_store_connection() {
+    async fn start_accepts_entry_point_material_before_store_connection() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let (bundle, configs) = proof_bundle_and_configs(tmp.path());
+        let config = tmp.path().join("portfolio.json");
+        std::fs::write(&config, sample_portfolio_config_json()).expect("write config");
 
-        let err = execute_internal(&StartArgs {
-            bundle,
-            run_id: None,
-            seeds: Vec::new(),
-            configs,
-            framework_version: "mfm.cli.test".to_owned(),
-            source_revision: "test-source".to_owned(),
-            drive: TypedDriveArg::AppendOnly,
-            stores: TypedRunStoresArgs {
+        let err = execute_internal(&start_args(
+            config,
+            TypedRunStoresArgs {
                 typed_artifact_root: Some(tmp.path().join("artifacts")),
                 database_url: None,
             },
-        })
+        ))
         .await
-        .expect_err("valid launch material proceeds to store construction");
+        .expect_err("valid entry-point launch proceeds to store construction");
 
         assert_eq!(err.code, "MissingDatabaseUrl");
     }
 
-    fn proof_bundle_and_configs(root: &std::path::Path) -> (PathBuf, Vec<ConfigInputArg>) {
-        let proof_config = mfm_op_proof::ProofWorkflowConfig::default();
-        let draft = mfm_op_proof::proof_program_draft(proof_config.clone()).expect("proof draft");
-        let certified = mfm_op_proof::certified_proof_spec(proof_config).expect("proof spec");
-        let bundle = certified.bundle().expect("proof bundle");
-        let bundle_json = serde_json::json!({
-            "kind": "certified_typed_spec_bundle_v1",
-            "spec": serde_json::from_slice::<serde_json::Value>(bundle.spec_bytes())
-                .expect("spec JSON"),
-            "certificate": serde_json::from_slice::<serde_json::Value>(bundle.certificate_bytes())
-                .expect("certificate JSON"),
-        });
-        let bundle_path = root.join("bundle.json");
-        std::fs::write(
-            &bundle_path,
-            serde_json::to_vec(&bundle_json).expect("bundle JSON"),
-        )
-        .expect("write bundle");
-
-        let mut configs = Vec::new();
-        let mut index = 0usize;
-        for config in draft
-            .state_nodes()
-            .iter()
-            .map(|node| &node.config)
-            .chain(draft.operation_lineage().iter().map(|frame| &frame.config))
-        {
-            let path = root.join(format!("config-{index}.json"));
-            index += 1;
-            std::fs::write(&path, config.canonical_json.as_bytes()).expect("write config");
-            configs.push(ConfigInputArg {
-                schema_id: config.schema_id.clone(),
-                path,
-            });
+    fn start_args(config: PathBuf, stores: TypedRunStoresArgs) -> StartArgs {
+        StartArgs {
+            op: "portfolio_snapshot".to_owned(),
+            config,
+            op_version: None,
+            config_format: ConfigFormatArg::Json,
+            run_id: None,
+            framework_version: "mfm.cli.test".to_owned(),
+            source_revision: "test-source".to_owned(),
+            drive: TypedDriveArg::AppendOnly,
+            stores,
         }
-        for node in &certified.envelope().spec.nodes {
-            let Some(framework) = &node.framework else {
-                continue;
-            };
-            let bytes = mfm_spec::v1::framework_config_canonical_json(
-                framework.config_kind(),
-                &node.node_id,
-            )
-            .expect("framework config");
-            let path = root.join(format!("config-{index}.json"));
-            index += 1;
-            std::fs::write(&path, bytes.as_bytes()).expect("write framework config");
-            configs.push(ConfigInputArg {
-                schema_id: node.config_ref.schema_id.clone(),
-                path,
-            });
-        }
+    }
 
-        (bundle_path, configs)
+    fn sample_portfolio_config_json() -> String {
+        serde_json::json!({
+            "portfolio": {
+                "portfolio_id": "portfolio_main",
+                "quote_codes": ["USD"],
+                "networks": [
+                    {
+                        "network_id": "ethereum-mainnet",
+                        "family": "evm",
+                        "chain_id": 1,
+                        "control_scope": "shared",
+                        "metadata": {}
+                    }
+                ],
+                "wallets": [
+                    {
+                        "wallet_id": "wallet_main",
+                        "subject": {
+                            "kind": "evm_address",
+                            "address": "0x000000000000000000000000000000000000dead"
+                        },
+                        "implementation": { "kind": "address_only" },
+                        "network_id": "ethereum-mainnet",
+                        "symbol_ids": ["eth.native.ethereum-mainnet"],
+                        "metadata": {}
+                    }
+                ],
+                "symbol_configs": [
+                    {
+                        "symbol_id": "eth.native.ethereum-mainnet",
+                        "display_symbol": "ETH",
+                        "kind": "native_balance",
+                        "role": "native",
+                        "network_id": "ethereum-mainnet",
+                        "protocol": null,
+                        "balance_reader": { "kind": "native_balance" },
+                        "valuation": {
+                            "quotes": [
+                                {
+                                    "quote": "USD",
+                                    "priced_symbol_id": "eth.native.ethereum-mainnet",
+                                    "reader": {
+                                        "kind": "fixed_unit_price",
+                                        "unit_price_dec": "1800.00"
+                                    }
+                                }
+                            ]
+                        },
+                        "decimals": 18,
+                        "underlying_symbol_id": null,
+                        "metadata": {}
+                    }
+                ],
+                "metadata": {}
+            },
+            "valuation_source_registry": { "sources": [] }
+        })
+        .to_string()
     }
 }

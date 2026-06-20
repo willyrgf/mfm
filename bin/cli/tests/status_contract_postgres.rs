@@ -9,7 +9,6 @@ use mfm_store::v1 as store;
 use mfm_stream_store_postgres::{PostgresSchema, PostgresTypedRunEventStore};
 use serde_json::Value;
 use sqlx::{AssertSqlSafe, PgPool};
-use std::path::{Path, PathBuf};
 use std::process::Output;
 use tempfile::TempDir;
 
@@ -30,19 +29,39 @@ async fn run_status_reports_interrupted_attempt_and_framework_attempts_from_hist
     let temp = TempDir::new().expect("temp dir");
     let artifact_root = temp.path().join("typed-artifacts");
     std::fs::create_dir_all(&artifact_root).expect("artifact root");
-    let proof_config = mfm_op_proof::ProofWorkflowConfig::default();
-    let draft = mfm_op_proof::proof_program_draft(proof_config.clone()).expect("proof draft");
-    let certified = mfm_op_proof::certified_proof_spec(proof_config).expect("proof spec");
-    let (bundle_path, config_args) = proof_bundle_and_config_args(temp.path(), &draft, &certified);
+    let config_path = temp.path().join("portfolio.json");
+    let config = sample_portfolio_config_json();
+    std::fs::write(&config_path, &config).expect("write portfolio config");
     let run_id = mfm_app::new_run_id();
+    let entry_point_registry = mfm_app::production_entry_point_op_registry().expect("entrypoints");
+    let certification_registry = mfm_app::production_certification_registry().expect("cert");
+    let prepared = mfm_app::prepare_entry_point_run_launch(mfm_app::EntryPointRunLaunchInput {
+        entry_point_registry: &entry_point_registry,
+        public_op_name: mfm_app::PublicOpName::new("portfolio_snapshot").expect("op name"),
+        op_version: None,
+        authored_config: mfm_app::AuthoredConfig::new(mfm_app::ConfigFormat::Json, config)
+            .expect("authored config"),
+        certification_registry: &certification_registry,
+        run_id: run_id.clone(),
+        framework_version: "mfm.cli.test",
+        source_revision: "status-contract-test",
+        launched_at_unix_ms: 1,
+        drive: mfm_app::DriveMode::AppendOnly,
+    })
+    .expect("prepared entry-point launch");
+    let certified = prepared.request.certified_spec.clone();
 
-    let mut start_args = vec![
+    let start_args = vec![
         "--output-format".to_owned(),
         "json".to_owned(),
         "run".to_owned(),
         "start".to_owned(),
-        "--bundle".to_owned(),
-        bundle_path.display().to_string(),
+        "--op".to_owned(),
+        "portfolio_snapshot".to_owned(),
+        "--config".to_owned(),
+        config_path.display().to_string(),
+        "--config-format".to_owned(),
+        "json".to_owned(),
         "--run-id".to_owned(),
         run_id.as_str().to_owned(),
         "--drive".to_owned(),
@@ -52,11 +71,10 @@ async fn run_status_reports_interrupted_attempt_and_framework_attempts_from_hist
         "--database-url".to_owned(),
         scoped_database_url.clone(),
     ];
-    start_args.extend(config_args);
     let start = run_cli(&start_args);
     assert_success(&start);
     let start_json = parse_success_json(&start.stdout);
-    assert_eq!(start_json["run_mode"], "forward");
+    assert_eq!(start_json["run"]["run_mode"], "forward");
 
     let interrupted_node = certified
         .envelope()
@@ -210,53 +228,64 @@ fn schema_scoped_database_url(database_url: &str, schema: &str) -> String {
     format!("{database_url}{separator}options=-csearch_path%3D{schema}")
 }
 
-fn proof_bundle_and_config_args(
-    root: &Path,
-    draft: &mfm_program::TypedProgramDraft,
-    certified: &mfm_certify::CertifiedTypedSpec,
-) -> (PathBuf, Vec<String>) {
-    let bundle = certified.bundle().expect("proof bundle");
-    let bundle_json = serde_json::json!({
-        "kind": "certified_typed_spec_bundle_v1",
-        "spec": serde_json::from_slice::<Value>(bundle.spec_bytes()).expect("spec JSON"),
-        "certificate": serde_json::from_slice::<Value>(bundle.certificate_bytes())
-            .expect("certificate JSON"),
-    });
-    let bundle_path = root.join("bundle.json");
-    std::fs::write(
-        &bundle_path,
-        serde_json::to_vec(&bundle_json).expect("bundle JSON"),
-    )
-    .expect("write bundle");
-
-    let mut args = Vec::new();
-    let mut index = 0usize;
-    for config in draft
-        .state_nodes()
-        .iter()
-        .map(|node| &node.config)
-        .chain(draft.operation_lineage().iter().map(|frame| &frame.config))
-    {
-        let path = root.join(format!("config-{index}.json"));
-        index += 1;
-        std::fs::write(&path, config.canonical_json.as_bytes()).expect("write config");
-        args.push("--config".to_owned());
-        args.push(format!("{}={}", config.schema_id, path.display()));
-    }
-    for node in &certified.envelope().spec.nodes {
-        let Some(framework) = &node.framework else {
-            continue;
-        };
-        let bytes = spec::framework_config_canonical_json(framework.config_kind(), &node.node_id)
-            .expect("framework config");
-        let path = root.join(format!("config-{index}.json"));
-        index += 1;
-        std::fs::write(&path, bytes.as_bytes()).expect("write framework config");
-        args.push("--config".to_owned());
-        args.push(format!("{}={}", node.config_ref.schema_id, path.display()));
-    }
-
-    (bundle_path, args)
+fn sample_portfolio_config_json() -> String {
+    serde_json::json!({
+        "portfolio": {
+            "portfolio_id": "portfolio_main",
+            "quote_codes": ["USD"],
+            "networks": [
+                {
+                    "network_id": "ethereum-mainnet",
+                    "family": "evm",
+                    "chain_id": 1,
+                    "control_scope": "shared",
+                    "metadata": {}
+                }
+            ],
+            "wallets": [
+                {
+                    "wallet_id": "wallet_main",
+                    "subject": {
+                        "kind": "evm_address",
+                        "address": "0x000000000000000000000000000000000000dead"
+                    },
+                    "implementation": { "kind": "address_only" },
+                    "network_id": "ethereum-mainnet",
+                    "symbol_ids": ["eth.native.ethereum-mainnet"],
+                    "metadata": {}
+                }
+            ],
+            "symbol_configs": [
+                {
+                    "symbol_id": "eth.native.ethereum-mainnet",
+                    "display_symbol": "ETH",
+                    "kind": "native_balance",
+                    "role": "native",
+                    "network_id": "ethereum-mainnet",
+                    "protocol": null,
+                    "balance_reader": { "kind": "native_balance" },
+                    "valuation": {
+                        "quotes": [
+                            {
+                                "quote": "USD",
+                                "priced_symbol_id": "eth.native.ethereum-mainnet",
+                                "reader": {
+                                    "kind": "fixed_unit_price",
+                                    "unit_price_dec": "1800.00"
+                                }
+                            }
+                        ]
+                    },
+                    "decimals": 18,
+                    "underlying_symbol_id": null,
+                    "metadata": {}
+                }
+            ],
+            "metadata": {}
+        },
+        "valuation_source_registry": { "sources": [] }
+    })
+    .to_string()
 }
 
 async fn append_interrupted_attempt(

@@ -268,40 +268,32 @@ or resume certified typed runs, and they do not route through the removed legacy
 
 ### `run start`
 
-Starts a certified typed run from a certified typed spec bundle JSON file. The command treats the
-bundle as untrusted transport data, verifies the contained spec and certificate against the
-production certification registry, canonicalizes supplied config and seed JSON, hands launch bytes
-to runtime middleware for staging, appends `RunAdmitted` through the prepared commit boundary, and
-optionally drives the typed scheduler.
+Starts a common workflow through a registered entry-point op. The CLI reads authored config,
+passes the public op name, optional version, config format, and config bytes to app assembly, and
+then starts the certified typed run prepared by the app layer. Config format defaults to TOML.
 
 **Usage:**
 ```sh
-mfm_cli run start --bundle <PATH> [--config <SCHEMA_ID=PATH>]... [--seed <SEED_ID=PATH>]... [OPTIONS]
+mfm_cli run start --op <NAME> --config <PATH> [OPTIONS]
 ```
 
 **Key Options:**
-- `--bundle <PATH>`: Certified typed spec bundle JSON file.
+- `--op <NAME>`: Public entry-point operation name.
+- `--config <PATH>`: Authored op config file.
+- `--op-version <VERSION>`: Optional public op version. If omitted, the latest registered version is selected.
+- `--config-format <toml|json>`: Authored config format. Defaults to `toml`.
 - `--run-id <RUN_ID>`: Optional typed run id. If omitted, a new typed digest id is generated.
-- `--config <SCHEMA_ID=PATH>`: JSON config input for a config reference declared by the certified spec.
-- `--seed <SEED_ID=PATH>`: Canonical JSON seed input for a seed declared by the certified spec.
 - `--framework-version <VALUE>`: Framework version evidence recorded in `RunAdmitted`.
 - `--source-revision <VALUE>`: Source revision evidence recorded in `RunAdmitted` (or `MFM_SOURCE_REVISION`).
 - `--drive <append-only|once|until-blocked>`: Scheduler drive policy after `RunAdmitted`.
 - `--database-url <URL>`: PostgreSQL connection string (default: `$DATABASE_URL`)
 - `--typed-artifact-root <PATH>`: Typed artifact store root directory
 
-Bundle shape:
+Examples:
 
-```json
-{
-  "kind": "certified_typed_spec_bundle_v1",
-  "spec": {
-    "...": "TypedExecutionSpec JSON"
-  },
-  "certificate": {
-    "...": "CertifiedSpecCertificate JSON"
-  }
-}
+```sh
+mfm_cli run start --op portfolio_snapshot --config portfolio.toml
+mfm_cli run start --op evm_contract_lifecycle --config lifecycle.toml --op-version 1
 ```
 
 Run start always resolves runner executable identities before `RunAdmitted`, because those identities
@@ -313,12 +305,11 @@ typed porting commits.
 
 Stable launch errors include:
 
-- `CertifiedBundleReadFailed`: the bundle file could not be read.
-- `CertifiedBundleInvalid`: the bundle JSON is malformed, has the wrong kind, is missing fields, or has
-  non-canonicalizable spec/certificate values.
-- `CertifiedBundleVerificationFailed`: certificate/spec evidence, registry digest, descriptor evidence, or
-  certifier validation failed. A hash-only spec envelope is not certification authority.
-- `MissingLaunchConfigArtifact`: a certified config reference was not supplied with `--config`.
+- `EntryPointOpNotFound`: no registered op matches `--op`.
+- `EntryPointOpVersionNotFound`: `--op-version` selects no registered version for the public op.
+- `AuthoredConfigReadFailed`: the authored config file could not be read.
+- `AuthoredConfigDecodeFailed`: the authored config does not match the selected op schema.
+- `EntryPointOpCertificationFailed`: app assembly could not certify the planned typed spec.
 - `LaunchRunnerUnavailable`: the certified spec references a state descriptor with no production
   runner binding.
 
@@ -435,104 +426,6 @@ registered by a domain port.
 ```sh
 mfm_cli run replay <RUN_ID> [OPTIONS]
 ```
-
-## EVM Contract Commands
-
-### `evm contracts deploy`
-
-Compiles a deploy phase config into a certified typed contract deployment run, starts the run, and
-renders the typed public output when the scheduler completes.
-
-**Usage:**
-```sh
-mfm_cli evm contracts deploy --config-file <DEPLOY_CONFIG_JSON> [OPTIONS]
-```
-
-### `evm contracts configure`
-
-Compiles a configure phase config plus a deployed-contract JSON seed into a certified typed
-configuration run.
-
-**Usage:**
-```sh
-mfm_cli evm contracts configure --config-file <CONFIGURE_CONFIG_JSON> --deployed-file <DEPLOYED_CONTRACT_JSON> [OPTIONS]
-```
-
-### `evm contracts validate`
-
-Compiles a validate phase config plus a configured-contract JSON seed into a certified typed
-validation run.
-
-**Usage:**
-```sh
-mfm_cli evm contracts validate --config-file <VALIDATE_CONFIG_JSON> --configured-file <CONFIGURED_CONTRACT_JSON> [OPTIONS]
-```
-
-### `evm contracts lifecycle`
-
-Compiles deploy, configure, and validate configs into one certified typed contract lifecycle run.
-
-**Usage:**
-```sh
-mfm_cli evm contracts lifecycle --config-file <LIFECYCLE_CONFIG_JSON> [OPTIONS]
-```
-
-**Common Options:**
-- `--drive <append-only|once|until-blocked>`: Scheduler drive policy after `RunAdmitted`
-- `--framework-version <VALUE>`: Framework version evidence recorded in `RunAdmitted`
-- `--source-revision <VALUE>`: Source revision evidence recorded in `RunAdmitted` (or `MFM_SOURCE_REVISION`)
-- `--typed-artifact-root <PATH>`: Typed artifact root
-- `--database-url <URL>`: PostgreSQL typed run-event store URL
-
-Contract config JSON is parsed into the reusable `mfm-evm-contract-config` phase types. Configure
-and validate seed files are parsed into `mfm-evm-contract-model` lifecycle values and supplied as
-typed launch seeds.
-
-## Portfolio Commands (Experimental)
-
-### `portfolio snapshot`
-
-Validates and canonicalizes the portfolio snapshot request object containing:
-- `portfolio`
-- `valuation_source_registry`
-
-The command compiles the canonical request into a certified typed portfolio execution spec,
-passes typed config/spec launch material to runtime middleware, starts a typed run, and renders the
-typed public output when the scheduler completes.
-
-**Usage:**
-```sh
-mfm_cli portfolio snapshot --request-file <REQUEST_FILE> [OPTIONS]
-mfm_cli portfolio snapshot --request-json '<REQUEST_JSON>' [OPTIONS]
-```
-
-**Key Options:**
-- `--request-file <PATH>`: Path to an authored request file in JSON or TOML
-- `--request-json <JSON>`: Inline canonical request JSON payload
-- `--drive <append-only|once|until-blocked>`: Scheduler drive policy after `RunAdmitted`
-- `--typed-artifact-root <PATH>`: Typed artifact root
-- `--database-url <URL>`: PostgreSQL typed run-event store URL
-
-Both authored formats normalize immediately into the same canonical typed request shape. The
-resulting canonical request must use this in-place contract:
-
-```json
-{
-  "portfolio": { "...": "canonical PortfolioConfig" },
-  "valuation_source_registry": { "...": "canonical ValuationSourceRegistry" }
-}
-```
-
-`portfolio.networks[*].control_scope` is optional and defaults to `shared`. Set it when one
-portfolio flow must keep typed RPC source selection and diagnostics partitioned from another flow on
-the same network.
-
-**Output Notes:**
-- JSON output wraps the typed run response and, when completed, the typed public output containing
-  `snapshot` and `report`.
-- Text output prints the public output JSON when available.
-- The command never submits old dynamic `portfolio_tracker`, `portfolio_execute`, or
-  `portfolio_config_build` ops.
 
 ## Configuration
 

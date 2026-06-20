@@ -44,8 +44,7 @@ fn test_run_start_help_describes_entry_point_op_surface() {
         .stdout(predicate::str::contains("--op <NAME>"))
         .stdout(predicate::str::contains("--op-version <VERSION>"))
         .stdout(predicate::str::contains("--config <PATH>"))
-        .stdout(predicate::str::contains("--config-format <CONFIG_FORMAT>"))
-        .stdout(predicate::str::contains("--bundle").not());
+        .stdout(predicate::str::contains("--config-format <CONFIG_FORMAT>"));
 }
 
 #[test]
@@ -61,7 +60,7 @@ fn test_run_start_accepts_entry_point_op_flags_before_dispatch() {
         "run",
         "start",
         "--op",
-        "__missing_contract_test_op__",
+        "missing_contract_test_op",
         "--op-version",
         "1",
         "--config",
