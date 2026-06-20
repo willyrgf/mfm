@@ -15,7 +15,7 @@ use mfm_runtime::{
     CertifiedRuntimeSpec, RunLaunchArtifact, RunLaunchEvidence, RuntimeArtifactStageFuture,
     RuntimeArtifactStager, RuntimeArtifactStore, SchedulerStatus, SerialTypedScheduler,
 };
-use mfm_store::v1::{self as store, TypedRunEventStore};
+use mfm_store::v1::{self as store, AsyncTypedRunEventStore};
 use serde::Serialize;
 
 type ProofArtifactRecord = (Vec<u8>, store::ArtifactEvidenceRef);
@@ -199,7 +199,7 @@ async fn conformance_start_rejects_draft_not_bound_to_certified_spec() {
         mfm_transports_proof::deterministic_proof_runner_registry().expect("runner registry"),
         artifact_stager,
     );
-    let mut store = store::InMemoryTypedRunStore::new();
+    let store = store::AsyncInMemoryTypedRunStore::new();
     let run_id = RunId::from_digest(
         DigestAlgorithm::Sha256JcsV1,
         DigestBytes::from_array([0x35; 32]),
@@ -207,7 +207,7 @@ async fn conformance_start_rejects_draft_not_bound_to_certified_spec() {
 
     let error = start_proof_run(
         &scheduler,
-        &mut store,
+        &store,
         &runtime_spec,
         &mismatched_draft,
         run_id.clone(),
@@ -220,7 +220,11 @@ async fn conformance_start_rejects_draft_not_bound_to_certified_spec() {
         "expected InvalidSpec, got {error:?}"
     );
     assert!(
-        store.load_run_stream(&run_id).is_empty(),
+        store
+            .load_run_stream(&run_id)
+            .await
+            .expect("load rejected conformance stream")
+            .is_empty(),
         "rejected conformance launch must not create a run stream"
     );
 }
@@ -288,7 +292,7 @@ async fn proof_implementation_conformance_summary(
     let runtime_spec =
         CertifiedRuntimeSpec::new(certified.clone()).map_err(|error| error.to_string())?;
     let artifacts = InMemoryProofArtifacts::default();
-    let mut store = store::InMemoryTypedRunStore::new();
+    let store = store::AsyncInMemoryTypedRunStore::new();
     let artifact_stager: Arc<dyn RuntimeArtifactStore> = Arc::new(artifacts.clone());
     let scheduler = SerialTypedScheduler::new(
         mfm_transports_proof::deterministic_proof_runner_registry()
@@ -299,19 +303,13 @@ async fn proof_implementation_conformance_summary(
         DigestAlgorithm::Sha256JcsV1,
         DigestBytes::from_array([0x34; 32]),
     );
-    start_proof_run(
-        &scheduler,
-        &mut store,
-        &runtime_spec,
-        &draft,
-        run_id.clone(),
-    )
-    .await
-    .map_err(|error| error.to_string())?;
+    start_proof_run(&scheduler, &store, &runtime_spec, &draft, run_id.clone())
+        .await
+        .map_err(|error| error.to_string())?;
 
     for _ in 0..16 {
         match scheduler
-            .drive_until_blocked(&mut store, &runtime_spec, &run_id)
+            .drive_until_blocked(&store, &runtime_spec, &run_id)
             .await
             .map_err(|error| error.to_string())?
         {
@@ -321,7 +319,10 @@ async fn proof_implementation_conformance_summary(
         }
     }
 
-    let stream = store.load_run_stream(&run_id);
+    let stream = store
+        .load_run_stream(&run_id)
+        .await
+        .map_err(|error| error.to_string())?;
     let verifier = mfm_transports_proof::DeterministicProofReplayVerifier::new()
         .map_err(|error| error.to_string())?;
     let facts = RecordedProofFacts { fact: proof_fact() };
@@ -368,9 +369,10 @@ async fn proof_implementation_conformance_summary(
             _ => {}
         }
     }
-    let replay_valid = verify_conformance_replay(&runtime_spec, &run_id, &store, &artifacts)
-        .await
-        .map_err(|error| error.to_string())?;
+    let replay_valid =
+        verify_conformance_replay(&runtime_spec, &run_id, stream.clone(), &artifacts)
+            .await
+            .map_err(|error| error.to_string())?;
     let summary = ProofImplementationConformanceSummary {
         implementation: "deterministic-proof".to_owned(),
         facts_valid,
@@ -386,17 +388,13 @@ async fn proof_implementation_conformance_summary(
 async fn verify_conformance_replay(
     runtime_spec: &CertifiedRuntimeSpec,
     run_id: &RunId,
-    store: &impl store::TypedRunEventStore,
+    stream: Vec<store::KernelEventEnvelope>,
     artifacts: &InMemoryProofArtifacts,
 ) -> replay::Result<bool> {
     let committed =
-        store::CommittedRunStream::from_events(run_id.clone(), store.load_run_stream(run_id))
-            .map_err(|error| {
-                replay::ReplayError::new(
-                    replay::ReplayErrorKind::InvalidRunStream,
-                    error.to_string(),
-                )
-            })?;
+        store::CommittedRunStream::from_events(run_id.clone(), stream).map_err(|error| {
+            replay::ReplayError::new(replay::ReplayErrorKind::InvalidRunStream, error.to_string())
+        })?;
     let retained_artifacts =
         store::VerifiedRunArtifactStore::from_committed_stream(&committed, artifacts)
             .await
@@ -588,7 +586,7 @@ fn conformance_certificate_launch_artifact(
 
 async fn start_proof_run(
     scheduler: &SerialTypedScheduler,
-    store: &mut store::InMemoryTypedRunStore,
+    store: &store::AsyncInMemoryTypedRunStore,
     runtime_spec: &CertifiedRuntimeSpec,
     draft: &mfm_program::TypedProgramDraft,
     run_id: RunId,
@@ -597,7 +595,7 @@ async fn start_proof_run(
         runtime_spec,
         run_id.clone(),
         run_start_evidence(runtime_spec, draft)?,
-        store.expected_next_seq(&run_id),
+        store.expected_next_seq(&run_id).await?,
     )?;
     scheduler.start_run(store, launch).await?;
     Ok(())
@@ -719,41 +717,7 @@ async fn verify_conformance_replay_stream(
                 "proof conformance stream is empty",
             )
         })?;
-    let store = StaticRunStore {
-        stream,
-        projection: store::ProjectionSnapshot::default(),
-    };
-    verify_conformance_replay(runtime_spec, &run_id, &store, artifacts).await
-}
-
-struct StaticRunStore {
-    stream: Vec<store::KernelEventEnvelope>,
-    projection: store::ProjectionSnapshot,
-}
-
-impl store::TypedProjectionRead for StaticRunStore {
-    fn projection_snapshot(&self) -> &store::ProjectionSnapshot {
-        &self.projection
-    }
-}
-
-impl store::TypedRunEventStore for StaticRunStore {
-    fn append_prepared_commit_plan(
-        &mut self,
-        _plan: store::PreparedCommitPlan,
-    ) -> store::Result<store::CommitOutcome> {
-        Err(store::StoreError::Event(
-            "static replay test store is read-only".to_owned(),
-        ))
-    }
-
-    fn load_run_stream(&self, _run_id: &RunId) -> Vec<store::KernelEventEnvelope> {
-        self.stream.clone()
-    }
-
-    fn expected_next_seq(&self, _run_id: &RunId) -> store::StreamSeq {
-        store::StreamSeq::FIRST
-    }
+    verify_conformance_replay(runtime_spec, &run_id, stream, artifacts).await
 }
 
 async fn conformance_stream() -> (
@@ -767,7 +731,7 @@ async fn conformance_stream() -> (
     let runtime_spec = CertifiedRuntimeSpec::new(certified).expect("runtime spec");
     let artifacts = InMemoryProofArtifacts::default();
 
-    let mut store = store::InMemoryTypedRunStore::new();
+    let store = store::AsyncInMemoryTypedRunStore::new();
     let artifact_stager: Arc<dyn RuntimeArtifactStore> = Arc::new(artifacts.clone());
     let scheduler = SerialTypedScheduler::new(
         mfm_transports_proof::deterministic_proof_runner_registry().expect("runner registry"),
@@ -777,19 +741,13 @@ async fn conformance_stream() -> (
         DigestAlgorithm::Sha256JcsV1,
         DigestBytes::from_array([0x34; 32]),
     );
-    start_proof_run(
-        &scheduler,
-        &mut store,
-        &runtime_spec,
-        &draft,
-        run_id.clone(),
-    )
-    .await
-    .expect("start run");
+    start_proof_run(&scheduler, &store, &runtime_spec, &draft, run_id.clone())
+        .await
+        .expect("start run");
 
     for _ in 0..16 {
         match scheduler
-            .drive_until_blocked(&mut store, &runtime_spec, &run_id)
+            .drive_until_blocked(&store, &runtime_spec, &run_id)
             .await
             .expect("drive conformance run")
         {
@@ -798,7 +756,7 @@ async fn conformance_stream() -> (
         }
     }
 
-    let stream = store.load_run_stream(&run_id);
+    let stream = store.load_run_stream(&run_id).await.expect("load stream");
     (runtime_spec, stream, artifacts)
 }
 
