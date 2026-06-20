@@ -2531,6 +2531,75 @@ fn test_prepared_commit_plan(
     PreparedCommit::<AttemptTerminal>::new(request, artifacts).map(PreparedCommitPlan::from)
 }
 
+fn append_async_prepared_commit(
+    store: &AsyncInMemoryTypedRunStore,
+    request: TypedCommitRequest,
+) -> mfm_store::v1::Result<CommitOutcome> {
+    let plan = test_prepared_commit_plan(request.clone(), request.required_artifacts().to_vec())?;
+    poll_ready_store_future(store.append_prepared_commit_plan(plan))
+}
+
+fn async_expected_next_seq(store: &AsyncInMemoryTypedRunStore, run_id: &RunId) -> StreamSeq {
+    poll_ready_store_future(store.expected_next_seq(run_id)).expect("async expected next seq")
+}
+
+fn append_async_side_effect_prepare_for_ledger(
+    store: &AsyncInMemoryTypedRunStore,
+    run_id: &RunId,
+    commit_key: &str,
+    ledger_key: events::SideEffectLedgerKey,
+    resource_key: events::ResourceKeyEvidence,
+    artifact_byte: u8,
+) {
+    let node_id = node_id(70);
+    let attempt_id = attempt_id(72);
+    append_async_prepared_commit(
+        store,
+        typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: async_expected_next_seq(store, run_id),
+            commit_key: CommitKey::new(format!("{commit_key}-attempt-start"))
+                .expect("commit key"),
+            payloads: vec![side_effect_attempt_started_for(
+                node_id.clone(),
+                attempt_id.clone(),
+            )],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        },
+    )
+    .expect("append async sidefx attempt start");
+
+    let artifact_id = artifact_id(artifact_byte);
+    let artifact_digest = content_digest(artifact_byte + 1);
+    let intent_evidence = intent_artifact_ref_for_node(
+        artifact_id.clone(),
+        artifact_digest.clone(),
+        node_id.clone(),
+    );
+    let purpose = events::SideEffectLedgerPurpose::Forward;
+    let mut intent = side_effect_intent(artifact_id, artifact_digest);
+    let mut claim = side_effect_claim();
+    let mut prepared = side_effect_prepared_with_resource_key(1, "token-1", resource_key);
+    for payload in [&mut intent, &mut claim, &mut prepared] {
+        set_side_effect_ledger(payload, ledger_key.clone(), purpose.clone());
+        set_side_effect_node_attempt(payload, node_id.clone(), attempt_id.clone());
+    }
+
+    append_async_prepared_commit(
+        store,
+        typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: async_expected_next_seq(store, run_id),
+            commit_key: CommitKey::new(commit_key).expect("commit key"),
+            payloads: vec![intent, claim, prepared],
+            required_artifacts: vec![intent_evidence],
+            preconditions: CommitPreconditions::default(),
+        },
+    )
+    .expect("append async sidefx prepare");
+}
+
 fn test_is_retention_payload(payload: &KernelEventPayload) -> bool {
     matches!(
         payload,
@@ -2923,19 +2992,14 @@ fn async_in_memory_store_exposes_commit_stream_and_status_contract() {
             .expect("append resource run start");
     assert!(matches!(resource_outcome, CommitOutcome::Appended(_)));
 
-    store
-        .with_inner_mut(|inner| {
-            append_side_effect_prepare_for_ledger(
-                inner,
-                &resource_run,
-                "async-resource-prepare",
-                side_effect_ledger_key_with_suffix(30),
-                resource_key("async-wallet", 230),
-                170,
-                true,
-            );
-        })
-        .expect("append resource lane fixture");
+    append_async_side_effect_prepare_for_ledger(
+        &store,
+        &resource_run,
+        "async-resource-prepare",
+        side_effect_ledger_key_with_suffix(30),
+        resource_key("async-wallet", 230),
+        170,
+    );
 
     let status_request = run_start_request(status_run.clone(), "async-status-run-start");
     let status_plan = test_prepared_commit_plan(

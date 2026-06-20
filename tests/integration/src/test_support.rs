@@ -4,6 +4,7 @@
 //! The crate owns reusable synthetic fixtures for CI gates that need to exercise the typed
 //! certified runtime without importing old dynamic authoring or execution APIs.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
@@ -2895,10 +2896,8 @@ async fn scheduler_start_run(
     store: &mut store::InMemoryTypedRunStore,
     launch: mfm_runtime::PreparedRunLaunch,
 ) -> mfm_runtime::Result<()> {
-    let async_store = store::AsyncInMemoryTypedRunStore::from_store(std::mem::take(store));
-    let result = scheduler.start_run(&async_store, launch).await.map(|_| ());
-    restore_in_memory_store(store, &async_store)?;
-    result
+    let async_store = BorrowedAsyncTypedRunStore::new(store);
+    scheduler.start_run(&async_store, launch).await.map(|_| ())
 }
 
 async fn scheduler_drive_once(
@@ -2907,22 +2906,58 @@ async fn scheduler_drive_once(
     runtime_spec: &CertifiedRuntimeSpec,
     run_id: &RunId,
 ) -> mfm_runtime::Result<SchedulerStatus> {
-    let async_store = store::AsyncInMemoryTypedRunStore::from_store(std::mem::take(store));
-    let result = scheduler
+    let async_store = BorrowedAsyncTypedRunStore::new(store);
+    scheduler
         .drive_once(&async_store, runtime_spec, run_id)
-        .await;
-    restore_in_memory_store(store, &async_store)?;
-    result
+        .await
 }
 
-fn restore_in_memory_store(
-    store: &mut store::InMemoryTypedRunStore,
-    async_store: &store::AsyncInMemoryTypedRunStore,
-) -> mfm_runtime::Result<()> {
-    *store = async_store
-        .with_inner(Clone::clone)
-        .map_err(RuntimeError::from)?;
-    Ok(())
+struct BorrowedAsyncTypedRunStore<'a> {
+    inner: RefCell<&'a mut store::InMemoryTypedRunStore>,
+}
+
+impl<'a> BorrowedAsyncTypedRunStore<'a> {
+    fn new(inner: &'a mut store::InMemoryTypedRunStore) -> Self {
+        Self {
+            inner: RefCell::new(inner),
+        }
+    }
+}
+
+impl store::AsyncTypedRunEventStore for BorrowedAsyncTypedRunStore<'_> {
+    type Error = store::StoreError;
+
+    fn append_prepared_commit_plan<'a>(
+        &'a self,
+        plan: store::PreparedCommitPlan,
+    ) -> store::AsyncStoreFuture<'a, store::CommitOutcome, Self::Error> {
+        let result = self.inner.borrow_mut().append_prepared_commit_plan(plan);
+        Box::pin(std::future::ready(result))
+    }
+
+    fn load_run_stream<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> store::AsyncStoreFuture<'a, Vec<store::KernelEventEnvelope>, Self::Error> {
+        let result = Ok(self.inner.borrow().load_run_stream(run_id));
+        Box::pin(std::future::ready(result))
+    }
+
+    fn expected_next_seq<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> store::AsyncStoreFuture<'a, store::StreamSeq, Self::Error> {
+        let result = Ok(self.inner.borrow().expected_next_seq(run_id));
+        Box::pin(std::future::ready(result))
+    }
+
+    fn status_projection_snapshot<'a>(
+        &'a self,
+        _run_id: &'a RunId,
+    ) -> store::AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
+        let result = Ok(self.inner.borrow().projection_snapshot().clone());
+        Box::pin(std::future::ready(result))
+    }
 }
 
 #[cfg(test)]

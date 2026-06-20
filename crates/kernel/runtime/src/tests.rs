@@ -21,6 +21,7 @@ use mfm_program::{
     StateKey, StateRegistryBuilder, StateResult, StateSpec,
 };
 use mfm_program_derive::{MfmConfig, MfmValue, PublicOutputs};
+use mfm_store::v1::AsyncTypedRunEventStore;
 use serde::{Deserialize, Serialize};
 
 const D0: DigestBytes = DigestBytes::from_array([0x10; 32]);
@@ -181,15 +182,17 @@ impl RecordingTypedRunStore {
             .clone()
     }
 
-    fn load_run_stream(&self, run_id: &RunId) -> Vec<store::KernelEventEnvelope> {
+    async fn load_run_stream(&self, run_id: &RunId) -> Vec<store::KernelEventEnvelope> {
         self.inner
-            .with_inner(|store| store.load_run_stream(run_id))
+            .load_run_stream(run_id)
+            .await
             .expect("recording store read")
     }
 
-    fn projection_snapshot(&self) -> store::ProjectionSnapshot {
+    async fn projection_snapshot(&self, run_id: &RunId) -> store::ProjectionSnapshot {
         self.inner
-            .with_inner(|store| store.projection_snapshot().clone())
+            .status_projection_snapshot(run_id)
+            .await
             .expect("recording store projection")
     }
 }
@@ -207,10 +210,63 @@ impl StaleOnceTypedRunStore {
         }
     }
 
-    fn projection_snapshot(&self) -> store::ProjectionSnapshot {
+    async fn projection_snapshot(&self, run_id: &RunId) -> store::ProjectionSnapshot {
         self.inner
-            .with_inner(|store| store.projection_snapshot().clone())
+            .status_projection_snapshot(run_id)
+            .await
             .expect("stale-once store projection")
+    }
+}
+
+struct BorrowedAsyncTypedRunStore<'a> {
+    inner: RefCell<&'a mut store::InMemoryTypedRunStore>,
+}
+
+impl<'a> BorrowedAsyncTypedRunStore<'a> {
+    fn new(inner: &'a mut store::InMemoryTypedRunStore) -> Self {
+        Self {
+            inner: RefCell::new(inner),
+        }
+    }
+
+    fn projection_snapshot(&self) -> store::ProjectionSnapshot {
+        self.inner.borrow().projection_snapshot().clone()
+    }
+}
+
+impl store::AsyncTypedRunEventStore for BorrowedAsyncTypedRunStore<'_> {
+    type Error = store::StoreError;
+
+    fn append_prepared_commit_plan<'a>(
+        &'a self,
+        plan: store::PreparedCommitPlan,
+    ) -> store::AsyncStoreFuture<'a, store::CommitOutcome, Self::Error> {
+        let result = self.inner.borrow_mut().append_prepared_commit_plan(plan);
+        Box::pin(std::future::ready(result))
+    }
+
+    fn load_run_stream<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> store::AsyncStoreFuture<'a, Vec<store::KernelEventEnvelope>, Self::Error> {
+        let result = Ok(self.inner.borrow().load_run_stream(run_id));
+        Box::pin(std::future::ready(result))
+    }
+
+    fn expected_next_seq<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> store::AsyncStoreFuture<'a, store::StreamSeq, Self::Error> {
+        let result = Ok(self.inner.borrow().expected_next_seq(run_id));
+        Box::pin(std::future::ready(result))
+    }
+
+    fn status_projection_snapshot<'a>(
+        &'a self,
+        _run_id: &'a RunId,
+    ) -> store::AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
+        let result = Ok(self.projection_snapshot());
+        Box::pin(std::future::ready(result))
     }
 }
 
@@ -2491,11 +2547,14 @@ async fn no_second_authority_full_run_stages_and_admits_first_artifact_reference
         SchedulerStatus::PublicOutputProjected
     );
     assert_eq!(
-        store.projection_snapshot().run_state(&fixture.run_id),
+        store
+            .projection_snapshot(&fixture.run_id)
+            .await
+            .run_state(&fixture.run_id),
         store::RunState::Completed
     );
 
-    let stream = store.load_run_stream(&fixture.run_id);
+    let stream = store.load_run_stream(&fixture.run_id).await;
     validate_runtime_stream_for_tests(&fixture.runtime_spec, &fixture.run_id, &stream)
         .expect("representative stream validates");
     assert_every_certified_node_has_attempt(&fixture.runtime_spec, &stream);
@@ -6378,7 +6437,7 @@ async fn side_effect_attempt_view_from_verified_context_exposes_ledger_state() {
             &fixture,
         )),
     );
-    let async_store = store::AsyncInMemoryTypedRunStore::from_store(store.clone());
+    let async_store = BorrowedAsyncTypedRunStore::new(&mut store);
     let context = loader
         .load_async(&fixture.runtime_spec, &fixture.run_id, &async_store)
         .await
@@ -6970,7 +7029,8 @@ async fn scheduler_reloads_and_redecides_after_stale_expected_sequence_on_termin
     );
     assert!(
         store
-            .projection_snapshot()
+            .projection_snapshot(&fixture.run_id)
+            .await
             .cell_terminal(&fixture.cell_a)
             .is_some(),
         "scheduler must reload and observe the concurrently advanced terminal projection"
@@ -8680,7 +8740,7 @@ async fn async_runtime_blocks_exclusive_lane_before_staging_artifact() {
         "wallet-async",
         "async-holder-prepare",
     );
-    let store = store::AsyncInMemoryTypedRunStore::from_store(inner);
+    let store = BorrowedAsyncTypedRunStore::new(&mut inner);
     let launch = scheduler
         .prepare_run_launch(
             &fixture.runtime_spec,
@@ -8706,16 +8766,12 @@ async fn async_runtime_blocks_exclusive_lane_before_staging_artifact() {
         staged.lock().expect("staged lock").len(),
         staged_before_block
     );
-    store
-        .with_inner(|inner| {
-            assert!(side_effect_projection_for_run_node(
-                inner.projection_snapshot(),
-                &fixture.run_id,
-                &node.node_id
-            )
-            .is_none());
-        })
-        .expect("read async in-memory store");
+    assert!(side_effect_projection_for_run_node(
+        &store.projection_snapshot(),
+        &fixture.run_id,
+        &node.node_id
+    )
+    .is_none());
 
     assert_eq!(
         scheduler
@@ -11501,10 +11557,8 @@ async fn scheduler_start_run(
     store: &mut store::InMemoryTypedRunStore,
     launch: PreparedRunLaunch,
 ) -> Result<store::CommitOutcome> {
-    let async_store = store::AsyncInMemoryTypedRunStore::from_store(std::mem::take(store));
-    let result = scheduler.start_run(&async_store, launch).await;
-    restore_in_memory_store(store, &async_store)?;
-    result
+    let async_store = BorrowedAsyncTypedRunStore::new(store);
+    scheduler.start_run(&async_store, launch).await
 }
 
 async fn scheduler_start_run_admitted(
@@ -11513,12 +11567,10 @@ async fn scheduler_start_run_admitted(
     runtime_spec: &CertifiedRuntimeSpec,
     launch: PreparedRunLaunch,
 ) -> Result<RunAdmissionAuthority> {
-    let async_store = store::AsyncInMemoryTypedRunStore::from_store(std::mem::take(store));
-    let result = scheduler
+    let async_store = BorrowedAsyncTypedRunStore::new(store);
+    scheduler
         .start_run_admitted(&async_store, runtime_spec, launch)
-        .await;
-    restore_in_memory_store(store, &async_store)?;
-    result
+        .await
 }
 
 async fn drive_once(
@@ -11527,12 +11579,10 @@ async fn drive_once(
     runtime_spec: &CertifiedRuntimeSpec,
     run_id: &RunId,
 ) -> Result<SchedulerStatus> {
-    let async_store = store::AsyncInMemoryTypedRunStore::from_store(std::mem::take(store));
-    let result = scheduler
+    let async_store = BorrowedAsyncTypedRunStore::new(store);
+    scheduler
         .drive_once(&async_store, runtime_spec, run_id)
-        .await;
-    restore_in_memory_store(store, &async_store)?;
-    result
+        .await
 }
 
 async fn drive_until_blocked(
@@ -11541,12 +11591,10 @@ async fn drive_until_blocked(
     runtime_spec: &CertifiedRuntimeSpec,
     run_id: &RunId,
 ) -> Result<SchedulerStatus> {
-    let async_store = store::AsyncInMemoryTypedRunStore::from_store(std::mem::take(store));
-    let result = scheduler
+    let async_store = BorrowedAsyncTypedRunStore::new(store);
+    scheduler
         .drive_until_blocked(&async_store, runtime_spec, run_id)
-        .await;
-    restore_in_memory_store(store, &async_store)?;
-    result
+        .await
 }
 
 async fn record_manual_resolution(
@@ -11556,20 +11604,10 @@ async fn record_manual_resolution(
     run_id: &RunId,
     request: ManualResolutionRequest,
 ) -> Result<store::CommitOutcome> {
-    let async_store = store::AsyncInMemoryTypedRunStore::from_store(std::mem::take(store));
-    let result = scheduler
+    let async_store = BorrowedAsyncTypedRunStore::new(store);
+    scheduler
         .record_manual_resolution(&async_store, runtime_spec, run_id, request)
-        .await;
-    restore_in_memory_store(store, &async_store)?;
-    result
-}
-
-fn restore_in_memory_store(
-    store: &mut store::InMemoryTypedRunStore,
-    async_store: &store::AsyncInMemoryTypedRunStore,
-) -> Result<()> {
-    *store = async_store.with_inner(Clone::clone)?;
-    Ok(())
+        .await
 }
 
 fn build_manual_resolution_prefix_authority_for_tests(

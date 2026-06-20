@@ -5187,28 +5187,6 @@ pub mod v1 {
             Self::default()
         }
 
-        /// Wraps an existing in-memory typed run store.
-        pub fn from_store(store: InMemoryTypedRunStore) -> Self {
-            Self {
-                inner: Arc::new(Mutex::new(store)),
-            }
-        }
-
-        /// Reads the inner synchronous store while holding its local mutex.
-        pub fn with_inner<R>(&self, read: impl FnOnce(&InMemoryTypedRunStore) -> R) -> Result<R> {
-            let inner = self.lock_inner()?;
-            Ok(read(&inner))
-        }
-
-        /// Mutates the inner synchronous store while holding its local mutex.
-        pub fn with_inner_mut<R>(
-            &self,
-            write: impl FnOnce(&mut InMemoryTypedRunStore) -> R,
-        ) -> Result<R> {
-            let mut inner = self.lock_inner()?;
-            Ok(write(&mut inner))
-        }
-
         fn lock_inner(&self) -> Result<MutexGuard<'_, InMemoryTypedRunStore>> {
             self.inner.lock().map_err(|_| {
                 StoreError::Event("async in-memory typed run store lock poisoned".to_owned())
@@ -5224,8 +5202,8 @@ pub mod v1 {
             plan: PreparedCommitPlan,
         ) -> AsyncStoreFuture<'a, CommitOutcome, Self::Error> {
             let result = self
-                .with_inner_mut(|store| store.append_prepared_commit_plan(plan))
-                .and_then(|result| result);
+                .lock_inner()
+                .and_then(|mut store| store.append_prepared_commit_plan(plan));
             Box::pin(std::future::ready(result))
         }
 
@@ -5233,7 +5211,7 @@ pub mod v1 {
             &'a self,
             run_id: &'a RunId,
         ) -> AsyncStoreFuture<'a, Vec<KernelEventEnvelope>, Self::Error> {
-            let result = self.with_inner(|store| store.load_run_stream(run_id));
+            let result = self.lock_inner().map(|store| store.load_run_stream(run_id));
             Box::pin(std::future::ready(result))
         }
 
@@ -5241,7 +5219,9 @@ pub mod v1 {
             &'a self,
             run_id: &'a RunId,
         ) -> AsyncStoreFuture<'a, StreamSeq, Self::Error> {
-            let result = self.with_inner(|store| store.expected_next_seq(run_id));
+            let result = self
+                .lock_inner()
+                .map(|store| store.expected_next_seq(run_id));
             Box::pin(std::future::ready(result))
         }
 
@@ -5250,7 +5230,8 @@ pub mod v1 {
             run_id: &'a RunId,
         ) -> AsyncStoreFuture<'a, ProjectionSnapshot, Self::Error> {
             let result = self
-                .with_inner(|store| {
+                .lock_inner()
+                .map(|store| {
                     let stream = store.load_run_stream(run_id);
                     let run_projection = ProjectionSnapshot::rebuild_from_run_stream(&stream)?;
                     projection_with_resource_lanes(
