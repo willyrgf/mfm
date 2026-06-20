@@ -43,7 +43,6 @@ members = [
 	"crates/states/portfolio",
 	"crates/storages/artifact-store-fs",
 	"crates/storages/stream-store-postgres",
-	"crates/transports/process-exec",
 	"crates/transports/evm",
 	"crates/transports/proof",
 	"crates/ops/evm-contract-lifecycle-op",
