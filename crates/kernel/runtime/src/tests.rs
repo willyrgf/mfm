@@ -21,7 +21,6 @@ use mfm_program::{
     StateKey, StateRegistryBuilder, StateResult, StateSpec,
 };
 use mfm_program_derive::{MfmConfig, MfmValue, PublicOutputs};
-use mfm_store::v1::{TypedProjectionRead, TypedRunEventStore};
 use serde::{Deserialize, Serialize};
 
 const D0: DigestBytes = DigestBytes::from_array([0x10; 32]);

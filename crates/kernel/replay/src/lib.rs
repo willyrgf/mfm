@@ -2563,7 +2563,7 @@ pub mod v1 {
             build_committed_batch, CommitArtifactEvidenceSet, CommitKey, CommitPreconditions,
             InMemoryTypedRunStore, PreparedCommit, PreparedCommitPlan, RequiredRunState, Retention,
             RunAdmission, SideEffectProgress, SideEffectTerminal, StateAttemptStarted, StreamSeq,
-            TypedCommitRequest, TypedRunEventStore,
+            TypedCommitRequest,
         };
 
         const SPEC_MEDIA_TYPE: &str = "application/vnd.mfm.typed-execution-spec+json;version=1";

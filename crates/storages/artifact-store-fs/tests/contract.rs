@@ -13,7 +13,7 @@ use mfm_spec::v1::{CanonicalizerIdentity, MediaType, SagaPolicySpec};
 use mfm_store::v1::{
     ArtifactEvidenceRef, CommitArtifactEvidenceSet, CommitKey, CommitPreconditions,
     InMemoryTypedRunStore, PreparedCommit, RequiredRunState, Retention, RunAdmission, StreamSeq,
-    TypedCommitRequest, TypedRunEventStore, VerifiedRetentionProjectionSet,
+    TypedCommitRequest, VerifiedRetentionProjectionSet,
 };
 use std::path::{Path, PathBuf};
 

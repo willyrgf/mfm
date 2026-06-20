@@ -4594,33 +4594,11 @@ pub mod v1 {
         Ok(())
     }
 
-    /// Read-only access to store-owned projections.
-    pub trait TypedProjectionRead {
-        /// Returns the current projection snapshot.
-        fn projection_snapshot(&self) -> &ProjectionSnapshot;
-    }
-
-    /// Typed run event store commit contract.
-    pub trait TypedRunEventStore: TypedProjectionRead {
-        /// Atomically appends one purpose-specific prepared commit plan.
-        fn append_prepared_commit_plan(
-            &mut self,
-            plan: PreparedCommitPlan,
-        ) -> Result<CommitOutcome>;
-
-        /// Loads the authoritative run stream.
-        fn load_run_stream(&self, run_id: &RunId) -> Vec<KernelEventEnvelope>;
-
-        /// Returns the next store-owned stream sequence for a run.
-        fn expected_next_seq(&self, run_id: &RunId) -> StreamSeq;
-    }
-
     /// Async typed run event store commit contract for durable stores.
     ///
-    /// This is the same certified commit surface as [`TypedRunEventStore`]. Runtime execution code
-    /// must derive run-local read views from the authoritative stream returned by
-    /// [`Self::load_run_stream`]. App status rendering may additionally request store-owned
-    /// cross-run projection authority through [`Self::status_projection_snapshot`].
+    /// Runtime execution code must derive run-local read views from the authoritative stream
+    /// returned by [`Self::load_run_stream`]. App status rendering may additionally request
+    /// store-owned cross-run projection authority through [`Self::status_projection_snapshot`].
     pub trait AsyncTypedRunEventStore {
         /// Store-specific error type.
         type Error: StoreErrorInspection + fmt::Display + Send + Sync + 'static;
@@ -5121,14 +5099,14 @@ pub mod v1 {
         })
     }
 
-    impl TypedProjectionRead for InMemoryTypedRunStore {
-        fn projection_snapshot(&self) -> &ProjectionSnapshot {
+    impl InMemoryTypedRunStore {
+        /// Returns the current in-memory projection snapshot.
+        pub fn projection_snapshot(&self) -> &ProjectionSnapshot {
             &self.projections
         }
-    }
 
-    impl TypedRunEventStore for InMemoryTypedRunStore {
-        fn append_prepared_commit_plan(
+        /// Atomically appends one purpose-specific prepared commit plan.
+        pub fn append_prepared_commit_plan(
             &mut self,
             plan: PreparedCommitPlan,
         ) -> Result<CommitOutcome> {
@@ -5177,11 +5155,13 @@ pub mod v1 {
             Ok(CommitOutcome::Appended(batch))
         }
 
-        fn load_run_stream(&self, run_id: &RunId) -> Vec<KernelEventEnvelope> {
+        /// Loads the authoritative run stream.
+        pub fn load_run_stream(&self, run_id: &RunId) -> Vec<KernelEventEnvelope> {
             self.stream_events(run_id)
         }
 
-        fn expected_next_seq(&self, run_id: &RunId) -> StreamSeq {
+        /// Returns the next store-owned stream sequence for a run.
+        pub fn expected_next_seq(&self, run_id: &RunId) -> StreamSeq {
             let Some(batches) = self.streams.get(run_id) else {
                 return StreamSeq::FIRST;
             };

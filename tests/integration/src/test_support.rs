@@ -40,7 +40,6 @@ use mfm_runtime::{
 };
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
-use mfm_store::v1::{TypedProjectionRead, TypedRunEventStore};
 use serde::{Deserialize, Serialize};
 
 /// In-memory REST app state used by integration tests.

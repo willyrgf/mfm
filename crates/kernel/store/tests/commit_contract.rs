@@ -33,8 +33,7 @@ use mfm_store::v1::{
     SagaAdmitToken, SagaEngagementProjection, SagaEngagementReason, SagaTerminal,
     SagaTerminalProof, SideEffectLedgerPhase, SideEffectPhase, SideEffectProgress,
     SideEffectTerminal, StateAttemptStarted, StoreError, StreamSeq, TypedCommitRequest,
-    TypedProjectionRead, TypedRunEventStore, VerifiedRetentionProjection,
-    VerifiedRetentionProjectionSet,
+    VerifiedRetentionProjection, VerifiedRetentionProjectionSet,
 };
 
 const SPEC_MEDIA_TYPE: &str = "application/vnd.mfm.typed-execution-spec+json;version=1";

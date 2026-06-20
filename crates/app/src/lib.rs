@@ -3032,7 +3032,7 @@ mod tests {
         ErasedRunCtx, ErasedRunnerBinding, ErasedRunnerFuture, ErasedRunnerOutput,
         RunnerEventPayload, StagedArtifact, StagedRetentionRefs,
     };
-    use mfm_store::v1::{AsyncTypedRunEventStore, TypedProjectionRead, TypedRunEventStore};
+    use mfm_store::v1::AsyncTypedRunEventStore;
     use mfm_values::MfmValue as _;
     use serde::{Deserialize, Serialize};
     use std::collections::{BTreeMap, BTreeSet};
