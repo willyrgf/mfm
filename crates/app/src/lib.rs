@@ -53,7 +53,8 @@ mod evm_contracts;
 pub use entry_point::{
     AuthoredConfig, CanonicalConfigMaterial, CanonicalSeedMaterial, CanonicalizerIdentity,
     ConfigFormat, EntryPointOpId, EntryPointOpPlan, EntryPointOpRegistry, EntryPointOpResolveError,
-    LaunchableOp, LoweringIdentity, OpLaunchError, OpVersion, PublicOpName,
+    LaunchableOp, LoweringIdentity, NormalizedAuthoredConfig, OpLaunchError, OpVersion,
+    PublicOpName, DEFAULT_AUTHORED_CONFIG_FORMAT, DEFAULT_AUTHORED_CONFIG_MAX_BYTES,
 };
 
 /// Shared observability configuration used by typed binaries.
