@@ -12,14 +12,21 @@ use mfm_op_proof::{
 };
 use mfm_replay::v1 as replay;
 use mfm_runtime::{
-    CertifiedRuntimeSpec, RunLaunchArtifact, RunLaunchEvidence, RuntimeArtifactStageFuture,
-    RuntimeArtifactStager, RuntimeArtifactStore, SchedulerStatus, SerialTypedScheduler,
+    CertifiedRuntimeSpec, ErasedRunnerRegistry, RunLaunchArtifact, RunLaunchEvidence,
+    RuntimeArtifactStageFuture, RuntimeArtifactStager, RuntimeArtifactStore, SchedulerStatus,
+    SerialTypedScheduler,
 };
 use mfm_store::v1::{self as store, AsyncTypedRunEventStore};
 use serde::Serialize;
 
 type ProofArtifactRecord = (Vec<u8>, store::ArtifactEvidenceRef);
 type ProofArtifactMap = BTreeMap<ArtifactId, ProofArtifactRecord>;
+
+fn deterministic_proof_runner_registry() -> mfm_runtime::Result<ErasedRunnerRegistry> {
+    let mut registry = ErasedRunnerRegistry::new();
+    mfm_transports_proof::register_deterministic_proof_runners(&mut registry)?;
+    Ok(registry)
+}
 
 fn typed_commit_request(
     run_id: RunId,
@@ -196,7 +203,7 @@ async fn conformance_start_rejects_draft_not_bound_to_certified_spec() {
     let artifacts = InMemoryProofArtifacts::default();
     let artifact_stager: Arc<dyn RuntimeArtifactStore> = Arc::new(artifacts);
     let scheduler = SerialTypedScheduler::new(
-        mfm_transports_proof::deterministic_proof_runner_registry().expect("runner registry"),
+        deterministic_proof_runner_registry().expect("runner registry"),
         artifact_stager,
     );
     let store = store::AsyncInMemoryTypedRunStore::new();
@@ -295,8 +302,7 @@ async fn proof_implementation_conformance_summary(
     let store = store::AsyncInMemoryTypedRunStore::new();
     let artifact_stager: Arc<dyn RuntimeArtifactStore> = Arc::new(artifacts.clone());
     let scheduler = SerialTypedScheduler::new(
-        mfm_transports_proof::deterministic_proof_runner_registry()
-            .map_err(|error| error.to_string())?,
+        deterministic_proof_runner_registry().map_err(|error| error.to_string())?,
         artifact_stager,
     );
     let run_id = RunId::from_digest(
@@ -734,7 +740,7 @@ async fn conformance_stream() -> (
     let store = store::AsyncInMemoryTypedRunStore::new();
     let artifact_stager: Arc<dyn RuntimeArtifactStore> = Arc::new(artifacts.clone());
     let scheduler = SerialTypedScheduler::new(
-        mfm_transports_proof::deterministic_proof_runner_registry().expect("runner registry"),
+        deterministic_proof_runner_registry().expect("runner registry"),
         artifact_stager,
     );
     let run_id = RunId::from_digest(

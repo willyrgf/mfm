@@ -73,13 +73,6 @@ pub fn register_deterministic_proof_runners(
     Ok(())
 }
 
-/// Builds a runner registry containing only the deterministic proof implementation.
-pub fn deterministic_proof_runner_registry() -> mfm_runtime::Result<ErasedRunnerRegistry> {
-    let mut registry = ErasedRunnerRegistry::new();
-    register_deterministic_proof_runners(&mut registry)?;
-    Ok(registry)
-}
-
 struct RegisteredRuntimeDescriptor {
     descriptor_id: DescriptorId,
     capabilities: CapabilitySetDescriptor,
