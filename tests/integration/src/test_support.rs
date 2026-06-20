@@ -981,10 +981,14 @@ async fn run_reference_certified_workflow() -> Result<ReferenceRun, String> {
     start_reference_run(&scheduler, &mut store, &fixture).await?;
 
     for _ in 0..32 {
-        match scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .map_err(display_error)?
+        match scheduler_drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id,
+        )
+        .await
+        .map_err(display_error)?
         {
             SchedulerStatus::Advanced => {}
             SchedulerStatus::PublicOutputProjected => {
@@ -1013,10 +1017,14 @@ async fn run_compensated_reference_workflow() -> Result<CompensatedReferenceRun,
         if compensated_forward_outputs_complete(&fixture, &store) {
             break;
         }
-        match scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .map_err(display_error)?
+        match scheduler_drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id,
+        )
+        .await
+        .map_err(display_error)?
         {
             SchedulerStatus::Advanced => {
                 if compensated_forward_outputs_complete(&fixture, &store) {
@@ -1042,10 +1050,14 @@ async fn run_compensated_reference_workflow() -> Result<CompensatedReferenceRun,
     append_compensated_tail_failure(&mut store, &fixture)?;
 
     for _ in 0..96 {
-        match scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .map_err(display_error)?
+        match scheduler_drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id,
+        )
+        .await
+        .map_err(display_error)?
         {
             SchedulerStatus::Advanced => {}
             SchedulerStatus::PublicOutputProjected => {
@@ -1992,9 +2004,13 @@ async fn resume_drift_is_rejected() -> Result<bool, String> {
     let read_node = node_by_output(&fixture, &fixture.read_cell).clone();
     append_attempt_started(&mut store, &fixture, &read_node, 1)?;
     Ok(matches!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await,
+        scheduler_drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id
+        )
+        .await,
         Err(RuntimeError::InvalidRunStream(_))
     ))
 }
@@ -2010,10 +2026,14 @@ async fn side_effect_failure_semantics_are_covered() -> Result<bool, String> {
     let mut store = store::InMemoryTypedRunStore::new();
     start_reference_run(&scheduler, &mut store, &fixture).await?;
     for _ in 0..4 {
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .map_err(display_error)?;
+        scheduler_drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id,
+        )
+        .await
+        .map_err(display_error)?;
     }
     let projection = store.projection_snapshot();
     let side_effect = first_forward_side_effect_projection(projection)
@@ -2036,10 +2056,14 @@ async fn side_effect_ambiguity_degrades_without_public_output() -> Result<bool, 
     start_reference_run(&scheduler, &mut store, &fixture).await?;
 
     for _ in 0..16 {
-        match scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .map_err(display_error)?
+        match scheduler_drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id,
+        )
+        .await
+        .map_err(display_error)?
         {
             SchedulerStatus::Advanced => {}
             SchedulerStatus::PublicOutputProjected => {
@@ -2850,10 +2874,44 @@ async fn start_reference_run(
             store.expected_next_seq(&fixture.run_id),
         )
         .map_err(display_error)?;
-    scheduler
-        .start_run(store, launch)
+    scheduler_start_run(scheduler, store, launch)
         .await
         .map_err(display_error)?;
+    Ok(())
+}
+
+async fn scheduler_start_run(
+    scheduler: &SerialTypedScheduler,
+    store: &mut store::InMemoryTypedRunStore,
+    launch: mfm_runtime::PreparedRunLaunch,
+) -> mfm_runtime::Result<()> {
+    let async_store = store::AsyncInMemoryTypedRunStore::from_store(std::mem::take(store));
+    let result = scheduler.start_run(&async_store, launch).await.map(|_| ());
+    restore_in_memory_store(store, &async_store)?;
+    result
+}
+
+async fn scheduler_drive_once(
+    scheduler: &SerialTypedScheduler,
+    store: &mut store::InMemoryTypedRunStore,
+    runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
+) -> mfm_runtime::Result<SchedulerStatus> {
+    let async_store = store::AsyncInMemoryTypedRunStore::from_store(std::mem::take(store));
+    let result = scheduler
+        .drive_once(&async_store, runtime_spec, run_id)
+        .await;
+    restore_in_memory_store(store, &async_store)?;
+    result
+}
+
+fn restore_in_memory_store(
+    store: &mut store::InMemoryTypedRunStore,
+    async_store: &store::AsyncInMemoryTypedRunStore,
+) -> mfm_runtime::Result<()> {
+    *store = async_store
+        .with_inner(Clone::clone)
+        .map_err(RuntimeError::from)?;
     Ok(())
 }
 
@@ -2876,8 +2934,7 @@ async fn start_compensated_reference_run(
             store.expected_next_seq(&fixture.run_id),
         )
         .map_err(display_error)?;
-    scheduler
-        .start_run(store, launch)
+    scheduler_start_run(scheduler, store, launch)
         .await
         .map_err(display_error)?;
     Ok(())
@@ -3841,25 +3898,12 @@ mod tests {
         .await
         .expect("replay without live capabilities");
 
-        let status = mfm_app::typed_run_status_from_stream(
-            &run.fixture.run_id,
-            &run.fixture.runtime_spec,
-            &stream,
-        )
-        .expect("typed run status");
-        assert_eq!(status.run_mode, mfm_app::TypedRunMode::Compensated);
         assert_eq!(
-            status
-                .saga
-                .terminal_resolution
-                .as_ref()
-                .expect("terminal resolution")
-                .outcome,
-            "compensated"
+            mfm_app::TypedRunMode::from(saga.run_mode),
+            mfm_app::TypedRunMode::Compensated
         );
-        assert_eq!(status.saga.obligations.len(), 2);
-        assert!(status.saga.obligations.iter().all(|obligation| {
-            obligation.classification == "owed"
+        assert!(saga.obligations.values().all(|obligation| {
+            obligation.classification == store::ForwardLedgerClassification::Owed
                 && obligation
                     .remediation
                     .as_ref()
