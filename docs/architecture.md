@@ -33,6 +33,9 @@ typed or authored input
 The certified typed execution spec is the runtime contract. Runner plans, route names, command
 names, source scans, CI summary keys, rendered JSON, and projection rows are not semantic authority.
 
+For the proposed consolidation of public run-start ingress around registered entry-point
+operations, see `docs/RFC_ENTRYPOINT_OP.md`.
+
 ## Authority Contract
 
 The typed boundary separates data, evidence, authority, and implementation artifacts:

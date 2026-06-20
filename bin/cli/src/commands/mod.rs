@@ -12,14 +12,34 @@ pub(crate) mod result;
 /// Run lifecycle and artifact commands.
 mod run;
 
+pub(crate) const OUTPUT_FORMAT_ENV: &str = "MFM_OUTPUT_FORMAT";
+const DEFAULT_OUTPUT_FORMAT: OutputFormat = OutputFormat::Text;
+
 /// Output encodings supported by the CLI library.
-#[derive(Debug, Clone, ValueEnum, Default)]
+#[derive(Debug, Clone, Copy, ValueEnum, Default)]
 pub(crate) enum OutputFormat {
     /// Human-readable text output (default)
     #[default]
     Text,
     /// Machine-readable JSON output
     Json,
+}
+
+impl OutputFormat {
+    pub(crate) fn is_json(self) -> bool {
+        matches!(self, Self::Json)
+    }
+
+    fn from_cli_value(value: &str) -> Option<Self> {
+        <Self as ValueEnum>::from_str(value, true).ok()
+    }
+
+    fn from_env_value(value: Option<&OsStr>) -> Self {
+        value
+            .and_then(OsStr::to_str)
+            .and_then(Self::from_cli_value)
+            .unwrap_or(DEFAULT_OUTPUT_FORMAT)
+    }
 }
 
 /// Detects the caller's requested output format when clap parsing itself failed.
@@ -31,10 +51,7 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let env_requests_json = env_output_format
-        .and_then(OsStr::to_str)
-        .map(|value| value.eq_ignore_ascii_case("json"))
-        .unwrap_or(false);
+    let fallback_format = OutputFormat::from_env_value(env_output_format);
     let mut iter = args.into_iter();
 
     while let Some(arg) = iter.next() {
@@ -46,45 +63,22 @@ where
         }
 
         if let Some(value) = arg.strip_prefix("--output-format=") {
-            return output_format_from_parse_value(value).unwrap_or({
-                if env_requests_json {
-                    OutputFormat::Json
-                } else {
-                    OutputFormat::Text
-                }
-            });
+            return OutputFormat::from_cli_value(value).unwrap_or(fallback_format);
         }
 
         if arg == "--output-format" {
-            let value = iter.next().and_then(|next| {
-                next.as_ref()
-                    .to_str()
-                    .map(output_format_from_parse_value)
-                    .unwrap_or(None)
-            });
-            return value.unwrap_or({
-                if env_requests_json {
-                    OutputFormat::Json
-                } else {
-                    OutputFormat::Text
-                }
-            });
+            return iter
+                .next()
+                .and_then(|next| {
+                    next.as_ref()
+                        .to_str()
+                        .and_then(OutputFormat::from_cli_value)
+                })
+                .unwrap_or(fallback_format);
         }
     }
 
-    if env_requests_json {
-        OutputFormat::Json
-    } else {
-        OutputFormat::Text
-    }
-}
-
-fn output_format_from_parse_value(value: &str) -> Option<OutputFormat> {
-    match value {
-        value if value.eq_ignore_ascii_case("json") => Some(OutputFormat::Json),
-        value if value.eq_ignore_ascii_case("text") => Some(OutputFormat::Text),
-        _ => None,
-    }
+    fallback_format
 }
 
 /// Context passed to CLI commands containing shared output settings.
@@ -108,7 +102,7 @@ impl CommandContext {
 #[command(version)]
 pub(crate) struct Cli {
     /// Output format for command results
-    #[arg(long = "output-format", value_enum, env = "MFM_OUTPUT_FORMAT", default_value_t = OutputFormat::Text)]
+    #[arg(long = "output-format", value_enum, env = OUTPUT_FORMAT_ENV, default_value_t = DEFAULT_OUTPUT_FORMAT)]
     output_format: OutputFormat,
 
     /// Top-level command selected by the caller.
@@ -148,21 +142,13 @@ enum Commands {
 impl Cli {
     /// Dispatches the parsed command and terminates the process with the command's exit code.
     pub(crate) async fn execute(&self) -> ! {
-        let ctx = CommandContext::new(self.output_format.clone());
+        let ctx = CommandContext::new(self.output_format);
 
         match &self.command {
-            Commands::Keystore { command } => {
-                command.execute(&ctx).await;
-            }
-            Commands::Evm { command } => {
-                command.execute(&ctx).await;
-            }
-            Commands::Portfolio { command } => {
-                command.execute(&ctx).await;
-            }
-            Commands::Run { command } => {
-                command.execute(&ctx).await;
-            }
+            Commands::Keystore { command } => command.execute(&ctx).await,
+            Commands::Evm { command } => command.execute(&ctx).await,
+            Commands::Portfolio { command } => command.execute(&ctx).await,
+            Commands::Run { command } => command.execute(&ctx).await,
         }
     }
 }
