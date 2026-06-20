@@ -35,45 +35,41 @@ fn test_keystore_help() {
 }
 
 #[test]
-fn test_evm_contracts_help() {
+fn test_run_start_help_describes_entry_point_op_surface() {
     let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    let removed = ["d", "c", "v"].concat();
-    cmd.args(&["evm", "contracts", "--help"]);
+    cmd.args(["run", "start", "--help"]);
 
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains("EVM contract lifecycle workflows"))
-        .stdout(predicate::str::contains("deploy"))
-        .stdout(predicate::str::contains("configure"))
-        .stdout(predicate::str::contains("validate"))
-        .stdout(predicate::str::contains("lifecycle"))
-        .stdout(predicate::str::contains(removed).not());
+        .stdout(predicate::str::contains("--op <NAME>"))
+        .stdout(predicate::str::contains("--op-version <VERSION>"))
+        .stdout(predicate::str::contains("--config <PATH>"))
+        .stdout(predicate::str::contains("--config-format <CONFIG_FORMAT>"))
+        .stdout(predicate::str::contains("--bundle").not());
 }
 
 #[test]
-fn test_removed_legacy_evm_command_is_absent() {
-    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    let removed = ["d", "c", "v"].concat();
-    cmd.args(["evm", removed.as_str(), "--help"]);
+fn test_run_start_accepts_entry_point_op_flags_before_dispatch() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let config_path = temp_dir.path().join("portfolio.toml");
+    std::fs::write(&config_path, "portfolio_id = \"main\"\n").expect("config file");
 
-    cmd.assert()
-        .failure()
-        .stderr(predicate::str::contains("unrecognized subcommand"))
-        .stderr(predicate::str::contains(removed));
-}
-
-#[test]
-fn test_evm_contracts_json_error_envelope() {
     let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    let missing_path = "/definitely/missing/request.json";
-    cmd.args(&[
+    cmd.args([
         "--output-format",
         "json",
-        "evm",
-        "contracts",
-        "deploy",
-        "--config-file",
-        missing_path,
+        "run",
+        "start",
+        "--op",
+        "__missing_contract_test_op__",
+        "--op-version",
+        "1",
+        "--config",
+        config_path.to_str().unwrap(),
+        "--config-format",
+        "toml",
+        "--drive",
+        "append-only",
     ]);
 
     let output = cmd.output().expect("run command");
@@ -81,24 +77,25 @@ fn test_evm_contracts_json_error_envelope() {
     let stderr = String::from_utf8(output.stderr).expect("stderr utf8");
     let parsed: serde_json::Value = serde_json::from_str(&stderr).expect("stderr JSON");
     assert_eq!(parsed["status"], "error");
-    assert_eq!(parsed["error"]["code"], "InvalidEvmContractRequest");
+    assert_eq!(parsed["error"]["code"], "EntryPointOpNotFound");
 }
 
 #[test]
-fn test_evm_contracts_text_error_redacts_missing_config_path() {
-    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    cmd.args(&[
-        "evm",
-        "contracts",
-        "deploy",
-        "--config-file",
-        "/definitely/missing/request.json",
-    ]);
+fn test_removed_domain_workflow_commands_are_absent() {
+    for args in [
+        &["portfolio", "snapshot", "--help"][..],
+        &["evm", "contracts", "deploy", "--help"],
+        &["evm", "contracts", "configure", "--help"],
+        &["evm", "contracts", "validate", "--help"],
+        &["evm", "contracts", "lifecycle", "--help"],
+    ] {
+        let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+        cmd.args(args);
 
-    let output = cmd.output().expect("run command");
-    assert!(!output.status.success());
-    let stderr = String::from_utf8(output.stderr).expect("stderr utf8");
-    assert!(stderr.contains("Failed to read EVM contract request file"));
+        cmd.assert()
+            .failure()
+            .stderr(predicate::str::contains("unrecognized subcommand"));
+    }
 }
 
 #[test]

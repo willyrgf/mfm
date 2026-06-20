@@ -4,6 +4,44 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const TEST_HARNESS_PATHS: &[&str] = &["tests/integration/tests/architecture_namespace_contract.rs"];
+const ENTRYPOINT_OP_MIGRATION_DOC_PATHS: &[&str] = &[
+    "docs/RFC_ENTRYPOINT_OP.md",
+    "docs/PLAN_IMPL_RFC_ENTRYPOINT_OP.md",
+];
+
+const REMOVED_PUBLIC_EXECUTION_SURFACE_TERMS: &[&str] = &[
+    "mfm_cli portfolio snapshot",
+    "mfm portfolio snapshot",
+    "bin/cli/src/commands/portfolio",
+    "/v1/portfolio/snapshot",
+    "portfolio_snapshot_start_v1",
+    "PortfolioSnapshotStartBody",
+    "PortfolioSnapshotStartKind",
+    "mfm_cli evm contracts",
+    "mfm evm contracts",
+    "bin/cli/src/commands/evm",
+    "/v1/evm/contracts/",
+    "EvmContractDeployStartBody",
+    "EvmContractConfigureStartBody",
+    "EvmContractValidateStartBody",
+    "EvmContractLifecycleStartBody",
+    "EvmContractDeployStartKind",
+    "EvmContractConfigureStartKind",
+    "EvmContractValidateStartKind",
+    "EvmContractLifecycleStartKind",
+];
+
+const PUBLIC_BUNDLE_LAUNCH_TERMS: &[&str] = &[
+    "--bundle",
+    "certified_typed_spec_bundle_v1",
+    "CERTIFIED_SPEC_BUNDLE_KIND",
+    "CertifiedSpecBundle",
+    "CertifiedBundleInvalid",
+    "CertifiedBundleVerificationFailed",
+    "parse_certified_spec_bundle",
+    "prepare_verified_bundle_launch",
+    "UntrustedCertifiedBundleLaunchInput",
+];
 
 const FORBIDDEN_TYPED_SURFACE_FIELDS: &[&str] = &[
     "rpc_url",
@@ -43,6 +81,34 @@ fn active_public_namespace_has_no_stale_workflow_recipe_terms() {
         &forbidden_terms,
         &[],
         |_path, _source| true,
+    );
+}
+
+#[test]
+fn public_execution_ingress_has_no_removed_domain_workflow_surfaces() {
+    let root = repo_root();
+    let entries = repo_text_entries(&root);
+
+    assert_forbidden_terms_are_allowlisted(
+        "removed public execution surface",
+        &entries,
+        REMOVED_PUBLIC_EXECUTION_SURFACE_TERMS,
+        &[],
+        |path, _source| is_public_execution_surface_scan_path(path),
+    );
+}
+
+#[test]
+fn public_execution_ingress_has_no_bundle_shaped_launch_surface() {
+    let root = repo_root();
+    let entries = repo_text_entries(&root);
+
+    assert_forbidden_terms_are_allowlisted(
+        "public bundle launch surface",
+        &entries,
+        PUBLIC_BUNDLE_LAUNCH_TERMS,
+        &[],
+        |path, _source| is_public_execution_surface_scan_path(path),
     );
 }
 
@@ -487,6 +553,16 @@ fn is_typed_surface_candidate(source: &str) -> bool {
     ]
     .iter()
     .any(|marker| source.contains(marker))
+}
+
+fn is_public_execution_surface_scan_path(path: &str) -> bool {
+    !TEST_HARNESS_PATHS.contains(&path)
+        && !ENTRYPOINT_OP_MIGRATION_DOC_PATHS.contains(&path)
+        && (path.starts_with("bin/cli/")
+            || path.starts_with("bin/rest-api/")
+            || path.starts_with("crates/app/")
+            || path.starts_with("docs/")
+            || path.starts_with("tests/"))
 }
 
 fn repo_text_entries(root: &Path) -> Vec<TextEntry> {

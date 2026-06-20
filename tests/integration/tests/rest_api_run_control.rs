@@ -196,6 +196,81 @@ async fn start_rejects_dynamic_single_op_payloads() {
 }
 
 #[tokio::test]
+async fn start_accepts_entry_point_toml_shape_with_default_format() {
+    let app = test_app();
+
+    let resp = app
+        .oneshot(json_post(
+            "/v1/runs/start",
+            serde_json::json!({
+                "kind": "typed_run_start_v1",
+                "op": "__missing_contract_test_op__",
+                "config": "portfolio_id = \"main\"\n",
+                "drive": "append_only"
+            }),
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let v = response_json(resp).await;
+    assert_eq!(v["status"], "error");
+    assert_eq!(v["error"]["code"], "EntryPointOpNotFound");
+}
+
+#[tokio::test]
+async fn start_accepts_entry_point_toml_shape_with_explicit_version() {
+    let app = test_app();
+
+    let resp = app
+        .oneshot(json_post(
+            "/v1/runs/start",
+            serde_json::json!({
+                "kind": "typed_run_start_v1",
+                "op": "__missing_contract_test_op__",
+                "op_version": 1,
+                "config_format": "toml",
+                "config": "portfolio_id = \"main\"\n",
+                "drive": "append_only"
+            }),
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let v = response_json(resp).await;
+    assert_eq!(v["status"], "error");
+    assert_eq!(v["error"]["code"], "EntryPointOpNotFound");
+}
+
+#[tokio::test]
+async fn start_accepts_entry_point_json_object_config_shape() {
+    let app = test_app();
+
+    let resp = app
+        .oneshot(json_post(
+            "/v1/runs/start",
+            serde_json::json!({
+                "kind": "typed_run_start_v1",
+                "op": "__missing_contract_test_op__",
+                "config_format": "json",
+                "config": {
+                    "portfolio_id": "main",
+                    "wallets": []
+                },
+                "drive": "append_only"
+            }),
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let v = response_json(resp).await;
+    assert_eq!(v["status"], "error");
+    assert_eq!(v["error"]["code"], "EntryPointOpNotFound");
+}
+
+#[tokio::test]
 async fn start_parses_certified_bundle_and_rejects_invalid_spec() {
     let app = test_app();
 
