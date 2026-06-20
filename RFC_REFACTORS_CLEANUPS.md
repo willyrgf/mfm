@@ -20,6 +20,11 @@ change the LOC profile.
 
 Current planning status:
 
+- Cleanup status was reopened on 2026-06-20 after an implementation audit. Phase 4 shared run view
+  exists, but app launch/resume/manual-resolution responses still have read paths that bypass the
+  verified context. Phase 5 sync/async collapse is incomplete while runtime/app/tests can still
+  execute over `TypedRunEventStore`. Phase 8 is only the initial `FactRecorded` declaration-backed
+  descriptor slice; broader descriptor and store-codec generation remains deferred.
 - The FSM scheduler lifecycle refactor has landed. Its detailed historical RFC and validation
   artifacts were removed by commit `c8c742510ab2070cdaea688264a293aaf2a7309f` after closeout.
   Current authority for that work lives in `docs/design.md`, `docs/architecture.md`, and
@@ -1594,15 +1599,20 @@ output rendering, retained artifacts, replay evidence, CLI/REST output, or side-
 
 ### Phase 4: Shared Run View And App Read Paths
 
-1. Promote the private runtime run view into a sealed `VerifiedRunHistoryView` inside
-   `mfm-runtime`.
-2. Mint the view only from `CertifiedRuntimeSpec`, `CommittedRunStream`, and
-   `VerifiedRunArtifactStore`; keep `CommittedRunStream` store-owned.
-3. Route runtime history, replay broker construction, app status/output paths, and stream range
+Status: incomplete tightening pass. `VerifiedRunHistoryView` exists, but every public read response
+must be routed through it before Phase 4 can be closed.
+
+1. Keep `VerifiedRunHistoryView` sealed inside `mfm-runtime` and minted only from
+   `CertifiedRuntimeSpec`, `CommittedRunStream`, and `VerifiedRunArtifactStore`; keep
+   `CommittedRunStream` store-owned.
+2. Route runtime history, replay broker construction, app status/output paths, and stream range
    filtering through purpose-specific wrappers over the shared view.
-4. Merge duplicated app read paths and sync/async service read behavior around the same verified
+3. Route launch, resume, and manual-resolution response rendering through the verified read
+   context instead of raw stream/projection helpers.
+4. Delete raw public status helpers that accept event slices directly.
+5. Merge duplicated app read paths and service read behavior around the same verified
    context.
-5. Keep replay evidence-only, keep public output render-only, and add compile-fail tests preventing
+6. Keep replay evidence-only, keep public output render-only, and add compile-fail tests preventing
    raw `VerifiedRunHistoryView` construction.
 
 Expected result: fewer duplicated correctness checks, less runtime/replay/app divergence, and one
@@ -1610,13 +1620,20 @@ validated path before presentation filtering.
 
 ### Phase 5: Full Sync/Async Driver And Service Collapse
 
-1. Make async execution and app services primary once shared run view/status authority exists.
-2. Add sync/async parity tests for emitted events, staged artifact refs, projections, replay results,
-   public status, and public JSON.
-3. Collapse duplicated runtime driver IO choreography where an async-primary core can preserve
+Status: incomplete. This phase is not complete while scheduler/app/runtime execution can still drive
+over `TypedRunEventStore`, including `#[cfg(test)]` facades.
+
+1. Make async execution and app services the only ordinary execution path once shared
+   run-view/status authority exists.
+2. Delete the app sync facade instead of retaining it for tests.
+3. Migrate runtime, app, and integration fixtures to `AsyncInMemoryTypedRunStore` or explicit async
+   test stores.
+4. Collapse duplicated runtime driver IO choreography where an async-primary core can preserve
    lifecycle semantics.
-4. Move CLI and REST paths through the unified service without leaking HTTP concerns into CLI JSON.
-5. Retain sync compatibility only as a thin wrapper or narrowly justified store adapter boundary.
+5. Delete public scheduler execution APIs that accept `TypedRunEventStore`.
+6. Move CLI and REST paths through the unified service without leaking HTTP concerns into CLI JSON.
+7. Retain synchronous store code only as low-level commit-contract/test machinery if no runtime,
+   app, CLI, REST, or integration execution path can call through it.
 
 Expected result: one ordinary execution/service path for future runner-kit and side-effect-driver
 work, without changing lifecycle semantics.
@@ -1648,6 +1665,9 @@ Expected result: large reuse for future mutation workflows and a smaller trusted
 side-effect protocol correctness.
 
 ### Phase 8: Kernel Protocol Generation And Declarations
+
+Status: only Phase 8A has landed. `FactRecorded` has a declaration-backed descriptor, but the
+remaining descriptors and store codec/projection match arms are still handwritten.
 
 1. Prototype the declarative kernel contract source in check-only mode for one small event family.
 2. Generate or derive schema descriptors, enum tag tables, artifact requirements, and store payload
