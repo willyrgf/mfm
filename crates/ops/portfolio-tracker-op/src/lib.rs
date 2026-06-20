@@ -23,6 +23,7 @@ use mfm_certify::{certify_program_draft, CertifiedTypedSpec};
 use mfm_ids::{
     ArtifactId, ContentDigest, DigestAlgorithm, OperationKind, OperationVersion, SchemaId,
 };
+use mfm_portfolio_config::PortfolioSnapshotCanonicalConfig;
 use mfm_portfolio_model::domain_key::{
     ObservationBatchDomainKey, ReportDomainKey, SourceDomainKey, SubjectDomainKey,
     ValuationDomainKey, ViewDomainKey,
@@ -307,6 +308,32 @@ pub fn certified_portfolio_spec(
     let draft = portfolio_program_draft(config)
         .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?;
     certify_program_draft(&draft)
+}
+
+/// Deterministic portfolio snapshot entry-point plan before certification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedPortfolioSnapshotProgram {
+    /// Typed program draft to be certified by app assembly.
+    pub draft: mfm_program::TypedProgramDraft,
+    /// Public output schema id exposed by the draft.
+    pub public_schema_id: SchemaId,
+    /// Author-emitted config artifacts required by the draft.
+    pub config_artifacts: Vec<PortfolioConfigArtifact>,
+}
+
+/// Plans a portfolio snapshot entry-point program from canonical non-secret config.
+pub fn plan_portfolio_snapshot_program(
+    canonical: PortfolioSnapshotCanonicalConfig,
+) -> Result<PlannedPortfolioSnapshotProgram, PortfolioSnapshotCompileError> {
+    let workflow_config: PortfolioWorkflowConfig = canonical.into();
+    let draft = portfolio_program_draft(workflow_config)?;
+    let public_schema_id = draft.public_output_spec().public_schema_id().clone();
+    let config_artifacts = portfolio_draft_config_artifacts(&draft)?;
+    Ok(PlannedPortfolioSnapshotProgram {
+        draft,
+        public_schema_id,
+        config_artifacts,
+    })
 }
 
 /// Fully compiled portfolio snapshot launch program.
@@ -648,6 +675,28 @@ mod tests {
             .expect("workflow config");
         let err = portfolio_program_draft(config).expect_err("duplicate domain key");
         assert!(matches!(err, mfm_program::PlanError::DuplicateDomainKey(_)));
+    }
+
+    #[test]
+    fn portfolio_snapshot_entry_point_plan_is_draft_only() {
+        let canonical = mfm_portfolio_config::PortfolioSnapshotCanonicalConfig {
+            portfolio: sample_portfolio_config(),
+            valuation_source_registry: sample_valuation_source_registry(),
+        }
+        .normalized();
+
+        let planned = plan_portfolio_snapshot_program(canonical).expect("entry-point plan");
+
+        assert!(!planned.draft.state_nodes().is_empty());
+        assert_eq!(
+            planned.public_schema_id,
+            planned
+                .draft
+                .public_output_spec()
+                .public_schema_id()
+                .clone()
+        );
+        assert!(!planned.config_artifacts.is_empty());
     }
 
     fn sample_workflow_config() -> PortfolioWorkflowConfig {

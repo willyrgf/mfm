@@ -365,6 +365,10 @@ pub struct EntryPointOpPlan {
     pub lowering_identity: LoweringIdentity,
     /// Config canonicalizer identity that produced config material.
     pub canonicalizer_identity: CanonicalizerIdentity,
+    /// Digest of the original authored config bytes.
+    pub authored_config_digest: ContentDigest,
+    /// Digest of the canonical op config bytes.
+    pub canonical_config_digest: ContentDigest,
 }
 
 /// Operation that can plan a public entry-point run from authored config.
@@ -880,6 +884,14 @@ mod tests {
                 public_output_schema_id: None,
                 lowering_identity: LoweringIdentity::new("mfm.test.lowering.v1")?,
                 canonicalizer_identity: CanonicalizerIdentity::new("mfm.test.canonicalizer.v1")?,
+                authored_config_digest: ContentDigest::from_digest(
+                    DigestAlgorithm::Sha256JcsV1,
+                    mfm_canonical::sha256_digest_bytes(b"authored"),
+                ),
+                canonical_config_digest: ContentDigest::from_digest(
+                    DigestAlgorithm::Sha256JcsV1,
+                    mfm_canonical::sha256_digest_bytes(b"canonical"),
+                ),
             })
         }
     }

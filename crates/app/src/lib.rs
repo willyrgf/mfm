@@ -48,6 +48,7 @@ use serde_json::{Map, Value};
 pub use mfm_runtime::ErasedRunnerRegistry;
 
 mod entry_point;
+mod entry_points;
 mod evm_contracts;
 
 pub use entry_point::{
@@ -255,6 +256,26 @@ impl From<mfm_certify::CertifyError> for AppError {
     }
 }
 
+impl From<EntryPointOpResolveError> for AppError {
+    fn from(error: EntryPointOpResolveError) -> Self {
+        Self::new(
+            ErrorClass::BadRequest,
+            error.code().to_owned(),
+            error.message().to_owned(),
+        )
+    }
+}
+
+impl From<OpLaunchError> for AppError {
+    fn from(error: OpLaunchError) -> Self {
+        Self::new(
+            ErrorClass::BadRequest,
+            error.code().to_owned(),
+            error.message().to_owned(),
+        )
+    }
+}
+
 /// Returns the default typed artifact root from `MFM_TYPED_ARTIFACT_ROOT` or
 /// `$HOME/.mfm/typed_run_artifacts`.
 #[allow(clippy::disallowed_methods)]
@@ -347,6 +368,11 @@ pub fn production_certification_registry() -> Result<CertificationRegistry, AppE
     mfm_op_portfolio_tracker::register_portfolio_certification_descriptors(&mut registry)?;
     mfm_op_proof::register_proof_certification_descriptors(&mut registry)?;
     Ok(registry)
+}
+
+/// Builds the production entry-point operation registry for this process.
+pub fn production_entry_point_op_registry() -> Result<EntryPointOpRegistry, AppError> {
+    entry_points::production_entry_point_op_registry()
 }
 
 #[derive(Clone)]
