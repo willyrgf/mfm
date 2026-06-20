@@ -18,13 +18,14 @@
 //! # }
 //! ```
 
+use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_certify::{certify_program_draft, CertifiedTypedSpec};
 use mfm_evm_contract_config::{
     ConfigurePhaseConfig, DeployPhaseConfig, EvmNetworkIntent, ValidatePhaseConfig,
 };
 use mfm_evm_contract_model::{ConfiguredContract, DeployedContract, ValidationReport};
 use mfm_ids::{
-    ArtifactId, ContentDigest, DigestAlgorithm, OperationKind, OperationVersion, SchemaId,
+    ArtifactId, ContentDigest, DigestAlgorithm, OperationKind, OperationVersion, SchemaId, SeedId,
 };
 use mfm_program::{
     build_root_with_registries, CanonicalSeed, Handle, Operation, OperationExpansion, OperationKey,
@@ -512,6 +513,72 @@ pub fn certified_contract_lifecycle_spec(
     certify_program_draft(&draft)
 }
 
+/// Deterministic EVM contract entry-point plan before certification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedContractLifecycleProgram {
+    /// Typed program draft to be certified by app assembly.
+    pub draft: mfm_program::TypedProgramDraft,
+    /// Public output schema id exposed by the draft.
+    pub public_schema_id: SchemaId,
+    /// Author-emitted config artifacts required by the draft.
+    pub config_artifacts: Vec<ContractLifecycleConfigArtifact>,
+    /// Canonical seed artifacts required by the draft.
+    pub seed_artifacts: Vec<ContractLifecycleSeedArtifact>,
+}
+
+/// Canonical bytes for one launch seed required by a typed lifecycle draft.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContractLifecycleSeedArtifact {
+    /// Derived seed id required by the draft.
+    pub seed_id: SeedId,
+    /// Canonical content digest.
+    pub digest: ContentDigest,
+    /// Canonical byte length.
+    pub byte_len: u64,
+    /// Canonical JSON bytes.
+    pub bytes: PlainCanonicalJsonBytes,
+    /// Seed media type.
+    pub media_type: spec::MediaType,
+}
+
+/// Plans a deploy-only EVM contract entry-point program.
+pub fn plan_contract_deploy_program(
+    config: DeployPhaseConfig,
+) -> Result<PlannedContractLifecycleProgram, ContractLifecycleCompileError> {
+    plan_draft(deploy_contract_program_draft(config)?, Vec::new())
+}
+
+/// Plans a configure-only EVM contract entry-point program with its launch seed.
+pub fn plan_contract_configure_program(
+    config: ConfigurePhaseConfig,
+    deployed: DeployedContract,
+) -> Result<PlannedContractLifecycleProgram, ContractLifecycleCompileError> {
+    let seed = CanonicalSeed::from_value(&deployed)?;
+    plan_draft(
+        configure_contract_program_draft(config, deployed)?,
+        vec![seed.canonical_json().clone()],
+    )
+}
+
+/// Plans a validate-only EVM contract entry-point program with its launch seed.
+pub fn plan_contract_validate_program(
+    config: ValidatePhaseConfig,
+    configured: ConfiguredContract,
+) -> Result<PlannedContractLifecycleProgram, ContractLifecycleCompileError> {
+    let seed = CanonicalSeed::from_value(&configured)?;
+    plan_draft(
+        validate_contract_program_draft(config, configured)?,
+        vec![seed.canonical_json().clone()],
+    )
+}
+
+/// Plans a full lifecycle EVM contract entry-point program.
+pub fn plan_contract_lifecycle_program(
+    config: ContractLifecycleConfig,
+) -> Result<PlannedContractLifecycleProgram, ContractLifecycleCompileError> {
+    plan_draft(contract_lifecycle_program_draft(config)?, Vec::new())
+}
+
 /// Fully compiled contract lifecycle launch program.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompiledContractLifecycleProgram {
@@ -677,6 +744,58 @@ fn compile_draft(
         public_schema_id,
         config_artifacts,
     })
+}
+
+fn plan_draft(
+    draft: mfm_program::TypedProgramDraft,
+    seed_bytes: Vec<PlainCanonicalJsonBytes>,
+) -> Result<PlannedContractLifecycleProgram, ContractLifecycleCompileError> {
+    let public_schema_id = draft.public_output_spec().public_schema_id().clone();
+    let config_artifacts = contract_lifecycle_draft_config_artifacts(&draft)?;
+    let seed_artifacts = seed_artifacts_for_draft(&draft, seed_bytes)?;
+    Ok(PlannedContractLifecycleProgram {
+        draft,
+        public_schema_id,
+        config_artifacts,
+        seed_artifacts,
+    })
+}
+
+fn seed_artifacts_for_draft(
+    draft: &mfm_program::TypedProgramDraft,
+    seed_bytes: Vec<PlainCanonicalJsonBytes>,
+) -> mfm_program::Result<Vec<ContractLifecycleSeedArtifact>> {
+    if draft.seeds().len() != seed_bytes.len() {
+        return Err(mfm_program::PlanError::Key(format!(
+            "entry-point seed material count mismatch: draft requires {}, supplied {}",
+            draft.seeds().len(),
+            seed_bytes.len()
+        )));
+    }
+    let media_type = spec::MediaType::new("application/json")
+        .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
+    draft
+        .seeds()
+        .iter()
+        .zip(seed_bytes)
+        .map(|(seed, bytes)| {
+            let digest = bytes.content_digest();
+            let byte_len = bytes.as_bytes().len() as u64;
+            if digest != seed.content_digest || byte_len != seed.byte_len as u64 {
+                return Err(mfm_program::PlanError::Canonical(format!(
+                    "entry-point seed material did not match draft seed {}",
+                    seed.seed_id
+                )));
+            }
+            Ok(ContractLifecycleSeedArtifact {
+                seed_id: seed.seed_id.clone(),
+                digest,
+                byte_len,
+                bytes,
+                media_type: media_type.clone(),
+            })
+        })
+        .collect()
 }
 
 fn build_program(
@@ -961,6 +1080,35 @@ mod tests {
         assert_eq!(configure.seeds().len(), 1);
         assert_eq!(validate.state_nodes().len(), 1);
         assert_eq!(validate.seeds().len(), 1);
+    }
+
+    #[test]
+    fn entry_point_plan_helpers_are_draft_only_and_preserve_seeds() {
+        let deploy = plan_contract_deploy_program(deploy_config()).expect("deploy plan");
+        let configure = plan_contract_configure_program(configure_config(), deployed_contract())
+            .expect("configure plan");
+        let validate = plan_contract_validate_program(validate_config(), configured_contract())
+            .expect("validate plan");
+        let lifecycle =
+            plan_contract_lifecycle_program(lifecycle_config()).expect("lifecycle plan");
+
+        assert_eq!(deploy.draft.state_nodes().len(), 1);
+        assert!(deploy.seed_artifacts.is_empty());
+        assert_eq!(configure.draft.state_nodes().len(), 1);
+        assert_eq!(configure.seed_artifacts.len(), 1);
+        assert_eq!(
+            configure.seed_artifacts[0].seed_id,
+            configure.draft.seeds()[0].seed_id
+        );
+        assert_eq!(validate.draft.state_nodes().len(), 1);
+        assert_eq!(validate.seed_artifacts.len(), 1);
+        assert_eq!(
+            validate.seed_artifacts[0].seed_id,
+            validate.draft.seeds()[0].seed_id
+        );
+        assert_eq!(lifecycle.draft.state_nodes().len(), 3);
+        assert!(lifecycle.seed_artifacts.is_empty());
+        assert!(!lifecycle.config_artifacts.is_empty());
     }
 
     #[test]
