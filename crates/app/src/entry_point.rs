@@ -504,6 +504,50 @@ impl EntryPointOpRegistry {
     pub fn is_empty(&self) -> bool {
         self.ops.is_empty()
     }
+
+    /// Returns the canonical digest of the registered public entry-point surface.
+    pub fn registry_digest(&self) -> Result<ContentDigest, EntryPointOpResolveError> {
+        let mut entries = Vec::new();
+        for (public_name, versions) in &self.ops {
+            for (version, op) in versions {
+                let op_id = op.op_id();
+                let mut formats = op
+                    .accepted_config_formats()
+                    .iter()
+                    .map(|format| format.as_str())
+                    .collect::<Vec<_>>();
+                formats.sort_unstable();
+                entries.push(serde_json::json!({
+                    "accepted_config_formats": formats,
+                    "op_id": {
+                        "name": op_id.name,
+                        "namespace": op_id.namespace,
+                        "version": op_id.version.get(),
+                    },
+                    "public_name": public_name.as_str(),
+                    "version": version.get(),
+                }));
+            }
+        }
+        let value = serde_json::json!({
+            "entries": entries,
+            "kind": "mfm.entry_point_op_registry.v1",
+        });
+        let json = serde_json::to_string(&value).map_err(|_| {
+            EntryPointOpResolveError::new(
+                "EntryPointOpRegistryDigestFailed",
+                "entry-point registry digest could not be serialized",
+            )
+        })?;
+        PlainCanonicalJsonBytes::from_json_str(&json)
+            .map(|canonical| canonical.content_digest())
+            .map_err(|_| {
+                EntryPointOpResolveError::new(
+                    "EntryPointOpRegistryDigestFailed",
+                    "entry-point registry digest could not be canonicalized",
+                )
+            })
+    }
 }
 
 /// Error returned while resolving or registering entry-point operations.
@@ -965,6 +1009,33 @@ mod tests {
 
         assert_eq!(missing.code(), "EntryPointOpNotFound");
         assert_eq!(missing_version.code(), "EntryPointOpVersionNotFound");
+    }
+
+    #[test]
+    fn entry_point_registry_digest_is_deterministic_and_surface_bound() {
+        let mut first = EntryPointOpRegistry::new();
+        first
+            .register(FakeOp::new("portfolio_snapshot", 1))
+            .unwrap();
+        first
+            .register(FakeOp::new("portfolio_snapshot", 2))
+            .unwrap();
+        let mut same = EntryPointOpRegistry::new();
+        same.register(FakeOp::new("portfolio_snapshot", 2)).unwrap();
+        same.register(FakeOp::new("portfolio_snapshot", 1)).unwrap();
+        let mut different = EntryPointOpRegistry::new();
+        different
+            .register(FakeOp::new("portfolio_snapshot", 1))
+            .unwrap();
+
+        assert_eq!(
+            first.registry_digest().unwrap(),
+            same.registry_digest().unwrap()
+        );
+        assert_ne!(
+            first.registry_digest().unwrap(),
+            different.registry_digest().unwrap()
+        );
     }
 
     #[test]
