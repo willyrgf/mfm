@@ -463,6 +463,64 @@ pub struct RunLaunchRequest {
     pub drive: DriveMode,
 }
 
+/// Request to prepare an entry-point op launch.
+pub struct EntryPointRunLaunchInput<'a> {
+    /// Registry containing public entry-point operation registrations.
+    pub entry_point_registry: &'a EntryPointOpRegistry,
+    /// Public operation name submitted by the caller.
+    pub public_op_name: PublicOpName,
+    /// Optional explicit public operation version.
+    pub op_version: Option<OpVersion>,
+    /// Authored operation config submitted by the caller.
+    pub authored_config: AuthoredConfig,
+    /// Trusted certification registry used to certify the planned typed spec.
+    pub certification_registry: &'a CertificationRegistry,
+    /// Store-owned run id to bind.
+    pub run_id: RunId,
+    /// Framework version evidence to bind to the run start event.
+    pub framework_version: &'a str,
+    /// Source revision evidence to bind to the run start event.
+    pub source_revision: &'a str,
+    /// Caller-supplied launch time in Unix milliseconds.
+    pub launched_at_unix_ms: u64,
+    /// Scheduler drive policy after start.
+    pub drive: DriveMode,
+}
+
+/// App-level evidence for a prepared entry-point op launch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntryPointLaunchEvidence {
+    /// Public operation name submitted by the caller.
+    pub submitted_public_op_name: PublicOpName,
+    /// Typed entry-point op id resolved from the registry.
+    pub resolved_op_id: EntryPointOpId,
+    /// Public operation version selected from the registry.
+    pub resolved_op_version: OpVersion,
+    /// Canonical digest of the entry-point registry used for resolution.
+    pub entry_point_registry_digest: ContentDigest,
+    /// Deterministic lowering identity used by the selected op.
+    pub lowering_identity: LoweringIdentity,
+    /// Config canonicalizer identity used by the selected op.
+    pub canonicalizer_identity: CanonicalizerIdentity,
+    /// Authored config format accepted by the selected op.
+    pub config_format: ConfigFormat,
+    /// Digest of the submitted authored config bytes.
+    pub authored_config_digest: ContentDigest,
+    /// Digest of the canonical op config bytes.
+    pub canonical_config_digest: ContentDigest,
+}
+
+/// Prepared entry-point op launch material accepted by app runtime services.
+#[derive(Debug, Clone)]
+pub struct PreparedEntryPointRunLaunch {
+    /// Runtime run launch request.
+    pub request: RunLaunchRequest,
+    /// Entry-point launch evidence produced by app assembly.
+    pub evidence: EntryPointLaunchEvidence,
+    /// Public output schema id exposed by the selected op, when available.
+    pub public_output_schema_id: Option<SchemaId>,
+}
+
 /// Request to append a signed manual resolution for a manually blocked typed run.
 #[derive(Debug, Clone)]
 pub struct ManualResolutionRecordRequest {
@@ -1448,6 +1506,35 @@ fn config_launch_artifacts_for_spec(
     Ok(validated)
 }
 
+fn framework_config_launch_artifacts_for_spec(
+    typed_spec: &spec::TypedExecutionSpec,
+) -> Result<Vec<RunLaunchConfigArtifact>, AppError> {
+    let mut artifacts = Vec::new();
+    for node in &typed_spec.nodes {
+        let Some(framework) = &node.framework else {
+            continue;
+        };
+        let bytes =
+            match spec::framework_config_canonical_json(framework.config_kind(), &node.node_id) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    let _ = error;
+                    return Err(AppError::backend(
+                        ErrorClass::Internal,
+                        "LaunchFrameworkConfigInvalid",
+                        "Framework config canonicalization failed",
+                    ));
+                }
+            };
+        artifacts.push(RunLaunchConfigArtifact {
+            schema_id: node.config_ref.schema_id.clone(),
+            bytes: bytes.to_vec(),
+            media_type: json_media_type()?,
+        });
+    }
+    Ok(artifacts)
+}
+
 fn framework_config_matches_ref(
     typed_spec: &spec::TypedExecutionSpec,
     config_ref: &spec::ConfigRef,
@@ -1805,6 +1892,110 @@ fn canonical_json_value_bytes(value: &Value, field: &'static str) -> Result<Vec<
                 "Certified typed spec bundle field is not canonical JSON",
             )
         })
+}
+
+/// Resolves, plans, certifies, and prepares an entry-point op run launch.
+pub fn prepare_entry_point_run_launch(
+    input: EntryPointRunLaunchInput<'_>,
+) -> Result<PreparedEntryPointRunLaunch, AppError> {
+    let registry_digest = input.entry_point_registry.registry_digest()?;
+    let submitted_public_op_name = input.public_op_name.clone();
+    let config_format = input.authored_config.format();
+    let authored_config_digest = input.authored_config.authored_digest().clone();
+    let op = input
+        .entry_point_registry
+        .resolve(&input.public_op_name, input.op_version)?;
+    let resolved_op_id = op.op_id();
+    let resolved_op_version = op.version();
+    let plan = op.plan(input.authored_config)?;
+    if plan.authored_config_digest != authored_config_digest {
+        return Err(entry_point_launch_internal_error(
+            "EntryPointOpAuthoredDigestMismatch",
+            "entry-point op produced mismatched authored config evidence",
+        ));
+    }
+
+    let public_output_schema_id = plan.public_output_schema_id.clone();
+    let mut config_inputs = plan
+        .config_material
+        .iter()
+        .map(|artifact| RunLaunchConfigArtifact {
+            schema_id: artifact.schema_id.clone(),
+            bytes: artifact.bytes.to_vec(),
+            media_type: artifact.media_type.clone(),
+        })
+        .collect::<Vec<_>>();
+    let seed_inputs = plan
+        .seed_material
+        .iter()
+        .map(|artifact| RunLaunchSeedArtifact {
+            seed_id: artifact.seed_id.clone(),
+            bytes: artifact.bytes.to_vec(),
+            media_type: artifact.media_type.clone(),
+        })
+        .collect::<Vec<_>>();
+    let lowered =
+        mfm_certify::lower_program_draft(&plan.draft).map_err(entry_point_certification_error)?;
+    let certified_spec = mfm_certify::certify_typed_spec(lowered, input.certification_registry)
+        .map_err(entry_point_certification_error)?;
+    config_inputs.extend(framework_config_launch_artifacts_for_spec(
+        &certified_spec.envelope().spec,
+    )?);
+    if let Some(expected_public_schema_id) = &public_output_schema_id {
+        let actual_public_schema_id = &certified_spec
+            .envelope()
+            .spec
+            .public_outputs
+            .public_schema_id;
+        if actual_public_schema_id != expected_public_schema_id {
+            return Err(entry_point_launch_internal_error(
+                "EntryPointOpPublicOutputMismatch",
+                "entry-point op public output schema does not match the certified spec",
+            ));
+        }
+    }
+
+    let evidence = EntryPointLaunchEvidence {
+        submitted_public_op_name,
+        resolved_op_id,
+        resolved_op_version,
+        entry_point_registry_digest: registry_digest,
+        lowering_identity: plan.lowering_identity,
+        canonicalizer_identity: plan.canonicalizer_identity,
+        config_format,
+        authored_config_digest,
+        canonical_config_digest: plan.canonical_config_digest,
+    };
+    let request = prepare_certified_run_launch(
+        CertifiedRunLaunchInput {
+            certified_spec,
+            registry: input.certification_registry,
+            run_id: input.run_id,
+            framework_version: input.framework_version,
+            source_revision: input.source_revision,
+            launched_at_unix_ms: input.launched_at_unix_ms,
+            drive: input.drive,
+        },
+        config_inputs,
+        seed_inputs,
+    )?;
+    Ok(PreparedEntryPointRunLaunch {
+        request,
+        evidence,
+        public_output_schema_id,
+    })
+}
+
+fn entry_point_certification_error(_error: mfm_certify::CertifyError) -> AppError {
+    AppError::backend(
+        ErrorClass::BadRequest,
+        "EntryPointOpCertificationFailed",
+        "Entry-point op planned spec failed certification",
+    )
+}
+
+fn entry_point_launch_internal_error(code: &'static str, message: &'static str) -> AppError {
+    AppError::backend(ErrorClass::Internal, code, message)
 }
 
 /// Untrusted persisted certified bundle bytes plus launch inputs for a typed run start.

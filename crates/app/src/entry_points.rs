@@ -391,6 +391,51 @@ mod tests {
     }
 
     #[test]
+    fn app_prepare_entry_point_run_launch_records_evidence_and_certifies() {
+        let entry_point_registry = production_entry_point_op_registry().expect("registry");
+        let certification_registry = crate::production_certification_registry().expect("cert");
+        let public_op_name = PublicOpName::new(PORTFOLIO_SNAPSHOT_PUBLIC_NAME).expect("name");
+        let authored = AuthoredConfig::new(ConfigFormat::Json, sample_portfolio_config_json())
+            .expect("authored config");
+        let authored_digest = authored.authored_digest().clone();
+        let registry_digest = entry_point_registry.registry_digest().expect("digest");
+        let run_id = crate::new_run_id();
+
+        let prepared = crate::prepare_entry_point_run_launch(crate::EntryPointRunLaunchInput {
+            entry_point_registry: &entry_point_registry,
+            public_op_name: public_op_name.clone(),
+            op_version: None,
+            authored_config: authored,
+            certification_registry: &certification_registry,
+            run_id: run_id.clone(),
+            framework_version: "mfm.test.entry_point.v1",
+            source_revision: "entry-point-test",
+            launched_at_unix_ms: 1,
+            drive: crate::DriveMode::AppendOnly,
+        })
+        .expect("prepared entry-point launch");
+
+        assert_eq!(prepared.evidence.submitted_public_op_name, public_op_name);
+        assert_eq!(
+            prepared.evidence.resolved_op_id.name,
+            PORTFOLIO_SNAPSHOT_PUBLIC_NAME
+        );
+        assert_eq!(
+            prepared.evidence.resolved_op_version,
+            OpVersion::new(1).unwrap()
+        );
+        assert_eq!(
+            prepared.evidence.entry_point_registry_digest,
+            registry_digest
+        );
+        assert_eq!(prepared.evidence.config_format, ConfigFormat::Json);
+        assert_eq!(prepared.evidence.authored_config_digest, authored_digest);
+        assert!(prepared.public_output_schema_id.is_some());
+        assert_eq!(prepared.request.run_id, run_id);
+        assert!(!prepared.request.evidence.config_artifacts.is_empty());
+    }
+
+    #[test]
     fn evm_contract_entry_point_registry_resolves_all_versions() {
         let registry = production_entry_point_op_registry().expect("registry");
 
