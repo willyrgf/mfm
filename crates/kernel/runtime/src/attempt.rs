@@ -166,213 +166,8 @@ impl<'a> AttemptLifecycle<'a> {
         Self { artifact_store }
     }
 
-    /// Runs one ordinary attempt against a sync typed store.
-    pub(crate) async fn run<S: store::TypedRunEventStore + ?Sized>(
-        &self,
-        store: &mut S,
-        runtime_spec: &CertifiedRuntimeSpec,
-        run_id: &RunId,
-        view: &RuntimeRunView,
-        bound_context: &BoundRuntimeContext,
-        attempt: TransitionAttempt<'_>,
-    ) -> Result<AttemptRunStatus> {
-        let TransitionAttempt {
-            node,
-            attempt_id: selected_attempt_id,
-            attempt_no,
-        } = attempt;
-        let selected_attempt = Attempt {
-            phase: Selected {
-                node,
-                selected_attempt_id,
-                attempt_no,
-            },
-        };
-        let descriptor = runtime_spec.state_descriptor_for_node(selected_attempt.phase.node)?;
-        let output_cell = runtime_spec
-            .cell(&selected_attempt.phase.node.output_cell)
-            .ok_or_else(|| {
-                RuntimeError::InvalidSpec(format!(
-                    "node {} output cell {} is missing",
-                    selected_attempt.phase.node.node_id, selected_attempt.phase.node.output_cell
-                ))
-            })?;
-        let binding = bound_context.runner_binding_for(selected_attempt.phase.node)?;
-        let mut advanced = false;
-        let (attempt_id, attempt_no) = match selected_attempt.phase.selected_attempt_id {
-            None => {
-                let attempt_id = attempt_id(
-                    run_id,
-                    runtime_spec.spec_hash(),
-                    &selected_attempt.phase.node.node_id,
-                    selected_attempt.phase.attempt_no,
-                )?;
-                let start_commit = CommitPlanner::prepare_attempt_start(
-                    runtime_spec,
-                    run_id,
-                    selected_attempt.phase.node,
-                    &attempt_id,
-                    selected_attempt.phase.attempt_no,
-                    view,
-                )?;
-                match store.append_prepared_commit_plan(start_commit.into()) {
-                    Ok(_) => {}
-                    Err(error) if store_error_is_stale_expected_next_seq(&error) => {
-                        return Ok(AttemptRunStatus::StaleView);
-                    }
-                    Err(error) => return Err(error.into()),
-                }
-                advanced = true;
-                (attempt_id, selected_attempt.phase.attempt_no)
-            }
-            Some(attempt_id) => (attempt_id, selected_attempt.phase.attempt_no),
-        };
-
-        let latest_stream = store.load_run_stream(run_id);
-        let latest_view = RuntimeRunView::from_stream(runtime_spec, run_id, &latest_stream)?;
-        let started_attempt = Attempt {
-            phase: Started {
-                node: selected_attempt.phase.node,
-                attempt_id: &attempt_id,
-                attempt_no,
-                view: &latest_view,
-            },
-        };
-        let failure_context = ObservedFailureContext {
-            runtime_spec,
-            run_id,
-            node: started_attempt.phase.node,
-            attempt_id: started_attempt.phase.attempt_id,
-            view: started_attempt.phase.view,
-            retryability: ObservedFailureRetryabilityPolicy::for_attempt(
-                runtime_spec,
-                started_attempt.phase.node,
-            ),
-        };
-        let invocation = match InvocationBuilder::new(InvocationBuilderInput {
-            runtime_spec,
-            run_id,
-            node: started_attempt.phase.node,
-            descriptor,
-            output_cell,
-            attempt_id: started_attempt.phase.attempt_id,
-            attempt_no: started_attempt.phase.attempt_no,
-            view: started_attempt.phase.view,
-        })
-        .build()
-        {
-            Ok(invocation) => invocation,
-            Err(error) => {
-                return terminalize_observed_failure(
-                    self.artifact_store,
-                    store,
-                    failure_context,
-                    error,
-                )
-                .await;
-            }
-        };
-        let output = match binding
-            .runner
-            .run_erased(ErasedRunCtx::from_prepared(&invocation))
-            .await
-        {
-            Ok(output) => output,
-            Err(error) => {
-                return terminalize_observed_failure(
-                    self.artifact_store,
-                    store,
-                    failure_context,
-                    error,
-                )
-                .await;
-            }
-        };
-        let invoked_attempt = Attempt {
-            phase: Invoked {
-                node: started_attempt.phase.node,
-                attempt_id: started_attempt.phase.attempt_id,
-                view: started_attempt.phase.view,
-                invocation,
-                output,
-            },
-        };
-        let Invoked {
-            node,
-            attempt_id,
-            view,
-            invocation,
-            output,
-        } = invoked_attempt.phase;
-        let terminal_output = match CommitPlanner::prepare_runner_output(RunnerOutputCommitInput {
-            runtime_spec,
-            run_id,
-            node,
-            attempt_id,
-            caps: invocation.caps(),
-            recorded_facts: invocation.recorded_facts(),
-            view,
-            saga_terminal_proof: None,
-            output,
-        }) {
-            Ok(output) => output,
-            Err(error) => {
-                return terminalize_observed_failure(
-                    self.artifact_store,
-                    store,
-                    failure_context,
-                    error,
-                )
-                .await;
-            }
-        };
-        let terminal_planned_attempt = Attempt {
-            phase: TerminalPlanned { terminal_output },
-        };
-        if let Some(witness) = resource_lane_block_for_request(
-            store.projection_snapshot(),
-            terminal_planned_attempt
-                .phase
-                .terminal_output
-                .commit
-                .request(),
-        ) {
-            return Ok(AttemptRunStatus::BlockedOnResourceLane { witness, advanced });
-        }
-        let has_resource_lane_prepare = request_has_resource_lane_prepare(
-            terminal_planned_attempt
-                .phase
-                .terminal_output
-                .commit
-                .request(),
-        );
-        let terminal_output = terminal_planned_attempt.phase.terminal_output;
-        stage_prepared_artifacts(self.artifact_store, &terminal_output.artifacts_to_stage).await?;
-        match store.append_prepared_commit_plan(terminal_output.commit) {
-            Ok(_) => {
-                let _terminal_committed_attempt = Attempt {
-                    phase: TerminalCommitted,
-                };
-                Ok(AttemptRunStatus::Advanced)
-            }
-            Err(error) if store_error_is_stale_expected_next_seq(&error) => {
-                Ok(AttemptRunStatus::StaleView)
-            }
-            Err(error)
-                if has_resource_lane_prepare
-                    && resource_lane_block_witness_from_store_error(&node.node_id, &error)
-                        .is_some() =>
-            {
-                let witness = resource_lane_block_witness_from_store_error(&node.node_id, &error)
-                    .expect("resource lane block witness");
-                Ok(AttemptRunStatus::BlockedOnResourceLane { witness, advanced })
-            }
-            Err(error) => Err(error.into()),
-        }
-    }
-
     /// Runs one ordinary attempt against an async typed store.
-    pub(crate) async fn run_async<S: store::AsyncTypedRunEventStore + ?Sized>(
+    pub(crate) async fn run<S: store::AsyncTypedRunEventStore + ?Sized>(
         &self,
         store: &S,
         runtime_spec: &CertifiedRuntimeSpec,
@@ -471,7 +266,7 @@ impl<'a> AttemptLifecycle<'a> {
         {
             Ok(invocation) => invocation,
             Err(error) => {
-                return terminalize_observed_failure_async(
+                return terminalize_observed_failure(
                     self.artifact_store,
                     store,
                     failure_context,
@@ -487,7 +282,7 @@ impl<'a> AttemptLifecycle<'a> {
         {
             Ok(output) => output,
             Err(error) => {
-                return terminalize_observed_failure_async(
+                return terminalize_observed_failure(
                     self.artifact_store,
                     store,
                     failure_context,
@@ -525,7 +320,7 @@ impl<'a> AttemptLifecycle<'a> {
         }) {
             Ok(output) => output,
             Err(error) => {
-                return terminalize_observed_failure_async(
+                return terminalize_observed_failure(
                     self.artifact_store,
                     store,
                     failure_context,
@@ -586,55 +381,7 @@ impl<'a> AttemptLifecycle<'a> {
     }
 }
 
-pub(crate) async fn terminalize_observed_failure<S: store::TypedRunEventStore + ?Sized>(
-    artifact_store: &dyn RuntimeArtifactStager,
-    store: &mut S,
-    context: ObservedFailureContext<'_>,
-    error: RuntimeError,
-) -> Result<AttemptRunStatus> {
-    let ObservedFailureContext {
-        runtime_spec,
-        run_id,
-        node,
-        attempt_id,
-        view,
-        retryability,
-    } = context;
-    let Some(error_info) = observed_attempt_failure_info(&error, retryability)? else {
-        return Err(error);
-    };
-    if !can_terminalize_observed_failure(node, attempt_id, view)? {
-        return Err(error);
-    }
-    let diagnostic_artifact = redacted_attempt_failure_diagnostic_artifact(
-        runtime_spec,
-        run_id,
-        node,
-        attempt_id,
-        &error_info,
-    )?;
-    let failure = CommitPlanner::prepare_attempt_failure(AttemptFailureCommitInput {
-        runtime_spec,
-        run_id,
-        node,
-        attempt_id,
-        view,
-        error: error_info,
-        diagnostic_artifact: Some(diagnostic_artifact),
-    })?;
-    stage_prepared_artifacts(artifact_store, &failure.artifacts_to_stage).await?;
-    match store.append_prepared_commit_plan(failure.commit) {
-        Ok(_) => Ok(AttemptRunStatus::Advanced),
-        Err(error) if store_error_is_stale_expected_next_seq(&error) => {
-            Ok(AttemptRunStatus::StaleView)
-        }
-        Err(error) => Err(error.into()),
-    }
-}
-
-pub(crate) async fn terminalize_observed_failure_async<
-    S: store::AsyncTypedRunEventStore + ?Sized,
->(
+pub(crate) async fn terminalize_observed_failure<S: store::AsyncTypedRunEventStore + ?Sized>(
     artifact_store: &dyn RuntimeArtifactStager,
     store: &S,
     context: ObservedFailureContext<'_>,

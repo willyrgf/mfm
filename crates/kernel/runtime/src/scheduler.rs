@@ -14,9 +14,9 @@ use crate::error::async_store_error;
 use crate::framework_lifecycle::FrameworkAttemptLifecycle;
 use crate::history::{RuntimeRunView, VerifiedRunContextLoader};
 use crate::manual_resolution::{
-    build_manual_resolution_prefix_authority, build_manual_resolution_prefix_authority_from_parts,
-    certified_manual_resolution_spec, prepare_manual_resolution_commit,
-    verify_manual_resolution_for_prefix, ManualResolutionEvidenceArtifact,
+    build_manual_resolution_prefix_authority_from_parts, certified_manual_resolution_spec,
+    prepare_manual_resolution_commit, verify_manual_resolution_for_prefix,
+    ManualResolutionEvidenceArtifact,
 };
 use crate::recovery::AttemptRecoveryLifecycle;
 use crate::runners::ErasedRunnerRegistry;
@@ -98,41 +98,8 @@ impl SerialTypedScheduler {
         )
     }
 
-    /// Appends the prepared typed admission commit to a sync typed store.
-    ///
-    /// This entry point remains for compatibility and focused runtime tests. Production app,
-    /// CLI, and REST surfaces should prefer [`Self::start_run_async`].
-    pub async fn start_run<S: store::TypedRunEventStore + ?Sized>(
-        &self,
-        store: &mut S,
-        launch: PreparedRunLaunch,
-    ) -> Result<store::CommitOutcome> {
-        self.stage_prepared_artifacts(&launch.artifacts_to_stage)
-            .await?;
-        Ok(store.append_prepared_commit_plan(launch.commit.into())?)
-    }
-
-    /// Appends admission to a sync typed store and reloads verified admission authority.
-    ///
-    /// This entry point remains for compatibility and focused runtime tests. Production app,
-    /// CLI, and REST surfaces should prefer [`Self::start_run_admitted_async`].
-    pub async fn start_run_admitted<S: store::TypedRunEventStore + ?Sized>(
-        &self,
-        store: &mut S,
-        runtime_spec: &CertifiedRuntimeSpec,
-        launch: PreparedRunLaunch,
-    ) -> Result<RunAdmissionAuthority> {
-        let run_id = launch.commit.request().run_id().clone();
-        self.stage_prepared_artifacts(&launch.artifacts_to_stage)
-            .await?;
-        store.append_prepared_commit_plan(launch.commit.into())?;
-        let stream = store.load_run_stream(&run_id);
-        let bound_context = self.run_contexts.load_bound_context(runtime_spec)?;
-        RunAdmissionLifecycle::admitted_run_authority(runtime_spec, &run_id, &stream, bound_context)
-    }
-
     /// Appends the prepared typed admission commit through an async typed store.
-    pub async fn start_run_async<S: store::AsyncTypedRunEventStore + ?Sized>(
+    pub async fn start_run<S: store::AsyncTypedRunEventStore + ?Sized>(
         &self,
         store: &S,
         launch: PreparedRunLaunch,
@@ -145,8 +112,8 @@ impl SerialTypedScheduler {
             .map_err(async_store_error)
     }
 
-    /// Appends async admission and reloads verified admission authority for the run.
-    pub async fn start_run_admitted_async<S: store::AsyncTypedRunEventStore + ?Sized>(
+    /// Appends admission and reloads verified admission authority for the run.
+    pub async fn start_run_admitted<S: store::AsyncTypedRunEventStore + ?Sized>(
         &self,
         store: &S,
         runtime_spec: &CertifiedRuntimeSpec,
@@ -167,48 +134,8 @@ impl SerialTypedScheduler {
         RunAdmissionLifecycle::admitted_run_authority(runtime_spec, &run_id, &stream, bound_context)
     }
 
-    /// Appends a verified manual resolution to a sync typed store.
-    ///
-    /// This entry point remains for compatibility and focused runtime tests. Production app,
-    /// CLI, and REST surfaces should prefer [`Self::record_manual_resolution_async`].
-    pub async fn record_manual_resolution<S: store::TypedRunEventStore + ?Sized>(
-        &self,
-        store: &mut S,
-        runtime_spec: &CertifiedRuntimeSpec,
-        run_id: &RunId,
-        request: ManualResolutionRequest,
-    ) -> Result<store::CommitOutcome> {
-        let ManualResolutionRequest {
-            outcome,
-            evidence_artifact,
-            proof_bytes,
-            note,
-        } = request;
-        let manual = certified_manual_resolution_spec(&runtime_spec.spec().saga)?;
-        let prefix =
-            build_manual_resolution_prefix_authority(store, runtime_spec, run_id, manual.clone())?;
-        let verified =
-            verify_manual_resolution_for_prefix(prefix, outcome, &evidence_artifact, proof_bytes)?;
-        let stream = store.load_run_stream(run_id);
-        let saga = store
-            .projection_snapshot()
-            .derive_saga_projection(run_id, &runtime_spec.spec().saga);
-        let expected_next_seq = store.expected_next_seq(run_id);
-        let (commit, artifacts_to_stage) = prepare_manual_resolution_commit(
-            runtime_spec,
-            &stream,
-            &saga,
-            expected_next_seq,
-            verified,
-            evidence_artifact,
-            note,
-        )?;
-        self.stage_prepared_artifacts(&artifacts_to_stage).await?;
-        Ok(store.append_prepared_commit_plan(commit.into())?)
-    }
-
     /// Appends a verified manual resolution through an async durable typed store.
-    pub async fn record_manual_resolution_async<S: store::AsyncTypedRunEventStore + ?Sized>(
+    pub async fn record_manual_resolution<S: store::AsyncTypedRunEventStore + ?Sized>(
         &self,
         store: &S,
         runtime_spec: &CertifiedRuntimeSpec,
@@ -255,87 +182,8 @@ impl SerialTypedScheduler {
             .map_err(async_store_error)
     }
 
-    /// Runs one deterministic runnable node against a sync typed store, if any.
-    ///
-    /// This entry point remains for compatibility and focused runtime tests. Production app,
-    /// CLI, and REST surfaces should prefer [`Self::drive_once_async`].
-    pub async fn drive_once<S: store::TypedRunEventStore + ?Sized>(
-        &self,
-        store: &mut S,
-        runtime_spec: &CertifiedRuntimeSpec,
-        run_id: &RunId,
-    ) -> Result<SchedulerStatus> {
-        let mut blocked_lanes = BTreeSet::new();
-        loop {
-            match self
-                .drive_once_with_blocked_lanes(store, runtime_spec, run_id, &blocked_lanes)
-                .await?
-            {
-                DriveStepStatus::Advanced => return Ok(SchedulerStatus::Advanced),
-                DriveStepStatus::StaleView => continue,
-                DriveStepStatus::Blocked => return Ok(SchedulerStatus::Blocked),
-                DriveStepStatus::OperationalBlock { node_id } => {
-                    let _ = node_id;
-                    return Ok(SchedulerStatus::Blocked);
-                }
-                DriveStepStatus::PublicOutputProjected => {
-                    return Ok(SchedulerStatus::PublicOutputProjected);
-                }
-                DriveStepStatus::BlockedOnResourceLane { witness, advanced } => {
-                    if advanced {
-                        return Ok(SchedulerStatus::Advanced);
-                    }
-                    blocked_lanes.insert(witness);
-                }
-            }
-        }
-    }
-
-    /// Runs deterministic runnable nodes against a sync typed store until blocked.
-    ///
-    /// This entry point remains for compatibility and focused runtime tests. Production app,
-    /// CLI, and REST surfaces should prefer [`Self::drive_until_blocked_async`].
-    pub async fn drive_until_blocked<S: store::TypedRunEventStore + ?Sized>(
-        &self,
-        store: &mut S,
-        runtime_spec: &CertifiedRuntimeSpec,
-        run_id: &RunId,
-    ) -> Result<SchedulerStatus> {
-        let mut advanced = false;
-        let mut blocked_lanes = BTreeSet::new();
-        loop {
-            match self
-                .drive_once_with_blocked_lanes(store, runtime_spec, run_id, &blocked_lanes)
-                .await?
-            {
-                DriveStepStatus::Advanced => advanced = true,
-                DriveStepStatus::StaleView => continue,
-                DriveStepStatus::BlockedOnResourceLane {
-                    witness,
-                    advanced: step_advanced,
-                } => {
-                    advanced |= step_advanced;
-                    blocked_lanes.insert(witness);
-                }
-                DriveStepStatus::Blocked if advanced => return Ok(SchedulerStatus::Advanced),
-                DriveStepStatus::Blocked => return Ok(SchedulerStatus::Blocked),
-                DriveStepStatus::OperationalBlock { node_id } if advanced => {
-                    let _ = node_id;
-                    return Ok(SchedulerStatus::Advanced);
-                }
-                DriveStepStatus::OperationalBlock { node_id } => {
-                    let _ = node_id;
-                    return Ok(SchedulerStatus::Blocked);
-                }
-                DriveStepStatus::PublicOutputProjected => {
-                    return Ok(SchedulerStatus::PublicOutputProjected);
-                }
-            }
-        }
-    }
-
     /// Runs one deterministic runnable node against an async durable typed store, if any.
-    pub async fn drive_once_async<S: store::AsyncTypedRunEventStore + ?Sized>(
+    pub async fn drive_once<S: store::AsyncTypedRunEventStore + ?Sized>(
         &self,
         store: &S,
         runtime_spec: &CertifiedRuntimeSpec,
@@ -344,7 +192,7 @@ impl SerialTypedScheduler {
         let mut blocked_lanes = BTreeSet::new();
         loop {
             match self
-                .drive_once_async_with_blocked_lanes(store, runtime_spec, run_id, &blocked_lanes)
+                .drive_once_with_blocked_lanes(store, runtime_spec, run_id, &blocked_lanes)
                 .await?
             {
                 DriveStepStatus::Advanced => return Ok(SchedulerStatus::Advanced),
@@ -368,7 +216,7 @@ impl SerialTypedScheduler {
     }
 
     /// Runs deterministic runnable nodes against an async durable typed store until blocked.
-    pub async fn drive_until_blocked_async<S: store::AsyncTypedRunEventStore + ?Sized>(
+    pub async fn drive_until_blocked<S: store::AsyncTypedRunEventStore + ?Sized>(
         &self,
         store: &S,
         runtime_spec: &CertifiedRuntimeSpec,
@@ -378,7 +226,7 @@ impl SerialTypedScheduler {
         let mut blocked_lanes = BTreeSet::new();
         loop {
             match self
-                .drive_once_async_with_blocked_lanes(store, runtime_spec, run_id, &blocked_lanes)
+                .drive_once_with_blocked_lanes(store, runtime_spec, run_id, &blocked_lanes)
                 .await?
             {
                 DriveStepStatus::Advanced => advanced = true,
@@ -407,14 +255,17 @@ impl SerialTypedScheduler {
         }
     }
 
-    async fn drive_once_with_blocked_lanes<S: store::TypedRunEventStore + ?Sized>(
+    async fn drive_once_with_blocked_lanes<S: store::AsyncTypedRunEventStore + ?Sized>(
         &self,
-        store: &mut S,
+        store: &S,
         runtime_spec: &CertifiedRuntimeSpec,
         run_id: &RunId,
         blocked_lanes: &BTreeSet<ResourceLaneBlockWitness>,
     ) -> Result<DriveStepStatus> {
-        let context = self.run_contexts.load(runtime_spec, run_id, store)?;
+        let context = self
+            .run_contexts
+            .load_async(runtime_spec, run_id, store)
+            .await?;
         let bound_context = context.bound_context();
         let view = context.view();
         match TransitionLifecycle::decide(runtime_spec, run_id, view, blocked_lanes)? {
@@ -451,63 +302,9 @@ impl SerialTypedScheduler {
         }
     }
 
-    async fn drive_once_async_with_blocked_lanes<S: store::AsyncTypedRunEventStore + ?Sized>(
+    async fn run_node_attempt<S: store::AsyncTypedRunEventStore + ?Sized>(
         &self,
         store: &S,
-        runtime_spec: &CertifiedRuntimeSpec,
-        run_id: &RunId,
-        blocked_lanes: &BTreeSet<ResourceLaneBlockWitness>,
-    ) -> Result<DriveStepStatus> {
-        let context = self
-            .run_contexts
-            .load_async(runtime_spec, run_id, store)
-            .await?;
-        let bound_context = context.bound_context();
-        let view = context.view();
-        match TransitionLifecycle::decide(runtime_spec, run_id, view, blocked_lanes)? {
-            TransitionDecision::StartNode(attempt)
-            | TransitionDecision::StartRemediation(attempt)
-            | TransitionDecision::ResolveSagaTerminal(attempt)
-            | TransitionDecision::ContinueAttempt(attempt) => {
-                match self
-                    .run_node_attempt_async(
-                        store,
-                        runtime_spec,
-                        run_id,
-                        view,
-                        bound_context,
-                        attempt,
-                    )
-                    .await?
-                {
-                    AttemptRunStatus::Advanced => Ok(DriveStepStatus::Advanced),
-                    AttemptRunStatus::StaleView => Ok(DriveStepStatus::StaleView),
-                    AttemptRunStatus::BlockedOnResourceLane { witness, advanced } => {
-                        Ok(DriveStepStatus::BlockedOnResourceLane { witness, advanced })
-                    }
-                    AttemptRunStatus::OperationalBlock { node_id } => {
-                        Ok(DriveStepStatus::OperationalBlock { node_id })
-                    }
-                }
-            }
-            TransitionDecision::AwaitManualResolution => Ok(DriveStepStatus::Blocked),
-            TransitionDecision::Blocked
-                if TransitionLifecycle::public_output_projected(
-                    runtime_spec,
-                    run_id,
-                    view,
-                    blocked_lanes,
-                )? =>
-            {
-                Ok(DriveStepStatus::PublicOutputProjected)
-            }
-            TransitionDecision::Blocked => Ok(DriveStepStatus::Blocked),
-        }
-    }
-
-    async fn run_node_attempt<S: store::TypedRunEventStore + ?Sized>(
-        &self,
-        store: &mut S,
         runtime_spec: &CertifiedRuntimeSpec,
         run_id: &RunId,
         view: &RuntimeRunView,
@@ -520,7 +317,9 @@ impl SerialTypedScheduler {
             run_id,
             view,
             &attempt,
-        )? {
+        )
+        .await?
+        {
             return Ok(status);
         }
         if FrameworkAttemptLifecycle::owns_node(attempt.node) {
@@ -530,36 +329,6 @@ impl SerialTypedScheduler {
         }
         AttemptLifecycle::new(self.artifact_store.as_ref())
             .run(store, runtime_spec, run_id, view, bound_context, attempt)
-            .await
-    }
-
-    async fn run_node_attempt_async<S: store::AsyncTypedRunEventStore + ?Sized>(
-        &self,
-        store: &S,
-        runtime_spec: &CertifiedRuntimeSpec,
-        run_id: &RunId,
-        view: &RuntimeRunView,
-        bound_context: &BoundRuntimeContext,
-        attempt: TransitionAttempt<'_>,
-    ) -> Result<AttemptRunStatus> {
-        if let Some(status) = AttemptRecoveryLifecycle::dispatch_open_attempt_for_attempt_async(
-            store,
-            runtime_spec,
-            run_id,
-            view,
-            &attempt,
-        )
-        .await?
-        {
-            return Ok(status);
-        }
-        if FrameworkAttemptLifecycle::owns_node(attempt.node) {
-            return FrameworkAttemptLifecycle::new(self.artifact_store.as_ref())
-                .run_async(store, runtime_spec, run_id, view, bound_context, attempt)
-                .await;
-        }
-        AttemptLifecycle::new(self.artifact_store.as_ref())
-            .run_async(store, runtime_spec, run_id, view, bound_context, attempt)
             .await
     }
 

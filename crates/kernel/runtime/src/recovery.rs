@@ -6,8 +6,7 @@ use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 
 use crate::attempt::{
-    async_error_is_stale_expected_next_seq, store_error_is_stale_expected_next_seq,
-    AttemptRunStatus, ResourceLaneBlockWitness,
+    async_error_is_stale_expected_next_seq, AttemptRunStatus, ResourceLaneBlockWitness,
 };
 use crate::commit::{AttemptInterruptionCommitInput, CommitPlanner};
 use crate::error::async_store_error;
@@ -150,28 +149,8 @@ impl AttemptRecoveryLifecycle {
         Self::classify_open_attempt(runtime_spec, view, node, open_attempt_id, open_attempt_no)
     }
 
-    /// Dispatches recovery-owned sync work for a selected open attempt.
-    pub(crate) fn dispatch_open_attempt_for_attempt<S: store::TypedRunEventStore + ?Sized>(
-        store: &mut S,
-        runtime_spec: &CertifiedRuntimeSpec,
-        run_id: &RunId,
-        view: &RuntimeRunView,
-        attempt: &TransitionAttempt<'_>,
-    ) -> Result<Option<AttemptRunStatus>> {
-        match Self::open_attempt_dispatch_for_attempt(runtime_spec, view, attempt)? {
-            OpenAttemptDispatch::RunLifecycle => Ok(None),
-            OpenAttemptDispatch::Interrupt { node, attempt_id } => {
-                Self::interrupt_attempt(store, runtime_spec, run_id, view, node, &attempt_id)
-                    .map(Some)
-            }
-            OpenAttemptDispatch::OperationalBlock { node_id } => {
-                Ok(Some(AttemptRunStatus::OperationalBlock { node_id }))
-            }
-        }
-    }
-
     /// Dispatches recovery-owned async work for a selected open attempt.
-    pub(crate) async fn dispatch_open_attempt_for_attempt_async<
+    pub(crate) async fn dispatch_open_attempt_for_attempt<
         S: store::AsyncTypedRunEventStore + ?Sized,
     >(
         store: &S,
@@ -183,7 +162,7 @@ impl AttemptRecoveryLifecycle {
         match Self::open_attempt_dispatch_for_attempt(runtime_spec, view, attempt)? {
             OpenAttemptDispatch::RunLifecycle => Ok(None),
             OpenAttemptDispatch::Interrupt { node, attempt_id } => {
-                Self::interrupt_attempt_async(store, runtime_spec, run_id, view, node, &attempt_id)
+                Self::interrupt_attempt(store, runtime_spec, run_id, view, node, &attempt_id)
                     .await
                     .map(Some)
             }
@@ -193,33 +172,8 @@ impl AttemptRecoveryLifecycle {
         }
     }
 
-    /// Appends the recovery-owned interruption evidence for a resumable sync store.
-    pub(crate) fn interrupt_attempt<S: store::TypedRunEventStore + ?Sized>(
-        store: &mut S,
-        runtime_spec: &CertifiedRuntimeSpec,
-        run_id: &RunId,
-        view: &RuntimeRunView,
-        node: &spec::NodeSpec,
-        attempt_id: &AttemptId,
-    ) -> Result<AttemptRunStatus> {
-        let commit = CommitPlanner::prepare_attempt_interruption(AttemptInterruptionCommitInput {
-            runtime_spec,
-            run_id,
-            node,
-            attempt_id,
-            view,
-        })?;
-        match store.append_prepared_commit_plan(commit) {
-            Ok(_) => Ok(AttemptRunStatus::Advanced),
-            Err(error) if store_error_is_stale_expected_next_seq(&error) => {
-                Ok(AttemptRunStatus::StaleView)
-            }
-            Err(error) => Err(error.into()),
-        }
-    }
-
     /// Appends the recovery-owned interruption evidence for a resumable async store.
-    pub(crate) async fn interrupt_attempt_async<S: store::AsyncTypedRunEventStore + ?Sized>(
+    pub(crate) async fn interrupt_attempt<S: store::AsyncTypedRunEventStore + ?Sized>(
         store: &S,
         runtime_spec: &CertifiedRuntimeSpec,
         run_id: &RunId,

@@ -1007,7 +1007,7 @@ where
             req.evidence,
             expected_next_seq,
         )?;
-        self.scheduler.start_run_async(&self.store, launch).await?;
+        self.scheduler.start_run(&self.store, launch).await?;
         let status = self
             .drive_with_mode(&runtime_spec, &req.run_id, req.drive)
             .await?;
@@ -1044,7 +1044,7 @@ where
             .clone();
         let manual_request = manual_resolution_runtime_request(req)?;
         self.scheduler
-            .record_manual_resolution_async(&self.store, &runtime_spec, &run_id, manual_request)
+            .record_manual_resolution(&self.store, &runtime_spec, &run_id, manual_request)
             .await?;
         let status = self.drive_with_mode(&runtime_spec, &run_id, drive).await?;
         self.run_response_from_verified_status(&run_id, status)
@@ -1203,11 +1203,11 @@ where
             DriveMode::AppendOnly => Ok(SchedulerStatus::Blocked),
             DriveMode::Once => Ok(self
                 .scheduler
-                .drive_once_async(&self.store, runtime_spec, run_id)
+                .drive_once(&self.store, runtime_spec, run_id)
                 .await?),
             DriveMode::UntilBlocked => Ok(self
                 .scheduler
-                .drive_until_blocked_async(&self.store, runtime_spec, run_id)
+                .drive_until_blocked(&self.store, runtime_spec, run_id)
                 .await?),
         }
     }

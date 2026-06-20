@@ -6,8 +6,7 @@ use mfm_store::v1 as store;
 
 use crate::artifacts::RuntimeArtifactStore;
 use crate::attempt::{
-    async_error_is_stale_expected_next_seq, store_error_is_stale_expected_next_seq,
-    terminalize_observed_failure, terminalize_observed_failure_async, AttemptRunStatus,
+    async_error_is_stale_expected_next_seq, terminalize_observed_failure, AttemptRunStatus,
     ObservedFailureContext, ObservedFailureRetryabilityPolicy,
 };
 use crate::binding::BoundRuntimeContext;
@@ -46,94 +45,8 @@ impl<'a> FrameworkAttemptLifecycle<'a> {
         )
     }
 
-    /// Runs one framework attempt against a sync typed store.
-    pub(crate) async fn run<S: store::TypedRunEventStore + ?Sized>(
-        &self,
-        store: &mut S,
-        runtime_spec: &CertifiedRuntimeSpec,
-        run_id: &RunId,
-        view: &RuntimeRunView,
-        bound_context: &BoundRuntimeContext,
-        attempt: TransitionAttempt<'_>,
-    ) -> Result<AttemptRunStatus> {
-        let FrameworkAttempt {
-            node,
-            selected_attempt_id,
-            attempt_no,
-            descriptor,
-            output_cell,
-            binding,
-        } = self.prepare(runtime_spec, bound_context, attempt)?;
-        let attempt_id = match selected_attempt_id {
-            Some(attempt_id) => attempt_id,
-            None => {
-                let attempt_id =
-                    attempt_id(run_id, runtime_spec.spec_hash(), &node.node_id, attempt_no)?;
-                let start_commit = CommitPlanner::prepare_attempt_start(
-                    runtime_spec,
-                    run_id,
-                    node,
-                    &attempt_id,
-                    attempt_no,
-                    view,
-                )?;
-                match store.append_prepared_commit_plan(start_commit.into()) {
-                    Ok(_) => {}
-                    Err(error) if store_error_is_stale_expected_next_seq(&error) => {
-                        return Ok(AttemptRunStatus::StaleView);
-                    }
-                    Err(error) => return Err(error.into()),
-                }
-                attempt_id
-            }
-        };
-        let latest_stream = store.load_run_stream(run_id);
-        let latest_view = RuntimeRunView::from_stream(runtime_spec, run_id, &latest_stream)?;
-        let failure_context = ObservedFailureContext {
-            runtime_spec,
-            run_id,
-            node,
-            attempt_id: &attempt_id,
-            view: &latest_view,
-            retryability: ObservedFailureRetryabilityPolicy::for_attempt(runtime_spec, node),
-        };
-        let terminal_output = match self
-            .prepare_terminal_output(FrameworkTerminalOutputInput {
-                runtime_spec,
-                run_id,
-                node,
-                descriptor,
-                output_cell,
-                binding,
-                attempt_id: &attempt_id,
-                attempt_no,
-                latest_view: &latest_view,
-            })
-            .await
-        {
-            Ok(output) => output,
-            Err(error) => {
-                return terminalize_observed_failure(
-                    self.artifact_store,
-                    store,
-                    failure_context,
-                    error,
-                )
-                .await;
-            }
-        };
-        stage_prepared_artifacts(self.artifact_store, &terminal_output.artifacts_to_stage).await?;
-        match store.append_prepared_commit_plan(terminal_output.commit) {
-            Ok(_) => Ok(AttemptRunStatus::Advanced),
-            Err(error) if store_error_is_stale_expected_next_seq(&error) => {
-                Ok(AttemptRunStatus::StaleView)
-            }
-            Err(error) => Err(error.into()),
-        }
-    }
-
     /// Runs one framework attempt against an async typed store.
-    pub(crate) async fn run_async<S: store::AsyncTypedRunEventStore + ?Sized>(
+    pub(crate) async fn run<S: store::AsyncTypedRunEventStore + ?Sized>(
         &self,
         store: &S,
         runtime_spec: &CertifiedRuntimeSpec,
@@ -202,7 +115,7 @@ impl<'a> FrameworkAttemptLifecycle<'a> {
         {
             Ok(output) => output,
             Err(error) => {
-                return terminalize_observed_failure_async(
+                return terminalize_observed_failure(
                     self.artifact_store,
                     store,
                     failure_context,
