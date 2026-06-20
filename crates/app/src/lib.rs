@@ -10,10 +10,14 @@
 //! # Examples
 //!
 //! ```rust
-//! use mfm_app::{make_in_memory_typed_services, ErasedRunnerRegistry};
+//! use mfm_app::{make_async_typed_services, ErasedRunnerRegistry};
+//! use mfm_artifact_store_fs::FsTypedArtifactStore;
+//! use mfm_store::v1::AsyncInMemoryTypedRunStore;
 //!
 //! let runners = ErasedRunnerRegistry::new();
-//! let _services = make_in_memory_typed_services(runners, "/tmp/mfm-typed-artifacts");
+//! let artifacts = FsTypedArtifactStore::new("/tmp/mfm-typed-artifacts");
+//! let store = AsyncInMemoryTypedRunStore::default();
+//! let _services = make_async_typed_services(runners, store, artifacts);
 //! ```
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -31,16 +35,15 @@ use mfm_ids::{
 };
 use mfm_replay::v1::{ReplayBroker, ReplayError, ReplayReadAuthority};
 use mfm_runtime::{
-    CertifiedRuntimeSpec, RunLaunchArtifact, RunLaunchEvidence, RunLaunchSeedCell,
-    RuntimeArtifactStageFuture, RuntimeArtifactStager, SchedulerStatus, SerialTypedScheduler,
-    VerifiedRunHistory,
+    CertifiedRuntimeSpec, ManualResolutionEvidenceArtifact, ManualResolutionRequest,
+    RunLaunchArtifact, RunLaunchEvidence, RunLaunchSeedCell, RuntimeArtifactStageFuture,
+    RuntimeArtifactStager, SchedulerStatus, SerialTypedScheduler, VerifiedRunHistoryView,
 };
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 use serde::{Deserialize, Serialize};
 use serde_json::map::Entry;
 use serde_json::{Map, Value};
-use tokio::sync::Mutex;
 
 pub use mfm_runtime::ErasedRunnerRegistry;
 
@@ -78,32 +81,65 @@ pub struct AppError {
     pub message: String,
 }
 
+/// Message text that has been selected for public CLI/REST/app surfaces.
+///
+/// This type marks the boundary where lower-level diagnostics are either intentionally exposed as
+/// caller input validation messages or replaced by fixed safe text. It does not authorize callers
+/// to forward backend `Display` output from storage, runtime, transport, signer, or provider
+/// errors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicSafeMessage(String);
+
+impl PublicSafeMessage {
+    /// Creates public-safe message text from an already reviewed string.
+    pub fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+
+    /// Creates fixed public-safe text for a lower-level backend failure.
+    pub fn backend(message: &'static str) -> Self {
+        Self(message.to_owned())
+    }
+
+    /// Consumes the reviewed message into owned text for existing public response structs.
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl From<&'static str> for PublicSafeMessage {
+    fn from(value: &'static str) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<String> for PublicSafeMessage {
+    fn from(value: String) -> Self {
+        Self::new(value)
+    }
+}
+
 impl AppError {
     /// Creates an application error from the supplied classification, code, and message.
-    pub fn new(class: ErrorClass, code: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn new(
+        class: ErrorClass,
+        code: impl Into<String>,
+        message: impl Into<PublicSafeMessage>,
+    ) -> Self {
         Self {
             class,
             code: code.into(),
-            message: message.into(),
+            message: message.into().into_string(),
         }
     }
 
-    /// Returns a generic invalid request error.
-    pub fn invalid_request(message: impl Into<String>) -> Self {
-        Self::new(ErrorClass::BadRequest, "InvalidRequest", message)
-    }
-
-    /// Returns the standard invalid UUID error payload.
-    pub fn invalid_uuid() -> Self {
-        Self::new(
-            ErrorClass::BadRequest,
-            "InvalidRunId",
-            "Invalid UUID format",
-        )
+    /// Creates an application error for a lower-level failure without exposing backend details.
+    pub fn backend(class: ErrorClass, code: impl Into<String>, message: &'static str) -> Self {
+        Self::new(class, code, PublicSafeMessage::backend(message))
     }
 
     /// Returns a not-found error with an explicit code and message.
-    pub fn not_found(code: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn not_found(code: impl Into<String>, message: impl Into<PublicSafeMessage>) -> Self {
         Self::new(ErrorClass::NotFound, code, message)
     }
 }
@@ -119,30 +155,40 @@ impl std::error::Error for AppError {}
 impl From<mfm_runtime::RuntimeError> for AppError {
     fn from(error: mfm_runtime::RuntimeError) -> Self {
         match error {
-            mfm_runtime::RuntimeError::Store(message) => {
-                Self::new(ErrorClass::Conflict, "RunStoreRejected", message)
-            }
-            mfm_runtime::RuntimeError::RunnerBinding(message) => {
-                Self::new(ErrorClass::BadRequest, "LaunchRunnerUnavailable", message)
-            }
-            mfm_runtime::RuntimeError::SpecHash(message)
-            | mfm_runtime::RuntimeError::InvalidSpec(message)
-            | mfm_runtime::RuntimeError::InvalidRunStream(message)
-            | mfm_runtime::RuntimeError::Blocked(message)
-            | mfm_runtime::RuntimeError::InputMaterialization(message)
-            | mfm_runtime::RuntimeError::InvalidRunnerOutput(message)
-            | mfm_runtime::RuntimeError::RuntimeValidation(message)
-            | mfm_runtime::RuntimeError::Identity(message)
-            | mfm_runtime::RuntimeError::Canonical(message) => {
-                Self::new(ErrorClass::Internal, "LaunchRuntimeError", message)
-            }
+            mfm_runtime::RuntimeError::Store(_) => Self::backend(
+                ErrorClass::Conflict,
+                "RunStoreRejected",
+                "Run store rejected the requested operation",
+            ),
+            mfm_runtime::RuntimeError::RunnerBinding(_) => Self::backend(
+                ErrorClass::BadRequest,
+                "LaunchRunnerUnavailable",
+                "A required typed runner is unavailable",
+            ),
+            mfm_runtime::RuntimeError::SpecHash(_)
+            | mfm_runtime::RuntimeError::InvalidSpec(_)
+            | mfm_runtime::RuntimeError::InvalidRunStream(_)
+            | mfm_runtime::RuntimeError::Blocked(_)
+            | mfm_runtime::RuntimeError::InputMaterialization(_)
+            | mfm_runtime::RuntimeError::InvalidRunnerOutput(_)
+            | mfm_runtime::RuntimeError::RuntimeValidation(_)
+            | mfm_runtime::RuntimeError::Identity(_)
+            | mfm_runtime::RuntimeError::Canonical(_) => Self::backend(
+                ErrorClass::Internal,
+                "LaunchRuntimeError",
+                "Typed runtime rejected the requested operation",
+            ),
         }
     }
 }
 
 impl From<store::StoreError> for AppError {
-    fn from(error: store::StoreError) -> Self {
-        Self::new(ErrorClass::Conflict, "RunStoreRejected", error.to_string())
+    fn from(_error: store::StoreError) -> Self {
+        Self::backend(
+            ErrorClass::Conflict,
+            "RunStoreRejected",
+            "Run store rejected the requested operation",
+        )
     }
 }
 
@@ -162,35 +208,41 @@ impl From<FsTypedArtifactError> for AppError {
             | FsTypedArtifactError::EvidenceMismatch { .. }
             | FsTypedArtifactError::InvalidEvidence { .. }
             | FsTypedArtifactError::InvalidIdentity { .. }
-            | FsTypedArtifactError::Io { .. } => {
-                Self::new(ErrorClass::Internal, "ArtifactError", error.to_string())
-            }
+            | FsTypedArtifactError::Io { .. } => Self::backend(
+                ErrorClass::Internal,
+                "ArtifactError",
+                "Typed artifact store rejected the requested operation",
+            ),
         }
     }
 }
 
 impl From<ReplayError> for AppError {
     fn from(error: ReplayError) -> Self {
-        Self::new(ErrorClass::Internal, error.code(), error.message)
+        Self::backend(
+            ErrorClass::Internal,
+            error.code(),
+            "Replay verification failed",
+        )
     }
 }
 
 impl From<mfm_spec::SpecError> for AppError {
-    fn from(error: mfm_spec::SpecError) -> Self {
-        Self::new(
+    fn from(_error: mfm_spec::SpecError) -> Self {
+        Self::backend(
             ErrorClass::Internal,
             "CertifiedSpecInvalid",
-            error.to_string(),
+            "Certified typed spec is invalid",
         )
     }
 }
 
 impl From<mfm_certify::CertifyError> for AppError {
-    fn from(error: mfm_certify::CertifyError) -> Self {
-        Self::new(
+    fn from(_error: mfm_certify::CertifyError) -> Self {
+        Self::backend(
             ErrorClass::BadRequest,
             "CertifiedBundleVerificationFailed",
-            error.to_string(),
+            "Certified typed spec bundle verification failed",
         )
     }
 }
@@ -215,49 +267,12 @@ pub fn make_default_typed_artifact_store() -> FsTypedArtifactStore {
     FsTypedArtifactStore::new(default_typed_artifact_root())
 }
 
-/// Builds an in-memory typed run store for tests and local single-process tools.
-pub fn make_in_memory_typed_run_store() -> store::InMemoryTypedRunStore {
-    store::InMemoryTypedRunStore::default()
-}
-
-/// Builds typed app services backed by an in-memory typed run event store.
-pub fn make_in_memory_typed_services(
-    runners: ErasedRunnerRegistry,
-    artifact_root: impl Into<PathBuf>,
-) -> RunServices<store::InMemoryTypedRunStore> {
-    make_in_memory_typed_services_with_certification_registry(
-        runners,
-        artifact_root,
-        CertificationRegistry::new(),
-    )
-}
-
-/// Builds in-memory typed app services with an explicit trusted certification registry.
-pub fn make_in_memory_typed_services_with_certification_registry(
-    runners: ErasedRunnerRegistry,
-    artifact_root: impl Into<PathBuf>,
-    certification_registry: CertificationRegistry,
-) -> RunServices<store::InMemoryTypedRunStore> {
-    let artifacts = FsTypedArtifactStore::new(artifact_root);
-    RunServices::new_with_certification_registry(
-        SerialTypedScheduler::new(
-            runners,
-            Arc::new(FsRuntimeArtifactStager {
-                artifacts: artifacts.clone(),
-            }),
-        ),
-        store::InMemoryTypedRunStore::default(),
-        artifacts,
-        certification_registry,
-    )
-}
-
 /// Builds typed app services backed by a durable async typed run event store.
 pub fn make_async_typed_services<S>(
     runners: ErasedRunnerRegistry,
     store: S,
     artifacts: FsTypedArtifactStore,
-) -> AsyncRunServices<S>
+) -> RunServices<S>
 where
     S: store::AsyncTypedRunEventStore + Send + Sync,
 {
@@ -275,14 +290,14 @@ pub fn make_async_typed_services_with_certification_registry<S>(
     store: S,
     artifacts: FsTypedArtifactStore,
     certification_registry: CertificationRegistry,
-) -> AsyncRunServices<S>
+) -> RunServices<S>
 where
     S: store::AsyncTypedRunEventStore + Send + Sync,
 {
     let artifact_stager = Arc::new(FsRuntimeArtifactStager {
         artifacts: artifacts.clone(),
     });
-    AsyncRunServices::new_with_certification_registry(
+    RunServices::new_with_certification_registry(
         SerialTypedScheduler::new(runners, artifact_stager),
         store,
         artifacts,
@@ -376,6 +391,31 @@ pub enum DriveMode {
     UntilBlocked,
 }
 
+/// Operator-selected manual resolution decision accepted by app ingress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManualResolutionDecision {
+    /// Confirm that unresolved obligations were remediated externally.
+    ConfirmRemediated,
+    /// Close the run without a compensation or AC/DC-equivalence claim.
+    FailWithoutAcdcClaim,
+}
+
+impl ManualResolutionDecision {
+    fn into_event(self) -> events::ManualResolutionOutcome {
+        match self {
+            Self::ConfirmRemediated => events::ManualResolutionOutcome::ConfirmRemediated,
+            Self::FailWithoutAcdcClaim => events::ManualResolutionOutcome::FailWithoutAcdcClaim,
+        }
+    }
+}
+
+impl fmt::Display for ManualResolutionDecision {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.into_event().as_str())
+    }
+}
+
 /// Request to start a certified typed run.
 #[derive(Debug, Clone)]
 pub struct RunLaunchRequest {
@@ -386,6 +426,25 @@ pub struct RunLaunchRequest {
     /// Launch material that runtime middleware stages and admits with the admission commit.
     pub evidence: RunLaunchEvidence,
     /// Scheduler drive policy after start.
+    pub drive: DriveMode,
+}
+
+/// Request to append a signed manual resolution for a manually blocked typed run.
+#[derive(Debug, Clone)]
+pub struct ManualResolutionRecordRequest {
+    /// Store-owned run id to resolve.
+    pub run_id: RunId,
+    /// Authorized manual decision to record.
+    pub outcome: ManualResolutionDecision,
+    /// Operator evidence artifact bytes bound by the signed proof claim.
+    pub evidence_bytes: Vec<u8>,
+    /// Evidence artifact media type.
+    pub evidence_media_type: String,
+    /// Canonical signed manual authorization proof bytes.
+    pub authorization_proof_bytes: Vec<u8>,
+    /// Optional redaction-safe operator note.
+    pub note: Option<String>,
+    /// Scheduler drive policy after the manual-resolution append.
     pub drive: DriveMode,
 }
 
@@ -832,265 +891,19 @@ impl fmt::Display for TypedReplayResponse {
     }
 }
 
-/// Application service facade for certified typed runtime dispatch.
+/// Application facade for certified typed runtime dispatch.
 #[derive(Clone)]
 pub struct RunServices<S> {
-    scheduler: SerialTypedScheduler,
-    store: Arc<Mutex<S>>,
-    artifacts: FsTypedArtifactStore,
-    certification_registry: CertificationRegistry,
-}
-
-impl<S> RunServices<S>
-where
-    S: store::TypedRunEventStore + Send,
-{
-    /// Creates typed app services from explicit scheduler, store, and artifact store choices.
-    pub fn new(scheduler: SerialTypedScheduler, store: S, artifacts: FsTypedArtifactStore) -> Self {
-        Self::new_with_certification_registry(
-            scheduler,
-            store,
-            artifacts,
-            CertificationRegistry::new(),
-        )
-    }
-
-    /// Creates typed app services with an explicit trusted certification registry.
-    pub fn new_with_certification_registry(
-        scheduler: SerialTypedScheduler,
-        store: S,
-        artifacts: FsTypedArtifactStore,
-        certification_registry: CertificationRegistry,
-    ) -> Self {
-        Self {
-            scheduler,
-            store: Arc::new(Mutex::new(store)),
-            artifacts,
-            certification_registry,
-        }
-    }
-
-    /// Returns the shared typed run store handle.
-    pub fn store(&self) -> Arc<Mutex<S>> {
-        Arc::clone(&self.store)
-    }
-
-    /// Returns the typed artifact store.
-    pub fn artifacts(&self) -> &FsTypedArtifactStore {
-        &self.artifacts
-    }
-
-    /// Returns the trusted certification registry used for stored bundle verification.
-    pub fn certification_registry(&self) -> &CertificationRegistry {
-        &self.certification_registry
-    }
-
-    /// Starts a certified typed run, optionally driving runnable nodes.
-    pub async fn launch_run(&self, req: RunLaunchRequest) -> Result<TypedRunResponse, AppError> {
-        let runtime_spec = CertifiedRuntimeSpec::new(req.certified_spec)?;
-        let mut store = self.store.lock().await;
-        let expected_next_seq = store.expected_next_seq(&req.run_id);
-        let launch = self.scheduler.prepare_run_launch(
-            &runtime_spec,
-            req.run_id.clone(),
-            req.evidence,
-            expected_next_seq,
-        )?;
-        self.scheduler.start_run(&mut *store, launch).await?;
-        let status = self
-            .drive_with_mode(&mut *store, &runtime_spec, &req.run_id, req.drive)
-            .await?;
-        typed_run_response(&*store, &runtime_spec, &req.run_id, status)
-    }
-
-    /// Resumes a stored typed run after verifying its persisted certified authority.
-    pub async fn resume_stored_run(
-        &self,
-        run_id: &RunId,
-        drive: DriveMode,
-    ) -> Result<TypedRunResponse, AppError> {
-        let stream = {
-            let store = self.store.lock().await;
-            store.load_run_stream(run_id)
-        };
-        if stream.is_empty() {
-            return Err(AppError::not_found(
-                "RunNotFound",
-                "typed run stream was not found",
-            ));
-        }
-        let runtime_spec = load_runtime_spec_for_run(
-            &self.artifacts,
-            &self.certification_registry,
-            run_id,
-            &stream,
-        )
-        .await?;
-        verified_run_history_from_events(&self.artifacts, &runtime_spec, run_id, &stream).await?;
-        let mut store = self.store.lock().await;
-        let status = self
-            .drive_with_mode(&mut *store, &runtime_spec, run_id, drive)
-            .await?;
-        typed_run_response(&*store, &runtime_spec, run_id, status)
-    }
-
-    /// Returns typed run status by rebuilding projection from the authoritative run stream.
-    pub async fn run_status(&self, run_id: &RunId) -> Result<TypedRunResponse, AppError> {
-        let (stream, projection) = {
-            let store = self.store.lock().await;
-            let stream = store.load_run_stream(run_id);
-            let projection = status_projection_from_stream_with_resource_lanes(
-                &stream,
-                store.projection_snapshot(),
-            )?;
-            (stream, projection)
-        };
-        if stream.is_empty() {
-            return Err(AppError::not_found(
-                "RunNotFound",
-                "typed run stream was not found",
-            ));
-        }
-        let runtime_spec = load_runtime_spec_for_run(
-            &self.artifacts,
-            &self.certification_registry,
-            run_id,
-            &stream,
-        )
-        .await?;
-        verified_run_history_from_events(&self.artifacts, &runtime_spec, run_id, &stream).await?;
-        typed_run_status_from_projection(run_id, &runtime_spec, &stream, &projection)
-    }
-
-    /// Returns the authoritative typed run stream.
-    pub async fn run_stream(&self, run_id: &RunId) -> Result<TypedRunStreamResponse, AppError> {
-        let events = {
-            let store = self.store.lock().await;
-            store.load_run_stream(run_id)
-        };
-        validate_stored_run_stream_for_read(
-            &self.artifacts,
-            &self.certification_registry,
-            run_id,
-            &events,
-        )
-        .await?;
-        Ok(typed_run_stream_response_from_events(
-            run_id,
-            stream_head(&events),
-            &events,
-        ))
-    }
-
-    /// Builds an evidence-only replay broker from stored certified authority and retained evidence.
-    pub async fn replay_broker(&self, run_id: &RunId) -> Result<ReplayBroker, AppError> {
-        let stream = {
-            let store = self.store.lock().await;
-            store.load_run_stream(run_id)
-        };
-        if stream.is_empty() {
-            return Err(AppError::not_found(
-                "RunNotFound",
-                "typed run stream was not found",
-            ));
-        }
-        let certified = load_certified_spec_for_run(
-            &self.artifacts,
-            &self.certification_registry,
-            run_id,
-            &stream,
-        )
-        .await?;
-        let runtime_spec = CertifiedRuntimeSpec::new(certified)?;
-        let verified_history =
-            verified_run_history_from_events(&self.artifacts, &runtime_spec, run_id, &stream)
-                .await?;
-        let authority =
-            replay_read_authority_for_run(&self.artifacts, &runtime_spec, &verified_history)
-                .await?;
-        ReplayBroker::from_read_authority(authority).map_err(Into::into)
-    }
-
-    /// Renders typed public output from store-owned projection and typed artifact bytes.
-    pub async fn typed_public_output(
-        &self,
-        run_id: &RunId,
-        public_schema_id: &SchemaId,
-    ) -> Result<TypedPublicOutputResponse, AppError> {
-        let stream = {
-            let store = self.store.lock().await;
-            store.load_run_stream(run_id)
-        };
-        if stream.is_empty() {
-            return Err(AppError::not_found(
-                "RunNotFound",
-                "typed run stream was not found",
-            ));
-        }
-        let runtime_spec = load_runtime_spec_for_run(
-            &self.artifacts,
-            &self.certification_registry,
-            run_id,
-            &stream,
-        )
-        .await?;
-        let verified_history =
-            verified_run_history_from_events(&self.artifacts, &runtime_spec, run_id, &stream)
-                .await?;
-        let authority = public_output_read_authority_for_run(
-            &self.artifacts,
-            &runtime_spec,
-            &verified_history,
-            public_schema_id,
-        )
-        .await?;
-        render_typed_public_output(&self.artifacts, &authority).await
-    }
-
-    async fn drive_with_mode(
-        &self,
-        store: &mut S,
-        runtime_spec: &CertifiedRuntimeSpec,
-        run_id: &RunId,
-        drive: DriveMode,
-    ) -> Result<SchedulerStatus, AppError> {
-        match drive {
-            DriveMode::AppendOnly => Ok(SchedulerStatus::Blocked),
-            DriveMode::Once => Ok(self
-                .scheduler
-                .drive_once(store, runtime_spec, run_id)
-                .await?),
-            DriveMode::UntilBlocked => Ok(self
-                .scheduler
-                .drive_until_blocked(store, runtime_spec, run_id)
-                .await?),
-        }
-    }
-}
-
-/// Application facade for durable async certified typed runtime dispatch.
-#[derive(Clone)]
-pub struct AsyncRunServices<S> {
     scheduler: SerialTypedScheduler,
     store: S,
     artifacts: FsTypedArtifactStore,
     certification_registry: CertificationRegistry,
 }
 
-impl<S> AsyncRunServices<S>
+impl<S> RunServices<S>
 where
     S: store::AsyncTypedRunEventStore + Send + Sync,
 {
-    /// Creates typed async app services from explicit scheduler, store, and artifact store choices.
-    pub fn new(scheduler: SerialTypedScheduler, store: S, artifacts: FsTypedArtifactStore) -> Self {
-        Self::new_with_certification_registry(
-            scheduler,
-            store,
-            artifacts,
-            CertificationRegistry::new(),
-        )
-    }
-
     /// Creates typed async app services with an explicit trusted certification registry.
     pub fn new_with_certification_registry(
         scheduler: SerialTypedScheduler,
@@ -1135,12 +948,12 @@ where
             req.evidence,
             expected_next_seq,
         )?;
-        self.scheduler.start_run_async(&self.store, launch).await?;
+        self.scheduler.start_run(&self.store, launch).await?;
         let status = self
             .drive_with_mode(&runtime_spec, &req.run_id, req.drive)
             .await?;
-        let (stream, projection) = self.status_stream_and_projection(&req.run_id).await?;
-        typed_run_response_from_projection(&req.run_id, &runtime_spec, &stream, &projection, status)
+        self.run_response_from_verified_status(&req.run_id, status)
+            .await
     }
 
     /// Resumes a certified typed run from its stored spec artifact.
@@ -1149,127 +962,78 @@ where
         run_id: &RunId,
         drive: DriveMode,
     ) -> Result<TypedRunResponse, AppError> {
-        let stream = self
-            .store
-            .load_run_stream(run_id)
-            .await
-            .map_err(async_app_store_error)?;
-        if stream.is_empty() {
-            return Err(AppError::not_found(
-                "RunNotFound",
-                "typed run stream was not found",
-            ));
-        }
-        let runtime_spec = load_runtime_spec_for_run(
-            &self.artifacts,
-            &self.certification_registry,
-            run_id,
-            &stream,
-        )
-        .await?;
-        verified_run_history_from_events(&self.artifacts, &runtime_spec, run_id, &stream).await?;
+        let runtime_spec = self
+            .load_verified_run_read_context(run_id)
+            .await?
+            .runtime_spec()
+            .clone();
         let status = self.drive_with_mode(&runtime_spec, run_id, drive).await?;
-        let (stream, projection) = self.status_stream_and_projection(run_id).await?;
-        typed_run_response_from_projection(run_id, &runtime_spec, &stream, &projection, status)
+        self.run_response_from_verified_status(run_id, status).await
+    }
+
+    /// Records a signed manual resolution and optionally resumes typed scheduler execution.
+    pub async fn record_manual_resolution(
+        &self,
+        req: ManualResolutionRecordRequest,
+    ) -> Result<TypedRunResponse, AppError> {
+        let run_id = req.run_id.clone();
+        let drive = req.drive;
+        let runtime_spec = self
+            .load_verified_run_read_context(&run_id)
+            .await?
+            .runtime_spec()
+            .clone();
+        let manual_request = manual_resolution_runtime_request(req)?;
+        self.scheduler
+            .record_manual_resolution(&self.store, &runtime_spec, &run_id, manual_request)
+            .await?;
+        let status = self.drive_with_mode(&runtime_spec, &run_id, drive).await?;
+        self.run_response_from_verified_status(&run_id, status)
+            .await
     }
 
     /// Returns typed run status by rebuilding projection from the authoritative run stream.
     pub async fn run_status(&self, run_id: &RunId) -> Result<TypedRunResponse, AppError> {
-        let (stream, projection) = self.status_stream_and_projection(run_id).await?;
-        if stream.is_empty() {
-            return Err(AppError::not_found(
-                "RunNotFound",
-                "typed run stream was not found",
-            ));
-        }
-        let runtime_spec = load_runtime_spec_for_run(
+        let context = load_async_verified_status_read_context(
+            &self.store,
             &self.artifacts,
             &self.certification_registry,
             run_id,
-            &stream,
         )
         .await?;
-        verified_run_history_from_events(&self.artifacts, &runtime_spec, run_id, &stream).await?;
-        typed_run_status_from_projection(run_id, &runtime_spec, &stream, &projection)
+        typed_run_status_from_projection(
+            run_id,
+            context.runtime_spec(),
+            context.events(),
+            context.projection(),
+        )
     }
 
-    /// Returns typed run status using a caller-supplied store-owned projection snapshot.
-    ///
-    /// Durable stores that maintain cross-run resource lane projections should pass their current
-    /// projection snapshot. Run-local status is rebuilt from the verified target stream, and only
-    /// global resource-lane authority is copied from the supplied projection.
-    pub async fn run_status_with_projection(
+    async fn run_response_from_verified_status(
         &self,
         run_id: &RunId,
-        projection: store::ProjectionSnapshot,
+        status: SchedulerStatus,
     ) -> Result<TypedRunResponse, AppError> {
-        let stream = self
-            .store
-            .load_run_stream(run_id)
-            .await
-            .map_err(async_app_store_error)?;
-        if stream.is_empty() {
-            return Err(AppError::not_found(
-                "RunNotFound",
-                "typed run stream was not found",
-            ));
-        }
-        let runtime_spec = load_runtime_spec_for_run(
+        let context = load_async_verified_status_read_context(
+            &self.store,
             &self.artifacts,
             &self.certification_registry,
             run_id,
-            &stream,
         )
         .await?;
-        verified_run_history_from_events(&self.artifacts, &runtime_spec, run_id, &stream).await?;
-        let status_projection =
-            status_projection_from_stream_with_resource_lanes(&stream, &projection)?;
-        typed_run_status_from_projection(run_id, &runtime_spec, &stream, &status_projection)
-    }
-
-    async fn status_stream_and_projection(
-        &self,
-        run_id: &RunId,
-    ) -> Result<(Vec<store::KernelEventEnvelope>, store::ProjectionSnapshot), AppError> {
-        let stream = self
-            .store
-            .load_run_stream(run_id)
-            .await
-            .map_err(async_app_store_error)?;
-        if stream.is_empty() {
-            let projection =
-                store::ProjectionSnapshot::from_parts(store::ProjectionSnapshotParts::default())?;
-            return Ok((stream, projection));
-        }
-        let projection = self
-            .store
-            .status_projection_snapshot(run_id)
-            .await
-            .map_err(async_app_store_error)?;
-        let status_projection =
-            status_projection_from_stream_with_resource_lanes(&stream, &projection)?;
-        Ok((stream, status_projection))
+        typed_run_response_from_projection(
+            run_id,
+            context.runtime_spec(),
+            context.events(),
+            context.projection(),
+            status,
+        )
     }
 
     /// Returns the authoritative typed run stream.
     pub async fn run_stream(&self, run_id: &RunId) -> Result<TypedRunStreamResponse, AppError> {
-        let events = self
-            .store
-            .load_run_stream(run_id)
-            .await
-            .map_err(async_app_store_error)?;
-        validate_stored_run_stream_for_read(
-            &self.artifacts,
-            &self.certification_registry,
-            run_id,
-            &events,
-        )
-        .await?;
-        Ok(typed_run_stream_response_from_events(
-            run_id,
-            stream_head(&events),
-            &events,
-        ))
+        let context = self.load_verified_run_read_context(run_id).await?;
+        Ok(typed_run_stream_response_from_verified_context(&context))
     }
 
     /// Verifies replay authority for a run using retained typed artifact evidence only.
@@ -1277,37 +1041,14 @@ where
         &self,
         run_id: &RunId,
     ) -> Result<TypedReplayResponse, AppError> {
-        let stream = self
-            .store
-            .load_run_stream(run_id)
-            .await
-            .map_err(async_app_store_error)?;
-        if stream.is_empty() {
-            return Err(AppError::not_found(
-                "RunNotFound",
-                "typed run stream was not found",
-            ));
-        }
-        let certified = load_certified_spec_for_run(
-            &self.artifacts,
-            &self.certification_registry,
-            run_id,
-            &stream,
-        )
-        .await?;
-        let runtime_spec = CertifiedRuntimeSpec::new(certified)?;
-        let verified_history =
-            verified_run_history_from_events(&self.artifacts, &runtime_spec, run_id, &stream)
-                .await?;
-        let authority =
-            replay_read_authority_for_run(&self.artifacts, &runtime_spec, &verified_history)
-                .await?;
+        let context = self.load_verified_run_read_context(run_id).await?;
+        let authority = replay_read_authority_for_run(context.runtime_spec(), context.view())?;
         let broker = ReplayBroker::from_read_authority(authority)?;
-        let stream = verified_history.events();
+        let stream = context.events();
         mfm_adapters_evm_contracts::verify_contract_lifecycle_replay(&broker)?;
         mfm_transports_proof::verify_deterministic_proof_replay(&broker)?;
         let projection = broker.projection_snapshot();
-        let saga = projection.derive_saga_projection(run_id, &runtime_spec.spec().saga);
+        let saga = projection.derive_saga_projection(run_id, &context.runtime_spec().spec().saga);
         let retained_artifacts = projection
             .retention(run_id)
             .map(|retention| retention.refs.len())
@@ -1316,7 +1057,11 @@ where
             run_id: run_id.as_str().to_owned(),
             spec_hash: broker.certified_spec().spec_hash.as_str().to_owned(),
             run_mode: typed_run_mode(saga.run_mode),
-            saga: typed_saga_status_with_resources(runtime_spec.spec(), projection, &saga),
+            saga: typed_saga_status_with_resources(
+                context.runtime_spec().spec(),
+                projection,
+                &saga,
+            ),
             attempt_dispositions: typed_attempt_dispositions(projection),
             head_seq: stream_head(stream),
             retained_artifacts,
@@ -1329,35 +1074,28 @@ where
         run_id: &RunId,
         public_schema_id: &SchemaId,
     ) -> Result<TypedPublicOutputResponse, AppError> {
-        let stream = self
-            .store
-            .load_run_stream(run_id)
-            .await
-            .map_err(async_app_store_error)?;
-        if stream.is_empty() {
-            return Err(AppError::not_found(
-                "RunNotFound",
-                "typed run stream was not found",
-            ));
-        }
-        let runtime_spec = load_runtime_spec_for_run(
-            &self.artifacts,
-            &self.certification_registry,
-            run_id,
-            &stream,
-        )
-        .await?;
-        let verified_history =
-            verified_run_history_from_events(&self.artifacts, &runtime_spec, run_id, &stream)
-                .await?;
+        let context = self.load_verified_run_read_context(run_id).await?;
         let authority = public_output_read_authority_for_run(
             &self.artifacts,
-            &runtime_spec,
-            &verified_history,
+            context.runtime_spec(),
+            context.view(),
             public_schema_id,
         )
         .await?;
         render_typed_public_output(&self.artifacts, &authority).await
+    }
+
+    async fn load_verified_run_read_context(
+        &self,
+        run_id: &RunId,
+    ) -> Result<VerifiedRunReadContext, AppError> {
+        load_async_verified_run_read_context(
+            &self.store,
+            &self.artifacts,
+            &self.certification_registry,
+            run_id,
+        )
+        .await
     }
 
     async fn drive_with_mode(
@@ -1370,14 +1108,134 @@ where
             DriveMode::AppendOnly => Ok(SchedulerStatus::Blocked),
             DriveMode::Once => Ok(self
                 .scheduler
-                .drive_once_async(&self.store, runtime_spec, run_id)
+                .drive_once(&self.store, runtime_spec, run_id)
                 .await?),
             DriveMode::UntilBlocked => Ok(self
                 .scheduler
-                .drive_until_blocked_async(&self.store, runtime_spec, run_id)
+                .drive_until_blocked(&self.store, runtime_spec, run_id)
                 .await?),
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct VerifiedRunReadContext {
+    runtime_spec: CertifiedRuntimeSpec,
+    view: VerifiedRunHistoryView,
+}
+
+impl VerifiedRunReadContext {
+    fn runtime_spec(&self) -> &CertifiedRuntimeSpec {
+        &self.runtime_spec
+    }
+
+    fn view(&self) -> &VerifiedRunHistoryView {
+        &self.view
+    }
+
+    fn events(&self) -> &[store::KernelEventEnvelope] {
+        self.view.events()
+    }
+
+    fn status_projection_with_resource_lanes(
+        &self,
+        global_projection: &store::ProjectionSnapshot,
+    ) -> Result<store::ProjectionSnapshot, AppError> {
+        status_projection_from_verified_view_with_resource_lanes(&self.view, global_projection)
+            .map_err(Into::into)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct VerifiedStatusReadContext {
+    read: VerifiedRunReadContext,
+    projection: store::ProjectionSnapshot,
+}
+
+impl VerifiedStatusReadContext {
+    fn runtime_spec(&self) -> &CertifiedRuntimeSpec {
+        self.read.runtime_spec()
+    }
+
+    fn events(&self) -> &[store::KernelEventEnvelope] {
+        self.read.events()
+    }
+
+    fn projection(&self) -> &store::ProjectionSnapshot {
+        &self.projection
+    }
+}
+
+async fn load_async_verified_run_read_context<S>(
+    store: &S,
+    artifacts: &FsTypedArtifactStore,
+    registry: &CertificationRegistry,
+    run_id: &RunId,
+) -> Result<VerifiedRunReadContext, AppError>
+where
+    S: store::AsyncTypedRunEventStore + Send + Sync,
+{
+    let stream = store
+        .load_run_stream(run_id)
+        .await
+        .map_err(async_app_store_error)?;
+    verified_run_read_context_from_events(artifacts, registry, run_id, stream).await
+}
+
+async fn load_async_verified_status_read_context<S>(
+    store: &S,
+    artifacts: &FsTypedArtifactStore,
+    registry: &CertificationRegistry,
+    run_id: &RunId,
+) -> Result<VerifiedStatusReadContext, AppError>
+where
+    S: store::AsyncTypedRunEventStore + Send + Sync,
+{
+    let stream = store
+        .load_run_stream(run_id)
+        .await
+        .map_err(async_app_store_error)?;
+    let projection = store
+        .status_projection_snapshot(run_id)
+        .await
+        .map_err(async_app_store_error)?;
+    verified_status_read_context_from_events(artifacts, registry, run_id, stream, &projection).await
+}
+
+async fn verified_status_read_context_from_events(
+    artifacts: &FsTypedArtifactStore,
+    registry: &CertificationRegistry,
+    run_id: &RunId,
+    stream: Vec<store::KernelEventEnvelope>,
+    global_projection: &store::ProjectionSnapshot,
+) -> Result<VerifiedStatusReadContext, AppError> {
+    let read = verified_run_read_context_from_events(artifacts, registry, run_id, stream).await?;
+    let projection = read.status_projection_with_resource_lanes(global_projection)?;
+    Ok(VerifiedStatusReadContext { read, projection })
+}
+
+async fn verified_run_read_context_from_events(
+    artifacts: &FsTypedArtifactStore,
+    registry: &CertificationRegistry,
+    run_id: &RunId,
+    stream: Vec<store::KernelEventEnvelope>,
+) -> Result<VerifiedRunReadContext, AppError> {
+    if stream.is_empty() {
+        return Err(AppError::not_found(
+            "RunNotFound",
+            "typed run stream was not found",
+        ));
+    }
+    let runtime_spec = load_runtime_spec_for_run(artifacts, registry, run_id, &stream).await?;
+    let committed = store::CommittedRunStream::from_events(run_id.clone(), stream)?;
+    let retained_artifacts =
+        store::VerifiedRunArtifactStore::from_committed_stream(&committed, artifacts).await?;
+    let view = VerifiedRunHistoryView::from_committed_stream(
+        &runtime_spec,
+        committed,
+        retained_artifacts,
+    )?;
+    Ok(VerifiedRunReadContext { runtime_spec, view })
 }
 
 /// Loads and verifies the certified spec artifact bound by a typed run stream.
@@ -1415,43 +1273,12 @@ async fn load_runtime_spec_for_run(
     CertifiedRuntimeSpec::new(certified).map_err(Into::into)
 }
 
-async fn verified_run_history_from_events(
-    artifacts: &FsTypedArtifactStore,
+/// Builds sealed replay read authority from a verified run-history view.
+pub fn replay_read_authority_for_run(
     runtime_spec: &CertifiedRuntimeSpec,
-    run_id: &RunId,
-    stream: &[store::KernelEventEnvelope],
-) -> Result<VerifiedRunHistory, AppError> {
-    let committed = store::CommittedRunStream::from_events(run_id.clone(), stream.to_vec())?;
-    let retained_artifacts =
-        store::VerifiedRunArtifactStore::from_committed_stream(&committed, artifacts).await?;
-    VerifiedRunHistory::from_committed_stream(runtime_spec, committed, retained_artifacts)
-        .map_err(Into::into)
-}
-
-async fn validate_stored_run_stream_for_read(
-    artifacts: &FsTypedArtifactStore,
-    registry: &CertificationRegistry,
-    run_id: &RunId,
-    stream: &[store::KernelEventEnvelope],
-) -> Result<(), AppError> {
-    if stream.is_empty() {
-        return Err(AppError::not_found(
-            "RunNotFound",
-            "typed run stream was not found",
-        ));
-    }
-    let runtime_spec = load_runtime_spec_for_run(artifacts, registry, run_id, stream).await?;
-    verified_run_history_from_events(artifacts, &runtime_spec, run_id, stream).await?;
-    Ok(())
-}
-
-/// Builds sealed replay read authority from retained artifact evidence in verified run history.
-pub async fn replay_read_authority_for_run(
-    _artifacts: &FsTypedArtifactStore,
-    runtime_spec: &CertifiedRuntimeSpec,
-    verified_history: &VerifiedRunHistory,
+    verified_view: &VerifiedRunHistoryView,
 ) -> Result<ReplayReadAuthority, AppError> {
-    ReplayReadAuthority::from_verified_run_history(runtime_spec, verified_history)
+    ReplayReadAuthority::from_verified_run_history_view(runtime_spec, verified_view)
         .map_err(Into::into)
 }
 
@@ -1459,10 +1286,11 @@ fn certified_spec_launch_artifact(
     runtime_spec: &CertifiedRuntimeSpec,
 ) -> Result<RunLaunchArtifact, AppError> {
     let canonical = runtime_spec.spec().canonical_json().map_err(|error| {
-        AppError::new(
+        let _ = error;
+        AppError::backend(
             ErrorClass::Internal,
             "CertifiedSpecCanonicalError",
-            error.to_string(),
+            "Certified typed spec canonicalization failed",
         )
     })?;
     Ok(launch_artifact(
@@ -1482,18 +1310,20 @@ fn certified_spec_certificate_launch_artifact(
         .certificate()
         .canonical_json()
         .map_err(|error| {
-            AppError::new(
+            let _ = error;
+            AppError::backend(
                 ErrorClass::Internal,
                 "CertifiedCertificateCanonicalError",
-                error.to_string(),
+                "Certified typed spec certificate canonicalization failed",
             )
         })?;
     let media_type =
         spec::MediaType::new(mfm_certify::CERTIFICATE_MEDIA_TYPE).map_err(|error| {
-            AppError::new(
+            let _ = error;
+            AppError::backend(
                 ErrorClass::Internal,
                 "CertifiedCertificateMediaTypeInvalid",
-                error.to_string(),
+                "Certified typed spec certificate media type is invalid",
             )
         })?;
     Ok(launch_artifact(
@@ -1551,22 +1381,13 @@ fn config_launch_artifacts_for_spec(
                 format!("missing config input for {}", config_ref.schema_id),
             )
         })?;
-        if artifact.evidence.artifact_id != config_ref.artifact_id
-            || artifact.evidence.digest != config_ref.digest
-            || artifact.evidence.byte_len != config_ref.byte_len
-            || artifact.evidence.media_type != config_ref.media_type
-            || artifact.evidence.schema_id.as_ref() != Some(&config_ref.schema_id)
-            || artifact.evidence.semantic_type_id.is_some()
-            || artifact.evidence.producer_node_id.is_some()
-            || artifact.evidence.producer_seed_id.is_some()
-            || artifact.evidence.artifact_role != events::ArtifactRole::TypedConfig
-        {
-            return Err(AppError::new(
-                ErrorClass::BadRequest,
-                "LaunchConfigArtifactMismatch",
-                "typed config input does not match the certified spec",
-            ));
-        }
+        validate_artifact_requirement_for_app(
+            config_ref_artifact_requirement(config_ref),
+            &artifact.evidence,
+            ErrorClass::BadRequest,
+            "LaunchConfigArtifactMismatch",
+            "typed config input does not match the certified spec",
+        )?;
         if registry
             .validate_config_ref_bytes(config_ref, &artifact.bytes)?
             .is_none()
@@ -1608,10 +1429,11 @@ fn framework_config_matches_ref(
         let expected =
             spec::framework_config_canonical_json(framework.config_kind(), &node.node_id).map_err(
                 |error| {
-                    AppError::new(
+                    let _ = error;
+                    AppError::backend(
                         ErrorClass::Internal,
                         "LaunchFrameworkConfigInvalid",
-                        error.to_string(),
+                        "Framework config canonicalization failed",
                     )
                 },
             )?;
@@ -1652,6 +1474,13 @@ fn seed_launch_cells_for_spec(
             Some(seed_spec.seed_id.clone()),
             events::ArtifactRole::SeedInput,
         );
+        validate_artifact_requirement_for_app(
+            seed_artifact_requirement(seed_spec, &artifact.evidence),
+            &artifact.evidence,
+            ErrorClass::BadRequest,
+            "LaunchSeedArtifactMismatch",
+            "seed input artifact metadata does not match the certified spec",
+        )?;
         if let Some(required_digest) = &seed_spec.required_digest {
             if &artifact.evidence.digest != required_digest {
                 return Err(AppError::new(
@@ -1730,13 +1559,132 @@ fn config_input_key(schema_id: &SchemaId, digest: &ContentDigest) -> String {
     format!("{schema_id}:{digest}")
 }
 
+fn validate_artifact_requirement_for_app(
+    requirement: store::EventArtifactRequirement,
+    evidence: &store::ArtifactEvidenceRef,
+    class: ErrorClass,
+    code: &'static str,
+    message: &'static str,
+) -> Result<(), AppError> {
+    store::validate_artifact_requirement_against_evidence(&requirement, evidence).map_err(|error| {
+        match error {
+            store::StoreError::ArtifactEvidenceMismatch { .. } => {
+                AppError::new(class, code, message)
+            }
+            error => error.into(),
+        }
+    })
+}
+
+fn run_artifact_requirement(
+    source: store::EventArtifactReferenceSource,
+    expected: &events::RunArtifactEvidenceRef,
+    role: events::ArtifactRole,
+) -> store::EventArtifactRequirement {
+    store::EventArtifactRequirement {
+        source,
+        artifact_id: expected.artifact_id.clone(),
+        digest: Some(expected.content_digest.clone()),
+        byte_len: Some(expected.byte_len),
+        media_type: Some(expected.media_type.clone()),
+        schema_id: expected.schema_id.clone(),
+        semantic_type_id: expected.semantic_type_id.clone(),
+        producer_node_id: None,
+        producer_seed_id: None,
+        artifact_role: Some(role),
+    }
+}
+
+fn config_ref_artifact_requirement(
+    config_ref: &spec::ConfigRef,
+) -> store::EventArtifactRequirement {
+    store::EventArtifactRequirement {
+        source: store::EventArtifactReferenceSource::RunConfig,
+        artifact_id: config_ref.artifact_id.clone(),
+        digest: Some(config_ref.digest.clone()),
+        byte_len: Some(config_ref.byte_len),
+        media_type: Some(config_ref.media_type.clone()),
+        schema_id: Some(config_ref.schema_id.clone()),
+        semantic_type_id: None,
+        producer_node_id: None,
+        producer_seed_id: None,
+        artifact_role: Some(events::ArtifactRole::TypedConfig),
+    }
+}
+
+fn seed_artifact_requirement(
+    seed_spec: &spec::SeedSpec,
+    evidence: &store::ArtifactEvidenceRef,
+) -> store::EventArtifactRequirement {
+    store::EventArtifactRequirement {
+        source: store::EventArtifactReferenceSource::SeedCell,
+        artifact_id: evidence.artifact_id.clone(),
+        digest: Some(evidence.digest.clone()),
+        byte_len: Some(evidence.byte_len),
+        media_type: Some(evidence.media_type.clone()),
+        schema_id: Some(seed_spec.schema_id.clone()),
+        semantic_type_id: Some(seed_spec.semantic_type_id.clone()),
+        producer_node_id: None,
+        producer_seed_id: Some(seed_spec.seed_id.clone()),
+        artifact_role: Some(events::ArtifactRole::SeedInput),
+    }
+}
+
+fn public_output_cell_artifact_requirement(
+    cell: &events::NamedTypedCellRef,
+) -> store::EventArtifactRequirement {
+    let (artifact_role, producer_node_id, producer_seed_id) = match &cell.producer {
+        spec::CellProducer::Node(node_id) => (
+            events::ArtifactRole::StateOutput,
+            Some(node_id.clone()),
+            None,
+        ),
+        spec::CellProducer::Seed(seed_id) => {
+            (events::ArtifactRole::SeedInput, None, Some(seed_id.clone()))
+        }
+    };
+    store::EventArtifactRequirement {
+        source: store::EventArtifactReferenceSource::PublicOutputCell,
+        artifact_id: cell.artifact_id.clone(),
+        digest: Some(cell.content_digest.clone()),
+        byte_len: None,
+        media_type: None,
+        schema_id: Some(cell.schema_id.clone()),
+        semantic_type_id: Some(cell.semantic_type_id.clone()),
+        producer_node_id,
+        producer_seed_id,
+        artifact_role: Some(artifact_role),
+    }
+}
+
+fn public_output_rendered_artifact_requirement(
+    payload: &events::PublicOutputProduced,
+    artifact_id: &ArtifactId,
+    rendered_digest: &ContentDigest,
+    media_type: spec::MediaType,
+) -> store::EventArtifactRequirement {
+    store::EventArtifactRequirement {
+        source: store::EventArtifactReferenceSource::PublicOutputRendered,
+        artifact_id: artifact_id.clone(),
+        digest: Some(rendered_digest.clone()),
+        byte_len: None,
+        media_type: Some(media_type),
+        schema_id: Some(payload.public_schema_id.clone()),
+        semantic_type_id: None,
+        producer_node_id: Some(payload.node_id.clone()),
+        producer_seed_id: None,
+        artifact_role: Some(events::ArtifactRole::PublicOutput),
+    }
+}
+
 /// Returns the default JSON media type used by typed CLI seed inputs.
 pub fn json_media_type() -> Result<spec::MediaType, AppError> {
     spec::MediaType::new("application/json").map_err(|error| {
-        AppError::new(
+        let _ = error;
+        AppError::backend(
             ErrorClass::Internal,
             "JsonMediaTypeInvalid",
-            error.to_string(),
+            "JSON media type is invalid",
         )
     })
 }
@@ -1757,10 +1705,11 @@ pub fn parse_certified_spec_bundle_json_bytes(
     bytes: &[u8],
 ) -> Result<CertifiedSpecBundle, AppError> {
     let parsed: CertifiedSpecBundleJson = serde_json::from_slice(bytes).map_err(|error| {
+        let _ = error;
         AppError::new(
             ErrorClass::BadRequest,
             "CertifiedBundleInvalid",
-            format!("invalid certified typed spec bundle JSON: {error}"),
+            "Certified typed spec bundle JSON is invalid",
         )
     })?;
     certified_spec_bundle_from_json(parsed)
@@ -1775,10 +1724,11 @@ pub fn parse_certified_spec_bundle_json_value(
 ) -> Result<CertifiedSpecBundle, AppError> {
     let parsed: CertifiedSpecBundleJson =
         serde_json::from_value(value.clone()).map_err(|error| {
+            let _ = error;
             AppError::new(
                 ErrorClass::BadRequest,
                 "CertifiedBundleInvalid",
-                format!("invalid certified typed spec bundle: {error}"),
+                "Certified typed spec bundle is invalid",
             )
         })?;
     certified_spec_bundle_from_json(parsed)
@@ -1804,19 +1754,21 @@ fn certified_spec_bundle_from_json(
 
 fn canonical_json_value_bytes(value: &Value, field: &'static str) -> Result<Vec<u8>, AppError> {
     let json = serde_json::to_string(value).map_err(|error| {
-        AppError::new(
+        let _ = (field, error);
+        AppError::backend(
             ErrorClass::Internal,
             "CertifiedBundleSerializationFailed",
-            format!("failed to serialize {field} JSON value: {error}"),
+            "Certified typed spec bundle serialization failed",
         )
     })?;
     PlainCanonicalJsonBytes::from_json_str(&json)
         .map(|canonical| canonical.to_vec())
         .map_err(|error| {
+            let _ = (field, error);
             AppError::new(
                 ErrorClass::BadRequest,
                 "CertifiedBundleInvalid",
-                format!("invalid certified typed spec bundle {field}: {error}"),
+                "Certified typed spec bundle field is not canonical JSON",
             )
         })
 }
@@ -1910,19 +1862,21 @@ pub fn prepare_certified_run_launch(
             config_artifacts,
             framework_version: events::FrameworkVersion::new(input.framework_version).map_err(
                 |error| {
+                    let _ = error;
                     AppError::new(
                         ErrorClass::BadRequest,
                         "FrameworkVersionInvalid",
-                        error.to_string(),
+                        "Framework version is invalid",
                     )
                 },
             )?,
             source_revision: events::SourceRevision::new(input.source_revision).map_err(
                 |error| {
+                    let _ = error;
                     AppError::new(
                         ErrorClass::BadRequest,
                         "SourceRevisionInvalid",
-                        error.to_string(),
+                        "Source revision is invalid",
                     )
                 },
             )?,
@@ -1934,31 +1888,46 @@ pub fn prepare_certified_run_launch(
     })
 }
 
-fn async_app_store_error(error: impl fmt::Display) -> AppError {
-    AppError::new(ErrorClass::Conflict, "RunStoreRejected", error.to_string())
+fn async_app_store_error(_error: impl fmt::Display) -> AppError {
+    AppError::backend(
+        ErrorClass::Conflict,
+        "RunStoreRejected",
+        "Run store rejected the requested operation",
+    )
 }
 
-/// Derives typed run status from an authoritative store-owned run stream.
-pub fn typed_run_status_from_stream(
-    run_id: &RunId,
-    runtime_spec: &CertifiedRuntimeSpec,
-    stream: &[store::KernelEventEnvelope],
-) -> Result<TypedRunResponse, AppError> {
-    if stream.is_empty() {
-        return Err(AppError::not_found(
-            "RunNotFound",
-            "typed run stream was not found",
-        ));
-    }
-    let spec_hash = run_admitted_spec_hash(stream)?;
-    let projection = store::ProjectionSnapshot::rebuild_from_run_stream(stream)?;
-    typed_run_status_from_projection_with_spec_hash(
-        run_id,
-        runtime_spec,
-        stream,
-        &projection,
-        &spec_hash,
-    )
+fn manual_resolution_runtime_request(
+    req: ManualResolutionRecordRequest,
+) -> Result<ManualResolutionRequest, AppError> {
+    let media_type = spec::MediaType::new(&req.evidence_media_type).map_err(|error| {
+        let _ = error;
+        AppError::new(
+            ErrorClass::BadRequest,
+            "ManualResolutionEvidenceMediaTypeInvalid",
+            "Manual resolution evidence media type is invalid",
+        )
+    })?;
+    let note = req
+        .note
+        .map(events::ManualResolutionNote::new)
+        .transpose()
+        .map_err(|error| {
+            let _ = error;
+            AppError::new(
+                ErrorClass::BadRequest,
+                "ManualResolutionNoteInvalid",
+                "Manual resolution note is invalid",
+            )
+        })?;
+    Ok(ManualResolutionRequest {
+        outcome: req.outcome.into_event(),
+        evidence_artifact: ManualResolutionEvidenceArtifact {
+            bytes: req.evidence_bytes,
+            media_type,
+        },
+        proof_bytes: req.authorization_proof_bytes,
+        note,
+    })
 }
 
 fn typed_run_status_from_projection(
@@ -1996,35 +1965,33 @@ fn typed_run_status_from_projection_with_spec_hash(
     })
 }
 
-/// Renders store-owned typed event references for a run stream response.
-pub fn typed_run_stream_response_from_events(
-    run_id: &RunId,
-    head_seq: u64,
-    events: &[store::KernelEventEnvelope],
+fn typed_run_stream_response_from_verified_context(
+    context: &VerifiedRunReadContext,
 ) -> TypedRunStreamResponse {
+    let events = context.events();
     TypedRunStreamResponse {
-        run_id: run_id.as_str().to_owned(),
-        head_seq,
+        run_id: context.view().run_id().as_str().to_owned(),
+        head_seq: stream_head(events),
         events: events.iter().map(typed_event_ref).collect(),
     }
 }
 
-/// Builds typed public-output read authority from certified runtime authority, verified run
-/// history, rebuilt projection, and verified typed artifact evidence.
+/// Builds typed public-output read authority from certified runtime authority, verified run-history
+/// view, rebuilt projection, and verified typed artifact evidence.
 pub async fn public_output_read_authority_for_run(
     artifacts: &FsTypedArtifactStore,
     runtime_spec: &CertifiedRuntimeSpec,
-    verified_history: &VerifiedRunHistory,
+    verified_view: &VerifiedRunHistoryView,
     public_schema_id: &SchemaId,
 ) -> Result<PublicOutputReadAuthority, AppError> {
-    if runtime_spec.spec_hash() != verified_history.spec_hash() {
+    if runtime_spec.spec_hash() != verified_view.spec_hash() {
         return Err(AppError::new(
             ErrorClass::Internal,
             "PublicOutputAuthorityMismatch",
             "verified history spec hash does not match certified runtime authority",
         ));
     }
-    let projection = verified_history.projection_snapshot();
+    let projection = verified_view.projection_snapshot();
     let public_output = projection.public_output(public_schema_id).ok_or_else(|| {
         AppError::not_found(
             "PublicOutputNotFound",
@@ -2045,7 +2012,7 @@ pub async fn public_output_read_authority_for_run(
     };
 
     let payload =
-        public_output_payload_from_stream(verified_history.events(), event_id, public_schema_id)?;
+        public_output_payload_from_stream(verified_view.events(), event_id, public_schema_id)?;
     if &payload.spec_hash != runtime_spec.spec_hash()
         || &payload.public_schema_id != public_schema_id
         || public_schema_id != &runtime_spec.spec().public_outputs.public_schema_id
@@ -2065,7 +2032,7 @@ pub async fn public_output_read_authority_for_run(
     .await?;
 
     Ok(PublicOutputReadAuthority {
-        run_id: verified_history.run_id().clone(),
+        run_id: verified_view.run_id().clone(),
         public_schema_id: public_schema_id.clone(),
         event_id: event_id.clone(),
         rendered_digest: rendered_digest.clone(),
@@ -2163,10 +2130,11 @@ async fn render_public_output_json_from_authority(
         let (bytes, evidence) = artifacts.get_artifact_by_id(&cell.artifact_id).await?;
         verify_public_output_cell_evidence(cell, &evidence)?;
         let value = serde_json::from_slice(&bytes).map_err(|error| {
-            AppError::new(
+            let _ = error;
+            AppError::backend(
                 ErrorClass::Internal,
                 "PublicOutputDecodeFailed",
-                format!("typed public-output cell artifact was not JSON: {error}"),
+                "Typed public-output cell artifact was not JSON",
             )
         })?;
         insert_public_output_value(&mut root, cell.public_field_path.as_str(), value)?;
@@ -2178,40 +2146,13 @@ fn verify_public_output_cell_evidence(
     cell: &events::NamedTypedCellRef,
     evidence: &store::ArtifactEvidenceRef,
 ) -> Result<(), AppError> {
-    if evidence.artifact_id != cell.artifact_id
-        || evidence.digest != cell.content_digest
-        || evidence.schema_id.as_ref() != Some(&cell.schema_id)
-        || evidence.semantic_type_id.as_ref() != Some(&cell.semantic_type_id)
-    {
-        return Err(public_output_artifact_mismatch(
-            "typed public-output cell artifact evidence does not match the event cell reference",
-        ));
-    }
-
-    match &cell.producer {
-        spec::CellProducer::Node(node_id) => {
-            if evidence.artifact_role != events::ArtifactRole::StateOutput
-                || evidence.producer_node_id.as_ref() != Some(node_id)
-                || evidence.producer_seed_id.is_some()
-            {
-                return Err(public_output_artifact_mismatch(
-                    "typed public-output node cell artifact evidence has the wrong producer or role",
-                ));
-            }
-        }
-        spec::CellProducer::Seed(seed_id) => {
-            if evidence.artifact_role != events::ArtifactRole::SeedInput
-                || evidence.producer_seed_id.as_ref() != Some(seed_id)
-                || evidence.producer_node_id.is_some()
-            {
-                return Err(public_output_artifact_mismatch(
-                    "typed public-output seed cell artifact evidence has the wrong producer or role",
-                ));
-            }
-        }
-    }
-
-    Ok(())
+    validate_artifact_requirement_for_app(
+        public_output_cell_artifact_requirement(cell),
+        evidence,
+        ErrorClass::Internal,
+        "PublicOutputArtifactMismatch",
+        "typed public-output cell artifact evidence does not match the event cell reference",
+    )
 }
 
 fn insert_public_output_value(
@@ -2268,10 +2209,11 @@ async fn load_public_output_json(
         payload,
     )?;
     serde_json::from_slice(&bytes).map_err(|error| {
-        AppError::new(
+        let _ = error;
+        AppError::backend(
             ErrorClass::Internal,
             "PublicOutputDecodeFailed",
-            format!("typed public-output artifact was not JSON: {error}"),
+            "Typed public-output artifact was not JSON",
         )
     })
 }
@@ -2283,26 +2225,25 @@ fn verify_public_output_rendered_artifact_evidence(
     payload: &events::PublicOutputProduced,
 ) -> Result<(), AppError> {
     let json_media_type = spec::MediaType::new("application/json").map_err(|error| {
-        AppError::new(
+        let _ = error;
+        AppError::backend(
             ErrorClass::Internal,
             "PublicOutputMediaTypeInvalid",
-            error.to_string(),
+            "Public-output JSON media type is invalid",
         )
     })?;
-    if evidence.artifact_id != *artifact_id
-        || evidence.digest != *rendered_digest
-        || evidence.media_type != json_media_type
-        || evidence.schema_id.as_ref() != Some(&payload.public_schema_id)
-        || evidence.semantic_type_id.is_some()
-        || evidence.producer_node_id.as_ref() != Some(&payload.node_id)
-        || evidence.producer_seed_id.is_some()
-        || evidence.artifact_role != events::ArtifactRole::PublicOutput
-    {
-        return Err(public_output_artifact_mismatch(
-            "typed public-output cache artifact evidence does not match the produced event",
-        ));
-    }
-    Ok(())
+    validate_artifact_requirement_for_app(
+        public_output_rendered_artifact_requirement(
+            payload,
+            artifact_id,
+            rendered_digest,
+            json_media_type,
+        ),
+        evidence,
+        ErrorClass::Internal,
+        "PublicOutputArtifactMismatch",
+        "typed public-output cache artifact evidence does not match the produced event",
+    )
 }
 
 fn public_output_artifact_mismatch(message: &'static str) -> AppError {
@@ -2347,22 +2288,27 @@ fn validate_spec_artifact_evidence(
     run_admitted: &events::RunAdmitted,
     evidence: &store::ArtifactEvidenceRef,
 ) -> Result<(), AppError> {
+    if run_admitted.spec_artifact.role != events::ArtifactRole::TypedExecutionSpec {
+        return Err(AppError::new(
+            ErrorClass::Internal,
+            "CertifiedSpecArtifactMismatch",
+            "typed execution spec artifact metadata does not match RunAdmitted evidence",
+        ));
+    }
+    validate_artifact_requirement_for_app(
+        run_artifact_requirement(
+            store::EventArtifactReferenceSource::RunSpec,
+            &run_admitted.spec_artifact,
+            events::ArtifactRole::TypedExecutionSpec,
+        ),
+        evidence,
+        ErrorClass::Internal,
+        "CertifiedSpecArtifactMismatch",
+        "typed execution spec artifact metadata does not match RunAdmitted evidence",
+    )?;
     let expected_spec_hash =
         SpecHash::from_digest(evidence.digest.algorithm(), *evidence.digest.digest());
-    if evidence.artifact_id != run_admitted.spec_artifact.artifact_id
-        || expected_spec_hash != run_admitted.spec_hash
-        || evidence.digest != run_admitted.spec_artifact.content_digest
-        || evidence.byte_len != run_admitted.spec_artifact.byte_len
-        || evidence.media_type != run_admitted.spec_artifact.media_type
-        || evidence.schema_id != run_admitted.spec_artifact.schema_id
-        || evidence.semantic_type_id != run_admitted.spec_artifact.semantic_type_id
-        || evidence.schema_id.is_some()
-        || evidence.semantic_type_id.is_some()
-        || evidence.producer_node_id.is_some()
-        || evidence.producer_seed_id.is_some()
-        || evidence.artifact_role != run_admitted.spec_artifact.role
-        || evidence.artifact_role != events::ArtifactRole::TypedExecutionSpec
-    {
+    if expected_spec_hash != run_admitted.spec_hash {
         return Err(AppError::new(
             ErrorClass::Internal,
             "CertifiedSpecArtifactMismatch",
@@ -2376,25 +2322,24 @@ fn validate_certificate_artifact_evidence(
     run_admitted: &events::RunAdmitted,
     evidence: &store::ArtifactEvidenceRef,
 ) -> Result<(), AppError> {
-    if evidence.artifact_id != run_admitted.certificate_artifact.artifact_id
-        || evidence.digest != run_admitted.certificate_artifact.content_digest
-        || evidence.byte_len != run_admitted.certificate_artifact.byte_len
-        || evidence.media_type != run_admitted.certificate_artifact.media_type
-        || evidence.schema_id != run_admitted.certificate_artifact.schema_id
-        || evidence.semantic_type_id != run_admitted.certificate_artifact.semantic_type_id
-        || evidence.schema_id.is_some()
-        || evidence.semantic_type_id.is_some()
-        || evidence.producer_node_id.is_some()
-        || evidence.producer_seed_id.is_some()
-        || evidence.artifact_role != run_admitted.certificate_artifact.role
-        || evidence.artifact_role != events::ArtifactRole::TypedSpecCertificate
-    {
+    if run_admitted.certificate_artifact.role != events::ArtifactRole::TypedSpecCertificate {
         return Err(AppError::new(
             ErrorClass::Internal,
             "CertifiedCertificateArtifactMismatch",
             "typed spec certificate artifact metadata does not match RunAdmitted evidence",
         ));
     }
+    validate_artifact_requirement_for_app(
+        run_artifact_requirement(
+            store::EventArtifactReferenceSource::RunCertificate,
+            &run_admitted.certificate_artifact,
+            events::ArtifactRole::TypedSpecCertificate,
+        ),
+        evidence,
+        ErrorClass::Internal,
+        "CertifiedCertificateArtifactMismatch",
+        "typed spec certificate artifact metadata does not match RunAdmitted evidence",
+    )?;
     Ok(())
 }
 
@@ -2443,25 +2388,12 @@ fn typed_run_response_from_projection(
     })
 }
 
-fn typed_run_response<S: store::TypedRunEventStore + ?Sized>(
-    store: &S,
-    runtime_spec: &CertifiedRuntimeSpec,
-    run_id: &RunId,
-    status: SchedulerStatus,
-) -> Result<TypedRunResponse, AppError> {
-    let stream = store.load_run_stream(run_id);
-    let projection =
-        status_projection_from_stream_with_resource_lanes(&stream, store.projection_snapshot())?;
-    typed_run_response_from_projection(run_id, runtime_spec, &stream, &projection, status)
-}
-
-fn status_projection_from_stream_with_resource_lanes(
-    stream: &[store::KernelEventEnvelope],
+fn status_projection_from_verified_view_with_resource_lanes(
+    view: &VerifiedRunHistoryView,
     global_projection: &store::ProjectionSnapshot,
 ) -> Result<store::ProjectionSnapshot, store::StoreError> {
-    let run_projection = store::ProjectionSnapshot::rebuild_from_run_stream(stream)?;
     projection_with_resource_lanes(
-        &run_projection,
+        view.projection_snapshot(),
         global_projection
             .resource_lanes()
             .map(|(lane_key, projection)| (lane_key.clone(), projection.clone()))
@@ -2561,14 +2493,6 @@ fn typed_attempt_disposition(attempt: &store::AttemptProjection) -> TypedAttempt
         retryable,
         output_cell_id,
     }
-}
-
-#[cfg(test)]
-fn typed_saga_status(
-    policy: &spec::SagaPolicySpec,
-    saga: &store::SagaProjection,
-) -> TypedSagaStatus {
-    typed_saga_status_inner(policy, None, None, saga)
 }
 
 fn typed_saga_status_with_resources(
@@ -3006,3213 +2930,5 @@ fn typed_event_ref(event: &store::KernelEventEnvelope) -> TypedRunEventRef {
         commit_key: event.commit_key().as_str().to_owned(),
         logical_key: event.logical_key().as_str().to_owned(),
         payload_hash: event.payload_hash().as_str().to_owned(),
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::disallowed_methods)]
-mod tests {
-    use super::*;
-    use mfm_artifact_store_fs::TypedArtifactDescriptor;
-    use mfm_capabilities::{NoCaps, Pure};
-    use mfm_ids::{
-        AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind, CapabilityVersion,
-        CellId, ContentDigest, DescriptorId, DigestBytes, LoweringVersion, NodeId, ScopeId, SeedId,
-        SemanticTypeId, SpecHash, SpecVersion, StateKind, StateVersion,
-    };
-    use mfm_program::{
-        build_root_with_registries, CanonicalSeed, PublicOutputKey, PureState, RootBuilder,
-        ScopeKey, SeedKey, StateKey, StateRegistryBuilder, StateResult, StateSpec,
-    };
-    use mfm_program_derive::{MfmConfig, MfmValue, PublicOutputs};
-    use mfm_runtime::{
-        ErasedNodeRunner, ErasedRunCtx, ErasedRunnerBinding, ErasedRunnerFuture,
-        ErasedRunnerOutput, RunnerEventPayload, StagedArtifact, StagedRetentionRefs,
-    };
-    use mfm_store::v1::{AsyncTypedRunEventStore, TypedProjectionRead, TypedRunEventStore};
-    use serde::{Deserialize, Serialize};
-    use std::collections::{BTreeMap, BTreeSet};
-    use std::path::Path;
-    use std::sync::Arc;
-    use std::sync::Mutex as StdMutex;
-
-    #[test]
-    fn generated_run_ids_are_typed_digest_ids() {
-        let run_id = new_run_id();
-
-        assert!(run_id.as_str().starts_with("run:sha256-jcs-v1:"));
-    }
-
-    #[test]
-    fn typed_run_mode_names_are_stable() {
-        assert_eq!(TypedRunMode::Forward.to_string(), "forward");
-        assert_eq!(TypedRunMode::Remediating.to_string(), "remediating");
-        assert_eq!(TypedRunMode::ManualBlocked.to_string(), "manual_blocked");
-        assert_eq!(TypedRunMode::Completed.to_string(), "completed");
-        assert_eq!(TypedRunMode::Compensated.to_string(), "compensated");
-        assert_eq!(
-            TypedRunMode::ManuallyResolved.to_string(),
-            "manually_resolved"
-        );
-        assert_eq!(
-            TypedRunMode::FailedWithoutAcdcClaim.to_string(),
-            "failed_without_acdc_claim"
-        );
-    }
-
-    #[test]
-    fn semantic_status_exposes_run_modes_manual_authorization_and_obligations() {
-        assert_eq!(
-            typed_run_mode(store::RunMode::Forward),
-            TypedRunMode::Forward
-        );
-        assert_eq!(
-            typed_run_mode(store::RunMode::Remediating),
-            TypedRunMode::Remediating
-        );
-        assert_eq!(
-            typed_run_mode(store::RunMode::ManualBlocked),
-            TypedRunMode::ManualBlocked
-        );
-        assert_eq!(
-            typed_run_mode(store::RunMode::Completed),
-            TypedRunMode::Completed
-        );
-        assert_eq!(
-            typed_run_mode(store::RunMode::Compensated),
-            TypedRunMode::Compensated
-        );
-        assert_eq!(
-            typed_run_mode(store::RunMode::ManuallyResolved),
-            TypedRunMode::ManuallyResolved
-        );
-        assert_eq!(
-            typed_run_mode(store::RunMode::FailedWithoutAcdcClaim),
-            TypedRunMode::FailedWithoutAcdcClaim
-        );
-
-        let run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xa0));
-        let manual = spec::ManualResolutionEvidenceSpec {
-            evidence_schema: schema_id("mfm.test.manual", 0xa2),
-            authorization: manual_authorization(0xa1),
-        };
-        let policy = spec::SagaPolicySpec::CompensateCompleted {
-            on_remediation_unresolved: spec::RemediationUnresolvedSpec::ManualResolution {
-                manual: Box::new(manual.clone()),
-            },
-        };
-        let manual_blocked = store::SagaProjection {
-            run_id: run_id.clone(),
-            run_mode: store::RunMode::ManualBlocked,
-            engagement: None,
-            forward_quiescent: true,
-            manual_block_reason: Some(store::ManualBlockReason::RemediationAmbiguous),
-            obligations: BTreeMap::new(),
-            manual_resolution: None,
-            run_completion: None,
-        };
-        let manual_status = typed_saga_status(&policy, &manual_blocked);
-        assert_eq!(manual_status.policy.variant, "compensate_completed");
-        assert_eq!(
-            manual_status.policy.on_remediation_unresolved.as_deref(),
-            Some("manual_resolution")
-        );
-        assert_eq!(
-            manual_status.manual_block_reason.as_deref(),
-            Some("remediation_ambiguous")
-        );
-        assert_eq!(
-            manual_status
-                .required_manual_authorization
-                .as_ref()
-                .expect("manual authorization")
-                .evidence_schema_id,
-            manual.evidence_schema.as_str()
-        );
-        let manual_authorization = manual_status
-            .required_manual_authorization
-            .as_ref()
-            .expect("manual authorization");
-        assert_eq!(
-            manual_authorization.verifier_id,
-            manual.authorization.verifier_id.as_str()
-        );
-        assert_eq!(
-            manual_authorization.signing_scheme,
-            manual.authorization.signing_scheme.as_str()
-        );
-        assert_eq!(
-            manual_authorization.authority_id,
-            manual.authorization.authority.authority_id.as_str()
-        );
-        assert_eq!(
-            manual_authorization.operator_public_identities,
-            manual
-                .authorization
-                .authority
-                .operators
-                .iter()
-                .map(|operator| operator.public_identity.as_str().to_owned())
-                .collect::<Vec<_>>()
-        );
-        assert_eq!(
-            manual_authorization.quorum_required_signatures,
-            manual.authorization.quorum.required_signatures()
-        );
-        assert_eq!(
-            manual_status
-                .policy
-                .manual_authorization
-                .as_ref()
-                .expect("manual policy authorization")
-                .authority_id,
-            manual.authorization.authority.authority_id.as_str()
-        );
-
-        let forward_ledger = events::SideEffectLedgerKey::new("forward-ledger").expect("ledger");
-        let remediation_ledger =
-            events::SideEffectLedgerKey::new("remediation-ledger").expect("ledger");
-        let mut obligations = BTreeMap::new();
-        obligations.insert(
-            forward_ledger.clone(),
-            store::SagaObligationProjection {
-                forward_ledger_key: forward_ledger.clone(),
-                forward_phase: store::SideEffectPhase::ConfirmationObserved {
-                    invocation_epoch: 1,
-                },
-                classification: store::ForwardLedgerClassification::Owed,
-                remediation: Some(store::RemediationLedgerProjection {
-                    ledger_key: remediation_ledger,
-                    phase: store::SideEffectPhase::ConfirmationObserved {
-                        invocation_epoch: 1,
-                    },
-                    closed: true,
-                    unresolved: None,
-                }),
-            },
-        );
-        let compensated = store::SagaProjection {
-            run_id,
-            run_mode: store::RunMode::Compensated,
-            engagement: None,
-            forward_quiescent: true,
-            manual_block_reason: None,
-            obligations,
-            manual_resolution: None,
-            run_completion: Some(store::RunCompletionProjection {
-                event_id: EventId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xa3)),
-                outcome: events::RunCompletionOutcome::Compensated,
-            }),
-        };
-        let compensated_status = typed_saga_status(&policy, &compensated);
-        assert_eq!(compensated_status.obligations.len(), 1);
-        assert_eq!(compensated_status.obligations[0].classification, "owed");
-        assert_eq!(
-            compensated_status.obligations[0]
-                .remediation
-                .as_ref()
-                .expect("remediation")
-                .forward_ledger_key,
-            forward_ledger.as_str()
-        );
-        assert_eq!(
-            compensated_status
-                .terminal_resolution
-                .as_ref()
-                .expect("terminal")
-                .claim,
-            "compensation"
-        );
-    }
-
-    #[test]
-    fn attempt_disposition_statuses_are_distinct_from_run_mode() {
-        let run = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xaf));
-        let started = typed_attempt_disposition(&store::AttemptProjection {
-            run_id: run.clone(),
-            node_id: node_id(0xb0),
-            attempt_id: attempt_id(0xb1),
-            event_id: EventId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xb2)),
-            status: store::AttemptStatus::Started {
-                attempt_no: 2,
-                state_kind: StateKind::new(
-                    "mfm.test",
-                    "state",
-                    DigestAlgorithm::Sha256JcsV1,
-                    digest(0xbd),
-                )
-                .expect("state kind"),
-                state_version: StateVersion::new("mfm.test.state.v1").expect("state version"),
-            },
-        });
-        assert_eq!(started.disposition, "started");
-        assert_eq!(started.attempt_no, Some(2));
-        assert_eq!(started.retryable, None);
-
-        let completed = typed_attempt_disposition(&store::AttemptProjection {
-            run_id: run.clone(),
-            node_id: node_id(0xb3),
-            attempt_id: attempt_id(0xb4),
-            event_id: EventId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xb5)),
-            status: store::AttemptStatus::Completed {
-                output_cell_id: cell_id(0xb6),
-            },
-        });
-        assert_eq!(completed.disposition, "completed");
-        assert_eq!(
-            completed.output_cell_id.as_deref(),
-            Some(cell_id(0xb6).as_str())
-        );
-
-        let failed = typed_attempt_disposition(&store::AttemptProjection {
-            run_id: run.clone(),
-            node_id: node_id(0xb7),
-            attempt_id: attempt_id(0xb8),
-            event_id: EventId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xb9)),
-            status: store::AttemptStatus::Failed {
-                retryable: false,
-                error: Box::new(events::MfmErrorInfo {
-                    code: events::ErrorCode::new("mfm.test.failed").expect("error code"),
-                    category: events::ErrorCategory::Runtime,
-                    retryable: false,
-                    safe_message: "redacted failure".to_owned(),
-                    public_details: None,
-                    diagnostic_ref: None,
-                }),
-            },
-        });
-        assert_eq!(failed.disposition, "failed");
-        assert_eq!(failed.retryable, Some(false));
-
-        let interrupted = typed_attempt_disposition(&store::AttemptProjection {
-            run_id: run,
-            node_id: node_id(0xba),
-            attempt_id: attempt_id(0xbb),
-            event_id: EventId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xbc)),
-            status: store::AttemptStatus::Interrupted,
-        });
-        assert_eq!(interrupted.disposition, "interrupted");
-        assert_eq!(interrupted.retryable, None);
-        assert_eq!(
-            typed_run_mode(store::RunMode::Forward),
-            TypedRunMode::Forward
-        );
-    }
-
-    #[test]
-    fn semantic_status_exposes_resource_lanes_from_store_projection() {
-        let run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xc0));
-        let spec_hash = SpecHash::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xc1));
-        let node_id = node_id(0xc2);
-        let attempt_id = attempt_id(0xc3);
-        let ledger_key =
-            events::SideEffectLedgerKey::new("ledger-public-status").expect("ledger key");
-        let resource_key = events::ResourceKeyEvidence {
-            namespace: spec::ResourceNamespace::new("mfm.test.account_nonce")
-                .expect("resource namespace"),
-            key_schema_id: schema_id("mfm.test.resource_key", 0xc4),
-            key: events::ResourceKey::new("wallet-public-status").expect("resource key"),
-        };
-        let lane_key = store::ResourceLaneKey::from_evidence(&resource_key);
-        let spec_artifact = store::ArtifactEvidenceRef {
-            artifact_id: ArtifactId::from_digest(spec_hash.algorithm(), *spec_hash.digest()),
-            digest: ContentDigest::from_digest(spec_hash.algorithm(), *spec_hash.digest()),
-            byte_len: 128,
-            media_type: spec::MediaType::new(spec::MEDIA_TYPE).expect("spec media type"),
-            schema_id: None,
-            semantic_type_id: None,
-            producer_node_id: None,
-            producer_seed_id: None::<SeedId>,
-            artifact_role: events::ArtifactRole::TypedExecutionSpec,
-        };
-        let certificate_artifact = store::ArtifactEvidenceRef {
-            artifact_id: ArtifactId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xc5)),
-            digest: content_digest(0xc5),
-            byte_len: 64,
-            media_type: spec::MediaType::new(mfm_certify::CERTIFICATE_MEDIA_TYPE)
-                .expect("certificate media type"),
-            schema_id: None,
-            semantic_type_id: None,
-            producer_node_id: None,
-            producer_seed_id: None::<SeedId>,
-            artifact_role: events::ArtifactRole::TypedSpecCertificate,
-        };
-        let intent_artifact = store::ArtifactEvidenceRef {
-            artifact_id: ArtifactId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xc6)),
-            digest: content_digest(0xc6),
-            byte_len: 32,
-            media_type: spec::MediaType::new("application/json").expect("intent media type"),
-            schema_id: Some(schema_id("mfm.test.side_effect_intent", 0xc7)),
-            semantic_type_id: None,
-            producer_node_id: Some(node_id.clone()),
-            producer_seed_id: None::<SeedId>,
-            artifact_role: events::ArtifactRole::SideEffectIntent,
-        };
-        let mut store = store::InMemoryTypedRunStore::new();
-
-        append_test_commit(
-            &mut store,
-            store::TypedCommitRequest::from_payloads(
-                run_id.clone(),
-                store::StreamSeq::FIRST,
-                store::CommitKey::new("public-status-run-start").expect("commit key"),
-                vec![events::KernelEventPayload::RunAdmitted(Box::new(
-                    events::RunAdmitted {
-                        run_id: run_id.clone(),
-                        spec_hash: spec_hash.clone(),
-                        spec_artifact: run_artifact_ref(&spec_artifact),
-                        certificate_artifact: run_artifact_ref(&certificate_artifact),
-                        config_artifacts: Vec::new(),
-                        spec_version: SpecVersion::new(spec::SPEC_VERSION).expect("spec version"),
-                        lowering_version: LoweringVersion::new(spec::LOWERING_VERSION)
-                            .expect("lowering version"),
-                        public_output_schema_id: schema_id("mfm.test.public_output", 0xc8),
-                        saga_policy_digest: spec::SagaPolicySpec::NoSideEffects
-                            .saga_policy_digest()
-                            .expect("saga policy digest"),
-                        descriptor_identities: Vec::new(),
-                        runner_executables: Vec::new(),
-                        adapter_executables: Vec::new(),
-                        admitted_binding_digest: content_digest(0xc9),
-                        canonicalizer_identity: spec::CanonicalizerIdentity::new("mfm.jcs.v1")
-                            .expect("canonicalizer"),
-                        framework_version: events::FrameworkVersion::new("mfm.test.framework")
-                            .expect("framework version"),
-                        source_revision: events::SourceRevision::new("test-source")
-                            .expect("source revision"),
-                        launched_at_unix_ms: 1_700_000_000_000,
-                        seed_cells: Vec::new(),
-                    },
-                ))],
-                vec![spec_artifact.clone(), certificate_artifact.clone()],
-                store::CommitPreconditions {
-                    required_run_state: store::RequiredRunState::Absent,
-                    ..store::CommitPreconditions::default()
-                },
-            )
-            .expect("run start request"),
-        );
-        let side_effect_expected_next_seq = store.expected_next_seq(&run_id);
-        append_test_commit(
-            &mut store,
-            store::TypedCommitRequest::from_payloads(
-                run_id.clone(),
-                side_effect_expected_next_seq,
-                store::CommitKey::new("public-status-side-effect-attempt-start")
-                    .expect("commit key"),
-                vec![events::KernelEventPayload::StateAttemptStarted(
-                    events::StateAttemptStarted {
-                        spec_hash: spec_hash.clone(),
-                        node_id: node_id.clone(),
-                        attempt_id: attempt_id.clone(),
-                        attempt_no: 1,
-                        state_kind: StateKind::new(
-                            "mfm.test",
-                            "side_effect_state",
-                            DigestAlgorithm::Sha256JcsV1,
-                            digest(0xc9),
-                        )
-                        .expect("state kind"),
-                        state_version: StateVersion::new("mfm.test.side_effect_state.v1")
-                            .expect("state version"),
-                    },
-                )],
-                Vec::new(),
-                store::CommitPreconditions::default(),
-            )
-            .expect("side-effect attempt start request"),
-        );
-        let side_effect_prepare_next_seq = store.expected_next_seq(&run_id);
-        append_test_commit(
-            &mut store,
-            store::TypedCommitRequest::from_payloads(
-                run_id.clone(),
-                side_effect_prepare_next_seq,
-                store::CommitKey::new("public-status-side-effect-prepare").expect("commit key"),
-                vec![
-                    events::KernelEventPayload::SideEffectIntentPersisted(
-                        events::side_effect::IntentPersisted {
-                            spec_hash: spec_hash.clone(),
-                            node_id: node_id.clone(),
-                            scope_id: scope_id(0xca),
-                            attempt_id: attempt_id.clone(),
-                            ledger_key: ledger_key.clone(),
-                            ledger_purpose: events::SideEffectLedgerPurpose::Forward,
-                            invocation_epoch: 1,
-                            intent_schema_id: intent_artifact
-                                .schema_id
-                                .clone()
-                                .expect("intent schema"),
-                            intent_hash: intent_artifact.digest.clone(),
-                            intent_artifact_id: intent_artifact.artifact_id.clone(),
-                            idempotency_input_schema_id: schema_id("mfm.test.idempotency", 0xcb),
-                            idempotency_input_hash: content_digest(0xcc),
-                            idempotency_key: events::IdempotencyKeyRef::new("idem-public-status")
-                                .expect("idempotency key"),
-                            capability_kind: CapabilityKind::new(
-                                "mfm.test",
-                                "side_effect",
-                                DigestAlgorithm::Sha256JcsV1,
-                                digest(0xcd),
-                            )
-                            .expect("capability kind"),
-                            capability_version: CapabilityVersion::new("mfm.test.side_effect.v1")
-                                .expect("capability version"),
-                            adapter_kind: AdapterKind::new(
-                                "mfm.test",
-                                "adapter",
-                                DigestAlgorithm::Sha256JcsV1,
-                                digest(0xce),
-                            )
-                            .expect("adapter kind"),
-                            adapter_version: AdapterVersion::new("mfm.test.adapter.v1")
-                                .expect("adapter version"),
-                        },
-                    ),
-                    events::KernelEventPayload::SideEffectClaimed(events::side_effect::Claimed {
-                        spec_hash: spec_hash.clone(),
-                        node_id: node_id.clone(),
-                        attempt_id: attempt_id.clone(),
-                        ledger_key: ledger_key.clone(),
-                        ledger_purpose: events::SideEffectLedgerPurpose::Forward,
-                        claim_owner: events::RunnerInvocationId::new("owner-public-status")
-                            .expect("claim owner"),
-                        invocation_epoch: 1,
-                        claim_generation: 1,
-                        claim_fencing_token: events::side_effect::ClaimFencingToken::new(
-                            "token-public-status",
-                        )
-                        .expect("fencing token"),
-                    }),
-                    events::KernelEventPayload::SideEffectInvocationPrepared(
-                        events::side_effect::InvocationPrepared {
-                            spec_hash: spec_hash.clone(),
-                            node_id: node_id.clone(),
-                            attempt_id: attempt_id.clone(),
-                            ledger_key: ledger_key.clone(),
-                            ledger_purpose: events::SideEffectLedgerPurpose::Forward,
-                            invocation_epoch: 1,
-                            claim_generation: 1,
-                            claim_fencing_token: events::side_effect::ClaimFencingToken::new(
-                                "token-public-status",
-                            )
-                            .expect("fencing token"),
-                            prepared_artifact_id: None,
-                            prepared_hash: None,
-                            resource_key: Some(resource_key),
-                        },
-                    ),
-                ],
-                vec![intent_artifact.clone()],
-                store::CommitPreconditions::default(),
-            )
-            .expect("side-effect prepare request"),
-        );
-
-        let projection = store.projection_snapshot();
-        let saga = projection.derive_saga_projection(&run_id, &spec::SagaPolicySpec::NoSideEffects);
-        let status = typed_saga_status_inner(
-            &spec::SagaPolicySpec::NoSideEffects,
-            None,
-            Some(projection),
-            &saga,
-        );
-
-        assert_eq!(status.resource_lanes.len(), 1);
-        let lane = &status.resource_lanes[0];
-        assert_eq!(lane.namespace, lane_key.namespace.as_str());
-        assert_eq!(lane.key, "wallet-public-status");
-        assert_eq!(lane.holding_run_id, run_id.as_str());
-        assert_eq!(lane.holding_ledger_key, ledger_key.as_str());
-        assert_eq!(lane.holding_ledger_purpose, "forward");
-        assert_eq!(lane.holding_forward_ledger_key, None);
-        assert_eq!(lane.holding_node_id, node_id.as_str());
-        assert_eq!(lane.holding_attempt_id, attempt_id.as_str());
-        assert_eq!(lane.invocation_epoch, 1);
-    }
-
-    #[test]
-    fn public_status_json_filters_global_lanes_and_released_ledgers() {
-        let fixture = framework_seed_public_output_fixture();
-        let mut certified_spec = fixture.certified_spec.envelope().spec.clone();
-        let node = certified_spec
-            .nodes
-            .iter_mut()
-            .find(|node| node.node_id == fixture.value_node_id)
-            .expect("fixture value node");
-        let resource_namespace =
-            spec::ResourceNamespace::new("mfm.test.account_nonce").expect("namespace");
-        let resource_key = events::ResourceKeyEvidence {
-            namespace: resource_namespace.clone(),
-            key_schema_id: schema_id("mfm.test.resource_key", 0xd0),
-            key: events::ResourceKey::new("wallet-cross-run").expect("resource key"),
-        };
-        let unrelated_resource_key = events::ResourceKeyEvidence {
-            namespace: resource_namespace.clone(),
-            key_schema_id: schema_id("mfm.test.unrelated_resource_key", 0xe1),
-            key: events::ResourceKey::new("wallet-unrelated").expect("unrelated resource key"),
-        };
-        node.side_effect = Some(spec::SideEffectContractSpec {
-            contract_digest: content_digest(0xd1),
-            resource_claim: spec::ResourceClaimSpec::Exclusive {
-                namespace: resource_namespace,
-                key_schema: resource_key.key_schema_id.clone(),
-            },
-        });
-
-        let target_run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xd2));
-        let unrelated_run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xe2));
-        let target_ledger =
-            events::SideEffectLedgerKey::new("ledger-target").expect("target ledger");
-        let unrelated_ledger =
-            events::SideEffectLedgerKey::new("ledger-unrelated").expect("unrelated ledger");
-        let target_attempt = attempt_id(0xd4);
-        let unrelated_attempt = attempt_id(0xe3);
-        let lane_key = store::ResourceLaneKey::from_evidence(&resource_key);
-        let unrelated_lane_key = store::ResourceLaneKey::from_evidence(&unrelated_resource_key);
-        let claim_fencing_token =
-            events::side_effect::ClaimFencingToken::new("token-target").expect("token");
-        let side_effect = store::SideEffectProjection {
-            run_id: target_run_id.clone(),
-            ledger_key: target_ledger.clone(),
-            ledger_purpose: events::SideEffectLedgerPurpose::Forward,
-            event_id: EventId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xd6)),
-            intent: store::SideEffectIntentProjection {
-                node_id: fixture.value_node_id.clone(),
-                attempt_id: target_attempt.clone(),
-                scope_id: scope_id(0xd7),
-                invocation_epoch: 1,
-                intent_schema_id: schema_id("mfm.test.intent", 0xd8),
-                intent_hash: content_digest(0xd9),
-                intent_artifact_id: artifact_id_for_digest(&content_digest(0xda)),
-                idempotency_input_schema_id: schema_id("mfm.test.idempotency", 0xdb),
-                idempotency_input_hash: content_digest(0xdc),
-                idempotency_key: events::IdempotencyKeyRef::new("idem-target").expect("idem"),
-                capability_kind: CapabilityKind::new(
-                    "mfm.test",
-                    "side_effect",
-                    DigestAlgorithm::Sha256JcsV1,
-                    digest(0xdd),
-                )
-                .expect("capability kind"),
-                capability_version: CapabilityVersion::new("mfm.test.side_effect.v1")
-                    .expect("capability version"),
-                adapter_kind: AdapterKind::new(
-                    "mfm.test",
-                    "adapter",
-                    DigestAlgorithm::Sha256JcsV1,
-                    digest(0xde),
-                )
-                .expect("adapter kind"),
-                adapter_version: AdapterVersion::new("mfm.test.adapter.v1")
-                    .expect("adapter version"),
-            },
-            prepared_invocation: None,
-            resource_key: Some(resource_key),
-            submission: None,
-            receipt: None,
-            confirmation: None,
-            resource_touched_set: None,
-            claim: Some(store::SideEffectClaimProjection {
-                node_id: fixture.value_node_id.clone(),
-                attempt_id: target_attempt.clone(),
-                claim_owner: events::RunnerInvocationId::new("owner-target").expect("owner"),
-                invocation_epoch: 1,
-                claim_generation: 1,
-                claim_fencing_token: claim_fencing_token.clone(),
-            }),
-            phase: store::SideEffectPhase::InvocationPrepared {
-                invocation_epoch: 1,
-                claim_generation: 1,
-                claim_fencing_token,
-            },
-        };
-        let projection = store::ProjectionSnapshot::from_parts(store::ProjectionSnapshotParts {
-            run_states: BTreeMap::from([(target_run_id.clone(), store::RunState::Started)]),
-            side_effects: BTreeMap::from([(
-                store::SideEffectLedgerRef::new(target_run_id.clone(), target_ledger.clone()),
-                side_effect.clone(),
-            )]),
-            resource_lanes: BTreeMap::from([
-                (
-                    lane_key.clone(),
-                    store::ResourceLaneProjection {
-                        event_id: EventId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xdf)),
-                        holder: store::SideEffectLedgerRef::new(
-                            target_run_id.clone(),
-                            target_ledger.clone(),
-                        ),
-                        ledger_purpose: events::SideEffectLedgerPurpose::Forward,
-                        node_id: fixture.value_node_id.clone(),
-                        attempt_id: target_attempt.clone(),
-                        invocation_epoch: 1,
-                    },
-                ),
-                (
-                    unrelated_lane_key,
-                    store::ResourceLaneProjection {
-                        event_id: EventId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xe4)),
-                        holder: store::SideEffectLedgerRef::new(unrelated_run_id, unrelated_ledger),
-                        ledger_purpose: events::SideEffectLedgerPurpose::Forward,
-                        node_id: node_id(0xe5),
-                        attempt_id: unrelated_attempt,
-                        invocation_epoch: 1,
-                    },
-                ),
-            ]),
-            ..store::ProjectionSnapshotParts::default()
-        })
-        .expect("projection snapshot");
-        let saga = projection.derive_saga_projection(&target_run_id, &certified_spec.saga);
-        let response = TypedRunResponse {
-            run_id: target_run_id.as_str().to_owned(),
-            spec_hash: fixture.certified_spec.spec_hash().as_str().to_owned(),
-            run_mode: typed_run_mode(saga.run_mode),
-            saga: typed_saga_status_with_resources(&certified_spec, &projection, &saga),
-            attempt_dispositions: Vec::new(),
-            scheduler_status: "blocked".to_owned(),
-            head_seq: 2,
-        };
-        let public_json = serde_json::to_value(response).expect("status json");
-        let ledger = public_json["saga"]["resource_ledgers"]
-            .as_array()
-            .expect("resource ledgers")
-            .iter()
-            .find(|ledger| ledger["ledger_key"] == target_ledger.as_str())
-            .expect("target ledger status");
-
-        assert_eq!(
-            ledger["active_lane"]["holding_run_id"],
-            target_run_id.as_str()
-        );
-        assert_eq!(
-            ledger["active_lane"]["holding_ledger_key"],
-            target_ledger.as_str()
-        );
-        assert_eq!(
-            ledger["active_lane"]["holding_attempt_id"],
-            target_attempt.as_str()
-        );
-        assert!(ledger["blocked_by_lane"].is_null());
-
-        let resource_lanes = public_json["saga"]["resource_lanes"]
-            .as_array()
-            .expect("resource lanes");
-        assert_eq!(resource_lanes.len(), 1);
-        assert_eq!(resource_lanes[0]["key"], "wallet-cross-run");
-        assert_eq!(resource_lanes[0]["holding_run_id"], target_run_id.as_str());
-        assert!(!resource_lanes
-            .iter()
-            .any(|lane| lane["key"] == "wallet-unrelated"));
-
-        let mut terminal_side_effect = side_effect;
-        terminal_side_effect.phase = store::SideEffectPhase::NotSubmittedProven {
-            invocation_epoch: 1,
-        };
-        let terminal_projection =
-            store::ProjectionSnapshot::from_parts(store::ProjectionSnapshotParts {
-                run_states: BTreeMap::from([(target_run_id.clone(), store::RunState::Started)]),
-                side_effects: BTreeMap::from([(
-                    store::SideEffectLedgerRef::new(target_run_id.clone(), target_ledger.clone()),
-                    terminal_side_effect,
-                )]),
-                resource_lanes: BTreeMap::from([(
-                    lane_key,
-                    store::ResourceLaneProjection {
-                        event_id: EventId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xe6)),
-                        holder: store::SideEffectLedgerRef::new(
-                            target_run_id.clone(),
-                            target_ledger.clone(),
-                        ),
-                        ledger_purpose: events::SideEffectLedgerPurpose::Forward,
-                        node_id: fixture.value_node_id.clone(),
-                        attempt_id: target_attempt,
-                        invocation_epoch: 1,
-                    },
-                )]),
-                ..store::ProjectionSnapshotParts::default()
-            })
-            .expect("terminal projection snapshot");
-        let terminal_saga =
-            terminal_projection.derive_saga_projection(&target_run_id, &certified_spec.saga);
-        let terminal_response = TypedRunResponse {
-            run_id: target_run_id.as_str().to_owned(),
-            spec_hash: fixture.certified_spec.spec_hash().as_str().to_owned(),
-            run_mode: typed_run_mode(terminal_saga.run_mode),
-            saga: typed_saga_status_with_resources(
-                &certified_spec,
-                &terminal_projection,
-                &terminal_saga,
-            ),
-            attempt_dispositions: Vec::new(),
-            scheduler_status: "blocked".to_owned(),
-            head_seq: 3,
-        };
-        let terminal_json = serde_json::to_value(terminal_response).expect("terminal status json");
-        let terminal_ledger = terminal_json["saga"]["resource_ledgers"]
-            .as_array()
-            .expect("terminal resource ledgers")
-            .iter()
-            .find(|ledger| ledger["ledger_key"] == target_ledger.as_str())
-            .expect("terminal target ledger status");
-        assert!(terminal_ledger["active_lane"].is_null());
-        assert!(terminal_ledger["blocked_by_lane"].is_null());
-        assert!(terminal_json["saga"]["resource_lanes"]
-            .as_array()
-            .expect("terminal resource lanes")
-            .is_empty());
-    }
-
-    #[tokio::test]
-    async fn async_status_with_projection_filters_unreferenced_global_resource_lanes() {
-        let (root, fixture, services, _started) =
-            start_framework_fixture_run_with_drive(DriveMode::AppendOnly, "status-lanes").await;
-        let resource_namespace =
-            spec::ResourceNamespace::new("mfm.test.account_nonce").expect("namespace");
-        let target_resource_key = events::ResourceKeyEvidence {
-            namespace: resource_namespace.clone(),
-            key_schema_id: schema_id("mfm.test.resource_key", 0xe8),
-            key: events::ResourceKey::new("wallet-target-owned").expect("target resource key"),
-        };
-        let unrelated_resource_key = events::ResourceKeyEvidence {
-            namespace: resource_namespace,
-            key_schema_id: schema_id("mfm.test.unrelated_resource_key", 0xe9),
-            key: events::ResourceKey::new("wallet-service-unrelated")
-                .expect("unrelated resource key"),
-        };
-        let target_lane_key = store::ResourceLaneKey::from_evidence(&target_resource_key);
-        let unrelated_lane_key = store::ResourceLaneKey::from_evidence(&unrelated_resource_key);
-        let target_ledger =
-            events::SideEffectLedgerKey::new("ledger-service-target").expect("target ledger");
-        let unrelated_ledger =
-            events::SideEffectLedgerKey::new("ledger-service-unrelated").expect("unrelated ledger");
-        let unrelated_run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xea));
-
-        let stream = services
-            .store()
-            .load_run_stream(&fixture.run_id)
-            .await
-            .expect("load stream");
-        let run_projection =
-            store::ProjectionSnapshot::rebuild_from_run_stream(&stream).expect("run projection");
-        let projection = projection_with_resource_lanes(
-            &run_projection,
-            BTreeMap::from([
-                (
-                    target_lane_key,
-                    store::ResourceLaneProjection {
-                        event_id: EventId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xeb)),
-                        holder: store::SideEffectLedgerRef::new(
-                            fixture.run_id.clone(),
-                            target_ledger.clone(),
-                        ),
-                        ledger_purpose: events::SideEffectLedgerPurpose::Forward,
-                        node_id: fixture.value_node_id.clone(),
-                        attempt_id: attempt_id(0xec),
-                        invocation_epoch: 1,
-                    },
-                ),
-                (
-                    unrelated_lane_key,
-                    store::ResourceLaneProjection {
-                        event_id: EventId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xed)),
-                        holder: store::SideEffectLedgerRef::new(unrelated_run_id, unrelated_ledger),
-                        ledger_purpose: events::SideEffectLedgerPurpose::Forward,
-                        node_id: node_id(0xee),
-                        attempt_id: attempt_id(0xef),
-                        invocation_epoch: 1,
-                    },
-                ),
-            ]),
-        )
-        .expect("status projection with global lanes");
-
-        let status = services
-            .run_status_with_projection(&fixture.run_id, projection)
-            .await
-            .expect("status with supplied projection");
-        let public_json = serde_json::to_value(status).expect("status json");
-        let resource_lanes = public_json["saga"]["resource_lanes"]
-            .as_array()
-            .expect("resource lanes");
-        assert!(resource_lanes.is_empty());
-        assert!(!resource_lanes
-            .iter()
-            .any(|lane| lane["key"] == "wallet-service-unrelated"));
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn certified_spec_bundle_parser_rejects_bare_spec_json() {
-        let err = parse_certified_spec_bundle_json_bytes(br#"{"spec_version":"mfm.typed.v1"}"#)
-            .expect_err("bare spec is not a transport bundle");
-
-        assert_eq!(err.code, "CertifiedBundleInvalid");
-    }
-
-    #[test]
-    fn certified_spec_bundle_parser_returns_untrusted_canonical_bytes() {
-        let bundle = parse_certified_spec_bundle_json_bytes(
-            br#"{
-                "kind": "certified_typed_spec_bundle_v1",
-                "spec": {"b": 2, "a": 1},
-                "certificate": {}
-            }"#,
-        )
-        .expect("bundle transport parses");
-
-        assert_eq!(bundle.spec_bytes(), br#"{"a":1,"b":2}"#);
-        assert_eq!(bundle.certificate_bytes(), br#"{}"#);
-    }
-
-    #[test]
-    fn typed_run_start_rejects_config_without_validator_or_exact_trust() {
-        let fixture = framework_seed_public_output_fixture();
-        let config_inputs = config_inputs_for_fixture(&fixture);
-        let err = prepare_certified_run_launch(
-            CertifiedRunLaunchInput {
-                certified_spec: fixture.certified_spec.clone(),
-                registry: &CertificationRegistry::new(),
-                run_id: fixture.run_id.clone(),
-                framework_version: "mfm.test.framework",
-                source_revision: "test-source",
-                launched_at_unix_ms: 1_700_000_000_000,
-                drive: DriveMode::AppendOnly,
-            },
-            config_inputs,
-            vec![RunLaunchSeedArtifact {
-                seed_id: fixture.seed_id.clone(),
-                bytes: fixture.seed_bytes.clone(),
-                media_type: spec::MediaType::new("application/json").expect("media type"),
-            }],
-        )
-        .expect_err("unvalidated config must not start");
-
-        assert_eq!(err.code, "LaunchConfigValidatorMissing");
-    }
-
-    #[tokio::test]
-    async fn public_output_renders_json_from_cells_without_rendered_artifact_id() {
-        let root =
-            std::env::temp_dir().join(format!("mfm-app-public-output-{}", uuid::Uuid::new_v4()));
-        let artifacts = FsTypedArtifactStore::new(&root);
-        let source_node_id = node_id(0x20);
-        let source_schema_id = schema_id("mfm.test.position", 0x21);
-        let semantic_type_id = semantic_id("position", 0x22);
-        let bytes = br#"{"total":"12.50"}"#.to_vec();
-
-        let evidence = artifacts
-            .put_artifact(
-                bytes,
-                TypedArtifactDescriptor {
-                    media_type: spec::MediaType::new("application/json").expect("media type"),
-                    schema_id: Some(source_schema_id.clone()),
-                    semantic_type_id: Some(semantic_type_id.clone()),
-                    producer_node_id: Some(source_node_id.clone()),
-                    producer_seed_id: None::<SeedId>,
-                    artifact_role: events::ArtifactRole::StateOutput,
-                },
-            )
-            .await
-            .expect("persist typed artifact");
-        let public_schema_id = schema_id("mfm.test.public_output", 0x26);
-        let cell = events::NamedTypedCellRef {
-            public_field_path: spec::PublicFieldPath::new("result").expect("field path"),
-            cell_id: cell_id(0x23),
-            producer: spec::CellProducer::Node(source_node_id),
-            scope_id: scope_id(0x24),
-            semantic_type_id,
-            schema_id: source_schema_id,
-            value_lineage: spec::ValueLineageRef {
-                lineage_digest: content_digest(0x25),
-            },
-            content_digest: evidence.digest,
-            artifact_id: evidence.artifact_id,
-        };
-        let rendered_digest = content_digest(0x27);
-        let authority = PublicOutputReadAuthority {
-            run_id: RunId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0x28)),
-            public_schema_id: public_schema_id.clone(),
-            event_id: EventId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0x29)),
-            rendered_digest,
-            rendered_artifact_id: None,
-            payload: events::PublicOutputProduced {
-                spec_hash: SpecHash::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0x2a)),
-                node_id: node_id(0x2b),
-                attempt_id: attempt_id(0x2c),
-                receipt_cell_id: cell_id(0x2d),
-                public_schema_id,
-                output_spec_digest: content_digest(0x2e),
-                cells: vec![cell],
-                rendered_digest: content_digest(0x27),
-                rendered_artifact_id: None,
-                renderer_descriptor_id: descriptor_id(0x2f),
-            },
-        };
-
-        let rendered = render_typed_public_output(&artifacts, &authority)
-            .await
-            .expect("render public output");
-
-        assert_eq!(
-            rendered.json,
-            Some(serde_json::json!({
-                "result": {
-                    "total": "12.50"
-                }
-            }))
-        );
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[tokio::test]
-    async fn public_output_api_renders_from_authoritative_stream_cells() {
-        let (root, fixture, services, _started) = start_framework_fixture_run().await;
-        let stream = services
-            .store()
-            .load_run_stream(&fixture.run_id)
-            .await
-            .expect("load stream");
-        let runtime_spec = load_runtime_spec_for_run(
-            services.artifacts(),
-            services.certification_registry(),
-            &fixture.run_id,
-            &stream,
-        )
-        .await
-        .expect("runtime spec");
-        let verified_history = verified_run_history_from_events(
-            services.artifacts(),
-            &runtime_spec,
-            &fixture.run_id,
-            &stream,
-        )
-        .await
-        .expect("verified history");
-        let authority = public_output_read_authority_for_run(
-            services.artifacts(),
-            &runtime_spec,
-            &verified_history,
-            &fixture.public_schema_id,
-        )
-        .await
-        .expect("public-output read authority");
-        let response = render_typed_public_output(services.artifacts(), &authority)
-            .await
-            .expect("render public output from authority");
-
-        assert_eq!(
-            response.json,
-            Some(serde_json::json!({
-                "result": {
-                    "total": "12.50"
-                }
-            }))
-        );
-        assert!(response.rendered_artifact_id.is_none());
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[tokio::test]
-    async fn async_typed_services_start_resume_replay_and_render_framework_public_output() {
-        let (root, fixture, services, started) = start_framework_fixture_run().await;
-        assert_eq!(started.run_mode, TypedRunMode::Completed);
-        assert_eq!(started.saga.policy.variant, "no_side_effects");
-        assert!(started.saga.obligations.is_empty());
-        assert_eq!(started.scheduler_status, "public_output_projected");
-
-        let resumed = services
-            .resume_stored_run(&fixture.run_id, DriveMode::UntilBlocked)
-            .await
-            .expect("resume completed typed run");
-        assert_eq!(resumed.run_mode, TypedRunMode::Completed);
-        assert_eq!(resumed.scheduler_status, "public_output_projected");
-
-        let replay = services
-            .verify_replay_for_run(&fixture.run_id)
-            .await
-            .expect("verify replay authority");
-        assert_eq!(replay.run_mode, TypedRunMode::Completed);
-        assert!(replay.retained_artifacts > 0);
-
-        let output = services
-            .typed_public_output(&fixture.run_id, &fixture.public_schema_id)
-            .await
-            .expect("render typed public output");
-        assert_eq!(
-            output.json,
-            Some(serde_json::json!({
-                "result": {
-                    "total": "12.50"
-                }
-            }))
-        );
-
-        let stream = services
-            .store()
-            .load_run_stream(&fixture.run_id)
-            .await
-            .expect("load stream");
-        let public_output = stream
-            .iter()
-            .find_map(|event| match event.payload() {
-                events::KernelEventPayload::PublicOutputProduced(payload) => Some(payload),
-                _ => None,
-            })
-            .expect("public output produced");
-        let receipt_artifact_id = stream
-            .iter()
-            .find_map(|event| match event.payload() {
-                events::KernelEventPayload::CellProduced(payload)
-                    if payload.node_id == public_output.node_id
-                        && payload.attempt_id == public_output.attempt_id
-                        && payload.cell_id == public_output.receipt_cell_id =>
-                {
-                    Some(payload.artifact_id.clone())
-                }
-                _ => None,
-            })
-            .expect("public-output receipt cell");
-        let (_receipt_bytes, receipt_evidence) = services
-            .artifacts()
-            .get_artifact_by_id(&receipt_artifact_id)
-            .await
-            .expect("runtime-staged public-output receipt artifact");
-        assert_eq!(
-            receipt_evidence.artifact_role,
-            events::ArtifactRole::StateOutput
-        );
-        assert_eq!(
-            receipt_evidence.semantic_type_id.as_ref(),
-            Some(&spec::public_output_receipt_semantic_type_id().expect("receipt semantic"))
-        );
-
-        let stream = services
-            .run_stream(&fixture.run_id)
-            .await
-            .expect("load stream");
-        assert!(stream.events.iter().any(|event| {
-            event.logical_key.starts_with("retention:")
-                && event.logical_key.ends_with(":manifest:1")
-        }));
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[tokio::test]
-    async fn async_status_reports_interrupted_attempt_and_framework_attempts_from_history() {
-        let (root, fixture, services, started) =
-            start_framework_fixture_run_with_drive(DriveMode::AppendOnly, "interrupted").await;
-        assert_eq!(started.run_mode, TypedRunMode::Forward);
-
-        let spec = &fixture.certified_spec.envelope().spec;
-        let node = spec
-            .nodes
-            .iter()
-            .find(|node| node.node_id == fixture.value_node_id)
-            .expect("fixture value node");
-        let interrupted_attempt_id = attempt_id(0xe1);
-        append_interrupted_attempt(
-            services.store(),
-            &fixture.run_id,
-            fixture.certified_spec.spec_hash(),
-            node,
-            &interrupted_attempt_id,
-        )
-        .await;
-
-        let resumed = services
-            .resume_stored_run(&fixture.run_id, DriveMode::UntilBlocked)
-            .await
-            .expect("resume after interrupted attempt");
-        assert_eq!(resumed.run_mode, TypedRunMode::Completed);
-
-        let status = services
-            .run_status(&fixture.run_id)
-            .await
-            .expect("status after resume");
-        let public_json = serde_json::to_value(&status).expect("status json");
-        assert_ne!(public_json["run_mode"], "interrupted");
-        let attempts = public_json["attempt_dispositions"]
-            .as_array()
-            .expect("attempt dispositions");
-        let interrupted = attempts
-            .iter()
-            .find(|attempt| {
-                attempt["attempt_id"] == interrupted_attempt_id.as_str()
-                    && attempt["disposition"] == "interrupted"
-            })
-            .expect("interrupted disposition");
-        assert!(interrupted["retryable"].is_null());
-
-        let completed_framework_kinds = spec
-            .nodes
-            .iter()
-            .filter(|node| {
-                attempts.iter().any(|attempt| {
-                    attempt["node_id"] == node.node_id.as_str()
-                        && attempt["disposition"] == "completed"
-                })
-            })
-            .filter_map(|node| match &node.framework {
-                Some(spec::FrameworkNodeSpec::PublicOutputRender(_)) => {
-                    Some("public_output_render")
-                }
-                Some(spec::FrameworkNodeSpec::ProjectRetentionManifest(_)) => {
-                    Some("project_retention_manifest")
-                }
-                Some(spec::FrameworkNodeSpec::CompleteRun(_)) => Some("complete_run"),
-                Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_)) => {
-                    Some("resolve_saga_terminal")
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert!(
-            completed_framework_kinds.contains(&"public_output_render"),
-            "missing completed public-output render framework attempt"
-        );
-        assert!(
-            completed_framework_kinds.contains(&"project_retention_manifest"),
-            "missing completed retention framework attempt"
-        );
-        assert!(
-            completed_framework_kinds.contains(&"complete_run"),
-            "missing completed complete-run framework attempt"
-        );
-
-        let stream = services
-            .run_stream(&fixture.run_id)
-            .await
-            .expect("public run stream after resume");
-        let stream_json = serde_json::to_value(&stream).expect("stream json");
-        let stream_events = stream_json["events"].as_array().expect("stream events");
-        assert_framework_started_before_terminal_evidence(
-            stream_events,
-            attempts,
-            &spec.nodes,
-            &fixture.run_id,
-        );
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[tokio::test]
-    async fn public_output_and_append_only_resume_validate_certified_history() {
-        let (root, fixture, services, _started) = start_framework_fixture_run().await;
-        let valid_stream = services
-            .store()
-            .load_run_stream(&fixture.run_id)
-            .await
-            .expect("load valid stream");
-        let artifacts = services.artifacts().clone();
-        let corrupt_stream = corrupt_public_output_history(&artifacts, &valid_stream).await;
-        let registry =
-            CertificationRegistry::from_program_draft(&fixture.draft).expect("fixture registry");
-        let corrupt_services = make_async_typed_services_with_certification_registry(
-            production_typed_runner_registry(artifacts.clone())
-                .expect("production runner registry"),
-            StaticAsyncStore {
-                run_id: fixture.run_id.clone(),
-                stream: corrupt_stream,
-            },
-            artifacts,
-            registry,
-        );
-
-        let public_output_err = corrupt_services
-            .typed_public_output(&fixture.run_id, &fixture.public_schema_id)
-            .await
-            .expect_err("public output rejects uncertified history");
-        assert_eq!(public_output_err.code, "LaunchRuntimeError");
-        assert!(public_output_err.message.contains("public-output payload"));
-
-        let resume_err = corrupt_services
-            .resume_stored_run(&fixture.run_id, DriveMode::AppendOnly)
-            .await
-            .expect_err("append-only resume rejects uncertified history");
-        assert_eq!(resume_err.code, "LaunchRuntimeError");
-        assert!(resume_err.message.contains("public-output payload"));
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[tokio::test]
-    async fn append_only_resume_rejects_unauthorized_historical_manual_resolution() {
-        let (root, fixture, services, _started) = start_framework_fixture_run().await;
-        let valid_stream = services
-            .store()
-            .load_run_stream(&fixture.run_id)
-            .await
-            .expect("load valid stream");
-        let terminal_index = valid_stream
-            .iter()
-            .position(|event| {
-                matches!(event.payload(), events::KernelEventPayload::RunCompleted(_))
-            })
-            .expect("terminal event");
-        let corrupt_stream =
-            append_forged_manual_resolution_history(&valid_stream[..terminal_index]);
-        let artifacts = services.artifacts().clone();
-        let registry =
-            CertificationRegistry::from_program_draft(&fixture.draft).expect("fixture registry");
-        let corrupt_services = make_async_typed_services_with_certification_registry(
-            production_typed_runner_registry(artifacts.clone())
-                .expect("production runner registry"),
-            StaticAsyncStore {
-                run_id: fixture.run_id.clone(),
-                stream: corrupt_stream,
-            },
-            artifacts,
-            registry,
-        );
-
-        let resume_err = corrupt_services
-            .resume_stored_run(&fixture.run_id, DriveMode::AppendOnly)
-            .await
-            .expect_err("append-only resume rejects unauthorized manual event");
-        assert_eq!(resume_err.code, "RunStoreRejected");
-        assert!(resume_err.message.contains("artifact"), "{resume_err}");
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[tokio::test]
-    async fn app_read_paths_reject_tampered_run_admitted_history() {
-        let (root, fixture, services, _started) = start_framework_fixture_run().await;
-        let valid_stream = services
-            .store()
-            .load_run_stream(&fixture.run_id)
-            .await
-            .expect("load valid stream");
-        let corrupt_stream = tamper_run_admitted_spec_artifact_history(&valid_stream);
-        let artifacts = services.artifacts().clone();
-        let registry =
-            CertificationRegistry::from_program_draft(&fixture.draft).expect("fixture registry");
-        let corrupt_services = make_async_typed_services_with_certification_registry(
-            production_typed_runner_registry(artifacts.clone())
-                .expect("production runner registry"),
-            StaticAsyncStore {
-                run_id: fixture.run_id.clone(),
-                stream: corrupt_stream,
-            },
-            artifacts,
-            registry,
-        );
-
-        for error in [
-            corrupt_services
-                .run_status(&fixture.run_id)
-                .await
-                .expect_err("status rejects tampered RunAdmitted"),
-            corrupt_services
-                .run_stream(&fixture.run_id)
-                .await
-                .expect_err("stream read rejects tampered RunAdmitted"),
-            corrupt_services
-                .resume_stored_run(&fixture.run_id, DriveMode::AppendOnly)
-                .await
-                .expect_err("resume rejects tampered RunAdmitted"),
-            corrupt_services
-                .typed_public_output(&fixture.run_id, &fixture.public_schema_id)
-                .await
-                .expect_err("public output rejects tampered RunAdmitted"),
-            corrupt_services
-                .verify_replay_for_run(&fixture.run_id)
-                .await
-                .expect_err("replay rejects tampered RunAdmitted"),
-        ] {
-            assert_eq!(error.code, "CertifiedSpecArtifactMismatch");
-            assert!(
-                error.message.contains("RunAdmitted evidence"),
-                "{}",
-                error.message
-            );
-        }
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[tokio::test]
-    async fn replay_authority_rejects_standalone_retention_projection_history() {
-        let (root, fixture, services, _started) = start_framework_fixture_run().await;
-        let valid_stream = services
-            .store()
-            .load_run_stream(&fixture.run_id)
-            .await
-            .expect("load valid stream");
-        let corrupt_stream = standalone_retention_projection_history(&valid_stream);
-        let artifacts = services.artifacts().clone();
-        let registry =
-            CertificationRegistry::from_program_draft(&fixture.draft).expect("fixture registry");
-        let corrupt_services = make_async_typed_services_with_certification_registry(
-            production_typed_runner_registry(artifacts.clone())
-                .expect("production runner registry"),
-            StaticAsyncStore {
-                run_id: fixture.run_id.clone(),
-                stream: corrupt_stream,
-            },
-            artifacts,
-            registry,
-        );
-
-        let replay_err = corrupt_services
-            .verify_replay_for_run(&fixture.run_id)
-            .await
-            .expect_err("replay rejects standalone retention projection");
-        assert!(matches!(
-            replay_err.code.as_str(),
-            "LaunchRuntimeError" | "RunStoreRejected"
-        ));
-        assert!(
-            replay_err.message.contains("retention")
-                || replay_err.message.contains("attempt")
-                || replay_err.message.contains("terminal"),
-            "{}",
-            replay_err.message
-        );
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[tokio::test]
-    async fn replay_authority_rejects_post_completion_retention_refs() {
-        let (root, fixture, services, _started) = start_framework_fixture_run().await;
-        let valid_stream = services
-            .store()
-            .load_run_stream(&fixture.run_id)
-            .await
-            .expect("load valid stream");
-        let corrupt_stream = append_post_completion_retention_refs_history(&valid_stream);
-        let artifacts = services.artifacts().clone();
-        let registry =
-            CertificationRegistry::from_program_draft(&fixture.draft).expect("fixture registry");
-        let corrupt_services = make_async_typed_services_with_certification_registry(
-            production_typed_runner_registry(artifacts.clone())
-                .expect("production runner registry"),
-            StaticAsyncStore {
-                run_id: fixture.run_id.clone(),
-                stream: corrupt_stream,
-            },
-            artifacts,
-            registry,
-        );
-
-        let replay_err = corrupt_services
-            .verify_replay_for_run(&fixture.run_id)
-            .await
-            .expect_err("replay rejects post-completion retention refs");
-        assert_eq!(replay_err.code, "LaunchRuntimeError");
-        assert!(
-            replay_err.message.contains("RunCompleted") || replay_err.message.contains("retention"),
-            "{}",
-            replay_err.message
-        );
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[tokio::test]
-    async fn public_output_read_authority_rejects_tampered_stream_projection() {
-        let (root, fixture, services, _started) = start_framework_fixture_run().await;
-        let valid_stream = services
-            .store()
-            .load_run_stream(&fixture.run_id)
-            .await
-            .expect("load valid stream");
-        let runtime_spec = load_runtime_spec_for_run(
-            services.artifacts(),
-            services.certification_registry(),
-            &fixture.run_id,
-            &valid_stream,
-        )
-        .await
-        .expect("runtime spec");
-        let corrupt_stream =
-            corrupt_public_output_history(services.artifacts(), &valid_stream).await;
-
-        let corrupt_store = StaticAsyncStore {
-            run_id: fixture.run_id.clone(),
-            stream: corrupt_stream,
-        };
-        let err = async {
-            let corrupt_stream = corrupt_store.stream.clone();
-            let verified_history = verified_run_history_from_events(
-                services.artifacts(),
-                &runtime_spec,
-                &fixture.run_id,
-                &corrupt_stream,
-            )
-            .await?;
-            public_output_read_authority_for_run(
-                services.artifacts(),
-                &runtime_spec,
-                &verified_history,
-                &fixture.public_schema_id,
-            )
-            .await
-        }
-        .await
-        .expect_err("tampered stream rejects before render authority");
-
-        assert_eq!(err.code, "LaunchRuntimeError");
-        assert!(err.message.contains("public-output payload"));
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[tokio::test]
-    async fn completed_run_without_public_output_evidence_rejects_render_authority() {
-        let (root, fixture, services, _started) = start_framework_fixture_run().await;
-        let valid_stream = services
-            .store()
-            .load_run_stream(&fixture.run_id)
-            .await
-            .expect("load valid stream");
-        let runtime_spec = load_runtime_spec_for_run(
-            services.artifacts(),
-            services.certification_registry(),
-            &fixture.run_id,
-            &valid_stream,
-        )
-        .await
-        .expect("runtime spec");
-        let stream_without_public_output = valid_stream
-            .iter()
-            .filter(|event| {
-                !matches!(
-                    event.payload(),
-                    events::KernelEventPayload::PublicOutputProduced(_)
-                )
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-
-        let corrupt_store = StaticAsyncStore {
-            run_id: fixture.run_id.clone(),
-            stream: stream_without_public_output,
-        };
-        let err = async {
-            let corrupt_stream = corrupt_store.stream.clone();
-            let verified_history = verified_run_history_from_events(
-                services.artifacts(),
-                &runtime_spec,
-                &fixture.run_id,
-                &corrupt_stream,
-            )
-            .await?;
-            public_output_read_authority_for_run(
-                services.artifacts(),
-                &runtime_spec,
-                &verified_history,
-                &fixture.public_schema_id,
-            )
-            .await
-        }
-        .await
-        .expect_err("completed run without public output evidence rejects");
-
-        assert!(matches!(
-            err.code.as_str(),
-            "LaunchRuntimeError" | "RunStoreRejected"
-        ));
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[tokio::test]
-    async fn app_rejects_invalid_bundle_before_run_admitted() {
-        let root =
-            std::env::temp_dir().join(format!("mfm-app-invalid-bundle-{}", uuid::Uuid::new_v4()));
-        let artifacts = FsTypedArtifactStore::new(&root);
-        let fixture = framework_seed_public_output_fixture();
-        let bundle = fixture.certified_spec.bundle().expect("fixture bundle");
-        let mut bad_spec = bundle.spec_bytes().to_vec();
-        let last = bad_spec.last_mut().expect("non-empty spec bytes");
-        *last = if *last == b'}' { b']' } else { b'}' };
-        let registry =
-            CertificationRegistry::from_program_draft(&fixture.draft).expect("fixture registry");
-        let run_id = fixture.run_id.clone();
-        let err = prepare_verified_bundle_launch(
-            UntrustedCertifiedBundleLaunchInput {
-                spec_bytes: &bad_spec,
-                certificate_bytes: bundle.certificate_bytes(),
-                registry: &registry,
-                run_id: run_id.clone(),
-                framework_version: "mfm.test.framework",
-                source_revision: "test-source",
-                launched_at_unix_ms: 1_700_000_000_000,
-                drive: DriveMode::AppendOnly,
-            },
-            Vec::new(),
-            Vec::new(),
-        )
-        .expect_err("invalid bundle must not build a start request");
-        assert_eq!(err.code, "CertifiedBundleVerificationFailed");
-
-        let services = make_async_typed_services_with_certification_registry(
-            ErasedRunnerRegistry::new(),
-            AsyncInMemoryStore::default(),
-            artifacts,
-            registry,
-        );
-        let stream = services
-            .store()
-            .load_run_stream(&run_id)
-            .await
-            .expect("load stream");
-        assert!(!stream
-            .iter()
-            .any(|event| matches!(event.payload(), events::KernelEventPayload::RunAdmitted(_))));
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[tokio::test]
-    async fn app_rejects_certifier_invalid_runtime_shape_valid_bundle_before_run_admitted() {
-        let root = std::env::temp_dir().join(format!(
-            "mfm-app-certifier-invalid-bundle-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let artifacts = FsTypedArtifactStore::new(&root);
-        let fixture = framework_seed_public_output_fixture();
-        let mut invalid_spec = fixture.certified_spec.validated_spec().spec().clone();
-        invalid_spec.config_refs.clear();
-        let spec_bytes = invalid_spec
-            .canonical_json()
-            .expect("invalid spec remains parseable")
-            .to_vec();
-        let mut evidence = fixture.certified_spec.certificate().evidence.clone();
-        evidence.spec_hash = invalid_spec.spec_hash().expect("invalid spec hash");
-        let certificate =
-            mfm_certify::CertifiedSpecCertificate::from_evidence(evidence).expect("certificate");
-        let certificate_bytes = certificate
-            .canonical_json()
-            .expect("certificate json")
-            .to_vec();
-        let registry =
-            CertificationRegistry::from_program_draft(&fixture.draft).expect("fixture registry");
-        let run_id = fixture.run_id.clone();
-        let err = prepare_verified_bundle_launch(
-            UntrustedCertifiedBundleLaunchInput {
-                spec_bytes: &spec_bytes,
-                certificate_bytes: &certificate_bytes,
-                registry: &registry,
-                run_id: run_id.clone(),
-                framework_version: "mfm.test.framework",
-                source_revision: "test-source",
-                launched_at_unix_ms: 1_700_000_000_000,
-                drive: DriveMode::AppendOnly,
-            },
-            Vec::new(),
-            Vec::new(),
-        )
-        .expect_err("certifier-invalid bundle must not build a start request");
-        assert_eq!(err.code, "CertifiedBundleVerificationFailed");
-
-        let services = make_async_typed_services_with_certification_registry(
-            ErasedRunnerRegistry::new(),
-            AsyncInMemoryStore::default(),
-            artifacts,
-            registry,
-        );
-        let stream = services
-            .store()
-            .load_run_stream(&run_id)
-            .await
-            .expect("load stream");
-        assert!(!stream
-            .iter()
-            .any(|event| matches!(event.payload(), events::KernelEventPayload::RunAdmitted(_))));
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[tokio::test]
-    async fn tampered_stored_spec_artifact_rejects_before_resume() {
-        let (root, fixture, services, _started) = start_framework_fixture_run().await;
-        let stream = services
-            .store()
-            .load_run_stream(&fixture.run_id)
-            .await
-            .expect("load stream");
-        let started = run_admitted_payload(&fixture.run_id, &stream)
-            .expect("run started")
-            .clone();
-        std::fs::write(
-            artifact_blob_path(&root, &started.spec_artifact.artifact_id),
-            b"{}",
-        )
-        .expect("tamper spec artifact");
-
-        let err = services
-            .resume_stored_run(&fixture.run_id, DriveMode::AppendOnly)
-            .await
-            .expect_err("tampered spec rejects before resume");
-        assert_eq!(err.code, "ArtifactError");
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[tokio::test]
-    async fn tampered_stored_certificate_artifact_rejects_before_resume() {
-        let (root, fixture, services, _started) = start_framework_fixture_run().await;
-        let stream = services
-            .store()
-            .load_run_stream(&fixture.run_id)
-            .await
-            .expect("load stream");
-        let started = run_admitted_payload(&fixture.run_id, &stream)
-            .expect("run started")
-            .clone();
-        std::fs::write(
-            artifact_blob_path(&root, &started.certificate_artifact.artifact_id),
-            b"{}",
-        )
-        .expect("tamper certificate artifact");
-
-        let err = services
-            .resume_stored_run(&fixture.run_id, DriveMode::AppendOnly)
-            .await
-            .expect_err("tampered certificate rejects before resume");
-        assert_eq!(err.code, "ArtifactError");
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[tokio::test]
-    async fn sync_resume_rebuilds_stored_authority_before_runtime_resume() {
-        let (root, fixture, services, _started) = start_sync_framework_fixture_run().await;
-        let stream = {
-            let store = services.store();
-            let store = store.lock().await;
-            store.load_run_stream(&fixture.run_id)
-        };
-        let started = run_admitted_payload(&fixture.run_id, &stream)
-            .expect("run started")
-            .clone();
-        std::fs::write(
-            artifact_blob_path(&root, &started.certificate_artifact.artifact_id),
-            b"{}",
-        )
-        .expect("tamper certificate artifact");
-
-        let err = services
-            .resume_stored_run(&fixture.run_id, DriveMode::AppendOnly)
-            .await
-            .expect_err("sync resume rejects tampered stored certificate");
-        assert_eq!(err.code, "ArtifactError");
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[tokio::test]
-    async fn registry_mismatch_rejects_before_replay_broker_construction() {
-        let (root, fixture, services, _started) = start_framework_fixture_run().await;
-        let stream = services
-            .store()
-            .load_run_stream(&fixture.run_id)
-            .await
-            .expect("load stream");
-        let mismatched_services = make_async_typed_services_with_certification_registry(
-            ErasedRunnerRegistry::new(),
-            StaticAsyncStore {
-                run_id: fixture.run_id.clone(),
-                stream,
-            },
-            services.artifacts().clone(),
-            CertificationRegistry::new(),
-        );
-
-        let err = mismatched_services
-            .verify_replay_for_run(&fixture.run_id)
-            .await
-            .expect_err("registry mismatch rejects before replay");
-        assert_eq!(err.code, "CertifiedBundleVerificationFailed");
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[tokio::test]
-    async fn verified_run_history_rejects_missing_retained_artifact_bytes() {
-        let (root, fixture, services, _started) = start_framework_fixture_run().await;
-        let stream = services
-            .store()
-            .load_run_stream(&fixture.run_id)
-            .await
-            .expect("load stream");
-        let runtime_spec = load_runtime_spec_for_run(
-            services.artifacts(),
-            services.certification_registry(),
-            &fixture.run_id,
-            &stream,
-        )
-        .await
-        .expect("runtime spec");
-        let committed =
-            store::CommittedRunStream::from_events(fixture.run_id.clone(), stream.clone())
-                .expect("committed stream");
-        let removed = committed
-            .artifact_requirements()
-            .iter()
-            .find(|requirement| !requirement.source.is_retention())
-            .expect("required retained artifact")
-            .artifact_id
-            .clone();
-        std::fs::remove_file(artifact_blob_path(&root, &removed)).expect("remove artifact blob");
-
-        let err = verified_run_history_from_events(
-            services.artifacts(),
-            &runtime_spec,
-            &fixture.run_id,
-            &stream,
-        )
-        .await
-        .expect_err("missing retained bytes reject verified history");
-
-        assert_eq!(err.code, "RunStoreRejected");
-        assert!(err.message.contains(&removed.to_string()));
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[tokio::test]
-    async fn sync_replay_broker_rebuilds_stored_authority_before_construction() {
-        let (root, fixture, services, _started) = start_sync_framework_fixture_run().await;
-        let stream = {
-            let store = services.store();
-            let store = store.lock().await;
-            store.load_run_stream(&fixture.run_id)
-        };
-        let started = run_admitted_payload(&fixture.run_id, &stream)
-            .expect("run started")
-            .clone();
-        std::fs::write(
-            artifact_blob_path(&root, &started.certificate_artifact.artifact_id),
-            b"{}",
-        )
-        .expect("tamper certificate artifact");
-
-        let err = services
-            .replay_broker(&fixture.run_id)
-            .await
-            .expect_err("sync replay broker rejects tampered stored certificate");
-        assert_eq!(err.code, "ArtifactError");
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[tokio::test]
-    async fn public_output_rejects_tampered_stored_authority_before_rendering() {
-        let (root, fixture, services, _started) = start_framework_fixture_run().await;
-        let stream = services
-            .store()
-            .load_run_stream(&fixture.run_id)
-            .await
-            .expect("load stream");
-        let started = run_admitted_payload(&fixture.run_id, &stream)
-            .expect("run started")
-            .clone();
-        std::fs::write(
-            artifact_blob_path(&root, &started.certificate_artifact.artifact_id),
-            b"{}",
-        )
-        .expect("tamper certificate artifact");
-
-        let err = services
-            .typed_public_output(&fixture.run_id, &fixture.public_schema_id)
-            .await
-            .expect_err("tampered authority rejects before rendering");
-        assert_eq!(err.code, "ArtifactError");
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[tokio::test]
-    async fn rendered_json_cannot_authorize_resume_or_replay() {
-        let (root, fixture, services, _started) = start_framework_fixture_run().await;
-        let rendered = services
-            .typed_public_output(&fixture.run_id, &fixture.public_schema_id)
-            .await
-            .expect("render public output before tamper");
-        assert!(rendered.json.is_some());
-
-        let stream = services
-            .store()
-            .load_run_stream(&fixture.run_id)
-            .await
-            .expect("load stream");
-        let started = run_admitted_payload(&fixture.run_id, &stream)
-            .expect("run started")
-            .clone();
-        std::fs::write(
-            artifact_blob_path(&root, &started.certificate_artifact.artifact_id),
-            b"{}",
-        )
-        .expect("tamper certificate artifact");
-
-        let resume_err = services
-            .resume_stored_run(&fixture.run_id, DriveMode::AppendOnly)
-            .await
-            .expect_err("rendered JSON must not authorize resume");
-        assert_eq!(resume_err.code, "ArtifactError");
-
-        let replay_err = services
-            .verify_replay_for_run(&fixture.run_id)
-            .await
-            .expect_err("rendered JSON must not authorize replay");
-        assert_eq!(replay_err.code, "ArtifactError");
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[tokio::test]
-    async fn async_typed_start_rejects_missing_runner_before_run_admitted() {
-        let root = std::env::temp_dir().join(format!(
-            "mfm-app-async-missing-runner-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let artifacts = FsTypedArtifactStore::new(&root);
-        let fixture = framework_seed_public_output_fixture();
-        let config_inputs = config_inputs_for_fixture(&fixture);
-        let registry =
-            CertificationRegistry::from_program_draft(&fixture.draft).expect("fixture registry");
-        let request = prepare_certified_run_launch(
-            CertifiedRunLaunchInput {
-                certified_spec: fixture.certified_spec.clone(),
-                registry: &registry,
-                run_id: fixture.run_id.clone(),
-                framework_version: "mfm.test.framework",
-                source_revision: "test-source",
-                launched_at_unix_ms: 1_700_000_000_000,
-                drive: DriveMode::UntilBlocked,
-            },
-            config_inputs,
-            vec![RunLaunchSeedArtifact {
-                seed_id: fixture.seed_id.clone(),
-                bytes: fixture.seed_bytes.clone(),
-                media_type: spec::MediaType::new("application/json").expect("media type"),
-            }],
-        )
-        .expect("typed run request");
-        let services = make_async_typed_services(
-            production_typed_runner_registry(artifacts.clone())
-                .expect("production runner registry"),
-            AsyncInMemoryStore::default(),
-            artifacts.clone(),
-        );
-
-        let err = services
-            .launch_run(request)
-            .await
-            .expect_err("missing typed runner rejects");
-        assert_eq!(err.code, "LaunchRunnerUnavailable");
-        assert!(matches!(err.class, ErrorClass::BadRequest));
-        let status = services
-            .run_status(&fixture.run_id)
-            .await
-            .expect_err("run was not started");
-        assert_eq!(status.code, "RunNotFound");
-        let stream = services
-            .run_stream(&fixture.run_id)
-            .await
-            .expect_err("run stream was not started");
-        assert_eq!(stream.code, "RunNotFound");
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[tokio::test]
-    async fn production_typed_runner_registry_executes_certified_proof_run() {
-        let root = std::env::temp_dir().join(format!(
-            "mfm-app-production-proof-run-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let artifacts = FsTypedArtifactStore::new(&root);
-        let proof_config = mfm_op_proof::ProofWorkflowConfig::default();
-        let draft = mfm_op_proof::proof_program_draft(proof_config.clone()).expect("proof draft");
-        let certified = mfm_op_proof::certified_proof_spec(proof_config).expect("proof spec");
-        let config_inputs = config_inputs_for_draft_and_spec(&draft, &certified.envelope().spec);
-        let bundle = certified.bundle().expect("proof bundle");
-        let registry = production_certification_registry().expect("production registry");
-        let request = prepare_verified_bundle_launch(
-            UntrustedCertifiedBundleLaunchInput {
-                spec_bytes: bundle.spec_bytes(),
-                certificate_bytes: bundle.certificate_bytes(),
-                registry: &registry,
-                run_id: new_run_id(),
-                framework_version: "mfm.test.proof",
-                source_revision: "test-source",
-                launched_at_unix_ms: 1_700_000_000_000,
-                drive: DriveMode::UntilBlocked,
-            },
-            config_inputs,
-            Vec::new(),
-        )
-        .expect("typed proof run request");
-        let services = make_async_typed_services_with_certification_registry(
-            production_typed_runner_registry(artifacts.clone())
-                .expect("production runner registry"),
-            AsyncInMemoryStore::default(),
-            artifacts.clone(),
-            registry,
-        );
-
-        let response = services.launch_run(request).await.expect("start proof run");
-
-        assert_eq!(response.run_mode, TypedRunMode::Completed);
-        let resource_ledger = response
-            .saga
-            .resource_ledgers
-            .iter()
-            .find(|ledger| ledger.claim.kind == "manual_only")
-            .expect("manual-only side-effect resource status");
-        assert_eq!(resource_ledger.ledger_purpose, "forward");
-        assert!(resource_ledger.key.is_none());
-        assert!(resource_ledger.active_lane.is_none());
-        assert!(resource_ledger.blocked_by_lane.is_none());
-        let replay = services
-            .verify_replay_for_run(&RunId::parse(&response.run_id).expect("typed run id"))
-            .await
-            .expect("verify proof replay");
-        assert_eq!(replay.run_mode, TypedRunMode::Completed);
-        let public_output = services
-            .typed_public_output(
-                &RunId::parse(&response.run_id).expect("typed run id"),
-                &certified.envelope().spec.public_outputs.public_schema_id,
-            )
-            .await
-            .expect("render proof public output");
-        let public_output_json = public_output.json.expect("rendered proof json");
-        assert_eq!(public_output_json["output"]["fact"]["n"], 1);
-        assert_eq!(
-            public_output_json["output"]["side_effect"]["status"],
-            "confirmed"
-        );
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    async fn start_framework_fixture_run() -> (
-        PathBuf,
-        FrameworkSeedPublicOutputFixture,
-        AsyncRunServices<AsyncInMemoryStore>,
-        TypedRunResponse,
-    ) {
-        start_framework_fixture_run_with_drive(DriveMode::UntilBlocked, "framework-run").await
-    }
-
-    async fn start_framework_fixture_run_with_drive(
-        drive: DriveMode,
-        label: &str,
-    ) -> (
-        PathBuf,
-        FrameworkSeedPublicOutputFixture,
-        AsyncRunServices<AsyncInMemoryStore>,
-        TypedRunResponse,
-    ) {
-        let root =
-            std::env::temp_dir().join(format!("mfm-app-async-{label}-{}", uuid::Uuid::new_v4()));
-        let artifacts = FsTypedArtifactStore::new(&root);
-        let fixture = framework_seed_public_output_fixture();
-        let config_inputs = config_inputs_for_fixture(&fixture);
-        let registry =
-            CertificationRegistry::from_program_draft(&fixture.draft).expect("fixture registry");
-        artifacts
-            .put_artifact(
-                fixture.output_bytes.clone(),
-                TypedArtifactDescriptor {
-                    media_type: spec::MediaType::new("application/json").expect("media type"),
-                    schema_id: Some(fixture.value_schema_id.clone()),
-                    semantic_type_id: Some(fixture.semantic_type_id.clone()),
-                    producer_node_id: Some(fixture.value_node_id.clone()),
-                    producer_seed_id: None,
-                    artifact_role: events::ArtifactRole::StateOutput,
-                },
-            )
-            .await
-            .expect("persist runner output artifact");
-        let request = prepare_certified_run_launch(
-            CertifiedRunLaunchInput {
-                certified_spec: fixture.certified_spec.clone(),
-                registry: &registry,
-                run_id: fixture.run_id.clone(),
-                framework_version: "mfm.test.framework",
-                source_revision: "test-source",
-                launched_at_unix_ms: 1_700_000_000_000,
-                drive,
-            },
-            config_inputs,
-            vec![RunLaunchSeedArtifact {
-                seed_id: fixture.seed_id.clone(),
-                bytes: fixture.seed_bytes.clone(),
-                media_type: spec::MediaType::new("application/json").expect("media type"),
-            }],
-        )
-        .expect("typed run request");
-        let runners = framework_fixture_runner_registry(&fixture);
-        let services = make_async_typed_services_with_certification_registry(
-            runners,
-            AsyncInMemoryStore::default(),
-            artifacts.clone(),
-            registry,
-        );
-
-        let started = services.launch_run(request).await.expect("start typed run");
-        (root, fixture, services, started)
-    }
-
-    async fn append_interrupted_attempt(
-        store: &AsyncInMemoryStore,
-        run_id: &RunId,
-        spec_hash: &SpecHash,
-        node: &spec::NodeSpec,
-        attempt_id: &AttemptId,
-    ) {
-        let start = store::TypedCommitRequest::from_payloads(
-            run_id.clone(),
-            store
-                .expected_next_seq(run_id)
-                .await
-                .expect("expected next seq"),
-            store::CommitKey::new("test-interrupted-attempt-start").expect("commit key"),
-            vec![events::KernelEventPayload::StateAttemptStarted(
-                events::StateAttemptStarted {
-                    spec_hash: spec_hash.clone(),
-                    node_id: node.node_id.clone(),
-                    attempt_id: attempt_id.clone(),
-                    attempt_no: 1,
-                    state_kind: node.state_kind.clone(),
-                    state_version: node.state_version.clone(),
-                },
-            )],
-            Vec::new(),
-            store::CommitPreconditions {
-                required_run_state: store::RequiredRunState::NotCompleted,
-                required_cell_states: vec![store::CellStatePrecondition {
-                    cell_id: node.output_cell.clone(),
-                    required: store::RequiredCellState::Absent,
-                }],
-                ..store::CommitPreconditions::default()
-            },
-        )
-        .expect("attempt start request");
-        append_async_test_commit(store, start).await;
-
-        let interrupted = store::TypedCommitRequest::from_payloads(
-            run_id.clone(),
-            store
-                .expected_next_seq(run_id)
-                .await
-                .expect("expected next seq"),
-            store::CommitKey::new("test-interrupted-attempt-terminal").expect("commit key"),
-            vec![events::KernelEventPayload::StateAttemptInterrupted(
-                events::StateAttemptInterrupted {
-                    spec_hash: spec_hash.clone(),
-                    node_id: node.node_id.clone(),
-                    attempt_id: attempt_id.clone(),
-                },
-            )],
-            Vec::new(),
-            store::CommitPreconditions {
-                required_run_state: store::RequiredRunState::NotCompleted,
-                required_cell_states: vec![store::CellStatePrecondition {
-                    cell_id: node.output_cell.clone(),
-                    required: store::RequiredCellState::Absent,
-                }],
-                ..store::CommitPreconditions::default()
-            },
-        )
-        .expect("attempt interrupted request");
-        append_async_test_commit(store, interrupted).await;
-    }
-
-    fn assert_framework_started_before_terminal_evidence(
-        stream_events: &[serde_json::Value],
-        attempts: &[serde_json::Value],
-        nodes: &[spec::NodeSpec],
-        run_id: &RunId,
-    ) {
-        for node in nodes.iter().filter(|node| node.framework.is_some()) {
-            let required_kind = match &node.framework {
-                Some(spec::FrameworkNodeSpec::PublicOutputRender(_)) => "public_output_render",
-                Some(spec::FrameworkNodeSpec::ProjectRetentionManifest(_)) => {
-                    "project_retention_manifest"
-                }
-                Some(spec::FrameworkNodeSpec::CompleteRun(_)) => "complete_run",
-                _ => continue,
-            };
-            let attempt = attempts
-                .iter()
-                .find(|attempt| {
-                    attempt["node_id"].as_str() == Some(node.node_id.as_str())
-                        && attempt["disposition"].as_str() == Some("completed")
-                })
-                .unwrap_or_else(|| {
-                    panic!(
-                        "missing completed {required_kind} framework attempt for {}",
-                        node.node_id
-                    )
-                });
-            let attempt_id = attempt["attempt_id"].as_str().expect("attempt id");
-            let attempt_key = format!("attempt:{}:{}", node.node_id, attempt_id);
-            let start_index = stream_event_position(
-                stream_events,
-                |event| {
-                    event["logical_key"].as_str() == Some(attempt_key.as_str())
-                        && event["event_schema_id"]
-                            .as_str()
-                            .is_some_and(|schema| schema.contains("state_attempt_started"))
-                },
-                &format!("framework start {attempt_key}"),
-            );
-            let completed_index = stream_event_position(
-                stream_events,
-                |event| {
-                    event["logical_key"].as_str() == Some(attempt_key.as_str())
-                        && event["event_schema_id"]
-                            .as_str()
-                            .is_some_and(|schema| schema.contains("state_attempt_completed"))
-                },
-                &format!("framework completion {attempt_key}"),
-            );
-            assert!(
-                start_index < completed_index,
-                "framework StateAttemptStarted must precede StateAttemptCompleted for {attempt_key}"
-            );
-
-            match &node.framework {
-                Some(spec::FrameworkNodeSpec::PublicOutputRender(_)) => {
-                    let public_output_index = stream_event_position(
-                        stream_events,
-                        |event| {
-                            event["logical_key"]
-                                .as_str()
-                                .is_some_and(|key| key.starts_with("public_output:"))
-                                && event["event_schema_id"]
-                                    .as_str()
-                                    .is_some_and(|schema| schema.contains("public_output_produced"))
-                        },
-                        "public-output terminal evidence",
-                    );
-                    assert!(
-                        start_index < public_output_index,
-                        "public-output framework start must precede public output evidence"
-                    );
-                }
-                Some(spec::FrameworkNodeSpec::ProjectRetentionManifest(_)) => {
-                    let retention_prefix = format!("retention:{}:manifest:", run_id);
-                    let retention_index = stream_event_position(
-                        stream_events,
-                        |event| {
-                            event["logical_key"]
-                                .as_str()
-                                .is_some_and(|key| key.starts_with(&retention_prefix))
-                                && event["event_schema_id"].as_str().is_some_and(|schema| {
-                                    schema.contains("retention_manifest_projected")
-                                })
-                        },
-                        "retention manifest terminal evidence",
-                    );
-                    assert!(
-                        start_index < retention_index,
-                        "retention framework start must precede retention manifest evidence"
-                    );
-                }
-                Some(spec::FrameworkNodeSpec::CompleteRun(_)) => {
-                    let completed_run_index = stream_event_position(
-                        stream_events,
-                        |event| {
-                            event["logical_key"].as_str() == Some("run:complete")
-                                && event["event_schema_id"]
-                                    .as_str()
-                                    .is_some_and(|schema| schema.contains("run_completed"))
-                        },
-                        "run completion terminal evidence",
-                    );
-                    assert!(
-                        start_index < completed_run_index,
-                        "complete-run framework start must precede run completion evidence"
-                    );
-                }
-                _ => {}
-            }
-        }
-    }
-
-    fn stream_event_position(
-        events: &[serde_json::Value],
-        predicate: impl Fn(&serde_json::Value) -> bool,
-        label: &str,
-    ) -> usize {
-        events
-            .iter()
-            .position(predicate)
-            .unwrap_or_else(|| panic!("missing stream event for {label}"))
-    }
-
-    async fn start_sync_framework_fixture_run() -> (
-        PathBuf,
-        FrameworkSeedPublicOutputFixture,
-        RunServices<store::InMemoryTypedRunStore>,
-        TypedRunResponse,
-    ) {
-        let root = std::env::temp_dir().join(format!(
-            "mfm-app-sync-framework-run-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let artifacts = FsTypedArtifactStore::new(&root);
-        let fixture = framework_seed_public_output_fixture();
-        let config_inputs = config_inputs_for_fixture(&fixture);
-        let registry =
-            CertificationRegistry::from_program_draft(&fixture.draft).expect("fixture registry");
-        artifacts
-            .put_artifact(
-                fixture.output_bytes.clone(),
-                TypedArtifactDescriptor {
-                    media_type: spec::MediaType::new("application/json").expect("media type"),
-                    schema_id: Some(fixture.value_schema_id.clone()),
-                    semantic_type_id: Some(fixture.semantic_type_id.clone()),
-                    producer_node_id: Some(fixture.value_node_id.clone()),
-                    producer_seed_id: None,
-                    artifact_role: events::ArtifactRole::StateOutput,
-                },
-            )
-            .await
-            .expect("persist runner output artifact");
-        let request = prepare_certified_run_launch(
-            CertifiedRunLaunchInput {
-                certified_spec: fixture.certified_spec.clone(),
-                registry: &registry,
-                run_id: fixture.run_id.clone(),
-                framework_version: "mfm.test.framework",
-                source_revision: "test-source",
-                launched_at_unix_ms: 1_700_000_000_000,
-                drive: DriveMode::UntilBlocked,
-            },
-            config_inputs,
-            vec![RunLaunchSeedArtifact {
-                seed_id: fixture.seed_id.clone(),
-                bytes: fixture.seed_bytes.clone(),
-                media_type: spec::MediaType::new("application/json").expect("media type"),
-            }],
-        )
-        .expect("typed run request");
-        let runners = framework_fixture_runner_registry(&fixture);
-        let services =
-            make_in_memory_typed_services_with_certification_registry(runners, &root, registry);
-
-        let started = services.launch_run(request).await.expect("start typed run");
-        (root, fixture, services, started)
-    }
-
-    fn framework_fixture_runner_registry(
-        fixture: &FrameworkSeedPublicOutputFixture,
-    ) -> ErasedRunnerRegistry {
-        let mut runners = ErasedRunnerRegistry::new();
-        let factory_id = fixture.value_runner_factory_id.clone();
-        runners
-            .register(
-                ErasedRunnerBinding::new(
-                    fixture.value_descriptor_id.clone(),
-                    factory_id.clone(),
-                    test_executable(factory_id),
-                    Arc::new(TestValueRunner {
-                        output_bytes: fixture.output_bytes.clone(),
-                    }),
-                )
-                .expect("runner binding"),
-            )
-            .expect("register runner");
-        runners
-    }
-
-    fn config_inputs_for_fixture(
-        fixture: &FrameworkSeedPublicOutputFixture,
-    ) -> Vec<RunLaunchConfigArtifact> {
-        config_inputs_for_draft_and_spec(&fixture.draft, &fixture.certified_spec.envelope().spec)
-    }
-
-    fn config_inputs_for_draft_and_spec(
-        draft: &mfm_program::TypedProgramDraft,
-        typed_spec: &spec::TypedExecutionSpec,
-    ) -> Vec<RunLaunchConfigArtifact> {
-        let mut inputs = Vec::new();
-        inputs.extend(
-            draft
-                .state_nodes()
-                .iter()
-                .map(|node| &node.config)
-                .chain(draft.operation_lineage().iter().map(|frame| &frame.config))
-                .map(|config| RunLaunchConfigArtifact {
-                    schema_id: config.schema_id.clone(),
-                    bytes: config.canonical_json.to_vec(),
-                    media_type: spec::MediaType::new("application/json").expect("media type"),
-                }),
-        );
-        for node in &typed_spec.nodes {
-            let Some(framework) = &node.framework else {
-                continue;
-            };
-            let bytes =
-                spec::framework_config_canonical_json(framework.config_kind(), &node.node_id)
-                    .expect("canonical framework config");
-            assert_eq!(
-                bytes.content_digest(),
-                node.config_ref.digest,
-                "framework config helper must match certified config ref"
-            );
-            inputs.push(RunLaunchConfigArtifact {
-                schema_id: node.config_ref.schema_id.clone(),
-                bytes: bytes.to_vec(),
-                media_type: node.config_ref.media_type.clone(),
-            });
-        }
-        inputs
-    }
-
-    async fn corrupt_public_output_history(
-        artifacts: &FsTypedArtifactStore,
-        valid_stream: &[store::KernelEventEnvelope],
-    ) -> Vec<store::KernelEventEnvelope> {
-        let run_id = valid_stream
-            .first()
-            .expect("valid stream is non-empty")
-            .run_id()
-            .clone();
-        let mut corrupt_store = store::InMemoryTypedRunStore::new();
-        let mut index = 0;
-        while index < valid_stream.len() {
-            let seq = valid_stream[index].seq();
-            let start = index;
-            while index < valid_stream.len() && valid_stream[index].seq() == seq {
-                index += 1;
-            }
-            let group = &valid_stream[start..index];
-            let mut payloads = group
-                .iter()
-                .map(|event| event.payload().clone())
-                .collect::<Vec<_>>();
-            let mut contains_public_output = false;
-            for payload in &mut payloads {
-                if let events::KernelEventPayload::PublicOutputProduced(public_output) = payload {
-                    public_output.output_spec_digest = content_digest(0xee);
-                    contains_public_output = true;
-                }
-            }
-            let required_artifacts = required_artifacts_for_payloads(artifacts, &payloads).await;
-            let admitted_artifacts = required_artifacts.clone();
-            let contains_run_admitted = payloads
-                .iter()
-                .any(|payload| matches!(payload, events::KernelEventPayload::RunAdmitted(_)));
-            let request = store::TypedCommitRequest::from_payloads(
-                run_id.clone(),
-                corrupt_store.expected_next_seq(&run_id),
-                group[0].commit_key().clone(),
-                payloads,
-                required_artifacts,
-                store::CommitPreconditions {
-                    required_run_state: if contains_run_admitted {
-                        store::RequiredRunState::Absent
-                    } else {
-                        store::RequiredRunState::NotCompleted
-                    },
-                    ..store::CommitPreconditions::default()
-                },
-            )
-            .expect("typed commit request");
-            let commit = test_prepared_commit_plan(request, admitted_artifacts)
-                .expect("prepare corrupt-history test commit");
-            corrupt_store
-                .append_prepared_commit_plan(commit)
-                .expect("append corrupt-history test commit");
-            if contains_public_output {
-                break;
-            }
-        }
-        corrupt_store.load_run_stream(&run_id)
-    }
-
-    fn standalone_retention_projection_history(
-        valid_stream: &[store::KernelEventEnvelope],
-    ) -> Vec<store::KernelEventEnvelope> {
-        let run_id = valid_stream
-            .first()
-            .expect("valid stream is non-empty")
-            .run_id()
-            .clone();
-        let retention_seq = valid_stream
-            .iter()
-            .find_map(|event| {
-                matches!(
-                    event.payload(),
-                    events::KernelEventPayload::RetentionManifestProjected(_)
-                )
-                .then_some(event.seq())
-            })
-            .expect("retention projection event");
-        let mut rewritten = Vec::new();
-        let mut index = 0;
-        while index < valid_stream.len() {
-            let seq = valid_stream[index].seq();
-            let commit_key = valid_stream[index].commit_key().clone();
-            let mut end = index + 1;
-            while end < valid_stream.len()
-                && valid_stream[end].seq() == seq
-                && valid_stream[end].commit_key() == &commit_key
-            {
-                end += 1;
-            }
-            let payloads = valid_stream[index..end]
-                .iter()
-                .filter(|event| {
-                    if event.seq() != retention_seq {
-                        return true;
-                    }
-                    matches!(
-                        event.payload(),
-                        events::KernelEventPayload::RetentionManifestProjected(_)
-                            | events::KernelEventPayload::RetentionRefsAppended(
-                                events::RetentionRefsAppended {
-                                    reason: events::RetentionReason::ManifestProjection,
-                                    ..
-                                }
-                            )
-                    )
-                })
-                .map(|event| event.payload().clone())
-                .collect::<Vec<_>>();
-            if !payloads.is_empty() {
-                let request = store::TypedCommitRequest::from_payloads(
-                    run_id.clone(),
-                    seq,
-                    commit_key,
-                    payloads,
-                    Vec::new(),
-                    store::CommitPreconditions::default(),
-                )
-                .expect("typed commit request");
-                let batch =
-                    store::build_committed_batch(&request, seq).expect("rewritten commit batch");
-                rewritten.extend(batch.events().iter().cloned());
-            }
-            index = end;
-        }
-        rewritten
-    }
-
-    fn append_post_completion_retention_refs_history(
-        stream: &[store::KernelEventEnvelope],
-    ) -> Vec<store::KernelEventEnvelope> {
-        let run_admitted = stream
-            .iter()
-            .find_map(|event| match event.payload() {
-                events::KernelEventPayload::RunAdmitted(payload) => Some(payload),
-                _ => None,
-            })
-            .expect("run started");
-        let retention = store::ProjectionSnapshot::rebuild_from_run_stream(stream)
-            .expect("valid projection")
-            .retention(&run_admitted.run_id)
-            .and_then(|projection| projection.refs.values().next().cloned())
-            .expect("retention ref");
-        let seq = stream
-            .last()
-            .map(|event| store::StreamSeq::new(event.seq().as_u64() + 1).expect("next stream seq"))
-            .unwrap_or(store::StreamSeq::FIRST);
-        let request = store::TypedCommitRequest::from_payloads(
-            run_admitted.run_id.clone(),
-            seq,
-            store::CommitKey::new("post-completion-retention-ref").expect("commit key"),
-            vec![events::KernelEventPayload::RetentionRefsAppended(
-                events::RetentionRefsAppended {
-                    run_id: run_admitted.run_id.clone(),
-                    spec_hash: run_admitted.spec_hash.clone(),
-                    refs: vec![retention],
-                    reason: events::RetentionReason::RuntimeEvidence,
-                },
-            )],
-            Vec::new(),
-            store::CommitPreconditions::default(),
-        )
-        .expect("typed commit request");
-        let batch = store::build_committed_batch(&request, seq).expect("retention refs batch");
-        let mut rewritten = stream.to_vec();
-        rewritten.extend(batch.events().iter().cloned());
-        rewritten
-    }
-
-    fn tamper_run_admitted_spec_artifact_history(
-        stream: &[store::KernelEventEnvelope],
-    ) -> Vec<store::KernelEventEnvelope> {
-        let first = stream.first().expect("valid stream is non-empty");
-        let run_id = first.run_id().clone();
-        let first_seq = first.seq();
-        let first_key = first.commit_key().clone();
-        let events::KernelEventPayload::RunAdmitted(mut run_admitted) = first.payload().clone()
-        else {
-            panic!("valid stream starts with RunAdmitted");
-        };
-        run_admitted.spec_artifact.byte_len += 1;
-        let request = store::TypedCommitRequest::from_payloads(
-            run_id,
-            first_seq,
-            first_key.clone(),
-            vec![events::KernelEventPayload::RunAdmitted(run_admitted)],
-            Vec::new(),
-            store::CommitPreconditions::default(),
-        )
-        .expect("typed commit request");
-        let batch =
-            store::build_committed_batch(&request, first_seq).expect("tampered admission batch");
-        let mut rewritten = batch.events().to_vec();
-        rewritten.extend(
-            stream
-                .iter()
-                .filter(|event| {
-                    !(event.seq() == first_seq && event.commit_key() == request.commit_key())
-                })
-                .cloned(),
-        );
-        rewritten
-    }
-
-    fn append_forged_manual_resolution_history(
-        stream: &[store::KernelEventEnvelope],
-    ) -> Vec<store::KernelEventEnvelope> {
-        let first = stream.first().expect("valid stream is non-empty");
-        let run_id = first.run_id().clone();
-        let seq = store::StreamSeq::new(
-            stream
-                .last()
-                .expect("valid stream is non-empty")
-                .seq()
-                .as_u64()
-                + 1,
-        )
-        .expect("next sequence");
-        let request = store::TypedCommitRequest::from_payloads(
-            run_id.clone(),
-            seq,
-            store::CommitKey::new("forged-manual-resolution").expect("commit key"),
-            vec![events::KernelEventPayload::ManualResolutionRecorded(
-                events::ManualResolutionRecorded {
-                    run_id,
-                    spec_hash: first.spec_hash().clone(),
-                    outcome: events::ManualResolutionOutcome::ConfirmRemediated,
-                    evidence_schema_id: schema_id("mfm.test.manual_evidence", 0xe0),
-                    evidence_hash: content_digest(0xe1),
-                    evidence_artifact_id: artifact_id_for_digest(&content_digest(0xe1)),
-                    authorization_schema_id: schema_id("mfm.test.manual_authorization", 0xe3),
-                    authorization_hash: content_digest(0xe4),
-                    authorization_artifact_id: artifact_id_for_digest(&content_digest(0xe4)),
-                    note: None,
-                },
-            )],
-            Vec::new(),
-            store::CommitPreconditions::default(),
-        )
-        .expect("typed commit request");
-        let batch = store::build_committed_batch(&request, seq).expect("manual batch");
-        let mut rewritten = stream.to_vec();
-        rewritten.extend(batch.events().iter().cloned());
-        rewritten
-    }
-
-    async fn required_artifacts_for_payloads(
-        artifacts: &FsTypedArtifactStore,
-        payloads: &[events::KernelEventPayload],
-    ) -> Vec<store::ArtifactEvidenceRef> {
-        let mut artifact_ids = BTreeSet::new();
-        for payload in payloads {
-            match payload {
-                events::KernelEventPayload::RunAdmitted(started) => {
-                    artifact_ids.insert(started.spec_artifact.artifact_id.clone());
-                    artifact_ids.insert(started.certificate_artifact.artifact_id.clone());
-                    artifact_ids.extend(
-                        started
-                            .config_artifacts
-                            .iter()
-                            .map(|artifact| artifact.artifact_id.clone()),
-                    );
-                    artifact_ids.extend(
-                        started
-                            .seed_cells
-                            .iter()
-                            .map(|seed| seed.seed_artifact.artifact_id.clone()),
-                    );
-                }
-                events::KernelEventPayload::RetentionRefsAppended(retention) => {
-                    artifact_ids.extend(
-                        retention
-                            .refs
-                            .iter()
-                            .map(|reference| reference.artifact_id.clone()),
-                    );
-                }
-                events::KernelEventPayload::CellProduced(cell) => {
-                    artifact_ids.insert(cell.artifact_id.clone());
-                }
-                events::KernelEventPayload::FactRecorded(fact) => {
-                    artifact_ids.insert(fact.artifact_id.clone());
-                }
-                events::KernelEventPayload::PublicOutputProduced(public_output) => {
-                    artifact_ids.extend(
-                        public_output
-                            .cells
-                            .iter()
-                            .map(|cell| cell.artifact_id.clone()),
-                    );
-                    if let Some(artifact_id) = &public_output.rendered_artifact_id {
-                        artifact_ids.insert(artifact_id.clone());
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        let mut evidence_by_id = BTreeMap::new();
-        for artifact_id in artifact_ids {
-            let (_bytes, evidence) = artifacts
-                .get_artifact_by_id(&artifact_id)
-                .await
-                .expect("required artifact exists in fixture store");
-            evidence_by_id.insert(artifact_id, evidence);
-        }
-        evidence_by_id.into_values().collect()
-    }
-
-    fn artifact_blob_path(root: &Path, artifact_id: &ArtifactId) -> PathBuf {
-        let digest = artifact_id.digest().to_string();
-        root.join("typed")
-            .join("blobs")
-            .join(&digest[0..2])
-            .join(artifact_id.as_str())
-    }
-
-    struct StaticAsyncStore {
-        run_id: RunId,
-        stream: Vec<store::KernelEventEnvelope>,
-    }
-
-    impl store::AsyncTypedRunEventStore for StaticAsyncStore {
-        type Error = store::StoreError;
-
-        fn append_prepared_commit_plan<'a>(
-            &'a self,
-            _plan: store::PreparedCommitPlan,
-        ) -> store::AsyncStoreFuture<'a, store::CommitOutcome, Self::Error> {
-            Box::pin(std::future::ready(Err(store::StoreError::Event(
-                "static test store is read-only".to_owned(),
-            ))))
-        }
-
-        fn load_run_stream<'a>(
-            &'a self,
-            run_id: &'a RunId,
-        ) -> store::AsyncStoreFuture<'a, Vec<store::KernelEventEnvelope>, Self::Error> {
-            let stream = if run_id == &self.run_id {
-                self.stream.clone()
-            } else {
-                Vec::new()
-            };
-            Box::pin(std::future::ready(Ok(stream)))
-        }
-
-        fn expected_next_seq<'a>(
-            &'a self,
-            _run_id: &'a RunId,
-        ) -> store::AsyncStoreFuture<'a, store::StreamSeq, Self::Error> {
-            Box::pin(std::future::ready(Ok(store::StreamSeq::FIRST)))
-        }
-
-        fn status_projection_snapshot<'a>(
-            &'a self,
-            run_id: &'a RunId,
-        ) -> store::AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
-            Box::pin(async move {
-                let stream = self.load_run_stream(run_id).await?;
-                store::ProjectionSnapshot::rebuild_from_run_stream(&stream)
-            })
-        }
-    }
-
-    #[derive(Default)]
-    struct AsyncInMemoryStore(StdMutex<store::InMemoryTypedRunStore>);
-
-    impl store::AsyncTypedRunEventStore for AsyncInMemoryStore {
-        type Error = store::StoreError;
-
-        fn append_prepared_commit_plan<'a>(
-            &'a self,
-            plan: store::PreparedCommitPlan,
-        ) -> store::AsyncStoreFuture<'a, store::CommitOutcome, Self::Error> {
-            let result = self
-                .0
-                .lock()
-                .expect("store lock")
-                .append_prepared_commit_plan(plan);
-            Box::pin(std::future::ready(result))
-        }
-
-        fn load_run_stream<'a>(
-            &'a self,
-            run_id: &'a RunId,
-        ) -> store::AsyncStoreFuture<'a, Vec<store::KernelEventEnvelope>, Self::Error> {
-            let result = Ok(self.0.lock().expect("store lock").load_run_stream(run_id));
-            Box::pin(std::future::ready(result))
-        }
-
-        fn expected_next_seq<'a>(
-            &'a self,
-            run_id: &'a RunId,
-        ) -> store::AsyncStoreFuture<'a, store::StreamSeq, Self::Error> {
-            let result = Ok(self.0.lock().expect("store lock").expected_next_seq(run_id));
-            Box::pin(std::future::ready(result))
-        }
-
-        fn status_projection_snapshot<'a>(
-            &'a self,
-            run_id: &'a RunId,
-        ) -> store::AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
-            Box::pin(async move {
-                let store = self.0.lock().expect("store lock");
-                let stream = store.load_run_stream(run_id);
-                let run_projection = store::ProjectionSnapshot::rebuild_from_run_stream(&stream)?;
-                projection_with_resource_lanes(
-                    &run_projection,
-                    store
-                        .projection_snapshot()
-                        .resource_lanes()
-                        .map(|(lane_key, projection)| (lane_key.clone(), projection.clone()))
-                        .collect(),
-                )
-            })
-        }
-    }
-
-    struct FrameworkSeedPublicOutputFixture {
-        draft: mfm_program::TypedProgramDraft,
-        certified_spec: CertifiedTypedSpec,
-        run_id: RunId,
-        seed_id: SeedId,
-        seed_bytes: Vec<u8>,
-        output_bytes: Vec<u8>,
-        value_schema_id: SchemaId,
-        semantic_type_id: SemanticTypeId,
-        value_node_id: NodeId,
-        value_descriptor_id: DescriptorId,
-        value_runner_factory_id: events::RunnerFactoryId,
-        public_schema_id: SchemaId,
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
-    #[mfm(
-        namespace = "mfm.app.test",
-        name = "framework_input",
-        version = "1",
-        schema = "mfm.app.test.framework_input"
-    )]
-    struct FrameworkInput {
-        input: String,
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
-    #[mfm(
-        namespace = "mfm.app.test",
-        name = "framework_output",
-        version = "1",
-        schema = "mfm.app.test.framework_output"
-    )]
-    struct FrameworkOutput {
-        total: String,
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
-    struct FrameworkConfig {
-        version: u64,
-    }
-
-    #[derive(PublicOutputs)]
-    #[mfm(schema = "mfm.app.test.framework_public")]
-    struct FrameworkPublicOutputs<'program, 'scope> {
-        result: mfm_program::Handle<'program, 'scope, FrameworkOutput>,
-    }
-
-    struct FrameworkValueState {
-        _config: FrameworkConfig,
-    }
-
-    impl StateSpec for FrameworkValueState {
-        type Config = FrameworkConfig;
-        type Input = FrameworkInput;
-        type Output = FrameworkOutput;
-        type Effect = Pure;
-        type Caps = NoCaps;
-
-        fn kind() -> mfm_program::Result<StateKind> {
-            StateKind::new(
-                "mfm.app.test",
-                "framework_value",
-                DigestAlgorithm::Sha256JcsV1,
-                digest(0xbf),
-            )
-            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
-        }
-
-        fn version() -> mfm_program::Result<StateVersion> {
-            StateVersion::new("mfm.app.test.framework_value.v1")
-                .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
-        }
-
-        fn name() -> &'static str {
-            "mfm.app.test.framework_value"
-        }
-
-        fn new(config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
-            Ok(Self {
-                _config: config.into_inner(),
-            })
-        }
-    }
-
-    impl PureState for FrameworkValueState {
-        fn run(&self, _input: Self::Input) -> StateResult<Self::Output> {
-            Ok(FrameworkOutput {
-                total: "12.50".to_owned(),
-            })
-        }
-    }
-
-    struct TestValueRunner {
-        output_bytes: Vec<u8>,
-    }
-
-    impl ErasedNodeRunner for TestValueRunner {
-        fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
-            Box::pin(async move {
-                let output_digest = content_digest_for_bytes(&self.output_bytes);
-                let artifact_id = artifact_id_for_digest(&output_digest);
-                let evidence = store::ArtifactEvidenceRef {
-                    artifact_id: artifact_id.clone(),
-                    digest: output_digest.clone(),
-                    byte_len: self.output_bytes.len() as u64,
-                    media_type: spec::MediaType::new("application/json")?,
-                    schema_id: Some(ctx.output_cell().schema_id.clone()),
-                    semantic_type_id: Some(ctx.output_cell().semantic_type_id.clone()),
-                    producer_node_id: Some(ctx.node().node_id.clone()),
-                    producer_seed_id: None,
-                    artifact_role: events::ArtifactRole::StateOutput,
-                };
-                let staged_artifact = StagedArtifact::inline_attempt_artifact(
-                    &ctx,
-                    self.output_bytes.clone(),
-                    evidence,
-                )?;
-                Ok(ErasedRunnerOutput {
-                    staged_artifacts: vec![staged_artifact],
-                    staged_retention_refs: vec![StagedRetentionRefs::runtime_evidence(vec![
-                        events::RetentionRef {
-                            artifact_id: artifact_id.clone(),
-                            role: events::ArtifactRole::StateOutput,
-                            content_digest: output_digest.clone(),
-                        },
-                    ])],
-                    payloads: vec![RunnerEventPayload::CellProduced(events::CellProduced {
-                        spec_hash: ctx.spec_hash().clone(),
-                        node_id: ctx.node().node_id.clone(),
-                        cell_id: ctx.node().output_cell.clone(),
-                        scope_id: ctx.output_cell().scope_id.clone(),
-                        attempt_id: ctx.attempt_id().clone(),
-                        semantic_type_id: ctx.output_cell().semantic_type_id.clone(),
-                        schema_id: ctx.output_cell().schema_id.clone(),
-                        value_lineage: ctx.output_cell().value_lineage.clone(),
-                        artifact_id,
-                        content_digest: output_digest,
-                        producer_state_kind: Some(ctx.node().state_kind.clone()),
-                        producer_state_version: Some(ctx.node().state_version.clone()),
-                    })],
-                })
-            })
-        }
-    }
-
-    fn test_executable(factory_id: events::RunnerFactoryId) -> events::ExecutableIdentity {
-        events::ExecutableIdentity {
-            factory_id,
-            source_revision: events::SourceRevision::new("test-source").expect("source revision"),
-            cargo_package_name: events::PackageName::new("mfm-app").expect("package name"),
-            cargo_package_version: events::PackageVersion::new("0.0.0-test")
-                .expect("package version"),
-            cargo_package_digest: content_digest(0xd0),
-            binary_digest: content_digest(0xd1),
-            nix_derivation_hash: None,
-            nix_output_hash: None,
-        }
-    }
-
-    fn framework_seed_public_output_fixture() -> FrameworkSeedPublicOutputFixture {
-        let run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(0xa0));
-        let seed = CanonicalSeed::from_value(&FrameworkInput {
-            input: "start".to_owned(),
-        })
-        .expect("canonical seed");
-        let seed_bytes = seed.canonical_json().to_vec();
-        let output_bytes = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(
-            &serde_json::to_string(&FrameworkOutput {
-                total: "12.50".to_owned(),
-            })
-            .expect("output json"),
-        )
-        .expect("canonical output")
-        .to_vec();
-        let mut states = StateRegistryBuilder::new();
-        states
-            .register::<FrameworkValueState>()
-            .expect("state registration");
-        let draft = build_root_with_registries(
-            ScopeKey::new("root").expect("root key"),
-            states.snapshot(),
-            mfm_program::OperationRegistryBuilder::new().snapshot(),
-            |root: &mut RootBuilder<'_, '_>| {
-                let seed = root.seed(SeedKey::new("launch")?, seed.clone())?;
-                let result = root.scope().state::<FrameworkValueState, _>(
-                    StateKey::new("value")?,
-                    FrameworkConfig { version: 1 },
-                    seed,
-                )?;
-                root.bind_public_outputs(
-                    PublicOutputKey::new("public-output")?,
-                    &FrameworkPublicOutputs { result },
-                )
-            },
-        )
-        .expect("program draft");
-        let certified_spec = mfm_certify::certify_program_draft(&draft).expect("certified spec");
-        let spec = &certified_spec.envelope().spec;
-        let public_output_cell = spec
-            .public_outputs
-            .outputs
-            .first()
-            .expect("public output cell");
-        let value_node_id = match &public_output_cell.producer {
-            spec::CellProducer::Node(node_id) => node_id.clone(),
-            spec::CellProducer::Seed(_) => panic!("public output must be node-produced"),
-        };
-        let value_node = spec
-            .nodes
-            .iter()
-            .find(|node| node.node_id == value_node_id)
-            .expect("value node");
-        let seed_id = spec.seeds.first().expect("seed").seed_id.clone();
-        let value_schema_id = public_output_cell.schema_id.clone();
-        let semantic_type_id = public_output_cell.semantic_type_id.clone();
-        let value_descriptor_id = value_node.descriptor_id.clone();
-        let value_runner_factory_id = spec
-            .descriptor_identities
-            .iter()
-            .find_map(|descriptor| match descriptor {
-                spec::DescriptorIdentity::State(identity)
-                    if identity.descriptor_id == value_descriptor_id =>
-                {
-                    Some(events::RunnerFactoryId::new(&identity.runner).expect("runner factory"))
-                }
-                _ => None,
-            })
-            .expect("value descriptor identity");
-        let public_schema_id = spec.public_outputs.public_schema_id.clone();
-
-        FrameworkSeedPublicOutputFixture {
-            draft,
-            certified_spec,
-            run_id,
-            seed_id,
-            seed_bytes,
-            output_bytes,
-            value_schema_id,
-            semantic_type_id,
-            value_node_id,
-            value_descriptor_id,
-            value_runner_factory_id,
-            public_schema_id,
-        }
-    }
-
-    fn digest(byte: u8) -> DigestBytes {
-        DigestBytes::from_array([byte; 32])
-    }
-
-    fn append_test_commit(
-        store: &mut store::InMemoryTypedRunStore,
-        request: store::TypedCommitRequest,
-    ) {
-        let admitted_artifacts = request.required_artifacts().to_vec();
-        let commit =
-            test_prepared_commit_plan(request, admitted_artifacts).expect("prepared commit plan");
-        store
-            .append_prepared_commit_plan(commit)
-            .expect("append prepared typed commit");
-    }
-
-    async fn append_async_test_commit(
-        store: &AsyncInMemoryStore,
-        request: store::TypedCommitRequest,
-    ) {
-        let admitted_artifacts = request.required_artifacts().to_vec();
-        let commit =
-            test_prepared_commit_plan(request, admitted_artifacts).expect("prepared commit plan");
-        store
-            .append_prepared_commit_plan(commit)
-            .await
-            .expect("append prepared typed commit");
-    }
-
-    fn test_prepared_commit_plan(
-        request: store::TypedCommitRequest,
-        admitted_artifacts: Vec<store::ArtifactEvidenceRef>,
-    ) -> store::Result<store::PreparedCommitPlan> {
-        let artifacts = store::CommitArtifactEvidenceSet::new(
-            request.required_artifacts().to_vec(),
-            admitted_artifacts,
-        )?;
-        if request
-            .payloads()
-            .iter()
-            .all(|payload| matches!(payload, events::KernelEventPayload::RunAdmitted(_)))
-        {
-            return store::PreparedCommit::<store::RunAdmission>::new(request, artifacts)
-                .map(store::PreparedCommitPlan::from);
-        }
-        if request
-            .payloads()
-            .iter()
-            .all(|payload| matches!(payload, events::KernelEventPayload::StateAttemptStarted(_)))
-        {
-            let mut preconditions = request.preconditions().clone();
-            preconditions.required_run_state = store::RequiredRunState::NotCompleted;
-            let request = request.with_preconditions(preconditions);
-            return store::PreparedCommit::<store::StateAttemptStarted>::new(request, artifacts)
-                .map(store::PreparedCommitPlan::from);
-        }
-        if request
-            .payloads()
-            .iter()
-            .any(test_is_side_effect_terminal_payload)
-        {
-            return store::PreparedCommit::<store::SideEffectTerminal>::new(request, artifacts)
-                .map(store::PreparedCommitPlan::from);
-        }
-        if request
-            .payloads()
-            .iter()
-            .any(|payload| payload.side_effect_ref().is_some())
-        {
-            return store::PreparedCommit::<store::SideEffectProgress>::new(request, artifacts)
-                .map(store::PreparedCommitPlan::from);
-        }
-        if request.payloads().iter().any(test_is_retention_payload) {
-            return store::PreparedCommit::<store::Retention>::new(request, artifacts)
-                .map(store::PreparedCommitPlan::from);
-        }
-        store::PreparedCommit::<store::AttemptTerminal>::new(request, artifacts)
-            .map(store::PreparedCommitPlan::from)
-    }
-
-    fn test_is_retention_payload(payload: &events::KernelEventPayload) -> bool {
-        matches!(
-            payload,
-            events::KernelEventPayload::RetentionRefsAppended(_)
-                | events::KernelEventPayload::RetentionManifestProjected(_)
-        )
-    }
-
-    fn test_is_side_effect_terminal_payload(payload: &events::KernelEventPayload) -> bool {
-        matches!(
-            payload,
-            events::KernelEventPayload::SideEffectNotSubmittedProven(_)
-                | events::KernelEventPayload::SideEffectSubmissionObserved(_)
-                | events::KernelEventPayload::SideEffectSubmissionUnknown(_)
-                | events::KernelEventPayload::SideEffectReceiptObserved(_)
-                | events::KernelEventPayload::SideEffectConfirmationObserved(_)
-                | events::KernelEventPayload::SideEffectAmbiguous(_)
-                | events::KernelEventPayload::SideEffectFailed(_)
-        )
-    }
-
-    fn content_digest(byte: u8) -> ContentDigest {
-        ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, digest(byte))
-    }
-
-    fn content_digest_for_bytes(bytes: &[u8]) -> ContentDigest {
-        ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, sha256_digest_bytes(bytes))
-    }
-
-    fn artifact_id_for_digest(digest: &ContentDigest) -> ArtifactId {
-        ArtifactId::from_digest(digest.algorithm(), *digest.digest())
-    }
-
-    fn run_artifact_ref(artifact: &store::ArtifactEvidenceRef) -> events::RunArtifactEvidenceRef {
-        events::RunArtifactEvidenceRef {
-            artifact_id: artifact.artifact_id.clone(),
-            role: artifact.artifact_role,
-            schema_id: artifact.schema_id.clone(),
-            semantic_type_id: artifact.semantic_type_id.clone(),
-            content_digest: artifact.digest.clone(),
-            byte_len: artifact.byte_len,
-            media_type: artifact.media_type.clone(),
-        }
-    }
-
-    fn node_id(byte: u8) -> NodeId {
-        NodeId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(byte))
-    }
-
-    fn attempt_id(byte: u8) -> AttemptId {
-        AttemptId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(byte))
-    }
-
-    fn descriptor_id(byte: u8) -> DescriptorId {
-        DescriptorId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(byte))
-    }
-
-    fn cell_id(byte: u8) -> CellId {
-        CellId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(byte))
-    }
-
-    fn scope_id(byte: u8) -> ScopeId {
-        ScopeId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(byte))
-    }
-
-    fn schema_id(name: &str, byte: u8) -> SchemaId {
-        SchemaId::new(name, "1", DigestAlgorithm::Sha256JcsV1, digest(byte)).expect("schema id")
-    }
-
-    fn manual_authorization(byte: u8) -> spec::ManualResolutionAuthorizationSpec {
-        spec::ManualResolutionAuthorizationSpec {
-            verifier_id: spec::ManualAuthorizationVerifierId::new(format!(
-                "mfm.test.manual.verifier.{byte}"
-            ))
-            .expect("verifier id"),
-            signing_scheme: spec::ManualSigningSchemeSpec::new(
-                "mfm.manual_resolution.digest_signature.v1",
-            )
-            .expect("signing scheme"),
-            authority: spec::OperatorAuthoritySnapshotSpec {
-                authority_id: spec::OperatorAuthorityId::new(format!(
-                    "mfm.test.manual.authority.{byte}"
-                ))
-                .expect("authority id"),
-                operators: vec![spec::OperatorAuthorityMemberSpec {
-                    operator_id: spec::OperatorId::new(format!("operator.{byte}"))
-                        .expect("operator id"),
-                    public_identity: spec::OperatorPublicIdentity::new(format!(
-                        "operator-public-{byte}"
-                    ))
-                    .expect("operator public identity"),
-                }],
-            },
-            quorum: spec::ManualAuthorizationQuorumSpec::new(1).expect("quorum"),
-        }
-    }
-
-    fn semantic_id(name: &str, byte: u8) -> SemanticTypeId {
-        SemanticTypeId::new(
-            "mfm.test",
-            name,
-            "1",
-            DigestAlgorithm::Sha256JcsV1,
-            digest(byte),
-        )
-        .expect("semantic id")
     }
 }

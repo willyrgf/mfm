@@ -1,15 +1,18 @@
 use super::*;
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Waker};
 
 use mfm_canonical::sha256_digest_bytes;
 use mfm_capabilities::{
     CapabilityDescriptor, CapabilityRole, CapabilitySetDescriptor, EffectSpec, ManagedPlatformWrite,
 };
 use mfm_ids::{
-    ArtifactId, DigestBytes, EffectKind, EffectVersion, EventId, LoweringVersion, SchemaId,
-    ScopeId, SeedId, SemanticTypeId, SpecVersion, StateKind, StateVersion,
+    ArtifactId, DigestBytes, EffectKind, EffectVersion, EventId, SchemaId, ScopeId, SeedId,
+    SemanticTypeId, StateKind, StateVersion,
 };
 use mfm_manual_auth::{
     ManualAuthorizationSignatureBytes, ManualResolutionAuthorizationProof,
@@ -20,7 +23,7 @@ use mfm_program::{
     StateKey, StateRegistryBuilder, StateResult, StateSpec,
 };
 use mfm_program_derive::{MfmConfig, MfmValue, PublicOutputs};
-use mfm_store::v1::{TypedProjectionRead, TypedRunEventStore};
+use mfm_store::v1::AsyncTypedRunEventStore;
 use serde::{Deserialize, Serialize};
 
 const D0: DigestBytes = DigestBytes::from_array([0x10; 32]);
@@ -33,6 +36,15 @@ const D6: DigestBytes = DigestBytes::from_array([0x16; 32]);
 const D7: DigestBytes = DigestBytes::from_array([0x17; 32]);
 const D8: DigestBytes = DigestBytes::from_array([0x18; 32]);
 const D9: DigestBytes = DigestBytes::from_array([0x19; 32]);
+
+fn fixture_value_semantic_id() -> SemanticTypeId {
+    SemanticTypeId::new("mfm.test", "value", "1", DigestAlgorithm::Sha256JcsV1, D9)
+        .expect("semantic")
+}
+
+fn fixture_value_schema_id() -> SchemaId {
+    SchemaId::new("mfm.test.value", "1", DigestAlgorithm::Sha256JcsV1, DA).expect("schema")
+}
 
 macro_rules! store_typed_commit_request {
     (
@@ -62,7 +74,7 @@ trait TestPreparedCommitExt {
     ) -> store::Result<store::CommitOutcome>;
 }
 
-impl TestPreparedCommitExt for store::InMemoryTypedRunStore {
+impl TestPreparedCommitExt for TestTypedRunStore {
     fn append_prepared_commit(
         &mut self,
         request: store::TypedCommitRequest,
@@ -153,6 +165,81 @@ fn validate_runtime_stream_for_tests(
     RuntimeRunView::from_stream(runtime_spec, run_id, stream).map(|_| ())
 }
 
+fn block_on_ready<F: Future>(future: F) -> F::Output {
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    let mut future = std::pin::pin!(future);
+    match Future::poll(future.as_mut(), &mut context) {
+        Poll::Ready(output) => output,
+        Poll::Pending => panic!("test in-memory store future unexpectedly pending"),
+    }
+}
+
+#[derive(Default)]
+struct TestTypedRunStore {
+    inner: store::AsyncInMemoryTypedRunStore,
+}
+
+impl TestTypedRunStore {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn append_prepared_commit_plan(
+        &self,
+        plan: store::PreparedCommitPlan,
+    ) -> store::Result<store::CommitOutcome> {
+        block_on_ready(self.inner.append_prepared_commit_plan(plan))
+    }
+
+    fn load_run_stream(&self, run_id: &RunId) -> Vec<store::KernelEventEnvelope> {
+        block_on_ready(self.inner.load_run_stream(run_id)).expect("test store read")
+    }
+
+    fn expected_next_seq(&self, run_id: &RunId) -> store::StreamSeq {
+        block_on_ready(self.inner.expected_next_seq(run_id)).expect("test store next seq")
+    }
+
+    fn projection_snapshot(&self) -> store::ProjectionSnapshot {
+        self.inner
+            .projection_snapshot()
+            .expect("test store projection")
+    }
+}
+
+impl store::AsyncTypedRunEventStore for TestTypedRunStore {
+    type Error = store::StoreError;
+
+    fn append_prepared_commit_plan<'a>(
+        &'a self,
+        plan: store::PreparedCommitPlan,
+    ) -> store::AsyncStoreFuture<'a, store::CommitOutcome, Self::Error> {
+        self.inner.append_prepared_commit_plan(plan)
+    }
+
+    fn load_run_stream<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> store::AsyncStoreFuture<'a, Vec<store::KernelEventEnvelope>, Self::Error> {
+        self.inner.load_run_stream(run_id)
+    }
+
+    fn expected_next_seq<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> store::AsyncStoreFuture<'a, store::StreamSeq, Self::Error> {
+        self.inner.expected_next_seq(run_id)
+    }
+
+    fn status_projection_snapshot<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> store::AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
+        self.inner.status_projection_snapshot(run_id)
+    }
+}
+
+#[derive(Clone)]
 struct RecordedPreparedCommit {
     seq: store::StreamSeq,
     commit_key: store::CommitKey,
@@ -161,62 +248,86 @@ struct RecordedPreparedCommit {
 }
 
 struct RecordingTypedRunStore {
-    inner: store::InMemoryTypedRunStore,
-    commits: Vec<RecordedPreparedCommit>,
+    inner: store::AsyncInMemoryTypedRunStore,
+    commits: Arc<Mutex<Vec<RecordedPreparedCommit>>>,
 }
 
 impl RecordingTypedRunStore {
     fn new() -> Self {
         Self {
-            inner: store::InMemoryTypedRunStore::new(),
-            commits: Vec::new(),
+            inner: store::AsyncInMemoryTypedRunStore::new(),
+            commits: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    fn commits(&self) -> Vec<RecordedPreparedCommit> {
+        self.commits
+            .lock()
+            .expect("recording store commits lock")
+            .clone()
+    }
+
+    async fn load_run_stream(&self, run_id: &RunId) -> Vec<store::KernelEventEnvelope> {
+        self.inner
+            .load_run_stream(run_id)
+            .await
+            .expect("recording store read")
+    }
+
+    async fn projection_snapshot(&self, run_id: &RunId) -> store::ProjectionSnapshot {
+        self.inner
+            .status_projection_snapshot(run_id)
+            .await
+            .expect("recording store projection")
     }
 }
 
 struct StaleOnceTypedRunStore {
-    inner: store::InMemoryTypedRunStore,
-    stale_terminal_injected: bool,
+    inner: store::AsyncInMemoryTypedRunStore,
+    stale_terminal_injected: Mutex<bool>,
 }
 
 impl StaleOnceTypedRunStore {
     fn new() -> Self {
         Self {
-            inner: store::InMemoryTypedRunStore::new(),
-            stale_terminal_injected: false,
-        }
-    }
-}
-
-struct AsyncInMemoryTypedRunStore {
-    inner: Mutex<store::InMemoryTypedRunStore>,
-}
-
-impl AsyncInMemoryTypedRunStore {
-    fn new(inner: store::InMemoryTypedRunStore) -> Self {
-        Self {
-            inner: Mutex::new(inner),
+            inner: store::AsyncInMemoryTypedRunStore::new(),
+            stale_terminal_injected: Mutex::new(false),
         }
     }
 
-    fn with_inner<R>(&self, f: impl FnOnce(&store::InMemoryTypedRunStore) -> R) -> R {
-        let inner = self.inner.lock().expect("async in-memory store lock");
-        f(&inner)
+    async fn projection_snapshot(&self, run_id: &RunId) -> store::ProjectionSnapshot {
+        self.inner
+            .status_projection_snapshot(run_id)
+            .await
+            .expect("stale-once store projection")
     }
 }
 
-impl store::AsyncTypedRunEventStore for AsyncInMemoryTypedRunStore {
+impl store::AsyncTypedRunEventStore for RecordingTypedRunStore {
     type Error = store::StoreError;
 
     fn append_prepared_commit_plan<'a>(
         &'a self,
         plan: store::PreparedCommitPlan,
     ) -> store::AsyncStoreFuture<'a, store::CommitOutcome, Self::Error> {
+        let payloads = plan.request().payloads().to_vec();
+        let admitted_artifacts = plan.admitted_artifacts().to_vec();
         Box::pin(async move {
-            self.inner
-                .lock()
-                .expect("async in-memory store lock")
-                .append_prepared_commit_plan(plan)
+            let outcome = self.inner.append_prepared_commit_plan(plan).await?;
+            if let store::CommitOutcome::Appended(batch) = &outcome {
+                self.commits
+                    .lock()
+                    .map_err(|_| {
+                        store::StoreError::Event("recording store lock poisoned".to_owned())
+                    })?
+                    .push(RecordedPreparedCommit {
+                        seq: batch.seq(),
+                        commit_key: batch.commit_key().clone(),
+                        payloads,
+                        admitted_artifacts,
+                    });
+            }
+            Ok(outcome)
         })
     }
 
@@ -224,62 +335,38 @@ impl store::AsyncTypedRunEventStore for AsyncInMemoryTypedRunStore {
         &'a self,
         run_id: &'a RunId,
     ) -> store::AsyncStoreFuture<'a, Vec<store::KernelEventEnvelope>, Self::Error> {
-        Box::pin(async move {
-            Ok(self
-                .inner
-                .lock()
-                .expect("async in-memory store lock")
-                .load_run_stream(run_id))
-        })
+        self.inner.load_run_stream(run_id)
     }
 
     fn expected_next_seq<'a>(
         &'a self,
         run_id: &'a RunId,
     ) -> store::AsyncStoreFuture<'a, store::StreamSeq, Self::Error> {
-        Box::pin(async move {
-            Ok(self
-                .inner
-                .lock()
-                .expect("async in-memory store lock")
-                .expected_next_seq(run_id))
-        })
+        self.inner.expected_next_seq(run_id)
     }
 
     fn status_projection_snapshot<'a>(
         &'a self,
-        _run_id: &'a RunId,
+        run_id: &'a RunId,
     ) -> store::AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
-        Box::pin(async move {
-            Ok(self
-                .inner
-                .lock()
-                .expect("async in-memory store lock")
-                .projection_snapshot()
-                .clone())
-        })
+        self.inner.status_projection_snapshot(run_id)
     }
 }
 
-impl store::TypedProjectionRead for StaleOnceTypedRunStore {
-    fn projection_snapshot(&self) -> &store::ProjectionSnapshot {
-        self.inner.projection_snapshot()
-    }
-}
+impl store::AsyncTypedRunEventStore for StaleOnceTypedRunStore {
+    type Error = store::StoreError;
 
-impl store::TypedRunEventStore for StaleOnceTypedRunStore {
-    fn append_prepared_commit_plan(
-        &mut self,
+    fn append_prepared_commit_plan<'a>(
+        &'a self,
         plan: store::PreparedCommitPlan,
-    ) -> store::Result<store::CommitOutcome> {
-        let is_run_start = plan
-            .request()
-            .payloads()
-            .iter()
-            .any(|payload| matches!(payload, events::KernelEventPayload::RunAdmitted(_)));
-        let should_inject = !self.stale_terminal_injected
-            && !is_run_start
-            && plan.request().payloads().iter().any(|payload| {
+    ) -> store::AsyncStoreFuture<'a, store::CommitOutcome, Self::Error> {
+        Box::pin(async move {
+            let is_run_start = plan
+                .request()
+                .payloads()
+                .iter()
+                .any(|payload| matches!(payload, events::KernelEventPayload::RunAdmitted(_)));
+            let has_terminal = plan.request().payloads().iter().any(|payload| {
                 matches!(
                     payload,
                     events::KernelEventPayload::StateAttemptCompleted(_)
@@ -287,59 +374,48 @@ impl store::TypedRunEventStore for StaleOnceTypedRunStore {
                         | events::KernelEventPayload::StateAttemptInterrupted(_)
                 )
             });
-        if should_inject {
-            self.stale_terminal_injected = true;
-            let expected = plan.request().expected_next_seq();
-            let run_id = plan.request().run_id().clone();
-            self.inner.append_prepared_commit_plan(plan)?;
-            return Err(store::StoreError::StaleExpectedNextSeq {
-                expected,
-                actual: self.inner.expected_next_seq(&run_id),
-            });
-        }
-        self.inner.append_prepared_commit_plan(plan)
+            let should_inject = {
+                let mut injected = self.stale_terminal_injected.lock().map_err(|_| {
+                    store::StoreError::Event("stale-once store lock poisoned".to_owned())
+                })?;
+                let should_inject = !*injected && !is_run_start && has_terminal;
+                if should_inject {
+                    *injected = true;
+                }
+                should_inject
+            };
+            if should_inject {
+                let expected = plan.request().expected_next_seq();
+                let run_id = plan.request().run_id().clone();
+                self.inner.append_prepared_commit_plan(plan).await?;
+                return Err(store::StoreError::StaleExpectedNextSeq {
+                    expected,
+                    actual: self.inner.expected_next_seq(&run_id).await?,
+                });
+            }
+            self.inner.append_prepared_commit_plan(plan).await
+        })
     }
 
-    fn load_run_stream(&self, run_id: &RunId) -> Vec<store::KernelEventEnvelope> {
+    fn load_run_stream<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> store::AsyncStoreFuture<'a, Vec<store::KernelEventEnvelope>, Self::Error> {
         self.inner.load_run_stream(run_id)
     }
 
-    fn expected_next_seq(&self, run_id: &RunId) -> store::StreamSeq {
+    fn expected_next_seq<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> store::AsyncStoreFuture<'a, store::StreamSeq, Self::Error> {
         self.inner.expected_next_seq(run_id)
     }
-}
 
-impl store::TypedProjectionRead for RecordingTypedRunStore {
-    fn projection_snapshot(&self) -> &store::ProjectionSnapshot {
-        self.inner.projection_snapshot()
-    }
-}
-
-impl store::TypedRunEventStore for RecordingTypedRunStore {
-    fn append_prepared_commit_plan(
-        &mut self,
-        plan: store::PreparedCommitPlan,
-    ) -> store::Result<store::CommitOutcome> {
-        let payloads = plan.request().payloads().to_vec();
-        let admitted_artifacts = plan.admitted_artifacts().to_vec();
-        let outcome = self.inner.append_prepared_commit_plan(plan)?;
-        if let store::CommitOutcome::Appended(batch) = &outcome {
-            self.commits.push(RecordedPreparedCommit {
-                seq: batch.seq(),
-                commit_key: batch.commit_key().clone(),
-                payloads,
-                admitted_artifacts,
-            });
-        }
-        Ok(outcome)
-    }
-
-    fn load_run_stream(&self, run_id: &RunId) -> Vec<store::KernelEventEnvelope> {
-        self.inner.load_run_stream(run_id)
-    }
-
-    fn expected_next_seq(&self, run_id: &RunId) -> store::StreamSeq {
-        self.inner.expected_next_seq(run_id)
+    fn status_projection_snapshot<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> store::AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
+        self.inner.status_projection_snapshot(run_id)
     }
 }
 
@@ -611,6 +687,40 @@ struct CertifierValue {
     amount: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct FixtureOutputValue {
+    amount: u64,
+    node_id: String,
+    attempt_id: String,
+}
+
+impl mfm_values::MfmValue for FixtureOutputValue {
+    fn schema_descriptor() -> mfm_values::Result<mfm_values::SchemaDescriptor> {
+        <CertifierValue as mfm_values::MfmValue>::schema_descriptor()
+    }
+
+    fn schema_id() -> mfm_values::Result<SchemaId> {
+        Ok(fixture_value_schema_id())
+    }
+
+    fn semantic_id() -> mfm_values::Result<SemanticTypeId> {
+        Ok(fixture_value_semantic_id())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[mfm(
+    namespace = "mfm.runtime.test",
+    name = "side_effect_evidence",
+    version = "1",
+    schema = "mfm.runtime.test.side_effect_evidence"
+)]
+struct FixtureSideEffectEvidence {
+    amount: u64,
+    node_id: String,
+    attempt_id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmConfig)]
 struct CertifierConfig {
     multiplier: u64,
@@ -820,6 +930,1523 @@ impl ErasedNodeRunner for ErrorRunner {
     }
 }
 
+#[test]
+fn runner_kit_builders_create_context_bound_artifacts_payloads_and_output() {
+    let fixture = fixture();
+    let node = node_by_output(&fixture, &fixture.cell_a);
+    let descriptor = fixture
+        .runtime_spec
+        .state_descriptor_for_node(node)
+        .expect("state descriptor");
+    let output_cell = fixture
+        .runtime_spec
+        .cell(&node.output_cell)
+        .expect("output cell");
+    let attempt_id = attempt_id(
+        &fixture.run_id,
+        fixture.runtime_spec.spec_hash(),
+        &node.node_id,
+        1,
+    )
+    .expect("attempt id");
+    let config_artifact = config_artifact(&fixture.runtime_spec, &node.config_ref).evidence;
+    let projections = store::ProjectionSnapshot::default();
+    let run_stream = Vec::new();
+    let invocation = PreparedRunnerInvocation {
+        runtime_spec: &fixture.runtime_spec,
+        run_id: &fixture.run_id,
+        spec_hash: fixture.runtime_spec.spec_hash(),
+        node,
+        descriptor,
+        output_cell,
+        attempt_id: &attempt_id,
+        attempt_no: 1,
+        config_artifact,
+        inputs: MaterializedInputs {
+            input_schema_id: node.input_bindings.input_schema_id.clone(),
+            root: MaterializedInputNode::Unit,
+        },
+        caps: CertifiedRuntimeCapabilities::new(
+            node.node_id.clone(),
+            node.capability_bindings.clone(),
+        ),
+        recorded_facts: RecordedFacts::default(),
+        projections: &projections,
+        run_stream: &run_stream,
+    };
+    let ctx = ErasedRunCtx::from_prepared(&invocation);
+    let artifacts = RunnerArtifactBuilder::new(&ctx);
+    let payloads = RunnerPayloadBuilder::new(&ctx);
+    let value = CertifierValue { amount: 42 };
+    let binding = RunnerCapabilityBinding {
+        capability_kind: fixture.cap_kind.clone(),
+        capability_version: fixture.cap_version.clone(),
+        adapter_kind: fixture.adapter_kind.clone(),
+        adapter_version: fixture.adapter_version.clone(),
+    };
+
+    let state = artifacts.state_output(&value).expect("state output");
+    assert_eq!(
+        state.evidence().artifact_role,
+        events::ArtifactRole::StateOutput
+    );
+    assert_eq!(
+        state.evidence().producer_node_id.as_ref(),
+        Some(&ctx.node().node_id)
+    );
+    assert_eq!(
+        artifacts.content_digest(&value).expect("content digest"),
+        state.evidence().digest
+    );
+
+    let cell = payloads.cell_produced(&state).expect("cell payload");
+    match &cell {
+        RunnerEventPayload::CellProduced(payload) => {
+            assert_eq!(payload.spec_hash, *ctx.spec_hash());
+            assert_eq!(payload.node_id, ctx.node().node_id);
+            assert_eq!(payload.cell_id, ctx.node().output_cell);
+            assert_eq!(payload.schema_id, ctx.output_cell().schema_id);
+            assert_eq!(payload.semantic_type_id, ctx.output_cell().semantic_type_id);
+            assert_eq!(payload.artifact_id, state.evidence().artifact_id);
+            assert_eq!(payload.content_digest, state.evidence().digest);
+        }
+        _ => panic!("expected cell produced payload"),
+    }
+
+    let response = artifacts.fact_response(&value).expect("fact response");
+    let fact = payloads
+        .fact_recorded(
+            events::FactKey::new("mfm.test.runner_kit.fact").expect("fact key"),
+            &value,
+            &response,
+            binding.clone(),
+        )
+        .expect("fact payload");
+    match &fact {
+        RunnerEventPayload::FactRecorded(payload) => {
+            assert_eq!(payload.node_id, ctx.node().node_id);
+            assert_eq!(payload.attempt_id, *ctx.attempt_id());
+            assert_eq!(payload.request_hash, state.evidence().digest);
+            assert_eq!(payload.response_hash, response.evidence().digest);
+            assert_eq!(payload.artifact_id, response.evidence().artifact_id);
+        }
+        _ => panic!("expected fact recorded payload"),
+    }
+
+    let ledger_key =
+        events::SideEffectLedgerKey::new("mfm.test.runner_kit.ledger").expect("ledger key");
+    let side_effect = RunnerSideEffectBinding {
+        ledger_key: ledger_key.clone(),
+        ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+        invocation_epoch: 1,
+    };
+    let idempotency_key =
+        events::IdempotencyKeyRef::new("mfm.test.runner_kit.idem").expect("idempotency key");
+    let owner = events::RunnerInvocationId::new("mfm.test.runner_kit.owner").expect("claim owner");
+    let next_owner =
+        events::RunnerInvocationId::new("mfm.test.runner_kit.owner.next").expect("claim owner");
+    let token =
+        events::side_effect::ClaimFencingToken::new("mfm.test.runner_kit.token").expect("token");
+    let next_token = events::side_effect::ClaimFencingToken::new("mfm.test.runner_kit.token.next")
+        .expect("next token");
+    let verifier = events::ReplayVerifierId::new("mfm.test.runner_kit.verifier").expect("verifier");
+
+    let intent = artifacts
+        .side_effect_intent(&value)
+        .expect("side-effect intent");
+    let intent_payload = payloads
+        .side_effect_intent_persisted(
+            side_effect.clone(),
+            &intent,
+            &value,
+            idempotency_key,
+            binding,
+        )
+        .expect("intent payload");
+    match &intent_payload {
+        RunnerEventPayload::SideEffectIntentPersisted(payload) => {
+            assert_eq!(payload.ledger_key, ledger_key);
+            assert_eq!(payload.intent_hash, intent.evidence().digest);
+            assert_eq!(payload.intent_artifact_id, intent.evidence().artifact_id);
+            assert_eq!(payload.idempotency_input_hash, state.evidence().digest);
+        }
+        _ => panic!("expected side-effect intent payload"),
+    }
+
+    let claim = payloads.side_effect_claimed(
+        side_effect.clone(),
+        RunnerClaimBinding {
+            claim_owner: owner.clone(),
+            claim_generation: 1,
+            claim_fencing_token: token.clone(),
+        },
+    );
+    match &claim {
+        RunnerEventPayload::SideEffectClaimed(payload) => {
+            assert_eq!(payload.claim_owner, owner);
+            assert_eq!(payload.claim_generation, 1);
+            assert_eq!(payload.claim_fencing_token, token);
+        }
+        _ => panic!("expected side-effect claimed payload"),
+    }
+
+    let takeover = payloads.side_effect_claim_taken_over(
+        side_effect.clone(),
+        RunnerClaimTakeoverBinding {
+            previous_claim_owner: owner.clone(),
+            new_claim_owner: next_owner.clone(),
+            previous_claim_generation: 1,
+            claim_generation: 2,
+            claim_fencing_token: next_token.clone(),
+        },
+    );
+    match &takeover {
+        RunnerEventPayload::SideEffectClaimTakenOver(payload) => {
+            assert_eq!(payload.previous_claim_owner, owner);
+            assert_eq!(payload.new_claim_owner, next_owner);
+            assert_eq!(payload.previous_claim_generation, 1);
+            assert_eq!(payload.claim_generation, 2);
+            assert_eq!(payload.claim_fencing_token, next_token);
+        }
+        _ => panic!("expected side-effect claim takeover payload"),
+    }
+
+    let prepared = artifacts
+        .prepared_invocation(&serde_json::json!({"prepared": true}))
+        .expect("prepared invocation");
+    assert_eq!(
+        prepared.evidence().artifact_role,
+        events::ArtifactRole::PreparedInvocation
+    );
+    assert!(prepared.evidence().schema_id.is_none());
+    let prepared_payload = payloads
+        .side_effect_invocation_prepared(
+            side_effect.clone(),
+            Some(&prepared),
+            RunnerPreparedInvocationBinding {
+                claim_generation: 2,
+                claim_fencing_token: next_token.clone(),
+                resource_key: None,
+            },
+        )
+        .expect("prepared payload");
+    match &prepared_payload {
+        RunnerEventPayload::SideEffectInvocationPrepared(payload) => {
+            assert_eq!(
+                payload.prepared_artifact_id.as_ref(),
+                Some(&prepared.evidence().artifact_id)
+            );
+            assert_eq!(
+                payload.prepared_hash.as_ref(),
+                Some(&prepared.evidence().digest)
+            );
+            assert_eq!(payload.claim_generation, 2);
+        }
+        _ => panic!("expected side-effect invocation prepared payload"),
+    }
+
+    let started = payloads.side_effect_invocation_started(
+        side_effect.clone(),
+        RunnerClaimBinding {
+            claim_owner: next_owner.clone(),
+            claim_generation: 2,
+            claim_fencing_token: next_token.clone(),
+        },
+    );
+    match &started {
+        RunnerEventPayload::SideEffectInvocationStarted(payload) => {
+            assert_eq!(payload.claim_owner, next_owner);
+            assert_eq!(payload.claim_generation, 2);
+            assert_eq!(payload.claim_fencing_token, next_token);
+        }
+        _ => panic!("expected side-effect invocation started payload"),
+    }
+
+    let not_submitted = artifacts
+        .not_submitted_proof(&value)
+        .expect("not-submitted proof");
+    let not_submitted_payload = payloads
+        .side_effect_not_submitted_proven(side_effect.clone(), &not_submitted)
+        .expect("not-submitted payload");
+    match &not_submitted_payload {
+        RunnerEventPayload::SideEffectNotSubmittedProven(payload) => {
+            assert_eq!(payload.proof_hash, not_submitted.evidence().digest);
+            assert_eq!(
+                payload.proof_artifact_id,
+                not_submitted.evidence().artifact_id
+            );
+        }
+        _ => panic!("expected side-effect not-submitted payload"),
+    }
+
+    let submission = artifacts.submission(&value).expect("submission");
+    let submission_payload = payloads
+        .side_effect_submission_observed(side_effect.clone(), &submission)
+        .expect("submission payload");
+    match &submission_payload {
+        RunnerEventPayload::SideEffectSubmissionObserved(payload) => {
+            assert_eq!(payload.submission_hash, submission.evidence().digest);
+            assert_eq!(
+                payload.submission_artifact_id,
+                submission.evidence().artifact_id
+            );
+        }
+        _ => panic!("expected side-effect submission payload"),
+    }
+
+    let submission_unknown = artifacts
+        .submission_unknown(&value)
+        .expect("submission unknown evidence");
+    let submission_unknown_payload = payloads
+        .side_effect_submission_unknown(side_effect.clone(), &submission_unknown)
+        .expect("submission unknown payload");
+    match &submission_unknown_payload {
+        RunnerEventPayload::SideEffectSubmissionUnknown(payload) => {
+            assert_eq!(payload.evidence_hash, submission_unknown.evidence().digest);
+            assert_eq!(
+                payload.evidence_artifact_id,
+                submission_unknown.evidence().artifact_id
+            );
+        }
+        _ => panic!("expected side-effect submission unknown payload"),
+    }
+
+    let receipt = artifacts.receipt(&value).expect("receipt");
+    let receipt_payload = payloads
+        .side_effect_receipt_observed(side_effect.clone(), &receipt, verifier.clone(), None)
+        .expect("receipt payload");
+    match &receipt_payload {
+        RunnerEventPayload::SideEffectReceiptObserved(payload) => {
+            assert_eq!(payload.receipt_hash, receipt.evidence().digest);
+            assert_eq!(payload.receipt_artifact_id, receipt.evidence().artifact_id);
+            assert_eq!(payload.replay_verifier_id, verifier);
+        }
+        _ => panic!("expected side-effect receipt payload"),
+    }
+
+    let confirmation = artifacts.confirmation(&value).expect("confirmation");
+    let confirmation_payload = payloads
+        .side_effect_confirmation_observed(
+            side_effect.clone(),
+            &confirmation,
+            verifier.clone(),
+            None,
+        )
+        .expect("confirmation payload");
+    match &confirmation_payload {
+        RunnerEventPayload::SideEffectConfirmationObserved(payload) => {
+            assert_eq!(payload.confirmation_hash, confirmation.evidence().digest);
+            assert_eq!(
+                payload.confirmation_artifact_id,
+                confirmation.evidence().artifact_id
+            );
+            assert_eq!(payload.replay_verifier_id, verifier);
+        }
+        _ => panic!("expected side-effect confirmation payload"),
+    }
+
+    let ambiguity = artifacts
+        .ambiguity_evidence(&value)
+        .expect("ambiguity evidence");
+    let ambiguity_payload = payloads
+        .side_effect_ambiguous(
+            side_effect.clone(),
+            events::AmbiguityCode::new("runner_kit_test").expect("ambiguity code"),
+            &ambiguity,
+        )
+        .expect("ambiguity payload");
+    match &ambiguity_payload {
+        RunnerEventPayload::SideEffectAmbiguous(payload) => {
+            assert_eq!(payload.evidence_hash, ambiguity.evidence().digest);
+            assert_eq!(
+                payload.evidence_artifact_id,
+                ambiguity.evidence().artifact_id
+            );
+        }
+        _ => panic!("expected side-effect ambiguous payload"),
+    }
+
+    let failed = payloads.side_effect_failed(
+        side_effect.clone(),
+        events::side_effect::FailurePhase::BeforeInvocationStarted,
+        true,
+        events::MfmErrorInfo::new(
+            events::ErrorCode::new("runner_kit_failure").expect("error code"),
+            events::ErrorCategory::Runtime,
+            true,
+            "runner kit failure",
+        )
+        .expect("error info"),
+    );
+    match &failed {
+        RunnerEventPayload::SideEffectFailed(payload) => {
+            assert_eq!(payload.ledger_key, ledger_key);
+            assert_eq!(
+                payload.failure_phase,
+                events::side_effect::FailurePhase::BeforeInvocationStarted
+            );
+            assert!(payload.retryable);
+            assert_eq!(payload.error.safe_message, "runner kit failure");
+        }
+        _ => panic!("expected side-effect failed payload"),
+    }
+
+    let role_mismatch = payloads
+        .cell_produced(&response)
+        .expect_err("fact response cannot produce a cell");
+    assert!(matches!(
+        role_mismatch,
+        RuntimeError::InvalidRunnerOutput(message)
+            if message.contains("fact_response")
+                && message.contains("state_output")
+    ));
+
+    let mut state_output = RunnerOutputBuilder::new(&ctx);
+    state_output
+        .stage_attempt_artifact(&state)
+        .expect("stage state output")
+        .retain_runtime_evidence(&state)
+        .payload(cell.clone());
+    let state_output = state_output.finish();
+    assert_eq!(state_output.staged_artifacts.len(), 1);
+    assert_eq!(state_output.staged_retention_refs.len(), 1);
+    assert_eq!(state_output.payloads, vec![cell]);
+
+    let mut side_effect_output = RunnerOutputBuilder::new(&ctx);
+    side_effect_output
+        .stage_side_effect_artifact(&intent, ledger_key, 1)
+        .expect("stage side-effect artifact")
+        .retain_runtime_evidence(&intent)
+        .payload(intent_payload);
+    let side_effect_output = side_effect_output.finish();
+    assert_eq!(side_effect_output.staged_artifacts.len(), 1);
+    assert_eq!(side_effect_output.staged_retention_refs.len(), 1);
+    assert_eq!(side_effect_output.payloads.len(), 1);
+}
+
+#[test]
+fn side_effect_evidence_builder_prepares_and_stages_claimed_invocation() {
+    let fixture = fixture();
+    let ledger_key = events::SideEffectLedgerKey::new("mfm.test.side_effect_builder.ledger")
+        .expect("ledger key");
+    let owner =
+        events::RunnerInvocationId::new("mfm.test.side_effect_builder.owner").expect("claim owner");
+    let token = events::side_effect::ClaimFencingToken::new("mfm.test.side_effect_builder.token")
+        .expect("token");
+    let resource_key = exclusive_resource_key(&fixture, "wallet-builder");
+    let idempotency_key = events::IdempotencyKeyRef::new("mfm.test.side_effect_builder.idem")
+        .expect("idempotency key");
+    let capability_binding = RunnerCapabilityBinding {
+        capability_kind: fixture.cap_kind.clone(),
+        capability_version: fixture.cap_version.clone(),
+        adapter_kind: fixture.adapter_kind.clone(),
+        adapter_version: fixture.adapter_version.clone(),
+    };
+    let intent = CertifierValue { amount: 7 };
+    let idempotency = CertifierValue { amount: 11 };
+    let prepared = serde_json::json!({"prepared": true});
+
+    with_runner_erased_ctx(&fixture, &fixture.cell_a, |ctx| {
+        let output = SideEffectEvidenceBuilder::new(&ctx)
+            .prepare_invocation_and_start(SideEffectPreparedInvocationEvidence {
+                side_effect: RunnerSideEffectBinding {
+                    ledger_key: ledger_key.clone(),
+                    ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                    invocation_epoch: 3,
+                },
+                claim: RuntimeSideEffectClaimAuthority {
+                    claim_owner: owner.clone(),
+                    claim_generation: 9,
+                    claim_fencing_token: token.clone(),
+                    resource_key: Some(resource_key.clone()),
+                },
+                intent: &intent,
+                idempotency: &idempotency,
+                idempotency_key: idempotency_key.clone(),
+                capability_binding,
+                prepared_invocation: &prepared,
+            })
+            .expect("prepare side-effect evidence");
+
+        assert_eq!(output.staged_artifacts.len(), 2);
+        assert_eq!(output.staged_retention_refs.len(), 2);
+        assert_eq!(output.payloads.len(), 4);
+        match &output.payloads[0] {
+            RunnerEventPayload::SideEffectIntentPersisted(payload) => {
+                assert_eq!(payload.ledger_key, ledger_key);
+                assert_eq!(
+                    payload.ledger_purpose,
+                    events::SideEffectLedgerPurpose::Forward
+                );
+                assert_eq!(payload.invocation_epoch, 3);
+                assert_eq!(payload.idempotency_key, idempotency_key);
+                assert_eq!(payload.capability_kind, fixture.cap_kind);
+                assert_eq!(payload.adapter_kind, fixture.adapter_kind);
+            }
+            other => panic!("expected side-effect intent payload: {other:?}"),
+        }
+        match &output.payloads[1] {
+            RunnerEventPayload::SideEffectClaimed(payload) => {
+                assert_eq!(payload.claim_owner, owner);
+                assert_eq!(payload.claim_generation, 9);
+                assert_eq!(payload.claim_fencing_token, token);
+            }
+            other => panic!("expected side-effect claimed payload: {other:?}"),
+        }
+        match &output.payloads[2] {
+            RunnerEventPayload::SideEffectInvocationPrepared(payload) => {
+                assert!(payload.prepared_artifact_id.is_some());
+                assert!(payload.prepared_hash.is_some());
+                assert_eq!(payload.claim_generation, 9);
+                assert_eq!(payload.claim_fencing_token, token);
+                assert_eq!(payload.resource_key.as_ref(), Some(&resource_key));
+            }
+            other => panic!("expected side-effect prepared payload: {other:?}"),
+        }
+        match &output.payloads[3] {
+            RunnerEventPayload::SideEffectInvocationStarted(payload) => {
+                assert_eq!(payload.claim_owner, owner);
+                assert_eq!(payload.claim_generation, 9);
+                assert_eq!(payload.claim_fencing_token, token);
+            }
+            other => panic!("expected side-effect started payload: {other:?}"),
+        }
+    });
+}
+
+#[test]
+fn side_effect_evidence_builder_builds_progress_evidence_with_replay_and_resources() {
+    let fixture = fixture();
+    let ledger_key = events::SideEffectLedgerKey::new("mfm.test.side_effect_builder.progress")
+        .expect("ledger key");
+    let verifier =
+        events::ReplayVerifierId::new("mfm.test.side_effect_builder.verifier").expect("verifier");
+    let touched_set = events::ResourceTouchedSetEvidence {
+        namespace: exact_touched_set_resource_namespace(),
+        evidence_schema_id: fixture.seed_ref.schema_id.clone(),
+        evidence_hash: content(0xd1),
+        evidence_artifact_id: artifact(0xd2),
+    };
+    let value = CertifierValue { amount: 17 };
+
+    with_runner_erased_ctx(&fixture, &fixture.cell_a, |ctx| {
+        let builder = SideEffectEvidenceBuilder::new(&ctx);
+        let side_effect = RunnerSideEffectBinding {
+            ledger_key: ledger_key.clone(),
+            ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+            invocation_epoch: 4,
+        };
+
+        match single_side_effect_payload(
+            &builder
+                .submission_observed(side_effect.clone(), &value)
+                .expect("submission evidence"),
+        ) {
+            RunnerEventPayload::SideEffectSubmissionObserved(payload) => {
+                assert_eq!(payload.ledger_key, ledger_key);
+                assert_eq!(payload.invocation_epoch, 4);
+            }
+            other => panic!("expected submission observed payload: {other:?}"),
+        }
+        match single_side_effect_payload(
+            &builder
+                .submission_unknown(side_effect.clone(), &value)
+                .expect("submission unknown evidence"),
+        ) {
+            RunnerEventPayload::SideEffectSubmissionUnknown(payload) => {
+                assert_eq!(payload.ledger_key, ledger_key);
+                assert_eq!(payload.invocation_epoch, 4);
+            }
+            other => panic!("expected submission unknown payload: {other:?}"),
+        }
+        match single_side_effect_payload(
+            &builder
+                .not_submitted_proven(side_effect.clone(), &value)
+                .expect("not-submitted evidence"),
+        ) {
+            RunnerEventPayload::SideEffectNotSubmittedProven(payload) => {
+                assert_eq!(payload.ledger_key, ledger_key);
+                assert_eq!(payload.invocation_epoch, 4);
+            }
+            other => panic!("expected not-submitted payload: {other:?}"),
+        }
+        match single_side_effect_payload(
+            &builder
+                .receipt_observed(
+                    side_effect.clone(),
+                    &value,
+                    SideEffectReplayEvidence {
+                        replay_verifier_id: verifier.clone(),
+                        resource_touched_set: Some(touched_set.clone()),
+                    },
+                )
+                .expect("receipt evidence"),
+        ) {
+            RunnerEventPayload::SideEffectReceiptObserved(payload) => {
+                assert_eq!(payload.ledger_key, ledger_key);
+                assert_eq!(payload.invocation_epoch, 4);
+                assert_eq!(payload.replay_verifier_id, verifier);
+                assert_eq!(payload.resource_touched_set.as_ref(), Some(&touched_set));
+            }
+            other => panic!("expected receipt payload: {other:?}"),
+        }
+        match single_side_effect_payload(
+            &builder
+                .confirmation_observed(
+                    side_effect.clone(),
+                    &value,
+                    SideEffectReplayEvidence {
+                        replay_verifier_id: verifier.clone(),
+                        resource_touched_set: Some(touched_set.clone()),
+                    },
+                )
+                .expect("confirmation evidence"),
+        ) {
+            RunnerEventPayload::SideEffectConfirmationObserved(payload) => {
+                assert_eq!(payload.ledger_key, ledger_key);
+                assert_eq!(payload.invocation_epoch, 4);
+                assert_eq!(payload.replay_verifier_id, verifier);
+                assert_eq!(payload.resource_touched_set.as_ref(), Some(&touched_set));
+            }
+            other => panic!("expected confirmation payload: {other:?}"),
+        }
+        match single_side_effect_payload(
+            &builder
+                .ambiguous(
+                    side_effect,
+                    events::AmbiguityCode::new("side_effect_builder_test").expect("ambiguity code"),
+                    &value,
+                )
+                .expect("ambiguity evidence"),
+        ) {
+            RunnerEventPayload::SideEffectAmbiguous(payload) => {
+                assert_eq!(payload.ledger_key, ledger_key);
+                assert_eq!(payload.invocation_epoch, 4);
+            }
+            other => panic!("expected ambiguity payload: {other:?}"),
+        }
+    });
+}
+
+#[derive(Clone)]
+enum TestSubmissionDecision {
+    Observed,
+    Unknown,
+    NotSubmitted,
+    Ambiguous,
+}
+
+#[derive(Clone)]
+struct TestSideEffectDriverCallbacks {
+    cap_kind: CapabilityKind,
+    cap_version: CapabilityVersion,
+    adapter_kind: AdapterKind,
+    adapter_version: AdapterVersion,
+    submission_decision: TestSubmissionDecision,
+}
+
+impl TestSideEffectDriverCallbacks {
+    fn new(fixture: &Fixture) -> Self {
+        Self {
+            cap_kind: side_effect_capability_kind(),
+            cap_version: side_effect_capability_version(),
+            adapter_kind: fixture.adapter_kind.clone(),
+            adapter_version: fixture.adapter_version.clone(),
+            submission_decision: TestSubmissionDecision::Observed,
+        }
+    }
+
+    fn with_submission_decision(mut self, decision: TestSubmissionDecision) -> Self {
+        self.submission_decision = decision;
+        self
+    }
+}
+
+impl SideEffectDriverCallbacks for TestSideEffectDriverCallbacks {
+    type Intent = FixtureSideEffectEvidence;
+    type Idempotency = FixtureSideEffectEvidence;
+    type PreparedInvocation = serde_json::Value;
+    type Submission = FixtureSideEffectEvidence;
+    type SubmissionUnknownEvidence = FixtureSideEffectEvidence;
+    type NotSubmittedProof = FixtureSideEffectEvidence;
+    type Receipt = FixtureSideEffectEvidence;
+    type Confirmation = FixtureSideEffectEvidence;
+    type AmbiguityEvidence = FixtureSideEffectEvidence;
+    type Output = FixtureOutputValue;
+
+    fn intent_and_idempotency<'a, 'ctx>(
+        &'a self,
+        ctx: &'a ErasedRunCtx<'ctx>,
+    ) -> SideEffectDriverFuture<'a, SideEffectIntentPlan<Self::Intent, Self::Idempotency>> {
+        let cap_kind = self.cap_kind.clone();
+        let cap_version = self.cap_version.clone();
+        let adapter_kind = self.adapter_kind.clone();
+        let adapter_version = self.adapter_version.clone();
+        let node_id = ctx.node().node_id.as_str().to_owned();
+        let attempt_id = ctx.attempt_id().as_str().to_owned();
+        Box::pin(async move {
+            Ok(SideEffectIntentPlan {
+                intent: FixtureSideEffectEvidence {
+                    amount: 21,
+                    node_id: node_id.clone(),
+                    attempt_id: attempt_id.clone(),
+                },
+                idempotency: FixtureSideEffectEvidence {
+                    amount: 34,
+                    node_id,
+                    attempt_id,
+                },
+                idempotency_key: events::IdempotencyKeyRef::new("mfm.test.driver.idem")
+                    .expect("idempotency key"),
+                capability_binding: RunnerCapabilityBinding {
+                    capability_kind: cap_kind,
+                    capability_version: cap_version,
+                    adapter_kind,
+                    adapter_version,
+                },
+            })
+        })
+    }
+
+    fn prepare_invocation<'a, 'ctx>(
+        &'a self,
+        ctx: &'a ErasedRunCtx<'ctx>,
+        _plan: &'a SideEffectIntentPlan<Self::Intent, Self::Idempotency>,
+    ) -> SideEffectDriverFuture<'a, SideEffectPreparedInvocationPlan<Self::PreparedInvocation>>
+    {
+        let node_id = ctx.node().node_id.as_str().to_owned();
+        let attempt_id = ctx.attempt_id().as_str().to_owned();
+        let resource_key = test_driver_resource_key(ctx);
+        Box::pin(async move {
+            let plan =
+                SideEffectPreparedInvocationPlan::with_prepared_invocation(serde_json::json!({
+                    "attempt_id": attempt_id,
+                    "node_id": node_id,
+                    "prepared": true
+                }));
+            Ok(if let Some(resource_key) = resource_key {
+                plan.with_resource_key(resource_key)
+            } else {
+                plan
+            })
+        })
+    }
+
+    fn reconstruct_prepared_invocation<'a, 'ctx>(
+        &'a self,
+        _ctx: &'a ErasedRunCtx<'ctx>,
+        prepared: &'a store::SideEffectArtifactProjection,
+    ) -> SideEffectDriverFuture<'a, Self::PreparedInvocation> {
+        let prepared_artifact_id = prepared.artifact_id.clone();
+        Box::pin(async move {
+            Ok(serde_json::json!({
+                "prepared_artifact_id": prepared_artifact_id.as_str()
+            }))
+        })
+    }
+
+    fn submit_or_recover_submission<'a, 'ctx>(
+        &'a self,
+        ctx: &'a ErasedRunCtx<'ctx>,
+        _action: SideEffectProtocolAction,
+        _prepared: Option<Self::PreparedInvocation>,
+    ) -> SideEffectSubmissionDecisionFuture<
+        'a,
+        Self::Submission,
+        Self::SubmissionUnknownEvidence,
+        Self::NotSubmittedProof,
+        Self::AmbiguityEvidence,
+    > {
+        let decision = self.submission_decision.clone();
+        let node_id = ctx.node().node_id.as_str().to_owned();
+        let attempt_id = ctx.attempt_id().as_str().to_owned();
+        Box::pin(async move {
+            Ok(match decision {
+                TestSubmissionDecision::Observed => {
+                    SideEffectSubmissionDecision::Observed(FixtureSideEffectEvidence {
+                        amount: 55,
+                        node_id: node_id.clone(),
+                        attempt_id: attempt_id.clone(),
+                    })
+                }
+                TestSubmissionDecision::Unknown => {
+                    SideEffectSubmissionDecision::Unknown(FixtureSideEffectEvidence {
+                        amount: 56,
+                        node_id: node_id.clone(),
+                        attempt_id: attempt_id.clone(),
+                    })
+                }
+                TestSubmissionDecision::NotSubmitted => {
+                    SideEffectSubmissionDecision::NotSubmitted(FixtureSideEffectEvidence {
+                        amount: 57,
+                        node_id: node_id.clone(),
+                        attempt_id: attempt_id.clone(),
+                    })
+                }
+                TestSubmissionDecision::Ambiguous => SideEffectSubmissionDecision::Ambiguous {
+                    ambiguity_code: events::AmbiguityCode::new("mfm_test_driver_ambiguous")
+                        .expect("ambiguity code"),
+                    evidence: FixtureSideEffectEvidence {
+                        amount: 58,
+                        node_id,
+                        attempt_id,
+                    },
+                },
+            })
+        })
+    }
+
+    fn read_receipt<'a, 'ctx>(
+        &'a self,
+        ctx: &'a ErasedRunCtx<'ctx>,
+        _submission: &'a store::SideEffectArtifactProjection,
+    ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Receipt>> {
+        let node_id = ctx.node().node_id.as_str().to_owned();
+        let attempt_id = ctx.attempt_id().as_str().to_owned();
+        Box::pin(async move {
+            Ok(SideEffectObservedEvidence {
+                evidence: FixtureSideEffectEvidence {
+                    amount: 89,
+                    node_id,
+                    attempt_id,
+                },
+                replay: test_driver_replay_evidence(),
+            })
+        })
+    }
+
+    fn build_confirmation<'a, 'ctx>(
+        &'a self,
+        ctx: &'a ErasedRunCtx<'ctx>,
+        _receipt: &'a store::SideEffectArtifactProjection,
+    ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Confirmation>> {
+        let node_id = ctx.node().node_id.as_str().to_owned();
+        let attempt_id = ctx.attempt_id().as_str().to_owned();
+        Box::pin(async move {
+            Ok(SideEffectObservedEvidence {
+                evidence: FixtureSideEffectEvidence {
+                    amount: 144,
+                    node_id,
+                    attempt_id,
+                },
+                replay: test_driver_replay_evidence(),
+            })
+        })
+    }
+
+    fn map_confirmation_to_output<'a, 'ctx>(
+        &'a self,
+        ctx: &'a ErasedRunCtx<'ctx>,
+        _confirmation: &'a store::SideEffectArtifactProjection,
+    ) -> SideEffectDriverFuture<'a, Self::Output> {
+        let node_id = ctx.node().node_id.as_str().to_owned();
+        let attempt_id = ctx.attempt_id().as_str().to_owned();
+        Box::pin(async move {
+            Ok(FixtureOutputValue {
+                amount: 233,
+                node_id,
+                attempt_id,
+            })
+        })
+    }
+}
+
+fn test_driver_replay_evidence() -> SideEffectReplayEvidence {
+    SideEffectReplayEvidence {
+        replay_verifier_id: events::ReplayVerifierId::new("mfm.test.driver.verifier")
+            .expect("verifier"),
+        resource_touched_set: None,
+    }
+}
+
+fn test_driver_resource_key(ctx: &ErasedRunCtx<'_>) -> Option<events::ResourceKeyEvidence> {
+    let Some(spec::SideEffectContractSpec {
+        resource_claim:
+            spec::ResourceClaimSpec::Exclusive {
+                namespace,
+                key_schema,
+            },
+        ..
+    }) = &ctx.node().side_effect
+    else {
+        return None;
+    };
+    Some(events::ResourceKeyEvidence {
+        namespace: namespace.clone(),
+        key_schema_id: key_schema.clone(),
+        key: events::ResourceKey::new("mfm.test.driver.shared-resource").expect("resource key"),
+    })
+}
+
+#[tokio::test]
+async fn side_effect_driver_prepares_and_starts_one_step() {
+    let fixture = fixture_with_first_side_effect_state();
+    let callbacks = TestSideEffectDriverCallbacks::new(&fixture);
+
+    let output = drive_side_effect_driver_empty(&fixture, &fixture.cell_a, &callbacks)
+        .await
+        .expect("driver output");
+
+    assert_eq!(output.staged_artifacts.len(), 2);
+    assert_eq!(output.payloads.len(), 4);
+    assert!(matches!(
+        output.payloads[0],
+        RunnerEventPayload::SideEffectIntentPersisted(_)
+    ));
+    assert!(matches!(
+        output.payloads[1],
+        RunnerEventPayload::SideEffectClaimed(_)
+    ));
+    assert!(matches!(
+        output.payloads[2],
+        RunnerEventPayload::SideEffectInvocationPrepared(_)
+    ));
+    assert!(matches!(
+        output.payloads[3],
+        RunnerEventPayload::SideEffectInvocationStarted(_)
+    ));
+    match &output.payloads[0] {
+        RunnerEventPayload::SideEffectIntentPersisted(payload) => {
+            assert_eq!(
+                payload.ledger_purpose,
+                events::SideEffectLedgerPurpose::Forward
+            );
+            assert_eq!(payload.invocation_epoch, 1);
+        }
+        other => panic!("expected intent payload: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn side_effect_driver_preserves_concrete_exclusive_resource_key_across_runs() {
+    let fixture = fixture_with_first_exclusive_side_effect_state();
+    let mut peer = fixture.clone();
+    peer.run_id = RunId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        DigestBytes::from_array([0xf6; 32]),
+    );
+    let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
+    let mut store = TestTypedRunStore::new();
+
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start first run");
+    assert_eq!(
+        drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id,
+        )
+        .await
+        .expect("first run prepares side effect"),
+        SchedulerStatus::Advanced
+    );
+    let resource_key = store
+        .load_run_stream(&fixture.run_id)
+        .iter()
+        .find_map(|event| match event.payload() {
+            events::KernelEventPayload::SideEffectInvocationPrepared(payload) => {
+                payload.resource_key.clone()
+            }
+            _ => None,
+        })
+        .expect("first run recorded resource key");
+    assert_eq!(resource_key.key.as_str(), "mfm.test.driver.shared-resource");
+    let lane_key = store::ResourceLaneKey::from_evidence(&resource_key);
+    assert!(store
+        .projection_snapshot()
+        .resource_lane(&lane_key)
+        .is_some());
+
+    start_fixture_run(&scheduler, &mut store, &peer, vec![peer.seed_ref.clone()])
+        .await
+        .expect("start peer run");
+    assert_eq!(
+        drive_once(&scheduler, &mut store, &peer.runtime_spec, &peer.run_id)
+            .await
+            .expect("peer run starts attempt before observing lane block"),
+        SchedulerStatus::Advanced
+    );
+    assert_eq!(
+        drive_once(&scheduler, &mut store, &peer.runtime_spec, &peer.run_id)
+            .await
+            .expect("peer run blocks on same resource lane"),
+        SchedulerStatus::Blocked
+    );
+    assert!(
+        store
+            .load_run_stream(&peer.run_id)
+            .iter()
+            .all(|event| !matches!(
+                event.payload(),
+                events::KernelEventPayload::SideEffectInvocationPrepared(_)
+            )),
+        "peer run must not prepare while the cross-run resource lane is held"
+    );
+}
+
+#[tokio::test]
+async fn side_effect_driver_submits_from_started_projection() {
+    let fixture = fixture_with_first_exclusive_side_effect_state();
+    let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
+    let mut store = TestTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    let node = node_by_output(&fixture, &fixture.cell_a);
+    let (attempt_id, ledger_key) = append_synthetic_exclusive_prepare(
+        &mut store,
+        &fixture,
+        &fixture.run_id,
+        node,
+        "wallet-driver-submit",
+        "sidefx-driver-submit",
+    );
+    append_synthetic_invocation_started(
+        &mut store,
+        &fixture,
+        &fixture.run_id,
+        node,
+        &attempt_id,
+        &ledger_key,
+        "sidefx-driver-submit-started",
+    );
+    let callbacks = TestSideEffectDriverCallbacks::new(&fixture);
+
+    let output =
+        drive_side_effect_driver_from_store(&fixture, &store, node, &attempt_id, &callbacks)
+            .await
+            .expect("driver output");
+
+    assert_eq!(output.payloads.len(), 1);
+    match &output.payloads[0] {
+        RunnerEventPayload::SideEffectSubmissionObserved(payload) => {
+            assert_eq!(payload.ledger_key, ledger_key);
+            assert_eq!(payload.invocation_epoch, 1);
+        }
+        other => panic!("expected submission payload: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn side_effect_driver_persists_submission_recovery_decisions() {
+    let fixture = fixture_with_first_exclusive_side_effect_state();
+    let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
+    let mut store = TestTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    let node = node_by_output(&fixture, &fixture.cell_a);
+    let (attempt_id, ledger_key) = append_synthetic_exclusive_prepare(
+        &mut store,
+        &fixture,
+        &fixture.run_id,
+        node,
+        "wallet-driver-recovery",
+        "sidefx-driver-recovery",
+    );
+    append_synthetic_invocation_started(
+        &mut store,
+        &fixture,
+        &fixture.run_id,
+        node,
+        &attempt_id,
+        &ledger_key,
+        "sidefx-driver-recovery-started",
+    );
+
+    for (decision, expected) in [
+        (
+            TestSubmissionDecision::Unknown,
+            "side_effect.submission_unknown",
+        ),
+        (
+            TestSubmissionDecision::NotSubmitted,
+            "side_effect.not_submitted_proven",
+        ),
+        (TestSubmissionDecision::Ambiguous, "side_effect.ambiguous"),
+    ] {
+        let callbacks =
+            TestSideEffectDriverCallbacks::new(&fixture).with_submission_decision(decision);
+        let output =
+            drive_side_effect_driver_from_store(&fixture, &store, node, &attempt_id, &callbacks)
+                .await
+                .expect("driver output");
+        let actual = match &output.payloads[0] {
+            RunnerEventPayload::SideEffectSubmissionUnknown(_) => "side_effect.submission_unknown",
+            RunnerEventPayload::SideEffectNotSubmittedProven(_) => {
+                "side_effect.not_submitted_proven"
+            }
+            RunnerEventPayload::SideEffectAmbiguous(_) => "side_effect.ambiguous",
+            other => panic!("unexpected recovery payload: {other:?}"),
+        };
+        assert_eq!(actual, expected);
+    }
+}
+
+#[tokio::test]
+async fn side_effect_driver_maps_confirmation_to_state_output() {
+    let fixture = fixture_with_first_exclusive_side_effect_state();
+    let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
+    let mut store = TestTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    let node = node_by_output(&fixture, &fixture.cell_a);
+    let (attempt_id, ledger_key) = append_synthetic_exclusive_prepare(
+        &mut store,
+        &fixture,
+        &fixture.run_id,
+        node,
+        "wallet-driver-output",
+        "sidefx-driver-output",
+    );
+    append_synthetic_invocation_started(
+        &mut store,
+        &fixture,
+        &fixture.run_id,
+        node,
+        &attempt_id,
+        &ledger_key,
+        "sidefx-driver-output-started",
+    );
+    append_synthetic_submission_observed(
+        &mut store,
+        &fixture,
+        node,
+        &attempt_id,
+        &ledger_key,
+        "sidefx-driver-output-submission",
+    );
+    append_synthetic_receipt_observed(
+        &mut store,
+        &fixture,
+        node,
+        &attempt_id,
+        &ledger_key,
+        "sidefx-driver-output-receipt",
+    );
+    append_synthetic_confirmation_observed(
+        &mut store,
+        &fixture,
+        node,
+        &attempt_id,
+        &ledger_key,
+        "sidefx-driver-output-confirmation",
+    );
+    let callbacks = TestSideEffectDriverCallbacks::new(&fixture);
+
+    let output =
+        drive_side_effect_driver_from_store(&fixture, &store, node, &attempt_id, &callbacks)
+            .await
+            .expect("driver output");
+
+    assert_eq!(output.staged_artifacts.len(), 1);
+    assert_eq!(output.payloads.len(), 1);
+    assert!(matches!(
+        output.payloads[0],
+        RunnerEventPayload::CellProduced(_)
+    ));
+}
+
+#[tokio::test]
+async fn side_effect_driver_idles_on_ambiguous_projection() {
+    let fixture = fixture_with_first_exclusive_side_effect_state();
+    let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
+    let mut store = TestTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    let node = node_by_output(&fixture, &fixture.cell_a);
+    let (attempt_id, ledger_key) = append_synthetic_exclusive_prepare(
+        &mut store,
+        &fixture,
+        &fixture.run_id,
+        node,
+        "wallet-driver-ambiguous",
+        "sidefx-driver-ambiguous",
+    );
+    append_synthetic_invocation_started(
+        &mut store,
+        &fixture,
+        &fixture.run_id,
+        node,
+        &attempt_id,
+        &ledger_key,
+        "sidefx-driver-ambiguous-started",
+    );
+    append_synthetic_ambiguous(
+        &mut store,
+        &fixture,
+        &fixture.run_id,
+        node,
+        &attempt_id,
+        &ledger_key,
+        "sidefx-driver-ambiguous-terminal",
+    );
+    let callbacks = TestSideEffectDriverCallbacks::new(&fixture);
+
+    let output =
+        drive_side_effect_driver_from_store(&fixture, &store, node, &attempt_id, &callbacks)
+            .await
+            .expect("driver output");
+
+    assert!(output.payloads.is_empty());
+    assert!(output.staged_artifacts.is_empty());
+}
+
+#[tokio::test]
+async fn side_effect_driver_starts_and_submits_from_prepared_projection() {
+    let fixture = fixture_with_first_exclusive_side_effect_state();
+    let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
+    let mut store = TestTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    let node = node_by_output(&fixture, &fixture.cell_a);
+    let (attempt_id, ledger_key) = append_synthetic_exclusive_prepare(
+        &mut store,
+        &fixture,
+        &fixture.run_id,
+        node,
+        "wallet-driver-unsupported",
+        "sidefx-driver-unsupported",
+    );
+    let callbacks = TestSideEffectDriverCallbacks::new(&fixture);
+
+    let output =
+        drive_side_effect_driver_from_store(&fixture, &store, node, &attempt_id, &callbacks)
+            .await
+            .expect("driver output");
+
+    assert_eq!(output.staged_artifacts.len(), 1);
+    assert_eq!(output.payloads.len(), 2);
+    match &output.payloads[0] {
+        RunnerEventPayload::SideEffectInvocationStarted(payload) => {
+            assert_eq!(payload.ledger_key, ledger_key);
+            assert_eq!(payload.invocation_epoch, 1);
+        }
+        other => panic!("expected invocation started payload: {other:?}"),
+    }
+    match &output.payloads[1] {
+        RunnerEventPayload::SideEffectSubmissionObserved(payload) => {
+            assert_eq!(payload.ledger_key, ledger_key);
+            assert_eq!(payload.invocation_epoch, 1);
+        }
+        other => panic!("expected submission payload: {other:?}"),
+    }
+
+    let required_artifacts = output
+        .staged_artifacts
+        .iter()
+        .map(|artifact| artifact.evidence().clone())
+        .collect::<Vec<_>>();
+    let payloads = output
+        .payloads
+        .into_iter()
+        .map(events::KernelEventPayload::from)
+        .collect::<Vec<_>>();
+    store
+        .append_prepared_commit(store_typed_commit_request! {
+            run_id: fixture.run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&fixture.run_id),
+            commit_key: store::CommitKey::new("sidefx-driver-prepared-resume")
+                .expect("commit key"),
+            payloads: payloads,
+            required_artifacts: required_artifacts,
+            preconditions: store::CommitPreconditions {
+                required_run_state: store::RequiredRunState::NotCompleted,
+                required_side_effect_states: vec![store::SideEffectStatePrecondition {
+                    ledger_key: ledger_key.clone(),
+                    required: store::RequiredSideEffectState::InvocationPrepared,
+                }],
+                ..store::CommitPreconditions::default()
+            },
+        })
+        .expect("append prepared recovery output");
+
+    let projection_snapshot = store.projection_snapshot();
+    let projection = projection_snapshot
+        .side_effect_state_for_run(&fixture.run_id, &ledger_key)
+        .expect("side-effect state")
+        .expect("side-effect projection");
+    assert!(matches!(
+        projection.phase(),
+        store::SideEffectLedgerPhase::SubmissionKnown {
+            status: store::SideEffectSubmissionState::Observed { .. },
+            ..
+        }
+    ));
+}
+
+fn with_runner_erased_ctx<R, F>(fixture: &Fixture, cell_id: &CellId, test: F) -> R
+where
+    F: for<'a> FnOnce(ErasedRunCtx<'a>) -> R,
+{
+    let node = node_by_output(fixture, cell_id);
+    let descriptor = fixture
+        .runtime_spec
+        .state_descriptor_for_node(node)
+        .expect("state descriptor");
+    let output_cell = fixture
+        .runtime_spec
+        .cell(&node.output_cell)
+        .expect("output cell");
+    let attempt_id = attempt_id(
+        &fixture.run_id,
+        fixture.runtime_spec.spec_hash(),
+        &node.node_id,
+        1,
+    )
+    .expect("attempt id");
+    let config_artifact = config_artifact(&fixture.runtime_spec, &node.config_ref).evidence;
+    let projections = store::ProjectionSnapshot::default();
+    let run_stream = Vec::new();
+    let invocation = PreparedRunnerInvocation {
+        runtime_spec: &fixture.runtime_spec,
+        run_id: &fixture.run_id,
+        spec_hash: fixture.runtime_spec.spec_hash(),
+        node,
+        descriptor,
+        output_cell,
+        attempt_id: &attempt_id,
+        attempt_no: 1,
+        config_artifact,
+        inputs: MaterializedInputs {
+            input_schema_id: node.input_bindings.input_schema_id.clone(),
+            root: MaterializedInputNode::Unit,
+        },
+        caps: CertifiedRuntimeCapabilities::new(
+            node.node_id.clone(),
+            node.capability_bindings.clone(),
+        ),
+        recorded_facts: RecordedFacts::default(),
+        projections: &projections,
+        run_stream: &run_stream,
+    };
+    test(ErasedRunCtx::from_prepared(&invocation))
+}
+
+async fn drive_side_effect_driver_empty<C>(
+    fixture: &Fixture,
+    cell_id: &CellId,
+    callbacks: &C,
+) -> Result<ErasedRunnerOutput>
+where
+    C: SideEffectDriverCallbacks + ?Sized,
+{
+    let node = node_by_output(fixture, cell_id);
+    let descriptor = fixture
+        .runtime_spec
+        .state_descriptor_for_node(node)
+        .expect("state descriptor");
+    let output_cell = fixture
+        .runtime_spec
+        .cell(&node.output_cell)
+        .expect("output cell");
+    let attempt_id = attempt_id(
+        &fixture.run_id,
+        fixture.runtime_spec.spec_hash(),
+        &node.node_id,
+        1,
+    )
+    .expect("attempt id");
+    let config_artifact = config_artifact(&fixture.runtime_spec, &node.config_ref).evidence;
+    let projections = store::ProjectionSnapshot::default();
+    let run_stream = Vec::new();
+    let invocation = PreparedRunnerInvocation {
+        runtime_spec: &fixture.runtime_spec,
+        run_id: &fixture.run_id,
+        spec_hash: fixture.runtime_spec.spec_hash(),
+        node,
+        descriptor,
+        output_cell,
+        attempt_id: &attempt_id,
+        attempt_no: 1,
+        config_artifact,
+        inputs: MaterializedInputs {
+            input_schema_id: node.input_bindings.input_schema_id.clone(),
+            root: MaterializedInputNode::Unit,
+        },
+        caps: CertifiedRuntimeCapabilities::new(
+            node.node_id.clone(),
+            node.capability_bindings.clone(),
+        ),
+        recorded_facts: RecordedFacts::default(),
+        projections: &projections,
+        run_stream: &run_stream,
+    };
+    SideEffectDriver::drive(ErasedRunCtx::from_prepared(&invocation), callbacks).await
+}
+
+async fn drive_side_effect_driver_from_store<C>(
+    fixture: &Fixture,
+    store: &TestTypedRunStore,
+    node: &spec::NodeSpec,
+    attempt_id: &AttemptId,
+    callbacks: &C,
+) -> Result<ErasedRunnerOutput>
+where
+    C: SideEffectDriverCallbacks + ?Sized,
+{
+    let descriptor = fixture
+        .runtime_spec
+        .state_descriptor_for_node(node)
+        .expect("state descriptor");
+    let output_cell = fixture
+        .runtime_spec
+        .cell(&node.output_cell)
+        .expect("output cell");
+    let config_artifact = config_artifact(&fixture.runtime_spec, &node.config_ref).evidence;
+    let projections = store.projection_snapshot().clone();
+    let run_stream = store.load_run_stream(&fixture.run_id);
+    let invocation = PreparedRunnerInvocation {
+        runtime_spec: &fixture.runtime_spec,
+        run_id: &fixture.run_id,
+        spec_hash: fixture.runtime_spec.spec_hash(),
+        node,
+        descriptor,
+        output_cell,
+        attempt_id,
+        attempt_no: 1,
+        config_artifact,
+        inputs: MaterializedInputs {
+            input_schema_id: node.input_bindings.input_schema_id.clone(),
+            root: MaterializedInputNode::Unit,
+        },
+        caps: CertifiedRuntimeCapabilities::new(
+            node.node_id.clone(),
+            node.capability_bindings.clone(),
+        ),
+        recorded_facts: RecordedFacts::default(),
+        projections: &projections,
+        run_stream: &run_stream,
+    };
+    SideEffectDriver::drive(ErasedRunCtx::from_prepared(&invocation), callbacks).await
+}
+
+fn single_side_effect_payload(output: &ErasedRunnerOutput) -> &RunnerEventPayload {
+    assert_eq!(output.staged_artifacts.len(), 1);
+    assert_eq!(output.staged_retention_refs.len(), 1);
+    assert_eq!(output.payloads.len(), 1);
+    &output.payloads[0]
+}
+
+#[test]
+fn runner_registration_builder_preserves_explicit_binding_authority() {
+    let fixture = fixture();
+    let node = node_by_output(&fixture, &fixture.cell_b);
+    let descriptor = fixture
+        .runtime_spec
+        .state_descriptor_for_node(node)
+        .expect("state descriptor");
+    let factory_id = events::RunnerFactoryId::new("read").expect("factory");
+    let executable = events::ExecutableIdentity {
+        factory_id: factory_id.clone(),
+        source_revision: events::SourceRevision::new("test-rev").expect("source"),
+        cargo_package_name: events::PackageName::new("mfm-test").expect("package"),
+        cargo_package_version: events::PackageVersion::new("0.1.0").expect("version"),
+        cargo_package_digest: content(0xe1),
+        binary_digest: content(0xe2),
+        nix_derivation_hash: None,
+        nix_output_hash: None,
+    };
+    let implementation_id = CapabilityImplementationId::new("mfm.test.runner-kit-registration")
+        .expect("implementation id");
+    let mut registry = ErasedRunnerRegistry::new();
+
+    RunnerRegistrationBuilder::new(&mut registry, implementation_id.clone())
+        .register_descriptor(
+            node.descriptor_id.clone(),
+            &node.capability_bindings,
+            factory_id.clone(),
+            executable.clone(),
+            Arc::new(RecordingRunner {
+                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                output_artifact: artifact(0xb1),
+                output_digest: content(0xb2),
+            }),
+        )
+        .expect("runner registration");
+
+    let binding = registry
+        .resolve(node, descriptor)
+        .expect("registered runner");
+    assert_eq!(binding.factory_id(), &factory_id);
+    assert_eq!(binding.executable(), &executable);
+    let capabilities = registry
+        .resolve_capability_implementations(node)
+        .expect("capability implementations");
+    assert_eq!(
+        capabilities.len(),
+        node.capability_bindings.capabilities.len()
+    );
+    for binding in capabilities {
+        assert_eq!(binding.implementation_id(), &implementation_id);
+    }
+
+    let wrong_factory = events::RunnerFactoryId::new("pure").expect("factory");
+    let mut mismatch_registry = ErasedRunnerRegistry::new();
+    let error = match RunnerRegistrationBuilder::new(
+        &mut mismatch_registry,
+        CapabilityImplementationId::new("mfm.test.runner-kit-registration-mismatch")
+            .expect("implementation id"),
+    )
+    .register_descriptor(
+        node.descriptor_id.clone(),
+        &node.capability_bindings,
+        factory_id,
+        events::ExecutableIdentity {
+            factory_id: wrong_factory,
+            ..executable
+        },
+        Arc::new(RecordingRunner {
+            expected_caps: Vec::new(),
+            output_artifact: artifact(0xc1),
+            output_digest: content(0xc2),
+        }),
+    ) {
+        Ok(_) => panic!("factory mismatch should be rejected"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        RuntimeError::RunnerBinding(message)
+            if message.contains("does not match binding factory")
+    ));
+}
+
 #[tokio::test]
 async fn serial_scheduler_runs_nodes_in_certified_topological_order() {
     let fixture = fixture();
@@ -847,7 +2474,7 @@ async fn serial_scheduler_runs_nodes_in_certified_topological_order() {
         ))
         .expect("binding b");
     let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -858,10 +2485,14 @@ async fn serial_scheduler_runs_nodes_in_certified_topological_order() {
     .expect("start run");
 
     assert_eq!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("drive a"),
+        drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id
+        )
+        .await
+        .expect("drive a"),
         SchedulerStatus::Advanced
     );
     assert!(store
@@ -873,23 +2504,31 @@ async fn serial_scheduler_runs_nodes_in_certified_topological_order() {
         .cell_terminal(&fixture.cell_b)
         .is_none());
     assert_eq!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("drive b"),
+        drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id
+        )
+        .await
+        .expect("drive b"),
         SchedulerStatus::Advanced
     );
     assert!(store
         .projection_snapshot()
         .cell_terminal(&fixture.cell_b)
         .is_some());
+    assert_eq!(
+        runtime_lifecycle_summary(&store, &fixture.run_id),
+        "run=Started attempts[started=0 completed=2 failed=0 interrupted=0 total=2] cells=2 side_effects=0 lanes[run=0 total=0] public_outputs=0 retentions=1"
+    );
 }
 
 #[tokio::test]
 async fn scheduler_completes_run_after_public_output_evidence() {
     let fixture = fixture();
     let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -900,10 +2539,14 @@ async fn scheduler_completes_run_after_public_output_evidence() {
     .expect("start run");
 
     assert_eq!(
-        scheduler
-            .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("drive to public output"),
+        drive_until_blocked(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id
+        )
+        .await
+        .expect("drive to public output"),
         SchedulerStatus::PublicOutputProjected
     );
     assert_eq!(
@@ -914,6 +2557,10 @@ async fn scheduler_completes_run_after_public_output_evidence() {
         .projection_snapshot()
         .cell_terminal(&fixture.render_cell)
         .is_some());
+    assert_eq!(
+        runtime_lifecycle_summary(&store, &fixture.run_id),
+        "run=Completed attempts[started=0 completed=5 failed=0 interrupted=0 total=5] cells=5 side_effects=0 lanes[run=0 total=0] public_outputs=1 retentions=1"
+    );
 
     let stream = store.load_run_stream(&fixture.run_id);
     let public_output_pos = stream
@@ -1012,10 +2659,14 @@ async fn scheduler_completes_run_after_public_output_evidence() {
     }));
     let stream_len = stream.len();
     assert_eq!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("drive completed run"),
+        drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id
+        )
+        .await
+        .expect("drive completed run"),
         SchedulerStatus::PublicOutputProjected
     );
     assert_eq!(store.load_run_stream(&fixture.run_id).len(), stream_len);
@@ -1087,29 +2738,27 @@ async fn no_second_authority_full_run_stages_and_admits_first_artifact_reference
             artifacts: Arc::new(Mutex::new(BTreeMap::new())),
         }),
     );
-    let mut store = RecordingTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+    let store = RecordingTypedRunStore::new();
+    start_fixture_run_async_store(&scheduler, &store, &fixture, vec![fixture.seed_ref.clone()])
+        .await
+        .expect("start run");
 
     assert_eq!(
         scheduler
-            .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .drive_until_blocked(&store, &fixture.runtime_spec, &fixture.run_id)
             .await
             .expect("drive full representative run"),
         SchedulerStatus::PublicOutputProjected
     );
     assert_eq!(
-        store.projection_snapshot().run_state(&fixture.run_id),
+        store
+            .projection_snapshot(&fixture.run_id)
+            .await
+            .run_state(&fixture.run_id),
         store::RunState::Completed
     );
 
-    let stream = store.load_run_stream(&fixture.run_id);
+    let stream = store.load_run_stream(&fixture.run_id).await;
     validate_runtime_stream_for_tests(&fixture.runtime_spec, &fixture.run_id, &stream)
         .expect("representative stream validates");
     assert_every_certified_node_has_attempt(&fixture.runtime_spec, &stream);
@@ -1135,7 +2784,8 @@ async fn no_second_authority_full_run_stages_and_admits_first_artifact_reference
 
     let staged_artifacts = staged.lock().expect("staged artifact lock").clone();
     let mut first_reference_by_artifact = BTreeMap::<ArtifactId, usize>::new();
-    for (commit_index, commit) in store.commits.iter().enumerate() {
+    let commits = store.commits();
+    for (commit_index, commit) in commits.iter().enumerate() {
         let commit_references = commit
             .payloads
             .iter()
@@ -1171,7 +2821,7 @@ async fn no_second_authority_full_run_stages_and_admits_first_artifact_reference
         "representative run should reference artifacts"
     );
     for (artifact_id, commit_index) in first_reference_by_artifact {
-        let commit = &store.commits[commit_index];
+        let commit = &commits[commit_index];
         assert!(
             commit
                 .admitted_artifacts
@@ -1195,7 +2845,7 @@ async fn run_launch_commits_single_admission_root_and_stages_launch_artifacts() 
             artifacts: Arc::new(Mutex::new(BTreeMap::new())),
         }),
     );
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
 
     start_fixture_run(
         &scheduler,
@@ -1257,7 +2907,7 @@ async fn run_launch_staging_failure_prevents_start_commit() {
         registered_fixture_runners(&fixture),
         Arc::new(FailingAfterRuntimeArtifactStager::after(0)),
     );
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     assert!(matches!(
         start_fixture_run(
             &scheduler,
@@ -1273,109 +2923,6 @@ async fn run_launch_staging_failure_prevents_start_commit() {
 }
 
 #[tokio::test]
-async fn runtime_rejects_run_admitted_config_artifact_metadata_tampering() {
-    let fixture = fixture();
-    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
-
-    let valid_stream = store.load_run_stream(&fixture.run_id);
-    let root_pos = valid_stream
-        .iter()
-        .position(|event| {
-            matches!(
-                event.payload(),
-                events::KernelEventPayload::RunAdmitted(payload)
-                    if !payload.config_artifacts.is_empty()
-            )
-        })
-        .expect("RunAdmitted config evidence");
-    let mut payload = match valid_stream[root_pos].payload().clone() {
-        events::KernelEventPayload::RunAdmitted(payload) => payload,
-        _ => unreachable!("position checked"),
-    };
-    payload.config_artifacts[0].byte_len += 1;
-    let corrupt_stream = rewrite_commit_payload(
-        &valid_stream,
-        root_pos,
-        events::KernelEventPayload::RunAdmitted(payload),
-    );
-
-    assert!(matches!(
-        validate_runtime_stream_for_tests(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
-        Err(RuntimeError::InvalidRunStream(message))
-            if message.contains("config artifact evidence")
-    ));
-}
-
-#[tokio::test]
-async fn runtime_rejects_attempt_before_run_admitted() {
-    let fixture = fixture();
-    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
-    scheduler
-        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-        .await
-        .expect("drive first attempt");
-    let valid_stream = store.load_run_stream(&fixture.run_id);
-    let started = valid_stream
-        .iter()
-        .find_map(|event| match event.payload() {
-            events::KernelEventPayload::StateAttemptStarted(payload) => Some(
-                events::KernelEventPayload::StateAttemptStarted(payload.clone()),
-            ),
-            _ => None,
-        })
-        .expect("real attempt started");
-    let mut corrupt_stream = Vec::new();
-    append_payload_commit_for_tests(
-        &mut corrupt_stream,
-        &fixture.run_id,
-        "pre-admission-attempt",
-        started,
-    );
-    for event in &valid_stream {
-        corrupt_stream.push(rewrite_envelope(
-            event,
-            increment_stream_seq_for_tests(event.seq()),
-            event.ordinal(),
-            event.commit_key().clone(),
-        ));
-    }
-
-    assert!(matches!(
-        validate_historical_run_admission_batch(
-            &fixture.runtime_spec,
-            &fixture.run_id,
-            &corrupt_stream
-        ),
-        Err(RuntimeError::InvalidRunStream(message))
-            if message.contains("run stream must start with RunAdmitted")
-    ));
-    assert!(validate_runtime_stream_for_tests(
-        &fixture.runtime_spec,
-        &fixture.run_id,
-        &corrupt_stream
-    )
-    .is_err());
-}
-
-#[tokio::test]
 async fn public_output_receipt_staging_failure_leaves_open_attempt() {
     let fixture = fixture();
     let scheduler = test_scheduler_with_stager(
@@ -1384,7 +2931,7 @@ async fn public_output_receipt_staging_failure_leaves_open_attempt() {
             fixture.render_node.clone(),
         )),
     );
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -1393,19 +2940,26 @@ async fn public_output_receipt_staging_failure_leaves_open_attempt() {
     )
     .await
     .expect("start run");
-    scheduler
-        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-        .await
-        .expect("drive a");
-    scheduler
-        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-        .await
-        .expect("drive b");
+    drive_once(
+        &scheduler,
+        &mut store,
+        &fixture.runtime_spec,
+        &fixture.run_id,
+    )
+    .await
+    .expect("drive a");
+    drive_once(
+        &scheduler,
+        &mut store,
+        &fixture.runtime_spec,
+        &fixture.run_id,
+    )
+    .await
+    .expect("drive b");
 
     let stream_len_before = store.load_run_stream(&fixture.run_id).len();
     assert!(matches!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+        drive_once(&scheduler, &mut store, &fixture.runtime_spec, &fixture.run_id)
             .await,
         Err(RuntimeError::Store(message))
             if message.contains("test node state-output staging failure")
@@ -1445,7 +2999,7 @@ async fn public_output_receipt_staging_failure_leaves_open_attempt() {
 async fn scheduler_binds_staged_retention_refs_and_projects_manifest() {
     let fixture = fixture_with_retention_lifecycle_node();
     let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -1455,18 +3009,22 @@ async fn scheduler_binds_staged_retention_refs_and_projects_manifest() {
     .await
     .expect("start run");
 
-    let start_retention = store
-        .projection_snapshot()
+    let projection_snapshot = store.projection_snapshot();
+    let start_retention = projection_snapshot
         .retention(&fixture.run_id)
         .expect("run-start retention");
     assert!(start_retention
         .refs
         .contains_key(&fixture.seed_ref.seed_artifact.artifact_id));
 
-    let status = scheduler
-        .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
-        .await
-        .expect("drive to completion");
+    let status = drive_until_blocked(
+        &scheduler,
+        &mut store,
+        &fixture.runtime_spec,
+        &fixture.run_id,
+    )
+    .await
+    .expect("drive to completion");
     assert_eq!(status, SchedulerStatus::PublicOutputProjected);
     let render_receipt_artifact = match store
         .projection_snapshot()
@@ -1483,8 +3041,8 @@ async fn scheduler_binds_staged_retention_refs_and_projects_manifest() {
         .refs
         .contains_key(&render_receipt_artifact));
 
-    let projection = store
-        .projection_snapshot()
+    let projection_snapshot = store.projection_snapshot();
+    let projection = projection_snapshot
         .retention(&fixture.run_id)
         .expect("retention projection");
     let manifest = projection.manifest.as_ref().expect("manifest");
@@ -1559,7 +3117,7 @@ async fn scheduler_binds_staged_retention_refs_and_projects_manifest() {
 async fn retention_manifest_projection_retry_is_idempotent_after_current_store_advanced() {
     let fixture = fixture_with_retention_lifecycle_node();
     let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -1575,23 +3133,24 @@ async fn retention_manifest_projection_retry_is_idempotent_after_current_store_a
     append_attempt_start(&mut store, &fixture, retention_node, 1);
     let stale_stream = store.load_run_stream(&fixture.run_id);
 
-    scheduler
-        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-        .await
-        .expect("advance current store with retention projection");
+    drive_once(
+        &scheduler,
+        &mut store,
+        &fixture.runtime_spec,
+        &fixture.run_id,
+    )
+    .await
+    .expect("advance current store with retention projection");
     assert!(store
         .projection_snapshot()
         .retention(&fixture.run_id)
         .and_then(|retention| retention.manifest.as_ref())
         .is_some());
 
-    let mut stale_store = StaleStreamStore {
-        inner: &mut store,
-        stream: stale_stream,
-    };
+    let stale_store = StaleStreamStore::new(&mut store, stale_stream);
     assert_eq!(
         scheduler
-            .drive_once(&mut stale_store, &fixture.runtime_spec, &fixture.run_id)
+            .drive_once(&stale_store, &fixture.runtime_spec, &fixture.run_id)
             .await
             .expect("idempotent retention retry"),
         SchedulerStatus::Advanced
@@ -1599,63 +3158,10 @@ async fn retention_manifest_projection_retry_is_idempotent_after_current_store_a
 }
 
 #[tokio::test]
-async fn retention_manifest_projection_rejects_corrupt_stream_before_commit() {
-    let fixture = fixture_with_retention_lifecycle_node();
-    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
-
-    drive_until_public_output_produced(&scheduler, &mut store, &fixture).await;
-
-    let mut corrupt_stream = store.load_run_stream(&fixture.run_id);
-    let corrupt_pos = corrupt_stream
-        .iter()
-        .position(|event| {
-            event.ordinal() == store::CommitOrdinal::new(0)
-                && matches!(
-                    event.payload(),
-                    events::KernelEventPayload::StateAttemptStarted(_)
-                )
-        })
-        .expect("attempt-start event");
-    let mut corrupt_payload = match corrupt_stream[corrupt_pos].payload().clone() {
-        events::KernelEventPayload::StateAttemptStarted(payload) => payload,
-        _ => unreachable!("position checked"),
-    };
-    corrupt_payload.spec_hash = SpecHash::from_digest(DigestAlgorithm::Sha256JcsV1, D9);
-    corrupt_stream[corrupt_pos] = rewrite_single_payload_envelope(
-        &corrupt_stream[corrupt_pos],
-        events::KernelEventPayload::StateAttemptStarted(corrupt_payload),
-    );
-
-    let projection = store::ProjectionSnapshot::rebuild_from_run_stream(&corrupt_stream)
-        .expect("projection rebuild accepts ordered corrupt stream");
-    let mut corrupt_store = ReadOnlyCorruptStore {
-        stream: corrupt_stream,
-        projection,
-    };
-
-    assert!(matches!(
-        scheduler
-            .drive_once(&mut corrupt_store, &fixture.runtime_spec, &fixture.run_id)
-            .await,
-        Err(RuntimeError::InvalidRunStream(message))
-            if message.contains("event payload spec hash")
-    ));
-}
-
-#[tokio::test]
 async fn runtime_rejects_standalone_retention_manifest_projection_history() {
     let fixture = fixture_with_retention_lifecycle_node();
     let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -1666,13 +3172,10 @@ async fn runtime_rejects_standalone_retention_manifest_projection_history() {
     .expect("start run");
     drive_until_public_output_produced(&scheduler, &mut store, &fixture).await;
 
-    let retention_node =
-        certified_retention_manifest_node(&fixture.runtime_spec).expect("retention node");
-    let manifest = build_retention_manifest_artifact_with_producer(
+    let manifest = build_retention_manifest_artifact(
         &fixture.runtime_spec,
         &fixture.run_id,
         &store.load_run_stream(&fixture.run_id),
-        Some(retention_node.node_id.clone()),
     )
     .expect("manifest");
     let manifest_evidence = manifest.evidence.clone();
@@ -1690,91 +3193,13 @@ async fn runtime_rejects_standalone_retention_manifest_projection_history() {
         .expect("synthetic standalone projection");
 
     assert!(matches!(
-        RuntimeRunView::from_store(&fixture.runtime_spec, &fixture.run_id, &store),
+        RuntimeRunView::from_stream(
+            &fixture.runtime_spec,
+            &fixture.run_id,
+            &store.load_run_stream(&fixture.run_id)
+        ),
         Err(RuntimeError::InvalidRunStream(message))
             if message.contains("retention manifest projection was not produced")
-    ));
-}
-
-#[tokio::test]
-async fn runtime_rejects_completed_history_without_retention_projection() {
-    let fixture = fixture();
-    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
-    assert_eq!(
-        scheduler
-            .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("drive to completion"),
-        SchedulerStatus::PublicOutputProjected
-    );
-    assert_eq!(
-        store.projection_snapshot().run_state(&fixture.run_id),
-        store::RunState::Completed
-    );
-
-    let valid_stream = store.load_run_stream(&fixture.run_id);
-    let corrupt_stream = rewrite_stream_without_commit_containing(&valid_stream, |payload| {
-        matches!(
-            payload,
-            events::KernelEventPayload::RetentionManifestProjected(_)
-        )
-    });
-
-    assert!(matches!(
-        validate_runtime_stream_for_tests(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
-        Err(RuntimeError::InvalidRunStream(message))
-            if message.contains("started before certified input cell")
-    ));
-}
-
-#[tokio::test]
-async fn runtime_rejects_standalone_run_completed_after_retention_projection() {
-    let fixture = fixture();
-    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
-    scheduler
-        .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
-        .await
-        .expect("drive to completion");
-
-    let valid_stream = store.load_run_stream(&fixture.run_id);
-    let completion_payload = valid_stream
-        .iter()
-        .find_map(|event| match event.payload() {
-            events::KernelEventPayload::RunCompleted(payload) => Some(payload.clone()),
-            _ => None,
-        })
-        .expect("run completion");
-    let mut corrupt_stream = rewrite_stream_without_commit_containing(&valid_stream, |payload| {
-        matches!(payload, events::KernelEventPayload::RunCompleted(_))
-    });
-    append_payload_commit_for_tests(
-        &mut corrupt_stream,
-        &fixture.run_id,
-        "standalone-run-completed-after-retention",
-        events::KernelEventPayload::RunCompleted(completion_payload),
-    );
-
-    assert!(matches!(
-        validate_runtime_stream_for_tests(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
-        Err(RuntimeError::InvalidRunStream(_))
     ));
 }
 
@@ -1782,7 +3207,7 @@ async fn runtime_rejects_standalone_run_completed_after_retention_projection() {
 async fn runtime_rejects_complete_run_receipt_commit_without_run_completed() {
     let fixture = fixture();
     let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -1791,10 +3216,14 @@ async fn runtime_rejects_complete_run_receipt_commit_without_run_completed() {
     )
     .await
     .expect("start run");
-    scheduler
-        .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
-        .await
-        .expect("drive to completion");
+    drive_until_blocked(
+        &scheduler,
+        &mut store,
+        &fixture.runtime_spec,
+        &fixture.run_id,
+    )
+    .await
+    .expect("drive to completion");
 
     let valid_stream = store.load_run_stream(&fixture.run_id);
     let corrupt_stream = rewrite_stream_without_payloads(&valid_stream, |payload| {
@@ -1809,596 +3238,10 @@ async fn runtime_rejects_complete_run_receipt_commit_without_run_completed() {
 }
 
 #[tokio::test]
-async fn runtime_rejects_complete_run_receipt_artifact_ref_metadata_tampering() {
-    for mutation in ["byte_len", "media_type"] {
-        let fixture = fixture();
-        let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-        let mut store = store::InMemoryTypedRunStore::new();
-        start_fixture_run(
-            &scheduler,
-            &mut store,
-            &fixture,
-            vec![fixture.seed_ref.clone()],
-        )
-        .await
-        .expect("start run");
-        scheduler
-            .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("drive to completion");
-
-        let complete_node =
-            certified_complete_run_node(&fixture.runtime_spec).expect("complete node");
-        let valid_stream = store.load_run_stream(&fixture.run_id);
-        let artifact_ref_pos = valid_stream
-            .iter()
-            .position(|event| {
-                matches!(
-                    event.payload(),
-                    events::KernelEventPayload::ArtifactReferenced(payload)
-                        if payload.node_id.as_ref() == Some(&complete_node.node_id)
-                )
-            })
-            .expect("completion artifact ref");
-        let mut payload = match valid_stream[artifact_ref_pos].payload().clone() {
-            events::KernelEventPayload::ArtifactReferenced(payload) => payload,
-            _ => unreachable!("checked above"),
-        };
-        match mutation {
-            "byte_len" => payload.artifact_ref.byte_len += 1,
-            "media_type" => {
-                payload.artifact_ref.media_type =
-                    spec::MediaType::new("application/octet-stream").expect("media type");
-            }
-            _ => unreachable!("known mutation"),
-        }
-        let corrupt_stream = rewrite_commit_payload(
-            &valid_stream,
-            artifact_ref_pos,
-            events::KernelEventPayload::ArtifactReferenced(payload),
-        );
-
-        assert!(matches!(
-            validate_runtime_stream_for_tests(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
-            Err(RuntimeError::InvalidRunStream(message))
-                if message.contains("sealed framework batch")
-        ));
-    }
-}
-
-#[tokio::test]
-async fn runtime_rejects_bare_retention_refs_before_completion() {
-    let fixture = fixture();
-    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
-    let mut corrupt_stream = store.load_run_stream(&fixture.run_id);
-    append_payload_commit_for_tests(
-        &mut corrupt_stream,
-        &fixture.run_id,
-        "bare-runtime-retention-ref",
-        events::KernelEventPayload::RetentionRefsAppended(events::RetentionRefsAppended {
-            run_id: fixture.run_id.clone(),
-            spec_hash: fixture.runtime_spec.spec_hash().clone(),
-            refs: vec![events::RetentionRef {
-                artifact_id: fixture.seed_ref.seed_artifact.artifact_id.clone(),
-                role: fixture.seed_ref.seed_artifact.role,
-                content_digest: fixture.seed_ref.seed_artifact.content_digest.clone(),
-            }],
-            reason: events::RetentionReason::RuntimeEvidence,
-        }),
-    );
-
-    assert!(matches!(
-        validate_runtime_stream_for_tests(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
-        Err(RuntimeError::InvalidRunStream(message))
-            if message.contains("same-commit typed payload evidence")
-    ));
-}
-
-#[tokio::test]
-async fn runtime_rejects_appended_run_admitted_retention_refs() {
-    let fixture = fixture();
-    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
-
-    let mut corrupt_stream = store.load_run_stream(&fixture.run_id);
-    append_payload_commit_for_tests(
-        &mut corrupt_stream,
-        &fixture.run_id,
-        "forged-run-admitted-retention",
-        events::KernelEventPayload::RetentionRefsAppended(events::RetentionRefsAppended {
-            run_id: fixture.run_id.clone(),
-            spec_hash: fixture.runtime_spec.spec_hash().clone(),
-            refs: vec![events::RetentionRef {
-                artifact_id: fixture.seed_ref.seed_artifact.artifact_id.clone(),
-                role: fixture.seed_ref.seed_artifact.role,
-                content_digest: fixture.seed_ref.seed_artifact.content_digest.clone(),
-            }],
-            reason: events::RetentionReason::RunAdmitted,
-        }),
-    );
-
-    assert!(matches!(
-        validate_runtime_stream_for_tests(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
-        Err(RuntimeError::InvalidRunStream(message))
-            if message.contains("projection-derived")
-    ));
-}
-
-#[tokio::test]
-async fn runtime_rejects_non_completed_run_completion_without_saga_terminal_authority() {
-    for (name, outcome) in [
-        ("compensated", events::RunCompletionOutcome::Compensated),
-        (
-            "manually-resolved",
-            events::RunCompletionOutcome::ManuallyResolved,
-        ),
-        (
-            "failed-without-acdc-claim",
-            events::RunCompletionOutcome::FailedWithoutAcdcClaim,
-        ),
-    ] {
-        let fixture = fixture();
-        let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-        let mut store = store::InMemoryTypedRunStore::new();
-        start_fixture_run(
-            &scheduler,
-            &mut store,
-            &fixture,
-            vec![fixture.seed_ref.clone()],
-        )
-        .await
-        .expect("start run");
-        let seq = store.expected_next_seq(&fixture.run_id);
-        let request = store_typed_commit_request! {
-            run_id: fixture.run_id.clone(),
-            expected_next_seq: seq,
-            commit_key: store::CommitKey::new(format!("forged-{name}-completion"))
-                .expect("commit key"),
-            payloads: vec![events::KernelEventPayload::RunCompleted(
-                events::RunCompleted {
-                    run_id: fixture.run_id.clone(),
-                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
-                    outcome,
-                },
-            )],
-            required_artifacts: Vec::new(),
-            preconditions: store::CommitPreconditions::default(),
-        };
-        let forged = store::build_committed_batch(&request, seq).expect("forged completion batch");
-        let mut stream = store.load_run_stream(&fixture.run_id);
-        stream.extend(forged.events().iter().cloned());
-
-        assert!(matches!(
-            validate_runtime_stream_for_tests(
-                &fixture.runtime_spec,
-                &fixture.run_id,
-                &stream,
-            ),
-            Err(RuntimeError::InvalidRunStream(message))
-                if message.contains("saga terminal resolution requires terminal saga mode")
-        ));
-    }
-}
-
-#[tokio::test]
-async fn runtime_rejects_post_completion_retention_refs() {
-    let fixture = fixture();
-    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
-    assert_eq!(
-        scheduler
-            .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("drive to completion"),
-        SchedulerStatus::PublicOutputProjected
-    );
-
-    let mut corrupt_stream = store.load_run_stream(&fixture.run_id);
-    append_payload_commit_for_tests(
-        &mut corrupt_stream,
-        &fixture.run_id,
-        "post-completion-retention-ref",
-        events::KernelEventPayload::RetentionRefsAppended(events::RetentionRefsAppended {
-            run_id: fixture.run_id.clone(),
-            spec_hash: fixture.runtime_spec.spec_hash().clone(),
-            refs: vec![events::RetentionRef {
-                artifact_id: fixture.seed_ref.seed_artifact.artifact_id.clone(),
-                role: fixture.seed_ref.seed_artifact.role,
-                content_digest: fixture.seed_ref.seed_artifact.content_digest.clone(),
-            }],
-            reason: events::RetentionReason::RuntimeEvidence,
-        }),
-    );
-
-    assert!(matches!(
-        validate_runtime_stream_for_tests(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
-        Err(RuntimeError::InvalidRunStream(message))
-            if message.contains("events after RunCompleted")
-    ));
-}
-
-#[tokio::test]
-async fn runtime_rejects_run_completed_with_active_retention_attempt() {
-    let fixture = fixture();
-    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
-    drive_until_public_output_produced(&scheduler, &mut store, &fixture).await;
-
-    let retention_node =
-        certified_retention_manifest_node(&fixture.runtime_spec).expect("retention node");
-    let mut corrupt_stream = store.load_run_stream(&fixture.run_id);
-    let public_event_id = corrupt_stream
-        .iter()
-        .find(|event| {
-            matches!(
-                event.payload(),
-                events::KernelEventPayload::PublicOutputProduced(_)
-            )
-        })
-        .expect("public output produced")
-        .event_id()
-        .clone();
-    append_payloads_commit_for_tests(
-        &mut corrupt_stream,
-        &fixture.run_id,
-        "active-retention-at-completion",
-        vec![
-            events::KernelEventPayload::StateAttemptStarted(events::StateAttemptStarted {
-                spec_hash: fixture.runtime_spec.spec_hash().clone(),
-                node_id: retention_node.node_id.clone(),
-                attempt_id: AttemptId::from_digest(
-                    DigestAlgorithm::Sha256JcsV1,
-                    DigestBytes::from_array([0x75; 32]),
-                ),
-                attempt_no: 99,
-                state_kind: retention_node.state_kind.clone(),
-                state_version: retention_node.state_version.clone(),
-            }),
-            events::KernelEventPayload::RunCompleted(events::RunCompleted {
-                run_id: fixture.run_id.clone(),
-                spec_hash: fixture.runtime_spec.spec_hash().clone(),
-                outcome: events::RunCompletionOutcome::Completed(Box::new(
-                    events::PublicOutputCompletionEvidence {
-                        public_output_schema_id: fixture
-                            .runtime_spec
-                            .spec()
-                            .public_outputs
-                            .public_schema_id
-                            .clone(),
-                        public_output_event_id: public_event_id,
-                    },
-                )),
-            }),
-        ],
-    );
-
-    assert!(matches!(
-        validate_runtime_stream_for_tests(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
-        Err(RuntimeError::InvalidRunStream(message))
-            if message.contains("attempts are active")
-    ));
-}
-
-#[tokio::test]
-async fn runtime_rejects_retained_evidence_between_retention_projection_and_completion() {
-    let fixture = fixture();
-    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
-    scheduler
-        .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
-        .await
-        .expect("drive to completion");
-
-    let valid_stream = store.load_run_stream(&fixture.run_id);
-    let completion_payload = valid_stream
-        .iter()
-        .find_map(|event| match event.payload() {
-            events::KernelEventPayload::RunCompleted(payload) => Some(payload.clone()),
-            _ => None,
-        })
-        .expect("run completion");
-    let retention_node =
-        certified_retention_manifest_node(&fixture.runtime_spec).expect("retention node");
-    let attempt_id = AttemptId::from_digest(
-        DigestAlgorithm::Sha256JcsV1,
-        DigestBytes::from_array([0x77; 32]),
-    );
-    let diagnostic_digest = content(0x78);
-    let diagnostic_artifact =
-        ArtifactId::from_digest(diagnostic_digest.algorithm(), *diagnostic_digest.digest());
-    let diagnostic_ref = events::ArtifactEvidenceRef {
-        artifact_id: diagnostic_artifact.clone(),
-        role: events::ArtifactRole::RedactedDiagnostic,
-        schema_id: retention_node.config_ref.schema_id.clone(),
-        semantic_type_id: None,
-        content_digest: diagnostic_digest.clone(),
-        byte_len: 10,
-        media_type: spec::MediaType::new("application/json").expect("media type"),
-    };
-    let mut corrupt_stream = rewrite_stream_without_commit_containing(&valid_stream, |payload| {
-        matches!(payload, events::KernelEventPayload::RunCompleted(_))
-    });
-    append_payload_commit_for_tests(
-        &mut corrupt_stream,
-        &fixture.run_id,
-        "retained-evidence-attempt-start",
-        events::KernelEventPayload::StateAttemptStarted(events::StateAttemptStarted {
-            spec_hash: fixture.runtime_spec.spec_hash().clone(),
-            node_id: retention_node.node_id.clone(),
-            attempt_id: attempt_id.clone(),
-            attempt_no: 100,
-            state_kind: retention_node.state_kind.clone(),
-            state_version: retention_node.state_version.clone(),
-        }),
-    );
-    append_payloads_commit_for_tests(
-        &mut corrupt_stream,
-        &fixture.run_id,
-        "retained-evidence-after-retention-projection",
-        vec![
-            events::KernelEventPayload::ArtifactReferenced(events::ArtifactReferenced {
-                spec_hash: fixture.runtime_spec.spec_hash().clone(),
-                node_id: Some(retention_node.node_id.clone()),
-                attempt_id: Some(attempt_id.clone()),
-                artifact_ref: diagnostic_ref.clone(),
-            }),
-            events::KernelEventPayload::StateAttemptFailed(events::StateAttemptFailed {
-                spec_hash: fixture.runtime_spec.spec_hash().clone(),
-                node_id: retention_node.node_id.clone(),
-                attempt_id,
-                retryable: false,
-                error: events::MfmErrorInfo {
-                    diagnostic_ref: Some(diagnostic_ref.clone()),
-                    ..public_output_error()
-                },
-            }),
-            events::KernelEventPayload::RetentionRefsAppended(events::RetentionRefsAppended {
-                run_id: fixture.run_id.clone(),
-                spec_hash: fixture.runtime_spec.spec_hash().clone(),
-                refs: vec![events::RetentionRef {
-                    artifact_id: diagnostic_artifact,
-                    role: events::ArtifactRole::RedactedDiagnostic,
-                    content_digest: diagnostic_digest,
-                }],
-                reason: events::RetentionReason::RuntimeEvidence,
-            }),
-        ],
-    );
-    append_payload_commit_for_tests(
-        &mut corrupt_stream,
-        &fixture.run_id,
-        "completion-after-post-retention-evidence",
-        events::KernelEventPayload::RunCompleted(completion_payload),
-    );
-
-    assert!(matches!(
-        validate_runtime_stream_for_tests(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
-        Err(RuntimeError::InvalidRunStream(_))
-    ));
-}
-
-#[tokio::test]
-async fn runtime_rejects_extra_attempt_evidence_in_retention_projection_commit() {
-    let fixture = fixture();
-    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
-    scheduler
-        .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
-        .await
-        .expect("drive to completion");
-
-    let retention_node =
-        certified_retention_manifest_node(&fixture.runtime_spec).expect("retention node");
-    let attempt_id = AttemptId::from_digest(
-        DigestAlgorithm::Sha256JcsV1,
-        DigestBytes::from_array([0x79; 32]),
-    );
-    let diagnostic_digest = content(0x7a);
-    let diagnostic_artifact =
-        ArtifactId::from_digest(diagnostic_digest.algorithm(), *diagnostic_digest.digest());
-    let diagnostic_ref = events::ArtifactEvidenceRef {
-        artifact_id: diagnostic_artifact,
-        role: events::ArtifactRole::RedactedDiagnostic,
-        schema_id: retention_node.config_ref.schema_id.clone(),
-        semantic_type_id: None,
-        content_digest: diagnostic_digest,
-        byte_len: 10,
-        media_type: spec::MediaType::new("application/json").expect("media type"),
-    };
-    let valid_stream = store.load_run_stream(&fixture.run_id);
-    let corrupt_stream = prepend_payloads_to_retention_projection_commit_for_tests(
-        &valid_stream,
-        Vec::new(),
-        vec![events::KernelEventPayload::ArtifactReferenced(
-            events::ArtifactReferenced {
-                spec_hash: fixture.runtime_spec.spec_hash().clone(),
-                node_id: Some(retention_node.node_id.clone()),
-                attempt_id: Some(attempt_id.clone()),
-                artifact_ref: diagnostic_ref.clone(),
-            },
-        )],
-    );
-
-    assert!(matches!(
-        validate_runtime_stream_for_tests(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
-        Err(RuntimeError::InvalidRunStream(message))
-            if message.contains(
-                "retention manifest projection commit contains unsupported payload"
-            )
-    ));
-}
-
-#[tokio::test]
-async fn runtime_rejects_same_sequence_sidecar_commit_at_retention_projection() {
-    let fixture = fixture();
-    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
-    scheduler
-        .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
-        .await
-        .expect("drive to completion");
-
-    let valid_stream = store.load_run_stream(&fixture.run_id);
-    let corrupt_stream =
-        append_same_sequence_sidecar_to_retention_projection_for_tests(&valid_stream);
-
-    assert!(matches!(
-        validate_runtime_stream_for_tests(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
-        Err(RuntimeError::Store(message)) if message.contains("multiple commit keys")
-    ));
-}
-
-#[tokio::test]
-async fn runtime_rejects_post_completion_retention_attempt() {
-    let fixture = fixture();
-    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
-    assert_eq!(
-        scheduler
-            .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("drive to completion"),
-        SchedulerStatus::PublicOutputProjected
-    );
-
-    let retention_node =
-        certified_retention_manifest_node(&fixture.runtime_spec).expect("retention node");
-    let mut corrupt_stream = store.load_run_stream(&fixture.run_id);
-    append_payload_commit_for_tests(
-        &mut corrupt_stream,
-        &fixture.run_id,
-        "post-completion-retention-attempt",
-        events::KernelEventPayload::StateAttemptStarted(events::StateAttemptStarted {
-            spec_hash: fixture.runtime_spec.spec_hash().clone(),
-            node_id: retention_node.node_id.clone(),
-            attempt_id: AttemptId::from_digest(DigestAlgorithm::Sha256JcsV1, DF),
-            attempt_no: 99,
-            state_kind: retention_node.state_kind.clone(),
-            state_version: retention_node.state_version.clone(),
-        }),
-    );
-
-    assert!(matches!(
-        validate_runtime_stream_for_tests(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
-        Err(RuntimeError::InvalidRunStream(message))
-            if message.contains("events after RunCompleted")
-    ));
-}
-
-#[tokio::test]
-async fn runtime_rejects_started_attempt_for_terminal_retention_node() {
-    let fixture = fixture();
-    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
-    scheduler
-        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-        .await
-        .expect("produce first cell");
-
-    let terminal_node = node_by_output(&fixture, &fixture.cell_a);
-    let mut corrupt_stream = store.load_run_stream(&fixture.run_id);
-    append_payload_commit_for_tests(
-        &mut corrupt_stream,
-        &fixture.run_id,
-        "terminal-node-started-again",
-        events::KernelEventPayload::StateAttemptStarted(events::StateAttemptStarted {
-            spec_hash: fixture.runtime_spec.spec_hash().clone(),
-            node_id: terminal_node.node_id.clone(),
-            attempt_id: AttemptId::from_digest(
-                DigestAlgorithm::Sha256JcsV1,
-                DigestBytes::from_array([0x76; 32]),
-            ),
-            attempt_no: 99,
-            state_kind: terminal_node.state_kind.clone(),
-            state_version: terminal_node.state_version.clone(),
-        }),
-    );
-
-    assert!(matches!(
-        validate_runtime_stream_for_tests(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
-        Err(RuntimeError::InvalidRunStream(message))
-            if message.contains("after its output cell became terminal")
-    ));
-}
-
-#[tokio::test]
 async fn public_output_render_failure_resumes_and_completes() {
     let fixture = fixture();
     let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -2407,14 +3250,22 @@ async fn public_output_render_failure_resumes_and_completes() {
     )
     .await
     .expect("start run");
-    scheduler
-        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-        .await
-        .expect("drive a");
-    scheduler
-        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-        .await
-        .expect("drive b");
+    drive_once(
+        &scheduler,
+        &mut store,
+        &fixture.runtime_spec,
+        &fixture.run_id,
+    )
+    .await
+    .expect("drive a");
+    drive_once(
+        &scheduler,
+        &mut store,
+        &fixture.runtime_spec,
+        &fixture.run_id,
+    )
+    .await
+    .expect("drive b");
     let render_node = node_by_output(&fixture, &fixture.render_cell);
     let failed_attempt = append_attempt_start(&mut store, &fixture, render_node, 1);
     append_public_output_render_failure(&mut store, &fixture, render_node, &failed_attempt);
@@ -2426,10 +3277,14 @@ async fn public_output_render_failure_resumes_and_completes() {
     ));
 
     assert_eq!(
-        scheduler
-            .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("retry render"),
+        drive_until_blocked(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id
+        )
+        .await
+        .expect("retry render"),
         SchedulerStatus::PublicOutputProjected
     );
     assert_eq!(
@@ -2484,7 +3339,7 @@ fn certified_runtime_spec_accepts_verified_bundle_authority() {
 async fn replay_rejects_run_completed_without_public_output_evidence() {
     let fixture = fixture();
     let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -2528,8 +3383,7 @@ async fn replay_rejects_run_completed_without_public_output_evidence() {
         .expect("append forged completion");
 
     assert!(matches!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+        drive_once(&scheduler, &mut store, &fixture.runtime_spec, &fixture.run_id)
             .await,
         Err(RuntimeError::InvalidRunStream(message))
             if message.contains("RunCompleted appeared before PublicOutputProduced")
@@ -2598,7 +3452,7 @@ async fn scheduler_rejects_uncertified_capability_use() {
         ))
         .expect("binding b");
     let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -2608,10 +3462,14 @@ async fn scheduler_rejects_uncertified_capability_use() {
     .await
     .expect("start run");
     assert_eq!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("terminalize uncertified capability use"),
+        drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id
+        )
+        .await
+        .expect("terminalize uncertified capability use"),
         SchedulerStatus::Advanced
     );
     let node = node_by_output(&fixture, &fixture.cell_a);
@@ -2676,7 +3534,7 @@ async fn runner_cannot_stage_artifact_with_foreign_producer() {
         ))
         .expect("binding b");
     let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -2687,10 +3545,14 @@ async fn runner_cannot_stage_artifact_with_foreign_producer() {
     .expect("start run");
 
     assert_eq!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("terminalize foreign producer artifact"),
+        drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id
+        )
+        .await
+        .expect("terminalize foreign producer artifact"),
         SchedulerStatus::Advanced
     );
     let node = node_by_output(&fixture, &fixture.cell_a);
@@ -2755,7 +3617,7 @@ async fn runner_cannot_stage_inline_artifact_with_mismatched_bytes() {
         ))
         .expect("binding b");
     let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -2766,10 +3628,14 @@ async fn runner_cannot_stage_inline_artifact_with_mismatched_bytes() {
     .expect("start run");
 
     assert_eq!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("terminalize mismatched inline artifact"),
+        drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id
+        )
+        .await
+        .expect("terminalize mismatched inline artifact"),
         SchedulerStatus::Advanced
     );
     let node = node_by_output(&fixture, &fixture.cell_a);
@@ -2833,7 +3699,7 @@ async fn runner_can_commit_inline_state_output_artifact() {
         ))
         .expect("binding b");
     let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -2844,10 +3710,14 @@ async fn runner_can_commit_inline_state_output_artifact() {
     .expect("start run");
 
     assert_eq!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("drive inline output"),
+        drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id
+        )
+        .await
+        .expect("drive inline output"),
         SchedulerStatus::Advanced
     );
     assert!(matches!(
@@ -2926,7 +3796,7 @@ async fn runner_cannot_stage_reserved_retention_reasons() {
             ))
             .expect("binding b");
         let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-        let mut store = store::InMemoryTypedRunStore::new();
+        let mut store = TestTypedRunStore::new();
         start_fixture_run(
             &scheduler,
             &mut store,
@@ -2938,10 +3808,14 @@ async fn runner_cannot_stage_reserved_retention_reasons() {
         let stream_before = store.load_run_stream(&fixture.run_id);
 
         assert_eq!(
-            scheduler
-                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-                .await
-                .expect("terminalize reserved retention reason"),
+            drive_once(
+                &scheduler,
+                &mut store,
+                &fixture.runtime_spec,
+                &fixture.run_id
+            )
+            .await
+            .expect("terminalize reserved retention reason"),
             SchedulerStatus::Advanced
         );
         assert_eq!(
@@ -2954,111 +3828,6 @@ async fn runner_cannot_stage_reserved_retention_reasons() {
             .cell_terminal(&fixture.cell_a)
             .is_none());
     }
-}
-
-#[tokio::test]
-async fn runtime_rejects_public_output_retention_reason_on_user_commit() {
-    struct RetainedStateOutputRunner {
-        output_bytes: Vec<u8>,
-    }
-
-    impl ErasedNodeRunner for RetainedStateOutputRunner {
-        fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
-            Box::pin(async move {
-                let artifact = state_output_artifact_for_bytes(
-                    ctx.node(),
-                    ctx.descriptor(),
-                    &self.output_bytes,
-                );
-                let staged_artifact = StagedArtifact::inline_attempt_artifact(
-                    &ctx,
-                    self.output_bytes.clone(),
-                    artifact.clone(),
-                )?;
-                Ok(ErasedRunnerOutput {
-                    staged_artifacts: vec![staged_artifact],
-                    staged_retention_refs: vec![StagedRetentionRefs::runtime_evidence(vec![
-                        retention_ref_for_artifact(&artifact),
-                    ])],
-                    payloads: terminal_payloads(
-                        &ctx,
-                        artifact.artifact_id.clone(),
-                        artifact.digest.clone(),
-                    ),
-                })
-            })
-        }
-    }
-
-    let fixture = fixture();
-    let mut registry = ErasedRunnerRegistry::new();
-    registry
-        .register(binding(
-            fixture.descriptor_a.clone(),
-            "pure",
-            RetainedStateOutputRunner {
-                output_bytes: br#"{"retained":true}"#.to_vec(),
-            },
-        ))
-        .expect("binding a");
-    registry
-        .register(binding(
-            fixture.descriptor_b.clone(),
-            "read",
-            RecordingRunner {
-                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
-                output_artifact: artifact(0xb1),
-                output_digest: content(0xb2),
-            },
-        ))
-        .expect("binding b");
-    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
-    assert_eq!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("drive retained state output"),
-        SchedulerStatus::Advanced
-    );
-
-    let valid_stream = store.load_run_stream(&fixture.run_id);
-    let corrupt_pos = valid_stream
-        .iter()
-        .position(|event| {
-            matches!(
-                event.payload(),
-                events::KernelEventPayload::RetentionRefsAppended(events::RetentionRefsAppended {
-                    reason: events::RetentionReason::RuntimeEvidence,
-                    ..
-                })
-            )
-        })
-        .expect("runtime evidence retention refs");
-    let mut corrupt_payload = match valid_stream[corrupt_pos].payload().clone() {
-        events::KernelEventPayload::RetentionRefsAppended(payload) => payload,
-        _ => unreachable!("position checked"),
-    };
-    corrupt_payload.reason = events::RetentionReason::PublicOutput;
-    let corrupt_stream = rewrite_commit_payload(
-        &valid_stream,
-        corrupt_pos,
-        events::KernelEventPayload::RetentionRefsAppended(corrupt_payload),
-    );
-
-    assert!(matches!(
-        validate_runtime_stream_for_tests(&fixture.runtime_spec, &fixture.run_id, &corrupt_stream),
-        Err(RuntimeError::InvalidRunStream(message))
-            if message.contains("public-output retention refs must be appended")
-    ));
 }
 
 #[tokio::test]
@@ -3108,7 +3877,7 @@ async fn runner_output_requires_payload_bound_staged_artifact() {
         ))
         .expect("binding b");
     let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -3119,10 +3888,14 @@ async fn runner_output_requires_payload_bound_staged_artifact() {
     .expect("start run");
 
     assert_eq!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("terminalize missing staged artifact"),
+        drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id
+        )
+        .await
+        .expect("terminalize missing staged artifact"),
         SchedulerStatus::Advanced
     );
     let node = node_by_output(&fixture, &fixture.cell_a);
@@ -3192,7 +3965,7 @@ async fn rejected_staged_payload_mismatch_does_not_admit_artifact_evidence() {
         ))
         .expect("binding b");
     let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -3210,10 +3983,14 @@ async fn rejected_staged_payload_mismatch_does_not_admit_artifact_evidence() {
     .expect("attempt id");
 
     assert_eq!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("terminalize staged payload mismatch"),
+        drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id
+        )
+        .await
+        .expect("terminalize staged payload mismatch"),
         SchedulerStatus::Advanced
     );
     assert_node_failed_with_code(&store, &node.node_id, "runner_output_invalid");
@@ -3288,7 +4065,7 @@ fn materialization_rejects_seed_digest_not_certified() {
     let mut seed = fixture.seed_ref.clone();
     seed.digest = content(0xee);
     let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let store = store::InMemoryTypedRunStore::new();
+    let store = TestTypedRunStore::new();
     assert!(matches!(
         prepare_fixture_launch(&scheduler, &store, &fixture, vec![seed],),
         Err(RuntimeError::InvalidRunStream(_))
@@ -3299,7 +4076,7 @@ fn materialization_rejects_seed_digest_not_certified() {
 fn run_start_rejects_missing_config_artifact_evidence() {
     let fixture = fixture();
     let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let store = store::InMemoryTypedRunStore::new();
+    let store = TestTypedRunStore::new();
     let mut evidence = run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]);
     evidence.config_artifacts.clear();
     assert!(matches!(
@@ -3317,7 +4094,7 @@ fn run_start_rejects_missing_config_artifact_evidence() {
 fn run_start_rejects_mismatched_staged_launch_bytes() {
     let fixture = fixture();
     let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let store = store::InMemoryTypedRunStore::new();
+    let store = TestTypedRunStore::new();
     let base = run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]);
 
     let mut bad_spec = base.clone();
@@ -3384,15 +4161,15 @@ fn run_start_rejects_mismatched_staged_launch_bytes() {
 async fn run_admission_returns_bound_context_with_capability_and_framework_authority() {
     let fixture = fixture();
     let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     let launch =
         prepare_fixture_launch(&scheduler, &store, &fixture, vec![fixture.seed_ref.clone()])
             .expect("prepare launch");
 
-    let authority = scheduler
-        .start_run_admitted(&mut store, &fixture.runtime_spec, launch)
-        .await
-        .expect("admitted run authority");
+    let authority =
+        scheduler_start_run_admitted(&scheduler, &mut store, &fixture.runtime_spec, launch)
+            .await
+            .expect("admitted run authority");
 
     assert_eq!(authority.run_id(), &fixture.run_id);
     assert_eq!(authority.spec_hash(), fixture.runtime_spec.spec_hash());
@@ -3479,7 +4256,7 @@ fn run_start_rejects_missing_capability_implementation() {
         ))
         .expect("binding b");
     let scheduler = test_scheduler(registry);
-    let store = store::InMemoryTypedRunStore::new();
+    let store = TestTypedRunStore::new();
     let error =
         prepare_fixture_launch(&scheduler, &store, &fixture, vec![fixture.seed_ref.clone()])
             .err()
@@ -3530,7 +4307,7 @@ fn run_start_rejects_capability_implementation_descriptor_mismatch() {
         ))
         .expect("binding b");
     let scheduler = test_scheduler(registry);
-    let store = store::InMemoryTypedRunStore::new();
+    let store = TestTypedRunStore::new();
     let error =
         prepare_fixture_launch(&scheduler, &store, &fixture, vec![fixture.seed_ref.clone()])
             .err()
@@ -3544,7 +4321,7 @@ fn run_start_rejects_capability_implementation_descriptor_mismatch() {
 async fn resume_rejects_missing_downstream_binding_before_attempt_start() {
     let fixture = fixture();
     let launch_scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &launch_scheduler,
         &mut store,
@@ -3568,10 +4345,14 @@ async fn resume_rejects_missing_downstream_binding_before_attempt_start() {
         ))
         .expect("binding a");
     let resume_scheduler = test_scheduler(partial_registry);
-    let error = resume_scheduler
-        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-        .await
-        .expect_err("missing descriptor b binding should reject bound context");
+    let error = drive_once(
+        &resume_scheduler,
+        &mut store,
+        &fixture.runtime_spec,
+        &fixture.run_id,
+    )
+    .await
+    .expect_err("missing descriptor b binding should reject bound context");
 
     assert!(
         matches!(error, RuntimeError::RunnerBinding(message) if message.contains("missing runner binding"))
@@ -3586,7 +4367,7 @@ async fn resume_rejects_missing_downstream_binding_before_attempt_start() {
 async fn resume_rejects_runner_executable_identity_mismatch_before_attempt_start() {
     let fixture = fixture();
     let launch_scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &launch_scheduler,
         &mut store,
@@ -3622,10 +4403,14 @@ async fn resume_rejects_runner_executable_identity_mismatch_before_attempt_start
         .expect("binding b");
     let resume_scheduler =
         test_scheduler(register_fixture_capabilities(changed_registry, &fixture));
-    let error = resume_scheduler
-        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-        .await
-        .expect_err("changed executable identity should reject bound context");
+    let error = drive_once(
+        &resume_scheduler,
+        &mut store,
+        &fixture.runtime_spec,
+        &fixture.run_id,
+    )
+    .await
+    .expect_err("changed executable identity should reject bound context");
 
     assert!(matches!(error, RuntimeError::RunnerBinding(message)
             if message.contains("runner executable identities")));
@@ -3636,59 +4421,10 @@ async fn resume_rejects_runner_executable_identity_mismatch_before_attempt_start
 }
 
 #[tokio::test]
-async fn runner_invocation_requires_run_admitted_config_evidence() {
-    let fixture = fixture();
-    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
-
-    let valid_stream = store.load_run_stream(&fixture.run_id);
-    let root_pos = valid_stream
-        .iter()
-        .position(|event| {
-            matches!(
-                event.payload(),
-                events::KernelEventPayload::RunAdmitted(payload)
-                    if !payload.config_artifacts.is_empty()
-            )
-        })
-        .expect("RunAdmitted config evidence");
-    let mut corrupt_payload = match valid_stream[root_pos].payload().clone() {
-        events::KernelEventPayload::RunAdmitted(payload) => payload,
-        _ => unreachable!("position checked"),
-    };
-    corrupt_payload.config_artifacts[0].role = events::ArtifactRole::StateOutput;
-    let corrupt_stream = rewrite_commit_payload(
-        &valid_stream,
-        root_pos,
-        events::KernelEventPayload::RunAdmitted(corrupt_payload),
-    );
-    let mut corrupt_store = StaleStreamStore {
-        inner: &mut store,
-        stream: corrupt_stream,
-    };
-
-    assert!(matches!(
-        scheduler
-            .drive_once(&mut corrupt_store, &fixture.runtime_spec, &fixture.run_id)
-            .await,
-        Err(RuntimeError::InvalidRunStream(message))
-            if message.contains("config artifact evidence")
-    ));
-}
-
-#[tokio::test]
 async fn runner_invocation_uses_run_admitted_config_evidence_without_reference_event() {
     let fixture = fixture();
     let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -3706,17 +4442,21 @@ async fn runner_invocation_uses_run_admitted_config_evidence_without_reference_e
                 if payload.artifact_ref.role == events::ArtifactRole::TypedConfig
         )
     }));
-    scheduler
-        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-        .await
-        .expect("drive with RunAdmitted config evidence");
+    drive_once(
+        &scheduler,
+        &mut store,
+        &fixture.runtime_spec,
+        &fixture.run_id,
+    )
+    .await
+    .expect("drive with RunAdmitted config evidence");
 }
 
 #[tokio::test]
 async fn runner_invocation_requires_committed_produced_input_artifact_reference() {
     let fixture = fixture();
     let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -3725,10 +4465,14 @@ async fn runner_invocation_requires_committed_produced_input_artifact_reference(
     )
     .await
     .expect("start run");
-    scheduler
-        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-        .await
-        .expect("produce first cell");
+    drive_once(
+        &scheduler,
+        &mut store,
+        &fixture.runtime_spec,
+        &fixture.run_id,
+    )
+    .await
+    .expect("produce first cell");
 
     let producer_node_id = node_by_output(&fixture, &fixture.cell_a).node_id.clone();
     let consumer_node_id = node_by_output(&fixture, &fixture.cell_b).node_id.clone();
@@ -3741,18 +4485,16 @@ async fn runner_invocation_requires_committed_produced_input_artifact_reference(
                     && payload.node_id.as_ref() == Some(&producer_node_id)
         )
     });
-    let mut corrupt_store = StaleStreamStore {
-        inner: &mut store,
-        stream: corrupt_stream,
-    };
-
-    assert!(matches!(
-        scheduler
-            .drive_once(&mut corrupt_store, &fixture.runtime_spec, &fixture.run_id)
-            .await,
-        Err(RuntimeError::InputMaterialization(message))
-            if message.contains("is not committed in the run stream")
-    ));
+    {
+        let corrupt_store = StaleStreamStore::new(&mut store, corrupt_stream);
+        assert!(matches!(
+            scheduler
+                .drive_once(&corrupt_store, &fixture.runtime_spec, &fixture.run_id)
+                .await,
+            Err(RuntimeError::InputMaterialization(message))
+                if message.contains("is not committed in the run stream")
+        ));
+    }
     assert_eq!(
         attempt_started_count(&store, &fixture.run_id, &consumer_node_id),
         1
@@ -3763,7 +4505,7 @@ async fn runner_invocation_requires_committed_produced_input_artifact_reference(
 async fn post_start_materialization_failure_terminalizes_attempt() {
     let fixture = fixture();
     let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -3772,21 +4514,22 @@ async fn post_start_materialization_failure_terminalizes_attempt() {
     )
     .await
     .expect("start run");
-    scheduler
-        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-        .await
-        .expect("produce first cell");
+    drive_once(
+        &scheduler,
+        &mut store,
+        &fixture.runtime_spec,
+        &fixture.run_id,
+    )
+    .await
+    .expect("produce first cell");
 
     let producer_node_id = node_by_output(&fixture, &fixture.cell_a).node_id.clone();
     let consumer_node = node_by_output(&fixture, &fixture.cell_b).clone();
     {
-        let mut corrupt_store = MissingInputArtifactRefStore {
-            inner: &mut store,
-            producer_node_id,
-        };
+        let corrupt_store = MissingInputArtifactRefStore::new(&mut store, producer_node_id);
         assert_eq!(
             scheduler
-                .drive_once(&mut corrupt_store, &fixture.runtime_spec, &fixture.run_id)
+                .drive_once(&corrupt_store, &fixture.runtime_spec, &fixture.run_id)
                 .await
                 .expect("terminalize materialization failure"),
             SchedulerStatus::Advanced
@@ -3832,7 +4575,7 @@ async fn post_start_runtime_validation_failure_terminalizes_attempt() {
         ))
         .expect("binding b");
     let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -3843,15 +4586,23 @@ async fn post_start_runtime_validation_failure_terminalizes_attempt() {
     .expect("start run");
 
     assert_eq!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("terminalize runtime validation failure"),
+        drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id
+        )
+        .await
+        .expect("terminalize runtime validation failure"),
         SchedulerStatus::Advanced
     );
 
     let node = node_by_output(&fixture, &fixture.cell_a);
     assert_node_failed_with_code(&store, &node.node_id, "runtime_validation_failed");
+    assert_eq!(
+        runtime_lifecycle_summary(&store, &fixture.run_id),
+        "run=Started attempts[started=0 completed=0 failed=1 interrupted=0 total=1] cells=0 side_effects=0 lanes[run=0 total=0] public_outputs=0 retentions=1"
+    );
 }
 
 #[tokio::test]
@@ -3881,7 +4632,7 @@ async fn post_start_invalid_run_stream_failure_does_not_terminalize_attempt() {
         ))
         .expect("binding b");
     let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -3892,16 +4643,15 @@ async fn post_start_invalid_run_stream_failure_does_not_terminalize_attempt() {
     .expect("start run");
 
     assert!(matches!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+        drive_once(&scheduler, &mut store, &fixture.runtime_spec, &fixture.run_id)
             .await,
         Err(RuntimeError::InvalidRunStream(message))
             if message.contains("synthetic corrupt stream authority")
     ));
 
     let node = node_by_output(&fixture, &fixture.cell_a);
-    let attempts = store
-        .projection_snapshot()
+    let projection_snapshot = store.projection_snapshot();
+    let attempts = projection_snapshot
         .attempts()
         .filter(|((node_id, _), _)| node_id == &node.node_id)
         .map(|(_, attempt)| attempt)
@@ -3913,130 +4663,17 @@ async fn post_start_invalid_run_stream_failure_does_not_terminalize_attempt() {
     ));
     assert_failure_code_count(&store, "runtime_validation_failed", 0);
     assert_failure_code_count(&store, "runner_output_invalid", 0);
-}
-
-#[tokio::test]
-async fn runner_invocation_rejects_late_produced_input_artifact_reference() {
-    let fixture = fixture();
-    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
-    scheduler
-        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-        .await
-        .expect("produce first cell");
-
-    let producer_node_id = node_by_output(&fixture, &fixture.cell_a).node_id.clone();
-    let consumer_node_id = node_by_output(&fixture, &fixture.cell_b).node_id.clone();
-    let valid_stream = store.load_run_stream(&fixture.run_id);
-    let output_ref = valid_stream
-        .iter()
-        .find_map(|event| match event.payload() {
-            events::KernelEventPayload::ArtifactReferenced(payload)
-                if payload.artifact_ref.role == events::ArtifactRole::StateOutput
-                    && payload.node_id.as_ref() == Some(&producer_node_id) =>
-            {
-                Some(event.payload().clone())
-            }
-            _ => None,
-        })
-        .expect("state output artifact reference");
-    let mut corrupt_stream = rewrite_stream_without_payloads(&valid_stream, |payload| {
-        matches!(
-            payload,
-            events::KernelEventPayload::ArtifactReferenced(payload)
-                if payload.artifact_ref.role == events::ArtifactRole::StateOutput
-                    && payload.node_id.as_ref() == Some(&producer_node_id)
-        )
-    });
-    append_payload_commit_for_tests(
-        &mut corrupt_stream,
-        &fixture.run_id,
-        "late-state-output-reference",
-        output_ref,
-    );
-    let mut corrupt_store = StaleStreamStore {
-        inner: &mut store,
-        stream: corrupt_stream,
-    };
-
-    assert!(matches!(
-        scheduler
-            .drive_once(&mut corrupt_store, &fixture.runtime_spec, &fixture.run_id)
-            .await,
-        Err(RuntimeError::InvalidRunStream(message))
-            if message.contains("same-commit typed payload")
-    ));
     assert_eq!(
-        attempt_started_count(&store, &fixture.run_id, &consumer_node_id),
-        0
+        runtime_lifecycle_summary(&store, &fixture.run_id),
+        "run=Started attempts[started=1 completed=0 failed=0 interrupted=0 total=1] cells=0 side_effects=0 lanes[run=0 total=0] public_outputs=0 retentions=1"
     );
-}
-
-#[tokio::test]
-async fn runner_invocation_rejects_unsupported_artifact_reference_role() {
-    let fixture = fixture();
-    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
-
-    let node = node_by_output(&fixture, &fixture.cell_a);
-    let artifact = store::ArtifactEvidenceRef {
-        artifact_id: artifact(0xe1),
-        digest: content(0xe2),
-        byte_len: 17,
-        media_type: spec::MediaType::new("application/json").expect("media"),
-        schema_id: Some(node.config_ref.schema_id.clone()),
-        semantic_type_id: None,
-        producer_node_id: Some(node.node_id.clone()),
-        producer_seed_id: None,
-        artifact_role: events::ArtifactRole::SideEffectIntent,
-    };
-    let mut corrupt_stream = store.load_run_stream(&fixture.run_id);
-    append_payload_commit_for_tests(
-        &mut corrupt_stream,
-        &fixture.run_id,
-        "unsupported-artifact-reference",
-        events::KernelEventPayload::ArtifactReferenced(events::ArtifactReferenced {
-            spec_hash: fixture.runtime_spec.spec_hash().clone(),
-            node_id: Some(node.node_id.clone()),
-            attempt_id: None,
-            artifact_ref: event_artifact_ref_from_store(&artifact),
-        }),
-    );
-    let mut corrupt_store = StaleStreamStore {
-        inner: &mut store,
-        stream: corrupt_stream,
-    };
-
-    assert!(matches!(
-        scheduler
-            .drive_once(&mut corrupt_store, &fixture.runtime_spec, &fixture.run_id)
-            .await,
-        Err(RuntimeError::InvalidRunStream(message))
-            if message.contains("unsupported artifact reference role")
-    ));
 }
 
 #[tokio::test]
 async fn replay_rejects_terminal_cell_producer_outside_certified_spec() {
     let fixture = fixture();
     let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -4134,9 +4771,13 @@ async fn replay_rejects_terminal_cell_producer_outside_certified_spec() {
         .expect("append forged terminal");
 
     assert!(matches!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await,
+        drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id
+        )
+        .await,
         Err(RuntimeError::InvalidRunStream(_))
     ));
 }
@@ -4145,7 +4786,7 @@ async fn replay_rejects_terminal_cell_producer_outside_certified_spec() {
 async fn store_rejects_fact_without_started_attempt() {
     let fixture = fixture();
     let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -4214,7 +4855,7 @@ async fn store_rejects_fact_without_started_attempt() {
 async fn replay_rejects_public_output_without_render_attempt() {
     let fixture = fixture();
     let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -4358,9 +4999,13 @@ async fn replay_rejects_public_output_without_render_attempt() {
         })
         .expect("append forged public output");
     assert!(matches!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await,
+        drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id
+        )
+        .await,
         Err(RuntimeError::InvalidRunStream(_))
     ));
 }
@@ -4369,7 +5014,7 @@ async fn replay_rejects_public_output_without_render_attempt() {
 async fn replay_rejects_public_output_with_forged_rendered_digest() {
     let fixture = fixture();
     let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -4378,14 +5023,22 @@ async fn replay_rejects_public_output_with_forged_rendered_digest() {
     )
     .await
     .expect("start run");
-    scheduler
-        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-        .await
-        .expect("drive a");
-    scheduler
-        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-        .await
-        .expect("drive b");
+    drive_once(
+        &scheduler,
+        &mut store,
+        &fixture.runtime_spec,
+        &fixture.run_id,
+    )
+    .await
+    .expect("drive a");
+    drive_once(
+        &scheduler,
+        &mut store,
+        &fixture.runtime_spec,
+        &fixture.run_id,
+    )
+    .await
+    .expect("drive b");
 
     let render_node = node_by_output(&fixture, &fixture.render_cell).clone();
     let attempt_id = append_attempt_start(&mut store, &fixture, &render_node, 1);
@@ -4416,13 +5069,12 @@ async fn replay_rejects_public_output_with_forged_rendered_digest() {
         .outputs
         .iter()
         .map(|public_cell| {
+            let projection_snapshot = store.projection_snapshot();
             let Some(store::CellTerminalProjection::Produced {
                 artifact_id,
                 content_digest,
                 ..
-            }) = store
-                .projection_snapshot()
-                .cell_terminal(&public_cell.cell_id)
+            }) = projection_snapshot.cell_terminal(&public_cell.cell_id)
             else {
                 panic!("public cell should be produced");
             };
@@ -4507,107 +5159,10 @@ async fn replay_rejects_public_output_with_forged_rendered_digest() {
 }
 
 #[tokio::test]
-async fn replay_rejects_split_public_output_terminal_commit() {
-    let fixture = fixture();
-    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
-    scheduler
-        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-        .await
-        .expect("drive a");
-    scheduler
-        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-        .await
-        .expect("drive b");
-    scheduler
-        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-        .await
-        .expect("render public output");
-
-    let stream = store.load_run_stream(&fixture.run_id);
-    let corrupt_stream = split_public_output_payload_to_own_commit_for_tests(&stream);
-    assert!(matches!(
-        store::ProjectionSnapshot::rebuild_from_run_stream(&corrupt_stream),
-        Err(store::StoreError::ProjectionConflict { message, .. })
-            if message.contains("public output requires matching render receipt terminal")
-    ));
-}
-
-#[tokio::test]
-async fn old_model_framework_stream_without_attempt_start_rejects_on_runtime_load() {
-    let fixture = fixture();
-    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
-    scheduler
-        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-        .await
-        .expect("drive a");
-    scheduler
-        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-        .await
-        .expect("drive b");
-    scheduler
-        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-        .await
-        .expect("render public output");
-
-    let render_node = fixture
-        .runtime_spec
-        .topological_order()
-        .iter()
-        .filter_map(|node_id| fixture.runtime_spec.node(node_id))
-        .find(|node| {
-            matches!(
-                node.framework,
-                Some(spec::FrameworkNodeSpec::PublicOutputRender(_))
-            )
-        })
-        .expect("render node");
-    let stream = store.load_run_stream(&fixture.run_id);
-    let old_model_stream = rewrite_stream_without_commit_containing(&stream, |payload| {
-        matches!(
-            payload,
-            events::KernelEventPayload::StateAttemptStarted(started)
-                if started.node_id == render_node.node_id
-        )
-    });
-
-    let old_model_store = ReadOnlyCorruptStore {
-        stream: old_model_stream,
-        projection: store::ProjectionSnapshot::default(),
-    };
-    let loader = crate::history::VerifiedRunContextLoader::new(
-        crate::binding::BoundRuntimeContextLoader::new(registered_fixture_runners(&fixture)),
-    );
-    assert!(matches!(
-        loader.load(&fixture.runtime_spec, &fixture.run_id, &old_model_store),
-        Err(RuntimeError::Store(message))
-            if message.contains("unsupported old stream model")
-                && message.contains("StateAttemptStarted")
-    ));
-}
-
-#[tokio::test]
 async fn recovery_interrupts_started_pure_attempt_before_retrying_fresh_attempt() {
     let fixture = fixture();
     let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -4620,14 +5175,18 @@ async fn recovery_interrupts_started_pure_attempt_before_retrying_fresh_attempt(
     let interrupted_attempt_id = append_attempt_start(&mut store, &fixture, node, 1);
 
     assert_eq!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("interrupt pure"),
+        drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id
+        )
+        .await
+        .expect("interrupt pure"),
         SchedulerStatus::Advanced
     );
-    let interrupted_attempt = store
-        .projection_snapshot()
+    let projection_snapshot = store.projection_snapshot();
+    let interrupted_attempt = projection_snapshot
         .attempt(&node.node_id, &interrupted_attempt_id)
         .expect("interrupted attempt");
     assert!(matches!(
@@ -4643,10 +5202,14 @@ async fn recovery_interrupts_started_pure_attempt_before_retrying_fresh_attempt(
     );
 
     assert_eq!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("retry pure"),
+        drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id
+        )
+        .await
+        .expect("retry pure"),
         SchedulerStatus::Advanced
     );
     assert_eq!(
@@ -4671,13 +5234,17 @@ async fn recovery_interrupts_started_pure_attempt_before_retrying_fresh_attempt(
         } => assert_eq!(produced_attempt, &retry_attempt_id),
         terminal => panic!("unexpected terminal projection: {terminal:?}"),
     }
+    assert_eq!(
+        runtime_lifecycle_summary(&store, &fixture.run_id),
+        "run=Started attempts[started=0 completed=1 failed=0 interrupted=1 total=2] cells=1 side_effects=0 lanes[run=0 total=0] public_outputs=0 retentions=1"
+    );
 }
 
 #[tokio::test]
 async fn recovery_delegates_started_side_effect_attempt_to_side_effect_lifecycle() {
     let fixture = fixture_with_first_exclusive_side_effect_state();
     let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -4699,6 +5266,10 @@ async fn recovery_delegates_started_side_effect_attempt_to_side_effect_lifecycle
     let stream = store.load_run_stream(&fixture.run_id);
     let view = RuntimeRunView::from_stream(&fixture.runtime_spec, &fixture.run_id, &stream)
         .expect("runtime view");
+    assert_eq!(
+        runtime_lifecycle_summary(&store, &fixture.run_id),
+        "run=Started attempts[started=1 completed=0 failed=0 interrupted=0 total=1] cells=0 side_effects=1 lanes[run=1 total=1] public_outputs=0 retentions=1"
+    );
 
     match crate::recovery::AttemptRecoveryLifecycle::next_open_attempt_disposition(
         &fixture.runtime_spec,
@@ -4728,11 +5299,66 @@ async fn recovery_delegates_started_side_effect_attempt_to_side_effect_lifecycle
     }
 }
 
+#[test]
+fn side_effect_attempt_view_from_erased_context_is_empty_before_ledger() {
+    let fixture = fixture_with_first_side_effect_state();
+    let node = node_by_output(&fixture, &fixture.cell_a);
+    let descriptor = fixture
+        .runtime_spec
+        .state_descriptor_for_node(node)
+        .expect("state descriptor");
+    let output_cell = fixture
+        .runtime_spec
+        .cell(&node.output_cell)
+        .expect("output cell");
+    let attempt_id = attempt_id(
+        &fixture.run_id,
+        fixture.runtime_spec.spec_hash(),
+        &node.node_id,
+        1,
+    )
+    .expect("attempt id");
+    let config_artifact = config_artifact(&fixture.runtime_spec, &node.config_ref).evidence;
+    let projections = store::ProjectionSnapshot::default();
+    let run_stream = Vec::new();
+    let invocation = PreparedRunnerInvocation {
+        runtime_spec: &fixture.runtime_spec,
+        run_id: &fixture.run_id,
+        spec_hash: fixture.runtime_spec.spec_hash(),
+        node,
+        descriptor,
+        output_cell,
+        attempt_id: &attempt_id,
+        attempt_no: 1,
+        config_artifact,
+        inputs: MaterializedInputs {
+            input_schema_id: node.input_bindings.input_schema_id.clone(),
+            root: MaterializedInputNode::Unit,
+        },
+        caps: CertifiedRuntimeCapabilities::new(
+            node.node_id.clone(),
+            node.capability_bindings.clone(),
+        ),
+        recorded_facts: RecordedFacts::default(),
+        projections: &projections,
+        run_stream: &run_stream,
+    };
+    let ctx = ErasedRunCtx::from_prepared(&invocation);
+    let view = SideEffectAttemptView::from_erased_context(&ctx).expect("side-effect view");
+
+    assert!(view.is_empty());
+    assert!(view.projection().is_none());
+    assert!(view.ledger_state().is_none());
+    assert!(view.phase().is_none());
+    assert!(view.ledger_key().is_none());
+    assert!(view.ledger_purpose().is_none());
+}
+
 #[tokio::test]
-async fn recovery_sweep_includes_open_remediation_attempts() {
-    let fixture = fixture_with_two_side_effects_and_failing_tail();
-    let scheduler = compensated_saga_scheduler(&fixture);
-    let mut store = store::InMemoryTypedRunStore::new();
+async fn side_effect_attempt_view_from_verified_context_exposes_ledger_state() {
+    let fixture = fixture_with_first_exclusive_side_effect_state();
+    let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -4742,15 +5368,73 @@ async fn recovery_sweep_includes_open_remediation_attempts() {
     .await
     .expect("start run");
 
-    for _ in 0..12 {
-        assert_eq!(
-            scheduler
-                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-                .await
-                .expect("drive forward side-effect phase"),
-            SchedulerStatus::Advanced
-        );
+    let node = node_by_output(&fixture, &fixture.cell_a);
+    let (attempt_id, ledger_key) = append_synthetic_exclusive_prepare(
+        &mut store,
+        &fixture,
+        &fixture.run_id,
+        node,
+        "wallet-view",
+        "sidefx-view-open",
+    );
+    let loader = crate::history::VerifiedRunContextLoader::new(
+        crate::binding::BoundRuntimeContextLoader::new(registered_side_effect_fixture_runners(
+            &fixture,
+        )),
+    );
+    let context = loader
+        .load_async(&fixture.runtime_spec, &fixture.run_id, &store)
+        .await
+        .expect("verified context");
+
+    let view = SideEffectAttemptView::from_verified_context(&context, node, &attempt_id)
+        .expect("side-effect view");
+    assert!(!view.is_empty());
+    assert_eq!(view.ledger_key(), Some(&ledger_key));
+    assert_eq!(
+        view.ledger_purpose(),
+        Some(&events::SideEffectLedgerPurpose::Forward)
+    );
+    assert_eq!(
+        view.projection().expect("projection").intent.attempt_id,
+        attempt_id
+    );
+    match view.phase().expect("ledger phase") {
+        store::SideEffectLedgerPhase::Prepared {
+            claim,
+            resource_key,
+            ..
+        } => {
+            assert_eq!(claim.attempt_id, attempt_id);
+            assert_eq!(claim.invocation_epoch, 1);
+            assert!(resource_key.is_some());
+        }
+        other => panic!("unexpected side-effect phase: {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn recovery_sweep_includes_open_remediation_attempts() {
+    let fixture = fixture_with_two_side_effects_and_failing_tail();
+    let scheduler = compensated_saga_scheduler(&fixture);
+    let mut store = TestTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+
+    drive_until_cells_terminal(
+        &scheduler,
+        &mut store,
+        &fixture,
+        &[fixture.cell_a.clone(), fixture.cell_b.clone()],
+        "drive forward side-effect phase",
+    )
+    .await;
     assert!(store
         .projection_snapshot()
         .cell_terminal(&fixture.cell_a)
@@ -4819,7 +5503,7 @@ async fn assert_prepared_boundary_side_effect_recovery_interrupts(emit_claim: bo
         &fixture,
         PrePreparedSideEffectRunner { emit_claim },
     ));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -4831,10 +5515,14 @@ async fn assert_prepared_boundary_side_effect_recovery_interrupts(emit_claim: bo
     let node = node_by_output(&fixture, &fixture.cell_a).clone();
 
     assert_eq!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("append pre-prepared side-effect evidence"),
+        drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id
+        )
+        .await
+        .expect("append pre-prepared side-effect evidence"),
         SchedulerStatus::Advanced
     );
     let stream = store.load_run_stream(&fixture.run_id);
@@ -4868,10 +5556,14 @@ async fn assert_prepared_boundary_side_effect_recovery_interrupts(emit_claim: bo
     }
 
     assert_eq!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("interrupt pre-prepared side-effect attempt"),
+        drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id
+        )
+        .await
+        .expect("interrupt pre-prepared side-effect attempt"),
         SchedulerStatus::Advanced
     );
     assert!(matches!(
@@ -4888,7 +5580,7 @@ async fn assert_prepared_boundary_side_effect_recovery_interrupts(emit_claim: bo
 async fn recovery_rejects_split_terminal_cell_and_attempt_completion() {
     let fixture = fixture();
     let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -4897,10 +5589,14 @@ async fn recovery_rejects_split_terminal_cell_and_attempt_completion() {
     )
     .await
     .expect("start run");
-    scheduler
-        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-        .await
-        .expect("produce first cell");
+    drive_once(
+        &scheduler,
+        &mut store,
+        &fixture.runtime_spec,
+        &fixture.run_id,
+    )
+    .await
+    .expect("produce first cell");
     let valid_stream = store.load_run_stream(&fixture.run_id);
     let corrupt_stream = rewrite_stream_without_payloads(&valid_stream, |payload| {
         matches!(
@@ -4921,7 +5617,7 @@ async fn recovery_rejects_split_terminal_cell_and_attempt_completion() {
 async fn recovery_rejects_attempt_started_before_inputs_were_terminal() {
     let fixture = fixture();
     let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -4944,9 +5640,13 @@ async fn recovery_rejects_attempt_started_before_inputs_were_terminal() {
     );
 
     assert!(matches!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await,
+        drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id
+        )
+        .await,
         Err(RuntimeError::InvalidRunStream(_))
     ));
 }
@@ -5020,7 +5720,7 @@ async fn recovery_reuses_committed_read_facts_for_same_attempt() {
         ))
         .expect("binding b");
     let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -5029,10 +5729,14 @@ async fn recovery_reuses_committed_read_facts_for_same_attempt() {
     )
     .await
     .expect("start run");
-    scheduler
-        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-        .await
-        .expect("produce input");
+    drive_once(
+        &scheduler,
+        &mut store,
+        &fixture.runtime_spec,
+        &fixture.run_id,
+    )
+    .await
+    .expect("produce input");
     let node = node_by_output(&fixture, &fixture.cell_b);
     let attempt_id = append_attempt_start(&mut store, &fixture, node, 1);
     append_fact(
@@ -5045,10 +5749,14 @@ async fn recovery_reuses_committed_read_facts_for_same_attempt() {
         content(0xd2),
     );
 
-    scheduler
-        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-        .await
-        .expect("resume read");
+    drive_once(
+        &scheduler,
+        &mut store,
+        &fixture.runtime_spec,
+        &fixture.run_id,
+    )
+    .await
+    .expect("resume read");
     assert_eq!(fact_recorded_count(&store), 1);
     match store
         .projection_snapshot()
@@ -5122,7 +5830,7 @@ async fn recovery_rejects_new_fact_after_same_attempt_fact_exists() {
         ))
         .expect("binding b");
     let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -5131,10 +5839,14 @@ async fn recovery_rejects_new_fact_after_same_attempt_fact_exists() {
     )
     .await
     .expect("start run");
-    scheduler
-        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-        .await
-        .expect("produce input");
+    drive_once(
+        &scheduler,
+        &mut store,
+        &fixture.runtime_spec,
+        &fixture.run_id,
+    )
+    .await
+    .expect("produce input");
     let node = node_by_output(&fixture, &fixture.cell_b);
     let attempt_id = append_attempt_start(&mut store, &fixture, node, 1);
     append_fact(
@@ -5148,10 +5860,14 @@ async fn recovery_rejects_new_fact_after_same_attempt_fact_exists() {
     );
 
     assert_eq!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("terminalize duplicate fact output"),
+        drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id
+        )
+        .await
+        .expect("terminalize duplicate fact output"),
         SchedulerStatus::Advanced
     );
     assert_node_failed_with_code(&store, &node.node_id, "runner_output_invalid");
@@ -5194,7 +5910,7 @@ async fn recovery_allows_managed_write_artifact_restage_before_terminal_commit()
         ))
         .expect("binding b");
     let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -5209,10 +5925,14 @@ async fn recovery_allows_managed_write_artifact_restage_before_terminal_commit()
         .cell_terminal(&fixture.cell_a)
         .is_none());
 
-    scheduler
-        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-        .await
-        .expect("resume managed write");
+    drive_once(
+        &scheduler,
+        &mut store,
+        &fixture.runtime_spec,
+        &fixture.run_id,
+    )
+    .await
+    .expect("resume managed write");
     assert_eq!(
         attempt_started_count(&store, &fixture.run_id, &node.node_id),
         1
@@ -5234,26 +5954,22 @@ async fn recovery_allows_managed_write_artifact_restage_before_terminal_commit()
 async fn scheduler_reloads_and_redecides_after_stale_expected_sequence_on_terminal_append() {
     let fixture = fixture();
     let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = StaleOnceTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+    let store = StaleOnceTypedRunStore::new();
+    start_fixture_run_async_store(&scheduler, &store, &fixture, vec![fixture.seed_ref.clone()])
+        .await
+        .expect("start run");
 
     assert_eq!(
         scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+            .drive_once(&store, &fixture.runtime_spec, &fixture.run_id)
             .await
             .expect("drive after injected stale terminal append"),
         SchedulerStatus::Advanced
     );
     assert!(
         store
-            .projection_snapshot()
+            .projection_snapshot(&fixture.run_id)
+            .await
             .cell_terminal(&fixture.cell_a)
             .is_some(),
         "scheduler must reload and observe the concurrently advanced terminal projection"
@@ -5264,7 +5980,7 @@ async fn scheduler_reloads_and_redecides_after_stale_expected_sequence_on_termin
 async fn side_effect_scheduler_commits_durable_ledger_phases_before_output() {
     let fixture = fixture_with_first_side_effect_state();
     let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -5285,23 +6001,25 @@ async fn side_effect_scheduler_commits_durable_ledger_phases_before_output() {
     let mut confirmed_before_output = false;
     for _ in 0..8 {
         assert_eq!(
-            scheduler
-                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-                .await
-                .expect("drive side effect phase"),
+            drive_once(
+                &scheduler,
+                &mut store,
+                &fixture.runtime_spec,
+                &fixture.run_id
+            )
+            .await
+            .expect("drive side effect phase"),
             SchedulerStatus::Advanced
         );
+        let projection_snapshot = store.projection_snapshot();
         let projection =
-            side_effect_projection_for_attempt(store.projection_snapshot(), node, &attempt_id)
+            side_effect_projection_for_attempt(&projection_snapshot, node, &attempt_id)
                 .expect("projection lookup")
                 .expect("side-effect projection");
         if matches!(
             projection.phase,
             store::SideEffectPhase::ConfirmationObserved { .. }
-        ) && store
-            .projection_snapshot()
-            .cell_terminal(&fixture.cell_a)
-            .is_none()
+        ) && projection_snapshot.cell_terminal(&fixture.cell_a).is_none()
         {
             confirmed_before_output = true;
             break;
@@ -5314,10 +6032,14 @@ async fn side_effect_scheduler_commits_durable_ledger_phases_before_output() {
         .is_none());
 
     assert_eq!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("materialize side-effect output"),
+        drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id
+        )
+        .await
+        .expect("materialize side-effect output"),
         SchedulerStatus::Advanced
     );
 
@@ -5325,10 +6047,10 @@ async fn side_effect_scheduler_commits_durable_ledger_phases_before_output() {
         .projection_snapshot()
         .cell_terminal(&fixture.cell_a)
         .is_some());
-    let projection =
-        side_effect_projection_for_attempt(store.projection_snapshot(), node, &attempt_id)
-            .expect("projection lookup")
-            .expect("side-effect projection");
+    let projection_snapshot = store.projection_snapshot();
+    let projection = side_effect_projection_for_attempt(&projection_snapshot, node, &attempt_id)
+        .expect("projection lookup")
+        .expect("side-effect projection");
     assert!(matches!(
         projection.phase,
         store::SideEffectPhase::ConfirmationObserved { .. }
@@ -5338,7 +6060,7 @@ async fn side_effect_scheduler_commits_durable_ledger_phases_before_output() {
         .iter()
         .any(|event| matches!(
             event.payload(),
-            events::KernelEventPayload::SideEffectClaimTakenOver(_)
+            events::KernelEventPayload::SideEffectInvocationStarted(_)
         )));
     assert_eq!(
         attempt_started_count(&store, &fixture.run_id, &node.node_id),
@@ -5350,7 +6072,7 @@ async fn side_effect_scheduler_commits_durable_ledger_phases_before_output() {
 async fn runtime_rejects_exact_touched_set_receipt_without_evidence() {
     let fixture = fixture_with_first_exact_touched_set_side_effect_state();
     let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -5360,18 +6082,21 @@ async fn runtime_rejects_exact_touched_set_receipt_without_evidence() {
     .await
     .expect("start run");
 
-    for _ in 0..3 {
+    for _ in 0..2 {
         assert_eq!(
-            scheduler
-                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-                .await
-                .expect("advance before receipt"),
+            drive_once(
+                &scheduler,
+                &mut store,
+                &fixture.runtime_spec,
+                &fixture.run_id
+            )
+            .await
+            .expect("advance before receipt"),
             SchedulerStatus::Advanced
         );
     }
     assert!(matches!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+        drive_once(&scheduler, &mut store, &fixture.runtime_spec, &fixture.run_id)
             .await,
         Err(RuntimeError::InvalidRunnerOutput(message))
             if message.contains("without touched-set evidence")
@@ -5385,7 +6110,7 @@ async fn runtime_rejects_exact_touched_set_confirmation_without_evidence() {
         &fixture,
         TouchedSetSideEffectRunner::with_receipt(&fixture),
     ));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -5395,18 +6120,21 @@ async fn runtime_rejects_exact_touched_set_confirmation_without_evidence() {
     .await
     .expect("start run");
 
-    for _ in 0..4 {
+    for _ in 0..3 {
         assert_eq!(
-            scheduler
-                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-                .await
-                .expect("advance through receipt"),
+            drive_once(
+                &scheduler,
+                &mut store,
+                &fixture.runtime_spec,
+                &fixture.run_id
+            )
+            .await
+            .expect("advance through receipt"),
             SchedulerStatus::Advanced
         );
     }
     assert!(matches!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+        drive_once(&scheduler, &mut store, &fixture.runtime_spec, &fixture.run_id)
             .await,
         Err(RuntimeError::InvalidRunnerOutput(message))
             if message.contains("without touched-set evidence")
@@ -5420,7 +6148,7 @@ async fn runtime_rejects_touched_set_confirmation_without_exact_claim() {
         &fixture,
         TouchedSetSideEffectRunner::with_confirmation(&fixture),
     ));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -5430,18 +6158,21 @@ async fn runtime_rejects_touched_set_confirmation_without_exact_claim() {
     .await
     .expect("start run");
 
-    for _ in 0..4 {
+    for _ in 0..3 {
         assert_eq!(
-            scheduler
-                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-                .await
-                .expect("advance through receipt"),
+            drive_once(
+                &scheduler,
+                &mut store,
+                &fixture.runtime_spec,
+                &fixture.run_id
+            )
+            .await
+            .expect("advance through receipt"),
             SchedulerStatus::Advanced
         );
     }
     assert!(matches!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+        drive_once(&scheduler, &mut store, &fixture.runtime_spec, &fixture.run_id)
             .await,
         Err(RuntimeError::InvalidRunnerOutput(message))
             if message.contains("without an exact-touched-set certified resource claim")
@@ -5455,9 +6186,9 @@ async fn runtime_fails_pre_boundary_forward_attempt_before_saga_terminal() {
     let failing_node = node_by_output(&fixture, &fixture.cell_b).clone();
     let scheduler = test_scheduler(registered_first_side_effect_runners_with(
         &fixture,
-        FailActiveSideEffectAfterSagaRunner::new(&fixture),
+        FailActiveSideEffectAfterSagaRunner::before_invocation_started(&fixture),
     ));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -5475,21 +6206,22 @@ async fn runtime_fails_pre_boundary_forward_attempt_before_saga_terminal() {
     .expect("forward attempt id");
 
     assert_eq!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("prepare forward side effect"),
+        drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id
+        )
+        .await
+        .expect("prepare forward side effect"),
         SchedulerStatus::Advanced
     );
+    let projection_snapshot = store.projection_snapshot();
     assert!(matches!(
-        side_effect_projection_for_attempt(
-            store.projection_snapshot(),
-            &forward_node,
-            &forward_attempt
-        )
-        .expect("side-effect lookup")
-        .expect("side-effect projection")
-        .phase,
+        side_effect_projection_for_attempt(&projection_snapshot, &forward_node, &forward_attempt)
+            .expect("side-effect lookup")
+            .expect("side-effect projection")
+            .phase,
         store::SideEffectPhase::InvocationPrepared { .. }
     ));
 
@@ -5504,21 +6236,22 @@ async fn runtime_fails_pre_boundary_forward_attempt_before_saga_terminal() {
     );
 
     assert_eq!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("fail active pre-boundary forward attempt"),
+        drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id
+        )
+        .await
+        .expect("fail active pre-boundary forward attempt"),
         SchedulerStatus::Advanced
     );
+    let projection_snapshot = store.projection_snapshot();
     assert!(matches!(
-        side_effect_projection_for_attempt(
-            store.projection_snapshot(),
-            &forward_node,
-            &forward_attempt
-        )
-        .expect("side-effect lookup")
-        .expect("side-effect projection")
-        .phase,
+        side_effect_projection_for_attempt(&projection_snapshot, &forward_node, &forward_attempt)
+            .expect("side-effect lookup")
+            .expect("side-effect projection")
+            .phase,
         store::SideEffectPhase::Failed {
             failure_phase: events::side_effect::FailurePhase::BeforeInvocationStarted,
             ..
@@ -5538,10 +6271,14 @@ async fn runtime_fails_pre_boundary_forward_attempt_before_saga_terminal() {
         .is_none());
 
     assert_eq!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("resolve saga terminal after active attempt closed"),
+        drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id
+        )
+        .await
+        .expect("resolve saga terminal after active attempt closed"),
         SchedulerStatus::Advanced
     );
     assert!(matches!(
@@ -5561,9 +6298,10 @@ async fn runtime_fails_not_submitted_forward_attempt_before_saga_terminal() {
     let failing_node = node_by_output(&fixture, &fixture.cell_b).clone();
     let scheduler = test_scheduler(registered_first_side_effect_runners_with(
         &fixture,
-        FailActiveSideEffectAfterSagaRunner::new(&fixture),
+        FailActiveSideEffectAfterSagaRunner::new(&fixture)
+            .with_submission_decision(TestSubmissionDecision::NotSubmitted),
     ));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -5582,23 +6320,23 @@ async fn runtime_fails_not_submitted_forward_attempt_before_saga_terminal() {
 
     for _ in 0..2 {
         assert_eq!(
-            scheduler
-                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-                .await
-                .expect("advance forward side effect before not-submitted proof"),
+            drive_once(
+                &scheduler,
+                &mut store,
+                &fixture.runtime_spec,
+                &fixture.run_id
+            )
+            .await
+            .expect("advance forward side effect before not-submitted proof"),
             SchedulerStatus::Advanced
         );
     }
-    append_not_submitted_proven(&mut store, &fixture, &forward_node, &forward_attempt, 1);
+    let projection_snapshot = store.projection_snapshot();
     assert!(matches!(
-        side_effect_projection_for_attempt(
-            store.projection_snapshot(),
-            &forward_node,
-            &forward_attempt
-        )
-        .expect("side-effect lookup")
-        .expect("side-effect projection")
-        .phase,
+        side_effect_projection_for_attempt(&projection_snapshot, &forward_node, &forward_attempt)
+            .expect("side-effect lookup")
+            .expect("side-effect projection")
+            .phase,
         store::SideEffectPhase::NotSubmittedProven { .. }
     ));
 
@@ -5606,21 +6344,22 @@ async fn runtime_fails_not_submitted_forward_attempt_before_saga_terminal() {
     append_attempt_failure(&mut store, &fixture, &failing_node, &failing_attempt, false);
 
     assert_eq!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("fail active not-submitted forward attempt"),
+        drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id
+        )
+        .await
+        .expect("fail active not-submitted forward attempt"),
         SchedulerStatus::Advanced
     );
+    let projection_snapshot = store.projection_snapshot();
     assert!(matches!(
-        side_effect_projection_for_attempt(
-            store.projection_snapshot(),
-            &forward_node,
-            &forward_attempt
-        )
-        .expect("side-effect lookup")
-        .expect("side-effect projection")
-        .phase,
+        side_effect_projection_for_attempt(&projection_snapshot, &forward_node, &forward_attempt)
+            .expect("side-effect lookup")
+            .expect("side-effect projection")
+            .phase,
         store::SideEffectPhase::Failed {
             failure_phase: events::side_effect::FailurePhase::AfterNotSubmittedProven,
             ..
@@ -5632,10 +6371,14 @@ async fn runtime_fails_not_submitted_forward_attempt_before_saga_terminal() {
         .is_none());
 
     assert_eq!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("resolve saga terminal after not-submitted attempt closed"),
+        drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id
+        )
+        .await
+        .expect("resolve saga terminal after not-submitted attempt closed"),
         SchedulerStatus::Advanced
     );
     assert!(matches!(
@@ -5663,14 +6406,14 @@ async fn runtime_remediates_confirmed_forward_ledgers_in_reverse_confirmation_or
         .register(binding(
             fixture.descriptor_a.clone(),
             "sidefx",
-            DeterministicSideEffectRunner::new(&fixture),
+            DriverSideEffectRunner::new(&fixture),
         ))
         .expect("binding forward a");
     registry
         .register(binding(
             fixture.descriptor_b.clone(),
             "sidefx",
-            DeterministicSideEffectRunner::new(&fixture),
+            DriverSideEffectRunner::new(&fixture),
         ))
         .expect("binding forward b");
     registry
@@ -5684,7 +6427,7 @@ async fn runtime_remediates_confirmed_forward_ledgers_in_reverse_confirmation_or
         ))
         .expect("binding failure node");
     let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -5694,15 +6437,14 @@ async fn runtime_remediates_confirmed_forward_ledgers_in_reverse_confirmation_or
     .await
     .expect("start run");
 
-    for _ in 0..12 {
-        assert_eq!(
-            scheduler
-                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-                .await
-                .expect("drive forward side-effect phase"),
-            SchedulerStatus::Advanced
-        );
-    }
+    drive_until_cells_terminal(
+        &scheduler,
+        &mut store,
+        &fixture,
+        &[fixture.cell_a.clone(), fixture.cell_b.clone()],
+        "drive forward side-effect phase",
+    )
+    .await;
     assert!(store
         .projection_snapshot()
         .cell_terminal(&fixture.cell_a)
@@ -5711,8 +6453,10 @@ async fn runtime_remediates_confirmed_forward_ledgers_in_reverse_confirmation_or
         .projection_snapshot()
         .cell_terminal(&fixture.cell_b)
         .is_some());
-    let forward_a_ledger = forward_ledger_for_node(store.projection_snapshot(), &forward_a.node_id);
-    let forward_b_ledger = forward_ledger_for_node(store.projection_snapshot(), &forward_b.node_id);
+    let forward_a_ledger =
+        forward_ledger_for_node(&store.projection_snapshot(), &forward_a.node_id);
+    let forward_b_ledger =
+        forward_ledger_for_node(&store.projection_snapshot(), &forward_b.node_id);
 
     let failure_attempt = append_attempt_start(&mut store, &fixture, &failure_node, 1);
     append_attempt_failure(&mut store, &fixture, &failure_node, &failure_attempt, false);
@@ -5723,13 +6467,26 @@ async fn runtime_remediates_confirmed_forward_ledgers_in_reverse_confirmation_or
     assert_eq!(saga.obligations.len(), 2);
 
     for _ in 0..12 {
-        assert_eq!(
-            scheduler
-                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-                .await
-                .expect("drive remediation phase"),
-            SchedulerStatus::Advanced
-        );
+        let status = drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id,
+        )
+        .await
+        .expect("drive remediation phase");
+        assert!(matches!(
+            status,
+            SchedulerStatus::Advanced | SchedulerStatus::PublicOutputProjected
+        ));
+        if store
+            .projection_snapshot()
+            .derive_saga_projection(&fixture.run_id, &fixture.runtime_spec.spec().saga)
+            .run_mode
+            == store::RunMode::Compensated
+        {
+            break;
+        }
     }
     let remediation_order = remediation_intent_forward_links(&store, &fixture.run_id);
     assert_eq!(
@@ -5757,13 +6514,23 @@ async fn runtime_remediates_confirmed_forward_ledgers_in_reverse_confirmation_or
                 .closed
         );
     }
-    assert_eq!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("resolve compensated terminal"),
-        SchedulerStatus::Advanced
-    );
+    for _ in 0..8 {
+        if store.projection_snapshot().run_state(&fixture.run_id) == store::RunState::Completed {
+            break;
+        }
+        let status = drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id,
+        )
+        .await
+        .expect("resolve compensated terminal");
+        assert!(matches!(
+            status,
+            SchedulerStatus::Advanced | SchedulerStatus::PublicOutputProjected
+        ));
+    }
     assert_eq!(
         store.projection_snapshot().run_state(&fixture.run_id),
         store::RunState::Completed
@@ -5777,10 +6544,14 @@ async fn runtime_remediates_confirmed_forward_ledgers_in_reverse_confirmation_or
         events::RunCompletionOutcome::Compensated
     ));
     assert_eq!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("completed compensated run"),
+        drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id
+        )
+        .await
+        .expect("completed compensated run"),
         SchedulerStatus::PublicOutputProjected
     );
 }
@@ -5810,7 +6581,7 @@ async fn runtime_compensated_saga_resume_boundaries_do_not_duplicate_mutations()
     )
     .clone();
     let mut scheduler = compensated_saga_scheduler(&fixture);
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -5841,8 +6612,10 @@ async fn runtime_compensated_saga_resume_boundaries_do_not_duplicate_mutations()
     )
     .await;
     assert_no_duplicate_side_effect_submissions(&store, &fixture.run_id);
-    let forward_a_ledger = forward_ledger_for_node(store.projection_snapshot(), &forward_a.node_id);
-    let forward_b_ledger = forward_ledger_for_node(store.projection_snapshot(), &forward_b.node_id);
+    let forward_a_ledger =
+        forward_ledger_for_node(&store.projection_snapshot(), &forward_a.node_id);
+    let forward_b_ledger =
+        forward_ledger_for_node(&store.projection_snapshot(), &forward_b.node_id);
 
     let failure_attempt = append_attempt_start(&mut store, &fixture, &failure_node, 1);
     append_attempt_failure(&mut store, &fixture, &failure_node, &failure_attempt, false);
@@ -5933,10 +6706,14 @@ async fn runtime_compensated_saga_resume_boundaries_do_not_duplicate_mutations()
 
     scheduler = compensated_saga_scheduler(&fixture);
     assert_eq!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("resolve compensated terminal after resume"),
+        drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id
+        )
+        .await
+        .expect("resolve compensated terminal after resume"),
         SchedulerStatus::Advanced
     );
     assert_eq!(
@@ -5952,10 +6729,14 @@ async fn runtime_compensated_saga_resume_boundaries_do_not_duplicate_mutations()
         events::RunCompletionOutcome::Compensated
     ));
     assert_eq!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("completed compensated run"),
+        drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id
+        )
+        .await
+        .expect("completed compensated run"),
         SchedulerStatus::PublicOutputProjected
     );
 
@@ -5984,7 +6765,7 @@ async fn runtime_resolves_clean_failure_without_acdc_claim() {
     let fixture = fixture();
     let failure_node = node_by_output(&fixture, &fixture.cell_a).clone();
     let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -6003,10 +6784,14 @@ async fn runtime_resolves_clean_failure_without_acdc_claim() {
     assert!(saga.obligations.is_empty());
 
     assert_eq!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("resolve clean failure terminal"),
+        drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id
+        )
+        .await
+        .expect("resolve clean failure terminal"),
         SchedulerStatus::Advanced
     );
     assert!(matches!(
@@ -6029,7 +6814,7 @@ async fn runtime_materializes_confirmed_forward_output_before_failed_without_cla
         .register(binding(
             fixture.descriptor_a.clone(),
             "sidefx",
-            DeterministicSideEffectRunner::new(&fixture),
+            DriverSideEffectRunner::new(&fixture),
         ))
         .expect("binding side effect");
     registry
@@ -6044,7 +6829,7 @@ async fn runtime_materializes_confirmed_forward_output_before_failed_without_cla
         ))
         .expect("binding failure node");
     let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -6063,14 +6848,19 @@ async fn runtime_materializes_confirmed_forward_output_before_failed_without_cla
     .expect("attempt id");
     for _ in 0..8 {
         assert_eq!(
-            scheduler
-                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-                .await
-                .expect("drive forward side-effect to confirmation"),
+            drive_once(
+                &scheduler,
+                &mut store,
+                &fixture.runtime_spec,
+                &fixture.run_id
+            )
+            .await
+            .expect("drive forward side-effect to confirmation"),
             SchedulerStatus::Advanced
         );
+        let projection_snapshot = store.projection_snapshot();
         let projection = side_effect_projection_for_attempt(
-            store.projection_snapshot(),
+            &projection_snapshot,
             &forward_node,
             &forward_attempt,
         )
@@ -6091,13 +6881,11 @@ async fn runtime_materializes_confirmed_forward_output_before_failed_without_cla
         .projection_snapshot()
         .cell_terminal(&fixture.cell_a)
         .is_none());
-    let projection = side_effect_projection_for_attempt(
-        store.projection_snapshot(),
-        &forward_node,
-        &forward_attempt,
-    )
-    .expect("side-effect projection lookup")
-    .expect("side-effect projection");
+    let projection_snapshot = store.projection_snapshot();
+    let projection =
+        side_effect_projection_for_attempt(&projection_snapshot, &forward_node, &forward_attempt)
+            .expect("side-effect projection lookup")
+            .expect("side-effect projection");
     assert!(matches!(
         projection.phase,
         store::SideEffectPhase::ConfirmationObserved { .. }
@@ -6111,10 +6899,14 @@ async fn runtime_materializes_confirmed_forward_output_before_failed_without_cla
     assert_eq!(saga.run_mode, store::RunMode::FailedWithoutAcdcClaim);
 
     assert_eq!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("materialize confirmed forward output"),
+        drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id
+        )
+        .await
+        .expect("materialize confirmed forward output"),
         SchedulerStatus::Advanced
     );
     assert!(store
@@ -6127,10 +6919,14 @@ async fn runtime_materializes_confirmed_forward_output_before_failed_without_cla
         .is_none());
 
     assert_eq!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("resolve failed-without-claim terminal"),
+        drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id
+        )
+        .await
+        .expect("resolve failed-without-claim terminal"),
         SchedulerStatus::Advanced
     );
     assert!(matches!(
@@ -6151,7 +6947,8 @@ async fn runtime_resolves_manual_resolution_terminal() {
         .register(binding(
             fixture.descriptor_a.clone(),
             "sidefx",
-            AmbiguousSideEffectRunner::new(&fixture),
+            DriverSideEffectRunner::new(&fixture)
+                .with_submission_decision(TestSubmissionDecision::Ambiguous),
         ))
         .expect("binding side effect");
     registry
@@ -6170,7 +6967,7 @@ async fn runtime_resolves_manual_resolution_terminal() {
         register_fixture_capabilities(registry.clone(), &fixture),
         artifact_store.clone(),
     );
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -6180,12 +6977,16 @@ async fn runtime_resolves_manual_resolution_terminal() {
     .await
     .expect("start run");
 
-    for _ in 0..3 {
+    for _ in 0..2 {
         assert_eq!(
-            scheduler
-                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-                .await
-                .expect("advance to ambiguity"),
+            drive_once(
+                &scheduler,
+                &mut store,
+                &fixture.runtime_spec,
+                &fixture.run_id
+            )
+            .await
+            .expect("advance to ambiguity"),
             SchedulerStatus::Advanced
         );
     }
@@ -6215,10 +7016,14 @@ async fn runtime_resolves_manual_resolution_terminal() {
         artifact_store,
     );
     assert_eq!(
-        fresh_scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("resolve manual terminal"),
+        drive_once(
+            &fresh_scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id
+        )
+        .await
+        .expect("resolve manual terminal"),
         SchedulerStatus::Advanced
     );
     assert!(matches!(
@@ -6239,7 +7044,8 @@ async fn runtime_rejects_manual_resolution_prefix_with_open_attempt() {
         .register(binding(
             fixture.descriptor_a.clone(),
             "sidefx",
-            AmbiguousSideEffectRunner::new(&fixture),
+            DriverSideEffectRunner::new(&fixture)
+                .with_submission_decision(TestSubmissionDecision::Ambiguous),
         ))
         .expect("binding side effect");
     registry
@@ -6254,7 +7060,7 @@ async fn runtime_rejects_manual_resolution_prefix_with_open_attempt() {
         ))
         .expect("binding read");
     let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -6264,12 +7070,16 @@ async fn runtime_rejects_manual_resolution_prefix_with_open_attempt() {
     .await
     .expect("start run");
 
-    for _ in 0..3 {
+    for _ in 0..2 {
         assert_eq!(
-            scheduler
-                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-                .await
-                .expect("advance to manual block"),
+            drive_once(
+                &scheduler,
+                &mut store,
+                &fixture.runtime_spec,
+                &fixture.run_id
+            )
+            .await
+            .expect("advance to manual block"),
             SchedulerStatus::Advanced
         );
     }
@@ -6292,10 +7102,10 @@ async fn runtime_rejects_manual_resolution_prefix_with_open_attempt() {
     else {
         panic!("manual resolution fixture policy");
     };
-    let error = build_manual_resolution_prefix_authority(
-        &store,
+    let error = build_manual_resolution_prefix_authority_for_tests(
         &fixture.runtime_spec,
         &fixture.run_id,
+        &store,
         manual.clone(),
     )
     .expect_err("manual prefix rejects open attempt");
@@ -6306,100 +7116,6 @@ async fn runtime_rejects_manual_resolution_prefix_with_open_attempt() {
 }
 
 #[tokio::test]
-async fn runtime_rejects_historical_manual_resolution_with_open_attempt_prefix() {
-    let fixture = fixture_with_manual_resolution_side_effect_state();
-    let mut registry = ErasedRunnerRegistry::new();
-    registry
-        .register(binding(
-            fixture.descriptor_a.clone(),
-            "sidefx",
-            AmbiguousSideEffectRunner::new(&fixture),
-        ))
-        .expect("binding side effect");
-    registry
-        .register(binding(
-            fixture.descriptor_b.clone(),
-            "read",
-            RecordingRunner {
-                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
-                output_artifact: artifact(0xb1),
-                output_digest: content(0xb2),
-            },
-        ))
-        .expect("binding read");
-    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
-
-    for _ in 0..3 {
-        assert_eq!(
-            scheduler
-                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-                .await
-                .expect("advance to manual block"),
-            SchedulerStatus::Advanced
-        );
-    }
-
-    let mut manual_payload_store = store.clone();
-    append_manual_resolution(
-        &scheduler,
-        &mut manual_payload_store,
-        &fixture,
-        events::ManualResolutionOutcome::ConfirmRemediated,
-    )
-    .await;
-    let manual_payload = manual_payload_store
-        .load_run_stream(&fixture.run_id)
-        .into_iter()
-        .find_map(|event| match event.payload().clone() {
-            events::KernelEventPayload::ManualResolutionRecorded(payload) => Some(payload),
-            _ => None,
-        })
-        .expect("manual resolution payload");
-
-    let node_b = fixture
-        .runtime_spec
-        .spec()
-        .nodes
-        .iter()
-        .find(|node| node.descriptor_id == fixture.descriptor_b)
-        .expect("node b")
-        .clone();
-    let open_attempt = append_attempt_start(&mut store, &fixture, &node_b, 2);
-    let mut stream = store.load_run_stream(&fixture.run_id);
-    append_payload_commit_for_tests(
-        &mut stream,
-        &fixture.run_id,
-        "forged-manual-resolution-open-prefix",
-        events::KernelEventPayload::ManualResolutionRecorded(manual_payload),
-    );
-    append_payload_commit_without_prefix_validation_for_tests(
-        &mut stream,
-        &fixture.run_id,
-        "close-open-attempt-after-forged-manual",
-        events::KernelEventPayload::StateAttemptInterrupted(events::StateAttemptInterrupted {
-            spec_hash: fixture.runtime_spec.spec_hash().clone(),
-            node_id: node_b.node_id.clone(),
-            attempt_id: open_attempt,
-        }),
-    );
-
-    assert!(matches!(
-        validate_runtime_stream_for_tests(&fixture.runtime_spec, &fixture.run_id, &stream),
-        Err(RuntimeError::Store(message) | RuntimeError::InvalidRunStream(message))
-            if message.contains("requires no open semantic attempts")
-    ));
-}
-
-#[tokio::test]
 async fn runtime_missing_manual_terminal_authorization_artifact_leaves_open_attempt() {
     let fixture = fixture_with_manual_resolution_side_effect_state();
     let mut registry = ErasedRunnerRegistry::new();
@@ -6407,7 +7123,8 @@ async fn runtime_missing_manual_terminal_authorization_artifact_leaves_open_atte
         .register(binding(
             fixture.descriptor_a.clone(),
             "sidefx",
-            AmbiguousSideEffectRunner::new(&fixture),
+            DriverSideEffectRunner::new(&fixture)
+                .with_submission_decision(TestSubmissionDecision::Ambiguous),
         ))
         .expect("binding side effect");
     registry
@@ -6426,7 +7143,7 @@ async fn runtime_missing_manual_terminal_authorization_artifact_leaves_open_atte
         register_fixture_capabilities(registry, &fixture),
         artifact_store.clone(),
     );
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -6436,12 +7153,16 @@ async fn runtime_missing_manual_terminal_authorization_artifact_leaves_open_atte
     .await
     .expect("start run");
 
-    for _ in 0..3 {
+    for _ in 0..2 {
         assert_eq!(
-            scheduler
-                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-                .await
-                .expect("advance to ambiguity"),
+            drive_once(
+                &scheduler,
+                &mut store,
+                &fixture.runtime_spec,
+                &fixture.run_id
+            )
+            .await
+            .expect("advance to ambiguity"),
             SchedulerStatus::Advanced
         );
     }
@@ -6481,8 +7202,7 @@ async fn runtime_missing_manual_terminal_authorization_artifact_leaves_open_atte
         })
         .expect("resolve saga terminal node");
     assert!(matches!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
+        drive_once(&scheduler, &mut store, &fixture.runtime_spec, &fixture.run_id)
             .await,
         Err(RuntimeError::Store(message)) if message.contains("missing artifact")
     ));
@@ -6519,7 +7239,8 @@ async fn runtime_rejects_manual_resolution_before_manual_blocked() {
         .register(binding(
             fixture.descriptor_a.clone(),
             "sidefx",
-            AmbiguousSideEffectRunner::new(&fixture),
+            DriverSideEffectRunner::new(&fixture)
+                .with_submission_decision(TestSubmissionDecision::Ambiguous),
         ))
         .expect("binding side effect");
     registry
@@ -6534,7 +7255,7 @@ async fn runtime_rejects_manual_resolution_before_manual_blocked() {
         ))
         .expect("binding read");
     let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -6545,23 +7266,23 @@ async fn runtime_rejects_manual_resolution_before_manual_blocked() {
     .expect("start run");
     let evidence_bytes = br#"{"operator_note":"too_early"}"#.to_vec();
 
-    let error = scheduler
-        .record_manual_resolution(
-            &mut store,
-            &fixture.runtime_spec,
-            &fixture.run_id,
-            ManualResolutionRequest {
-                outcome: events::ManualResolutionOutcome::ConfirmRemediated,
-                evidence_artifact: ManualResolutionEvidenceArtifact {
-                    bytes: evidence_bytes,
-                    media_type: spec::MediaType::new("application/json").expect("media"),
-                },
-                proof_bytes: br#"{}"#.to_vec(),
-                note: None,
+    let error = record_manual_resolution(
+        &scheduler,
+        &mut store,
+        &fixture.runtime_spec,
+        &fixture.run_id,
+        ManualResolutionRequest {
+            outcome: events::ManualResolutionOutcome::ConfirmRemediated,
+            evidence_artifact: ManualResolutionEvidenceArtifact {
+                bytes: evidence_bytes,
+                media_type: spec::MediaType::new("application/json").expect("media"),
             },
-        )
-        .await
-        .expect_err("manual resolution before block rejects");
+            proof_bytes: br#"{}"#.to_vec(),
+            note: None,
+        },
+    )
+    .await
+    .expect_err("manual resolution before block rejects");
 
     assert!(
         matches!(error, RuntimeError::InvalidRunStream(_)),
@@ -6592,7 +7313,7 @@ async fn runtime_rejects_forward_node_emitting_remediation_ledger_purpose() {
         ))
         .expect("binding b");
     let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -6603,10 +7324,14 @@ async fn runtime_rejects_forward_node_emitting_remediation_ledger_purpose() {
     .expect("start run");
 
     assert_eq!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("terminalize wrong forward ledger purpose"),
+        drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id
+        )
+        .await
+        .expect("terminalize wrong forward ledger purpose"),
         SchedulerStatus::Advanced
     );
     let node = node_by_output(&fixture, &fixture.cell_a);
@@ -6647,7 +7372,7 @@ async fn runtime_rejects_remediation_node_emitting_forward_ledger_purpose() {
         ))
         .expect("binding failure node");
     let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -6657,903 +7382,36 @@ async fn runtime_rejects_remediation_node_emitting_forward_ledger_purpose() {
     .await
     .expect("start run");
 
-    for _ in 0..12 {
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("drive forward side-effect phase");
-    }
+    drive_until_cells_terminal(
+        &scheduler,
+        &mut store,
+        &fixture,
+        &[fixture.cell_a.clone(), fixture.cell_b.clone()],
+        "drive forward side-effect phase",
+    )
+    .await;
     let failure_attempt = append_attempt_start(&mut store, &fixture, &failure_node, 1);
     append_attempt_failure(&mut store, &fixture, &failure_node, &failure_attempt, false);
 
     assert_eq!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("terminalize wrong remediation ledger purpose"),
+        drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id
+        )
+        .await
+        .expect("terminalize wrong remediation ledger purpose"),
         SchedulerStatus::Advanced
     );
     assert_failure_code_count(&store, "runner_output_invalid", 1);
 }
 
 #[tokio::test]
-async fn runtime_rejects_exclusive_side_effect_without_resource_key() {
-    let fixture = fixture_with_first_exclusive_side_effect_state();
-    let scheduler = test_scheduler(registered_first_side_effect_runners_with(
-        &fixture,
-        DeterministicSideEffectRunner::new(&fixture),
-    ));
-    let mut store = store::InMemoryTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
-
-    assert_eq!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("terminalize missing exclusive resource key"),
-        SchedulerStatus::Advanced
-    );
-    let node = node_by_output(&fixture, &fixture.cell_a);
-    assert_node_failed_with_code(&store, &node.node_id, "runner_output_invalid");
-}
-
-#[tokio::test]
-async fn runtime_sequences_two_runs_on_same_exclusive_lane_until_release() {
-    let fixture = fixture_with_first_exclusive_side_effect_state();
-    let holder_run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, DA);
-    let resource_key = exclusive_resource_key(&fixture, "wallet-1");
-    let lane_key = store::ResourceLaneKey::from_evidence(&resource_key);
-    let runner = side_effect_runner_with_resource_keys(
-        &fixture,
-        resource_keys_for_all_side_effects(&fixture, "wallet-1"),
-    );
-    let scheduler = test_scheduler(registered_first_side_effect_runners_with(&fixture, runner));
-    let mut store = store::InMemoryTypedRunStore::new();
-    let node = node_by_output(&fixture, &fixture.cell_a).clone();
-    append_synthetic_run_admitted(&mut store, &fixture, &holder_run_id, "holder-run-start");
-    let (holder_attempt, holder_ledger) = append_synthetic_exclusive_prepare(
-        &mut store,
-        &fixture,
-        &holder_run_id,
-        &node,
-        "wallet-1",
-        "holder-prepare",
-    );
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start peer run");
-    assert_eq!(
-        store
-            .projection_snapshot()
-            .resource_lane(&lane_key)
-            .expect("held lane")
-            .holder
-            .run_id,
-        holder_run_id
-    );
-
-    assert_eq!(
-        scheduler
-            .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("peer blocks on lane"),
-        SchedulerStatus::Advanced
-    );
-    assert!(side_effect_projection_for_run_node(
-        store.projection_snapshot(),
-        &fixture.run_id,
-        &node.node_id
-    )
-    .is_none());
-    assert_eq!(
-        scheduler
-            .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("peer remains blocked"),
-        SchedulerStatus::Blocked
-    );
-
-    append_synthetic_side_effect_failed(
-        &mut store,
-        &fixture,
-        &holder_run_id,
-        &node,
-        &holder_attempt,
-        &holder_ledger,
-        "holder-release",
-    );
-    assert!(store
-        .projection_snapshot()
-        .resource_lane(&lane_key)
-        .is_none());
-    assert_eq!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("peer prepares after release"),
-        SchedulerStatus::Advanced
-    );
-    assert!(side_effect_projection_for_run_node(
-        store.projection_snapshot(),
-        &fixture.run_id,
-        &node.node_id
-    )
-    .is_some());
-}
-
-#[tokio::test]
-async fn async_runtime_blocks_exclusive_lane_before_staging_artifact() {
-    let fixture = fixture_with_first_exclusive_side_effect_state();
-    let holder_run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, DA);
-    let runner = side_effect_runner_with_resource_keys(
-        &fixture,
-        resource_keys_for_all_side_effects(&fixture, "wallet-async"),
-    )
-    .with_inline_prepare_artifacts();
-    let staged = Arc::new(Mutex::new(Vec::new()));
-    let artifacts = Arc::new(Mutex::new(TestArtifactMap::new()));
-    let scheduler = test_scheduler_with_stager(
-        registered_first_side_effect_runners_with(&fixture, runner),
-        Arc::new(RecordingRuntimeArtifactStager {
-            staged: Arc::clone(&staged),
-            artifacts,
-        }),
-    );
-    let node = node_by_output(&fixture, &fixture.cell_a).clone();
-    let mut inner = store::InMemoryTypedRunStore::new();
-    append_synthetic_run_admitted(
-        &mut inner,
-        &fixture,
-        &holder_run_id,
-        "async-holder-run-start",
-    );
-    append_synthetic_exclusive_prepare(
-        &mut inner,
-        &fixture,
-        &holder_run_id,
-        &node,
-        "wallet-async",
-        "async-holder-prepare",
-    );
-    let store = AsyncInMemoryTypedRunStore::new(inner);
-    let launch = scheduler
-        .prepare_run_launch(
-            &fixture.runtime_spec,
-            fixture.run_id.clone(),
-            run_start_evidence(&fixture, vec![fixture.seed_ref.clone()]),
-            store::StreamSeq::FIRST,
-        )
-        .expect("prepare async peer launch");
-    scheduler
-        .start_run_async(&store, launch)
-        .await
-        .expect("start async peer run");
-    let staged_before_block = staged.lock().expect("staged lock").len();
-
-    assert_eq!(
-        scheduler
-            .drive_until_blocked_async(&store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("async peer blocks on lane"),
-        SchedulerStatus::Advanced
-    );
-    assert_eq!(
-        staged.lock().expect("staged lock").len(),
-        staged_before_block
-    );
-    store.with_inner(|inner| {
-        assert!(side_effect_projection_for_run_node(
-            inner.projection_snapshot(),
-            &fixture.run_id,
-            &node.node_id
-        )
-        .is_none());
-    });
-
-    assert_eq!(
-        scheduler
-            .drive_until_blocked_async(&store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("async peer remains blocked on lane"),
-        SchedulerStatus::Blocked
-    );
-    assert_eq!(
-        staged.lock().expect("staged lock").len(),
-        staged_before_block
-    );
-}
-
-#[tokio::test]
-async fn runtime_allows_unrelated_exclusive_keys_to_progress_across_runs() {
-    let fixture = fixture_with_first_exclusive_side_effect_state();
-    let holder_run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, DB);
-    let runner = side_effect_runner_with_resource_keys(
-        &fixture,
-        resource_keys_for_all_side_effects(&fixture, "wallet-b"),
-    );
-    let scheduler = test_scheduler(registered_first_side_effect_runners_with(&fixture, runner));
-    let mut store = store::InMemoryTypedRunStore::new();
-    let node = node_by_output(&fixture, &fixture.cell_a).clone();
-    append_synthetic_run_admitted(
-        &mut store,
-        &fixture,
-        &holder_run_id,
-        "unrelated-holder-start",
-    );
-    append_synthetic_exclusive_prepare(
-        &mut store,
-        &fixture,
-        &holder_run_id,
-        &node,
-        "wallet-a",
-        "unrelated-holder-prepare",
-    );
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start peer run");
-
-    assert_eq!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("peer prepares unrelated key"),
-        SchedulerStatus::Advanced
-    );
-    assert!(side_effect_projection_for_run_node(
-        store.projection_snapshot(),
-        &fixture.run_id,
-        &node.node_id
-    )
-    .is_some());
-}
-
-#[tokio::test]
-async fn runtime_blocks_parallel_branches_of_one_run_on_held_exclusive_lane() {
-    let fixture = fixture_with_run_id(fixture_with_independent_exclusive_side_effects(), DC);
-    let holder_run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, DD);
-    let runner = side_effect_runner_with_resource_keys(
-        &fixture,
-        resource_keys_for_all_side_effects(&fixture, "wallet-shared"),
-    );
-    let scheduler = test_scheduler(registered_two_side_effect_runners_with(&fixture, runner));
-    let mut store = store::InMemoryTypedRunStore::new();
-    let node_a = node_by_output(&fixture, &fixture.cell_a).clone();
-    let node_b = node_by_output(&fixture, &fixture.cell_b).clone();
-    append_synthetic_run_admitted(&mut store, &fixture, &holder_run_id, "branch-holder-start");
-    append_synthetic_exclusive_prepare(
-        &mut store,
-        &fixture,
-        &holder_run_id,
-        &node_a,
-        "wallet-shared",
-        "branch-holder-prepare",
-    );
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start branched run");
-    assert_eq!(
-        scheduler
-            .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("branched run blocks"),
-        SchedulerStatus::Advanced
-    );
-    assert_eq!(
-        attempt_started_count(&store, &fixture.run_id, &node_a.node_id),
-        1
-    );
-    assert_eq!(
-        attempt_started_count(&store, &fixture.run_id, &node_b.node_id),
-        0
-    );
-    assert!(side_effect_projection_for_run_node(
-        store.projection_snapshot(),
-        &fixture.run_id,
-        &node_a.node_id
-    )
-    .is_none());
-    assert!(side_effect_projection_for_run_node(
-        store.projection_snapshot(),
-        &fixture.run_id,
-        &node_b.node_id
-    )
-    .is_none());
-}
-
-#[tokio::test]
-async fn runtime_advances_independent_node_while_resource_lane_is_parked() {
-    let base = fixture_with_independent_second_node_and_first_side_effect_state();
-    let descriptors = vec![base.descriptor_a.clone()];
-    let fixture = with_exclusive_resource_claims(base, &descriptors);
-    let holder_run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, DA);
-    let runner = side_effect_runner_with_resource_keys(
-        &fixture,
-        resource_keys_for_all_side_effects(&fixture, "wallet-parked"),
-    );
-    let scheduler = test_scheduler(registered_first_side_effect_runners_with(&fixture, runner));
-    let mut store = store::InMemoryTypedRunStore::new();
-    let blocked_node = node_by_output(&fixture, &fixture.cell_a).clone();
-    let independent_node = node_by_output(&fixture, &fixture.cell_b).clone();
-    append_synthetic_run_admitted(
-        &mut store,
-        &fixture,
-        &holder_run_id,
-        "independent-holder-start",
-    );
-    append_synthetic_exclusive_prepare(
-        &mut store,
-        &fixture,
-        &holder_run_id,
-        &blocked_node,
-        "wallet-parked",
-        "independent-holder-prepare",
-    );
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start independent run");
-
-    assert_eq!(
-        scheduler
-            .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("independent node advances while lane is parked"),
-        SchedulerStatus::Advanced
-    );
-    assert_eq!(
-        attempt_started_count(&store, &fixture.run_id, &blocked_node.node_id),
-        1
-    );
-    assert!(side_effect_projection_for_run_node(
-        store.projection_snapshot(),
-        &fixture.run_id,
-        &blocked_node.node_id
-    )
-    .is_none());
-    assert_eq!(
-        attempt_started_count(&store, &fixture.run_id, &independent_node.node_id),
-        1
-    );
-    assert!(store
-        .projection_snapshot()
-        .cell_terminal(&independent_node.output_cell)
-        .is_some());
-}
-
-#[tokio::test]
-async fn runtime_advances_independent_side_effect_lane_while_resource_lane_is_parked() {
-    let fixture = fixture_with_independent_exclusive_side_effect_lanes();
-    let holder_run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, DB);
-    let blocked_node = node_by_output(&fixture, &fixture.cell_a).clone();
-    let independent_node = node_by_output(&fixture, &fixture.cell_b).clone();
-    let mut resource_keys = BTreeMap::new();
-    resource_keys.insert(
-        blocked_node.node_id.clone(),
-        exclusive_resource_key(&fixture, "wallet-parked"),
-    );
-    resource_keys.insert(
-        independent_node.node_id.clone(),
-        resource_key_in_namespace(
-            &fixture,
-            independent_resource_namespace(),
-            "wallet-independent",
-        ),
-    );
-    let scheduler = test_scheduler(registered_two_side_effect_runners_with(
-        &fixture,
-        side_effect_runner_with_resource_keys(&fixture, resource_keys),
-    ));
-    let mut store = store::InMemoryTypedRunStore::new();
-    append_synthetic_run_admitted(
-        &mut store,
-        &fixture,
-        &holder_run_id,
-        "independent-lane-holder-start",
-    );
-    append_synthetic_exclusive_prepare(
-        &mut store,
-        &fixture,
-        &holder_run_id,
-        &blocked_node,
-        "wallet-parked",
-        "independent-lane-holder-prepare",
-    );
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start independent lane run");
-
-    assert_eq!(
-        scheduler
-            .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("independent side-effect lane advances while another lane is parked"),
-        SchedulerStatus::Advanced
-    );
-    assert_eq!(
-        attempt_started_count(&store, &fixture.run_id, &blocked_node.node_id),
-        1
-    );
-    assert!(side_effect_projection_for_run_node(
-        store.projection_snapshot(),
-        &fixture.run_id,
-        &blocked_node.node_id
-    )
-    .is_none());
-    assert!(side_effect_projection_for_run_node(
-        store.projection_snapshot(),
-        &fixture.run_id,
-        &independent_node.node_id
-    )
-    .is_some());
-    assert!(store
-        .projection_snapshot()
-        .cell_terminal(&independent_node.output_cell)
-        .is_some());
-}
-
-#[tokio::test]
-async fn runtime_parks_same_namespace_side_effect_until_blocked_lane_releases() {
-    let fixture = fixture_with_independent_exclusive_side_effects();
-    let holder_run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, DD);
-    let blocked_node = node_by_output(&fixture, &fixture.cell_a).clone();
-    let same_namespace_node = node_by_output(&fixture, &fixture.cell_b).clone();
-    let mut resource_keys = BTreeMap::new();
-    resource_keys.insert(
-        blocked_node.node_id.clone(),
-        exclusive_resource_key(&fixture, "wallet-parked"),
-    );
-    resource_keys.insert(
-        same_namespace_node.node_id.clone(),
-        exclusive_resource_key(&fixture, "wallet-other"),
-    );
-    let scheduler = test_scheduler(registered_two_side_effect_runners_with(
-        &fixture,
-        side_effect_runner_with_resource_keys(&fixture, resource_keys),
-    ));
-    let mut store = store::InMemoryTypedRunStore::new();
-    append_synthetic_run_admitted(
-        &mut store,
-        &fixture,
-        &holder_run_id,
-        "same-namespace-holder-start",
-    );
-    let (holder_attempt, holder_ledger) = append_synthetic_exclusive_prepare(
-        &mut store,
-        &fixture,
-        &holder_run_id,
-        &blocked_node,
-        "wallet-parked",
-        "same-namespace-holder-prepare",
-    );
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start same-namespace run");
-
-    assert_eq!(
-        scheduler
-            .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("same-namespace node waits while lane key is unknown"),
-        SchedulerStatus::Advanced
-    );
-    assert_eq!(
-        attempt_started_count(&store, &fixture.run_id, &blocked_node.node_id),
-        1
-    );
-    assert_eq!(
-        attempt_started_count(&store, &fixture.run_id, &same_namespace_node.node_id),
-        0
-    );
-
-    append_synthetic_side_effect_failed(
-        &mut store,
-        &fixture,
-        &holder_run_id,
-        &blocked_node,
-        &holder_attempt,
-        &holder_ledger,
-        "same-namespace-holder-release",
-    );
-    let status = scheduler
-        .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
-        .await
-        .expect("same-namespace node advances after lane release");
-    assert!(matches!(
-        status,
-        SchedulerStatus::Advanced | SchedulerStatus::PublicOutputProjected
-    ));
-    assert!(side_effect_projection_for_run_node(
-        store.projection_snapshot(),
-        &fixture.run_id,
-        &blocked_node.node_id
-    )
-    .is_some());
-    assert!(side_effect_projection_for_run_node(
-        store.projection_snapshot(),
-        &fixture.run_id,
-        &same_namespace_node.node_id
-    )
-    .is_some());
-}
-
-#[tokio::test]
-async fn transition_allows_same_namespace_node_with_different_projected_lane() {
-    let fixture = fixture_with_independent_exclusive_side_effects();
-    let holder_run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, DF);
-    let blocked_node = node_by_output(&fixture, &fixture.cell_a).clone();
-    let same_namespace_node = node_by_output(&fixture, &fixture.cell_b).clone();
-    let scheduler = test_scheduler(registered_two_side_effect_runners_with(
-        &fixture,
-        DeterministicSideEffectRunner::new(&fixture),
-    ));
-    let mut store = store::InMemoryTypedRunStore::new();
-    append_synthetic_run_admitted(
-        &mut store,
-        &fixture,
-        &holder_run_id,
-        "projected-lane-holder-start",
-    );
-    append_synthetic_exclusive_prepare(
-        &mut store,
-        &fixture,
-        &holder_run_id,
-        &blocked_node,
-        "wallet-parked",
-        "projected-lane-holder-prepare",
-    );
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start projected-lane run");
-    let (same_namespace_attempt, _) = append_synthetic_exclusive_prepare(
-        &mut store,
-        &fixture,
-        &fixture.run_id,
-        &same_namespace_node,
-        "wallet-other",
-        "projected-lane-same-namespace-prepare",
-    );
-
-    let stream = store.load_run_stream(&fixture.run_id);
-    let view = RuntimeRunView::from_stream(&fixture.runtime_spec, &fixture.run_id, &stream)
-        .expect("runtime view");
-    let blocked_lane =
-        store::ResourceLaneKey::from_evidence(&exclusive_resource_key(&fixture, "wallet-parked"));
-    let blocked_lanes = BTreeSet::from([crate::attempt::ResourceLaneBlockWitness {
-        node_id: blocked_node.node_id.clone(),
-        lane_key: blocked_lane,
-    }]);
-
-    match crate::transition::TransitionLifecycle::decide(
-        &fixture.runtime_spec,
-        &fixture.run_id,
-        &view,
-        &blocked_lanes,
-    )
-    .expect("transition decision")
-    {
-        crate::transition::TransitionDecision::ContinueAttempt(attempt) => {
-            assert_eq!(attempt.node.node_id, same_namespace_node.node_id);
-            assert_eq!(attempt.attempt_id, Some(same_namespace_attempt));
-            assert_eq!(attempt.attempt_no, 1);
-        }
-        crate::transition::TransitionDecision::StartNode(_)
-        | crate::transition::TransitionDecision::StartRemediation(_)
-        | crate::transition::TransitionDecision::AwaitManualResolution
-        | crate::transition::TransitionDecision::ResolveSagaTerminal(_)
-        | crate::transition::TransitionDecision::Blocked => {
-            panic!("same-namespace node with different projected lane should continue")
-        }
-    }
-}
-
-#[tokio::test]
-async fn runtime_blocks_remediation_lane_until_conflicting_holder_releases() {
-    let fixture = fixture_with_two_exclusive_side_effects_and_failing_tail();
-    let holder_run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, DE);
-    let runner = side_effect_runner_with_resource_keys(
-        &fixture,
-        resource_keys_for_all_side_effects(&fixture, "wallet-remediate"),
-    );
-    let mut registry = registered_two_side_effect_runners_with(&fixture, runner.clone());
-    registry
-        .register(binding(
-            fixture
-                .descriptor_c
-                .clone()
-                .expect("failing node descriptor"),
-            "fail",
-            BlockingRunner,
-        ))
-        .expect("binding failure node");
-    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start compensating run");
-
-    let forward_a = node_by_output(&fixture, &fixture.cell_a).clone();
-    let forward_b = node_by_output(&fixture, &fixture.cell_b).clone();
-    drive_side_effect_to_confirmation(&scheduler, &mut store, &fixture, &forward_a).await;
-    assert_eq!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("materialize forward a"),
-        SchedulerStatus::Advanced
-    );
-    drive_side_effect_to_confirmation(&scheduler, &mut store, &fixture, &forward_b).await;
-    assert_eq!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("materialize forward b"),
-        SchedulerStatus::Advanced
-    );
-    let failure_node = node_by_output(
-        &fixture,
-        fixture.cell_c.as_ref().expect("failing output cell"),
-    )
-    .clone();
-    let failure_attempt = append_attempt_start(&mut store, &fixture, &failure_node, 1);
-    append_attempt_failure(&mut store, &fixture, &failure_node, &failure_attempt, false);
-
-    append_synthetic_run_admitted(
-        &mut store,
-        &fixture,
-        &holder_run_id,
-        "remediation-holder-start",
-    );
-    let (holder_attempt, holder_ledger) = append_synthetic_exclusive_prepare(
-        &mut store,
-        &fixture,
-        &holder_run_id,
-        &forward_b,
-        "wallet-remediate",
-        "remediation-holder-prepare",
-    );
-    assert_eq!(
-        scheduler
-            .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("remediation blocks on lane"),
-        SchedulerStatus::Advanced
-    );
-    assert_eq!(
-        scheduler
-            .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("remediation remains blocked on lane"),
-        SchedulerStatus::Blocked
-    );
-    assert!(remediation_intent_forward_links(&store, &fixture.run_id).is_empty());
-
-    append_synthetic_side_effect_failed(
-        &mut store,
-        &fixture,
-        &holder_run_id,
-        &forward_b,
-        &holder_attempt,
-        &holder_ledger,
-        "remediation-holder-release",
-    );
-    assert_eq!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("remediation prepares after lane release"),
-        SchedulerStatus::Advanced
-    );
-    assert_eq!(
-        remediation_intent_forward_links(&store, &fixture.run_id).len(),
-        1
-    );
-}
-
-#[tokio::test]
-async fn runtime_ambiguous_holder_releases_lane_for_peer() {
-    let fixture = fixture_with_first_exclusive_side_effect_state();
-    let holder_run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, DE);
-    let resource_key = exclusive_resource_key(&fixture, "wallet-ambiguous");
-    let lane_key = store::ResourceLaneKey::from_evidence(&resource_key);
-    let scheduler = test_scheduler(registered_first_side_effect_runners_with(
-        &fixture,
-        side_effect_runner_with_resource_keys(
-            &fixture,
-            resource_keys_for_all_side_effects(&fixture, "wallet-ambiguous"),
-        ),
-    ));
-    let mut store = store::InMemoryTypedRunStore::new();
-    let node = node_by_output(&fixture, &fixture.cell_a).clone();
-    append_synthetic_run_admitted(
-        &mut store,
-        &fixture,
-        &holder_run_id,
-        "ambiguous-holder-start",
-    );
-    let (holder_attempt, holder_ledger) = append_synthetic_exclusive_prepare(
-        &mut store,
-        &fixture,
-        &holder_run_id,
-        &node,
-        "wallet-ambiguous",
-        "ambiguous-holder-prepare",
-    );
-    append_synthetic_invocation_started(
-        &mut store,
-        &fixture,
-        &holder_run_id,
-        &node,
-        &holder_attempt,
-        &holder_ledger,
-        "ambiguous-holder-invocation-started",
-    );
-    append_synthetic_ambiguous(
-        &mut store,
-        &fixture,
-        &holder_run_id,
-        &node,
-        &holder_attempt,
-        &holder_ledger,
-        "ambiguous-holder-evidence",
-    );
-    assert!(store
-        .projection_snapshot()
-        .resource_lane(&lane_key)
-        .is_none());
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start peer");
-
-    assert_eq!(
-        scheduler
-            .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("peer runs after ambiguous holder releases lane"),
-        SchedulerStatus::PublicOutputProjected
-    );
-    assert!(side_effect_projection_for_run_node(
-        store.projection_snapshot(),
-        &fixture.run_id,
-        &node.node_id
-    )
-    .is_some());
-}
-
-#[tokio::test]
-async fn runtime_prepared_holder_lane_releases_at_run_terminal() {
-    let fixture = fixture_with_first_exclusive_side_effect_state();
-    let holder_run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, DF);
-    let resource_key = exclusive_resource_key(&fixture, "wallet-prepared");
-    let lane_key = store::ResourceLaneKey::from_evidence(&resource_key);
-    let scheduler = test_scheduler(registered_first_side_effect_runners_with(
-        &fixture,
-        side_effect_runner_with_resource_keys(
-            &fixture,
-            resource_keys_for_all_side_effects(&fixture, "wallet-prepared"),
-        ),
-    ));
-    let mut store = store::InMemoryTypedRunStore::new();
-    let node = node_by_output(&fixture, &fixture.cell_a).clone();
-    append_synthetic_run_admitted(
-        &mut store,
-        &fixture,
-        &holder_run_id,
-        "prepared-holder-start",
-    );
-    append_synthetic_exclusive_prepare(
-        &mut store,
-        &fixture,
-        &holder_run_id,
-        &node,
-        "wallet-prepared",
-        "prepared-holder-prepare",
-    );
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start peer");
-    assert_eq!(
-        scheduler
-            .drive_until_blocked(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("peer blocks on prepared holder"),
-        SchedulerStatus::Advanced
-    );
-    assert!(store
-        .projection_snapshot()
-        .resource_lane(&lane_key)
-        .is_some());
-    assert!(side_effect_projection_for_run_node(
-        store.projection_snapshot(),
-        &fixture.run_id,
-        &node.node_id
-    )
-    .is_none());
-    append_synthetic_completed_terminal(
-        &mut store,
-        &fixture,
-        &holder_run_id,
-        "prepared-holder-terminal",
-    );
-    assert!(store
-        .projection_snapshot()
-        .resource_lane(&lane_key)
-        .is_none());
-    assert_eq!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("peer prepares after holder terminal"),
-        SchedulerStatus::Advanced
-    );
-    assert!(side_effect_projection_for_run_node(
-        store.projection_snapshot(),
-        &fixture.run_id,
-        &node.node_id
-    )
-    .is_some());
-}
-
-#[tokio::test]
 async fn side_effect_not_submitted_resume_claims_next_epoch() {
     let fixture = fixture_with_first_side_effect_state();
     let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -7562,14 +7420,14 @@ async fn side_effect_not_submitted_resume_claims_next_epoch() {
     )
     .await
     .expect("start run");
-    scheduler
-        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-        .await
-        .expect("prepare side effect");
-    scheduler
-        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-        .await
-        .expect("take over and start invocation");
+    drive_once(
+        &scheduler,
+        &mut store,
+        &fixture.runtime_spec,
+        &fixture.run_id,
+    )
+    .await
+    .expect("prepare and start side effect");
 
     let node = node_by_output(&fixture, &fixture.cell_a);
     let attempt_id = attempt_id(
@@ -7581,19 +7439,23 @@ async fn side_effect_not_submitted_resume_claims_next_epoch() {
     .expect("attempt id");
     append_not_submitted_proven(&mut store, &fixture, node, &attempt_id, 1);
 
-    scheduler
-        .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-        .await
-        .expect("resume not-submitted");
-    let projection =
-        side_effect_projection_for_attempt(store.projection_snapshot(), node, &attempt_id)
-            .expect("projection lookup")
-            .expect("side-effect projection");
+    drive_once(
+        &scheduler,
+        &mut store,
+        &fixture.runtime_spec,
+        &fixture.run_id,
+    )
+    .await
+    .expect("resume not-submitted");
+    let projection_snapshot = store.projection_snapshot();
+    let projection = side_effect_projection_for_attempt(&projection_snapshot, node, &attempt_id)
+        .expect("projection lookup")
+        .expect("side-effect projection");
     assert!(matches!(
         projection.phase,
         store::SideEffectPhase::InvocationStarted {
             invocation_epoch: 2,
-            claim_generation: 3,
+            claim_generation: 2,
             ..
         }
     ));
@@ -7700,7 +7562,7 @@ async fn side_effect_staged_artifact_must_match_payload_ledger_binding() {
         ))
         .expect("binding b");
     let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -7711,10 +7573,14 @@ async fn side_effect_staged_artifact_must_match_payload_ledger_binding() {
     .expect("start run");
 
     assert_eq!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("terminalize side-effect artifact binding mismatch"),
+        drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id
+        )
+        .await
+        .expect("terminalize side-effect artifact binding mismatch"),
         SchedulerStatus::Advanced
     );
     let node = node_by_output(&fixture, &fixture.cell_a);
@@ -7729,7 +7595,8 @@ async fn side_effect_ambiguous_phase_blocks_resume() {
         .register(binding(
             fixture.descriptor_a.clone(),
             "sidefx",
-            AmbiguousSideEffectRunner::new(&fixture),
+            DriverSideEffectRunner::new(&fixture)
+                .with_submission_decision(TestSubmissionDecision::Ambiguous),
         ))
         .expect("binding a");
     registry
@@ -7744,7 +7611,7 @@ async fn side_effect_ambiguous_phase_blocks_resume() {
         ))
         .expect("binding b");
     let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -7756,19 +7623,27 @@ async fn side_effect_ambiguous_phase_blocks_resume() {
 
     for _ in 0..3 {
         assert_eq!(
-            scheduler
-                .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-                .await
-                .expect("advance to ambiguity"),
+            drive_once(
+                &scheduler,
+                &mut store,
+                &fixture.runtime_spec,
+                &fixture.run_id
+            )
+            .await
+            .expect("advance to ambiguity"),
             SchedulerStatus::Advanced
         );
     }
     assert_eq!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("ambiguous side effect resolves terminal"),
-        SchedulerStatus::Advanced
+        drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id
+        )
+        .await
+        .expect("ambiguous side effect resolves terminal"),
+        SchedulerStatus::PublicOutputProjected
     );
     assert!(store
         .projection_snapshot()
@@ -7792,7 +7667,8 @@ async fn side_effect_ambiguity_blocks_independent_ready_nodes() {
         .register(binding(
             fixture.descriptor_a.clone(),
             "sidefx",
-            AmbiguousSideEffectRunner::new(&fixture),
+            DriverSideEffectRunner::new(&fixture)
+                .with_submission_decision(TestSubmissionDecision::Ambiguous),
         ))
         .expect("binding a");
     registry
@@ -7807,7 +7683,7 @@ async fn side_effect_ambiguity_blocks_independent_ready_nodes() {
         ))
         .expect("binding b");
     let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -7818,17 +7694,25 @@ async fn side_effect_ambiguity_blocks_independent_ready_nodes() {
     .expect("start run");
 
     for _ in 0..3 {
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("advance to ambiguity");
+        drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id,
+        )
+        .await
+        .expect("advance to ambiguity");
     }
     assert_eq!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("ambiguity resolves terminal"),
-        SchedulerStatus::Advanced
+        drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id
+        )
+        .await
+        .expect("ambiguity resolves terminal"),
+        SchedulerStatus::PublicOutputProjected
     );
     assert!(store
         .projection_snapshot()
@@ -7870,7 +7754,7 @@ async fn side_effect_output_before_confirmation_is_rejected() {
         ))
         .expect("binding b");
     let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-    let mut store = store::InMemoryTypedRunStore::new();
+    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -7881,10 +7765,14 @@ async fn side_effect_output_before_confirmation_is_rejected() {
     .expect("start run");
 
     assert_eq!(
-        scheduler
-            .drive_once(&mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("terminalize premature side-effect output"),
+        drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id
+        )
+        .await
+        .expect("terminalize premature side-effect output"),
         SchedulerStatus::Advanced
     );
     let node = node_by_output(&fixture, &fixture.cell_a);
@@ -7979,283 +7867,26 @@ fn side_effect_ambiguity_derives_attempt_failure_payload() {
 }
 
 #[derive(Clone)]
-struct DeterministicSideEffectRunner {
-    cap_kind: CapabilityKind,
-    cap_version: CapabilityVersion,
-    adapter_kind: AdapterKind,
-    adapter_version: AdapterVersion,
-    resource_keys: BTreeMap<NodeId, events::ResourceKeyEvidence>,
-    inline_prepare_artifacts: bool,
+struct DriverSideEffectRunner {
+    callbacks: TestSideEffectDriverCallbacks,
 }
 
-impl DeterministicSideEffectRunner {
+impl DriverSideEffectRunner {
     fn new(fixture: &Fixture) -> Self {
         Self {
-            cap_kind: side_effect_capability_kind(),
-            cap_version: side_effect_capability_version(),
-            adapter_kind: fixture.adapter_kind.clone(),
-            adapter_version: fixture.adapter_version.clone(),
-            resource_keys: BTreeMap::new(),
-            inline_prepare_artifacts: false,
+            callbacks: TestSideEffectDriverCallbacks::new(fixture),
         }
     }
 
-    fn with_resource_keys(
-        mut self,
-        resource_keys: BTreeMap<NodeId, events::ResourceKeyEvidence>,
-    ) -> Self {
-        self.resource_keys = resource_keys;
+    fn with_submission_decision(mut self, decision: TestSubmissionDecision) -> Self {
+        self.callbacks = self.callbacks.with_submission_decision(decision);
         self
-    }
-
-    fn with_inline_prepare_artifacts(mut self) -> Self {
-        self.inline_prepare_artifacts = true;
-        self
-    }
-
-    fn resource_key_for_ctx(&self, ctx: &ErasedRunCtx<'_>) -> Option<events::ResourceKeyEvidence> {
-        self.resource_keys.get(&ctx.node().node_id).cloned()
-    }
-
-    fn prepared(
-        &self,
-        ctx: &ErasedRunCtx<'_>,
-        ledger: events::SideEffectLedgerKey,
-        invocation_epoch: u32,
-        claim_generation: u32,
-    ) -> RunnerEventPayload {
-        side_effect_prepared_with_resource_key(
-            ctx,
-            ledger,
-            invocation_epoch,
-            claim_generation,
-            self.resource_key_for_ctx(ctx),
-        )
     }
 }
 
-impl ErasedNodeRunner for DeterministicSideEffectRunner {
+impl ErasedNodeRunner for DriverSideEffectRunner {
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
-        Box::pin(async move {
-            let ledger = side_effect_ledger_key_for_ctx(&ctx);
-            let phase = side_effect_projection_for_attempt(
-                ctx.projections(),
-                ctx.node(),
-                ctx.attempt_id(),
-            )?;
-            match phase {
-                None => self.prepare(ctx, ledger),
-                Some(projection)
-                    if matches!(
-                        projection.phase,
-                        store::SideEffectPhase::Claimed { .. }
-                            | store::SideEffectPhase::InvocationPrepared { .. }
-                    ) =>
-                {
-                    let claim = projection.claim.as_ref().expect("claim projection");
-                    Ok(ErasedRunnerOutput::new(vec![
-                        side_effect_claim_taken_over(&ctx, ledger.clone(), claim, 2),
-                        self.prepared(&ctx, ledger.clone(), 1, 2),
-                        side_effect_invocation_started(&ctx, ledger, 1, 2),
-                    ]))
-                }
-                Some(store::SideEffectProjection {
-                    phase:
-                        store::SideEffectPhase::InvocationStarted {
-                            invocation_epoch, ..
-                        }
-                        | store::SideEffectPhase::SubmissionUnknown { invocation_epoch },
-                    ..
-                }) => {
-                    let (artifact_id, digest) =
-                        side_effect_fixture_artifact_pair(&ctx, "submission");
-                    let staged_artifact = staged_side_effect_artifact(
-                        &ctx,
-                        side_effect_artifact(
-                            &ctx,
-                            artifact_id.clone(),
-                            digest.clone(),
-                            events::ArtifactRole::Submission,
-                        ),
-                        ledger.clone(),
-                        *invocation_epoch,
-                    )?;
-                    Ok(ErasedRunnerOutput {
-                        staged_artifacts: vec![staged_artifact],
-                        staged_retention_refs: Vec::new(),
-                        payloads: vec![side_effect_submission_observed(
-                            &ctx,
-                            ledger,
-                            *invocation_epoch,
-                            artifact_id,
-                            digest,
-                        )],
-                    })
-                }
-                Some(store::SideEffectProjection {
-                    phase: store::SideEffectPhase::NotSubmittedProven { invocation_epoch },
-                    claim,
-                    ..
-                }) => {
-                    let claim = claim.as_ref().expect("claim projection");
-                    let next_epoch = invocation_epoch + 1;
-                    let next_generation = claim.claim_generation + 1;
-                    Ok(ErasedRunnerOutput::new(vec![
-                        side_effect_claimed(&ctx, ledger.clone(), next_epoch, next_generation),
-                        self.prepared(&ctx, ledger.clone(), next_epoch, next_generation),
-                        side_effect_invocation_started(&ctx, ledger, next_epoch, next_generation),
-                    ]))
-                }
-                Some(store::SideEffectProjection {
-                    phase: store::SideEffectPhase::SubmissionObserved { invocation_epoch },
-                    ..
-                }) => {
-                    let (artifact_id, digest) = side_effect_fixture_artifact_pair(&ctx, "receipt");
-                    let staged_artifact = staged_side_effect_artifact(
-                        &ctx,
-                        side_effect_artifact(
-                            &ctx,
-                            artifact_id.clone(),
-                            digest.clone(),
-                            events::ArtifactRole::Receipt,
-                        ),
-                        ledger.clone(),
-                        *invocation_epoch,
-                    )?;
-                    Ok(ErasedRunnerOutput {
-                        staged_artifacts: vec![staged_artifact],
-                        staged_retention_refs: Vec::new(),
-                        payloads: vec![side_effect_receipt_observed(
-                            &ctx,
-                            ledger,
-                            *invocation_epoch,
-                            artifact_id,
-                            digest,
-                        )],
-                    })
-                }
-                Some(store::SideEffectProjection {
-                    phase: store::SideEffectPhase::ReceiptObserved { invocation_epoch },
-                    ..
-                }) => {
-                    let (artifact_id, digest) =
-                        side_effect_fixture_artifact_pair(&ctx, "confirmation");
-                    let staged_artifact = staged_side_effect_artifact(
-                        &ctx,
-                        side_effect_artifact(
-                            &ctx,
-                            artifact_id.clone(),
-                            digest.clone(),
-                            events::ArtifactRole::Confirmation,
-                        ),
-                        ledger.clone(),
-                        *invocation_epoch,
-                    )?;
-                    Ok(ErasedRunnerOutput {
-                        staged_artifacts: vec![staged_artifact],
-                        staged_retention_refs: Vec::new(),
-                        payloads: vec![side_effect_confirmation_observed(
-                            &ctx,
-                            ledger,
-                            *invocation_epoch,
-                            artifact_id,
-                            digest,
-                        )],
-                    })
-                }
-                Some(store::SideEffectProjection {
-                    phase: store::SideEffectPhase::ConfirmationObserved { .. },
-                    ..
-                }) => {
-                    let (output_artifact, output_digest) =
-                        side_effect_fixture_artifact_pair(&ctx, "state-output");
-                    let artifact = state_output_artifact(
-                        ctx.node(),
-                        ctx.descriptor(),
-                        output_artifact.clone(),
-                        output_digest.clone(),
-                    );
-                    let staged_artifact = staged_attempt_artifact(&ctx, artifact)?;
-                    Ok(ErasedRunnerOutput {
-                        staged_artifacts: vec![staged_artifact],
-                        staged_retention_refs: Vec::new(),
-                        payloads: terminal_payloads(&ctx, output_artifact, output_digest),
-                    })
-                }
-                Some(_) => Err(RuntimeError::Blocked(
-                    "side-effect fixture blocked".to_owned(),
-                )),
-            }
-        })
-    }
-}
-
-impl DeterministicSideEffectRunner {
-    fn prepare(
-        &self,
-        ctx: ErasedRunCtx<'_>,
-        ledger: events::SideEffectLedgerKey,
-    ) -> Result<ErasedRunnerOutput> {
-        assert!(ctx.caps().contains(&self.cap_kind, &self.cap_version));
-        let (intent_bytes, intent_artifact_id, intent_hash) = if self.inline_prepare_artifacts {
-            let bytes = side_effect_fixture_bytes(&ctx, "intent");
-            let digest = digest_for_bytes(&bytes);
-            let artifact_id = ArtifactId::from_digest(digest.algorithm(), *digest.digest());
-            (Some(bytes), artifact_id, digest)
-        } else {
-            let (artifact_id, digest) = side_effect_fixture_artifact_pair(&ctx, "intent");
-            (None, artifact_id, digest)
-        };
-        let mut intent_evidence = side_effect_artifact(
-            &ctx,
-            intent_artifact_id.clone(),
-            intent_hash.clone(),
-            events::ArtifactRole::SideEffectIntent,
-        );
-        if let Some(bytes) = &intent_bytes {
-            intent_evidence.byte_len = bytes.len() as u64;
-        }
-        let staged_artifact = if let Some(bytes) = intent_bytes {
-            StagedArtifact::inline_side_effect_artifact(
-                &ctx,
-                bytes,
-                intent_evidence,
-                ledger.clone(),
-                1,
-            )?
-        } else {
-            staged_side_effect_artifact(&ctx, intent_evidence, ledger.clone(), 1)?
-        };
-        Ok(ErasedRunnerOutput {
-            staged_artifacts: vec![staged_artifact],
-            staged_retention_refs: Vec::new(),
-            payloads: vec![
-                RunnerEventPayload::SideEffectIntentPersisted(
-                    events::side_effect::IntentPersisted {
-                        spec_hash: ctx.spec_hash().clone(),
-                        node_id: ctx.node().node_id.clone(),
-                        scope_id: ctx.node().scope_id.clone(),
-                        attempt_id: ctx.attempt_id().clone(),
-                        ledger_key: ledger.clone(),
-                        ledger_purpose: side_effect_ledger_purpose_for_ctx(&ctx),
-                        invocation_epoch: 1,
-                        intent_schema_id: ctx.node().config_ref.schema_id.clone(),
-                        intent_hash,
-                        intent_artifact_id,
-                        idempotency_input_schema_id: ctx.node().config_ref.schema_id.clone(),
-                        idempotency_input_hash: side_effect_fixture_digest(&ctx, "idempotency"),
-                        idempotency_key: events::IdempotencyKeyRef::new("idem-1")
-                            .expect("idempotency key"),
-                        capability_kind: self.cap_kind.clone(),
-                        capability_version: self.cap_version.clone(),
-                        adapter_kind: self.adapter_kind.clone(),
-                        adapter_version: self.adapter_version.clone(),
-                    },
-                ),
-                side_effect_claimed(&ctx, ledger.clone(), 1, 1),
-                self.prepared(&ctx, ledger, 1, 1),
-            ],
-        })
+        Box::pin(async move { SideEffectDriver::drive(ctx, &self.callbacks).await })
     }
 }
 
@@ -8333,72 +7964,8 @@ impl ErasedNodeRunner for PrePreparedSideEffectRunner {
     }
 }
 
-struct AmbiguousSideEffectRunner {
-    inner: DeterministicSideEffectRunner,
-}
-
-impl AmbiguousSideEffectRunner {
-    fn new(fixture: &Fixture) -> Self {
-        Self {
-            inner: DeterministicSideEffectRunner::new(fixture),
-        }
-    }
-}
-
-impl ErasedNodeRunner for AmbiguousSideEffectRunner {
-    fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
-        Box::pin(async move {
-            let ledger = side_effect_ledger_key_for_ctx(&ctx);
-            let phase = side_effect_projection_for_attempt(
-                ctx.projections(),
-                ctx.node(),
-                ctx.attempt_id(),
-            )?;
-            if matches!(
-                phase.map(|projection| &projection.phase),
-                Some(store::SideEffectPhase::InvocationStarted { .. })
-            ) {
-                let artifact_id = artifact(0xcb);
-                let digest = content(0xca);
-                let staged_artifact = staged_side_effect_artifact(
-                    &ctx,
-                    side_effect_artifact(
-                        &ctx,
-                        artifact_id.clone(),
-                        digest.clone(),
-                        events::ArtifactRole::AmbiguityEvidence,
-                    ),
-                    ledger.clone(),
-                    1,
-                )?;
-                Ok(ErasedRunnerOutput {
-                    staged_artifacts: vec![staged_artifact],
-                    staged_retention_refs: Vec::new(),
-                    payloads: vec![RunnerEventPayload::SideEffectAmbiguous(
-                        events::side_effect::Ambiguous {
-                            spec_hash: ctx.spec_hash().clone(),
-                            node_id: ctx.node().node_id.clone(),
-                            attempt_id: ctx.attempt_id().clone(),
-                            ledger_key: ledger,
-                            ledger_purpose: side_effect_ledger_purpose_for_ctx(&ctx),
-                            invocation_epoch: 1,
-                            ambiguity_code: events::AmbiguityCode::new("unknown_submission")
-                                .expect("ambiguity code"),
-                            evidence_schema_id: ctx.node().config_ref.schema_id.clone(),
-                            evidence_hash: digest,
-                            evidence_artifact_id: artifact_id,
-                        },
-                    )],
-                })
-            } else {
-                self.inner.run_erased(ctx).await
-            }
-        })
-    }
-}
-
 struct TouchedSetSideEffectRunner {
-    inner: DeterministicSideEffectRunner,
+    inner: DriverSideEffectRunner,
     receipt: TouchedSetEmission,
     confirmation: TouchedSetEmission,
 }
@@ -8412,7 +7979,7 @@ enum TouchedSetEmission {
 impl TouchedSetSideEffectRunner {
     fn with_receipt(fixture: &Fixture) -> Self {
         Self {
-            inner: DeterministicSideEffectRunner::new(fixture),
+            inner: DriverSideEffectRunner::new(fixture),
             receipt: TouchedSetEmission::MatchPayloadSchema,
             confirmation: TouchedSetEmission::None,
         }
@@ -8420,7 +7987,7 @@ impl TouchedSetSideEffectRunner {
 
     fn with_confirmation(fixture: &Fixture) -> Self {
         Self {
-            inner: DeterministicSideEffectRunner::new(fixture),
+            inner: DriverSideEffectRunner::new(fixture),
             receipt: TouchedSetEmission::None,
             confirmation: TouchedSetEmission::MatchPayloadSchema,
         }
@@ -8458,14 +8025,28 @@ impl ErasedNodeRunner for TouchedSetSideEffectRunner {
 }
 
 struct FailActiveSideEffectAfterSagaRunner {
-    inner: DeterministicSideEffectRunner,
+    inner: DriverSideEffectRunner,
+    stop_before_invocation_started: bool,
 }
 
 impl FailActiveSideEffectAfterSagaRunner {
     fn new(fixture: &Fixture) -> Self {
         Self {
-            inner: DeterministicSideEffectRunner::new(fixture),
+            inner: DriverSideEffectRunner::new(fixture),
+            stop_before_invocation_started: false,
         }
+    }
+
+    fn before_invocation_started(fixture: &Fixture) -> Self {
+        Self {
+            inner: DriverSideEffectRunner::new(fixture),
+            stop_before_invocation_started: true,
+        }
+    }
+
+    fn with_submission_decision(mut self, decision: TestSubmissionDecision) -> Self {
+        self.inner = self.inner.with_submission_decision(decision);
+        self
     }
 }
 
@@ -8482,13 +8063,13 @@ impl ErasedNodeRunner for FailActiveSideEffectAfterSagaRunner {
             )?
             .map(|projection| (projection.ledger_key.clone(), projection.phase.clone()));
             if saga.engagement.is_some() {
-                if let Some((ledger, phase)) = projected {
+                if let Some((ledger, phase)) = &projected {
                     if let Some((invocation_epoch, failure_phase)) =
-                        saga_closure_failure_for_phase(&phase)
+                        saga_closure_failure_for_phase(phase)
                     {
                         return Ok(ErasedRunnerOutput::new(vec![side_effect_failed(
                             &ctx,
-                            ledger,
+                            ledger.clone(),
                             invocation_epoch,
                             failure_phase,
                             false,
@@ -8496,9 +8077,67 @@ impl ErasedNodeRunner for FailActiveSideEffectAfterSagaRunner {
                     }
                 }
             }
+            if self.stop_before_invocation_started && projected.is_none() {
+                return prepared_boundary_side_effect_output(ctx);
+            }
             self.inner.run_erased(ctx).await
         })
     }
+}
+
+fn prepared_boundary_side_effect_output(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutput> {
+    let ledger = side_effect_ledger_key_for_ctx(&ctx);
+    let (intent_artifact_id, intent_hash) = side_effect_fixture_artifact_pair(&ctx, "intent");
+    let staged_artifact = staged_side_effect_artifact(
+        &ctx,
+        side_effect_artifact(
+            &ctx,
+            intent_artifact_id.clone(),
+            intent_hash.clone(),
+            events::ArtifactRole::SideEffectIntent,
+        ),
+        ledger.clone(),
+        1,
+    )?;
+    Ok(ErasedRunnerOutput {
+        staged_artifacts: vec![staged_artifact],
+        staged_retention_refs: Vec::new(),
+        payloads: vec![
+            RunnerEventPayload::SideEffectIntentPersisted(events::side_effect::IntentPersisted {
+                spec_hash: ctx.spec_hash().clone(),
+                node_id: ctx.node().node_id.clone(),
+                scope_id: ctx.node().scope_id.clone(),
+                attempt_id: ctx.attempt_id().clone(),
+                ledger_key: ledger.clone(),
+                ledger_purpose: side_effect_ledger_purpose_for_ctx(&ctx),
+                invocation_epoch: 1,
+                intent_schema_id: ctx.node().config_ref.schema_id.clone(),
+                intent_hash,
+                intent_artifact_id,
+                idempotency_input_schema_id: ctx.node().config_ref.schema_id.clone(),
+                idempotency_input_hash: side_effect_fixture_digest(&ctx, "idempotency"),
+                idempotency_key: events::IdempotencyKeyRef::new("idem-1").expect("idempotency key"),
+                capability_kind: side_effect_capability_kind(),
+                capability_version: side_effect_capability_version(),
+                adapter_kind: ctx
+                    .node()
+                    .adapter_bindings
+                    .first()
+                    .expect("side-effect adapter")
+                    .adapter_kind
+                    .clone(),
+                adapter_version: ctx
+                    .node()
+                    .adapter_bindings
+                    .first()
+                    .expect("side-effect adapter")
+                    .adapter_version
+                    .clone(),
+            }),
+            side_effect_claimed(&ctx, ledger.clone(), 1, 1),
+            side_effect_prepared(&ctx, ledger, 1, 1),
+        ],
+    })
 }
 
 fn saga_closure_failure_for_phase(
@@ -8556,13 +8195,13 @@ impl ErasedNodeRunner for ForwardEmitsRemediationPurposeRunner {
 }
 
 struct RemediationEmitsForwardPurposeRunner {
-    inner: DeterministicSideEffectRunner,
+    inner: DriverSideEffectRunner,
 }
 
 impl RemediationEmitsForwardPurposeRunner {
     fn new(fixture: &Fixture) -> Self {
         Self {
-            inner: DeterministicSideEffectRunner::new(fixture),
+            inner: DriverSideEffectRunner::new(fixture),
         }
     }
 }
@@ -8668,95 +8307,111 @@ impl ErasedNodeRunner for PrematureSideEffectOutputRunner {
 }
 
 struct StaleStreamStore<'a> {
-    inner: &'a mut store::InMemoryTypedRunStore,
+    inner: RefCell<&'a mut TestTypedRunStore>,
     stream: Vec<store::KernelEventEnvelope>,
 }
 
-impl store::TypedProjectionRead for StaleStreamStore<'_> {
-    fn projection_snapshot(&self) -> &store::ProjectionSnapshot {
-        self.inner.projection_snapshot()
+impl<'a> StaleStreamStore<'a> {
+    fn new(inner: &'a mut TestTypedRunStore, stream: Vec<store::KernelEventEnvelope>) -> Self {
+        Self {
+            inner: RefCell::new(inner),
+            stream,
+        }
     }
 }
 
-impl store::TypedRunEventStore for StaleStreamStore<'_> {
-    fn append_prepared_commit_plan(
-        &mut self,
+impl store::AsyncTypedRunEventStore for StaleStreamStore<'_> {
+    type Error = store::StoreError;
+
+    fn append_prepared_commit_plan<'a>(
+        &'a self,
         plan: store::PreparedCommitPlan,
-    ) -> store::Result<store::CommitOutcome> {
-        self.inner.append_prepared_commit_plan(plan)
+    ) -> store::AsyncStoreFuture<'a, store::CommitOutcome, Self::Error> {
+        let result = self.inner.borrow_mut().append_prepared_commit_plan(plan);
+        Box::pin(std::future::ready(result))
     }
 
-    fn load_run_stream(&self, _run_id: &RunId) -> Vec<store::KernelEventEnvelope> {
-        self.stream.clone()
+    fn load_run_stream<'a>(
+        &'a self,
+        _run_id: &'a RunId,
+    ) -> store::AsyncStoreFuture<'a, Vec<store::KernelEventEnvelope>, Self::Error> {
+        Box::pin(std::future::ready(Ok(self.stream.clone())))
     }
 
-    fn expected_next_seq(&self, run_id: &RunId) -> store::StreamSeq {
-        self.inner.expected_next_seq(run_id)
+    fn expected_next_seq<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> store::AsyncStoreFuture<'a, store::StreamSeq, Self::Error> {
+        let result = Ok(self.inner.borrow().expected_next_seq(run_id));
+        Box::pin(std::future::ready(result))
+    }
+
+    fn status_projection_snapshot<'a>(
+        &'a self,
+        _run_id: &'a RunId,
+    ) -> store::AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
+        let result = Ok(self.inner.borrow().projection_snapshot().clone());
+        Box::pin(std::future::ready(result))
     }
 }
 
 struct MissingInputArtifactRefStore<'a> {
-    inner: &'a mut store::InMemoryTypedRunStore,
+    inner: RefCell<&'a mut TestTypedRunStore>,
     producer_node_id: NodeId,
 }
 
-impl store::TypedProjectionRead for MissingInputArtifactRefStore<'_> {
-    fn projection_snapshot(&self) -> &store::ProjectionSnapshot {
-        self.inner.projection_snapshot()
+impl<'a> MissingInputArtifactRefStore<'a> {
+    fn new(inner: &'a mut TestTypedRunStore, producer_node_id: NodeId) -> Self {
+        Self {
+            inner: RefCell::new(inner),
+            producer_node_id,
+        }
     }
 }
 
-impl store::TypedRunEventStore for MissingInputArtifactRefStore<'_> {
-    fn append_prepared_commit_plan(
-        &mut self,
+impl store::AsyncTypedRunEventStore for MissingInputArtifactRefStore<'_> {
+    type Error = store::StoreError;
+
+    fn append_prepared_commit_plan<'a>(
+        &'a self,
         plan: store::PreparedCommitPlan,
-    ) -> store::Result<store::CommitOutcome> {
-        self.inner.append_prepared_commit_plan(plan)
+    ) -> store::AsyncStoreFuture<'a, store::CommitOutcome, Self::Error> {
+        let result = self.inner.borrow_mut().append_prepared_commit_plan(plan);
+        Box::pin(std::future::ready(result))
     }
 
-    fn load_run_stream(&self, run_id: &RunId) -> Vec<store::KernelEventEnvelope> {
-        rewrite_stream_without_payloads(&self.inner.load_run_stream(run_id), |payload| {
-            matches!(
-                payload,
-                events::KernelEventPayload::ArtifactReferenced(payload)
-                    if payload.artifact_ref.role == events::ArtifactRole::StateOutput
-                        && payload.node_id.as_ref() == Some(&self.producer_node_id)
-            )
-        })
+    fn load_run_stream<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> store::AsyncStoreFuture<'a, Vec<store::KernelEventEnvelope>, Self::Error> {
+        let result = rewrite_stream_without_payloads(
+            &self.inner.borrow().load_run_stream(run_id),
+            |payload| {
+                matches!(
+                    payload,
+                    events::KernelEventPayload::ArtifactReferenced(payload)
+                        if payload.artifact_ref.role == events::ArtifactRole::StateOutput
+                            && payload.node_id.as_ref() == Some(&self.producer_node_id)
+                )
+            },
+        );
+        Box::pin(std::future::ready(Ok(result)))
     }
 
-    fn expected_next_seq(&self, run_id: &RunId) -> store::StreamSeq {
-        self.inner.expected_next_seq(run_id)
-    }
-}
-
-struct ReadOnlyCorruptStore {
-    stream: Vec<store::KernelEventEnvelope>,
-    projection: store::ProjectionSnapshot,
-}
-
-impl store::TypedProjectionRead for ReadOnlyCorruptStore {
-    fn projection_snapshot(&self) -> &store::ProjectionSnapshot {
-        &self.projection
-    }
-}
-
-impl store::TypedRunEventStore for ReadOnlyCorruptStore {
-    fn append_prepared_commit_plan(
-        &mut self,
-        _plan: store::PreparedCommitPlan,
-    ) -> store::Result<store::CommitOutcome> {
-        Err(store::StoreError::Identity(
-            "corrupt test store is read-only".to_owned(),
-        ))
+    fn expected_next_seq<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> store::AsyncStoreFuture<'a, store::StreamSeq, Self::Error> {
+        let result = Ok(self.inner.borrow().expected_next_seq(run_id));
+        Box::pin(std::future::ready(result))
     }
 
-    fn load_run_stream(&self, _run_id: &RunId) -> Vec<store::KernelEventEnvelope> {
-        self.stream.clone()
-    }
-
-    fn expected_next_seq(&self, _run_id: &RunId) -> store::StreamSeq {
-        store::StreamSeq::FIRST
+    fn status_projection_snapshot<'a>(
+        &'a self,
+        _run_id: &'a RunId,
+    ) -> store::AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
+        let result = Ok(self.inner.borrow().projection_snapshot().clone());
+        Box::pin(std::future::ready(result))
     }
 }
 
@@ -8780,46 +8435,6 @@ fn rewrite_envelope(
         payload_canonical_byte_len: event.audit().payload_canonical_byte_len(),
     })
     .expect("rewritten envelope")
-}
-
-fn rewrite_commit_payload(
-    stream: &[store::KernelEventEnvelope],
-    target_pos: usize,
-    payload: events::KernelEventPayload,
-) -> Vec<store::KernelEventEnvelope> {
-    let target = &stream[target_pos];
-    let seq = target.seq();
-    let commit_key = target.commit_key().clone();
-    let mut positions = stream
-        .iter()
-        .enumerate()
-        .filter_map(|(index, event)| {
-            (event.seq() == seq && event.commit_key() == &commit_key).then_some(index)
-        })
-        .collect::<Vec<_>>();
-    positions.sort_by_key(|index| stream[*index].ordinal().as_u32());
-    let target_ordinal = target.ordinal().as_u32() as usize;
-    assert_eq!(positions[target_ordinal], target_pos);
-    let mut payloads = positions
-        .iter()
-        .map(|index| stream[*index].payload().clone())
-        .collect::<Vec<_>>();
-    payloads[target_ordinal] = payload;
-    let request = store_typed_commit_request! {
-        run_id: target.run_id().clone(),
-        expected_next_seq: seq,
-        commit_key: commit_key,
-            payloads: payloads,
-        required_artifacts: Vec::new(),
-        preconditions: store::CommitPreconditions::default(),
-    };
-    let batch =
-        store::build_committed_batch(&request, seq).expect("rewritten commit payload batch");
-    let mut rewritten = stream.to_vec();
-    for (position, event) in positions.into_iter().zip(batch.events().iter().cloned()) {
-        rewritten[position] = event;
-    }
-    rewritten
 }
 
 fn rewrite_stream_without_payloads<F>(
@@ -8872,420 +8487,6 @@ where
         index = end;
     }
     rewritten
-}
-
-fn rewrite_stream_without_commit_containing<F>(
-    stream: &[store::KernelEventEnvelope],
-    mut should_remove_commit: F,
-) -> Vec<store::KernelEventEnvelope>
-where
-    F: FnMut(&events::KernelEventPayload) -> bool,
-{
-    let mut rewritten = Vec::with_capacity(stream.len());
-    let mut index = 0;
-    while index < stream.len() {
-        let first = &stream[index];
-        let original_seq = first.seq();
-        let commit_key = first.commit_key().clone();
-        let mut end = index + 1;
-        while end < stream.len()
-            && stream[end].seq() == original_seq
-            && stream[end].commit_key() == &commit_key
-        {
-            end += 1;
-        }
-        let commit = &stream[index..end];
-        if commit
-            .iter()
-            .any(|event| should_remove_commit(event.payload()))
-        {
-            index = end;
-            continue;
-        }
-        let seq = next_seq_for_stream_for_tests(first.run_id(), &rewritten);
-        let request = store_typed_commit_request! {
-            run_id: first.run_id().clone(),
-            expected_next_seq: seq,
-            commit_key: commit_key,
-            payloads: commit
-                .iter()
-                .map(|event| event.payload().clone())
-                .collect::<Vec<_>>(),
-            required_artifacts: Vec::new(),
-            preconditions: store::CommitPreconditions::default(),
-        };
-        let batch =
-            store::build_committed_batch(&request, seq).expect("rewritten commit payload batch");
-        rewritten.extend(batch.events().iter().cloned());
-        index = end;
-    }
-    rewritten
-}
-
-fn prepend_payloads_to_retention_projection_commit_for_tests(
-    stream: &[store::KernelEventEnvelope],
-    prelude_payloads: Vec<events::KernelEventPayload>,
-    prefix_payloads: Vec<events::KernelEventPayload>,
-) -> Vec<store::KernelEventEnvelope> {
-    if prelude_payloads.is_empty() {
-        let mut rewritten = Vec::with_capacity(stream.len() + prefix_payloads.len());
-        let mut inserted = false;
-        let mut index = 0;
-        while index < stream.len() {
-            let first = &stream[index];
-            let seq = first.seq();
-            let commit_key = first.commit_key().clone();
-            let mut end = index + 1;
-            while end < stream.len()
-                && stream[end].seq() == seq
-                && stream[end].commit_key() == &commit_key
-            {
-                end += 1;
-            }
-            let commit = &stream[index..end];
-            if commit.iter().any(|event| {
-                matches!(
-                    event.payload(),
-                    events::KernelEventPayload::RetentionManifestProjected(_)
-                )
-            }) {
-                let mut payloads = prefix_payloads.clone();
-                payloads.extend(commit.iter().map(|event| event.payload().clone()));
-                let request = store_typed_commit_request! {
-                    run_id: first.run_id().clone(),
-                    expected_next_seq: seq,
-                    commit_key: commit_key,
-                    payloads: payloads,
-                    required_artifacts: Vec::new(),
-                    preconditions: store::CommitPreconditions::default(),
-                };
-                let batch = store::build_committed_batch(&request, seq)
-                    .expect("rewritten retention projection batch");
-                rewritten.extend(batch.events().iter().cloned());
-                inserted = true;
-            } else {
-                rewritten.extend(commit.iter().cloned());
-            }
-            index = end;
-        }
-        assert!(inserted, "retention projection commit exists");
-        return rewritten;
-    }
-
-    let mut rewritten =
-        Vec::with_capacity(stream.len() + prelude_payloads.len() + prefix_payloads.len());
-    let mut inserted = false;
-    let mut next_seq = store::StreamSeq::FIRST;
-    let mut index = 0;
-    while index < stream.len() {
-        let first = &stream[index];
-        let original_seq = first.seq();
-        let commit_key = first.commit_key().clone();
-        let mut end = index + 1;
-        while end < stream.len()
-            && stream[end].seq() == original_seq
-            && stream[end].commit_key() == &commit_key
-        {
-            end += 1;
-        }
-        let commit = &stream[index..end];
-        if commit.iter().any(|event| {
-            matches!(
-                event.payload(),
-                events::KernelEventPayload::RetentionManifestProjected(_)
-            )
-        }) {
-            if !prelude_payloads.is_empty() {
-                let request = store_typed_commit_request! {
-                    run_id: first.run_id().clone(),
-                    expected_next_seq: next_seq,
-                    commit_key: store::CommitKey::new("retention-projection-prelude")
-                        .expect("commit key"),
-                    payloads: prelude_payloads.clone(),
-                    required_artifacts: Vec::new(),
-                    preconditions: store::CommitPreconditions::default(),
-                };
-                let batch = store::build_committed_batch(&request, next_seq)
-                    .expect("retention projection prelude batch");
-                rewritten.extend(batch.events().iter().cloned());
-                next_seq = increment_stream_seq_for_tests(next_seq);
-            }
-            let mut payloads = prefix_payloads.clone();
-            payloads.extend(commit.iter().map(|event| event.payload().clone()));
-            let request = store_typed_commit_request! {
-                run_id: first.run_id().clone(),
-                expected_next_seq: next_seq,
-                commit_key: commit_key,
-                payloads: payloads,
-                required_artifacts: Vec::new(),
-                preconditions: store::CommitPreconditions::default(),
-            };
-            let batch = store::build_committed_batch(&request, next_seq)
-                .expect("rewritten retention projection batch");
-            rewritten.extend(batch.events().iter().cloned());
-            next_seq = increment_stream_seq_for_tests(next_seq);
-            inserted = true;
-        } else {
-            let request = store_typed_commit_request! {
-                run_id: first.run_id().clone(),
-                expected_next_seq: next_seq,
-                commit_key: commit_key,
-                payloads: commit.iter().map(|event| event.payload().clone()).collect(),
-                required_artifacts: Vec::new(),
-                preconditions: store::CommitPreconditions::default(),
-            };
-            let batch =
-                store::build_committed_batch(&request, next_seq).expect("shifted commit batch");
-            rewritten.extend(batch.events().iter().cloned());
-            next_seq = increment_stream_seq_for_tests(next_seq);
-        }
-        index = end;
-    }
-    assert!(inserted, "retention projection commit exists");
-    rewritten
-}
-
-fn append_same_sequence_sidecar_to_retention_projection_for_tests(
-    stream: &[store::KernelEventEnvelope],
-) -> Vec<store::KernelEventEnvelope> {
-    let mut rewritten = Vec::with_capacity(stream.len() + 1);
-    let mut inserted = false;
-    let mut index = 0;
-    while index < stream.len() {
-        let first = &stream[index];
-        let seq = first.seq();
-        let commit_key = first.commit_key().clone();
-        let mut end = index + 1;
-        while end < stream.len()
-            && stream[end].seq() == seq
-            && stream[end].commit_key() == &commit_key
-        {
-            end += 1;
-        }
-        let commit = &stream[index..end];
-        rewritten.extend(commit.iter().cloned());
-        if commit.iter().any(|event| {
-            matches!(
-                event.payload(),
-                events::KernelEventPayload::RetentionManifestProjected(_)
-            )
-        }) {
-            let runtime_evidence = commit
-                .iter()
-                .find_map(|event| match event.payload() {
-                    events::KernelEventPayload::RetentionRefsAppended(payload)
-                        if payload.reason == events::RetentionReason::RuntimeEvidence =>
-                    {
-                        Some(payload)
-                    }
-                    _ => None,
-                })
-                .expect("retention projection runtime evidence refs");
-            let sidecar_key =
-                store::CommitKey::new("forged-same-seq-retention-sidecar").expect("commit key");
-            let request = store_typed_commit_request! {
-                run_id: first.run_id().clone(),
-                expected_next_seq: seq,
-                commit_key: sidecar_key.clone(),
-                payloads: vec![events::KernelEventPayload::RetentionRefsAppended(
-                    events::RetentionRefsAppended {
-                        run_id: runtime_evidence.run_id.clone(),
-                        spec_hash: runtime_evidence.spec_hash.clone(),
-                        refs: runtime_evidence.refs.clone(),
-                        reason: events::RetentionReason::RuntimeEvidence,
-                    },
-                )],
-                required_artifacts: Vec::new(),
-                preconditions: store::CommitPreconditions::default(),
-            };
-            let batch = store::build_committed_batch(&request, seq).expect("sidecar commit batch");
-            let next_ordinal = u32::try_from(commit.len()).expect("retention commit ordinal count");
-            for (offset, event) in batch.events().iter().enumerate() {
-                rewritten.push(rewrite_envelope(
-                    event,
-                    seq,
-                    store::CommitOrdinal::new(
-                        next_ordinal
-                            .checked_add(u32::try_from(offset).expect("sidecar ordinal offset"))
-                            .expect("sidecar ordinal"),
-                    ),
-                    sidecar_key.clone(),
-                ));
-            }
-            inserted = true;
-        }
-        index = end;
-    }
-    assert!(inserted, "retention projection commit exists");
-    rewritten
-}
-
-fn split_public_output_payload_to_own_commit_for_tests(
-    stream: &[store::KernelEventEnvelope],
-) -> Vec<store::KernelEventEnvelope> {
-    let mut rewritten = Vec::with_capacity(stream.len());
-    let mut next_seq = store::StreamSeq::FIRST;
-    let mut split = false;
-    let mut index = 0;
-    while index < stream.len() {
-        let first = &stream[index];
-        let original_seq = first.seq();
-        let commit_key = first.commit_key().clone();
-        let mut end = index + 1;
-        while end < stream.len()
-            && stream[end].seq() == original_seq
-            && stream[end].commit_key() == &commit_key
-        {
-            end += 1;
-        }
-        let commit = &stream[index..end];
-        if commit.iter().any(|event| {
-            matches!(
-                event.payload(),
-                events::KernelEventPayload::PublicOutputProduced(_)
-            )
-        }) {
-            let mut terminal_payloads = Vec::new();
-            let mut public_event = None;
-            for event in commit {
-                if matches!(
-                    event.payload(),
-                    events::KernelEventPayload::PublicOutputProduced(_)
-                ) {
-                    public_event = Some(event);
-                } else {
-                    terminal_payloads.push(event.payload().clone());
-                }
-            }
-            assert!(
-                !terminal_payloads.is_empty(),
-                "public-output commit keeps terminal evidence"
-            );
-            let terminal_request = store_typed_commit_request! {
-                run_id: first.run_id().clone(),
-                expected_next_seq: next_seq,
-                commit_key: commit_key,
-                payloads: terminal_payloads,
-                required_artifacts: Vec::new(),
-                preconditions: store::CommitPreconditions::default(),
-            };
-            let terminal_batch = store::build_committed_batch(&terminal_request, next_seq)
-                .expect("terminal rewrite batch");
-            rewritten.extend(terminal_batch.events().iter().cloned());
-            next_seq = increment_stream_seq_for_tests(next_seq);
-
-            rewritten.push(rewrite_envelope(
-                public_event.expect("public output payload"),
-                next_seq,
-                store::CommitOrdinal::new(0),
-                store::CommitKey::new("corrupt-public-output-split").expect("commit key"),
-            ));
-            next_seq = increment_stream_seq_for_tests(next_seq);
-            split = true;
-        } else {
-            let request = store_typed_commit_request! {
-                run_id: first.run_id().clone(),
-                expected_next_seq: next_seq,
-                commit_key: commit_key,
-            payloads: commit.iter().map(|event| event.payload().clone()).collect(),
-                required_artifacts: Vec::new(),
-                preconditions: store::CommitPreconditions::default(),
-            };
-            let batch =
-                store::build_committed_batch(&request, next_seq).expect("shifted commit batch");
-            rewritten.extend(batch.events().iter().cloned());
-            next_seq = increment_stream_seq_for_tests(next_seq);
-        }
-        index = end;
-    }
-    assert!(split, "public output payload exists");
-    rewritten
-}
-
-fn increment_stream_seq_for_tests(seq: store::StreamSeq) -> store::StreamSeq {
-    store::StreamSeq::new(seq.as_u64() + 1).expect("next shifted seq")
-}
-
-fn next_seq_for_stream_for_tests(
-    run_id: &RunId,
-    stream: &[store::KernelEventEnvelope],
-) -> store::StreamSeq {
-    store::CommittedRunStream::from_events(run_id.clone(), stream.to_vec())
-        .expect("committed stream")
-        .next_seq()
-}
-
-fn append_payload_commit_for_tests(
-    stream: &mut Vec<store::KernelEventEnvelope>,
-    run_id: &RunId,
-    commit_key: &str,
-    payload: events::KernelEventPayload,
-) {
-    append_payloads_commit_for_tests(stream, run_id, commit_key, vec![payload]);
-}
-
-fn append_payload_commit_without_prefix_validation_for_tests(
-    stream: &mut Vec<store::KernelEventEnvelope>,
-    run_id: &RunId,
-    commit_key: &str,
-    payload: events::KernelEventPayload,
-) {
-    let seq = stream
-        .last()
-        .map(|event| increment_stream_seq_for_tests(event.seq()))
-        .unwrap_or(store::StreamSeq::FIRST);
-    let request = store_typed_commit_request! {
-        run_id: run_id.clone(),
-        expected_next_seq: seq,
-        commit_key: store::CommitKey::new(commit_key).expect("commit key"),
-        payloads: vec![payload],
-        required_artifacts: Vec::new(),
-        preconditions: store::CommitPreconditions::default(),
-    };
-    let batch = store::build_committed_batch(&request, seq).expect("raw appended payload batch");
-    stream.extend(batch.events().iter().cloned());
-}
-
-fn append_payloads_commit_for_tests(
-    stream: &mut Vec<store::KernelEventEnvelope>,
-    run_id: &RunId,
-    commit_key: &str,
-    payloads: Vec<events::KernelEventPayload>,
-) {
-    let seq = next_seq_for_stream_for_tests(run_id, stream);
-    let request = store_typed_commit_request! {
-        run_id: run_id.clone(),
-        expected_next_seq: seq,
-        commit_key: store::CommitKey::new(commit_key).expect("commit key"),
-        payloads: payloads,
-        required_artifacts: Vec::new(),
-        preconditions: store::CommitPreconditions::default(),
-    };
-    let batch =
-        store::build_committed_batch(&request, seq).expect("appended corrupt payload commit batch");
-    stream.extend(batch.events().iter().cloned());
-}
-
-fn rewrite_single_payload_envelope(
-    event: &store::KernelEventEnvelope,
-    payload: events::KernelEventPayload,
-) -> store::KernelEventEnvelope {
-    assert_eq!(event.ordinal(), store::CommitOrdinal::new(0));
-    let request = store_typed_commit_request! {
-        run_id: event.run_id().clone(),
-        expected_next_seq: event.seq(),
-        commit_key: event.commit_key().clone(),
-        payloads: vec![payload],
-        required_artifacts: Vec::new(),
-        preconditions: store::CommitPreconditions::default(),
-    };
-    let batch =
-        store::build_committed_batch(&request, event.seq()).expect("rewritten payload batch");
-    batch
-        .events()
-        .first()
-        .expect("rewritten payload event")
-        .clone()
 }
 
 fn event_id_for(
@@ -9448,9 +8649,9 @@ fn referenced_artifact_ids_for_payload(payload: &events::KernelEventPayload) -> 
     artifacts
 }
 
-fn prepare_fixture_launch<S: store::TypedRunEventStore + ?Sized>(
+fn prepare_fixture_launch(
     scheduler: &SerialTypedScheduler,
-    store: &S,
+    store: &TestTypedRunStore,
     fixture: &Fixture,
     seed_cells: Vec<events::SeedCellRef>,
 ) -> Result<PreparedRunLaunch> {
@@ -9462,14 +8663,101 @@ fn prepare_fixture_launch<S: store::TypedRunEventStore + ?Sized>(
     )
 }
 
-async fn start_fixture_run<S: store::TypedRunEventStore + ?Sized>(
+async fn start_fixture_run(
     scheduler: &SerialTypedScheduler,
-    store: &mut S,
+    store: &mut TestTypedRunStore,
     fixture: &Fixture,
     seed_cells: Vec<events::SeedCellRef>,
 ) -> Result<store::CommitOutcome> {
     let launch = prepare_fixture_launch(scheduler, store, fixture, seed_cells)?;
+    scheduler_start_run(scheduler, store, launch).await
+}
+
+async fn start_fixture_run_async_store<S: store::AsyncTypedRunEventStore + ?Sized>(
+    scheduler: &SerialTypedScheduler,
+    store: &S,
+    fixture: &Fixture,
+    seed_cells: Vec<events::SeedCellRef>,
+) -> Result<store::CommitOutcome> {
+    let expected_next_seq = store
+        .expected_next_seq(&fixture.run_id)
+        .await
+        .map_err(crate::error::async_store_error)?;
+    let launch = scheduler.prepare_run_launch(
+        &fixture.runtime_spec,
+        fixture.run_id.clone(),
+        run_start_evidence(fixture, seed_cells),
+        expected_next_seq,
+    )?;
     scheduler.start_run(store, launch).await
+}
+
+async fn scheduler_start_run(
+    scheduler: &SerialTypedScheduler,
+    store: &mut TestTypedRunStore,
+    launch: PreparedRunLaunch,
+) -> Result<store::CommitOutcome> {
+    scheduler.start_run(&*store, launch).await
+}
+
+async fn scheduler_start_run_admitted(
+    scheduler: &SerialTypedScheduler,
+    store: &mut TestTypedRunStore,
+    runtime_spec: &CertifiedRuntimeSpec,
+    launch: PreparedRunLaunch,
+) -> Result<RunAdmissionAuthority> {
+    scheduler
+        .start_run_admitted(&*store, runtime_spec, launch)
+        .await
+}
+
+async fn drive_once(
+    scheduler: &SerialTypedScheduler,
+    store: &mut TestTypedRunStore,
+    runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
+) -> Result<SchedulerStatus> {
+    scheduler.drive_once(&*store, runtime_spec, run_id).await
+}
+
+async fn drive_until_blocked(
+    scheduler: &SerialTypedScheduler,
+    store: &mut TestTypedRunStore,
+    runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
+) -> Result<SchedulerStatus> {
+    scheduler
+        .drive_until_blocked(&*store, runtime_spec, run_id)
+        .await
+}
+
+async fn record_manual_resolution(
+    scheduler: &SerialTypedScheduler,
+    store: &mut TestTypedRunStore,
+    runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
+    request: ManualResolutionRequest,
+) -> Result<store::CommitOutcome> {
+    scheduler
+        .record_manual_resolution(&*store, runtime_spec, run_id, request)
+        .await
+}
+
+fn build_manual_resolution_prefix_authority_for_tests(
+    runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
+    store: &TestTypedRunStore,
+    manual: spec::ManualResolutionEvidenceSpec,
+) -> Result<mfm_manual_auth::ManualResolutionPrefixAuthority> {
+    let projection_snapshot = store.projection_snapshot();
+    crate::manual_resolution::build_manual_resolution_prefix_authority_from_parts(
+        runtime_spec,
+        run_id,
+        manual,
+        &store.load_run_stream(run_id),
+        store.expected_next_seq(run_id),
+        &projection_snapshot,
+    )
 }
 
 fn run_start_evidence(
@@ -9640,22 +8928,71 @@ fn state_output_artifact_for_bytes(
     }
 }
 
-fn event_artifact_ref_from_store(
-    artifact: &store::ArtifactEvidenceRef,
-) -> events::ArtifactEvidenceRef {
-    events::ArtifactEvidenceRef {
-        artifact_id: artifact.artifact_id.clone(),
-        role: artifact.artifact_role,
-        schema_id: artifact.schema_id.clone().expect("schema-bearing artifact"),
-        semantic_type_id: artifact.semantic_type_id.clone(),
-        content_digest: artifact.digest.clone(),
-        byte_len: artifact.byte_len,
-        media_type: artifact.media_type.clone(),
-    }
-}
-
 fn digest_for_bytes(bytes: &[u8]) -> ContentDigest {
     ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, sha256_digest_bytes(bytes))
+}
+
+fn runtime_staging_class(role: events::ArtifactRole) -> &'static str {
+    match role.contract().staging {
+        events::ArtifactStagingClass::AttemptStateOutput
+        | events::ArtifactStagingClass::AttemptFactResponse
+        | events::ArtifactStagingClass::AttemptPublicOutput
+        | events::ArtifactStagingClass::AttemptRedactedDiagnostic => {
+            assert!(staged_artifact_binding_kind(role).is_some());
+            assert!(staged_side_effect_artifact_phase(role).is_none());
+        }
+        events::ArtifactStagingClass::SideEffectIntent
+        | events::ArtifactStagingClass::SideEffectPreparedInvocation
+        | events::ArtifactStagingClass::SideEffectNotSubmittedProof
+        | events::ArtifactStagingClass::SideEffectSubmission
+        | events::ArtifactStagingClass::SideEffectSubmissionUnknown
+        | events::ArtifactStagingClass::SideEffectReceipt
+        | events::ArtifactStagingClass::SideEffectConfirmation
+        | events::ArtifactStagingClass::SideEffectAmbiguity => {
+            assert!(staged_artifact_binding_kind(role).is_none());
+            assert!(staged_side_effect_artifact_phase(role).is_some());
+        }
+        events::ArtifactStagingClass::RunAdmission
+        | events::ArtifactStagingClass::ManualResolution
+        | events::ArtifactStagingClass::MiddlewareRetentionManifest => {
+            assert!(staged_artifact_binding_kind(role).is_none());
+            assert!(staged_side_effect_artifact_phase(role).is_none());
+        }
+    }
+    role.contract().staging.as_str()
+}
+
+#[test]
+fn artifact_role_contract_runtime_staging_matches_current_helpers() {
+    let rows = events::ArtifactRole::ALL
+        .iter()
+        .copied()
+        .map(|role| format!("{role:?} -> {}", runtime_staging_class(role)))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert_eq!(
+        rows,
+        "TypedExecutionSpec -> run_admission\n\
+TypedSpecCertificate -> run_admission\n\
+TypedConfig -> run_admission\n\
+SeedInput -> run_admission\n\
+StateOutput -> attempt_state_output\n\
+FactResponse -> attempt_fact_response\n\
+SideEffectIntent -> side_effect_intent\n\
+PreparedInvocation -> side_effect_prepared_invocation\n\
+NotSubmittedProof -> side_effect_not_submitted_proof\n\
+Submission -> side_effect_submission\n\
+SubmissionUnknownEvidence -> side_effect_submission_unknown\n\
+Receipt -> side_effect_receipt\n\
+Confirmation -> side_effect_confirmation\n\
+AmbiguityEvidence -> side_effect_ambiguity\n\
+ManualResolutionEvidence -> manual_resolution\n\
+ManualResolutionAuthorization -> manual_resolution\n\
+PublicOutput -> attempt_public_output\n\
+RedactedDiagnostic -> attempt_redacted_diagnostic\n\
+RetentionManifest -> middleware_retention_manifest"
+    );
 }
 
 fn staged_attempt_artifact(
@@ -9696,7 +9033,7 @@ fn node_by_output<'a>(fixture: &'a Fixture, cell_id: &CellId) -> &'a spec::NodeS
 }
 
 fn append_attempt_start(
-    store: &mut store::InMemoryTypedRunStore,
+    store: &mut TestTypedRunStore,
     fixture: &Fixture,
     node: &spec::NodeSpec,
     attempt_no: u32,
@@ -9738,7 +9075,7 @@ fn append_attempt_start(
 }
 
 fn append_attempt_failure(
-    store: &mut store::InMemoryTypedRunStore,
+    store: &mut TestTypedRunStore,
     fixture: &Fixture,
     node: &spec::NodeSpec,
     attempt_id: &AttemptId,
@@ -9783,88 +9120,8 @@ fn append_attempt_failure(
         .expect("append attempt failure");
 }
 
-fn append_synthetic_run_admitted(
-    store: &mut store::InMemoryTypedRunStore,
-    fixture: &Fixture,
-    run_id: &RunId,
-    commit_key: &str,
-) {
-    let spec_artifact = spec_artifact(&fixture.runtime_spec).evidence;
-    let certificate_artifact = certificate_artifact(&fixture.runtime_spec).evidence;
-    let config_artifacts = fixture
-        .runtime_spec
-        .spec()
-        .config_refs
-        .iter()
-        .map(|config| config_artifact(&fixture.runtime_spec, config).evidence)
-        .collect::<Vec<_>>();
-    let bound_context = crate::binding::BoundRuntimeContextLoader::new(
-        registered_admission_fixture_runners(fixture),
-    )
-    .load(&fixture.runtime_spec)
-    .expect("bound context");
-    let runner_executables = bound_context.runner_executables();
-    let adapter_executables = Vec::new();
-    let admitted_binding_digest = bound_context
-        .admitted_binding_digest(&adapter_executables)
-        .expect("binding digest");
-    let mut required_artifacts = Vec::with_capacity(2 + config_artifacts.len());
-    required_artifacts.push(spec_artifact.clone());
-    required_artifacts.push(certificate_artifact.clone());
-    required_artifacts.extend(config_artifacts.iter().cloned());
-    store
-        .append_prepared_commit(store_typed_commit_request! {
-            run_id: run_id.clone(),
-            expected_next_seq: store.expected_next_seq(run_id),
-            commit_key: store::CommitKey::new(commit_key).expect("commit key"),
-            payloads: vec![events::KernelEventPayload::RunAdmitted(Box::new(events::RunAdmitted {
-                run_id: run_id.clone(),
-                spec_hash: fixture.runtime_spec.spec_hash().clone(),
-                spec_artifact: crate::history::run_artifact_ref_from_store(&spec_artifact),
-                certificate_artifact: crate::history::run_artifact_ref_from_store(
-                    &certificate_artifact,
-                ),
-                config_artifacts: config_artifacts
-                    .iter()
-                    .map(crate::history::run_artifact_ref_from_store)
-                    .collect(),
-                spec_version: SpecVersion::new(spec::SPEC_VERSION).expect("spec version"),
-                lowering_version: LoweringVersion::new(spec::LOWERING_VERSION)
-                    .expect("lowering version"),
-                public_output_schema_id: fixture
-                    .runtime_spec
-                    .spec()
-                    .public_outputs
-                    .public_schema_id
-                    .clone(),
-                saga_policy_digest: fixture
-                    .runtime_spec
-                    .spec()
-                    .saga
-                    .saga_policy_digest()
-                    .expect("saga policy digest"),
-                descriptor_identities: Vec::new(),
-                runner_executables: runner_executables.to_vec(),
-                adapter_executables,
-                admitted_binding_digest,
-                canonicalizer_identity: spec::CanonicalizerIdentity::new("sha256-jcs-v1")
-                    .expect("canonicalizer"),
-                framework_version: events::FrameworkVersion::new("mfm.test.1").expect("framework"),
-                source_revision: events::SourceRevision::new("test-rev").expect("source"),
-                launched_at_unix_ms: 1_700_000_000_000,
-                seed_cells: Vec::new(),
-            }))],
-            required_artifacts: required_artifacts,
-            preconditions: store::CommitPreconditions {
-                required_run_state: store::RequiredRunState::Absent,
-                ..store::CommitPreconditions::default()
-            },
-        })
-        .expect("append synthetic run start");
-}
-
 fn append_synthetic_exclusive_prepare(
-    store: &mut store::InMemoryTypedRunStore,
+    store: &mut TestTypedRunStore,
     fixture: &Fixture,
     run_id: &RunId,
     node: &spec::NodeSpec,
@@ -9997,7 +9254,7 @@ fn append_synthetic_exclusive_prepare(
 }
 
 fn append_synthetic_invocation_started(
-    store: &mut store::InMemoryTypedRunStore,
+    store: &mut TestTypedRunStore,
     fixture: &Fixture,
     run_id: &RunId,
     node: &spec::NodeSpec,
@@ -10037,55 +9294,174 @@ fn append_synthetic_invocation_started(
         .expect("append synthetic invocation started");
 }
 
-fn append_synthetic_side_effect_failed(
-    store: &mut store::InMemoryTypedRunStore,
+fn append_synthetic_submission_observed(
+    store: &mut TestTypedRunStore,
     fixture: &Fixture,
-    run_id: &RunId,
     node: &spec::NodeSpec,
     attempt_id: &AttemptId,
     ledger: &events::SideEffectLedgerKey,
     commit_key: &str,
 ) {
+    let artifact_id = artifact(0xd7);
+    let digest = content(0xd8);
+    let evidence = side_effect_evidence(
+        node,
+        artifact_id.clone(),
+        digest.clone(),
+        events::ArtifactRole::Submission,
+    );
     store
         .append_prepared_commit(store_typed_commit_request! {
-            run_id: run_id.clone(),
-            expected_next_seq: store.expected_next_seq(run_id),
+            run_id: fixture.run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&fixture.run_id),
             commit_key: store::CommitKey::new(commit_key).expect("commit key"),
-            payloads: vec![
-                events::KernelEventPayload::SideEffectFailed(events::side_effect::Failed {
+            payloads: vec![events::KernelEventPayload::SideEffectSubmissionObserved(
+                events::side_effect::SubmissionObserved {
                     spec_hash: fixture.runtime_spec.spec_hash().clone(),
                     node_id: node.node_id.clone(),
                     attempt_id: attempt_id.clone(),
                     ledger_key: ledger.clone(),
                     ledger_purpose: events::SideEffectLedgerPurpose::Forward,
                     invocation_epoch: 1,
-                    failure_phase: events::side_effect::FailurePhase::BeforeInvocationStarted,
-                    retryable: true,
-                    error: side_effect_error(true),
-                }),
-                events::KernelEventPayload::StateAttemptFailed(events::StateAttemptFailed {
-                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
-                    node_id: node.node_id.clone(),
-                    attempt_id: attempt_id.clone(),
-                    retryable: true,
-                    error: side_effect_error(true),
-                }),
-            ],
-            required_artifacts: Vec::new(),
+                    submission_schema_id: node.config_ref.schema_id.clone(),
+                    submission_hash: digest,
+                    submission_artifact_id: artifact_id,
+                },
+            )],
+            required_artifacts: vec![evidence],
             preconditions: store::CommitPreconditions {
                 required_run_state: store::RequiredRunState::NotCompleted,
                 required_side_effect_states: vec![store::SideEffectStatePrecondition {
                     ledger_key: ledger.clone(),
-                    required: store::RequiredSideEffectState::InvocationPrepared,
+                    required: store::RequiredSideEffectState::InvocationStarted,
                 }],
                 ..store::CommitPreconditions::default()
             },
         })
-        .expect("append synthetic side-effect failure");
+        .expect("append synthetic submission observed");
+}
+
+fn append_synthetic_receipt_observed(
+    store: &mut TestTypedRunStore,
+    fixture: &Fixture,
+    node: &spec::NodeSpec,
+    attempt_id: &AttemptId,
+    ledger: &events::SideEffectLedgerKey,
+    commit_key: &str,
+) {
+    let artifact_id = artifact(0xd9);
+    let digest = content(0xda);
+    let evidence = side_effect_evidence(
+        node,
+        artifact_id.clone(),
+        digest.clone(),
+        events::ArtifactRole::Receipt,
+    );
+    store
+        .append_prepared_commit(store_typed_commit_request! {
+            run_id: fixture.run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&fixture.run_id),
+            commit_key: store::CommitKey::new(commit_key).expect("commit key"),
+            payloads: vec![events::KernelEventPayload::SideEffectReceiptObserved(
+                events::side_effect::ReceiptObserved {
+                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                    node_id: node.node_id.clone(),
+                    attempt_id: attempt_id.clone(),
+                    ledger_key: ledger.clone(),
+                    ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                    invocation_epoch: 1,
+                    receipt_schema_id: node.config_ref.schema_id.clone(),
+                    receipt_hash: digest,
+                    receipt_artifact_id: artifact_id,
+                    replay_verifier_id: events::ReplayVerifierId::new("mfm.test.driver.replay")
+                        .expect("replay verifier"),
+                    resource_touched_set: None,
+                },
+            )],
+            required_artifacts: vec![evidence],
+            preconditions: store::CommitPreconditions {
+                required_run_state: store::RequiredRunState::NotCompleted,
+                required_side_effect_states: vec![store::SideEffectStatePrecondition {
+                    ledger_key: ledger.clone(),
+                    required: store::RequiredSideEffectState::SubmissionResult,
+                }],
+                ..store::CommitPreconditions::default()
+            },
+        })
+        .expect("append synthetic receipt observed");
+}
+
+fn append_synthetic_confirmation_observed(
+    store: &mut TestTypedRunStore,
+    fixture: &Fixture,
+    node: &spec::NodeSpec,
+    attempt_id: &AttemptId,
+    ledger: &events::SideEffectLedgerKey,
+    commit_key: &str,
+) {
+    let artifact_id = artifact(0xdb);
+    let digest = content(0xdc);
+    let evidence = side_effect_evidence(
+        node,
+        artifact_id.clone(),
+        digest.clone(),
+        events::ArtifactRole::Confirmation,
+    );
+    store
+        .append_prepared_commit(store_typed_commit_request! {
+            run_id: fixture.run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&fixture.run_id),
+            commit_key: store::CommitKey::new(commit_key).expect("commit key"),
+            payloads: vec![events::KernelEventPayload::SideEffectConfirmationObserved(
+                events::side_effect::ConfirmationObserved {
+                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                    node_id: node.node_id.clone(),
+                    attempt_id: attempt_id.clone(),
+                    ledger_key: ledger.clone(),
+                    ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                    invocation_epoch: 1,
+                    confirmation_schema_id: node.config_ref.schema_id.clone(),
+                    confirmation_hash: digest,
+                    confirmation_artifact_id: artifact_id,
+                    replay_verifier_id: events::ReplayVerifierId::new("mfm.test.driver.replay")
+                        .expect("replay verifier"),
+                    resource_touched_set: None,
+                },
+            )],
+            required_artifacts: vec![evidence],
+            preconditions: store::CommitPreconditions {
+                required_run_state: store::RequiredRunState::NotCompleted,
+                required_side_effect_states: vec![store::SideEffectStatePrecondition {
+                    ledger_key: ledger.clone(),
+                    required: store::RequiredSideEffectState::ReceiptObserved,
+                }],
+                ..store::CommitPreconditions::default()
+            },
+        })
+        .expect("append synthetic confirmation observed");
+}
+
+fn side_effect_evidence(
+    node: &spec::NodeSpec,
+    artifact_id: ArtifactId,
+    digest: ContentDigest,
+    role: events::ArtifactRole,
+) -> store::ArtifactEvidenceRef {
+    store::ArtifactEvidenceRef {
+        artifact_id,
+        digest,
+        byte_len: 19,
+        media_type: spec::MediaType::new("application/json").expect("media"),
+        schema_id: Some(node.config_ref.schema_id.clone()),
+        semantic_type_id: None,
+        producer_node_id: Some(node.node_id.clone()),
+        producer_seed_id: None,
+        artifact_role: role,
+    }
 }
 
 fn append_synthetic_ambiguous(
-    store: &mut store::InMemoryTypedRunStore,
+    store: &mut TestTypedRunStore,
     fixture: &Fixture,
     run_id: &RunId,
     node: &spec::NodeSpec,
@@ -10145,49 +9521,9 @@ fn append_synthetic_ambiguous(
         .expect("append synthetic ambiguity");
 }
 
-fn append_synthetic_completed_terminal(
-    store: &mut store::InMemoryTypedRunStore,
-    fixture: &Fixture,
-    run_id: &RunId,
-    commit_key: &str,
-) {
-    store
-        .append_prepared_commit(store_typed_commit_request! {
-            run_id: run_id.clone(),
-            expected_next_seq: store.expected_next_seq(run_id),
-            commit_key: store::CommitKey::new(commit_key).expect("commit key"),
-            payloads: vec![events::KernelEventPayload::RunCompleted(
-                events::RunCompleted {
-                    run_id: run_id.clone(),
-                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
-                    outcome: events::RunCompletionOutcome::Completed(Box::new(
-                        events::PublicOutputCompletionEvidence {
-                            public_output_schema_id: fixture
-                                .runtime_spec
-                                .spec()
-                                .public_outputs
-                                .public_schema_id
-                                .clone(),
-                            public_output_event_id: EventId::from_digest(
-                                DigestAlgorithm::Sha256JcsV1,
-                                D9,
-                            ),
-                        },
-                    )),
-                },
-            )],
-            required_artifacts: Vec::new(),
-            preconditions: store::CommitPreconditions {
-                required_run_state: store::RequiredRunState::Started,
-                ..store::CommitPreconditions::default()
-            },
-        })
-        .expect("append synthetic terminal");
-}
-
 async fn append_manual_resolution(
     scheduler: &SerialTypedScheduler,
-    store: &mut store::InMemoryTypedRunStore,
+    store: &mut TestTypedRunStore,
     fixture: &Fixture,
     outcome: events::ManualResolutionOutcome,
 ) {
@@ -10210,10 +9546,10 @@ async fn append_manual_resolution(
         content_hash: evidence_hash,
         artifact_id: evidence_artifact_id,
     };
-    let prefix = build_manual_resolution_prefix_authority(
-        store,
+    let prefix = build_manual_resolution_prefix_authority_for_tests(
         &fixture.runtime_spec,
         &fixture.run_id,
+        store,
         manual.clone(),
     )
     .expect("manual prefix authority");
@@ -10240,23 +9576,23 @@ async fn append_manual_resolution(
         .canonical_json()
         .expect("canonical manual proof")
         .to_vec();
-    scheduler
-        .record_manual_resolution(
-            store,
-            &fixture.runtime_spec,
-            &fixture.run_id,
-            ManualResolutionRequest {
-                outcome,
-                evidence_artifact: ManualResolutionEvidenceArtifact {
-                    bytes: evidence_bytes,
-                    media_type: spec::MediaType::new("application/json").expect("media"),
-                },
-                proof_bytes,
-                note: None,
+    record_manual_resolution(
+        scheduler,
+        store,
+        &fixture.runtime_spec,
+        &fixture.run_id,
+        ManualResolutionRequest {
+            outcome,
+            evidence_artifact: ManualResolutionEvidenceArtifact {
+                bytes: evidence_bytes,
+                media_type: spec::MediaType::new("application/json").expect("media"),
             },
-        )
-        .await
-        .expect("append manual resolution");
+            proof_bytes,
+            note: None,
+        },
+    )
+    .await
+    .expect("append manual resolution");
 }
 
 fn test_manual_signing_key() -> k256::ecdsa::SigningKey {
@@ -10276,7 +9612,7 @@ fn sign_manual_claim_digest(signing_key: &k256::ecdsa::SigningKey, digest: &[u8;
 }
 
 fn append_fact(
-    store: &mut store::InMemoryTypedRunStore,
+    store: &mut TestTypedRunStore,
     fixture: &Fixture,
     node: &spec::NodeSpec,
     attempt_id: &AttemptId,
@@ -10337,7 +9673,7 @@ fn append_fact(
 }
 
 fn append_terminal(
-    store: &mut store::InMemoryTypedRunStore,
+    store: &mut TestTypedRunStore,
     fixture: &Fixture,
     node: &spec::NodeSpec,
     attempt_id: &AttemptId,
@@ -10404,7 +9740,7 @@ fn append_terminal(
 }
 
 fn append_public_output_render_failure(
-    store: &mut store::InMemoryTypedRunStore,
+    store: &mut TestTypedRunStore,
     fixture: &Fixture,
     node: &spec::NodeSpec,
     attempt_id: &AttemptId,
@@ -10461,16 +9797,16 @@ fn append_public_output_render_failure(
 }
 
 fn append_not_submitted_proven(
-    store: &mut store::InMemoryTypedRunStore,
+    store: &mut TestTypedRunStore,
     fixture: &Fixture,
     node: &spec::NodeSpec,
     attempt_id: &AttemptId,
     invocation_epoch: u32,
 ) {
-    let projection =
-        side_effect_projection_for_attempt(store.projection_snapshot(), node, attempt_id)
-            .expect("side-effect projection lookup")
-            .expect("side-effect projection");
+    let projection_snapshot = store.projection_snapshot();
+    let projection = side_effect_projection_for_attempt(&projection_snapshot, node, attempt_id)
+        .expect("side-effect projection lookup")
+        .expect("side-effect projection");
     let ledger_key = projection.ledger_key.clone();
     let ledger_purpose = projection.ledger_purpose.clone();
     let proof_artifact = artifact(0xd5);
@@ -10522,11 +9858,7 @@ fn append_not_submitted_proven(
         .expect("append not-submitted proof");
 }
 
-fn attempt_started_count(
-    store: &store::InMemoryTypedRunStore,
-    run_id: &RunId,
-    node_id: &NodeId,
-) -> usize {
+fn attempt_started_count(store: &TestTypedRunStore, run_id: &RunId, node_id: &NodeId) -> usize {
     store
         .load_run_stream(run_id)
         .iter()
@@ -10540,8 +9872,66 @@ fn attempt_started_count(
         .count()
 }
 
+fn runtime_lifecycle_summary(store: &TestTypedRunStore, run_id: &RunId) -> String {
+    let projections = store.projection_snapshot();
+    let mut started = 0;
+    let mut completed = 0;
+    let mut failed = 0;
+    let mut interrupted = 0;
+    for (_, attempt) in projections
+        .attempts()
+        .filter(|(_, attempt)| &attempt.run_id == run_id)
+    {
+        match attempt.status {
+            store::AttemptStatus::Started { .. } => started += 1,
+            store::AttemptStatus::Completed { .. } => completed += 1,
+            store::AttemptStatus::Failed { .. } => failed += 1,
+            store::AttemptStatus::Interrupted => interrupted += 1,
+        }
+    }
+    let total = started + completed + failed + interrupted;
+    let run_attempts = projections
+        .attempts()
+        .filter(|(_, attempt)| &attempt.run_id == run_id)
+        .map(|((node_id, attempt_id), _)| (node_id.clone(), attempt_id.clone()))
+        .collect::<BTreeSet<_>>();
+    let cells = projections
+        .cells()
+        .filter(|(_, terminal)| match terminal {
+            store::CellTerminalProjection::Produced {
+                node_id,
+                attempt_id,
+                ..
+            }
+            | store::CellTerminalProjection::Skipped {
+                node_id,
+                attempt_id,
+                ..
+            } => run_attempts.contains(&(node_id.clone(), attempt_id.clone())),
+        })
+        .count();
+    let side_effects = projections
+        .side_effects()
+        .filter(|(_, side_effect)| &side_effect.run_id == run_id)
+        .count();
+    let lanes_total = projections.resource_lanes().count();
+    let lanes = projections
+        .resource_lanes()
+        .filter(|(_, lane)| &lane.holder.run_id == run_id)
+        .count();
+    let public_outputs = projections.public_outputs().count();
+    let retentions = projections
+        .retentions()
+        .filter(|(retention_run_id, _)| *retention_run_id == run_id)
+        .count();
+    format!(
+        "run={:?} attempts[started={started} completed={completed} failed={failed} interrupted={interrupted} total={total}] cells={cells} side_effects={side_effects} lanes[run={lanes} total={lanes_total}] public_outputs={public_outputs} retentions={retentions}",
+        projections.run_state(run_id)
+    )
+}
+
 fn assert_node_failed_with_code(
-    store: &store::InMemoryTypedRunStore,
+    store: &TestTypedRunStore,
     node_id: &NodeId,
     code: &str,
 ) -> AttemptId {
@@ -10549,7 +9939,7 @@ fn assert_node_failed_with_code(
 }
 
 fn assert_node_failed_with_code_and_retryable(
-    store: &store::InMemoryTypedRunStore,
+    store: &TestTypedRunStore,
     node_id: &NodeId,
     code: &str,
     expected_retryable: bool,
@@ -10615,7 +10005,7 @@ fn assert_node_failed_with_code_and_retryable(
     attempt_id
 }
 
-fn assert_failure_code_count(store: &store::InMemoryTypedRunStore, code: &str, expected: usize) {
+fn assert_failure_code_count(store: &TestTypedRunStore, code: &str, expected: usize) {
     let count = store
         .projection_snapshot()
         .attempts()
@@ -10629,7 +10019,7 @@ fn assert_failure_code_count(store: &store::InMemoryTypedRunStore, code: &str, e
     assert_eq!(count, expected, "failure code count for {code}");
 }
 
-fn fact_recorded_count(store: &store::InMemoryTypedRunStore) -> usize {
+fn fact_recorded_count(store: &TestTypedRunStore) -> usize {
     store
         .projection_snapshot()
         .facts()
@@ -10704,7 +10094,7 @@ fn registered_side_effect_fixture_runners(fixture: &Fixture) -> ErasedRunnerRegi
         .register(binding(
             fixture.descriptor_a.clone(),
             "sidefx",
-            DeterministicSideEffectRunner::new(fixture),
+            DriverSideEffectRunner::new(fixture),
         ))
         .expect("binding a");
     registry
@@ -10718,74 +10108,6 @@ fn registered_side_effect_fixture_runners(fixture: &Fixture) -> ErasedRunnerRegi
             },
         ))
         .expect("binding b");
-    registry
-}
-
-fn registered_admission_fixture_runners(fixture: &Fixture) -> ErasedRunnerRegistry {
-    let mut registry = ErasedRunnerRegistry::new();
-    register_spec_capabilities(&mut registry, &fixture.runtime_spec);
-    let mut registered = BTreeSet::new();
-    for node in &fixture.runtime_spec.spec().nodes {
-        if node.framework.is_some() || !registered.insert(node.descriptor_id.clone()) {
-            continue;
-        }
-        let descriptor = fixture
-            .runtime_spec
-            .spec()
-            .descriptor_identities
-            .iter()
-            .find_map(|identity| match identity {
-                spec::DescriptorIdentity::State(state)
-                    if state.descriptor_id == node.descriptor_id =>
-                {
-                    Some(state.as_ref())
-                }
-                _ => None,
-            })
-            .expect("state descriptor identity");
-        match descriptor.runner.as_str() {
-            "pure" => registry
-                .register(binding(
-                    descriptor.descriptor_id.clone(),
-                    "pure",
-                    RecordingRunner {
-                        expected_caps: Vec::new(),
-                        output_artifact: artifact(0xa1),
-                        output_digest: content(0xa2),
-                    },
-                ))
-                .expect("pure binding"),
-            "read" => registry
-                .register(binding(
-                    descriptor.descriptor_id.clone(),
-                    "read",
-                    RecordingRunner {
-                        expected_caps: vec![(
-                            fixture.cap_kind.clone(),
-                            fixture.cap_version.clone(),
-                        )],
-                        output_artifact: artifact(0xb1),
-                        output_digest: content(0xb2),
-                    },
-                ))
-                .expect("read binding"),
-            "sidefx" => registry
-                .register(binding(
-                    descriptor.descriptor_id.clone(),
-                    "sidefx",
-                    DeterministicSideEffectRunner::new(fixture),
-                ))
-                .expect("sidefx binding"),
-            "fail" => registry
-                .register(binding(
-                    descriptor.descriptor_id.clone(),
-                    "fail",
-                    BlockingRunner,
-                ))
-                .expect("fail binding"),
-            other => panic!("unsupported fixture runner {other:?}"),
-        }
-    }
     registry
 }
 
@@ -10812,25 +10134,6 @@ fn registered_first_side_effect_runners_with<R: ErasedNodeRunner + 'static>(
     registry
 }
 
-fn registered_two_side_effect_runners_with(
-    fixture: &Fixture,
-    runner: DeterministicSideEffectRunner,
-) -> ErasedRunnerRegistry {
-    let mut registry = ErasedRunnerRegistry::new();
-    register_spec_capabilities(&mut registry, &fixture.runtime_spec);
-    registry
-        .register(binding(
-            fixture.descriptor_a.clone(),
-            "sidefx",
-            runner.clone(),
-        ))
-        .expect("binding a");
-    registry
-        .register(binding(fixture.descriptor_b.clone(), "sidefx", runner))
-        .expect("binding b");
-    registry
-}
-
 fn compensated_saga_scheduler(fixture: &Fixture) -> SerialTypedScheduler {
     let mut registry = ErasedRunnerRegistry::new();
     register_spec_capabilities(&mut registry, &fixture.runtime_spec);
@@ -10838,14 +10141,14 @@ fn compensated_saga_scheduler(fixture: &Fixture) -> SerialTypedScheduler {
         .register(binding(
             fixture.descriptor_a.clone(),
             "sidefx",
-            DeterministicSideEffectRunner::new(fixture),
+            DriverSideEffectRunner::new(fixture),
         ))
         .expect("binding forward a");
     registry
         .register(binding(
             fixture.descriptor_b.clone(),
             "sidefx",
-            DeterministicSideEffectRunner::new(fixture),
+            DriverSideEffectRunner::new(fixture),
         ))
         .expect("binding forward b");
     registry
@@ -11262,10 +10565,8 @@ fn fixture() -> Fixture {
     let cell_b = CellId::from_digest(DigestAlgorithm::Sha256JcsV1, D6);
     let descriptor_a = DescriptorId::from_digest(DigestAlgorithm::Sha256JcsV1, D7);
     let descriptor_b = DescriptorId::from_digest(DigestAlgorithm::Sha256JcsV1, D8);
-    let semantic = SemanticTypeId::new("mfm.test", "value", "1", DigestAlgorithm::Sha256JcsV1, D9)
-        .expect("semantic");
-    let value_schema =
-        SchemaId::new("mfm.test.value", "1", DigestAlgorithm::Sha256JcsV1, DA).expect("schema");
+    let semantic = fixture_value_semantic_id();
+    let value_schema = fixture_value_schema_id();
     let input_schema = SchemaId::new("mfm.test.input", "1", DigestAlgorithm::Sha256JcsV1, DB)
         .expect("input schema");
     let config_schema = SchemaId::new("mfm.test.config", "1", DigestAlgorithm::Sha256JcsV1, DC)
@@ -11662,12 +10963,11 @@ fn fixture_with_retention_lifecycle_node() -> Fixture {
 
 async fn drive_until_public_output_produced(
     scheduler: &SerialTypedScheduler,
-    store: &mut store::InMemoryTypedRunStore,
+    store: &mut TestTypedRunStore,
     fixture: &Fixture,
 ) {
     for _ in 0..8 {
-        scheduler
-            .drive_once(store, &fixture.runtime_spec, &fixture.run_id)
+        drive_once(scheduler, store, &fixture.runtime_spec, &fixture.run_id)
             .await
             .expect("drive until public output");
         let projections = store.projection_snapshot();
@@ -11936,33 +11236,6 @@ fn fixture_with_independent_second_node_and_first_side_effect_state() -> Fixture
                 .iter()
                 .map(|public_output| public_output.cell_id.clone())
                 .collect();
-        }
-    }
-    let envelope = spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
-    fixture.runtime_spec =
-        CertifiedRuntimeSpec::from_verified_envelope(envelope).expect("runtime spec");
-    fixture
-}
-
-fn fixture_with_independent_exclusive_side_effects() -> Fixture {
-    let fixture = fixture_with_independent_second_node_and_first_side_effect_state();
-    let descriptors = vec![fixture.descriptor_a.clone(), fixture.descriptor_b.clone()];
-    with_exclusive_resource_claims(fixture, &descriptors)
-}
-
-fn fixture_with_independent_exclusive_side_effect_lanes() -> Fixture {
-    let mut fixture = fixture_with_independent_exclusive_side_effects();
-    let mut envelope = fixture.runtime_spec.envelope().clone();
-    for node in &mut envelope.spec.nodes {
-        if node.descriptor_id == fixture.descriptor_b {
-            let side_effect = node
-                .side_effect
-                .as_mut()
-                .expect("descriptor b is a side-effect node");
-            side_effect.resource_claim = spec::ResourceClaimSpec::Exclusive {
-                namespace: independent_resource_namespace(),
-                key_schema: fixture.seed_ref.schema_id.clone(),
-            };
         }
     }
     let envelope = spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
@@ -12247,12 +11520,6 @@ fn fixture_with_two_side_effects_and_failing_tail() -> Fixture {
     fixture
 }
 
-fn fixture_with_two_exclusive_side_effects_and_failing_tail() -> Fixture {
-    let fixture = fixture_with_two_side_effects_and_failing_tail();
-    let descriptors = vec![fixture.descriptor_a.clone(), fixture.descriptor_b.clone()];
-    with_exclusive_resource_claims(fixture, &descriptors)
-}
-
 fn with_exclusive_resource_claims(mut fixture: Fixture, descriptors: &[DescriptorId]) -> Fixture {
     let mut envelope = fixture.runtime_spec.envelope().clone();
     let side_effect = EffectKind::new("mfm.test", "side-effect", DigestAlgorithm::Sha256JcsV1, D8)
@@ -12336,7 +11603,8 @@ fn with_exact_touched_set_resource_claims(
                 .expect("exact touched-set descriptor is a side-effect node");
             side_effect.resource_claim = spec::ResourceClaimSpec::ExactTouchedSet {
                 namespace: exact_touched_set_resource_namespace(),
-                evidence_schema: node.config_ref.schema_id.clone(),
+                evidence_schema: <FixtureSideEffectEvidence as mfm_values::MfmValue>::schema_id()
+                    .expect("fixture side-effect evidence schema"),
             };
         }
     }
@@ -12608,10 +11876,6 @@ fn exclusive_resource_namespace() -> spec::ResourceNamespace {
     spec::ResourceNamespace::new("mfm.test.wallet_nonce").expect("resource namespace")
 }
 
-fn independent_resource_namespace() -> spec::ResourceNamespace {
-    spec::ResourceNamespace::new("mfm.test.independent_wallet_nonce").expect("resource namespace")
-}
-
 fn exact_touched_set_resource_namespace() -> spec::ResourceNamespace {
     spec::ResourceNamespace::new("mfm.test.wallet_nonce").expect("resource namespace")
 }
@@ -12630,34 +11894,6 @@ fn resource_key_in_namespace(
         key_schema_id: fixture.seed_ref.schema_id.clone(),
         key: events::ResourceKey::new(value).expect("resource key"),
     }
-}
-
-fn resource_keys_for_all_side_effects(
-    fixture: &Fixture,
-    value: &str,
-) -> BTreeMap<NodeId, events::ResourceKeyEvidence> {
-    let evidence = exclusive_resource_key(fixture, value);
-    fixture
-        .runtime_spec
-        .spec()
-        .nodes
-        .iter()
-        .chain(fixture.runtime_spec.spec().remediations.values())
-        .filter(|node| node.side_effect.is_some())
-        .map(|node| (node.node_id.clone(), evidence.clone()))
-        .collect()
-}
-
-fn side_effect_runner_with_resource_keys(
-    fixture: &Fixture,
-    resource_keys: BTreeMap<NodeId, events::ResourceKeyEvidence>,
-) -> DeterministicSideEffectRunner {
-    DeterministicSideEffectRunner::new(fixture).with_resource_keys(resource_keys)
-}
-
-fn fixture_with_run_id(mut fixture: Fixture, digest: DigestBytes) -> Fixture {
-    fixture.run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, digest);
-    fixture
 }
 
 fn side_effect_ledger_key(attempt_no: u32) -> events::SideEffectLedgerKey {
@@ -12689,20 +11925,21 @@ fn forward_ledger_for_node(
     found.expect("forward ledger for node")
 }
 
-fn side_effect_projection_for_run_node<'a>(
-    projections: &'a store::ProjectionSnapshot,
+fn side_effect_projection_for_run_node<P: std::borrow::Borrow<store::ProjectionSnapshot>>(
+    projections: P,
     run_id: &RunId,
     node_id: &NodeId,
-) -> Option<&'a store::SideEffectProjection> {
+) -> Option<store::SideEffectProjection> {
+    let projections = projections.borrow();
     projections.side_effects().find_map(|(_, projection)| {
         (projection.run_id == *run_id && projection.intent.node_id == *node_id)
-            .then_some(projection)
+            .then(|| projection.clone())
     })
 }
 
 async fn drive_until_side_effect_confirmation_without_output(
     scheduler: &SerialTypedScheduler,
-    store: &mut store::InMemoryTypedRunStore,
+    store: &mut TestTypedRunStore,
     fixture: &Fixture,
     node: &spec::NodeSpec,
     output_cell: &CellId,
@@ -12710,69 +11947,29 @@ async fn drive_until_side_effect_confirmation_without_output(
 ) {
     for _ in 0..8 {
         assert_eq!(
-            scheduler
-                .drive_once(store, &fixture.runtime_spec, &fixture.run_id)
+            drive_once(scheduler, store, &fixture.runtime_spec, &fixture.run_id)
                 .await
                 .expect(context),
             SchedulerStatus::Advanced
         );
-        if side_effect_projection_for_run_node(
-            store.projection_snapshot(),
-            &fixture.run_id,
-            &node.node_id,
-        )
-        .is_some_and(|projection| {
-            matches!(
-                projection.phase,
-                store::SideEffectPhase::ConfirmationObserved { .. }
-            ) && store
-                .projection_snapshot()
-                .cell_terminal(output_cell)
-                .is_none()
-        }) {
+        let projection_snapshot = store.projection_snapshot();
+        if side_effect_projection_for_run_node(&projection_snapshot, &fixture.run_id, &node.node_id)
+            .is_some_and(|projection| {
+                matches!(
+                    projection.phase,
+                    store::SideEffectPhase::ConfirmationObserved { .. }
+                ) && projection_snapshot.cell_terminal(output_cell).is_none()
+            })
+        {
             return;
         }
     }
     panic!("{context} was not reached");
 }
 
-async fn drive_side_effect_to_confirmation(
-    scheduler: &SerialTypedScheduler,
-    store: &mut store::InMemoryTypedRunStore,
-    fixture: &Fixture,
-    node: &spec::NodeSpec,
-) {
-    for _ in 0..8 {
-        assert_eq!(
-            scheduler
-                .drive_once(store, &fixture.runtime_spec, &fixture.run_id)
-                .await
-                .expect("drive side effect to confirmation"),
-            SchedulerStatus::Advanced
-        );
-        if side_effect_projection_for_run_node(
-            store.projection_snapshot(),
-            &fixture.run_id,
-            &node.node_id,
-        )
-        .is_some_and(|projection| {
-            matches!(
-                projection.phase,
-                store::SideEffectPhase::ConfirmationObserved { .. }
-            )
-        }) {
-            return;
-        }
-    }
-    panic!(
-        "side-effect node {} did not reach confirmation",
-        node.node_id
-    );
-}
-
 async fn drive_until_cells_terminal(
     scheduler: &SerialTypedScheduler,
-    store: &mut store::InMemoryTypedRunStore,
+    store: &mut TestTypedRunStore,
     fixture: &Fixture,
     cells: &[CellId],
     context: &str,
@@ -12785,8 +11982,7 @@ async fn drive_until_cells_terminal(
             return;
         }
         assert_eq!(
-            scheduler
-                .drive_once(store, &fixture.runtime_spec, &fixture.run_id)
+            drive_once(scheduler, store, &fixture.runtime_spec, &fixture.run_id)
                 .await
                 .expect(context),
             SchedulerStatus::Advanced
@@ -12803,7 +11999,7 @@ enum RemediationPhaseCheckpoint {
 
 async fn drive_until_remediation_phase(
     scheduler: &SerialTypedScheduler,
-    store: &mut store::InMemoryTypedRunStore,
+    store: &mut TestTypedRunStore,
     fixture: &Fixture,
     forward_ledger_key: &events::SideEffectLedgerKey,
     checkpoint: RemediationPhaseCheckpoint,
@@ -12811,30 +12007,28 @@ async fn drive_until_remediation_phase(
 ) {
     for _ in 0..8 {
         assert_eq!(
-            scheduler
-                .drive_once(store, &fixture.runtime_spec, &fixture.run_id)
+            drive_once(scheduler, store, &fixture.runtime_spec, &fixture.run_id)
                 .await
                 .expect(context),
             SchedulerStatus::Advanced
         );
-        if remediation_projection_for_forward_ledger(
-            store.projection_snapshot(),
-            forward_ledger_key,
-        )
-        .is_some_and(|projection| match checkpoint {
-            RemediationPhaseCheckpoint::SubmissionObserved => {
-                matches!(
-                    projection.phase,
-                    store::SideEffectPhase::SubmissionObserved { .. }
-                )
-            }
-            RemediationPhaseCheckpoint::ConfirmationObserved => {
-                matches!(
-                    projection.phase,
-                    store::SideEffectPhase::ConfirmationObserved { .. }
-                )
-            }
-        }) {
+        let projection_snapshot = store.projection_snapshot();
+        if remediation_projection_for_forward_ledger(&projection_snapshot, forward_ledger_key)
+            .is_some_and(|projection| match checkpoint {
+                RemediationPhaseCheckpoint::SubmissionObserved => {
+                    matches!(
+                        projection.phase,
+                        store::SideEffectPhase::SubmissionObserved { .. }
+                    )
+                }
+                RemediationPhaseCheckpoint::ConfirmationObserved => {
+                    matches!(
+                        projection.phase,
+                        store::SideEffectPhase::ConfirmationObserved { .. }
+                    )
+                }
+            })
+        {
             return;
         }
     }
@@ -12843,7 +12037,7 @@ async fn drive_until_remediation_phase(
 
 async fn drive_until_compensated_before_terminal(
     scheduler: &SerialTypedScheduler,
-    store: &mut store::InMemoryTypedRunStore,
+    store: &mut TestTypedRunStore,
     fixture: &Fixture,
 ) {
     for _ in 0..24 {
@@ -12856,8 +12050,7 @@ async fn drive_until_compensated_before_terminal(
             return;
         }
         assert_eq!(
-            scheduler
-                .drive_once(store, &fixture.runtime_spec, &fixture.run_id)
+            drive_once(scheduler, store, &fixture.runtime_spec, &fixture.run_id)
                 .await
                 .expect("drive until compensated before terminal"),
             SchedulerStatus::Advanced
@@ -12867,7 +12060,7 @@ async fn drive_until_compensated_before_terminal(
 }
 
 fn remediation_intent_forward_links(
-    store: &store::InMemoryTypedRunStore,
+    store: &TestTypedRunStore,
     run_id: &RunId,
 ) -> Vec<events::SideEffectLedgerKey> {
     store
@@ -12887,10 +12080,11 @@ fn remediation_intent_forward_links(
         .collect()
 }
 
-fn remediation_projection_for_forward_ledger<'a>(
-    projections: &'a store::ProjectionSnapshot,
+fn remediation_projection_for_forward_ledger<P: std::borrow::Borrow<store::ProjectionSnapshot>>(
+    projections: P,
     forward_ledger_key: &events::SideEffectLedgerKey,
-) -> Option<&'a store::SideEffectProjection> {
+) -> Option<store::SideEffectProjection> {
+    let projections = projections.borrow();
     projections.side_effects().find_map(|(_, projection)| {
         matches!(
             &projection.ledger_purpose,
@@ -12898,14 +12092,11 @@ fn remediation_projection_for_forward_ledger<'a>(
                 forward_ledger_key: linked
             } if linked == forward_ledger_key
         )
-        .then_some(projection)
+        .then(|| projection.clone())
     })
 }
 
-fn assert_no_duplicate_side_effect_submissions(
-    store: &store::InMemoryTypedRunStore,
-    run_id: &RunId,
-) {
+fn assert_no_duplicate_side_effect_submissions(store: &TestTypedRunStore, run_id: &RunId) {
     let mut by_ledger = BTreeMap::<events::SideEffectLedgerKey, usize>::new();
     let mut forward_by_node = BTreeMap::<NodeId, usize>::new();
     let mut remediation_by_forward = BTreeMap::<events::SideEffectLedgerKey, usize>::new();
@@ -12939,7 +12130,7 @@ fn assert_no_duplicate_side_effect_submissions(
 }
 
 fn side_effect_submission_count_for_ledger(
-    store: &store::InMemoryTypedRunStore,
+    store: &TestTypedRunStore,
     run_id: &RunId,
     ledger_key: &events::SideEffectLedgerKey,
 ) -> usize {
@@ -12957,7 +12148,7 @@ fn side_effect_submission_count_for_ledger(
 }
 
 fn remediation_submission_count_for_forward_ledger(
-    store: &store::InMemoryTypedRunStore,
+    store: &TestTypedRunStore,
     run_id: &RunId,
     forward_ledger_key: &events::SideEffectLedgerKey,
 ) -> usize {
@@ -12986,16 +12177,6 @@ fn side_effect_fixture_digest(ctx: &ErasedRunCtx<'_>, role: &str) -> ContentDige
         "role": role,
     }))
     .expect("side-effect fixture digest")
-}
-
-fn side_effect_fixture_bytes(ctx: &ErasedRunCtx<'_>, role: &str) -> Vec<u8> {
-    format!(
-        r#"{{"attempt":"{}","node":"{}","role":"{}"}}"#,
-        ctx.attempt_id(),
-        ctx.node().node_id,
-        role
-    )
-    .into_bytes()
 }
 
 fn side_effect_fixture_artifact_pair(
@@ -13121,27 +12302,6 @@ fn side_effect_claimed(
     })
 }
 
-fn side_effect_claim_taken_over(
-    ctx: &ErasedRunCtx<'_>,
-    ledger: events::SideEffectLedgerKey,
-    previous: &store::SideEffectClaimProjection,
-    claim_generation: u32,
-) -> RunnerEventPayload {
-    RunnerEventPayload::SideEffectClaimTakenOver(events::side_effect::ClaimTakenOver {
-        spec_hash: ctx.spec_hash().clone(),
-        node_id: ctx.node().node_id.clone(),
-        attempt_id: ctx.attempt_id().clone(),
-        ledger_key: ledger,
-        ledger_purpose: side_effect_ledger_purpose_for_ctx(ctx),
-        previous_claim_owner: previous.claim_owner.clone(),
-        new_claim_owner: side_effect_claim_owner(ctx.attempt_no(), claim_generation),
-        invocation_epoch: previous.invocation_epoch,
-        previous_claim_generation: previous.claim_generation,
-        claim_generation,
-        claim_fencing_token: side_effect_fencing_token(ctx.attempt_no(), claim_generation),
-    })
-}
-
 fn side_effect_prepared(
     ctx: &ErasedRunCtx<'_>,
     ledger: events::SideEffectLedgerKey,
@@ -13170,89 +12330,6 @@ fn side_effect_prepared_with_resource_key(
         prepared_artifact_id: None,
         prepared_hash: None,
         resource_key,
-    })
-}
-
-fn side_effect_invocation_started(
-    ctx: &ErasedRunCtx<'_>,
-    ledger: events::SideEffectLedgerKey,
-    invocation_epoch: u32,
-    claim_generation: u32,
-) -> RunnerEventPayload {
-    RunnerEventPayload::SideEffectInvocationStarted(events::side_effect::InvocationStarted {
-        spec_hash: ctx.spec_hash().clone(),
-        node_id: ctx.node().node_id.clone(),
-        attempt_id: ctx.attempt_id().clone(),
-        ledger_key: ledger,
-        ledger_purpose: side_effect_ledger_purpose_for_ctx(ctx),
-        invocation_epoch,
-        claim_owner: side_effect_claim_owner(ctx.attempt_no(), claim_generation),
-        claim_generation,
-        claim_fencing_token: side_effect_fencing_token(ctx.attempt_no(), claim_generation),
-    })
-}
-
-fn side_effect_submission_observed(
-    ctx: &ErasedRunCtx<'_>,
-    ledger: events::SideEffectLedgerKey,
-    invocation_epoch: u32,
-    artifact_id: ArtifactId,
-    digest: ContentDigest,
-) -> RunnerEventPayload {
-    RunnerEventPayload::SideEffectSubmissionObserved(events::side_effect::SubmissionObserved {
-        spec_hash: ctx.spec_hash().clone(),
-        node_id: ctx.node().node_id.clone(),
-        attempt_id: ctx.attempt_id().clone(),
-        ledger_key: ledger,
-        ledger_purpose: side_effect_ledger_purpose_for_ctx(ctx),
-        invocation_epoch,
-        submission_schema_id: ctx.node().config_ref.schema_id.clone(),
-        submission_hash: digest,
-        submission_artifact_id: artifact_id,
-    })
-}
-
-fn side_effect_receipt_observed(
-    ctx: &ErasedRunCtx<'_>,
-    ledger: events::SideEffectLedgerKey,
-    invocation_epoch: u32,
-    artifact_id: ArtifactId,
-    digest: ContentDigest,
-) -> RunnerEventPayload {
-    RunnerEventPayload::SideEffectReceiptObserved(events::side_effect::ReceiptObserved {
-        spec_hash: ctx.spec_hash().clone(),
-        node_id: ctx.node().node_id.clone(),
-        attempt_id: ctx.attempt_id().clone(),
-        ledger_key: ledger,
-        ledger_purpose: side_effect_ledger_purpose_for_ctx(ctx),
-        invocation_epoch,
-        receipt_schema_id: ctx.node().config_ref.schema_id.clone(),
-        receipt_hash: digest,
-        receipt_artifact_id: artifact_id,
-        replay_verifier_id: events::ReplayVerifierId::new("verifier-1").expect("verifier"),
-        resource_touched_set: None,
-    })
-}
-
-fn side_effect_confirmation_observed(
-    ctx: &ErasedRunCtx<'_>,
-    ledger: events::SideEffectLedgerKey,
-    invocation_epoch: u32,
-    artifact_id: ArtifactId,
-    digest: ContentDigest,
-) -> RunnerEventPayload {
-    RunnerEventPayload::SideEffectConfirmationObserved(events::side_effect::ConfirmationObserved {
-        spec_hash: ctx.spec_hash().clone(),
-        node_id: ctx.node().node_id.clone(),
-        attempt_id: ctx.attempt_id().clone(),
-        ledger_key: ledger,
-        ledger_purpose: side_effect_ledger_purpose_for_ctx(ctx),
-        invocation_epoch,
-        confirmation_schema_id: ctx.node().config_ref.schema_id.clone(),
-        confirmation_hash: digest,
-        confirmation_artifact_id: artifact_id,
-        replay_verifier_id: events::ReplayVerifierId::new("verifier-1").expect("verifier"),
-        resource_touched_set: None,
     })
 }
 

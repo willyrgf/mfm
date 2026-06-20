@@ -32,7 +32,6 @@ mfm-program-derive = { path = "../../kernel/program-derive" }
 mfm-replay = { path = "../../kernel/replay" }
 mfm-runtime = { path = "../../kernel/runtime" }
 mfm-signing = { path = "../../signing" }
-mfm-spec = { path = "../../kernel/spec" }
 mfm-state-evm-contracts = { path = "../../states/evm-contracts" }
 mfm-store = { path = "../../kernel/store" }
 mfm-values = { path = "../../kernel/values" }

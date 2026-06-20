@@ -65,6 +65,7 @@ fn test_removed_legacy_evm_command_is_absent() {
 #[test]
 fn test_evm_contracts_json_error_envelope() {
     let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+    let missing_path = "/definitely/missing/request.json";
     cmd.args(&[
         "--output-format",
         "json",
@@ -72,7 +73,7 @@ fn test_evm_contracts_json_error_envelope() {
         "contracts",
         "deploy",
         "--config-file",
-        "/definitely/missing/contract-config.json",
+        missing_path,
     ]);
 
     let output = cmd.output().expect("run command");
@@ -81,6 +82,23 @@ fn test_evm_contracts_json_error_envelope() {
     let parsed: serde_json::Value = serde_json::from_str(&stderr).expect("stderr JSON");
     assert_eq!(parsed["status"], "error");
     assert_eq!(parsed["error"]["code"], "InvalidEvmContractRequest");
+}
+
+#[test]
+fn test_evm_contracts_text_error_redacts_missing_config_path() {
+    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+    cmd.args(&[
+        "evm",
+        "contracts",
+        "deploy",
+        "--config-file",
+        "/definitely/missing/request.json",
+    ]);
+
+    let output = cmd.output().expect("run command");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).expect("stderr utf8");
+    assert!(stderr.contains("Failed to read EVM contract request file"));
 }
 
 #[test]

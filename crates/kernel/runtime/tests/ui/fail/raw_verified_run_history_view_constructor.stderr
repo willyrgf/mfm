@@ -1,0 +1,5 @@
+error[E0599]: no associated function or constant named `new` found for struct `VerifiedRunHistoryView` in the current scope
+ --> tests/ui/fail/raw_verified_run_history_view_constructor.rs:2:50
+  |
+2 |     let _ = mfm_runtime::VerifiedRunHistoryView::new;
+  |                                                  ^^^ associated function or constant not found in `VerifiedRunHistoryView`

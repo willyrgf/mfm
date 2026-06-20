@@ -16,11 +16,6 @@
 //! }
 //! ```
 
-use std::collections::BTreeMap;
-use std::future::Future;
-use std::path::PathBuf;
-use std::pin::Pin;
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::body::Bytes;
@@ -32,9 +27,9 @@ use axum::Json;
 use axum::Router;
 use http::header::HeaderName;
 use mfm_app::{
-    AppError, AsyncRunServices, DriveMode, ErrorClass, RunLaunchConfigArtifact,
-    RunLaunchSeedArtifact, TypedPublicOutputResponse, TypedRunMode, TypedRunResponse,
-    TypedRunStreamResponse,
+    AppError, DriveMode, ErrorClass, ManualResolutionDecision, ManualResolutionRecordRequest,
+    PublicSafeMessage, RunLaunchConfigArtifact, RunLaunchSeedArtifact, RunServices,
+    TypedPublicOutputResponse, TypedRunMode, TypedRunResponse, TypedRunStreamResponse,
 };
 use mfm_artifact_store_fs::{FsTypedArtifactError, FsTypedArtifactStore};
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
@@ -56,9 +51,7 @@ use mfm_portfolio_config::{
 use mfm_spec::v1 as spec;
 use mfm_state_portfolio::PortfolioWorkflowConfig;
 use mfm_store::v1 as store;
-use mfm_store::v1::{
-    AsyncStoreFuture, AsyncTypedRunEventStore, TypedProjectionRead, TypedRunEventStore,
-};
+use mfm_store::v1::AsyncTypedRunEventStore;
 use mfm_stream_store_postgres::{PostgresTypedRunEventStore, PostgresTypedStoreError};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -66,19 +59,6 @@ use serde_json::json;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::trace::TraceLayer;
 use tracing::instrument;
-
-/// Boxed future returned by [`StatusProjectionRead`].
-pub type StatusProjectionFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<store::ProjectionSnapshot, ApiError>> + Send + 'a>>;
-
-/// Store capability required by REST status rendering.
-///
-/// Implementations must return a projection for the requested run while preserving any global
-/// projection families that status depends on, such as active cross-run resource lanes.
-pub trait StatusProjectionRead {
-    /// Loads the status projection for `run_id`.
-    fn status_projection<'a>(&'a self, run_id: &'a RunId) -> StatusProjectionFuture<'a>;
-}
 
 fn ok(data: serde_json::Value) -> serde_json::Value {
     json!({ "status": "success", "data": data })
@@ -121,12 +101,21 @@ pub struct ApiError {
 
 impl ApiError {
     /// Creates an API error with an explicit HTTP status, code, and message.
-    pub fn new(status: StatusCode, code: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn new(
+        status: StatusCode,
+        code: impl Into<String>,
+        message: impl Into<PublicSafeMessage>,
+    ) -> Self {
         Self {
             status,
             code: code.into(),
-            message: message.into(),
+            message: message.into().into_string(),
         }
+    }
+
+    /// Creates an API error for a lower-level failure without exposing backend details.
+    pub fn backend(status: StatusCode, code: impl Into<String>, message: &'static str) -> Self {
+        Self::new(status, code, PublicSafeMessage::backend(message))
     }
 
     /// Returns the standard invalid-JSON error.
@@ -166,91 +155,6 @@ impl axum::response::IntoResponse for ApiError {
     }
 }
 
-/// Async in-memory typed run store for tests and single-process development tools.
-#[derive(Clone, Default)]
-pub struct InMemoryAsyncTypedRunStore {
-    inner: Arc<Mutex<store::InMemoryTypedRunStore>>,
-}
-
-impl AsyncTypedRunEventStore for InMemoryAsyncTypedRunStore {
-    type Error = store::StoreError;
-
-    fn append_prepared_commit_plan<'a>(
-        &'a self,
-        plan: store::PreparedCommitPlan,
-    ) -> AsyncStoreFuture<'a, store::CommitOutcome, Self::Error> {
-        let result = self
-            .inner
-            .lock()
-            .expect("typed run store lock")
-            .append_prepared_commit_plan(plan);
-        Box::pin(std::future::ready(result))
-    }
-
-    fn load_run_stream<'a>(
-        &'a self,
-        run_id: &'a RunId,
-    ) -> AsyncStoreFuture<'a, Vec<store::KernelEventEnvelope>, Self::Error> {
-        let result = Ok(self
-            .inner
-            .lock()
-            .expect("typed run store lock")
-            .load_run_stream(run_id));
-        Box::pin(std::future::ready(result))
-    }
-
-    fn expected_next_seq<'a>(
-        &'a self,
-        run_id: &'a RunId,
-    ) -> AsyncStoreFuture<'a, store::StreamSeq, Self::Error> {
-        let result = Ok(self
-            .inner
-            .lock()
-            .expect("typed run store lock")
-            .expected_next_seq(run_id));
-        Box::pin(std::future::ready(result))
-    }
-
-    fn status_projection_snapshot<'a>(
-        &'a self,
-        run_id: &'a RunId,
-    ) -> AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
-        Box::pin(async move {
-            let store = self.inner.lock().expect("typed run store lock");
-            let stream = store.load_run_stream(run_id);
-            let run_projection = store::ProjectionSnapshot::rebuild_from_run_stream(&stream)?;
-            projection_with_resource_lanes(
-                &run_projection,
-                store
-                    .projection_snapshot()
-                    .resource_lanes()
-                    .map(|(lane_key, projection)| (lane_key.clone(), projection.clone()))
-                    .collect(),
-            )
-        })
-    }
-}
-
-impl StatusProjectionRead for InMemoryAsyncTypedRunStore {
-    fn status_projection<'a>(&'a self, run_id: &'a RunId) -> StatusProjectionFuture<'a> {
-        Box::pin(async move {
-            self.status_projection_snapshot(run_id)
-                .await
-                .map_err(api_error_from_store_error)
-        })
-    }
-}
-
-impl StatusProjectionRead for PostgresTypedRunEventStore {
-    fn status_projection<'a>(&'a self, run_id: &'a RunId) -> StatusProjectionFuture<'a> {
-        Box::pin(async move {
-            self.status_projection_snapshot(run_id)
-                .await
-                .map_err(api_error_from_typed_store_error)
-        })
-    }
-}
-
 /// Default production REST API state.
 pub type DefaultAppState = AppState<PostgresTypedRunEventStore>;
 
@@ -272,7 +176,7 @@ impl<S> RouterState<S>
 where
     S: AsyncTypedRunEventStore + Clone + Send + Sync,
 {
-    fn services(&self) -> Result<AsyncRunServices<S>, ApiError> {
+    fn services(&self) -> Result<RunServices<S>, ApiError> {
         let runners = mfm_app::production_typed_runner_registry(self.app.artifacts.clone())?;
         let certification_registry = mfm_app::production_certification_registry()?;
         Ok(
@@ -306,20 +210,10 @@ pub async fn make_default_app_state() -> Result<DefaultAppState, ApiError> {
     })
 }
 
-/// Builds in-memory REST API state rooted at `artifact_root`.
-pub fn make_in_memory_app_state(
-    artifact_root: impl Into<PathBuf>,
-) -> AppState<InMemoryAsyncTypedRunStore> {
-    AppState {
-        store: InMemoryAsyncTypedRunStore::default(),
-        artifacts: FsTypedArtifactStore::new(artifact_root),
-    }
-}
-
 /// Builds the `axum` router for the public REST API surface.
 pub fn make_app<S>(state: AppState<S>) -> Router
 where
-    S: AsyncTypedRunEventStore + StatusProjectionRead + Clone + Send + Sync + 'static,
+    S: AsyncTypedRunEventStore + Clone + Send + Sync + 'static,
 {
     let request_id_header = HeaderName::from_static("x-request-id");
     let make_span_header = request_id_header.clone();
@@ -344,6 +238,10 @@ where
         )
         .route("/v1/runs/start", post(runs_start::<S>))
         .route("/v1/runs/:run_id/resume", post(runs_resume::<S>))
+        .route(
+            "/v1/runs/:run_id/manual-resolution",
+            post(runs_manual_resolution::<S>),
+        )
         .route("/v1/runs/:run_id/status", get(runs_status::<S>))
         .route("/v1/runs/:run_id/stream", get(runs_stream::<S>))
         .route("/v1/runs/:run_id/replay", post(runs_replay::<S>))
@@ -445,6 +343,12 @@ async fn not_found() -> (StatusCode, Json<serde_json::Value>) {
 #[serde(rename_all = "snake_case")]
 enum TypedRunStartKind {
     TypedRunStartV1,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ManualResolutionKind {
+    ManualResolutionV1,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -627,6 +531,21 @@ struct TypedRunResumeBody {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ManualResolutionBody {
+    kind: ManualResolutionKind,
+    outcome: ManualResolutionDecision,
+    evidence_json: serde_json::Value,
+    authorization_proof: serde_json::Value,
+    #[serde(default = "default_json_media_type_string")]
+    evidence_media_type: String,
+    #[serde(default)]
+    note: Option<String>,
+    #[serde(default)]
+    drive: RestDriveMode,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RunStreamQuery {
     #[serde(default = "default_from_seq")]
     from_seq: u64,
@@ -636,6 +555,10 @@ struct RunStreamQuery {
 
 fn default_from_seq() -> u64 {
     1
+}
+
+fn default_json_media_type_string() -> String {
+    "application/json".to_owned()
 }
 
 fn default_framework_version() -> String {
@@ -658,11 +581,11 @@ fn default_source_revision() -> String {
 fn launch_unix_ms() -> Result<u64, ApiError> {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|error| {
-            ApiError::new(
+        .map_err(|_| {
+            ApiError::backend(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "LaunchClockUnavailable",
-                format!("system clock is before Unix epoch: {error}"),
+                "System clock is unavailable",
             )
         })?
         .as_millis();
@@ -690,10 +613,11 @@ where
     let canonical = parse_portfolio_snapshot_request(&req.request)?;
     let workflow_config = PortfolioWorkflowConfig::from(canonical);
     let compiled = compile_portfolio_snapshot_program(workflow_config).map_err(|error| {
-        ApiError::new(
+        let _ = error;
+        ApiError::backend(
             StatusCode::BAD_REQUEST,
             "PortfolioCompileInvalid",
-            error.to_string(),
+            "Portfolio snapshot request failed validation",
         )
     })?;
     let public_schema_id = compiled.public_schema_id.clone();
@@ -920,20 +844,50 @@ where
     json_ok(data)
 }
 
+#[instrument(level = "info", skip(state, body), fields(run_id = run_id.as_str()))]
+async fn runs_manual_resolution<S>(
+    State(state): State<RouterState<S>>,
+    Path(run_id): Path<String>,
+    body: Result<Json<ManualResolutionBody>, JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError>
+where
+    S: AsyncTypedRunEventStore + Clone + Send + Sync,
+{
+    let run_id = parse_run_id(&run_id)?;
+    let Json(req) = body.map_err(|_| ApiError::invalid_json())?;
+    match req.kind {
+        ManualResolutionKind::ManualResolutionV1 => {}
+    }
+    let evidence_bytes =
+        canonical_json_value_bytes(&req.evidence_json, "ManualResolutionEvidenceInvalid")?;
+    let proof_bytes =
+        canonical_json_value_bytes(&req.authorization_proof, "ManualResolutionProofInvalid")?;
+    let data = state
+        .services()?
+        .record_manual_resolution(ManualResolutionRecordRequest {
+            run_id,
+            outcome: req.outcome,
+            evidence_bytes,
+            evidence_media_type: req.evidence_media_type,
+            authorization_proof_bytes: proof_bytes,
+            note: req.note,
+            drive: req.drive.into_app(),
+        })
+        .await?;
+
+    json_ok(data)
+}
+
 #[instrument(level = "debug", skip(state), fields(run_id = run_id.as_str()))]
 async fn runs_status<S>(
     State(state): State<RouterState<S>>,
     Path(run_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError>
 where
-    S: AsyncTypedRunEventStore + StatusProjectionRead + Clone + Send + Sync,
+    S: AsyncTypedRunEventStore + Clone + Send + Sync,
 {
     let run_id = parse_run_id(&run_id)?;
-    let projection = state.app.store.status_projection(&run_id).await?;
-    let data = state
-        .services()?
-        .run_status_with_projection(&run_id, projection)
-        .await?;
+    let data = state.services()?.run_status(&run_id).await?;
 
     json_ok(data)
 }
@@ -1098,11 +1052,11 @@ fn deserialize_request_value<T>(value: &serde_json::Value) -> Result<T, ApiError
 where
     T: DeserializeOwned,
 {
-    serde_json::from_value(value.clone()).map_err(|error| {
-        ApiError::new(
+    serde_json::from_value(value.clone()).map_err(|_| {
+        ApiError::backend(
             StatusCode::BAD_REQUEST,
             "InvalidEvmContractRequest",
-            error.to_string(),
+            "Invalid EVM contract request",
         )
     })
 }
@@ -1111,29 +1065,30 @@ fn canonical_request_value_bytes<T>(value: &T) -> Result<Vec<u8>, ApiError>
 where
     T: Serialize,
 {
-    let json = serde_json::to_string(value).map_err(|error| {
-        ApiError::new(
+    let json = serde_json::to_string(value).map_err(|_| {
+        ApiError::backend(
             StatusCode::BAD_REQUEST,
             "InvalidEvmContractRequest",
-            error.to_string(),
+            "Failed to serialize EVM contract request",
         )
     })?;
     PlainCanonicalJsonBytes::from_json_str(&json)
         .map(|canonical| canonical.to_vec())
-        .map_err(|error| {
-            ApiError::new(
+        .map_err(|_| {
+            ApiError::backend(
                 StatusCode::BAD_REQUEST,
                 "InvalidEvmContractRequest",
-                error.to_string(),
+                "Failed to canonicalize EVM contract request",
             )
         })
 }
 
 fn api_error_from_contract_compile(error: ContractLifecycleCompileError) -> ApiError {
-    ApiError::new(
+    let _ = error;
+    ApiError::backend(
         StatusCode::BAD_REQUEST,
         "EvmContractCompileInvalid",
-        error.to_string(),
+        "EVM contract lifecycle request failed validation",
     )
 }
 
@@ -1197,7 +1152,13 @@ fn canonical_json_value_bytes(
     })?;
     PlainCanonicalJsonBytes::from_json_str(&json)
         .map(|canonical| canonical.to_vec())
-        .map_err(|error| ApiError::new(StatusCode::BAD_REQUEST, error_code, error.to_string()))
+        .map_err(|_| {
+            ApiError::backend(
+                StatusCode::BAD_REQUEST,
+                error_code,
+                "Request JSON is not canonical JSON",
+            )
+        })
 }
 
 fn parse_portfolio_snapshot_request(
@@ -1244,10 +1205,10 @@ fn api_error_from_portfolio_config_error(error: PortfolioSnapshotConfigError) ->
         PortfolioSnapshotConfigError::InvalidBundle(_)
         | PortfolioSnapshotConfigError::Decode { .. }
         | PortfolioSnapshotConfigError::Serialize { .. }
-        | PortfolioSnapshotConfigError::CanonicalJson { .. } => ApiError::new(
+        | PortfolioSnapshotConfigError::CanonicalJson { .. } => ApiError::backend(
             StatusCode::BAD_REQUEST,
             "InvalidPortfolioRequest",
-            error.to_string(),
+            "Portfolio request failed validation",
         ),
     }
 }
@@ -1280,11 +1241,11 @@ fn readiness_artifact_probe() -> Result<store::ArtifactEvidenceRef, ApiError> {
         artifact_id: ArtifactId::from_digest(DigestAlgorithm::Sha256JcsV1, *digest.digest()),
         digest,
         byte_len: bytes.len() as u64,
-        media_type: spec::MediaType::new("application/json").map_err(|error| {
-            ApiError::new(
+        media_type: spec::MediaType::new("application/json").map_err(|_| {
+            ApiError::backend(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "JsonMediaTypeInvalid",
-                error.to_string(),
+                "JSON media type is invalid",
             )
         })?,
         schema_id: None,
@@ -1297,108 +1258,52 @@ fn readiness_artifact_probe() -> Result<store::ArtifactEvidenceRef, ApiError> {
 
 fn api_error_from_typed_store_error(error: PostgresTypedStoreError) -> ApiError {
     match error {
-        PostgresTypedStoreError::Store(error) => {
-            ApiError::new(StatusCode::CONFLICT, "RunStoreRejected", error.to_string())
-        }
-        PostgresTypedStoreError::Database(message) => ApiError::new(
+        PostgresTypedStoreError::Store(_) => ApiError::backend(
+            StatusCode::CONFLICT,
+            "RunStoreRejected",
+            "Run store rejected the requested operation",
+        ),
+        PostgresTypedStoreError::Database(_) => ApiError::backend(
             StatusCode::SERVICE_UNAVAILABLE,
             "RunStoreUnavailable",
-            message,
+            "Run store is unavailable",
         ),
-        PostgresTypedStoreError::Corruption(message) => ApiError::new(
+        PostgresTypedStoreError::Corruption(_) => ApiError::backend(
             StatusCode::INTERNAL_SERVER_ERROR,
             "RunStoreCorruption",
-            message,
+            "Run store returned invalid data",
         ),
     }
 }
 
-fn api_error_from_store_error(error: store::StoreError) -> ApiError {
-    ApiError::new(StatusCode::CONFLICT, "RunStoreRejected", error.to_string())
-}
-
-fn projection_with_resource_lanes(
-    snapshot: &store::ProjectionSnapshot,
-    resource_lanes: BTreeMap<store::ResourceLaneKey, store::ResourceLaneProjection>,
-) -> Result<store::ProjectionSnapshot, store::StoreError> {
-    store::ProjectionSnapshot::from_parts(store::ProjectionSnapshotParts {
-        run_states: snapshot
-            .run_states()
-            .map(|(run_id, state)| (run_id.clone(), *state))
-            .collect(),
-        saga_policy_digests: snapshot
-            .saga_policy_digests()
-            .map(|(run_id, digest)| (run_id.clone(), digest.clone()))
-            .collect(),
-        run_completions: snapshot
-            .run_completions()
-            .map(|(run_id, completion)| (run_id.clone(), completion.clone()))
-            .collect(),
-        saga_engagements: snapshot
-            .saga_engagements()
-            .map(|(run_id, engagement)| (run_id.clone(), engagement.clone()))
-            .collect(),
-        manual_resolutions: snapshot
-            .manual_resolutions()
-            .map(|(run_id, resolution)| (run_id.clone(), resolution.clone()))
-            .collect(),
-        attempts: snapshot
-            .attempts()
-            .map(|((node_id, attempt_id), attempt)| {
-                ((node_id.clone(), attempt_id.clone()), attempt.clone())
-            })
-            .collect(),
-        cells: snapshot
-            .cells()
-            .map(|(cell_id, cell)| (cell_id.clone(), cell.clone()))
-            .collect(),
-        facts: snapshot
-            .facts()
-            .map(|((node_id, attempt_id, fact_key), fact)| {
-                (
-                    (node_id.clone(), attempt_id.clone(), fact_key.clone()),
-                    fact.clone(),
-                )
-            })
-            .collect(),
-        side_effects: snapshot
-            .side_effects()
-            .map(|(ledger_ref, side_effect)| (ledger_ref.clone(), side_effect.clone()))
-            .collect(),
-        resource_lanes,
-        public_outputs: snapshot
-            .public_outputs()
-            .map(|(schema_id, output)| (schema_id.clone(), output.clone()))
-            .collect(),
-        retentions: snapshot
-            .retentions()
-            .map(|(run_id, retention)| (run_id.clone(), retention.clone()))
-            .collect(),
-    })
-}
-
 fn api_error_from_typed_artifact_error(error: FsTypedArtifactError) -> ApiError {
     match error {
-        FsTypedArtifactError::NotFound { .. } => {
-            ApiError::new(StatusCode::NOT_FOUND, "ArtifactNotFound", error.to_string())
-        }
+        FsTypedArtifactError::NotFound { .. } => ApiError::backend(
+            StatusCode::NOT_FOUND,
+            "ArtifactNotFound",
+            "Typed artifact was not found",
+        ),
         FsTypedArtifactError::InvalidEvidence { .. }
         | FsTypedArtifactError::InvalidIdentity { .. }
-        | FsTypedArtifactError::EvidenceMismatch { .. } => {
-            ApiError::new(StatusCode::CONFLICT, "ArtifactRejected", error.to_string())
-        }
-        FsTypedArtifactError::RetainedArtifactRefused { .. } => {
-            ApiError::new(StatusCode::CONFLICT, "ArtifactRetained", error.to_string())
-        }
-        FsTypedArtifactError::Corruption { .. } => ApiError::new(
+        | FsTypedArtifactError::EvidenceMismatch { .. } => ApiError::backend(
+            StatusCode::CONFLICT,
+            "ArtifactRejected",
+            "Typed artifact evidence was rejected",
+        ),
+        FsTypedArtifactError::RetainedArtifactRefused { .. } => ApiError::backend(
+            StatusCode::CONFLICT,
+            "ArtifactRetained",
+            "Typed artifact is retained",
+        ),
+        FsTypedArtifactError::Corruption { .. } => ApiError::backend(
             StatusCode::INTERNAL_SERVER_ERROR,
             "ArtifactCorruption",
-            error.to_string(),
+            "Typed artifact store returned invalid data",
         ),
-        FsTypedArtifactError::Io { .. } => ApiError::new(
+        FsTypedArtifactError::Io { .. } => ApiError::backend(
             StatusCode::SERVICE_UNAVAILABLE,
             "ArtifactStoreUnavailable",
-            error.to_string(),
+            "Typed artifact store is unavailable",
         ),
     }
 }
@@ -1504,101 +1409,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn success_response_preserves_run_status_attempt_and_saga_contract() {
-        let response = ok(json!({
-            "run": {
-                "run_id": "run:sha256-jcs-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "spec_hash": "spec:sha256-jcs-v1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                "run_mode": "failed_without_acdc_claim",
-                "saga": {
-                    "policy": {
-                        "variant": "compensate_completed",
-                        "manual_authorization": null,
-                        "on_remediation_unresolved": "manual_resolution"
-                    },
-                    "obligations": [],
-                    "resource_ledgers": [],
-                    "resource_lanes": [{
-                        "namespace": "mfm.test.account_nonce",
-                        "key": "wallet-1",
-                        "holding_run_id": "run:sha256-jcs-v1:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-                        "holding_ledger_key": "ledger-forward",
-                        "holding_ledger_purpose": "forward",
-                        "holding_forward_ledger_key": null,
-                        "holding_node_id": "node:sha256-jcs-v1:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-                        "holding_attempt_id": "attempt:sha256-jcs-v1:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-                        "invocation_epoch": 1
-                    }],
-                    "manual_block_reason": "remediation_ambiguous",
-                    "required_manual_authorization": null,
-                    "terminal_resolution": {
-                        "outcome": "failed_without_acdc_claim",
-                        "claim": "none"
-                    }
-                },
-                "attempt_dispositions": [
-                    {
-                        "node_id": "node:sha256-jcs-v1:1111111111111111111111111111111111111111111111111111111111111111",
-                        "attempt_id": "attempt:sha256-jcs-v1:2222222222222222222222222222222222222222222222222222222222222222",
-                        "disposition": "started",
-                        "attempt_no": 1,
-                        "retryable": null,
-                        "output_cell_id": null
-                    },
-                    {
-                        "node_id": "node:sha256-jcs-v1:3333333333333333333333333333333333333333333333333333333333333333",
-                        "attempt_id": "attempt:sha256-jcs-v1:4444444444444444444444444444444444444444444444444444444444444444",
-                        "disposition": "interrupted",
-                        "attempt_no": null,
-                        "retryable": null,
-                        "output_cell_id": null
-                    },
-                    {
-                        "node_id": "node:sha256-jcs-v1:5555555555555555555555555555555555555555555555555555555555555555",
-                        "attempt_id": "attempt:sha256-jcs-v1:6666666666666666666666666666666666666666666666666666666666666666",
-                        "disposition": "failed",
-                        "attempt_no": null,
-                        "retryable": false,
-                        "output_cell_id": null
-                    },
-                    {
-                        "node_id": "node:sha256-jcs-v1:7777777777777777777777777777777777777777777777777777777777777777",
-                        "attempt_id": "attempt:sha256-jcs-v1:8888888888888888888888888888888888888888888888888888888888888888",
-                        "disposition": "completed",
-                        "attempt_no": null,
-                        "retryable": null,
-                        "output_cell_id": "cell:sha256-jcs-v1:9999999999999999999999999999999999999999999999999999999999999999"
-                    }
-                ],
-                "scheduler_status": "blocked",
-                "head_seq": 42
-            }
-        }));
-
-        assert_eq!(response["status"], "success");
-        let dispositions = response["data"]["run"]["attempt_dispositions"]
-            .as_array()
-            .expect("attempt dispositions");
-        assert_eq!(dispositions.len(), 4);
-        assert_eq!(dispositions[0]["disposition"], "started");
-        assert_eq!(dispositions[1]["disposition"], "interrupted");
-        assert_eq!(dispositions[2]["disposition"], "failed");
-        assert_eq!(dispositions[3]["disposition"], "completed");
-        assert_eq!(
-            response["data"]["run"]["saga"]["resource_lanes"][0]["key"],
-            "wallet-1"
-        );
-        assert_eq!(
-            response["data"]["run"]["saga"]["manual_block_reason"],
-            "remediation_ambiguous"
-        );
-        assert_eq!(
-            response["data"]["run"]["saga"]["terminal_resolution"]["outcome"],
-            "failed_without_acdc_claim"
-        );
-    }
-
     #[tokio::test]
     async fn removed_legacy_contract_route_is_not_found() {
         let route = ["/v1/evm/", "d", "c", "v", "/deploy"].concat();
@@ -1671,7 +1481,10 @@ mod tests {
             .as_nanos();
         let root = std::env::temp_dir().join(format!("mfm-rest-api-contract-test-{unique}"));
         std::fs::create_dir_all(&root).expect("artifact root");
-        make_app(make_in_memory_app_state(root))
+        make_app(AppState {
+            store: store::AsyncInMemoryTypedRunStore::default(),
+            artifacts: FsTypedArtifactStore::new(root),
+        })
     }
 
     fn json_post(uri: &str, body: serde_json::Value) -> Request<Body> {

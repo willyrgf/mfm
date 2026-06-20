@@ -112,12 +112,13 @@ fn runtime_signing_error(error: mfm_signing::SigningError) -> mfm_runtime::Runti
 mod tests {
     use super::*;
     use crate::{
-        make_in_memory_typed_services_with_certification_registry, new_run_id,
+        make_async_typed_services_with_certification_registry, new_run_id,
         prepare_certified_run_launch, CertifiedRunLaunchInput, DriveMode, RunLaunchConfigArtifact,
         RunLaunchSeedArtifact, TypedRunMode,
     };
     use mfm_adapters_evm_contracts::{
-        EvmContractRuntime, EvmContractRuntimeFactory, EvmContractRuntimeRoute,
+        ensure_prepared_invocation_public, EvmContractRuntime, EvmContractRuntimeFactory,
+        EvmContractRuntimeRoute, PreparedContractInvocation,
     };
     use mfm_canonical::PlainCanonicalJsonBytes;
     use mfm_capabilities::CapabilitySpec;
@@ -147,13 +148,64 @@ mod tests {
         SigningProvider, SigningRequest, SigningResult,
     };
     use mfm_spec::v1 as spec;
-    use mfm_store::v1::{self as store, TypedRunEventStore};
+    use mfm_store::v1::{self as store, AsyncTypedRunEventStore};
     use serde::Serialize;
     use serde_json::json;
+    use std::collections::BTreeMap;
     use std::sync::Mutex;
 
     const TEST_SIGNER_HEX: &str =
         "4c0883a69102937d6231471b5dbb6204fe512961708279c2f802d6a8ebf2d3a4";
+
+    fn evm_forbidden_runtime_terms() -> Vec<String> {
+        vec![
+            ["raw", "_transaction"].concat(),
+            ["raw", "_tx"].concat(),
+            ["signed", "_payload"].concat(),
+            "signature".to_owned(),
+            ["key", "store"].concat(),
+            ["key", "store", "_path"].concat(),
+            ["private", "_key"].concat(),
+            ["private", " key"].concat(),
+            ["pass", "word"].concat(),
+            ["mne", "monic"].concat(),
+            ["seed", "_phrase"].concat(),
+            ["rpc", "_url"].concat(),
+            ["rpc", " url"].concat(),
+            ["end", "point"].concat(),
+            ["provider", "_kind"].concat(),
+            ["provider", " kind"].concat(),
+            ["author", "ization"].concat(),
+            TEST_SIGNER_HEX.to_owned(),
+        ]
+    }
+
+    fn assert_no_evm_runtime_surface(label: &str, rendered: &str) {
+        let rendered = rendered.to_ascii_lowercase();
+        for forbidden in evm_forbidden_runtime_terms() {
+            assert!(
+                !rendered.contains(&forbidden),
+                "{label} contains forbidden EVM runtime surface"
+            );
+        }
+    }
+
+    fn assert_prepared_invocation_has_unsigned_provenance(prepared: &PreparedContractInvocation) {
+        assert!(!prepared.signer_ref.is_empty());
+        assert!(prepared.expected_signer_address.starts_with("0x"));
+        assert!(
+            !prepared.transactions.is_empty(),
+            "prepared invocation must retain transaction provenance"
+        );
+        for transaction in &prepared.transactions {
+            assert!(transaction
+                .data_digest
+                .starts_with("content:sha256-jcs-v1:"));
+            assert!(transaction.signing_digest.starts_with("0x"));
+            assert_eq!(transaction.signing_digest.len(), 66);
+            assert!(transaction.gas_limit > 0);
+        }
+    }
 
     fn canonical_value<T: Serialize>(value: &T) -> mfm_runtime::Result<PlainCanonicalJsonBytes> {
         let json = serde_json::to_string(value)
@@ -187,9 +239,10 @@ mod tests {
             Arc::new(TestRuntimeFactory::new(artifacts.clone())),
         )
         .expect("contract runners");
-        let services = make_in_memory_typed_services_with_certification_registry(
+        let services = make_async_typed_services_with_certification_registry(
             runners,
-            &root,
+            store::AsyncInMemoryTypedRunStore::default(),
+            artifacts.clone(),
             certification,
         );
         let run_id = new_run_id();
@@ -237,12 +290,13 @@ mod tests {
             .expect("resume validate lifecycle");
         assert_eq!(resumed.run_mode, TypedRunMode::Completed);
         let replay = services
-            .replay_broker(&run_id)
+            .verify_replay_for_run(&run_id)
             .await
             .expect("replay validate lifecycle");
         assert_eq!(
-            replay.projection_snapshot().run_state(&run_id),
-            store::RunState::Completed
+            replay.run_mode,
+            TypedRunMode::Completed,
+            "validated lifecycle replay should report a completed run"
         );
         let public_output = services
             .typed_public_output(&run_id, &compiled.public_schema_id)
@@ -283,9 +337,10 @@ mod tests {
             Arc::new(TestRuntimeFactory::new(artifacts.clone())),
         )
         .expect("contract runners");
-        let services = make_in_memory_typed_services_with_certification_registry(
+        let services = make_async_typed_services_with_certification_registry(
             runners,
-            &root,
+            store::AsyncInMemoryTypedRunStore::default(),
+            artifacts.clone(),
             certification,
         );
         let run_id = new_run_id();
@@ -332,11 +387,11 @@ mod tests {
             .await
             .expect("resume validate lifecycle");
         assert_eq!(resumed.run_mode, TypedRunMode::Completed);
-        let stream = {
-            let store = services.store();
-            let store = store.lock().await;
-            store.load_run_stream(&run_id)
-        };
+        let stream = services
+            .store()
+            .load_run_stream(&run_id)
+            .await
+            .expect("load run stream");
         let fact_kinds = stream
             .iter()
             .filter_map(|event| match event.payload() {
@@ -384,9 +439,10 @@ mod tests {
             )),
         )
         .expect("contract runners");
-        let services = make_in_memory_typed_services_with_certification_registry(
+        let services = make_async_typed_services_with_certification_registry(
             runners,
-            &root,
+            store::AsyncInMemoryTypedRunStore::default(),
+            artifacts.clone(),
             certification,
         );
         let run_id = new_run_id();
@@ -421,16 +477,13 @@ mod tests {
             .expect("resume deploy lifecycle");
         assert_eq!(resumed.run_mode, TypedRunMode::Completed);
         let replay = services
-            .replay_broker(&run_id)
+            .verify_replay_for_run(&run_id)
             .await
             .expect("replay deploy lifecycle");
         assert_eq!(
-            replay.projection_snapshot().run_state(&run_id),
-            store::RunState::Completed
-        );
-        assert!(
-            mfm_adapters_evm_contracts::verify_contract_lifecycle_replay(&replay)
-                .expect("contract replay verifier")
+            replay.run_mode,
+            TypedRunMode::Completed,
+            "deploy lifecycle replay should report a completed run"
         );
         let public_output = services
             .typed_public_output(&run_id, &compiled.public_schema_id)
@@ -480,9 +533,10 @@ mod tests {
             )),
         )
         .expect("contract runners");
-        let services = make_in_memory_typed_services_with_certification_registry(
+        let services = make_async_typed_services_with_certification_registry(
             runners,
-            &root,
+            store::AsyncInMemoryTypedRunStore::default(),
+            artifacts.clone(),
             certification,
         );
         let run_id = new_run_id();
@@ -516,14 +570,10 @@ mod tests {
             .await
             .expect("resume full lifecycle");
         assert_eq!(resumed.run_mode, TypedRunMode::Completed);
-        let replay = services
-            .replay_broker(&run_id)
+        services
+            .verify_replay_for_run(&run_id)
             .await
             .expect("replay full lifecycle");
-        assert!(
-            mfm_adapters_evm_contracts::verify_contract_lifecycle_replay(&replay)
-                .expect("contract replay verifier")
-        );
         let public_output = services
             .typed_public_output(&run_id, &compiled.public_schema_id)
             .await
@@ -541,7 +591,70 @@ mod tests {
             rendered.to_string().contains("configure_receipt_evidence"),
             "rendered lifecycle output must contain configure receipt evidence refs: {rendered}"
         );
+        assert_no_evm_runtime_surface("contract public output", &rendered.to_string());
 
+        let stream = services
+            .store()
+            .load_run_stream(&run_id)
+            .await
+            .expect("load run stream");
+        assert_eq!(
+            contract_lifecycle_runner_output_summary(&stream),
+            [
+                "attempt-output:mfm.evm.contract/deploy:side_effect.intent_persisted+side_effect.claimed+side_effect.invocation_prepared+side_effect.invocation_started+retention_refs_appended[roles=side_effect_intent]+retention_refs_appended[roles=prepared_invocation]",
+                "attempt-output:mfm.evm.contract/deploy:side_effect.submission_observed+retention_refs_appended[roles=submission]",
+                "attempt-output:mfm.evm.contract/deploy:side_effect.receipt_observed+retention_refs_appended[roles=receipt]",
+                "attempt-output:mfm.evm.contract/deploy:side_effect.confirmation_observed+retention_refs_appended[roles=confirmation]",
+                "attempt-output:mfm.evm.contract/deploy:cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+retention_refs_appended[roles=state_output]",
+                "attempt-output:mfm.evm.contract/configure:side_effect.intent_persisted+side_effect.claimed+side_effect.invocation_prepared+side_effect.invocation_started+retention_refs_appended[roles=side_effect_intent]+retention_refs_appended[roles=prepared_invocation]",
+                "attempt-output:mfm.evm.contract/configure:side_effect.submission_observed+retention_refs_appended[roles=submission]",
+                "attempt-output:mfm.evm.contract/configure:side_effect.receipt_observed+retention_refs_appended[roles=receipt]",
+                "attempt-output:mfm.evm.contract/configure:side_effect.confirmation_observed+retention_refs_appended[roles=confirmation]",
+                "attempt-output:mfm.evm.contract/configure:cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+retention_refs_appended[roles=state_output]",
+                "attempt-output:mfm.evm.contract/validate:fact_recorded+cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+artifact_referenced[role=fact_response]+retention_refs_appended[roles=fact_response]+retention_refs_appended[roles=state_output]",
+            ]
+        );
+        let mut prepared_artifact_ids = Vec::new();
+        for event in &stream {
+            let payload_debug = format!("{:?}", event.payload());
+            assert_no_evm_runtime_surface("contract event payload", &payload_debug);
+            if let events::KernelEventPayload::SideEffectInvocationPrepared(payload) =
+                event.payload()
+            {
+                prepared_artifact_ids.push(
+                    payload
+                        .prepared_artifact_id
+                        .clone()
+                        .expect("prepared invocation event has artifact id"),
+                );
+            }
+        }
+        assert_eq!(
+            prepared_artifact_ids.len(),
+            2,
+            "full lifecycle should prepare deploy and configure side effects"
+        );
+
+        for artifact_id in prepared_artifact_ids {
+            let (bytes, evidence) = services
+                .artifacts()
+                .get_artifact_by_id(&artifact_id)
+                .await
+                .expect("prepared invocation artifact");
+            assert_eq!(
+                evidence.artifact_role,
+                events::ArtifactRole::PreparedInvocation
+            );
+            assert_eq!(evidence.schema_id, None);
+            assert_eq!(evidence.semantic_type_id, None);
+            let rendered =
+                std::str::from_utf8(&bytes).expect("prepared invocation artifact is UTF-8");
+            assert_no_evm_runtime_surface("prepared invocation artifact", rendered);
+            let prepared = serde_json::from_slice::<PreparedContractInvocation>(&bytes)
+                .expect("prepared invocation json");
+            ensure_prepared_invocation_public(&prepared).expect("prepared invocation is public");
+            assert_prepared_invocation_has_unsigned_provenance(&prepared);
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1027,6 +1140,160 @@ mod tests {
             configure_tx_hashes: Vec::new(),
             configure_receipt_evidence: Vec::new(),
             configured_block_number: Some(1),
+        }
+    }
+
+    fn contract_lifecycle_runner_output_summary(
+        stream: &[store::KernelEventEnvelope],
+    ) -> Vec<String> {
+        attempt_output_commit_summaries(stream, "mfm.evm.contract/")
+    }
+
+    fn attempt_output_commit_summaries(
+        stream: &[store::KernelEventEnvelope],
+        state_kind_prefix: &str,
+    ) -> Vec<String> {
+        let state_kinds_by_node = state_kinds_by_node(stream);
+        let mut summaries = Vec::new();
+        let mut index = 0;
+        while index < stream.len() {
+            let first = &stream[index];
+            let seq = first.seq();
+            let commit_key = first.commit_key();
+            let mut end = index + 1;
+            while end < stream.len()
+                && stream[end].seq() == seq
+                && stream[end].commit_key() == commit_key
+            {
+                end += 1;
+            }
+            if commit_key.as_str().starts_with("attempt-output:") {
+                let state_kind = runner_output_node_id(&stream[index..end])
+                    .and_then(|node_id| state_kinds_by_node.get(&node_id))
+                    .map(String::as_str)
+                    .unwrap_or("unknown");
+                if state_kind.starts_with(state_kind_prefix) {
+                    let payloads = stream[index..end]
+                        .iter()
+                        .map(|event| runner_payload_summary(event.payload()))
+                        .collect::<Vec<_>>()
+                        .join("+");
+                    summaries.push(format!(
+                        "{}:{state_kind}:{payloads}",
+                        commit_key_class(commit_key.as_str())
+                    ));
+                }
+            }
+            index = end;
+        }
+        summaries
+    }
+
+    fn state_kinds_by_node(stream: &[store::KernelEventEnvelope]) -> BTreeMap<String, String> {
+        stream
+            .iter()
+            .filter_map(|event| match event.payload() {
+                events::KernelEventPayload::StateAttemptStarted(payload) => Some((
+                    payload.node_id.as_str().to_owned(),
+                    payload
+                        .state_kind
+                        .canonical_name()
+                        .unwrap_or_else(|| payload.state_kind.as_str())
+                        .to_owned(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn runner_output_node_id(events: &[store::KernelEventEnvelope]) -> Option<String> {
+        events.iter().find_map(|event| match event.payload() {
+            events::KernelEventPayload::FactRecorded(payload) => {
+                Some(payload.node_id.as_str().to_owned())
+            }
+            events::KernelEventPayload::CellProduced(payload) => {
+                Some(payload.node_id.as_str().to_owned())
+            }
+            events::KernelEventPayload::CellSkipped(payload) => {
+                Some(payload.node_id.as_str().to_owned())
+            }
+            events::KernelEventPayload::SideEffectIntentPersisted(payload) => {
+                Some(payload.node_id.as_str().to_owned())
+            }
+            events::KernelEventPayload::SideEffectClaimed(payload) => {
+                Some(payload.node_id.as_str().to_owned())
+            }
+            events::KernelEventPayload::SideEffectClaimTakenOver(payload) => {
+                Some(payload.node_id.as_str().to_owned())
+            }
+            events::KernelEventPayload::SideEffectInvocationPrepared(payload) => {
+                Some(payload.node_id.as_str().to_owned())
+            }
+            events::KernelEventPayload::SideEffectInvocationStarted(payload) => {
+                Some(payload.node_id.as_str().to_owned())
+            }
+            events::KernelEventPayload::SideEffectNotSubmittedProven(payload) => {
+                Some(payload.node_id.as_str().to_owned())
+            }
+            events::KernelEventPayload::SideEffectSubmissionObserved(payload) => {
+                Some(payload.node_id.as_str().to_owned())
+            }
+            events::KernelEventPayload::SideEffectSubmissionUnknown(payload) => {
+                Some(payload.node_id.as_str().to_owned())
+            }
+            events::KernelEventPayload::SideEffectReceiptObserved(payload) => {
+                Some(payload.node_id.as_str().to_owned())
+            }
+            events::KernelEventPayload::SideEffectConfirmationObserved(payload) => {
+                Some(payload.node_id.as_str().to_owned())
+            }
+            events::KernelEventPayload::SideEffectAmbiguous(payload) => {
+                Some(payload.node_id.as_str().to_owned())
+            }
+            events::KernelEventPayload::SideEffectFailed(payload) => {
+                Some(payload.node_id.as_str().to_owned())
+            }
+            events::KernelEventPayload::StateAttemptCompleted(payload) => {
+                Some(payload.node_id.as_str().to_owned())
+            }
+            _ => None,
+        })
+    }
+
+    fn runner_payload_summary(payload: &events::KernelEventPayload) -> String {
+        match payload {
+            events::KernelEventPayload::ArtifactReferenced(payload) => {
+                format!(
+                    "artifact_referenced[role={}]",
+                    payload.artifact_ref.role.as_str()
+                )
+            }
+            events::KernelEventPayload::RetentionRefsAppended(payload) => {
+                let roles = payload
+                    .refs
+                    .iter()
+                    .map(|retention| retention.role.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!("retention_refs_appended[roles={roles}]")
+            }
+            _ => payload_schema_name(payload).to_owned(),
+        }
+    }
+
+    fn payload_schema_name(payload: &events::KernelEventPayload) -> &str {
+        payload
+            .schema_descriptor()
+            .schema_name
+            .strip_prefix("mfm.events.v1.")
+            .unwrap_or_else(|| payload.schema_descriptor().schema_name)
+    }
+
+    fn commit_key_class(commit_key: &str) -> &str {
+        if commit_key.starts_with("attempt-output:") {
+            "attempt-output"
+        } else {
+            commit_key
         }
     }
 }

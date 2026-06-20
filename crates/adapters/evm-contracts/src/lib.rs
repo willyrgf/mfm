@@ -23,7 +23,6 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
-use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,7 +33,7 @@ use mfm_artifact_capabilities::{
     ArtifactEvidenceRef as CapabilityArtifactEvidenceRef, ArtifactReadProvider, ArtifactReadRequest,
 };
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
-use mfm_capabilities::{CapabilitySetDescriptor, CapabilitySpec};
+use mfm_capabilities::CapabilitySpec;
 use mfm_events::v1::{self as events, side_effect};
 use mfm_evm_capabilities::{
     EvmBlockSelector, EvmCallReadCapability, EvmCallReadProvider, EvmCallReadRequest,
@@ -59,21 +58,20 @@ use mfm_evm_core::hex::bytes_to_hex_prefixed;
 use mfm_evm_core::rlp::{rlp_encode_list, u64_to_min_be};
 use mfm_evm_core::tx::{parse_address, parse_u128_quantity, Eip1559TxToSign, LegacyTxToSign};
 use mfm_evm_signing::EvmSigningRequest;
-use mfm_ids::{
-    ArtifactId, CapabilityKind, CapabilityVersion, ContentDigest, DescriptorId, DigestAlgorithm,
-    NodeId, SchemaId,
-};
+use mfm_ids::{CapabilityKind, CapabilityVersion, ContentDigest, DigestAlgorithm, SchemaId};
 use mfm_program::{SideEffectState, StateSpec, ValidatedConfig};
 use mfm_program_derive::MfmValue;
 use mfm_replay::v1 as replay;
 use mfm_runtime::{
-    CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerBinding,
-    ErasedRunnerFuture, ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCell,
-    MaterializedCellTerminal, MaterializedInputNode, RunnerEventPayload, StagedArtifact,
-    StagedRetentionRefs,
+    CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture,
+    ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCell, MaterializedCellTerminal,
+    MaterializedInputNode, RunnerArtifactBuilder, RunnerCapabilityBinding, RunnerOutputBuilder,
+    RunnerPayloadBuilder, RunnerRegistrationBuilder, SideEffectDriver, SideEffectDriverCallbacks,
+    SideEffectDriverFuture, SideEffectIntentPlan, SideEffectObservedEvidence,
+    SideEffectPreparedInvocationPlan, SideEffectProtocolAction, SideEffectReplayEvidence,
+    SideEffectSubmissionDecision, SideEffectSubmissionDecisionFuture,
 };
 use mfm_signing::{PublicKeyBytes, SignerRef, SigningProvider};
-use mfm_spec::v1 as spec;
 use mfm_state_evm_contracts::{
     ConfigureContractInput, ConfigureContractState, ContractConfigureConfirmation,
     ContractConfigureIntent, ContractDeployConfirmation, ContractDeployIntent,
@@ -1024,128 +1022,48 @@ pub fn replay_verifier_id() -> Result<events::ReplayVerifierId> {
         .map_err(|error| EvmContractAdapterError::Identity(error.to_string()))
 }
 
+fn contract_side_effect_replay_evidence() -> mfm_runtime::Result<SideEffectReplayEvidence> {
+    Ok(SideEffectReplayEvidence {
+        replay_verifier_id: replay_verifier_id().map_err(runtime_adapter_error)?,
+        resource_touched_set: None,
+    })
+}
+
 /// Verifies contract lifecycle side-effect replay evidence when present in a broker stream.
 ///
 /// Returns `Ok(false)` when the stream contains no contract lifecycle side-effect intent.
 pub fn verify_contract_lifecycle_replay(broker: &replay::ReplayBroker) -> replay::Result<bool> {
-    let mut frames =
-        BTreeMap::<(events::SideEffectLedgerKey, u32), ContractLifecycleReplayFrames>::new();
-    for event in broker.events() {
-        match event.payload() {
-            events::KernelEventPayload::SideEffectIntentPersisted(payload)
-                if is_contract_lifecycle_intent(payload)? =>
-            {
-                let key = (payload.ledger_key.clone(), payload.invocation_epoch);
-                if frames
-                    .insert(
-                        key,
-                        ContractLifecycleReplayFrames {
-                            intent: payload.clone(),
-                            submission: None,
-                            receipt: None,
-                            confirmation: None,
-                        },
-                    )
-                    .is_some()
-                {
-                    return Err(replay::ReplayError::new(
-                        replay::ReplayErrorKind::SideEffectMismatch,
-                        "duplicate contract lifecycle side-effect intent",
-                    ));
-                }
-            }
-            events::KernelEventPayload::SideEffectSubmissionObserved(payload) => {
-                let key = (payload.ledger_key.clone(), payload.invocation_epoch);
-                if let Some(frames) = frames.get_mut(&key) {
-                    frames.submission = Some(payload.clone());
-                }
-            }
-            events::KernelEventPayload::SideEffectReceiptObserved(payload) => {
-                let key = (payload.ledger_key.clone(), payload.invocation_epoch);
-                if let Some(frames) = frames.get_mut(&key) {
-                    frames.receipt = Some(payload.clone());
-                }
-            }
-            events::KernelEventPayload::SideEffectConfirmationObserved(payload) => {
-                let key = (payload.ledger_key.clone(), payload.invocation_epoch);
-                if let Some(frames) = frames.get_mut(&key) {
-                    frames.confirmation = Some(payload.clone());
-                }
-            }
-            _ => {}
-        }
-    }
+    let frames = broker.side_effect_replay_frames_matching(is_contract_lifecycle_intent)?;
     if frames.is_empty() {
         return Ok(false);
     }
     let verifier =
         EvmContractLifecycleReplayVerifier::new().map_err(replay_contract_adapter_error)?;
-    for frames in frames.values() {
-        verify_contract_lifecycle_replay_frames(broker, &verifier, frames)?;
+    for frame in &frames {
+        verify_contract_lifecycle_replay_frame(broker, &verifier, frame)?;
     }
     Ok(true)
 }
 
-fn verify_contract_lifecycle_replay_frames(
+fn verify_contract_lifecycle_replay_frame(
     broker: &replay::ReplayBroker,
     verifier: &EvmContractLifecycleReplayVerifier,
-    frames: &ContractLifecycleReplayFrames,
+    frame: &replay::SideEffectReplayFrame<'_>,
 ) -> replay::Result<()> {
-    let Some(submission) = &frames.submission else {
+    let Some(submission_request) = frame.submission_request() else {
         return Err(contract_lifecycle_side_effect_missing("submission"));
     };
-    let Some(receipt) = &frames.receipt else {
+    let Some(receipt_request) = frame.receipt_request() else {
         return Err(contract_lifecycle_side_effect_missing("receipt"));
     };
-    let Some(confirmation) = &frames.confirmation else {
+    let Some(confirmation_request) = frame.confirmation_request() else {
         return Err(contract_lifecycle_side_effect_missing("confirmation"));
     };
 
-    broker.verify_side_effect_submission(
-        &side_effect_replay_request(
-            &frames.intent,
-            submission.submission_schema_id.clone(),
-            submission.submission_hash.clone(),
-            None,
-        ),
-        verifier,
-    )?;
-    broker.verify_side_effect_receipt(
-        &side_effect_replay_request(
-            &frames.intent,
-            receipt.receipt_schema_id.clone(),
-            receipt.receipt_hash.clone(),
-            Some(receipt.replay_verifier_id.clone()),
-        ),
-        verifier,
-    )?;
-    broker.verify_side_effect_confirmation(
-        &side_effect_replay_request(
-            &frames.intent,
-            confirmation.confirmation_schema_id.clone(),
-            confirmation.confirmation_hash.clone(),
-            Some(confirmation.replay_verifier_id.clone()),
-        ),
-        verifier,
-    )?;
+    broker.verify_side_effect_submission(&submission_request, verifier)?;
+    broker.verify_side_effect_receipt(&receipt_request, verifier)?;
+    broker.verify_side_effect_confirmation(&confirmation_request, verifier)?;
     Ok(())
-}
-
-/// Reads and decodes prepared invocation evidence through the artifact-read contract.
-pub async fn read_prepared_invocation_artifact(
-    artifacts: &dyn ArtifactReadProvider,
-    evidence: CapabilityArtifactEvidenceRef,
-) -> Result<PreparedContractInvocation> {
-    let request = ArtifactReadRequest::from_replay_authorized_evidence(evidence);
-    let verified = artifacts
-        .read_artifact(&request)
-        .await
-        .map_err(EvmContractAdapterError::ArtifactRead)?;
-    let prepared = verified
-        .decode_json::<PreparedContractInvocation>()
-        .map_err(EvmContractAdapterError::ArtifactRead)?;
-    ensure_prepared_invocation_public(&prepared)?;
-    Ok(prepared)
 }
 
 /// Converts artifact capability evidence into lifecycle value evidence.
@@ -1192,6 +1110,7 @@ fn created_contract_address(sender: Address, nonce: u64) -> Address {
 pub fn ensure_prepared_invocation_public(prepared: &PreparedContractInvocation) -> Result<()> {
     let json = serde_json::to_string(prepared)
         .map_err(|_| EvmContractAdapterError::InvalidPreparedInvocation)?;
+    let json = json.to_ascii_lowercase();
     for forbidden in forbidden_prepared_terms() {
         if json.contains(&forbidden) {
             return Err(EvmContractAdapterError::PreparedInvocationLeak);
@@ -1200,43 +1119,10 @@ pub fn ensure_prepared_invocation_public(prepared: &PreparedContractInvocation) 
     Ok(())
 }
 
-#[derive(Debug, Clone)]
-struct ContractLifecycleReplayFrames {
-    intent: side_effect::IntentPersisted,
-    submission: Option<side_effect::SubmissionObserved>,
-    receipt: Option<side_effect::ReceiptObserved>,
-    confirmation: Option<side_effect::ConfirmationObserved>,
-}
-
 fn is_contract_lifecycle_intent(intent: &side_effect::IntentPersisted) -> replay::Result<bool> {
     let binding = evm_contract_lifecycle_adapter_binding().map_err(replay_adapter_error)?;
     Ok(intent.adapter_kind == *binding.adapter_kind()
         && intent.adapter_version == *binding.adapter_version())
-}
-
-fn side_effect_replay_request(
-    intent: &side_effect::IntentPersisted,
-    evidence_schema_id: SchemaId,
-    evidence_hash: ContentDigest,
-    replay_verifier_id: Option<events::ReplayVerifierId>,
-) -> replay::SideEffectEvidenceReplayRequest {
-    replay::SideEffectEvidenceReplayRequest {
-        ledger_key: intent.ledger_key.clone(),
-        node_id: intent.node_id.clone(),
-        attempt_id: intent.attempt_id.clone(),
-        invocation_epoch: intent.invocation_epoch,
-        intent_schema_id: intent.intent_schema_id.clone(),
-        intent_hash: intent.intent_hash.clone(),
-        idempotency_input_schema_id: intent.idempotency_input_schema_id.clone(),
-        idempotency_input_hash: intent.idempotency_input_hash.clone(),
-        capability_kind: intent.capability_kind.clone(),
-        capability_version: intent.capability_version.clone(),
-        adapter_kind: intent.adapter_kind.clone(),
-        adapter_version: intent.adapter_version.clone(),
-        evidence_schema_id,
-        evidence_hash,
-        replay_verifier_id,
-    }
 }
 
 fn contract_lifecycle_side_effect_missing(phase: &str) -> replay::ReplayError {
@@ -1500,13 +1386,21 @@ fn replay_value_error(error: mfm_values::ValueError) -> replay::ReplayError {
 fn forbidden_prepared_terms() -> Vec<String> {
     vec![
         ["raw", "_transaction"].concat(),
+        ["raw", "_tx"].concat(),
+        ["signed", "_payload"].concat(),
         "signature".to_owned(),
         ["key", "store"].concat(),
+        ["key", "store", "_path"].concat(),
         ["private", "_key"].concat(),
+        ["private", " key"].concat(),
         ["pass", "word"].concat(),
+        ["mne", "monic"].concat(),
+        ["seed", "_phrase"].concat(),
         ["rpc", "_url"].concat(),
+        ["rpc", " url"].concat(),
         ["end", "point"].concat(),
         ["provider", "_kind"].concat(),
+        ["provider", " kind"].concat(),
         ["author", "ization"].concat(),
     ]
 }
@@ -1606,69 +1500,43 @@ pub fn register_contract_lifecycle_runners_with_factory(
     factory: Arc<dyn EvmContractRuntimeFactory>,
 ) -> mfm_runtime::Result<()> {
     let implementation_id = CapabilityImplementationId::new(CAPABILITY_IMPLEMENTATION_ID)?;
-    let deploy = registered_descriptor::<DeployContractState>()?;
-    registry.register_capability_set(&deploy.capabilities, implementation_id.clone())?;
-    registry.register(binding(
-        deploy.descriptor_id,
-        SIDE_EFFECT_FACTORY,
+    let mut registrations = RunnerRegistrationBuilder::new(registry, implementation_id);
+    let side_effect_factory = events::RunnerFactoryId::new(SIDE_EFFECT_FACTORY)?;
+    let read_factory = events::RunnerFactoryId::new(READ_FACTORY)?;
+    let deploy = mfm_program::registered_state_descriptor::<DeployContractState>()
+        .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
+    registrations.register_descriptor(
+        deploy.descriptor_id().clone(),
+        deploy.capabilities(),
+        side_effect_factory.clone(),
+        executable(side_effect_factory.clone())?,
         Arc::new(ContractMutationRunner {
             phase: ContractMutationRunnerPhase::Deploy,
             factory: factory.clone(),
         }),
-    )?)?;
-    let configure = registered_descriptor::<ConfigureContractState>()?;
-    registry.register_capability_set(&configure.capabilities, implementation_id.clone())?;
-    registry.register(binding(
-        configure.descriptor_id,
-        SIDE_EFFECT_FACTORY,
+    )?;
+    let configure = mfm_program::registered_state_descriptor::<ConfigureContractState>()
+        .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
+    registrations.register_descriptor(
+        configure.descriptor_id().clone(),
+        configure.capabilities(),
+        side_effect_factory.clone(),
+        executable(side_effect_factory)?,
         Arc::new(ContractMutationRunner {
             phase: ContractMutationRunnerPhase::Configure,
             factory: factory.clone(),
         }),
-    )?)?;
-    let validate = registered_descriptor::<ValidateContractState>()?;
-    registry.register_capability_set(&validate.capabilities, implementation_id)?;
-    registry.register(binding(
-        validate.descriptor_id,
-        READ_FACTORY,
-        Arc::new(ContractValidateRunner { factory }),
-    )?)?;
-    Ok(())
-}
-
-struct RegisteredRuntimeDescriptor {
-    descriptor_id: DescriptorId,
-    capabilities: CapabilitySetDescriptor,
-}
-
-fn registered_descriptor<S>() -> mfm_runtime::Result<RegisteredRuntimeDescriptor>
-where
-    S: StateSpec,
-    S::Effect: mfm_program::EffectRunner<S>,
-    S::Caps: mfm_capabilities::CapabilitySetFor<S::Effect>,
-{
-    let mut states = mfm_program::StateRegistryBuilder::new();
-    let registered = states
-        .register::<S>()
+    )?;
+    let validate = mfm_program::registered_state_descriptor::<ValidateContractState>()
         .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
-    Ok(RegisteredRuntimeDescriptor {
-        descriptor_id: registered.descriptor().descriptor_id().clone(),
-        capabilities: registered.descriptor().capabilities().clone(),
-    })
-}
-
-fn binding(
-    descriptor_id: DescriptorId,
-    factory: &'static str,
-    runner: Arc<dyn ErasedNodeRunner>,
-) -> mfm_runtime::Result<ErasedRunnerBinding> {
-    let factory_id = events::RunnerFactoryId::new(factory)?;
-    ErasedRunnerBinding::new(
-        descriptor_id,
-        factory_id.clone(),
-        executable(factory_id)?,
-        runner,
-    )
+    registrations.register_descriptor(
+        validate.descriptor_id().clone(),
+        validate.capabilities(),
+        read_factory.clone(),
+        executable(read_factory)?,
+        Arc::new(ContractValidateRunner { factory }),
+    )?;
+    Ok(())
 }
 
 fn executable(
@@ -1736,7 +1604,6 @@ struct DeployMutationPlan {
     state: DeployContractState,
     intent: ContractDeployIntent,
     idempotency: ContractTransactionIdempotency,
-    ledger_key: events::SideEffectLedgerKey,
 }
 
 struct ConfigureMutationPlan {
@@ -1745,7 +1612,6 @@ struct ConfigureMutationPlan {
     input: ConfigureContractInput,
     intent: ContractConfigureIntent,
     idempotency: ContractTransactionIdempotency,
-    ledger_key: events::SideEffectLedgerKey,
 }
 
 async fn run_deploy_mutation(
@@ -1753,106 +1619,205 @@ async fn run_deploy_mutation(
     factory: &dyn EvmContractRuntimeFactory,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
     let plan = deploy_mutation_plan(&ctx, factory.artifacts()).await?;
-    match ctx
-        .projections()
-        .side_effect(&plan.ledger_key)
-        .map(|projection| projection.phase.clone())
-    {
-        None => {
-            let runtime = factory.runtime_for(plan.config.as_ref().network().network_id())?;
-            let prepared = runtime
-                .adapter()
-                .prepare_deploy_invocation(&plan.config, &plan.intent)
-                .await
-                .map_err(runtime_adapter_error)?;
-            side_effect_prepare(
-                ctx,
-                plan.ledger_key,
-                &plan.intent,
-                &plan.idempotency,
-                prepared.evidence(),
-            )
-        }
-        Some(store::SideEffectPhase::InvocationStarted {
-            invocation_epoch, ..
+    let callbacks = DeploySideEffectCallbacks { factory, plan };
+    SideEffectDriver::drive(ctx, &callbacks).await
+}
+
+struct DeploySideEffectCallbacks<'a> {
+    factory: &'a dyn EvmContractRuntimeFactory,
+    plan: DeployMutationPlan,
+}
+
+impl SideEffectDriverCallbacks for DeploySideEffectCallbacks<'_> {
+    type Intent = ContractDeployIntent;
+    type Idempotency = ContractTransactionIdempotency;
+    type PreparedInvocation = PreparedContractInvocation;
+    type Submission = ContractTransactionSubmissions;
+    type SubmissionUnknownEvidence = ContractTransactionSubmissions;
+    type NotSubmittedProof = ContractTransactionSubmissions;
+    type Receipt = ContractTransactionReceipts;
+    type Confirmation = ContractDeployConfirmation;
+    type AmbiguityEvidence = ContractTransactionSubmissions;
+    type Output = DeployedContract;
+
+    fn intent_and_idempotency<'a, 'ctx>(
+        &'a self,
+        _ctx: &'a ErasedRunCtx<'ctx>,
+    ) -> SideEffectDriverFuture<'a, SideEffectIntentPlan<Self::Intent, Self::Idempotency>> {
+        Box::pin(async {
+            Ok(SideEffectIntentPlan {
+                intent: self.plan.intent.clone(),
+                idempotency: self.plan.idempotency.clone(),
+                idempotency_key: idempotency_key_ref(&self.plan.idempotency)?,
+                capability_binding: evm_transaction_submit_binding()?,
+            })
         })
-        | Some(store::SideEffectPhase::SubmissionUnknown { invocation_epoch }) => {
-            let prepared_projection = projected_prepared_artifact(&ctx, &plan.ledger_key)?;
-            let stored_prepared = load_prepared_invocation(
-                &prepared_projection,
-                events::ArtifactRole::PreparedInvocation,
-                &ctx,
-                factory.artifacts(),
-            )
-            .await?;
-            let runtime = factory.runtime_for(plan.config.as_ref().network().network_id())?;
+    }
+
+    fn prepare_invocation<'a, 'ctx>(
+        &'a self,
+        _ctx: &'a ErasedRunCtx<'ctx>,
+        _plan: &'a SideEffectIntentPlan<Self::Intent, Self::Idempotency>,
+    ) -> SideEffectDriverFuture<'a, SideEffectPreparedInvocationPlan<Self::PreparedInvocation>>
+    {
+        Box::pin(async {
+            let runtime = self
+                .factory
+                .runtime_for(self.plan.config.as_ref().network().network_id())?;
             let prepared = runtime
                 .adapter()
-                .reconstruct_deploy_invocation(&plan.config, &plan.intent, &stored_prepared)
-                .map_err(runtime_adapter_error)?;
-            side_effect_submission(ctx, &runtime, plan.ledger_key, invocation_epoch, &prepared)
+                .prepare_deploy_invocation(&self.plan.config, &self.plan.intent)
                 .await
-        }
-        Some(store::SideEffectPhase::SubmissionObserved { invocation_epoch }) => {
-            let prepared_projection = projected_prepared_artifact(&ctx, &plan.ledger_key)?;
-            let submission_projection = projected_submission_artifact(&ctx, &plan.ledger_key)?;
-            let runtime = factory.runtime_for(plan.config.as_ref().network().network_id())?;
-            side_effect_receipt(
+                .map_err(runtime_adapter_error)?;
+            Ok(SideEffectPreparedInvocationPlan::with_prepared_invocation(
+                prepared.evidence().clone(),
+            ))
+        })
+    }
+
+    fn reconstruct_prepared_invocation<'a, 'ctx>(
+        &'a self,
+        ctx: &'a ErasedRunCtx<'ctx>,
+        prepared: &'a store::SideEffectArtifactProjection,
+    ) -> SideEffectDriverFuture<'a, Self::PreparedInvocation> {
+        Box::pin(async {
+            load_prepared_invocation(
+                prepared,
+                events::ArtifactRole::PreparedInvocation,
                 ctx,
-                factory.artifacts(),
-                &runtime,
-                plan.ledger_key,
-                invocation_epoch,
-                &prepared_projection,
-                &submission_projection,
+                self.factory.artifacts(),
             )
             .await
-        }
-        Some(store::SideEffectPhase::ReceiptObserved { invocation_epoch }) => {
-            let prepared_projection = projected_prepared_artifact(&ctx, &plan.ledger_key)?;
-            let receipt_projection = projected_receipt_artifact(&ctx, &plan.ledger_key)?;
+        })
+    }
+
+    fn submit_or_recover_submission<'a, 'ctx>(
+        &'a self,
+        _ctx: &'a ErasedRunCtx<'ctx>,
+        _action: SideEffectProtocolAction,
+        prepared: Option<Self::PreparedInvocation>,
+    ) -> SideEffectSubmissionDecisionFuture<
+        'a,
+        Self::Submission,
+        Self::SubmissionUnknownEvidence,
+        Self::NotSubmittedProof,
+        Self::AmbiguityEvidence,
+    > {
+        Box::pin(async {
+            let stored_prepared =
+                prepared.ok_or_else(|| missing_side_effect_artifact("prepared invocation"))?;
+            let runtime = self
+                .factory
+                .runtime_for(self.plan.config.as_ref().network().network_id())?;
+            let prepared = runtime
+                .adapter()
+                .reconstruct_deploy_invocation(
+                    &self.plan.config,
+                    &self.plan.intent,
+                    &stored_prepared,
+                )
+                .map_err(runtime_adapter_error)?;
+            let submissions = ContractTransactionSubmissions {
+                submissions_version: 1,
+                transactions: runtime
+                    .adapter()
+                    .submit_prepared(&prepared)
+                    .await
+                    .map_err(runtime_adapter_error)?,
+            };
+            Ok(SideEffectSubmissionDecision::Observed(submissions))
+        })
+    }
+
+    fn read_receipt<'a, 'ctx>(
+        &'a self,
+        ctx: &'a ErasedRunCtx<'ctx>,
+        submission: &'a store::SideEffectArtifactProjection,
+    ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Receipt>> {
+        Box::pin(async {
+            let prepared_projection = projected_prepared_artifact(ctx)?;
             let prepared = load_prepared_invocation(
                 &prepared_projection,
                 events::ArtifactRole::PreparedInvocation,
-                &ctx,
-                factory.artifacts(),
+                ctx,
+                self.factory.artifacts(),
+            )
+            .await?;
+            let submissions = load_side_effect_value::<ContractTransactionSubmissions>(
+                submission,
+                events::ArtifactRole::Submission,
+                ctx,
+                self.factory.artifacts(),
+            )
+            .await?;
+            let runtime = self
+                .factory
+                .runtime_for(self.plan.config.as_ref().network().network_id())?;
+            Ok(SideEffectObservedEvidence {
+                evidence: ContractTransactionReceipts {
+                    receipts_version: 1,
+                    transactions: read_receipts_with_poll(&runtime, &prepared, &submissions)
+                        .await?,
+                },
+                replay: contract_side_effect_replay_evidence()?,
+            })
+        })
+    }
+
+    fn build_confirmation<'a, 'ctx>(
+        &'a self,
+        ctx: &'a ErasedRunCtx<'ctx>,
+        receipt: &'a store::SideEffectArtifactProjection,
+    ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Confirmation>> {
+        Box::pin(async {
+            let prepared_projection = projected_prepared_artifact(ctx)?;
+            let prepared = load_prepared_invocation(
+                &prepared_projection,
+                events::ArtifactRole::PreparedInvocation,
+                ctx,
+                self.factory.artifacts(),
             )
             .await?;
             let (receipts, receipt_evidence) =
                 load_side_effect_artifact::<ContractTransactionReceipts>(
-                    &receipt_projection,
+                    receipt,
                     events::ArtifactRole::Receipt,
-                    &ctx,
-                    factory.artifacts(),
+                    ctx,
+                    self.factory.artifacts(),
                 )
                 .await?;
             let receipts = receipts_with_evidence(receipts, &receipt_evidence);
             let receipt = single_receipt(receipts)?;
-            let confirmation = ContractDeployConfirmation {
-                confirmation_version: 1,
-                contract_address: deploy_contract_address_from_prepared(&prepared)
-                    .map_err(runtime_adapter_error)?,
-                receipt,
-            };
-            side_effect_confirmation(ctx, plan.ledger_key, invocation_epoch, &confirmation)
-        }
-        Some(store::SideEffectPhase::ConfirmationObserved { .. }) => {
-            let confirmation_projection = projected_confirmation_artifact(&ctx, &plan.ledger_key)?;
+            Ok(SideEffectObservedEvidence {
+                evidence: ContractDeployConfirmation {
+                    confirmation_version: 1,
+                    contract_address: deploy_contract_address_from_prepared(&prepared)
+                        .map_err(runtime_adapter_error)?,
+                    receipt,
+                },
+                replay: contract_side_effect_replay_evidence()?,
+            })
+        })
+    }
+
+    fn map_confirmation_to_output<'a, 'ctx>(
+        &'a self,
+        ctx: &'a ErasedRunCtx<'ctx>,
+        confirmation: &'a store::SideEffectArtifactProjection,
+    ) -> SideEffectDriverFuture<'a, Self::Output> {
+        Box::pin(async {
             let confirmation = load_side_effect_value::<ContractDeployConfirmation>(
-                &confirmation_projection,
+                confirmation,
                 events::ArtifactRole::Confirmation,
-                &ctx,
-                factory.artifacts(),
+                ctx,
+                self.factory.artifacts(),
             )
             .await?;
-            let output = plan
+            self.plan
                 .state
-                .output_from_confirmation(&(), &plan.intent, &confirmation)
-                .map_err(runtime_state_error)?;
-            mutation_output(ctx, &output)
-        }
-        Some(store::SideEffectPhase::Ambiguous { .. }) => Ok(ErasedRunnerOutput::new(Vec::new())),
-        Some(other) => unsupported_side_effect_phase("deploy", other),
+                .output_from_confirmation(&(), &self.plan.intent, &confirmation)
+                .map_err(runtime_state_error)
+        })
     }
 }
 
@@ -1861,105 +1826,204 @@ async fn run_configure_mutation(
     factory: &dyn EvmContractRuntimeFactory,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
     let plan = configure_mutation_plan(&ctx, factory.artifacts()).await?;
-    match ctx
-        .projections()
-        .side_effect(&plan.ledger_key)
-        .map(|projection| projection.phase.clone())
+    let callbacks = ConfigureSideEffectCallbacks { factory, plan };
+    SideEffectDriver::drive(ctx, &callbacks).await
+}
+
+struct ConfigureSideEffectCallbacks<'a> {
+    factory: &'a dyn EvmContractRuntimeFactory,
+    plan: ConfigureMutationPlan,
+}
+
+impl SideEffectDriverCallbacks for ConfigureSideEffectCallbacks<'_> {
+    type Intent = ContractConfigureIntent;
+    type Idempotency = ContractTransactionIdempotency;
+    type PreparedInvocation = PreparedContractInvocation;
+    type Submission = ContractTransactionSubmissions;
+    type SubmissionUnknownEvidence = ContractTransactionSubmissions;
+    type NotSubmittedProof = ContractTransactionSubmissions;
+    type Receipt = ContractTransactionReceipts;
+    type Confirmation = ContractConfigureConfirmation;
+    type AmbiguityEvidence = ContractTransactionSubmissions;
+    type Output = ConfiguredContract;
+
+    fn intent_and_idempotency<'a, 'ctx>(
+        &'a self,
+        _ctx: &'a ErasedRunCtx<'ctx>,
+    ) -> SideEffectDriverFuture<'a, SideEffectIntentPlan<Self::Intent, Self::Idempotency>> {
+        Box::pin(async {
+            Ok(SideEffectIntentPlan {
+                intent: self.plan.intent.clone(),
+                idempotency: self.plan.idempotency.clone(),
+                idempotency_key: idempotency_key_ref(&self.plan.idempotency)?,
+                capability_binding: evm_transaction_submit_binding()?,
+            })
+        })
+    }
+
+    fn prepare_invocation<'a, 'ctx>(
+        &'a self,
+        _ctx: &'a ErasedRunCtx<'ctx>,
+        _plan: &'a SideEffectIntentPlan<Self::Intent, Self::Idempotency>,
+    ) -> SideEffectDriverFuture<'a, SideEffectPreparedInvocationPlan<Self::PreparedInvocation>>
     {
-        None => {
-            let runtime = factory.runtime_for(plan.config.as_ref().network().network_id())?;
+        Box::pin(async {
+            let runtime = self
+                .factory
+                .runtime_for(self.plan.config.as_ref().network().network_id())?;
             let prepared = runtime
                 .adapter()
-                .prepare_configure_invocation(&plan.config, &plan.input, &plan.intent)
+                .prepare_configure_invocation(
+                    &self.plan.config,
+                    &self.plan.input,
+                    &self.plan.intent,
+                )
                 .await
                 .map_err(runtime_adapter_error)?;
-            side_effect_prepare(
-                ctx,
-                plan.ledger_key,
-                &plan.intent,
-                &plan.idempotency,
-                prepared.evidence(),
-            )
-        }
-        Some(store::SideEffectPhase::InvocationStarted {
-            invocation_epoch, ..
+            Ok(SideEffectPreparedInvocationPlan::with_prepared_invocation(
+                prepared.evidence().clone(),
+            ))
         })
-        | Some(store::SideEffectPhase::SubmissionUnknown { invocation_epoch }) => {
-            let prepared_projection = projected_prepared_artifact(&ctx, &plan.ledger_key)?;
-            let stored_prepared = load_prepared_invocation(
-                &prepared_projection,
+    }
+
+    fn reconstruct_prepared_invocation<'a, 'ctx>(
+        &'a self,
+        ctx: &'a ErasedRunCtx<'ctx>,
+        prepared: &'a store::SideEffectArtifactProjection,
+    ) -> SideEffectDriverFuture<'a, Self::PreparedInvocation> {
+        Box::pin(async {
+            load_prepared_invocation(
+                prepared,
                 events::ArtifactRole::PreparedInvocation,
-                &ctx,
-                factory.artifacts(),
+                ctx,
+                self.factory.artifacts(),
             )
-            .await?;
-            let runtime = factory.runtime_for(plan.config.as_ref().network().network_id())?;
+            .await
+        })
+    }
+
+    fn submit_or_recover_submission<'a, 'ctx>(
+        &'a self,
+        _ctx: &'a ErasedRunCtx<'ctx>,
+        _action: SideEffectProtocolAction,
+        prepared: Option<Self::PreparedInvocation>,
+    ) -> SideEffectSubmissionDecisionFuture<
+        'a,
+        Self::Submission,
+        Self::SubmissionUnknownEvidence,
+        Self::NotSubmittedProof,
+        Self::AmbiguityEvidence,
+    > {
+        Box::pin(async {
+            let stored_prepared =
+                prepared.ok_or_else(|| missing_side_effect_artifact("prepared invocation"))?;
+            let runtime = self
+                .factory
+                .runtime_for(self.plan.config.as_ref().network().network_id())?;
             let prepared = runtime
                 .adapter()
                 .reconstruct_configure_invocation(
-                    &plan.config,
-                    &plan.input,
-                    &plan.intent,
+                    &self.plan.config,
+                    &self.plan.input,
+                    &self.plan.intent,
                     &stored_prepared,
                 )
                 .map_err(runtime_adapter_error)?;
-            side_effect_submission(ctx, &runtime, plan.ledger_key, invocation_epoch, &prepared)
-                .await
-        }
-        Some(store::SideEffectPhase::SubmissionObserved { invocation_epoch }) => {
-            let prepared_projection = projected_prepared_artifact(&ctx, &plan.ledger_key)?;
-            let submission_projection = projected_submission_artifact(&ctx, &plan.ledger_key)?;
-            let runtime = factory.runtime_for(plan.config.as_ref().network().network_id())?;
-            side_effect_receipt(
-                ctx,
-                factory.artifacts(),
-                &runtime,
-                plan.ledger_key,
-                invocation_epoch,
+            let submissions = ContractTransactionSubmissions {
+                submissions_version: 1,
+                transactions: runtime
+                    .adapter()
+                    .submit_prepared(&prepared)
+                    .await
+                    .map_err(runtime_adapter_error)?,
+            };
+            Ok(SideEffectSubmissionDecision::Observed(submissions))
+        })
+    }
+
+    fn read_receipt<'a, 'ctx>(
+        &'a self,
+        ctx: &'a ErasedRunCtx<'ctx>,
+        submission: &'a store::SideEffectArtifactProjection,
+    ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Receipt>> {
+        Box::pin(async {
+            let prepared_projection = projected_prepared_artifact(ctx)?;
+            let prepared = load_prepared_invocation(
                 &prepared_projection,
-                &submission_projection,
+                events::ArtifactRole::PreparedInvocation,
+                ctx,
+                self.factory.artifacts(),
             )
-            .await
-        }
-        Some(store::SideEffectPhase::ReceiptObserved { invocation_epoch }) => {
-            let receipt_projection = projected_receipt_artifact(&ctx, &plan.ledger_key)?;
+            .await?;
+            let submissions = load_side_effect_value::<ContractTransactionSubmissions>(
+                submission,
+                events::ArtifactRole::Submission,
+                ctx,
+                self.factory.artifacts(),
+            )
+            .await?;
+            let runtime = self
+                .factory
+                .runtime_for(self.plan.config.as_ref().network().network_id())?;
+            Ok(SideEffectObservedEvidence {
+                evidence: ContractTransactionReceipts {
+                    receipts_version: 1,
+                    transactions: read_receipts_with_poll(&runtime, &prepared, &submissions)
+                        .await?,
+                },
+                replay: contract_side_effect_replay_evidence()?,
+            })
+        })
+    }
+
+    fn build_confirmation<'a, 'ctx>(
+        &'a self,
+        ctx: &'a ErasedRunCtx<'ctx>,
+        receipt: &'a store::SideEffectArtifactProjection,
+    ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Confirmation>> {
+        Box::pin(async {
             let (receipts, receipt_evidence) =
                 load_side_effect_artifact::<ContractTransactionReceipts>(
-                    &receipt_projection,
+                    receipt,
                     events::ArtifactRole::Receipt,
-                    &ctx,
-                    factory.artifacts(),
+                    ctx,
+                    self.factory.artifacts(),
                 )
                 .await?;
             let receipts = receipts_with_evidence(receipts, &receipt_evidence);
-            let confirmation = ContractConfigureConfirmation {
-                confirmation_version: 1,
-                configured_block_number: receipts
-                    .transactions
-                    .iter()
-                    .map(|receipt| receipt.block_number)
-                    .max(),
-                receipts: receipts.transactions,
-            };
-            side_effect_confirmation(ctx, plan.ledger_key, invocation_epoch, &confirmation)
-        }
-        Some(store::SideEffectPhase::ConfirmationObserved { .. }) => {
-            let confirmation_projection = projected_confirmation_artifact(&ctx, &plan.ledger_key)?;
+            Ok(SideEffectObservedEvidence {
+                evidence: ContractConfigureConfirmation {
+                    confirmation_version: 1,
+                    configured_block_number: receipts
+                        .transactions
+                        .iter()
+                        .map(|receipt| receipt.block_number)
+                        .max(),
+                    receipts: receipts.transactions,
+                },
+                replay: contract_side_effect_replay_evidence()?,
+            })
+        })
+    }
+
+    fn map_confirmation_to_output<'a, 'ctx>(
+        &'a self,
+        ctx: &'a ErasedRunCtx<'ctx>,
+        confirmation: &'a store::SideEffectArtifactProjection,
+    ) -> SideEffectDriverFuture<'a, Self::Output> {
+        Box::pin(async {
             let confirmation = load_side_effect_value::<ContractConfigureConfirmation>(
-                &confirmation_projection,
+                confirmation,
                 events::ArtifactRole::Confirmation,
-                &ctx,
-                factory.artifacts(),
+                ctx,
+                self.factory.artifacts(),
             )
             .await?;
-            let output = plan
+            self.plan
                 .state
-                .output_from_confirmation(&plan.input, &plan.intent, &confirmation)
-                .map_err(runtime_state_error)?;
-            mutation_output(ctx, &output)
-        }
-        Some(store::SideEffectPhase::Ambiguous { .. }) => Ok(ErasedRunnerOutput::new(Vec::new())),
-        Some(other) => unsupported_side_effect_phase("configure", other),
+                .output_from_confirmation(&self.plan.input, &self.plan.intent, &confirmation)
+                .map_err(runtime_state_error)
+        })
     }
 }
 
@@ -1973,13 +2037,11 @@ async fn deploy_mutation_plan(
     let idempotency = state
         .idempotency_input(&(), &intent)
         .map_err(runtime_state_error)?;
-    let ledger_key = ledger_key_for_idempotency(&idempotency)?;
     Ok(DeployMutationPlan {
         config,
         state,
         intent,
         idempotency,
-        ledger_key,
     })
 }
 
@@ -1996,14 +2058,12 @@ async fn configure_mutation_plan(
     let idempotency = state
         .idempotency_input(&input, &intent)
         .map_err(runtime_state_error)?;
-    let ledger_key = ledger_key_for_idempotency(&idempotency)?;
     Ok(ConfigureMutationPlan {
         config,
         state,
         input,
         intent,
         idempotency,
-        ledger_key,
     })
 }
 
@@ -2062,201 +2122,6 @@ fn validation_fact_capabilities(
     Ok(facts)
 }
 
-fn side_effect_prepare<Intent>(
-    ctx: ErasedRunCtx<'_>,
-    ledger_key: events::SideEffectLedgerKey,
-    intent: &Intent,
-    idempotency: &ContractTransactionIdempotency,
-    prepared: &PreparedContractInvocation,
-) -> mfm_runtime::Result<ErasedRunnerOutput>
-where
-    Intent: MfmValue + Serialize,
-{
-    let intent_artifact = artifact_for_value(
-        intent,
-        events::ArtifactRole::SideEffectIntent,
-        Some(ctx.node().node_id.clone()),
-    )?;
-    let prepared_artifact = artifact_for_schema_less_json(
-        prepared,
-        events::ArtifactRole::PreparedInvocation,
-        Some(ctx.node().node_id.clone()),
-    )?;
-    let staged_intent = staged_side_effect_artifact(&ctx, &intent_artifact, ledger_key.clone(), 1)?;
-    let staged_prepared =
-        staged_side_effect_artifact(&ctx, &prepared_artifact, ledger_key.clone(), 1)?;
-    let idempotency_hash = digest_value(idempotency)?;
-    let owner = runner_invocation_id(&ctx, &ledger_key)?;
-    let token = claim_fencing_token(&ctx, &ledger_key)?;
-    let ledger_purpose = events::SideEffectLedgerPurpose::Forward;
-    let binding = evm_contract_lifecycle_adapter_binding()
-        .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
-    Ok(ErasedRunnerOutput {
-        staged_artifacts: vec![staged_intent, staged_prepared],
-        staged_retention_refs: vec![
-            retention(&intent_artifact.evidence),
-            retention(&prepared_artifact.evidence),
-        ],
-        payloads: vec![
-            RunnerEventPayload::SideEffectIntentPersisted(side_effect::IntentPersisted {
-                spec_hash: ctx.spec_hash().clone(),
-                node_id: ctx.node().node_id.clone(),
-                scope_id: ctx.node().scope_id.clone(),
-                attempt_id: ctx.attempt_id().clone(),
-                ledger_key: ledger_key.clone(),
-                ledger_purpose: ledger_purpose.clone(),
-                invocation_epoch: 1,
-                intent_schema_id: Intent::schema_id().map_err(runtime_value_error)?,
-                intent_hash: intent_artifact.evidence.digest.clone(),
-                intent_artifact_id: intent_artifact.evidence.artifact_id.clone(),
-                idempotency_input_schema_id: ContractTransactionIdempotency::schema_id()
-                    .map_err(runtime_value_error)?,
-                idempotency_input_hash: idempotency_hash,
-                idempotency_key: idempotency_key_ref(idempotency)?,
-                capability_kind: EvmTransactionSubmitCapability::kind()
-                    .map_err(runtime_capability_error)?,
-                capability_version: EvmTransactionSubmitCapability::version()
-                    .map_err(runtime_capability_error)?,
-                adapter_kind: binding.adapter_kind().clone(),
-                adapter_version: binding.adapter_version().clone(),
-            }),
-            RunnerEventPayload::SideEffectClaimed(side_effect::Claimed {
-                spec_hash: ctx.spec_hash().clone(),
-                node_id: ctx.node().node_id.clone(),
-                attempt_id: ctx.attempt_id().clone(),
-                ledger_key: ledger_key.clone(),
-                ledger_purpose: ledger_purpose.clone(),
-                claim_owner: owner.clone(),
-                invocation_epoch: 1,
-                claim_generation: 1,
-                claim_fencing_token: token.clone(),
-            }),
-            RunnerEventPayload::SideEffectInvocationPrepared(side_effect::InvocationPrepared {
-                spec_hash: ctx.spec_hash().clone(),
-                node_id: ctx.node().node_id.clone(),
-                attempt_id: ctx.attempt_id().clone(),
-                ledger_key: ledger_key.clone(),
-                ledger_purpose: ledger_purpose.clone(),
-                invocation_epoch: 1,
-                claim_generation: 1,
-                claim_fencing_token: token.clone(),
-                prepared_artifact_id: Some(prepared_artifact.evidence.artifact_id.clone()),
-                prepared_hash: Some(prepared_artifact.evidence.digest.clone()),
-                resource_key: None,
-            }),
-            RunnerEventPayload::SideEffectInvocationStarted(side_effect::InvocationStarted {
-                spec_hash: ctx.spec_hash().clone(),
-                node_id: ctx.node().node_id.clone(),
-                attempt_id: ctx.attempt_id().clone(),
-                ledger_key,
-                ledger_purpose,
-                invocation_epoch: 1,
-                claim_owner: owner,
-                claim_generation: 1,
-                claim_fencing_token: token,
-            }),
-        ],
-    })
-}
-
-async fn side_effect_submission(
-    ctx: ErasedRunCtx<'_>,
-    runtime: &EvmContractRuntime,
-    ledger_key: events::SideEffectLedgerKey,
-    invocation_epoch: u32,
-    prepared: &PreparedContractMutation,
-) -> mfm_runtime::Result<ErasedRunnerOutput> {
-    let submissions = ContractTransactionSubmissions {
-        submissions_version: 1,
-        transactions: runtime
-            .adapter()
-            .submit_prepared(prepared)
-            .await
-            .map_err(runtime_adapter_error)?,
-    };
-    let artifact = artifact_for_value(
-        &submissions,
-        events::ArtifactRole::Submission,
-        Some(ctx.node().node_id.clone()),
-    )?;
-    let staged =
-        staged_side_effect_artifact(&ctx, &artifact, ledger_key.clone(), invocation_epoch)?;
-    Ok(ErasedRunnerOutput {
-        staged_artifacts: vec![staged],
-        staged_retention_refs: vec![retention(&artifact.evidence)],
-        payloads: vec![RunnerEventPayload::SideEffectSubmissionObserved(
-            side_effect::SubmissionObserved {
-                spec_hash: ctx.spec_hash().clone(),
-                node_id: ctx.node().node_id.clone(),
-                attempt_id: ctx.attempt_id().clone(),
-                ledger_key,
-                ledger_purpose: events::SideEffectLedgerPurpose::Forward,
-                invocation_epoch,
-                submission_schema_id: ContractTransactionSubmissions::schema_id()
-                    .map_err(runtime_value_error)?,
-                submission_hash: artifact.evidence.digest,
-                submission_artifact_id: artifact.evidence.artifact_id,
-            },
-        )],
-    })
-}
-
-async fn side_effect_receipt(
-    ctx: ErasedRunCtx<'_>,
-    artifacts: &dyn ArtifactReadProvider,
-    runtime: &EvmContractRuntime,
-    ledger_key: events::SideEffectLedgerKey,
-    invocation_epoch: u32,
-    prepared_projection: &store::SideEffectArtifactProjection,
-    submission_projection: &store::SideEffectArtifactProjection,
-) -> mfm_runtime::Result<ErasedRunnerOutput> {
-    let prepared = load_prepared_invocation(
-        prepared_projection,
-        events::ArtifactRole::PreparedInvocation,
-        &ctx,
-        artifacts,
-    )
-    .await?;
-    let submissions = load_side_effect_value::<ContractTransactionSubmissions>(
-        submission_projection,
-        events::ArtifactRole::Submission,
-        &ctx,
-        artifacts,
-    )
-    .await?;
-    let receipts = ContractTransactionReceipts {
-        receipts_version: 1,
-        transactions: read_receipts_with_poll(runtime, &prepared, &submissions).await?,
-    };
-    let artifact = artifact_for_value(
-        &receipts,
-        events::ArtifactRole::Receipt,
-        Some(ctx.node().node_id.clone()),
-    )?;
-    let staged =
-        staged_side_effect_artifact(&ctx, &artifact, ledger_key.clone(), invocation_epoch)?;
-    Ok(ErasedRunnerOutput {
-        staged_artifacts: vec![staged],
-        staged_retention_refs: vec![retention(&artifact.evidence)],
-        payloads: vec![RunnerEventPayload::SideEffectReceiptObserved(
-            side_effect::ReceiptObserved {
-                spec_hash: ctx.spec_hash().clone(),
-                node_id: ctx.node().node_id.clone(),
-                attempt_id: ctx.attempt_id().clone(),
-                ledger_key,
-                ledger_purpose: events::SideEffectLedgerPurpose::Forward,
-                invocation_epoch,
-                receipt_schema_id: ContractTransactionReceipts::schema_id()
-                    .map_err(runtime_value_error)?,
-                receipt_hash: artifact.evidence.digest,
-                receipt_artifact_id: artifact.evidence.artifact_id,
-                replay_verifier_id: replay_verifier_id().map_err(runtime_adapter_error)?,
-                resource_touched_set: None,
-            },
-        )],
-    })
-}
-
 async fn read_receipts_with_poll(
     runtime: &EvmContractRuntime,
     prepared: &PreparedContractInvocation,
@@ -2294,63 +2159,6 @@ async fn read_receipts_with_poll(
     Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(
         "contract lifecycle receipt polling exhausted".to_owned(),
     ))
-}
-
-fn side_effect_confirmation<Confirmation>(
-    ctx: ErasedRunCtx<'_>,
-    ledger_key: events::SideEffectLedgerKey,
-    invocation_epoch: u32,
-    confirmation: &Confirmation,
-) -> mfm_runtime::Result<ErasedRunnerOutput>
-where
-    Confirmation: MfmValue + Serialize,
-{
-    let artifact = artifact_for_value(
-        confirmation,
-        events::ArtifactRole::Confirmation,
-        Some(ctx.node().node_id.clone()),
-    )?;
-    let staged =
-        staged_side_effect_artifact(&ctx, &artifact, ledger_key.clone(), invocation_epoch)?;
-    Ok(ErasedRunnerOutput {
-        staged_artifacts: vec![staged],
-        staged_retention_refs: vec![retention(&artifact.evidence)],
-        payloads: vec![RunnerEventPayload::SideEffectConfirmationObserved(
-            side_effect::ConfirmationObserved {
-                spec_hash: ctx.spec_hash().clone(),
-                node_id: ctx.node().node_id.clone(),
-                attempt_id: ctx.attempt_id().clone(),
-                ledger_key,
-                ledger_purpose: events::SideEffectLedgerPurpose::Forward,
-                invocation_epoch,
-                confirmation_schema_id: Confirmation::schema_id().map_err(runtime_value_error)?,
-                confirmation_hash: artifact.evidence.digest,
-                confirmation_artifact_id: artifact.evidence.artifact_id,
-                replay_verifier_id: replay_verifier_id().map_err(runtime_adapter_error)?,
-                resource_touched_set: None,
-            },
-        )],
-    })
-}
-
-fn mutation_output<Output>(
-    ctx: ErasedRunCtx<'_>,
-    output: &Output,
-) -> mfm_runtime::Result<ErasedRunnerOutput>
-where
-    Output: MfmValue + Serialize,
-{
-    let artifact = artifact_for_value(
-        output,
-        events::ArtifactRole::StateOutput,
-        Some(ctx.node().node_id.clone()),
-    )?;
-    let staged = staged_attempt_artifact(&ctx, &artifact)?;
-    Ok(ErasedRunnerOutput {
-        staged_artifacts: vec![staged],
-        staged_retention_refs: vec![retention(&artifact.evidence)],
-        payloads: vec![cell_produced(&ctx, &artifact.evidence)],
-    })
 }
 
 async fn load_validate_input(
@@ -2481,52 +2289,29 @@ where
     Response: MfmValue + Serialize,
     Output: MfmValue + Serialize,
 {
-    let request_hash = digest_value(&request)?;
-    let response_artifact = artifact_for_value(
-        &response,
-        events::ArtifactRole::FactResponse,
-        Some(ctx.node().node_id.clone()),
-    )?;
-    let output_artifact = artifact_for_value(
-        &output,
-        events::ArtifactRole::StateOutput,
-        Some(ctx.node().node_id.clone()),
-    )?;
-    let staged_response = staged_attempt_artifact(&ctx, &response_artifact)?;
-    let staged_output = staged_attempt_artifact(&ctx, &output_artifact)?;
-    let binding = evm_contract_lifecycle_adapter_binding()
-        .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
-    let mut payloads = Vec::with_capacity(fact_capabilities.len() + 1);
+    let artifacts = RunnerArtifactBuilder::new(&ctx);
+    let payloads = RunnerPayloadBuilder::new(&ctx);
+    let response_artifact = artifacts.fact_response(&response)?;
+    let output_artifact = artifacts.state_output(&output)?;
+    let mut runner_output = RunnerOutputBuilder::new(&ctx);
+    runner_output.stage_attempt_artifact(&response_artifact)?;
+    runner_output.retain_runtime_evidence(&response_artifact);
+    runner_output.stage_attempt_artifact(&output_artifact)?;
+    runner_output.retain_runtime_evidence(&output_artifact);
     for fact in fact_capabilities {
-        payloads.push(RunnerEventPayload::FactRecorded(events::FactRecorded {
-            spec_hash: ctx.spec_hash().clone(),
-            node_id: ctx.node().node_id.clone(),
-            attempt_id: ctx.attempt_id().clone(),
-            capability_kind: fact.kind,
-            capability_version: fact.version,
-            adapter_kind: binding.adapter_kind().clone(),
-            adapter_version: binding.adapter_version().clone(),
-            request_schema_id: Request::schema_id().map_err(runtime_value_error)?,
-            request_hash: request_hash.clone(),
-            response_schema_id: Response::schema_id().map_err(runtime_value_error)?,
-            response_hash: response_artifact.evidence.digest.clone(),
-            fact_key: events::FactKey::new(format!(
+        runner_output.payload(payloads.fact_recorded(
+            events::FactKey::new(format!(
                 "mfm.evm.contract.fact.{}.{}",
                 ctx.node().node_id.as_str(),
                 fact.key_suffix
             ))?,
-            artifact_id: response_artifact.evidence.artifact_id.clone(),
-        }));
+            &request,
+            &response_artifact,
+            evm_capability_binding(fact.kind, fact.version)?,
+        )?);
     }
-    payloads.push(cell_produced(&ctx, &output_artifact.evidence));
-    Ok(ErasedRunnerOutput {
-        staged_artifacts: vec![staged_response, staged_output],
-        staged_retention_refs: vec![
-            retention(&response_artifact.evidence),
-            retention(&output_artifact.evidence),
-        ],
-        payloads,
-    })
+    runner_output.payload(payloads.cell_produced(&output_artifact)?);
+    Ok(runner_output.finish())
 }
 
 async fn load_value_from_node<T>(
@@ -2585,164 +2370,53 @@ where
     verified.decode_json().map_err(runtime_artifact_read_error)
 }
 
-fn staged_attempt_artifact(
-    ctx: &ErasedRunCtx<'_>,
-    artifact: &ContractAppArtifact,
-) -> mfm_runtime::Result<StagedArtifact> {
-    StagedArtifact::inline_attempt_artifact(ctx, artifact.bytes.clone(), artifact.evidence.clone())
-}
-
-fn staged_side_effect_artifact(
-    ctx: &ErasedRunCtx<'_>,
-    artifact: &ContractAppArtifact,
-    ledger_key: events::SideEffectLedgerKey,
-    invocation_epoch: u32,
-) -> mfm_runtime::Result<StagedArtifact> {
-    StagedArtifact::inline_side_effect_artifact(
-        ctx,
-        artifact.bytes.clone(),
-        artifact.evidence.clone(),
-        ledger_key,
-        invocation_epoch,
+fn evm_transaction_submit_binding() -> mfm_runtime::Result<RunnerCapabilityBinding> {
+    evm_capability_binding(
+        EvmTransactionSubmitCapability::kind().map_err(runtime_capability_error)?,
+        EvmTransactionSubmitCapability::version().map_err(runtime_capability_error)?,
     )
 }
 
-fn cell_produced(
-    ctx: &ErasedRunCtx<'_>,
-    artifact: &store::ArtifactEvidenceRef,
-) -> RunnerEventPayload {
-    RunnerEventPayload::CellProduced(events::CellProduced {
-        spec_hash: ctx.spec_hash().clone(),
-        node_id: ctx.node().node_id.clone(),
-        cell_id: ctx.node().output_cell.clone(),
-        scope_id: ctx.output_cell().scope_id.clone(),
-        attempt_id: ctx.attempt_id().clone(),
-        semantic_type_id: ctx.output_cell().semantic_type_id.clone(),
-        schema_id: ctx.output_cell().schema_id.clone(),
-        value_lineage: ctx.output_cell().value_lineage.clone(),
-        artifact_id: artifact.artifact_id.clone(),
-        content_digest: artifact.digest.clone(),
-        producer_state_kind: Some(ctx.node().state_kind.clone()),
-        producer_state_version: Some(ctx.node().state_version.clone()),
+fn evm_capability_binding(
+    capability_kind: CapabilityKind,
+    capability_version: CapabilityVersion,
+) -> mfm_runtime::Result<RunnerCapabilityBinding> {
+    let binding = evm_contract_lifecycle_adapter_binding()
+        .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
+    Ok(RunnerCapabilityBinding {
+        capability_kind,
+        capability_version,
+        adapter_kind: binding.adapter_kind().clone(),
+        adapter_version: binding.adapter_version().clone(),
     })
-}
-
-struct ContractAppArtifact {
-    bytes: Vec<u8>,
-    evidence: store::ArtifactEvidenceRef,
-}
-
-fn artifact_for_value<T>(
-    value: &T,
-    role: events::ArtifactRole,
-    producer_node_id: Option<NodeId>,
-) -> mfm_runtime::Result<ContractAppArtifact>
-where
-    T: MfmValue + Serialize,
-{
-    let bytes = canonical_value(value)?;
-    let digest = bytes.content_digest();
-    let evidence = store::ArtifactEvidenceRef {
-        artifact_id: ArtifactId::from_digest(digest.algorithm(), *digest.digest()),
-        digest,
-        byte_len: bytes.as_bytes().len() as u64,
-        media_type: spec::MediaType::new("application/json")?,
-        schema_id: Some(T::schema_id().map_err(runtime_value_error)?),
-        semantic_type_id: Some(T::semantic_id().map_err(runtime_value_error)?),
-        producer_node_id,
-        producer_seed_id: None,
-        artifact_role: role,
-    };
-    Ok(ContractAppArtifact {
-        bytes: bytes.to_vec(),
-        evidence,
-    })
-}
-
-fn artifact_for_schema_less_json<T>(
-    value: &T,
-    role: events::ArtifactRole,
-    producer_node_id: Option<NodeId>,
-) -> mfm_runtime::Result<ContractAppArtifact>
-where
-    T: Serialize,
-{
-    let bytes = canonical_value(value)?;
-    let digest = bytes.content_digest();
-    let evidence = store::ArtifactEvidenceRef {
-        artifact_id: ArtifactId::from_digest(digest.algorithm(), *digest.digest()),
-        digest,
-        byte_len: bytes.as_bytes().len() as u64,
-        media_type: spec::MediaType::new("application/json")?,
-        schema_id: None,
-        semantic_type_id: None,
-        producer_node_id,
-        producer_seed_id: None,
-        artifact_role: role,
-    };
-    Ok(ContractAppArtifact {
-        bytes: bytes.to_vec(),
-        evidence,
-    })
-}
-
-fn retention(artifact: &store::ArtifactEvidenceRef) -> StagedRetentionRefs {
-    StagedRetentionRefs::runtime_evidence(vec![events::RetentionRef {
-        artifact_id: artifact.artifact_id.clone(),
-        role: artifact.artifact_role,
-        content_digest: artifact.digest.clone(),
-    }])
 }
 
 fn projected_side_effect<'a>(
     ctx: &'a ErasedRunCtx<'_>,
-    ledger_key: &events::SideEffectLedgerKey,
 ) -> mfm_runtime::Result<&'a store::SideEffectProjection> {
-    ctx.projections().side_effect(ledger_key).ok_or_else(|| {
-        mfm_runtime::RuntimeError::InvalidRunnerOutput(format!(
-            "contract lifecycle side-effect projection missing for ledger {ledger_key}"
-        ))
-    })
+    ctx.projections()
+        .side_effects()
+        .find_map(|(_, projection)| {
+            (projection.intent.node_id == ctx.node().node_id
+                && projection.intent.attempt_id == *ctx.attempt_id())
+            .then_some(projection)
+        })
+        .ok_or_else(|| {
+            mfm_runtime::RuntimeError::InvalidRunnerOutput(format!(
+                "contract lifecycle side-effect projection missing for node {} attempt {}",
+                ctx.node().node_id,
+                ctx.attempt_id()
+            ))
+        })
 }
 
 fn projected_prepared_artifact(
     ctx: &ErasedRunCtx<'_>,
-    ledger_key: &events::SideEffectLedgerKey,
 ) -> mfm_runtime::Result<store::SideEffectArtifactProjection> {
-    projected_side_effect(ctx, ledger_key)?
+    projected_side_effect(ctx)?
         .prepared_invocation
         .clone()
         .ok_or_else(|| missing_side_effect_artifact("prepared invocation"))
-}
-
-fn projected_submission_artifact(
-    ctx: &ErasedRunCtx<'_>,
-    ledger_key: &events::SideEffectLedgerKey,
-) -> mfm_runtime::Result<store::SideEffectArtifactProjection> {
-    projected_side_effect(ctx, ledger_key)?
-        .submission
-        .clone()
-        .ok_or_else(|| missing_side_effect_artifact("submission"))
-}
-
-fn projected_receipt_artifact(
-    ctx: &ErasedRunCtx<'_>,
-    ledger_key: &events::SideEffectLedgerKey,
-) -> mfm_runtime::Result<store::SideEffectArtifactProjection> {
-    projected_side_effect(ctx, ledger_key)?
-        .receipt
-        .clone()
-        .ok_or_else(|| missing_side_effect_artifact("receipt"))
-}
-
-fn projected_confirmation_artifact(
-    ctx: &ErasedRunCtx<'_>,
-    ledger_key: &events::SideEffectLedgerKey,
-) -> mfm_runtime::Result<store::SideEffectArtifactProjection> {
-    projected_side_effect(ctx, ledger_key)?
-        .confirmation
-        .clone()
-        .ok_or_else(|| missing_side_effect_artifact("confirmation"))
 }
 
 fn missing_side_effect_artifact(label: &str) -> mfm_runtime::RuntimeError {
@@ -2774,16 +2448,6 @@ fn receipts_with_evidence(
     receipts
 }
 
-fn ledger_key_for_idempotency(
-    idempotency: &ContractTransactionIdempotency,
-) -> mfm_runtime::Result<events::SideEffectLedgerKey> {
-    events::SideEffectLedgerKey::new(format!(
-        "mfm.evm.contract.ledger.{}",
-        short_stable_key(&idempotency.key)
-    ))
-    .map_err(Into::into)
-}
-
 fn idempotency_key_ref(
     idempotency: &ContractTransactionIdempotency,
 ) -> mfm_runtime::Result<events::IdempotencyKeyRef> {
@@ -2792,34 +2456,6 @@ fn idempotency_key_ref(
         short_stable_key(&idempotency.key)
     ))
     .map_err(Into::into)
-}
-
-fn runner_invocation_id(
-    ctx: &ErasedRunCtx<'_>,
-    ledger_key: &events::SideEffectLedgerKey,
-) -> mfm_runtime::Result<events::RunnerInvocationId> {
-    let digest = digest_json(serde_json::json!({
-        "attempt_id": ctx.attempt_id().as_str(),
-        "ledger_key": ledger_key.as_str(),
-        "node_id": ctx.node().node_id.as_str(),
-        "run_id": ctx.run_id().as_str(),
-    }))?;
-    events::RunnerInvocationId::new(format!("mfm.evm.contract.owner.{}", short_digest(&digest)))
-        .map_err(Into::into)
-}
-
-fn claim_fencing_token(
-    ctx: &ErasedRunCtx<'_>,
-    ledger_key: &events::SideEffectLedgerKey,
-) -> mfm_runtime::Result<side_effect::ClaimFencingToken> {
-    let digest = digest_json(serde_json::json!({
-        "attempt_id": ctx.attempt_id().as_str(),
-        "ledger_key": ledger_key.as_str(),
-        "node_id": ctx.node().node_id.as_str(),
-        "token": "contract-lifecycle",
-    }))?;
-    side_effect::ClaimFencingToken::new(format!("mfm.evm.contract.token.{}", short_digest(&digest)))
-        .map_err(Into::into)
 }
 
 fn short_stable_key(value: &str) -> String {
@@ -2833,40 +2469,12 @@ fn short_stable_key(value: &str) -> String {
         .collect()
 }
 
-fn short_digest(digest: &ContentDigest) -> String {
-    short_stable_key(digest.as_str())
-}
-
-fn unsupported_side_effect_phase(
-    phase: &'static str,
-    current: store::SideEffectPhase,
-) -> mfm_runtime::Result<ErasedRunnerOutput> {
-    Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(format!(
-        "unsupported contract lifecycle {phase} side-effect phase: {current:?}"
-    )))
-}
-
-fn canonical_value<T: Serialize>(value: &T) -> mfm_runtime::Result<PlainCanonicalJsonBytes> {
-    let json = serde_json::to_string(value)
-        .map_err(|error| mfm_runtime::RuntimeError::Canonical(error.to_string()))?;
-    PlainCanonicalJsonBytes::from_json_str(&json)
-        .map_err(|error| mfm_runtime::RuntimeError::Canonical(error.to_string()))
-}
-
-fn digest_value<T: Serialize>(value: &T) -> mfm_runtime::Result<ContentDigest> {
-    Ok(canonical_value(value)?.content_digest())
-}
-
 fn digest_json(value: serde_json::Value) -> mfm_runtime::Result<ContentDigest> {
     let json = serde_json::to_string(&value)
         .map_err(|error| mfm_runtime::RuntimeError::Canonical(error.to_string()))?;
     Ok(PlainCanonicalJsonBytes::from_json_str(&json)
         .map_err(|error| mfm_runtime::RuntimeError::Canonical(error.to_string()))?
         .content_digest())
-}
-
-fn runtime_value_error(error: mfm_values::ValueError) -> mfm_runtime::RuntimeError {
-    mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
 }
 
 fn runtime_capability_error(error: mfm_capabilities::CapabilityError) -> mfm_runtime::RuntimeError {
@@ -3159,6 +2767,17 @@ mod tests {
         )
     }
 
+    #[test]
+    fn executable_identity_summary_matches_golden() {
+        assert_eq!(
+            executable_identity_summary([SIDE_EFFECT_FACTORY, READ_FACTORY]),
+            [
+                "factory=apply_side_effect;source=mfm-adapters-evm-contracts-built-in;package=mfm-adapters-evm-contracts;version=0.1.0;cargo_digest=content:sha256-jcs-v1:685edb3e7cd5decfb0f17613a76568a2c5c572024d6db20bf0803d61ee0657e4;binary_digest=content:sha256-jcs-v1:4a583ef5eb9bb2ce3f01767ddffc34e0744290d029bde3d69967b272a74f302f;nix_derivation=false;nix_output=false",
+                "factory=read_external;source=mfm-adapters-evm-contracts-built-in;package=mfm-adapters-evm-contracts;version=0.1.0;cargo_digest=content:sha256-jcs-v1:685edb3e7cd5decfb0f17613a76568a2c5c572024d6db20bf0803d61ee0657e4;binary_digest=content:sha256-jcs-v1:4a583ef5eb9bb2ce3f01767ddffc34e0744290d029bde3d69967b272a74f302f;nix_derivation=false;nix_output=false",
+            ]
+        );
+    }
+
     #[tokio::test]
     async fn deploy_preparation_defaults_to_eip1559_contract_creation() {
         let route = route();
@@ -3220,13 +2839,125 @@ mod tests {
             .expect("prepared");
 
         ensure_prepared_invocation_public(prepared.evidence()).expect("public evidence");
+        let evidence = prepared.evidence();
+        let rendered_value = serde_json::to_value(evidence).expect("json value");
+        assert_eq!(
+            sorted_json_keys(&rendered_value),
+            vec![
+                "expected_chain_id",
+                "expected_signer_address",
+                "max_receipt_polls",
+                "network_id",
+                "phase",
+                "poll_interval_ms",
+                "prepared_version",
+                "signer_ref",
+                "transactions",
+            ]
+        );
+        assert_eq!(evidence.signer_ref, "deployer");
+        assert_eq!(
+            evidence.expected_signer_address,
+            "0x0f65fe9276bc9a24ae7083ae28e2660ef72df99e"
+        );
+        let transaction = evidence.transactions.first().expect("transaction");
+        let rendered_transaction = rendered_value["transactions"][0].clone();
+        assert_eq!(
+            sorted_json_keys(&rendered_transaction),
+            vec![
+                "chain_id",
+                "data_digest",
+                "data_len",
+                "gas_limit",
+                "gas_price",
+                "index",
+                "max_fee_per_gas",
+                "max_priority_fee_per_gas",
+                "nonce",
+                "signing_digest",
+                "style",
+                "to_address",
+                "value_wei",
+            ]
+        );
+        assert_eq!(transaction.nonce, 7);
+        assert_eq!(transaction.gas_limit, 21_000);
+        assert_eq!(transaction.max_fee_per_gas.as_deref(), Some("11"));
+        assert_eq!(transaction.max_priority_fee_per_gas.as_deref(), Some("3"));
+        assert!(transaction
+            .data_digest
+            .starts_with("content:sha256-jcs-v1:"));
+        assert_eq!(transaction.data_len, 2);
+        assert!(transaction.signing_digest.starts_with("0x"));
+        assert_eq!(transaction.signing_digest.len(), 66);
+
         let rendered = serde_json::to_string(prepared.evidence()).expect("json");
+        let rendered = rendered.to_ascii_lowercase();
         for forbidden in forbidden_prepared_terms() {
             assert!(
                 !rendered.contains(&forbidden),
-                "{rendered} contains {forbidden}"
+                "prepared invocation evidence contains forbidden runtime surface"
             );
         }
+    }
+
+    #[test]
+    fn prepared_invocation_guard_rejects_forbidden_runtime_terms() {
+        for forbidden in forbidden_prepared_terms() {
+            let mut prepared = prepared_invocation_fixture();
+            prepared.signer_ref = format!("deployer-{forbidden}");
+
+            assert!(
+                matches!(
+                    ensure_prepared_invocation_public(&prepared),
+                    Err(EvmContractAdapterError::PreparedInvocationLeak)
+                ),
+                "expected forbidden prepared term {forbidden} to be rejected"
+            );
+        }
+    }
+
+    fn prepared_invocation_fixture() -> PreparedContractInvocation {
+        PreparedContractInvocation {
+            prepared_version: 1,
+            phase: ContractMutationPhase::Deploy,
+            network_id: "ethereum-mainnet".to_owned(),
+            expected_chain_id: 1,
+            signer_ref: "deployer".to_owned(),
+            expected_signer_address: "0x0f65fe9276bc9a24ae7083ae28e2660ef72df99e".to_owned(),
+            transactions: vec![PreparedContractTransactionEvidence {
+                index: 0,
+                style: PreparedContractTransactionStyle::Eip1559,
+                chain_id: 1,
+                nonce: 7,
+                to_address: None,
+                value_wei: "0".to_owned(),
+                gas_limit: 21_000,
+                max_fee_per_gas: Some("11".to_owned()),
+                max_priority_fee_per_gas: Some("3".to_owned()),
+                gas_price: None,
+                data_digest:
+                    "content:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000"
+                        .to_owned(),
+                data_len: 2,
+                signing_digest:
+                    "0x0000000000000000000000000000000000000000000000000000000000000000"
+                        .to_owned(),
+            }],
+            poll_interval_ms: 1_000,
+            max_receipt_polls: 10,
+        }
+    }
+
+    fn sorted_json_keys(value: &serde_json::Value) -> Vec<&str> {
+        let mut keys = value
+            .as_object()
+            .expect("json object")
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        keys.sort_unstable();
+        keys
     }
 
     #[test]
@@ -3400,5 +3131,27 @@ mod tests {
                 "adapter source contains forbidden coupling {forbidden}"
             );
         }
+    }
+
+    fn executable_identity_summary(factories: [&str; 2]) -> Vec<String> {
+        factories
+            .into_iter()
+            .map(|factory| {
+                let identity =
+                    executable(events::RunnerFactoryId::new(factory).expect("factory id"))
+                        .expect("executable identity");
+                format!(
+                    "factory={};source={};package={};version={};cargo_digest={};binary_digest={};nix_derivation={};nix_output={}",
+                    identity.factory_id,
+                    identity.source_revision,
+                    identity.cargo_package_name,
+                    identity.cargo_package_version,
+                    identity.cargo_package_digest,
+                    identity.binary_digest,
+                    identity.nix_derivation_hash.is_some(),
+                    identity.nix_output_hash.is_some()
+                )
+            })
+            .collect()
     }
 }

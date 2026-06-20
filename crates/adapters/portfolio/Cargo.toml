@@ -23,10 +23,8 @@ mfm-evm-core = { path = "../../evm-core" }
 mfm-ids = { path = "../../kernel/ids" }
 mfm-program = { path = "../../kernel/program" }
 mfm-runtime = { path = "../../kernel/runtime" }
-mfm-spec = { path = "../../kernel/spec" }
 mfm-portfolio-model = { path = "../../portfolio/model" }
 mfm-state-portfolio = { path = "../../states/portfolio" }
-mfm-store = { path = "../../kernel/store" }
 mfm-values = { path = "../../kernel/values" }
 
 [dev-dependencies]

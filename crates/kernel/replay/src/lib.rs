@@ -16,7 +16,7 @@ pub mod v1 {
     use mfm_events::v1::{self as events, side_effect, ArtifactRole, KernelEventPayload};
     use mfm_ids::{
         AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind, CapabilityVersion,
-        ContentDigest, DigestAlgorithm, NodeId, RunId, SchemaId, SpecHash,
+        ContentDigest, DigestAlgorithm, NodeId, RunId, SchemaId, SeedId, SemanticTypeId, SpecHash,
     };
     use mfm_manual_auth::{
         manual_authorization_proof_schema_id, ManualResolutionEvidenceRef,
@@ -175,19 +175,28 @@ pub mod v1 {
             runtime_spec: &mfm_runtime::CertifiedRuntimeSpec,
             verified_history: &mfm_runtime::VerifiedRunHistory,
         ) -> Result<Self> {
-            if runtime_spec.spec_hash() != verified_history.spec_hash() {
+            Self::from_verified_run_history_view(runtime_spec, verified_history.view())
+        }
+
+        /// Mints replay read authority from certifier-backed runtime authority and a shared
+        /// verified run-history view.
+        pub fn from_verified_run_history_view(
+            runtime_spec: &mfm_runtime::CertifiedRuntimeSpec,
+            verified_view: &mfm_runtime::VerifiedRunHistoryView,
+        ) -> Result<Self> {
+            if runtime_spec.spec_hash() != verified_view.spec_hash() {
                 return Err(ReplayError::new(
                     ReplayErrorKind::SpecHashMismatch,
                     "verified history spec hash does not match certified runtime spec",
                 ));
             }
-            let run_admitted = run_admitted_payload(verified_history.events())?;
-            let artifact_evidence = verified_history
+            let run_admitted = verified_view.run_admitted();
+            let artifact_evidence = verified_view
                 .artifact_store()
                 .artifacts()
                 .map(|(_, artifact)| artifact.evidence().clone())
                 .collect::<Vec<_>>();
-            let artifact_bytes = verified_history
+            let artifact_bytes = verified_view
                 .artifact_store()
                 .artifacts()
                 .map(|(artifact_id, artifact)| ReplayArtifactBytes {
@@ -197,10 +206,10 @@ pub mod v1 {
                 .collect::<Vec<_>>();
             let artifacts = artifact_map(artifact_evidence.clone())?;
             let artifact_bytes = artifact_bytes_map(artifact_bytes)?;
-            verify_replay_artifact_authority(verified_history, &artifacts)?;
+            verify_replay_artifact_authority(verified_view, &artifacts)?;
             Ok(Self {
                 certified_spec: runtime_spec.envelope().clone(),
-                stream: verified_history.events().to_vec(),
+                stream: verified_view.events().to_vec(),
                 canonicalizer_identity: runtime_spec
                     .envelope()
                     .spec
@@ -208,8 +217,8 @@ pub mod v1 {
                     .renderer_descriptor
                     .canonicalizer_identity
                     .clone(),
-                runner_executables: run_admitted.runner_executables,
-                adapter_executables: run_admitted.adapter_executables,
+                runner_executables: run_admitted.runner_executables.clone(),
+                adapter_executables: run_admitted.adapter_executables.clone(),
                 artifact_evidence,
                 artifact_bytes,
             })
@@ -259,7 +268,7 @@ pub mod v1 {
         pub artifact: StoredArtifactEvidenceRef,
     }
 
-    /// Request for replaying side-effect submission, receipt, or confirmation evidence.
+    /// Request for replaying recorded side-effect evidence.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct SideEffectEvidenceReplayRequest {
         /// Side-effect ledger key.
@@ -294,6 +303,95 @@ pub mod v1 {
         pub replay_verifier_id: Option<events::ReplayVerifierId>,
     }
 
+    /// Broker-indexed side-effect replay frame for one intent and invocation epoch.
+    ///
+    /// The frame borrows recorded, replay-authorized event payloads from [`ReplayBroker`]. Domain
+    /// verifiers still own cardinality, missing-evidence policy, and evidence interpretation.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct SideEffectReplayFrame<'a> {
+        /// Intent persisted event payload.
+        pub intent: &'a side_effect::IntentPersisted,
+        /// Submission observed event payload, when present.
+        pub submission: Option<&'a side_effect::SubmissionObserved>,
+        /// Receipt observed event payload, when present.
+        pub receipt: Option<&'a side_effect::ReceiptObserved>,
+        /// Confirmation observed event payload, when present.
+        pub confirmation: Option<&'a side_effect::ConfirmationObserved>,
+        /// Ambiguity event payload, when present.
+        pub ambiguity: Option<&'a side_effect::Ambiguous>,
+    }
+
+    impl SideEffectReplayFrame<'_> {
+        /// Builds the replay request for this frame's submission evidence, when present.
+        pub fn submission_request(&self) -> Option<SideEffectEvidenceReplayRequest> {
+            let submission = self.submission?;
+            Some(side_effect_evidence_replay_request(
+                self.intent,
+                submission.submission_schema_id.clone(),
+                submission.submission_hash.clone(),
+                None,
+            ))
+        }
+
+        /// Builds the replay request for this frame's receipt evidence, when present.
+        pub fn receipt_request(&self) -> Option<SideEffectEvidenceReplayRequest> {
+            let receipt = self.receipt?;
+            Some(side_effect_evidence_replay_request(
+                self.intent,
+                receipt.receipt_schema_id.clone(),
+                receipt.receipt_hash.clone(),
+                Some(receipt.replay_verifier_id.clone()),
+            ))
+        }
+
+        /// Builds the replay request for this frame's confirmation evidence, when present.
+        pub fn confirmation_request(&self) -> Option<SideEffectEvidenceReplayRequest> {
+            let confirmation = self.confirmation?;
+            Some(side_effect_evidence_replay_request(
+                self.intent,
+                confirmation.confirmation_schema_id.clone(),
+                confirmation.confirmation_hash.clone(),
+                Some(confirmation.replay_verifier_id.clone()),
+            ))
+        }
+
+        /// Builds the replay request for this frame's ambiguity evidence, when present.
+        pub fn ambiguity_request(&self) -> Option<SideEffectEvidenceReplayRequest> {
+            let ambiguity = self.ambiguity?;
+            Some(side_effect_evidence_replay_request(
+                self.intent,
+                ambiguity.evidence_schema_id.clone(),
+                ambiguity.evidence_hash.clone(),
+                None,
+            ))
+        }
+    }
+
+    fn side_effect_evidence_replay_request(
+        intent: &side_effect::IntentPersisted,
+        evidence_schema_id: SchemaId,
+        evidence_hash: ContentDigest,
+        replay_verifier_id: Option<events::ReplayVerifierId>,
+    ) -> SideEffectEvidenceReplayRequest {
+        SideEffectEvidenceReplayRequest {
+            ledger_key: intent.ledger_key.clone(),
+            node_id: intent.node_id.clone(),
+            attempt_id: intent.attempt_id.clone(),
+            invocation_epoch: intent.invocation_epoch,
+            intent_schema_id: intent.intent_schema_id.clone(),
+            intent_hash: intent.intent_hash.clone(),
+            idempotency_input_schema_id: intent.idempotency_input_schema_id.clone(),
+            idempotency_input_hash: intent.idempotency_input_hash.clone(),
+            capability_kind: intent.capability_kind.clone(),
+            capability_version: intent.capability_version.clone(),
+            adapter_kind: intent.adapter_kind.clone(),
+            adapter_version: intent.adapter_version.clone(),
+            evidence_schema_id,
+            evidence_hash,
+            replay_verifier_id,
+        }
+    }
+
     /// Replay evidence returned for an observed side-effect submission.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct SubmissionReplayEvidence {
@@ -318,6 +416,15 @@ pub mod v1 {
         /// Confirmation observed event payload.
         pub confirmation: side_effect::ConfirmationObserved,
         /// Retained confirmation artifact evidence.
+        pub artifact: StoredArtifactEvidenceRef,
+    }
+
+    /// Replay evidence returned for recorded side-effect ambiguity.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct AmbiguityReplayEvidence {
+        /// Ambiguous event payload.
+        pub ambiguity: side_effect::Ambiguous,
+        /// Retained ambiguity artifact evidence.
         pub artifact: StoredArtifactEvidenceRef,
     }
 
@@ -393,8 +500,23 @@ pub mod v1 {
         pub digest: ContentDigest,
         /// Expected schema id, when schema-bearing.
         pub schema_id: Option<SchemaId>,
+        /// Expected semantic type id, when value-bearing.
+        pub semantic_type_id: Option<SemanticTypeId>,
         /// Expected producer node id, when node-produced.
         pub producer_node_id: Option<NodeId>,
+        /// Expected producer seed id, when seed-produced.
+        pub producer_seed_id: Option<SeedId>,
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct ArtifactEvidenceExpectation<'a> {
+        artifact_id: &'a ArtifactId,
+        digest: &'a ContentDigest,
+        schema_id: Option<&'a SchemaId>,
+        semantic_type_id: Option<&'a SemanticTypeId>,
+        role: ArtifactRole,
+        producer_node_id: Option<&'a NodeId>,
+        producer_seed_id: Option<&'a SeedId>,
     }
 
     type FactKey = (NodeId, AttemptId, events::FactKey);
@@ -415,6 +537,7 @@ pub mod v1 {
         submissions: BTreeMap<SideEffectKey, side_effect::SubmissionObserved>,
         receipts: BTreeMap<SideEffectKey, side_effect::ReceiptObserved>,
         confirmations: BTreeMap<SideEffectKey, side_effect::ConfirmationObserved>,
+        ambiguities: BTreeMap<SideEffectKey, side_effect::Ambiguous>,
         manual_resolutions: BTreeMap<RunId, VerifiedManualResolutionForPrefix>,
     }
 
@@ -469,6 +592,7 @@ pub mod v1 {
                 submissions: BTreeMap::new(),
                 receipts: BTreeMap::new(),
                 confirmations: BTreeMap::new(),
+                ambiguities: BTreeMap::new(),
                 manual_resolutions: BTreeMap::new(),
             };
             broker.authorize_certified_spec_artifacts()?;
@@ -503,13 +627,15 @@ pub mod v1 {
             &self,
             request: &ArtifactReplayRequest,
         ) -> Result<StoredArtifactEvidenceRef> {
-            self.verify_artifact(
-                &request.artifact_id,
-                &request.digest,
-                request.schema_id.as_ref(),
-                request.role,
-                request.producer_node_id.as_ref(),
-            )
+            self.verify_artifact(ArtifactEvidenceExpectation {
+                artifact_id: &request.artifact_id,
+                digest: &request.digest,
+                schema_id: request.schema_id.as_ref(),
+                semantic_type_id: request.semantic_type_id.as_ref(),
+                role: request.role,
+                producer_node_id: request.producer_node_id.as_ref(),
+                producer_seed_id: request.producer_seed_id.as_ref(),
+            })
         }
 
         /// Returns a recorded fact from replay evidence only.
@@ -556,14 +682,44 @@ pub mod v1 {
 
             Ok(RecordedFactReplay {
                 fact: fact.clone(),
-                artifact: self.verify_artifact(
-                    &fact.artifact_id,
-                    &fact.response_hash,
-                    Some(&fact.response_schema_id),
-                    ArtifactRole::FactResponse,
-                    Some(&fact.node_id),
-                )?,
+                artifact: self.verify_artifact(ArtifactEvidenceExpectation {
+                    artifact_id: &fact.artifact_id,
+                    digest: &fact.response_hash,
+                    schema_id: Some(&fact.response_schema_id),
+                    semantic_type_id: None,
+                    role: ArtifactRole::FactResponse,
+                    producer_node_id: Some(&fact.node_id),
+                    producer_seed_id: None,
+                })?,
             })
+        }
+
+        /// Returns side-effect replay frames whose intent matches a domain predicate.
+        ///
+        /// This exposes broker-validated recorded evidence only. Domain verifiers remain
+        /// responsible for deciding how many frames are valid and which phases are required.
+        pub fn side_effect_replay_frames_matching<F>(
+            &self,
+            mut matches_intent: F,
+        ) -> Result<Vec<SideEffectReplayFrame<'_>>>
+        where
+            F: FnMut(&side_effect::IntentPersisted) -> Result<bool>,
+        {
+            let mut frames = Vec::new();
+            for intent in self.intents.values() {
+                if !matches_intent(intent)? {
+                    continue;
+                }
+                let key = (intent.ledger_key.clone(), intent.invocation_epoch);
+                frames.push(SideEffectReplayFrame {
+                    intent,
+                    submission: self.submissions.get(&key),
+                    receipt: self.receipts.get(&key),
+                    confirmation: self.confirmations.get(&key),
+                    ambiguity: self.ambiguities.get(&key),
+                });
+            }
+            Ok(frames)
         }
 
         /// Returns observed side-effect submission evidence from replay records only.
@@ -588,13 +744,15 @@ pub mod v1 {
             }
             Ok(SubmissionReplayEvidence {
                 submission: submission.clone(),
-                artifact: self.verify_artifact(
-                    &submission.submission_artifact_id,
-                    &submission.submission_hash,
-                    Some(&submission.submission_schema_id),
-                    ArtifactRole::Submission,
-                    Some(&submission.node_id),
-                )?,
+                artifact: self.verify_artifact(ArtifactEvidenceExpectation {
+                    artifact_id: &submission.submission_artifact_id,
+                    digest: &submission.submission_hash,
+                    schema_id: Some(&submission.submission_schema_id),
+                    semantic_type_id: None,
+                    role: ArtifactRole::Submission,
+                    producer_node_id: Some(&submission.node_id),
+                    producer_seed_id: None,
+                })?,
             })
         }
 
@@ -642,13 +800,15 @@ pub mod v1 {
             }
             Ok(ReceiptReplayEvidence {
                 receipt: receipt.clone(),
-                artifact: self.verify_artifact(
-                    &receipt.receipt_artifact_id,
-                    &receipt.receipt_hash,
-                    Some(&receipt.receipt_schema_id),
-                    ArtifactRole::Receipt,
-                    Some(&receipt.node_id),
-                )?,
+                artifact: self.verify_artifact(ArtifactEvidenceExpectation {
+                    artifact_id: &receipt.receipt_artifact_id,
+                    digest: &receipt.receipt_hash,
+                    schema_id: Some(&receipt.receipt_schema_id),
+                    semantic_type_id: None,
+                    role: ArtifactRole::Receipt,
+                    producer_node_id: Some(&receipt.node_id),
+                    producer_seed_id: None,
+                })?,
             })
         }
 
@@ -678,13 +838,49 @@ pub mod v1 {
             }
             Ok(ConfirmationReplayEvidence {
                 confirmation: confirmation.clone(),
-                artifact: self.verify_artifact(
-                    &confirmation.confirmation_artifact_id,
-                    &confirmation.confirmation_hash,
-                    Some(&confirmation.confirmation_schema_id),
-                    ArtifactRole::Confirmation,
-                    Some(&confirmation.node_id),
-                )?,
+                artifact: self.verify_artifact(ArtifactEvidenceExpectation {
+                    artifact_id: &confirmation.confirmation_artifact_id,
+                    digest: &confirmation.confirmation_hash,
+                    schema_id: Some(&confirmation.confirmation_schema_id),
+                    semantic_type_id: None,
+                    role: ArtifactRole::Confirmation,
+                    producer_node_id: Some(&confirmation.node_id),
+                    producer_seed_id: None,
+                })?,
+            })
+        }
+
+        /// Returns side-effect ambiguity evidence from replay records only.
+        pub fn side_effect_ambiguity(
+            &self,
+            request: &SideEffectEvidenceReplayRequest,
+        ) -> Result<AmbiguityReplayEvidence> {
+            self.verify_side_effect_intent(request)?;
+            let ambiguity = self
+                .ambiguities
+                .get(&(request.ledger_key.clone(), request.invocation_epoch))
+                .ok_or_else(|| {
+                    ReplayError::new(
+                        ReplayErrorKind::SideEffectMissing,
+                        format!("missing side-effect ambiguity {}", request.ledger_key),
+                    )
+                })?;
+            if ambiguity.evidence_schema_id != request.evidence_schema_id
+                || ambiguity.evidence_hash != request.evidence_hash
+            {
+                return Err(side_effect_mismatch("ambiguity evidence mismatch"));
+            }
+            Ok(AmbiguityReplayEvidence {
+                ambiguity: ambiguity.clone(),
+                artifact: self.verify_artifact(ArtifactEvidenceExpectation {
+                    artifact_id: &ambiguity.evidence_artifact_id,
+                    digest: &ambiguity.evidence_hash,
+                    schema_id: Some(&ambiguity.evidence_schema_id),
+                    semantic_type_id: None,
+                    role: ArtifactRole::AmbiguityEvidence,
+                    producer_node_id: Some(&ambiguity.node_id),
+                    producer_seed_id: None,
+                })?,
             })
         }
 
@@ -742,13 +938,15 @@ pub mod v1 {
         fn authorize_certified_spec_artifacts(&mut self) -> Result<()> {
             let config_refs = self.certified_spec.spec.config_refs.clone();
             for config in config_refs {
-                self.authorize_artifact(
-                    &config.artifact_id,
-                    &config.digest,
-                    Some(&config.schema_id),
-                    ArtifactRole::TypedConfig,
-                    None,
-                )?;
+                self.authorize_artifact(ArtifactEvidenceExpectation {
+                    artifact_id: &config.artifact_id,
+                    digest: &config.digest,
+                    schema_id: Some(&config.schema_id),
+                    semantic_type_id: None,
+                    role: ArtifactRole::TypedConfig,
+                    producer_node_id: None,
+                    producer_seed_id: None,
+                })?;
             }
             Ok(())
         }
@@ -914,6 +1112,13 @@ pub mod v1 {
                             &payload.attempt_id,
                         )?;
                         self.authorize_event_artifacts(envelope.payload())?;
+                        insert_unique(
+                            &mut self.ambiguities,
+                            (payload.ledger_key.clone(), payload.invocation_epoch),
+                            payload.clone(),
+                            ReplayErrorKind::InvalidRunStream,
+                            "duplicate side-effect ambiguity replay event",
+                        )?;
                     }
                     KernelEventPayload::CellProduced(payload) => {
                         self.verify_cell_produced_against_spec(payload)?;
@@ -992,13 +1197,15 @@ pub mod v1 {
             })?;
             Ok(SideEffectIntentReplayEvidence {
                 intent: intent.clone(),
-                artifact: self.verify_artifact(
-                    &intent.intent_artifact_id,
-                    &intent.intent_hash,
-                    Some(&intent.intent_schema_id),
-                    ArtifactRole::SideEffectIntent,
-                    Some(&intent.node_id),
-                )?,
+                artifact: self.verify_artifact(ArtifactEvidenceExpectation {
+                    artifact_id: &intent.intent_artifact_id,
+                    digest: &intent.intent_hash,
+                    schema_id: Some(&intent.intent_schema_id),
+                    semantic_type_id: None,
+                    role: ArtifactRole::SideEffectIntent,
+                    producer_node_id: Some(&intent.node_id),
+                    producer_seed_id: None,
+                })?,
             })
         }
 
@@ -1014,13 +1221,15 @@ pub mod v1 {
             };
             Ok(Some(SubmissionReplayEvidence {
                 submission: submission.clone(),
-                artifact: self.verify_artifact(
-                    &submission.submission_artifact_id,
-                    &submission.submission_hash,
-                    Some(&submission.submission_schema_id),
-                    ArtifactRole::Submission,
-                    Some(&submission.node_id),
-                )?,
+                artifact: self.verify_artifact(ArtifactEvidenceExpectation {
+                    artifact_id: &submission.submission_artifact_id,
+                    digest: &submission.submission_hash,
+                    schema_id: Some(&submission.submission_schema_id),
+                    semantic_type_id: None,
+                    role: ArtifactRole::Submission,
+                    producer_node_id: Some(&submission.node_id),
+                    producer_seed_id: None,
+                })?,
             }))
         }
 
@@ -1036,13 +1245,15 @@ pub mod v1 {
             };
             Ok(Some(ReceiptReplayEvidence {
                 receipt: receipt.clone(),
-                artifact: self.verify_artifact(
-                    &receipt.receipt_artifact_id,
-                    &receipt.receipt_hash,
-                    Some(&receipt.receipt_schema_id),
-                    ArtifactRole::Receipt,
-                    Some(&receipt.node_id),
-                )?,
+                artifact: self.verify_artifact(ArtifactEvidenceExpectation {
+                    artifact_id: &receipt.receipt_artifact_id,
+                    digest: &receipt.receipt_hash,
+                    schema_id: Some(&receipt.receipt_schema_id),
+                    semantic_type_id: None,
+                    role: ArtifactRole::Receipt,
+                    producer_node_id: Some(&receipt.node_id),
+                    producer_seed_id: None,
+                })?,
             }))
         }
 
@@ -1410,7 +1621,9 @@ pub mod v1 {
                 evidence_artifact,
                 &payload.evidence_hash,
                 Some(&payload.evidence_schema_id),
+                None,
                 ArtifactRole::ManualResolutionEvidence,
+                None,
                 None,
             )?;
             let authorization_artifact = self
@@ -1429,7 +1642,9 @@ pub mod v1 {
                 authorization_artifact,
                 &payload.authorization_hash,
                 Some(&payload.authorization_schema_id),
+                None,
                 ArtifactRole::ManualResolutionAuthorization,
+                None,
                 None,
             )?;
             let proof_bytes = self
@@ -1814,15 +2029,62 @@ pub mod v1 {
             &mut self,
             requirement: &store::EventArtifactRequirement,
         ) -> Result<StoredArtifactEvidenceRef> {
-            let digest = requirement.digest.as_ref().ok_or_else(|| {
-                ReplayError::new(
+            self.validate_event_artifact_requirement(
+                requirement,
+                "skipped artifact evidence mismatch",
+            )
+        }
+
+        fn authorize_event_artifact_requirement(
+            &mut self,
+            requirement: &store::EventArtifactRequirement,
+        ) -> Result<StoredArtifactEvidenceRef> {
+            if requirement.digest.is_none() {
+                return Err(ReplayError::new(
                     ReplayErrorKind::InvalidRunStream,
                     format!(
                         "artifact requirement for {} does not carry a digest",
                         requirement.artifact_id
                     ),
-                )
-            })?;
+                ));
+            }
+            if requirement.source == store::EventArtifactReferenceSource::RetentionRef
+                && requirement.artifact_role.is_none()
+            {
+                return Err(ReplayError::new(
+                    ReplayErrorKind::InvalidRunStream,
+                    format!(
+                        "retention requirement for {} does not carry an artifact role",
+                        requirement.artifact_id
+                    ),
+                ));
+            }
+            if requirement.artifact_role.is_none() && requirement.schema_id.is_none() {
+                return Err(ReplayError::new(
+                    ReplayErrorKind::InvalidRunStream,
+                    format!(
+                        "schema-only requirement for {} does not carry a schema id",
+                        requirement.artifact_id
+                    ),
+                ));
+            }
+            self.validate_event_artifact_requirement(requirement, "artifact evidence mismatch")
+        }
+
+        fn validate_event_artifact_requirement(
+            &mut self,
+            requirement: &store::EventArtifactRequirement,
+            mismatch_context: &'static str,
+        ) -> Result<StoredArtifactEvidenceRef> {
+            if requirement.digest.is_none() {
+                return Err(ReplayError::new(
+                    ReplayErrorKind::InvalidRunStream,
+                    format!(
+                        "artifact requirement for {} does not carry a digest",
+                        requirement.artifact_id
+                    ),
+                ));
+            }
             let evidence = self
                 .retained_artifacts
                 .get(&requirement.artifact_id)
@@ -1835,160 +2097,8 @@ pub mod v1 {
                         ),
                     )
                 })?;
-            if &evidence.digest != digest
-                || requirement
-                    .schema_id
-                    .as_ref()
-                    .is_some_and(|schema_id| evidence.schema_id.as_ref() != Some(schema_id))
-                || requirement
-                    .semantic_type_id
-                    .as_ref()
-                    .is_some_and(|semantic_type_id| {
-                        evidence.semantic_type_id.as_ref() != Some(semantic_type_id)
-                    })
-                || requirement
-                    .artifact_role
-                    .is_some_and(|role| evidence.artifact_role != role)
-                || requirement
-                    .producer_node_id
-                    .as_ref()
-                    .is_some_and(|node_id| evidence.producer_node_id.as_ref() != Some(node_id))
-                || requirement
-                    .producer_seed_id
-                    .as_ref()
-                    .is_some_and(|seed_id| evidence.producer_seed_id.as_ref() != Some(seed_id))
-            {
-                return Err(ReplayError::new(
-                    ReplayErrorKind::ArtifactMismatch,
-                    format!(
-                        "skipped artifact evidence mismatch for {}",
-                        requirement.artifact_id
-                    ),
-                ));
-            }
-            let evidence = evidence.clone();
-            self.insert_authorized_artifact(evidence.clone())?;
-            Ok(evidence)
-        }
-
-        fn authorize_event_artifact_requirement(
-            &mut self,
-            requirement: &store::EventArtifactRequirement,
-        ) -> Result<StoredArtifactEvidenceRef> {
-            let digest = requirement.digest.as_ref().ok_or_else(|| {
-                ReplayError::new(
-                    ReplayErrorKind::InvalidRunStream,
-                    format!(
-                        "artifact requirement for {} does not carry a digest",
-                        requirement.artifact_id
-                    ),
-                )
-            })?;
-            if requirement.source == store::EventArtifactReferenceSource::RetentionRef {
-                let role = requirement.artifact_role.ok_or_else(|| {
-                    ReplayError::new(
-                        ReplayErrorKind::InvalidRunStream,
-                        format!(
-                            "retention requirement for {} does not carry an artifact role",
-                            requirement.artifact_id
-                        ),
-                    )
-                })?;
-                return self.authorize_artifact_partial(&requirement.artifact_id, digest, role);
-            }
-            if requirement.artifact_role.is_none() {
-                let schema_id = requirement.schema_id.as_ref().ok_or_else(|| {
-                    ReplayError::new(
-                        ReplayErrorKind::InvalidRunStream,
-                        format!(
-                            "schema-only requirement for {} does not carry a schema id",
-                            requirement.artifact_id
-                        ),
-                    )
-                })?;
-                return self.authorize_artifact_by_schema(
-                    &requirement.artifact_id,
-                    digest,
-                    schema_id,
-                );
-            }
-
-            let evidence = self.authorize_artifact(
-                &requirement.artifact_id,
-                digest,
-                requirement.schema_id.as_ref(),
-                requirement
-                    .artifact_role
-                    .expect("artifact role checked above"),
-                requirement.producer_node_id.as_ref(),
-            )?;
-            if requires_event_artifact_ref_checks(requirement.source)
-                && (requirement
-                    .byte_len
-                    .is_some_and(|byte_len| evidence.byte_len != byte_len)
-                    || requirement
-                        .media_type
-                        .as_ref()
-                        .is_some_and(|media_type| &evidence.media_type != media_type)
-                    || requirement
-                        .semantic_type_id
-                        .as_ref()
-                        .is_some_and(|semantic_type_id| {
-                            evidence.semantic_type_id.as_ref() != Some(semantic_type_id)
-                        })
-                    || requirement.producer_seed_id.is_some()
-                        && evidence.producer_seed_id.as_ref()
-                            != requirement.producer_seed_id.as_ref())
-            {
-                return Err(ReplayError::new(
-                    ReplayErrorKind::ArtifactMismatch,
-                    format!("artifact evidence mismatch for {}", requirement.artifact_id),
-                ));
-            }
-            Ok(evidence)
-        }
-
-        fn authorize_artifact_partial(
-            &mut self,
-            artifact_id: &ArtifactId,
-            digest: &ContentDigest,
-            role: ArtifactRole,
-        ) -> Result<StoredArtifactEvidenceRef> {
-            let evidence = self.retained_artifacts.get(artifact_id).ok_or_else(|| {
-                ReplayError::new(
-                    ReplayErrorKind::ArtifactMissing,
-                    format!("missing retained artifact evidence for {artifact_id}"),
-                )
-            })?;
-            if &evidence.digest != digest || evidence.artifact_role != role {
-                return Err(ReplayError::new(
-                    ReplayErrorKind::ArtifactMismatch,
-                    format!("retained artifact evidence mismatch for {artifact_id}"),
-                ));
-            }
-            let evidence = evidence.clone();
-            self.insert_authorized_artifact(evidence.clone())?;
-            Ok(evidence)
-        }
-
-        fn authorize_artifact_by_schema(
-            &mut self,
-            artifact_id: &ArtifactId,
-            digest: &ContentDigest,
-            schema_id: &SchemaId,
-        ) -> Result<StoredArtifactEvidenceRef> {
-            let evidence = self.retained_artifacts.get(artifact_id).ok_or_else(|| {
-                ReplayError::new(
-                    ReplayErrorKind::ArtifactMissing,
-                    format!("missing retained artifact evidence for {artifact_id}"),
-                )
-            })?;
-            if &evidence.digest != digest || evidence.schema_id.as_ref() != Some(schema_id) {
-                return Err(ReplayError::new(
-                    ReplayErrorKind::ArtifactMismatch,
-                    format!("retained artifact evidence mismatch for {artifact_id}"),
-                ));
-            }
+            store::validate_artifact_requirement_against_evidence(requirement, evidence)
+                .map_err(|error| artifact_requirement_replay_error(error, mismatch_context))?;
             let evidence = evidence.clone();
             self.insert_authorized_artifact(evidence.clone())?;
             Ok(evidence)
@@ -1996,19 +2106,29 @@ pub mod v1 {
 
         fn authorize_artifact(
             &mut self,
-            artifact_id: &ArtifactId,
-            digest: &ContentDigest,
-            schema_id: Option<&SchemaId>,
-            role: ArtifactRole,
-            producer_node_id: Option<&NodeId>,
+            expected: ArtifactEvidenceExpectation<'_>,
         ) -> Result<StoredArtifactEvidenceRef> {
-            let evidence = self.retained_artifacts.get(artifact_id).ok_or_else(|| {
-                ReplayError::new(
-                    ReplayErrorKind::ArtifactMissing,
-                    format!("missing retained artifact evidence for {artifact_id}"),
-                )
-            })?;
-            verify_artifact_fields(evidence, digest, schema_id, role, producer_node_id)?;
+            let evidence = self
+                .retained_artifacts
+                .get(expected.artifact_id)
+                .ok_or_else(|| {
+                    ReplayError::new(
+                        ReplayErrorKind::ArtifactMissing,
+                        format!(
+                            "missing retained artifact evidence for {}",
+                            expected.artifact_id
+                        ),
+                    )
+                })?;
+            verify_artifact_fields(
+                evidence,
+                expected.digest,
+                expected.schema_id,
+                expected.semantic_type_id,
+                expected.role,
+                expected.producer_node_id,
+                expected.producer_seed_id,
+            )?;
             let evidence = evidence.clone();
             self.insert_authorized_artifact(evidence.clone())?;
             Ok(evidence)
@@ -2037,19 +2157,26 @@ pub mod v1 {
 
         fn verify_artifact(
             &self,
-            artifact_id: &ArtifactId,
-            digest: &ContentDigest,
-            schema_id: Option<&SchemaId>,
-            role: ArtifactRole,
-            producer_node_id: Option<&NodeId>,
+            expected: ArtifactEvidenceExpectation<'_>,
         ) -> Result<StoredArtifactEvidenceRef> {
-            let evidence = self.artifacts.get(artifact_id).ok_or_else(|| {
+            let evidence = self.artifacts.get(expected.artifact_id).ok_or_else(|| {
                 ReplayError::new(
                     ReplayErrorKind::ArtifactMissing,
-                    format!("missing replay-authorized artifact evidence for {artifact_id}"),
+                    format!(
+                        "missing replay-authorized artifact evidence for {}",
+                        expected.artifact_id
+                    ),
                 )
             })?;
-            verify_artifact_fields(evidence, digest, schema_id, role, producer_node_id)?;
+            verify_artifact_fields(
+                evidence,
+                expected.digest,
+                expected.schema_id,
+                expected.semantic_type_id,
+                expected.role,
+                expected.producer_node_id,
+                expected.producer_seed_id,
+            )?;
             Ok(evidence.clone())
         }
     }
@@ -2098,10 +2225,10 @@ pub mod v1 {
     }
 
     fn verify_replay_artifact_authority(
-        verified_history: &mfm_runtime::VerifiedRunHistory,
+        verified_view: &mfm_runtime::VerifiedRunHistoryView,
         artifacts: &BTreeMap<ArtifactId, StoredArtifactEvidenceRef>,
     ) -> Result<()> {
-        let verified_artifacts = verified_history.artifact_store();
+        let verified_artifacts = verified_view.artifact_store();
         for (artifact_id, artifact) in verified_artifacts.artifacts() {
             let evidence = artifacts.get(artifact_id).ok_or_else(|| {
                 ReplayError::new(
@@ -2221,37 +2348,42 @@ pub mod v1 {
         )
     }
 
-    fn requires_event_artifact_ref_checks(source: store::EventArtifactReferenceSource) -> bool {
-        matches!(
-            source,
-            store::EventArtifactReferenceSource::SeedCell
-                | store::EventArtifactReferenceSource::ArtifactReferenced
-                | store::EventArtifactReferenceSource::PublicOutputRenderFailureDiagnostic
-                | store::EventArtifactReferenceSource::StateAttemptFailureDiagnostic
-        )
-    }
-
     fn verify_artifact_fields(
         evidence: &StoredArtifactEvidenceRef,
         digest: &ContentDigest,
         schema_id: Option<&SchemaId>,
+        semantic_type_id: Option<&SemanticTypeId>,
         role: ArtifactRole,
         producer_node_id: Option<&NodeId>,
+        producer_seed_id: Option<&SeedId>,
     ) -> Result<()> {
-        if &evidence.digest != digest
-            || evidence.schema_id.as_ref() != schema_id
-            || evidence.artifact_role != role
-            || producer_node_id.is_some() && evidence.producer_node_id.as_ref() != producer_node_id
-        {
-            return Err(ReplayError::new(
+        let requirement = store::EventArtifactRequirement {
+            source: store::EventArtifactReferenceSource::ArtifactReferenced,
+            artifact_id: evidence.artifact_id.clone(),
+            digest: Some(digest.clone()),
+            byte_len: None,
+            media_type: None,
+            schema_id: schema_id.cloned(),
+            semantic_type_id: semantic_type_id.cloned(),
+            producer_node_id: producer_node_id.cloned(),
+            producer_seed_id: producer_seed_id.cloned(),
+            artifact_role: Some(role),
+        };
+        store::validate_artifact_requirement_against_evidence(&requirement, evidence)
+            .map_err(|error| artifact_requirement_replay_error(error, "artifact evidence mismatch"))
+    }
+
+    fn artifact_requirement_replay_error(
+        error: store::StoreError,
+        context: &'static str,
+    ) -> ReplayError {
+        match error {
+            store::StoreError::ArtifactEvidenceMismatch { artifact_id, field } => ReplayError::new(
                 ReplayErrorKind::ArtifactMismatch,
-                format!(
-                    "retained artifact evidence mismatch for {}",
-                    evidence.artifact_id
-                ),
-            ));
+                format!("{context} for {artifact_id} field {field}"),
+            ),
+            error => error.into(),
         }
-        Ok(())
     }
 
     fn certified_evidence_mismatch(message: &'static str) -> ReplayError {
@@ -2477,2969 +2609,5 @@ pub mod v1 {
 
     fn spec_digest(spec_hash: &SpecHash) -> ContentDigest {
         ContentDigest::from_digest(spec_hash.algorithm(), *spec_hash.digest())
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-        use mfm_capabilities::{CapabilityDescriptor, CapabilityRole, CapabilitySetDescriptor};
-        use mfm_ids::{
-            DescriptorId, DigestAlgorithm, DigestBytes, EffectKind, EffectVersion, EventId,
-            LoweringVersion, RunId, ScopeId, SeedId, SemanticTypeId, SpecHash, SpecVersion,
-            StateKind, StateVersion,
-        };
-        use mfm_manual_auth::{
-            ManualAuthorizationSignatureBytes, ManualResolutionAuthorizationClaim,
-            ManualResolutionAuthorizationProof, ManualResolutionAuthorizationSignature,
-            ManualResolutionEvidenceRef,
-        };
-        use mfm_store::v1::{
-            build_committed_batch, CommitArtifactEvidenceSet, CommitKey, CommitPreconditions,
-            InMemoryTypedRunStore, PreparedCommit, PreparedCommitPlan, RequiredRunState, Retention,
-            RunAdmission, SideEffectProgress, SideEffectTerminal, StateAttemptStarted, StreamSeq,
-            TypedCommitRequest, TypedRunEventStore,
-        };
-
-        const SPEC_MEDIA_TYPE: &str = "application/vnd.mfm.typed-execution-spec+json;version=1";
-
-        #[test]
-        fn replay_broker_returns_recorded_fact_and_side_effect_evidence() {
-            let fixture = Fixture::new();
-            let broker = fixture.broker();
-
-            let fact = broker
-                .recorded_fact(&fixture.fact_request())
-                .expect("fact replay");
-            assert_eq!(fact.fact.response_hash, fixture.fact_response_hash);
-            assert_eq!(fact.artifact.artifact_role, ArtifactRole::FactResponse);
-
-            let submission = broker
-                .side_effect_submission(&fixture.submission_request())
-                .expect("submission replay");
-            assert_eq!(
-                submission.submission.submission_hash,
-                fixture.submission_hash
-            );
-
-            let receipt = broker
-                .side_effect_receipt(&fixture.receipt_request())
-                .expect("receipt replay");
-            assert_eq!(receipt.receipt.receipt_hash, fixture.receipt_hash);
-
-            let confirmation = broker
-                .side_effect_confirmation(&fixture.confirmation_request())
-                .expect("confirmation replay");
-            assert_eq!(
-                confirmation.confirmation.confirmation_hash,
-                fixture.confirmation_hash
-            );
-
-            let verifier = TestReplayVerifier {
-                verifier_id: events::ReplayVerifierId::new("verifier-1").expect("verifier"),
-                submission_hash: fixture.submission_hash.clone(),
-                receipt_hash: fixture.receipt_hash.clone(),
-                confirmation_hash: fixture.confirmation_hash.clone(),
-            };
-            let verified_submission = broker
-                .verify_side_effect_submission(&fixture.submission_request(), &verifier)
-                .expect("verified submission");
-            assert_eq!(
-                verified_submission.submission.submission_hash,
-                fixture.submission_hash
-            );
-            let verified_receipt = broker
-                .verify_side_effect_receipt(&fixture.receipt_request(), &verifier)
-                .expect("verified receipt");
-            assert_eq!(verified_receipt.receipt.receipt_hash, fixture.receipt_hash);
-            let verified_confirmation = broker
-                .verify_side_effect_confirmation(&fixture.confirmation_request(), &verifier)
-                .expect("verified confirmation");
-            assert_eq!(
-                verified_confirmation.confirmation.confirmation_hash,
-                fixture.confirmation_hash
-            );
-        }
-
-        #[test]
-        fn replay_rejects_missing_fact_and_mismatched_fact_hash() {
-            let fixture = Fixture::new();
-            let broker = fixture.broker();
-
-            let mut missing = fixture.fact_request();
-            missing.fact_key = events::FactKey::new("missing-fact").expect("fact key");
-            assert_eq!(
-                broker
-                    .recorded_fact(&missing)
-                    .expect_err("missing fact")
-                    .kind,
-                ReplayErrorKind::FactMissing
-            );
-
-            let mut mismatched = fixture.fact_request();
-            mismatched.request_hash = content(0xfa);
-            assert_eq!(
-                broker
-                    .recorded_fact(&mismatched)
-                    .expect_err("fact mismatch")
-                    .kind,
-                ReplayErrorKind::FactMismatch
-            );
-        }
-
-        #[test]
-        fn replay_rejects_unsupported_adapter_and_live_capability() {
-            let fixture = Fixture::new();
-            let broker = fixture.broker();
-
-            let mut request = fixture.fact_request();
-            request.adapter_version =
-                AdapterVersion::new("mfm.test.adapter.v2").expect("adapter version");
-            assert_eq!(
-                broker
-                    .recorded_fact(&request)
-                    .expect_err("unsupported adapter")
-                    .kind,
-                ReplayErrorKind::UnsupportedAdapter
-            );
-
-            assert_eq!(
-                broker
-                    .reject_live_capability_request()
-                    .expect_err("live caps rejected")
-                    .kind,
-                ReplayErrorKind::LiveCapabilityRequest
-            );
-        }
-
-        #[test]
-        fn replay_rejects_executable_and_canonicalizer_mismatch() {
-            let fixture = Fixture::new();
-            let mut authority = fixture.authority();
-            authority.runner_executables = vec![executable("different-runner")];
-            assert_eq!(
-                ReplayBroker::from_validated_parts(authority)
-                    .expect_err("runner mismatch")
-                    .kind,
-                ReplayErrorKind::ExecutableIdentityMismatch
-            );
-
-            let mut authority = fixture.authority();
-            authority.canonicalizer_identity =
-                CanonicalizerIdentity::new("different-canonicalizer").expect("canonicalizer");
-            assert_eq!(
-                ReplayBroker::from_validated_parts(authority)
-                    .expect_err("canonicalizer mismatch")
-                    .kind,
-                ReplayErrorKind::CanonicalizerMismatch
-            );
-        }
-
-        #[test]
-        fn replay_rejects_old_model_terminal_attempt_without_start() {
-            let fixture = Fixture::new();
-            let request = TypedCommitRequest::from_payloads(
-                fixture.stream[0].run_id().clone(),
-                StreamSeq::new(2).expect("old terminal seq"),
-                CommitKey::new("old-terminal-without-start").expect("commit key"),
-                vec![KernelEventPayload::StateAttemptFailed(
-                    events::StateAttemptFailed {
-                        spec_hash: fixture.envelope.spec_hash.clone(),
-                        node_id: fixture.node_id.clone(),
-                        attempt_id: fixture.attempt_id.clone(),
-                        retryable: false,
-                        error: test_error(false),
-                    },
-                )],
-                Vec::new(),
-                CommitPreconditions::default(),
-            )
-            .expect("typed commit request");
-            let old_terminal =
-                build_committed_batch(&request, StreamSeq::new(2).expect("old terminal seq"))
-                    .expect("old terminal batch");
-            let mut old_stream = vec![fixture.stream[0].clone()];
-            old_stream.extend(old_terminal.events().iter().cloned());
-
-            let error =
-                ReplayBroker::from_validated_parts(fixture.authority_for_stream(&old_stream))
-                    .expect_err("old model stream rejects");
-            assert_eq!(error.kind, ReplayErrorKind::InvalidRunStream);
-            assert!(error.message.contains("unsupported old stream model"));
-            assert!(error.message.contains("StateAttemptStarted"));
-        }
-
-        #[test]
-        fn replay_rejects_receipt_verifier_or_artifact_mismatch() {
-            let fixture = Fixture::new();
-            let broker = fixture.broker();
-
-            let mut request = fixture.receipt_request();
-            request.replay_verifier_id =
-                Some(events::ReplayVerifierId::new("wrong-verifier").expect("verifier"));
-            assert_eq!(
-                broker
-                    .side_effect_receipt(&request)
-                    .expect_err("verifier mismatch")
-                    .kind,
-                ReplayErrorKind::ReplayVerifierMismatch
-            );
-
-            let mut authority = fixture.authority();
-            let receipt_artifact = authority
-                .artifact_evidence
-                .iter_mut()
-                .find(|artifact| artifact.artifact_id == fixture.receipt_artifact)
-                .expect("receipt artifact");
-            receipt_artifact.digest = content(0xfb);
-            assert_eq!(
-                ReplayBroker::from_validated_parts(authority)
-                    .expect_err("artifact mismatch")
-                    .kind,
-                ReplayErrorKind::ArtifactMismatch
-            );
-        }
-
-        #[test]
-        fn replay_rejects_missing_artifact_evidence() {
-            let fixture = Fixture::new();
-            let mut authority = fixture.authority();
-            authority
-                .artifact_evidence
-                .retain(|artifact| artifact.artifact_id != fixture.fact_artifact);
-            assert_eq!(
-                ReplayBroker::from_validated_parts(authority)
-                    .expect_err("missing artifact")
-                    .kind,
-                ReplayErrorKind::ArtifactMissing
-            );
-        }
-
-        #[test]
-        fn replay_rejects_extra_artifacts_not_referenced_by_spec_or_stream() {
-            let fixture = Fixture::new();
-            let mut authority = fixture.authority();
-            let extra_artifact = stored_artifact(
-                artifact(0xee),
-                content(0xef),
-                Some(schema("mfm.test.extra", 0xf0)),
-                ArtifactRole::FactResponse,
-                Some(fixture.node_id.clone()),
-            );
-            authority.artifact_evidence.push(extra_artifact.clone());
-
-            assert_eq!(
-                ReplayBroker::from_validated_parts(authority)
-                    .expect_err("unauthorized artifact evidence")
-                    .kind,
-                ReplayErrorKind::ArtifactMismatch
-            );
-        }
-
-        #[test]
-        fn replay_construction_rejects_uncertified_fact_capability() {
-            let fixture = Fixture::new();
-            let mut stream = fixture.stream.clone();
-            let fact_index = stream
-                .iter()
-                .position(|event| matches!(event.payload(), KernelEventPayload::FactRecorded(_)))
-                .expect("fact event");
-            let KernelEventPayload::FactRecorded(mut fact) = stream[fact_index].payload().clone()
-            else {
-                unreachable!("fact event")
-            };
-            fact.capability_kind = CapabilityKind::new(
-                "mfm.test",
-                "rogue-capability",
-                DigestAlgorithm::Sha256JcsV1,
-                bytes(0xf1),
-            )
-            .expect("rogue capability");
-            let request = TypedCommitRequest::from_payloads(
-                stream[fact_index].run_id().clone(),
-                stream[fact_index].seq(),
-                CommitKey::new("bad-fact-replay").expect("commit key"),
-                vec![KernelEventPayload::FactRecorded(fact)],
-                Vec::new(),
-                CommitPreconditions::default(),
-            )
-            .expect("typed commit request");
-            let batch = build_committed_batch(&request, stream[fact_index].seq())
-                .expect("rebuild fact envelope");
-            stream[fact_index] = batch.events()[0].clone();
-
-            assert_eq!(
-                ReplayBroker::from_validated_parts(fixture.authority_for_stream(&stream))
-                    .expect_err("uncertified fact capability")
-                    .kind,
-                ReplayErrorKind::UnsupportedCapability
-            );
-        }
-
-        #[test]
-        fn replay_construction_rejects_uncertified_public_output_evidence() {
-            let fixture = Fixture::new();
-            let mut stream = fixture.stream.clone();
-            let node = fixture.envelope.spec.nodes[0].clone();
-            let cell = fixture.envelope.spec.cells[0].clone();
-            let artifact_id = artifact(0xf2);
-            let content_digest = content(0xf3);
-            append_payloads_to_stream(
-                &mut stream,
-                "bad-public-output",
-                vec![
-                    KernelEventPayload::CellProduced(events::CellProduced {
-                        spec_hash: fixture.envelope.spec_hash.clone(),
-                        node_id: node.node_id.clone(),
-                        cell_id: node.output_cell.clone(),
-                        scope_id: cell.scope_id.clone(),
-                        attempt_id: fixture.attempt_id.clone(),
-                        semantic_type_id: cell.semantic_type_id.clone(),
-                        schema_id: cell.schema_id.clone(),
-                        value_lineage: cell.value_lineage.clone(),
-                        artifact_id: artifact_id.clone(),
-                        content_digest: content_digest.clone(),
-                        producer_state_kind: Some(node.state_kind.clone()),
-                        producer_state_version: Some(node.state_version.clone()),
-                    }),
-                    KernelEventPayload::PublicOutputProduced(events::PublicOutputProduced {
-                        spec_hash: fixture.envelope.spec_hash.clone(),
-                        node_id: node.node_id.clone(),
-                        attempt_id: fixture.attempt_id.clone(),
-                        receipt_cell_id: node.output_cell.clone(),
-                        public_schema_id: fixture
-                            .envelope
-                            .spec
-                            .public_outputs
-                            .public_schema_id
-                            .clone(),
-                        output_spec_digest: content(0xf4),
-                        cells: vec![events::NamedTypedCellRef {
-                            public_field_path: fixture.envelope.spec.public_outputs.outputs[0]
-                                .public_field_path
-                                .clone(),
-                            cell_id: cell.cell_id.clone(),
-                            producer: cell.producer.clone(),
-                            scope_id: cell.scope_id.clone(),
-                            semantic_type_id: cell.semantic_type_id.clone(),
-                            schema_id: cell.schema_id.clone(),
-                            value_lineage: cell.value_lineage.clone(),
-                            content_digest: content_digest.clone(),
-                            artifact_id: artifact_id.clone(),
-                        }],
-                        rendered_digest: content(0xf5),
-                        rendered_artifact_id: None,
-                        renderer_descriptor_id: fixture
-                            .envelope
-                            .spec
-                            .public_outputs
-                            .renderer_descriptor
-                            .descriptor_id
-                            .clone(),
-                    }),
-                    KernelEventPayload::StateAttemptCompleted(events::StateAttemptCompleted {
-                        spec_hash: fixture.envelope.spec_hash.clone(),
-                        node_id: node.node_id.clone(),
-                        attempt_id: fixture.attempt_id.clone(),
-                        output_cell_id: node.output_cell.clone(),
-                    }),
-                ],
-            );
-
-            assert_eq!(
-                ReplayBroker::from_validated_parts(fixture.authority_for_stream_and_artifacts(
-                    &stream,
-                    {
-                        let mut artifacts = fixture.artifacts.clone();
-                        artifacts.push(stored_artifact(
-                            artifact_id,
-                            content_digest,
-                            Some(cell.schema_id),
-                            ArtifactRole::StateOutput,
-                            Some(node.node_id.clone()),
-                        ));
-                        artifacts
-                    }
-                ),)
-                .expect_err("uncertified public output")
-                .kind,
-                ReplayErrorKind::CertifiedEvidenceMismatch
-            );
-        }
-
-        #[test]
-        fn replay_construction_rejects_completed_run_without_public_output_projection() {
-            let fixture = Fixture::new();
-            let mut stream = fixture.stream.clone();
-            let run_id = stream[0].run_id().clone();
-            let public_output_event_id = stream[0].event_id().clone();
-            append_payload_to_stream(
-                &mut stream,
-                "bad-run-complete",
-                KernelEventPayload::RunCompleted(events::RunCompleted {
-                    run_id,
-                    spec_hash: fixture.envelope.spec_hash.clone(),
-                    outcome: events::RunCompletionOutcome::Completed(Box::new(
-                        events::PublicOutputCompletionEvidence {
-                            public_output_schema_id: fixture
-                                .envelope
-                                .spec
-                                .public_outputs
-                                .public_schema_id
-                                .clone(),
-                            public_output_event_id,
-                        },
-                    )),
-                }),
-            );
-
-            assert_eq!(
-                ReplayBroker::from_validated_parts(fixture.authority_for_stream(&stream))
-                    .expect_err("missing public output projection")
-                    .kind,
-                ReplayErrorKind::CertifiedEvidenceMismatch
-            );
-        }
-
-        #[test]
-        fn replay_construction_rejects_compensated_terminal_without_closed_remediation() {
-            let fixture = Fixture::with_saga_policy(spec::SagaPolicySpec::CompensateCompleted {
-                on_remediation_unresolved: spec::RemediationUnresolvedSpec::FailWithoutAcdcClaim,
-            });
-            let mut stream = fixture.stream.clone();
-            let run_id = stream[0].run_id().clone();
-            append_payload_to_stream(
-                &mut stream,
-                "non-retryable-failure",
-                KernelEventPayload::StateAttemptFailed(events::StateAttemptFailed {
-                    spec_hash: fixture.envelope.spec_hash.clone(),
-                    node_id: fixture.node_id.clone(),
-                    attempt_id: fixture.attempt_id.clone(),
-                    retryable: false,
-                    error: test_error(false),
-                }),
-            );
-            append_payload_to_stream(
-                &mut stream,
-                "forged-compensated-terminal",
-                KernelEventPayload::RunCompleted(events::RunCompleted {
-                    run_id,
-                    spec_hash: fixture.envelope.spec_hash.clone(),
-                    outcome: events::RunCompletionOutcome::Compensated,
-                }),
-            );
-
-            assert_eq!(
-                ReplayBroker::from_validated_parts(fixture.authority_for_stream(&stream))
-                    .expect_err("unclosed compensation")
-                    .kind,
-                ReplayErrorKind::CertifiedEvidenceMismatch
-            );
-        }
-
-        #[test]
-        fn replay_construction_accepts_compensated_terminal_with_closed_remediation() {
-            let fixture = Fixture::with_saga_policy_and_remediation(
-                spec::SagaPolicySpec::CompensateCompleted {
-                    on_remediation_unresolved:
-                        spec::RemediationUnresolvedSpec::FailWithoutAcdcClaim,
-                },
-            );
-            let remediation_node_id = node(0x60);
-            let remediation_attempt_id = attempt(0xa0);
-            let remediation_ledger =
-                events::SideEffectLedgerKey::new("remediation-ledger").expect("ledger");
-            let remediation_purpose = events::SideEffectLedgerPurpose::Remediation {
-                forward_ledger_key: fixture.ledger_key.clone(),
-            };
-            let remediation_intent_artifact = artifact(0xa1);
-            let remediation_intent_hash = content(0xa2);
-            let remediation_submission_artifact = artifact(0xa3);
-            let remediation_submission_hash = content(0xa4);
-            let remediation_receipt_artifact = artifact(0xa5);
-            let remediation_receipt_hash = content(0xa6);
-            let remediation_confirmation_artifact = artifact(0xa7);
-            let remediation_confirmation_hash = content(0xa8);
-            let mut stream = fixture.stream.clone();
-            let run_id = stream[0].run_id().clone();
-            append_payload_to_stream(
-                &mut stream,
-                "non-retryable-failure",
-                KernelEventPayload::StateAttemptFailed(events::StateAttemptFailed {
-                    spec_hash: fixture.envelope.spec_hash.clone(),
-                    node_id: fixture.node_id.clone(),
-                    attempt_id: fixture.attempt_id.clone(),
-                    retryable: false,
-                    error: test_error(false),
-                }),
-            );
-            append_payload_to_stream(
-                &mut stream,
-                "remediation-attempt-start",
-                KernelEventPayload::StateAttemptStarted(events::StateAttemptStarted {
-                    spec_hash: fixture.envelope.spec_hash.clone(),
-                    node_id: remediation_node_id.clone(),
-                    attempt_id: remediation_attempt_id.clone(),
-                    attempt_no: 1,
-                    state_kind: fixture.envelope.spec.nodes[0].state_kind.clone(),
-                    state_version: fixture.envelope.spec.nodes[0].state_version.clone(),
-                }),
-            );
-            append_payloads_to_stream(
-                &mut stream,
-                "remediation-intent",
-                vec![
-                    KernelEventPayload::SideEffectIntentPersisted(side_effect::IntentPersisted {
-                        spec_hash: fixture.envelope.spec_hash.clone(),
-                        node_id: remediation_node_id.clone(),
-                        scope_id: fixture.envelope.spec.nodes[0].scope_id.clone(),
-                        attempt_id: remediation_attempt_id.clone(),
-                        ledger_key: remediation_ledger.clone(),
-                        ledger_purpose: remediation_purpose.clone(),
-                        invocation_epoch: 1,
-                        intent_schema_id: fixture.intent_schema_id.clone(),
-                        intent_hash: remediation_intent_hash.clone(),
-                        intent_artifact_id: remediation_intent_artifact.clone(),
-                        idempotency_input_schema_id: fixture.idempotency_input_schema_id.clone(),
-                        idempotency_input_hash: fixture.idempotency_input_hash.clone(),
-                        idempotency_key: events::IdempotencyKeyRef::new("remediation-idem")
-                            .expect("idempotency"),
-                        capability_kind: fixture.capability_kind.clone(),
-                        capability_version: fixture.capability_version.clone(),
-                        adapter_kind: fixture.adapter_kind.clone(),
-                        adapter_version: fixture.adapter_version.clone(),
-                    }),
-                    KernelEventPayload::SideEffectClaimed(side_effect::Claimed {
-                        spec_hash: fixture.envelope.spec_hash.clone(),
-                        node_id: remediation_node_id.clone(),
-                        attempt_id: remediation_attempt_id.clone(),
-                        ledger_key: remediation_ledger.clone(),
-                        ledger_purpose: remediation_purpose.clone(),
-                        claim_owner: events::RunnerInvocationId::new("remediation-owner")
-                            .expect("owner"),
-                        invocation_epoch: 1,
-                        claim_generation: 1,
-                        claim_fencing_token: side_effect::ClaimFencingToken::new(
-                            "remediation-token",
-                        )
-                        .expect("token"),
-                    }),
-                    KernelEventPayload::SideEffectInvocationPrepared(
-                        side_effect::InvocationPrepared {
-                            spec_hash: fixture.envelope.spec_hash.clone(),
-                            node_id: remediation_node_id.clone(),
-                            attempt_id: remediation_attempt_id.clone(),
-                            ledger_key: remediation_ledger.clone(),
-                            ledger_purpose: remediation_purpose.clone(),
-                            invocation_epoch: 1,
-                            claim_generation: 1,
-                            claim_fencing_token: side_effect::ClaimFencingToken::new(
-                                "remediation-token",
-                            )
-                            .expect("token"),
-                            prepared_artifact_id: None,
-                            prepared_hash: None,
-                            resource_key: None,
-                        },
-                    ),
-                    KernelEventPayload::SideEffectInvocationStarted(
-                        side_effect::InvocationStarted {
-                            spec_hash: fixture.envelope.spec_hash.clone(),
-                            node_id: remediation_node_id.clone(),
-                            attempt_id: remediation_attempt_id.clone(),
-                            ledger_key: remediation_ledger.clone(),
-                            ledger_purpose: remediation_purpose.clone(),
-                            invocation_epoch: 1,
-                            claim_owner: events::RunnerInvocationId::new("remediation-owner")
-                                .expect("owner"),
-                            claim_generation: 1,
-                            claim_fencing_token: side_effect::ClaimFencingToken::new(
-                                "remediation-token",
-                            )
-                            .expect("token"),
-                        },
-                    ),
-                ],
-            );
-            append_payloads_to_stream(
-                &mut stream,
-                "remediation-confirmed",
-                vec![
-                    KernelEventPayload::SideEffectSubmissionObserved(
-                        side_effect::SubmissionObserved {
-                            spec_hash: fixture.envelope.spec_hash.clone(),
-                            node_id: remediation_node_id.clone(),
-                            attempt_id: remediation_attempt_id.clone(),
-                            ledger_key: remediation_ledger.clone(),
-                            ledger_purpose: remediation_purpose.clone(),
-                            invocation_epoch: 1,
-                            submission_schema_id: schema("mfm.test.submission", 0x43),
-                            submission_hash: remediation_submission_hash.clone(),
-                            submission_artifact_id: remediation_submission_artifact.clone(),
-                        },
-                    ),
-                    KernelEventPayload::SideEffectReceiptObserved(side_effect::ReceiptObserved {
-                        spec_hash: fixture.envelope.spec_hash.clone(),
-                        node_id: remediation_node_id.clone(),
-                        attempt_id: remediation_attempt_id.clone(),
-                        ledger_key: remediation_ledger.clone(),
-                        ledger_purpose: remediation_purpose.clone(),
-                        invocation_epoch: 1,
-                        receipt_schema_id: schema("mfm.test.receipt", 0x44),
-                        receipt_hash: remediation_receipt_hash.clone(),
-                        receipt_artifact_id: remediation_receipt_artifact.clone(),
-                        replay_verifier_id: events::ReplayVerifierId::new("verifier-1")
-                            .expect("verifier"),
-                        resource_touched_set: None,
-                    }),
-                    KernelEventPayload::SideEffectConfirmationObserved(
-                        side_effect::ConfirmationObserved {
-                            spec_hash: fixture.envelope.spec_hash.clone(),
-                            node_id: remediation_node_id.clone(),
-                            attempt_id: remediation_attempt_id.clone(),
-                            ledger_key: remediation_ledger,
-                            ledger_purpose: remediation_purpose,
-                            invocation_epoch: 1,
-                            confirmation_schema_id: schema("mfm.test.confirmation", 0x45),
-                            confirmation_hash: remediation_confirmation_hash.clone(),
-                            confirmation_artifact_id: remediation_confirmation_artifact.clone(),
-                            replay_verifier_id: events::ReplayVerifierId::new("verifier-1")
-                                .expect("verifier"),
-                            resource_touched_set: None,
-                        },
-                    ),
-                ],
-            );
-            append_payload_to_stream(
-                &mut stream,
-                "compensated-terminal",
-                KernelEventPayload::RunCompleted(events::RunCompleted {
-                    run_id: run_id.clone(),
-                    spec_hash: fixture.envelope.spec_hash.clone(),
-                    outcome: events::RunCompletionOutcome::Compensated,
-                }),
-            );
-            let mut artifacts = fixture.artifacts.clone();
-            artifacts.extend([
-                stored_artifact(
-                    remediation_intent_artifact,
-                    remediation_intent_hash,
-                    Some(fixture.intent_schema_id.clone()),
-                    ArtifactRole::SideEffectIntent,
-                    Some(remediation_node_id.clone()),
-                ),
-                stored_artifact(
-                    remediation_submission_artifact,
-                    remediation_submission_hash,
-                    Some(schema("mfm.test.submission", 0x43)),
-                    ArtifactRole::Submission,
-                    Some(remediation_node_id.clone()),
-                ),
-                stored_artifact(
-                    remediation_receipt_artifact,
-                    remediation_receipt_hash,
-                    Some(schema("mfm.test.receipt", 0x44)),
-                    ArtifactRole::Receipt,
-                    Some(remediation_node_id.clone()),
-                ),
-                stored_artifact(
-                    remediation_confirmation_artifact,
-                    remediation_confirmation_hash,
-                    Some(schema("mfm.test.confirmation", 0x45)),
-                    ArtifactRole::Confirmation,
-                    Some(remediation_node_id),
-                ),
-            ]);
-
-            let broker = ReplayBroker::from_validated_parts(
-                fixture.authority_for_stream_and_artifacts(&stream, artifacts),
-            )
-            .expect("compensated replay");
-            let saga = broker
-                .projection_snapshot()
-                .derive_saga_projection(&run_id, &fixture.envelope.spec.saga);
-            assert_eq!(saga.run_mode, store::RunMode::Compensated);
-        }
-
-        #[test]
-        fn replay_construction_rejects_vacuous_compensated_terminal() {
-            let fixture = Fixture::with_saga_policy(spec::SagaPolicySpec::CompensateCompleted {
-                on_remediation_unresolved: spec::RemediationUnresolvedSpec::FailWithoutAcdcClaim,
-            });
-            let mut stream = fixture.stream[..2].to_vec();
-            let run_id = stream[0].run_id().clone();
-            append_payload_to_stream(
-                &mut stream,
-                "clean-failure",
-                KernelEventPayload::StateAttemptFailed(events::StateAttemptFailed {
-                    spec_hash: fixture.envelope.spec_hash.clone(),
-                    node_id: fixture.node_id.clone(),
-                    attempt_id: fixture.attempt_id.clone(),
-                    retryable: false,
-                    error: test_error(false),
-                }),
-            );
-            append_payload_to_stream(
-                &mut stream,
-                "vacuous-compensated-terminal",
-                KernelEventPayload::RunCompleted(events::RunCompleted {
-                    run_id,
-                    spec_hash: fixture.envelope.spec_hash.clone(),
-                    outcome: events::RunCompletionOutcome::Compensated,
-                }),
-            );
-
-            assert_eq!(
-                ReplayBroker::from_validated_parts(
-                    fixture
-                        .authority_for_stream_and_artifacts(&stream, fixture.run_start_artifacts()),
-                )
-                .expect_err("vacuous compensated")
-                .kind,
-                ReplayErrorKind::CertifiedEvidenceMismatch
-            );
-        }
-
-        #[test]
-        fn replay_construction_rejects_terminal_without_forward_quiescence() {
-            let fixture = Fixture::with_saga_policy(spec::SagaPolicySpec::FailWithoutAcdcClaim);
-            let mut stream = fixture.stream[..7].to_vec();
-            let run_id = stream[0].run_id().clone();
-            append_payload_to_stream(
-                &mut stream,
-                "non-quiescent-terminal",
-                KernelEventPayload::RunCompleted(events::RunCompleted {
-                    run_id,
-                    spec_hash: fixture.envelope.spec_hash.clone(),
-                    outcome: events::RunCompletionOutcome::FailedWithoutAcdcClaim,
-                }),
-            );
-
-            assert_eq!(
-                ReplayBroker::from_validated_parts(
-                    fixture.authority_for_stream_and_artifacts(
-                        &stream,
-                        fixture.artifacts[..5].to_vec()
-                    ),
-                )
-                .expect_err("terminal without quiescence")
-                .kind,
-                ReplayErrorKind::InvalidRunStream
-            );
-        }
-
-        #[test]
-        fn replay_construction_rejects_forward_fence_violation() {
-            let fixture = Fixture::with_saga_policy(spec::SagaPolicySpec::FailWithoutAcdcClaim);
-            let mut stream = fixture.stream.clone();
-            append_payload_to_stream(
-                &mut stream,
-                "engage-saga",
-                KernelEventPayload::StateAttemptFailed(events::StateAttemptFailed {
-                    spec_hash: fixture.envelope.spec_hash.clone(),
-                    node_id: fixture.node_id.clone(),
-                    attempt_id: fixture.attempt_id.clone(),
-                    retryable: false,
-                    error: test_error(false),
-                }),
-            );
-            append_payload_to_stream(
-                &mut stream,
-                "late-forward-intent",
-                KernelEventPayload::SideEffectIntentPersisted(side_effect::IntentPersisted {
-                    spec_hash: fixture.envelope.spec_hash.clone(),
-                    node_id: fixture.node_id.clone(),
-                    scope_id: fixture.envelope.spec.nodes[0].scope_id.clone(),
-                    attempt_id: fixture.attempt_id.clone(),
-                    ledger_key: events::SideEffectLedgerKey::new("late-forward-ledger")
-                        .expect("ledger"),
-                    ledger_purpose: events::SideEffectLedgerPurpose::Forward,
-                    invocation_epoch: 1,
-                    intent_schema_id: fixture.intent_schema_id.clone(),
-                    intent_hash: content(0xb0),
-                    intent_artifact_id: artifact(0xb1),
-                    idempotency_input_schema_id: fixture.idempotency_input_schema_id.clone(),
-                    idempotency_input_hash: fixture.idempotency_input_hash.clone(),
-                    idempotency_key: events::IdempotencyKeyRef::new("late-forward-idem")
-                        .expect("idempotency"),
-                    capability_kind: fixture.capability_kind.clone(),
-                    capability_version: fixture.capability_version.clone(),
-                    adapter_kind: fixture.adapter_kind.clone(),
-                    adapter_version: fixture.adapter_version.clone(),
-                }),
-            );
-
-            assert_eq!(
-                ReplayBroker::from_validated_parts(fixture.authority_for_stream(&stream))
-                    .expect_err("fence violation")
-                    .kind,
-                ReplayErrorKind::InvalidRunStream
-            );
-        }
-
-        #[test]
-        fn replay_rejects_remediation_ledger_linked_to_unconfirmed_or_foreign_forward() {
-            let fixture = Fixture::with_saga_policy(spec::SagaPolicySpec::CompensateCompleted {
-                on_remediation_unresolved: spec::RemediationUnresolvedSpec::FailWithoutAcdcClaim,
-            });
-            let remediation_node_id = node(0x80);
-            let certified_spec =
-                fixture.certified_spec_with_remediation(remediation_node_id.clone());
-            let forward_ledger =
-                events::SideEffectLedgerKey::new("forward-ledger").expect("ledger");
-            let remediation_ledger =
-                events::SideEffectLedgerKey::new("remediation-ledger").expect("ledger");
-            let mut side_effects = BTreeMap::new();
-            side_effects.insert(
-                forward_ledger.clone(),
-                fixture.side_effect_projection(
-                    forward_ledger.clone(),
-                    events::SideEffectLedgerPurpose::Forward,
-                    fixture.node_id.clone(),
-                    store::SideEffectPhase::ReceiptObserved {
-                        invocation_epoch: 1,
-                    },
-                    0x81,
-                ),
-            );
-            side_effects.insert(
-                remediation_ledger.clone(),
-                fixture.side_effect_projection(
-                    remediation_ledger.clone(),
-                    events::SideEffectLedgerPurpose::Remediation {
-                        forward_ledger_key: forward_ledger.clone(),
-                    },
-                    remediation_node_id,
-                    store::SideEffectPhase::ConfirmationObserved {
-                        invocation_epoch: 1,
-                    },
-                    0x82,
-                ),
-            );
-            let projection = projection_with_side_effects(side_effects);
-            assert_eq!(
-                verify_remediation_ledger_links(&certified_spec, &projection)
-                    .expect_err("unconfirmed forward")
-                    .kind,
-                ReplayErrorKind::CertifiedEvidenceMismatch
-            );
-
-            let foreign_forward =
-                events::SideEffectLedgerKey::new("foreign-forward-ledger").expect("ledger");
-            let mut side_effects = BTreeMap::new();
-            side_effects.insert(
-                remediation_ledger.clone(),
-                fixture.side_effect_projection(
-                    remediation_ledger,
-                    events::SideEffectLedgerPurpose::Remediation {
-                        forward_ledger_key: foreign_forward,
-                    },
-                    node(0x83),
-                    store::SideEffectPhase::ConfirmationObserved {
-                        invocation_epoch: 1,
-                    },
-                    0x84,
-                ),
-            );
-            let projection = projection_with_side_effects(side_effects);
-            assert_eq!(
-                verify_remediation_ledger_links(&certified_spec, &projection)
-                    .expect_err("foreign forward")
-                    .kind,
-                ReplayErrorKind::CertifiedEvidenceMismatch
-            );
-        }
-
-        #[test]
-        fn replay_construction_rejects_manual_resolution_schema_mismatch() {
-            let signed = signed_manual_resolution_case(
-                |_| {},
-                |_| {},
-                |event| {
-                    event.evidence_schema_id = schema("mfm.test.wrong_manual_evidence", 0x92);
-                },
-                |_, _| {},
-            );
-
-            assert_eq!(
-                ReplayBroker::from_validated_parts(
-                    signed.fixture.authority_for_stream_artifacts_and_bytes(
-                        &signed.stream,
-                        signed.artifacts,
-                        signed.artifact_bytes,
-                    ),
-                )
-                .expect_err("manual schema mismatch")
-                .kind,
-                ReplayErrorKind::CertifiedEvidenceMismatch
-            );
-        }
-
-        #[test]
-        fn replay_construction_rejects_manual_resolution_before_manual_blocked() {
-            let evidence_schema = schema("mfm.test.manual_evidence", 0x99);
-            let fixture = Fixture::with_saga_policy(spec::SagaPolicySpec::ManualResolution {
-                manual: spec::ManualResolutionEvidenceSpec {
-                    evidence_schema: evidence_schema.clone(),
-                    authorization: manual_authorization(0x98),
-                },
-            });
-            let mut stream = fixture.stream.clone();
-            let run_id = stream[0].run_id().clone();
-            append_payload_to_stream(
-                &mut stream,
-                "interrupted-before-manual-resolution",
-                KernelEventPayload::StateAttemptInterrupted(events::StateAttemptInterrupted {
-                    spec_hash: fixture.envelope.spec_hash.clone(),
-                    node_id: fixture.node_id.clone(),
-                    attempt_id: fixture.attempt_id.clone(),
-                }),
-            );
-            append_payload_to_stream(
-                &mut stream,
-                "forged-manual-resolution",
-                KernelEventPayload::ManualResolutionRecorded(events::ManualResolutionRecorded {
-                    run_id,
-                    spec_hash: fixture.envelope.spec_hash.clone(),
-                    outcome: events::ManualResolutionOutcome::ConfirmRemediated,
-                    evidence_schema_id: evidence_schema,
-                    evidence_hash: content(0x9c),
-                    evidence_artifact_id: artifact(0x9d),
-                    authorization_schema_id: schema("mfm.test.manual_authorization", 0x9e),
-                    authorization_hash: content(0x9f),
-                    authorization_artifact_id: artifact(0xa1),
-                    note: None,
-                }),
-            );
-
-            assert_eq!(
-                ReplayBroker::from_validated_parts(fixture.authority_for_stream(&stream))
-                    .expect_err("manual resolution before manual-blocked")
-                    .kind,
-                ReplayErrorKind::InvalidRunStream
-            );
-        }
-
-        #[test]
-        fn replay_construction_accepts_valid_signed_manual_resolution() {
-            let signed = signed_manual_resolution_case(|_| {}, |_| {}, |_| {}, |_, _| {});
-
-            let broker = ReplayBroker::from_validated_parts(
-                signed.fixture.authority_for_stream_artifacts_and_bytes(
-                    &signed.stream,
-                    signed.artifacts,
-                    signed.artifact_bytes,
-                ),
-            )
-            .expect("valid signed manual resolution replay");
-            let saga = broker
-                .projection_snapshot()
-                .derive_saga_projection(&signed.run_id, &signed.fixture.envelope.spec.saga);
-            assert_eq!(saga.run_mode, store::RunMode::ManuallyResolved);
-        }
-
-        #[test]
-        fn replay_construction_rejects_manual_resolution_with_open_attempt_prefix() {
-            let open_attempt_id = attempt(0xe0);
-            let mut signed = signed_manual_resolution_case_with_prefix_edit(
-                |stream, fixture| {
-                    let node = &fixture.envelope.spec.nodes[0];
-                    append_payload_to_stream(
-                        stream,
-                        "manual-prefix-open-attempt",
-                        KernelEventPayload::StateAttemptStarted(events::StateAttemptStarted {
-                            spec_hash: fixture.envelope.spec_hash.clone(),
-                            node_id: fixture.node_id.clone(),
-                            attempt_id: open_attempt_id.clone(),
-                            attempt_no: 2,
-                            state_kind: node.state_kind.clone(),
-                            state_version: node.state_version.clone(),
-                        }),
-                    );
-                },
-                |_| {},
-                |_| {},
-                |_| {},
-                |_| {},
-                |_, _| {},
-            );
-            append_payload_to_stream(
-                &mut signed.stream,
-                "manual-prefix-open-attempt-terminal",
-                KernelEventPayload::StateAttemptInterrupted(events::StateAttemptInterrupted {
-                    spec_hash: signed.fixture.envelope.spec_hash.clone(),
-                    node_id: signed.fixture.node_id.clone(),
-                    attempt_id: open_attempt_id,
-                }),
-            );
-
-            let error = ReplayBroker::from_validated_parts(
-                signed.fixture.authority_for_stream_artifacts_and_bytes(
-                    &signed.stream,
-                    signed.artifacts,
-                    signed.artifact_bytes,
-                ),
-            )
-            .expect_err("manual resolution with open attempt prefix rejects");
-            assert!(
-                error.message.contains("requires no open semantic attempts"),
-                "{error}"
-            );
-        }
-
-        #[test]
-        fn replay_construction_rejects_manual_authorization_wrong_outcome() {
-            let signed = signed_manual_resolution_case(
-                |_| {},
-                |_| {},
-                |event| {
-                    event.outcome = events::ManualResolutionOutcome::FailWithoutAcdcClaim;
-                },
-                |_, _| {},
-            );
-
-            assert_eq!(
-                ReplayBroker::from_validated_parts(
-                    signed.fixture.authority_for_stream_artifacts_and_bytes(
-                        &signed.stream,
-                        signed.artifacts,
-                        signed.artifact_bytes,
-                    ),
-                )
-                .expect_err("manual outcome mismatch")
-                .kind,
-                ReplayErrorKind::CertifiedEvidenceMismatch
-            );
-        }
-
-        #[test]
-        fn replay_construction_rejects_manual_authorization_wrong_run() {
-            let signed = signed_manual_resolution_case(
-                |claim| {
-                    claim.run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, bytes(0xde));
-                },
-                |_| {},
-                |_| {},
-                |_, _| {},
-            );
-
-            assert_eq!(
-                ReplayBroker::from_validated_parts(
-                    signed.fixture.authority_for_stream_artifacts_and_bytes(
-                        &signed.stream,
-                        signed.artifacts,
-                        signed.artifact_bytes,
-                    ),
-                )
-                .expect_err("manual run mismatch")
-                .kind,
-                ReplayErrorKind::CertifiedEvidenceMismatch
-            );
-        }
-
-        #[test]
-        fn replay_construction_rejects_manual_authorization_wrong_spec() {
-            let signed = signed_manual_resolution_case(
-                |claim| {
-                    claim.spec_hash =
-                        SpecHash::from_digest(DigestAlgorithm::Sha256JcsV1, bytes(0xdf));
-                },
-                |_| {},
-                |_| {},
-                |_, _| {},
-            );
-
-            assert_eq!(
-                ReplayBroker::from_validated_parts(
-                    signed.fixture.authority_for_stream_artifacts_and_bytes(
-                        &signed.stream,
-                        signed.artifacts,
-                        signed.artifact_bytes,
-                    ),
-                )
-                .expect_err("manual spec mismatch")
-                .kind,
-                ReplayErrorKind::CertifiedEvidenceMismatch
-            );
-        }
-
-        #[test]
-        fn replay_construction_rejects_manual_authorization_wrong_prefix() {
-            let signed = signed_manual_resolution_case(
-                |claim| {
-                    claim.stream_prefix_digest = content(0xdd);
-                },
-                |_| {},
-                |_| {},
-                |_, _| {},
-            );
-
-            assert_eq!(
-                ReplayBroker::from_validated_parts(
-                    signed.fixture.authority_for_stream_artifacts_and_bytes(
-                        &signed.stream,
-                        signed.artifacts,
-                        signed.artifact_bytes,
-                    ),
-                )
-                .expect_err("manual prefix mismatch")
-                .kind,
-                ReplayErrorKind::CertifiedEvidenceMismatch
-            );
-        }
-
-        #[test]
-        fn replay_construction_rejects_manual_authorization_stale_sequence() {
-            let signed = signed_manual_resolution_case(
-                |claim| {
-                    claim.expected_next_seq = claim.expected_next_seq.saturating_sub(1);
-                },
-                |_| {},
-                |_| {},
-                |_, _| {},
-            );
-
-            assert_eq!(
-                ReplayBroker::from_validated_parts(
-                    signed.fixture.authority_for_stream_artifacts_and_bytes(
-                        &signed.stream,
-                        signed.artifacts,
-                        signed.artifact_bytes,
-                    ),
-                )
-                .expect_err("manual stale sequence")
-                .kind,
-                ReplayErrorKind::CertifiedEvidenceMismatch
-            );
-        }
-
-        #[test]
-        fn replay_construction_rejects_manual_authorization_wrong_evidence_hash() {
-            let signed = signed_manual_resolution_case(
-                |_| {},
-                |_| {},
-                |event| {
-                    event.evidence_hash = content(0xe0);
-                },
-                |_, _| {},
-            );
-
-            assert_eq!(
-                ReplayBroker::from_validated_parts(
-                    signed.fixture.authority_for_stream_artifacts_and_bytes(
-                        &signed.stream,
-                        signed.artifacts,
-                        signed.artifact_bytes,
-                    ),
-                )
-                .expect_err("manual evidence hash mismatch")
-                .kind,
-                ReplayErrorKind::CertifiedEvidenceMismatch
-            );
-        }
-
-        #[test]
-        fn replay_construction_rejects_manual_authorization_invalid_signature() {
-            let signed = signed_manual_resolution_case(
-                |_| {},
-                |signature| {
-                    signature[0] ^= 0x80;
-                },
-                |_| {},
-                |_, _| {},
-            );
-
-            assert_eq!(
-                ReplayBroker::from_validated_parts(
-                    signed.fixture.authority_for_stream_artifacts_and_bytes(
-                        &signed.stream,
-                        signed.artifacts,
-                        signed.artifact_bytes,
-                    ),
-                )
-                .expect_err("manual invalid signature")
-                .kind,
-                ReplayErrorKind::CertifiedEvidenceMismatch
-            );
-        }
-
-        #[test]
-        fn replay_construction_rejects_missing_manual_authorization_artifact() {
-            let signed = signed_manual_resolution_case(
-                |_| {},
-                |_| {},
-                |_| {},
-                |artifacts, _| {
-                    artifacts.retain(|artifact| {
-                        artifact.artifact_role != ArtifactRole::ManualResolutionAuthorization
-                    });
-                },
-            );
-
-            assert_eq!(
-                ReplayBroker::from_validated_parts(
-                    signed.fixture.authority_for_stream_artifacts_and_bytes(
-                        &signed.stream,
-                        signed.artifacts,
-                        signed.artifact_bytes,
-                    ),
-                )
-                .expect_err("missing manual authorization artifact")
-                .kind,
-                ReplayErrorKind::ArtifactMissing
-            );
-        }
-
-        #[test]
-        fn replay_construction_rejects_missing_manual_authorization_artifact_bytes() {
-            let signed = signed_manual_resolution_case(
-                |_| {},
-                |_| {},
-                |_| {},
-                |_, artifact_bytes| {
-                    artifact_bytes.clear();
-                },
-            );
-
-            assert_eq!(
-                ReplayBroker::from_validated_parts(
-                    signed.fixture.authority_for_stream_artifacts_and_bytes(
-                        &signed.stream,
-                        signed.artifacts,
-                        signed.artifact_bytes,
-                    ),
-                )
-                .expect_err("missing manual authorization bytes")
-                .kind,
-                ReplayErrorKind::ArtifactMissing
-            );
-        }
-
-        #[test]
-        fn replay_construction_rejects_manual_signer_outside_authority() {
-            let signed = signed_manual_resolution_case_with_proof_edit(
-                |_| {},
-                |_| {},
-                |proof| {
-                    proof.signatures[0].public_identity = spec::OperatorPublicIdentity::new(
-                        "0x0000000000000000000000000000000000000000",
-                    )
-                    .expect("operator public identity");
-                },
-                |_| {},
-                |_, _| {},
-            );
-
-            assert_eq!(
-                ReplayBroker::from_validated_parts(
-                    signed.fixture.authority_for_stream_artifacts_and_bytes(
-                        &signed.stream,
-                        signed.artifacts,
-                        signed.artifact_bytes,
-                    ),
-                )
-                .expect_err("manual signer outside authority")
-                .kind,
-                ReplayErrorKind::CertifiedEvidenceMismatch
-            );
-        }
-
-        #[test]
-        fn replay_rejects_exclusive_ledger_without_recorded_key() {
-            let fixture = Fixture::with_resource_claim(exclusive_resource_claim());
-
-            assert_eq!(
-                ReplayBroker::from_validated_parts(fixture.authority())
-                    .expect_err("exclusive key missing")
-                    .kind,
-                ReplayErrorKind::CertifiedEvidenceMismatch
-            );
-        }
-
-        #[test]
-        fn replay_rejects_exclusive_ledger_with_wrong_key_schema() {
-            let fixture = Fixture::with_resource_claim(exclusive_resource_claim());
-            let mut stream = fixture.stream.clone();
-            set_first_prepared_resource_key(
-                &mut stream,
-                Some(resource_key(
-                    "wallet-1",
-                    schema("mfm.test.wrong_resource_key", 0xc1),
-                )),
-            );
-
-            assert_eq!(
-                ReplayBroker::from_validated_parts(fixture.authority_for_stream(&stream))
-                    .expect_err("exclusive key schema mismatch")
-                    .kind,
-                ReplayErrorKind::CertifiedEvidenceMismatch
-            );
-        }
-
-        #[test]
-        fn replay_rejects_exclusive_key_changed_across_invocation_epochs() {
-            let fixture = Fixture::with_resource_claim(exclusive_resource_claim());
-            let mut stream = fixture.stream[..7].to_vec();
-            set_first_prepared_resource_key(
-                &mut stream,
-                Some(resource_key("wallet-1", resource_key_schema())),
-            );
-            let not_submitted_proof_artifact = artifact(0xc2);
-            let not_submitted_proof_hash = content(0xc3);
-            append_payloads_to_stream(
-                &mut stream,
-                "exclusive-epoch-two",
-                vec![
-                    KernelEventPayload::SideEffectNotSubmittedProven(
-                        side_effect::NotSubmittedProven {
-                            spec_hash: fixture.envelope.spec_hash.clone(),
-                            node_id: fixture.node_id.clone(),
-                            attempt_id: fixture.attempt_id.clone(),
-                            ledger_key: fixture.ledger_key.clone(),
-                            ledger_purpose: events::SideEffectLedgerPurpose::Forward,
-                            invocation_epoch: 1,
-                            proof_schema_id: schema("mfm.test.not_submitted", 0xc4),
-                            proof_hash: not_submitted_proof_hash.clone(),
-                            proof_artifact_id: not_submitted_proof_artifact.clone(),
-                        },
-                    ),
-                    KernelEventPayload::SideEffectClaimed(side_effect::Claimed {
-                        spec_hash: fixture.envelope.spec_hash.clone(),
-                        node_id: fixture.node_id.clone(),
-                        attempt_id: fixture.attempt_id.clone(),
-                        ledger_key: fixture.ledger_key.clone(),
-                        ledger_purpose: events::SideEffectLedgerPurpose::Forward,
-                        claim_owner: events::RunnerInvocationId::new("owner-2").expect("owner"),
-                        invocation_epoch: 2,
-                        claim_generation: 2,
-                        claim_fencing_token: side_effect::ClaimFencingToken::new("token-2")
-                            .expect("token"),
-                    }),
-                    KernelEventPayload::SideEffectInvocationPrepared(
-                        side_effect::InvocationPrepared {
-                            spec_hash: fixture.envelope.spec_hash.clone(),
-                            node_id: fixture.node_id.clone(),
-                            attempt_id: fixture.attempt_id.clone(),
-                            ledger_key: fixture.ledger_key.clone(),
-                            ledger_purpose: events::SideEffectLedgerPurpose::Forward,
-                            invocation_epoch: 2,
-                            claim_generation: 2,
-                            claim_fencing_token: side_effect::ClaimFencingToken::new("token-2")
-                                .expect("token"),
-                            prepared_artifact_id: None,
-                            prepared_hash: None,
-                            resource_key: Some(resource_key("wallet-2", resource_key_schema())),
-                        },
-                    ),
-                ],
-            );
-            let mut artifacts = fixture.artifacts[..5].to_vec();
-            artifacts.push(stored_artifact(
-                not_submitted_proof_artifact,
-                not_submitted_proof_hash,
-                Some(schema("mfm.test.not_submitted", 0xc4)),
-                ArtifactRole::NotSubmittedProof,
-                Some(fixture.node_id.clone()),
-            ));
-
-            assert_eq!(
-                ReplayBroker::from_validated_parts(
-                    fixture.authority_for_stream_and_artifacts(&stream, artifacts),
-                )
-                .expect_err("unstable exclusive key")
-                .kind,
-                ReplayErrorKind::InvalidRunStream
-            );
-        }
-
-        #[test]
-        fn replay_rejects_exact_touched_set_ledger_without_evidence() {
-            let fixture = Fixture::with_resource_claim(exact_touched_set_claim());
-
-            assert_eq!(
-                ReplayBroker::from_validated_parts(fixture.authority())
-                    .expect_err("missing touched set")
-                    .kind,
-                ReplayErrorKind::CertifiedEvidenceMismatch
-            );
-        }
-
-        #[test]
-        fn replay_rejects_exact_touched_set_schema_mismatch() {
-            let fixture = Fixture::with_resource_claim(exact_touched_set_claim());
-            let mut stream = fixture.stream.clone();
-            set_first_receipt_touched_set(
-                &mut stream,
-                Some(resource_touched_set(
-                    schema("mfm.test.wrong_touched_set", 0xc4),
-                    0xc5,
-                )),
-            );
-
-            assert_eq!(
-                ReplayBroker::from_validated_parts(fixture.authority_for_stream(&stream))
-                    .expect_err("touched set schema mismatch")
-                    .kind,
-                ReplayErrorKind::CertifiedEvidenceMismatch
-            );
-        }
-
-        struct TestReplayVerifier {
-            verifier_id: events::ReplayVerifierId,
-            submission_hash: ContentDigest,
-            receipt_hash: ContentDigest,
-            confirmation_hash: ContentDigest,
-        }
-
-        impl SideEffectReplayVerifier for TestReplayVerifier {
-            fn verifier_id(&self) -> &events::ReplayVerifierId {
-                &self.verifier_id
-            }
-
-            fn verify_submission(&self, input: &SideEffectSubmissionReplayInput) -> Result<()> {
-                if input.submission.submission.submission_hash == self.submission_hash
-                    && input.intent.intent.intent_hash != self.submission_hash
-                {
-                    Ok(())
-                } else {
-                    Err(ReplayError::new(
-                        ReplayErrorKind::ReplayVerifierMismatch,
-                        "submission verifier rejected recorded evidence",
-                    ))
-                }
-            }
-
-            fn verify_receipt(&self, input: &SideEffectReceiptReplayInput) -> Result<()> {
-                if input.receipt.receipt.receipt_hash == self.receipt_hash
-                    && input.submission.is_some()
-                    && input.intent.intent.intent_hash != self.receipt_hash
-                {
-                    Ok(())
-                } else {
-                    Err(ReplayError::new(
-                        ReplayErrorKind::ReplayVerifierMismatch,
-                        "receipt verifier rejected recorded evidence",
-                    ))
-                }
-            }
-
-            fn verify_confirmation(&self, input: &SideEffectConfirmationReplayInput) -> Result<()> {
-                if input.confirmation.confirmation.confirmation_hash == self.confirmation_hash
-                    && input.submission.is_some()
-                    && input.receipt.is_some()
-                {
-                    Ok(())
-                } else {
-                    Err(ReplayError::new(
-                        ReplayErrorKind::ReplayVerifierMismatch,
-                        "confirmation verifier rejected recorded evidence",
-                    ))
-                }
-            }
-        }
-
-        struct SignedManualResolutionCase {
-            fixture: Fixture,
-            run_id: RunId,
-            stream: Vec<KernelEventEnvelope>,
-            artifacts: Vec<StoredArtifactEvidenceRef>,
-            artifact_bytes: Vec<ReplayArtifactBytes>,
-        }
-
-        fn signed_manual_resolution_case(
-            edit_claim: impl FnOnce(&mut ManualResolutionAuthorizationClaim),
-            edit_signature: impl FnOnce(&mut Vec<u8>),
-            edit_event: impl FnOnce(&mut events::ManualResolutionRecorded),
-            edit_materials: impl FnOnce(
-                &mut Vec<StoredArtifactEvidenceRef>,
-                &mut Vec<ReplayArtifactBytes>,
-            ),
-        ) -> SignedManualResolutionCase {
-            signed_manual_resolution_case_with_proof_edit(
-                edit_claim,
-                edit_signature,
-                |_| {},
-                edit_event,
-                edit_materials,
-            )
-        }
-
-        fn signed_manual_resolution_case_with_proof_edit(
-            edit_claim: impl FnOnce(&mut ManualResolutionAuthorizationClaim),
-            edit_signature: impl FnOnce(&mut Vec<u8>),
-            edit_proof: impl FnOnce(&mut ManualResolutionAuthorizationProof),
-            edit_event: impl FnOnce(&mut events::ManualResolutionRecorded),
-            edit_materials: impl FnOnce(
-                &mut Vec<StoredArtifactEvidenceRef>,
-                &mut Vec<ReplayArtifactBytes>,
-            ),
-        ) -> SignedManualResolutionCase {
-            signed_manual_resolution_case_with_prefix_edit(
-                |_, _| {},
-                edit_claim,
-                edit_signature,
-                edit_proof,
-                edit_event,
-                edit_materials,
-            )
-        }
-
-        fn signed_manual_resolution_case_with_prefix_edit(
-            edit_prefix: impl FnOnce(&mut Vec<KernelEventEnvelope>, &Fixture),
-            edit_claim: impl FnOnce(&mut ManualResolutionAuthorizationClaim),
-            edit_signature: impl FnOnce(&mut Vec<u8>),
-            edit_proof: impl FnOnce(&mut ManualResolutionAuthorizationProof),
-            edit_event: impl FnOnce(&mut events::ManualResolutionRecorded),
-            edit_materials: impl FnOnce(
-                &mut Vec<StoredArtifactEvidenceRef>,
-                &mut Vec<ReplayArtifactBytes>,
-            ),
-        ) -> SignedManualResolutionCase {
-            let signing_key = test_manual_signing_key();
-            let operator_public_identity = "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf".to_owned();
-            let evidence_schema = schema("mfm.test.manual_evidence", 0xd0);
-            let fixture = Fixture::with_saga_policy(spec::SagaPolicySpec::ManualResolution {
-                manual: spec::ManualResolutionEvidenceSpec {
-                    evidence_schema: evidence_schema.clone(),
-                    authorization: manual_authorization_with_public_identity(
-                        0xd1,
-                        operator_public_identity,
-                    ),
-                },
-            });
-            let mut stream = fixture.stream.clone();
-            let run_id = stream[0].run_id().clone();
-            append_payload_to_stream(
-                &mut stream,
-                "manual-blocking-failure",
-                KernelEventPayload::StateAttemptFailed(events::StateAttemptFailed {
-                    spec_hash: fixture.envelope.spec_hash.clone(),
-                    node_id: fixture.node_id.clone(),
-                    attempt_id: fixture.attempt_id.clone(),
-                    retryable: false,
-                    error: test_error(false),
-                }),
-            );
-            edit_prefix(&mut stream, &fixture);
-            let prefix_projection =
-                ProjectionSnapshot::rebuild_from_run_stream(&stream).expect("prefix projection");
-            let prefix_saga =
-                prefix_projection.derive_saga_projection(&run_id, &fixture.envelope.spec.saga);
-            assert_eq!(prefix_saga.run_mode, store::RunMode::ManualBlocked);
-            let block_reason = prefix_saga
-                .manual_block_reason
-                .expect("manual block reason");
-            let expected_next_seq = stream
-                .last()
-                .expect("stream")
-                .seq()
-                .as_u64()
-                .checked_add(1)
-                .expect("next sequence");
-
-            let evidence_hash = content(0xd2);
-            let evidence_artifact_id = artifact(0xd3);
-            let expected_claim = ManualResolutionAuthorizationClaim {
-                run_id: run_id.clone(),
-                spec_hash: fixture.envelope.spec_hash.clone(),
-                expected_next_seq,
-                stream_prefix_digest: mfm_runtime::manual_resolution_stream_prefix_digest(&stream)
-                    .expect("prefix digest"),
-                manual_block_reason: mfm_runtime::manual_resolution_block_reason(block_reason),
-                unresolved_obligations_digest: mfm_runtime::unresolved_manual_obligations_digest(
-                    &prefix_saga,
-                )
-                .expect("obligations digest"),
-                outcome: events::ManualResolutionOutcome::ConfirmRemediated,
-                evidence: ManualResolutionEvidenceRef {
-                    schema_id: evidence_schema,
-                    content_hash: evidence_hash,
-                    artifact_id: evidence_artifact_id,
-                },
-            };
-            let mut proof_claim = expected_claim.clone();
-            edit_claim(&mut proof_claim);
-            let manual = certified_manual_resolution_spec(&fixture.envelope.spec.saga)
-                .expect("manual policy");
-            let operator = manual.authorization.authority.operators[0].clone();
-            let claim_digest = proof_claim.digest().expect("claim digest");
-            let mut signature_bytes =
-                sign_manual_claim_digest(&signing_key, claim_digest.digest().as_bytes());
-            edit_signature(&mut signature_bytes);
-            let mut proof = ManualResolutionAuthorizationProof {
-                verifier_id: manual.authorization.verifier_id.clone(),
-                signing_scheme: manual.authorization.signing_scheme.clone(),
-                claim: proof_claim,
-                signatures: vec![ManualResolutionAuthorizationSignature {
-                    operator_id: operator.operator_id,
-                    public_identity: operator.public_identity,
-                    signature: ManualAuthorizationSignatureBytes::new(signature_bytes)
-                        .expect("signature bytes"),
-                }],
-            };
-            edit_proof(&mut proof);
-            let proof_bytes = proof.canonical_json().expect("canonical proof");
-            let authorization_hash = proof_bytes.content_digest();
-            let authorization_artifact_id = ArtifactId::from_digest(
-                authorization_hash.algorithm(),
-                *authorization_hash.digest(),
-            );
-            let mut event = events::ManualResolutionRecorded {
-                run_id: expected_claim.run_id.clone(),
-                spec_hash: expected_claim.spec_hash.clone(),
-                outcome: expected_claim.outcome,
-                evidence_schema_id: expected_claim.evidence.schema_id.clone(),
-                evidence_hash: expected_claim.evidence.content_hash.clone(),
-                evidence_artifact_id: expected_claim.evidence.artifact_id.clone(),
-                authorization_schema_id: manual_authorization_proof_schema_id()
-                    .expect("manual authorization schema"),
-                authorization_hash,
-                authorization_artifact_id,
-                note: None,
-            };
-            edit_event(&mut event);
-            let mut artifacts = fixture.artifacts.clone();
-            artifacts.extend([
-                stored_artifact(
-                    event.evidence_artifact_id.clone(),
-                    event.evidence_hash.clone(),
-                    Some(event.evidence_schema_id.clone()),
-                    ArtifactRole::ManualResolutionEvidence,
-                    None,
-                ),
-                stored_artifact(
-                    event.authorization_artifact_id.clone(),
-                    event.authorization_hash.clone(),
-                    Some(event.authorization_schema_id.clone()),
-                    ArtifactRole::ManualResolutionAuthorization,
-                    None,
-                ),
-            ]);
-            let mut artifact_bytes = vec![ReplayArtifactBytes {
-                artifact_id: event.authorization_artifact_id.clone(),
-                bytes: proof_bytes.to_vec(),
-            }];
-            edit_materials(&mut artifacts, &mut artifact_bytes);
-            append_payload_to_stream(
-                &mut stream,
-                "signed-manual-resolution",
-                KernelEventPayload::ManualResolutionRecorded(event),
-            );
-
-            SignedManualResolutionCase {
-                fixture,
-                run_id,
-                stream,
-                artifacts,
-                artifact_bytes,
-            }
-        }
-
-        fn test_manual_signing_key() -> k256::ecdsa::SigningKey {
-            let mut key_bytes = [0u8; 32];
-            key_bytes[31] = 1;
-            let secret_key = k256::SecretKey::from_slice(&key_bytes).expect("test key");
-            k256::ecdsa::SigningKey::from(&secret_key)
-        }
-
-        fn sign_manual_claim_digest(
-            signing_key: &k256::ecdsa::SigningKey,
-            digest: &[u8; 32],
-        ) -> Vec<u8> {
-            let (signature, recovery_id) = signing_key
-                .sign_prehash_recoverable(digest)
-                .expect("manual signature");
-            let mut signature_bytes = signature.to_bytes().to_vec();
-            signature_bytes.push(u8::from(recovery_id.is_y_odd()));
-            signature_bytes
-        }
-
-        struct Fixture {
-            envelope: HashedSpecEnvelope,
-            stream: Vec<KernelEventEnvelope>,
-            artifacts: Vec<StoredArtifactEvidenceRef>,
-            runner: events::ExecutableIdentity,
-            adapter_exec: events::ExecutableIdentity,
-            node_id: NodeId,
-            attempt_id: AttemptId,
-            fact_artifact: ArtifactId,
-            fact_request_hash: ContentDigest,
-            fact_response_hash: ContentDigest,
-            submission_hash: ContentDigest,
-            receipt_artifact: ArtifactId,
-            receipt_hash: ContentDigest,
-            confirmation_hash: ContentDigest,
-            capability_kind: CapabilityKind,
-            capability_version: CapabilityVersion,
-            adapter_kind: AdapterKind,
-            adapter_version: AdapterVersion,
-            intent_schema_id: SchemaId,
-            intent_hash: ContentDigest,
-            idempotency_input_schema_id: SchemaId,
-            idempotency_input_hash: ContentDigest,
-            ledger_key: events::SideEffectLedgerKey,
-        }
-
-        impl Fixture {
-            fn new() -> Self {
-                Self::with_saga_policy(spec::SagaPolicySpec::NoSideEffects)
-            }
-
-            fn with_saga_policy(saga: spec::SagaPolicySpec) -> Self {
-                Self::with_saga_policy_internal(saga, false)
-            }
-
-            fn with_resource_claim(resource_claim: spec::ResourceClaimSpec) -> Self {
-                Self::with_saga_policy_internal_with_resource_claim(
-                    spec::SagaPolicySpec::NoSideEffects,
-                    false,
-                    resource_claim,
-                )
-            }
-
-            fn with_saga_policy_and_remediation(saga: spec::SagaPolicySpec) -> Self {
-                Self::with_saga_policy_internal(saga, true)
-            }
-
-            fn with_saga_policy_internal(
-                saga: spec::SagaPolicySpec,
-                include_remediation: bool,
-            ) -> Self {
-                Self::with_saga_policy_internal_with_resource_claim(
-                    saga,
-                    include_remediation,
-                    spec::ResourceClaimSpec::ManualOnly,
-                )
-            }
-
-            fn with_saga_policy_internal_with_resource_claim(
-                saga: spec::SagaPolicySpec,
-                include_remediation: bool,
-                resource_claim: spec::ResourceClaimSpec,
-            ) -> Self {
-                let node_id = node(0x10);
-                let attempt_id = attempt(0x11);
-                let output_cell = cell(0x12);
-                let scope_id = scope(0x13);
-                let descriptor_id = descriptor(0x14);
-                let semantic = semantic("value", 0x15);
-                let value_schema = schema("mfm.test.value", 0x16);
-                let input_schema = schema("mfm.test.input", 0x17);
-                let config_schema = schema("mfm.test.config", 0x18);
-                let public_schema = schema("mfm.test.public", 0x19);
-                let capability_kind = CapabilityKind::new(
-                    "mfm.test",
-                    "external-mutation",
-                    DigestAlgorithm::Sha256JcsV1,
-                    bytes(0x20),
-                )
-                .expect("capability kind");
-                let capability_version =
-                    CapabilityVersion::new("mfm.test.capability.v1").expect("capability version");
-                let adapter_kind = AdapterKind::new(
-                    "mfm.test",
-                    "adapter",
-                    DigestAlgorithm::Sha256JcsV1,
-                    bytes(0x21),
-                )
-                .expect("adapter kind");
-                let adapter_version =
-                    AdapterVersion::new("mfm.test.adapter.v1").expect("adapter version");
-                let capability = CapabilityDescriptor::new(
-                    capability_kind.clone(),
-                    capability_version.clone(),
-                    CapabilityRole::ExternalMutationAuthority,
-                    "external-mutation",
-                )
-                .expect("capability");
-                let capabilities =
-                    CapabilitySetDescriptor::new(vec![capability]).expect("capabilities");
-                let config_ref = spec::ConfigRef {
-                    schema_id: config_schema.clone(),
-                    artifact_id: artifact(0x22),
-                    digest: content(0x23),
-                    byte_len: 2,
-                    media_type: spec::MediaType::new("application/json").expect("media"),
-                };
-                let planning = spec::PlanningLineage {
-                    active_operation_instances: Vec::new(),
-                    completed_operation_frames: Vec::new(),
-                    lineage_digest: content(0x24),
-                };
-                let lineage = spec::ValueLineageRef {
-                    lineage_digest: content(0x25),
-                };
-                let effect_kind = EffectKind::new(
-                    "mfm.test",
-                    "side-effect",
-                    DigestAlgorithm::Sha256JcsV1,
-                    bytes(0x26),
-                )
-                .expect("effect");
-                let state_kind = StateKind::new(
-                    "mfm.test",
-                    "sidefx",
-                    DigestAlgorithm::Sha256JcsV1,
-                    bytes(0x27),
-                )
-                .expect("state kind");
-                let state_version =
-                    StateVersion::new("mfm.test.side_effect_state.v1").expect("state version");
-                let contract_digest = content(0x28);
-                let node_spec = spec::NodeSpec {
-                    node_id: node_id.clone(),
-                    stable_key: spec::StableAuthorKey::new("sidefx").expect("stable key"),
-                    scope_id: scope_id.clone(),
-                    state_kind: state_kind.clone(),
-                    state_version: state_version.clone(),
-                    descriptor_id: descriptor_id.clone(),
-                    config_ref: config_ref.clone(),
-                    input_bindings: spec::InputBindingSpec {
-                        input_schema_id: input_schema.clone(),
-                        input_descriptor_id: descriptor(0x29),
-                        root: spec::InputBindingNodeSpec::Unit,
-                        digest: content(0x2a),
-                    },
-                    output_cell: output_cell.clone(),
-                    effect_kind: effect_kind.clone(),
-                    capability_bindings: capabilities.clone(),
-                    adapter_bindings: vec![spec::AdapterBinding {
-                        adapter_kind: adapter_kind.clone(),
-                        adapter_version: adapter_version.clone(),
-                        binding_digest: None,
-                    }],
-                    side_effect: Some(spec::SideEffectContractSpec {
-                        contract_digest: contract_digest.clone(),
-                        resource_claim,
-                    }),
-                    framework: None,
-                    planning_lineage: planning.clone(),
-                    deterministic_predecessors: Vec::new(),
-                };
-                let renderer = spec::RendererDescriptorIdentity {
-                    descriptor_id: descriptor(0x2b),
-                    renderer_kind: spec::RendererKind::new("public-output/json")
-                        .expect("renderer kind"),
-                    renderer_version: spec::RendererVersion::new("mfm.renderer.test.v1")
-                        .expect("renderer version"),
-                    public_schema_id: public_schema.clone(),
-                    canonicalizer_identity: CanonicalizerIdentity::new("sha256-jcs-v1")
-                        .expect("canonicalizer"),
-                };
-                let state_descriptor = spec::StateDescriptorIdentity {
-                    descriptor_id: descriptor_id.clone(),
-                    name: "mfm.test.sidefx".to_owned(),
-                    state_kind: state_kind.clone(),
-                    state_version: state_version.clone(),
-                    config_schema_id: config_schema.clone(),
-                    input_schema_id: input_schema,
-                    output_schema_id: value_schema.clone(),
-                    output_semantic_type_id: semantic.clone(),
-                    effect_kind,
-                    effect_class: "sidefx".to_owned(),
-                    effect_name: "sidefx".to_owned(),
-                    effect_version: EffectVersion::new("mfm.effect.v1").expect("effect version"),
-                    capabilities: capabilities.clone(),
-                    runner: "sidefx".to_owned(),
-                    side_effect_contract_digest: Some(contract_digest),
-                };
-                let mut remediations = BTreeMap::new();
-                let mut cells = vec![spec::CellSpec {
-                    cell_id: output_cell.clone(),
-                    producer: spec::CellProducer::Node(node_id.clone()),
-                    scope_id: scope_id.clone(),
-                    semantic_type_id: semantic.clone(),
-                    schema_id: value_schema.clone(),
-                    value_lineage: lineage.clone(),
-                    terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
-                    storage_policy: spec::StoragePolicy::ContentAddressed,
-                    redaction_policy: spec::RedactionPolicy::Public,
-                }];
-                let mut value_lineages = vec![spec::ValueLineage {
-                    lineage_ref: lineage.clone(),
-                    scope_id: scope_id.clone(),
-                    producer: spec::CellProducer::Node(node_id.clone()),
-                    input_cells: Vec::new(),
-                    config_ref_digest: None,
-                    planning_lineage: planning.clone(),
-                    domain_keys: Vec::new(),
-                    transform_policy: spec::LineageTransformPolicy::StateOutput,
-                }];
-                if include_remediation {
-                    let remediation_node_id = node(0x60);
-                    let remediation_output_cell = cell(0x61);
-                    let remediation_lineage = spec::ValueLineageRef {
-                        lineage_digest: content(0x62),
-                    };
-                    let mut remediation = node_spec.clone();
-                    remediation.node_id = remediation_node_id.clone();
-                    remediation.stable_key =
-                        spec::StableAuthorKey::new("remediation").expect("stable key");
-                    remediation.output_cell = remediation_output_cell.clone();
-                    remediations.insert(node_id.clone(), remediation);
-                    cells.push(spec::CellSpec {
-                        cell_id: remediation_output_cell.clone(),
-                        producer: spec::CellProducer::Node(remediation_node_id.clone()),
-                        scope_id: scope_id.clone(),
-                        semantic_type_id: semantic.clone(),
-                        schema_id: value_schema.clone(),
-                        value_lineage: remediation_lineage.clone(),
-                        terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
-                        storage_policy: spec::StoragePolicy::ContentAddressed,
-                        redaction_policy: spec::RedactionPolicy::Public,
-                    });
-                    value_lineages.push(spec::ValueLineage {
-                        lineage_ref: remediation_lineage,
-                        scope_id: scope_id.clone(),
-                        producer: spec::CellProducer::Node(remediation_node_id),
-                        input_cells: Vec::new(),
-                        config_ref_digest: None,
-                        planning_lineage: planning.clone(),
-                        domain_keys: Vec::new(),
-                        transform_policy: spec::LineageTransformPolicy::StateOutput,
-                    });
-                }
-                let spec = spec::TypedExecutionSpec::new(spec::TypedExecutionSpecParts {
-                    authoring: spec::AuthoringProvenance::StateComposition {
-                        descriptor: spec::CompositionDescriptor {
-                            descriptor_id: descriptor(0x2c),
-                            name: "mfm.test.replay".to_owned(),
-                            version: "mfm.test.replay.v1".to_owned(),
-                        },
-                        config_hash: content(0x2d),
-                    },
-                    saga,
-                    scopes: vec![spec::ScopeSpec {
-                        scope_id: scope_id.clone(),
-                        parent_scope_id: None,
-                        stable_key: spec::StableAuthorKey::new("root").expect("stable key"),
-                        planning_lineage: planning.clone(),
-                    }],
-                    seeds: Vec::new(),
-                    descriptor_identities: vec![
-                        spec::DescriptorIdentity::State(Box::new(state_descriptor)),
-                        spec::DescriptorIdentity::Renderer(Box::new(renderer.clone())),
-                    ],
-                    config_refs: vec![config_ref],
-                    nodes: vec![node_spec],
-                    remediations,
-                    cells,
-                    value_lineages,
-                    planning_lineage: Vec::new(),
-                    public_outputs: spec::PublicOutputSpec {
-                        public_schema_id: public_schema,
-                        outputs: vec![spec::PublicOutputCell {
-                            public_field_path: spec::PublicFieldPath::new("result").expect("field"),
-                            cell_id: output_cell,
-                            producer: spec::CellProducer::Node(node_id.clone()),
-                            scope_id: scope_id.clone(),
-                            semantic_type_id: semantic,
-                            schema_id: value_schema,
-                            value_lineage: lineage,
-                            required_terminal: spec::RequiredTerminal::ProducedOnly,
-                        }],
-                        renderer_descriptor: renderer,
-                    },
-                })
-                .expect("typed spec");
-                let envelope =
-                    HashedSpecEnvelope::new(spec, spec::TypedExecutionSpecAudit::default())
-                        .expect("envelope");
-                let run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, bytes(0x30));
-                let runner = executable("sidefx");
-                let adapter_exec = executable("adapter");
-                let fact_artifact = artifact(0x31);
-                let fact_request_hash = content(0x32);
-                let fact_response_hash = content(0x33);
-                let side_effect_artifact = artifact(0x34);
-                let intent_schema_id = schema("mfm.test.intent", 0x35);
-                let intent_hash = content(0x36);
-                let idempotency_input_schema_id = schema("mfm.test.idempotency", 0x37);
-                let idempotency_input_hash = content(0x38);
-                let submission_artifact = artifact(0x39);
-                let submission_hash = content(0x3a);
-                let receipt_artifact = artifact(0x3b);
-                let receipt_hash = content(0x3c);
-                let confirmation_artifact = artifact(0x3d);
-                let confirmation_hash = content(0x3e);
-                let ledger_key =
-                    events::SideEffectLedgerKey::new("ledger-key-1").expect("ledger key");
-                let ledger_purpose = events::SideEffectLedgerPurpose::Forward;
-
-                let mut store = InMemoryTypedRunStore::default();
-                let mut artifacts = Vec::new();
-                let certified_config = envelope.spec.config_refs[0].clone();
-                artifacts.push(stored_artifact(
-                    certified_config.artifact_id,
-                    certified_config.digest,
-                    Some(certified_config.schema_id),
-                    ArtifactRole::TypedConfig,
-                    None,
-                ));
-                let mut spec_artifact = stored_artifact(
-                    artifact(0x40),
-                    spec_digest(&envelope.spec_hash),
-                    None,
-                    ArtifactRole::TypedExecutionSpec,
-                    None,
-                );
-                spec_artifact.media_type = spec::MediaType::new(SPEC_MEDIA_TYPE).expect("media");
-                let certificate_digest = content(0x41);
-                let mut certificate_artifact = stored_artifact(
-                    artifact(0x42),
-                    certificate_digest.clone(),
-                    None,
-                    ArtifactRole::TypedSpecCertificate,
-                    None,
-                );
-                certificate_artifact.media_type =
-                    spec::MediaType::new(mfm_certify::CERTIFICATE_MEDIA_TYPE)
-                        .expect("certificate media");
-                append(
-                    &mut store,
-                    &mut artifacts,
-                    &run_id,
-                    "run-start",
-                    vec![KernelEventPayload::RunAdmitted(Box::new(
-                        events::RunAdmitted {
-                            run_id: run_id.clone(),
-                            spec_hash: envelope.spec_hash.clone(),
-                            spec_artifact: run_artifact_ref(&spec_artifact),
-                            certificate_artifact: run_artifact_ref(&certificate_artifact),
-                            config_artifacts: Vec::new(),
-                            spec_version: SpecVersion::new(spec::SPEC_VERSION)
-                                .expect("spec version"),
-                            lowering_version: LoweringVersion::new(spec::LOWERING_VERSION)
-                                .expect("lowering version"),
-                            public_output_schema_id: envelope
-                                .spec
-                                .public_outputs
-                                .public_schema_id
-                                .clone(),
-                            saga_policy_digest: envelope
-                                .spec
-                                .saga
-                                .saga_policy_digest()
-                                .expect("saga policy digest"),
-                            descriptor_identities: envelope.spec.descriptor_identities.clone(),
-                            runner_executables: vec![runner.clone()],
-                            adapter_executables: vec![adapter_exec.clone()],
-                            admitted_binding_digest: admitted_binding_digest(
-                                std::slice::from_ref(&runner),
-                                std::slice::from_ref(&adapter_exec),
-                            )
-                            .expect("binding digest"),
-                            canonicalizer_identity: envelope
-                                .spec
-                                .public_outputs
-                                .renderer_descriptor
-                                .canonicalizer_identity
-                                .clone(),
-                            framework_version: events::FrameworkVersion::new("mfm.test.1")
-                                .expect("framework"),
-                            source_revision: events::SourceRevision::new("test-revision")
-                                .expect("source"),
-                            launched_at_unix_ms: 1_700_000_000_000,
-                            seed_cells: Vec::new(),
-                        },
-                    ))],
-                    vec![spec_artifact, certificate_artifact],
-                    CommitPreconditions {
-                        required_run_state: RequiredRunState::Absent,
-                        ..CommitPreconditions::default()
-                    },
-                );
-                append(
-                    &mut store,
-                    &mut artifacts,
-                    &run_id,
-                    "attempt-start",
-                    vec![KernelEventPayload::StateAttemptStarted(
-                        events::StateAttemptStarted {
-                            spec_hash: envelope.spec_hash.clone(),
-                            node_id: node_id.clone(),
-                            attempt_id: attempt_id.clone(),
-                            attempt_no: 1,
-                            state_kind,
-                            state_version,
-                        },
-                    )],
-                    Vec::new(),
-                    CommitPreconditions::default(),
-                );
-                append(
-                    &mut store,
-                    &mut artifacts,
-                    &run_id,
-                    "fact",
-                    vec![KernelEventPayload::FactRecorded(events::FactRecorded {
-                        spec_hash: envelope.spec_hash.clone(),
-                        node_id: node_id.clone(),
-                        attempt_id: attempt_id.clone(),
-                        capability_kind: capability_kind.clone(),
-                        capability_version: capability_version.clone(),
-                        adapter_kind: adapter_kind.clone(),
-                        adapter_version: adapter_version.clone(),
-                        request_schema_id: schema("mfm.test.fact_request", 0x41),
-                        request_hash: fact_request_hash.clone(),
-                        response_schema_id: schema("mfm.test.fact_response", 0x42),
-                        response_hash: fact_response_hash.clone(),
-                        fact_key: events::FactKey::new("fact-key-1").expect("fact key"),
-                        artifact_id: fact_artifact.clone(),
-                    })],
-                    vec![stored_artifact(
-                        fact_artifact.clone(),
-                        fact_response_hash.clone(),
-                        Some(schema("mfm.test.fact_response", 0x42)),
-                        ArtifactRole::FactResponse,
-                        Some(node_id.clone()),
-                    )],
-                    CommitPreconditions::default(),
-                );
-                append(
-                    &mut store,
-                    &mut artifacts,
-                    &run_id,
-                    "side-effect-intent",
-                    vec![
-                        KernelEventPayload::SideEffectIntentPersisted(
-                            side_effect::IntentPersisted {
-                                spec_hash: envelope.spec_hash.clone(),
-                                node_id: node_id.clone(),
-                                scope_id: scope_id.clone(),
-                                attempt_id: attempt_id.clone(),
-                                ledger_key: ledger_key.clone(),
-                                ledger_purpose: ledger_purpose.clone(),
-                                invocation_epoch: 1,
-                                intent_schema_id: intent_schema_id.clone(),
-                                intent_hash: intent_hash.clone(),
-                                intent_artifact_id: side_effect_artifact.clone(),
-                                idempotency_input_schema_id: idempotency_input_schema_id.clone(),
-                                idempotency_input_hash: idempotency_input_hash.clone(),
-                                idempotency_key: events::IdempotencyKeyRef::new("idem-key-1")
-                                    .expect("idempotency"),
-                                capability_kind: capability_kind.clone(),
-                                capability_version: capability_version.clone(),
-                                adapter_kind: adapter_kind.clone(),
-                                adapter_version: adapter_version.clone(),
-                            },
-                        ),
-                        KernelEventPayload::SideEffectClaimed(side_effect::Claimed {
-                            spec_hash: envelope.spec_hash.clone(),
-                            node_id: node_id.clone(),
-                            attempt_id: attempt_id.clone(),
-                            ledger_key: ledger_key.clone(),
-                            ledger_purpose: ledger_purpose.clone(),
-                            claim_owner: events::RunnerInvocationId::new("owner-1").expect("owner"),
-                            invocation_epoch: 1,
-                            claim_generation: 1,
-                            claim_fencing_token: side_effect::ClaimFencingToken::new("token-1")
-                                .expect("token"),
-                        }),
-                        KernelEventPayload::SideEffectInvocationPrepared(
-                            side_effect::InvocationPrepared {
-                                spec_hash: envelope.spec_hash.clone(),
-                                node_id: node_id.clone(),
-                                attempt_id: attempt_id.clone(),
-                                ledger_key: ledger_key.clone(),
-                                ledger_purpose: ledger_purpose.clone(),
-                                invocation_epoch: 1,
-                                claim_generation: 1,
-                                claim_fencing_token: side_effect::ClaimFencingToken::new("token-1")
-                                    .expect("token"),
-                                prepared_artifact_id: None,
-                                prepared_hash: None,
-                                resource_key: None,
-                            },
-                        ),
-                        KernelEventPayload::SideEffectInvocationStarted(
-                            side_effect::InvocationStarted {
-                                spec_hash: envelope.spec_hash.clone(),
-                                node_id: node_id.clone(),
-                                attempt_id: attempt_id.clone(),
-                                ledger_key: ledger_key.clone(),
-                                ledger_purpose: ledger_purpose.clone(),
-                                invocation_epoch: 1,
-                                claim_owner: events::RunnerInvocationId::new("owner-1")
-                                    .expect("owner"),
-                                claim_generation: 1,
-                                claim_fencing_token: side_effect::ClaimFencingToken::new("token-1")
-                                    .expect("token"),
-                            },
-                        ),
-                    ],
-                    vec![stored_artifact(
-                        side_effect_artifact.clone(),
-                        intent_hash.clone(),
-                        Some(intent_schema_id.clone()),
-                        ArtifactRole::SideEffectIntent,
-                        Some(node_id.clone()),
-                    )],
-                    CommitPreconditions::default(),
-                );
-                append(
-                    &mut store,
-                    &mut artifacts,
-                    &run_id,
-                    "side-effect-evidence",
-                    vec![
-                        KernelEventPayload::SideEffectSubmissionObserved(
-                            side_effect::SubmissionObserved {
-                                spec_hash: envelope.spec_hash.clone(),
-                                node_id: node_id.clone(),
-                                attempt_id: attempt_id.clone(),
-                                ledger_key: ledger_key.clone(),
-                                ledger_purpose: ledger_purpose.clone(),
-                                invocation_epoch: 1,
-                                submission_schema_id: schema("mfm.test.submission", 0x43),
-                                submission_hash: submission_hash.clone(),
-                                submission_artifact_id: submission_artifact.clone(),
-                            },
-                        ),
-                        KernelEventPayload::SideEffectReceiptObserved(
-                            side_effect::ReceiptObserved {
-                                spec_hash: envelope.spec_hash.clone(),
-                                node_id: node_id.clone(),
-                                attempt_id: attempt_id.clone(),
-                                ledger_key: ledger_key.clone(),
-                                ledger_purpose: ledger_purpose.clone(),
-                                invocation_epoch: 1,
-                                receipt_schema_id: schema("mfm.test.receipt", 0x44),
-                                receipt_hash: receipt_hash.clone(),
-                                receipt_artifact_id: receipt_artifact.clone(),
-                                replay_verifier_id: events::ReplayVerifierId::new("verifier-1")
-                                    .expect("verifier"),
-                                resource_touched_set: None,
-                            },
-                        ),
-                        KernelEventPayload::SideEffectConfirmationObserved(
-                            side_effect::ConfirmationObserved {
-                                spec_hash: envelope.spec_hash.clone(),
-                                node_id: node_id.clone(),
-                                attempt_id: attempt_id.clone(),
-                                ledger_key: ledger_key.clone(),
-                                ledger_purpose,
-                                invocation_epoch: 1,
-                                confirmation_schema_id: schema("mfm.test.confirmation", 0x45),
-                                confirmation_hash: confirmation_hash.clone(),
-                                confirmation_artifact_id: confirmation_artifact.clone(),
-                                replay_verifier_id: events::ReplayVerifierId::new("verifier-1")
-                                    .expect("verifier"),
-                                resource_touched_set: None,
-                            },
-                        ),
-                    ],
-                    vec![
-                        stored_artifact(
-                            submission_artifact.clone(),
-                            submission_hash.clone(),
-                            Some(schema("mfm.test.submission", 0x43)),
-                            ArtifactRole::Submission,
-                            Some(node_id.clone()),
-                        ),
-                        stored_artifact(
-                            receipt_artifact.clone(),
-                            receipt_hash.clone(),
-                            Some(schema("mfm.test.receipt", 0x44)),
-                            ArtifactRole::Receipt,
-                            Some(node_id.clone()),
-                        ),
-                        stored_artifact(
-                            confirmation_artifact.clone(),
-                            confirmation_hash.clone(),
-                            Some(schema("mfm.test.confirmation", 0x45)),
-                            ArtifactRole::Confirmation,
-                            Some(node_id.clone()),
-                        ),
-                    ],
-                    CommitPreconditions::default(),
-                );
-                let stream = store.load_run_stream(&run_id);
-                Self {
-                    envelope,
-                    stream,
-                    artifacts,
-                    runner,
-                    adapter_exec,
-                    node_id,
-                    attempt_id,
-                    fact_artifact,
-                    fact_request_hash,
-                    fact_response_hash,
-                    submission_hash,
-                    receipt_artifact,
-                    receipt_hash,
-                    confirmation_hash,
-                    capability_kind,
-                    capability_version,
-                    adapter_kind,
-                    adapter_version,
-                    intent_schema_id,
-                    intent_hash,
-                    idempotency_input_schema_id,
-                    idempotency_input_hash,
-                    ledger_key,
-                }
-            }
-
-            fn certified_spec_with_remediation(
-                &self,
-                remediation_node_id: NodeId,
-            ) -> HashedSpecEnvelope {
-                let mut certified_spec = self.envelope.clone();
-                let mut remediation = certified_spec.spec.nodes[0].clone();
-                remediation.node_id = remediation_node_id;
-                remediation.stable_key =
-                    spec::StableAuthorKey::new("remediation").expect("stable key");
-                certified_spec
-                    .spec
-                    .remediations
-                    .insert(self.node_id.clone(), remediation);
-                certified_spec
-            }
-
-            fn side_effect_projection(
-                &self,
-                ledger_key: events::SideEffectLedgerKey,
-                ledger_purpose: events::SideEffectLedgerPurpose,
-                node_id: NodeId,
-                phase: store::SideEffectPhase,
-                event_byte: u8,
-            ) -> store::SideEffectProjection {
-                let claim = side_effect_phase_requires_claim(&phase).then(|| {
-                    store::SideEffectClaimProjection {
-                        node_id: node_id.clone(),
-                        attempt_id: self.attempt_id.clone(),
-                        claim_owner: events::RunnerInvocationId::new("projection-owner")
-                            .expect("claim owner"),
-                        invocation_epoch: 1,
-                        claim_generation: 1,
-                        claim_fencing_token: side_effect::ClaimFencingToken::new(
-                            "projection-token",
-                        )
-                        .expect("fencing token"),
-                    }
-                });
-                let submission = side_effect_phase_requires_submission(&phase).then(|| {
-                    store::SideEffectArtifactProjection {
-                        artifact_id: artifact(event_byte.wrapping_add(2)),
-                        content_digest: content(event_byte.wrapping_add(2)),
-                        schema_id: Some(schema("mfm.test.projection_submission", event_byte)),
-                    }
-                });
-                let receipt = side_effect_phase_requires_receipt(&phase).then(|| {
-                    store::SideEffectArtifactProjection {
-                        artifact_id: artifact(event_byte.wrapping_add(3)),
-                        content_digest: content(event_byte.wrapping_add(3)),
-                        schema_id: Some(schema("mfm.test.projection_receipt", event_byte)),
-                    }
-                });
-                let confirmation = side_effect_phase_requires_confirmation(&phase).then(|| {
-                    store::SideEffectArtifactProjection {
-                        artifact_id: artifact(event_byte.wrapping_add(4)),
-                        content_digest: content(event_byte.wrapping_add(4)),
-                        schema_id: Some(schema("mfm.test.projection_confirmation", event_byte)),
-                    }
-                });
-                store::SideEffectProjection {
-                    run_id: self.stream[0].run_id().clone(),
-                    ledger_key,
-                    ledger_purpose,
-                    event_id: event(event_byte),
-                    intent: store::SideEffectIntentProjection {
-                        node_id,
-                        attempt_id: self.attempt_id.clone(),
-                        scope_id: self.envelope.spec.nodes[0].scope_id.clone(),
-                        invocation_epoch: 1,
-                        intent_schema_id: self.intent_schema_id.clone(),
-                        intent_hash: self.intent_hash.clone(),
-                        intent_artifact_id: artifact(event_byte.wrapping_add(1)),
-                        idempotency_input_schema_id: self.idempotency_input_schema_id.clone(),
-                        idempotency_input_hash: self.idempotency_input_hash.clone(),
-                        idempotency_key: events::IdempotencyKeyRef::new("projection-idem")
-                            .expect("idempotency"),
-                        capability_kind: self.capability_kind.clone(),
-                        capability_version: self.capability_version.clone(),
-                        adapter_kind: self.adapter_kind.clone(),
-                        adapter_version: self.adapter_version.clone(),
-                    },
-                    prepared_invocation: None,
-                    resource_key: None,
-                    submission,
-                    receipt,
-                    confirmation,
-                    resource_touched_set: None,
-                    claim,
-                    phase,
-                }
-            }
-
-            fn authority(&self) -> ReplayReadAuthority {
-                self.authority_for_stream(&self.stream)
-            }
-
-            fn authority_for_stream(&self, stream: &[KernelEventEnvelope]) -> ReplayReadAuthority {
-                self.authority_for_stream_and_artifacts(stream, self.artifacts.clone())
-            }
-
-            fn authority_for_stream_and_artifacts(
-                &self,
-                stream: &[KernelEventEnvelope],
-                artifacts: Vec<StoredArtifactEvidenceRef>,
-            ) -> ReplayReadAuthority {
-                self.authority_for_stream_artifacts_and_bytes(stream, artifacts, Vec::new())
-            }
-
-            fn authority_for_stream_artifacts_and_bytes(
-                &self,
-                stream: &[KernelEventEnvelope],
-                artifacts: Vec<StoredArtifactEvidenceRef>,
-                artifact_bytes: Vec<ReplayArtifactBytes>,
-            ) -> ReplayReadAuthority {
-                ReplayReadAuthority {
-                    certified_spec: self.envelope.clone(),
-                    stream: stream.to_vec(),
-                    canonicalizer_identity: self
-                        .envelope
-                        .spec
-                        .public_outputs
-                        .renderer_descriptor
-                        .canonicalizer_identity
-                        .clone(),
-                    runner_executables: vec![self.runner.clone()],
-                    adapter_executables: vec![self.adapter_exec.clone()],
-                    artifact_evidence: artifacts,
-                    artifact_bytes: artifact_bytes_map(artifact_bytes).expect("artifact bytes"),
-                }
-            }
-
-            fn broker(&self) -> ReplayBroker {
-                ReplayBroker::from_validated_parts(self.authority()).expect("broker")
-            }
-
-            fn run_start_artifacts(&self) -> Vec<StoredArtifactEvidenceRef> {
-                self.artifacts
-                    .iter()
-                    .filter(|artifact| {
-                        matches!(
-                            artifact.artifact_role,
-                            ArtifactRole::TypedConfig
-                                | ArtifactRole::TypedExecutionSpec
-                                | ArtifactRole::TypedSpecCertificate
-                        )
-                    })
-                    .cloned()
-                    .collect()
-            }
-
-            fn fact_request(&self) -> FactReplayRequest {
-                FactReplayRequest {
-                    node_id: self.node_id.clone(),
-                    attempt_id: self.attempt_id.clone(),
-                    fact_key: events::FactKey::new("fact-key-1").expect("fact key"),
-                    capability_kind: self.capability_kind.clone(),
-                    capability_version: self.capability_version.clone(),
-                    adapter_kind: self.adapter_kind.clone(),
-                    adapter_version: self.adapter_version.clone(),
-                    request_schema_id: schema("mfm.test.fact_request", 0x41),
-                    request_hash: self.fact_request_hash.clone(),
-                    response_schema_id: schema("mfm.test.fact_response", 0x42),
-                }
-            }
-
-            fn submission_request(&self) -> SideEffectEvidenceReplayRequest {
-                self.side_effect_request(
-                    schema("mfm.test.submission", 0x43),
-                    self.submission_hash.clone(),
-                    None,
-                )
-            }
-
-            fn receipt_request(&self) -> SideEffectEvidenceReplayRequest {
-                self.side_effect_request(
-                    schema("mfm.test.receipt", 0x44),
-                    self.receipt_hash.clone(),
-                    Some(events::ReplayVerifierId::new("verifier-1").expect("verifier")),
-                )
-            }
-
-            fn confirmation_request(&self) -> SideEffectEvidenceReplayRequest {
-                self.side_effect_request(
-                    schema("mfm.test.confirmation", 0x45),
-                    self.confirmation_hash.clone(),
-                    Some(events::ReplayVerifierId::new("verifier-1").expect("verifier")),
-                )
-            }
-
-            fn side_effect_request(
-                &self,
-                evidence_schema_id: SchemaId,
-                evidence_hash: ContentDigest,
-                replay_verifier_id: Option<events::ReplayVerifierId>,
-            ) -> SideEffectEvidenceReplayRequest {
-                SideEffectEvidenceReplayRequest {
-                    ledger_key: self.ledger_key.clone(),
-                    node_id: self.node_id.clone(),
-                    attempt_id: self.attempt_id.clone(),
-                    invocation_epoch: 1,
-                    intent_schema_id: self.intent_schema_id.clone(),
-                    intent_hash: self.intent_hash.clone(),
-                    idempotency_input_schema_id: self.idempotency_input_schema_id.clone(),
-                    idempotency_input_hash: self.idempotency_input_hash.clone(),
-                    capability_kind: self.capability_kind.clone(),
-                    capability_version: self.capability_version.clone(),
-                    adapter_kind: self.adapter_kind.clone(),
-                    adapter_version: self.adapter_version.clone(),
-                    evidence_schema_id,
-                    evidence_hash,
-                    replay_verifier_id,
-                }
-            }
-        }
-
-        fn append(
-            store: &mut InMemoryTypedRunStore,
-            retained_artifacts: &mut Vec<StoredArtifactEvidenceRef>,
-            run_id: &RunId,
-            commit_key: &str,
-            payloads: Vec<KernelEventPayload>,
-            artifacts: Vec<StoredArtifactEvidenceRef>,
-            preconditions: CommitPreconditions,
-        ) {
-            retained_artifacts.extend(artifacts.iter().cloned());
-            let request = TypedCommitRequest::from_payloads(
-                run_id.clone(),
-                store.expected_next_seq(run_id),
-                CommitKey::new(commit_key).expect("commit key"),
-                payloads,
-                artifacts.clone(),
-                preconditions,
-            )
-            .expect("typed commit request");
-            let commit =
-                test_prepared_commit_plan(request, artifacts).expect("prepare typed commit");
-            store
-                .append_prepared_commit_plan(commit)
-                .expect("append typed commit");
-        }
-
-        fn test_prepared_commit_plan(
-            request: TypedCommitRequest,
-            admitted_artifacts: Vec<StoredArtifactEvidenceRef>,
-        ) -> store::Result<PreparedCommitPlan> {
-            let artifacts = CommitArtifactEvidenceSet::new(
-                request.required_artifacts().to_vec(),
-                admitted_artifacts,
-            )?;
-            if request
-                .payloads()
-                .iter()
-                .all(|payload| matches!(payload, KernelEventPayload::RunAdmitted(_)))
-            {
-                return PreparedCommit::<RunAdmission>::new(request, artifacts)
-                    .map(PreparedCommitPlan::from);
-            }
-            if request
-                .payloads()
-                .iter()
-                .all(|payload| matches!(payload, KernelEventPayload::StateAttemptStarted(_)))
-            {
-                let mut preconditions = request.preconditions().clone();
-                preconditions.required_run_state = RequiredRunState::NotCompleted;
-                let request = request.with_preconditions(preconditions);
-                return PreparedCommit::<StateAttemptStarted>::new(request, artifacts)
-                    .map(PreparedCommitPlan::from);
-            }
-            if request
-                .payloads()
-                .iter()
-                .any(test_is_side_effect_terminal_payload)
-            {
-                return PreparedCommit::<SideEffectTerminal>::new(request, artifacts)
-                    .map(PreparedCommitPlan::from);
-            }
-            if request
-                .payloads()
-                .iter()
-                .any(|payload| payload.side_effect_ref().is_some())
-            {
-                return PreparedCommit::<SideEffectProgress>::new(request, artifacts)
-                    .map(PreparedCommitPlan::from);
-            }
-            if request.payloads().iter().any(test_is_retention_payload) {
-                return PreparedCommit::<Retention>::new(request, artifacts)
-                    .map(PreparedCommitPlan::from);
-            }
-            PreparedCommit::<store::AttemptTerminal>::new(request, artifacts)
-                .map(PreparedCommitPlan::from)
-        }
-
-        fn test_is_retention_payload(payload: &KernelEventPayload) -> bool {
-            matches!(
-                payload,
-                KernelEventPayload::RetentionRefsAppended(_)
-                    | KernelEventPayload::RetentionManifestProjected(_)
-            )
-        }
-
-        fn test_is_side_effect_terminal_payload(payload: &KernelEventPayload) -> bool {
-            matches!(
-                payload,
-                KernelEventPayload::SideEffectNotSubmittedProven(_)
-                    | KernelEventPayload::SideEffectSubmissionObserved(_)
-                    | KernelEventPayload::SideEffectSubmissionUnknown(_)
-                    | KernelEventPayload::SideEffectReceiptObserved(_)
-                    | KernelEventPayload::SideEffectConfirmationObserved(_)
-                    | KernelEventPayload::SideEffectAmbiguous(_)
-                    | KernelEventPayload::SideEffectFailed(_)
-            )
-        }
-
-        fn append_payload_to_stream(
-            stream: &mut Vec<KernelEventEnvelope>,
-            commit_key: &str,
-            payload: KernelEventPayload,
-        ) {
-            append_payloads_to_stream(stream, commit_key, vec![payload]);
-        }
-
-        fn append_payloads_to_stream(
-            stream: &mut Vec<KernelEventEnvelope>,
-            commit_key: &str,
-            payloads: Vec<KernelEventPayload>,
-        ) {
-            let seq = stream.last().expect("non-empty stream").seq();
-            let seq = StreamSeq::new(seq.as_u64() + 1).expect("next sequence");
-            let request = TypedCommitRequest::from_payloads(
-                stream[0].run_id().clone(),
-                seq,
-                CommitKey::new(commit_key).expect("commit key"),
-                payloads,
-                Vec::new(),
-                CommitPreconditions::default(),
-            )
-            .expect("typed commit request");
-            let batch = build_committed_batch(&request, seq).expect("build envelope");
-            stream.extend(batch.events().iter().cloned());
-        }
-
-        fn set_first_prepared_resource_key(
-            stream: &mut [KernelEventEnvelope],
-            resource_key: Option<events::ResourceKeyEvidence>,
-        ) {
-            replace_first_payload(
-                stream,
-                "rewrite-prepared-resource-key",
-                |payload| matches!(payload, KernelEventPayload::SideEffectInvocationPrepared(_)),
-                |payload| {
-                    let KernelEventPayload::SideEffectInvocationPrepared(mut payload) = payload
-                    else {
-                        unreachable!("prepared event")
-                    };
-                    payload.resource_key = resource_key;
-                    KernelEventPayload::SideEffectInvocationPrepared(payload)
-                },
-            );
-        }
-
-        fn set_first_receipt_touched_set(
-            stream: &mut [KernelEventEnvelope],
-            touched_set: Option<events::ResourceTouchedSetEvidence>,
-        ) {
-            replace_first_payload(
-                stream,
-                "rewrite-receipt-touched-set",
-                |payload| matches!(payload, KernelEventPayload::SideEffectReceiptObserved(_)),
-                |payload| {
-                    let KernelEventPayload::SideEffectReceiptObserved(mut payload) = payload else {
-                        unreachable!("receipt event")
-                    };
-                    payload.resource_touched_set = touched_set;
-                    KernelEventPayload::SideEffectReceiptObserved(payload)
-                },
-            );
-        }
-
-        fn replace_first_payload(
-            stream: &mut [KernelEventEnvelope],
-            commit_key: &str,
-            matches_payload: impl Fn(&KernelEventPayload) -> bool,
-            rewrite: impl FnOnce(KernelEventPayload) -> KernelEventPayload,
-        ) {
-            let index = stream
-                .iter()
-                .position(|event| matches_payload(event.payload()))
-                .expect("payload to rewrite");
-            let seq = stream[index].seq();
-            let indices = stream
-                .iter()
-                .enumerate()
-                .filter_map(|(candidate, event)| (event.seq() == seq).then_some(candidate))
-                .collect::<Vec<_>>();
-            let rewrite_index = indices
-                .iter()
-                .position(|candidate| *candidate == index)
-                .expect("rewritten event in sequence batch");
-            let mut payloads = indices
-                .iter()
-                .map(|candidate| stream[*candidate].payload().clone())
-                .collect::<Vec<_>>();
-            payloads[rewrite_index] = rewrite(payloads[rewrite_index].clone());
-            let request = TypedCommitRequest::from_payloads(
-                stream[index].run_id().clone(),
-                seq,
-                CommitKey::new(commit_key).expect("commit key"),
-                payloads,
-                Vec::new(),
-                CommitPreconditions::default(),
-            )
-            .expect("typed commit request");
-            let batch = build_committed_batch(&request, seq).expect("rebuild envelope");
-            assert_eq!(batch.events().len(), indices.len());
-            for (candidate, event) in indices.into_iter().zip(batch.events()) {
-                stream[candidate] = event.clone();
-            }
-        }
-
-        fn projection_with_side_effects(
-            side_effects: BTreeMap<events::SideEffectLedgerKey, store::SideEffectProjection>,
-        ) -> ProjectionSnapshot {
-            let side_effects = side_effects
-                .into_values()
-                .map(|projection| {
-                    (
-                        store::SideEffectLedgerRef::new(
-                            projection.run_id.clone(),
-                            projection.ledger_key.clone(),
-                        ),
-                        projection,
-                    )
-                })
-                .collect();
-            ProjectionSnapshot::from_parts(store::ProjectionSnapshotParts {
-                side_effects,
-                ..Default::default()
-            })
-            .expect("test side-effect projection is typed-valid")
-        }
-
-        fn side_effect_phase_requires_claim(phase: &store::SideEffectPhase) -> bool {
-            !matches!(
-                phase,
-                store::SideEffectPhase::IntentPersisted { .. }
-                    | store::SideEffectPhase::Failed {
-                        failure_phase: side_effect::FailurePhase::BeforeInvocationStarted,
-                        ..
-                    }
-            )
-        }
-
-        fn side_effect_phase_requires_submission(phase: &store::SideEffectPhase) -> bool {
-            matches!(
-                phase,
-                store::SideEffectPhase::SubmissionObserved { .. }
-                    | store::SideEffectPhase::ReceiptObserved { .. }
-                    | store::SideEffectPhase::ConfirmationObserved { .. }
-            )
-        }
-
-        fn side_effect_phase_requires_receipt(phase: &store::SideEffectPhase) -> bool {
-            matches!(
-                phase,
-                store::SideEffectPhase::ReceiptObserved { .. }
-                    | store::SideEffectPhase::ConfirmationObserved { .. }
-            )
-        }
-
-        fn side_effect_phase_requires_confirmation(phase: &store::SideEffectPhase) -> bool {
-            matches!(phase, store::SideEffectPhase::ConfirmationObserved { .. })
-        }
-
-        fn stored_artifact(
-            artifact_id: ArtifactId,
-            digest: ContentDigest,
-            schema_id: Option<SchemaId>,
-            role: ArtifactRole,
-            producer_node_id: Option<NodeId>,
-        ) -> StoredArtifactEvidenceRef {
-            StoredArtifactEvidenceRef {
-                artifact_id,
-                digest,
-                byte_len: 128,
-                media_type: spec::MediaType::new("application/json").expect("media"),
-                schema_id,
-                semantic_type_id: None,
-                producer_node_id,
-                producer_seed_id: None::<SeedId>,
-                artifact_role: role,
-            }
-        }
-
-        fn run_artifact_ref(
-            artifact: &StoredArtifactEvidenceRef,
-        ) -> events::RunArtifactEvidenceRef {
-            events::RunArtifactEvidenceRef {
-                artifact_id: artifact.artifact_id.clone(),
-                role: artifact.artifact_role,
-                schema_id: artifact.schema_id.clone(),
-                semantic_type_id: artifact.semantic_type_id.clone(),
-                content_digest: artifact.digest.clone(),
-                byte_len: artifact.byte_len,
-                media_type: artifact.media_type.clone(),
-            }
-        }
-
-        fn executable(factory: &str) -> events::ExecutableIdentity {
-            events::ExecutableIdentity {
-                factory_id: events::RunnerFactoryId::new(factory).expect("factory"),
-                source_revision: events::SourceRevision::new("test-revision").expect("source"),
-                cargo_package_name: events::PackageName::new("mfm-test").expect("package"),
-                cargo_package_version: events::PackageVersion::new("0.1.0").expect("version"),
-                cargo_package_digest: content(0xe1),
-                binary_digest: content(0xe2),
-                nix_derivation_hash: None,
-                nix_output_hash: None,
-            }
-        }
-
-        fn bytes(byte: u8) -> DigestBytes {
-            DigestBytes::from_array([byte; 32])
-        }
-
-        fn content(byte: u8) -> ContentDigest {
-            ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, bytes(byte))
-        }
-
-        fn artifact(byte: u8) -> ArtifactId {
-            ArtifactId::from_digest(DigestAlgorithm::Sha256JcsV1, bytes(byte))
-        }
-
-        fn event(byte: u8) -> EventId {
-            EventId::from_digest(DigestAlgorithm::Sha256JcsV1, bytes(byte))
-        }
-
-        fn attempt(byte: u8) -> AttemptId {
-            AttemptId::from_digest(DigestAlgorithm::Sha256JcsV1, bytes(byte))
-        }
-
-        fn node(byte: u8) -> NodeId {
-            NodeId::from_digest(DigestAlgorithm::Sha256JcsV1, bytes(byte))
-        }
-
-        fn cell(byte: u8) -> mfm_ids::CellId {
-            mfm_ids::CellId::from_digest(DigestAlgorithm::Sha256JcsV1, bytes(byte))
-        }
-
-        fn scope(byte: u8) -> ScopeId {
-            ScopeId::from_digest(DigestAlgorithm::Sha256JcsV1, bytes(byte))
-        }
-
-        fn descriptor(byte: u8) -> DescriptorId {
-            DescriptorId::from_digest(DigestAlgorithm::Sha256JcsV1, bytes(byte))
-        }
-
-        fn schema(name: &str, byte: u8) -> SchemaId {
-            SchemaId::new(name, "1", DigestAlgorithm::Sha256JcsV1, bytes(byte)).expect("schema")
-        }
-
-        fn manual_authorization(byte: u8) -> spec::ManualResolutionAuthorizationSpec {
-            manual_authorization_with_public_identity(byte, format!("operator-public-{byte}"))
-        }
-
-        fn manual_authorization_with_public_identity(
-            byte: u8,
-            public_identity: String,
-        ) -> spec::ManualResolutionAuthorizationSpec {
-            spec::ManualResolutionAuthorizationSpec {
-                verifier_id: spec::ManualAuthorizationVerifierId::new(format!(
-                    "mfm.test.manual.verifier.{byte}"
-                ))
-                .expect("verifier id"),
-                signing_scheme: spec::ManualSigningSchemeSpec::new(
-                    "mfm.manual_resolution.digest_signature.v1",
-                )
-                .expect("signing scheme"),
-                authority: spec::OperatorAuthoritySnapshotSpec {
-                    authority_id: spec::OperatorAuthorityId::new(format!(
-                        "mfm.test.manual.authority.{byte}"
-                    ))
-                    .expect("authority id"),
-                    operators: vec![spec::OperatorAuthorityMemberSpec {
-                        operator_id: spec::OperatorId::new(format!("operator.{byte}"))
-                            .expect("operator id"),
-                        public_identity: spec::OperatorPublicIdentity::new(public_identity)
-                            .expect("operator public identity"),
-                    }],
-                },
-                quorum: spec::ManualAuthorizationQuorumSpec::new(1).expect("quorum"),
-            }
-        }
-
-        fn resource_namespace() -> spec::ResourceNamespace {
-            spec::ResourceNamespace::new("mfm.test.wallet_nonce").expect("namespace")
-        }
-
-        fn resource_key_schema() -> SchemaId {
-            schema("mfm.test.resource_key", 0xc0)
-        }
-
-        fn exclusive_resource_claim() -> spec::ResourceClaimSpec {
-            spec::ResourceClaimSpec::Exclusive {
-                namespace: resource_namespace(),
-                key_schema: resource_key_schema(),
-            }
-        }
-
-        fn exact_touched_set_schema() -> SchemaId {
-            schema("mfm.test.touched_set", 0xc6)
-        }
-
-        fn exact_touched_set_claim() -> spec::ResourceClaimSpec {
-            spec::ResourceClaimSpec::ExactTouchedSet {
-                namespace: resource_namespace(),
-                evidence_schema: exact_touched_set_schema(),
-            }
-        }
-
-        fn resource_key(value: &str, key_schema_id: SchemaId) -> events::ResourceKeyEvidence {
-            events::ResourceKeyEvidence {
-                namespace: resource_namespace(),
-                key_schema_id,
-                key: events::ResourceKey::new(value).expect("resource key"),
-            }
-        }
-
-        fn resource_touched_set(
-            evidence_schema_id: SchemaId,
-            byte: u8,
-        ) -> events::ResourceTouchedSetEvidence {
-            events::ResourceTouchedSetEvidence {
-                namespace: resource_namespace(),
-                evidence_schema_id,
-                evidence_hash: content(byte),
-                evidence_artifact_id: artifact(byte.wrapping_add(1)),
-            }
-        }
-
-        fn semantic(name: &str, byte: u8) -> SemanticTypeId {
-            SemanticTypeId::new(
-                "mfm.test",
-                name,
-                "1",
-                DigestAlgorithm::Sha256JcsV1,
-                bytes(byte),
-            )
-            .expect("semantic")
-        }
-
-        fn test_error(retryable: bool) -> events::MfmErrorInfo {
-            events::MfmErrorInfo {
-                code: events::ErrorCode::new("replay_test_failure").expect("error code"),
-                category: events::ErrorCategory::Runtime,
-                retryable,
-                safe_message: "replay test failure".to_owned(),
-                public_details: None,
-                diagnostic_ref: None,
-            }
-        }
     }
 }

@@ -1,8 +1,9 @@
 use mfm_artifact_store_fs::{FsTypedArtifactError, FsTypedArtifactStore, TypedArtifactDescriptor};
 use mfm_canonical::sha256_digest_bytes;
 use mfm_events::v1::{
-    ArtifactEvidenceRef as EventArtifactEvidenceRef, ArtifactRole, FrameworkVersion,
-    KernelEventPayload, RetentionReason, SeedCellRef, SourceRevision,
+    ArtifactEvidenceRef as EventArtifactEvidenceRef, ArtifactProducerScope, ArtifactRole,
+    ArtifactSchemaPolicy, ArtifactSemanticPolicy, FrameworkVersion, KernelEventPayload,
+    RetentionReason, SeedCellRef, SourceRevision,
 };
 use mfm_ids::{
     ArtifactId, CellId, ContentDigest, DigestAlgorithm, DigestBytes, LoweringVersion, NodeId,
@@ -10,9 +11,9 @@ use mfm_ids::{
 };
 use mfm_spec::v1::{CanonicalizerIdentity, MediaType, SagaPolicySpec};
 use mfm_store::v1::{
-    ArtifactEvidenceRef, CommitArtifactEvidenceSet, CommitKey, CommitPreconditions,
-    InMemoryTypedRunStore, PreparedCommit, RequiredRunState, Retention, RunAdmission, StreamSeq,
-    TypedCommitRequest, TypedRunEventStore, VerifiedRetentionProjectionSet,
+    ArtifactEvidenceRef, AsyncInMemoryTypedRunStore, AsyncTypedRunEventStore,
+    CommitArtifactEvidenceSet, CommitKey, CommitPreconditions, PreparedCommit, RequiredRunState,
+    Retention, RunAdmission, StreamSeq, TypedCommitRequest, VerifiedRetentionProjectionSet,
 };
 use std::path::{Path, PathBuf};
 
@@ -137,7 +138,7 @@ async fn persisted_artifact_fixture() -> (
     (dir, store, evidence, bytes)
 }
 
-fn verified_retention_projection_for(
+async fn verified_retention_projection_for(
     evidence: &ArtifactEvidenceRef,
 ) -> VerifiedRetentionProjectionSet {
     let run_id = run_id(80);
@@ -167,7 +168,7 @@ fn verified_retention_projection_for(
         producer_seed_id: None,
         artifact_role: ArtifactRole::TypedSpecCertificate,
     };
-    let mut run_store = InMemoryTypedRunStore::new();
+    let run_store = AsyncInMemoryTypedRunStore::new();
     let run_start_request = TypedCommitRequest::from_payloads(
         run_id.clone(),
         StreamSeq::FIRST,
@@ -215,10 +216,14 @@ fn verified_retention_projection_for(
             .expect("prepare run start");
     run_store
         .append_prepared_commit_plan(run_start_commit.into())
+        .await
         .expect("append run start");
     let retention_request = TypedCommitRequest::from_payloads(
         run_id.clone(),
-        run_store.expected_next_seq(&run_id),
+        run_store
+            .expected_next_seq(&run_id)
+            .await
+            .expect("expected next seq"),
         CommitKey::new("retain-artifact").expect("commit key"),
         vec![KernelEventPayload::RetentionRefsAppended(
             mfm_events::v1::RetentionRefsAppended {
@@ -232,21 +237,26 @@ fn verified_retention_projection_for(
                 reason: RetentionReason::RuntimeEvidence,
             },
         )],
-        Vec::new(),
+        vec![evidence.clone()],
         CommitPreconditions {
             required_run_state: RequiredRunState::Started,
             ..CommitPreconditions::default()
         },
     )
     .expect("retention request");
-    let retention_artifacts = CommitArtifactEvidenceSet::new(Vec::new(), vec![evidence.clone()])
-        .expect("retention artifact evidence set");
+    let retention_artifacts =
+        CommitArtifactEvidenceSet::new(vec![evidence.clone()], vec![evidence.clone()])
+            .expect("retention artifact evidence set");
     let retention_commit = PreparedCommit::<Retention>::new(retention_request, retention_artifacts)
         .expect("prepare retention refs");
     run_store
         .append_prepared_commit_plan(retention_commit.into())
+        .await
         .expect("append retention refs");
-    let stream = run_store.load_run_stream(&run_id);
+    let stream = run_store
+        .load_run_stream(&run_id)
+        .await
+        .expect("load run stream");
     VerifiedRetentionProjectionSet::from_synthetic_run_streams(vec![(run_id, stream.as_slice())])
         .expect("verified retention projection")
 }
@@ -308,8 +318,24 @@ async fn typed_artifact_store_rejects_mismatched_evidence() {
         }
     ));
 
-    let mut wrong_role = evidence;
-    wrong_role.artifact_role = ArtifactRole::PublicOutput;
+    let side_effect_bytes = b"side-effect-evidence".to_vec();
+    let side_effect_evidence = ArtifactEvidenceRef {
+        artifact_id: artifact_id(&side_effect_bytes),
+        digest: content_digest(&side_effect_bytes),
+        byte_len: side_effect_bytes.len() as u64,
+        media_type: json_media_type(),
+        schema_id: Some(schema_id("mfm.test.side_effect", 10)),
+        semantic_type_id: None,
+        producer_node_id: Some(node_id(11)),
+        producer_seed_id: None,
+        artifact_role: ArtifactRole::SideEffectIntent,
+    };
+    store
+        .put_verified_artifact(side_effect_bytes.clone(), side_effect_evidence.clone())
+        .await
+        .expect("put side-effect evidence");
+    let mut wrong_role = side_effect_evidence;
+    wrong_role.artifact_role = ArtifactRole::Submission;
     let error = store
         .get_artifact(&wrong_role)
         .await
@@ -390,7 +416,7 @@ async fn typed_artifact_gc_refuses_verified_retained_artifacts() {
         .put_artifact(br#"{"retained":false}"#.to_vec(), state_output_descriptor())
         .await
         .expect("put unretained artifact");
-    let retention = verified_retention_projection_for(&retained);
+    let retention = verified_retention_projection_for(&retained).await;
 
     let error = store
         .remove_unretained_artifact(&retained, &retention)
@@ -536,6 +562,126 @@ async fn typed_seed_artifacts_require_seed_producer() {
         error,
         FsTypedArtifactError::InvalidEvidence { .. }
     ));
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProducerPolicyBaseline {
+    role: ArtifactRole,
+    accepts_no_producer: bool,
+    accepts_node_producer: bool,
+    accepts_seed_producer: bool,
+}
+
+fn artifact_store_producer_policy_baselines() -> Vec<ProducerPolicyBaseline> {
+    ArtifactRole::ALL
+        .iter()
+        .copied()
+        .map(|role| {
+            let producer = role.contract().producer;
+            ProducerPolicyBaseline {
+                role,
+                accepts_no_producer: matches!(
+                    producer,
+                    ArtifactProducerScope::LaunchOrGlobalNoSeed
+                        | ArtifactProducerScope::GlobalNoSeed
+                        | ArtifactProducerScope::DiagnosticOptionalNodeNoSeed
+                        | ArtifactProducerScope::MiddlewareNoSeed
+                ),
+                accepts_node_producer: matches!(
+                    producer,
+                    ArtifactProducerScope::LaunchOrGlobalNoSeed
+                        | ArtifactProducerScope::NodeRequired
+                        | ArtifactProducerScope::DiagnosticOptionalNodeNoSeed
+                ),
+                accepts_seed_producer: matches!(producer, ArtifactProducerScope::SeedRequired),
+            }
+        })
+        .collect()
+}
+
+fn producer_policy_evidence(
+    role: ArtifactRole,
+    bytes: &[u8],
+    producer_node_id: Option<NodeId>,
+    producer_seed_id: Option<SeedId>,
+) -> ArtifactEvidenceRef {
+    ArtifactEvidenceRef {
+        artifact_id: artifact_id(bytes),
+        digest: content_digest(bytes),
+        byte_len: bytes.len() as u64,
+        media_type: json_media_type(),
+        schema_id: schema_id_for_role(role),
+        semantic_type_id: semantic_type_id_for_role(role),
+        producer_node_id,
+        producer_seed_id,
+        artifact_role: role,
+    }
+}
+
+fn schema_id_for_role(role: ArtifactRole) -> Option<SchemaId> {
+    match role.contract().schema {
+        ArtifactSchemaPolicy::OptionalLaunchSchema | ArtifactSchemaPolicy::Absent => None,
+        ArtifactSchemaPolicy::ExactSeedSchema
+        | ArtifactSchemaPolicy::ExactValueSchema
+        | ArtifactSchemaPolicy::ExactEvidenceSchema
+        | ArtifactSchemaPolicy::ExactPublicSchema
+        | ArtifactSchemaPolicy::ExactDiagnosticSchema => Some(schema_id("mfm.test.artifact", 34)),
+    }
+}
+
+fn semantic_type_id_for_role(role: ArtifactRole) -> Option<SemanticTypeId> {
+    match role.contract().semantic {
+        ArtifactSemanticPolicy::OptionalLaunchSemantic | ArtifactSemanticPolicy::Absent => None,
+        ArtifactSemanticPolicy::ExactSeedSemantic | ArtifactSemanticPolicy::ExactValueSemantic => {
+            Some(semantic_id("mfm.test.artifact", 35))
+        }
+    }
+}
+
+#[tokio::test]
+async fn typed_artifact_store_producer_policy_matrix_matches_current_roles() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = FsTypedArtifactStore::new(dir.path());
+
+    for (role_index, baseline) in artifact_store_producer_policy_baselines()
+        .iter()
+        .enumerate()
+    {
+        let cases = [
+            ("no_producer", baseline.accepts_no_producer, None, None),
+            (
+                "node_producer",
+                baseline.accepts_node_producer,
+                Some(node_id(30)),
+                None,
+            ),
+            (
+                "seed_producer",
+                baseline.accepts_seed_producer,
+                None,
+                Some(seed_id(31)),
+            ),
+            (
+                "node_and_seed_producer",
+                false,
+                Some(node_id(32)),
+                Some(seed_id(33)),
+            ),
+        ];
+
+        for (case, should_accept, producer_node_id, producer_seed_id) in cases {
+            let bytes = format!("producer-policy-{role_index}-{case}").into_bytes();
+            let evidence =
+                producer_policy_evidence(baseline.role, &bytes, producer_node_id, producer_seed_id);
+            let result = store.put_verified_artifact(bytes, evidence).await;
+            assert_eq!(
+                result.is_ok(),
+                should_accept,
+                "unexpected producer policy result for {:?} {case}: {result:?}",
+                baseline.role
+            );
+        }
+    }
 }
 
 #[tokio::test]

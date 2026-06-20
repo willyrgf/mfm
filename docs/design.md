@@ -143,6 +143,10 @@ bytes, raw signing material, and signed raw transactions must not be typed value
 artifacts, events, public outputs, error details, or fixtures. States refer to secret-bearing systems
 through non-secret labels, references, and capabilities.
 
+Persisted and public surfaces are inventoried in `docs/persisted-public-surfaces.md`; that inventory
+is the review checklist for applying this no-secret invariant to app, CLI, REST, storage, artifact,
+and diagnostic boundaries.
+
 ## Typed Program Authoring
 
 State outputs are represented by branded typed handles. Handles carry the produced Rust value type,
@@ -313,10 +317,10 @@ The first certified persistent storage path is:
 crates/storages/stream-store-postgres + crates/storages/artifact-store-fs
 ```
 
-Postgres stores typed event envelopes, commit keys, logical-key indexes, and derived projections.
+Postgres stores typed event envelopes, commit keys, logical-key indexes, and resource-lane locks.
 Its schema and migrations are owned by `crates/storages/stream-store-postgres`; runtime callers
-validate schema compatibility and must not run startup auto-DDL. Projection tables are repairable
-indexes over append-only `typed_run_events`, not semantic authority.
+validate schema compatibility and must not run startup auto-DDL. Read projections are rebuilt from
+append-only `typed_run_events`; they are not persisted semantic authority.
 The filesystem artifact store keeps immutable canonical bytes by digest for local development,
 tests, replay fixtures, and typed workflow ports.
 
@@ -355,13 +359,14 @@ validation is also the centralized old-model ingress guard: loaded streams and p
 reject attempt-bound payloads that are not preceded by a separate `StateAttemptStarted` commit, so
 runtime, replay, and Postgres-backed loads fail before trusting old lifecycle rows.
 
-Read, resume, replay, and status paths must construct `VerifiedRunHistory` from a
-`CommittedRunStream` plus `VerifiedRunArtifactStore` before trusting history. Replay authority is
-minted from that verified history and certified runtime authority; raw event vectors or retained
-artifact bytes without committed evidence do not cross the runtime/replay boundary. Scheduler drive
-paths construct `VerifiedRunContext` through `VerifiedRunContextLoader`, which combines the same
-committed stream/view authority with `BoundRuntimeContext` runner, capability, and framework-handler
-authority before any transition is selected.
+Read, resume, replay, and status paths must construct a `VerifiedRunHistoryView` from a
+`CommittedRunStream` plus `VerifiedRunArtifactStore` before trusting history. `VerifiedRunHistory`
+wraps that view for compatibility. Replay authority is minted from the verified view and certified
+runtime authority; raw event vectors or retained artifact bytes without committed evidence do not
+cross the runtime/replay boundary. Scheduler drive paths construct `VerifiedRunContext` through
+`VerifiedRunContextLoader`, which combines the same committed stream/fold authority with
+`BoundRuntimeContext` runner, capability, and framework-handler authority before any transition is
+selected.
 
 The deterministic frontier scheduler is pure. Given the static certified transition graph and
 verified run history, it returns one closed transition decision: start a node, continue an open

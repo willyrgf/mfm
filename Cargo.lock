@@ -1986,6 +1986,7 @@ dependencies = [
  "chrono",
  "clap",
  "hex",
+ "k256",
  "mfm-app",
  "mfm-artifact-store-fs",
  "mfm-canonical",
@@ -1995,11 +1996,13 @@ dependencies = [
  "mfm-evm-contract-model",
  "mfm-evm-core",
  "mfm-ids",
+ "mfm-manual-auth",
  "mfm-op-evm-contract-lifecycle",
  "mfm-op-portfolio-tracker",
  "mfm-op-proof",
  "mfm-portfolio-config",
  "mfm-program",
+ "mfm-runtime",
  "mfm-spec",
  "mfm-store",
  "mfm-stream-store-postgres",
@@ -2010,9 +2013,9 @@ dependencies = [
  "rpassword",
  "serde",
  "serde_json",
+ "sqlx",
  "tempfile",
  "tokio",
- "toml 0.8.23",
  "uuid",
  "zeroize",
 ]
@@ -2049,7 +2052,6 @@ dependencies = [
  "mfm-replay",
  "mfm-runtime",
  "mfm-signing",
- "mfm-spec",
  "mfm-state-evm-contracts",
  "mfm-store",
  "mfm-values",
@@ -2074,9 +2076,7 @@ dependencies = [
  "mfm-portfolio-model",
  "mfm-program",
  "mfm-runtime",
- "mfm-spec",
  "mfm-state-portfolio",
- "mfm-store",
  "mfm-values",
  "serde",
  "serde_json",
@@ -2086,7 +2086,7 @@ dependencies = [
 name = "mfm-app"
 version = "0.1.0"
 dependencies = [
- "mfm-adapter-contracts",
+ "k256",
  "mfm-adapters-evm-contracts",
  "mfm-adapters-portfolio",
  "mfm-artifact-capabilities",
@@ -2099,6 +2099,7 @@ dependencies = [
  "mfm-evm-contract-config",
  "mfm-evm-contract-model",
  "mfm-ids",
+ "mfm-manual-auth",
  "mfm-op-evm-contract-lifecycle",
  "mfm-op-portfolio-tracker",
  "mfm-op-proof",
@@ -2109,14 +2110,13 @@ dependencies = [
  "mfm-signers-keystore",
  "mfm-signing",
  "mfm-spec",
- "mfm-state-evm-contracts",
  "mfm-store",
  "mfm-transports-evm",
  "mfm-transports-proof",
- "mfm-values",
  "mfm_core",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing-subscriber",
  "trybuild",
@@ -2312,29 +2312,26 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "axum",
+ "k256",
  "mfm-app",
  "mfm-artifact-store-fs",
  "mfm-canonical",
- "mfm-capabilities",
  "mfm-certify",
  "mfm-events",
  "mfm-evm-contract-config",
  "mfm-evm-contract-model",
  "mfm-ids",
+ "mfm-manual-auth",
  "mfm-op-evm-contract-lifecycle",
  "mfm-op-portfolio-tracker",
  "mfm-op-proof",
  "mfm-portfolio-config",
  "mfm-program",
- "mfm-program-derive",
- "mfm-replay",
  "mfm-rest-api",
  "mfm-runtime",
  "mfm-spec",
  "mfm-store",
  "mfm-stream-store-postgres",
- "mfm-transports-proof",
- "mfm-values",
  "mfm_core",
  "reqwest",
  "serde",
@@ -2403,6 +2400,7 @@ dependencies = [
  "mfm-collectors-proof",
  "mfm-ids",
  "mfm-program",
+ "mfm-spec",
 ]
 
 [[package]]
@@ -2660,14 +2658,6 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
-]
-
-[[package]]
-name = "mfm-transports-process-exec"
-version = "0.1.0"
-dependencies = [
- "tokio",
- "uuid",
 ]
 
 [[package]]

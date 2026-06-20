@@ -54,14 +54,18 @@ The typed boundary separates data, evidence, authority, and implementation artif
 - `SagaTerminalProof` is required authority for terminal saga outcomes
 - `CommittedRunStream` is store-owned append-only stream authority
 - `VerifiedRunArtifactStore` is retained-artifact authority tied to a committed stream
-- `VerifiedRunHistory` is runtime/replay authority over a committed stream plus verified retained
-  artifact evidence
+- `VerifiedRunHistoryView` is runtime/replay read authority over a committed stream plus verified
+  retained artifact evidence; `VerifiedRunHistory` wraps that view for compatibility
 - erased runner plans are implementation artifacts
 - rendered public-output JSON is an output/cache surface only
 
 Start, resume, replay, and public-output rendering must verify stored spec/certificate artifacts
 against the production registry and compare stream evidence before constructing runtime, replay, or
 render authority.
+
+Use `docs/persisted-public-surfaces.md` when reviewing data that is persisted, returned by CLI/REST,
+or exposed through app read paths. It classifies allowed data, forbidden secret classes, provenance
+authority, and tests for each surface.
 
 ## Taxonomy
 

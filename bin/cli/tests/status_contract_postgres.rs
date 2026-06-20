@@ -8,6 +8,7 @@ use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 use mfm_stream_store_postgres::{PostgresSchema, PostgresTypedRunEventStore};
 use serde_json::Value;
+use sqlx::{AssertSqlSafe, PgPool};
 use std::path::{Path, PathBuf};
 use std::process::Output;
 use tempfile::TempDir;
@@ -16,10 +17,14 @@ use tempfile::TempDir;
 async fn run_status_reports_interrupted_attempt_and_framework_attempts_from_history() {
     let database_url =
         std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for parity tests");
-    PostgresSchema::migrate(&database_url)
+    let schema = unique_schema();
+    create_schema(&database_url, &schema).await;
+    let scoped_database_url = schema_scoped_database_url(&database_url, &schema);
+
+    PostgresSchema::migrate(&scoped_database_url)
         .await
         .expect("migrate typed postgres schema");
-    let store = PostgresTypedRunEventStore::connect(&database_url)
+    let store = PostgresTypedRunEventStore::connect(&scoped_database_url)
         .await
         .expect("connect typed postgres store");
     let temp = TempDir::new().expect("temp dir");
@@ -45,7 +50,7 @@ async fn run_status_reports_interrupted_attempt_and_framework_attempts_from_hist
         "--typed-artifact-root".to_owned(),
         artifact_root.display().to_string(),
         "--database-url".to_owned(),
-        database_url.clone(),
+        scoped_database_url.clone(),
     ];
     start_args.extend(config_args);
     let start = run_cli(&start_args);
@@ -81,7 +86,7 @@ async fn run_status_reports_interrupted_attempt_and_framework_attempts_from_hist
         "--typed-artifact-root".to_owned(),
         artifact_root.display().to_string(),
         "--database-url".to_owned(),
-        database_url.clone(),
+        scoped_database_url.clone(),
     ]);
     assert_success(&resume);
     let resume_json = parse_success_json(&resume.stdout);
@@ -96,7 +101,7 @@ async fn run_status_reports_interrupted_attempt_and_framework_attempts_from_hist
         "--typed-artifact-root".to_owned(),
         artifact_root.display().to_string(),
         "--database-url".to_owned(),
-        database_url.clone(),
+        scoped_database_url.clone(),
     ]);
     assert_success(&status);
     let status_json = parse_success_json(&status.stdout);
@@ -155,7 +160,7 @@ async fn run_status_reports_interrupted_attempt_and_framework_attempts_from_hist
         "--typed-artifact-root".to_owned(),
         artifact_root.display().to_string(),
         "--database-url".to_owned(),
-        database_url,
+        scoped_database_url,
     ]);
     assert_success(&stream);
     let stream_json = parse_success_json(&stream.stdout);
@@ -166,6 +171,43 @@ async fn run_status_reports_interrupted_attempt_and_framework_attempts_from_hist
         &certified.envelope().spec.nodes,
         &run_id,
     );
+    drop(store);
+    drop_schema(&database_url, &schema).await;
+}
+
+fn unique_schema() -> String {
+    format!("cli_status_{}", uuid::Uuid::new_v4().simple())
+}
+
+async fn create_schema(database_url: &str, schema: &str) {
+    let pool = PgPool::connect(database_url)
+        .await
+        .expect("connect postgres");
+    // The schema name is generated from a UUID and never comes from user input; dynamic DDL is
+    // required because PostgreSQL does not parameterize identifiers.
+    sqlx::raw_sql(AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+        .execute(&pool)
+        .await
+        .expect("create schema");
+    pool.close().await;
+}
+
+async fn drop_schema(database_url: &str, schema: &str) {
+    let pool = PgPool::connect(database_url)
+        .await
+        .expect("connect postgres");
+    sqlx::raw_sql(AssertSqlSafe(format!(
+        "DROP SCHEMA IF EXISTS {schema} CASCADE"
+    )))
+    .execute(&pool)
+    .await
+    .expect("drop schema");
+    pool.close().await;
+}
+
+fn schema_scoped_database_url(database_url: &str, schema: &str) -> String {
+    let separator = if database_url.contains('?') { '&' } else { '?' };
+    format!("{database_url}{separator}options=-csearch_path%3D{schema}")
 }
 
 fn proof_bundle_and_config_args(

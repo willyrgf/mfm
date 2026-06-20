@@ -30,8 +30,10 @@ mod history;
 mod invocation;
 mod manual_resolution;
 mod recovery;
+mod runner_kit;
 mod runners;
 mod scheduler;
+mod side_effect_driver;
 mod side_effect_lifecycle;
 mod side_effects;
 mod spec_authority;
@@ -49,17 +51,21 @@ pub use binding::{
 };
 pub use commit::{PreparedRunLaunch, RunLaunchArtifact, RunLaunchEvidence, RunLaunchSeedCell};
 pub use error::RuntimeError;
-pub use framework::build_public_output_receipt_artifact;
-pub use history::{VerifiedRunContext, VerifiedRunContextLoader, VerifiedRunHistory};
+pub use history::{
+    VerifiedRunContext, VerifiedRunContextLoader, VerifiedRunHistory, VerifiedRunHistoryView,
+};
 pub use invocation::{
     CertifiedRuntimeCapabilities, ErasedRunCtx, MaterializedCell, MaterializedCellTerminal,
     MaterializedInputNode, MaterializedInputs, NamedMaterializedInput, PreparedRunnerInvocation,
     RecordedFact, RecordedFacts,
 };
 pub use manual_resolution::{
-    build_manual_resolution_prefix_authority, manual_resolution_block_reason,
-    manual_resolution_stream_prefix_digest, unresolved_manual_obligations_digest,
-    ManualResolutionEvidenceArtifact,
+    manual_resolution_block_reason, manual_resolution_stream_prefix_digest,
+    unresolved_manual_obligations_digest, ManualResolutionEvidenceArtifact,
+};
+pub use runner_kit::{
+    RunnerArtifactBuilder, RunnerCapabilityBinding, RunnerJsonArtifact, RunnerOutputBuilder,
+    RunnerPayloadBuilder, RunnerRegistrationBuilder,
 };
 pub use runners::{
     CapabilityImplementationBinding, CapabilityImplementationId, ErasedNodeRunner,
@@ -67,6 +73,12 @@ pub use runners::{
     RunnerEventPayload,
 };
 pub use scheduler::{ManualResolutionRequest, SchedulerStatus, SerialTypedScheduler};
+pub use side_effect_driver::{
+    SideEffectDriver, SideEffectDriverCallbacks, SideEffectDriverFuture, SideEffectIntentPlan,
+    SideEffectObservedEvidence, SideEffectPreparedInvocationPlan, SideEffectProtocolAction,
+    SideEffectReplayEvidence, SideEffectSubmissionDecision, SideEffectSubmissionDecisionFuture,
+};
+pub use side_effect_lifecycle::SideEffectAttemptView;
 pub use spec_authority::CertifiedRuntimeSpec;
 
 #[cfg(test)]
@@ -78,13 +90,21 @@ use artifacts::{staged_artifact_binding_kind, staged_side_effect_artifact_phase}
 use commit::{retention_manifest_payloads, runner_payloads_with_derived_lifecycle};
 #[cfg(test)]
 use framework::{
-    build_retention_manifest_artifact_with_producer, certified_complete_run_node,
+    build_retention_manifest_artifact, certified_complete_run_node,
     certified_retention_manifest_node,
 };
 #[cfg(test)]
-use history::validate_historical_run_admission_batch;
-#[cfg(test)]
 use history::RuntimeRunView;
+#[cfg(test)]
+use runner_kit::{
+    RunnerClaimBinding, RunnerClaimTakeoverBinding, RunnerPreparedInvocationBinding,
+    RunnerSideEffectBinding,
+};
+#[cfg(test)]
+use side_effect_driver::{
+    RuntimeSideEffectClaimAuthority, SideEffectEvidenceBuilder,
+    SideEffectPreparedInvocationEvidence,
+};
 #[cfg(test)]
 use side_effect_lifecycle::side_effect_projection_for_attempt;
 

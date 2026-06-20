@@ -46,7 +46,10 @@ CREATE TABLE typed_artifacts (
   producer_node_id TEXT NULL,
   producer_seed_id TEXT NULL,
   artifact_role TEXT NOT NULL,
-  CONSTRAINT typed_artifacts_byte_len_nonnegative CHECK (byte_len >= 0)
+  CONSTRAINT typed_artifacts_byte_len_nonnegative CHECK (byte_len >= 0),
+  CONSTRAINT typed_artifacts_single_producer CHECK (
+    producer_node_id IS NULL OR producer_seed_id IS NULL
+  )
 );
 
 CREATE TABLE typed_run_artifacts (
@@ -75,83 +78,8 @@ CREATE TABLE typed_unique_logical_payloads (
   CONSTRAINT typed_unique_logical_payloads_run_fk FOREIGN KEY (run_id) REFERENCES typed_run_heads(run_id) ON DELETE CASCADE
 );
 
-CREATE TABLE typed_run_projection (
-  run_id TEXT PRIMARY KEY,
-  run_state TEXT NOT NULL,
-  projection_json JSONB NOT NULL,
-  CONSTRAINT typed_run_projection_run_fk FOREIGN KEY (run_id) REFERENCES typed_run_heads(run_id) ON DELETE CASCADE
+CREATE TABLE typed_resource_lane_locks (
+  lock_name TEXT PRIMARY KEY
 );
 
-CREATE TABLE typed_run_completion_projection (
-  run_id TEXT PRIMARY KEY,
-  projection_json JSONB NOT NULL,
-  CONSTRAINT typed_run_completion_projection_run_fk FOREIGN KEY (run_id) REFERENCES typed_run_heads(run_id) ON DELETE CASCADE
-);
-
-CREATE TABLE typed_saga_engagement_projection (
-  run_id TEXT PRIMARY KEY,
-  projection_json JSONB NOT NULL,
-  CONSTRAINT typed_saga_engagement_projection_run_fk FOREIGN KEY (run_id) REFERENCES typed_run_heads(run_id) ON DELETE CASCADE
-);
-
-CREATE TABLE typed_manual_resolution_projection (
-  run_id TEXT PRIMARY KEY,
-  projection_json JSONB NOT NULL,
-  CONSTRAINT typed_manual_resolution_projection_run_fk FOREIGN KEY (run_id) REFERENCES typed_run_heads(run_id) ON DELETE CASCADE
-);
-
-CREATE TABLE typed_attempt_projection (
-  run_id TEXT NOT NULL,
-  node_id TEXT NOT NULL,
-  attempt_id TEXT NOT NULL,
-  projection_json JSONB NOT NULL,
-  PRIMARY KEY (run_id, node_id, attempt_id),
-  CONSTRAINT typed_attempt_projection_run_fk FOREIGN KEY (run_id) REFERENCES typed_run_heads(run_id) ON DELETE CASCADE
-);
-
-CREATE TABLE typed_cell_projection (
-  run_id TEXT NOT NULL,
-  cell_id TEXT NOT NULL,
-  projection_json JSONB NOT NULL,
-  PRIMARY KEY (run_id, cell_id),
-  CONSTRAINT typed_cell_projection_run_fk FOREIGN KEY (run_id) REFERENCES typed_run_heads(run_id) ON DELETE CASCADE
-);
-
-CREATE TABLE typed_fact_projection (
-  run_id TEXT NOT NULL,
-  node_id TEXT NOT NULL,
-  attempt_id TEXT NOT NULL,
-  fact_key TEXT NOT NULL,
-  projection_json JSONB NOT NULL,
-  PRIMARY KEY (run_id, node_id, attempt_id, fact_key),
-  CONSTRAINT typed_fact_projection_run_fk FOREIGN KEY (run_id) REFERENCES typed_run_heads(run_id) ON DELETE CASCADE
-);
-
-CREATE TABLE typed_side_effect_projection (
-  run_id TEXT NOT NULL,
-  ledger_key TEXT NOT NULL,
-  projection_json JSONB NOT NULL,
-  PRIMARY KEY (run_id, ledger_key),
-  CONSTRAINT typed_side_effect_projection_run_fk FOREIGN KEY (run_id) REFERENCES typed_run_heads(run_id) ON DELETE CASCADE
-);
-
-CREATE TABLE typed_resource_lane_projection (
-  namespace TEXT NOT NULL,
-  resource_key TEXT NOT NULL,
-  run_id TEXT NOT NULL,
-  ledger_key TEXT NOT NULL,
-  projection_json JSONB NOT NULL,
-  PRIMARY KEY (namespace, resource_key),
-  CONSTRAINT typed_resource_lane_projection_run_fk FOREIGN KEY (run_id) REFERENCES typed_run_heads(run_id) ON DELETE CASCADE
-);
-
-CREATE INDEX typed_resource_lane_projection_run_idx
-  ON typed_resource_lane_projection (run_id);
-
-CREATE TABLE typed_public_output_projection (
-  run_id TEXT NOT NULL,
-  public_schema_id TEXT NOT NULL,
-  projection_json JSONB NOT NULL,
-  PRIMARY KEY (run_id, public_schema_id),
-  CONSTRAINT typed_public_output_projection_run_fk FOREIGN KEY (run_id) REFERENCES typed_run_heads(run_id) ON DELETE CASCADE
-);
+INSERT INTO typed_resource_lane_locks (lock_name) VALUES ('global');

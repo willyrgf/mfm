@@ -23,7 +23,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use mfm_canonical::sha256_digest_bytes;
-use mfm_events::v1::{ArtifactRole, SeedCellRef};
+use mfm_events::v1::{
+    ArtifactProducerScope, ArtifactRole, ArtifactSchemaPolicy, ArtifactSemanticPolicy, SeedCellRef,
+};
 use mfm_ids::{
     ArtifactId, ContentDigest, DigestAlgorithm, IdentityError, NodeId, SchemaId, SeedId,
     SemanticTypeId,
@@ -409,48 +411,147 @@ fn validate_evidence_shape(evidence: &ArtifactEvidenceRef) -> TypedArtifactResul
             field: "artifact_id",
         });
     }
-    if evidence.producer_node_id.is_some() && evidence.producer_seed_id.is_some() {
-        return Err(FsTypedArtifactError::InvalidEvidence {
-            message: "typed artifact evidence cannot have both node and seed producers".to_owned(),
-        });
-    }
-    match evidence.artifact_role {
-        ArtifactRole::SeedInput => {
-            if evidence.producer_seed_id.is_none() {
-                return Err(FsTypedArtifactError::InvalidEvidence {
-                    message: "seed input artifacts require producer_seed_id".to_owned(),
-                });
-            }
-            if evidence.producer_node_id.is_some() {
-                return Err(FsTypedArtifactError::InvalidEvidence {
-                    message: "seed input artifacts cannot have producer_node_id".to_owned(),
-                });
-            }
-        }
-        ArtifactRole::TypedExecutionSpec
-        | ArtifactRole::TypedSpecCertificate
-        | ArtifactRole::TypedConfig
-        | ArtifactRole::ManualResolutionEvidence
-        | ArtifactRole::ManualResolutionAuthorization
-        | ArtifactRole::RedactedDiagnostic
-        | ArtifactRole::RetentionManifest => {}
-        _ => {
-            if evidence.producer_node_id.is_none() {
-                return Err(FsTypedArtifactError::InvalidEvidence {
-                    message: format!(
-                        "{} artifacts require producer_node_id",
-                        artifact_role_str(evidence.artifact_role)
-                    ),
-                });
-            }
-        }
-    }
-    if evidence.artifact_role != ArtifactRole::SeedInput && evidence.producer_seed_id.is_some() {
-        return Err(FsTypedArtifactError::InvalidEvidence {
-            message: "only seed input artifacts may carry producer_seed_id".to_owned(),
-        });
-    }
+    let contract = evidence.artifact_role.contract();
+    validate_schema_policy(evidence, contract.schema)?;
+    validate_semantic_policy(evidence, contract.semantic)?;
+    validate_producer_policy(evidence, contract.producer)?;
     Ok(())
+}
+
+fn invalid_evidence(message: impl Into<String>) -> FsTypedArtifactError {
+    FsTypedArtifactError::InvalidEvidence {
+        message: message.into(),
+    }
+}
+
+fn validate_schema_policy(
+    evidence: &ArtifactEvidenceRef,
+    policy: ArtifactSchemaPolicy,
+) -> TypedArtifactResult<()> {
+    match policy {
+        ArtifactSchemaPolicy::OptionalLaunchSchema => Ok(()),
+        ArtifactSchemaPolicy::ExactSeedSchema
+        | ArtifactSchemaPolicy::ExactValueSchema
+        | ArtifactSchemaPolicy::ExactEvidenceSchema
+        | ArtifactSchemaPolicy::ExactPublicSchema
+        | ArtifactSchemaPolicy::ExactDiagnosticSchema => {
+            if evidence.schema_id.is_some() {
+                Ok(())
+            } else {
+                Err(invalid_evidence(format!(
+                    "{} artifacts require schema_id",
+                    evidence.artifact_role.as_str()
+                )))
+            }
+        }
+        ArtifactSchemaPolicy::Absent => {
+            if evidence.schema_id.is_none() {
+                Ok(())
+            } else {
+                Err(invalid_evidence(format!(
+                    "{} artifacts cannot have schema_id",
+                    evidence.artifact_role.as_str()
+                )))
+            }
+        }
+    }
+}
+
+fn validate_semantic_policy(
+    evidence: &ArtifactEvidenceRef,
+    policy: ArtifactSemanticPolicy,
+) -> TypedArtifactResult<()> {
+    match policy {
+        ArtifactSemanticPolicy::OptionalLaunchSemantic => Ok(()),
+        ArtifactSemanticPolicy::ExactSeedSemantic | ArtifactSemanticPolicy::ExactValueSemantic => {
+            if evidence.semantic_type_id.is_some() {
+                Ok(())
+            } else {
+                Err(invalid_evidence(format!(
+                    "{} artifacts require semantic_type_id",
+                    evidence.artifact_role.as_str()
+                )))
+            }
+        }
+        ArtifactSemanticPolicy::Absent => {
+            if evidence.semantic_type_id.is_none() {
+                Ok(())
+            } else {
+                Err(invalid_evidence(format!(
+                    "{} artifacts cannot have semantic_type_id",
+                    evidence.artifact_role.as_str()
+                )))
+            }
+        }
+    }
+}
+
+fn validate_producer_policy(
+    evidence: &ArtifactEvidenceRef,
+    policy: ArtifactProducerScope,
+) -> TypedArtifactResult<()> {
+    match policy {
+        ArtifactProducerScope::LaunchOrGlobalNoSeed
+        | ArtifactProducerScope::DiagnosticOptionalNodeNoSeed => {
+            require_producer_seed_absent(evidence)
+        }
+        ArtifactProducerScope::SeedRequired => {
+            require_producer_node_absent(evidence)?;
+            require_producer_seed_present(evidence)
+        }
+        ArtifactProducerScope::NodeRequired => {
+            require_producer_seed_absent(evidence)?;
+            require_producer_node_present(evidence)
+        }
+        ArtifactProducerScope::GlobalNoSeed | ArtifactProducerScope::MiddlewareNoSeed => {
+            require_producer_node_absent(evidence)?;
+            require_producer_seed_absent(evidence)
+        }
+    }
+}
+
+fn require_producer_node_present(evidence: &ArtifactEvidenceRef) -> TypedArtifactResult<()> {
+    if evidence.producer_node_id.is_some() {
+        Ok(())
+    } else {
+        Err(invalid_evidence(format!(
+            "{} artifacts require producer_node_id",
+            evidence.artifact_role.as_str()
+        )))
+    }
+}
+
+fn require_producer_node_absent(evidence: &ArtifactEvidenceRef) -> TypedArtifactResult<()> {
+    if evidence.producer_node_id.is_none() {
+        Ok(())
+    } else {
+        Err(invalid_evidence(format!(
+            "{} artifacts cannot have producer_node_id",
+            evidence.artifact_role.as_str()
+        )))
+    }
+}
+
+fn require_producer_seed_present(evidence: &ArtifactEvidenceRef) -> TypedArtifactResult<()> {
+    if evidence.producer_seed_id.is_some() {
+        Ok(())
+    } else {
+        Err(invalid_evidence(format!(
+            "{} artifacts require producer_seed_id",
+            evidence.artifact_role.as_str()
+        )))
+    }
+}
+
+fn require_producer_seed_absent(evidence: &ArtifactEvidenceRef) -> TypedArtifactResult<()> {
+    if evidence.producer_seed_id.is_none() {
+        Ok(())
+    } else {
+        Err(invalid_evidence(format!(
+            "{} artifacts cannot have producer_seed_id",
+            evidence.artifact_role.as_str()
+        )))
+    }
 }
 
 fn verify_evidence_matches_bytes(
@@ -507,7 +608,7 @@ fn compare_evidence(
             .map(|semantic_type_id| semantic_type_id.as_str().to_owned())
     })?;
     compare_evidence_field(stored, expected, "artifact_role", |evidence| {
-        artifact_role_str(evidence.artifact_role).to_owned()
+        evidence.artifact_role.as_str().to_owned()
     })?;
     compare_evidence_field(stored, expected, "producer_node_id", |evidence| {
         evidence
@@ -789,7 +890,7 @@ fn evidence_json(evidence: &ArtifactEvidenceRef) -> Value {
         "semantic_type_id": evidence.semantic_type_id.as_ref().map(SemanticTypeId::as_str),
         "producer_node_id": evidence.producer_node_id.as_ref().map(NodeId::as_str),
         "producer_seed_id": evidence.producer_seed_id.as_ref().map(SeedId::as_str),
-        "artifact_role": artifact_role_str(evidence.artifact_role),
+        "artifact_role": evidence.artifact_role.as_str(),
     })
 }
 
@@ -803,7 +904,7 @@ fn evidence_from_json(json: &Value) -> TypedArtifactResult<ArtifactEvidenceRef> 
         semantic_type_id: optional_identity(json, "semantic_type_id")?,
         producer_node_id: optional_identity(json, "producer_node_id")?,
         producer_seed_id: optional_identity(json, "producer_seed_id")?,
-        artifact_role: parse_artifact_role(required_str(json, "artifact_role")?)?,
+        artifact_role: decode_artifact_role_tag(required_str(json, "artifact_role")?)?,
     })
 }
 
@@ -843,55 +944,10 @@ where
     value.parse().map_err(FsTypedArtifactError::from)
 }
 
-fn artifact_role_str(role: ArtifactRole) -> &'static str {
-    match role {
-        ArtifactRole::TypedExecutionSpec => "typed_execution_spec",
-        ArtifactRole::TypedSpecCertificate => "typed_spec_certificate",
-        ArtifactRole::TypedConfig => "typed_config",
-        ArtifactRole::SeedInput => "seed_input",
-        ArtifactRole::StateOutput => "state_output",
-        ArtifactRole::FactResponse => "fact_response",
-        ArtifactRole::SideEffectIntent => "side_effect_intent",
-        ArtifactRole::PreparedInvocation => "prepared_invocation",
-        ArtifactRole::NotSubmittedProof => "not_submitted_proof",
-        ArtifactRole::Submission => "submission",
-        ArtifactRole::SubmissionUnknownEvidence => "submission_unknown_evidence",
-        ArtifactRole::Receipt => "receipt",
-        ArtifactRole::Confirmation => "confirmation",
-        ArtifactRole::AmbiguityEvidence => "ambiguity_evidence",
-        ArtifactRole::ManualResolutionEvidence => "manual_resolution_evidence",
-        ArtifactRole::ManualResolutionAuthorization => "manual_resolution_authorization",
-        ArtifactRole::PublicOutput => "public_output",
-        ArtifactRole::RedactedDiagnostic => "redacted_diagnostic",
-        ArtifactRole::RetentionManifest => "retention_manifest",
-    }
-}
-
-fn parse_artifact_role(value: &str) -> TypedArtifactResult<ArtifactRole> {
-    match value {
-        "typed_execution_spec" => Ok(ArtifactRole::TypedExecutionSpec),
-        "typed_spec_certificate" => Ok(ArtifactRole::TypedSpecCertificate),
-        "typed_config" => Ok(ArtifactRole::TypedConfig),
-        "seed_input" => Ok(ArtifactRole::SeedInput),
-        "state_output" => Ok(ArtifactRole::StateOutput),
-        "fact_response" => Ok(ArtifactRole::FactResponse),
-        "side_effect_intent" => Ok(ArtifactRole::SideEffectIntent),
-        "prepared_invocation" => Ok(ArtifactRole::PreparedInvocation),
-        "not_submitted_proof" => Ok(ArtifactRole::NotSubmittedProof),
-        "submission" => Ok(ArtifactRole::Submission),
-        "submission_unknown_evidence" => Ok(ArtifactRole::SubmissionUnknownEvidence),
-        "receipt" => Ok(ArtifactRole::Receipt),
-        "confirmation" => Ok(ArtifactRole::Confirmation),
-        "ambiguity_evidence" => Ok(ArtifactRole::AmbiguityEvidence),
-        "manual_resolution_evidence" => Ok(ArtifactRole::ManualResolutionEvidence),
-        "manual_resolution_authorization" => Ok(ArtifactRole::ManualResolutionAuthorization),
-        "public_output" => Ok(ArtifactRole::PublicOutput),
-        "redacted_diagnostic" => Ok(ArtifactRole::RedactedDiagnostic),
-        "retention_manifest" => Ok(ArtifactRole::RetentionManifest),
-        _ => Err(FsTypedArtifactError::InvalidEvidence {
-            message: format!("unknown artifact role {value}"),
-        }),
-    }
+fn decode_artifact_role_tag(value: &str) -> TypedArtifactResult<ArtifactRole> {
+    ArtifactRole::parse(value).ok_or_else(|| FsTypedArtifactError::InvalidEvidence {
+        message: format!("unknown artifact role {value}"),
+    })
 }
 
 #[cfg(test)]
@@ -938,6 +994,33 @@ mod tests {
             producer_seed_id: None,
             artifact_role: ArtifactRole::StateOutput,
         }
+    }
+
+    #[test]
+    fn artifact_role_contract_metadata_tags_roundtrip_through_events_contract() {
+        for role in ArtifactRole::ALL {
+            assert_eq!(
+                decode_artifact_role_tag(role.as_str()).expect("role tag parses"),
+                *role
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn artifact_role_contract_metadata_rejects_forbidden_semantic_field() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = FsTypedArtifactStore::new(temp.path());
+        let bytes = br#"{"ok":true}"#.to_vec();
+        let mut descriptor = descriptor();
+        descriptor.artifact_role = ArtifactRole::FactResponse;
+
+        let err = store
+            .put_artifact(bytes, descriptor)
+            .await
+            .expect_err("fact response semantic metadata rejects");
+
+        assert!(matches!(err, FsTypedArtifactError::InvalidEvidence { .. }));
+        assert!(err.to_string().contains("semantic_type_id"));
     }
 
     #[tokio::test]

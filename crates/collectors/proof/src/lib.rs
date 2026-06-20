@@ -27,6 +27,9 @@ const NAMESPACE: &str = "mfm.proof";
 const ADAPTER_NAME: &str = "deterministic-proof";
 const ADAPTER_VERSION: &str = "mfm.proof.adapter.deterministic.v1";
 
+/// Proof action that intentionally leaves the forward side effect ambiguous for manual resolution.
+pub const MANUAL_RESOLUTION_PROOF_ACTION: &str = "manual-resolution";
+
 /// Returns the deterministic proof adapter kind.
 pub fn proof_adapter_kind() -> Result<AdapterKind, mfm_ids::IdentityError> {
     AdapterKind::new(

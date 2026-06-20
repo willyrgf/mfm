@@ -8,27 +8,33 @@
 use std::sync::Arc;
 
 use mfm_canonical::PlainCanonicalJsonBytes;
-use mfm_capabilities::{CapabilitySetDescriptor, CapabilitySpec};
+use mfm_capabilities::CapabilitySpec;
 use mfm_collectors_proof::{
     proof_adapter_kind, proof_adapter_version, ProofApplyConfig, ProofApplySideEffectState,
     ProofAssembleConfig, ProofAssembleOutputState, ProofConfirmation, ProofFact, ProofFactRequest,
     ProofFactResponse, ProofIdempotencyInput, ProofIntent, ProofMutationCapability, ProofOutput,
     ProofReadCapability, ProofReadConfig, ProofReadFactState, ProofReceipt, ProofReplayError,
     ProofReplayVerifier, ProofSideEffectResult, ProofSubmission, RecordedProofFacts,
+    MANUAL_RESOLUTION_PROOF_ACTION,
 };
 use mfm_events::v1::{self as events, side_effect};
-use mfm_ids::{ArtifactId, ContentDigest, DescriptorId, NodeId, SchemaId};
+use mfm_ids::ContentDigest;
 use mfm_replay::v1 as replay;
 use mfm_runtime::{
-    CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerBinding,
-    ErasedRunnerFuture, ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCellTerminal,
-    MaterializedInputNode, RunnerEventPayload, StagedArtifact, StagedRetentionRefs,
+    CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture,
+    ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCellTerminal, MaterializedInputNode,
+    RunnerArtifactBuilder, RunnerCapabilityBinding, RunnerOutputBuilder, RunnerPayloadBuilder,
+    RunnerRegistrationBuilder, SideEffectDriver, SideEffectDriverCallbacks, SideEffectDriverFuture,
+    SideEffectIntentPlan, SideEffectObservedEvidence, SideEffectPreparedInvocationPlan,
+    SideEffectProtocolAction, SideEffectReplayEvidence, SideEffectSubmissionDecision,
+    SideEffectSubmissionDecisionFuture,
 };
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
-use mfm_values::{MfmConfig, MfmValue};
+use mfm_values::MfmConfig;
 use serde::Serialize;
 
+const ACCEPT_PROOF_ACTION: &str = "accept";
 const READ_FACTORY: &str = "read_external";
 const SIDE_EFFECT_FACTORY: &str = "apply_side_effect";
 const PURE_FACTORY: &str = "pure";
@@ -40,72 +46,39 @@ pub fn register_deterministic_proof_runners(
     registry: &mut ErasedRunnerRegistry,
 ) -> mfm_runtime::Result<()> {
     let implementation_id = CapabilityImplementationId::new(CAPABILITY_IMPLEMENTATION_ID)?;
-    let read = registered_descriptor::<ProofReadFactState>()?;
-    let side_effect = registered_descriptor::<ProofApplySideEffectState>()?;
-    let assemble = registered_descriptor::<ProofAssembleOutputState>()?;
+    let mut registrations = RunnerRegistrationBuilder::new(registry, implementation_id);
 
-    registry.register_capability_set(&read.capabilities, implementation_id.clone())?;
-    registry.register_capability_set(&side_effect.capabilities, implementation_id.clone())?;
-    registry.register_capability_set(&assemble.capabilities, implementation_id)?;
-
-    registry.register(binding(
-        read.descriptor_id,
-        READ_FACTORY,
-        Arc::new(ProofReadRunner),
-    )?)?;
-    registry.register(binding(
-        side_effect.descriptor_id,
-        SIDE_EFFECT_FACTORY,
-        Arc::new(ProofSideEffectRunner),
-    )?)?;
-    registry.register(binding(
-        assemble.descriptor_id,
-        PURE_FACTORY,
-        Arc::new(ProofAssembleRunner),
-    )?)?;
-    Ok(())
-}
-
-/// Builds a runner registry containing only the deterministic proof implementation.
-pub fn deterministic_proof_runner_registry() -> mfm_runtime::Result<ErasedRunnerRegistry> {
-    let mut registry = ErasedRunnerRegistry::new();
-    register_deterministic_proof_runners(&mut registry)?;
-    Ok(registry)
-}
-
-struct RegisteredRuntimeDescriptor {
-    descriptor_id: DescriptorId,
-    capabilities: CapabilitySetDescriptor,
-}
-
-fn registered_descriptor<S>() -> mfm_runtime::Result<RegisteredRuntimeDescriptor>
-where
-    S: mfm_program::StateSpec,
-    S::Effect: mfm_program::EffectRunner<S>,
-    S::Caps: mfm_capabilities::CapabilitySetFor<S::Effect>,
-{
-    let mut states = mfm_program::StateRegistryBuilder::new();
-    let registered = states
-        .register::<S>()
+    let read = mfm_program::registered_state_descriptor::<ProofReadFactState>()
         .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
-    Ok(RegisteredRuntimeDescriptor {
-        descriptor_id: registered.descriptor().descriptor_id().clone(),
-        capabilities: registered.descriptor().capabilities().clone(),
-    })
-}
-
-fn binding(
-    descriptor_id: DescriptorId,
-    factory: &'static str,
-    runner: Arc<dyn ErasedNodeRunner>,
-) -> mfm_runtime::Result<ErasedRunnerBinding> {
-    let factory_id = events::RunnerFactoryId::new(factory)?;
-    ErasedRunnerBinding::new(
-        descriptor_id,
-        factory_id.clone(),
-        executable(factory_id)?,
-        runner,
-    )
+    let read_factory = events::RunnerFactoryId::new(READ_FACTORY)?;
+    registrations.register_descriptor(
+        read.descriptor_id().clone(),
+        read.capabilities(),
+        read_factory.clone(),
+        executable(read_factory)?,
+        Arc::new(ProofReadRunner),
+    )?;
+    let side_effect = mfm_program::registered_state_descriptor::<ProofApplySideEffectState>()
+        .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
+    let side_effect_factory = events::RunnerFactoryId::new(SIDE_EFFECT_FACTORY)?;
+    registrations.register_descriptor(
+        side_effect.descriptor_id().clone(),
+        side_effect.capabilities(),
+        side_effect_factory.clone(),
+        executable(side_effect_factory)?,
+        Arc::new(ProofSideEffectRunner),
+    )?;
+    let assemble = mfm_program::registered_state_descriptor::<ProofAssembleOutputState>()
+        .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
+    let assemble_factory = events::RunnerFactoryId::new(PURE_FACTORY)?;
+    registrations.register_descriptor(
+        assemble.descriptor_id().clone(),
+        assemble.capabilities(),
+        assemble_factory.clone(),
+        executable(assemble_factory)?,
+        Arc::new(ProofAssembleRunner),
+    )?;
+    Ok(())
 }
 
 fn executable(
@@ -156,280 +129,181 @@ impl ErasedNodeRunner for ProofAssembleRunner {
 
 async fn run_read(ctx: ErasedRunCtx<'_>) -> mfm_runtime::Result<ErasedRunnerOutput> {
     ensure_config::<ProofReadConfig>(&ctx.node().config_ref, &ProofReadConfig { fact_n: 1 })?;
+    let artifacts = RunnerArtifactBuilder::new(&ctx);
+    let payloads = RunnerPayloadBuilder::new(&ctx);
     let fact = ProofFact { n: 1 };
     let request = ProofFactRequest {
         source: "deterministic-proof".to_owned(),
     };
     let response = ProofFactResponse { fact: fact.clone() };
-    let request_hash = digest_value(&request)?;
-    let response_artifact = artifact_for_value(
-        &response,
-        events::ArtifactRole::FactResponse,
-        Some(ctx.node().node_id.clone()),
-    )?;
-    let output_artifact = artifact_for_value(
-        &fact,
-        events::ArtifactRole::StateOutput,
-        Some(ctx.node().node_id.clone()),
-    )?;
-    let staged_response = staged_attempt_artifact(&ctx, &response_artifact)?;
-    let staged_output = staged_attempt_artifact(&ctx, &output_artifact)?;
-    Ok(ErasedRunnerOutput {
-        staged_artifacts: vec![staged_response, staged_output],
-        staged_retention_refs: vec![
-            retention(&response_artifact.evidence),
-            retention(&output_artifact.evidence),
-        ],
-        payloads: vec![
-            RunnerEventPayload::FactRecorded(events::FactRecorded {
-                spec_hash: ctx.spec_hash().clone(),
-                node_id: ctx.node().node_id.clone(),
-                attempt_id: ctx.attempt_id().clone(),
-                capability_kind: ProofReadCapability::kind().map_err(runtime_capability_error)?,
-                capability_version: ProofReadCapability::version()
-                    .map_err(runtime_capability_error)?,
-                adapter_kind: proof_adapter_kind()?,
-                adapter_version: proof_adapter_version()?,
-                request_schema_id: ProofFactRequest::schema_id().map_err(runtime_value_error)?,
-                request_hash,
-                response_schema_id: ProofFactResponse::schema_id().map_err(runtime_value_error)?,
-                response_hash: response_artifact.evidence.digest.clone(),
-                fact_key: events::FactKey::new("mfm.proof.fact.default")?,
-                artifact_id: response_artifact.evidence.artifact_id.clone(),
-            }),
-            cell_produced(&ctx, &output_artifact.evidence),
-        ],
-    })
+    let response_artifact = artifacts.fact_response(&response)?;
+    let output_artifact = artifacts.state_output(&fact)?;
+    let mut output = RunnerOutputBuilder::new(&ctx);
+    output.stage_attempt_artifact(&response_artifact)?;
+    output.retain_runtime_evidence(&response_artifact);
+    output.stage_attempt_artifact(&output_artifact)?;
+    output.retain_runtime_evidence(&output_artifact);
+    output.payload(payloads.fact_recorded(
+        events::FactKey::new("mfm.proof.fact.default")?,
+        &request,
+        &response_artifact,
+        proof_read_binding()?,
+    )?);
+    output.payload(payloads.cell_produced(&output_artifact)?);
+    Ok(output.finish())
 }
 
 async fn run_side_effect(ctx: ErasedRunCtx<'_>) -> mfm_runtime::Result<ErasedRunnerOutput> {
-    let config =
-        ProofApplyConfig::new("accept").map_err(mfm_runtime::RuntimeError::InvalidRunnerOutput)?;
-    ensure_config::<ProofApplyConfig>(&ctx.node().config_ref, &config)?;
-    let ledger_key = events::SideEffectLedgerKey::new("mfm.proof.ledger.default")?;
-    let phase = ctx
-        .projections()
-        .side_effect(&ledger_key)
-        .map(|projection| projection.phase.clone());
-    match phase {
-        None => side_effect_prepare(ctx, ledger_key).await,
-        Some(store::SideEffectPhase::InvocationStarted {
-            invocation_epoch, ..
+    let accept = ProofApplyConfig::new(ACCEPT_PROOF_ACTION)
+        .map_err(mfm_runtime::RuntimeError::InvalidRunnerOutput)?;
+    if ensure_config::<ProofApplyConfig>(&ctx.node().config_ref, &accept).is_ok() {
+        return SideEffectDriver::drive(
+            ctx,
+            &ProofSideEffectCallbacks {
+                action: ACCEPT_PROOF_ACTION,
+                ambiguous: false,
+            },
+        )
+        .await;
+    }
+    let manual_resolution = ProofApplyConfig::new(MANUAL_RESOLUTION_PROOF_ACTION)
+        .map_err(mfm_runtime::RuntimeError::InvalidRunnerOutput)?;
+    ensure_config::<ProofApplyConfig>(&ctx.node().config_ref, &manual_resolution)?;
+    SideEffectDriver::drive(
+        ctx,
+        &ProofSideEffectCallbacks {
+            action: MANUAL_RESOLUTION_PROOF_ACTION,
+            ambiguous: true,
+        },
+    )
+    .await
+}
+
+struct ProofSideEffectCallbacks {
+    action: &'static str,
+    ambiguous: bool,
+}
+
+impl SideEffectDriverCallbacks for ProofSideEffectCallbacks {
+    type Intent = ProofIntent;
+    type Idempotency = ProofIdempotencyInput;
+    type PreparedInvocation = serde_json::Value;
+    type Submission = ProofSubmission;
+    type SubmissionUnknownEvidence = ProofSideEffectResult;
+    type NotSubmittedProof = ProofSideEffectResult;
+    type Receipt = ProofReceipt;
+    type Confirmation = ProofConfirmation;
+    type AmbiguityEvidence = ProofSideEffectResult;
+    type Output = ProofSideEffectResult;
+
+    fn intent_and_idempotency<'a, 'ctx>(
+        &'a self,
+        _ctx: &'a ErasedRunCtx<'ctx>,
+    ) -> SideEffectDriverFuture<'a, SideEffectIntentPlan<Self::Intent, Self::Idempotency>> {
+        let action = self.action;
+        Box::pin(async move {
+            let idempotency = proof_idempotency_input(action);
+            let idem_hash = digest_value(&idempotency)?;
+            Ok(SideEffectIntentPlan {
+                intent: proof_intent(action),
+                idempotency,
+                idempotency_key: events::IdempotencyKeyRef::new(format!(
+                    "idem-{}",
+                    short_digest(&idem_hash)
+                ))?,
+                capability_binding: proof_mutation_binding()?,
+            })
         })
-        | Some(store::SideEffectPhase::SubmissionUnknown { invocation_epoch }) => {
-            side_effect_submission(ctx, ledger_key, invocation_epoch).await
-        }
-        Some(store::SideEffectPhase::SubmissionObserved { invocation_epoch }) => {
-            side_effect_receipt(ctx, ledger_key, invocation_epoch).await
-        }
-        Some(store::SideEffectPhase::ReceiptObserved { invocation_epoch }) => {
-            side_effect_confirmation(ctx, ledger_key, invocation_epoch).await
-        }
-        Some(store::SideEffectPhase::ConfirmationObserved { .. }) => side_effect_output(ctx).await,
-        Some(store::SideEffectPhase::Ambiguous { .. }) => Ok(ErasedRunnerOutput::new(Vec::new())),
-        Some(other) => Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(format!(
-            "unsupported proof side-effect phase: {other:?}"
-        ))),
+    }
+
+    fn prepare_invocation<'a, 'ctx>(
+        &'a self,
+        _ctx: &'a ErasedRunCtx<'ctx>,
+        _plan: &'a SideEffectIntentPlan<Self::Intent, Self::Idempotency>,
+    ) -> SideEffectDriverFuture<'a, SideEffectPreparedInvocationPlan<Self::PreparedInvocation>>
+    {
+        Box::pin(async { Ok(SideEffectPreparedInvocationPlan::none()) })
+    }
+
+    fn reconstruct_prepared_invocation<'a, 'ctx>(
+        &'a self,
+        _ctx: &'a ErasedRunCtx<'ctx>,
+        _prepared: &'a store::SideEffectArtifactProjection,
+    ) -> SideEffectDriverFuture<'a, Self::PreparedInvocation> {
+        Box::pin(async {
+            Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(
+                "deterministic proof side effect does not use prepared invocation evidence"
+                    .to_owned(),
+            ))
+        })
+    }
+
+    fn submit_or_recover_submission<'a, 'ctx>(
+        &'a self,
+        _ctx: &'a ErasedRunCtx<'ctx>,
+        _action: SideEffectProtocolAction,
+        _prepared: Option<Self::PreparedInvocation>,
+    ) -> SideEffectSubmissionDecisionFuture<
+        'a,
+        Self::Submission,
+        Self::SubmissionUnknownEvidence,
+        Self::NotSubmittedProof,
+        Self::AmbiguityEvidence,
+    > {
+        Box::pin(async move {
+            if self.ambiguous {
+                Ok(SideEffectSubmissionDecision::Ambiguous {
+                    ambiguity_code: events::AmbiguityCode::new("mfm.proof.manual_resolution")
+                        .map_err(|error| {
+                            mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
+                        })?,
+                    evidence: proof_side_effect_result()?,
+                })
+            } else {
+                Ok(SideEffectSubmissionDecision::Observed(proof_submission()?))
+            }
+        })
+    }
+
+    fn read_receipt<'a, 'ctx>(
+        &'a self,
+        _ctx: &'a ErasedRunCtx<'ctx>,
+        _submission: &'a store::SideEffectArtifactProjection,
+    ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Receipt>> {
+        Box::pin(async {
+            Ok(SideEffectObservedEvidence {
+                evidence: proof_receipt()?,
+                replay: proof_replay_evidence()?,
+            })
+        })
+    }
+
+    fn build_confirmation<'a, 'ctx>(
+        &'a self,
+        _ctx: &'a ErasedRunCtx<'ctx>,
+        _receipt: &'a store::SideEffectArtifactProjection,
+    ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Confirmation>> {
+        Box::pin(async {
+            Ok(SideEffectObservedEvidence {
+                evidence: proof_confirmation()?,
+                replay: proof_replay_evidence()?,
+            })
+        })
+    }
+
+    fn map_confirmation_to_output<'a, 'ctx>(
+        &'a self,
+        _ctx: &'a ErasedRunCtx<'ctx>,
+        _confirmation: &'a store::SideEffectArtifactProjection,
+    ) -> SideEffectDriverFuture<'a, Self::Output> {
+        Box::pin(async { proof_side_effect_result() })
     }
 }
 
-async fn side_effect_prepare(
-    ctx: ErasedRunCtx<'_>,
-    ledger_key: events::SideEffectLedgerKey,
-) -> mfm_runtime::Result<ErasedRunnerOutput> {
-    let intent = proof_intent();
-    let idem_input = proof_idempotency_input();
-    let intent_artifact = artifact_for_value(
-        &intent,
-        events::ArtifactRole::SideEffectIntent,
-        Some(ctx.node().node_id.clone()),
-    )?;
-    let idem_hash = digest_value(&idem_input)?;
-    let idempotency_key =
-        events::IdempotencyKeyRef::new(format!("idem-{}", short_digest(&idem_hash)))?;
-    let owner = events::RunnerInvocationId::new("mfm.proof.owner.1")?;
-    let token = side_effect::ClaimFencingToken::new("mfm.proof.token.1")?;
-    let ledger_purpose = events::SideEffectLedgerPurpose::Forward;
-    let staged_artifact =
-        staged_side_effect_artifact(&ctx, &intent_artifact, ledger_key.clone(), 1)?;
-    Ok(ErasedRunnerOutput {
-        staged_artifacts: vec![staged_artifact],
-        staged_retention_refs: vec![retention(&intent_artifact.evidence)],
-        payloads: vec![
-            RunnerEventPayload::SideEffectIntentPersisted(side_effect::IntentPersisted {
-                spec_hash: ctx.spec_hash().clone(),
-                node_id: ctx.node().node_id.clone(),
-                scope_id: ctx.node().scope_id.clone(),
-                attempt_id: ctx.attempt_id().clone(),
-                ledger_key: ledger_key.clone(),
-                ledger_purpose: ledger_purpose.clone(),
-                invocation_epoch: 1,
-                intent_schema_id: ProofIntent::schema_id().map_err(runtime_value_error)?,
-                intent_hash: intent_artifact.evidence.digest.clone(),
-                intent_artifact_id: intent_artifact.evidence.artifact_id.clone(),
-                idempotency_input_schema_id: ProofIdempotencyInput::schema_id()
-                    .map_err(runtime_value_error)?,
-                idempotency_input_hash: idem_hash,
-                idempotency_key,
-                capability_kind: ProofMutationCapability::kind()
-                    .map_err(runtime_capability_error)?,
-                capability_version: ProofMutationCapability::version()
-                    .map_err(runtime_capability_error)?,
-                adapter_kind: proof_adapter_kind()?,
-                adapter_version: proof_adapter_version()?,
-            }),
-            RunnerEventPayload::SideEffectClaimed(side_effect::Claimed {
-                spec_hash: ctx.spec_hash().clone(),
-                node_id: ctx.node().node_id.clone(),
-                attempt_id: ctx.attempt_id().clone(),
-                ledger_key: ledger_key.clone(),
-                ledger_purpose: ledger_purpose.clone(),
-                claim_owner: owner.clone(),
-                invocation_epoch: 1,
-                claim_generation: 1,
-                claim_fencing_token: token.clone(),
-            }),
-            RunnerEventPayload::SideEffectInvocationPrepared(side_effect::InvocationPrepared {
-                spec_hash: ctx.spec_hash().clone(),
-                node_id: ctx.node().node_id.clone(),
-                attempt_id: ctx.attempt_id().clone(),
-                ledger_key: ledger_key.clone(),
-                ledger_purpose: ledger_purpose.clone(),
-                invocation_epoch: 1,
-                claim_generation: 1,
-                claim_fencing_token: token.clone(),
-                prepared_artifact_id: None,
-                prepared_hash: None,
-                resource_key: None,
-            }),
-            RunnerEventPayload::SideEffectInvocationStarted(side_effect::InvocationStarted {
-                spec_hash: ctx.spec_hash().clone(),
-                node_id: ctx.node().node_id.clone(),
-                attempt_id: ctx.attempt_id().clone(),
-                ledger_key,
-                ledger_purpose,
-                invocation_epoch: 1,
-                claim_owner: owner,
-                claim_generation: 1,
-                claim_fencing_token: token,
-            }),
-        ],
-    })
-}
-
-async fn side_effect_submission(
-    ctx: ErasedRunCtx<'_>,
-    ledger_key: events::SideEffectLedgerKey,
-    invocation_epoch: u32,
-) -> mfm_runtime::Result<ErasedRunnerOutput> {
-    let submission = proof_submission()?;
-    let artifact = artifact_for_value(
-        &submission,
-        events::ArtifactRole::Submission,
-        Some(ctx.node().node_id.clone()),
-    )?;
-    let staged_artifact =
-        staged_side_effect_artifact(&ctx, &artifact, ledger_key.clone(), invocation_epoch)?;
-    Ok(ErasedRunnerOutput {
-        staged_artifacts: vec![staged_artifact],
-        staged_retention_refs: vec![retention(&artifact.evidence)],
-        payloads: vec![RunnerEventPayload::SideEffectSubmissionObserved(
-            side_effect::SubmissionObserved {
-                spec_hash: ctx.spec_hash().clone(),
-                node_id: ctx.node().node_id.clone(),
-                attempt_id: ctx.attempt_id().clone(),
-                ledger_key,
-                ledger_purpose: events::SideEffectLedgerPurpose::Forward,
-                invocation_epoch,
-                submission_schema_id: ProofSubmission::schema_id().map_err(runtime_value_error)?,
-                submission_hash: artifact.evidence.digest,
-                submission_artifact_id: artifact.evidence.artifact_id,
-            },
-        )],
-    })
-}
-
-async fn side_effect_receipt(
-    ctx: ErasedRunCtx<'_>,
-    ledger_key: events::SideEffectLedgerKey,
-    invocation_epoch: u32,
-) -> mfm_runtime::Result<ErasedRunnerOutput> {
-    let receipt = proof_receipt()?;
-    let artifact = artifact_for_value(
-        &receipt,
-        events::ArtifactRole::Receipt,
-        Some(ctx.node().node_id.clone()),
-    )?;
-    let staged_artifact =
-        staged_side_effect_artifact(&ctx, &artifact, ledger_key.clone(), invocation_epoch)?;
-    Ok(ErasedRunnerOutput {
-        staged_artifacts: vec![staged_artifact],
-        staged_retention_refs: vec![retention(&artifact.evidence)],
-        payloads: vec![RunnerEventPayload::SideEffectReceiptObserved(
-            side_effect::ReceiptObserved {
-                spec_hash: ctx.spec_hash().clone(),
-                node_id: ctx.node().node_id.clone(),
-                attempt_id: ctx.attempt_id().clone(),
-                ledger_key,
-                ledger_purpose: events::SideEffectLedgerPurpose::Forward,
-                invocation_epoch,
-                receipt_schema_id: ProofReceipt::schema_id().map_err(runtime_value_error)?,
-                receipt_hash: artifact.evidence.digest,
-                receipt_artifact_id: artifact.evidence.artifact_id,
-                replay_verifier_id: replay_verifier_id()?,
-                resource_touched_set: None,
-            },
-        )],
-    })
-}
-
-async fn side_effect_confirmation(
-    ctx: ErasedRunCtx<'_>,
-    ledger_key: events::SideEffectLedgerKey,
-    invocation_epoch: u32,
-) -> mfm_runtime::Result<ErasedRunnerOutput> {
-    let confirmation = proof_confirmation()?;
-    let artifact = artifact_for_value(
-        &confirmation,
-        events::ArtifactRole::Confirmation,
-        Some(ctx.node().node_id.clone()),
-    )?;
-    let staged_artifact =
-        staged_side_effect_artifact(&ctx, &artifact, ledger_key.clone(), invocation_epoch)?;
-    Ok(ErasedRunnerOutput {
-        staged_artifacts: vec![staged_artifact],
-        staged_retention_refs: vec![retention(&artifact.evidence)],
-        payloads: vec![RunnerEventPayload::SideEffectConfirmationObserved(
-            side_effect::ConfirmationObserved {
-                spec_hash: ctx.spec_hash().clone(),
-                node_id: ctx.node().node_id.clone(),
-                attempt_id: ctx.attempt_id().clone(),
-                ledger_key,
-                ledger_purpose: events::SideEffectLedgerPurpose::Forward,
-                invocation_epoch,
-                confirmation_schema_id: ProofConfirmation::schema_id()
-                    .map_err(runtime_value_error)?,
-                confirmation_hash: artifact.evidence.digest,
-                confirmation_artifact_id: artifact.evidence.artifact_id,
-                replay_verifier_id: replay_verifier_id()?,
-                resource_touched_set: None,
-            },
-        )],
-    })
-}
-
-async fn side_effect_output(ctx: ErasedRunCtx<'_>) -> mfm_runtime::Result<ErasedRunnerOutput> {
-    let output = proof_side_effect_result()?;
-    let artifact = artifact_for_value(
-        &output,
-        events::ArtifactRole::StateOutput,
-        Some(ctx.node().node_id.clone()),
-    )?;
-    let staged_artifact = staged_attempt_artifact(&ctx, &artifact)?;
-    Ok(ErasedRunnerOutput {
-        staged_artifacts: vec![staged_artifact],
-        staged_retention_refs: vec![retention(&artifact.evidence)],
-        payloads: vec![cell_produced(&ctx, &artifact.evidence)],
+fn proof_replay_evidence() -> mfm_runtime::Result<SideEffectReplayEvidence> {
+    Ok(SideEffectReplayEvidence {
+        replay_verifier_id: replay_verifier_id()?,
+        resource_touched_set: None,
     })
 }
 
@@ -445,39 +319,14 @@ async fn run_assemble(ctx: ErasedRunCtx<'_>) -> mfm_runtime::Result<ErasedRunner
         fact: proof_fact(),
         side_effect: proof_side_effect_result()?,
     };
-    let artifact = artifact_for_value(
-        &output,
-        events::ArtifactRole::StateOutput,
-        Some(ctx.node().node_id.clone()),
-    )?;
-    let staged_artifact = staged_attempt_artifact(&ctx, &artifact)?;
-    Ok(ErasedRunnerOutput {
-        staged_artifacts: vec![staged_artifact],
-        staged_retention_refs: vec![retention(&artifact.evidence)],
-        payloads: vec![cell_produced(&ctx, &artifact.evidence)],
-    })
-}
-
-fn staged_attempt_artifact(
-    ctx: &ErasedRunCtx<'_>,
-    artifact: &ProofArtifact,
-) -> mfm_runtime::Result<StagedArtifact> {
-    StagedArtifact::inline_attempt_artifact(ctx, artifact.bytes.clone(), artifact.evidence.clone())
-}
-
-fn staged_side_effect_artifact(
-    ctx: &ErasedRunCtx<'_>,
-    artifact: &ProofArtifact,
-    ledger_key: events::SideEffectLedgerKey,
-    invocation_epoch: u32,
-) -> mfm_runtime::Result<StagedArtifact> {
-    StagedArtifact::inline_side_effect_artifact(
-        ctx,
-        artifact.bytes.clone(),
-        artifact.evidence.clone(),
-        ledger_key,
-        invocation_epoch,
-    )
+    let artifacts = RunnerArtifactBuilder::new(&ctx);
+    let payloads = RunnerPayloadBuilder::new(&ctx);
+    let artifact = artifacts.state_output(&output)?;
+    let mut runner_output = RunnerOutputBuilder::new(&ctx);
+    runner_output.stage_attempt_artifact(&artifact)?;
+    runner_output.retain_runtime_evidence(&artifact);
+    runner_output.payload(payloads.cell_produced(&artifact)?);
+    Ok(runner_output.finish())
 }
 
 fn ensure_struct_input_digest(
@@ -518,64 +367,22 @@ fn ensure_struct_input_digest(
     }
 }
 
-fn cell_produced(
-    ctx: &ErasedRunCtx<'_>,
-    artifact: &store::ArtifactEvidenceRef,
-) -> RunnerEventPayload {
-    RunnerEventPayload::CellProduced(events::CellProduced {
-        spec_hash: ctx.spec_hash().clone(),
-        node_id: ctx.node().node_id.clone(),
-        cell_id: ctx.node().output_cell.clone(),
-        scope_id: ctx.output_cell().scope_id.clone(),
-        attempt_id: ctx.attempt_id().clone(),
-        semantic_type_id: ctx.output_cell().semantic_type_id.clone(),
-        schema_id: ctx.output_cell().schema_id.clone(),
-        value_lineage: ctx.output_cell().value_lineage.clone(),
-        artifact_id: artifact.artifact_id.clone(),
-        content_digest: artifact.digest.clone(),
-        producer_state_kind: Some(ctx.node().state_kind.clone()),
-        producer_state_version: Some(ctx.node().state_version.clone()),
+fn proof_read_binding() -> mfm_runtime::Result<RunnerCapabilityBinding> {
+    Ok(RunnerCapabilityBinding {
+        capability_kind: ProofReadCapability::kind().map_err(runtime_capability_error)?,
+        capability_version: ProofReadCapability::version().map_err(runtime_capability_error)?,
+        adapter_kind: proof_adapter_kind()?,
+        adapter_version: proof_adapter_version()?,
     })
 }
 
-struct ProofArtifact {
-    bytes: Vec<u8>,
-    evidence: store::ArtifactEvidenceRef,
-}
-
-fn artifact_for_value<T>(
-    value: &T,
-    role: events::ArtifactRole,
-    producer_node_id: Option<NodeId>,
-) -> mfm_runtime::Result<ProofArtifact>
-where
-    T: MfmValue + Serialize,
-{
-    let bytes = canonical_value(value)?;
-    let digest = bytes.content_digest();
-    let evidence = store::ArtifactEvidenceRef {
-        artifact_id: ArtifactId::from_digest(digest.algorithm(), *digest.digest()),
-        digest,
-        byte_len: bytes.as_bytes().len() as u64,
-        media_type: spec::MediaType::new("application/json")?,
-        schema_id: Some(T::schema_id().map_err(runtime_value_error)?),
-        semantic_type_id: Some(T::semantic_id().map_err(runtime_value_error)?),
-        producer_node_id,
-        producer_seed_id: None,
-        artifact_role: role,
-    };
-    Ok(ProofArtifact {
-        bytes: bytes.to_vec(),
-        evidence,
+fn proof_mutation_binding() -> mfm_runtime::Result<RunnerCapabilityBinding> {
+    Ok(RunnerCapabilityBinding {
+        capability_kind: ProofMutationCapability::kind().map_err(runtime_capability_error)?,
+        capability_version: ProofMutationCapability::version().map_err(runtime_capability_error)?,
+        adapter_kind: proof_adapter_kind()?,
+        adapter_version: proof_adapter_version()?,
     })
-}
-
-fn retention(artifact: &store::ArtifactEvidenceRef) -> StagedRetentionRefs {
-    StagedRetentionRefs::runtime_evidence(vec![events::RetentionRef {
-        artifact_id: artifact.artifact_id.clone(),
-        role: artifact.artifact_role,
-        content_digest: artifact.digest.clone(),
-    }])
 }
 
 fn ensure_config<T>(config: &spec::ConfigRef, expected: &T) -> mfm_runtime::Result<()>
@@ -629,22 +436,22 @@ fn proof_fact() -> ProofFact {
     ProofFact { n: 1 }
 }
 
-fn proof_intent() -> ProofIntent {
+fn proof_intent(action: &str) -> ProofIntent {
     ProofIntent {
         fact_n: 1,
-        action: "accept".to_owned(),
+        action: action.to_owned(),
     }
 }
 
-fn proof_idempotency_input() -> ProofIdempotencyInput {
+fn proof_idempotency_input(action: &str) -> ProofIdempotencyInput {
     ProofIdempotencyInput {
         fact_n: 1,
-        action: "accept".to_owned(),
+        action: action.to_owned(),
     }
 }
 
 fn proof_submission() -> mfm_runtime::Result<ProofSubmission> {
-    let idempotency_digest = digest_value(&proof_idempotency_input())?
+    let idempotency_digest = digest_value(&proof_idempotency_input(ACCEPT_PROOF_ACTION))?
         .as_str()
         .to_owned();
     Ok(ProofSubmission {
@@ -785,7 +592,12 @@ impl replay::SideEffectReplayVerifier for DeterministicProofReplayVerifier {
         ensure_digest(
             "proof intent",
             &input.intent.intent.intent_hash,
-            &proof_intent(),
+            &proof_intent(ACCEPT_PROOF_ACTION),
+        )?;
+        ensure_digest(
+            "proof idempotency",
+            &input.intent.intent.idempotency_input_hash,
+            &proof_idempotency_input(ACCEPT_PROOF_ACTION),
         )?;
         let submission = proof_submission().map_err(replay_runtime_error)?;
         ensure_digest(
@@ -800,7 +612,7 @@ impl replay::SideEffectReplayVerifier for DeterministicProofReplayVerifier {
         )?;
         ProofReplayVerifier::verify_submission(
             self,
-            &proof_intent(),
+            &proof_intent(ACCEPT_PROOF_ACTION),
             &submission,
             &RecordedProofFacts { fact: proof_fact() },
         )
@@ -811,7 +623,12 @@ impl replay::SideEffectReplayVerifier for DeterministicProofReplayVerifier {
         ensure_digest(
             "proof intent",
             &input.intent.intent.intent_hash,
-            &proof_intent(),
+            &proof_intent(ACCEPT_PROOF_ACTION),
+        )?;
+        ensure_digest(
+            "proof idempotency",
+            &input.intent.intent.idempotency_input_hash,
+            &proof_idempotency_input(ACCEPT_PROOF_ACTION),
         )?;
         if let Some(submission) = &input.submission {
             let expected_submission = proof_submission().map_err(replay_runtime_error)?;
@@ -834,7 +651,7 @@ impl replay::SideEffectReplayVerifier for DeterministicProofReplayVerifier {
         )?;
         ProofReplayVerifier::verify_receipt(
             self,
-            &proof_intent(),
+            &proof_intent(ACCEPT_PROOF_ACTION),
             &receipt,
             &RecordedProofFacts { fact: proof_fact() },
         )
@@ -848,7 +665,12 @@ impl replay::SideEffectReplayVerifier for DeterministicProofReplayVerifier {
         ensure_digest(
             "proof intent",
             &input.intent.intent.intent_hash,
-            &proof_intent(),
+            &proof_intent(ACCEPT_PROOF_ACTION),
+        )?;
+        ensure_digest(
+            "proof idempotency",
+            &input.intent.intent.idempotency_input_hash,
+            &proof_idempotency_input(ACCEPT_PROOF_ACTION),
         )?;
         let receipt = proof_receipt().map_err(replay_runtime_error)?;
         if let Some(observed_receipt) = &input.receipt {
@@ -884,107 +706,92 @@ impl replay::SideEffectReplayVerifier for DeterministicProofReplayVerifier {
 ///
 /// Returns `Ok(false)` when the broker stream contains no deterministic proof side-effect intent.
 pub fn verify_deterministic_proof_replay(broker: &replay::ReplayBroker) -> replay::Result<bool> {
-    let Some(frames) = proof_side_effect_replay_frames(broker.events())? else {
+    let frames = broker.side_effect_replay_frames_matching(is_deterministic_proof_intent)?;
+    if frames.is_empty() {
         return Ok(false);
-    };
-    let verifier = DeterministicProofReplayVerifier::new().map_err(replay_runtime_error)?;
-    let Some(submission) = &frames.submission else {
-        return Err(proof_side_effect_missing("submission"));
-    };
-    let Some(receipt) = &frames.receipt else {
-        return Err(proof_side_effect_missing("receipt"));
-    };
-    let Some(confirmation) = &frames.confirmation else {
-        return Err(proof_side_effect_missing("confirmation"));
-    };
-
-    let submission_request = side_effect_replay_request(
-        &frames.intent,
-        submission.submission_schema_id.clone(),
-        submission.submission_hash.clone(),
-        None,
-    );
-    broker.verify_side_effect_submission(&submission_request, &verifier)?;
-
-    let receipt_request = side_effect_replay_request(
-        &frames.intent,
-        receipt.receipt_schema_id.clone(),
-        receipt.receipt_hash.clone(),
-        Some(receipt.replay_verifier_id.clone()),
-    );
-    broker.verify_side_effect_receipt(&receipt_request, &verifier)?;
-
-    let confirmation_request = side_effect_replay_request(
-        &frames.intent,
-        confirmation.confirmation_schema_id.clone(),
-        confirmation.confirmation_hash.clone(),
-        Some(confirmation.replay_verifier_id.clone()),
-    );
-    broker.verify_side_effect_confirmation(&confirmation_request, &verifier)?;
+    }
+    if frames.len() > 1 {
+        return Err(replay::ReplayError::new(
+            replay::ReplayErrorKind::SideEffectMismatch,
+            "multiple deterministic proof side-effect intents in one run",
+        ));
+    }
+    let frames = frames[0];
+    match deterministic_proof_action(frames.intent)? {
+        DeterministicProofAction::Accept => verify_accepted_proof_replay(broker, &frames)?,
+        DeterministicProofAction::ManualResolution => {
+            verify_manual_resolution_proof_replay(broker, &frames)?
+        }
+    }
     Ok(true)
 }
 
-#[derive(Debug, Clone)]
-struct ProofSideEffectReplayFrames {
-    intent: side_effect::IntentPersisted,
-    submission: Option<side_effect::SubmissionObserved>,
-    receipt: Option<side_effect::ReceiptObserved>,
-    confirmation: Option<side_effect::ConfirmationObserved>,
+fn verify_accepted_proof_replay(
+    broker: &replay::ReplayBroker,
+    frame: &replay::SideEffectReplayFrame<'_>,
+) -> replay::Result<()> {
+    if frame.ambiguity.is_some() {
+        return Err(replay::ReplayError::new(
+            replay::ReplayErrorKind::SideEffectMismatch,
+            "accepted deterministic proof side effect recorded ambiguity evidence",
+        ));
+    }
+    let verifier = DeterministicProofReplayVerifier::new().map_err(replay_runtime_error)?;
+    let Some(submission_request) = frame.submission_request() else {
+        return Err(proof_side_effect_missing("submission"));
+    };
+    let Some(receipt_request) = frame.receipt_request() else {
+        return Err(proof_side_effect_missing("receipt"));
+    };
+    let Some(confirmation_request) = frame.confirmation_request() else {
+        return Err(proof_side_effect_missing("confirmation"));
+    };
+
+    broker.verify_side_effect_submission(&submission_request, &verifier)?;
+    broker.verify_side_effect_receipt(&receipt_request, &verifier)?;
+    broker.verify_side_effect_confirmation(&confirmation_request, &verifier)?;
+    Ok(())
 }
 
-fn proof_side_effect_replay_frames(
-    stream: &[store::KernelEventEnvelope],
-) -> replay::Result<Option<ProofSideEffectReplayFrames>> {
-    let mut frames = None::<ProofSideEffectReplayFrames>;
-    for event in stream {
-        match event.payload() {
-            events::KernelEventPayload::SideEffectIntentPersisted(payload)
-                if is_deterministic_proof_intent(payload)? =>
-            {
-                if frames.is_some() {
-                    return Err(replay::ReplayError::new(
-                        replay::ReplayErrorKind::SideEffectMismatch,
-                        "multiple deterministic proof side-effect intents in one run",
-                    ));
-                }
-                frames = Some(ProofSideEffectReplayFrames {
-                    intent: payload.clone(),
-                    submission: None,
-                    receipt: None,
-                    confirmation: None,
-                });
-            }
-            events::KernelEventPayload::SideEffectSubmissionObserved(payload) => {
-                if let Some(frames) = frames.as_mut() {
-                    if payload.ledger_key == frames.intent.ledger_key
-                        && payload.invocation_epoch == frames.intent.invocation_epoch
-                    {
-                        frames.submission = Some(payload.clone());
-                    }
-                }
-            }
-            events::KernelEventPayload::SideEffectReceiptObserved(payload) => {
-                if let Some(frames) = frames.as_mut() {
-                    if payload.ledger_key == frames.intent.ledger_key
-                        && payload.invocation_epoch == frames.intent.invocation_epoch
-                    {
-                        frames.receipt = Some(payload.clone());
-                    }
-                }
-            }
-            events::KernelEventPayload::SideEffectConfirmationObserved(payload) => {
-                if let Some(frames) = frames.as_mut() {
-                    if payload.ledger_key == frames.intent.ledger_key
-                        && payload.invocation_epoch == frames.intent.invocation_epoch
-                    {
-                        frames.confirmation = Some(payload.clone());
-                    }
-                }
-            }
-            _ => {}
-        }
+fn verify_manual_resolution_proof_replay(
+    broker: &replay::ReplayBroker,
+    frame: &replay::SideEffectReplayFrame<'_>,
+) -> replay::Result<()> {
+    if frame.submission.is_some() || frame.receipt.is_some() || frame.confirmation.is_some() {
+        return Err(replay::ReplayError::new(
+            replay::ReplayErrorKind::SideEffectMismatch,
+            "manual-resolution deterministic proof side effect recorded non-ambiguity evidence",
+        ));
     }
-    Ok(frames)
+    let Some(ambiguity_request) = frame.ambiguity_request() else {
+        return Err(proof_side_effect_missing("ambiguity"));
+    };
+    let ambiguity = broker.side_effect_ambiguity(&ambiguity_request)?;
+    let expected_code =
+        events::AmbiguityCode::new("mfm.proof.manual_resolution").map_err(|error| {
+            replay::ReplayError::new(
+                replay::ReplayErrorKind::SideEffectMismatch,
+                error.to_string(),
+            )
+        })?;
+    if ambiguity.ambiguity.ambiguity_code != expected_code {
+        return Err(replay::ReplayError::new(
+            replay::ReplayErrorKind::SideEffectMismatch,
+            "manual-resolution deterministic proof ambiguity code mismatch",
+        ));
+    }
+    let expected = proof_side_effect_result().map_err(replay_runtime_error)?;
+    ensure_digest(
+        "proof ambiguity",
+        &ambiguity.ambiguity.evidence_hash,
+        &expected,
+    )?;
+    ensure_digest(
+        "proof ambiguity artifact",
+        &ambiguity.artifact.digest,
+        &expected,
+    )?;
+    Ok(())
 }
 
 fn is_deterministic_proof_intent(intent: &side_effect::IntentPersisted) -> replay::Result<bool> {
@@ -993,29 +800,36 @@ fn is_deterministic_proof_intent(intent: &side_effect::IntentPersisted) -> repla
     Ok(intent.capability_kind == expected_capability && intent.adapter_kind == expected_adapter)
 }
 
-fn side_effect_replay_request(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeterministicProofAction {
+    Accept,
+    ManualResolution,
+}
+
+fn deterministic_proof_action(
     intent: &side_effect::IntentPersisted,
-    evidence_schema_id: SchemaId,
-    evidence_hash: ContentDigest,
-    replay_verifier_id: Option<events::ReplayVerifierId>,
-) -> replay::SideEffectEvidenceReplayRequest {
-    replay::SideEffectEvidenceReplayRequest {
-        ledger_key: intent.ledger_key.clone(),
-        node_id: intent.node_id.clone(),
-        attempt_id: intent.attempt_id.clone(),
-        invocation_epoch: intent.invocation_epoch,
-        intent_schema_id: intent.intent_schema_id.clone(),
-        intent_hash: intent.intent_hash.clone(),
-        idempotency_input_schema_id: intent.idempotency_input_schema_id.clone(),
-        idempotency_input_hash: intent.idempotency_input_hash.clone(),
-        capability_kind: intent.capability_kind.clone(),
-        capability_version: intent.capability_version.clone(),
-        adapter_kind: intent.adapter_kind.clone(),
-        adapter_version: intent.adapter_version.clone(),
-        evidence_schema_id,
-        evidence_hash,
-        replay_verifier_id,
+) -> replay::Result<DeterministicProofAction> {
+    if proof_intent_matches_action(intent, ACCEPT_PROOF_ACTION)? {
+        return Ok(DeterministicProofAction::Accept);
     }
+    if proof_intent_matches_action(intent, MANUAL_RESOLUTION_PROOF_ACTION)? {
+        return Ok(DeterministicProofAction::ManualResolution);
+    }
+    Err(replay::ReplayError::new(
+        replay::ReplayErrorKind::SideEffectMismatch,
+        "deterministic proof intent evidence did not match a supported action",
+    ))
+}
+
+fn proof_intent_matches_action(
+    intent: &side_effect::IntentPersisted,
+    action: &str,
+) -> replay::Result<bool> {
+    Ok(
+        intent.intent_hash == digest_value(&proof_intent(action)).map_err(replay_runtime_error)?
+            && intent.idempotency_input_hash
+                == digest_value(&proof_idempotency_input(action)).map_err(replay_runtime_error)?,
+    )
 }
 
 fn proof_side_effect_missing(phase: &str) -> replay::ReplayError {
@@ -1037,4 +851,43 @@ fn replay_capability_error(error: mfm_capabilities::CapabilityError) -> replay::
         replay::ReplayErrorKind::SideEffectMismatch,
         error.to_string(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn executable_identity_summary_matches_golden() {
+        assert_eq!(
+            executable_identity_summary([READ_FACTORY, SIDE_EFFECT_FACTORY, PURE_FACTORY]),
+            [
+                "factory=read_external;source=mfm-transports-proof-built-in;package=mfm-transports-proof;version=0.1.0;cargo_digest=content:sha256-jcs-v1:8e5756e097f23f2a6d5fe8c69846ba7ca609c5a7816528a85d7718cd760357f2;binary_digest=content:sha256-jcs-v1:67de41659eff846aa936862dfb86e7bb6acc9405aeb40f46bddfc4e287cb7f1b;nix_derivation=false;nix_output=false",
+                "factory=apply_side_effect;source=mfm-transports-proof-built-in;package=mfm-transports-proof;version=0.1.0;cargo_digest=content:sha256-jcs-v1:8e5756e097f23f2a6d5fe8c69846ba7ca609c5a7816528a85d7718cd760357f2;binary_digest=content:sha256-jcs-v1:67de41659eff846aa936862dfb86e7bb6acc9405aeb40f46bddfc4e287cb7f1b;nix_derivation=false;nix_output=false",
+                "factory=pure;source=mfm-transports-proof-built-in;package=mfm-transports-proof;version=0.1.0;cargo_digest=content:sha256-jcs-v1:8e5756e097f23f2a6d5fe8c69846ba7ca609c5a7816528a85d7718cd760357f2;binary_digest=content:sha256-jcs-v1:67de41659eff846aa936862dfb86e7bb6acc9405aeb40f46bddfc4e287cb7f1b;nix_derivation=false;nix_output=false",
+            ]
+        );
+    }
+
+    fn executable_identity_summary(factories: [&str; 3]) -> Vec<String> {
+        factories
+            .into_iter()
+            .map(|factory| {
+                let identity =
+                    executable(events::RunnerFactoryId::new(factory).expect("factory id"))
+                        .expect("executable identity");
+                format!(
+                    "factory={};source={};package={};version={};cargo_digest={};binary_digest={};nix_derivation={};nix_output={}",
+                    identity.factory_id,
+                    identity.source_revision,
+                    identity.cargo_package_name,
+                    identity.cargo_package_version,
+                    identity.cargo_package_digest,
+                    identity.binary_digest,
+                    identity.nix_derivation_hash.is_some(),
+                    identity.nix_output_hash.is_some()
+                )
+            })
+            .collect()
+    }
 }

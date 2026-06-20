@@ -26,7 +26,6 @@ mfm_core = { path = "../../crates/core" }
 clap = { version = "4.4", features = ["derive", "env"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-toml = "0.8"
 uuid = { version = "1.0", features = ["v4"] }
 hex = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
@@ -37,14 +36,18 @@ zeroize = "1.7"
 [dev-dependencies]
 mfm-certify = { path = "../../crates/kernel/certify" }
 mfm-events = { path = "../../crates/kernel/events" }
+mfm-manual-auth = { path = "../../crates/kernel/manual-auth" }
 mfm-op-proof = { path = "../../crates/ops/proof-op" }
 mfm-program = { path = "../../crates/kernel/program" }
+mfm-runtime = { path = "../../crates/kernel/runtime" }
 mfm-spec = { path = "../../crates/kernel/spec" }
 mfm-store = { path = "../../crates/kernel/store" }
 tempfile = "3.0"
 assert_cmd = "2.0"
 predicates = "3.0"
 rand = { workspace = true }
+k256 = { version = "0.13.0", features = ["ecdsa"] }
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-none", "postgres"] }
 
 [[bin]]
 name = "mfm_cli"

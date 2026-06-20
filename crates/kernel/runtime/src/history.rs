@@ -12,7 +12,7 @@ use crate::binding::{BoundRuntimeContext, BoundRuntimeContextLoader};
 use crate::commit::SealedTerminalCommitValidation;
 use crate::error::async_store_error;
 use crate::framework::{
-    build_retention_manifest_artifact_with_producer, certified_complete_run_node,
+    build_retention_manifest_artifact, certified_complete_run_node,
     certified_resolve_saga_terminal_node, certified_retention_manifest_node,
     complete_run_receipt_json, projected_retention_manifest, public_output_receipt_digest,
     public_output_rendered_digest, resolve_saga_terminal_receipt_json,
@@ -102,10 +102,21 @@ impl RuntimeCommittedBatch {
 /// Store-owned run history validated against certified runtime authority.
 #[derive(Debug, Clone)]
 pub struct VerifiedRunHistory {
+    view: VerifiedRunHistoryView,
+}
+
+/// Shared verified run-history view for runtime, replay, and app read paths.
+///
+/// This view is minted only from a store-owned committed run stream, certified runtime authority,
+/// and verified retained artifact evidence. It keeps the runtime fold private while exposing stable
+/// accessors for consumers that need read authority without rebuilding raw stream projections.
+#[derive(Debug, Clone)]
+pub struct VerifiedRunHistoryView {
     run_id: RunId,
     spec_hash: SpecHash,
     committed: store::CommittedRunStream,
     artifacts: store::VerifiedRunArtifactStore,
+    runtime: RuntimeRunView,
 }
 
 /// Scheduler-owned verified run context for transition and attempt dispatch.
@@ -173,21 +184,6 @@ impl VerifiedRunContextLoader {
         self.runtime_contexts.load(runtime_spec)
     }
 
-    /// Loads and verifies scheduler context from a sync typed store.
-    pub fn load<S>(
-        &self,
-        runtime_spec: &CertifiedRuntimeSpec,
-        run_id: &RunId,
-        store: &S,
-    ) -> Result<VerifiedRunContext>
-    where
-        S: store::TypedRunEventStore + ?Sized,
-    {
-        let committed =
-            store::CommittedRunStream::from_events(run_id.clone(), store.load_run_stream(run_id))?;
-        self.load_committed_stream(runtime_spec, committed)
-    }
-
     /// Loads and verifies scheduler context from an async typed store.
     pub async fn load_async<S>(
         &self,
@@ -225,25 +221,77 @@ impl VerifiedRunContextLoader {
 }
 
 impl VerifiedRunHistory {
-    /// Loads the authoritative run stream from a typed store and validates it against certified
-    /// runtime authority and verified retained artifact evidence.
-    pub fn from_store<S>(
+    /// Loads the authoritative run stream from an async typed store and validates it against
+    /// certified runtime authority and verified retained artifact evidence.
+    pub async fn from_async_store<S>(
         runtime_spec: &CertifiedRuntimeSpec,
         run_id: &RunId,
         store: &S,
         artifacts: store::VerifiedRunArtifactStore,
     ) -> Result<Self>
     where
-        S: store::TypedRunEventStore + ?Sized,
+        S: store::AsyncTypedRunEventStore + ?Sized,
     {
-        let committed =
-            store::CommittedRunStream::from_events(run_id.clone(), store.load_run_stream(run_id))?;
-        Self::from_committed_stream(runtime_spec, committed, artifacts)
+        Ok(Self {
+            view: VerifiedRunHistoryView::from_async_store(runtime_spec, run_id, store, artifacts)
+                .await?,
+        })
     }
 
-    /// Loads the authoritative run stream from an async typed store and validates it against
-    /// certified runtime authority and verified retained artifact evidence.
-    pub async fn from_async_store<S>(
+    /// Validates a committed stream against certified runtime authority and verified retained
+    /// artifact evidence.
+    pub fn from_committed_stream(
+        runtime_spec: &CertifiedRuntimeSpec,
+        committed: store::CommittedRunStream,
+        artifacts: store::VerifiedRunArtifactStore,
+    ) -> Result<Self> {
+        Ok(Self {
+            view: VerifiedRunHistoryView::from_committed_stream(
+                runtime_spec,
+                committed,
+                artifacts,
+            )?,
+        })
+    }
+
+    /// Shared verified view covered by this history authority.
+    pub fn view(&self) -> &VerifiedRunHistoryView {
+        &self.view
+    }
+
+    /// Run id covered by this verified history.
+    pub fn run_id(&self) -> &RunId {
+        self.view.run_id()
+    }
+
+    /// Certified spec hash covered by this verified history.
+    pub fn spec_hash(&self) -> &SpecHash {
+        self.view.spec_hash()
+    }
+
+    /// Authoritative committed event envelopes covered by this verified history.
+    pub fn events(&self) -> &[store::KernelEventEnvelope] {
+        self.view.events()
+    }
+
+    /// Projection rebuilt from the verified committed stream.
+    pub fn projection_snapshot(&self) -> &store::ProjectionSnapshot {
+        self.view.projection_snapshot()
+    }
+
+    /// Store-owned committed stream authority covered by this runtime verification.
+    pub fn committed_stream(&self) -> &store::CommittedRunStream {
+        self.view.committed_stream()
+    }
+
+    /// Verified retained artifacts required by this run history.
+    pub fn artifact_store(&self) -> &store::VerifiedRunArtifactStore {
+        self.view.artifact_store()
+    }
+}
+
+impl VerifiedRunHistoryView {
+    async fn from_async_store<S>(
         runtime_spec: &CertifiedRuntimeSpec,
         run_id: &RunId,
         store: &S,
@@ -269,37 +317,33 @@ impl VerifiedRunHistory {
         committed: store::CommittedRunStream,
         artifacts: store::VerifiedRunArtifactStore,
     ) -> Result<Self> {
-        RuntimeRunView::from_committed_stream(runtime_spec, &committed)?;
+        let runtime = RuntimeRunView::from_committed_stream(runtime_spec, &committed)?;
         artifacts.validate_committed_stream(&committed)?;
         Ok(Self {
             run_id: committed.run_id().clone(),
             spec_hash: runtime_spec.spec_hash().clone(),
             committed,
             artifacts,
+            runtime,
         })
     }
 
-    /// Run id covered by this verified history.
+    /// Run id covered by this verified view.
     pub fn run_id(&self) -> &RunId {
         &self.run_id
     }
 
-    /// Certified spec hash covered by this verified history.
+    /// Certified spec hash covered by this verified view.
     pub fn spec_hash(&self) -> &SpecHash {
         &self.spec_hash
     }
 
-    /// Authoritative committed event envelopes covered by this verified history.
+    /// Authoritative committed event envelopes covered by this verified view.
     pub fn events(&self) -> &[store::KernelEventEnvelope] {
         self.committed.events()
     }
 
-    /// Projection rebuilt from the verified committed stream.
-    pub fn projection_snapshot(&self) -> &store::ProjectionSnapshot {
-        self.committed.projection()
-    }
-
-    /// Store-owned committed stream authority covered by this runtime verification.
+    /// Store-owned committed stream authority covered by this verified view.
     pub fn committed_stream(&self) -> &store::CommittedRunStream {
         &self.committed
     }
@@ -308,20 +352,24 @@ impl VerifiedRunHistory {
     pub fn artifact_store(&self) -> &store::VerifiedRunArtifactStore {
         &self.artifacts
     }
+
+    /// Projection rebuilt from the verified committed stream.
+    pub fn projection_snapshot(&self) -> &store::ProjectionSnapshot {
+        self.committed.projection()
+    }
+
+    /// Run admission evidence certified for this run.
+    pub fn run_admitted(&self) -> &events::RunAdmitted {
+        &self.runtime.run_admitted
+    }
+
+    /// Next store-owned stream sequence after this committed stream.
+    pub fn head_seq(&self) -> store::StreamSeq {
+        self.committed.next_seq()
+    }
 }
 
 impl RuntimeRunView {
-    #[cfg(test)]
-    pub(crate) fn from_store<S: store::TypedRunEventStore + ?Sized>(
-        runtime_spec: &CertifiedRuntimeSpec,
-        run_id: &RunId,
-        store: &S,
-    ) -> Result<Self> {
-        let committed =
-            store::CommittedRunStream::from_events(run_id.clone(), store.load_run_stream(run_id))?;
-        Self::from_committed_stream(runtime_spec, &committed)
-    }
-
     pub(crate) fn from_stream(
         runtime_spec: &CertifiedRuntimeSpec,
         run_id: &RunId,
@@ -1571,123 +1619,18 @@ fn same_commit_artifact_reference_keys(
 fn same_commit_typed_artifact_keys(
     commit: &[store::KernelEventEnvelope],
 ) -> BTreeSet<RetentionRefKey> {
-    let mut keys = BTreeSet::new();
-    for event in commit {
-        match event.payload() {
-            events::KernelEventPayload::CellProduced(payload) => {
-                keys.insert((
-                    payload.artifact_id.clone(),
-                    payload.content_digest.clone(),
-                    events::ArtifactRole::StateOutput,
-                ));
-            }
-            events::KernelEventPayload::FactRecorded(payload) => {
-                keys.insert((
-                    payload.artifact_id.clone(),
-                    payload.response_hash.clone(),
-                    events::ArtifactRole::FactResponse,
-                ));
-            }
-            events::KernelEventPayload::PublicOutputProduced(payload) => {
-                if let Some(artifact_id) = &payload.rendered_artifact_id {
-                    keys.insert((
-                        artifact_id.clone(),
-                        payload.rendered_digest.clone(),
-                        events::ArtifactRole::PublicOutput,
-                    ));
-                }
-            }
-            events::KernelEventPayload::PublicOutputRenderFailed(payload) => {
-                insert_error_diagnostic_key(&payload.error, &mut keys);
-            }
-            events::KernelEventPayload::StateAttemptFailed(payload) => {
-                insert_error_diagnostic_key(&payload.error, &mut keys);
-            }
-            events::KernelEventPayload::SideEffectIntentPersisted(payload) => {
-                keys.insert((
-                    payload.intent_artifact_id.clone(),
-                    payload.intent_hash.clone(),
-                    events::ArtifactRole::SideEffectIntent,
-                ));
-            }
-            events::KernelEventPayload::SideEffectInvocationPrepared(payload) => {
-                if let (Some(artifact_id), Some(content_digest)) =
-                    (&payload.prepared_artifact_id, &payload.prepared_hash)
-                {
-                    keys.insert((
-                        artifact_id.clone(),
-                        content_digest.clone(),
-                        events::ArtifactRole::PreparedInvocation,
-                    ));
-                }
-            }
-            events::KernelEventPayload::SideEffectNotSubmittedProven(payload) => {
-                keys.insert((
-                    payload.proof_artifact_id.clone(),
-                    payload.proof_hash.clone(),
-                    events::ArtifactRole::NotSubmittedProof,
-                ));
-            }
-            events::KernelEventPayload::SideEffectSubmissionObserved(payload) => {
-                keys.insert((
-                    payload.submission_artifact_id.clone(),
-                    payload.submission_hash.clone(),
-                    events::ArtifactRole::Submission,
-                ));
-            }
-            events::KernelEventPayload::SideEffectSubmissionUnknown(payload) => {
-                keys.insert((
-                    payload.evidence_artifact_id.clone(),
-                    payload.evidence_hash.clone(),
-                    events::ArtifactRole::SubmissionUnknownEvidence,
-                ));
-            }
-            events::KernelEventPayload::SideEffectReceiptObserved(payload) => {
-                keys.insert((
-                    payload.receipt_artifact_id.clone(),
-                    payload.receipt_hash.clone(),
-                    events::ArtifactRole::Receipt,
-                ));
-            }
-            events::KernelEventPayload::SideEffectConfirmationObserved(payload) => {
-                keys.insert((
-                    payload.confirmation_artifact_id.clone(),
-                    payload.confirmation_hash.clone(),
-                    events::ArtifactRole::Confirmation,
-                ));
-            }
-            events::KernelEventPayload::ManualResolutionRecorded(payload) => {
-                keys.insert((
-                    payload.evidence_artifact_id.clone(),
-                    payload.evidence_hash.clone(),
-                    events::ArtifactRole::ManualResolutionEvidence,
-                ));
-                keys.insert((
-                    payload.authorization_artifact_id.clone(),
-                    payload.authorization_hash.clone(),
-                    events::ArtifactRole::ManualResolutionAuthorization,
-                ));
-            }
-            events::KernelEventPayload::SideEffectAmbiguous(payload) => {
-                keys.insert((
-                    payload.evidence_artifact_id.clone(),
-                    payload.evidence_hash.clone(),
-                    events::ArtifactRole::AmbiguityEvidence,
-                ));
-            }
-            events::KernelEventPayload::SideEffectFailed(payload) => {
-                insert_error_diagnostic_key(&payload.error, &mut keys);
-            }
-            _ => {}
-        }
-    }
-    keys
-}
-
-fn insert_error_diagnostic_key(error: &events::MfmErrorInfo, keys: &mut BTreeSet<RetentionRefKey>) {
-    if let Some(diagnostic) = &error.diagnostic_ref {
-        keys.insert(event_artifact_ref_key(diagnostic));
-    }
+    commit
+        .iter()
+        .flat_map(|event| store::event_artifact_requirements(event.payload()))
+        .filter(|requirement| requirement.source.is_same_commit_payload_evidence())
+        .filter_map(|requirement| {
+            Some((
+                requirement.artifact_id,
+                requirement.digest?,
+                requirement.artifact_role?,
+            ))
+        })
+        .collect()
 }
 
 fn validate_historical_retention_manifest_batch(
@@ -1719,12 +1662,8 @@ fn validate_historical_retention_manifest_batch(
                 .to_owned(),
         ));
     }
-    let expected = build_retention_manifest_artifact_with_producer(
-        runtime_spec,
-        &projection.run_id,
-        pre_projection_stream,
-        Some(retention_node.node_id.clone()),
-    )?;
+    let expected =
+        build_retention_manifest_artifact(runtime_spec, &projection.run_id, pre_projection_stream)?;
     if projection.manifest_seq != expected.manifest_seq
         || projection.manifest_digest != expected.evidence.digest
         || projection.previous_manifest_digest != expected.previous_manifest_digest

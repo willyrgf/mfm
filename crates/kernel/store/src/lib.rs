@@ -21,6 +21,7 @@ pub mod v1 {
     use std::future::Future;
     use std::marker::PhantomData;
     use std::pin::Pin;
+    use std::sync::{Arc, Mutex, MutexGuard};
 
     use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
     use mfm_capabilities::{CapabilityDescriptor, CapabilityRole, CapabilitySetDescriptor};
@@ -916,82 +917,6 @@ pub mod v1 {
         pub manual_resolution: Option<ManualResolutionProjection>,
         /// Run completion recorded for the run, if any.
         pub run_completion: Option<RunCompletionProjection>,
-    }
-
-    /// Store-derived authority that a prefix is manually blocked.
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub struct ManualBlockedPrefix {
-        run_id: RunId,
-        spec_hash: SpecHash,
-        expected_next_seq: StreamSeq,
-        manual_block_reason: ManualBlockReason,
-        manual_policy: ManualResolutionEvidenceSpec,
-    }
-
-    impl ManualBlockedPrefix {
-        /// Mints manual-blocked prefix authority from certified policy and the current saga view.
-        pub fn new(
-            saga: &SagaProjection,
-            spec_hash: SpecHash,
-            expected_next_seq: StreamSeq,
-            policy: &SagaPolicySpec,
-        ) -> Result<Self> {
-            if saga.run_mode != RunMode::ManualBlocked {
-                return Err(StoreError::ProjectionConflict {
-                    key: format!("run:{}:manual_prefix", saga.run_id),
-                    message: format!(
-                        "manual prefix requires manual_blocked saga mode, found {}",
-                        saga.run_mode.as_str()
-                    ),
-                });
-            }
-            let reason =
-                saga.manual_block_reason
-                    .ok_or_else(|| StoreError::ProjectionConflict {
-                        key: format!("run:{}:manual_prefix", saga.run_id),
-                        message: "manual prefix lacks block reason".to_owned(),
-                    })?;
-            let manual_policy = manual_policy_for_block_reason(policy, reason)
-                .ok_or_else(|| StoreError::ProjectionConflict {
-                    key: format!("run:{}:manual_prefix", saga.run_id),
-                    message:
-                        "certified saga policy does not permit manual resolution for this prefix"
-                            .to_owned(),
-                })?
-                .clone();
-            Ok(Self {
-                run_id: saga.run_id.clone(),
-                spec_hash,
-                expected_next_seq,
-                manual_block_reason: reason,
-                manual_policy,
-            })
-        }
-
-        /// Returns the run id bound into this prefix.
-        pub const fn run_id(&self) -> &RunId {
-            &self.run_id
-        }
-
-        /// Returns the certified spec hash bound into this prefix.
-        pub const fn spec_hash(&self) -> &SpecHash {
-            &self.spec_hash
-        }
-
-        /// Returns the expected sequence for the manual-resolution append.
-        pub const fn expected_next_seq(&self) -> StreamSeq {
-            self.expected_next_seq
-        }
-
-        /// Returns the manual block reason derived from the prefix.
-        pub const fn manual_block_reason(&self) -> ManualBlockReason {
-            self.manual_block_reason
-        }
-
-        /// Returns the certified manual evidence policy bound into this prefix.
-        pub const fn manual_policy(&self) -> &ManualResolutionEvidenceSpec {
-            &self.manual_policy
-        }
     }
 
     /// Non-empty proof that compensating obligations were closed.
@@ -4669,33 +4594,11 @@ pub mod v1 {
         Ok(())
     }
 
-    /// Read-only access to store-owned projections.
-    pub trait TypedProjectionRead {
-        /// Returns the current projection snapshot.
-        fn projection_snapshot(&self) -> &ProjectionSnapshot;
-    }
-
-    /// Typed run event store commit contract.
-    pub trait TypedRunEventStore: TypedProjectionRead {
-        /// Atomically appends one purpose-specific prepared commit plan.
-        fn append_prepared_commit_plan(
-            &mut self,
-            plan: PreparedCommitPlan,
-        ) -> Result<CommitOutcome>;
-
-        /// Loads the authoritative run stream.
-        fn load_run_stream(&self, run_id: &RunId) -> Vec<KernelEventEnvelope>;
-
-        /// Returns the next store-owned stream sequence for a run.
-        fn expected_next_seq(&self, run_id: &RunId) -> StreamSeq;
-    }
-
     /// Async typed run event store commit contract for durable stores.
     ///
-    /// This is the same certified commit surface as [`TypedRunEventStore`]. Runtime execution code
-    /// must derive run-local read views from the authoritative stream returned by
-    /// [`Self::load_run_stream`]. App status rendering may additionally request store-owned
-    /// cross-run projection authority through [`Self::status_projection_snapshot`].
+    /// Runtime execution code must derive run-local read views from the authoritative stream
+    /// returned by [`Self::load_run_stream`]. App status rendering may additionally request
+    /// store-owned cross-run projection authority through [`Self::status_projection_snapshot`].
     pub trait AsyncTypedRunEventStore {
         /// Store-specific error type.
         type Error: StoreErrorInspection + fmt::Display + Send + Sync + 'static;
@@ -4744,9 +4647,9 @@ pub mod v1 {
     /// Authoritative state needed to validate and stage one absent commit-key append.
     ///
     /// Durable stores load this from their run stream, artifact table, logical-key table, and
-    /// rebuilt projections before calling [`stage_typed_run_commit`]. Commit-key lookup remains the
-    /// storage implementation's responsibility because the RFC requires that lookup to precede stale
-    /// `expected_next_seq` checks.
+    /// rebuilt projections before calling [`stage_prepared_commit_plan`]. Commit-key lookup remains
+    /// the storage implementation's responsibility because the RFC requires that lookup to precede
+    /// stale `expected_next_seq` checks.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct TypedCommitBase {
         /// Artifact evidence recorded before event commit.
@@ -4814,9 +4717,9 @@ pub mod v1 {
         }
     }
 
-    /// In-memory implementation of the typed store contract for contract tests.
+    /// Private in-memory implementation behind the async typed store test backend.
     #[derive(Debug, Clone, Default)]
-    pub struct InMemoryTypedRunStore {
+    struct TypedRunMemoryCore {
         streams: BTreeMap<RunId, Vec<CommittedBatch>>,
         commit_keys: BTreeMap<(RunId, CommitKey), CommitKeyRecord>,
         artifacts: BTreeMap<ArtifactId, ArtifactEvidenceRef>,
@@ -4825,12 +4728,7 @@ pub mod v1 {
         projections: ProjectionSnapshot,
     }
 
-    impl InMemoryTypedRunStore {
-        /// Creates an empty in-memory typed run store.
-        pub fn new() -> Self {
-            Self::default()
-        }
-
+    impl TypedRunMemoryCore {
         fn stream_events(&self, run_id: &RunId) -> Vec<KernelEventEnvelope> {
             self.streams
                 .get(run_id)
@@ -4894,8 +4792,8 @@ pub mod v1 {
             compare_artifact_field(
                 &evidence.artifact_id,
                 "artifact_role",
-                artifact_role_str(stored.artifact_role),
-                artifact_role_str(evidence.artifact_role),
+                stored.artifact_role.as_str(),
+                evidence.artifact_role.as_str(),
             )
         }
 
@@ -4988,19 +4886,6 @@ pub mod v1 {
         }
     }
 
-    /// Validates and stages a typed commit after the caller has handled commit-key idempotency.
-    ///
-    /// This is the shared commit engine for in-memory and durable stores. It checks stale sequence,
-    /// payload run/spec identity, logical-key preconditions, artifact evidence, and projection
-    /// transitions, then returns the store-owned envelopes plus staged projection/logical-key state.
-    pub fn stage_typed_run_commit(
-        base: &TypedCommitBase,
-        request: &TypedCommitRequest,
-    ) -> Result<StagedTypedCommit> {
-        let fingerprint = commit_fingerprint(request)?;
-        stage_typed_run_commit_with_fingerprint(base, request, fingerprint)
-    }
-
     /// Validates and stages a purpose-specific prepared commit plan after commit-key idempotency handling.
     ///
     /// The returned batch fingerprint covers the full prepared mutation, including the artifact
@@ -5032,8 +4917,9 @@ pub mod v1 {
             &request.payloads,
         )?;
         validate_retention_manifest_pairs(&request.payloads)?;
+        validate_payload_public_diagnostics(&request.payloads)?;
 
-        let verifier = InMemoryTypedRunStore {
+        let verifier = TypedRunMemoryCore {
             streams: BTreeMap::new(),
             commit_keys: BTreeMap::new(),
             artifacts: base.artifacts.clone(),
@@ -5136,18 +5022,6 @@ pub mod v1 {
         })
     }
 
-    /// Builds a store-owned committed batch for an already validated request and persisted sequence.
-    ///
-    /// Durable stores use this after a same-fingerprint commit-key hit so the idempotent result can
-    /// return the original sequence even when the caller's `expected_next_seq` is stale.
-    pub fn build_committed_batch(
-        request: &TypedCommitRequest,
-        committed_seq: StreamSeq,
-    ) -> Result<CommittedBatch> {
-        let fingerprint = commit_fingerprint(request)?;
-        build_committed_batch_with_fingerprint(request, committed_seq, fingerprint)
-    }
-
     /// Builds a store-owned committed batch for an already persisted prepared commit plan.
     ///
     /// Durable stores use this after a same-fingerprint prepared plan commit-key hit so the idempotent
@@ -5208,13 +5082,11 @@ pub mod v1 {
         })
     }
 
-    impl TypedProjectionRead for InMemoryTypedRunStore {
+    impl TypedRunMemoryCore {
         fn projection_snapshot(&self) -> &ProjectionSnapshot {
             &self.projections
         }
-    }
 
-    impl TypedRunEventStore for InMemoryTypedRunStore {
         fn append_prepared_commit_plan(
             &mut self,
             plan: PreparedCommitPlan,
@@ -5277,6 +5149,141 @@ pub mod v1 {
                 .map(|batch| batch.seq.checked_next().unwrap_or(StreamSeq(u64::MAX)))
                 .unwrap_or(StreamSeq::FIRST)
         }
+    }
+
+    /// Non-durable async wrapper around a private in-memory typed store core.
+    ///
+    /// This is intended for contract tests and single-process local tools that need the async typed
+    /// store API without a durable backend. It must not be used as a production persistence store.
+    #[derive(Debug, Clone, Default)]
+    pub struct AsyncInMemoryTypedRunStore {
+        inner: Arc<Mutex<TypedRunMemoryCore>>,
+    }
+
+    impl AsyncInMemoryTypedRunStore {
+        /// Creates an empty async in-memory typed run store.
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        /// Returns the current in-memory projection snapshot.
+        pub fn projection_snapshot(&self) -> Result<ProjectionSnapshot> {
+            self.lock_inner()
+                .map(|store| store.projection_snapshot().clone())
+        }
+
+        fn lock_inner(&self) -> Result<MutexGuard<'_, TypedRunMemoryCore>> {
+            self.inner.lock().map_err(|_| {
+                StoreError::Event("async in-memory typed run store lock poisoned".to_owned())
+            })
+        }
+    }
+
+    impl AsyncTypedRunEventStore for AsyncInMemoryTypedRunStore {
+        type Error = StoreError;
+
+        fn append_prepared_commit_plan<'a>(
+            &'a self,
+            plan: PreparedCommitPlan,
+        ) -> AsyncStoreFuture<'a, CommitOutcome, Self::Error> {
+            let result = self
+                .lock_inner()
+                .and_then(|mut store| store.append_prepared_commit_plan(plan));
+            Box::pin(std::future::ready(result))
+        }
+
+        fn load_run_stream<'a>(
+            &'a self,
+            run_id: &'a RunId,
+        ) -> AsyncStoreFuture<'a, Vec<KernelEventEnvelope>, Self::Error> {
+            let result = self.lock_inner().map(|store| store.load_run_stream(run_id));
+            Box::pin(std::future::ready(result))
+        }
+
+        fn expected_next_seq<'a>(
+            &'a self,
+            run_id: &'a RunId,
+        ) -> AsyncStoreFuture<'a, StreamSeq, Self::Error> {
+            let result = self
+                .lock_inner()
+                .map(|store| store.expected_next_seq(run_id));
+            Box::pin(std::future::ready(result))
+        }
+
+        fn status_projection_snapshot<'a>(
+            &'a self,
+            run_id: &'a RunId,
+        ) -> AsyncStoreFuture<'a, ProjectionSnapshot, Self::Error> {
+            let result = self
+                .lock_inner()
+                .map(|store| {
+                    let stream = store.load_run_stream(run_id);
+                    let run_projection = ProjectionSnapshot::rebuild_from_run_stream(&stream)?;
+                    projection_with_resource_lanes(
+                        &run_projection,
+                        store
+                            .projection_snapshot()
+                            .resource_lanes()
+                            .map(|(lane_key, projection)| (lane_key.clone(), projection.clone()))
+                            .collect(),
+                    )
+                })
+                .and_then(|result| result);
+            Box::pin(std::future::ready(result))
+        }
+    }
+
+    fn projection_with_resource_lanes(
+        snapshot: &ProjectionSnapshot,
+        resource_lanes: BTreeMap<ResourceLaneKey, ResourceLaneProjection>,
+    ) -> Result<ProjectionSnapshot> {
+        ProjectionSnapshot::from_parts(ProjectionSnapshotParts {
+            run_states: snapshot
+                .run_states()
+                .map(|(run_id, state)| (run_id.clone(), *state))
+                .collect(),
+            saga_policy_digests: snapshot
+                .saga_policy_digests()
+                .map(|(run_id, digest)| (run_id.clone(), digest.clone()))
+                .collect(),
+            run_completions: snapshot
+                .run_completions()
+                .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
+                .collect(),
+            saga_engagements: snapshot
+                .saga_engagements()
+                .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
+                .collect(),
+            manual_resolutions: snapshot
+                .manual_resolutions()
+                .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
+                .collect(),
+            attempts: snapshot
+                .attempts()
+                .map(|(key, projection)| (key.clone(), projection.clone()))
+                .collect(),
+            cells: snapshot
+                .cells()
+                .map(|(cell_id, projection)| (cell_id.clone(), projection.clone()))
+                .collect(),
+            facts: snapshot
+                .facts()
+                .map(|(key, projection)| (key.clone(), projection.clone()))
+                .collect(),
+            side_effects: snapshot
+                .side_effects()
+                .map(|(ledger_ref, projection)| (ledger_ref.clone(), projection.clone()))
+                .collect(),
+            resource_lanes,
+            public_outputs: snapshot
+                .public_outputs()
+                .map(|(schema_id, projection)| (schema_id.clone(), projection.clone()))
+                .collect(),
+            retentions: snapshot
+                .retentions()
+                .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
+                .collect(),
+        })
     }
 
     fn admit_artifact_evidence(
@@ -5418,9 +5425,6 @@ pub mod v1 {
             .collect::<BTreeMap<_, _>>();
         for payload in &request.payloads {
             for requirement in event_artifact_requirements(payload) {
-                if requirement.source.is_retention() {
-                    continue;
-                }
                 let evidence = required.get(&requirement.artifact_id).ok_or_else(|| {
                     invalid_prepared_commit_purpose(
                         purpose,
@@ -5430,115 +5434,72 @@ pub mod v1 {
                         ),
                     )
                 })?;
-                validate_required_artifact_field(
-                    purpose,
-                    &requirement,
-                    "digest",
-                    requirement.digest.as_ref(),
-                    Some(&evidence.digest),
-                )?;
-                validate_required_artifact_field(
-                    purpose,
-                    &requirement,
-                    "byte_len",
-                    requirement.byte_len.as_ref(),
-                    Some(&evidence.byte_len),
-                )?;
-                validate_required_artifact_field(
-                    purpose,
-                    &requirement,
-                    "media_type",
-                    requirement.media_type.as_ref(),
-                    Some(&evidence.media_type),
-                )?;
-                validate_required_artifact_field(
-                    purpose,
-                    &requirement,
-                    "schema_id",
-                    requirement.schema_id.as_ref(),
-                    evidence.schema_id.as_ref(),
-                )?;
-                validate_required_artifact_field(
-                    purpose,
-                    &requirement,
-                    "semantic_type_id",
-                    requirement.semantic_type_id.as_ref(),
-                    evidence.semantic_type_id.as_ref(),
-                )?;
-                validate_required_artifact_field(
-                    purpose,
-                    &requirement,
-                    "producer_node_id",
-                    requirement.producer_node_id.as_ref(),
-                    evidence.producer_node_id.as_ref(),
-                )?;
-                validate_required_artifact_field(
-                    purpose,
-                    &requirement,
-                    "producer_seed_id",
-                    requirement.producer_seed_id.as_ref(),
-                    evidence.producer_seed_id.as_ref(),
-                )?;
-                validate_required_artifact_field(
-                    purpose,
-                    &requirement,
-                    "artifact_role",
-                    requirement.artifact_role.as_ref(),
-                    Some(&evidence.artifact_role),
-                )?;
+                validate_required_artifact_requirement(purpose, &requirement, evidence)?;
             }
         }
         Ok(())
     }
 
-    fn validate_required_artifact_field<T: PartialEq>(
+    fn validate_required_artifact_requirement(
         purpose: &'static str,
-        requirement: &EventArtifactRequirement,
-        field: &'static str,
-        expected: Option<&T>,
-        actual: Option<&T>,
-    ) -> Result<()> {
-        if expected.is_none() || expected == actual {
-            Ok(())
-        } else {
-            Err(invalid_prepared_commit_purpose(
-                purpose,
-                format!(
-                    "required artifact {} field {field} does not satisfy payload reference",
-                    requirement.artifact_id
-                ),
-            ))
-        }
-    }
-
-    fn validate_artifact_requirement_against_evidence(
         requirement: &EventArtifactRequirement,
         evidence: &ArtifactEvidenceRef,
     ) -> Result<()> {
-        if let Some(digest) = &requirement.digest {
-            compare_artifact_field(
-                &requirement.artifact_id,
-                "digest",
-                evidence.digest.as_str(),
-                digest.as_str(),
-            )?;
+        validate_artifact_requirement_against_evidence(requirement, evidence).map_err(|error| {
+            if let StoreError::ArtifactEvidenceMismatch { field, .. } = error {
+                return invalid_prepared_commit_purpose(
+                    purpose,
+                    format!(
+                        "required artifact {} field {field} does not satisfy payload reference",
+                        requirement.artifact_id
+                    ),
+                );
+            }
+            error
+        })
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ArtifactRequirementValidationMode {
+        Strict,
+        RetentionMetadata,
+    }
+
+    fn artifact_evidence_mismatch(artifact_id: &ArtifactId, field: &'static str) -> StoreError {
+        StoreError::ArtifactEvidenceMismatch {
+            artifact_id: artifact_id.clone(),
+            field,
         }
-        if let Some(byte_len) = requirement.byte_len {
-            compare_artifact_field(
-                &requirement.artifact_id,
-                "byte_len",
-                evidence.byte_len,
-                byte_len,
-            )?;
+    }
+
+    fn require_artifact_option_present(
+        artifact_id: &ArtifactId,
+        field: &'static str,
+        actual: Option<&str>,
+    ) -> Result<()> {
+        if actual.is_some() {
+            Ok(())
+        } else {
+            Err(artifact_evidence_mismatch(artifact_id, field))
         }
-        if let Some(media_type) = &requirement.media_type {
-            compare_artifact_field(
-                &requirement.artifact_id,
-                "media_type",
-                evidence.media_type.as_str(),
-                media_type.as_str(),
-            )?;
+    }
+
+    fn require_artifact_option_absent(
+        artifact_id: &ArtifactId,
+        field: &'static str,
+        actual: Option<&str>,
+    ) -> Result<()> {
+        if actual.is_none() {
+            Ok(())
+        } else {
+            Err(artifact_evidence_mismatch(artifact_id, field))
         }
+    }
+
+    fn validate_artifact_requirement_exact_fields(
+        requirement: &EventArtifactRequirement,
+        evidence: &ArtifactEvidenceRef,
+    ) -> Result<()> {
         if let Some(schema_id) = &requirement.schema_id {
             compare_artifact_option(
                 &requirement.artifact_id,
@@ -5574,13 +5535,310 @@ pub mod v1 {
                 Some(producer_seed_id.as_str()),
             )?;
         }
+        Ok(())
+    }
+
+    fn validate_artifact_schema_policy(
+        requirement: &EventArtifactRequirement,
+        evidence: &ArtifactEvidenceRef,
+        policy: events::ArtifactSchemaPolicy,
+        mode: ArtifactRequirementValidationMode,
+    ) -> Result<()> {
+        let actual = evidence.schema_id.as_ref().map(SchemaId::as_str);
+        match policy {
+            events::ArtifactSchemaPolicy::OptionalLaunchSchema => {
+                if let Some(schema_id) = &requirement.schema_id {
+                    compare_artifact_option(
+                        &requirement.artifact_id,
+                        "schema_id",
+                        actual,
+                        Some(schema_id.as_str()),
+                    )?;
+                }
+            }
+            events::ArtifactSchemaPolicy::ExactSeedSchema
+            | events::ArtifactSchemaPolicy::ExactValueSchema
+            | events::ArtifactSchemaPolicy::ExactEvidenceSchema
+            | events::ArtifactSchemaPolicy::ExactPublicSchema
+            | events::ArtifactSchemaPolicy::ExactDiagnosticSchema => {
+                if let Some(schema_id) = &requirement.schema_id {
+                    compare_artifact_option(
+                        &requirement.artifact_id,
+                        "schema_id",
+                        actual,
+                        Some(schema_id.as_str()),
+                    )?;
+                } else if mode == ArtifactRequirementValidationMode::RetentionMetadata {
+                    require_artifact_option_present(&requirement.artifact_id, "schema_id", actual)?;
+                } else {
+                    return Err(artifact_evidence_mismatch(
+                        &requirement.artifact_id,
+                        "schema_id",
+                    ));
+                }
+            }
+            events::ArtifactSchemaPolicy::Absent => {
+                if requirement.schema_id.is_some() {
+                    return Err(artifact_evidence_mismatch(
+                        &requirement.artifact_id,
+                        "schema_id",
+                    ));
+                }
+                require_artifact_option_absent(&requirement.artifact_id, "schema_id", actual)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_artifact_semantic_policy(
+        requirement: &EventArtifactRequirement,
+        evidence: &ArtifactEvidenceRef,
+        policy: events::ArtifactSemanticPolicy,
+        mode: ArtifactRequirementValidationMode,
+    ) -> Result<()> {
+        let actual = evidence
+            .semantic_type_id
+            .as_ref()
+            .map(SemanticTypeId::as_str);
+        match policy {
+            events::ArtifactSemanticPolicy::OptionalLaunchSemantic => {
+                if let Some(semantic_type_id) = &requirement.semantic_type_id {
+                    compare_artifact_option(
+                        &requirement.artifact_id,
+                        "semantic_type_id",
+                        actual,
+                        Some(semantic_type_id.as_str()),
+                    )?;
+                }
+            }
+            events::ArtifactSemanticPolicy::ExactSeedSemantic
+            | events::ArtifactSemanticPolicy::ExactValueSemantic => {
+                if let Some(semantic_type_id) = &requirement.semantic_type_id {
+                    compare_artifact_option(
+                        &requirement.artifact_id,
+                        "semantic_type_id",
+                        actual,
+                        Some(semantic_type_id.as_str()),
+                    )?;
+                } else if mode == ArtifactRequirementValidationMode::RetentionMetadata {
+                    require_artifact_option_present(
+                        &requirement.artifact_id,
+                        "semantic_type_id",
+                        actual,
+                    )?;
+                } else {
+                    return Err(artifact_evidence_mismatch(
+                        &requirement.artifact_id,
+                        "semantic_type_id",
+                    ));
+                }
+            }
+            events::ArtifactSemanticPolicy::Absent => {
+                if requirement.semantic_type_id.is_some() {
+                    return Err(artifact_evidence_mismatch(
+                        &requirement.artifact_id,
+                        "semantic_type_id",
+                    ));
+                }
+                require_artifact_option_absent(
+                    &requirement.artifact_id,
+                    "semantic_type_id",
+                    actual,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn require_producer_node_absent(
+        requirement: &EventArtifactRequirement,
+        evidence: &ArtifactEvidenceRef,
+    ) -> Result<()> {
+        if requirement.producer_node_id.is_some() {
+            return Err(artifact_evidence_mismatch(
+                &requirement.artifact_id,
+                "producer_node_id",
+            ));
+        }
+        require_artifact_option_absent(
+            &requirement.artifact_id,
+            "producer_node_id",
+            evidence.producer_node_id.as_ref().map(NodeId::as_str),
+        )
+    }
+
+    fn require_producer_seed_absent(
+        requirement: &EventArtifactRequirement,
+        evidence: &ArtifactEvidenceRef,
+    ) -> Result<()> {
+        if requirement.producer_seed_id.is_some() {
+            return Err(artifact_evidence_mismatch(
+                &requirement.artifact_id,
+                "producer_seed_id",
+            ));
+        }
+        require_artifact_option_absent(
+            &requirement.artifact_id,
+            "producer_seed_id",
+            evidence.producer_seed_id.as_ref().map(SeedId::as_str),
+        )
+    }
+
+    fn require_producer_node_exact_or_present(
+        requirement: &EventArtifactRequirement,
+        evidence: &ArtifactEvidenceRef,
+        mode: ArtifactRequirementValidationMode,
+    ) -> Result<()> {
+        let actual = evidence.producer_node_id.as_ref().map(NodeId::as_str);
+        if let Some(producer_node_id) = &requirement.producer_node_id {
+            compare_artifact_option(
+                &requirement.artifact_id,
+                "producer_node_id",
+                actual,
+                Some(producer_node_id.as_str()),
+            )
+        } else if mode == ArtifactRequirementValidationMode::RetentionMetadata {
+            require_artifact_option_present(&requirement.artifact_id, "producer_node_id", actual)
+        } else {
+            Err(artifact_evidence_mismatch(
+                &requirement.artifact_id,
+                "producer_node_id",
+            ))
+        }
+    }
+
+    fn require_producer_seed_exact_or_present(
+        requirement: &EventArtifactRequirement,
+        evidence: &ArtifactEvidenceRef,
+        mode: ArtifactRequirementValidationMode,
+    ) -> Result<()> {
+        let actual = evidence.producer_seed_id.as_ref().map(SeedId::as_str);
+        if let Some(producer_seed_id) = &requirement.producer_seed_id {
+            compare_artifact_option(
+                &requirement.artifact_id,
+                "producer_seed_id",
+                actual,
+                Some(producer_seed_id.as_str()),
+            )
+        } else if mode == ArtifactRequirementValidationMode::RetentionMetadata {
+            require_artifact_option_present(&requirement.artifact_id, "producer_seed_id", actual)
+        } else {
+            Err(artifact_evidence_mismatch(
+                &requirement.artifact_id,
+                "producer_seed_id",
+            ))
+        }
+    }
+
+    fn validate_optional_producer_node_no_seed(
+        requirement: &EventArtifactRequirement,
+        evidence: &ArtifactEvidenceRef,
+    ) -> Result<()> {
+        require_producer_seed_absent(requirement, evidence)?;
+        if let Some(producer_node_id) = &requirement.producer_node_id {
+            compare_artifact_option(
+                &requirement.artifact_id,
+                "producer_node_id",
+                evidence.producer_node_id.as_ref().map(NodeId::as_str),
+                Some(producer_node_id.as_str()),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn validate_artifact_producer_policy(
+        requirement: &EventArtifactRequirement,
+        evidence: &ArtifactEvidenceRef,
+        policy: events::ArtifactProducerScope,
+        mode: ArtifactRequirementValidationMode,
+    ) -> Result<()> {
+        match policy {
+            events::ArtifactProducerScope::LaunchOrGlobalNoSeed
+            | events::ArtifactProducerScope::DiagnosticOptionalNodeNoSeed => {
+                validate_optional_producer_node_no_seed(requirement, evidence)?;
+            }
+            events::ArtifactProducerScope::SeedRequired => {
+                require_producer_node_absent(requirement, evidence)?;
+                require_producer_seed_exact_or_present(requirement, evidence, mode)?;
+            }
+            events::ArtifactProducerScope::NodeRequired => {
+                require_producer_seed_absent(requirement, evidence)?;
+                require_producer_node_exact_or_present(requirement, evidence, mode)?;
+            }
+            events::ArtifactProducerScope::GlobalNoSeed
+            | events::ArtifactProducerScope::MiddlewareNoSeed => {
+                require_producer_node_absent(requirement, evidence)?;
+                require_producer_seed_absent(requirement, evidence)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_artifact_role_contract(
+        requirement: &EventArtifactRequirement,
+        evidence: &ArtifactEvidenceRef,
+        role: ArtifactRole,
+        mode: ArtifactRequirementValidationMode,
+    ) -> Result<()> {
+        let contract = role.contract();
+        validate_artifact_schema_policy(requirement, evidence, contract.schema, mode)?;
+        validate_artifact_semantic_policy(requirement, evidence, contract.semantic, mode)?;
+        validate_artifact_producer_policy(requirement, evidence, contract.producer, mode)
+    }
+
+    /// Validates a typed event artifact requirement against retained artifact evidence.
+    ///
+    /// This applies the closed [`events::ArtifactRole`] contract for role-bearing requirements and
+    /// exact carried-field matching for schema-only requirements.
+    pub fn validate_artifact_requirement_against_evidence(
+        requirement: &EventArtifactRequirement,
+        evidence: &ArtifactEvidenceRef,
+    ) -> Result<()> {
+        let mode = if requirement.source.is_retention() {
+            ArtifactRequirementValidationMode::RetentionMetadata
+        } else {
+            ArtifactRequirementValidationMode::Strict
+        };
+        compare_artifact_field(
+            &requirement.artifact_id,
+            "artifact_id",
+            evidence.artifact_id.as_str(),
+            requirement.artifact_id.as_str(),
+        )?;
+        if let Some(digest) = &requirement.digest {
+            compare_artifact_field(
+                &requirement.artifact_id,
+                "digest",
+                evidence.digest.as_str(),
+                digest.as_str(),
+            )?;
+        }
+        if let Some(byte_len) = requirement.byte_len {
+            compare_artifact_field(
+                &requirement.artifact_id,
+                "byte_len",
+                evidence.byte_len,
+                byte_len,
+            )?;
+        }
+        if let Some(media_type) = &requirement.media_type {
+            compare_artifact_field(
+                &requirement.artifact_id,
+                "media_type",
+                evidence.media_type.as_str(),
+                media_type.as_str(),
+            )?;
+        }
         if let Some(role) = requirement.artifact_role {
             compare_artifact_field(
                 &requirement.artifact_id,
                 "artifact_role",
-                artifact_role_str(evidence.artifact_role),
-                artifact_role_str(role),
+                evidence.artifact_role.as_str(),
+                role.as_str(),
             )?;
+            validate_artifact_role_contract(requirement, evidence, role, mode)?;
+        } else {
+            validate_artifact_requirement_exact_fields(requirement, evidence)?;
         }
         Ok(())
     }
@@ -5597,6 +5855,20 @@ pub mod v1 {
                 artifact_id: evidence.artifact_id.clone(),
                 field: "bytes",
             });
+        }
+        Ok(())
+    }
+
+    fn validate_payload_public_diagnostics(payloads: &[KernelEventPayload]) -> Result<()> {
+        for payload in payloads {
+            match payload {
+                KernelEventPayload::PublicOutputRenderFailed(payload) => {
+                    payload.error.validate()?
+                }
+                KernelEventPayload::StateAttemptFailed(payload) => payload.error.validate()?,
+                KernelEventPayload::SideEffectFailed(payload) => payload.error.validate()?,
+                _ => {}
+            }
         }
         Ok(())
     }
@@ -6473,31 +6745,11 @@ pub mod v1 {
         canonical_json(payload_json(payload))
     }
 
-    /// Returns the canonical payload hash for a typed event payload.
-    pub fn payload_hash(payload: &KernelEventPayload) -> Result<ContentDigest> {
-        Ok(payload_canonical_json(payload)?.content_digest())
-    }
-
-    /// Computes the canonical idempotency fingerprint for a typed commit request.
-    ///
-    /// The fingerprint intentionally excludes `expected_next_seq`, so idempotent retries can be
-    /// recognized before stale sequence checks as required by the store contract.
-    pub fn commit_fingerprint(request: &TypedCommitRequest) -> Result<CommitFingerprint> {
-        let canonical = canonical_json(serde_json::json!({
-            "commit_key": request.commit_key.as_str(),
-            "payloads": request.payloads.iter().map(payload_json).collect::<Vec<_>>(),
-            "preconditions": preconditions_json(&request.preconditions),
-            "required_artifacts": sorted_store_artifacts_json(&request.required_artifacts),
-            "run_id": request.run_id.as_str(),
-        }))?;
-        Ok(CommitFingerprint(canonical.content_digest()))
-    }
-
     /// Computes the canonical idempotency fingerprint for a purpose-specific prepared commit plan.
     ///
     /// The fingerprint intentionally excludes `expected_next_seq`, so idempotent retries can be
-    /// recognized before stale sequence checks as required by the store contract. Unlike
-    /// [`commit_fingerprint`], this covers the artifact evidence admitted atomically with the commit.
+    /// recognized before stale sequence checks as required by the store contract. It covers the
+    /// artifact evidence admitted atomically with the commit.
     pub fn prepared_commit_plan_fingerprint(
         plan: &PreparedCommitPlan,
     ) -> Result<CommitFingerprint> {
@@ -7780,7 +8032,7 @@ pub mod v1 {
     ) -> CodecResult<events::ArtifactEvidenceRef> {
         Ok(events::ArtifactEvidenceRef {
             artifact_id: parse_identity(required_str(json, "artifact_id")?)?,
-            role: parse_artifact_role(required_str(json, "role")?)?,
+            role: decode_artifact_role_tag(required_str(json, "role")?)?,
             schema_id: parse_identity(required_str(json, "schema_id")?)?,
             semantic_type_id: optional_str(json, "semantic_type_id")?
                 .map(parse_identity)
@@ -7795,7 +8047,7 @@ pub mod v1 {
     fn parse_run_artifact(json: &serde_json::Value) -> Result<events::RunArtifactEvidenceRef> {
         Ok(events::RunArtifactEvidenceRef {
             artifact_id: parse_identity(required_str(json, "artifact_id")?)?,
-            role: parse_artifact_role(required_str(json, "role")?)?,
+            role: decode_artifact_role_tag(required_str(json, "role")?)?,
             schema_id: optional_str(json, "schema_id")?
                 .map(parse_identity)
                 .transpose()?,
@@ -7884,22 +8136,29 @@ pub mod v1 {
 
     /// Parses structured error info from canonical JSON.
     pub fn parse_error_info(json: &serde_json::Value) -> CodecResult<events::MfmErrorInfo> {
-        Ok(events::MfmErrorInfo {
-            code: events::ErrorCode::new(required_str(json, "code")?)?,
-            category: parse_error_category(required_str(json, "category")?)?,
-            retryable: required_bool(json, "retryable")?,
-            safe_message: required_str(json, "safe_message")?.to_owned(),
-            public_details: optional_obj(json, "public_details")?
-                .map(|details| {
-                    Ok::<events::RedactedJson, CodecError>(events::RedactedJson {
-                        content_digest: parse_identity(required_str(details, "content_digest")?)?,
-                    })
-                })
-                .transpose()?,
-            diagnostic_ref: optional_obj(json, "diagnostic_ref")?
-                .map(parse_event_artifact)
-                .transpose()?,
-        })
+        let public_details = optional_obj(json, "public_details")?
+            .map(|details| {
+                Ok::<events::RedactedJson, CodecError>(events::RedactedJson::new(parse_identity(
+                    required_str(details, "content_digest")?,
+                )?))
+            })
+            .transpose()?;
+        let diagnostic_ref = optional_obj(json, "diagnostic_ref")?
+            .map(parse_event_artifact)
+            .transpose()?;
+        let mut error = events::MfmErrorInfo::new(
+            events::ErrorCode::new(required_str(json, "code")?)?,
+            parse_error_category(required_str(json, "category")?)?,
+            required_bool(json, "retryable")?,
+            required_str(json, "safe_message")?,
+        )?;
+        if let Some(public_details) = public_details {
+            error = error.with_public_details(public_details)?;
+        }
+        if let Some(diagnostic_ref) = diagnostic_ref {
+            error = error.with_diagnostic_ref(diagnostic_ref)?;
+        }
+        Ok(error)
     }
 
     /// Parses a run completion outcome from canonical JSON.
@@ -7934,37 +8193,14 @@ pub mod v1 {
     fn parse_retention_ref(json: &serde_json::Value) -> Result<events::RetentionRef> {
         Ok(events::RetentionRef {
             artifact_id: parse_identity(required_str(json, "artifact_id")?)?,
-            role: parse_artifact_role(required_str(json, "role")?)?,
+            role: decode_artifact_role_tag(required_str(json, "role")?)?,
             content_digest: parse_identity(required_str(json, "content_digest")?)?,
         })
     }
 
-    /// Parses an artifact role tag.
-    pub fn parse_artifact_role(value: &str) -> CodecResult<ArtifactRole> {
-        match value {
-            "typed_execution_spec" => Ok(ArtifactRole::TypedExecutionSpec),
-            "typed_spec_certificate" => Ok(ArtifactRole::TypedSpecCertificate),
-            "typed_config" => Ok(ArtifactRole::TypedConfig),
-            "seed_input" => Ok(ArtifactRole::SeedInput),
-            "state_output" => Ok(ArtifactRole::StateOutput),
-            "fact_response" => Ok(ArtifactRole::FactResponse),
-            "side_effect_intent" => Ok(ArtifactRole::SideEffectIntent),
-            "prepared_invocation" => Ok(ArtifactRole::PreparedInvocation),
-            "not_submitted_proof" => Ok(ArtifactRole::NotSubmittedProof),
-            "submission" => Ok(ArtifactRole::Submission),
-            "submission_unknown_evidence" => Ok(ArtifactRole::SubmissionUnknownEvidence),
-            "receipt" => Ok(ArtifactRole::Receipt),
-            "confirmation" => Ok(ArtifactRole::Confirmation),
-            "ambiguity_evidence" => Ok(ArtifactRole::AmbiguityEvidence),
-            "manual_resolution_evidence" => Ok(ArtifactRole::ManualResolutionEvidence),
-            "manual_resolution_authorization" => Ok(ArtifactRole::ManualResolutionAuthorization),
-            "public_output" => Ok(ArtifactRole::PublicOutput),
-            "redacted_diagnostic" => Ok(ArtifactRole::RedactedDiagnostic),
-            "retention_manifest" => Ok(ArtifactRole::RetentionManifest),
-            other => Err(CodecError::Identity(format!(
-                "unknown artifact role {other}"
-            ))),
-        }
+    fn decode_artifact_role_tag(value: &str) -> CodecResult<ArtifactRole> {
+        ArtifactRole::parse(value)
+            .ok_or_else(|| CodecError::Identity(format!("unknown artifact role {value}")))
     }
 
     fn parse_capability_role(value: &str) -> Result<CapabilityRole> {
@@ -8093,7 +8329,7 @@ pub mod v1 {
     fn store_artifact_json(evidence: &ArtifactEvidenceRef) -> serde_json::Value {
         serde_json::json!({
             "artifact_id": evidence.artifact_id.as_str(),
-            "artifact_role": artifact_role_str(evidence.artifact_role),
+            "artifact_role": evidence.artifact_role.as_str(),
             "byte_len": evidence.byte_len,
             "digest": evidence.digest.as_str(),
             "media_type": evidence.media_type.as_str(),
@@ -8111,7 +8347,7 @@ pub mod v1 {
             "byte_len": evidence.byte_len,
             "content_digest": evidence.content_digest.as_str(),
             "media_type": evidence.media_type.as_str(),
-            "role": artifact_role_str(evidence.role),
+            "role": evidence.role.as_str(),
             "schema_id": evidence.schema_id.as_str(),
             "semantic_type_id": evidence.semantic_type_id.as_ref().map(SemanticTypeId::as_str),
         })
@@ -8123,7 +8359,7 @@ pub mod v1 {
             "byte_len": evidence.byte_len,
             "content_digest": evidence.content_digest.as_str(),
             "media_type": evidence.media_type.as_str(),
-            "role": artifact_role_str(evidence.role),
+            "role": evidence.role.as_str(),
             "schema_id": evidence.schema_id.as_ref().map(SchemaId::as_str),
             "semantic_type_id": evidence.semantic_type_id.as_ref().map(SemanticTypeId::as_str),
         })
@@ -9104,7 +9340,7 @@ pub mod v1 {
         serde_json::json!({
             "artifact_id": retention_ref.artifact_id.as_str(),
             "content_digest": retention_ref.content_digest.as_str(),
-            "role": artifact_role_str(retention_ref.role),
+            "role": retention_ref.role.as_str(),
         })
     }
 
@@ -9139,31 +9375,6 @@ pub mod v1 {
             RequiredSideEffectState::ConfirmationObserved => "confirmation_observed",
             RequiredSideEffectState::Ambiguous => "ambiguous",
             RequiredSideEffectState::Failed => "failed",
-        }
-    }
-
-    /// Returns the canonical tag for an artifact role.
-    pub fn artifact_role_str(role: ArtifactRole) -> &'static str {
-        match role {
-            ArtifactRole::TypedExecutionSpec => "typed_execution_spec",
-            ArtifactRole::TypedSpecCertificate => "typed_spec_certificate",
-            ArtifactRole::TypedConfig => "typed_config",
-            ArtifactRole::SeedInput => "seed_input",
-            ArtifactRole::StateOutput => "state_output",
-            ArtifactRole::FactResponse => "fact_response",
-            ArtifactRole::SideEffectIntent => "side_effect_intent",
-            ArtifactRole::PreparedInvocation => "prepared_invocation",
-            ArtifactRole::NotSubmittedProof => "not_submitted_proof",
-            ArtifactRole::Submission => "submission",
-            ArtifactRole::SubmissionUnknownEvidence => "submission_unknown_evidence",
-            ArtifactRole::Receipt => "receipt",
-            ArtifactRole::Confirmation => "confirmation",
-            ArtifactRole::AmbiguityEvidence => "ambiguity_evidence",
-            ArtifactRole::ManualResolutionEvidence => "manual_resolution_evidence",
-            ArtifactRole::ManualResolutionAuthorization => "manual_resolution_authorization",
-            ArtifactRole::PublicOutput => "public_output",
-            ArtifactRole::RedactedDiagnostic => "redacted_diagnostic",
-            ArtifactRole::RetentionManifest => "retention_manifest",
         }
     }
 

@@ -57,6 +57,7 @@ Endpoints:
 - `POST /v1/evm/contracts/lifecycle`
 - `POST /v1/runs/start`
 - `POST /v1/runs/:run_id/resume`
+- `POST /v1/runs/:run_id/manual-resolution`
 - `GET /v1/runs/:run_id/status`
 - `GET /v1/runs/:run_id/stream?from_seq=1&to_seq=<optional>`
 - `POST /v1/runs/:run_id/replay`
@@ -233,6 +234,39 @@ curl -s -X POST "http://127.0.0.1:3001/v1/runs/$RUN_ID/resume" \
   -d '{"drive":"once"}'
 ```
 
+Record a signed manual resolution:
+
+```bash
+curl -s -X POST "http://127.0.0.1:3001/v1/runs/$RUN_ID/manual-resolution" \
+  -H "content-type: application/json" \
+  -d '{
+    "kind": "manual_resolution_v1",
+    "outcome": "confirm_remediated",
+    "evidence_json": {
+      "operator_note": "reviewed"
+    },
+    "authorization_proof": {
+      "...": "canonical manual authorization proof JSON"
+    },
+    "drive": "until_blocked"
+  }'
+```
+
+The manual-resolution route canonicalizes `evidence_json` and `authorization_proof`, then submits
+the resulting bytes to `mfm-app`. Runtime derives the current prefix authority from the stored run
+stream, verifies the proof against the certified manual policy, checks signatures and quorum,
+stages the evidence and authorization artifacts, and appends only through the typed
+manual-resolution commit boundary. The route does not accept request-supplied prefix facts, artifact
+ids, hashes, verifier ids, authority ids, quorum values, keystore paths, signer configuration, or
+signature secrets. Proof authoring is outside this REST ingress; submitted proof bytes are always
+untrusted until runtime verifies them.
+
+Optional fields:
+
+- `evidence_media_type`: defaults to `application/json`.
+- `note`: optional redaction-safe operator note recorded in `ManualResolutionRecorded`.
+- `drive`: `append_only`, `once`, or `until_blocked`; defaults to `until_blocked`.
+
 Replay verification:
 
 ```bash
@@ -246,9 +280,10 @@ curl -s "http://127.0.0.1:3001/v1/runs/$RUN_ID/public-output/$SCHEMA_ID"
 ```
 
 The status and stream endpoints are typed inspection views over the authoritative typed run stream.
+Stream range filters are applied only after the app service validates the full stored stream.
 Resume, replay, and public-output rendering load the stored spec/certificate artifacts, verify them
-against the production registry, compare their evidence to `RunAdmitted`, and rebuild stream evidence
-before constructing runtime, replay, or render authority. Rendered public-output JSON is an
+against the production registry, compare their evidence to `RunAdmitted`, and rebuild stream
+evidence before constructing runtime, replay, or render authority. Rendered public-output JSON is an
 output/cache surface only.
 
 Typed run responses expose semantic status through `run_mode`, not the old absent/started/completed

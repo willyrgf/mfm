@@ -1,6 +1,8 @@
 use serde::Serialize;
 use std::fmt;
 
+use mfm_app::PublicSafeMessage;
+
 /// Standardized result type for all CLI commands
 pub(crate) type CommandResult<T> = Result<CommandOutput<T>, CommandError>;
 
@@ -36,12 +38,17 @@ pub(crate) struct CommandError {
 
 impl CommandError {
     /// Builds a command error with the default non-zero exit code.
-    pub(crate) fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: impl Into<String>, message: impl Into<PublicSafeMessage>) -> Self {
         Self {
             code: code.into(),
-            message: message.into(),
+            message: message.into().into_string(),
             exit_code: 1,
         }
+    }
+
+    /// Builds a command error for lower-level failures without exposing backend details.
+    pub(crate) fn backend(code: impl Into<String>, message: &'static str) -> Self {
+        Self::new(code, PublicSafeMessage::backend(message))
     }
 }
 
@@ -54,7 +61,7 @@ impl fmt::Display for CommandError {
 impl std::error::Error for CommandError {}
 
 impl From<Box<dyn std::error::Error>> for CommandError {
-    fn from(err: Box<dyn std::error::Error>) -> Self {
-        Self::new("InternalError", err.to_string())
+    fn from(_err: Box<dyn std::error::Error>) -> Self {
+        Self::backend("InternalError", "Command failed")
     }
 }

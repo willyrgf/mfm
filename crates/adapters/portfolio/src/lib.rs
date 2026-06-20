@@ -10,7 +10,7 @@ use std::sync::Arc;
 use alloy_primitives::{Address, U256};
 use mfm_artifact_capabilities::{ArtifactReadProvider, ArtifactReadRequest};
 use mfm_canonical::PlainCanonicalJsonBytes;
-use mfm_capabilities::{CapabilitySetDescriptor, CapabilitySpec};
+use mfm_capabilities::CapabilitySpec;
 use mfm_events::v1 as events;
 use mfm_evm_capabilities::{
     EvmBalanceReadProvider, EvmBalanceReadRequest, EvmBlockReadProvider, EvmBlockReadRequest,
@@ -19,14 +19,14 @@ use mfm_evm_capabilities::{
 };
 use mfm_evm_core::encoding::{encode_erc20_balance_of, encode_erc20_decimals, parse_u8_u256};
 use mfm_evm_core::hex::hex_to_bytes;
-use mfm_ids::{ArtifactId, ContentDigest, DescriptorId, NodeId};
-use mfm_program::{StateSpec, ValidatedConfig};
+use mfm_ids::ContentDigest;
+use mfm_program::ValidatedConfig;
 use mfm_runtime::{
-    CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerBinding,
-    ErasedRunnerFuture, ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCellTerminal,
-    MaterializedInputNode, RunnerEventPayload, StagedArtifact, StagedRetentionRefs,
+    CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture,
+    ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCellTerminal, MaterializedInputNode,
+    RunnerArtifactBuilder, RunnerCapabilityBinding, RunnerOutputBuilder, RunnerPayloadBuilder,
+    RunnerRegistrationBuilder,
 };
-use mfm_spec::v1 as spec;
 use mfm_state_portfolio::{
     balance_reader_kind, evm_block_number_for, observe_batch_with_backend, pin_views_with_backend,
     portfolio_adapter_kind, portfolio_adapter_version, prepare_sources_from_config,
@@ -39,7 +39,6 @@ use mfm_state_portfolio::{
     ResolveSubjectsConfig, ResolveSubjectsState, ResolveValuationsConfig, ResolveValuationsState,
     SourcePreparationRequest, SourcePreparationResponse, ViewPinRequest, ViewPinResponse,
 };
-use mfm_store::v1 as store;
 use mfm_values::{MfmConfig, MfmValue, NonEmpty};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -131,116 +130,100 @@ pub fn register_portfolio_runners(
     let implementation_id = CapabilityImplementationId::new(CAPABILITY_IMPLEMENTATION_ID)?;
     let artifacts = capabilities.artifacts();
     let evm = capabilities.evm();
-    let prepare_sources = registered_descriptor::<PrepareSourcesState>()?;
-    registry.register_capability_set(&prepare_sources.capabilities, implementation_id.clone())?;
-    registry.register(binding(
-        prepare_sources.descriptor_id,
-        READ_FACTORY,
+    let mut registrations = RunnerRegistrationBuilder::new(registry, implementation_id);
+    let read_factory = events::RunnerFactoryId::new(READ_FACTORY)?;
+    let pure_factory = events::RunnerFactoryId::new(PURE_FACTORY)?;
+    let prepare_sources = mfm_program::registered_state_descriptor::<PrepareSourcesState>()
+        .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
+    registrations.register_descriptor(
+        prepare_sources.descriptor_id().clone(),
+        prepare_sources.capabilities(),
+        read_factory.clone(),
+        executable(read_factory.clone())?,
         Arc::new(PrepareSourcesRunner {
             artifacts: artifacts.clone(),
         }),
-    )?)?;
-    let resolve_subjects = registered_descriptor::<ResolveSubjectsState>()?;
-    registry.register_capability_set(&resolve_subjects.capabilities, implementation_id.clone())?;
-    registry.register(binding(
-        resolve_subjects.descriptor_id,
-        PURE_FACTORY,
+    )?;
+    let resolve_subjects = mfm_program::registered_state_descriptor::<ResolveSubjectsState>()
+        .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
+    registrations.register_descriptor(
+        resolve_subjects.descriptor_id().clone(),
+        resolve_subjects.capabilities(),
+        pure_factory.clone(),
+        executable(pure_factory.clone())?,
         Arc::new(ResolveSubjectsRunner {
             artifacts: artifacts.clone(),
         }),
-    )?)?;
-    let pin_views = registered_descriptor::<PinViewsState>()?;
-    registry.register_capability_set(&pin_views.capabilities, implementation_id.clone())?;
-    registry.register(binding(
-        pin_views.descriptor_id,
-        READ_FACTORY,
+    )?;
+    let pin_views = mfm_program::registered_state_descriptor::<PinViewsState>()
+        .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
+    registrations.register_descriptor(
+        pin_views.descriptor_id().clone(),
+        pin_views.capabilities(),
+        read_factory.clone(),
+        executable(read_factory.clone())?,
         Arc::new(PinViewsRunner {
             artifacts: artifacts.clone(),
             evm: evm.clone(),
         }),
-    )?)?;
-    let resolve_valuations = registered_descriptor::<ResolveValuationsState>()?;
-    registry
-        .register_capability_set(&resolve_valuations.capabilities, implementation_id.clone())?;
-    registry.register(binding(
-        resolve_valuations.descriptor_id,
-        PURE_FACTORY,
+    )?;
+    let resolve_valuations =
+        mfm_program::registered_state_descriptor::<ResolveValuationsState>()
+            .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
+    registrations.register_descriptor(
+        resolve_valuations.descriptor_id().clone(),
+        resolve_valuations.capabilities(),
+        pure_factory.clone(),
+        executable(pure_factory.clone())?,
         Arc::new(ResolveValuationsRunner {
             artifacts: artifacts.clone(),
         }),
-    )?)?;
-    let observe_batch = registered_descriptor::<ObserveBatchState>()?;
-    registry.register_capability_set(&observe_batch.capabilities, implementation_id.clone())?;
-    registry.register(binding(
-        observe_batch.descriptor_id,
-        READ_FACTORY,
+    )?;
+    let observe_batch = mfm_program::registered_state_descriptor::<ObserveBatchState>()
+        .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
+    registrations.register_descriptor(
+        observe_batch.descriptor_id().clone(),
+        observe_batch.capabilities(),
+        read_factory.clone(),
+        executable(read_factory)?,
         Arc::new(ObserveBatchRunner {
             artifacts: artifacts.clone(),
             evm,
         }),
-    )?)?;
-    let merge_observations = registered_descriptor::<MergeObservationsState>()?;
-    registry
-        .register_capability_set(&merge_observations.capabilities, implementation_id.clone())?;
-    registry.register(binding(
-        merge_observations.descriptor_id,
-        PURE_FACTORY,
+    )?;
+    let merge_observations =
+        mfm_program::registered_state_descriptor::<MergeObservationsState>()
+            .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
+    registrations.register_descriptor(
+        merge_observations.descriptor_id().clone(),
+        merge_observations.capabilities(),
+        pure_factory.clone(),
+        executable(pure_factory.clone())?,
         Arc::new(MergeObservationsRunner {
             artifacts: artifacts.clone(),
         }),
-    )?)?;
-    let assemble_snapshot = registered_descriptor::<AssembleSnapshotState>()?;
-    registry.register_capability_set(&assemble_snapshot.capabilities, implementation_id.clone())?;
-    registry.register(binding(
-        assemble_snapshot.descriptor_id,
-        PURE_FACTORY,
+    )?;
+    let assemble_snapshot = mfm_program::registered_state_descriptor::<AssembleSnapshotState>()
+        .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
+    registrations.register_descriptor(
+        assemble_snapshot.descriptor_id().clone(),
+        assemble_snapshot.capabilities(),
+        pure_factory.clone(),
+        executable(pure_factory.clone())?,
         Arc::new(AssembleSnapshotRunner {
             artifacts: artifacts.clone(),
         }),
-    )?)?;
-    let project_report = registered_descriptor::<ProjectReportState>()?;
-    registry.register_capability_set(&project_report.capabilities, implementation_id)?;
-    registry.register(binding(
-        project_report.descriptor_id,
-        PURE_FACTORY,
-        Arc::new(ProjectReportRunner { artifacts }),
-    )?)?;
-    Ok(())
-}
-
-struct RegisteredRuntimeDescriptor {
-    descriptor_id: DescriptorId,
-    capabilities: CapabilitySetDescriptor,
-}
-
-fn registered_descriptor<S>() -> mfm_runtime::Result<RegisteredRuntimeDescriptor>
-where
-    S: StateSpec,
-    S::Effect: mfm_program::EffectRunner<S>,
-    S::Caps: mfm_capabilities::CapabilitySetFor<S::Effect>,
-{
-    let mut states = mfm_program::StateRegistryBuilder::new();
-    let registered = states
-        .register::<S>()
+    )?;
+    let project_report = mfm_program::registered_state_descriptor::<ProjectReportState>()
         .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
-    Ok(RegisteredRuntimeDescriptor {
-        descriptor_id: registered.descriptor().descriptor_id().clone(),
-        capabilities: registered.descriptor().capabilities().clone(),
-    })
-}
-
-fn binding(
-    descriptor_id: DescriptorId,
-    factory: &'static str,
-    runner: Arc<dyn ErasedNodeRunner>,
-) -> mfm_runtime::Result<ErasedRunnerBinding> {
-    let factory_id = events::RunnerFactoryId::new(factory)?;
-    ErasedRunnerBinding::new(
-        descriptor_id,
-        factory_id.clone(),
-        executable(factory_id)?,
-        runner,
-    )
+    registrations.register_descriptor(
+        project_report.descriptor_id().clone(),
+        project_report.capabilities(),
+        pure_factory.clone(),
+        executable(pure_factory)?,
+        Arc::new(ProjectReportRunner { artifacts }),
+    )?;
+    Ok(())
 }
 
 fn executable(
@@ -468,49 +451,26 @@ where
     Response: MfmValue + Serialize,
     Output: MfmValue + Serialize,
 {
-    let request_hash = digest_value(&request)?;
-    let response_artifact = artifact_for_value(
-        &response,
-        events::ArtifactRole::FactResponse,
-        Some(ctx.node().node_id.clone()),
-    )?;
-    let output_artifact = artifact_for_value(
-        &output,
-        events::ArtifactRole::StateOutput,
-        Some(ctx.node().node_id.clone()),
-    )?;
-    let staged_response = staged_attempt_artifact(&ctx, &response_artifact)?;
-    let staged_output = staged_attempt_artifact(&ctx, &output_artifact)?;
-    Ok(ErasedRunnerOutput {
-        staged_artifacts: vec![staged_response, staged_output],
-        staged_retention_refs: vec![
-            retention(&response_artifact.evidence),
-            retention(&output_artifact.evidence),
-        ],
-        payloads: vec![
-            RunnerEventPayload::FactRecorded(events::FactRecorded {
-                spec_hash: ctx.spec_hash().clone(),
-                node_id: ctx.node().node_id.clone(),
-                attempt_id: ctx.attempt_id().clone(),
-                capability_kind: PortfolioReadCapability::kind()
-                    .map_err(runtime_capability_error)?,
-                capability_version: PortfolioReadCapability::version()
-                    .map_err(runtime_capability_error)?,
-                adapter_kind: portfolio_adapter_kind()?,
-                adapter_version: portfolio_adapter_version()?,
-                request_schema_id: Request::schema_id().map_err(runtime_value_error)?,
-                request_hash,
-                response_schema_id: Response::schema_id().map_err(runtime_value_error)?,
-                response_hash: response_artifact.evidence.digest.clone(),
-                fact_key: events::FactKey::new(format!(
-                    "mfm.portfolio.fact.{}",
-                    ctx.node().node_id.as_str()
-                ))?,
-                artifact_id: response_artifact.evidence.artifact_id.clone(),
-            }),
-            cell_produced(&ctx, &output_artifact.evidence),
-        ],
-    })
+    let artifacts = RunnerArtifactBuilder::new(&ctx);
+    let payloads = RunnerPayloadBuilder::new(&ctx);
+    let response_artifact = artifacts.fact_response(&response)?;
+    let output_artifact = artifacts.state_output(&output)?;
+    let mut runner_output = RunnerOutputBuilder::new(&ctx);
+    runner_output.stage_attempt_artifact(&response_artifact)?;
+    runner_output.retain_runtime_evidence(&response_artifact);
+    runner_output.stage_attempt_artifact(&output_artifact)?;
+    runner_output.retain_runtime_evidence(&output_artifact);
+    runner_output.payload(payloads.fact_recorded(
+        events::FactKey::new(format!(
+            "mfm.portfolio.fact.{}",
+            ctx.node().node_id.as_str()
+        ))?,
+        &request,
+        &response_artifact,
+        portfolio_read_binding()?,
+    )?);
+    runner_output.payload(payloads.cell_produced(&output_artifact)?);
+    Ok(runner_output.finish())
 }
 
 async fn state_output<T>(
@@ -520,24 +480,14 @@ async fn state_output<T>(
 where
     T: MfmValue + Serialize,
 {
-    let artifact = artifact_for_value(
-        value,
-        events::ArtifactRole::StateOutput,
-        Some(ctx.node().node_id.clone()),
-    )?;
-    let staged_artifact = staged_attempt_artifact(&ctx, &artifact)?;
-    Ok(ErasedRunnerOutput {
-        staged_artifacts: vec![staged_artifact],
-        staged_retention_refs: vec![retention(&artifact.evidence)],
-        payloads: vec![cell_produced(&ctx, &artifact.evidence)],
-    })
-}
-
-fn staged_attempt_artifact(
-    ctx: &ErasedRunCtx<'_>,
-    artifact: &PortfolioArtifact,
-) -> mfm_runtime::Result<StagedArtifact> {
-    StagedArtifact::inline_attempt_artifact(ctx, artifact.bytes.clone(), artifact.evidence.clone())
+    let artifacts = RunnerArtifactBuilder::new(&ctx);
+    let payloads = RunnerPayloadBuilder::new(&ctx);
+    let artifact = artifacts.state_output(value)?;
+    let mut output = RunnerOutputBuilder::new(&ctx);
+    output.stage_attempt_artifact(&artifact)?;
+    output.retain_runtime_evidence(&artifact);
+    output.payload(payloads.cell_produced(&artifact)?);
+    Ok(output.finish())
 }
 
 async fn load_config<T>(
@@ -703,75 +653,13 @@ async fn load_cell_bytes(
     Ok(verified.into_bytes())
 }
 
-fn cell_produced(
-    ctx: &ErasedRunCtx<'_>,
-    artifact: &store::ArtifactEvidenceRef,
-) -> RunnerEventPayload {
-    RunnerEventPayload::CellProduced(events::CellProduced {
-        spec_hash: ctx.spec_hash().clone(),
-        node_id: ctx.node().node_id.clone(),
-        cell_id: ctx.node().output_cell.clone(),
-        scope_id: ctx.output_cell().scope_id.clone(),
-        attempt_id: ctx.attempt_id().clone(),
-        semantic_type_id: ctx.output_cell().semantic_type_id.clone(),
-        schema_id: ctx.output_cell().schema_id.clone(),
-        value_lineage: ctx.output_cell().value_lineage.clone(),
-        artifact_id: artifact.artifact_id.clone(),
-        content_digest: artifact.digest.clone(),
-        producer_state_kind: Some(ctx.node().state_kind.clone()),
-        producer_state_version: Some(ctx.node().state_version.clone()),
+fn portfolio_read_binding() -> mfm_runtime::Result<RunnerCapabilityBinding> {
+    Ok(RunnerCapabilityBinding {
+        capability_kind: PortfolioReadCapability::kind().map_err(runtime_capability_error)?,
+        capability_version: PortfolioReadCapability::version().map_err(runtime_capability_error)?,
+        adapter_kind: portfolio_adapter_kind()?,
+        adapter_version: portfolio_adapter_version()?,
     })
-}
-
-struct PortfolioArtifact {
-    bytes: Vec<u8>,
-    evidence: store::ArtifactEvidenceRef,
-}
-
-fn artifact_for_value<T>(
-    value: &T,
-    role: events::ArtifactRole,
-    producer_node_id: Option<NodeId>,
-) -> mfm_runtime::Result<PortfolioArtifact>
-where
-    T: MfmValue + Serialize,
-{
-    let bytes = canonical_value(value)?;
-    let digest = bytes.content_digest();
-    let evidence = store::ArtifactEvidenceRef {
-        artifact_id: ArtifactId::from_digest(digest.algorithm(), *digest.digest()),
-        digest,
-        byte_len: bytes.as_bytes().len() as u64,
-        media_type: spec::MediaType::new("application/json")?,
-        schema_id: Some(T::schema_id().map_err(runtime_value_error)?),
-        semantic_type_id: Some(T::semantic_id().map_err(runtime_value_error)?),
-        producer_node_id,
-        producer_seed_id: None,
-        artifact_role: role,
-    };
-    Ok(PortfolioArtifact {
-        bytes: bytes.to_vec(),
-        evidence,
-    })
-}
-
-fn retention(artifact: &store::ArtifactEvidenceRef) -> StagedRetentionRefs {
-    StagedRetentionRefs::runtime_evidence(vec![events::RetentionRef {
-        artifact_id: artifact.artifact_id.clone(),
-        role: artifact.artifact_role,
-        content_digest: artifact.digest.clone(),
-    }])
-}
-
-fn canonical_value<T: Serialize>(value: &T) -> mfm_runtime::Result<PlainCanonicalJsonBytes> {
-    let json = serde_json::to_string(value)
-        .map_err(|error| mfm_runtime::RuntimeError::Canonical(error.to_string()))?;
-    PlainCanonicalJsonBytes::from_json_str(&json)
-        .map_err(|error| mfm_runtime::RuntimeError::Canonical(error.to_string()))
-}
-
-fn digest_value<T: Serialize>(value: &T) -> mfm_runtime::Result<ContentDigest> {
-    Ok(canonical_value(value)?.content_digest())
 }
 
 fn digest_json(value: serde_json::Value) -> mfm_runtime::Result<ContentDigest> {
@@ -780,10 +668,6 @@ fn digest_json(value: serde_json::Value) -> mfm_runtime::Result<ContentDigest> {
     Ok(PlainCanonicalJsonBytes::from_json_str(&json)
         .map_err(|error| mfm_runtime::RuntimeError::Canonical(error.to_string()))?
         .content_digest())
-}
-
-fn runtime_value_error(error: mfm_values::ValueError) -> mfm_runtime::RuntimeError {
-    mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
 }
 
 fn runtime_capability_error(error: mfm_capabilities::CapabilityError) -> mfm_runtime::RuntimeError {
@@ -994,6 +878,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn executable_identity_summary_matches_golden() {
+        assert_eq!(
+            executable_identity_summary([READ_FACTORY, PURE_FACTORY]),
+            [
+                "factory=read_external;source=mfm-adapters-portfolio-built-in;package=mfm-adapters-portfolio;version=0.1.0;cargo_digest=content:sha256-jcs-v1:9cee33a7e03231e1baeb99725c9724361ba5763bc7f3cbe11698fa96696e6f1a;binary_digest=content:sha256-jcs-v1:ded559fbdf36801d1e3c95838014c5e7b94e50655014d7ddc612f288a508988e;nix_derivation=false;nix_output=false",
+                "factory=pure;source=mfm-adapters-portfolio-built-in;package=mfm-adapters-portfolio;version=0.1.0;cargo_digest=content:sha256-jcs-v1:9cee33a7e03231e1baeb99725c9724361ba5763bc7f3cbe11698fa96696e6f1a;binary_digest=content:sha256-jcs-v1:ded559fbdf36801d1e3c95838014c5e7b94e50655014d7ddc612f288a508988e;nix_derivation=false;nix_output=false",
+            ]
+        );
+    }
+
+    #[test]
     fn decode_config_bytes_rejects_invalid_serialized_config() {
         let error = decode_config_bytes::<ProjectReportConfig>(br#"{"report_version":0}"#)
             .expect_err("zero report version must fail decoding");
@@ -1001,5 +896,27 @@ mod tests {
             panic!("unexpected error: {error}");
         };
         assert!(message.contains("nonzero u64"));
+    }
+
+    fn executable_identity_summary(factories: [&str; 2]) -> Vec<String> {
+        factories
+            .into_iter()
+            .map(|factory| {
+                let identity =
+                    executable(events::RunnerFactoryId::new(factory).expect("factory id"))
+                        .expect("executable identity");
+                format!(
+                    "factory={};source={};package={};version={};cargo_digest={};binary_digest={};nix_derivation={};nix_output={}",
+                    identity.factory_id,
+                    identity.source_revision,
+                    identity.cargo_package_name,
+                    identity.cargo_package_version,
+                    identity.cargo_package_digest,
+                    identity.binary_digest,
+                    identity.nix_derivation_hash.is_some(),
+                    identity.nix_output_hash.is_some()
+                )
+            })
+            .collect()
     }
 }

@@ -634,7 +634,7 @@ fn rest_test_app() -> axum::Router {
         uuid::Uuid::new_v4()
     ));
     std::fs::create_dir_all(&root).expect("typed artifact root");
-    mfm_rest_api::make_app(mfm_rest_api::make_in_memory_app_state(root))
+    mfm_rest_api::make_app(test_support::in_memory_rest_app_state(root))
 }
 
 fn json_post(uri: &str, body: serde_json::Value) -> Request<Body> {

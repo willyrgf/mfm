@@ -122,24 +122,6 @@ async fn validate_catalog(pool: &PgPool) -> Result<()> {
         }
     }
 
-    let index_exists = sqlx::query_scalar!(
-        "SELECT EXISTS ( \
-           SELECT 1 \
-           FROM pg_indexes \
-           WHERE schemaname = current_schema() \
-             AND tablename = 'typed_resource_lane_projection' \
-             AND indexname = 'typed_resource_lane_projection_run_idx' \
-         )"
-    )
-    .fetch_one(pool)
-    .await
-    .map_err(|_| PostgresTypedStoreError::Database("failed to inspect schema indexes"))?;
-    if index_exists != Some(true) {
-        return Err(PostgresTypedStoreError::Database(
-            "required schema index missing",
-        ));
-    }
-
     Ok(())
 }
 
@@ -152,6 +134,12 @@ const REQUIRED_TABLES: &[&str] = &[
     "typed_run_artifacts",
     "typed_logical_keys",
     "typed_unique_logical_payloads",
+    "typed_resource_lane_locks",
+];
+
+const FORBIDDEN_TABLES: &[&str] = &[
+    "typed_retention_projection",
+    "typed_retention_manifests",
     "typed_run_projection",
     "typed_run_completion_projection",
     "typed_saga_engagement_projection",
@@ -163,5 +151,3 @@ const REQUIRED_TABLES: &[&str] = &[
     "typed_resource_lane_projection",
     "typed_public_output_projection",
 ];
-
-const FORBIDDEN_TABLES: &[&str] = &["typed_retention_projection", "typed_retention_manifests"];
