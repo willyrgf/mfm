@@ -184,21 +184,6 @@ impl VerifiedRunContextLoader {
         self.runtime_contexts.load(runtime_spec)
     }
 
-    /// Loads and verifies scheduler context from a sync typed store.
-    pub fn load<S>(
-        &self,
-        runtime_spec: &CertifiedRuntimeSpec,
-        run_id: &RunId,
-        store: &S,
-    ) -> Result<VerifiedRunContext>
-    where
-        S: store::TypedRunEventStore + ?Sized,
-    {
-        let committed =
-            store::CommittedRunStream::from_events(run_id.clone(), store.load_run_stream(run_id))?;
-        self.load_committed_stream(runtime_spec, committed)
-    }
-
     /// Loads and verifies scheduler context from an async typed store.
     pub async fn load_async<S>(
         &self,
@@ -236,22 +221,6 @@ impl VerifiedRunContextLoader {
 }
 
 impl VerifiedRunHistory {
-    /// Loads the authoritative run stream from a typed store and validates it against certified
-    /// runtime authority and verified retained artifact evidence.
-    pub fn from_store<S>(
-        runtime_spec: &CertifiedRuntimeSpec,
-        run_id: &RunId,
-        store: &S,
-        artifacts: store::VerifiedRunArtifactStore,
-    ) -> Result<Self>
-    where
-        S: store::TypedRunEventStore + ?Sized,
-    {
-        Ok(Self {
-            view: VerifiedRunHistoryView::from_store(runtime_spec, run_id, store, artifacts)?,
-        })
-    }
-
     /// Loads the authoritative run stream from an async typed store and validates it against
     /// certified runtime authority and verified retained artifact evidence.
     pub async fn from_async_store<S>(
@@ -322,20 +291,6 @@ impl VerifiedRunHistory {
 }
 
 impl VerifiedRunHistoryView {
-    fn from_store<S>(
-        runtime_spec: &CertifiedRuntimeSpec,
-        run_id: &RunId,
-        store: &S,
-        artifacts: store::VerifiedRunArtifactStore,
-    ) -> Result<Self>
-    where
-        S: store::TypedRunEventStore + ?Sized,
-    {
-        let committed =
-            store::CommittedRunStream::from_events(run_id.clone(), store.load_run_stream(run_id))?;
-        Self::from_committed_stream(runtime_spec, committed, artifacts)
-    }
-
     async fn from_async_store<S>(
         runtime_spec: &CertifiedRuntimeSpec,
         run_id: &RunId,
@@ -415,17 +370,6 @@ impl VerifiedRunHistoryView {
 }
 
 impl RuntimeRunView {
-    #[cfg(test)]
-    pub(crate) fn from_store<S: store::TypedRunEventStore + ?Sized>(
-        runtime_spec: &CertifiedRuntimeSpec,
-        run_id: &RunId,
-        store: &S,
-    ) -> Result<Self> {
-        let committed =
-            store::CommittedRunStream::from_events(run_id.clone(), store.load_run_stream(run_id))?;
-        Self::from_committed_stream(runtime_spec, &committed)
-    }
-
     pub(crate) fn from_stream(
         runtime_spec: &CertifiedRuntimeSpec,
         run_id: &RunId,

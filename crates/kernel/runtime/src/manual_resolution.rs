@@ -26,26 +26,6 @@ pub struct ManualResolutionEvidenceArtifact {
     pub media_type: spec::MediaType,
 }
 
-/// Builds manual resolution prefix authority for the current store prefix.
-pub fn build_manual_resolution_prefix_authority<S: store::TypedRunEventStore + ?Sized>(
-    store: &S,
-    runtime_spec: &CertifiedRuntimeSpec,
-    run_id: &RunId,
-    manual: spec::ManualResolutionEvidenceSpec,
-) -> Result<ManualResolutionPrefixAuthority> {
-    let stream = store.load_run_stream(run_id);
-    let expected_next_seq = store.expected_next_seq(run_id);
-    let projection = store.projection_snapshot();
-    build_manual_resolution_prefix_authority_from_parts(
-        runtime_spec,
-        run_id,
-        manual,
-        &stream,
-        expected_next_seq,
-        projection,
-    )
-}
-
 pub(crate) fn build_manual_resolution_prefix_authority_from_parts(
     runtime_spec: &CertifiedRuntimeSpec,
     run_id: &RunId,

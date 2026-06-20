@@ -3091,7 +3091,11 @@ async fn runtime_rejects_standalone_retention_manifest_projection_history() {
         .expect("synthetic standalone projection");
 
     assert!(matches!(
-        RuntimeRunView::from_store(&fixture.runtime_spec, &fixture.run_id, &store),
+        RuntimeRunView::from_stream(
+            &fixture.runtime_spec,
+            &fixture.run_id,
+            &store.load_run_stream(&fixture.run_id)
+        ),
         Err(RuntimeError::InvalidRunStream(message))
             if message.contains("retention manifest projection was not produced")
     ));
@@ -6142,7 +6146,9 @@ async fn old_model_framework_stream_without_attempt_start_rejects_on_runtime_loa
         crate::binding::BoundRuntimeContextLoader::new(registered_fixture_runners(&fixture)),
     );
     assert!(matches!(
-        loader.load(&fixture.runtime_spec, &fixture.run_id, &old_model_store),
+        loader
+            .load_async(&fixture.runtime_spec, &fixture.run_id, &old_model_store)
+            .await,
         Err(RuntimeError::Store(message))
             if message.contains("unsupported old stream model")
                 && message.contains("StateAttemptStarted")
@@ -6373,8 +6379,10 @@ async fn side_effect_attempt_view_from_verified_context_exposes_ledger_state() {
             &fixture,
         )),
     );
+    let async_store = store::AsyncInMemoryTypedRunStore::from_store(store.clone());
     let context = loader
-        .load(&fixture.runtime_spec, &fixture.run_id, &store)
+        .load_async(&fixture.runtime_spec, &fixture.run_id, &async_store)
+        .await
         .expect("verified context");
 
     let view = SideEffectAttemptView::from_verified_context(&context, node, &attempt_id)
@@ -8095,10 +8103,10 @@ async fn runtime_rejects_manual_resolution_prefix_with_open_attempt() {
     else {
         panic!("manual resolution fixture policy");
     };
-    let error = build_manual_resolution_prefix_authority(
-        &store,
+    let error = build_manual_resolution_prefix_authority_for_tests(
         &fixture.runtime_spec,
         &fixture.run_id,
+        &store,
         manual.clone(),
     )
     .expect_err("manual prefix rejects open attempt");
@@ -10724,31 +10732,6 @@ struct ReadOnlyCorruptStore {
     projection: store::ProjectionSnapshot,
 }
 
-impl store::TypedProjectionRead for ReadOnlyCorruptStore {
-    fn projection_snapshot(&self) -> &store::ProjectionSnapshot {
-        &self.projection
-    }
-}
-
-impl store::TypedRunEventStore for ReadOnlyCorruptStore {
-    fn append_prepared_commit_plan(
-        &mut self,
-        _plan: store::PreparedCommitPlan,
-    ) -> store::Result<store::CommitOutcome> {
-        Err(store::StoreError::Identity(
-            "corrupt test store is read-only".to_owned(),
-        ))
-    }
-
-    fn load_run_stream(&self, _run_id: &RunId) -> Vec<store::KernelEventEnvelope> {
-        self.stream.clone()
-    }
-
-    fn expected_next_seq(&self, _run_id: &RunId) -> store::StreamSeq {
-        store::StreamSeq::FIRST
-    }
-}
-
 impl store::AsyncTypedRunEventStore for ReadOnlyCorruptStore {
     type Error = store::StoreError;
 
@@ -11471,9 +11454,9 @@ fn referenced_artifact_ids_for_payload(payload: &events::KernelEventPayload) -> 
     artifacts
 }
 
-fn prepare_fixture_launch<S: store::TypedRunEventStore + ?Sized>(
+fn prepare_fixture_launch(
     scheduler: &SerialTypedScheduler,
-    store: &S,
+    store: &store::InMemoryTypedRunStore,
     fixture: &Fixture,
     seed_cells: Vec<events::SeedCellRef>,
 ) -> Result<PreparedRunLaunch> {
@@ -11588,6 +11571,22 @@ fn restore_in_memory_store(
 ) -> Result<()> {
     *store = async_store.with_inner(Clone::clone)?;
     Ok(())
+}
+
+fn build_manual_resolution_prefix_authority_for_tests(
+    runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
+    store: &store::InMemoryTypedRunStore,
+    manual: spec::ManualResolutionEvidenceSpec,
+) -> Result<mfm_manual_auth::ManualResolutionPrefixAuthority> {
+    crate::manual_resolution::build_manual_resolution_prefix_authority_from_parts(
+        runtime_spec,
+        run_id,
+        manual,
+        &store.load_run_stream(run_id),
+        store.expected_next_seq(run_id),
+        store.projection_snapshot(),
+    )
 }
 
 fn run_start_evidence(
@@ -12557,10 +12556,10 @@ async fn append_manual_resolution(
         content_hash: evidence_hash,
         artifact_id: evidence_artifact_id,
     };
-    let prefix = build_manual_resolution_prefix_authority(
-        store,
+    let prefix = build_manual_resolution_prefix_authority_for_tests(
         &fixture.runtime_spec,
         &fixture.run_id,
+        store,
         manual.clone(),
     )
     .expect("manual prefix authority");
