@@ -20,13 +20,19 @@ change the LOC profile.
 
 Current planning status:
 
+- A deletion-gate audit was added on 2026-06-20 after the branch measured `+17581/-5748` against
+  `origin/dev`. The audit below is now authoritative for cleanup accounting: phases count as
+  cleanup only when the old displaced surface is deleted, made private behind an approved low-level
+  contract, or explicitly classified as negative-test fixture machinery.
 - Cleanup status was reopened on 2026-06-20 after an implementation audit. The follow-up cleanup
-  closed the Phase 4 app read-path gaps and Phase 5 ordinary execution gaps: app launch/resume/manual
-  responses now render through the verified status read context, public raw-stream status helpers
-  were deleted, and runtime/app/CLI/REST/integration execution no longer drives over
-  `TypedRunEventStore`. Synchronous store code remains only as low-level store/replay contract and
-  fixture machinery. Phase 8 is still only the initial `FactRecorded` declaration-backed descriptor
-  slice; broader descriptor and store-codec generation remains deferred.
+  closed the main Phase 4 production app read-path gap and the main Phase 5 ordinary execution gap:
+  app launch/resume/manual responses now render through the verified status read context, public
+  raw-status helpers were deleted, and runtime/app/CLI/REST/integration ordinary execution no longer
+  drives over `TypedRunEventStore`. These phases are not deletion-gate complete until the remaining
+  raw presentation, projection-status, and fixture gates listed below are resolved. Synchronous store
+  code remains only as low-level store/replay contract and fixture machinery. Phase 8 is still only
+  the initial `FactRecorded` declaration-backed descriptor slice; broader descriptor and store-codec
+  generation remains deferred.
 - The FSM scheduler lifecycle refactor has landed. Its detailed historical RFC and validation
   artifacts were removed by commit `c8c742510ab2070cdaea688264a293aaf2a7309f` after closeout.
   Current authority for that work lives in `docs/design.md`, `docs/architecture.md`, and
@@ -151,6 +157,469 @@ Sequencing judgment:
 - Keep declarative kernel protocol generation in check-only mode until descriptor, canonical JSON,
   spec-hash, role, and runtime/replay equivalence goldens exist.
 - Move projection persistence to a separate measurement RFC.
+
+## Deletion-Gate Audit: 2026-06-20 Branch Review
+
+This audit was added after the branch implemented most roadmap slices but still measured
+`+17581/-5748` against `origin/dev`. That result means the branch is a refactor-plus-baseline branch,
+not a cleanup branch. The implementation added useful abstractions and tests, but several phases
+did not delete the old independently maintained protocol copies they were meant to displace.
+
+Branch-wide diff shape at audit time:
+
+| Category | Added | Deleted | Net | Interpretation |
+|---|---:|---:|---:|---|
+| Docs | `2831` | `16` | `+2815` | RFC, plan, and persisted/public inventory are planning/support surface. |
+| Tests | `6132` | `1142` | `+4990` | Baselines and scenario scaffolding were added before old fixture machinery was removed. |
+| Production Rust | `8618` | `4590` | `+4028` | New abstractions were layered in, with partial production deletion. |
+
+Largest net-positive files and surfaces:
+
+| File / Surface | Added | Deleted | Net | Audit meaning |
+|---|---:|---:|---:|---|
+| `crates/kernel/runtime/src/tests.rs` | `3322` | `887` | `+2435` | Runtime baselines and helper duplication increased. |
+| `RFC_REFACTORS_CLEANUPS.md` | `1820` | `0` | `+1820` | Planning text only; no cleanup credit. |
+| `crates/kernel/events/src/lib.rs` | `1396` | `26` | `+1370` | Role contracts and declaration scaffolding added; most event protocol remains handwritten. |
+| `crates/app/src/lib.rs` | `2177` | `891` | `+1286` | Shared read/status/public-output coverage added; app fixture and presentation helpers remain large. |
+| `crates/kernel/store/tests/commit_contract.rs` | `1073` | `14` | `+1059` | Store declaration and codec baselines added without replacing production codec/projection matches. |
+| `crates/kernel/runtime/src/side_effect_driver.rs` | `953` | `0` | `+953` | New driver surface added. Cleanup credit requires deleting displaced adapter/test ceremony. |
+| `PLAN_RFC_REFACTORS_CLEANUPS.md` | `874` | `0` | `+874` | Execution plan text only; no cleanup credit. |
+| `crates/kernel/runtime/src/runner_kit.rs` | `806` | `0` | `+806` | New runner kit surface added. Cleanup credit requires deleting displaced runner builders/wrappers. |
+
+Largest net-negative files and surfaces:
+
+| File / Surface | Added | Deleted | Net | Audit meaning |
+|---|---:|---:|---:|---|
+| `crates/transports/process-exec/src/lib.rs` | `0` | `308` | `-308` | Real unused workspace-leaf deletion. |
+| `crates/kernel/runtime/src/attempt.rs` | `20` | `279` | `-259` | Real runtime lifecycle cleanup. |
+| `crates/transports/proof/src/lib.rs` | `233` | `481` | `-248` | Runner kit and side-effect driver displaced some proof ceremony. |
+| `crates/kernel/runtime/src/scheduler.rs` | `53` | `204` | `-151` | Real scheduler API cleanup. |
+| `crates/adapters/evm-contracts/src/lib.rs` | `592` | `729` | `-137` | Partial EVM ceremony reduction, but new side-effect callback code remains substantial. |
+
+Deletion-gate rule for the rest of this RFC:
+
+1. A phase does not count as cleanup when it only adds baselines, declarations, wrappers, helper
+   crates, compile-fail tests, or generic APIs.
+2. A phase earns cleanup credit only when the new surface becomes the production/test authority and
+   the old duplicate surface is deleted, made private behind an approved low-level contract, or
+   explicitly classified as a negative-test fixture.
+3. Test-only use is not a permanent justification for public old APIs. Either move those APIs into
+   approved test support, convert tests to the new abstraction, or document the API as a deliberate
+   low-level corruption/contract fixture.
+4. A phase with a positive net LOC can still be valuable, but it must be labeled "baseline",
+   "hardening", or "infrastructure" until a later deletion commit removes the displaced code.
+5. Check-only generated/declarative code is not cleanup. It becomes cleanup only after it replaces
+   handwritten production code and the handwritten code is deleted.
+
+### Phase 0 Deletion Gate: Baselines
+
+Status: necessary infrastructure, no cleanup credit by itself.
+
+What landed:
+
+- Descriptor, role, projection, runtime lifecycle, public-output, replay, runner-output, and
+  side-effect baselines were added across runtime tests, store contract tests, integration tests, and
+  app tests.
+- `docs/persisted-public-surfaces.md` inventories persisted/public surfaces for later no-secret
+  gates.
+
+Deletion-gate finding:
+
+- Phase 0 increased maintained test and documentation surface. That is acceptable only as a
+  temporary safety net for later deletion.
+- Baselines must be paired with a later commit that deletes the replaced handwritten fixture or
+  protocol path. If no deletion follows, the baseline has become additional maintained surface.
+
+Required deletion gates:
+
+1. Every baseline group must name the future old surface it authorizes deleting.
+2. Baseline-only commits must not be counted toward LOC cleanup.
+3. Fixture baselines that duplicate production builders must either become shared scenario data or be
+   removed after the replacement is proven.
+
+### Phase 1 Deletion Gate: FSM Scheduler Lifecycle Refactor
+
+Status: structurally complete as a prerequisite, but deferred work must not be counted as Phase 1
+cleanup.
+
+What landed:
+
+- Transition decisions, ordinary attempt lifecycle, framework lifecycle, recovery lifecycle, and
+  side-effect lifecycle were split into named runtime modules.
+- `SerialTypedScheduler` is a smaller facade over context loading, transition dispatch, and
+  lifecycle execution.
+
+Deletion-gate finding:
+
+- Phase 1 did real runtime decomposition, but the adjacent sync/async collapse, public
+  `ResolveSagaTerminal` fixture, persisted/public no-secret hardening, and public no-append waiter
+  status were intentionally deferred.
+- Those deferred items cannot be credited to Phase 1 unless their later phase gates are satisfied.
+
+Required deletion gates:
+
+1. Keep full sync/async collapse under Phase 5 accounting.
+2. Keep manual-resolution public scenario coverage under Phase 3 accounting.
+3. Keep persisted/public no-secret gates under Phase 3b accounting.
+4. Keep no-append waiter public status outside this cleanup RFC unless a separate design/API RFC
+   makes it implementation work.
+
+### Phase 2 Deletion Gate: Artifact Role Contract
+
+Status: abstraction started, not deletion-complete.
+
+What landed:
+
+- `ArtifactRoleContract`, policy enums, `ArtifactRole::ALL`, `ArtifactRole::as_str`, and
+  `ArtifactRole::parse` now live in `crates/kernel/events/src/lib.rs`.
+- Store role parse/string helpers and filesystem artifact metadata parsing delegate to the
+  events-owned role tags.
+- Role-contract goldens cover schema tags and policy rows.
+
+Retained duplicate surfaces:
+
+- Runtime commit validation still hand-maps payloads to required roles in
+  `crates/kernel/runtime/src/commit.rs`.
+- Runtime history still hand-maps same-commit payload keys in
+  `crates/kernel/runtime/src/history.rs`.
+- Replay still hardcodes run-admission artifact role authorization in
+  `crates/kernel/replay/src/lib.rs`.
+- Integration fixtures still duplicate role classes in `tests/integration/src/test_support.rs`.
+
+Deletion-gate finding:
+
+- Phase 2 created the right role authority, but it did not yet make that authority the only source
+  of role policy. It removed some string/tag drift, but role classification and context-specific
+  requirements remain hand-maintained in runtime, replay, and fixtures.
+
+Required deletion gates:
+
+1. Runtime staged artifact requirements must consume the events-owned role contract or an
+   events-owned requirement lens.
+2. Runtime same-commit role extraction must consume the role contract where possible.
+3. Replay artifact authorization must consume the same role policy table for role/schema/producer
+   decisions.
+4. Fixture role groupings must move to shared test scenario helpers or events-owned role
+   classifications.
+5. Store same-commit admission checks may remain store-owned, but duplicate role policy/classification
+   matches outside store admission must be deleted before Phase 2 counts as cleanup-complete.
+
+### Phase 3 Deletion Gate: Scenario And Golden Infrastructure
+
+Status: infrastructure-started, not cleanup-complete.
+
+What landed:
+
+- `mfm-kernel-scenario-data` was added under `tests/` with a strict low-level dependency allowlist.
+- Proof replay corruption cases now iterate scenario data.
+- Cargo metadata guards prevent production crates from depending on scenario data.
+- Some proof replay corruption cases have equivalence goldens.
+
+Retained duplicate surfaces:
+
+- Proof corruption mutation dispatch remains handwritten by string in
+  `tests/integration/tests/proof_transport_conformance.rs`.
+- Equivalence goldens remain local vectors in the integration test instead of scenario-owned
+  expected summaries.
+- Replay-artifact negative cases still dispatch through handwritten match/mutation helpers in
+  `tests/integration/src/test_support.rs`.
+- Runtime/app/store tests still contain large local corruption helpers and direct
+  `build_committed_batch` fixture rewrites.
+
+Deletion-gate finding:
+
+- Phase 3 added scenario infrastructure but left most fixture construction and illegal mutation
+  machinery in place. This is useful scaffold, not LOC cleanup.
+
+Required deletion gates:
+
+1. Scenario descriptors must carry stable expected summaries, event-shape hashes, or public-output
+   hashes rather than only labels that point back to handwritten test-local goldens.
+2. Old/new differential tests must prove equivalent streams, projections, replay results, public JSON,
+   and error classes.
+3. After equivalence passes, replaced fixture plumbing must be deleted from integration/runtime/app
+   test files.
+4. Intentional invalid-output or corruption builders must be moved to explicitly named negative-test
+   support, not mixed with normal valid scenario builders.
+5. `build_committed_batch` can remain public only if it is explicitly documented as a low-level
+   corruption/contract fixture; otherwise scenario support must own the forged-stream construction.
+
+### Phase 3 Public Manual-Resolution Fixture Gate
+
+Status: app coverage improved, not full public-surface scenario coverage.
+
+What landed:
+
+- App tests now drive a manual-resolution terminal fixture, assert `ResolveSagaTerminal` instead of
+  `CompleteRun`, verify framework attempt ordering, and check proof/signature/evidence non-exposure.
+- CLI and REST coverage mostly checks response shape/static contracts.
+
+Deletion-gate finding:
+
+- This does not yet satisfy the roadmap gate that the same logical manual-resolution scenario be
+  visible through app, CLI, REST, status, and stream surfaces before shared-view/public-status
+  rewrites are credited.
+
+Required deletion gates:
+
+1. Reuse the same logical manual-resolution scenario across app, CLI, and REST contract tests.
+2. Assert stable public JSON for run mode, manual block state, terminal saga fields, framework
+   attempt disposition, and stream ordering.
+3. Assert no authorization proof bytes, signer material, or secret-bearing diagnostics on every
+   public surface.
+
+### Phase 3b Deletion Gate: Persisted/Public No-Secret Provenance
+
+Status: hardening started, not a complete rewrite gate.
+
+What landed:
+
+- Persisted/public surface inventory was added.
+- `MfmErrorInfo` now validates public diagnostic text/reference shape.
+- Runtime emits redacted failure diagnostics.
+- App tests check public/persisted surfaces for sentinel leakage.
+- EVM prepared invocation evidence excludes raw signed payload/signature surfaces.
+
+Retained gaps:
+
+- Secret-bearing runner inputs do not yet have broad scenario goldens across runtime/store/replay,
+  public outputs, CLI, and REST.
+- Some assurance still comes from source scans and string sentinels rather than typed production
+  entry-point tests.
+
+Deletion-gate finding:
+
+- Phase 3b is security hardening, not LOC cleanup. It should gate larger rewrites, but it should not
+  be counted as deletion unless it removes duplicate or weak public/persisted surface checks.
+
+Required deletion gates:
+
+1. Add scenario goldens for secret-bearing runner inputs.
+2. Add production entry-point tests for side-effect signed/raw payload paths across runtime, store,
+   replay, public output, CLI, and REST.
+3. Keep source scans as defense-in-depth only; typed tests over production entry points must be the
+   authority.
+4. Delete or demote old source-scan-only checks once typed coverage supersedes them.
+
+### Phase 4 Deletion Gate: Shared Run View And App Read Paths
+
+Status: mostly closed for production read authority, not deletion-complete.
+
+What landed:
+
+- `VerifiedRunHistoryView` is minted inside runtime from certified spec, committed stream, and
+  verified artifact store.
+- Runtime history, replay authority construction, app status/output paths, and stream filtering use
+  shared verified context wrappers.
+- Launch, resume, and manual-resolution responses now render through verified status read context.
+- The raw public status helper accepting event slices was deleted.
+
+Retained duplicate or risky surfaces:
+
+- `typed_run_stream_response_from_events` remains public and accepts arbitrary event slices in
+  `crates/app/src/lib.rs`.
+- CLI status still loads a Postgres projection before constructing services and calls
+  `run_status_with_projection`; app validates the target stream before rendering, but the
+  projection path needs to be explicitly documented as the store-owned global resource-lane exception
+  or folded behind the same service loader.
+- Some CLI docs still mention older support paths and should be checked against the current read
+  authority model.
+
+Deletion-gate finding:
+
+- Phase 4 did remove an important raw status path, but one raw stream presentation helper and one
+  projection-assisted status path remain. The phase should be labeled "production mostly closed"
+  rather than deletion-complete until those are resolved or explicitly approved.
+
+Required deletion gates:
+
+1. Make raw stream response construction view-backed, private, or explicitly limited to already
+   verified contexts.
+2. Document and guard `run_status_with_projection` as the only allowed store-owned cross-run
+   projection exception, or fold it behind the same service loader.
+3. Add a source/namespace check preventing app public read helpers from accepting raw event slices
+   unless they are in an approved formatting-only module.
+4. Refresh CLI/REST docs to match the verified read authority path.
+
+### Phase 5 Deletion Gate: Full Sync/Async Driver And Service Collapse
+
+Status: production ordinary execution is async-primary; fixture gate remains incomplete.
+
+What landed:
+
+- Old app sync facade and `AsyncRunServices` split were removed.
+- Public scheduler execution APIs now accept `AsyncTypedRunEventStore`.
+- The `TypedRunEventStore` trait was deleted.
+- App, CLI, REST, scheduler, and integration proof conformance execution paths compile against the
+  async store surface.
+- Unused `crates/transports/process-exec` was deleted.
+
+Retained duplicate or low-level surfaces:
+
+- `InMemoryTypedRunStore` remains public as sync low-level store machinery.
+- Runtime, app, and integration fixtures still build sync in-memory stores and wrap or copy them
+  into async fixtures.
+- App corruption/status helpers still use sync stores directly.
+
+Deletion-gate finding:
+
+- Phase 5 removed real production duplication, but fixture usage can still preserve the old mental
+  model and public sync store construction. It is acceptable only if the sync store is explicitly
+  classified as low-level store/replay contract machinery and not an execution path.
+
+Required deletion gates:
+
+1. Migrate runtime/app/integration fixtures to `AsyncInMemoryTypedRunStore` or explicit async test
+   stores where they exercise scheduler/app behavior.
+2. Keep direct `InMemoryTypedRunStore` use only in approved store/replay corruption or commit-contract
+   fixtures.
+3. Add a source scan forbidding sync store execution helpers outside approved files.
+4. Hide or document remaining sync in-memory constructors as low-level test/contract machinery, not
+   a supported runtime/app execution API.
+
+### Phase 6 Deletion Gate: Runtime Runner Kit
+
+Status: partial production displacement, not full wrapper deletion.
+
+What landed:
+
+- `RunnerArtifactBuilder`, `RunnerPayloadBuilder`, `RunnerOutputBuilder`, and
+  `RunnerRegistrationBuilder` were added.
+- Proof, portfolio, and EVM adapters use runner kit helpers for some artifact/output payload
+  construction.
+- Proof and portfolio production code lost some local artifact/cell/fact helper ceremony.
+
+Retained duplicate surfaces:
+
+- Proof, portfolio, and EVM adapters still carry local `registered_descriptor`, `register_runner`,
+  executable identity, and digest wrapper helpers.
+- Integration/app/runtime tests still manually build `CellProduced`, `FactRecorded`, staged
+  artifacts, side-effect artifacts, retention refs, and side-effect payloads.
+- Some retained wrappers may be correct because executable identity must stay explicit, but they are
+  not deleted surface.
+
+Deletion-gate finding:
+
+- Phase 6 should not count the entire runner kit as cleanup. Cleanup credit is limited to the old
+  helper code actually removed from adapters. The new kit is net-positive until valid runner-output
+  fixtures and adapter-local wrappers are converted or explicitly retained.
+
+Required deletion gates:
+
+1. Add proof, portfolio, and EVM runner-output/executable-identity goldens that cover emitted
+   artifacts, event payloads, retention refs, and executable identities.
+2. Convert valid test builders to the runner kit where they model normal runner output.
+3. Split intentional invalid-output builders into named negative-test helpers.
+4. Delete adapter-local registration wrappers only where the kit can preserve explicit executable
+   identity and descriptor binding.
+5. Count remaining wrappers as retained authority ceremony, not cleanup.
+
+### Phase 7 Deletion Gate: Generic Side-Effect Driver
+
+Status: driver abstraction added and partially adopted; not deletion-complete and still has authority
+questions.
+
+What landed:
+
+- `SideEffectDriver`, `SideEffectDriverCallbacks`, `SideEffectAttemptView`,
+  `SideEffectEvidenceBuilder`, and protocol action types were added.
+- Proof and EVM deploy/configure paths call the generic driver.
+- Runtime side-effect driver unit tests cover several protocol actions.
+- Replay side-effect frame collection was centralized.
+
+Retained duplicate or problematic surfaces:
+
+- First-step ledger/claim authority still comes from adapter callbacks through
+  `SideEffectIntentPlan`, `RunnerSideEffectBinding`, and `SideEffectClaimAuthority`.
+- Proof hardcodes ledger key, epoch, owner, and fencing token in adapter code.
+- EVM derives side-effect claim authority in adapter code.
+- Generic driver support for failed/not-submitted phases is incomplete; some phases are treated as
+  unsupported.
+- Production proof goldens are primarily happy-path, and EVM runner-output/recovery/ambiguity/failure
+  goldens are not broad enough to justify deleting old paths.
+- Runtime/integration/app tests retain side-effect payload and staging builders alongside the driver.
+
+Deletion-gate finding:
+
+- Phase 7 is valuable abstraction work, but it is not yet a cleanup phase. It adds a new generic
+  driver while retaining store/replay/runtime validation and fixture-side builders. The remaining
+  authority leak around ledger key, claim owner, fencing token, and epoch must be resolved before
+  more deletion is safe.
+
+Required deletion gates:
+
+1. Runtime/store must mint side-effect ledger key, claim owner, fencing token, and epoch authority;
+   adapters may supply domain idempotency inputs, not durable protocol authority.
+2. Proof and EVM must have recovery, unknown-submission, not-submitted, ambiguity, failure, and
+   output-after-confirmation goldens.
+3. EVM must have runner-output and executable-identity goldens before local ceremony is deleted.
+4. Valid side-effect test builders must move to the driver/runner kit; invalid builders must be
+   marked as negative fixtures.
+5. The driver must consume runtime-minted verified side-effect views and must not read persisted
+   projection rows or become transition-admission authority.
+
+### Phase 8 Deletion Gate: Kernel Protocol Generation And Declarations
+
+Status: check-only plus one narrow production descriptor replacement; not cleanup-complete.
+
+What landed:
+
+- `FactRecorded` has a declaration-backed schema descriptor.
+- Test-only `EventFamilyDeclaration` and artifact lens checks compare generated expectations against
+  handwritten event requirements.
+- Store contract tests include check-only event codec and projection transition declaration views for
+  `FactRecorded` and `StateAttemptStarted`.
+
+Retained duplicate surfaces:
+
+- Production `KernelEventPayload::schema_descriptor` still matches most variants by hand.
+- Production store payload encoding/decoding is still a large handwritten match.
+- Production projection folding is still handwritten per event.
+- `crates/kernel/spec` persisted JSON/hash/parse logic remains handwritten.
+- Replay still indexes and validates concrete payload variants directly.
+
+Deletion-gate finding:
+
+- Phase 8 is currently a drift-check and compatibility baseline. It should not be credited as LOC
+  cleanup beyond the single `FactRecorded` descriptor slice.
+
+Required deletion gates:
+
+1. The declaration/generator must become the production source for descriptors for the targeted
+   event family.
+2. The declaration/generator must become the production source for artifact lenses and requirements
+   for that family.
+3. Store payload codecs for that family must be generated/derived from the declaration, and the
+   handwritten encode/decode arms must be deleted.
+4. Projection transition inputs for that family must be generated/derived, and the parallel
+   handwritten transition declarations must be removed or reduced to explicit semantic code.
+5. Each replacement must prove byte-for-byte compatibility through descriptor, canonical JSON,
+   spec-hash, role, runtime, replay, and projection goldens.
+
+### Deferred Projection Persistence Deletion Gate
+
+Status: explicitly out of cleanup scope until a separate measurement RFC exists.
+
+Current state:
+
+- Postgres projection tables still exist and are written on append.
+- Reads have moved toward stream-authoritative rebuild paths, which is authority cleanup, but the
+  non-authoritative projection persistence layer remains.
+
+Deletion-gate finding:
+
+- Projection persistence cannot be counted as cleanup until the repository either deletes the
+  persisted projection tables/writers or proves their cache semantics with explicit versioned repair
+  and validation behavior.
+
+Required deletion gates:
+
+1. Write the separate projection persistence measurement RFC before implementation.
+2. Decide whether projection tables are deleted or kept as verified caches.
+3. If kept, persist and validate cache metadata such as `{run_id, head_seq, fold_version, spec_hash}`.
+4. Define repair behavior and Postgres parity checks.
+5. Do not count stream-authoritative reads as projection-persistence deletion while projection
+   writers and tables remain.
 
 ## Fundamental Abstraction Bets
 
@@ -1601,9 +2070,12 @@ output rendering, retained artifacts, replay evidence, CLI/REST output, or side-
 
 ### Phase 4: Shared Run View And App Read Paths
 
-Status: closed by the 2026-06-20 tightening pass. `VerifiedRunHistoryView` is the shared read
-authority, app launch/resume/manual-resolution responses render through the verified status read
-context, and the raw public status helper that accepted event slices directly has been deleted.
+Status: production read-authority path mostly closed by the 2026-06-20 tightening pass, but not
+deletion-gate complete. `VerifiedRunHistoryView` is the shared read authority,
+app launch/resume/manual-resolution responses render through the verified status read context, and
+the raw public status helper that accepted event slices directly has been deleted. The
+deletion-gate audit above still requires resolving raw stream presentation and projection-status
+exceptions before this phase counts as cleanup-complete.
 
 1. Keep `VerifiedRunHistoryView` sealed inside `mfm-runtime` and minted only from
    `CertifiedRuntimeSpec`, `CommittedRunStream`, and `VerifiedRunArtifactStore`; keep
@@ -1623,11 +2095,12 @@ validated path before presentation filtering.
 
 ### Phase 5: Full Sync/Async Driver And Service Collapse
 
-Status: closed for ordinary execution by the 2026-06-20 tightening pass. Scheduler, runtime
-attempt/recovery internals, app services, CLI, REST, and integration support drive through
-`AsyncTypedRunEventStore`; the app sync facade and public scheduler APIs over `TypedRunEventStore`
-were deleted. Synchronous store code is retained only as low-level commit-contract/replay fixture
-machinery.
+Status: production ordinary execution path closed by the 2026-06-20 tightening pass, but not
+fixture deletion-gate complete. Scheduler, runtime attempt/recovery internals, app services, CLI,
+REST, and integration support drive through `AsyncTypedRunEventStore`; the app sync facade and
+public scheduler APIs over `TypedRunEventStore` were deleted. Synchronous store code is retained only
+as low-level commit-contract/replay fixture machinery and must remain fenced by the deletion-gate
+rules above.
 
 1. Make async execution and app services the only ordinary execution path once shared
    run-view/status authority exists.
