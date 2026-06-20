@@ -47,7 +47,14 @@ use serde_json::{Map, Value};
 
 pub use mfm_runtime::ErasedRunnerRegistry;
 
+mod entry_point;
 mod evm_contracts;
+
+pub use entry_point::{
+    AuthoredConfig, CanonicalConfigMaterial, CanonicalSeedMaterial, CanonicalizerIdentity,
+    ConfigFormat, EntryPointOpId, EntryPointOpPlan, EntryPointOpRegistry, EntryPointOpResolveError,
+    LaunchableOp, LoweringIdentity, OpLaunchError, OpVersion, PublicOpName,
+};
 
 /// Shared observability configuration used by typed binaries.
 pub mod observability;
