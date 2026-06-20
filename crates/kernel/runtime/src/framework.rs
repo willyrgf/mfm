@@ -14,8 +14,8 @@ use crate::runners::{
     RunnerEventPayload,
 };
 use crate::{
-    canonical_json, content_digest_json, retention_ref_for_artifact, validate_public_output,
-    CertifiedRuntimeSpec, Result, RuntimeError,
+    canonical_json, content_digest_json, retention_ref_for_artifact, CertifiedRuntimeSpec, Result,
+    RuntimeError,
 };
 
 pub(crate) fn framework_public_output_binding(
@@ -702,51 +702,6 @@ fn public_output_cell_json(cell: &events::NamedTypedCellRef) -> serde_json::Valu
         "semantic_type_id": cell.semantic_type_id.as_str(),
         "value_lineage": cell.value_lineage.lineage_digest.as_str(),
     })
-}
-
-/// Rebuilds framework public-output receipt artifact bytes and evidence.
-pub fn build_public_output_receipt_artifact(
-    runtime_spec: &CertifiedRuntimeSpec,
-    payload: &events::PublicOutputProduced,
-) -> Result<(PlainCanonicalJsonBytes, store::ArtifactEvidenceRef)> {
-    let node = runtime_spec.node(&payload.node_id).ok_or_else(|| {
-        RuntimeError::InvalidSpec(format!(
-            "public-output payload references missing node {}",
-            payload.node_id
-        ))
-    })?;
-    validate_public_output(runtime_spec, node, payload)?;
-    let Some(spec::FrameworkNodeSpec::PublicOutputRender(render)) = &node.framework else {
-        return Err(RuntimeError::InvalidSpec(format!(
-            "public-output node {} is not a framework render node",
-            node.node_id
-        )));
-    };
-    let output_cell = runtime_spec.cell(&node.output_cell).ok_or_else(|| {
-        RuntimeError::InvalidSpec(format!(
-            "public-output node {} output cell {} is missing",
-            node.node_id, node.output_cell
-        ))
-    })?;
-    let bytes = public_output_receipt_json(
-        render,
-        &payload.cells,
-        &payload.rendered_digest,
-        payload.rendered_artifact_id.as_ref(),
-    )?;
-    let digest = bytes.content_digest();
-    let evidence = store::ArtifactEvidenceRef {
-        artifact_id: ArtifactId::from_digest(digest.algorithm(), *digest.digest()),
-        digest,
-        byte_len: bytes.as_bytes().len() as u64,
-        media_type: spec::MediaType::new("application/json")?,
-        schema_id: Some(output_cell.schema_id.clone()),
-        semantic_type_id: Some(output_cell.semantic_type_id.clone()),
-        producer_node_id: Some(node.node_id.clone()),
-        producer_seed_id: None,
-        artifact_role: events::ArtifactRole::StateOutput,
-    };
-    Ok((bytes, evidence))
 }
 
 fn retention_manifest_json(

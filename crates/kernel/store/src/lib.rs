@@ -919,82 +919,6 @@ pub mod v1 {
         pub run_completion: Option<RunCompletionProjection>,
     }
 
-    /// Store-derived authority that a prefix is manually blocked.
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub struct ManualBlockedPrefix {
-        run_id: RunId,
-        spec_hash: SpecHash,
-        expected_next_seq: StreamSeq,
-        manual_block_reason: ManualBlockReason,
-        manual_policy: ManualResolutionEvidenceSpec,
-    }
-
-    impl ManualBlockedPrefix {
-        /// Mints manual-blocked prefix authority from certified policy and the current saga view.
-        pub fn new(
-            saga: &SagaProjection,
-            spec_hash: SpecHash,
-            expected_next_seq: StreamSeq,
-            policy: &SagaPolicySpec,
-        ) -> Result<Self> {
-            if saga.run_mode != RunMode::ManualBlocked {
-                return Err(StoreError::ProjectionConflict {
-                    key: format!("run:{}:manual_prefix", saga.run_id),
-                    message: format!(
-                        "manual prefix requires manual_blocked saga mode, found {}",
-                        saga.run_mode.as_str()
-                    ),
-                });
-            }
-            let reason =
-                saga.manual_block_reason
-                    .ok_or_else(|| StoreError::ProjectionConflict {
-                        key: format!("run:{}:manual_prefix", saga.run_id),
-                        message: "manual prefix lacks block reason".to_owned(),
-                    })?;
-            let manual_policy = manual_policy_for_block_reason(policy, reason)
-                .ok_or_else(|| StoreError::ProjectionConflict {
-                    key: format!("run:{}:manual_prefix", saga.run_id),
-                    message:
-                        "certified saga policy does not permit manual resolution for this prefix"
-                            .to_owned(),
-                })?
-                .clone();
-            Ok(Self {
-                run_id: saga.run_id.clone(),
-                spec_hash,
-                expected_next_seq,
-                manual_block_reason: reason,
-                manual_policy,
-            })
-        }
-
-        /// Returns the run id bound into this prefix.
-        pub const fn run_id(&self) -> &RunId {
-            &self.run_id
-        }
-
-        /// Returns the certified spec hash bound into this prefix.
-        pub const fn spec_hash(&self) -> &SpecHash {
-            &self.spec_hash
-        }
-
-        /// Returns the expected sequence for the manual-resolution append.
-        pub const fn expected_next_seq(&self) -> StreamSeq {
-            self.expected_next_seq
-        }
-
-        /// Returns the manual block reason derived from the prefix.
-        pub const fn manual_block_reason(&self) -> ManualBlockReason {
-            self.manual_block_reason
-        }
-
-        /// Returns the certified manual evidence policy bound into this prefix.
-        pub const fn manual_policy(&self) -> &ManualResolutionEvidenceSpec {
-            &self.manual_policy
-        }
-    }
-
     /// Non-empty proof that compensating obligations were closed.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct ClosedObligationsNonEmpty {
@@ -4745,9 +4669,9 @@ pub mod v1 {
     /// Authoritative state needed to validate and stage one absent commit-key append.
     ///
     /// Durable stores load this from their run stream, artifact table, logical-key table, and
-    /// rebuilt projections before calling [`stage_typed_run_commit`]. Commit-key lookup remains the
-    /// storage implementation's responsibility because the RFC requires that lookup to precede stale
-    /// `expected_next_seq` checks.
+    /// rebuilt projections before calling [`stage_prepared_commit_plan`]. Commit-key lookup remains
+    /// the storage implementation's responsibility because the RFC requires that lookup to precede
+    /// stale `expected_next_seq` checks.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct TypedCommitBase {
         /// Artifact evidence recorded before event commit.
@@ -4987,19 +4911,6 @@ pub mod v1 {
             }
             Ok(())
         }
-    }
-
-    /// Validates and stages a typed commit after the caller has handled commit-key idempotency.
-    ///
-    /// This is the shared commit engine for in-memory and durable stores. It checks stale sequence,
-    /// payload run/spec identity, logical-key preconditions, artifact evidence, and projection
-    /// transitions, then returns the store-owned envelopes plus staged projection/logical-key state.
-    pub fn stage_typed_run_commit(
-        base: &TypedCommitBase,
-        request: &TypedCommitRequest,
-    ) -> Result<StagedTypedCommit> {
-        let fingerprint = commit_fingerprint(request)?;
-        stage_typed_run_commit_with_fingerprint(base, request, fingerprint)
     }
 
     /// Validates and stages a purpose-specific prepared commit plan after commit-key idempotency handling.

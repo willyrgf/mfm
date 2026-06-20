@@ -136,20 +136,6 @@ impl AppError {
         Self::new(class, code, PublicSafeMessage::backend(message))
     }
 
-    /// Returns a generic invalid request error.
-    pub fn invalid_request(message: impl Into<PublicSafeMessage>) -> Self {
-        Self::new(ErrorClass::BadRequest, "InvalidRequest", message)
-    }
-
-    /// Returns the standard invalid UUID error payload.
-    pub fn invalid_uuid() -> Self {
-        Self::new(
-            ErrorClass::BadRequest,
-            "InvalidRunId",
-            "Invalid UUID format",
-        )
-    }
-
     /// Returns a not-found error with an explicit code and message.
     pub fn not_found(code: impl Into<String>, message: impl Into<PublicSafeMessage>) -> Self {
         Self::new(ErrorClass::NotFound, code, message)
@@ -948,16 +934,6 @@ impl<S> RunServices<S>
 where
     S: store::AsyncTypedRunEventStore + Send + Sync,
 {
-    /// Creates typed async app services from explicit scheduler, store, and artifact store choices.
-    pub fn new(scheduler: SerialTypedScheduler, store: S, artifacts: FsTypedArtifactStore) -> Self {
-        Self::new_with_certification_registry(
-            scheduler,
-            store,
-            artifacts,
-            CertificationRegistry::new(),
-        )
-    }
-
     /// Creates typed async app services with an explicit trusted certification registry.
     pub fn new_with_certification_registry(
         scheduler: SerialTypedScheduler,
