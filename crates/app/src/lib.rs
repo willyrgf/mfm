@@ -279,11 +279,6 @@ pub fn make_default_typed_artifact_store() -> FsTypedArtifactStore {
     FsTypedArtifactStore::new(default_typed_artifact_root())
 }
 
-/// Builds an in-memory typed run store for tests and local single-process tools.
-pub fn make_in_memory_typed_run_store() -> store::InMemoryTypedRunStore {
-    store::InMemoryTypedRunStore::default()
-}
-
 /// Builds typed app services backed by an in-memory typed run event store.
 pub fn make_in_memory_typed_services(
     runners: ErasedRunnerRegistry,
