@@ -42,8 +42,6 @@ use mfm_store::v1 as store;
 use serde::{Deserialize, Serialize};
 use serde_json::map::Entry;
 use serde_json::{Map, Value};
-#[cfg(test)]
-use tokio::sync::Mutex;
 
 pub use mfm_runtime::ErasedRunnerRegistry;
 
@@ -313,26 +311,6 @@ pub fn make_in_memory_typed_services_with_certification_registry(
             }),
         ),
         store::AsyncInMemoryTypedRunStore::default(),
-        artifacts,
-        certification_registry,
-    )
-}
-
-#[cfg(test)]
-fn make_sync_in_memory_typed_services_with_certification_registry(
-    runners: ErasedRunnerRegistry,
-    artifact_root: impl Into<PathBuf>,
-    certification_registry: CertificationRegistry,
-) -> SyncRunServices<store::InMemoryTypedRunStore> {
-    let artifacts = FsTypedArtifactStore::new(artifact_root);
-    SyncRunServices::new_with_certification_registry(
-        SerialTypedScheduler::new(
-            runners,
-            Arc::new(FsRuntimeArtifactStager {
-                artifacts: artifacts.clone(),
-            }),
-        ),
-        store::InMemoryTypedRunStore::default(),
         artifacts,
         certification_registry,
     )
@@ -962,196 +940,6 @@ impl fmt::Display for TypedReplayResponse {
     }
 }
 
-/// Test-only synchronous service facade for certified typed runtime dispatch.
-#[cfg(test)]
-#[derive(Clone)]
-struct SyncRunServices<S> {
-    scheduler: SerialTypedScheduler,
-    store: Arc<Mutex<S>>,
-    artifacts: FsTypedArtifactStore,
-    certification_registry: CertificationRegistry,
-}
-
-#[cfg(test)]
-impl<S> SyncRunServices<S>
-where
-    S: store::TypedRunEventStore + Send,
-{
-    /// Creates typed app services with an explicit trusted certification registry.
-    pub fn new_with_certification_registry(
-        scheduler: SerialTypedScheduler,
-        store: S,
-        artifacts: FsTypedArtifactStore,
-        certification_registry: CertificationRegistry,
-    ) -> Self {
-        Self {
-            scheduler,
-            store: Arc::new(Mutex::new(store)),
-            artifacts,
-            certification_registry,
-        }
-    }
-
-    /// Returns the shared typed run store handle.
-    pub fn store(&self) -> Arc<Mutex<S>> {
-        Arc::clone(&self.store)
-    }
-
-    /// Returns the typed artifact store.
-    pub fn artifacts(&self) -> &FsTypedArtifactStore {
-        &self.artifacts
-    }
-
-    /// Returns the trusted certification registry used for stored bundle verification.
-    pub fn certification_registry(&self) -> &CertificationRegistry {
-        &self.certification_registry
-    }
-
-    /// Starts a certified typed run, optionally driving runnable nodes.
-    pub async fn launch_run(&self, req: RunLaunchRequest) -> Result<TypedRunResponse, AppError> {
-        let runtime_spec = CertifiedRuntimeSpec::new(req.certified_spec)?;
-        let mut store = self.store.lock().await;
-        let expected_next_seq = store.expected_next_seq(&req.run_id);
-        let launch = self.scheduler.prepare_run_launch(
-            &runtime_spec,
-            req.run_id.clone(),
-            req.evidence,
-            expected_next_seq,
-        )?;
-        self.scheduler.start_run(&mut *store, launch).await?;
-        let status = self
-            .drive_with_mode(&mut *store, &runtime_spec, &req.run_id, req.drive)
-            .await?;
-        typed_run_response(&*store, &runtime_spec, &req.run_id, status)
-    }
-
-    /// Resumes a stored typed run after verifying its persisted certified authority.
-    pub async fn resume_stored_run(
-        &self,
-        run_id: &RunId,
-        drive: DriveMode,
-    ) -> Result<TypedRunResponse, AppError> {
-        let runtime_spec = self
-            .load_verified_run_read_context(run_id)
-            .await?
-            .runtime_spec()
-            .clone();
-        let mut store = self.store.lock().await;
-        let status = self
-            .drive_with_mode(&mut *store, &runtime_spec, run_id, drive)
-            .await?;
-        typed_run_response(&*store, &runtime_spec, run_id, status)
-    }
-
-    /// Records a signed manual resolution and optionally resumes typed scheduler execution.
-    pub async fn record_manual_resolution(
-        &self,
-        req: ManualResolutionRecordRequest,
-    ) -> Result<TypedRunResponse, AppError> {
-        let run_id = req.run_id.clone();
-        let drive = req.drive;
-        let runtime_spec = self
-            .load_verified_run_read_context(&run_id)
-            .await?
-            .runtime_spec()
-            .clone();
-        let manual_request = manual_resolution_runtime_request(req)?;
-        let mut store = self.store.lock().await;
-        self.scheduler
-            .record_manual_resolution(&mut *store, &runtime_spec, &run_id, manual_request)
-            .await?;
-        let status = self
-            .drive_with_mode(&mut *store, &runtime_spec, &run_id, drive)
-            .await?;
-        typed_run_response(&*store, &runtime_spec, &run_id, status)
-    }
-
-    /// Returns typed run status by rebuilding projection from the authoritative run stream.
-    pub async fn run_status(&self, run_id: &RunId) -> Result<TypedRunResponse, AppError> {
-        let context = load_sync_verified_status_read_context(
-            &self.store,
-            &self.artifacts,
-            &self.certification_registry,
-            run_id,
-        )
-        .await?;
-        typed_run_status_from_projection(
-            run_id,
-            context.runtime_spec(),
-            context.events(),
-            context.projection(),
-        )
-    }
-
-    /// Returns the authoritative typed run stream.
-    pub async fn run_stream(&self, run_id: &RunId) -> Result<TypedRunStreamResponse, AppError> {
-        let context = self.load_verified_run_read_context(run_id).await?;
-        let events = context.events();
-        Ok(typed_run_stream_response_from_events(
-            run_id,
-            stream_head(events),
-            events,
-        ))
-    }
-
-    /// Builds an evidence-only replay broker from stored certified authority and retained evidence.
-    pub async fn replay_broker(&self, run_id: &RunId) -> Result<ReplayBroker, AppError> {
-        let context = self.load_verified_run_read_context(run_id).await?;
-        let authority = replay_read_authority_for_run(context.runtime_spec(), context.view())?;
-        ReplayBroker::from_read_authority(authority).map_err(Into::into)
-    }
-
-    /// Renders typed public output from store-owned projection and typed artifact bytes.
-    pub async fn typed_public_output(
-        &self,
-        run_id: &RunId,
-        public_schema_id: &SchemaId,
-    ) -> Result<TypedPublicOutputResponse, AppError> {
-        let context = self.load_verified_run_read_context(run_id).await?;
-        let authority = public_output_read_authority_for_run(
-            &self.artifacts,
-            context.runtime_spec(),
-            context.view(),
-            public_schema_id,
-        )
-        .await?;
-        render_typed_public_output(&self.artifacts, &authority).await
-    }
-
-    async fn load_verified_run_read_context(
-        &self,
-        run_id: &RunId,
-    ) -> Result<VerifiedRunReadContext, AppError> {
-        load_sync_verified_run_read_context(
-            &self.store,
-            &self.artifacts,
-            &self.certification_registry,
-            run_id,
-        )
-        .await
-    }
-
-    async fn drive_with_mode(
-        &self,
-        store: &mut S,
-        runtime_spec: &CertifiedRuntimeSpec,
-        run_id: &RunId,
-        drive: DriveMode,
-    ) -> Result<SchedulerStatus, AppError> {
-        match drive {
-            DriveMode::AppendOnly => Ok(SchedulerStatus::Blocked),
-            DriveMode::Once => Ok(self
-                .scheduler
-                .drive_once(store, runtime_spec, run_id)
-                .await?),
-            DriveMode::UntilBlocked => Ok(self
-                .scheduler
-                .drive_until_blocked(store, runtime_spec, run_id)
-                .await?),
-        }
-    }
-}
-
 /// Application facade for certified typed runtime dispatch.
 #[derive(Clone)]
 pub struct RunServices<S> {
@@ -1223,8 +1011,8 @@ where
         let status = self
             .drive_with_mode(&runtime_spec, &req.run_id, req.drive)
             .await?;
-        let (stream, projection) = self.status_stream_and_projection(&req.run_id).await?;
-        typed_run_response_from_projection(&req.run_id, &runtime_spec, &stream, &projection, status)
+        self.run_response_from_verified_status(&req.run_id, status)
+            .await
     }
 
     /// Resumes a certified typed run from its stored spec artifact.
@@ -1239,8 +1027,7 @@ where
             .runtime_spec()
             .clone();
         let status = self.drive_with_mode(&runtime_spec, run_id, drive).await?;
-        let (stream, projection) = self.status_stream_and_projection(run_id).await?;
-        typed_run_response_from_projection(run_id, &runtime_spec, &stream, &projection, status)
+        self.run_response_from_verified_status(run_id, status).await
     }
 
     /// Records a signed manual resolution and optionally resumes typed scheduler execution.
@@ -1260,8 +1047,8 @@ where
             .record_manual_resolution_async(&self.store, &runtime_spec, &run_id, manual_request)
             .await?;
         let status = self.drive_with_mode(&runtime_spec, &run_id, drive).await?;
-        let (stream, projection) = self.status_stream_and_projection(&run_id).await?;
-        typed_run_response_from_projection(&run_id, &runtime_spec, &stream, &projection, status)
+        self.run_response_from_verified_status(&run_id, status)
+            .await
     }
 
     /// Returns typed run status by rebuilding projection from the authoritative run stream.
@@ -1312,28 +1099,25 @@ where
         )
     }
 
-    async fn status_stream_and_projection(
+    async fn run_response_from_verified_status(
         &self,
         run_id: &RunId,
-    ) -> Result<(Vec<store::KernelEventEnvelope>, store::ProjectionSnapshot), AppError> {
-        let stream = self
-            .store
-            .load_run_stream(run_id)
-            .await
-            .map_err(async_app_store_error)?;
-        if stream.is_empty() {
-            let projection =
-                store::ProjectionSnapshot::from_parts(store::ProjectionSnapshotParts::default())?;
-            return Ok((stream, projection));
-        }
-        let projection = self
-            .store
-            .status_projection_snapshot(run_id)
-            .await
-            .map_err(async_app_store_error)?;
-        let status_projection =
-            status_projection_from_stream_with_resource_lanes(&stream, &projection)?;
-        Ok((stream, status_projection))
+        status: SchedulerStatus,
+    ) -> Result<TypedRunResponse, AppError> {
+        let context = load_async_verified_status_read_context(
+            &self.store,
+            &self.artifacts,
+            &self.certification_registry,
+            run_id,
+        )
+        .await?;
+        typed_run_response_from_projection(
+            run_id,
+            context.runtime_spec(),
+            context.events(),
+            context.projection(),
+            status,
+        )
     }
 
     /// Returns the authoritative typed run stream.
@@ -1475,43 +1259,6 @@ impl VerifiedStatusReadContext {
     fn projection(&self) -> &store::ProjectionSnapshot {
         &self.projection
     }
-}
-
-#[cfg(test)]
-async fn load_sync_verified_run_read_context<S>(
-    store: &Arc<Mutex<S>>,
-    artifacts: &FsTypedArtifactStore,
-    registry: &CertificationRegistry,
-    run_id: &RunId,
-) -> Result<VerifiedRunReadContext, AppError>
-where
-    S: store::TypedRunEventStore + Send,
-{
-    let stream = {
-        let store = store.lock().await;
-        store.load_run_stream(run_id)
-    };
-    verified_run_read_context_from_events(artifacts, registry, run_id, stream).await
-}
-
-#[cfg(test)]
-async fn load_sync_verified_status_read_context<S>(
-    store: &Arc<Mutex<S>>,
-    artifacts: &FsTypedArtifactStore,
-    registry: &CertificationRegistry,
-    run_id: &RunId,
-) -> Result<VerifiedStatusReadContext, AppError>
-where
-    S: store::TypedRunEventStore + Send,
-{
-    let (stream, projection) = {
-        let store = store.lock().await;
-        (
-            store.load_run_stream(run_id),
-            store.projection_snapshot().clone(),
-        )
-    };
-    verified_status_read_context_from_events(artifacts, registry, run_id, stream, &projection).await
 }
 
 async fn load_async_verified_run_read_context<S>(
@@ -2292,29 +2039,6 @@ fn manual_resolution_runtime_request(
     })
 }
 
-/// Derives typed run status from an authoritative store-owned run stream.
-pub fn typed_run_status_from_stream(
-    run_id: &RunId,
-    runtime_spec: &CertifiedRuntimeSpec,
-    stream: &[store::KernelEventEnvelope],
-) -> Result<TypedRunResponse, AppError> {
-    if stream.is_empty() {
-        return Err(AppError::not_found(
-            "RunNotFound",
-            "typed run stream was not found",
-        ));
-    }
-    let spec_hash = run_admitted_spec_hash(stream)?;
-    let projection = store::ProjectionSnapshot::rebuild_from_run_stream(stream)?;
-    typed_run_status_from_projection_with_spec_hash(
-        run_id,
-        runtime_spec,
-        stream,
-        &projection,
-        &spec_hash,
-    )
-}
-
 fn typed_run_status_from_projection(
     run_id: &RunId,
     runtime_spec: &CertifiedRuntimeSpec,
@@ -2773,33 +2497,6 @@ fn typed_run_response_from_projection(
         scheduler_status: scheduler_status_str(status).to_owned(),
         head_seq: stream_head(stream),
     })
-}
-
-#[cfg(test)]
-fn typed_run_response<S: store::TypedRunEventStore + ?Sized>(
-    store: &S,
-    runtime_spec: &CertifiedRuntimeSpec,
-    run_id: &RunId,
-    status: SchedulerStatus,
-) -> Result<TypedRunResponse, AppError> {
-    let stream = store.load_run_stream(run_id);
-    let projection =
-        status_projection_from_stream_with_resource_lanes(&stream, store.projection_snapshot())?;
-    typed_run_response_from_projection(run_id, runtime_spec, &stream, &projection, status)
-}
-
-fn status_projection_from_stream_with_resource_lanes(
-    stream: &[store::KernelEventEnvelope],
-    global_projection: &store::ProjectionSnapshot,
-) -> Result<store::ProjectionSnapshot, store::StoreError> {
-    let run_projection = store::ProjectionSnapshot::rebuild_from_run_stream(stream)?;
-    projection_with_resource_lanes(
-        &run_projection,
-        global_projection
-            .resource_lanes()
-            .map(|(lane_key, projection)| (lane_key.clone(), projection.clone()))
-            .collect(),
-    )
 }
 
 fn status_projection_from_verified_view_with_resource_lanes(
@@ -3369,6 +3066,7 @@ mod tests {
     use mfm_manual_auth::{
         ManualAuthorizationSignatureBytes, ManualResolutionAuthorizationProof,
         ManualResolutionAuthorizationSignature, ManualResolutionEvidenceRef,
+        ManualResolutionPrefixAuthority,
     };
     use mfm_op_proof::{
         proof_adapter_kind, proof_adapter_version, proof_operation_registry, proof_state_registry,
@@ -3386,7 +3084,8 @@ mod tests {
     };
     use mfm_program_derive::{MfmConfig, MfmValue, PublicOutputs};
     use mfm_runtime::{
-        build_manual_resolution_prefix_authority, CapabilityImplementationId, ErasedNodeRunner,
+        manual_resolution_block_reason, manual_resolution_stream_prefix_digest,
+        unresolved_manual_obligations_digest, CapabilityImplementationId, ErasedNodeRunner,
         ErasedRunCtx, ErasedRunnerBinding, ErasedRunnerFuture, ErasedRunnerOutput,
         RunnerEventPayload, StagedArtifact, StagedRetentionRefs,
     };
@@ -4526,55 +4225,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sync_async_services_match_completed_framework_read_surfaces() {
-        let (async_root, async_fixture, async_services, async_started) =
-            start_framework_fixture_run().await;
-        let (sync_root, sync_fixture, sync_services, sync_started) =
-            start_sync_framework_fixture_run().await;
-
-        assert_eq!(async_fixture.run_id, sync_fixture.run_id);
-        assert_eq!(async_started, sync_started);
-        assert_eq!(
-            async_completed_read_surface_summary(&async_services, &async_fixture).await,
-            sync_completed_read_surface_summary(&sync_services, &sync_fixture).await
-        );
-
-        let _ = std::fs::remove_dir_all(async_root);
-        let _ = std::fs::remove_dir_all(sync_root);
-    }
-
-    #[tokio::test]
-    async fn sync_async_services_match_append_only_resume_surfaces() {
-        let (async_root, async_fixture, async_services, async_started) =
-            start_framework_fixture_run_with_drive(DriveMode::AppendOnly, "append-only-async")
-                .await;
-        let (sync_root, sync_fixture, sync_services, sync_started) =
-            start_sync_framework_fixture_run_with_drive(DriveMode::AppendOnly, "append-only-sync")
-                .await;
-
-        assert_eq!(async_fixture.run_id, sync_fixture.run_id);
-        assert_eq!(async_started, sync_started);
-
-        let async_resumed = async_services
-            .resume_stored_run(&async_fixture.run_id, DriveMode::UntilBlocked)
-            .await
-            .expect("async append-only resume");
-        let sync_resumed = sync_services
-            .resume_stored_run(&sync_fixture.run_id, DriveMode::UntilBlocked)
-            .await
-            .expect("sync append-only resume");
-
-        assert_eq!(async_resumed, sync_resumed);
-        assert_eq!(
-            async_completed_read_surface_summary(&async_services, &async_fixture).await,
-            sync_completed_read_surface_summary(&sync_services, &sync_fixture).await
-        );
-
-        let _ = std::fs::remove_dir_all(async_root);
-        let _ = std::fs::remove_dir_all(sync_root);
-    }
-
-    #[tokio::test]
     async fn shared_run_history_read_paths_match_for_completed_run() {
         let (root, fixture, services, _started) = start_framework_fixture_run().await;
         let stream = services
@@ -4619,8 +4269,13 @@ mod tests {
             verified_history.projection_snapshot()
         );
 
-        let expected_status = typed_run_status_from_stream(&fixture.run_id, &runtime_spec, &stream)
-            .expect("status from stream");
+        let expected_status = typed_run_status_from_projection(
+            &fixture.run_id,
+            &runtime_spec,
+            verified_history.events(),
+            verified_history.projection_snapshot(),
+        )
+        .expect("status from verified history");
         let status = services.run_status(&fixture.run_id).await.expect("status");
         assert_eq!(status, expected_status);
 
@@ -5535,31 +5190,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sync_resume_rebuilds_stored_authority_before_runtime_resume() {
-        let (root, fixture, services, _started) = start_sync_framework_fixture_run().await;
-        let stream = {
-            let store = services.store();
-            let store = store.lock().await;
-            store.load_run_stream(&fixture.run_id)
-        };
-        let started = run_admitted_payload(&fixture.run_id, &stream)
-            .expect("run started")
-            .clone();
-        std::fs::write(
-            artifact_blob_path(&root, &started.certificate_artifact.artifact_id),
-            b"{}",
-        )
-        .expect("tamper certificate artifact");
-
-        let err = services
-            .resume_stored_run(&fixture.run_id, DriveMode::AppendOnly)
-            .await
-            .expect_err("sync resume rejects tampered stored certificate");
-        assert_eq!(err.code, "ArtifactError");
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[tokio::test]
     async fn registry_mismatch_rejects_before_replay_broker_construction() {
         let (root, fixture, services, _started) = start_framework_fixture_run().await;
         let stream = services
@@ -5625,31 +5255,6 @@ mod tests {
         assert_eq!(err.code, "RunStoreRejected");
         assert_eq!(err.message, "Run store rejected the requested operation");
         assert!(!err.message.contains(&removed.to_string()));
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[tokio::test]
-    async fn sync_replay_broker_rebuilds_stored_authority_before_construction() {
-        let (root, fixture, services, _started) = start_sync_framework_fixture_run().await;
-        let stream = {
-            let store = services.store();
-            let store = store.lock().await;
-            store.load_run_stream(&fixture.run_id)
-        };
-        let started = run_admitted_payload(&fixture.run_id, &stream)
-            .expect("run started")
-            .clone();
-        std::fs::write(
-            artifact_blob_path(&root, &started.certificate_artifact.artifact_id),
-            b"{}",
-        )
-        .expect("tamper certificate artifact");
-
-        let err = services
-            .replay_broker(&fixture.run_id)
-            .await
-            .expect_err("sync replay broker rejects tampered stored certificate");
-        assert_eq!(err.code, "ArtifactError");
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -5848,77 +5453,6 @@ mod tests {
         TypedRunResponse,
     ) {
         start_framework_fixture_run_with_drive(DriveMode::UntilBlocked, "framework-run").await
-    }
-
-    #[derive(Debug, PartialEq, Eq)]
-    struct CompletedReadSurfaceSummary {
-        status: TypedRunResponse,
-        stream: TypedRunStreamResponse,
-        replay: TypedReplayResponse,
-        public_output: TypedPublicOutputResponse,
-    }
-
-    async fn async_completed_read_surface_summary(
-        services: &RunServices<AsyncInMemoryStore>,
-        fixture: &FrameworkSeedPublicOutputFixture,
-    ) -> CompletedReadSurfaceSummary {
-        CompletedReadSurfaceSummary {
-            status: services
-                .run_status(&fixture.run_id)
-                .await
-                .expect("async status"),
-            stream: services
-                .run_stream(&fixture.run_id)
-                .await
-                .expect("async stream"),
-            replay: services
-                .verify_replay_for_run(&fixture.run_id)
-                .await
-                .expect("async replay"),
-            public_output: services
-                .typed_public_output(&fixture.run_id, &fixture.public_schema_id)
-                .await
-                .expect("async public output"),
-        }
-    }
-
-    async fn sync_completed_read_surface_summary(
-        services: &SyncRunServices<store::InMemoryTypedRunStore>,
-        fixture: &FrameworkSeedPublicOutputFixture,
-    ) -> CompletedReadSurfaceSummary {
-        let replay = services
-            .replay_broker(&fixture.run_id)
-            .await
-            .expect("sync replay broker");
-        let projection = replay.projection_snapshot();
-        let spec = &fixture.certified_spec.envelope().spec;
-        let saga = projection.derive_saga_projection(&fixture.run_id, &spec.saga);
-        CompletedReadSurfaceSummary {
-            status: services
-                .run_status(&fixture.run_id)
-                .await
-                .expect("sync status"),
-            stream: services
-                .run_stream(&fixture.run_id)
-                .await
-                .expect("sync stream"),
-            replay: TypedReplayResponse {
-                run_id: fixture.run_id.as_str().to_owned(),
-                spec_hash: replay.certified_spec().spec_hash.as_str().to_owned(),
-                run_mode: typed_run_mode(saga.run_mode),
-                saga: typed_saga_status_with_resources(spec, projection, &saga),
-                attempt_dispositions: typed_attempt_dispositions(projection),
-                head_seq: stream_head(replay.events()),
-                retained_artifacts: projection
-                    .retention(&fixture.run_id)
-                    .map(|retention| retention.refs.len())
-                    .unwrap_or_default(),
-            },
-            public_output: services
-                .typed_public_output(&fixture.run_id, &fixture.public_schema_id)
-                .await
-                .expect("sync public output"),
-        }
     }
 
     async fn start_framework_fixture_run_with_drive(
@@ -6184,7 +5718,7 @@ mod tests {
     }
 
     async fn signed_manual_resolution_proof(
-        services: &SyncRunServices<store::InMemoryTypedRunStore>,
+        services: &RunServices<AsyncInMemoryStore>,
         fixture: &ManualProofFixture,
         outcome: events::ManualResolutionOutcome,
         evidence_bytes: &[u8],
@@ -6197,16 +5731,32 @@ mod tests {
         };
         let runtime_spec =
             CertifiedRuntimeSpec::new(fixture.certified_spec.clone()).expect("runtime spec");
-        let store = services.store();
-        let guard = store.lock().await;
-        let prefix = build_manual_resolution_prefix_authority(
-            &*guard,
-            &runtime_spec,
-            &fixture.run_id,
+        let stream = services
+            .store()
+            .load_run_stream(&fixture.run_id)
+            .await
+            .expect("load manual prefix stream");
+        let expected_next_seq = services
+            .store()
+            .expected_next_seq(&fixture.run_id)
+            .await
+            .expect("expected next seq");
+        let projection = store::ProjectionSnapshot::rebuild_from_run_stream(&stream)
+            .expect("manual prefix projection");
+        let saga = projection.derive_saga_projection(&fixture.run_id, &runtime_spec.spec().saga);
+        let reason = saga
+            .manual_block_reason
+            .expect("manual prefix is blocked for manual resolution");
+        let prefix = ManualResolutionPrefixAuthority::new(
+            fixture.run_id.clone(),
+            runtime_spec.spec_hash().clone(),
+            expected_next_seq.as_u64(),
+            manual_resolution_stream_prefix_digest(&stream).expect("manual prefix digest"),
+            manual_resolution_block_reason(reason),
+            unresolved_manual_obligations_digest(&saga).expect("manual obligations digest"),
             fixture.manual.clone(),
         )
         .expect("manual prefix authority");
-        drop(guard);
 
         let claim = prefix
             .authorization_claim(outcome, evidence)
@@ -6359,89 +5909,10 @@ mod tests {
         );
     }
 
-    async fn start_sync_framework_fixture_run() -> (
-        PathBuf,
-        FrameworkSeedPublicOutputFixture,
-        SyncRunServices<store::InMemoryTypedRunStore>,
-        TypedRunResponse,
-    ) {
-        start_sync_framework_fixture_run_with_drive(DriveMode::UntilBlocked, "framework-run").await
-    }
-
-    async fn start_sync_framework_fixture_run_with_drive(
-        drive: DriveMode,
-        label: &str,
-    ) -> (
-        PathBuf,
-        FrameworkSeedPublicOutputFixture,
-        SyncRunServices<store::InMemoryTypedRunStore>,
-        TypedRunResponse,
-    ) {
-        launch_sync_framework_fixture_run(drive, label, framework_fixture_runner_registry).await
-    }
-
-    async fn launch_sync_framework_fixture_run(
-        drive: DriveMode,
-        label: &str,
-        runner_registry: impl FnOnce(&FrameworkSeedPublicOutputFixture) -> ErasedRunnerRegistry,
-    ) -> (
-        PathBuf,
-        FrameworkSeedPublicOutputFixture,
-        SyncRunServices<store::InMemoryTypedRunStore>,
-        TypedRunResponse,
-    ) {
-        let root =
-            std::env::temp_dir().join(format!("mfm-app-sync-{label}-{}", uuid::Uuid::new_v4()));
-        let artifacts = FsTypedArtifactStore::new(&root);
-        let fixture = framework_seed_public_output_fixture();
-        let config_inputs = config_inputs_for_fixture(&fixture);
-        let registry =
-            CertificationRegistry::from_program_draft(&fixture.draft).expect("fixture registry");
-        artifacts
-            .put_artifact(
-                fixture.output_bytes.clone(),
-                TypedArtifactDescriptor {
-                    media_type: spec::MediaType::new("application/json").expect("media type"),
-                    schema_id: Some(fixture.value_schema_id.clone()),
-                    semantic_type_id: Some(fixture.semantic_type_id.clone()),
-                    producer_node_id: Some(fixture.value_node_id.clone()),
-                    producer_seed_id: None,
-                    artifact_role: events::ArtifactRole::StateOutput,
-                },
-            )
-            .await
-            .expect("persist runner output artifact");
-        let request = prepare_certified_run_launch(
-            CertifiedRunLaunchInput {
-                certified_spec: fixture.certified_spec.clone(),
-                registry: &registry,
-                run_id: fixture.run_id.clone(),
-                framework_version: "mfm.test.framework",
-                source_revision: "test-source",
-                launched_at_unix_ms: 1_700_000_000_000,
-                drive,
-            },
-            config_inputs,
-            vec![RunLaunchSeedArtifact {
-                seed_id: fixture.seed_id.clone(),
-                bytes: fixture.seed_bytes.clone(),
-                media_type: spec::MediaType::new("application/json").expect("media type"),
-            }],
-        )
-        .expect("typed run request");
-        let runners = runner_registry(&fixture);
-        let services = make_sync_in_memory_typed_services_with_certification_registry(
-            runners, &root, registry,
-        );
-
-        let started = services.launch_run(request).await.expect("start typed run");
-        (root, fixture, services, started)
-    }
-
     async fn start_manual_proof_fixture_run() -> (
         PathBuf,
         ManualProofFixture,
-        SyncRunServices<store::InMemoryTypedRunStore>,
+        RunServices<AsyncInMemoryStore>,
         TypedRunResponse,
     ) {
         let root =
@@ -6469,8 +5940,11 @@ mod tests {
         )
         .expect("typed run request");
         let runners = manual_proof_runner_registry(&fixture.certified_spec.envelope().spec);
-        let services = make_sync_in_memory_typed_services_with_certification_registry(
-            runners, &root, registry,
+        let services = make_async_typed_services_with_certification_registry(
+            runners,
+            AsyncInMemoryStore::default(),
+            FsTypedArtifactStore::new(&root),
+            registry,
         );
 
         let started = services

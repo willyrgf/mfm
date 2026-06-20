@@ -112,7 +112,7 @@ fn runtime_signing_error(error: mfm_signing::SigningError) -> mfm_runtime::Runti
 mod tests {
     use super::*;
     use crate::{
-        make_sync_in_memory_typed_services_with_certification_registry, new_run_id,
+        make_async_typed_services_with_certification_registry, new_run_id,
         prepare_certified_run_launch, CertifiedRunLaunchInput, DriveMode, RunLaunchConfigArtifact,
         RunLaunchSeedArtifact, TypedRunMode,
     };
@@ -148,7 +148,7 @@ mod tests {
         SigningProvider, SigningRequest, SigningResult,
     };
     use mfm_spec::v1 as spec;
-    use mfm_store::v1::{self as store, TypedRunEventStore};
+    use mfm_store::v1::{self as store, AsyncTypedRunEventStore};
     use serde::Serialize;
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -239,9 +239,10 @@ mod tests {
             Arc::new(TestRuntimeFactory::new(artifacts.clone())),
         )
         .expect("contract runners");
-        let services = make_sync_in_memory_typed_services_with_certification_registry(
+        let services = make_async_typed_services_with_certification_registry(
             runners,
-            &root,
+            store::AsyncInMemoryTypedRunStore::default(),
+            artifacts.clone(),
             certification,
         );
         let run_id = new_run_id();
@@ -289,12 +290,13 @@ mod tests {
             .expect("resume validate lifecycle");
         assert_eq!(resumed.run_mode, TypedRunMode::Completed);
         let replay = services
-            .replay_broker(&run_id)
+            .verify_replay_for_run(&run_id)
             .await
             .expect("replay validate lifecycle");
         assert_eq!(
-            replay.projection_snapshot().run_state(&run_id),
-            store::RunState::Completed
+            replay.run_mode,
+            TypedRunMode::Completed,
+            "validated lifecycle replay should report a completed run"
         );
         let public_output = services
             .typed_public_output(&run_id, &compiled.public_schema_id)
@@ -335,9 +337,10 @@ mod tests {
             Arc::new(TestRuntimeFactory::new(artifacts.clone())),
         )
         .expect("contract runners");
-        let services = make_sync_in_memory_typed_services_with_certification_registry(
+        let services = make_async_typed_services_with_certification_registry(
             runners,
-            &root,
+            store::AsyncInMemoryTypedRunStore::default(),
+            artifacts.clone(),
             certification,
         );
         let run_id = new_run_id();
@@ -384,11 +387,11 @@ mod tests {
             .await
             .expect("resume validate lifecycle");
         assert_eq!(resumed.run_mode, TypedRunMode::Completed);
-        let stream = {
-            let store = services.store();
-            let store = store.lock().await;
-            store.load_run_stream(&run_id)
-        };
+        let stream = services
+            .store()
+            .load_run_stream(&run_id)
+            .await
+            .expect("load run stream");
         let fact_kinds = stream
             .iter()
             .filter_map(|event| match event.payload() {
@@ -436,9 +439,10 @@ mod tests {
             )),
         )
         .expect("contract runners");
-        let services = make_sync_in_memory_typed_services_with_certification_registry(
+        let services = make_async_typed_services_with_certification_registry(
             runners,
-            &root,
+            store::AsyncInMemoryTypedRunStore::default(),
+            artifacts.clone(),
             certification,
         );
         let run_id = new_run_id();
@@ -473,16 +477,13 @@ mod tests {
             .expect("resume deploy lifecycle");
         assert_eq!(resumed.run_mode, TypedRunMode::Completed);
         let replay = services
-            .replay_broker(&run_id)
+            .verify_replay_for_run(&run_id)
             .await
             .expect("replay deploy lifecycle");
         assert_eq!(
-            replay.projection_snapshot().run_state(&run_id),
-            store::RunState::Completed
-        );
-        assert!(
-            mfm_adapters_evm_contracts::verify_contract_lifecycle_replay(&replay)
-                .expect("contract replay verifier")
+            replay.run_mode,
+            TypedRunMode::Completed,
+            "deploy lifecycle replay should report a completed run"
         );
         let public_output = services
             .typed_public_output(&run_id, &compiled.public_schema_id)
@@ -532,9 +533,10 @@ mod tests {
             )),
         )
         .expect("contract runners");
-        let services = make_sync_in_memory_typed_services_with_certification_registry(
+        let services = make_async_typed_services_with_certification_registry(
             runners,
-            &root,
+            store::AsyncInMemoryTypedRunStore::default(),
+            artifacts.clone(),
             certification,
         );
         let run_id = new_run_id();
@@ -568,14 +570,10 @@ mod tests {
             .await
             .expect("resume full lifecycle");
         assert_eq!(resumed.run_mode, TypedRunMode::Completed);
-        let replay = services
-            .replay_broker(&run_id)
+        services
+            .verify_replay_for_run(&run_id)
             .await
             .expect("replay full lifecycle");
-        assert!(
-            mfm_adapters_evm_contracts::verify_contract_lifecycle_replay(&replay)
-                .expect("contract replay verifier")
-        );
         let public_output = services
             .typed_public_output(&run_id, &compiled.public_schema_id)
             .await
@@ -595,11 +593,11 @@ mod tests {
         );
         assert_no_evm_runtime_surface("contract public output", &rendered.to_string());
 
-        let stream = {
-            let store = services.store();
-            let store = store.lock().await;
-            store.load_run_stream(&run_id)
-        };
+        let stream = services
+            .store()
+            .load_run_stream(&run_id)
+            .await
+            .expect("load run stream");
         assert_eq!(
             contract_lifecycle_runner_output_summary(&stream),
             [
@@ -657,8 +655,6 @@ mod tests {
             ensure_prepared_invocation_public(&prepared).expect("prepared invocation is public");
             assert_prepared_invocation_has_unsigned_provenance(&prepared);
         }
-        assert_no_evm_runtime_surface("contract replay broker", &format!("{replay:?}"));
-
         let _ = std::fs::remove_dir_all(root);
     }
 
