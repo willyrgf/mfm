@@ -1603,8 +1603,9 @@ fn fact_recorded_protocol_baselines_cover_codec_requirements_and_projection() {
         r#"{"adapter_kind":"adapter:mfm.test:adapter:sha256-jcs-v1:5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d","adapter_version":"mfm.test.adapter.v1","artifact_id":"artifact:sha256-jcs-v1:3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f","attempt_id":"attempt:sha256-jcs-v1:5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b","capability_kind":"capability:mfm.test:capability:sha256-jcs-v1:5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c","capability_version":"mfm.test.fact.v1","fact_key":"fact-key-1","node_id":"node:sha256-jcs-v1:5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a","request_hash":"content:sha256-jcs-v1:5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f","request_schema_id":"schema:mfm.test.fact_request:1:sha256-jcs-v1:5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e","response_hash":"content:sha256-jcs-v1:4040404040404040404040404040404040404040404040404040404040404040","response_schema_id":"schema:mfm.test.fact_response:1:sha256-jcs-v1:6060606060606060606060606060606060606060606060606060606060606060","spec_hash":"spec:sha256-jcs-v1:0101010101010101010101010101010101010101010101010101010101010101","variant":"FactRecorded"}"#
     );
     assert_eq!(
-        mfm_store::v1::payload_hash(&payload)
+        payload_canonical_json(&payload)
             .expect("fact payload hash")
+            .content_digest()
             .as_str(),
         "content:sha256-jcs-v1:327d0e04794116c46f8ab330b071cb1b10ae862177a1b1e3a04159d742aa986b"
     );
@@ -1786,7 +1787,9 @@ fn fact_recorded_codec_declaration_view_matches_handwritten_codec() {
     );
     assert_eq!(
         declared_canonical.content_digest(),
-        mfm_store::v1::payload_hash(&payload).expect("handwritten payload hash")
+        payload_canonical_json(&payload)
+            .expect("handwritten payload hash")
+            .content_digest()
     );
     assert_eq!(
         payload_from_json_value(&declared).expect("declared payload decode"),
@@ -1989,7 +1992,9 @@ fn state_attempt_started_codec_declaration_view_matches_handwritten_codec() {
     );
     assert_eq!(
         declared_canonical.content_digest(),
-        mfm_store::v1::payload_hash(&payload).expect("handwritten payload hash")
+        payload_canonical_json(&payload)
+            .expect("handwritten payload hash")
+            .content_digest()
     );
     assert_eq!(
         payload_from_json_value(&declared).expect("declared payload decode"),

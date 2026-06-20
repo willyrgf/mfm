@@ -6760,16 +6760,7 @@ pub mod v1 {
         canonical_json(payload_json(payload))
     }
 
-    /// Returns the canonical payload hash for a typed event payload.
-    pub fn payload_hash(payload: &KernelEventPayload) -> Result<ContentDigest> {
-        Ok(payload_canonical_json(payload)?.content_digest())
-    }
-
-    /// Computes the canonical idempotency fingerprint for a typed commit request.
-    ///
-    /// The fingerprint intentionally excludes `expected_next_seq`, so idempotent retries can be
-    /// recognized before stale sequence checks as required by the store contract.
-    pub fn commit_fingerprint(request: &TypedCommitRequest) -> Result<CommitFingerprint> {
+    fn commit_fingerprint(request: &TypedCommitRequest) -> Result<CommitFingerprint> {
         let canonical = canonical_json(serde_json::json!({
             "commit_key": request.commit_key.as_str(),
             "payloads": request.payloads.iter().map(payload_json).collect::<Vec<_>>(),
