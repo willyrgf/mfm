@@ -4,6 +4,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use mfm_events::v1 as events;
 use mfm_ids::{AttemptId, DigestAlgorithm, DigestBytes, RunId, SpecHash};
+use mfm_integration_tests::test_support;
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 use mfm_store::v1::AsyncTypedRunEventStore;
@@ -54,17 +55,14 @@ fn certified_bundle_json(spec_bytes: &[u8], certificate_bytes: &[u8]) -> serde_j
 fn test_app() -> axum::Router {
     let root = std::env::temp_dir().join(format!("mfm-rest-api-test-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&root).expect("artifact root");
-    let state = mfm_rest_api::make_in_memory_app_state(root);
+    let state = test_support::in_memory_rest_app_state(root);
     mfm_rest_api::make_app(state)
 }
 
-fn in_memory_state_with_root() -> (
-    std::path::PathBuf,
-    mfm_rest_api::AppState<mfm_rest_api::InMemoryAsyncTypedRunStore>,
-) {
+fn in_memory_state_with_root() -> (std::path::PathBuf, test_support::InMemoryRestAppState) {
     let root = std::env::temp_dir().join(format!("mfm-rest-api-test-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&root).expect("artifact root");
-    let state = mfm_rest_api::make_in_memory_app_state(root.clone());
+    let state = test_support::in_memory_rest_app_state(root.clone());
     (root, state)
 }
 
@@ -367,7 +365,7 @@ async fn start_rejects_missing_config_inputs_before_stream_creation() {
 async fn proof_http_start_replay_uses_certified_bundle_evidence() {
     let root = std::env::temp_dir().join(format!("mfm-rest-proof-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&root).expect("artifact root");
-    let state = mfm_rest_api::make_in_memory_app_state(root.clone());
+    let state = test_support::in_memory_rest_app_state(root.clone());
     let proof_config = mfm_op_proof::ProofWorkflowConfig::default();
     let draft = mfm_op_proof::proof_program_draft(proof_config.clone()).expect("proof draft");
     let certified = mfm_op_proof::certified_proof_spec(proof_config).expect("proof spec");
@@ -783,7 +781,7 @@ fn config_body(schema_id: &str, bytes: &[u8]) -> serde_json::Value {
 }
 
 async fn append_interrupted_attempt(
-    store: &mfm_rest_api::InMemoryAsyncTypedRunStore,
+    store: &store::AsyncInMemoryTypedRunStore,
     run_id: &RunId,
     spec_hash: &SpecHash,
     node: &spec::NodeSpec,
@@ -848,7 +846,7 @@ async fn append_interrupted_attempt(
 }
 
 async fn append_typed_commit(
-    store: &mfm_rest_api::InMemoryAsyncTypedRunStore,
+    store: &store::AsyncInMemoryTypedRunStore,
     request: store::TypedCommitRequest,
 ) {
     let admitted_artifacts = request.required_artifacts().to_vec();

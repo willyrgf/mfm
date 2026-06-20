@@ -10,10 +10,14 @@
 //! # Examples
 //!
 //! ```rust
-//! use mfm_app::{make_in_memory_typed_services, ErasedRunnerRegistry};
+//! use mfm_app::{make_async_typed_services, ErasedRunnerRegistry};
+//! use mfm_artifact_store_fs::FsTypedArtifactStore;
+//! use mfm_store::v1::AsyncInMemoryTypedRunStore;
 //!
 //! let runners = ErasedRunnerRegistry::new();
-//! let _services = make_in_memory_typed_services(runners, "/tmp/mfm-typed-artifacts");
+//! let artifacts = FsTypedArtifactStore::new("/tmp/mfm-typed-artifacts");
+//! let store = AsyncInMemoryTypedRunStore::default();
+//! let _services = make_async_typed_services(runners, store, artifacts);
 //! ```
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -263,38 +267,6 @@ pub fn default_typed_artifact_root() -> PathBuf {
 /// Builds the default certified typed filesystem artifact store.
 pub fn make_default_typed_artifact_store() -> FsTypedArtifactStore {
     FsTypedArtifactStore::new(default_typed_artifact_root())
-}
-
-/// Builds typed app services backed by an in-memory typed run event store.
-pub fn make_in_memory_typed_services(
-    runners: ErasedRunnerRegistry,
-    artifact_root: impl Into<PathBuf>,
-) -> RunServices<store::AsyncInMemoryTypedRunStore> {
-    make_in_memory_typed_services_with_certification_registry(
-        runners,
-        artifact_root,
-        CertificationRegistry::new(),
-    )
-}
-
-/// Builds in-memory typed app services with an explicit trusted certification registry.
-pub fn make_in_memory_typed_services_with_certification_registry(
-    runners: ErasedRunnerRegistry,
-    artifact_root: impl Into<PathBuf>,
-    certification_registry: CertificationRegistry,
-) -> RunServices<store::AsyncInMemoryTypedRunStore> {
-    let artifacts = FsTypedArtifactStore::new(artifact_root);
-    RunServices::new_with_certification_registry(
-        SerialTypedScheduler::new(
-            runners,
-            Arc::new(FsRuntimeArtifactStager {
-                artifacts: artifacts.clone(),
-            }),
-        ),
-        store::AsyncInMemoryTypedRunStore::default(),
-        artifacts,
-        certification_registry,
-    )
 }
 
 /// Builds typed app services backed by a durable async typed run event store.

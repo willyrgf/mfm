@@ -43,6 +43,17 @@ use mfm_store::v1 as store;
 use mfm_store::v1::{TypedProjectionRead, TypedRunEventStore};
 use serde::{Deserialize, Serialize};
 
+/// In-memory REST app state used by integration tests.
+pub type InMemoryRestAppState = mfm_rest_api::AppState<store::AsyncInMemoryTypedRunStore>;
+
+/// Builds in-memory REST app state rooted at `artifact_root`.
+pub fn in_memory_rest_app_state(artifact_root: impl Into<PathBuf>) -> InMemoryRestAppState {
+    mfm_rest_api::AppState {
+        store: store::AsyncInMemoryTypedRunStore::default(),
+        artifacts: mfm_artifact_store_fs::FsTypedArtifactStore::new(artifact_root),
+    }
+}
+
 /// Calls a JSON-RPC endpoint and returns the response `result`.
 pub async fn rpc_call(rpc_url: &str, method: &str, params: serde_json::Value) -> serde_json::Value {
     let response = reqwest::Client::new()

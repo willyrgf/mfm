@@ -16,7 +16,6 @@
 //! }
 //! ```
 
-use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::body::Bytes;
@@ -156,9 +155,6 @@ impl axum::response::IntoResponse for ApiError {
     }
 }
 
-/// Async in-memory typed run store for tests and single-process development tools.
-pub type InMemoryAsyncTypedRunStore = store::AsyncInMemoryTypedRunStore;
-
 /// Default production REST API state.
 pub type DefaultAppState = AppState<PostgresTypedRunEventStore>;
 
@@ -212,16 +208,6 @@ pub async fn make_default_app_state() -> Result<DefaultAppState, ApiError> {
         store: make_default_typed_run_store().await?,
         artifacts: make_default_typed_artifact_store(),
     })
-}
-
-/// Builds in-memory REST API state rooted at `artifact_root`.
-pub fn make_in_memory_app_state(
-    artifact_root: impl Into<PathBuf>,
-) -> AppState<InMemoryAsyncTypedRunStore> {
-    AppState {
-        store: InMemoryAsyncTypedRunStore::default(),
-        artifacts: FsTypedArtifactStore::new(artifact_root),
-    }
 }
 
 /// Builds the `axum` router for the public REST API surface.
@@ -1640,7 +1626,10 @@ mod tests {
             .as_nanos();
         let root = std::env::temp_dir().join(format!("mfm-rest-api-contract-test-{unique}"));
         std::fs::create_dir_all(&root).expect("artifact root");
-        make_app(make_in_memory_app_state(root))
+        make_app(AppState {
+            store: store::AsyncInMemoryTypedRunStore::default(),
+            artifacts: FsTypedArtifactStore::new(root),
+        })
     }
 
     fn json_post(uri: &str, body: serde_json::Value) -> Request<Body> {

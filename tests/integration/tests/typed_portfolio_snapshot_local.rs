@@ -120,7 +120,7 @@ async fn portfolio_runner_output_summary_matches_golden() {
         uuid::Uuid::new_v4()
     ));
     std::fs::create_dir_all(&root).expect("typed artifact root");
-    let state = mfm_rest_api::make_in_memory_app_state(&root);
+    let state = support::in_memory_rest_app_state(&root);
     let store = state.store.clone();
     let app = mfm_rest_api::make_app(state);
     let response = local_portfolio_snapshot_post(&app, &portfolio_payload(), "until_blocked").await;
@@ -208,7 +208,7 @@ fn set_rpc_env(rpc_url: String) {
 fn rest_test_app() -> axum::Router {
     let root = std::env::temp_dir().join(format!("mfm-rest-portfolio-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&root).expect("typed artifact root");
-    mfm_rest_api::make_app(mfm_rest_api::make_in_memory_app_state(root))
+    mfm_rest_api::make_app(support::in_memory_rest_app_state(root))
 }
 
 fn json_post(uri: &str, body: serde_json::Value) -> Request<Body> {
