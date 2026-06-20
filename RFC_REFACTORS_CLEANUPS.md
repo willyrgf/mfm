@@ -20,11 +20,13 @@ change the LOC profile.
 
 Current planning status:
 
-- Cleanup status was reopened on 2026-06-20 after an implementation audit. Phase 4 shared run view
-  exists, but app launch/resume/manual-resolution responses still have read paths that bypass the
-  verified context. Phase 5 sync/async collapse is incomplete while runtime/app/tests can still
-  execute over `TypedRunEventStore`. Phase 8 is only the initial `FactRecorded` declaration-backed
-  descriptor slice; broader descriptor and store-codec generation remains deferred.
+- Cleanup status was reopened on 2026-06-20 after an implementation audit. The follow-up cleanup
+  closed the Phase 4 app read-path gaps and Phase 5 ordinary execution gaps: app launch/resume/manual
+  responses now render through the verified status read context, public raw-stream status helpers
+  were deleted, and runtime/app/CLI/REST/integration execution no longer drives over
+  `TypedRunEventStore`. Synchronous store code remains only as low-level store/replay contract and
+  fixture machinery. Phase 8 is still only the initial `FactRecorded` declaration-backed descriptor
+  slice; broader descriptor and store-codec generation remains deferred.
 - The FSM scheduler lifecycle refactor has landed. Its detailed historical RFC and validation
   artifacts were removed by commit `c8c742510ab2070cdaea688264a293aaf2a7309f` after closeout.
   Current authority for that work lives in `docs/design.md`, `docs/architecture.md`, and
@@ -1599,8 +1601,9 @@ output rendering, retained artifacts, replay evidence, CLI/REST output, or side-
 
 ### Phase 4: Shared Run View And App Read Paths
 
-Status: incomplete tightening pass. `VerifiedRunHistoryView` exists, but every public read response
-must be routed through it before Phase 4 can be closed.
+Status: closed by the 2026-06-20 tightening pass. `VerifiedRunHistoryView` is the shared read
+authority, app launch/resume/manual-resolution responses render through the verified status read
+context, and the raw public status helper that accepted event slices directly has been deleted.
 
 1. Keep `VerifiedRunHistoryView` sealed inside `mfm-runtime` and minted only from
    `CertifiedRuntimeSpec`, `CommittedRunStream`, and `VerifiedRunArtifactStore`; keep
@@ -1620,8 +1623,11 @@ validated path before presentation filtering.
 
 ### Phase 5: Full Sync/Async Driver And Service Collapse
 
-Status: incomplete. This phase is not complete while scheduler/app/runtime execution can still drive
-over `TypedRunEventStore`, including `#[cfg(test)]` facades.
+Status: closed for ordinary execution by the 2026-06-20 tightening pass. Scheduler, runtime
+attempt/recovery internals, app services, CLI, REST, and integration support drive through
+`AsyncTypedRunEventStore`; the app sync facade and public scheduler APIs over `TypedRunEventStore`
+were deleted. Synchronous store code is retained only as low-level commit-contract/replay fixture
+machinery.
 
 1. Make async execution and app services the only ordinary execution path once shared
    run-view/status authority exists.
