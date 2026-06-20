@@ -1206,6 +1206,18 @@ impl<S: StateSpec> RegisteredState<S> {
     }
 }
 
+/// Returns the validated descriptor identity for a typed state.
+pub fn registered_state_descriptor<S>(
+) -> std::result::Result<StateDescriptorIdentity, RegistryError>
+where
+    S: StateSpec,
+    S::Effect: EffectRunner<S>,
+    S::Caps: CapabilitySetFor<S::Effect>,
+{
+    let mut states = StateRegistryBuilder::new();
+    Ok(states.register::<S>()?.descriptor().clone())
+}
+
 /// Private registration evidence carried by a registered operation token.
 #[derive(Debug, PartialEq, Eq)]
 pub struct OperationRegistrationEvidence<O: Operation> {

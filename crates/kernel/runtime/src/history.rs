@@ -1619,123 +1619,18 @@ fn same_commit_artifact_reference_keys(
 fn same_commit_typed_artifact_keys(
     commit: &[store::KernelEventEnvelope],
 ) -> BTreeSet<RetentionRefKey> {
-    let mut keys = BTreeSet::new();
-    for event in commit {
-        match event.payload() {
-            events::KernelEventPayload::CellProduced(payload) => {
-                keys.insert((
-                    payload.artifact_id.clone(),
-                    payload.content_digest.clone(),
-                    events::ArtifactRole::StateOutput,
-                ));
-            }
-            events::KernelEventPayload::FactRecorded(payload) => {
-                keys.insert((
-                    payload.artifact_id.clone(),
-                    payload.response_hash.clone(),
-                    events::ArtifactRole::FactResponse,
-                ));
-            }
-            events::KernelEventPayload::PublicOutputProduced(payload) => {
-                if let Some(artifact_id) = &payload.rendered_artifact_id {
-                    keys.insert((
-                        artifact_id.clone(),
-                        payload.rendered_digest.clone(),
-                        events::ArtifactRole::PublicOutput,
-                    ));
-                }
-            }
-            events::KernelEventPayload::PublicOutputRenderFailed(payload) => {
-                insert_error_diagnostic_key(&payload.error, &mut keys);
-            }
-            events::KernelEventPayload::StateAttemptFailed(payload) => {
-                insert_error_diagnostic_key(&payload.error, &mut keys);
-            }
-            events::KernelEventPayload::SideEffectIntentPersisted(payload) => {
-                keys.insert((
-                    payload.intent_artifact_id.clone(),
-                    payload.intent_hash.clone(),
-                    events::ArtifactRole::SideEffectIntent,
-                ));
-            }
-            events::KernelEventPayload::SideEffectInvocationPrepared(payload) => {
-                if let (Some(artifact_id), Some(content_digest)) =
-                    (&payload.prepared_artifact_id, &payload.prepared_hash)
-                {
-                    keys.insert((
-                        artifact_id.clone(),
-                        content_digest.clone(),
-                        events::ArtifactRole::PreparedInvocation,
-                    ));
-                }
-            }
-            events::KernelEventPayload::SideEffectNotSubmittedProven(payload) => {
-                keys.insert((
-                    payload.proof_artifact_id.clone(),
-                    payload.proof_hash.clone(),
-                    events::ArtifactRole::NotSubmittedProof,
-                ));
-            }
-            events::KernelEventPayload::SideEffectSubmissionObserved(payload) => {
-                keys.insert((
-                    payload.submission_artifact_id.clone(),
-                    payload.submission_hash.clone(),
-                    events::ArtifactRole::Submission,
-                ));
-            }
-            events::KernelEventPayload::SideEffectSubmissionUnknown(payload) => {
-                keys.insert((
-                    payload.evidence_artifact_id.clone(),
-                    payload.evidence_hash.clone(),
-                    events::ArtifactRole::SubmissionUnknownEvidence,
-                ));
-            }
-            events::KernelEventPayload::SideEffectReceiptObserved(payload) => {
-                keys.insert((
-                    payload.receipt_artifact_id.clone(),
-                    payload.receipt_hash.clone(),
-                    events::ArtifactRole::Receipt,
-                ));
-            }
-            events::KernelEventPayload::SideEffectConfirmationObserved(payload) => {
-                keys.insert((
-                    payload.confirmation_artifact_id.clone(),
-                    payload.confirmation_hash.clone(),
-                    events::ArtifactRole::Confirmation,
-                ));
-            }
-            events::KernelEventPayload::ManualResolutionRecorded(payload) => {
-                keys.insert((
-                    payload.evidence_artifact_id.clone(),
-                    payload.evidence_hash.clone(),
-                    events::ArtifactRole::ManualResolutionEvidence,
-                ));
-                keys.insert((
-                    payload.authorization_artifact_id.clone(),
-                    payload.authorization_hash.clone(),
-                    events::ArtifactRole::ManualResolutionAuthorization,
-                ));
-            }
-            events::KernelEventPayload::SideEffectAmbiguous(payload) => {
-                keys.insert((
-                    payload.evidence_artifact_id.clone(),
-                    payload.evidence_hash.clone(),
-                    events::ArtifactRole::AmbiguityEvidence,
-                ));
-            }
-            events::KernelEventPayload::SideEffectFailed(payload) => {
-                insert_error_diagnostic_key(&payload.error, &mut keys);
-            }
-            _ => {}
-        }
-    }
-    keys
-}
-
-fn insert_error_diagnostic_key(error: &events::MfmErrorInfo, keys: &mut BTreeSet<RetentionRefKey>) {
-    if let Some(diagnostic) = &error.diagnostic_ref {
-        keys.insert(event_artifact_ref_key(diagnostic));
-    }
+    commit
+        .iter()
+        .flat_map(|event| store::event_artifact_requirements(event.payload()))
+        .filter(|requirement| requirement.source.is_same_commit_payload_evidence())
+        .filter_map(|requirement| {
+            Some((
+                requirement.artifact_id,
+                requirement.digest?,
+                requirement.artifact_role?,
+            ))
+        })
+        .collect()
 }
 
 fn validate_historical_retention_manifest_batch(

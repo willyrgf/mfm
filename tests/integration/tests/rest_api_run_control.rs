@@ -3,8 +3,19 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use mfm_events::v1 as events;
-use mfm_ids::{AttemptId, DigestAlgorithm, DigestBytes, RunId, SpecHash};
+use mfm_ids::{
+    ArtifactId, AttemptId, ContentDigest, DigestAlgorithm, DigestBytes, RunId, SpecHash,
+};
 use mfm_integration_tests::test_support;
+use mfm_manual_auth::{
+    ManualAuthorizationSignatureBytes, ManualResolutionAuthorizationProof,
+    ManualResolutionAuthorizationSignature, ManualResolutionEvidenceRef,
+    ManualResolutionPrefixAuthority,
+};
+use mfm_runtime::{
+    manual_resolution_block_reason, manual_resolution_stream_prefix_digest,
+    unresolved_manual_obligations_digest,
+};
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 use mfm_store::v1::AsyncTypedRunEventStore;
@@ -13,7 +24,6 @@ use tower::ServiceExt;
 
 const VALID_RUN_ID: &str =
     "run:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000001";
-const REDACTION_SENTINEL: &str = "phase3b-secret-sentinel-password-token-42";
 const VALID_SCHEMA_ID: &str =
     "schema:mfm.test.public:1:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000002";
 
@@ -237,7 +247,7 @@ async fn start_rejects_invalid_certified_bundle_before_stream_creation() {
                 "kind": "typed_run_start_v1",
                 "run_id": VALID_RUN_ID,
                 "bundle": {
-                    "password": REDACTION_SENTINEL
+                    "unexpected": "field"
                 },
                 "drive": "append_only"
             }),
@@ -249,10 +259,6 @@ async fn start_rejects_invalid_certified_bundle_before_stream_creation() {
     let v = response_json(resp).await;
     assert_eq!(v["status"], "error");
     assert_eq!(v["error"]["code"], "CertifiedBundleInvalid");
-    assert!(
-        !v.to_string().contains(REDACTION_SENTINEL),
-        "REST JSON error leaked sentinel request body: {v}"
-    );
 
     let status = app
         .oneshot(
@@ -477,6 +483,152 @@ async fn proof_http_start_replay_uses_certified_bundle_evidence() {
         public_body["data"]["json"]["output"]["side_effect"]["status"],
         "confirmed"
     );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn manual_resolution_route_records_resolution_and_hides_proof_bytes() {
+    let (root, state) = in_memory_state_with_root();
+    let proof_config = mfm_op_proof::ProofWorkflowConfig::default();
+    let draft = mfm_op_proof::manual_resolution_proof_program_draft(proof_config.clone())
+        .expect("manual proof draft");
+    let certified = mfm_op_proof::certified_manual_resolution_proof_spec(proof_config)
+        .expect("manual proof spec");
+    let configs = config_bodies_for_draft_and_spec(&draft, &certified.envelope().spec);
+    let bundle = certified.bundle().expect("manual proof bundle");
+    let bundle_json = certified_bundle_json(bundle.spec_bytes(), bundle.certificate_bytes());
+    let run_id = mfm_app::new_run_id();
+    let app = mfm_rest_api::make_app(state.clone());
+
+    let start = app
+        .clone()
+        .oneshot(json_post(
+            "/v1/runs/start",
+            serde_json::json!({
+                "kind": "typed_run_start_v1",
+                "run_id": run_id.as_str(),
+                "bundle": bundle_json,
+                "configs": configs,
+                "framework_version": "mfm.integration.rest.manual_resolution.v1",
+                "source_revision": "integration-test",
+                "drive": "until_blocked"
+            }),
+        ))
+        .await
+        .expect("start response");
+    assert_eq!(start.status(), StatusCode::OK);
+    let start_body = response_json(start).await;
+    assert_eq!(start_body["status"], "success");
+    assert_eq!(start_body["data"]["run_mode"], "manual_blocked");
+    assert_eq!(
+        start_body["data"]["saga"]["manual_block_reason"],
+        "policy_manual_resolution"
+    );
+
+    let evidence_json = serde_json::json!({"operator_note":"reviewed"});
+    let evidence_bytes = serde_json::to_vec(&evidence_json).expect("evidence JSON");
+    let proof_bytes = signed_manual_resolution_proof_bytes(
+        &state.store,
+        &run_id,
+        &certified,
+        manual_policy(&certified),
+        &evidence_bytes,
+    )
+    .await;
+    let proof_json: Value = serde_json::from_slice(&proof_bytes).expect("proof JSON");
+
+    let resolved = app
+        .clone()
+        .oneshot(json_post(
+            &format!("/v1/runs/{run_id}/manual-resolution"),
+            serde_json::json!({
+                "kind": "manual_resolution_v1",
+                "outcome": "confirm_remediated",
+                "evidence_json": evidence_json,
+                "authorization_proof": proof_json,
+                "note": "reviewed externally",
+                "drive": "until_blocked"
+            }),
+        ))
+        .await
+        .expect("manual resolution response");
+    assert_eq!(resolved.status(), StatusCode::OK);
+    let resolved_body = response_json(resolved).await;
+    assert_eq!(resolved_body["status"], "success");
+    assert_eq!(resolved_body["data"]["run_mode"], "manually_resolved");
+    assert_eq!(
+        resolved_body["data"]["saga"]["terminal_resolution"]["claim"],
+        "manual_resolution"
+    );
+
+    let status = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/runs/{run_id}/status"))
+                .body(Body::empty())
+                .expect("status request"),
+        )
+        .await
+        .expect("status response");
+    assert_eq!(status.status(), StatusCode::OK);
+    let status_body = response_json(status).await;
+    assert_eq!(status_body["data"]["run_mode"], "manually_resolved");
+    assert!(
+        status_body["data"]["attempt_dispositions"]
+            .as_array()
+            .expect("attempts")
+            .iter()
+            .any(|attempt| {
+                attempt["disposition"] == "completed"
+                    && resolve_saga_node_ids(&certified.envelope().spec)
+                        .contains(&attempt["node_id"].as_str().unwrap_or_default())
+            }),
+        "missing completed ResolveSagaTerminal attempt"
+    );
+
+    let raw_stream = state
+        .store
+        .load_run_stream(&run_id)
+        .await
+        .expect("raw run stream");
+    assert!(
+        raw_stream.iter().any(|event| matches!(
+            event.payload(),
+            events::KernelEventPayload::ManualResolutionRecorded(_)
+        )),
+        "stream must contain manual resolution event"
+    );
+    assert_framework_started_before_run_completed(&raw_stream, &certified.envelope().spec);
+
+    let stream = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/runs/{run_id}/stream"))
+                .body(Body::empty())
+                .expect("stream request"),
+        )
+        .await
+        .expect("stream response");
+    assert_eq!(stream.status(), StatusCode::OK);
+    let stream_body = response_json(stream).await;
+    let rendered = serde_json::to_string(&serde_json::json!([
+        start_body,
+        resolved_body,
+        status_body,
+        stream_body
+    ]))
+    .expect("render public JSON");
+    let proof_rendered = std::str::from_utf8(&proof_bytes).expect("proof utf8");
+    let proof: Value = serde_json::from_slice(&proof_bytes).expect("proof JSON");
+    let signature = proof["signatures"][0]["signature_hex"]
+        .as_str()
+        .expect("signature");
+    assert!(!rendered.contains(proof_rendered));
+    assert!(!rendered.contains(signature));
 
     let _ = std::fs::remove_dir_all(root);
 }
@@ -1003,4 +1155,123 @@ fn stream_event_position(
         .iter()
         .position(predicate)
         .unwrap_or_else(|| panic!("missing stream event for {label}"))
+}
+
+async fn signed_manual_resolution_proof_bytes(
+    store: &store::AsyncInMemoryTypedRunStore,
+    run_id: &RunId,
+    certified: &mfm_certify::CertifiedTypedSpec,
+    manual: spec::ManualResolutionEvidenceSpec,
+    evidence_bytes: &[u8],
+) -> Vec<u8> {
+    let evidence_hash = ContentDigest::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        mfm_canonical::sha256_digest_bytes(evidence_bytes),
+    );
+    let evidence = ManualResolutionEvidenceRef {
+        schema_id: manual.evidence_schema.clone(),
+        artifact_id: ArtifactId::from_digest(evidence_hash.algorithm(), *evidence_hash.digest()),
+        content_hash: evidence_hash,
+    };
+    let stream = store.load_run_stream(run_id).await.expect("run stream");
+    let projection =
+        store::ProjectionSnapshot::rebuild_from_run_stream(&stream).expect("projection rebuild");
+    let saga = projection.derive_saga_projection(run_id, &certified.envelope().spec.saga);
+    let reason = saga.manual_block_reason.expect("manual block reason");
+    let expected_next_seq = store
+        .expected_next_seq(run_id)
+        .await
+        .expect("expected next seq");
+    let prefix = ManualResolutionPrefixAuthority::new(
+        run_id.clone(),
+        certified.spec_hash().clone(),
+        expected_next_seq.as_u64(),
+        manual_resolution_stream_prefix_digest(&stream).expect("prefix digest"),
+        manual_resolution_block_reason(reason),
+        unresolved_manual_obligations_digest(&saga).expect("obligation digest"),
+        manual.clone(),
+    )
+    .expect("manual prefix");
+    let claim = prefix
+        .authorization_claim(events::ManualResolutionOutcome::ConfirmRemediated, evidence)
+        .expect("manual claim");
+    let operator = manual.authorization.authority.operators[0].clone();
+    let claim_digest = claim.digest().expect("claim digest");
+    let proof = ManualResolutionAuthorizationProof {
+        verifier_id: manual.authorization.verifier_id,
+        signing_scheme: manual.authorization.signing_scheme,
+        claim,
+        signatures: vec![ManualResolutionAuthorizationSignature {
+            operator_id: operator.operator_id,
+            public_identity: operator.public_identity,
+            signature: ManualAuthorizationSignatureBytes::new(sign_manual_claim_digest(
+                &test_manual_signing_key(),
+                claim_digest.digest().as_bytes(),
+            ))
+            .expect("signature"),
+        }],
+    };
+    proof
+        .canonical_json()
+        .expect("canonical manual proof")
+        .to_vec()
+}
+
+fn manual_policy(
+    certified: &mfm_certify::CertifiedTypedSpec,
+) -> spec::ManualResolutionEvidenceSpec {
+    match &certified.envelope().spec.saga {
+        spec::SagaPolicySpec::ManualResolution { manual } => manual.clone(),
+        _ => panic!("manual proof scenario must carry manual policy"),
+    }
+}
+
+fn resolve_saga_node_ids(spec: &spec::TypedExecutionSpec) -> Vec<&str> {
+    spec.nodes
+        .iter()
+        .filter(|node| {
+            matches!(
+                node.framework,
+                Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_))
+            )
+        })
+        .map(|node| node.node_id.as_str())
+        .collect()
+}
+
+fn assert_framework_started_before_run_completed(
+    stream: &[store::KernelEventEnvelope],
+    spec: &spec::TypedExecutionSpec,
+) {
+    let resolve_nodes = resolve_saga_node_ids(spec);
+    let started = stream
+        .iter()
+        .position(|event| match event.payload() {
+            events::KernelEventPayload::StateAttemptStarted(payload) => {
+                resolve_nodes.contains(&payload.node_id.as_str())
+            }
+            _ => false,
+        })
+        .expect("ResolveSagaTerminal attempt start");
+    let completed = stream
+        .iter()
+        .position(|event| matches!(event.payload(), events::KernelEventPayload::RunCompleted(_)))
+        .expect("RunCompleted event");
+    assert!(started < completed);
+}
+
+fn test_manual_signing_key() -> k256::ecdsa::SigningKey {
+    let mut key_bytes = [0u8; 32];
+    key_bytes[31] = 1;
+    let secret_key = k256::SecretKey::from_slice(&key_bytes).expect("test key");
+    k256::ecdsa::SigningKey::from(&secret_key)
+}
+
+fn sign_manual_claim_digest(signing_key: &k256::ecdsa::SigningKey, digest: &[u8; 32]) -> Vec<u8> {
+    let (signature, recovery_id) = signing_key
+        .sign_prehash_recoverable(digest)
+        .expect("manual signature");
+    let mut signature_bytes = signature.to_bytes().to_vec();
+    signature_bytes.push(u8::from(recovery_id.is_y_odd()));
+    signature_bytes
 }

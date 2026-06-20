@@ -1194,187 +1194,216 @@ fn staged_payload_artifact_requirements(
 ) -> Result<Vec<StagedArtifactRequirement>> {
     let mut requirements = Vec::new();
     for payload in payloads {
-        match payload {
-            events::KernelEventPayload::FactRecorded(payload) => {
-                require_attempt(node, attempt_id, &payload.node_id, &payload.attempt_id)?;
-                requirements.push(StagedArtifactRequirement {
-                    artifact_id: payload.artifact_id.clone(),
-                    digest: payload.response_hash.clone(),
-                    byte_len: None,
-                    media_type: None,
-                    schema_id: Some(payload.response_schema_id.clone()),
-                    semantic_type_id: None,
-                    role: events::ArtifactRole::FactResponse,
-                    binding: StagedArtifactBindingKind::FactResponse,
-                });
-            }
-            events::KernelEventPayload::CellProduced(payload) => {
-                require_attempt(node, attempt_id, &payload.node_id, &payload.attempt_id)?;
-                requirements.push(StagedArtifactRequirement {
-                    artifact_id: payload.artifact_id.clone(),
-                    digest: payload.content_digest.clone(),
-                    byte_len: None,
-                    media_type: None,
-                    schema_id: Some(payload.schema_id.clone()),
-                    semantic_type_id: Some(payload.semantic_type_id.clone()),
-                    role: events::ArtifactRole::StateOutput,
-                    binding: StagedArtifactBindingKind::StateOutput,
-                });
-            }
-            events::KernelEventPayload::PublicOutputProduced(payload) => {
-                require_attempt(node, attempt_id, &payload.node_id, &payload.attempt_id)?;
-                if let Some(artifact_id) = &payload.rendered_artifact_id {
-                    requirements.push(StagedArtifactRequirement {
-                        artifact_id: artifact_id.clone(),
-                        digest: payload.rendered_digest.clone(),
-                        byte_len: None,
-                        media_type: None,
-                        schema_id: Some(payload.public_schema_id.clone()),
-                        semantic_type_id: None,
-                        role: events::ArtifactRole::PublicOutput,
-                        binding: StagedArtifactBindingKind::PublicOutput,
-                    });
-                }
-            }
-            events::KernelEventPayload::PublicOutputRenderFailed(payload) => {
-                require_attempt(node, attempt_id, &payload.node_id, &payload.attempt_id)?;
-                if let Some(ref diagnostic) = payload.error.diagnostic_ref {
-                    push_staged_event_artifact_requirement(
-                        node,
-                        diagnostic,
-                        StagedArtifactBindingKind::RedactedDiagnostic,
-                        &mut requirements,
-                    )?;
-                }
-            }
-            events::KernelEventPayload::StateAttemptFailed(payload) => {
-                require_attempt(node, attempt_id, &payload.node_id, &payload.attempt_id)?;
-                if let Some(ref diagnostic) = payload.error.diagnostic_ref {
-                    push_staged_event_artifact_requirement(
-                        node,
-                        diagnostic,
-                        StagedArtifactBindingKind::RedactedDiagnostic,
-                        &mut requirements,
-                    )?;
-                }
-            }
-            events::KernelEventPayload::SideEffectIntentPersisted(payload) => {
-                require_attempt(node, attempt_id, &payload.node_id, &payload.attempt_id)?;
-                requirements.push(side_effect_artifact_requirement(
-                    payload.intent_artifact_id.clone(),
-                    payload.intent_hash.clone(),
-                    Some(payload.intent_schema_id.clone()),
-                    events::ArtifactRole::SideEffectIntent,
-                    payload.ledger_key.clone(),
-                    payload.invocation_epoch,
-                    StagedSideEffectArtifactPhase::Intent,
-                ));
-            }
-            events::KernelEventPayload::SideEffectInvocationPrepared(payload) => {
-                require_attempt(node, attempt_id, &payload.node_id, &payload.attempt_id)?;
-                if let (Some(artifact_id), Some(hash)) =
-                    (&payload.prepared_artifact_id, &payload.prepared_hash)
-                {
-                    requirements.push(side_effect_artifact_requirement(
-                        artifact_id.clone(),
-                        hash.clone(),
-                        None,
-                        events::ArtifactRole::PreparedInvocation,
-                        payload.ledger_key.clone(),
-                        payload.invocation_epoch,
-                        StagedSideEffectArtifactPhase::PreparedInvocation,
-                    ));
-                }
-            }
-            events::KernelEventPayload::SideEffectNotSubmittedProven(payload) => {
-                require_attempt(node, attempt_id, &payload.node_id, &payload.attempt_id)?;
-                requirements.push(side_effect_artifact_requirement(
-                    payload.proof_artifact_id.clone(),
-                    payload.proof_hash.clone(),
-                    Some(payload.proof_schema_id.clone()),
-                    events::ArtifactRole::NotSubmittedProof,
-                    payload.ledger_key.clone(),
-                    payload.invocation_epoch,
-                    StagedSideEffectArtifactPhase::NotSubmittedProof,
-                ));
-            }
-            events::KernelEventPayload::SideEffectSubmissionObserved(payload) => {
-                require_attempt(node, attempt_id, &payload.node_id, &payload.attempt_id)?;
-                requirements.push(side_effect_artifact_requirement(
-                    payload.submission_artifact_id.clone(),
-                    payload.submission_hash.clone(),
-                    Some(payload.submission_schema_id.clone()),
-                    events::ArtifactRole::Submission,
-                    payload.ledger_key.clone(),
-                    payload.invocation_epoch,
-                    StagedSideEffectArtifactPhase::Submission,
-                ));
-            }
-            events::KernelEventPayload::SideEffectSubmissionUnknown(payload) => {
-                require_attempt(node, attempt_id, &payload.node_id, &payload.attempt_id)?;
-                requirements.push(side_effect_artifact_requirement(
-                    payload.evidence_artifact_id.clone(),
-                    payload.evidence_hash.clone(),
-                    Some(payload.evidence_schema_id.clone()),
-                    events::ArtifactRole::SubmissionUnknownEvidence,
-                    payload.ledger_key.clone(),
-                    payload.invocation_epoch,
-                    StagedSideEffectArtifactPhase::SubmissionUnknownEvidence,
-                ));
-            }
-            events::KernelEventPayload::SideEffectReceiptObserved(payload) => {
-                require_attempt(node, attempt_id, &payload.node_id, &payload.attempt_id)?;
-                requirements.push(side_effect_artifact_requirement(
-                    payload.receipt_artifact_id.clone(),
-                    payload.receipt_hash.clone(),
-                    Some(payload.receipt_schema_id.clone()),
-                    events::ArtifactRole::Receipt,
-                    payload.ledger_key.clone(),
-                    payload.invocation_epoch,
-                    StagedSideEffectArtifactPhase::Receipt,
-                ));
-            }
-            events::KernelEventPayload::SideEffectConfirmationObserved(payload) => {
-                require_attempt(node, attempt_id, &payload.node_id, &payload.attempt_id)?;
-                requirements.push(side_effect_artifact_requirement(
-                    payload.confirmation_artifact_id.clone(),
-                    payload.confirmation_hash.clone(),
-                    Some(payload.confirmation_schema_id.clone()),
-                    events::ArtifactRole::Confirmation,
-                    payload.ledger_key.clone(),
-                    payload.invocation_epoch,
-                    StagedSideEffectArtifactPhase::Confirmation,
-                ));
-            }
-            events::KernelEventPayload::SideEffectAmbiguous(payload) => {
-                require_attempt(node, attempt_id, &payload.node_id, &payload.attempt_id)?;
-                requirements.push(side_effect_artifact_requirement(
-                    payload.evidence_artifact_id.clone(),
-                    payload.evidence_hash.clone(),
-                    Some(payload.evidence_schema_id.clone()),
-                    events::ArtifactRole::AmbiguityEvidence,
-                    payload.ledger_key.clone(),
-                    payload.invocation_epoch,
-                    StagedSideEffectArtifactPhase::AmbiguityEvidence,
-                ));
-            }
-            events::KernelEventPayload::RunAdmitted(_)
-            | events::KernelEventPayload::ManualResolutionRecorded(_)
-            | events::KernelEventPayload::ArtifactReferenced(_)
-            | events::KernelEventPayload::RunCompleted(_)
-            | events::KernelEventPayload::RetentionRefsAppended(_)
-            | events::KernelEventPayload::RetentionManifestProjected(_)
-            | events::KernelEventPayload::StateAttemptStarted(_)
-            | events::KernelEventPayload::StateAttemptCompleted(_)
-            | events::KernelEventPayload::StateAttemptInterrupted(_)
-            | events::KernelEventPayload::CellSkipped(_)
-            | events::KernelEventPayload::SideEffectClaimed(_)
-            | events::KernelEventPayload::SideEffectClaimTakenOver(_)
-            | events::KernelEventPayload::SideEffectInvocationStarted(_)
-            | events::KernelEventPayload::SideEffectFailed(_) => {}
+        for requirement in store::event_artifact_requirements(payload) {
+            let Some(binding) =
+                staged_payload_artifact_binding(node, attempt_id, payload, requirement.source)?
+            else {
+                continue;
+            };
+            requirements.push(staged_artifact_requirement_from_event_requirement(
+                node,
+                requirement,
+                binding,
+            )?);
         }
     }
     Ok(requirements)
+}
+
+fn staged_payload_artifact_binding(
+    node: &spec::NodeSpec,
+    attempt_id: &AttemptId,
+    payload: &events::KernelEventPayload,
+    source: store::EventArtifactReferenceSource,
+) -> Result<Option<StagedArtifactBindingKind>> {
+    match (payload, source) {
+        (
+            events::KernelEventPayload::FactRecorded(payload),
+            store::EventArtifactReferenceSource::FactResponse,
+        ) => {
+            require_attempt(node, attempt_id, &payload.node_id, &payload.attempt_id)?;
+            Ok(Some(StagedArtifactBindingKind::FactResponse))
+        }
+        (
+            events::KernelEventPayload::CellProduced(payload),
+            store::EventArtifactReferenceSource::StateOutput,
+        ) => {
+            require_attempt(node, attempt_id, &payload.node_id, &payload.attempt_id)?;
+            Ok(Some(StagedArtifactBindingKind::StateOutput))
+        }
+        (
+            events::KernelEventPayload::PublicOutputProduced(payload),
+            store::EventArtifactReferenceSource::PublicOutputRendered,
+        ) => {
+            require_attempt(node, attempt_id, &payload.node_id, &payload.attempt_id)?;
+            Ok(Some(StagedArtifactBindingKind::PublicOutput))
+        }
+        (
+            events::KernelEventPayload::PublicOutputRenderFailed(payload),
+            store::EventArtifactReferenceSource::PublicOutputRenderFailureDiagnostic,
+        ) => {
+            require_attempt(node, attempt_id, &payload.node_id, &payload.attempt_id)?;
+            Ok(Some(StagedArtifactBindingKind::RedactedDiagnostic))
+        }
+        (
+            events::KernelEventPayload::StateAttemptFailed(payload),
+            store::EventArtifactReferenceSource::StateAttemptFailureDiagnostic,
+        ) => {
+            require_attempt(node, attempt_id, &payload.node_id, &payload.attempt_id)?;
+            Ok(Some(StagedArtifactBindingKind::RedactedDiagnostic))
+        }
+        (
+            events::KernelEventPayload::SideEffectIntentPersisted(payload),
+            store::EventArtifactReferenceSource::SideEffectIntent,
+        ) => staged_side_effect_artifact_binding(
+            node,
+            attempt_id,
+            &payload.node_id,
+            &payload.attempt_id,
+            payload.ledger_key.clone(),
+            payload.invocation_epoch,
+            StagedSideEffectArtifactPhase::Intent,
+        ),
+        (
+            events::KernelEventPayload::SideEffectInvocationPrepared(payload),
+            store::EventArtifactReferenceSource::PreparedInvocation,
+        ) => staged_side_effect_artifact_binding(
+            node,
+            attempt_id,
+            &payload.node_id,
+            &payload.attempt_id,
+            payload.ledger_key.clone(),
+            payload.invocation_epoch,
+            StagedSideEffectArtifactPhase::PreparedInvocation,
+        ),
+        (
+            events::KernelEventPayload::SideEffectNotSubmittedProven(payload),
+            store::EventArtifactReferenceSource::NotSubmittedProof,
+        ) => staged_side_effect_artifact_binding(
+            node,
+            attempt_id,
+            &payload.node_id,
+            &payload.attempt_id,
+            payload.ledger_key.clone(),
+            payload.invocation_epoch,
+            StagedSideEffectArtifactPhase::NotSubmittedProof,
+        ),
+        (
+            events::KernelEventPayload::SideEffectSubmissionObserved(payload),
+            store::EventArtifactReferenceSource::Submission,
+        ) => staged_side_effect_artifact_binding(
+            node,
+            attempt_id,
+            &payload.node_id,
+            &payload.attempt_id,
+            payload.ledger_key.clone(),
+            payload.invocation_epoch,
+            StagedSideEffectArtifactPhase::Submission,
+        ),
+        (
+            events::KernelEventPayload::SideEffectSubmissionUnknown(payload),
+            store::EventArtifactReferenceSource::SubmissionUnknownEvidence,
+        ) => staged_side_effect_artifact_binding(
+            node,
+            attempt_id,
+            &payload.node_id,
+            &payload.attempt_id,
+            payload.ledger_key.clone(),
+            payload.invocation_epoch,
+            StagedSideEffectArtifactPhase::SubmissionUnknownEvidence,
+        ),
+        (
+            events::KernelEventPayload::SideEffectReceiptObserved(payload),
+            store::EventArtifactReferenceSource::Receipt,
+        ) => staged_side_effect_artifact_binding(
+            node,
+            attempt_id,
+            &payload.node_id,
+            &payload.attempt_id,
+            payload.ledger_key.clone(),
+            payload.invocation_epoch,
+            StagedSideEffectArtifactPhase::Receipt,
+        ),
+        (
+            events::KernelEventPayload::SideEffectConfirmationObserved(payload),
+            store::EventArtifactReferenceSource::Confirmation,
+        ) => staged_side_effect_artifact_binding(
+            node,
+            attempt_id,
+            &payload.node_id,
+            &payload.attempt_id,
+            payload.ledger_key.clone(),
+            payload.invocation_epoch,
+            StagedSideEffectArtifactPhase::Confirmation,
+        ),
+        (
+            events::KernelEventPayload::SideEffectAmbiguous(payload),
+            store::EventArtifactReferenceSource::AmbiguityEvidence,
+        ) => staged_side_effect_artifact_binding(
+            node,
+            attempt_id,
+            &payload.node_id,
+            &payload.attempt_id,
+            payload.ledger_key.clone(),
+            payload.invocation_epoch,
+            StagedSideEffectArtifactPhase::AmbiguityEvidence,
+        ),
+        _ => Ok(None),
+    }
+}
+
+fn staged_side_effect_artifact_binding(
+    node: &spec::NodeSpec,
+    attempt_id: &AttemptId,
+    node_id: &NodeId,
+    payload_attempt_id: &AttemptId,
+    ledger_key: events::SideEffectLedgerKey,
+    invocation_epoch: u32,
+    phase: StagedSideEffectArtifactPhase,
+) -> Result<Option<StagedArtifactBindingKind>> {
+    require_attempt(node, attempt_id, node_id, payload_attempt_id)?;
+    Ok(Some(side_effect_artifact_binding(
+        ledger_key,
+        invocation_epoch,
+        phase,
+    )))
+}
+
+fn staged_artifact_requirement_from_event_requirement(
+    node: &spec::NodeSpec,
+    requirement: store::EventArtifactRequirement,
+    binding: StagedArtifactBindingKind,
+) -> Result<StagedArtifactRequirement> {
+    let role = requirement.artifact_role.ok_or_else(|| {
+        RuntimeError::InvalidRunnerOutput(format!(
+            "node {} typed payload requirement for artifact {} lacks artifact role",
+            node.node_id, requirement.artifact_id
+        ))
+    })?;
+    let digest = requirement.digest.ok_or_else(|| {
+        RuntimeError::InvalidRunnerOutput(format!(
+            "node {} typed payload requirement for artifact {} lacks digest",
+            node.node_id, requirement.artifact_id
+        ))
+    })?;
+    let expected_role = staged_artifact_binding_role(&binding);
+    if role != expected_role {
+        return Err(RuntimeError::InvalidRunnerOutput(format!(
+            "node {} typed payload requirement role {} does not match staged binding",
+            node.node_id,
+            artifact_role_name(role)
+        )));
+    }
+    Ok(StagedArtifactRequirement {
+        artifact_id: requirement.artifact_id,
+        digest,
+        byte_len: requirement.byte_len,
+        media_type: requirement.media_type,
+        schema_id: requirement.schema_id,
+        semantic_type_id: requirement.semantic_type_id,
+        role,
+        binding,
+    })
 }
 
 fn staged_artifact_reference_payloads(
@@ -1425,54 +1454,6 @@ fn staged_artifact_reference_payloads(
         ));
     }
     refs
-}
-
-fn push_staged_event_artifact_requirement(
-    node: &spec::NodeSpec,
-    artifact: &events::ArtifactEvidenceRef,
-    binding: StagedArtifactBindingKind,
-    requirements: &mut Vec<StagedArtifactRequirement>,
-) -> Result<()> {
-    let role = staged_artifact_binding_role(&binding);
-    if artifact.role != role {
-        return Err(RuntimeError::InvalidRunnerOutput(format!(
-            "node {} diagnostic artifact role {} does not match staged binding",
-            node.node_id,
-            artifact_role_name(artifact.role)
-        )));
-    }
-    requirements.push(StagedArtifactRequirement {
-        artifact_id: artifact.artifact_id.clone(),
-        digest: artifact.content_digest.clone(),
-        byte_len: Some(artifact.byte_len),
-        media_type: Some(artifact.media_type.clone()),
-        schema_id: Some(artifact.schema_id.clone()),
-        semantic_type_id: artifact.semantic_type_id.clone(),
-        role: artifact.role,
-        binding,
-    });
-    Ok(())
-}
-
-fn side_effect_artifact_requirement(
-    artifact_id: ArtifactId,
-    digest: ContentDigest,
-    schema_id: Option<SchemaId>,
-    role: events::ArtifactRole,
-    ledger_key: events::SideEffectLedgerKey,
-    invocation_epoch: u32,
-    phase: StagedSideEffectArtifactPhase,
-) -> StagedArtifactRequirement {
-    StagedArtifactRequirement {
-        artifact_id,
-        digest,
-        byte_len: None,
-        media_type: None,
-        schema_id,
-        semantic_type_id: None,
-        role,
-        binding: side_effect_artifact_binding(ledger_key, invocation_epoch, phase),
-    }
 }
 
 fn bind_staged_retention_refs(

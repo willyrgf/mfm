@@ -10,7 +10,7 @@ use std::sync::Arc;
 use alloy_primitives::{Address, U256};
 use mfm_artifact_capabilities::{ArtifactReadProvider, ArtifactReadRequest};
 use mfm_canonical::PlainCanonicalJsonBytes;
-use mfm_capabilities::{CapabilitySetDescriptor, CapabilitySpec};
+use mfm_capabilities::CapabilitySpec;
 use mfm_events::v1 as events;
 use mfm_evm_capabilities::{
     EvmBalanceReadProvider, EvmBalanceReadRequest, EvmBlockReadProvider, EvmBlockReadRequest,
@@ -19,8 +19,8 @@ use mfm_evm_capabilities::{
 };
 use mfm_evm_core::encoding::{encode_erc20_balance_of, encode_erc20_decimals, parse_u8_u256};
 use mfm_evm_core::hex::hex_to_bytes;
-use mfm_ids::{ContentDigest, DescriptorId};
-use mfm_program::{StateSpec, ValidatedConfig};
+use mfm_ids::ContentDigest;
+use mfm_program::ValidatedConfig;
 use mfm_runtime::{
     CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture,
     ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCellTerminal, MaterializedInputNode,
@@ -131,124 +131,97 @@ pub fn register_portfolio_runners(
     let artifacts = capabilities.artifacts();
     let evm = capabilities.evm();
     let mut registrations = RunnerRegistrationBuilder::new(registry, implementation_id);
-    let prepare_sources = registered_descriptor::<PrepareSourcesState>()?;
-    register_runner(
-        &mut registrations,
-        prepare_sources.descriptor_id,
-        &prepare_sources.capabilities,
-        READ_FACTORY,
+    let read_factory = events::RunnerFactoryId::new(READ_FACTORY)?;
+    let pure_factory = events::RunnerFactoryId::new(PURE_FACTORY)?;
+    let prepare_sources = mfm_program::registered_state_descriptor::<PrepareSourcesState>()
+        .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
+    registrations.register_descriptor(
+        prepare_sources.descriptor_id().clone(),
+        prepare_sources.capabilities(),
+        read_factory.clone(),
+        executable(read_factory.clone())?,
         Arc::new(PrepareSourcesRunner {
             artifacts: artifacts.clone(),
         }),
     )?;
-    let resolve_subjects = registered_descriptor::<ResolveSubjectsState>()?;
-    register_runner(
-        &mut registrations,
-        resolve_subjects.descriptor_id,
-        &resolve_subjects.capabilities,
-        PURE_FACTORY,
+    let resolve_subjects = mfm_program::registered_state_descriptor::<ResolveSubjectsState>()
+        .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
+    registrations.register_descriptor(
+        resolve_subjects.descriptor_id().clone(),
+        resolve_subjects.capabilities(),
+        pure_factory.clone(),
+        executable(pure_factory.clone())?,
         Arc::new(ResolveSubjectsRunner {
             artifacts: artifacts.clone(),
         }),
     )?;
-    let pin_views = registered_descriptor::<PinViewsState>()?;
-    register_runner(
-        &mut registrations,
-        pin_views.descriptor_id,
-        &pin_views.capabilities,
-        READ_FACTORY,
+    let pin_views = mfm_program::registered_state_descriptor::<PinViewsState>()
+        .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
+    registrations.register_descriptor(
+        pin_views.descriptor_id().clone(),
+        pin_views.capabilities(),
+        read_factory.clone(),
+        executable(read_factory.clone())?,
         Arc::new(PinViewsRunner {
             artifacts: artifacts.clone(),
             evm: evm.clone(),
         }),
     )?;
-    let resolve_valuations = registered_descriptor::<ResolveValuationsState>()?;
-    register_runner(
-        &mut registrations,
-        resolve_valuations.descriptor_id,
-        &resolve_valuations.capabilities,
-        PURE_FACTORY,
+    let resolve_valuations =
+        mfm_program::registered_state_descriptor::<ResolveValuationsState>()
+            .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
+    registrations.register_descriptor(
+        resolve_valuations.descriptor_id().clone(),
+        resolve_valuations.capabilities(),
+        pure_factory.clone(),
+        executable(pure_factory.clone())?,
         Arc::new(ResolveValuationsRunner {
             artifacts: artifacts.clone(),
         }),
     )?;
-    let observe_batch = registered_descriptor::<ObserveBatchState>()?;
-    register_runner(
-        &mut registrations,
-        observe_batch.descriptor_id,
-        &observe_batch.capabilities,
-        READ_FACTORY,
+    let observe_batch = mfm_program::registered_state_descriptor::<ObserveBatchState>()
+        .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
+    registrations.register_descriptor(
+        observe_batch.descriptor_id().clone(),
+        observe_batch.capabilities(),
+        read_factory.clone(),
+        executable(read_factory)?,
         Arc::new(ObserveBatchRunner {
             artifacts: artifacts.clone(),
             evm,
         }),
     )?;
-    let merge_observations = registered_descriptor::<MergeObservationsState>()?;
-    register_runner(
-        &mut registrations,
-        merge_observations.descriptor_id,
-        &merge_observations.capabilities,
-        PURE_FACTORY,
+    let merge_observations =
+        mfm_program::registered_state_descriptor::<MergeObservationsState>()
+            .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
+    registrations.register_descriptor(
+        merge_observations.descriptor_id().clone(),
+        merge_observations.capabilities(),
+        pure_factory.clone(),
+        executable(pure_factory.clone())?,
         Arc::new(MergeObservationsRunner {
             artifacts: artifacts.clone(),
         }),
     )?;
-    let assemble_snapshot = registered_descriptor::<AssembleSnapshotState>()?;
-    register_runner(
-        &mut registrations,
-        assemble_snapshot.descriptor_id,
-        &assemble_snapshot.capabilities,
-        PURE_FACTORY,
+    let assemble_snapshot = mfm_program::registered_state_descriptor::<AssembleSnapshotState>()
+        .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
+    registrations.register_descriptor(
+        assemble_snapshot.descriptor_id().clone(),
+        assemble_snapshot.capabilities(),
+        pure_factory.clone(),
+        executable(pure_factory.clone())?,
         Arc::new(AssembleSnapshotRunner {
             artifacts: artifacts.clone(),
         }),
     )?;
-    let project_report = registered_descriptor::<ProjectReportState>()?;
-    register_runner(
-        &mut registrations,
-        project_report.descriptor_id,
-        &project_report.capabilities,
-        PURE_FACTORY,
-        Arc::new(ProjectReportRunner { artifacts }),
-    )?;
-    Ok(())
-}
-
-struct RegisteredRuntimeDescriptor {
-    descriptor_id: DescriptorId,
-    capabilities: CapabilitySetDescriptor,
-}
-
-fn registered_descriptor<S>() -> mfm_runtime::Result<RegisteredRuntimeDescriptor>
-where
-    S: StateSpec,
-    S::Effect: mfm_program::EffectRunner<S>,
-    S::Caps: mfm_capabilities::CapabilitySetFor<S::Effect>,
-{
-    let mut states = mfm_program::StateRegistryBuilder::new();
-    let registered = states
-        .register::<S>()
+    let project_report = mfm_program::registered_state_descriptor::<ProjectReportState>()
         .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
-    Ok(RegisteredRuntimeDescriptor {
-        descriptor_id: registered.descriptor().descriptor_id().clone(),
-        capabilities: registered.descriptor().capabilities().clone(),
-    })
-}
-
-fn register_runner(
-    registrations: &mut RunnerRegistrationBuilder<'_>,
-    descriptor_id: DescriptorId,
-    capabilities: &CapabilitySetDescriptor,
-    factory: &'static str,
-    runner: Arc<dyn ErasedNodeRunner>,
-) -> mfm_runtime::Result<()> {
-    let factory_id = events::RunnerFactoryId::new(factory)?;
     registrations.register_descriptor(
-        descriptor_id,
-        capabilities,
-        factory_id.clone(),
-        executable(factory_id)?,
-        runner,
+        project_report.descriptor_id().clone(),
+        project_report.capabilities(),
+        pure_factory.clone(),
+        executable(pure_factory)?,
+        Arc::new(ProjectReportRunner { artifacts }),
     )?;
     Ok(())
 }

@@ -7,12 +7,7 @@ use mfm_ids::{
     ArtifactId, ContentDigest, IdentityError, NodeId, RunId, SchemaId, SeedId, SemanticTypeId,
 };
 use mfm_spec::v1::MediaType;
-use mfm_store::v1::codec::{
-    attempt_projection_json, cell_projection_json, fact_projection_json,
-    manual_resolution_projection_json, parse_identity, public_output_projection_json,
-    resource_lane_projection_json, run_completion_projection_json, run_state_str,
-    saga_engagement_projection_json, side_effect_projection_json,
-};
+use mfm_store::v1::codec::parse_identity;
 use mfm_store::v1::{
     build_prepared_commit_plan_batch, payload_from_json_value, prepared_commit_plan_fingerprint,
     stage_prepared_commit_plan, ArtifactEvidenceRef, AsyncStoreFuture, AsyncTypedRunEventStore,
@@ -200,7 +195,6 @@ impl PostgresTypedRunEventStore {
         };
         let staged = stage_prepared_commit_plan(&base, &plan)?;
         let batch = staged.batch().clone();
-        let staged_projections = staged.projections().clone();
 
         for evidence in plan.admitted_artifacts() {
             admit_artifact_evidence_tx(
@@ -288,7 +282,6 @@ impl PostgresTypedRunEventStore {
             }
         }
 
-        write_projection_tables(&mut tx, request.run_id(), &staged_projections).await?;
         sqlx::query!(
             "UPDATE typed_run_heads SET head_seq = $2 WHERE run_id = $1",
             request.run_id().as_str(),
@@ -304,7 +297,7 @@ impl PostgresTypedRunEventStore {
         Ok(CommitOutcome::Appended(batch))
     }
 
-    /// Loads the current projection snapshot from projection tables.
+    /// Loads the current projection snapshot from authoritative event rows.
     pub async fn projection_snapshot(&self, run_id: &RunId) -> Result<ProjectionSnapshot> {
         load_projection_snapshot_client(&self.pool, run_id).await
     }
@@ -312,33 +305,6 @@ impl PostgresTypedRunEventStore {
     /// Loads the authoritative typed run stream from persisted event rows.
     pub async fn load_run_stream(&self, run_id: &RunId) -> Result<Vec<KernelEventEnvelope>> {
         load_run_stream_client(&self.pool, run_id).await
-    }
-
-    /// Rebuilds projection tables from the authoritative `typed_run_events` stream.
-    pub async fn rebuild_projections_from_events(
-        &self,
-        run_id: &RunId,
-    ) -> Result<ProjectionSnapshot> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|error| database_error("failed to start transaction", error))?;
-        ensure_run_head(&mut tx, run_id).await?;
-        let head = read_head_for_update(&mut tx, run_id).await?;
-        lock_resource_lanes_tx(&mut tx).await?;
-        let snapshot = rebuild_projection_snapshot_from_events(&mut tx, run_id).await?;
-        let stream_head = projection_stream_head(&mut tx, run_id).await?;
-        if stream_head != head {
-            return Err(PostgresTypedStoreError::Corruption(
-                "typed run head does not match persisted event stream".to_owned(),
-            ));
-        }
-        write_projection_tables(&mut tx, run_id, &snapshot).await?;
-        tx.commit()
-            .await
-            .map_err(|error| database_error("failed to commit transaction", error))?;
-        Ok(snapshot)
     }
 }
 
@@ -510,9 +476,9 @@ async fn read_head_for_update(tx: &mut Transaction<'_, Postgres>, run_id: &RunId
 }
 
 async fn lock_resource_lanes_tx(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
-    // This table lock is the cross-run resource-lane admission mutex. Lane authority is rebuilt
-    // from typed_run_events, so the contents of projection rows are not trusted during admission.
-    sqlx::query!("LOCK TABLE typed_resource_lane_projection IN SHARE ROW EXCLUSIVE MODE")
+    // Cross-run resource lanes are rebuilt from streams, but admission still needs a transaction
+    // mutex so two runs cannot both observe a free lane and commit conflicting claims.
+    sqlx::query("LOCK TABLE typed_resource_lane_locks IN SHARE ROW EXCLUSIVE MODE")
         .execute(&mut **tx)
         .await
         .map_err(|error| database_error("failed to lock resource lanes", error))?;
@@ -600,35 +566,14 @@ impl ArtifactEvidenceParts {
             semantic_type_id: parse_optional_identity(self.semantic_type_id)?,
             producer_node_id: parse_optional_identity(self.producer_node_id)?,
             producer_seed_id: parse_optional_identity(self.producer_seed_id)?,
-            artifact_role: parse_artifact_role(&self.artifact_role)?,
+            artifact_role: decode_artifact_role_tag(&self.artifact_role)?,
         })
     }
 }
 
-fn parse_artifact_role(value: &str) -> Result<events::ArtifactRole> {
+fn decode_artifact_role_tag(value: &str) -> Result<events::ArtifactRole> {
     events::ArtifactRole::parse(value)
         .ok_or_else(|| StoreError::Identity(format!("unknown artifact role {value}")).into())
-}
-
-#[cfg(test)]
-mod unit_tests {
-    use super::*;
-
-    #[test]
-    fn artifact_role_contract_postgres_tag_roundtrip_uses_events_contract() {
-        for role in events::ArtifactRole::ALL {
-            assert_eq!(
-                parse_artifact_role(role.as_str()).expect("role tag parses"),
-                *role
-            );
-        }
-
-        assert!(matches!(
-            parse_artifact_role("unknown_artifact_role"),
-            Err(PostgresTypedStoreError::Store(StoreError::Identity(message)))
-                if message.contains("unknown artifact role unknown_artifact_role")
-        ));
-    }
 }
 
 async fn load_logical_keys(
@@ -867,266 +812,6 @@ struct TypedRunEventRow {
     payload_json: Value,
 }
 
-async fn write_projection_tables(
-    tx: &mut Transaction<'_, Postgres>,
-    run_id: &RunId,
-    snapshot: &ProjectionSnapshot,
-) -> Result<()> {
-    clear_projection_tables(tx, run_id).await?;
-
-    for (projected_run_id, state) in snapshot.run_states() {
-        if projected_run_id == run_id {
-            let json = serde_json::json!({
-                "run_id": projected_run_id.as_str(),
-                "run_state": run_state_str(*state),
-            });
-            sqlx::query!(
-                "INSERT INTO typed_run_projection (run_id, run_state, projection_json) \
-                 VALUES ($1,$2,$3)",
-                projected_run_id.as_str(),
-                run_state_str(*state),
-                json,
-            )
-            .execute(&mut **tx)
-            .await
-            .map_err(|error| database_error("failed to write run projection", error))?;
-        }
-    }
-
-    for (projected_run_id, projection) in snapshot.run_completions() {
-        if projected_run_id == run_id {
-            let json = run_completion_projection_json(projected_run_id, projection);
-            sqlx::query!(
-                "INSERT INTO typed_run_completion_projection (run_id, projection_json) \
-                 VALUES ($1,$2)",
-                projected_run_id.as_str(),
-                json,
-            )
-            .execute(&mut **tx)
-            .await
-            .map_err(|error| database_error("failed to write run completion projection", error))?;
-        }
-    }
-
-    for (projected_run_id, projection) in snapshot.saga_engagements() {
-        if projected_run_id == run_id {
-            let json = saga_engagement_projection_json(projected_run_id, projection);
-            sqlx::query!(
-                "INSERT INTO typed_saga_engagement_projection (run_id, projection_json) \
-                 VALUES ($1,$2)",
-                projected_run_id.as_str(),
-                json,
-            )
-            .execute(&mut **tx)
-            .await
-            .map_err(|error| database_error("failed to write saga engagement projection", error))?;
-        }
-    }
-
-    for (projected_run_id, projection) in snapshot.manual_resolutions() {
-        if projected_run_id == run_id {
-            let json = manual_resolution_projection_json(projected_run_id, projection);
-            sqlx::query!(
-                "INSERT INTO typed_manual_resolution_projection (run_id, projection_json) \
-                 VALUES ($1,$2)",
-                projected_run_id.as_str(),
-                json,
-            )
-            .execute(&mut **tx)
-            .await
-            .map_err(|error| {
-                database_error("failed to write manual resolution projection", error)
-            })?;
-        }
-    }
-
-    for (_, projection) in snapshot.attempts() {
-        let json = attempt_projection_json(projection);
-        sqlx::query!(
-            "INSERT INTO typed_attempt_projection (run_id, node_id, attempt_id, projection_json) \
-             VALUES ($1,$2,$3,$4)",
-            run_id.as_str(),
-            projection.node_id.as_str(),
-            projection.attempt_id.as_str(),
-            json,
-        )
-        .execute(&mut **tx)
-        .await
-        .map_err(|error| database_error("failed to write attempt projection", error))?;
-    }
-
-    for (cell_id, projection) in snapshot.cells() {
-        let json = cell_projection_json(cell_id, projection);
-        sqlx::query!(
-            "INSERT INTO typed_cell_projection (run_id, cell_id, projection_json) VALUES ($1,$2,$3)",
-            run_id.as_str(),
-            cell_id.as_str(),
-            json,
-        )
-        .execute(&mut **tx)
-        .await
-        .map_err(|error| database_error("failed to write cell projection", error))?;
-    }
-
-    for (_, projection) in snapshot.facts() {
-        let json = fact_projection_json(projection);
-        sqlx::query!(
-            "INSERT INTO typed_fact_projection \
-             (run_id, node_id, attempt_id, fact_key, projection_json) VALUES ($1,$2,$3,$4,$5)",
-            run_id.as_str(),
-            projection.node_id.as_str(),
-            projection.attempt_id.as_str(),
-            projection.fact_key.as_str(),
-            json,
-        )
-        .execute(&mut **tx)
-        .await
-        .map_err(|error| database_error("failed to write fact projection", error))?;
-    }
-
-    for (ledger_ref, projection) in snapshot.side_effects() {
-        if &ledger_ref.run_id == run_id {
-            let json = side_effect_projection_json(projection);
-            sqlx::query!(
-                "INSERT INTO typed_side_effect_projection (run_id, ledger_key, projection_json) \
-                 VALUES ($1,$2,$3)",
-                ledger_ref.run_id.as_str(),
-                ledger_ref.ledger_key.as_str(),
-                json,
-            )
-            .execute(&mut **tx)
-            .await
-            .map_err(|error| database_error("failed to write side-effect projection", error))?;
-        }
-    }
-
-    for (lane_key, projection) in snapshot.resource_lanes() {
-        if &projection.holder.run_id == run_id {
-            let json = resource_lane_projection_json(lane_key, projection);
-            sqlx::query(
-                "DELETE FROM typed_resource_lane_projection \
-                 WHERE namespace = $1 AND resource_key = $2",
-            )
-            .bind(lane_key.namespace.as_str())
-            .bind(lane_key.key.as_str())
-            .execute(&mut **tx)
-            .await
-            .map_err(|error| database_error("failed to clear resource lane key", error))?;
-            sqlx::query!(
-                "INSERT INTO typed_resource_lane_projection \
-                 (namespace, resource_key, run_id, ledger_key, projection_json) \
-                 VALUES ($1,$2,$3,$4,$5)",
-                lane_key.namespace.as_str(),
-                lane_key.key.as_str(),
-                projection.holder.run_id.as_str(),
-                projection.holder.ledger_key.as_str(),
-                json,
-            )
-            .execute(&mut **tx)
-            .await
-            .map_err(|error| database_error("failed to write resource lane projection", error))?;
-        }
-    }
-
-    for (schema_id, projection) in snapshot.public_outputs() {
-        let json = public_output_projection_json(schema_id, projection);
-        sqlx::query!(
-            "INSERT INTO typed_public_output_projection \
-             (run_id, public_schema_id, projection_json) VALUES ($1,$2,$3)",
-            run_id.as_str(),
-            schema_id.as_str(),
-            json,
-        )
-        .execute(&mut **tx)
-        .await
-        .map_err(|error| database_error("failed to write public-output projection", error))?;
-    }
-
-    Ok(())
-}
-
-async fn clear_projection_tables(tx: &mut Transaction<'_, Postgres>, run_id: &RunId) -> Result<()> {
-    sqlx::query!(
-        "DELETE FROM typed_run_projection WHERE run_id = $1",
-        run_id.as_str()
-    )
-    .execute(&mut **tx)
-    .await
-    .map_err(|error| database_error("failed to clear run projection", error))?;
-    sqlx::query!(
-        "DELETE FROM typed_run_completion_projection WHERE run_id = $1",
-        run_id.as_str()
-    )
-    .execute(&mut **tx)
-    .await
-    .map_err(|error| database_error("failed to clear run completion projection", error))?;
-    sqlx::query!(
-        "DELETE FROM typed_saga_engagement_projection WHERE run_id = $1",
-        run_id.as_str()
-    )
-    .execute(&mut **tx)
-    .await
-    .map_err(|error| database_error("failed to clear saga engagement projection", error))?;
-    sqlx::query!(
-        "DELETE FROM typed_manual_resolution_projection WHERE run_id = $1",
-        run_id.as_str()
-    )
-    .execute(&mut **tx)
-    .await
-    .map_err(|error| database_error("failed to clear manual resolution projection", error))?;
-    sqlx::query!(
-        "DELETE FROM typed_attempt_projection WHERE run_id = $1",
-        run_id.as_str()
-    )
-    .execute(&mut **tx)
-    .await
-    .map_err(|error| database_error("failed to clear attempt projection", error))?;
-    sqlx::query!(
-        "DELETE FROM typed_cell_projection WHERE run_id = $1",
-        run_id.as_str()
-    )
-    .execute(&mut **tx)
-    .await
-    .map_err(|error| database_error("failed to clear cell projection", error))?;
-    sqlx::query!(
-        "DELETE FROM typed_fact_projection WHERE run_id = $1",
-        run_id.as_str()
-    )
-    .execute(&mut **tx)
-    .await
-    .map_err(|error| database_error("failed to clear fact projection", error))?;
-    sqlx::query!(
-        "DELETE FROM typed_side_effect_projection WHERE run_id = $1",
-        run_id.as_str()
-    )
-    .execute(&mut **tx)
-    .await
-    .map_err(|error| database_error("failed to clear side-effect projection", error))?;
-    sqlx::query!(
-        "DELETE FROM typed_resource_lane_projection WHERE run_id = $1",
-        run_id.as_str()
-    )
-    .execute(&mut **tx)
-    .await
-    .map_err(|error| database_error("failed to clear resource lane projection", error))?;
-    sqlx::query!(
-        "DELETE FROM typed_public_output_projection WHERE run_id = $1",
-        run_id.as_str()
-    )
-    .execute(&mut **tx)
-    .await
-    .map_err(|error| database_error("failed to clear public-output projection", error))?;
-    Ok(())
-}
-
-async fn rebuild_projection_snapshot_from_events(
-    tx: &mut Transaction<'_, Postgres>,
-    run_id: &RunId,
-) -> Result<ProjectionSnapshot> {
-    let stream = load_run_stream_tx(tx, run_id).await?;
-    Ok(ProjectionSnapshot::rebuild_from_run_stream(&stream)?)
-}
-
 async fn rebuild_projection_snapshot_with_head(
     tx: &mut Transaction<'_, Postgres>,
     run_id: &RunId,
@@ -1135,17 +820,6 @@ async fn rebuild_projection_snapshot_with_head(
     let head = stream.last().map(|event| event.seq().as_u64()).unwrap_or(0);
     let snapshot = ProjectionSnapshot::rebuild_from_run_stream(&stream)?;
     Ok((snapshot, head))
-}
-
-async fn projection_stream_head(tx: &mut Transaction<'_, Postgres>, run_id: &RunId) -> Result<u64> {
-    let row = sqlx::query!(
-        "SELECT COALESCE(MAX(seq), 0) as \"head!\" FROM typed_run_events WHERE run_id = $1",
-        run_id.as_str(),
-    )
-    .fetch_one(&mut **tx)
-    .await
-    .map_err(|error| database_error("failed to query typed stream head", error))?;
-    i64_to_nonnegative_u64(row.head, "typed_run_events.seq")
 }
 
 fn canonical_payload_value(payload: &events::KernelEventPayload) -> Result<Value> {
@@ -1205,8 +879,8 @@ mod tests {
     use mfm_events::v1::{self as events, ArtifactRole, KernelEventPayload};
     use mfm_ids::{
         AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind, CapabilityVersion,
-        CellId, ContentDigest, DigestAlgorithm, DigestBytes, EventId, LoweringVersion, NodeId,
-        RunId, SchemaId, ScopeId, SemanticTypeId, SpecHash, SpecVersion, StateKind, StateVersion,
+        CellId, ContentDigest, DigestAlgorithm, DigestBytes, LoweringVersion, NodeId, RunId,
+        SchemaId, ScopeId, SemanticTypeId, SpecHash, SpecVersion, StateKind, StateVersion,
     };
     use mfm_manual_auth::{
         manual_authorization_proof_schema_id, ManualAuthorizationSignatureBytes,
@@ -1219,15 +893,15 @@ mod tests {
         ResourceNamespace, SagaPolicySpec, ValueLineageRef,
     };
     use mfm_store::v1::{
-        build_committed_batch, ArtifactEvidenceRef, AttemptStatus, AttemptTerminal,
-        CellTerminalProjection, CommitArtifactEvidenceSet, CommitKey, CommitOutcome,
-        CommitPreconditions, ManualResolution, PreparedCommit, PreparedCommitPlan,
-        RequiredRunState, ResourceLaneKey, Retention, RunAdmission, RunState, SagaEngagementReason,
-        SagaTerminal, SagaTerminalProof, SideEffectPhase, SideEffectProgress, SideEffectTerminal,
-        StateAttemptStarted, StoreError, StreamSeq,
+        ArtifactEvidenceRef, AttemptStatus, AttemptTerminal, CellTerminalProjection,
+        CommitArtifactEvidenceSet, CommitKey, CommitOutcome, CommitPreconditions, ManualResolution,
+        PreparedCommit, PreparedCommitPlan, RequiredRunState, ResourceLaneKey, Retention,
+        RunAdmission, RunState, SagaEngagementReason, SagaTerminal, SagaTerminalProof,
+        SideEffectPhase, SideEffectProgress, SideEffectTerminal, StateAttemptStarted, StoreError,
+        StreamSeq,
     };
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-    use sqlx::{AssertSqlSafe, Row};
+    use sqlx::AssertSqlSafe;
 
     use super::*;
 
@@ -1287,170 +961,6 @@ mod tests {
         .execute(&admin_pool)
         .await
         .expect("drop schema");
-    }
-
-    async fn clear_projection_rows(store: &PostgresTypedRunEventStore, run_id: &RunId) {
-        let mut tx = store.pool.begin().await.expect("start projection clear tx");
-        clear_projection_tables(&mut tx, run_id)
-            .await
-            .expect("clear projections");
-        tx.commit().await.expect("commit projection clear tx");
-    }
-
-    async fn poison_run_projection_state(store: &PostgresTypedRunEventStore, run_id: &RunId) {
-        sqlx::query("UPDATE typed_run_projection SET run_state = $2 WHERE run_id = $1")
-            .bind(run_id.as_str())
-            .bind(run_state_str(RunState::Completed))
-            .execute(&store.pool)
-            .await
-            .expect("poison run projection");
-    }
-
-    async fn poison_cell_projection_json(store: &PostgresTypedRunEventStore, run_id: &RunId) {
-        sqlx::query("UPDATE typed_cell_projection SET projection_json = $2 WHERE run_id = $1")
-            .bind(run_id.as_str())
-            .bind(serde_json::json!({
-                "cell_id": cell_id(199).as_str(),
-                "poisoned": true,
-            }))
-            .execute(&store.pool)
-            .await
-            .expect("poison cell projection");
-    }
-
-    async fn poison_resource_lane_projection_row(
-        store: &PostgresTypedRunEventStore,
-        lane_key: &ResourceLaneKey,
-        poisoned_run: &RunId,
-    ) {
-        let poisoned_ledger = side_effect_ledger_key();
-        let updated = sqlx::query(
-            "UPDATE typed_resource_lane_projection \
-             SET run_id = $3, ledger_key = $4, projection_json = $5 \
-             WHERE namespace = $1 AND resource_key = $2",
-        )
-        .bind(lane_key.namespace.as_str())
-        .bind(lane_key.key.as_str())
-        .bind(poisoned_run.as_str())
-        .bind(poisoned_ledger.as_str())
-        .bind(serde_json::json!({
-            "poisoned": true,
-            "run_id": poisoned_run.as_str(),
-        }))
-        .execute(&store.pool)
-        .await
-        .expect("poison resource lane projection");
-        assert_eq!(updated.rows_affected(), 1);
-    }
-
-    async fn insert_stale_resource_lane_projection_row(
-        store: &PostgresTypedRunEventStore,
-        lane_key: &ResourceLaneKey,
-        stale_run: &RunId,
-    ) {
-        let stale_ledger = side_effect_ledger_key();
-        let projection = ResourceLaneProjection {
-            event_id: EventId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(40)),
-            holder: mfm_store::v1::SideEffectLedgerRef::new(
-                stale_run.clone(),
-                stale_ledger.clone(),
-            ),
-            ledger_purpose: side_effect_ledger_purpose(),
-            node_id: node_id(70),
-            attempt_id: attempt_id(72),
-            invocation_epoch: 1,
-        };
-        sqlx::query(
-            "INSERT INTO typed_resource_lane_projection \
-             (namespace, resource_key, run_id, ledger_key, projection_json) \
-             VALUES ($1,$2,$3,$4,$5)",
-        )
-        .bind(lane_key.namespace.as_str())
-        .bind(lane_key.key.as_str())
-        .bind(stale_run.as_str())
-        .bind(stale_ledger.as_str())
-        .bind(resource_lane_projection_json(lane_key, &projection))
-        .execute(&store.pool)
-        .await
-        .expect("insert stale resource lane projection");
-    }
-
-    async fn assert_resource_lane_projection_row_holder(
-        store: &PostgresTypedRunEventStore,
-        lane_key: &ResourceLaneKey,
-        expected_run: &RunId,
-    ) {
-        let row = sqlx::query(
-            "SELECT run_id FROM typed_resource_lane_projection \
-             WHERE namespace = $1 AND resource_key = $2",
-        )
-        .bind(lane_key.namespace.as_str())
-        .bind(lane_key.key.as_str())
-        .fetch_one(&store.pool)
-        .await
-        .expect("resource lane projection row");
-        let run_id: String = row.try_get("run_id").expect("run_id column");
-        assert_eq!(run_id, expected_run.as_str());
-    }
-
-    async fn insert_persisted_events_direct(
-        store: &PostgresTypedRunEventStore,
-        run_id: &RunId,
-        events: &[KernelEventEnvelope],
-    ) -> Result<()> {
-        let mut tx = store.pool.begin().await.expect("start direct insert tx");
-        let head_seq = events
-            .last()
-            .map(|event| event.seq().as_u64())
-            .unwrap_or_default();
-        sqlx::query("INSERT INTO typed_run_heads (run_id, head_seq) VALUES ($1, $2)")
-            .bind(run_id.as_str())
-            .bind(u64_to_i64(head_seq, "typed_run_heads.head_seq")?)
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| database_error("failed to insert typed run head", error))?;
-        for event in events {
-            let payload_json = canonical_payload_value(event.payload())?;
-            let ordinal = i32::try_from(event.ordinal().as_u32()).map_err(|_| {
-                PostgresTypedStoreError::Corruption("typed_run_events.ordinal overflow".to_owned())
-            })?;
-            sqlx::query(
-                "INSERT INTO typed_run_events \
-                 (run_id, seq, ordinal, event_id, event_schema_id, spec_hash, commit_key, \
-                  logical_key, payload_hash, payload_canonical_byte_len, payload_json) \
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
-            )
-            .bind(event.run_id().as_str())
-            .bind(u64_to_i64(event.seq().as_u64(), "typed_run_events.seq")?)
-            .bind(ordinal)
-            .bind(event.event_id().as_str())
-            .bind(event.event_schema_id().as_str())
-            .bind(event.spec_hash().as_str())
-            .bind(event.commit_key().as_str())
-            .bind(event.logical_key().as_str())
-            .bind(event.payload_hash().as_str())
-            .bind(u64_to_i64(
-                event.audit().payload_canonical_byte_len(),
-                "typed_run_events.payload_canonical_byte_len",
-            )?)
-            .bind(payload_json)
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| database_error("failed to insert typed event", error))?;
-        }
-        tx.commit()
-            .await
-            .map_err(|error| database_error("failed to commit direct insert", error))?;
-        Ok(())
-    }
-
-    fn assert_old_model_rejection(error: PostgresTypedStoreError) {
-        assert!(matches!(
-            error,
-            PostgresTypedStoreError::Store(StoreError::ProjectionConflict { message, .. })
-                if message.contains("unsupported old stream model")
-                    && message.contains("StateAttemptStarted")
-        ));
     }
 
     fn digest_bytes(byte: u8) -> DigestBytes {
@@ -2461,35 +1971,19 @@ mod tests {
             before
         );
 
-        poison_run_projection_state(&store, &run).await;
-        poison_cell_projection_json(&store, &run).await;
         assert_eq!(
             store
                 .projection_snapshot(&run)
                 .await
-                .expect("stream-authoritative projection ignores poisoned rows"),
+                .expect("stream-authoritative projection rebuilds from events"),
             before
         );
-
-        clear_projection_rows(&store, &run).await;
-        assert_eq!(
-            store
-                .projection_snapshot(&run)
-                .await
-                .expect("stream-authoritative projection ignores deleted rows"),
-            before
-        );
-        let rebuilt = store
-            .rebuild_projections_from_events(&run)
-            .await
-            .expect("rebuild projections");
-        assert_eq!(rebuilt, before);
 
         drop_schema(&store, &schema).await;
     }
 
     #[tokio::test]
-    async fn typed_interrupted_attempt_projection_persists_and_rebuilds_from_events() {
+    async fn typed_interrupted_attempt_projection_rebuilds_from_events() {
         let (store, schema) = test_store().await;
         let run = run_id(17);
 
@@ -2532,16 +2026,15 @@ mod tests {
         assert!(matches!(&attempt.status, AttemptStatus::Interrupted));
         assert!(before.saga_engagement(&run).is_none());
 
-        clear_projection_rows(&store, &run).await;
         let rebuilt = store
-            .rebuild_projections_from_events(&run)
+            .projection_snapshot(&run)
             .await
-            .expect("rebuild projections");
+            .expect("projection rebuilds from events");
         assert_eq!(rebuilt, before);
         assert!(matches!(
             &rebuilt
                 .attempt(&node_id(20), &attempt_id(23))
-                .expect("rebuilt attempt projection")
+                .expect("stream-derived attempt projection")
                 .status,
             AttemptStatus::Interrupted
         ));
@@ -2550,49 +2043,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn typed_old_model_persisted_rows_reject_on_load_and_rebuild() {
-        let (store, schema) = test_store().await;
-        let run = run_id(18);
-        let run_start = build_committed_batch(
-            &request(run.clone(), 1, "run-start", vec![run_admitted(run.clone())]),
-            StreamSeq::FIRST,
-        )
-        .expect("run start batch");
-        let old_terminal = build_committed_batch(
-            &request(
-                run.clone(),
-                2,
-                "old-terminal-without-start",
-                vec![
-                    cell_produced(artifact_id(19), content_digest(20)),
-                    state_attempt_completed(),
-                ],
-            ),
-            StreamSeq::new(2).expect("terminal seq"),
-        )
-        .expect("old terminal batch");
-        let mut events = run_start.events().to_vec();
-        events.extend(old_terminal.events().iter().cloned());
-        insert_persisted_events_direct(&store, &run, &events)
-            .await
-            .expect("insert old rows");
-
-        let load_error = store
-            .load_run_stream(&run)
-            .await
-            .expect_err("old model rows reject on load");
-        assert_old_model_rejection(load_error);
-        let rebuild_error = store
-            .rebuild_projections_from_events(&run)
-            .await
-            .expect_err("old model rows reject on rebuild");
-        assert_old_model_rejection(rebuild_error);
-
-        drop_schema(&store, &schema).await;
-    }
-
-    #[tokio::test]
-    async fn typed_resource_lane_projection_persists_and_rebuilds_from_events() {
+    async fn typed_resource_lane_projection_rebuilds_from_events() {
         let (store, schema) = test_store().await;
         let run = run_id(21);
         let intent_artifact = artifact_id(22);
@@ -2646,9 +2097,7 @@ mod tests {
         .expect("prepare with resource key");
 
         let before = store.projection_snapshot(&run).await.expect("projection");
-        let lane = before
-            .resource_lane(&lane_key)
-            .expect("persisted resource lane");
+        let lane = before.resource_lane(&lane_key).expect("resource lane");
         assert_eq!(lane.holder.run_id, run);
         assert_eq!(lane.holder.ledger_key, side_effect_ledger_key());
 
@@ -2681,59 +2130,32 @@ mod tests {
         assert_eq!(&peer_lane.holder.run_id, &run);
         assert_eq!(peer_before.resource_lanes().count(), 1);
 
-        clear_projection_rows(&store, &run).await;
-        clear_projection_rows(&store, &peer_run).await;
-        let peer_after_deleted = store
+        let peer_after_reload = store
             .projection_snapshot(&peer_run)
             .await
             .expect("peer stream-authoritative projection");
-        let peer_lane = peer_after_deleted
+        let peer_lane = peer_after_reload
             .resource_lane(&lane_key)
-            .expect("peer snapshot rebuilds cross-run lane from stream");
+            .expect("peer snapshot includes cross-run lane from stream");
         assert_eq!(&peer_lane.holder.run_id, &run);
         assert_eq!(&peer_lane.holder.ledger_key, &side_effect_ledger_key());
-        assert_eq!(peer_after_deleted.run_state(&peer_run), RunState::Started);
+        assert_eq!(peer_after_reload.run_state(&peer_run), RunState::Started);
         assert_eq!(
             store
                 .projection_snapshot(&run)
                 .await
-                .expect("holder stream-authoritative projection ignores deleted lane row"),
+                .expect("holder stream-authoritative projection"),
             before
         );
-        let rebuilt = store
-            .rebuild_projections_from_events(&run)
-            .await
-            .expect("rebuild projections");
-        assert_eq!(rebuilt, before);
-        assert!(
-            rebuilt.resource_lane(&lane_key).is_some(),
-            "rebuilt projection must retain non-terminal lane"
-        );
-
-        clear_projection_rows(&store, &peer_run).await;
-        store
-            .rebuild_projections_from_events(&peer_run)
-            .await
-            .expect("rebuild peer projections");
-        let peer_after_rebuild = store
-            .projection_snapshot(&peer_run)
-            .await
-            .expect("peer status projection after rebuild");
-        let peer_lane = peer_after_rebuild
-            .resource_lane(&lane_key)
-            .expect("peer rebuilt status projection includes cross-run lane");
-        assert_eq!(&peer_lane.holder.run_id, &run);
-        assert_eq!(&peer_lane.holder.ledger_key, &side_effect_ledger_key());
 
         drop_schema(&store, &schema).await;
     }
 
     #[tokio::test]
-    async fn typed_resource_lane_append_admission_uses_stream_authority_after_projection_damage() {
+    async fn typed_resource_lane_append_admission_uses_stream_authority() {
         let (store, schema) = test_store().await;
         let holder_run = run_id(25);
-        let deleted_projection_contender = run_id(26);
-        let poisoned_projection_contender = run_id(27);
+        let contender = run_id(26);
         let lane_value = "wallet-admission";
         let lane_key = resource_lane_key(lane_value);
 
@@ -2765,162 +2187,41 @@ mod tests {
             holder_run
         );
 
-        append_run_start(
-            &store,
-            &deleted_projection_contender,
-            "deleted-contender-run-start",
-        )
-        .await
-        .expect("deleted contender run start");
-        append_resource_lane_attempt_start(
-            &store,
-            &deleted_projection_contender,
-            "deleted-contender-attempt-start",
-        )
-        .await
-        .expect("deleted contender attempt start");
-        let deleted_stream_before = store
-            .load_run_stream(&deleted_projection_contender)
-            .await
-            .expect("deleted contender stream before conflict");
-        clear_projection_rows(&store, &holder_run).await;
-        let deleted_projection_error = append_resource_lane_prepare(
-            &store,
-            &deleted_projection_contender,
-            "deleted-contender-prepare",
-            lane_value,
-            30,
-        )
-        .await
-        .expect_err("deleted resource lane projection row still blocks from stream authority");
-        assert_resource_lane_blocked(deleted_projection_error, &lane_key, &holder_run);
-        assert_eq!(
-            store
-                .load_run_stream(&deleted_projection_contender)
-                .await
-                .expect("deleted contender stream after conflict"),
-            deleted_stream_before
-        );
-        assert_eq!(
-            store
-                .expected_next_seq(&deleted_projection_contender)
-                .await
-                .expect("deleted contender next seq"),
-            StreamSeq::new(3).expect("deleted contender prepare seq")
-        );
-
-        store
-            .rebuild_projections_from_events(&holder_run)
-            .await
-            .expect("restore holder resource lane projection row");
-        append_run_start(
-            &store,
-            &poisoned_projection_contender,
-            "poisoned-contender-run-start",
-        )
-        .await
-        .expect("poisoned contender run start");
-        append_resource_lane_attempt_start(
-            &store,
-            &poisoned_projection_contender,
-            "poisoned-contender-attempt-start",
-        )
-        .await
-        .expect("poisoned contender attempt start");
-        let poisoned_stream_before = store
-            .load_run_stream(&poisoned_projection_contender)
-            .await
-            .expect("poisoned contender stream before conflict");
-        poison_resource_lane_projection_row(&store, &lane_key, &poisoned_projection_contender)
-            .await;
-        let poisoned_projection_error = append_resource_lane_prepare(
-            &store,
-            &poisoned_projection_contender,
-            "poisoned-contender-prepare",
-            lane_value,
-            32,
-        )
-        .await
-        .expect_err("poisoned resource lane projection row still blocks from stream authority");
-        assert_resource_lane_blocked(poisoned_projection_error, &lane_key, &holder_run);
-        assert_eq!(
-            store
-                .load_run_stream(&poisoned_projection_contender)
-                .await
-                .expect("poisoned contender stream after conflict"),
-            poisoned_stream_before
-        );
-        assert_eq!(
-            store
-                .expected_next_seq(&poisoned_projection_contender)
-                .await
-                .expect("poisoned contender next seq"),
-            StreamSeq::new(3).expect("poisoned contender prepare seq")
-        );
-
-        drop_schema(&store, &schema).await;
-    }
-
-    #[tokio::test]
-    async fn typed_resource_lane_projection_writer_repairs_stale_free_lane_rows() {
-        let (store, schema) = test_store().await;
-        let stale_projection_run = run_id(33);
-        let contender_run = run_id(34);
-        let lane_value = "wallet-stale-free-lane";
-        let lane_key = resource_lane_key(lane_value);
-
-        append_run_start(&store, &stale_projection_run, "stale-free-row-run-start")
-            .await
-            .expect("stale projection run start");
-        insert_stale_resource_lane_projection_row(&store, &lane_key, &stale_projection_run).await;
-        assert_resource_lane_projection_row_holder(&store, &lane_key, &stale_projection_run).await;
-
-        append_run_start(&store, &contender_run, "stale-free-contender-run-start")
+        append_run_start(&store, &contender, "contender-run-start")
             .await
             .expect("contender run start");
-        append_resource_lane_attempt_start(
-            &store,
-            &contender_run,
-            "stale-free-contender-attempt-start",
-        )
-        .await
-        .expect("contender attempt start");
-        append_resource_lane_prepare(
-            &store,
-            &contender_run,
-            "stale-free-contender-prepare",
-            lane_value,
-            35,
-        )
-        .await
-        .expect("stale projection row must not veto stream-free lane");
-        let projection = store
-            .projection_snapshot(&contender_run)
+        append_resource_lane_attempt_start(&store, &contender, "contender-attempt-start")
             .await
-            .expect("contender projection");
-        let lane = projection
-            .resource_lane(&lane_key)
-            .expect("contender acquired lane");
-        assert_eq!(&lane.holder.run_id, &contender_run);
-        assert_resource_lane_projection_row_holder(&store, &lane_key, &contender_run).await;
-
-        poison_resource_lane_projection_row(&store, &lane_key, &stale_projection_run).await;
-        assert_resource_lane_projection_row_holder(&store, &lane_key, &stale_projection_run).await;
-        let rebuilt = store
-            .rebuild_projections_from_events(&contender_run)
+            .expect("contender attempt start");
+        let stream_before = store
+            .load_run_stream(&contender)
             .await
-            .expect("rebuild repairs stale free-lane row");
-        let rebuilt_lane = rebuilt
-            .resource_lane(&lane_key)
-            .expect("rebuilt contender lane");
-        assert_eq!(&rebuilt_lane.holder.run_id, &contender_run);
-        assert_resource_lane_projection_row_holder(&store, &lane_key, &contender_run).await;
+            .expect("contender stream before conflict");
+        let error =
+            append_resource_lane_prepare(&store, &contender, "contender-prepare", lane_value, 30)
+                .await
+                .expect_err("resource lane stream authority blocks contender");
+        assert_resource_lane_blocked(error, &lane_key, &holder_run);
+        assert_eq!(
+            store
+                .load_run_stream(&contender)
+                .await
+                .expect("contender stream after conflict"),
+            stream_before
+        );
+        assert_eq!(
+            store
+                .expected_next_seq(&contender)
+                .await
+                .expect("contender next seq"),
+            StreamSeq::new(3).expect("contender prepare seq")
+        );
 
         drop_schema(&store, &schema).await;
     }
 
     #[tokio::test]
-    async fn typed_saga_projection_tables_persist_and_rebuild_from_events() {
+    async fn typed_saga_projection_rebuilds_from_events() {
         let (store, schema) = test_store().await;
         let run = run_id(41);
         let saga_policy = manual_saga_policy(42);
@@ -3047,13 +2348,6 @@ mod tests {
             ProjectionSnapshot::rebuild_from_run_stream(&stream).expect("payload rebuild"),
             before
         );
-
-        clear_projection_rows(&store, &run).await;
-        let rebuilt = store
-            .rebuild_projections_from_events(&run)
-            .await
-            .expect("rebuild projections");
-        assert_eq!(rebuilt, before);
 
         let terminal_run = run_id(43);
         let terminal_policy = SagaPolicySpec::FailWithoutAcdcClaim;
@@ -3193,13 +2487,6 @@ mod tests {
                 .expect("terminal payload rebuild"),
             terminal_before
         );
-
-        clear_projection_rows(&store, &terminal_run).await;
-        let terminal_rebuilt = store
-            .rebuild_projections_from_events(&terminal_run)
-            .await
-            .expect("rebuild terminal projections");
-        assert_eq!(terminal_rebuilt, terminal_before);
 
         drop_schema(&store, &schema).await;
     }
@@ -3425,5 +2712,26 @@ mod tests {
         );
 
         drop_schema(&store, &schema).await;
+    }
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+
+    #[test]
+    fn artifact_role_contract_postgres_tag_roundtrip_uses_events_contract() {
+        for role in events::ArtifactRole::ALL {
+            assert_eq!(
+                decode_artifact_role_tag(role.as_str()).expect("role tag parses"),
+                *role
+            );
+        }
+
+        assert!(matches!(
+            decode_artifact_role_tag("unknown_artifact_role"),
+            Err(PostgresTypedStoreError::Store(StoreError::Identity(message)))
+                if message.contains("unknown artifact role unknown_artifact_role")
+        ));
     }
 }

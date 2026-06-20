@@ -12,5 +12,6 @@ mfm-certify = { path = "../../kernel/certify" }
 mfm-collectors-proof = { path = "../../collectors/proof" }
 mfm-ids = { path = "../../kernel/ids" }
 mfm-program = { path = "../../kernel/program" }
+mfm-spec = { path = "../../kernel/spec" }
 
 [dev-dependencies]

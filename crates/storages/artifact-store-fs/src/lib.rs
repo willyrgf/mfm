@@ -904,7 +904,7 @@ fn evidence_from_json(json: &Value) -> TypedArtifactResult<ArtifactEvidenceRef> 
         semantic_type_id: optional_identity(json, "semantic_type_id")?,
         producer_node_id: optional_identity(json, "producer_node_id")?,
         producer_seed_id: optional_identity(json, "producer_seed_id")?,
-        artifact_role: parse_artifact_role(required_str(json, "artifact_role")?)?,
+        artifact_role: decode_artifact_role_tag(required_str(json, "artifact_role")?)?,
     })
 }
 
@@ -944,7 +944,7 @@ where
     value.parse().map_err(FsTypedArtifactError::from)
 }
 
-fn parse_artifact_role(value: &str) -> TypedArtifactResult<ArtifactRole> {
+fn decode_artifact_role_tag(value: &str) -> TypedArtifactResult<ArtifactRole> {
     ArtifactRole::parse(value).ok_or_else(|| FsTypedArtifactError::InvalidEvidence {
         message: format!("unknown artifact role {value}"),
     })
@@ -1000,7 +1000,7 @@ mod tests {
     fn artifact_role_contract_metadata_tags_roundtrip_through_events_contract() {
         for role in ArtifactRole::ALL {
             assert_eq!(
-                parse_artifact_role(role.as_str()).expect("role tag parses"),
+                decode_artifact_role_tag(role.as_str()).expect("role tag parses"),
                 *role
             );
         }

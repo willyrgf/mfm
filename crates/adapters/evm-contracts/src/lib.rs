@@ -33,7 +33,7 @@ use mfm_artifact_capabilities::{
     ArtifactEvidenceRef as CapabilityArtifactEvidenceRef, ArtifactReadProvider, ArtifactReadRequest,
 };
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
-use mfm_capabilities::{CapabilitySetDescriptor, CapabilitySpec};
+use mfm_capabilities::CapabilitySpec;
 use mfm_events::v1::{self as events, side_effect};
 use mfm_evm_capabilities::{
     EvmBlockSelector, EvmCallReadCapability, EvmCallReadProvider, EvmCallReadRequest,
@@ -58,9 +58,7 @@ use mfm_evm_core::hex::bytes_to_hex_prefixed;
 use mfm_evm_core::rlp::{rlp_encode_list, u64_to_min_be};
 use mfm_evm_core::tx::{parse_address, parse_u128_quantity, Eip1559TxToSign, LegacyTxToSign};
 use mfm_evm_signing::EvmSigningRequest;
-use mfm_ids::{
-    CapabilityKind, CapabilityVersion, ContentDigest, DescriptorId, DigestAlgorithm, SchemaId,
-};
+use mfm_ids::{CapabilityKind, CapabilityVersion, ContentDigest, DigestAlgorithm, SchemaId};
 use mfm_program::{SideEffectState, StateSpec, ValidatedConfig};
 use mfm_program_derive::MfmValue;
 use mfm_replay::v1 as replay;
@@ -68,10 +66,10 @@ use mfm_runtime::{
     CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture,
     ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCell, MaterializedCellTerminal,
     MaterializedInputNode, RunnerArtifactBuilder, RunnerCapabilityBinding, RunnerOutputBuilder,
-    RunnerPayloadBuilder, RunnerRegistrationBuilder, RunnerSideEffectBinding,
-    SideEffectClaimAuthority, SideEffectDriver, SideEffectDriverCallbacks, SideEffectDriverFuture,
-    SideEffectIntentPlan, SideEffectObservedEvidence, SideEffectProtocolAction,
-    SideEffectReplayEvidence, SideEffectSubmissionDecision, SideEffectSubmissionDecisionFuture,
+    RunnerPayloadBuilder, RunnerRegistrationBuilder, SideEffectDriver, SideEffectDriverCallbacks,
+    SideEffectDriverFuture, SideEffectIntentPlan, SideEffectObservedEvidence,
+    SideEffectProtocolAction, SideEffectReplayEvidence, SideEffectSubmissionDecision,
+    SideEffectSubmissionDecisionFuture,
 };
 use mfm_signing::{PublicKeyBytes, SignerRef, SigningProvider};
 use mfm_state_evm_contracts::{
@@ -1520,74 +1518,40 @@ pub fn register_contract_lifecycle_runners_with_factory(
 ) -> mfm_runtime::Result<()> {
     let implementation_id = CapabilityImplementationId::new(CAPABILITY_IMPLEMENTATION_ID)?;
     let mut registrations = RunnerRegistrationBuilder::new(registry, implementation_id);
-    let deploy = registered_descriptor::<DeployContractState>()?;
-    register_runner(
-        &mut registrations,
-        deploy.descriptor_id,
-        &deploy.capabilities,
-        SIDE_EFFECT_FACTORY,
+    let side_effect_factory = events::RunnerFactoryId::new(SIDE_EFFECT_FACTORY)?;
+    let read_factory = events::RunnerFactoryId::new(READ_FACTORY)?;
+    let deploy = mfm_program::registered_state_descriptor::<DeployContractState>()
+        .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
+    registrations.register_descriptor(
+        deploy.descriptor_id().clone(),
+        deploy.capabilities(),
+        side_effect_factory.clone(),
+        executable(side_effect_factory.clone())?,
         Arc::new(ContractMutationRunner {
             phase: ContractMutationRunnerPhase::Deploy,
             factory: factory.clone(),
         }),
     )?;
-    let configure = registered_descriptor::<ConfigureContractState>()?;
-    register_runner(
-        &mut registrations,
-        configure.descriptor_id,
-        &configure.capabilities,
-        SIDE_EFFECT_FACTORY,
+    let configure = mfm_program::registered_state_descriptor::<ConfigureContractState>()
+        .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
+    registrations.register_descriptor(
+        configure.descriptor_id().clone(),
+        configure.capabilities(),
+        side_effect_factory.clone(),
+        executable(side_effect_factory)?,
         Arc::new(ContractMutationRunner {
             phase: ContractMutationRunnerPhase::Configure,
             factory: factory.clone(),
         }),
     )?;
-    let validate = registered_descriptor::<ValidateContractState>()?;
-    register_runner(
-        &mut registrations,
-        validate.descriptor_id,
-        &validate.capabilities,
-        READ_FACTORY,
-        Arc::new(ContractValidateRunner { factory }),
-    )?;
-    Ok(())
-}
-
-struct RegisteredRuntimeDescriptor {
-    descriptor_id: DescriptorId,
-    capabilities: CapabilitySetDescriptor,
-}
-
-fn registered_descriptor<S>() -> mfm_runtime::Result<RegisteredRuntimeDescriptor>
-where
-    S: StateSpec,
-    S::Effect: mfm_program::EffectRunner<S>,
-    S::Caps: mfm_capabilities::CapabilitySetFor<S::Effect>,
-{
-    let mut states = mfm_program::StateRegistryBuilder::new();
-    let registered = states
-        .register::<S>()
+    let validate = mfm_program::registered_state_descriptor::<ValidateContractState>()
         .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
-    Ok(RegisteredRuntimeDescriptor {
-        descriptor_id: registered.descriptor().descriptor_id().clone(),
-        capabilities: registered.descriptor().capabilities().clone(),
-    })
-}
-
-fn register_runner(
-    registrations: &mut RunnerRegistrationBuilder<'_>,
-    descriptor_id: DescriptorId,
-    capabilities: &CapabilitySetDescriptor,
-    factory: &'static str,
-    runner: Arc<dyn ErasedNodeRunner>,
-) -> mfm_runtime::Result<()> {
-    let factory_id = events::RunnerFactoryId::new(factory)?;
     registrations.register_descriptor(
-        descriptor_id,
-        capabilities,
-        factory_id.clone(),
-        executable(factory_id)?,
-        runner,
+        validate.descriptor_id().clone(),
+        validate.capabilities(),
+        read_factory.clone(),
+        executable(read_factory)?,
+        Arc::new(ContractValidateRunner { factory }),
     )?;
     Ok(())
 }
@@ -1657,7 +1621,6 @@ struct DeployMutationPlan {
     state: DeployContractState,
     intent: ContractDeployIntent,
     idempotency: ContractTransactionIdempotency,
-    ledger_key: events::SideEffectLedgerKey,
 }
 
 struct ConfigureMutationPlan {
@@ -1666,7 +1629,6 @@ struct ConfigureMutationPlan {
     input: ConfigureContractInput,
     intent: ContractConfigureIntent,
     idempotency: ContractTransactionIdempotency,
-    ledger_key: events::SideEffectLedgerKey,
 }
 
 async fn run_deploy_mutation(
@@ -1697,21 +1659,10 @@ impl SideEffectDriverCallbacks for DeploySideEffectCallbacks<'_> {
 
     fn intent_and_idempotency<'a, 'ctx>(
         &'a self,
-        ctx: &'a ErasedRunCtx<'ctx>,
+        _ctx: &'a ErasedRunCtx<'ctx>,
     ) -> SideEffectDriverFuture<'a, SideEffectIntentPlan<Self::Intent, Self::Idempotency>> {
         Box::pin(async {
             Ok(SideEffectIntentPlan {
-                side_effect: RunnerSideEffectBinding {
-                    ledger_key: self.plan.ledger_key.clone(),
-                    ledger_purpose: events::SideEffectLedgerPurpose::Forward,
-                    invocation_epoch: 1,
-                },
-                claim: SideEffectClaimAuthority {
-                    claim_owner: runner_invocation_id(ctx, &self.plan.ledger_key)?,
-                    claim_generation: 1,
-                    claim_fencing_token: claim_fencing_token(ctx, &self.plan.ledger_key)?,
-                    resource_key: None,
-                },
                 intent: self.plan.intent.clone(),
                 idempotency: self.plan.idempotency.clone(),
                 idempotency_key: idempotency_key_ref(&self.plan.idempotency)?,
@@ -1798,7 +1749,7 @@ impl SideEffectDriverCallbacks for DeploySideEffectCallbacks<'_> {
         submission: &'a store::SideEffectArtifactProjection,
     ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Receipt>> {
         Box::pin(async {
-            let prepared_projection = projected_prepared_artifact(ctx, &self.plan.ledger_key)?;
+            let prepared_projection = projected_prepared_artifact(ctx)?;
             let prepared = load_prepared_invocation(
                 &prepared_projection,
                 events::ArtifactRole::PreparedInvocation,
@@ -1833,7 +1784,7 @@ impl SideEffectDriverCallbacks for DeploySideEffectCallbacks<'_> {
         receipt: &'a store::SideEffectArtifactProjection,
     ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Confirmation>> {
         Box::pin(async {
-            let prepared_projection = projected_prepared_artifact(ctx, &self.plan.ledger_key)?;
+            let prepared_projection = projected_prepared_artifact(ctx)?;
             let prepared = load_prepared_invocation(
                 &prepared_projection,
                 events::ArtifactRole::PreparedInvocation,
@@ -1912,21 +1863,10 @@ impl SideEffectDriverCallbacks for ConfigureSideEffectCallbacks<'_> {
 
     fn intent_and_idempotency<'a, 'ctx>(
         &'a self,
-        ctx: &'a ErasedRunCtx<'ctx>,
+        _ctx: &'a ErasedRunCtx<'ctx>,
     ) -> SideEffectDriverFuture<'a, SideEffectIntentPlan<Self::Intent, Self::Idempotency>> {
         Box::pin(async {
             Ok(SideEffectIntentPlan {
-                side_effect: RunnerSideEffectBinding {
-                    ledger_key: self.plan.ledger_key.clone(),
-                    ledger_purpose: events::SideEffectLedgerPurpose::Forward,
-                    invocation_epoch: 1,
-                },
-                claim: SideEffectClaimAuthority {
-                    claim_owner: runner_invocation_id(ctx, &self.plan.ledger_key)?,
-                    claim_generation: 1,
-                    claim_fencing_token: claim_fencing_token(ctx, &self.plan.ledger_key)?,
-                    resource_key: None,
-                },
                 intent: self.plan.intent.clone(),
                 idempotency: self.plan.idempotency.clone(),
                 idempotency_key: idempotency_key_ref(&self.plan.idempotency)?,
@@ -2018,7 +1958,7 @@ impl SideEffectDriverCallbacks for ConfigureSideEffectCallbacks<'_> {
         submission: &'a store::SideEffectArtifactProjection,
     ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Receipt>> {
         Box::pin(async {
-            let prepared_projection = projected_prepared_artifact(ctx, &self.plan.ledger_key)?;
+            let prepared_projection = projected_prepared_artifact(ctx)?;
             let prepared = load_prepared_invocation(
                 &prepared_projection,
                 events::ArtifactRole::PreparedInvocation,
@@ -2108,13 +2048,11 @@ async fn deploy_mutation_plan(
     let idempotency = state
         .idempotency_input(&(), &intent)
         .map_err(runtime_state_error)?;
-    let ledger_key = ledger_key_for_idempotency(&idempotency)?;
     Ok(DeployMutationPlan {
         config,
         state,
         intent,
         idempotency,
-        ledger_key,
     })
 }
 
@@ -2131,14 +2069,12 @@ async fn configure_mutation_plan(
     let idempotency = state
         .idempotency_input(&input, &intent)
         .map_err(runtime_state_error)?;
-    let ledger_key = ledger_key_for_idempotency(&idempotency)?;
     Ok(ConfigureMutationPlan {
         config,
         state,
         input,
         intent,
         idempotency,
-        ledger_key,
     })
 }
 
@@ -2468,20 +2404,27 @@ fn evm_capability_binding(
 
 fn projected_side_effect<'a>(
     ctx: &'a ErasedRunCtx<'_>,
-    ledger_key: &events::SideEffectLedgerKey,
 ) -> mfm_runtime::Result<&'a store::SideEffectProjection> {
-    ctx.projections().side_effect(ledger_key).ok_or_else(|| {
-        mfm_runtime::RuntimeError::InvalidRunnerOutput(format!(
-            "contract lifecycle side-effect projection missing for ledger {ledger_key}"
-        ))
-    })
+    ctx.projections()
+        .side_effects()
+        .find_map(|(_, projection)| {
+            (projection.intent.node_id == ctx.node().node_id
+                && projection.intent.attempt_id == *ctx.attempt_id())
+            .then_some(projection)
+        })
+        .ok_or_else(|| {
+            mfm_runtime::RuntimeError::InvalidRunnerOutput(format!(
+                "contract lifecycle side-effect projection missing for node {} attempt {}",
+                ctx.node().node_id,
+                ctx.attempt_id()
+            ))
+        })
 }
 
 fn projected_prepared_artifact(
     ctx: &ErasedRunCtx<'_>,
-    ledger_key: &events::SideEffectLedgerKey,
 ) -> mfm_runtime::Result<store::SideEffectArtifactProjection> {
-    projected_side_effect(ctx, ledger_key)?
+    projected_side_effect(ctx)?
         .prepared_invocation
         .clone()
         .ok_or_else(|| missing_side_effect_artifact("prepared invocation"))
@@ -2516,16 +2459,6 @@ fn receipts_with_evidence(
     receipts
 }
 
-fn ledger_key_for_idempotency(
-    idempotency: &ContractTransactionIdempotency,
-) -> mfm_runtime::Result<events::SideEffectLedgerKey> {
-    events::SideEffectLedgerKey::new(format!(
-        "mfm.evm.contract.ledger.{}",
-        short_stable_key(&idempotency.key)
-    ))
-    .map_err(Into::into)
-}
-
 fn idempotency_key_ref(
     idempotency: &ContractTransactionIdempotency,
 ) -> mfm_runtime::Result<events::IdempotencyKeyRef> {
@@ -2534,34 +2467,6 @@ fn idempotency_key_ref(
         short_stable_key(&idempotency.key)
     ))
     .map_err(Into::into)
-}
-
-fn runner_invocation_id(
-    ctx: &ErasedRunCtx<'_>,
-    ledger_key: &events::SideEffectLedgerKey,
-) -> mfm_runtime::Result<events::RunnerInvocationId> {
-    let digest = digest_json(serde_json::json!({
-        "attempt_id": ctx.attempt_id().as_str(),
-        "ledger_key": ledger_key.as_str(),
-        "node_id": ctx.node().node_id.as_str(),
-        "run_id": ctx.run_id().as_str(),
-    }))?;
-    events::RunnerInvocationId::new(format!("mfm.evm.contract.owner.{}", short_digest(&digest)))
-        .map_err(Into::into)
-}
-
-fn claim_fencing_token(
-    ctx: &ErasedRunCtx<'_>,
-    ledger_key: &events::SideEffectLedgerKey,
-) -> mfm_runtime::Result<side_effect::ClaimFencingToken> {
-    let digest = digest_json(serde_json::json!({
-        "attempt_id": ctx.attempt_id().as_str(),
-        "ledger_key": ledger_key.as_str(),
-        "node_id": ctx.node().node_id.as_str(),
-        "token": "contract-lifecycle",
-    }))?;
-    side_effect::ClaimFencingToken::new(format!("mfm.evm.contract.token.{}", short_digest(&digest)))
-        .map_err(Into::into)
 }
 
 fn short_stable_key(value: &str) -> String {
@@ -2573,10 +2478,6 @@ fn short_stable_key(value: &str) -> String {
         .filter(|ch| ch.is_ascii_alphanumeric())
         .take(32)
         .collect()
-}
-
-fn short_digest(digest: &ContentDigest) -> String {
-    short_stable_key(digest.as_str())
 }
 
 fn digest_json(value: serde_json::Value) -> mfm_runtime::Result<ContentDigest> {

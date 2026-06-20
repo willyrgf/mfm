@@ -24,15 +24,18 @@ Current planning status:
   `origin/dev`. The audit below is now authoritative for cleanup accounting: phases count as
   cleanup only when the old displaced surface is deleted, made private behind an approved low-level
   contract, or explicitly classified as negative-test fixture machinery.
+- A deletion-gate implementation pass on 2026-06-20 moved the working tree to `+18490/-23376`
+  against `origin/dev`, or net `-4886` lines. Runtime valid side-effect fixture machinery and
+  check-only event declaration scaffolding were deleted rather than kept as parallel authority.
+  Broader generated event codecs/projections remain deferred work and are not counted as cleanup.
 - Cleanup status was reopened on 2026-06-20 after an implementation audit. The follow-up cleanup
   closed the main Phase 4 production app read-path gap and the main Phase 5 ordinary execution gap:
   app launch/resume/manual responses now render through the verified status read context, public
   raw-status helpers were deleted, and runtime/app/CLI/REST/integration ordinary execution no longer
-  drives over `TypedRunEventStore`. These phases are not deletion-gate complete until the remaining
-  raw presentation, projection-status, and fixture gates listed below are resolved. Synchronous store
-  code remains only as low-level store/replay contract and fixture machinery. Phase 8 is still only
-  the initial `FactRecorded` declaration-backed descriptor slice; broader descriptor and store-codec
-  generation remains deferred.
+  drives over `TypedRunEventStore`. Synchronous store code remains only as low-level store/replay
+  contract and fixture machinery. The later deletion-gate pass removed remaining fixture gates and
+  check-only Phase 8 declaration scaffolding; broader descriptor and store-codec generation remains
+  deferred.
 - The FSM scheduler lifecycle refactor has landed. Its detailed historical RFC and validation
   artifacts were removed by commit `c8c742510ab2070cdaea688264a293aaf2a7309f` after closeout.
   Current authority for that work lives in `docs/design.md`, `docs/architecture.md`, and
@@ -173,23 +176,57 @@ Branch-wide diff shape at audit time:
 | Tests | `6132` | `1142` | `+4990` | Baselines and scenario scaffolding were added before old fixture machinery was removed. |
 | Production Rust | `8618` | `4590` | `+4028` | New abstractions were layered in, with partial production deletion. |
 
+Deletion-gate implementation result on 2026-06-20:
+
+| Category | Added | Deleted | Net | Accounting |
+|---|---:|---:|---:|---|
+| Docs | `3983` | `16` | `+3967` | Planning and closeout ledger. No cleanup credit. |
+| Tests | `7479` | `11350` | `-3871` | Real fixture/test deletion, dominated by proof/replay corruption, synthetic integration cleanup, and runtime side-effect fixture removal. |
+| Production Rust | `7469` | `12033` | `-4564` | Real production cleanup from app/store/runtime/adapters/proof deletion. |
+| Other | `41` | `103` | `-62` | Mechanical metadata/schema side effects. |
+| Total | `18972` | `23502` | `-4530` | Branch remains net negative after deleting the remaining runtime fixture and check-only declaration scaffolding. |
+
+Implementation ledger:
+
+| Plan commit | Result | Cleanup accounting |
+|---:|---|---|
+| 2 | deletion-complete | Public raw stream presentation entrypoint was deleted; stream rendering now uses verified read context. |
+| 3 | deletion-complete | Public projection-supplied status path was deleted; CLI/REST/app use the service status path. |
+| 4 | deletion-complete | Runtime/app/CLI/REST/integration ordinary execution no longer drives the sync store. The mutable in-memory core is private to `mfm-store`; contract tests use async store wrappers or local harness code. |
+| 5 | deletion-complete | Public forged batch/fingerprint helpers were deleted; low-level envelope construction remains private to approved store contract machinery. |
+| 6 | deletion-complete | Runtime/replay role policy duplication was removed in favor of events-owned role contracts, with store admission remaining the authority boundary. |
+| 7 | deletion-complete by deletion | Proof/replay corruption fixture stacks and scenario-data corruption descriptors were deleted. The proof conformance target now has no local corruption matrix to maintain. |
+| 8 | public scenario landed | One certified proof manual-resolution scenario now drives app, REST, and CLI public surfaces. App and REST run in-memory; the CLI JSON scenario runs when `DATABASE_URL` is available because the CLI store is PostgreSQL-backed. |
+| 9 | deletion-complete | String-sentinel no-secret checks were deleted and replaced by production-path invalid input checks. |
+| 10 | deletion-complete for targeted wrappers | Adapter/proof registration wrappers were deleted; remaining runner-kit construction is the runtime authority path. |
+| 11 | deletion-complete for adapter authority | Durable side-effect claim authority is runtime/store-minted. Adapter/proof code no longer returns ledger key, claim owner, fencing token, or epoch authority. |
+| 12 | deletion-complete for old valid fixtures | The duplicate integration synthetic side-effect fixture and runtime `DeterministicSideEffectRunner` were deleted. Ordinary valid runtime side-effect execution delegates to `SideEffectDriver`; remaining malformed side-effect tests use named negative fixtures. Resource-lane custom-key fixture tests were deleted with the old runner. |
+| 13 | deletion-complete for check-only scaffold, not promoted | Check-only `FactRecorded` declaration indirection was deleted rather than promoted. Store codec and projection logic remain handwritten and are deferred generator work, not cleanup credit. |
+| 14 | deletion-complete for check-only scaffold, not promoted | Check-only `StateAttemptStarted` declaration scaffolding is gone; production schema/codec/projection paths remain handwritten and are deferred generator work. |
+| 15 | deletion-complete | Postgres projection tables, writers, repair tests, and projection rebuild APIs were deleted. Postgres now rebuilds status from stream events and retains only a small resource-lane lock table for append serialization. |
+| 16 | current ledger | This section is the deletion ledger; it must remain honest when later gates close. |
+
 Largest net-positive files and surfaces:
 
 | File / Surface | Added | Deleted | Net | Audit meaning |
 |---|---:|---:|---:|---|
-| `crates/kernel/runtime/src/tests.rs` | `3322` | `887` | `+2435` | Runtime baselines and helper duplication increased. |
-| `RFC_REFACTORS_CLEANUPS.md` | `1820` | `0` | `+1820` | Planning text only; no cleanup credit. |
-| `crates/kernel/events/src/lib.rs` | `1396` | `26` | `+1370` | Role contracts and declaration scaffolding added; most event protocol remains handwritten. |
-| `crates/app/src/lib.rs` | `2177` | `891` | `+1286` | Shared read/status/public-output coverage added; app fixture and presentation helpers remain large. |
-| `crates/kernel/store/tests/commit_contract.rs` | `1073` | `14` | `+1059` | Store declaration and codec baselines added without replacing production codec/projection matches. |
-| `crates/kernel/runtime/src/side_effect_driver.rs` | `953` | `0` | `+953` | New driver surface added. Cleanup credit requires deleting displaced adapter/test ceremony. |
+| `RFC_REFACTORS_CLEANUPS.md` | `2331` | `0` | `+2331` | Planning text only; no cleanup credit. |
+| `crates/kernel/runtime/src/side_effect_driver.rs` | `1220` | `0` | `+1220` | New driver surface added; old valid side-effect fixtures are now deleted. |
+| `crates/kernel/events/src/lib.rs` | `1182` | `24` | `+1158` | Role contracts and event descriptors added; check-only declaration indirection is gone. |
 | `PLAN_RFC_REFACTORS_CLEANUPS.md` | `874` | `0` | `+874` | Execution plan text only; no cleanup credit. |
 | `crates/kernel/runtime/src/runner_kit.rs` | `806` | `0` | `+806` | New runner kit surface added. Cleanup credit requires deleting displaced runner builders/wrappers. |
+| `PLAN_IMPL_RFC_DELETION_GATE.md` | `638` | `0` | `+638` | Execution plan text only; no cleanup credit. |
 
 Largest net-negative files and surfaces:
 
 | File / Surface | Added | Deleted | Net | Audit meaning |
 |---|---:|---:|---:|---|
+| `tests/integration/src/test_support.rs` | `12` | `3784` | `-3772` | Real integration fixture deletion. |
+| `crates/app/src/lib.rs` | `645` | `3929` | `-3284` | Real app read/status/presentation cleanup. |
+| `crates/kernel/replay/src/lib.rs` | `328` | `3226` | `-2898` | Real replay corruption fixture cleanup. |
+| `tests/integration/tests/proof_transport_conformance.rs` | `1` | `1297` | `-1296` | Real proof conformance fixture deletion. |
+| `crates/kernel/runtime/src/tests.rs` | `4806` | `5835` | `-1029` | Runtime fixture deletion now outweighs added baselines. |
+| `crates/storages/stream-store-postgres/src/typed.rs` | `74` | `740` | `-666` | Projection writer/rebuild deletion. |
 | `crates/transports/process-exec/src/lib.rs` | `0` | `308` | `-308` | Real unused workspace-leaf deletion. |
 | `crates/kernel/runtime/src/attempt.rs` | `20` | `279` | `-259` | Real runtime lifecycle cleanup. |
 | `crates/transports/proof/src/lib.rs` | `233` | `481` | `-248` | Runner kit and side-effect driver displaced some proof ceremony. |
@@ -306,30 +343,29 @@ Required deletion gates:
 
 ### Phase 3 Deletion Gate: Scenario And Golden Infrastructure
 
-Status: infrastructure-started, not cleanup-complete.
+Status: proof/replay corruption fixtures deleted; broader scenario cleanup remains open.
 
 What landed:
 
 - `mfm-kernel-scenario-data` was added under `tests/` with a strict low-level dependency allowlist.
-- Proof replay corruption cases now iterate scenario data.
 - Cargo metadata guards prevent production crates from depending on scenario data.
-- Some proof replay corruption cases have equivalence goldens.
+- Proof replay corruption dispatch, local corruption vectors, and replay-artifact negative mutation
+  helpers were deleted during the deletion-gate pass.
 
 Retained duplicate surfaces:
 
-- Proof corruption mutation dispatch remains handwritten by string in
-  `tests/integration/tests/proof_transport_conformance.rs`.
-- Equivalence goldens remain local vectors in the integration test instead of scenario-owned
-  expected summaries.
-- Replay-artifact negative cases still dispatch through handwritten match/mutation helpers in
-  `tests/integration/src/test_support.rs`.
-- Runtime/app/store tests still contain large local corruption helpers and direct
-  `build_committed_batch` fixture rewrites.
+- Runtime and store tests still contain large local negative fixture helpers for low-level contract
+  behavior.
+- The proof conformance target currently has no scenario-owned corruption matrix; the old matrix was
+  deleted rather than replaced.
+- Runtime no longer retains the old normal valid side-effect fixture machinery; ordinary
+  side-effect progress now goes through `SideEffectDriver`. Remaining hand-emitting helpers are
+  limited to low-level negative, corruption, and recovery boundary fixtures.
 
 Deletion-gate finding:
 
-- Phase 3 added scenario infrastructure but left most fixture construction and illegal mutation
-  machinery in place. This is useful scaffold, not LOC cleanup.
+- The proof/replay fixture deletion counts as cleanup. Broader scenario-data cleanup remains open
+  only for remaining low-level negative, corruption, and recovery fixture consolidation.
 
 Required deletion gates:
 
@@ -346,27 +382,31 @@ Required deletion gates:
 
 ### Phase 3 Public Manual-Resolution Fixture Gate
 
-Status: app coverage improved, not full public-surface scenario coverage.
+Status: public-surface scenario landed.
 
 What landed:
 
-- App tests now drive a manual-resolution terminal fixture, assert `ResolveSagaTerminal` instead of
-  `CompleteRun`, verify framework attempt ordering, and check proof/signature/evidence non-exposure.
-- CLI and REST coverage mostly checks response shape/static contracts.
+- Runtime tests drive a manual-resolution terminal fixture, assert `ResolveSagaTerminal`, verify
+  framework attempt behavior, and check proof/signature/evidence handling.
+- Route-shape-only CLI/REST tests and static JSON manual-resolution/status fixtures were deleted.
+- `mfm-op-proof` now exposes a certified proof workflow variant that quiesces into manual block via
+  the normal proof transport and `SideEffectDriver` ambiguity path.
+- App, REST, and CLI JSON tests use that same certified workflow to prove manual block, signed
+  manual resolution recording, `ResolveSagaTerminal` completion, framework attempt disposition,
+  stream visibility, and non-exposure of proof/signature bytes on public JSON surfaces.
 
 Deletion-gate finding:
 
-- This does not yet satisfy the roadmap gate that the same logical manual-resolution scenario be
-  visible through app, CLI, REST, status, and stream surfaces before shared-view/public-status
-  rewrites are credited.
+- The public-surface manual-resolution gate is now satisfied for app and REST in local focused
+  tests. The CLI JSON test is present in the required target and runs the same scenario when
+  `DATABASE_URL` is set; without Postgres it reports the missing prerequisite and returns.
 
 Required deletion gates:
 
-1. Reuse the same logical manual-resolution scenario across app, CLI, and REST contract tests.
-2. Assert stable public JSON for run mode, manual block state, terminal saga fields, framework
-   attempt disposition, and stream ordering.
-3. Assert no authorization proof bytes, signer material, or secret-bearing diagnostics on every
-   public surface.
+1. Keep app, CLI, and REST manual-resolution coverage on the certified proof manual-resolution
+   scenario instead of reintroducing independent route-shape fixtures.
+2. For CLI changes, run the manual JSON scenario with `DATABASE_URL` when the PostgreSQL-backed CLI
+   store is in scope.
 
 ### Phase 3b Deletion Gate: Persisted/Public No-Secret Provenance
 
@@ -377,15 +417,15 @@ What landed:
 - Persisted/public surface inventory was added.
 - `MfmErrorInfo` now validates public diagnostic text/reference shape.
 - Runtime emits redacted failure diagnostics.
-- App tests check public/persisted surfaces for sentinel leakage.
+- String-sentinel leak checks were deleted where production-path invalid input checks now cover the
+  public error surface.
 - EVM prepared invocation evidence excludes raw signed payload/signature surfaces.
 
 Retained gaps:
 
 - Secret-bearing runner inputs do not yet have broad scenario goldens across runtime/store/replay,
   public outputs, CLI, and REST.
-- Some assurance still comes from source scans and string sentinels rather than typed production
-  entry-point tests.
+- Some assurance still comes from source scans rather than typed production entry-point tests.
 
 Deletion-gate finding:
 
@@ -456,30 +496,30 @@ What landed:
 
 Retained duplicate or low-level surfaces:
 
-- `InMemoryTypedRunStore` remains public as sync low-level store machinery.
-- Runtime, app, and integration fixtures still build sync in-memory stores and wrap or copy them
-  into async fixtures.
-- App corruption/status helpers still use sync stores directly.
+- The mutable in-memory store core is private to `mfm-store`.
+- Runtime, app, and integration fixtures use async stores or local harnesses instead of public sync
+  store construction.
+- App corruption/status helpers no longer construct the sync store directly.
 
 Deletion-gate finding:
 
-- Phase 5 removed real production duplication, but fixture usage can still preserve the old mental
-  model and public sync store construction. It is acceptable only if the sync store is explicitly
-  classified as low-level store/replay contract machinery and not an execution path.
+- Phase 5 removed real production duplication and closed public sync store construction. Remaining
+  direct mutation is private store machinery or local contract-test harness code, not an execution
+  path.
 
 Required deletion gates:
 
-1. Migrate runtime/app/integration fixtures to `AsyncInMemoryTypedRunStore` or explicit async test
+1. Keep runtime/app/integration fixtures on `AsyncInMemoryTypedRunStore` or explicit async test
    stores where they exercise scheduler/app behavior.
-2. Keep direct `InMemoryTypedRunStore` use only in approved store/replay corruption or commit-contract
-   fixtures.
-3. Add a source scan forbidding sync store execution helpers outside approved files.
+2. Keep direct mutable in-memory core access private to `mfm-store`.
+3. Keep source scans forbidding sync store execution helpers outside approved files.
 4. Hide or document remaining sync in-memory constructors as low-level test/contract machinery, not
    a supported runtime/app execution API.
 
 ### Phase 6 Deletion Gate: Runtime Runner Kit
 
-Status: partial production displacement, not full wrapper deletion.
+Status: targeted wrapper deletion complete; remaining valid runner-builder cleanup is outside the
+side-effect fixture gate.
 
 What landed:
 
@@ -487,22 +527,20 @@ What landed:
   `RunnerRegistrationBuilder` were added.
 - Proof, portfolio, and EVM adapters use runner kit helpers for some artifact/output payload
   construction.
-- Proof and portfolio production code lost some local artifact/cell/fact helper ceremony.
+- Proof, portfolio, and EVM adapter-local registration/descriptor wrappers were deleted where the
+  shared registration helper preserves explicit executable identity.
 
 Retained duplicate surfaces:
 
-- Proof, portfolio, and EVM adapters still carry local `registered_descriptor`, `register_runner`,
-  executable identity, and digest wrapper helpers.
 - Integration/app/runtime tests still manually build `CellProduced`, `FactRecorded`, staged
   artifacts, side-effect artifacts, retention refs, and side-effect payloads.
-- Some retained wrappers may be correct because executable identity must stay explicit, but they are
-  not deleted surface.
+- Runtime side-effect valid fixture payload builders were deleted; remaining side-effect-specific
+  helper payloads are malformed negative fixtures or direct runner-kit tests.
 
 Deletion-gate finding:
 
-- Phase 6 should not count the entire runner kit as cleanup. Cleanup credit is limited to the old
-  helper code actually removed from adapters. The new kit is net-positive until valid runner-output
-  fixtures and adapter-local wrappers are converted or explicitly retained.
+- Phase 6 cleanup credit is limited to the old helper/wrapper code actually removed from adapters.
+  The remaining open item is conversion or deletion of normal valid test builders.
 
 Required deletion gates:
 
@@ -516,8 +554,7 @@ Required deletion gates:
 
 ### Phase 7 Deletion Gate: Generic Side-Effect Driver
 
-Status: driver abstraction added and partially adopted; not deletion-complete and still has authority
-questions.
+Status: adapter authority leak closed; old valid runtime fixture path deleted.
 
 What landed:
 
@@ -526,29 +563,33 @@ What landed:
 - Proof and EVM deploy/configure paths call the generic driver.
 - Runtime side-effect driver unit tests cover several protocol actions.
 - Replay side-effect frame collection was centralized.
+- Runtime/store now mint ledger key, claim owner, fencing token, and claim generation authority.
+- Proof and EVM no longer return durable ledger/claim authority from adapter callbacks.
+- Ordinary valid runtime side-effect fixtures now delegate to `SideEffectDriver`.
+- Not-submitted retry is handled by `SideEffectDriver` rather than by the old deterministic test
+  runner.
+- Ambiguity fixtures use `SideEffectDriver` with an ambiguous submission decision.
+- The runtime `DeterministicSideEffectRunner`, custom resource-key runner helper, and resource-lane
+  custom-key tests were deleted. Pre-boundary and invalid-output coverage now uses named malformed
+  fixtures only where the stream is intentionally invalid.
 
 Retained duplicate or problematic surfaces:
 
-- First-step ledger/claim authority still comes from adapter callbacks through
-  `SideEffectIntentPlan`, `RunnerSideEffectBinding`, and `SideEffectClaimAuthority`.
-- Proof hardcodes ledger key, epoch, owner, and fencing token in adapter code.
-- EVM derives side-effect claim authority in adapter code.
-- Generic driver support for failed/not-submitted phases is incomplete; some phases are treated as
-  unsupported.
 - Production proof goldens are primarily happy-path, and EVM runner-output/recovery/ambiguity/failure
   goldens are not broad enough to justify deleting old paths.
-- Runtime/integration/app tests retain side-effect payload and staging builders alongside the driver.
+- The duplicate integration synthetic side-effect fixture was deleted.
+- Remaining side-effect-specific test helpers are explicit negative fixtures or driver callback
+  configurations, not a parallel valid lifecycle implementation.
 
 Deletion-gate finding:
 
-- Phase 7 is valuable abstraction work, but it is not yet a cleanup phase. It adds a new generic
-  driver while retaining store/replay/runtime validation and fixture-side builders. The remaining
-  authority leak around ledger key, claim owner, fencing token, and epoch must be resolved before
-  more deletion is safe.
+- Phase 7 now has real adapter-authority and valid-fixture cleanup credit. The old parallel valid
+  side-effect runner is gone; retained malformed helpers are negative fixtures, and normal lifecycle
+  behavior is covered through `SideEffectDriver`.
 
 Required deletion gates:
 
-1. Runtime/store must mint side-effect ledger key, claim owner, fencing token, and epoch authority;
+1. Keep side-effect ledger key, claim owner, fencing token, and epoch authority runtime/store-owned;
    adapters may supply domain idempotency inputs, not durable protocol authority.
 2. Proof and EVM must have recovery, unknown-submission, not-submitted, ambiguity, failure, and
    output-after-confirmation goldens.
@@ -560,15 +601,15 @@ Required deletion gates:
 
 ### Phase 8 Deletion Gate: Kernel Protocol Generation And Declarations
 
-Status: check-only plus one narrow production descriptor replacement; not cleanup-complete.
+Status: check-only scaffolding deleted; production generator promotion deferred.
 
 What landed:
 
-- `FactRecorded` has a declaration-backed schema descriptor.
-- Test-only `EventFamilyDeclaration` and artifact lens checks compare generated expectations against
-  handwritten event requirements.
-- Store contract tests include check-only event codec and projection transition declaration views for
-  `FactRecorded` and `StateAttemptStarted`.
+- The `FactRecorded` check-only declaration indirection was deleted; its production schema
+  descriptor is now a direct descriptor constant like the other event descriptors.
+- The check-only `EventFamilyDeclaration`, artifact lens checks, and store-side codec/projection
+  declaration views for `FactRecorded` and `StateAttemptStarted` were deleted during the deletion
+  gate pass because they had not become production authority.
 
 Retained duplicate surfaces:
 
@@ -580,8 +621,9 @@ Retained duplicate surfaces:
 
 Deletion-gate finding:
 
-- Phase 8 is currently a drift-check and compatibility baseline. It should not be credited as LOC
-  cleanup beyond the single `FactRecorded` descriptor slice.
+- Phase 8 no longer carries check-only declaration scaffolding, but it also did not complete
+  production generator promotion. It should not be credited as cleanup beyond deleting the duplicate
+  declaration scaffold.
 
 Required deletion gates:
 
@@ -596,30 +638,30 @@ Required deletion gates:
 5. Each replacement must prove byte-for-byte compatibility through descriptor, canonical JSON,
    spec-hash, role, runtime, replay, and projection goldens.
 
-### Deferred Projection Persistence Deletion Gate
+### Projection Persistence Deletion Gate
 
-Status: explicitly out of cleanup scope until a separate measurement RFC exists.
+Status: deletion-complete.
 
 Current state:
 
-- Postgres projection tables still exist and are written on append.
-- Reads have moved toward stream-authoritative rebuild paths, which is authority cleanup, but the
-  non-authoritative projection persistence layer remains.
+- Postgres projection tables and writers were deleted.
+- Postgres status/projection reads rebuild from authoritative stream events.
+- The only replacement table is `typed_resource_lane_locks`, a serialization lock used while
+  resource-lane state is rebuilt from streams.
+- Removed projection table names are forbidden in schema validation so stale databases fail fast.
 
 Deletion-gate finding:
 
-- Projection persistence cannot be counted as cleanup until the repository either deletes the
-  persisted projection tables/writers or proves their cache semantics with explicit versioned repair
-  and validation behavior.
+- Projection persistence now counts as cleanup because the persisted projection tables/writers and
+  repair tests were deleted rather than reclassified as caches.
 
 Required deletion gates:
 
-1. Write the separate projection persistence measurement RFC before implementation.
-2. Decide whether projection tables are deleted or kept as verified caches.
-3. If kept, persist and validate cache metadata such as `{run_id, head_seq, fold_version, spec_hash}`.
-4. Define repair behavior and Postgres parity checks.
-5. Do not count stream-authoritative reads as projection-persistence deletion while projection
-   writers and tables remain.
+1. Keep projection tables in the forbidden schema list unless a new measured cache RFC reintroduces
+   them with explicit cache metadata and repair behavior.
+2. Keep status/projection reads stream-authoritative.
+3. Keep Postgres parity tests focused on stream rebuild behavior and resource-lane append
+   serialization, not projection-row repair.
 
 ## Fundamental Abstraction Bets
 
@@ -2095,24 +2137,23 @@ validated path before presentation filtering.
 
 ### Phase 5: Full Sync/Async Driver And Service Collapse
 
-Status: production ordinary execution path closed by the 2026-06-20 tightening pass, but not
-fixture deletion-gate complete. Scheduler, runtime attempt/recovery internals, app services, CLI,
-REST, and integration support drive through `AsyncTypedRunEventStore`; the app sync facade and
-public scheduler APIs over `TypedRunEventStore` were deleted. Synchronous store code is retained only
-as low-level commit-contract/replay fixture machinery and must remain fenced by the deletion-gate
-rules above.
+Status: deletion-gate complete for ordinary execution. Scheduler, runtime attempt/recovery
+internals, app services, CLI, REST, and integration support drive through
+`AsyncTypedRunEventStore`; the app sync facade, public scheduler APIs over `TypedRunEventStore`, and
+public sync in-memory store construction were deleted. The remaining mutable in-memory core is
+private store machinery and must remain fenced by the deletion-gate rules above.
 
-1. Make async execution and app services the only ordinary execution path once shared
-   run-view/status authority exists.
-2. Delete the app sync facade instead of retaining it for tests.
-3. Migrate runtime, app, and integration fixtures to `AsyncInMemoryTypedRunStore` or explicit async
-   test stores.
+1. Keep async execution and app services as the only ordinary execution path once shared
+   run-view/status authority evolves.
+2. Keep the app sync facade deleted instead of reintroducing it for tests.
+3. Keep runtime, app, and integration fixtures on `AsyncInMemoryTypedRunStore` or explicit async test
+   stores.
 4. Collapse duplicated runtime driver IO choreography where an async-primary core can preserve
    lifecycle semantics.
-5. Delete public scheduler execution APIs that accept `TypedRunEventStore`.
+5. Keep public scheduler execution APIs from accepting `TypedRunEventStore`.
 6. Move CLI and REST paths through the unified service without leaking HTTP concerns into CLI JSON.
-7. Retain synchronous store code only as low-level commit-contract/test machinery if no runtime,
-   app, CLI, REST, or integration execution path can call through it.
+7. Retain synchronous store code only as private low-level commit-contract/test machinery if no
+   runtime, app, CLI, REST, or integration execution path can call through it.
 
 Expected result: one ordinary execution/service path for future runner-kit and side-effect-driver
 work, without changing lifecycle semantics.
@@ -2145,8 +2186,8 @@ side-effect protocol correctness.
 
 ### Phase 8: Kernel Protocol Generation And Declarations
 
-Status: only Phase 8A has landed. `FactRecorded` has a declaration-backed descriptor, but the
-remaining descriptors and store codec/projection match arms are still handwritten.
+Status: Phase 8A check-only scaffolding was deleted in the deletion-gate pass. Event descriptors and
+store codec/projection match arms are still handwritten unless separately replaced later.
 
 1. Prototype the declarative kernel contract source in check-only mode for one small event family.
 2. Generate or derive schema descriptors, enum tag tables, artifact requirements, and store payload

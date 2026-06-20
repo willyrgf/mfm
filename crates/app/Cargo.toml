@@ -46,4 +46,5 @@ k256 = { version = "0.13.0", features = ["ecdsa"] }
 mfm-manual-auth = { path = "../kernel/manual-auth" }
 mfm_core = { path = "../core" }
 mfm-program-derive = { path = "../kernel/program-derive" }
+tempfile = "3.0"
 trybuild = "1.0"

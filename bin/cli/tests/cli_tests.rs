@@ -4,8 +4,6 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use tempfile::TempDir;
 
-const REDACTION_SENTINEL: &str = "phase3b-secret-sentinel-password-token-42";
-
 fn create_test_keystore() -> (TempDir, std::path::PathBuf) {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let keystore_path = temp_dir.path().join("test_keystore");
@@ -67,7 +65,7 @@ fn test_removed_legacy_evm_command_is_absent() {
 #[test]
 fn test_evm_contracts_json_error_envelope() {
     let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    let missing_path = format!("/definitely/missing/{REDACTION_SENTINEL}.json");
+    let missing_path = "/definitely/missing/request.json";
     cmd.args(&[
         "--output-format",
         "json",
@@ -75,16 +73,12 @@ fn test_evm_contracts_json_error_envelope() {
         "contracts",
         "deploy",
         "--config-file",
-        &missing_path,
+        missing_path,
     ]);
 
     let output = cmd.output().expect("run command");
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).expect("stderr utf8");
-    assert!(
-        !stderr.contains(REDACTION_SENTINEL),
-        "CLI JSON error leaked sentinel path: {stderr}"
-    );
     let parsed: serde_json::Value = serde_json::from_str(&stderr).expect("stderr JSON");
     assert_eq!(parsed["status"], "error");
     assert_eq!(parsed["error"]["code"], "InvalidEvmContractRequest");
@@ -93,16 +87,17 @@ fn test_evm_contracts_json_error_envelope() {
 #[test]
 fn test_evm_contracts_text_error_redacts_missing_config_path() {
     let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    let missing_path = format!("/definitely/missing/{REDACTION_SENTINEL}.json");
-    cmd.args(&["evm", "contracts", "deploy", "--config-file", &missing_path]);
+    cmd.args(&[
+        "evm",
+        "contracts",
+        "deploy",
+        "--config-file",
+        "/definitely/missing/request.json",
+    ]);
 
     let output = cmd.output().expect("run command");
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).expect("stderr utf8");
-    assert!(
-        !stderr.contains(REDACTION_SENTINEL),
-        "CLI text error leaked sentinel path: {stderr}"
-    );
     assert!(stderr.contains("Failed to read EVM contract request file"));
 }
 

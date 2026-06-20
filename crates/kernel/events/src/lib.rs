@@ -1544,6 +1544,30 @@ pub mod v1 {
         pub fn is_retention(self) -> bool {
             matches!(self, Self::RetentionRef | Self::RetentionManifest)
         }
+
+        /// Returns true when this source is payload evidence that may authorize same-commit
+        /// runtime retention refs.
+        pub fn is_same_commit_payload_evidence(self) -> bool {
+            matches!(
+                self,
+                Self::FactResponse
+                    | Self::StateOutput
+                    | Self::PublicOutputRendered
+                    | Self::PublicOutputRenderFailureDiagnostic
+                    | Self::StateAttemptFailureDiagnostic
+                    | Self::SideEffectFailureDiagnostic
+                    | Self::ManualResolutionEvidence
+                    | Self::ManualResolutionAuthorization
+                    | Self::SideEffectIntent
+                    | Self::PreparedInvocation
+                    | Self::NotSubmittedProof
+                    | Self::Submission
+                    | Self::SubmissionUnknownEvidence
+                    | Self::Receipt
+                    | Self::Confirmation
+                    | Self::AmbiguityEvidence
+            )
+        }
     }
 
     /// Artifact evidence requirement derived from a single kernel event payload.
@@ -3346,24 +3370,6 @@ pub mod v1 {
         };
     }
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    struct EventSchemaDeclaration {
-        schema_name: &'static str,
-        rust_type_path: &'static str,
-        fields: &'static [EventFieldDescriptor],
-    }
-
-    impl EventSchemaDeclaration {
-        const fn schema_descriptor(self) -> EventSchemaDescriptor {
-            EventSchemaDescriptor {
-                schema_name: self.schema_name,
-                rust_type_path: self.rust_type_path,
-                schema_version: EVENT_SCHEMA_VERSION,
-                fields: self.fields,
-            }
-        }
-    }
-
     const RUN_ADMITTED_SCHEMA: EventSchemaDescriptor = EventSchemaDescriptor {
         schema_name: "mfm.events.v1.run_admitted",
         rust_type_path: "mfm_events::v1::RunAdmitted",
@@ -3403,9 +3409,10 @@ pub mod v1 {
         ],
     };
 
-    const FACT_RECORDED_SCHEMA_DECLARATION: EventSchemaDeclaration = EventSchemaDeclaration {
+    const FACT_RECORDED_SCHEMA: EventSchemaDescriptor = EventSchemaDescriptor {
         schema_name: "mfm.events.v1.fact_recorded",
         rust_type_path: "mfm_events::v1::FactRecorded",
+        schema_version: EVENT_SCHEMA_VERSION,
         fields: fields![
             EventFieldDescriptor::required("spec_hash", "SpecHash"),
             EventFieldDescriptor::required("node_id", "NodeId"),
@@ -3422,9 +3429,6 @@ pub mod v1 {
             EventFieldDescriptor::required("artifact_id", "ArtifactId"),
         ],
     };
-
-    const FACT_RECORDED_SCHEMA: EventSchemaDescriptor =
-        FACT_RECORDED_SCHEMA_DECLARATION.schema_descriptor();
 
     const ARTIFACT_REFERENCED_SCHEMA: EventSchemaDescriptor = EventSchemaDescriptor {
         schema_name: "mfm.events.v1.artifact_referenced",
@@ -3824,68 +3828,6 @@ pub mod v1 {
         use super::*;
         use mfm_ids::DigestBytes;
 
-        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-        struct EventFamilyDeclaration {
-            variant_tag: &'static str,
-            schema: EventSchemaDeclaration,
-            artifact_lenses: &'static [ArtifactLensDeclaration],
-        }
-
-        impl EventFamilyDeclaration {
-            fn schema_descriptor(self) -> EventSchemaDescriptor {
-                self.schema.schema_descriptor()
-            }
-        }
-
-        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-        struct ArtifactLensDeclaration {
-            source: EventArtifactReferenceSource,
-            artifact_id_field: &'static str,
-            digest_field: Option<&'static str>,
-            byte_len_field: Option<&'static str>,
-            media_type_field: Option<&'static str>,
-            schema_id_field: Option<&'static str>,
-            semantic_type_id_field: Option<&'static str>,
-            producer_node_id_field: Option<&'static str>,
-            producer_seed_id_field: Option<&'static str>,
-            role: ArtifactRole,
-        }
-
-        const FACT_RECORDED_EVENT_DECLARATION: EventFamilyDeclaration = EventFamilyDeclaration {
-            variant_tag: "FactRecorded",
-            schema: FACT_RECORDED_SCHEMA_DECLARATION,
-            artifact_lenses: &[ArtifactLensDeclaration {
-                source: EventArtifactReferenceSource::FactResponse,
-                artifact_id_field: "artifact_id",
-                digest_field: Some("response_hash"),
-                byte_len_field: None,
-                media_type_field: None,
-                schema_id_field: Some("response_schema_id"),
-                semantic_type_id_field: None,
-                producer_node_id_field: Some("node_id"),
-                producer_seed_id_field: None,
-                role: ArtifactRole::FactResponse,
-            }],
-        };
-
-        const STATE_ATTEMPT_STARTED_EVENT_DECLARATION: EventFamilyDeclaration =
-            EventFamilyDeclaration {
-                variant_tag: "StateAttemptStarted",
-                schema: EventSchemaDeclaration {
-                    schema_name: "mfm.events.v1.state_attempt_started",
-                    rust_type_path: "mfm_events::v1::StateAttemptStarted",
-                    fields: fields![
-                        EventFieldDescriptor::required("spec_hash", "SpecHash"),
-                        EventFieldDescriptor::required("node_id", "NodeId"),
-                        EventFieldDescriptor::required("attempt_id", "AttemptId"),
-                        EventFieldDescriptor::required("attempt_no", "u32"),
-                        EventFieldDescriptor::required("state_kind", "StateKind"),
-                        EventFieldDescriptor::required("state_version", "StateVersion"),
-                    ],
-                },
-                artifact_lenses: &[],
-            };
-
         fn digest_bytes(byte: u8) -> DigestBytes {
             DigestBytes::from_array([byte; 32])
         }
@@ -3944,16 +3886,6 @@ pub mod v1 {
                 digest_bytes(byte),
             )
             .expect("semantic id")
-        }
-
-        fn state_kind(byte: u8) -> StateKind {
-            StateKind::new(
-                "mfm.test",
-                "state",
-                DigestAlgorithm::Sha256JcsV1,
-                digest_bytes(byte),
-            )
-            .expect("state kind")
         }
 
         fn media_type(value: &str) -> MediaType {
@@ -4653,150 +4585,6 @@ mfm_events::v1::RetentionManifestProjected schema:mfm.events.v1.retention_manife
             assert_eq!(
                 canonical.content_digest().as_str(),
                 "content:sha256-jcs-v1:e708d591505935c8d5b12e833e34e6883c3e62fc548758a53ed5199e94218f70"
-            );
-        }
-
-        #[test]
-        fn fact_recorded_event_family_declaration_matches_handwritten_schema() {
-            let declared = FACT_RECORDED_EVENT_DECLARATION.schema_descriptor();
-            assert_eq!(declared, FACT_RECORDED_SCHEMA);
-            assert_eq!(
-                declared.canonical_json().expect("declared schema json"),
-                FACT_RECORDED_SCHEMA
-                    .canonical_json()
-                    .expect("handwritten schema json")
-            );
-            assert_eq!(
-                declared.schema_id().expect("declared schema id"),
-                FACT_RECORDED_SCHEMA
-                    .schema_id()
-                    .expect("handwritten schema id")
-            );
-            assert_eq!(FACT_RECORDED_EVENT_DECLARATION.variant_tag, "FactRecorded");
-            assert_eq!(
-                FACT_RECORDED_EVENT_DECLARATION.artifact_lenses,
-                &[ArtifactLensDeclaration {
-                    source: EventArtifactReferenceSource::FactResponse,
-                    artifact_id_field: "artifact_id",
-                    digest_field: Some("response_hash"),
-                    byte_len_field: None,
-                    media_type_field: None,
-                    schema_id_field: Some("response_schema_id"),
-                    semantic_type_id_field: None,
-                    producer_node_id_field: Some("node_id"),
-                    producer_seed_id_field: None,
-                    role: ArtifactRole::FactResponse,
-                }]
-            );
-        }
-
-        #[test]
-        fn fact_recorded_declaration_generates_handwritten_artifact_requirements() {
-            let payload = FactRecorded {
-                spec_hash: spec_hash(40),
-                node_id: node_id(41),
-                attempt_id: attempt_id(42),
-                capability_kind: CapabilityKind::new(
-                    "mfm.test",
-                    "capability",
-                    DigestAlgorithm::Sha256JcsV1,
-                    digest_bytes(43),
-                )
-                .expect("capability kind"),
-                capability_version: CapabilityVersion::new("mfm.test.capability.v1")
-                    .expect("capability version"),
-                adapter_kind: AdapterKind::new(
-                    "mfm.test",
-                    "adapter",
-                    DigestAlgorithm::Sha256JcsV1,
-                    digest_bytes(44),
-                )
-                .expect("adapter kind"),
-                adapter_version: AdapterVersion::new("mfm.test.adapter.v1")
-                    .expect("adapter version"),
-                request_schema_id: schema_id("mfm.test.request", 45),
-                request_hash: content_digest(46),
-                response_schema_id: schema_id("mfm.test.response", 47),
-                response_hash: content_digest(48),
-                fact_key: FactKey::new("fact-key").expect("fact key"),
-                artifact_id: artifact_id(49),
-            };
-
-            assert_eq!(
-                fact_recorded_artifact_requirements_from_declaration(&payload),
-                KernelEventPayload::FactRecorded(payload).artifact_requirements()
-            );
-        }
-
-        fn fact_recorded_artifact_requirements_from_declaration(
-            payload: &FactRecorded,
-        ) -> Vec<EventArtifactRequirement> {
-            FACT_RECORDED_EVENT_DECLARATION
-                .artifact_lenses
-                .iter()
-                .map(|lens| {
-                    assert_eq!(lens.artifact_id_field, "artifact_id");
-                    assert_eq!(lens.digest_field, Some("response_hash"));
-                    assert_eq!(lens.byte_len_field, None);
-                    assert_eq!(lens.media_type_field, None);
-                    assert_eq!(lens.schema_id_field, Some("response_schema_id"));
-                    assert_eq!(lens.semantic_type_id_field, None);
-                    assert_eq!(lens.producer_node_id_field, Some("node_id"));
-                    assert_eq!(lens.producer_seed_id_field, None);
-                    EventArtifactRequirement {
-                        source: lens.source,
-                        artifact_id: payload.artifact_id.clone(),
-                        digest: Some(payload.response_hash.clone()),
-                        byte_len: None,
-                        media_type: None,
-                        schema_id: Some(payload.response_schema_id.clone()),
-                        semantic_type_id: None,
-                        producer_node_id: Some(payload.node_id.clone()),
-                        producer_seed_id: None,
-                        artifact_role: Some(lens.role),
-                    }
-                })
-                .collect()
-        }
-
-        #[test]
-        fn state_attempt_started_event_family_declaration_matches_handwritten_schema() {
-            let declared = STATE_ATTEMPT_STARTED_EVENT_DECLARATION.schema_descriptor();
-            assert_eq!(declared, STATE_ATTEMPT_STARTED_SCHEMA);
-            assert_eq!(
-                declared.canonical_json().expect("declared schema json"),
-                STATE_ATTEMPT_STARTED_SCHEMA
-                    .canonical_json()
-                    .expect("handwritten schema json")
-            );
-            assert_eq!(
-                declared.schema_id().expect("declared schema id"),
-                STATE_ATTEMPT_STARTED_SCHEMA
-                    .schema_id()
-                    .expect("handwritten schema id")
-            );
-            assert_eq!(
-                STATE_ATTEMPT_STARTED_EVENT_DECLARATION.variant_tag,
-                "StateAttemptStarted"
-            );
-            assert_eq!(STATE_ATTEMPT_STARTED_EVENT_DECLARATION.artifact_lenses, &[]);
-        }
-
-        #[test]
-        fn state_attempt_started_declaration_generates_no_artifact_requirements() {
-            let payload = StateAttemptStarted {
-                spec_hash: spec_hash(50),
-                node_id: node_id(51),
-                attempt_id: attempt_id(52),
-                attempt_no: 3,
-                state_kind: state_kind(53),
-                state_version: StateVersion::new("mfm.test.state.v1").expect("state version"),
-            };
-
-            assert_eq!(STATE_ATTEMPT_STARTED_EVENT_DECLARATION.artifact_lenses, &[]);
-            assert_eq!(
-                KernelEventPayload::StateAttemptStarted(payload).artifact_requirements(),
-                Vec::<EventArtifactRequirement>::new()
             );
         }
 

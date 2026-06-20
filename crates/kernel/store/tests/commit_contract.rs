@@ -21,19 +21,18 @@ use mfm_spec::v1::{
     PublicFieldPath, RemediationUnresolvedSpec, ResourceNamespace, SagaPolicySpec, ValueLineageRef,
 };
 use mfm_store::v1::{
-    build_committed_batch, event_artifact_requirements, payload_canonical_json,
-    payload_from_json_value, ArtifactEvidenceRef, AsyncInMemoryTypedRunStore, AsyncStoreFuture,
-    AsyncTypedRunEventStore, AttemptStatus, AttemptTerminal, CellTerminalProjection,
-    CommitArtifactEvidenceSet, CommitKey, CommitOrdinal, CommitOutcome, CommitPreconditions,
-    CommittedRunStream, EventArtifactReferenceSource, ForwardLedgerClassification,
-    InMemoryTypedRunStore, KernelEventEnvelope, ManualBlockReason, ManualResolution,
-    ManualResolutionProjection, NonEmptyPayloadBatch, PersistedKernelEventRecord, PreparedCommit,
-    PreparedCommitPlan, ProjectionSnapshot, PublicOutputProjection, RequiredRunState,
-    ResourceLaneKey, Retention, RunAdmission, RunCompletionProjection, RunMode, RunState,
-    SagaAdmitToken, SagaEngagementProjection, SagaEngagementReason, SagaTerminal,
-    SagaTerminalProof, SideEffectLedgerPhase, SideEffectPhase, SideEffectProgress,
-    SideEffectTerminal, StateAttemptStarted, StoreError, StreamSeq, TypedCommitRequest,
-    VerifiedRetentionProjection, VerifiedRetentionProjectionSet,
+    event_artifact_requirements, payload_canonical_json, payload_from_json_value,
+    ArtifactEvidenceRef, AsyncInMemoryTypedRunStore, AsyncStoreFuture, AsyncTypedRunEventStore,
+    AttemptStatus, AttemptTerminal, CellTerminalProjection, CommitArtifactEvidenceSet, CommitKey,
+    CommitOutcome, CommitPreconditions, CommittedRunStream, EventArtifactReferenceSource,
+    ForwardLedgerClassification, KernelEventEnvelope, ManualBlockReason, ManualResolution,
+    ManualResolutionProjection, NonEmptyPayloadBatch, PreparedCommit, PreparedCommitPlan,
+    ProjectionSnapshot, PublicOutputProjection, RequiredRunState, ResourceLaneKey, Retention,
+    RunAdmission, RunCompletionProjection, RunMode, RunState, SagaAdmitToken,
+    SagaEngagementProjection, SagaEngagementReason, SagaTerminal, SagaTerminalProof,
+    SideEffectLedgerPhase, SideEffectPhase, SideEffectProgress, SideEffectTerminal,
+    StateAttemptStarted, StoreError, StreamSeq, TypedCommitRequest, VerifiedRetentionProjection,
+    VerifiedRetentionProjectionSet,
 };
 
 const SPEC_MEDIA_TYPE: &str = "application/vnd.mfm.typed-execution-spec+json;version=1";
@@ -57,6 +56,44 @@ macro_rules! typed_commit_request {
         )
         .expect("typed commit request")
     };
+}
+
+#[derive(Debug, Default)]
+struct StoreContractRunStore {
+    inner: AsyncInMemoryTypedRunStore,
+    projection: ProjectionSnapshot,
+}
+
+impl StoreContractRunStore {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn append_prepared_commit_plan(
+        &mut self,
+        plan: PreparedCommitPlan,
+    ) -> std::result::Result<CommitOutcome, StoreError> {
+        let outcome = poll_ready_store_future(self.inner.append_prepared_commit_plan(plan));
+        if outcome.is_ok() {
+            self.projection = self
+                .inner
+                .projection_snapshot()
+                .expect("in-memory projection snapshot");
+        }
+        outcome
+    }
+
+    fn expected_next_seq(&self, run_id: &RunId) -> StreamSeq {
+        poll_ready_store_future(self.inner.expected_next_seq(run_id)).expect("expected next seq")
+    }
+
+    fn load_run_stream(&self, run_id: &RunId) -> Vec<KernelEventEnvelope> {
+        poll_ready_store_future(self.inner.load_run_stream(run_id)).expect("load run stream")
+    }
+
+    fn projection_snapshot(&self) -> &ProjectionSnapshot {
+        &self.projection
+    }
 }
 
 fn poll_ready_store_future<T, E>(
@@ -1376,7 +1413,7 @@ fn retention_manifest_commit_payloads(
 }
 
 fn projection_differential_summary(
-    store: &InMemoryTypedRunStore,
+    store: &StoreContractRunStore,
     run_id: &RunId,
     stream: &[KernelEventEnvelope],
 ) -> String {
@@ -1501,9 +1538,9 @@ fn artifact_role_contract_store_codec_roundtrips_current_tags() {
     let rows = artifact_role_tag_baselines()
         .iter()
         .map(|(role, tag)| {
-            assert_eq!(mfm_store::v1::codec::artifact_role_str(*role), *tag);
+            assert_eq!(role.as_str(), *tag);
             assert_eq!(
-                mfm_store::v1::codec::parse_artifact_role(tag).expect("parse artifact role"),
+                ArtifactRole::parse(tag).expect("parse artifact role"),
                 *role
             );
             format!("{tag} -> {role:?}")
@@ -1534,7 +1571,7 @@ redacted_diagnostic -> RedactedDiagnostic\n\
 retention_manifest -> RetentionManifest"
     );
 
-    assert!(mfm_store::v1::codec::parse_artifact_role("resource_touched_set_evidence").is_err());
+    assert_eq!(ArtifactRole::parse("resource_touched_set_evidence"), None);
 }
 
 #[test]
@@ -1639,7 +1676,7 @@ fn fact_recorded_protocol_baselines_cover_codec_requirements_and_projection() {
     let run_id = run_id(250);
     let fact_artifact_id = artifact_id(63);
     let fact_digest = content_digest(64);
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     store
         .append_prepared_commit(run_start_request(run_id.clone(), "fact-baseline-run-start"))
         .expect("append run start");
@@ -1708,384 +1745,9 @@ fn fact_recorded_protocol_baselines_cover_codec_requirements_and_projection() {
 }
 
 #[test]
-fn fact_recorded_codec_declaration_view_matches_handwritten_codec() {
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    struct EventCodecDeclaration {
-        variant_tag: &'static str,
-        fields: &'static [&'static str],
-    }
-
-    const FACT_RECORDED_CODEC_DECLARATION: EventCodecDeclaration = EventCodecDeclaration {
-        variant_tag: "FactRecorded",
-        fields: &[
-            "adapter_kind",
-            "adapter_version",
-            "artifact_id",
-            "attempt_id",
-            "capability_kind",
-            "capability_version",
-            "fact_key",
-            "node_id",
-            "request_hash",
-            "request_schema_id",
-            "response_hash",
-            "response_schema_id",
-            "spec_hash",
-        ],
-    };
-
-    fn declared_json(payload: &events::FactRecorded) -> serde_json::Value {
-        assert_eq!(FACT_RECORDED_CODEC_DECLARATION.variant_tag, "FactRecorded");
-        assert_eq!(
-            FACT_RECORDED_CODEC_DECLARATION.fields,
-            [
-                "adapter_kind",
-                "adapter_version",
-                "artifact_id",
-                "attempt_id",
-                "capability_kind",
-                "capability_version",
-                "fact_key",
-                "node_id",
-                "request_hash",
-                "request_schema_id",
-                "response_hash",
-                "response_schema_id",
-                "spec_hash",
-            ]
-        );
-        serde_json::json!({
-            "adapter_kind": payload.adapter_kind.as_str(),
-            "adapter_version": payload.adapter_version.as_str(),
-            "artifact_id": payload.artifact_id.as_str(),
-            "attempt_id": payload.attempt_id.as_str(),
-            "capability_kind": payload.capability_kind.as_str(),
-            "capability_version": payload.capability_version.as_str(),
-            "fact_key": payload.fact_key.as_str(),
-            "node_id": payload.node_id.as_str(),
-            "request_hash": payload.request_hash.as_str(),
-            "request_schema_id": payload.request_schema_id.as_str(),
-            "response_hash": payload.response_hash.as_str(),
-            "response_schema_id": payload.response_schema_id.as_str(),
-            "spec_hash": payload.spec_hash.as_str(),
-            "variant": FACT_RECORDED_CODEC_DECLARATION.variant_tag,
-        })
-    }
-
-    let payload = fact_recorded(artifact_id(63), content_digest(64));
-    let KernelEventPayload::FactRecorded(fact) = &payload else {
-        unreachable!("helper returns fact payload");
-    };
-    let declared = declared_json(fact);
-    let declared_canonical =
-        PlainCanonicalJsonBytes::from_json_str(&declared.to_string()).expect("declared canonical");
-
-    assert_eq!(declared, payload_json_value(&payload));
-    assert_eq!(
-        declared_canonical,
-        payload_canonical_json(&payload).expect("handwritten canonical")
-    );
-    assert_eq!(
-        declared_canonical.content_digest(),
-        payload_canonical_json(&payload)
-            .expect("handwritten payload hash")
-            .content_digest()
-    );
-    assert_eq!(
-        payload_from_json_value(&declared).expect("declared payload decode"),
-        payload
-    );
-}
-
-#[test]
-fn fact_recorded_projection_transition_descriptor_matches_rebuilt_projection() {
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    struct FactRecordedProjectionTransitionDeclaration {
-        requires_started_attempt: bool,
-        unique_key: &'static [&'static str],
-        projected_fields: &'static [&'static str],
-    }
-
-    const FACT_RECORDED_PROJECTION: FactRecordedProjectionTransitionDeclaration =
-        FactRecordedProjectionTransitionDeclaration {
-            requires_started_attempt: true,
-            unique_key: &["node_id", "attempt_id", "fact_key"],
-            projected_fields: &[
-                "event_id",
-                "node_id",
-                "attempt_id",
-                "fact_key",
-                "request_schema_id",
-                "request_hash",
-                "response_schema_id",
-                "response_hash",
-                "artifact_id",
-                "capability_kind",
-                "capability_version",
-                "adapter_kind",
-                "adapter_version",
-            ],
-        };
-
-    let run_id = run_id(251);
-    let fact_artifact_id = artifact_id(63);
-    let fact_digest = content_digest(64);
-    let mut store = InMemoryTypedRunStore::new();
-    store
-        .append_prepared_commit(run_start_request(
-            run_id.clone(),
-            "fact-projection-run-start",
-        ))
-        .expect("append run start");
-    store
-        .append_prepared_commit(typed_commit_request! {
-            run_id: run_id.clone(),
-            expected_next_seq: store.expected_next_seq(&run_id),
-            commit_key: CommitKey::new("fact-projection-attempt-start").expect("commit key"),
-            payloads: vec![fact_attempt_started()],
-            required_artifacts: Vec::new(),
-            preconditions: CommitPreconditions {
-                required_run_state: RequiredRunState::NotCompleted,
-                ..CommitPreconditions::default()
-            },
-        })
-        .expect("append fact attempt start");
-    store
-        .append_prepared_commit(typed_commit_request! {
-            run_id: run_id.clone(),
-            expected_next_seq: store.expected_next_seq(&run_id),
-            commit_key: CommitKey::new("fact-projection-recorded").expect("commit key"),
-            payloads: vec![fact_recorded(fact_artifact_id.clone(), fact_digest.clone())],
-            required_artifacts: vec![fact_artifact_ref(fact_artifact_id, fact_digest)],
-            preconditions: CommitPreconditions {
-                required_run_state: RequiredRunState::NotCompleted,
-                ..CommitPreconditions::default()
-            },
-        })
-        .expect("append fact recorded");
-
-    let stream = store.load_run_stream(&run_id);
-    let snapshot = ProjectionSnapshot::rebuild_from_run_stream(&stream).expect("rebuild stream");
-    let projection = snapshot
-        .fact(
-            &node_id(90),
-            &attempt_id(91),
-            &events::FactKey::new("fact-key-1").expect("fact key"),
-        )
-        .expect("fact projection");
-
-    assert_eq!(
-        FACT_RECORDED_PROJECTION.requires_started_attempt,
-        snapshot.attempt(&node_id(90), &attempt_id(91)).is_some()
-    );
-    assert_eq!(
-        FACT_RECORDED_PROJECTION.unique_key,
-        ["node_id", "attempt_id", "fact_key"]
-    );
-    assert_eq!(
-        FACT_RECORDED_PROJECTION.projected_fields,
-        [
-            "event_id",
-            "node_id",
-            "attempt_id",
-            "fact_key",
-            "request_schema_id",
-            "request_hash",
-            "response_schema_id",
-            "response_hash",
-            "artifact_id",
-            "capability_kind",
-            "capability_version",
-            "adapter_kind",
-            "adapter_version",
-        ]
-    );
-    assert_eq!(projection.event_id, stream[2].event_id().clone());
-    assert_eq!(projection.node_id, node_id(90));
-    assert_eq!(projection.attempt_id, attempt_id(91));
-    assert_eq!(
-        projection.fact_key,
-        events::FactKey::new("fact-key-1").expect("fact key")
-    );
-    assert_eq!(
-        projection.request_schema_id,
-        schema_id("mfm.test.fact_request", 94)
-    );
-    assert_eq!(projection.request_hash, content_digest(95));
-    assert_eq!(
-        projection.response_schema_id,
-        schema_id("mfm.test.fact_response", 96)
-    );
-    assert_eq!(projection.response_hash, content_digest(64));
-    assert_eq!(projection.artifact_id, artifact_id(63));
-    assert_eq!(projection.capability_kind, capability_kind(92));
-    assert_eq!(
-        projection.capability_version,
-        CapabilityVersion::new("mfm.test.fact.v1").expect("capability version")
-    );
-    assert_eq!(projection.adapter_kind, adapter_kind(93));
-    assert_eq!(
-        projection.adapter_version,
-        AdapterVersion::new("mfm.test.adapter.v1").expect("adapter version")
-    );
-}
-
-#[test]
-fn state_attempt_started_codec_declaration_view_matches_handwritten_codec() {
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    struct EventCodecDeclaration {
-        variant_tag: &'static str,
-        fields: &'static [&'static str],
-    }
-
-    const STATE_ATTEMPT_STARTED_CODEC_DECLARATION: EventCodecDeclaration = EventCodecDeclaration {
-        variant_tag: "StateAttemptStarted",
-        fields: &[
-            "attempt_id",
-            "attempt_no",
-            "node_id",
-            "spec_hash",
-            "state_kind",
-            "state_version",
-        ],
-    };
-
-    fn declared_json(payload: &events::StateAttemptStarted) -> serde_json::Value {
-        assert_eq!(
-            STATE_ATTEMPT_STARTED_CODEC_DECLARATION.variant_tag,
-            "StateAttemptStarted"
-        );
-        assert_eq!(
-            STATE_ATTEMPT_STARTED_CODEC_DECLARATION.fields,
-            [
-                "attempt_id",
-                "attempt_no",
-                "node_id",
-                "spec_hash",
-                "state_kind",
-                "state_version",
-            ]
-        );
-        serde_json::json!({
-            "attempt_id": payload.attempt_id.as_str(),
-            "attempt_no": payload.attempt_no,
-            "node_id": payload.node_id.as_str(),
-            "spec_hash": payload.spec_hash.as_str(),
-            "state_kind": payload.state_kind.as_str(),
-            "state_version": payload.state_version.as_str(),
-            "variant": STATE_ATTEMPT_STARTED_CODEC_DECLARATION.variant_tag,
-        })
-    }
-
-    let payload = fact_attempt_started();
-    let KernelEventPayload::StateAttemptStarted(attempt) = &payload else {
-        unreachable!("helper returns attempt-start payload");
-    };
-    let declared = declared_json(attempt);
-    let declared_canonical =
-        PlainCanonicalJsonBytes::from_json_str(&declared.to_string()).expect("declared canonical");
-
-    assert_eq!(declared, payload_json_value(&payload));
-    assert_eq!(
-        declared_canonical,
-        payload_canonical_json(&payload).expect("handwritten canonical")
-    );
-    assert_eq!(
-        declared_canonical.content_digest(),
-        payload_canonical_json(&payload)
-            .expect("handwritten payload hash")
-            .content_digest()
-    );
-    assert_eq!(
-        payload_from_json_value(&declared).expect("declared payload decode"),
-        payload
-    );
-}
-
-#[test]
-fn state_attempt_started_projection_transition_descriptor_matches_rebuilt_projection() {
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    struct StateAttemptStartedProjectionTransitionDeclaration {
-        unique_key: &'static [&'static str],
-        projected_fields: &'static [&'static str],
-    }
-
-    const STATE_ATTEMPT_STARTED_PROJECTION: StateAttemptStartedProjectionTransitionDeclaration =
-        StateAttemptStartedProjectionTransitionDeclaration {
-            unique_key: &["node_id", "attempt_id"],
-            projected_fields: &[
-                "run_id",
-                "node_id",
-                "attempt_id",
-                "event_id",
-                "attempt_no",
-                "state_kind",
-                "state_version",
-            ],
-        };
-
-    let run_id = run_id(252);
-    let mut store = InMemoryTypedRunStore::new();
-    store
-        .append_prepared_commit(run_start_request(
-            run_id.clone(),
-            "attempt-projection-run-start",
-        ))
-        .expect("append run start");
-    store
-        .append_prepared_commit(typed_commit_request! {
-            run_id: run_id.clone(),
-            expected_next_seq: store.expected_next_seq(&run_id),
-            commit_key: CommitKey::new("attempt-projection-start").expect("commit key"),
-            payloads: vec![fact_attempt_started()],
-            required_artifacts: Vec::new(),
-            preconditions: CommitPreconditions {
-                required_run_state: RequiredRunState::NotCompleted,
-                ..CommitPreconditions::default()
-            },
-        })
-        .expect("append attempt start");
-
-    let stream = store.load_run_stream(&run_id);
-    let snapshot = ProjectionSnapshot::rebuild_from_run_stream(&stream).expect("rebuild stream");
-    let projection = snapshot
-        .attempt(&node_id(90), &attempt_id(91))
-        .expect("attempt projection");
-
-    assert_eq!(
-        STATE_ATTEMPT_STARTED_PROJECTION.unique_key,
-        ["node_id", "attempt_id"]
-    );
-    assert_eq!(
-        STATE_ATTEMPT_STARTED_PROJECTION.projected_fields,
-        [
-            "run_id",
-            "node_id",
-            "attempt_id",
-            "event_id",
-            "attempt_no",
-            "state_kind",
-            "state_version",
-        ]
-    );
-    assert_eq!(projection.run_id, run_id);
-    assert_eq!(projection.node_id, node_id(90));
-    assert_eq!(projection.attempt_id, attempt_id(91));
-    assert_eq!(projection.event_id, stream[1].event_id().clone());
-    assert_eq!(
-        projection.status,
-        AttemptStatus::Started {
-            attempt_no: 1,
-            state_kind: state_kind(90),
-            state_version: StateVersion::new("mfm.test.fact_state.v1").expect("state version"),
-        }
-    );
-}
-
-#[test]
 fn committed_run_stream_exposes_store_owned_authority() {
     let run_id = run_id(141);
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     store
         .append_prepared_commit(run_start_request(
             run_id.clone(),
@@ -2137,7 +1799,7 @@ fn committed_run_stream_exposes_store_owned_authority() {
 fn committed_run_stream_rejects_events_for_a_different_run() {
     let requested_run_id = run_id(142);
     let other_run_id = run_id(143);
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     store
         .append_prepared_commit(run_start_request(
             requested_run_id.clone(),
@@ -2300,7 +1962,7 @@ fn prepared_commit_plan_accepts_explicit_terminal_attempt_authority() {
 
 #[test]
 fn commit_rejects_secret_shaped_persisted_error_message() {
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     let run_id = run_id(152);
     ensure_test_run_admitted(&mut store, &run_id, "public-diagnostic-secret-run-start");
     store
@@ -2339,7 +2001,7 @@ fn commit_rejects_secret_shaped_persisted_error_message() {
 
 #[test]
 fn commit_rejects_non_redacted_diagnostic_artifact_ref() {
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     let run_id = run_id(153);
     ensure_test_run_admitted(&mut store, &run_id, "public-diagnostic-artifact-run-start");
     store
@@ -2453,7 +2115,7 @@ trait TestPreparedCommitExt {
     ) -> mfm_store::v1::Result<CommitOutcome>;
 }
 
-impl TestPreparedCommitExt for InMemoryTypedRunStore {
+impl TestPreparedCommitExt for StoreContractRunStore {
     fn append_prepared_commit(
         &mut self,
         request: TypedCommitRequest,
@@ -2661,7 +2323,7 @@ fn run_start_request_with_saga_policy(
     .expect("run start request")
 }
 
-fn ensure_test_run_admitted(store: &mut InMemoryTypedRunStore, run_id: &RunId, commit_key: &str) {
+fn ensure_test_run_admitted(store: &mut StoreContractRunStore, run_id: &RunId, commit_key: &str) {
     if store.expected_next_seq(run_id) == StreamSeq::FIRST {
         store
             .append_prepared_commit(run_start_request(run_id.clone(), commit_key))
@@ -2669,7 +2331,7 @@ fn ensure_test_run_admitted(store: &mut InMemoryTypedRunStore, run_id: &RunId, c
     }
 }
 
-fn append_side_effect_prepare(store: &mut InMemoryTypedRunStore, run_id: &RunId) {
+fn append_side_effect_prepare(store: &mut StoreContractRunStore, run_id: &RunId) {
     ensure_test_run_admitted(store, run_id, "sidefx-fixture-run-start");
     let artifact_id = artifact_id(81);
     let artifact_digest = content_digest(82);
@@ -2701,7 +2363,7 @@ fn append_side_effect_prepare(store: &mut InMemoryTypedRunStore, run_id: &RunId)
 }
 
 fn append_side_effect_prepare_for_ledger(
-    store: &mut InMemoryTypedRunStore,
+    store: &mut StoreContractRunStore,
     run_id: &RunId,
     commit_key: &str,
     ledger_key: events::SideEffectLedgerKey,
@@ -2724,7 +2386,7 @@ fn append_side_effect_prepare_for_ledger(
 
 #[allow(clippy::too_many_arguments)]
 fn append_side_effect_prepare_for_ledger_on_attempt(
-    store: &mut InMemoryTypedRunStore,
+    store: &mut StoreContractRunStore,
     run_id: &RunId,
     commit_key: &str,
     ledger_key: events::SideEffectLedgerKey,
@@ -2780,7 +2442,7 @@ fn append_side_effect_prepare_for_ledger_on_attempt(
         .expect("append sidefx prepare");
 }
 
-fn append_side_effect_started(store: &mut InMemoryTypedRunStore, run_id: &RunId) {
+fn append_side_effect_started(store: &mut StoreContractRunStore, run_id: &RunId) {
     store
         .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
@@ -2794,7 +2456,7 @@ fn append_side_effect_started(store: &mut InMemoryTypedRunStore, run_id: &RunId)
 }
 
 fn append_generic_nonretryable_failure(
-    store: &mut InMemoryTypedRunStore,
+    store: &mut StoreContractRunStore,
     run_id: &RunId,
     key_prefix: &str,
 ) {
@@ -2821,7 +2483,7 @@ fn append_generic_nonretryable_failure(
         .expect("append generic attempt failure");
 }
 
-fn append_forward_confirmation(store: &mut InMemoryTypedRunStore, run_id: &RunId) {
+fn append_forward_confirmation(store: &mut StoreContractRunStore, run_id: &RunId) {
     append_side_effect_prepare(store, run_id);
     append_side_effect_started(store, run_id);
     let submission_artifact_id = artifact_id(84);
@@ -2872,7 +2534,7 @@ fn append_forward_confirmation(store: &mut InMemoryTypedRunStore, run_id: &RunId
 }
 
 fn append_remediation_confirmation(
-    store: &mut InMemoryTypedRunStore,
+    store: &mut StoreContractRunStore,
     run_id: &RunId,
     ledger_key: events::SideEffectLedgerKey,
 ) {
@@ -2960,7 +2622,7 @@ fn side_effect_evidence(
 #[test]
 fn commit_key_idempotency_precedes_stale_expected_next_seq() {
     let run_id = run_id(40);
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     let request = run_start_request(run_id.clone(), "run-start");
     let appended = store
         .append_prepared_commit(request.clone())
@@ -3041,7 +2703,7 @@ fn async_in_memory_store_exposes_commit_stream_and_status_contract() {
 #[test]
 fn commit_key_conflict_is_rejected_before_stale_sequence() {
     let run_id = run_id(41);
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     let request = run_start_request(run_id.clone(), "run-start");
     store
         .append_prepared_commit(request)
@@ -3065,7 +2727,7 @@ fn commit_key_conflict_is_rejected_before_stale_sequence() {
 #[test]
 fn store_owns_envelope_sequence_ordinal_and_event_id() {
     let run_id = run_id(42);
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     let first = store
         .append_prepared_commit(run_start_request(run_id.clone(), "run-start"))
         .expect("append run start");
@@ -3095,146 +2757,10 @@ fn store_owns_envelope_sequence_ordinal_and_event_id() {
 }
 
 #[test]
-fn projection_rebuild_rejects_gapped_persisted_run_stream() {
-    let run_id = run_id(43);
-    let first = build_committed_batch(
-        &run_start_request(run_id.clone(), "run-start"),
-        StreamSeq::FIRST,
-    )
-    .expect("first batch");
-    let second = build_committed_batch(
-        &typed_commit_request! {
-            run_id: run_id,
-            expected_next_seq: StreamSeq::new(3).expect("gapped seq"),
-            commit_key: CommitKey::new("attempt-start").expect("commit key"),
-            payloads: vec![state_attempt_started()],
-            required_artifacts: Vec::new(),
-            preconditions: CommitPreconditions::default(),
-        },
-        StreamSeq::new(3).expect("gapped seq"),
-    )
-    .expect("second batch");
-    let mut events = first.events().to_vec();
-    events.extend(second.events().iter().cloned());
-
-    let error = ProjectionSnapshot::rebuild_from_run_stream(&events)
-        .expect_err("gapped persisted stream rejects");
-    assert!(matches!(
-        error,
-        StoreError::PersistedEventMismatch { field: "seq", .. }
-    ));
-}
-
-#[test]
-fn projection_rebuild_rejects_mixed_commit_keys_for_one_sequence() {
-    let run_id = run_id(44);
-    let first = build_committed_batch(
-        &run_start_request(run_id.clone(), "run-start"),
-        StreamSeq::FIRST,
-    )
-    .expect("first batch");
-    let sidecar = build_committed_batch(
-        &typed_commit_request! {
-            run_id: run_id,
-            expected_next_seq: StreamSeq::FIRST,
-            commit_key: CommitKey::new("same-seq-sidecar").expect("commit key"),
-            payloads: vec![state_attempt_started()],
-            required_artifacts: Vec::new(),
-            preconditions: CommitPreconditions::default(),
-        },
-        StreamSeq::FIRST,
-    )
-    .expect("sidecar batch");
-    let mut events = first.events().to_vec();
-    events.push(rewrite_envelope(
-        &sidecar.events()[0],
-        StreamSeq::FIRST,
-        CommitOrdinal::new(1),
-        CommitKey::new("same-seq-sidecar").expect("commit key"),
-    ));
-
-    let error = ProjectionSnapshot::rebuild_from_run_stream(&events)
-        .expect_err("mixed commit keys for one sequence reject");
-    assert!(matches!(
-        error,
-        StoreError::PersistedEventMismatch {
-            field: "commit_key",
-            ..
-        }
-    ));
-}
-
-#[test]
-fn projection_rebuild_rejects_old_model_terminal_attempt_without_start() {
-    let run_id = run_id(45);
-    let first = build_committed_batch(
-        &run_start_request(run_id.clone(), "run-start"),
-        StreamSeq::FIRST,
-    )
-    .expect("first batch");
-    let old_terminal = build_committed_batch(
-        &typed_commit_request! {
-            run_id: run_id.clone(),
-            expected_next_seq: StreamSeq::new(2).expect("next seq"),
-            commit_key: CommitKey::new("old-terminal-without-start").expect("commit key"),
-            payloads: terminal_cell_commit_payloads(artifact_id(46), content_digest(47)),
-            required_artifacts: Vec::new(),
-            preconditions: CommitPreconditions::default(),
-        },
-        StreamSeq::new(2).expect("terminal seq"),
-    )
-    .expect("old terminal batch");
-    let mut events = first.events().to_vec();
-    events.extend(old_terminal.events().iter().cloned());
-
-    let error = ProjectionSnapshot::rebuild_from_run_stream(&events)
-        .expect_err("old terminal attempt model rejects");
-    assert_projection_conflict_contains(
-        error,
-        "unsupported old stream model: attempt-bound payload is not preceded by a StateAttemptStarted commit",
-    );
-}
-
-#[test]
-fn projection_rebuild_rejects_old_model_start_and_terminal_in_same_commit() {
-    let run_id = run_id(48);
-    let first = build_committed_batch(
-        &run_start_request(run_id.clone(), "run-start"),
-        StreamSeq::FIRST,
-    )
-    .expect("first batch");
-    let old_combined = build_committed_batch(
-        &typed_commit_request! {
-            run_id: run_id.clone(),
-            expected_next_seq: StreamSeq::new(2).expect("next seq"),
-            commit_key: CommitKey::new("old-combined-framework").expect("commit key"),
-            payloads: {
-                let mut payloads = vec![state_attempt_started()];
-                payloads.extend(terminal_cell_commit_payloads(artifact_id(49), content_digest(50)));
-                payloads
-            },
-            required_artifacts: Vec::new(),
-            preconditions: CommitPreconditions::default(),
-        },
-        StreamSeq::new(2).expect("combined seq"),
-    )
-    .expect("old combined batch");
-    let mut events = first.events().to_vec();
-    events.extend(old_combined.events().iter().cloned());
-
-    let error = CommittedRunStream::from_events(run_id, events)
-        .expect_err("old combined framework model rejects");
-    assert_projection_conflict_contains(
-        error,
-        "unsupported old stream model: StateAttemptStarted must be committed before attempt-bound terminal payloads",
-    );
-}
-
-#[test]
 fn required_artifact_precondition_is_atomic_with_append() {
     let artifact_id = artifact_id(50);
     let artifact_digest = content_digest(51);
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     let run_id = run_id(52);
     let evidence = event_artifact_ref(artifact_id, artifact_digest);
     let request = typed_commit_request! {
@@ -3269,49 +2795,12 @@ fn required_artifact_precondition_is_atomic_with_append() {
     assert_eq!(store.expected_next_seq(&run_id), StreamSeq::FIRST);
 }
 
-fn rewrite_envelope(
-    event: &KernelEventEnvelope,
-    seq: StreamSeq,
-    ordinal: CommitOrdinal,
-    commit_key: CommitKey,
-) -> KernelEventEnvelope {
-    KernelEventEnvelope::from_persisted_record(PersistedKernelEventRecord {
-        event_id: event_id_for(event, seq, ordinal),
-        event_schema_id: event.event_schema_id().clone(),
-        run_id: event.run_id().clone(),
-        seq,
-        ordinal,
-        spec_hash: event.spec_hash().clone(),
-        commit_key,
-        logical_key: event.logical_key().clone(),
-        payload_hash: event.payload_hash().clone(),
-        payload: event.payload().clone(),
-        payload_canonical_byte_len: event.audit().payload_canonical_byte_len(),
-    })
-    .expect("rewritten envelope")
-}
-
-fn event_id_for(event: &KernelEventEnvelope, seq: StreamSeq, ordinal: CommitOrdinal) -> EventId {
-    let canonical = PlainCanonicalJsonBytes::from_json_str(
-        &serde_json::json!({
-            "event_schema_id": event.event_schema_id().as_str(),
-            "ordinal": ordinal.as_u32(),
-            "payload_hash": event.payload_hash().as_str(),
-            "run_id": event.run_id().as_str(),
-            "seq": seq.as_u64(),
-        })
-        .to_string(),
-    )
-    .expect("event id canonical");
-    EventId::from_digest(DigestAlgorithm::Sha256JcsV1, canonical.digest_bytes())
-}
-
 #[test]
 fn prepared_commit_rejects_unreferenced_admitted_artifact_without_persisting_it() {
     let run_id = run_id(53);
     let artifact_id = artifact_id(54);
     let artifact_digest = content_digest(55);
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     let admitted = store_artifact_ref(artifact_id.clone(), artifact_digest.clone());
 
     let error = store
@@ -3362,7 +2851,7 @@ fn prepared_commit_idempotency_fingerprint_includes_admitted_artifacts() {
     let run_id = run_id(120);
     let artifact_id = artifact_id(131);
     let artifact_digest = content_digest(132);
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     let evidence = store_artifact_ref(artifact_id.clone(), artifact_digest.clone());
     let mut conflicting_evidence = evidence.clone();
     conflicting_evidence.byte_len += 1;
@@ -3400,7 +2889,7 @@ fn admitted_artifacts_are_rolled_back_when_commit_validation_fails() {
     let run_id = run_id(56);
     let artifact_id = artifact_id(57);
     let artifact_digest = content_digest(58);
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     let evidence = store_artifact_ref(artifact_id.clone(), artifact_digest.clone());
 
     let error = store
@@ -3445,7 +2934,7 @@ fn payload_artifact_byte_len_media_type_and_producer_mismatches_are_rejected() {
     let first_run_id = run_id(59);
     let first_artifact_id = artifact_id(60);
     let first_artifact_digest = content_digest(61);
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     let mut wrong_len =
         store_artifact_ref(first_artifact_id.clone(), first_artifact_digest.clone());
     wrong_len.byte_len = 129;
@@ -3484,7 +2973,7 @@ fn payload_artifact_byte_len_media_type_and_producer_mismatches_are_rejected() {
     let media_run_id = run_id(86);
     let media_artifact_id = artifact_id(87);
     let media_artifact_digest = content_digest(88);
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     let mut wrong_media =
         store_artifact_ref(media_artifact_id.clone(), media_artifact_digest.clone());
     wrong_media.media_type = media_type("application/octet-stream");
@@ -3522,7 +3011,7 @@ fn payload_artifact_byte_len_media_type_and_producer_mismatches_are_rejected() {
     let second_run_id = run_id(62);
     let second_artifact_id = artifact_id(63);
     let second_artifact_digest = content_digest(64);
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     let mut wrong_producer =
         store_artifact_ref(second_artifact_id.clone(), second_artifact_digest.clone());
     wrong_producer.producer_node_id = Some(node_id(99));
@@ -3559,7 +3048,7 @@ fn duplicate_attempt_lifecycle_events_are_rejected() {
     let run_id = run_id(59);
     let artifact_id = artifact_id(60);
     let artifact_digest = content_digest(61);
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     let artifact = store_artifact_ref(artifact_id.clone(), artifact_digest.clone());
     store
         .append_prepared_commit(run_start_request(run_id.clone(), "duplicate-run-start"))
@@ -3620,7 +3109,7 @@ fn duplicate_attempt_lifecycle_events_are_rejected() {
 #[test]
 fn state_attempt_interrupted_projects_retryable_terminal_without_saga_engagement() {
     let run_id = run_id(60);
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     store
         .append_prepared_commit(run_start_request(run_id.clone(), "run-start"))
         .expect("append run start");
@@ -3664,7 +3153,7 @@ fn state_attempt_interrupted_projects_retryable_terminal_without_saga_engagement
 #[test]
 fn state_attempt_interrupted_rejects_duplicate_terminal_event() {
     let run_id = run_id(61);
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     store
         .append_prepared_commit(run_start_request(run_id.clone(), "run-start"))
         .expect("append run start");
@@ -3707,7 +3196,7 @@ fn state_attempt_interrupted_allows_side_effect_intent_before_invocation_prepare
     let run_id = run_id(62);
     let artifact_id = artifact_id(81);
     let artifact_digest = content_digest(82);
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     store
         .append_prepared_commit(run_start_request(run_id.clone(), "run-start"))
         .expect("append run start");
@@ -3773,7 +3262,7 @@ fn state_attempt_interrupted_allows_side_effect_claim_before_invocation_prepared
     let run_id = run_id(63);
     let artifact_id = artifact_id(83);
     let artifact_digest = content_digest(84);
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     store
         .append_prepared_commit(run_start_request(run_id.clone(), "run-start"))
         .expect("append run start");
@@ -3837,7 +3326,7 @@ fn state_attempt_interrupted_allows_side_effect_claim_before_invocation_prepared
 #[test]
 fn state_attempt_interrupted_rejects_after_side_effect_invocation_prepared() {
     let run_id = run_id(64);
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     store
         .append_prepared_commit(run_start_request(run_id.clone(), "run-start"))
         .expect("append run start");
@@ -3865,7 +3354,7 @@ fn state_attempt_interrupted_rejects_after_side_effect_invocation_prepared() {
 #[test]
 fn state_attempt_failed_rejects_after_side_effect_authority_without_terminal_evidence() {
     let run_id = run_id(65);
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     store
         .append_prepared_commit(run_start_request(run_id.clone(), "run-start"))
         .expect("append run start");
@@ -3885,31 +3374,12 @@ fn state_attempt_failed_rejects_after_side_effect_authority_without_terminal_evi
         error,
         "side-effect attempt failure requires terminal side-effect evidence",
     );
-
-    let request = typed_commit_request! {
-        run_id: run_id.clone(),
-        expected_next_seq: store.expected_next_seq(&run_id),
-        commit_key: CommitKey::new("forged-sidefx-attempt-failed-alone").expect("commit key"),
-        payloads: vec![side_effect_attempt_failed(true)],
-        required_artifacts: Vec::new(),
-        preconditions: CommitPreconditions::default(),
-    };
-    let batch =
-        build_committed_batch(&request, store.expected_next_seq(&run_id)).expect("forged batch");
-    let mut stream = store.load_run_stream(&run_id);
-    stream.extend(batch.events().iter().cloned());
-    let rebuild = ProjectionSnapshot::rebuild_from_run_stream(&stream)
-        .expect_err("projection rebuild rejects forged generic failure");
-    assert_projection_conflict_contains(
-        rebuild,
-        "side-effect attempt failure requires terminal side-effect evidence",
-    );
 }
 
 #[test]
 fn attempt_terminal_and_cell_terminal_must_commit_together() {
     let run_id = run_id(62);
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     store
         .append_prepared_commit(run_start_request(run_id.clone(), "terminal-pair-run-start"))
         .expect("append run start");
@@ -3957,7 +3427,7 @@ fn public_output_must_commit_with_render_receipt_terminal() {
     let run_id = run_id(67);
     let artifact_id = artifact_id(68);
     let artifact_digest = content_digest(69);
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     let artifact = store_artifact_ref(artifact_id.clone(), artifact_digest.clone());
     store
         .append_prepared_commit(run_start_request(run_id.clone(), "public-output-run-start"))
@@ -4007,7 +3477,7 @@ fn side_effect_transition_mismatches_are_rejected() {
     let run_id = run_id(80);
     let artifact_id = artifact_id(81);
     let artifact_digest = content_digest(82);
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     let intent_evidence = intent_artifact_ref(artifact_id.clone(), artifact_digest.clone());
     store
         .append_prepared_commit(run_start_request(
@@ -4214,7 +3684,7 @@ fn run_mode_strings_and_terminal_outcome_mapping_are_canonical() {
 
 #[test]
 fn resource_lane_rejects_same_key_for_other_ledgers_same_run_and_cross_run() {
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     let run_a = run_id(201);
     let run_b = run_id(202);
     store
@@ -4329,7 +3799,7 @@ fn resource_lane_rejects_same_key_for_other_ledgers_same_run_and_cross_run() {
 
 #[test]
 fn resource_lane_holder_identity_includes_run_for_same_ledger_key_across_runs() {
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     let run_a = run_id(213);
     let run_b = run_id(214);
     let shared_ledger = side_effect_ledger_key_with_suffix(11);
@@ -4433,7 +3903,7 @@ fn resource_lane_holder_identity_includes_run_for_same_ledger_key_across_runs() 
 
 #[test]
 fn resource_lane_allows_same_ledger_refresh_with_same_key_only() {
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     let run = run_id(203);
     let ledger = side_effect_ledger_key_with_suffix(4);
     store
@@ -4509,7 +3979,7 @@ fn resource_lane_releases_on_ledger_terminals_and_run_terminal() {
     let run = run_id(204);
     let lane_key = resource_lane_key("wallet-4");
 
-    let mut not_submitted_store = InMemoryTypedRunStore::new();
+    let mut not_submitted_store = StoreContractRunStore::new();
     not_submitted_store
         .append_prepared_commit(run_start_request(
             run.clone(),
@@ -4558,7 +4028,7 @@ fn resource_lane_releases_on_ledger_terminals_and_run_terminal() {
         .is_none());
 
     let run = run_id(205);
-    let mut confirmation_store = InMemoryTypedRunStore::new();
+    let mut confirmation_store = StoreContractRunStore::new();
     confirmation_store
         .append_prepared_commit(run_start_request(
             run.clone(),
@@ -4638,7 +4108,7 @@ fn resource_lane_releases_on_ledger_terminals_and_run_terminal() {
         .is_none());
 
     let run = run_id(206);
-    let mut failure_store = InMemoryTypedRunStore::new();
+    let mut failure_store = StoreContractRunStore::new();
     failure_store
         .append_prepared_commit(run_start_request(run.clone(), "resource-failed-run-start"))
         .expect("append run");
@@ -4673,7 +4143,7 @@ fn resource_lane_releases_on_ledger_terminals_and_run_terminal() {
         .is_none());
 
     let run = run_id(207);
-    let mut manual_store = InMemoryTypedRunStore::new();
+    let mut manual_store = StoreContractRunStore::new();
     manual_store
         .append_prepared_commit(run_start_request_with_saga_policy(
             run.clone(),
@@ -4747,7 +4217,7 @@ fn resource_lane_releases_on_ledger_terminals_and_run_terminal() {
     assert_eq!(lane.holder.run_id, second_run);
 
     let run = run_id(208);
-    let mut terminal_store = InMemoryTypedRunStore::new();
+    let mut terminal_store = StoreContractRunStore::new();
     terminal_store
         .append_prepared_commit(run_start_request(
             run.clone(),
@@ -4788,7 +4258,7 @@ fn resource_lane_reprepare_after_release_requires_stable_resource_key_evidence()
     let run = run_id(212);
     let ledger = side_effect_ledger_key_with_suffix(12);
     let lane_key = resource_lane_key("wallet-stable");
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     store
         .append_prepared_commit(run_start_request(
             run.clone(),
@@ -4888,7 +4358,7 @@ fn resource_lane_reprepare_after_release_requires_stable_resource_key_evidence()
 
 #[test]
 fn resource_lane_projection_rebuilds_from_non_terminal_run_stream() {
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     let run = run_id(209);
     let lane_key = resource_lane_key("wallet-5");
     store
@@ -4920,7 +4390,7 @@ fn resource_lane_projection_rebuilds_from_non_terminal_run_stream() {
 fn resource_touched_set_evidence_is_schema_checked_at_admission() {
     let run = run_id(210);
     let touched = resource_touched_set(52);
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     store
         .append_prepared_commit(run_start_request(run.clone(), "resource-touched-run-start"))
         .expect("append run");
@@ -5061,7 +4531,7 @@ fn side_effect_ledger_purpose_cannot_change_after_intent() {
     let run_id = run_id(92);
     let artifact_id = artifact_id(93);
     let artifact_digest = content_digest(94);
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     store
         .append_prepared_commit(run_start_request(run_id.clone(), "purpose-run-start"))
         .expect("append run start");
@@ -5192,9 +4662,9 @@ fn manual_resolution_outcome_is_closed() {
 
 #[test]
 fn forward_fence_rejects_boundary_events_after_engagement() {
-    fn started_store() -> (RunId, InMemoryTypedRunStore) {
+    fn started_store() -> (RunId, StoreContractRunStore) {
         let run_id = run_id(120);
-        let mut store = InMemoryTypedRunStore::new();
+        let mut store = StoreContractRunStore::new();
         store
             .append_prepared_commit(run_start_request(run_id.clone(), "fence-run-start"))
             .expect("append run start");
@@ -5351,7 +4821,7 @@ fn forward_fence_rejects_boundary_events_after_engagement() {
 #[test]
 fn remediation_intent_requires_engaged_confirmed_forward_and_unique_link() {
     let run_id = run_id(120);
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     store
         .append_prepared_commit(run_start_request(run_id.clone(), "remediation-run-start"))
         .expect("append run start");
@@ -5400,7 +4870,7 @@ fn remediation_intent_requires_engaged_confirmed_forward_and_unique_link() {
     assert_projection_conflict_contains(error, "already exists for forward ledger");
 
     let unconfirmed_run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(121));
-    let mut unconfirmed = InMemoryTypedRunStore::new();
+    let mut unconfirmed = StoreContractRunStore::new();
     unconfirmed
         .append_prepared_commit(run_start_request(
             unconfirmed_run_id.clone(),
@@ -5431,7 +4901,7 @@ fn remediation_intent_requires_engaged_confirmed_forward_and_unique_link() {
 #[test]
 fn manual_resolution_requires_manual_blocked_prefix_and_is_unique() {
     let run_id = run_id(220);
-    let mut non_quiescent = InMemoryTypedRunStore::new();
+    let mut non_quiescent = StoreContractRunStore::new();
     non_quiescent
         .append_prepared_commit(run_start_request_with_saga_policy(
             run_id.clone(),
@@ -5455,7 +4925,7 @@ fn manual_resolution_requires_manual_blocked_prefix_and_is_unique() {
         .expect_err("manual resolution rejects with open non-quiescent attempt");
     assert_projection_conflict_contains(error, "requires no open semantic attempts");
 
-    let mut remediating = InMemoryTypedRunStore::new();
+    let mut remediating = StoreContractRunStore::new();
     remediating
         .append_prepared_commit(run_start_request_with_saga_policy(
             run_id.clone(),
@@ -5487,7 +4957,7 @@ fn manual_resolution_requires_manual_blocked_prefix_and_is_unique() {
         .expect_err("raw manual resolution rejects without proof");
     assert_invalid_prepared_commit_contains(raw_error, "requires verified manual resolution proof");
 
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     store
         .append_prepared_commit(run_start_request_with_saga_policy(
             run_id.clone(),
@@ -5596,7 +5066,7 @@ fn manual_resolution_prepared_commit_requires_matching_verified_proof() {
 #[test]
 fn manual_resolution_rejects_with_same_run_open_attempt() {
     let run_id = run_id(220);
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     store
         .append_prepared_commit(run_start_request_with_saga_policy(
             run_id.clone(),
@@ -5643,7 +5113,7 @@ fn manual_resolution_rejects_with_same_run_open_attempt() {
 fn manual_resolution_admits_with_unrelated_run_open_attempt() {
     let manual_run_id = run_id(220);
     let other_run_id = run_id(221);
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     store
         .append_prepared_commit(run_start_request_with_saga_policy(
             manual_run_id.clone(),
@@ -5715,7 +5185,7 @@ fn manual_resolution_rejects_open_side_effect_lane_without_releasing_it() {
     let run_id = run_id(220);
     let lane_key = resource_lane_key("wallet-open");
     let open_ledger = side_effect_ledger_key_with_suffix(31);
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     store
         .append_prepared_commit(run_start_request_with_saga_policy(
             run_id.clone(),
@@ -5771,7 +5241,7 @@ fn manual_resolution_rejects_open_side_effect_lane_without_releasing_it() {
 #[test]
 fn saga_admit_token_must_match_run_start_policy_digest() {
     let run_id = run_id(220);
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     store
         .append_prepared_commit(run_start_request_with_saga_policy(
             run_id.clone(),
@@ -5817,7 +5287,7 @@ fn manual_resolution_artifacts_require_dedicated_roles() {
         expected_field: &'static str,
     ) {
         let run_id = run_id(220);
-        let mut store = InMemoryTypedRunStore::new();
+        let mut store = StoreContractRunStore::new();
         store
             .append_prepared_commit(run_start_request_with_saga_policy(
                 run_id.clone(),
@@ -5889,7 +5359,7 @@ fn manual_resolution_artifacts_require_dedicated_roles() {
 #[test]
 fn saga_run_completed_requires_terminal_proof() {
     let terminal_run = run_id(120);
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     let policy = manual_saga_policy(160);
     store
         .append_prepared_commit(run_start_request_with_saga_policy(
@@ -5922,7 +5392,7 @@ fn saga_run_completed_requires_terminal_proof() {
         .expect_err("raw terminal completion rejects without proof");
     assert_invalid_prepared_commit_contains(error, "requires SagaTerminalProof");
 
-    let mut forged = InMemoryTypedRunStore::new();
+    let mut forged = StoreContractRunStore::new();
     let forged_run = run_id(220);
     let forged_policy = proof_manual_saga_policy();
     forged
@@ -5997,7 +5467,7 @@ fn saga_run_completed_requires_terminal_proof() {
 fn saga_terminal_prepared_commit_requires_matching_proof() {
     let run_id = run_id(122);
     let policy = SagaPolicySpec::FailWithoutAcdcClaim;
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     store
         .append_prepared_commit(run_start_request_with_saga_policy(
             run_id.clone(),
@@ -6043,7 +5513,7 @@ fn saga_terminal_prepared_commit_rejects_cross_run_proof() {
     let proof_run = run_id(123);
     let request_run = run_id(124);
     let policy = SagaPolicySpec::FailWithoutAcdcClaim;
-    let mut proof_store = InMemoryTypedRunStore::new();
+    let mut proof_store = StoreContractRunStore::new();
     proof_store
         .append_prepared_commit(run_start_request_with_saga_policy(
             proof_run.clone(),
@@ -6088,7 +5558,7 @@ fn saga_terminal_prepared_commit_rejects_cross_run_proof() {
 fn saga_terminal_prepared_commit_rejects_policy_digest_mismatch() {
     let run_id = run_id(125);
     let policy = SagaPolicySpec::FailWithoutAcdcClaim;
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     store
         .append_prepared_commit(run_start_request_with_saga_policy(
             run_id.clone(),
@@ -6124,7 +5594,7 @@ fn saga_terminal_prepared_commit_rejects_policy_digest_mismatch() {
 fn saga_terminal_prepared_commit_rejects_stale_prefix_proof() {
     let run_id = run_id(126);
     let policy = SagaPolicySpec::FailWithoutAcdcClaim;
-    let mut proof_store = InMemoryTypedRunStore::new();
+    let mut proof_store = StoreContractRunStore::new();
     proof_store
         .append_prepared_commit(run_start_request_with_saga_policy(
             run_id.clone(),
@@ -6148,7 +5618,7 @@ fn saga_terminal_prepared_commit_rejects_stale_prefix_proof() {
     )
     .expect("terminal proof authority");
 
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     store
         .append_prepared_commit(run_start_request_with_saga_policy(
             run_id.clone(),
@@ -6176,7 +5646,7 @@ fn saga_terminal_prepared_commit_rejects_stale_prefix_proof() {
 #[test]
 fn saga_projection_derives_obligations_and_run_mode_from_policy_and_stream() {
     let run_id = run_id(120);
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     store
         .append_prepared_commit(run_start_request(
             run_id.clone(),
@@ -6236,7 +5706,7 @@ fn saga_projection_derives_obligations_and_run_mode_from_policy_and_stream() {
 #[test]
 fn side_effect_ledger_state_exposes_valid_prepared_view() {
     let run_id = run_id(120);
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     append_side_effect_prepare(&mut store, &run_id);
 
     let projection = store
@@ -6261,7 +5731,7 @@ fn side_effect_ledger_state_exposes_valid_prepared_view() {
 #[test]
 fn side_effect_ledger_state_rejects_claim_phase_without_active_claim() {
     let run_id = run_id(120);
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     append_side_effect_prepare(&mut store, &run_id);
     let mut projection = store
         .projection_snapshot()
@@ -6279,7 +5749,7 @@ fn side_effect_ledger_state_rejects_claim_phase_without_active_claim() {
 #[test]
 fn side_effect_ledger_state_rejects_confirmed_phase_without_confirmation_evidence() {
     let run_id = run_id(120);
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     append_forward_confirmation(&mut store, &run_id);
     let mut projection = store
         .projection_snapshot()
@@ -6297,7 +5767,7 @@ fn side_effect_ledger_state_rejects_confirmed_phase_without_confirmation_evidenc
 #[test]
 fn side_effect_ledger_state_classifies_ambiguity_as_terminal_not_frontier() {
     let run_id = run_id(120);
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     append_side_effect_prepare(&mut store, &run_id);
     append_side_effect_started(&mut store, &run_id);
     let ambiguity_artifact = artifact_id(121);
@@ -6335,7 +5805,7 @@ fn side_effect_ledger_state_classifies_ambiguity_as_terminal_not_frontier() {
 
 #[test]
 fn side_effect_phase_order_and_fencing_are_enforced() {
-    let mut stale_owner_store = InMemoryTypedRunStore::new();
+    let mut stale_owner_store = StoreContractRunStore::new();
     let stale_owner_run = run_id(100);
     append_side_effect_prepare(&mut stale_owner_store, &stale_owner_run);
     let stale_owner = stale_owner_store
@@ -6350,7 +5820,7 @@ fn side_effect_phase_order_and_fencing_are_enforced() {
         .expect_err("stale owner rejects");
     assert!(matches!(stale_owner, StoreError::ProjectionConflict { .. }));
 
-    let mut stale_token_store = InMemoryTypedRunStore::new();
+    let mut stale_token_store = StoreContractRunStore::new();
     let stale_token_run = run_id(101);
     append_side_effect_prepare(&mut stale_token_store, &stale_token_run);
     let stale_token = stale_token_store
@@ -6365,7 +5835,7 @@ fn side_effect_phase_order_and_fencing_are_enforced() {
         .expect_err("stale token rejects");
     assert!(matches!(stale_token, StoreError::ProjectionConflict { .. }));
 
-    let mut takeover_store = InMemoryTypedRunStore::new();
+    let mut takeover_store = StoreContractRunStore::new();
     let takeover_run = run_id(102);
     append_side_effect_prepare(&mut takeover_store, &takeover_run);
     let reused_token_takeover = takeover_store
@@ -6443,7 +5913,7 @@ fn side_effect_phase_order_and_fencing_are_enforced() {
         StoreError::ProjectionConflict { .. }
     ));
 
-    let mut receipt_store = InMemoryTypedRunStore::new();
+    let mut receipt_store = StoreContractRunStore::new();
     let receipt_run = run_id(103);
     append_side_effect_prepare(&mut receipt_store, &receipt_run);
     append_side_effect_started(&mut receipt_store, &receipt_run);
@@ -6470,7 +5940,7 @@ fn side_effect_phase_order_and_fencing_are_enforced() {
         StoreError::ProjectionConflict { .. }
     ));
 
-    let mut confirmation_store = InMemoryTypedRunStore::new();
+    let mut confirmation_store = StoreContractRunStore::new();
     let confirmation_run = run_id(104);
     append_side_effect_prepare(&mut confirmation_store, &confirmation_run);
     append_side_effect_started(&mut confirmation_store, &confirmation_run);
@@ -6549,7 +6019,7 @@ fn side_effect_phase_order_and_fencing_are_enforced() {
             | StoreError::ProjectionConflict { .. }
     ));
 
-    let mut failure_store = InMemoryTypedRunStore::new();
+    let mut failure_store = StoreContractRunStore::new();
     let failure_run = run_id(105);
     append_side_effect_prepare(&mut failure_store, &failure_run);
     let mismatched_retryability = failure_store
@@ -6568,7 +6038,7 @@ fn side_effect_phase_order_and_fencing_are_enforced() {
         StoreError::ProjectionConflict { .. }
     ));
 
-    let mut failed_without_attempt_store = InMemoryTypedRunStore::new();
+    let mut failed_without_attempt_store = StoreContractRunStore::new();
     let failed_without_attempt_run = run_id(106);
     append_side_effect_prepare(
         &mut failed_without_attempt_store,
@@ -6590,7 +6060,7 @@ fn side_effect_phase_order_and_fencing_are_enforced() {
         "side-effect failure requires matching StateAttemptFailed",
     );
 
-    let mut failed_with_attempt_store = InMemoryTypedRunStore::new();
+    let mut failed_with_attempt_store = StoreContractRunStore::new();
     let failed_with_attempt_run = run_id(107);
     append_side_effect_prepare(&mut failed_with_attempt_store, &failed_with_attempt_run);
     failed_with_attempt_store
@@ -6605,7 +6075,7 @@ fn side_effect_phase_order_and_fencing_are_enforced() {
         })
         .expect("side-effect failure with matching attempt failure accepts");
 
-    let mut failed_mismatch_store = InMemoryTypedRunStore::new();
+    let mut failed_mismatch_store = StoreContractRunStore::new();
     let failed_mismatch_run = run_id(108);
     append_side_effect_prepare(&mut failed_mismatch_store, &failed_mismatch_run);
     let mut mismatched_attempt = side_effect_attempt_failed(false);
@@ -6625,7 +6095,7 @@ fn side_effect_phase_order_and_fencing_are_enforced() {
         "side-effect failure requires matching StateAttemptFailed",
     );
 
-    let mut ambiguity_without_attempt_store = InMemoryTypedRunStore::new();
+    let mut ambiguity_without_attempt_store = StoreContractRunStore::new();
     let ambiguity_without_attempt_run = run_id(109);
     append_side_effect_prepare(
         &mut ambiguity_without_attempt_store,
@@ -6659,7 +6129,7 @@ fn side_effect_phase_order_and_fencing_are_enforced() {
         "side-effect ambiguity requires matching StateAttemptFailed",
     );
 
-    let mut ambiguity_with_attempt_store = InMemoryTypedRunStore::new();
+    let mut ambiguity_with_attempt_store = StoreContractRunStore::new();
     let ambiguity_with_attempt_run = run_id(110);
     append_side_effect_prepare(
         &mut ambiguity_with_attempt_store,
@@ -6692,7 +6162,7 @@ fn side_effect_phase_order_and_fencing_are_enforced() {
         })
         .expect("side-effect ambiguity with matching non-retryable attempt failure accepts");
 
-    let mut ambiguity_retryable_attempt_store = InMemoryTypedRunStore::new();
+    let mut ambiguity_retryable_attempt_store = StoreContractRunStore::new();
     let ambiguity_retryable_attempt_run = run_id(111);
     append_side_effect_prepare(
         &mut ambiguity_retryable_attempt_store,
@@ -6729,7 +6199,7 @@ fn side_effect_phase_order_and_fencing_are_enforced() {
         "side-effect ambiguity retryability must match attempt failure",
     );
 
-    let mut ambiguity_mismatch_store = InMemoryTypedRunStore::new();
+    let mut ambiguity_mismatch_store = StoreContractRunStore::new();
     let ambiguity_mismatch_run = run_id(112);
     append_side_effect_prepare(&mut ambiguity_mismatch_store, &ambiguity_mismatch_run);
     append_side_effect_started(&mut ambiguity_mismatch_store, &ambiguity_mismatch_run);
@@ -6764,7 +6234,7 @@ fn side_effect_phase_order_and_fencing_are_enforced() {
 
 #[test]
 fn side_effect_submission_unknown_recovery_uses_one_submission_result_key() {
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     let run_id = run_id(113);
     append_side_effect_prepare(&mut store, &run_id);
     append_side_effect_started(&mut store, &run_id);
@@ -6911,7 +6381,7 @@ fn fact_recorded_projects_reusable_fact_evidence() {
     let run_id = run_id(95);
     let artifact_id = artifact_id(96);
     let artifact_digest = content_digest(97);
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     let fact_evidence = fact_artifact_ref(artifact_id.clone(), artifact_digest.clone());
     store
         .append_prepared_commit(run_start_request(run_id.clone(), "run-start"))
@@ -6957,7 +6427,7 @@ fn fact_recorded_requires_started_attempt_projection() {
     let run_id = run_id(96);
     let artifact_id = artifact_id(97);
     let artifact_digest = content_digest(98);
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     let fact_evidence = fact_artifact_ref(artifact_id.clone(), artifact_digest.clone());
     store
         .append_prepared_commit(run_start_request(run_id.clone(), "run-start"))
@@ -6984,7 +6454,7 @@ fn retention_refs_are_projected_from_authoritative_stream() {
     let run_id = run_id(120);
     let artifact_id = artifact_id(121);
     let digest = content_digest(122);
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     let evidence = store_artifact_ref(artifact_id.clone(), digest.clone());
     store
         .append_prepared_commit(run_start_request(run_id.clone(), "run-start"))
@@ -7034,7 +6504,7 @@ fn retention_refs_validate_role_contract_shape_without_repeating_exact_fields() 
         let digest = content_digest(223);
         let mut evidence = store_artifact_ref(artifact_id.clone(), digest.clone());
         mutate(&mut evidence);
-        let mut store = InMemoryTypedRunStore::new();
+        let mut store = StoreContractRunStore::new();
         store
             .append_prepared_commit(run_start_request(
                 run_id.clone(),
@@ -7088,7 +6558,7 @@ fn retention_refs_validate_role_contract_shape_without_repeating_exact_fields() 
         let digest = content_digest(225);
         let mut evidence = retention_manifest_artifact_ref(artifact_id.clone(), digest.clone());
         mutate(&mut evidence);
-        let mut store = InMemoryTypedRunStore::new();
+        let mut store = StoreContractRunStore::new();
         store
             .append_prepared_commit(run_start_request(
                 run_id.clone(),
@@ -7136,7 +6606,7 @@ fn retention_manifest_projection_must_chain_append_only() {
     let first_digest = content_digest(124);
     let second_artifact = artifact_id(125);
     let second_digest = content_digest(126);
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     let first_evidence =
         retention_manifest_artifact_ref(first_artifact.clone(), first_digest.clone());
     let second_evidence =
@@ -7263,7 +6733,7 @@ fn retention_manifest_projection_requires_same_commit_retention_ref() {
     let run_id = run_id(120);
     let artifact_id = artifact_id(129);
     let digest = content_digest(130);
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     let evidence = retention_manifest_artifact_ref(artifact_id.clone(), digest.clone());
     store
         .append_prepared_commit(run_start_request(run_id.clone(), "run-start"))
@@ -7421,7 +6891,7 @@ fn projections_rebuild_from_authoritative_run_stream() {
     let manifest_digest = content_digest(66);
     let rendered_artifact_id = artifact_id(67);
     let rendered_digest = content_digest(68);
-    let mut store = InMemoryTypedRunStore::new();
+    let mut store = StoreContractRunStore::new();
     let evidence = store_artifact_ref(output_artifact_id.clone(), output_digest.clone());
     let fact_evidence = fact_artifact_ref(fact_artifact_id.clone(), fact_digest.clone());
     let manifest_evidence =

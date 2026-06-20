@@ -64,9 +64,8 @@ pub use manual_resolution::{
     unresolved_manual_obligations_digest, ManualResolutionEvidenceArtifact,
 };
 pub use runner_kit::{
-    RunnerArtifactBuilder, RunnerCapabilityBinding, RunnerClaimBinding, RunnerClaimTakeoverBinding,
-    RunnerJsonArtifact, RunnerOutputBuilder, RunnerPayloadBuilder, RunnerPreparedInvocationBinding,
-    RunnerRegistrationBuilder, RunnerSideEffectBinding,
+    RunnerArtifactBuilder, RunnerCapabilityBinding, RunnerJsonArtifact, RunnerOutputBuilder,
+    RunnerPayloadBuilder, RunnerRegistrationBuilder,
 };
 pub use runners::{
     CapabilityImplementationBinding, CapabilityImplementationId, ErasedNodeRunner,
@@ -75,10 +74,9 @@ pub use runners::{
 };
 pub use scheduler::{ManualResolutionRequest, SchedulerStatus, SerialTypedScheduler};
 pub use side_effect_driver::{
-    SideEffectClaimAuthority, SideEffectDriver, SideEffectDriverCallbacks, SideEffectDriverFuture,
-    SideEffectEvidenceBuilder, SideEffectIntentPlan, SideEffectObservedEvidence,
-    SideEffectPrepareEvidence, SideEffectPreparedInvocationEvidence, SideEffectProtocolAction,
-    SideEffectReplayEvidence, SideEffectSubmissionDecision, SideEffectSubmissionDecisionFuture,
+    SideEffectDriver, SideEffectDriverCallbacks, SideEffectDriverFuture, SideEffectIntentPlan,
+    SideEffectObservedEvidence, SideEffectProtocolAction, SideEffectReplayEvidence,
+    SideEffectSubmissionDecision, SideEffectSubmissionDecisionFuture,
 };
 pub use side_effect_lifecycle::SideEffectAttemptView;
 pub use spec_authority::CertifiedRuntimeSpec;
@@ -96,9 +94,17 @@ use framework::{
     certified_retention_manifest_node,
 };
 #[cfg(test)]
-use history::validate_historical_run_admission_batch;
-#[cfg(test)]
 use history::RuntimeRunView;
+#[cfg(test)]
+use runner_kit::{
+    RunnerClaimBinding, RunnerClaimTakeoverBinding, RunnerPreparedInvocationBinding,
+    RunnerSideEffectBinding,
+};
+#[cfg(test)]
+use side_effect_driver::{
+    RuntimeSideEffectClaimAuthority, SideEffectEvidenceBuilder,
+    SideEffectPreparedInvocationEvidence,
+};
 #[cfg(test)]
 use side_effect_lifecycle::side_effect_projection_for_attempt;
 

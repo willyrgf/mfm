@@ -2,19 +2,18 @@
 //! Shared data descriptors for kernel scenario and golden tests.
 //!
 //! The crate is intentionally data-only. It names scenario families, public JSON
-//! fragments, corruption cases, and golden labels, while execution and stream
-//! mutation remain in the integration test crate.
+//! fragments and golden labels, while execution remains in the integration test
+//! crate.
 //!
 //! ```
 //! let descriptor = mfm_kernel_scenario_data::proof_transport::SCENARIO;
 //! assert_eq!(descriptor.label, "proof_transport.conformance.deterministic");
-//! assert!(descriptor.corruption_cases.len() >= 7);
+//! assert_eq!(descriptor.public_json_fragments.len(), 5);
 //! ```
 
 use std::fmt;
 
 use mfm_canonical::PlainCanonicalJsonBytes;
-use mfm_events::v1::ArtifactRole;
 use mfm_ids::ContentDigest;
 use mfm_spec::v1::MediaType;
 use serde::Serialize;
@@ -70,8 +69,6 @@ pub struct ScenarioDescriptor {
     pub public_summary_media_type: &'static str,
     /// Public JSON fragments expected from the scenario.
     pub public_json_fragments: &'static [PublicJsonFragment],
-    /// Corruption cases owned by this scenario family.
-    pub corruption_cases: &'static [CorruptionCaseDescriptor],
     /// Golden labels associated with this scenario family.
     pub golden_labels: &'static [GoldenLabel],
 }
@@ -126,38 +123,6 @@ impl ExpectedJsonValue {
     }
 }
 
-/// Corruption case descriptor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub struct CorruptionCaseDescriptor {
-    /// Stable case name.
-    pub name: &'static str,
-    /// Scenario family containing the case.
-    pub family: CorruptionCaseFamily,
-    /// Mutation label to execute in the owning test crate.
-    pub mutation: &'static str,
-    /// Expected public or replay error class.
-    pub expected_error_kind: &'static str,
-    /// Artifact role tag involved in the case, when role-specific.
-    pub artifact_role_tag: Option<&'static str>,
-}
-
-impl CorruptionCaseDescriptor {
-    /// Parses the optional artifact role tag.
-    pub fn artifact_role(&self) -> Option<ArtifactRole> {
-        self.artifact_role_tag.and_then(ArtifactRole::parse)
-    }
-}
-
-/// Corruption case family.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CorruptionCaseFamily {
-    /// Proof transport replay stream corruption.
-    ProofReplayStream,
-    /// Replay artifact evidence corruption.
-    ReplayArtifactEvidence,
-}
-
 /// Stable golden label associated with a scenario family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct GoldenLabel {
@@ -165,13 +130,6 @@ pub struct GoldenLabel {
     pub label: &'static str,
     /// File or assertion surface that owns the golden.
     pub surface: &'static str,
-}
-
-/// Returns true when every corruption case has either no role tag or a known artifact role tag.
-pub fn corruption_case_role_tags_are_known(cases: &[CorruptionCaseDescriptor]) -> bool {
-    cases
-        .iter()
-        .all(|case| case.artifact_role_tag.is_none() || case.artifact_role().is_some())
 }
 
 #[cfg(test)]
@@ -192,15 +150,5 @@ mod tests {
                 .expect("scenario descriptor has canonical digest");
             assert_eq!(digest.algorithm(), mfm_ids::DigestAlgorithm::Sha256JcsV1);
         }
-    }
-
-    #[test]
-    fn corruption_case_role_tags_match_event_roles() {
-        assert!(corruption_case_role_tags_are_known(
-            proof_transport::SCENARIO.corruption_cases
-        ));
-        assert!(corruption_case_role_tags_are_known(
-            replay_artifacts::NEGATIVE_CASE_SCENARIO.corruption_cases
-        ));
     }
 }

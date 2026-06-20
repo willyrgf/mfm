@@ -8,25 +8,25 @@
 use std::sync::Arc;
 
 use mfm_canonical::PlainCanonicalJsonBytes;
-use mfm_capabilities::{CapabilitySetDescriptor, CapabilitySpec};
+use mfm_capabilities::CapabilitySpec;
 use mfm_collectors_proof::{
     proof_adapter_kind, proof_adapter_version, ProofApplyConfig, ProofApplySideEffectState,
     ProofAssembleConfig, ProofAssembleOutputState, ProofConfirmation, ProofFact, ProofFactRequest,
     ProofFactResponse, ProofIdempotencyInput, ProofIntent, ProofMutationCapability, ProofOutput,
     ProofReadCapability, ProofReadConfig, ProofReadFactState, ProofReceipt, ProofReplayError,
     ProofReplayVerifier, ProofSideEffectResult, ProofSubmission, RecordedProofFacts,
+    MANUAL_RESOLUTION_PROOF_ACTION,
 };
 use mfm_events::v1::{self as events, side_effect};
-use mfm_ids::{ContentDigest, DescriptorId};
+use mfm_ids::ContentDigest;
 use mfm_replay::v1 as replay;
 use mfm_runtime::{
     CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture,
     ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCellTerminal, MaterializedInputNode,
     RunnerArtifactBuilder, RunnerCapabilityBinding, RunnerOutputBuilder, RunnerPayloadBuilder,
-    RunnerRegistrationBuilder, RunnerSideEffectBinding, SideEffectClaimAuthority, SideEffectDriver,
-    SideEffectDriverCallbacks, SideEffectDriverFuture, SideEffectIntentPlan,
-    SideEffectObservedEvidence, SideEffectProtocolAction, SideEffectReplayEvidence,
-    SideEffectSubmissionDecision, SideEffectSubmissionDecisionFuture,
+    RunnerRegistrationBuilder, SideEffectDriver, SideEffectDriverCallbacks, SideEffectDriverFuture,
+    SideEffectIntentPlan, SideEffectObservedEvidence, SideEffectProtocolAction,
+    SideEffectReplayEvidence, SideEffectSubmissionDecision, SideEffectSubmissionDecisionFuture,
 };
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
@@ -44,70 +44,37 @@ pub fn register_deterministic_proof_runners(
     registry: &mut ErasedRunnerRegistry,
 ) -> mfm_runtime::Result<()> {
     let implementation_id = CapabilityImplementationId::new(CAPABILITY_IMPLEMENTATION_ID)?;
-    let read = registered_descriptor::<ProofReadFactState>()?;
-    let side_effect = registered_descriptor::<ProofApplySideEffectState>()?;
-    let assemble = registered_descriptor::<ProofAssembleOutputState>()?;
     let mut registrations = RunnerRegistrationBuilder::new(registry, implementation_id);
 
-    register_runner(
-        &mut registrations,
-        read.descriptor_id,
-        &read.capabilities,
-        READ_FACTORY,
+    let read = mfm_program::registered_state_descriptor::<ProofReadFactState>()
+        .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
+    let read_factory = events::RunnerFactoryId::new(READ_FACTORY)?;
+    registrations.register_descriptor(
+        read.descriptor_id().clone(),
+        read.capabilities(),
+        read_factory.clone(),
+        executable(read_factory)?,
         Arc::new(ProofReadRunner),
     )?;
-    register_runner(
-        &mut registrations,
-        side_effect.descriptor_id,
-        &side_effect.capabilities,
-        SIDE_EFFECT_FACTORY,
+    let side_effect = mfm_program::registered_state_descriptor::<ProofApplySideEffectState>()
+        .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
+    let side_effect_factory = events::RunnerFactoryId::new(SIDE_EFFECT_FACTORY)?;
+    registrations.register_descriptor(
+        side_effect.descriptor_id().clone(),
+        side_effect.capabilities(),
+        side_effect_factory.clone(),
+        executable(side_effect_factory)?,
         Arc::new(ProofSideEffectRunner),
     )?;
-    register_runner(
-        &mut registrations,
-        assemble.descriptor_id,
-        &assemble.capabilities,
-        PURE_FACTORY,
-        Arc::new(ProofAssembleRunner),
-    )?;
-    Ok(())
-}
-
-struct RegisteredRuntimeDescriptor {
-    descriptor_id: DescriptorId,
-    capabilities: CapabilitySetDescriptor,
-}
-
-fn registered_descriptor<S>() -> mfm_runtime::Result<RegisteredRuntimeDescriptor>
-where
-    S: mfm_program::StateSpec,
-    S::Effect: mfm_program::EffectRunner<S>,
-    S::Caps: mfm_capabilities::CapabilitySetFor<S::Effect>,
-{
-    let mut states = mfm_program::StateRegistryBuilder::new();
-    let registered = states
-        .register::<S>()
+    let assemble = mfm_program::registered_state_descriptor::<ProofAssembleOutputState>()
         .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
-    Ok(RegisteredRuntimeDescriptor {
-        descriptor_id: registered.descriptor().descriptor_id().clone(),
-        capabilities: registered.descriptor().capabilities().clone(),
-    })
-}
-
-fn register_runner(
-    registrations: &mut RunnerRegistrationBuilder<'_>,
-    descriptor_id: DescriptorId,
-    capabilities: &CapabilitySetDescriptor,
-    factory: &'static str,
-    runner: Arc<dyn ErasedNodeRunner>,
-) -> mfm_runtime::Result<()> {
-    let factory_id = events::RunnerFactoryId::new(factory)?;
+    let assemble_factory = events::RunnerFactoryId::new(PURE_FACTORY)?;
     registrations.register_descriptor(
-        descriptor_id,
-        capabilities,
-        factory_id.clone(),
-        executable(factory_id)?,
-        runner,
+        assemble.descriptor_id().clone(),
+        assemble.capabilities(),
+        assemble_factory.clone(),
+        executable(assemble_factory)?,
+        Arc::new(ProofAssembleRunner),
     )?;
     Ok(())
 }
@@ -185,13 +152,20 @@ async fn run_read(ctx: ErasedRunCtx<'_>) -> mfm_runtime::Result<ErasedRunnerOutp
 }
 
 async fn run_side_effect(ctx: ErasedRunCtx<'_>) -> mfm_runtime::Result<ErasedRunnerOutput> {
-    let config =
+    let accept =
         ProofApplyConfig::new("accept").map_err(mfm_runtime::RuntimeError::InvalidRunnerOutput)?;
-    ensure_config::<ProofApplyConfig>(&ctx.node().config_ref, &config)?;
-    SideEffectDriver::drive(ctx, &ProofSideEffectCallbacks).await
+    if ensure_config::<ProofApplyConfig>(&ctx.node().config_ref, &accept).is_ok() {
+        return SideEffectDriver::drive(ctx, &ProofSideEffectCallbacks { ambiguous: false }).await;
+    }
+    let manual_resolution = ProofApplyConfig::new(MANUAL_RESOLUTION_PROOF_ACTION)
+        .map_err(mfm_runtime::RuntimeError::InvalidRunnerOutput)?;
+    ensure_config::<ProofApplyConfig>(&ctx.node().config_ref, &manual_resolution)?;
+    SideEffectDriver::drive(ctx, &ProofSideEffectCallbacks { ambiguous: true }).await
 }
 
-struct ProofSideEffectCallbacks;
+struct ProofSideEffectCallbacks {
+    ambiguous: bool,
+}
 
 impl SideEffectDriverCallbacks for ProofSideEffectCallbacks {
     type Intent = ProofIntent;
@@ -213,17 +187,6 @@ impl SideEffectDriverCallbacks for ProofSideEffectCallbacks {
             let idempotency = proof_idempotency_input();
             let idem_hash = digest_value(&idempotency)?;
             Ok(SideEffectIntentPlan {
-                side_effect: RunnerSideEffectBinding {
-                    ledger_key: events::SideEffectLedgerKey::new("mfm.proof.ledger.default")?,
-                    ledger_purpose: events::SideEffectLedgerPurpose::Forward,
-                    invocation_epoch: 1,
-                },
-                claim: SideEffectClaimAuthority {
-                    claim_owner: events::RunnerInvocationId::new("mfm.proof.owner.1")?,
-                    claim_generation: 1,
-                    claim_fencing_token: side_effect::ClaimFencingToken::new("mfm.proof.token.1")?,
-                    resource_key: None,
-                },
                 intent: proof_intent(),
                 idempotency,
                 idempotency_key: events::IdempotencyKeyRef::new(format!(
@@ -268,7 +231,19 @@ impl SideEffectDriverCallbacks for ProofSideEffectCallbacks {
         Self::NotSubmittedProof,
         Self::AmbiguityEvidence,
     > {
-        Box::pin(async { Ok(SideEffectSubmissionDecision::Observed(proof_submission()?)) })
+        Box::pin(async move {
+            if self.ambiguous {
+                Ok(SideEffectSubmissionDecision::Ambiguous {
+                    ambiguity_code: events::AmbiguityCode::new("mfm.proof.manual_resolution")
+                        .map_err(|error| {
+                            mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
+                        })?,
+                    evidence: proof_side_effect_result()?,
+                })
+            } else {
+                Ok(SideEffectSubmissionDecision::Observed(proof_submission()?))
+            }
+        })
     }
 
     fn read_receipt<'a, 'ctx>(

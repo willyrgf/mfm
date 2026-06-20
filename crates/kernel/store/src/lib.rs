@@ -4717,9 +4717,9 @@ pub mod v1 {
         }
     }
 
-    /// In-memory implementation of the typed store contract for contract tests.
+    /// Private in-memory implementation behind the async typed store test backend.
     #[derive(Debug, Clone, Default)]
-    pub struct InMemoryTypedRunStore {
+    struct TypedRunMemoryCore {
         streams: BTreeMap<RunId, Vec<CommittedBatch>>,
         commit_keys: BTreeMap<(RunId, CommitKey), CommitKeyRecord>,
         artifacts: BTreeMap<ArtifactId, ArtifactEvidenceRef>,
@@ -4728,12 +4728,7 @@ pub mod v1 {
         projections: ProjectionSnapshot,
     }
 
-    impl InMemoryTypedRunStore {
-        /// Creates an empty in-memory typed run store.
-        pub fn new() -> Self {
-            Self::default()
-        }
-
+    impl TypedRunMemoryCore {
         fn stream_events(&self, run_id: &RunId) -> Vec<KernelEventEnvelope> {
             self.streams
                 .get(run_id)
@@ -4797,8 +4792,8 @@ pub mod v1 {
             compare_artifact_field(
                 &evidence.artifact_id,
                 "artifact_role",
-                artifact_role_str(stored.artifact_role),
-                artifact_role_str(evidence.artifact_role),
+                stored.artifact_role.as_str(),
+                evidence.artifact_role.as_str(),
             )
         }
 
@@ -4924,7 +4919,7 @@ pub mod v1 {
         validate_retention_manifest_pairs(&request.payloads)?;
         validate_payload_public_diagnostics(&request.payloads)?;
 
-        let verifier = InMemoryTypedRunStore {
+        let verifier = TypedRunMemoryCore {
             streams: BTreeMap::new(),
             commit_keys: BTreeMap::new(),
             artifacts: base.artifacts.clone(),
@@ -5027,18 +5022,6 @@ pub mod v1 {
         })
     }
 
-    /// Builds a store-owned committed batch for an already validated request and persisted sequence.
-    ///
-    /// Durable stores use this after a same-fingerprint commit-key hit so the idempotent result can
-    /// return the original sequence even when the caller's `expected_next_seq` is stale.
-    pub fn build_committed_batch(
-        request: &TypedCommitRequest,
-        committed_seq: StreamSeq,
-    ) -> Result<CommittedBatch> {
-        let fingerprint = commit_fingerprint(request)?;
-        build_committed_batch_with_fingerprint(request, committed_seq, fingerprint)
-    }
-
     /// Builds a store-owned committed batch for an already persisted prepared commit plan.
     ///
     /// Durable stores use this after a same-fingerprint prepared plan commit-key hit so the idempotent
@@ -5099,14 +5082,12 @@ pub mod v1 {
         })
     }
 
-    impl InMemoryTypedRunStore {
-        /// Returns the current in-memory projection snapshot.
-        pub fn projection_snapshot(&self) -> &ProjectionSnapshot {
+    impl TypedRunMemoryCore {
+        fn projection_snapshot(&self) -> &ProjectionSnapshot {
             &self.projections
         }
 
-        /// Atomically appends one purpose-specific prepared commit plan.
-        pub fn append_prepared_commit_plan(
+        fn append_prepared_commit_plan(
             &mut self,
             plan: PreparedCommitPlan,
         ) -> Result<CommitOutcome> {
@@ -5155,13 +5136,11 @@ pub mod v1 {
             Ok(CommitOutcome::Appended(batch))
         }
 
-        /// Loads the authoritative run stream.
-        pub fn load_run_stream(&self, run_id: &RunId) -> Vec<KernelEventEnvelope> {
+        fn load_run_stream(&self, run_id: &RunId) -> Vec<KernelEventEnvelope> {
             self.stream_events(run_id)
         }
 
-        /// Returns the next store-owned stream sequence for a run.
-        pub fn expected_next_seq(&self, run_id: &RunId) -> StreamSeq {
+        fn expected_next_seq(&self, run_id: &RunId) -> StreamSeq {
             let Some(batches) = self.streams.get(run_id) else {
                 return StreamSeq::FIRST;
             };
@@ -5172,13 +5151,13 @@ pub mod v1 {
         }
     }
 
-    /// Non-durable async wrapper around [`InMemoryTypedRunStore`].
+    /// Non-durable async wrapper around a private in-memory typed store core.
     ///
     /// This is intended for contract tests and single-process local tools that need the async typed
     /// store API without a durable backend. It must not be used as a production persistence store.
     #[derive(Debug, Clone, Default)]
     pub struct AsyncInMemoryTypedRunStore {
-        inner: Arc<Mutex<InMemoryTypedRunStore>>,
+        inner: Arc<Mutex<TypedRunMemoryCore>>,
     }
 
     impl AsyncInMemoryTypedRunStore {
@@ -5187,7 +5166,13 @@ pub mod v1 {
             Self::default()
         }
 
-        fn lock_inner(&self) -> Result<MutexGuard<'_, InMemoryTypedRunStore>> {
+        /// Returns the current in-memory projection snapshot.
+        pub fn projection_snapshot(&self) -> Result<ProjectionSnapshot> {
+            self.lock_inner()
+                .map(|store| store.projection_snapshot().clone())
+        }
+
+        fn lock_inner(&self) -> Result<MutexGuard<'_, TypedRunMemoryCore>> {
             self.inner.lock().map_err(|_| {
                 StoreError::Event("async in-memory typed run store lock poisoned".to_owned())
             })
@@ -5848,8 +5833,8 @@ pub mod v1 {
             compare_artifact_field(
                 &requirement.artifact_id,
                 "artifact_role",
-                artifact_role_str(evidence.artifact_role),
-                artifact_role_str(role),
+                evidence.artifact_role.as_str(),
+                role.as_str(),
             )?;
             validate_artifact_role_contract(requirement, evidence, role, mode)?;
         } else {
@@ -6760,22 +6745,11 @@ pub mod v1 {
         canonical_json(payload_json(payload))
     }
 
-    fn commit_fingerprint(request: &TypedCommitRequest) -> Result<CommitFingerprint> {
-        let canonical = canonical_json(serde_json::json!({
-            "commit_key": request.commit_key.as_str(),
-            "payloads": request.payloads.iter().map(payload_json).collect::<Vec<_>>(),
-            "preconditions": preconditions_json(&request.preconditions),
-            "required_artifacts": sorted_store_artifacts_json(&request.required_artifacts),
-            "run_id": request.run_id.as_str(),
-        }))?;
-        Ok(CommitFingerprint(canonical.content_digest()))
-    }
-
     /// Computes the canonical idempotency fingerprint for a purpose-specific prepared commit plan.
     ///
     /// The fingerprint intentionally excludes `expected_next_seq`, so idempotent retries can be
-    /// recognized before stale sequence checks as required by the store contract. Unlike
-    /// [`commit_fingerprint`], this covers the artifact evidence admitted atomically with the commit.
+    /// recognized before stale sequence checks as required by the store contract. It covers the
+    /// artifact evidence admitted atomically with the commit.
     pub fn prepared_commit_plan_fingerprint(
         plan: &PreparedCommitPlan,
     ) -> Result<CommitFingerprint> {
@@ -8058,7 +8032,7 @@ pub mod v1 {
     ) -> CodecResult<events::ArtifactEvidenceRef> {
         Ok(events::ArtifactEvidenceRef {
             artifact_id: parse_identity(required_str(json, "artifact_id")?)?,
-            role: parse_artifact_role(required_str(json, "role")?)?,
+            role: decode_artifact_role_tag(required_str(json, "role")?)?,
             schema_id: parse_identity(required_str(json, "schema_id")?)?,
             semantic_type_id: optional_str(json, "semantic_type_id")?
                 .map(parse_identity)
@@ -8073,7 +8047,7 @@ pub mod v1 {
     fn parse_run_artifact(json: &serde_json::Value) -> Result<events::RunArtifactEvidenceRef> {
         Ok(events::RunArtifactEvidenceRef {
             artifact_id: parse_identity(required_str(json, "artifact_id")?)?,
-            role: parse_artifact_role(required_str(json, "role")?)?,
+            role: decode_artifact_role_tag(required_str(json, "role")?)?,
             schema_id: optional_str(json, "schema_id")?
                 .map(parse_identity)
                 .transpose()?,
@@ -8219,13 +8193,12 @@ pub mod v1 {
     fn parse_retention_ref(json: &serde_json::Value) -> Result<events::RetentionRef> {
         Ok(events::RetentionRef {
             artifact_id: parse_identity(required_str(json, "artifact_id")?)?,
-            role: parse_artifact_role(required_str(json, "role")?)?,
+            role: decode_artifact_role_tag(required_str(json, "role")?)?,
             content_digest: parse_identity(required_str(json, "content_digest")?)?,
         })
     }
 
-    /// Parses an artifact role tag.
-    pub fn parse_artifact_role(value: &str) -> CodecResult<ArtifactRole> {
+    fn decode_artifact_role_tag(value: &str) -> CodecResult<ArtifactRole> {
         ArtifactRole::parse(value)
             .ok_or_else(|| CodecError::Identity(format!("unknown artifact role {value}")))
     }
@@ -8356,7 +8329,7 @@ pub mod v1 {
     fn store_artifact_json(evidence: &ArtifactEvidenceRef) -> serde_json::Value {
         serde_json::json!({
             "artifact_id": evidence.artifact_id.as_str(),
-            "artifact_role": artifact_role_str(evidence.artifact_role),
+            "artifact_role": evidence.artifact_role.as_str(),
             "byte_len": evidence.byte_len,
             "digest": evidence.digest.as_str(),
             "media_type": evidence.media_type.as_str(),
@@ -8374,7 +8347,7 @@ pub mod v1 {
             "byte_len": evidence.byte_len,
             "content_digest": evidence.content_digest.as_str(),
             "media_type": evidence.media_type.as_str(),
-            "role": artifact_role_str(evidence.role),
+            "role": evidence.role.as_str(),
             "schema_id": evidence.schema_id.as_str(),
             "semantic_type_id": evidence.semantic_type_id.as_ref().map(SemanticTypeId::as_str),
         })
@@ -8386,7 +8359,7 @@ pub mod v1 {
             "byte_len": evidence.byte_len,
             "content_digest": evidence.content_digest.as_str(),
             "media_type": evidence.media_type.as_str(),
-            "role": artifact_role_str(evidence.role),
+            "role": evidence.role.as_str(),
             "schema_id": evidence.schema_id.as_ref().map(SchemaId::as_str),
             "semantic_type_id": evidence.semantic_type_id.as_ref().map(SemanticTypeId::as_str),
         })
@@ -9367,7 +9340,7 @@ pub mod v1 {
         serde_json::json!({
             "artifact_id": retention_ref.artifact_id.as_str(),
             "content_digest": retention_ref.content_digest.as_str(),
-            "role": artifact_role_str(retention_ref.role),
+            "role": retention_ref.role.as_str(),
         })
     }
 
@@ -9403,11 +9376,6 @@ pub mod v1 {
             RequiredSideEffectState::Ambiguous => "ambiguous",
             RequiredSideEffectState::Failed => "failed",
         }
-    }
-
-    /// Returns the canonical tag for an artifact role.
-    pub fn artifact_role_str(role: ArtifactRole) -> &'static str {
-        role.as_str()
     }
 
     /// Returns the canonical tag for an error category.
