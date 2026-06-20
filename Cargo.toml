@@ -6,7 +6,6 @@ members = [
 	"bin/cli",
 	"bin/rest-api",
 	"tests/integration",
-	"tests/kernel-scenario-data",
 	"crates/app",
 	"crates/collectors/btc-jsonrpc-http",
 	"crates/collectors/proof",

@@ -26,7 +26,6 @@ mfm_core = { path = "../../crates/core" }
 clap = { version = "4.4", features = ["derive", "env"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-toml = "0.8"
 uuid = { version = "1.0", features = ["v4"] }
 hex = "0.4"
 chrono = { version = "0.4", features = ["serde"] }

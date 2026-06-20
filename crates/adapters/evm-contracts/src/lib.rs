@@ -1066,23 +1066,6 @@ fn verify_contract_lifecycle_replay_frame(
     Ok(())
 }
 
-/// Reads and decodes prepared invocation evidence through the artifact-read contract.
-pub async fn read_prepared_invocation_artifact(
-    artifacts: &dyn ArtifactReadProvider,
-    evidence: CapabilityArtifactEvidenceRef,
-) -> Result<PreparedContractInvocation> {
-    let request = ArtifactReadRequest::from_replay_authorized_evidence(evidence);
-    let verified = artifacts
-        .read_artifact(&request)
-        .await
-        .map_err(EvmContractAdapterError::ArtifactRead)?;
-    let prepared = verified
-        .decode_json::<PreparedContractInvocation>()
-        .map_err(EvmContractAdapterError::ArtifactRead)?;
-    ensure_prepared_invocation_public(&prepared)?;
-    Ok(prepared)
-}
-
 /// Converts artifact capability evidence into lifecycle value evidence.
 pub fn lifecycle_evidence_ref(
     evidence: &CapabilityArtifactEvidenceRef,

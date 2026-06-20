@@ -317,10 +317,10 @@ The first certified persistent storage path is:
 crates/storages/stream-store-postgres + crates/storages/artifact-store-fs
 ```
 
-Postgres stores typed event envelopes, commit keys, logical-key indexes, and derived projections.
+Postgres stores typed event envelopes, commit keys, logical-key indexes, and resource-lane locks.
 Its schema and migrations are owned by `crates/storages/stream-store-postgres`; runtime callers
-validate schema compatibility and must not run startup auto-DDL. Projection tables are repairable
-indexes over append-only `typed_run_events`, not semantic authority.
+validate schema compatibility and must not run startup auto-DDL. Read projections are rebuilt from
+append-only `typed_run_events`; they are not persisted semantic authority.
 The filesystem artifact store keeps immutable canonical bytes by digest for local development,
 tests, replay fixtures, and typed workflow ports.
 

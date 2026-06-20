@@ -21,25 +21,19 @@ mfm-app = { path = "../../crates/app" }
 mfm-events = { path = "../../crates/kernel/events" }
 mfm-ids = { path = "../../crates/kernel/ids" }
 mfm-canonical = { path = "../../crates/kernel/canonical" }
-mfm-capabilities = { path = "../../crates/kernel/capabilities" }
 mfm-spec = { path = "../../crates/kernel/spec" }
 mfm-certify = { path = "../../crates/kernel/certify" }
 mfm-program = { path = "../../crates/kernel/program" }
-mfm-program-derive = { path = "../../crates/kernel/program-derive" }
-mfm-values = { path = "../../crates/kernel/values" }
 mfm-manual-auth = { path = "../../crates/kernel/manual-auth" }
 mfm-store = { path = "../../crates/kernel/store" }
 mfm-stream-store-postgres = { path = "../../crates/storages/stream-store-postgres" }
 mfm-op-proof = { path = "../../crates/ops/proof-op" }
 mfm-op-evm-contract-lifecycle = { path = "../../crates/ops/evm-contract-lifecycle-op" }
-mfm-transports-proof = { path = "../../crates/transports/proof" }
-mfm-replay = { path = "../../crates/kernel/replay" }
 mfm-runtime = { path = "../../crates/kernel/runtime" }
 mfm-op-portfolio-tracker = { path = "../../crates/ops/portfolio-tracker-op" }
 mfm-portfolio-config = { path = "../../crates/portfolio-config" }
 mfm_core = { path = "../../crates/core" }
 mfm-rest-api = { path = "../../bin/rest-api" }
-mfm-kernel-scenario-data = { path = "../kernel-scenario-data" }
 
 [dev-dependencies]
 alloy-primitives = { workspace = true }

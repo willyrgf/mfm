@@ -5,7 +5,7 @@ of the MFM typed run-event PostgreSQL schema.
 
 `PostgresTypedRunEventStore` is the certified typed submit/resume surface for
 durable run streams. It persists typed event envelopes, commit keys, artifact
-evidence, logical-key indexes, and replayable projections through `mfm-store`.
+evidence, logical-key indexes, and resource-lane locks through `mfm-store`.
 It owns the PostgreSQL migrations, crate-local SQLx query metadata, and runtime
 schema compatibility checks for that store.
 

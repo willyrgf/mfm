@@ -2016,7 +2016,6 @@ dependencies = [
  "sqlx",
  "tempfile",
  "tokio",
- "toml 0.8.23",
  "uuid",
  "zeroize",
 ]
@@ -2053,7 +2052,6 @@ dependencies = [
  "mfm-replay",
  "mfm-runtime",
  "mfm-signing",
- "mfm-spec",
  "mfm-state-evm-contracts",
  "mfm-store",
  "mfm-values",
@@ -2078,9 +2076,7 @@ dependencies = [
  "mfm-portfolio-model",
  "mfm-program",
  "mfm-runtime",
- "mfm-spec",
  "mfm-state-portfolio",
- "mfm-store",
  "mfm-values",
  "serde",
  "serde_json",
@@ -2091,7 +2087,6 @@ name = "mfm-app"
 version = "0.1.0"
 dependencies = [
  "k256",
- "mfm-adapter-contracts",
  "mfm-adapters-evm-contracts",
  "mfm-adapters-portfolio",
  "mfm-artifact-capabilities",
@@ -2115,11 +2110,9 @@ dependencies = [
  "mfm-signers-keystore",
  "mfm-signing",
  "mfm-spec",
- "mfm-state-evm-contracts",
  "mfm-store",
  "mfm-transports-evm",
  "mfm-transports-proof",
- "mfm-values",
  "mfm_core",
  "serde",
  "serde_json",
@@ -2323,28 +2316,22 @@ dependencies = [
  "mfm-app",
  "mfm-artifact-store-fs",
  "mfm-canonical",
- "mfm-capabilities",
  "mfm-certify",
  "mfm-events",
  "mfm-evm-contract-config",
  "mfm-evm-contract-model",
  "mfm-ids",
- "mfm-kernel-scenario-data",
  "mfm-manual-auth",
  "mfm-op-evm-contract-lifecycle",
  "mfm-op-portfolio-tracker",
  "mfm-op-proof",
  "mfm-portfolio-config",
  "mfm-program",
- "mfm-program-derive",
- "mfm-replay",
  "mfm-rest-api",
  "mfm-runtime",
  "mfm-spec",
  "mfm-store",
  "mfm-stream-store-postgres",
- "mfm-transports-proof",
- "mfm-values",
  "mfm_core",
  "reqwest",
  "serde",
@@ -2354,18 +2341,6 @@ dependencies = [
  "tokio",
  "tower",
  "uuid",
-]
-
-[[package]]
-name = "mfm-kernel-scenario-data"
-version = "0.1.0"
-dependencies = [
- "mfm-canonical",
- "mfm-events",
- "mfm-ids",
- "mfm-spec",
- "serde",
- "serde_json",
 ]
 
 [[package]]

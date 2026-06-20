@@ -100,8 +100,7 @@ impl Operation for ProofWorkflowOperation {
     }
 }
 
-/// Builds the proof state registry used for authoring and certification.
-pub fn proof_state_registry() -> mfm_program::Result<mfm_program::StateRegistrySnapshot> {
+fn proof_state_registry() -> mfm_program::Result<mfm_program::StateRegistrySnapshot> {
     let mut states = StateRegistryBuilder::new();
     states.register::<ProofReadFactState>()?;
     states.register::<ProofApplySideEffectState>()?;
@@ -109,8 +108,7 @@ pub fn proof_state_registry() -> mfm_program::Result<mfm_program::StateRegistryS
     Ok(states.into_snapshot())
 }
 
-/// Builds the proof operation registry used for authoring and certification.
-pub fn proof_operation_registry() -> mfm_program::Result<mfm_program::OperationRegistrySnapshot> {
+fn proof_operation_registry() -> mfm_program::Result<mfm_program::OperationRegistrySnapshot> {
     let mut operations = OperationRegistryBuilder::new();
     operations.register::<ProofWorkflowOperation>()?;
     Ok(operations.into_snapshot())

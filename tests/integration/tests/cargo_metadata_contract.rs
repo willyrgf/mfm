@@ -40,16 +40,6 @@ const PATH_CATEGORY_EXCEPTIONS: &[(&str, CrateCategory)] = &[
     ("crates/core/Cargo.toml", CrateCategory::SignerProvider),
 ];
 
-const SCENARIO_DATA_PACKAGE: &str = "mfm-kernel-scenario-data";
-const SCENARIO_DATA_ALLOWED_DEPENDENCIES: &[&str] = &[
-    "mfm-canonical",
-    "mfm-events",
-    "mfm-ids",
-    "mfm-spec",
-    "serde",
-    "serde_json",
-];
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum CrateCategory {
     Kernel,
@@ -143,62 +133,6 @@ fn workspace_category_dependency_rules_hold_with_exact_allowlist() {
     let metadata = workspace_metadata(&root);
 
     validate_category_dependency_rules(&metadata, &root).expect("category dependency rules");
-}
-
-#[test]
-fn scenario_data_dependencies_match_exact_allowlist() {
-    let root = repo_root();
-    let metadata = workspace_metadata(&root);
-
-    validate_scenario_data_dependency_allowlist(&metadata)
-        .expect("scenario data dependency allowlist");
-}
-
-#[test]
-fn scenario_data_dependency_guard_rejects_forbidden_dependency() {
-    let root = repo_root();
-    let mut metadata = workspace_metadata(&root);
-    push_path_dependency(
-        &mut metadata,
-        SCENARIO_DATA_PACKAGE,
-        "mfm-store",
-        &root.join("crates/kernel/store"),
-    );
-
-    let error = validate_scenario_data_dependency_allowlist(&metadata)
-        .expect_err("forbidden scenario data dependency must fail");
-    assert!(
-        error.contains(SCENARIO_DATA_PACKAGE) && error.contains("mfm-store"),
-        "unexpected error: {error}"
-    );
-}
-
-#[test]
-fn production_crates_do_not_depend_on_scenario_data() {
-    let root = repo_root();
-    let metadata = workspace_metadata(&root);
-
-    validate_no_production_dependencies_on_scenario_data(&metadata, &root)
-        .expect("production crates do not depend on scenario data");
-}
-
-#[test]
-fn production_scenario_data_dependency_guard_rejects_fixture() {
-    let root = repo_root();
-    let mut metadata = workspace_metadata(&root);
-    push_path_dependency(
-        &mut metadata,
-        "mfm-app",
-        SCENARIO_DATA_PACKAGE,
-        &root.join("tests/kernel-scenario-data"),
-    );
-
-    let error = validate_no_production_dependencies_on_scenario_data(&metadata, &root)
-        .expect_err("production scenario data dependency must fail");
-    assert!(
-        error.contains("mfm-app") && error.contains(SCENARIO_DATA_PACKAGE),
-        "unexpected error: {error}"
-    );
 }
 
 #[test]
@@ -661,81 +595,6 @@ fn validate_category_dependency_rules(metadata: &Value, root: &Path) -> Result<(
             return Err(format!(
                 "stale category dependency override source={source} dependency={dependency}"
             ));
-        }
-    }
-
-    Ok(())
-}
-
-fn validate_scenario_data_dependency_allowlist(metadata: &Value) -> Result<(), String> {
-    let packages = metadata_packages(metadata)?;
-    let package = packages
-        .iter()
-        .find(|package| package.get("name").and_then(Value::as_str) == Some(SCENARIO_DATA_PACKAGE))
-        .ok_or_else(|| format!("missing scenario data package {SCENARIO_DATA_PACKAGE}"))?;
-    let dependencies = package
-        .get("dependencies")
-        .and_then(Value::as_array)
-        .ok_or_else(|| format!("{SCENARIO_DATA_PACKAGE} missing dependency list"))?;
-    let actual = dependencies
-        .iter()
-        .filter_map(|dependency| dependency.get("name").and_then(Value::as_str))
-        .collect::<BTreeSet<_>>();
-    let expected = SCENARIO_DATA_ALLOWED_DEPENDENCIES
-        .iter()
-        .copied()
-        .collect::<BTreeSet<_>>();
-
-    if actual == expected {
-        Ok(())
-    } else {
-        Err(format!(
-            "{SCENARIO_DATA_PACKAGE} dependency allowlist mismatch expected={expected:?} actual={actual:?}"
-        ))
-    }
-}
-
-fn validate_no_production_dependencies_on_scenario_data(
-    metadata: &Value,
-    root: &Path,
-) -> Result<(), String> {
-    let packages = workspace_packages(metadata, root)?;
-    let by_name = packages
-        .iter()
-        .map(|package| (package.name.as_str(), package))
-        .collect::<BTreeMap<_, _>>();
-    let scenario_data_packages = packages
-        .iter()
-        .filter(|package| {
-            package.category == CrateCategory::TestSupport && package.name.contains("scenario-data")
-        })
-        .map(|package| package.name.as_str())
-        .collect::<BTreeSet<_>>();
-
-    for source in metadata_packages(metadata)? {
-        let Some(source_name) = source.get("name").and_then(Value::as_str) else {
-            continue;
-        };
-        let Some(source_package) = by_name.get(source_name) else {
-            continue;
-        };
-        if source_package.category == CrateCategory::TestSupport {
-            continue;
-        }
-        let Some(dependencies) = source.get("dependencies").and_then(Value::as_array) else {
-            continue;
-        };
-        for dependency in dependencies {
-            let Some(dependency_name) = dependency.get("name").and_then(Value::as_str) else {
-                continue;
-            };
-            if scenario_data_packages.contains(dependency_name) {
-                return Err(format!(
-                    "production crate depends on scenario data source={} source_category={} dependency={dependency_name}",
-                    source_package.name,
-                    source_package.category.as_str()
-                ));
-            }
         }
     }
 
