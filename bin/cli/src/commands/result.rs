@@ -65,3 +65,21 @@ impl From<Box<dyn std::error::Error>> for CommandError {
         Self::backend("InternalError", "Command failed")
     }
 }
+
+impl From<mfm_app::EntryPointOpResolveError> for CommandError {
+    fn from(error: mfm_app::EntryPointOpResolveError) -> Self {
+        Self::new(
+            error.code().to_owned(),
+            PublicSafeMessage::new(error.message().to_owned()),
+        )
+    }
+}
+
+impl From<mfm_app::OpLaunchError> for CommandError {
+    fn from(error: mfm_app::OpLaunchError) -> Self {
+        Self::new(
+            error.code().to_owned(),
+            PublicSafeMessage::new(error.message().to_owned()),
+        )
+    }
+}
