@@ -185,7 +185,7 @@ impl LaunchableOp for ManualResolutionProofEntryPointOp {
     }
 
     fn plan(&self, authored_config: AuthoredConfig) -> Result<EntryPointOpPlan, OpLaunchError> {
-        let normalized = authored_config.normalize::<Value>()?;
+        let _normalized = authored_config.normalize::<Value>()?;
         let draft = mfm_op_proof::manual_resolution_proof_program_draft(
             mfm_op_proof::ProofWorkflowConfig::default(),
         )
@@ -196,7 +196,6 @@ impl LaunchableOp for ManualResolutionProofEntryPointOp {
             config_material: config_material_for_draft(&draft)?,
             draft,
             seed_material: Vec::new(),
-            authored_config_digest: normalized.authored_digest,
         })
     }
 }

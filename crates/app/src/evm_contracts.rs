@@ -301,7 +301,15 @@ mod tests {
             "validated lifecycle replay should report a completed run"
         );
         let public_output = services
-            .typed_public_output(&run_id, &compiled.public_schema_id)
+            .typed_public_output(
+                &run_id,
+                &compiled
+                    .certified_spec
+                    .envelope()
+                    .spec
+                    .public_outputs
+                    .public_schema_id,
+            )
             .await
             .expect("public output");
         let rendered = public_output.json.expect("json");
@@ -484,7 +492,15 @@ mod tests {
             "deploy lifecycle replay should report a completed run"
         );
         let public_output = services
-            .typed_public_output(&run_id, &compiled.public_schema_id)
+            .typed_public_output(
+                &run_id,
+                &compiled
+                    .certified_spec
+                    .envelope()
+                    .spec
+                    .public_outputs
+                    .public_schema_id,
+            )
             .await
             .expect("public output");
         let rendered = public_output.json.expect("json");
@@ -571,7 +587,15 @@ mod tests {
             .await
             .expect("replay full lifecycle");
         let public_output = services
-            .typed_public_output(&run_id, &compiled.public_schema_id)
+            .typed_public_output(
+                &run_id,
+                &compiled
+                    .certified_spec
+                    .envelope()
+                    .spec
+                    .public_outputs
+                    .public_schema_id,
+            )
             .await
             .expect("public output");
         let rendered = public_output.json.expect("json");

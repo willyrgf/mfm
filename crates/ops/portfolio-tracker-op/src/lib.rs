@@ -315,8 +315,6 @@ pub fn certified_portfolio_spec(
 pub struct PlannedPortfolioSnapshotProgram {
     /// Typed program draft to be certified by app assembly.
     pub draft: mfm_program::TypedProgramDraft,
-    /// Public output schema id exposed by the draft.
-    pub public_schema_id: SchemaId,
     /// Author-emitted config artifacts required by the draft.
     pub config_artifacts: Vec<PortfolioConfigArtifact>,
 }
@@ -327,11 +325,9 @@ pub fn plan_portfolio_snapshot_program(
 ) -> Result<PlannedPortfolioSnapshotProgram, PortfolioSnapshotCompileError> {
     let workflow_config: PortfolioWorkflowConfig = canonical.into();
     let draft = portfolio_program_draft(workflow_config)?;
-    let public_schema_id = draft.public_output_spec().public_schema_id().clone();
     let config_artifacts = portfolio_draft_config_artifacts(&draft)?;
     Ok(PlannedPortfolioSnapshotProgram {
         draft,
-        public_schema_id,
         config_artifacts,
     })
 }
@@ -341,8 +337,6 @@ pub fn plan_portfolio_snapshot_program(
 pub struct CompiledPortfolioSnapshotProgram {
     /// Certifier-backed typed spec authority.
     pub certified_spec: CertifiedTypedSpec,
-    /// Public output schema id exposed by the certified spec.
-    pub public_schema_id: SchemaId,
     /// Config artifacts required to launch the certified spec.
     pub config_artifacts: Vec<PortfolioConfigArtifact>,
 }
@@ -385,17 +379,10 @@ pub fn compile_portfolio_snapshot_program(
 ) -> Result<CompiledPortfolioSnapshotProgram, PortfolioSnapshotCompileError> {
     let draft = portfolio_program_draft(config)?;
     let certified_spec = certify_program_draft(&draft)?;
-    let public_schema_id = certified_spec
-        .envelope()
-        .spec
-        .public_outputs
-        .public_schema_id
-        .clone();
     let config_artifacts =
         portfolio_config_artifacts_for_spec(&draft, &certified_spec.envelope().spec)?;
     Ok(CompiledPortfolioSnapshotProgram {
         certified_spec,
-        public_schema_id,
         config_artifacts,
     })
 }
@@ -403,12 +390,6 @@ pub fn compile_portfolio_snapshot_program(
 /// Canonical bytes for one config artifact required by a typed portfolio spec.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PortfolioConfigArtifact {
-    /// Content-addressed artifact id.
-    pub artifact_id: ArtifactId,
-    /// Canonical content digest.
-    pub digest: ContentDigest,
-    /// Canonical byte length.
-    pub byte_len: u64,
     /// Canonical JSON bytes.
     pub bytes: Vec<u8>,
     /// Config schema id.
@@ -491,9 +472,11 @@ pub fn portfolio_config_artifacts_for_spec(
         let artifact = candidates
             .iter()
             .find(|artifact| {
-                artifact.artifact_id == config_ref.artifact_id
-                    && artifact.digest == config_ref.digest
-                    && artifact.byte_len == config_ref.byte_len
+                let digest = artifact_digest(&artifact.bytes);
+                let artifact_id = ArtifactId::from_digest(digest.algorithm(), *digest.digest());
+                artifact_id == config_ref.artifact_id
+                    && digest == config_ref.digest
+                    && artifact.bytes.len() as u64 == config_ref.byte_len
                     && artifact.media_type == config_ref.media_type
                     && artifact.schema_id == config_ref.schema_id
             })
@@ -514,17 +497,18 @@ fn config_artifact(
     schema_id: SchemaId,
     media_type: spec::MediaType,
 ) -> PortfolioConfigArtifact {
-    let digest = bytes.content_digest();
-    let artifact_id = ArtifactId::from_digest(digest.algorithm(), *digest.digest());
-    let byte_len = bytes.as_bytes().len() as u64;
     PortfolioConfigArtifact {
-        artifact_id,
-        digest,
-        byte_len,
         bytes: bytes.to_vec(),
         schema_id,
         media_type,
     }
+}
+
+fn artifact_digest(bytes: &[u8]) -> ContentDigest {
+    ContentDigest::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        mfm_canonical::sha256_digest_bytes(bytes),
+    )
 }
 
 fn networks_by_id(
@@ -688,14 +672,6 @@ mod tests {
         let planned = plan_portfolio_snapshot_program(canonical).expect("entry-point plan");
 
         assert!(!planned.draft.state_nodes().is_empty());
-        assert_eq!(
-            planned.public_schema_id,
-            planned
-                .draft
-                .public_output_spec()
-                .public_schema_id()
-                .clone()
-        );
         assert!(!planned.config_artifacts.is_empty());
     }
 

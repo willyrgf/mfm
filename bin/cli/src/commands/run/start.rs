@@ -115,14 +115,22 @@ async fn execute_internal(args: &StartArgs) -> CommandResult<StartOutput> {
         run_id: run_id.clone(),
         drive: drive_mode(args.drive),
     })?;
-    let public_output_schema_id = prepared.public_output_schema_id.clone();
+    let public_output_schema_id = prepared
+        .request
+        .certified_spec
+        .envelope()
+        .spec
+        .public_outputs
+        .public_schema_id
+        .clone();
     let services = connect_run_services(&args.stores).await?;
     let run = services.launch_run(prepared.request).await?;
     let public_output = if run.run_mode == TypedRunMode::Completed {
-        match public_output_schema_id {
-            Some(schema_id) => Some(services.typed_public_output(&run_id, &schema_id).await?),
-            None => None,
-        }
+        Some(
+            services
+                .typed_public_output(&run_id, &public_output_schema_id)
+                .await?,
+        )
     } else {
         None
     };

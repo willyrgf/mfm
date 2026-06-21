@@ -519,8 +519,6 @@ pub fn certified_contract_lifecycle_spec(
 pub struct PlannedContractLifecycleProgram {
     /// Typed program draft to be certified by app assembly.
     pub draft: mfm_program::TypedProgramDraft,
-    /// Public output schema id exposed by the draft.
-    pub public_schema_id: SchemaId,
     /// Author-emitted config artifacts required by the draft.
     pub config_artifacts: Vec<ContractLifecycleConfigArtifact>,
     /// Canonical seed artifacts required by the draft.
@@ -532,10 +530,6 @@ pub struct PlannedContractLifecycleProgram {
 pub struct ContractLifecycleSeedArtifact {
     /// Derived seed id required by the draft.
     pub seed_id: SeedId,
-    /// Canonical content digest.
-    pub digest: ContentDigest,
-    /// Canonical byte length.
-    pub byte_len: u64,
     /// Canonical JSON bytes.
     pub bytes: PlainCanonicalJsonBytes,
     /// Seed media type.
@@ -585,8 +579,6 @@ pub fn plan_contract_lifecycle_program(
 pub struct CompiledContractLifecycleProgram {
     /// Certifier-backed typed spec authority.
     pub certified_spec: CertifiedTypedSpec,
-    /// Public output schema id exposed by the certified spec.
-    pub public_schema_id: SchemaId,
     /// Config artifacts required to launch the certified spec.
     pub config_artifacts: Vec<ContractLifecycleConfigArtifact>,
 }
@@ -663,12 +655,6 @@ pub fn compile_contract_lifecycle_program(
 /// Canonical bytes for one config artifact required by a typed lifecycle spec.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContractLifecycleConfigArtifact {
-    /// Content-addressed artifact id.
-    pub artifact_id: ArtifactId,
-    /// Canonical content digest.
-    pub digest: ContentDigest,
-    /// Canonical byte length.
-    pub byte_len: u64,
     /// Canonical JSON bytes.
     pub bytes: Vec<u8>,
     /// Config schema id.
@@ -738,9 +724,11 @@ pub fn contract_lifecycle_config_artifacts_for_spec(
         let artifact = candidates
             .iter()
             .find(|artifact| {
-                artifact.artifact_id == config_ref.artifact_id
-                    && artifact.digest == config_ref.digest
-                    && artifact.byte_len == config_ref.byte_len
+                let digest = artifact_digest(&artifact.bytes);
+                let artifact_id = ArtifactId::from_digest(digest.algorithm(), *digest.digest());
+                artifact_id == config_ref.artifact_id
+                    && digest == config_ref.digest
+                    && artifact.bytes.len() as u64 == config_ref.byte_len
                     && artifact.media_type == config_ref.media_type
                     && artifact.schema_id == config_ref.schema_id
             })
@@ -760,17 +748,10 @@ fn compile_draft(
     draft: mfm_program::TypedProgramDraft,
 ) -> Result<CompiledContractLifecycleProgram, ContractLifecycleCompileError> {
     let certified_spec = certify_program_draft(&draft)?;
-    let public_schema_id = certified_spec
-        .envelope()
-        .spec
-        .public_outputs
-        .public_schema_id
-        .clone();
     let config_artifacts =
         contract_lifecycle_config_artifacts_for_spec(&draft, &certified_spec.envelope().spec)?;
     Ok(CompiledContractLifecycleProgram {
         certified_spec,
-        public_schema_id,
         config_artifacts,
     })
 }
@@ -779,12 +760,10 @@ fn plan_draft(
     draft: mfm_program::TypedProgramDraft,
     seed_bytes: Vec<PlainCanonicalJsonBytes>,
 ) -> Result<PlannedContractLifecycleProgram, ContractLifecycleCompileError> {
-    let public_schema_id = draft.public_output_spec().public_schema_id().clone();
     let config_artifacts = contract_lifecycle_draft_config_artifacts(&draft)?;
     let seed_artifacts = seed_artifacts_for_draft(&draft, seed_bytes)?;
     Ok(PlannedContractLifecycleProgram {
         draft,
-        public_schema_id,
         config_artifacts,
         seed_artifacts,
     })
@@ -818,8 +797,6 @@ fn seed_artifacts_for_draft(
             }
             Ok(ContractLifecycleSeedArtifact {
                 seed_id: seed.seed_id.clone(),
-                digest,
-                byte_len,
                 bytes,
                 media_type: media_type.clone(),
             })
@@ -911,17 +888,18 @@ fn config_artifact(
     schema_id: SchemaId,
     media_type: spec::MediaType,
 ) -> ContractLifecycleConfigArtifact {
-    let digest = bytes.content_digest();
-    let artifact_id = ArtifactId::from_digest(digest.algorithm(), *digest.digest());
-    let byte_len = bytes.as_bytes().len() as u64;
     ContractLifecycleConfigArtifact {
-        artifact_id,
-        digest,
-        byte_len,
         bytes: bytes.to_vec(),
         schema_id,
         media_type,
     }
+}
+
+fn artifact_digest(bytes: &[u8]) -> ContentDigest {
+    ContentDigest::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        mfm_canonical::sha256_digest_bytes(bytes),
+    )
 }
 
 #[cfg(test)]
