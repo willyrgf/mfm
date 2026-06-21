@@ -495,8 +495,6 @@ pub struct PreparedEntryPointRunLaunch {
     pub request: RunLaunchRequest,
     /// Entry-point launch evidence produced by app assembly.
     pub evidence: EntryPointLaunchEvidence,
-    /// Public output schema id exposed by the selected op, when available.
-    pub public_output_schema_id: Option<SchemaId>,
 }
 
 /// Request to append a signed manual resolution for a manually blocked typed run.
@@ -1797,18 +1795,11 @@ pub fn prepare_entry_point_run_launch(
     input: EntryPointRunLaunchInput<'_>,
 ) -> Result<PreparedEntryPointRunLaunch, AppError> {
     let registry_digest = input.entry_point_registry.registry_digest()?;
-    let authored_config_digest = input.authored_config.authored_digest().clone();
     let op = input
         .entry_point_registry
         .resolve(&input.public_op_name, input.op_version)?;
     let resolved_op_id = op.op_id();
     let plan = op.plan(input.authored_config)?;
-    if plan.authored_config_digest != authored_config_digest {
-        return Err(entry_point_launch_internal_error(
-            "EntryPointOpAuthoredDigestMismatch",
-            "entry-point op produced mismatched authored config evidence",
-        ));
-    }
 
     let mut config_inputs = plan
         .config_material
@@ -1836,14 +1827,6 @@ pub fn prepare_entry_point_run_launch(
         .map_err(entry_point_certification_error)?;
     let certified_spec = mfm_certify::certify_typed_spec(lowered, &scoped_registry)
         .map_err(entry_point_certification_error)?;
-    let public_output_schema_id = Some(
-        certified_spec
-            .envelope()
-            .spec
-            .public_outputs
-            .public_schema_id
-            .clone(),
-    );
     config_inputs.extend(framework_config_launch_artifacts_for_spec(
         &certified_spec.envelope().spec,
     )?);
@@ -1874,11 +1857,7 @@ pub fn prepare_entry_point_run_launch(
         config_inputs,
         seed_inputs,
     )?;
-    Ok(PreparedEntryPointRunLaunch {
-        request,
-        evidence,
-        public_output_schema_id,
-    })
+    Ok(PreparedEntryPointRunLaunch { request, evidence })
 }
 
 fn entry_point_certification_error(_error: mfm_certify::CertifyError) -> AppError {

@@ -1,7 +1,6 @@
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_evm_contract_config::{ConfigurePhaseConfig, DeployPhaseConfig, ValidatePhaseConfig};
 use mfm_evm_contract_model::{ConfiguredContract, DeployedContract};
-use mfm_ids::ContentDigest;
 use mfm_op_evm_contract_lifecycle::ContractLifecycleConfig;
 use mfm_portfolio_config::{
     canonicalize_portfolio_snapshot_authored_config, PortfolioSnapshotAuthoredConfig,
@@ -94,7 +93,6 @@ impl LaunchableOp for PortfolioSnapshotEntryPointOp {
             draft: planned.draft,
             config_material,
             seed_material: Vec::new(),
-            authored_config_digest: authored.authored_digest,
         })
     }
 }
@@ -189,7 +187,7 @@ impl LaunchableOp for EvmContractEntryPointOp {
                 let planned =
                     mfm_op_evm_contract_lifecycle::plan_contract_deploy_program(normalized.value)
                         .map_err(evm_contract_plan_error)?;
-                self.entry_plan(planned, normalized.authored_digest)
+                self.entry_plan(planned)
             }
             EvmContractEntryPointKind::Configure => {
                 let normalized = authored_config.normalize::<ConfigureEntryPointConfig>()?;
@@ -198,7 +196,7 @@ impl LaunchableOp for EvmContractEntryPointOp {
                     normalized.value.deployed,
                 )
                 .map_err(evm_contract_plan_error)?;
-                self.entry_plan(planned, normalized.authored_digest)
+                self.entry_plan(planned)
             }
             EvmContractEntryPointKind::Validate => {
                 let normalized = authored_config.normalize::<ValidateEntryPointConfig>()?;
@@ -207,7 +205,7 @@ impl LaunchableOp for EvmContractEntryPointOp {
                     normalized.value.configured,
                 )
                 .map_err(evm_contract_plan_error)?;
-                self.entry_plan(planned, normalized.authored_digest)
+                self.entry_plan(planned)
             }
             EvmContractEntryPointKind::Lifecycle => {
                 let normalized = authored_config.normalize::<ContractLifecycleConfig>()?;
@@ -215,7 +213,7 @@ impl LaunchableOp for EvmContractEntryPointOp {
                     normalized.value,
                 )
                 .map_err(evm_contract_plan_error)?;
-                self.entry_plan(planned, normalized.authored_digest)
+                self.entry_plan(planned)
             }
         }
     }
@@ -225,7 +223,6 @@ impl EvmContractEntryPointOp {
     fn entry_plan(
         &self,
         planned: mfm_op_evm_contract_lifecycle::PlannedContractLifecycleProgram,
-        authored_config_digest: ContentDigest,
     ) -> Result<EntryPointOpPlan, OpLaunchError> {
         Ok(EntryPointOpPlan {
             draft: planned.draft,
@@ -239,7 +236,6 @@ impl EvmContractEntryPointOp {
                     media_type: seed.media_type,
                 })
                 .collect(),
-            authored_config_digest,
         })
     }
 }
@@ -348,7 +344,6 @@ mod tests {
             prepared.evidence.entry_point_registry_digest,
             registry_digest
         );
-        assert!(prepared.public_output_schema_id.is_some());
         assert_eq!(prepared.request.run_id, run_id);
         assert!(!prepared.request.evidence.config_artifacts.is_empty());
     }

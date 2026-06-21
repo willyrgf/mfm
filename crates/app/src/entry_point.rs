@@ -313,8 +313,6 @@ pub struct EntryPointOpPlan {
     pub config_material: Vec<CanonicalConfigMaterial>,
     /// Canonical seed artifacts required by the draft.
     pub seed_material: Vec<CanonicalSeedMaterial>,
-    /// Digest of the original authored config bytes.
-    pub authored_config_digest: ContentDigest,
 }
 
 /// Operation that can plan a public entry-point run from authored config.
@@ -851,10 +849,6 @@ mod tests {
                 draft,
                 config_material: Vec::new(),
                 seed_material: Vec::new(),
-                authored_config_digest: ContentDigest::from_digest(
-                    DigestAlgorithm::Sha256JcsV1,
-                    mfm_canonical::sha256_digest_bytes(b"authored"),
-                ),
             })
         }
     }
