@@ -120,7 +120,7 @@ mod tests {
         ensure_prepared_invocation_public, EvmContractRuntime, EvmContractRuntimeFactory,
         EvmContractRuntimeRoute, PreparedContractInvocation,
     };
-    use mfm_canonical::PlainCanonicalJsonBytes;
+    use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
     use mfm_capabilities::CapabilitySpec;
     use mfm_certify::CertificationRegistry;
     use mfm_core::crypto::EthereumPrivateKey;
@@ -138,6 +138,7 @@ mod tests {
     };
     use mfm_evm_contract_config::{ConfigurePhaseConfig, DeployPhaseConfig, ValidatePhaseConfig};
     use mfm_evm_contract_model::{ConfiguredContract, DeployedContract};
+    use mfm_ids::{ContentDigest, DigestAlgorithm};
     use mfm_op_evm_contract_lifecycle::{
         compile_contract_deploy_program, compile_contract_lifecycle_program,
         compile_contract_validate_program, ContractLifecycleConfig,
@@ -156,6 +157,28 @@ mod tests {
 
     const TEST_SIGNER_HEX: &str =
         "4c0883a69102937d6231471b5dbb6204fe512961708279c2f802d6a8ebf2d3a4";
+
+    fn test_entry_point_evidence(op_name: &'static str) -> events::EntryPointLaunchEvidence {
+        events::EntryPointLaunchEvidence {
+            submitted_public_op_name: events::EntryPointPublicOpName::new(op_name)
+                .expect("public op name"),
+            resolved_op_id: events::EntryPointOpId::new(format!("mfm.test:{op_name}:1"))
+                .expect("entry-point op id"),
+            resolved_op_version: 1,
+            entry_point_registry_digest: test_digest(b"entry-point-registry"),
+            lowering_identity: events::EntryPointLoweringIdentity::new("mfm.test.lowering.v1")
+                .expect("lowering identity"),
+            canonicalizer_identity: spec::CanonicalizerIdentity::new("mfm.test.canonicalizer.v1")
+                .expect("canonicalizer identity"),
+            config_format: events::EntryPointConfigFormat::Toml,
+            authored_config_digest: test_digest(b"authored-config"),
+            canonical_config_digest: test_digest(b"canonical-config"),
+        }
+    }
+
+    fn test_digest(bytes: &[u8]) -> ContentDigest {
+        ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, sha256_digest_bytes(bytes))
+    }
 
     fn evm_forbidden_runtime_terms() -> Vec<String> {
         vec![
@@ -260,6 +283,7 @@ mod tests {
                 certified_spec: compiled.certified_spec.clone(),
                 registry: services.certification_registry(),
                 run_id: run_id.clone(),
+                entry_point_evidence: test_entry_point_evidence("evm_contract_validate"),
                 framework_version: "mfm.test.contract",
                 source_revision: "test-source",
                 launched_at_unix_ms: 1_700_000_000_000,
@@ -358,6 +382,7 @@ mod tests {
                 certified_spec: compiled.certified_spec.clone(),
                 registry: services.certification_registry(),
                 run_id: run_id.clone(),
+                entry_point_evidence: test_entry_point_evidence("evm_contract_validate"),
                 framework_version: "mfm.test.contract",
                 source_revision: "test-source",
                 launched_at_unix_ms: 1_700_000_000_000,
@@ -451,6 +476,7 @@ mod tests {
                 certified_spec: compiled.certified_spec.clone(),
                 registry: services.certification_registry(),
                 run_id: run_id.clone(),
+                entry_point_evidence: test_entry_point_evidence("evm_contract_deploy"),
                 framework_version: "mfm.test.contract",
                 source_revision: "test-source",
                 launched_at_unix_ms: 1_700_000_000_000,
@@ -545,6 +571,7 @@ mod tests {
                 certified_spec: compiled.certified_spec.clone(),
                 registry: services.certification_registry(),
                 run_id: run_id.clone(),
+                entry_point_evidence: test_entry_point_evidence("evm_contract_lifecycle"),
                 framework_version: "mfm.test.contract",
                 source_revision: "test-source",
                 launched_at_unix_ms: 1_700_000_000_000,

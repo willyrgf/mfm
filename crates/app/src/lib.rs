@@ -1884,11 +1884,13 @@ pub fn prepare_entry_point_run_launch(
         authored_config_digest,
         canonical_config_digest: plan.canonical_config_digest,
     };
+    let runtime_entry_point_evidence = runtime_entry_point_launch_evidence(&evidence)?;
     let request = prepare_certified_run_launch(
         CertifiedRunLaunchInput {
             certified_spec,
             registry: &scoped_registry,
             run_id: input.run_id,
+            entry_point_evidence: runtime_entry_point_evidence,
             framework_version: input.framework_version,
             source_revision: input.source_revision,
             launched_at_unix_ms: input.launched_at_unix_ms,
@@ -1901,6 +1903,56 @@ pub fn prepare_entry_point_run_launch(
         request,
         evidence,
         public_output_schema_id,
+    })
+}
+
+fn runtime_entry_point_launch_evidence(
+    evidence: &EntryPointLaunchEvidence,
+) -> Result<events::EntryPointLaunchEvidence, AppError> {
+    Ok(events::EntryPointLaunchEvidence {
+        submitted_public_op_name: events::EntryPointPublicOpName::new(
+            evidence.submitted_public_op_name.as_str(),
+        )
+        .map_err(|_| {
+            entry_point_launch_internal_error(
+                "EntryPointLaunchEvidenceInvalid",
+                "entry-point launch evidence is invalid",
+            )
+        })?,
+        resolved_op_id: events::EntryPointOpId::new(evidence.resolved_op_id.to_string()).map_err(
+            |_| {
+                entry_point_launch_internal_error(
+                    "EntryPointLaunchEvidenceInvalid",
+                    "entry-point launch evidence is invalid",
+                )
+            },
+        )?,
+        resolved_op_version: evidence.resolved_op_version.get(),
+        entry_point_registry_digest: evidence.entry_point_registry_digest.clone(),
+        lowering_identity: events::EntryPointLoweringIdentity::new(
+            evidence.lowering_identity.as_str(),
+        )
+        .map_err(|_| {
+            entry_point_launch_internal_error(
+                "EntryPointLaunchEvidenceInvalid",
+                "entry-point launch evidence is invalid",
+            )
+        })?,
+        canonicalizer_identity: spec::CanonicalizerIdentity::new(
+            evidence.canonicalizer_identity.as_str(),
+        )
+        .map_err(|_| {
+            entry_point_launch_internal_error(
+                "EntryPointLaunchEvidenceInvalid",
+                "entry-point launch evidence is invalid",
+            )
+        })?,
+        config_format: match evidence.config_format {
+            ConfigFormat::Toml => events::EntryPointConfigFormat::Toml,
+            ConfigFormat::Json => events::EntryPointConfigFormat::Json,
+        },
+        authored_config_digest: evidence.authored_config_digest.clone(),
+        canonical_config_digest: evidence.canonical_config_digest.clone(),
     })
 }
 
@@ -1924,6 +1976,8 @@ pub(crate) struct CertifiedRunLaunchInput<'a> {
     pub(crate) registry: &'a CertificationRegistry,
     /// Run id to record in the started run stream.
     pub(crate) run_id: RunId,
+    /// Public entry-point operation evidence selected by app assembly.
+    pub(crate) entry_point_evidence: events::EntryPointLaunchEvidence,
     /// Framework version evidence to bind to the run start event.
     pub(crate) framework_version: &'a str,
     /// Source revision evidence to bind to the run start event.
@@ -1950,6 +2004,7 @@ fn prepare_certified_run_launch(
         certified_spec: input.certified_spec,
         run_id: input.run_id,
         evidence: RunLaunchEvidence {
+            entry_point: input.entry_point_evidence,
             spec_artifact,
             certificate_artifact,
             config_artifacts,

@@ -35,6 +35,8 @@ use crate::{
 /// Launch evidence needed to prepare a typed run admission commit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunLaunchEvidence {
+    /// Public entry-point operation evidence selected by app assembly.
+    pub entry_point: events::EntryPointLaunchEvidence,
     /// Staged certified spec bytes and the evidence to admit with `RunAdmitted`.
     pub spec_artifact: RunLaunchArtifact,
     /// Staged certified spec certificate bytes and the evidence to admit with `RunAdmitted`.
@@ -185,6 +187,7 @@ impl CommitPlanner {
             bound_context.admitted_binding_digest(&adapter_executables)?;
         let run_admitted = events::RunAdmitted {
             run_id: run_id.clone(),
+            entry_point: evidence.entry_point,
             spec_hash: runtime_spec.spec_hash().clone(),
             spec_artifact: run_artifact_ref_from_store(&spec_artifact),
             certificate_artifact: run_artifact_ref_from_store(&certificate_artifact),
