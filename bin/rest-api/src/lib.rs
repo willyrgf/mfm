@@ -35,7 +35,6 @@ use mfm_artifact_store_fs::{FsTypedArtifactError, FsTypedArtifactStore};
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_events::v1::ArtifactRole;
 use mfm_ids::{ArtifactId, ContentDigest, DigestAlgorithm, RunId, SchemaId};
-use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 use mfm_store::v1::AsyncTypedRunEventStore;
 use mfm_stream_store_postgres::{PostgresTypedRunEventStore, PostgresTypedStoreError};
@@ -147,6 +146,12 @@ impl From<mfm_app::OpLaunchError> for ApiError {
     }
 }
 
+impl From<JsonRejection> for ApiError {
+    fn from(_error: JsonRejection) -> Self {
+        Self::invalid_json()
+    }
+}
+
 impl std::fmt::Display for ApiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}: {}", self.code, self.message)
@@ -203,9 +208,7 @@ pub fn make_default_typed_artifact_store() -> FsTypedArtifactStore {
 
 /// Connects to the default certified typed run-event store.
 pub async fn make_default_typed_run_store() -> Result<PostgresTypedRunEventStore, ApiError> {
-    PostgresTypedRunEventStore::connect_env()
-        .await
-        .map_err(api_error_from_typed_store_error)
+    Ok(PostgresTypedRunEventStore::connect_env().await?)
 }
 
 /// Builds default production REST API state from environment-selected stores.
@@ -473,7 +476,7 @@ async fn runs_start<S>(
 where
     S: AsyncTypedRunEventStore + Clone + Send + Sync,
 {
-    let Json(req) = body.map_err(|_| ApiError::invalid_json())?;
+    let Json(req) = body?;
     let run_id = parse_optional_run_id(req.run_id)?;
     let services = state.services()?;
     let entry_point_registry = mfm_app::production_entry_point_op_registry()?;
@@ -538,7 +541,7 @@ where
     S: AsyncTypedRunEventStore + Clone + Send + Sync,
 {
     let run_id = parse_run_id(&run_id)?;
-    let Json(req) = body.map_err(|_| ApiError::invalid_json())?;
+    let Json(req) = body?;
     match req.kind {
         ManualResolutionKind::ManualResolutionV1 => {}
     }
@@ -742,13 +745,7 @@ fn readiness_artifact_probe() -> Result<store::ArtifactEvidenceRef, ApiError> {
         artifact_id: ArtifactId::from_digest(DigestAlgorithm::Sha256JcsV1, *digest.digest()),
         digest,
         byte_len: bytes.len() as u64,
-        media_type: spec::MediaType::new("application/json").map_err(|_| {
-            ApiError::backend(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "JsonMediaTypeInvalid",
-                "JSON media type is invalid",
-            )
-        })?,
+        media_type: mfm_app::json_media_type()?,
         schema_id: None,
         semantic_type_id: None,
         producer_node_id: None,
@@ -774,6 +771,12 @@ fn api_error_from_typed_store_error(error: PostgresTypedStoreError) -> ApiError 
             "RunStoreCorruption",
             "Run store returned invalid data",
         ),
+    }
+}
+
+impl From<PostgresTypedStoreError> for ApiError {
+    fn from(error: PostgresTypedStoreError) -> Self {
+        api_error_from_typed_store_error(error)
     }
 }
 

@@ -202,22 +202,22 @@ impl fmt::Debug for TransientRawTransaction {
 
 /// Returns the EVM signing algorithm identifier.
 pub fn evm_signing_algorithm_id() -> Result<SigningAlgorithmId> {
-    SigningAlgorithmId::new(EVM_SIGNING_ALGORITHM_ID).map_err(EvmSigningError::Signing)
+    Ok(SigningAlgorithmId::new(EVM_SIGNING_ALGORITHM_ID)?)
 }
 
 /// Returns the EVM transaction signing domain identifier.
 pub fn evm_transaction_domain_id() -> Result<SigningDomainId> {
-    SigningDomainId::new(EVM_TRANSACTION_DOMAIN_ID).map_err(EvmSigningError::Signing)
+    Ok(SigningDomainId::new(EVM_TRANSACTION_DOMAIN_ID)?)
 }
 
 /// Returns the legacy EVM transaction signing purpose identifier.
 pub fn legacy_transaction_purpose_id() -> Result<SigningPurposeId> {
-    SigningPurposeId::new(EVM_LEGACY_TRANSACTION_PURPOSE_ID).map_err(EvmSigningError::Signing)
+    Ok(SigningPurposeId::new(EVM_LEGACY_TRANSACTION_PURPOSE_ID)?)
 }
 
 /// Returns the EIP-1559 EVM transaction signing purpose identifier.
 pub fn eip1559_transaction_purpose_id() -> Result<SigningPurposeId> {
-    SigningPurposeId::new(EVM_EIP1559_TRANSACTION_PURPOSE_ID).map_err(EvmSigningError::Signing)
+    Ok(SigningPurposeId::new(EVM_EIP1559_TRANSACTION_PURPOSE_ID)?)
 }
 
 /// Converts a provider signature into a normalized EVM primitive signature.
@@ -260,10 +260,11 @@ fn signing_request(
         purpose,
         digest_from_hash(signing_hash),
     );
-    Ok(request.require_public_identity(
-        ExpectedSignerIdentity::account_id(format!("{expected_from:?}"))
-            .map_err(EvmSigningError::Signing)?,
-    ))
+    Ok(
+        request.require_public_identity(ExpectedSignerIdentity::account_id(format!(
+            "{expected_from:?}"
+        ))?),
+    )
 }
 
 fn digest_from_hash(hash: B256) -> mfm_ids::DigestBytes {
@@ -312,6 +313,12 @@ impl fmt::Display for EvmSigningError {
 }
 
 impl std::error::Error for EvmSigningError {}
+
+impl From<SigningError> for EvmSigningError {
+    fn from(error: SigningError) -> Self {
+        Self::Signing(error)
+    }
+}
 
 /// Closed EVM signature validation failures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -31,7 +31,7 @@ pub fn parse_identity<T>(value: &str) -> CodecResult<T>
 where
     T: std::str::FromStr<Err = IdentityError>,
 {
-    value.parse().map_err(CodecError::from)
+    Ok(value.parse()?)
 }
 
 /// Returns a required string field.

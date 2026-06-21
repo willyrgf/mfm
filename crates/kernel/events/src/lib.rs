@@ -3479,13 +3479,12 @@ pub mod v1 {
         /// Returns the schema id derived from this event schema descriptor.
         pub fn schema_id(&self) -> Result<SchemaId> {
             let digest = self.canonical_json()?.digest_bytes();
-            SchemaId::new(
+            Ok(SchemaId::new(
                 self.schema_name,
                 self.schema_version,
                 DigestAlgorithm::Sha256JcsV1,
                 digest,
-            )
-            .map_err(EventError::from)
+            )?)
         }
     }
 

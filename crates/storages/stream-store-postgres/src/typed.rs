@@ -671,7 +671,7 @@ async fn load_all_stream_run_ids_tx(tx: &mut Transaction<'_, Postgres>) -> Resul
     .await
     .map_err(|error| database_error("failed to load typed stream run ids", error))?;
     rows.into_iter()
-        .map(|run_id| parse_identity::<RunId>(&run_id).map_err(Into::into))
+        .map(|run_id| parse_store_identity(&run_id))
         .collect()
 }
 
@@ -864,11 +864,14 @@ fn parse_optional_identity<T>(value: Option<String>) -> Result<Option<T>>
 where
     T: FromStr<Err = IdentityError>,
 {
-    value
-        .as_deref()
-        .map(parse_identity)
-        .transpose()
-        .map_err(Into::into)
+    Ok(value.as_deref().map(parse_identity).transpose()?)
+}
+
+fn parse_store_identity<T>(value: &str) -> Result<T>
+where
+    T: FromStr<Err = IdentityError>,
+{
+    Ok(parse_identity(value)?)
 }
 
 #[cfg(all(test, feature = "parity-tests"))]

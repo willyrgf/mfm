@@ -941,7 +941,7 @@ fn parse_identity<T>(value: &str) -> TypedArtifactResult<T>
 where
     T: std::str::FromStr<Err = IdentityError>,
 {
-    value.parse().map_err(FsTypedArtifactError::from)
+    Ok(value.parse()?)
 }
 
 fn decode_artifact_role_tag(value: &str) -> TypedArtifactResult<ArtifactRole> {
