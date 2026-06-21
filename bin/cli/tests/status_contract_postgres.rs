@@ -12,8 +12,15 @@ use sqlx::{AssertSqlSafe, PgPool};
 use std::process::Output;
 use tempfile::TempDir;
 
+const ENV_EVM_RPC_SOURCES_JSON: &str = "MFM_EVM_RPC_SOURCES_JSON";
+const PORTFOLIO_NETWORK_ID: &str = "ethereum-mainnet";
+static RPC_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[tokio::test]
 async fn run_status_reports_interrupted_attempt_and_framework_attempts_from_history() {
+    let _rpc_env_guard = RPC_ENV_LOCK.lock().await;
+    let rpc_url = start_rpc_mock();
+    let _rpc_restore = set_rpc_env(rpc_url);
     let database_url =
         std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for parity tests");
     let schema = unique_schema();
@@ -283,6 +290,95 @@ fn sample_portfolio_config_json() -> String {
         "valuation_source_registry": { "sources": [] }
     })
     .to_string()
+}
+
+fn start_rpc_mock() -> String {
+    let app = axum::Router::new().route("/", axum::routing::post(rpc_handler));
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind rpc mock");
+    let addr = listener.local_addr().expect("rpc mock addr");
+    listener
+        .set_nonblocking(true)
+        .expect("set rpc mock nonblocking");
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("rpc mock runtime");
+        runtime.block_on(async move {
+            let listener = tokio::net::TcpListener::from_std(listener).expect("tokio rpc listener");
+            axum::serve(listener, app).await.expect("rpc mock serve");
+        });
+    });
+    format!("http://{addr}")
+}
+
+async fn rpc_handler(
+    axum::Json(request): axum::Json<serde_json::Value>,
+) -> axum::Json<serde_json::Value> {
+    let id = request
+        .get("id")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!(1));
+    let method = request
+        .get("method")
+        .and_then(|value| value.as_str())
+        .expect("json-rpc method");
+    let result = match method {
+        "eth_chainId" => serde_json::json!("0x1"),
+        "eth_getBlockByNumber" => serde_json::json!({
+            "number": "0x64",
+            "hash": "0x1111111111111111111111111111111111111111111111111111111111111111"
+        }),
+        "eth_getBalance" => serde_json::json!("0xde0b6b3a7640000"),
+        other => panic!("unexpected rpc method {other}"),
+    };
+    axum::Json(serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": result
+    }))
+}
+
+fn set_rpc_env(rpc_url: String) -> EnvVarRestore {
+    let previous = std::env::var(ENV_EVM_RPC_SOURCES_JSON).ok();
+    std::env::set_var(
+        ENV_EVM_RPC_SOURCES_JSON,
+        serde_json::json!({
+            "sources": [
+                {
+                    "id": PORTFOLIO_NETWORK_ID,
+                    "expected_chain_id": 1,
+                    "rpc_url": rpc_url,
+                    "authorization": null
+                }
+            ],
+            "policies": [
+                {
+                    "id": PORTFOLIO_NETWORK_ID,
+                    "ordered_sources": [PORTFOLIO_NETWORK_ID]
+                }
+            ]
+        })
+        .to_string(),
+    );
+    EnvVarRestore {
+        name: ENV_EVM_RPC_SOURCES_JSON,
+        previous,
+    }
+}
+
+struct EnvVarRestore {
+    name: &'static str,
+    previous: Option<String>,
+}
+
+impl Drop for EnvVarRestore {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => std::env::set_var(self.name, value),
+            None => std::env::remove_var(self.name),
+        }
+    }
 }
 
 async fn append_interrupted_attempt(
