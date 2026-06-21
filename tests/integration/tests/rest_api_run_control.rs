@@ -249,7 +249,7 @@ async fn start_accepts_entry_point_json_object_config_shape() {
 }
 
 #[tokio::test]
-async fn status_route_reports_interrupted_attempt_and_framework_attempts_from_history() {
+async fn portfolio_status_route_reports_interrupted_attempt_and_framework_attempts_from_history() {
     let _env_guard = RPC_ENV_LOCK.lock().await;
     let rpc_url = start_rpc_mock().await;
     let _env_restore = set_rpc_env(rpc_url);
