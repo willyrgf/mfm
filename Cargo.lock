@@ -1983,6 +1983,7 @@ name = "mfm"
 version = "0.1.29"
 dependencies = [
  "assert_cmd",
+ "axum",
  "chrono",
  "clap",
  "hex",

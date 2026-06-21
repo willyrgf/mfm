@@ -34,6 +34,7 @@ rpassword = "7.0"
 zeroize = "1.7"
 
 [dev-dependencies]
+axum = "0.7"
 mfm-certify = { path = "../../crates/kernel/certify" }
 mfm-events = { path = "../../crates/kernel/events" }
 mfm-manual-auth = { path = "../../crates/kernel/manual-auth" }

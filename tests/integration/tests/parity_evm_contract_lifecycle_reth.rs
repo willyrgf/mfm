@@ -39,6 +39,10 @@ async fn parity_reth_contract_lifecycle_rest_route_completes_and_replays() {
     let public_schema_id =
         mfm_op_evm_contract_lifecycle::compile_contract_lifecycle_program(compiled_config)
             .expect("compiled lifecycle")
+            .certified_spec
+            .envelope()
+            .spec
+            .public_outputs
             .public_schema_id
             .to_string();
 
@@ -466,6 +470,10 @@ fn deploy_public_schema_id(config: serde_json::Value) -> String {
         serde_json::from_value(config).expect("deploy phase config");
     mfm_op_evm_contract_lifecycle::compile_contract_deploy_program(config)
         .expect("compiled deploy")
+        .certified_spec
+        .envelope()
+        .spec
+        .public_outputs
         .public_schema_id
         .to_string()
 }
@@ -477,6 +485,10 @@ fn configure_public_schema_id(config: serde_json::Value, deployed: serde_json::V
         serde_json::from_value(deployed).expect("deployed contract");
     mfm_op_evm_contract_lifecycle::compile_contract_configure_program(config, deployed)
         .expect("compiled configure")
+        .certified_spec
+        .envelope()
+        .spec
+        .public_outputs
         .public_schema_id
         .to_string()
 }
@@ -488,6 +500,10 @@ fn validate_public_schema_id(config: serde_json::Value, configured: serde_json::
         serde_json::from_value(configured).expect("configured contract");
     mfm_op_evm_contract_lifecycle::compile_contract_validate_program(config, configured)
         .expect("compiled validate")
+        .certified_spec
+        .envelope()
+        .spec
+        .public_outputs
         .public_schema_id
         .to_string()
 }
