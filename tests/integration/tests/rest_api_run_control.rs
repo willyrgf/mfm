@@ -786,8 +786,9 @@ fn certified_portfolio_spec_for_config(
         serde_json::from_value(config.clone()).expect("portfolio authored config");
     let canonical = canonicalize_portfolio_snapshot_authored_config(authored)
         .expect("portfolio canonical config");
-    mfm_op_portfolio_tracker::certified_portfolio_spec(canonical.into())
-        .expect("certified portfolio spec")
+    let draft = mfm_op_portfolio_tracker::portfolio_program_draft(canonical.into())
+        .expect("portfolio draft");
+    mfm_certify::certify_program_draft(&draft).expect("certified portfolio spec")
 }
 
 async fn append_interrupted_attempt(

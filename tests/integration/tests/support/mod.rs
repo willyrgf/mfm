@@ -1,7 +1,8 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use mfm_app::{TypedPublicOutputResponse, TypedRunMode, TypedRunResponse};
-use mfm_op_portfolio_tracker::certified_portfolio_spec;
+use mfm_certify::certify_program_draft;
+use mfm_op_portfolio_tracker::portfolio_program_draft;
 use mfm_portfolio_config::{
     canonicalize_portfolio_snapshot_authored_config, parse_portfolio_snapshot_authored_config,
     AuthoredConfigFormat,
@@ -200,7 +201,8 @@ fn parse_public_schema_id(value: &serde_json::Value) -> String {
     let canonical = canonicalize_portfolio_snapshot_authored_config(authored)
         .expect("portfolio snapshot canonical config");
     let workflow = canonical.into();
-    let certified = certified_portfolio_spec(workflow).expect("certified portfolio spec");
+    let draft = portfolio_program_draft(workflow).expect("portfolio draft");
+    let certified = certify_program_draft(&draft).expect("certified portfolio spec");
     certified
         .envelope()
         .spec

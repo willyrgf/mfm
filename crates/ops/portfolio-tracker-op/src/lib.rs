@@ -19,11 +19,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use mfm_certify::{certify_program_draft, CertifiedTypedSpec};
-use mfm_ids::{
-    ArtifactId, ContentDigest, DigestAlgorithm, OperationKind, OperationVersion, SchemaId,
+use mfm_authored_config::{EntryPointDescriptor, TOML_JSON_AUTHORED_CONFIG_FORMATS};
+use mfm_ids::{DigestAlgorithm, OperationKind, OperationVersion};
+use mfm_portfolio_config::{
+    canonicalize_portfolio_snapshot_authored_config, PortfolioSnapshotAuthoredConfig,
+    PortfolioSnapshotCanonicalConfig, PortfolioSnapshotConfigError,
 };
-use mfm_portfolio_config::PortfolioSnapshotCanonicalConfig;
 use mfm_portfolio_model::domain_key::{
     ObservationBatchDomainKey, ReportDomainKey, SourceDomainKey, SubjectDomainKey,
     ValuationDomainKey, ViewDomainKey,
@@ -34,9 +35,9 @@ use mfm_portfolio_model::wallet::WalletConfig;
 use mfm_program::{
     build_root_with_registries, DomainKeyedNonEmptyHandles, Operation, OperationExpansion,
     OperationKey, OperationRegistryBuilder, PublicOutputKey, RootBuilder, ScopeKey, StateKey,
-    StateRegistryBuilder,
+    StateRegistryBuilder, TypedProgramConfigMaterial, TypedProgramLaunchPlan,
 };
-use mfm_spec::v1 as spec;
+use mfm_spec::v1::MediaType;
 pub use mfm_state_portfolio::{
     balance_reader_kind, observation_batch_id, portfolio_adapter_kind, portfolio_adapter_version,
     AssembleSnapshotConfig, AssembleSnapshotInput, AssembleSnapshotInputHandles,
@@ -53,6 +54,15 @@ const PORTFOLIO_OPERATION_VERSION: &str = "mfm.portfolio.operation.tracker_workf
 const ROOT_SCOPE: &str = "portfolio";
 const OP_KEY: &str = "portfolio_tracker";
 const PUBLIC_OUTPUT_KEY: &str = "portfolio";
+
+/// Public portfolio snapshot entry-point descriptor.
+pub const PORTFOLIO_SNAPSHOT_ENTRY_POINT: EntryPointDescriptor = EntryPointDescriptor {
+    namespace: "mfm.portfolio",
+    name: "portfolio_snapshot",
+    public_name: "portfolio_snapshot",
+    version: 1,
+    accepted_config_formats: TOML_JSON_AUTHORED_CONFIG_FORMATS,
+};
 
 /// Typed portfolio tracker workflow operation.
 pub struct PortfolioTrackerWorkflowOperation;
@@ -301,214 +311,77 @@ pub fn portfolio_program_draft(
     )
 }
 
-/// Builds and certifies the typed portfolio program.
-pub fn certified_portfolio_spec(
-    config: PortfolioWorkflowConfig,
-) -> mfm_certify::Result<CertifiedTypedSpec> {
-    let draft = portfolio_program_draft(config)
-        .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?;
-    certify_program_draft(&draft)
-}
-
-/// Deterministic portfolio snapshot entry-point plan before certification.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlannedPortfolioSnapshotProgram {
-    /// Typed program draft to be certified by app assembly.
-    pub draft: mfm_program::TypedProgramDraft,
-    /// Author-emitted config artifacts required by the draft.
-    pub config_artifacts: Vec<PortfolioConfigArtifact>,
+/// Plans a portfolio snapshot entry-point program from human-authored config.
+pub fn plan_portfolio_snapshot_entry_point(
+    authored: PortfolioSnapshotAuthoredConfig,
+) -> Result<TypedProgramLaunchPlan, PortfolioSnapshotPlanError> {
+    let canonical = canonicalize_portfolio_snapshot_authored_config(authored)?;
+    plan_portfolio_snapshot_program(canonical)
 }
 
 /// Plans a portfolio snapshot entry-point program from canonical non-secret config.
 pub fn plan_portfolio_snapshot_program(
     canonical: PortfolioSnapshotCanonicalConfig,
-) -> Result<PlannedPortfolioSnapshotProgram, PortfolioSnapshotCompileError> {
+) -> Result<TypedProgramLaunchPlan, PortfolioSnapshotPlanError> {
     let workflow_config: PortfolioWorkflowConfig = canonical.into();
     let draft = portfolio_program_draft(workflow_config)?;
-    let config_artifacts = portfolio_draft_config_artifacts(&draft)?;
-    Ok(PlannedPortfolioSnapshotProgram {
+    let config_material = portfolio_draft_config_material(&draft)?;
+    Ok(TypedProgramLaunchPlan {
         draft,
-        config_artifacts,
+        config_material,
+        seed_material: Vec::new(),
     })
 }
 
-/// Fully compiled portfolio snapshot launch program.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CompiledPortfolioSnapshotProgram {
-    /// Certifier-backed typed spec authority.
-    pub certified_spec: CertifiedTypedSpec,
-    /// Config artifacts required to launch the certified spec.
-    pub config_artifacts: Vec<PortfolioConfigArtifact>,
-}
-
-/// Error returned while compiling a portfolio snapshot program.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PortfolioSnapshotCompileError {
-    /// Program drafting or config artifact selection failed.
+/// Error returned while planning a portfolio snapshot entry point.
+#[derive(Debug)]
+pub enum PortfolioSnapshotPlanError {
+    /// Authored portfolio snapshot config failed canonical validation.
+    Config(PortfolioSnapshotConfigError),
+    /// Program drafting or config material selection failed.
     Plan(mfm_program::PlanError),
-    /// Certification failed.
-    Certify(mfm_certify::CertifyError),
 }
 
-impl std::fmt::Display for PortfolioSnapshotCompileError {
+impl std::fmt::Display for PortfolioSnapshotPlanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Config(error) => write!(f, "portfolio snapshot config failed: {error}"),
             Self::Plan(error) => write!(f, "portfolio snapshot planning failed: {error}"),
-            Self::Certify(error) => write!(f, "portfolio snapshot certification failed: {error}"),
         }
     }
 }
 
-impl std::error::Error for PortfolioSnapshotCompileError {}
+impl std::error::Error for PortfolioSnapshotPlanError {}
 
-impl From<mfm_program::PlanError> for PortfolioSnapshotCompileError {
+impl From<PortfolioSnapshotConfigError> for PortfolioSnapshotPlanError {
+    fn from(error: PortfolioSnapshotConfigError) -> Self {
+        Self::Config(error)
+    }
+}
+
+impl From<mfm_program::PlanError> for PortfolioSnapshotPlanError {
     fn from(error: mfm_program::PlanError) -> Self {
         Self::Plan(error)
     }
 }
 
-impl From<mfm_certify::CertifyError> for PortfolioSnapshotCompileError {
-    fn from(error: mfm_certify::CertifyError) -> Self {
-        Self::Certify(error)
-    }
-}
-
-/// Builds, certifies, and gathers launch config artifacts for a portfolio snapshot program.
-pub fn compile_portfolio_snapshot_program(
-    config: PortfolioWorkflowConfig,
-) -> Result<CompiledPortfolioSnapshotProgram, PortfolioSnapshotCompileError> {
-    let draft = portfolio_program_draft(config)?;
-    let certified_spec = certify_program_draft(&draft)?;
-    let config_artifacts =
-        portfolio_config_artifacts_for_spec(&draft, &certified_spec.envelope().spec)?;
-    Ok(CompiledPortfolioSnapshotProgram {
-        certified_spec,
-        config_artifacts,
-    })
-}
-
-/// Canonical bytes for one config artifact required by a typed portfolio spec.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PortfolioConfigArtifact {
-    /// Canonical JSON bytes.
-    pub bytes: Vec<u8>,
-    /// Config schema id.
-    pub schema_id: SchemaId,
-    /// Config media type.
-    pub media_type: spec::MediaType,
-}
-
-/// Returns all author-emitted config artifacts from a portfolio draft.
-pub fn portfolio_draft_config_artifacts(
+/// Returns all author-emitted config material from a portfolio draft.
+pub fn portfolio_draft_config_material(
     draft: &mfm_program::TypedProgramDraft,
-) -> mfm_program::Result<Vec<PortfolioConfigArtifact>> {
-    let media_type = spec::MediaType::new("application/json")
+) -> mfm_program::Result<Vec<TypedProgramConfigMaterial>> {
+    let media_type = MediaType::new("application/json")
         .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
     Ok(draft
         .state_nodes()
         .iter()
         .map(|node| &node.config)
         .chain(draft.operation_lineage().iter().map(|frame| &frame.config))
-        .map(|config| {
-            config_artifact(
-                config.canonical_json.clone(),
-                config.schema_id.clone(),
-                media_type.clone(),
-            )
+        .map(|config| TypedProgramConfigMaterial {
+            schema_id: config.schema_id.clone(),
+            bytes: config.canonical_json.clone(),
+            media_type: media_type.clone(),
         })
         .collect())
-}
-
-/// Returns framework config artifacts introduced during certification.
-pub fn portfolio_framework_config_artifacts(
-    typed_spec: &spec::TypedExecutionSpec,
-) -> mfm_program::Result<Vec<PortfolioConfigArtifact>> {
-    let mut artifacts = Vec::new();
-    for node in &typed_spec.nodes {
-        let Some(framework) = &node.framework else {
-            continue;
-        };
-        let bytes = spec::framework_config_canonical_json(framework.config_kind(), &node.node_id)
-            .map_err(|error| mfm_program::PlanError::Canonical(error.to_string()))?;
-        if bytes.content_digest() != node.config_ref.digest
-            || bytes.as_bytes().len() as u64 != node.config_ref.byte_len
-        {
-            return Err(mfm_program::PlanError::Canonical(format!(
-                "framework config helper did not match certified config ref for node {}",
-                node.node_id
-            )));
-        }
-        artifacts.push(config_artifact(
-            bytes,
-            node.config_ref.schema_id.clone(),
-            node.config_ref.media_type.clone(),
-        ));
-    }
-    Ok(artifacts)
-}
-
-/// Returns only config artifacts required by the certified spec, with metadata matching
-/// `config_refs`.
-pub fn portfolio_config_artifacts_for_spec(
-    draft: &mfm_program::TypedProgramDraft,
-    typed_spec: &spec::TypedExecutionSpec,
-) -> mfm_program::Result<Vec<PortfolioConfigArtifact>> {
-    let mut candidates = portfolio_draft_config_artifacts(draft)?;
-    candidates.extend(portfolio_framework_config_artifacts(typed_spec)?);
-    let mut selected = Vec::new();
-    let mut seen_artifact_ids = BTreeMap::new();
-    for config_ref in &typed_spec.config_refs {
-        if let Some(previous_schema) =
-            seen_artifact_ids.insert(config_ref.artifact_id.clone(), config_ref.schema_id.clone())
-        {
-            if previous_schema != config_ref.schema_id {
-                return Err(mfm_program::PlanError::Key(format!(
-                    "certified spec contains duplicate config artifact {} with schemas {} and {}",
-                    config_ref.artifact_id, previous_schema, config_ref.schema_id
-                )));
-            }
-            continue;
-        }
-        let artifact = candidates
-            .iter()
-            .find(|artifact| {
-                let digest = artifact_digest(&artifact.bytes);
-                let artifact_id = ArtifactId::from_digest(digest.algorithm(), *digest.digest());
-                artifact_id == config_ref.artifact_id
-                    && digest == config_ref.digest
-                    && artifact.bytes.len() as u64 == config_ref.byte_len
-                    && artifact.media_type == config_ref.media_type
-                    && artifact.schema_id == config_ref.schema_id
-            })
-            .cloned()
-            .ok_or_else(|| {
-                mfm_program::PlanError::Key(format!(
-                    "missing typed config artifact for {}",
-                    config_ref.artifact_id
-                ))
-            })?;
-        selected.push(artifact);
-    }
-    Ok(selected)
-}
-
-fn config_artifact(
-    bytes: mfm_canonical::PlainCanonicalJsonBytes,
-    schema_id: SchemaId,
-    media_type: spec::MediaType,
-) -> PortfolioConfigArtifact {
-    PortfolioConfigArtifact {
-        bytes: bytes.to_vec(),
-        schema_id,
-        media_type,
-    }
-}
-
-fn artifact_digest(bytes: &[u8]) -> ContentDigest {
-    ContentDigest::from_digest(
-        DigestAlgorithm::Sha256JcsV1,
-        mfm_canonical::sha256_digest_bytes(bytes),
-    )
 }
 
 fn networks_by_id(
@@ -574,6 +447,7 @@ fn observation_targets(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mfm_certify::certify_program_draft;
     use mfm_portfolio_model::metadata::PublicMetadata;
     use mfm_portfolio_model::portfolio::NetworkFamilyConfig;
     use mfm_portfolio_model::symbol::{
@@ -672,7 +546,23 @@ mod tests {
         let planned = plan_portfolio_snapshot_program(canonical).expect("entry-point plan");
 
         assert!(!planned.draft.state_nodes().is_empty());
-        assert!(!planned.config_artifacts.is_empty());
+        assert!(!planned.config_material.is_empty());
+        assert!(planned.seed_material.is_empty());
+    }
+
+    #[test]
+    fn portfolio_snapshot_entry_point_descriptor_is_public_launch_surface() {
+        assert_eq!(PORTFOLIO_SNAPSHOT_ENTRY_POINT.namespace, "mfm.portfolio");
+        assert_eq!(PORTFOLIO_SNAPSHOT_ENTRY_POINT.name, "portfolio_snapshot");
+        assert_eq!(
+            PORTFOLIO_SNAPSHOT_ENTRY_POINT.public_name,
+            "portfolio_snapshot"
+        );
+        assert_eq!(PORTFOLIO_SNAPSHOT_ENTRY_POINT.version, 1);
+        assert_eq!(
+            PORTFOLIO_SNAPSHOT_ENTRY_POINT.accepted_config_formats,
+            TOML_JSON_AUTHORED_CONFIG_FORMATS
+        );
     }
 
     fn sample_workflow_config() -> PortfolioWorkflowConfig {
