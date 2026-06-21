@@ -17,7 +17,7 @@ use mfm_store::v1::{
     TypedCommitBase,
 };
 use serde_json::Value;
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{postgres::PgRow, PgPool, Postgres, Row, Transaction};
 
 use crate::schema::{connect_pool, validate_pool};
 
@@ -213,27 +213,22 @@ impl PostgresTypedRunEventStore {
             let ordinal = i32::try_from(event.ordinal().as_u32()).map_err(|_| {
                 PostgresTypedStoreError::Corruption("typed_run_events.ordinal overflow".into())
             })?;
-            let payload_canonical_byte_len = u64_to_i64(
-                event.audit().payload_canonical_byte_len(),
-                "typed_run_events.payload_canonical_byte_len",
-            )?;
-            sqlx::query!(
+            sqlx::query(
                 "INSERT INTO typed_run_events \
                  (run_id, seq, ordinal, event_id, event_schema_id, spec_hash, commit_key, \
-                  logical_key, payload_hash, payload_canonical_byte_len, payload_json) \
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
-                event.run_id().as_str(),
-                seq,
-                ordinal,
-                event.event_id().as_str(),
-                event.event_schema_id().as_str(),
-                event.spec_hash().as_str(),
-                event.commit_key().as_str(),
-                event.logical_key().as_str(),
-                event.payload_hash().as_str(),
-                payload_canonical_byte_len,
-                payload_json,
+                  logical_key, payload_hash, payload_json) \
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
             )
+            .bind(event.run_id().as_str())
+            .bind(seq)
+            .bind(ordinal)
+            .bind(event.event_id().as_str())
+            .bind(event.event_schema_id().as_str())
+            .bind(event.spec_hash().as_str())
+            .bind(event.commit_key().as_str())
+            .bind(event.logical_key().as_str())
+            .bind(event.payload_hash().as_str())
+            .bind(payload_json)
             .execute(&mut *tx)
             .await
             .map_err(|error| database_error("failed to insert typed event", error))?;
@@ -729,13 +724,12 @@ fn projection_snapshot_with_resource_lanes(
 }
 
 async fn load_run_stream_client(pool: &PgPool, run_id: &RunId) -> Result<Vec<KernelEventEnvelope>> {
-    let rows = sqlx::query_as!(
-        TypedRunEventRow,
+    let rows = sqlx::query(
         "SELECT run_id, seq, ordinal, event_id, event_schema_id, spec_hash, commit_key, \
-         logical_key, payload_hash, payload_canonical_byte_len, payload_json \
+         logical_key, payload_hash, payload_json \
          FROM typed_run_events WHERE run_id = $1 ORDER BY seq ASC, ordinal ASC",
-        run_id.as_str(),
     )
+    .bind(run_id.as_str())
     .fetch_all(pool)
     .await
     .map_err(|error| database_error("failed to load typed run stream", error))?;
@@ -751,13 +745,12 @@ async fn load_run_stream_tx(
     tx: &mut Transaction<'_, Postgres>,
     run_id: &RunId,
 ) -> Result<Vec<KernelEventEnvelope>> {
-    let rows = sqlx::query_as!(
-        TypedRunEventRow,
+    let rows = sqlx::query(
         "SELECT run_id, seq, ordinal, event_id, event_schema_id, spec_hash, commit_key, \
-         logical_key, payload_hash, payload_canonical_byte_len, payload_json \
+         logical_key, payload_hash, payload_json \
          FROM typed_run_events WHERE run_id = $1 ORDER BY seq ASC, ordinal ASC",
-        run_id.as_str(),
     )
+    .bind(run_id.as_str())
     .fetch_all(&mut **tx)
     .await
     .map_err(|error| database_error("failed to load typed run stream", error))?;
@@ -769,7 +762,39 @@ async fn load_run_stream_tx(
     Ok(events)
 }
 
-fn event_envelope_from_row(row: TypedRunEventRow) -> Result<KernelEventEnvelope> {
+fn event_envelope_from_row(row: PgRow) -> Result<KernelEventEnvelope> {
+    let row = TypedRunEventRow {
+        run_id: row
+            .try_get("run_id")
+            .map_err(|error| database_error("failed to decode typed event run_id", error))?,
+        seq: row
+            .try_get("seq")
+            .map_err(|error| database_error("failed to decode typed event seq", error))?,
+        ordinal: row
+            .try_get("ordinal")
+            .map_err(|error| database_error("failed to decode typed event ordinal", error))?,
+        event_id: row
+            .try_get("event_id")
+            .map_err(|error| database_error("failed to decode typed event event_id", error))?,
+        event_schema_id: row.try_get("event_schema_id").map_err(|error| {
+            database_error("failed to decode typed event event_schema_id", error)
+        })?,
+        spec_hash: row
+            .try_get("spec_hash")
+            .map_err(|error| database_error("failed to decode typed event spec_hash", error))?,
+        commit_key: row
+            .try_get("commit_key")
+            .map_err(|error| database_error("failed to decode typed event commit_key", error))?,
+        logical_key: row
+            .try_get("logical_key")
+            .map_err(|error| database_error("failed to decode typed event logical_key", error))?,
+        payload_hash: row
+            .try_get("payload_hash")
+            .map_err(|error| database_error("failed to decode typed event payload_hash", error))?,
+        payload_json: row
+            .try_get("payload_json")
+            .map_err(|error| database_error("failed to decode typed event payload_json", error))?,
+    };
     let payload = payload_from_json_value(&row.payload_json)?;
     let ordinal = u32::try_from(row.ordinal).map_err(|_| {
         PostgresTypedStoreError::Corruption(
@@ -789,10 +814,6 @@ fn event_envelope_from_row(row: TypedRunEventRow) -> Result<KernelEventEnvelope>
             logical_key: LogicalEventKey::new(row.logical_key)?,
             payload_hash: parse_identity::<ContentDigest>(&row.payload_hash)?,
             payload,
-            payload_canonical_byte_len: i64_to_nonnegative_u64(
-                row.payload_canonical_byte_len,
-                "typed_run_events.payload_canonical_byte_len",
-            )?,
         },
     )?)
 }
@@ -807,7 +828,6 @@ struct TypedRunEventRow {
     commit_key: String,
     logical_key: String,
     payload_hash: String,
-    payload_canonical_byte_len: i64,
     payload_json: Value,
 }
 
