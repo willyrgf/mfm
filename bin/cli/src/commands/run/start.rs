@@ -108,17 +108,12 @@ async fn execute_internal(args: &StartArgs) -> CommandResult<StartOutput> {
         Some(run_id) => parse_typed_run_id(run_id)?,
         None => mfm_app::new_run_id(),
     };
-    let public_op_name = PublicOpName::new(&args.op).map_err(command_error_from_op_resolution)?;
-    let op_version = args
-        .op_version
-        .map(mfm_app::OpVersion::new)
-        .transpose()
-        .map_err(command_error_from_op_resolution)?;
+    let public_op_name = PublicOpName::new(&args.op)?;
+    let op_version = args.op_version.map(mfm_app::OpVersion::new).transpose()?;
     let config_bytes = tokio::fs::read(&args.config)
         .await
         .map_err(|_| CommandError::backend("AuthoredConfigReadFailed", "Failed to read config"))?;
-    let authored_config = AuthoredConfig::new(args.config_format.into(), config_bytes)
-        .map_err(command_error_from_op_launch)?;
+    let authored_config = AuthoredConfig::new(args.config_format.into(), config_bytes)?;
     let entry_point_registry =
         mfm_app::production_entry_point_op_registry().map_err(command_error_from_app_error)?;
     let certification_registry =
@@ -156,20 +151,6 @@ async fn execute_internal(args: &StartArgs) -> CommandResult<StartOutput> {
         None
     };
     Ok(CommandOutput::new(StartOutput { run, public_output }))
-}
-
-fn command_error_from_op_resolution(error: mfm_app::EntryPointOpResolveError) -> CommandError {
-    CommandError::new(
-        error.code().to_owned(),
-        mfm_app::PublicSafeMessage::new(error.message().to_owned()),
-    )
-}
-
-fn command_error_from_op_launch(error: mfm_app::OpLaunchError) -> CommandError {
-    CommandError::new(
-        error.code().to_owned(),
-        mfm_app::PublicSafeMessage::new(error.message().to_owned()),
-    )
 }
 
 fn launch_unix_ms() -> Result<u64, CommandError> {
