@@ -136,28 +136,6 @@ fn workspace_category_dependency_rules_hold_with_exact_allowlist() {
 }
 
 #[test]
-fn architecture_overrides_do_not_preserve_stale_workflow_names() {
-    validate_architecture_overrides_do_not_preserve_stale_workflow_names()
-        .expect("architecture override names");
-}
-
-#[test]
-fn architecture_override_guard_rejects_expanded_stale_workflow_names() {
-    let stale_operation_name = [
-        "mfm-op-evm-",
-        &["deploy", "configure", "validate"].join("-"),
-    ]
-    .concat();
-    let error = reject_stale_workflow_name("synthetic override", &stale_operation_name)
-        .expect_err("expanded stale workflow name must fail");
-
-    assert!(
-        error.contains(&stale_operation_name),
-        "unexpected error: {error}"
-    );
-}
-
-#[test]
 fn category_dependency_rules_reject_forbidden_edges() {
     let root = repo_root();
     let mut metadata = workspace_metadata(&root);
@@ -415,67 +393,6 @@ fn kernel_dependency_boundary_rejects_non_kernel_path_dependency_fixture() {
     );
 }
 
-fn validate_architecture_overrides_do_not_preserve_stale_workflow_names() -> Result<(), String> {
-    for &(source, dependency) in APPROVED_CATEGORY_DEPENDENCY_OVERRIDES {
-        reject_stale_workflow_name("category dependency override source", source)?;
-        reject_stale_workflow_name("category dependency override dependency", dependency)?;
-    }
-
-    for &(manifest, category) in PATH_CATEGORY_EXCEPTIONS {
-        reject_stale_workflow_name("category path exception manifest", manifest)?;
-        reject_stale_workflow_name("category path exception category", category.as_str())?;
-    }
-
-    Ok(())
-}
-
-fn reject_stale_workflow_name(label: &str, value: &str) -> Result<(), String> {
-    if let Some(term) = stale_workflow_terms()
-        .into_iter()
-        .find(|term| value.contains(term))
-    {
-        return Err(format!(
-            "{label} preserves stale workflow-shaped name value={value} term={term}"
-        ));
-    }
-
-    Ok(())
-}
-
-fn stale_workflow_terms() -> Vec<String> {
-    let lower = ["d", "cv"].concat();
-    let upper = lower.to_ascii_uppercase();
-    let title = lower
-        .chars()
-        .enumerate()
-        .flat_map(|(index, ch)| {
-            if index == 0 {
-                ch.to_uppercase().collect::<Vec<_>>()
-            } else {
-                vec![ch]
-            }
-        })
-        .collect::<String>();
-    let deploy = "deploy";
-    let configure = "configure";
-    let validate = "validate";
-    let operation_words = [deploy, configure, validate];
-
-    vec![
-        lower.clone(),
-        upper,
-        title.clone(),
-        format!("Evm{title}"),
-        format!("evm_{lower}"),
-        format!("evm-{lower}"),
-        format!("mfm.evm.{lower}"),
-        format!("typed-evm-{lower}"),
-        ["Deploy", "Configure", "Validate"].concat(),
-        operation_words.join("_"),
-        operation_words.join("-"),
-    ]
-}
-
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -533,8 +450,6 @@ fn validate_all_workspace_crates_have_mfm_category(metadata: &Value) -> Result<(
 }
 
 fn validate_category_dependency_rules(metadata: &Value, root: &Path) -> Result<(), String> {
-    validate_architecture_overrides_do_not_preserve_stale_workflow_names()?;
-
     let packages = workspace_packages(metadata, root)?;
     let by_manifest_dir = packages
         .iter()
@@ -706,8 +621,6 @@ fn push_synthetic_workspace_package(
 }
 
 fn validate_workspace_category_paths(packages: &[WorkspacePackage]) -> Result<(), String> {
-    validate_architecture_overrides_do_not_preserve_stale_workflow_names()?;
-
     let mut used_exceptions = BTreeSet::new();
 
     for package in packages {

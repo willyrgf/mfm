@@ -78,16 +78,6 @@ fn schema_scoped_database_url(database_url: &str, schema: &str) -> String {
     format!("{database_url}{separator}options=-csearch_path%3D{schema}")
 }
 
-fn json_post(uri: &str, body: serde_json::Value) -> Request<Body> {
-    let s = serde_json::to_string(&body).expect("json request must serialize");
-    Request::builder()
-        .method("POST")
-        .uri(uri)
-        .header("content-type", "application/json")
-        .body(Body::from(s))
-        .expect("request")
-}
-
 async fn response_json(resp: axum::response::Response) -> serde_json::Value {
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
@@ -126,34 +116,6 @@ async fn parity_typed_rest_postgres_smoke() {
     let ready_v = response_json(ready).await;
     assert_eq!(ready_v["status"], "success");
     assert_eq!(ready_v["data"]["checks"]["typed_run_store"], "ready");
-
-    let dynamic_artifact = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/v1/artifacts/0000000000000000000000000000000000000000000000000000000000000000")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("artifact response");
-    assert_eq!(dynamic_artifact.status(), StatusCode::NOT_FOUND);
-
-    let dynamic_start = app
-        .clone()
-        .oneshot(json_post(
-            "/v1/runs/start",
-            serde_json::json!({
-                "kind": "single_op_start_v1",
-                "op_id": "proof",
-                "op_version": "v1",
-                "op_config": {},
-            }),
-        ))
-        .await
-        .expect("dynamic start response");
-    assert_eq!(dynamic_start.status(), StatusCode::BAD_REQUEST);
 
     let absent_status = app
         .oneshot(

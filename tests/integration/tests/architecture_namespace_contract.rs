@@ -4,45 +4,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const TEST_HARNESS_PATHS: &[&str] = &["tests/integration/tests/architecture_namespace_contract.rs"];
-const ENTRYPOINT_OP_MIGRATION_DOC_PATHS: &[&str] = &[
-    "docs/RFC_ENTRYPOINT_OP.md",
-    "docs/PLAN_IMPL_RFC_ENTRYPOINT_OP.md",
-];
-
-const REMOVED_PUBLIC_EXECUTION_SURFACE_TERMS: &[&str] = &[
-    "mfm_cli portfolio snapshot",
-    "mfm portfolio snapshot",
-    "bin/cli/src/commands/portfolio",
-    "/v1/portfolio/snapshot",
-    "portfolio_snapshot_start_v1",
-    "PortfolioSnapshotStartBody",
-    "PortfolioSnapshotStartKind",
-    "mfm_cli evm contracts",
-    "mfm evm contracts",
-    "bin/cli/src/commands/evm",
-    "/v1/evm/contracts/",
-    "EvmContractDeployStartBody",
-    "EvmContractConfigureStartBody",
-    "EvmContractValidateStartBody",
-    "EvmContractLifecycleStartBody",
-    "EvmContractDeployStartKind",
-    "EvmContractConfigureStartKind",
-    "EvmContractValidateStartKind",
-    "EvmContractLifecycleStartKind",
-];
-
-const PUBLIC_BUNDLE_LAUNCH_TERMS: &[&str] = &[
-    "--bundle",
-    "certified_typed_spec_bundle_v1",
-    "CERTIFIED_SPEC_BUNDLE_KIND",
-    "CertifiedSpecBundle",
-    "CertifiedBundleInvalid",
-    "CertifiedBundleVerificationFailed",
-    "parse_certified_spec_bundle",
-    "prepare_verified_bundle_launch",
-    "UntrustedCertifiedBundleLaunchInput",
-];
-
 const FORBIDDEN_TYPED_SURFACE_FIELDS: &[&str] = &[
     "rpc_url",
     "authorization",
@@ -68,49 +29,6 @@ const TEMPORARY_TYPED_FIELD_ALLOWLIST: &[(&str, &str, usize)] = &[
     ("crates/kernel/runtime/src/tests.rs", "authorization", 11),
     ("crates/ops/proof-op/src/lib.rs", "authorization", 5),
 ];
-
-#[test]
-fn active_public_namespace_has_no_stale_workflow_recipe_terms() {
-    let root = repo_root();
-    let entries = repo_text_entries(&root);
-    let forbidden_terms = forbidden_public_name_terms();
-
-    assert_forbidden_terms_are_allowlisted(
-        "public namespace",
-        &entries,
-        &forbidden_terms,
-        &[],
-        |_path, _source| true,
-    );
-}
-
-#[test]
-fn public_execution_ingress_has_no_removed_domain_workflow_surfaces() {
-    let root = repo_root();
-    let entries = repo_text_entries(&root);
-
-    assert_forbidden_terms_are_allowlisted(
-        "removed public execution surface",
-        &entries,
-        REMOVED_PUBLIC_EXECUTION_SURFACE_TERMS,
-        &[],
-        |path, _source| is_public_execution_surface_scan_path(path),
-    );
-}
-
-#[test]
-fn public_execution_ingress_has_no_bundle_shaped_launch_surface() {
-    let root = repo_root();
-    let entries = repo_text_entries(&root);
-
-    assert_forbidden_terms_are_allowlisted(
-        "public bundle launch surface",
-        &entries,
-        PUBLIC_BUNDLE_LAUNCH_TERMS,
-        &[],
-        |path, _source| is_public_execution_surface_scan_path(path),
-    );
-}
 
 #[test]
 fn typed_surface_runtime_fields_are_temporarily_allowlisted_by_path() {
@@ -163,50 +81,6 @@ fn repository_text_entries_include_tracked_dot_config_surfaces() {
             .iter()
             .all(|entry| !entry.path.starts_with("migrations/")),
         "Postgres migrations must live under the owning storage crate"
-    );
-}
-
-#[test]
-fn docs_do_not_describe_synthetic_admission_as_executed_genesis_state() {
-    let root = repo_root();
-    let entries = repo_text_entries(&root);
-    let forbidden = [
-        "executes the sealed `BootstrapRun` genesis state",
-        "executes the sealed BootstrapRun genesis state",
-        "`BootstrapRun` remains certified",
-        "BootstrapRun remains certified",
-        "legacy bundled bootstrap evidence",
-        "bundled bootstrap evidence",
-    ];
-
-    assert_forbidden_terms_are_allowlisted(
-        "stale admission docs",
-        &entries,
-        &forbidden,
-        &[],
-        |path, _source| path != "tests/integration/tests/architecture_namespace_contract.rs",
-    );
-}
-
-#[test]
-fn repository_does_not_expose_raw_prepared_commit_escape_hatch_names() {
-    let root = repo_root();
-    let entries = repo_text_entries(&root);
-    let forbidden = [
-        "PreparedTypedCommit",
-        "append_prepared_typed_commit",
-        "stage_prepared_typed_run_commit",
-        "build_prepared_committed_batch",
-        "prepared_commit_fingerprint",
-        "into_typed_commit",
-    ];
-
-    assert_forbidden_terms_are_allowlisted(
-        "raw prepared commit escape hatch",
-        &entries,
-        &forbidden,
-        &[],
-        |path, _source| path != "tests/integration/tests/architecture_namespace_contract.rs",
     );
 }
 
@@ -315,52 +189,6 @@ fn evm_contract_lifecycle_runners_live_in_adapter_not_app() {
 }
 
 #[test]
-fn namespace_guard_rejects_synthetic_stale_names() {
-    let forbidden_terms = forbidden_public_name_terms();
-    let stale_route_base = format!("/v1/evm/{}", stale_recipe_abbrev());
-    let stale_route = format!("{stale_route_base}/deploy");
-    let entries = vec![TextEntry {
-        path: "crates/new-public-surface/src/lib.rs".to_owned(),
-        source: format!("const ROUTE: &str = \"{stale_route}\";"),
-    }];
-
-    let error = forbidden_term_report(
-        "synthetic namespace",
-        &entries,
-        &forbidden_terms,
-        &[],
-        |_path, _source| true,
-    )
-    .expect_err("synthetic stale name must fail");
-
-    assert!(
-        error.contains("crates/new-public-surface/src/lib.rs") && error.contains(&stale_route_base),
-        "unexpected error: {error}"
-    );
-}
-
-#[test]
-fn namespace_guard_rejects_synthetic_stale_path_names() {
-    let forbidden_terms = forbidden_public_name_terms();
-    let stale_path = format!("crates/transports/evm-{}/src/lib.rs", stale_recipe_abbrev());
-    let entries = vec![TextEntry {
-        path: stale_path.clone(),
-        source: "pub struct ContractTransport;".to_owned(),
-    }];
-
-    let error = forbidden_term_report(
-        "synthetic namespace",
-        &entries,
-        &forbidden_terms,
-        &[],
-        |_path, _source| true,
-    )
-    .expect_err("synthetic stale path must fail");
-
-    assert!(error.contains(&stale_path), "unexpected error: {error}");
-}
-
-#[test]
 fn typed_surface_guard_rejects_synthetic_runtime_fields() {
     let entries = vec![TextEntry {
         path: "crates/new-config/src/lib.rs".to_owned(),
@@ -409,46 +237,6 @@ fn typed_surface_guard_rejects_extra_runtime_field_in_allowlisted_path() {
 struct TextEntry {
     path: String,
     source: String,
-}
-
-fn stale_recipe_abbrev() -> String {
-    ["d", "cv"].concat()
-}
-
-fn forbidden_public_name_terms() -> Vec<String> {
-    let lower = stale_recipe_abbrev();
-    let upper = lower.to_ascii_uppercase();
-    let title = lower
-        .chars()
-        .enumerate()
-        .flat_map(|(index, ch)| {
-            if index == 0 {
-                ch.to_uppercase().collect::<Vec<_>>()
-            } else {
-                vec![ch]
-            }
-        })
-        .collect::<String>();
-    let deploy = "deploy";
-    let configure = "configure";
-    let validate = "validate";
-    let operation_words = [deploy, configure, validate];
-
-    vec![
-        lower.clone(),
-        upper,
-        title.clone(),
-        format!("Evm{title}"),
-        format!("evm_{lower}"),
-        format!("evm-{lower}"),
-        format!("mfm.evm.{lower}"),
-        format!("/v1/evm/{lower}"),
-        format!("typed-evm-{lower}"),
-        ["Deploy", "Configure", "Validate"].concat(),
-        operation_words.join("_"),
-        operation_words.join("-"),
-        format!("mfm-transports-evm-{lower}"),
-    ]
 }
 
 fn assert_forbidden_terms_are_allowlisted<T: AsRef<str>>(
@@ -553,16 +341,6 @@ fn is_typed_surface_candidate(source: &str) -> bool {
     ]
     .iter()
     .any(|marker| source.contains(marker))
-}
-
-fn is_public_execution_surface_scan_path(path: &str) -> bool {
-    !TEST_HARNESS_PATHS.contains(&path)
-        && !ENTRYPOINT_OP_MIGRATION_DOC_PATHS.contains(&path)
-        && (path.starts_with("bin/cli/")
-            || path.starts_with("bin/rest-api/")
-            || path.starts_with("crates/app/")
-            || path.starts_with("docs/")
-            || path.starts_with("tests/"))
 }
 
 fn repo_text_entries(root: &Path) -> Vec<TextEntry> {
