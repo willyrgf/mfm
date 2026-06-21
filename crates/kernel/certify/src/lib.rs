@@ -67,9 +67,10 @@ impl ProblemClass {
 }
 
 /// Certification failure.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CertifyError {
     /// A typed-core problem class was rejected.
+    #[error("{class:?}: {message}")]
     Problem {
         /// Rejected problem class.
         class: ProblemClass,
@@ -77,12 +78,16 @@ pub enum CertifyError {
         message: String,
     },
     /// Lowering a program draft failed before v1 validation.
+    #[error("typed lowering failed: {0}")]
     Lowering(String),
     /// Canonicalization or hashing failed.
+    #[error("canonicalization failed: {0}")]
     Canonical(String),
     /// Spec contract validation failed.
+    #[error("typed spec failed: {0}")]
     Spec(String),
     /// Persisted spec/certificate verification failed.
+    #[error("typed spec certificate failed: {0}")]
     Certificate(String),
 }
 
@@ -95,22 +100,6 @@ impl CertifyError {
         }
     }
 }
-
-impl fmt::Display for CertifyError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Problem { class, message } => {
-                write!(f, "{class:?}: {message}")
-            }
-            Self::Lowering(message) => write!(f, "typed lowering failed: {message}"),
-            Self::Canonical(message) => write!(f, "canonicalization failed: {message}"),
-            Self::Spec(message) => write!(f, "typed spec failed: {message}"),
-            Self::Certificate(message) => write!(f, "typed spec certificate failed: {message}"),
-        }
-    }
-}
-
-impl std::error::Error for CertifyError {}
 
 /// Program-lowered typed spec data.
 ///

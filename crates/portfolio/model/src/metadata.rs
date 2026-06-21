@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::fmt;
 use std::ops::Deref;
 
 use mfm_program_derive::MfmValue;
@@ -7,7 +6,8 @@ use mfm_values::string_map_secret_marker_key;
 use serde::{Deserialize, Serialize};
 
 /// Error returned when public metadata contains secret-shaped content.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("public metadata key `{key}` contains secret-shaped content")]
 pub struct PublicMetadataError {
     key: String,
 }
@@ -18,18 +18,6 @@ impl PublicMetadataError {
         &self.key
     }
 }
-
-impl fmt::Display for PublicMetadataError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "public metadata key `{}` contains secret-shaped content",
-            self.key
-        )
-    }
-}
-
-impl std::error::Error for PublicMetadataError {}
 
 /// Redaction-safe public metadata stored on portfolio model surfaces.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, MfmValue)]

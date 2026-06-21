@@ -10,6 +10,7 @@ license = "MIT"
 category = "adapter-contract"
 
 [dependencies]
+thiserror = { workspace = true }
 mfm-canonical = { path = "../kernel/canonical" }
 mfm-capabilities = { path = "../kernel/capabilities" }
 mfm-evm-capabilities = { path = "../evm-capabilities" }

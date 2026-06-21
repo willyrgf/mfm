@@ -67,11 +67,13 @@ pub struct BtcJsonRpcClient {
 }
 
 /// Error returned by the Bitcoin JSON-RPC client.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum BtcRpcError {
     /// HTTP transport failure.
+    #[error("btc rpc http error: {0}")]
     Http(String),
     /// Non-2xx HTTP status.
+    #[error("btc rpc http status {status}{status_details}", status_details = btc_status_details(*body_len, content_type.as_deref()))]
     HttpStatus {
         /// HTTP status code returned by the RPC endpoint.
         status: u16,
@@ -81,10 +83,13 @@ pub enum BtcRpcError {
         content_type: Option<String>,
     },
     /// Response body could not be read.
+    #[error("btc rpc body read error: {0}")]
     BodyRead(String),
     /// Response was not valid JSON.
+    #[error("btc rpc invalid json: {0}")]
     InvalidJson(String),
     /// JSON-RPC error object returned by Bitcoin Core.
+    #[error("btc rpc error {code}: {message}")]
     JsonRpcError {
         /// Error code from Bitcoin Core.
         code: i64,
@@ -92,42 +97,20 @@ pub enum BtcRpcError {
         message: String,
     },
     /// JSON-RPC response missing `result` field.
+    #[error("btc rpc response missing result")]
     MissingResult,
 }
 
-impl std::fmt::Display for BtcRpcError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            BtcRpcError::Http(e) => write!(f, "btc rpc http error: {e}"),
-            BtcRpcError::HttpStatus {
-                status,
-                body_len,
-                content_type,
-            } => {
-                write!(f, "btc rpc http status {status}")?;
-                if let Some(body_len) = body_len {
-                    write!(f, " (body_len={body_len}")?;
-                    if let Some(content_type) = content_type {
-                        write!(f, ", content_type={content_type}")?;
-                    }
-                    write!(f, ")")
-                } else if let Some(content_type) = content_type {
-                    write!(f, " (content_type={content_type})")
-                } else {
-                    Ok(())
-                }
-            }
-            BtcRpcError::BodyRead(e) => write!(f, "btc rpc body read error: {e}"),
-            BtcRpcError::InvalidJson(e) => write!(f, "btc rpc invalid json: {e}"),
-            BtcRpcError::JsonRpcError { code, message } => {
-                write!(f, "btc rpc error {code}: {message}")
-            }
-            BtcRpcError::MissingResult => write!(f, "btc rpc response missing result"),
+fn btc_status_details(body_len: Option<usize>, content_type: Option<&str>) -> String {
+    match (body_len, content_type) {
+        (Some(body_len), Some(content_type)) => {
+            format!(" (body_len={body_len}, content_type={content_type})")
         }
+        (Some(body_len), None) => format!(" (body_len={body_len})"),
+        (None, Some(content_type)) => format!(" (content_type={content_type})"),
+        (None, None) => String::new(),
     }
 }
-
-impl std::error::Error for BtcRpcError {}
 
 fn redacted_optional_secret(value: &Option<String>) -> &'static str {
     if value.is_some() {
@@ -245,37 +228,24 @@ fn sanitized_content_type(headers: &reqwest::header::HeaderMap) -> Option<String
 }
 
 /// Error returned when a Bitcoin BTC-denominated JSON amount cannot be represented exactly.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum BtcAmountParseError {
     /// The amount token or string was empty.
+    #[error("bitcoin amount was empty")]
     Empty,
     /// The amount was negative.
+    #[error("bitcoin amount must not be negative")]
     Negative,
     /// The amount was not a plain base-10 integer or decimal.
+    #[error("bitcoin amount must be a base-10 integer or decimal")]
     Invalid,
     /// The amount had more than eight decimal places.
+    #[error("bitcoin amount must not have more than 8 decimal places")]
     TooPrecise,
     /// The amount exceeded `u64` satoshi range.
+    #[error("bitcoin amount overflowed satoshi range")]
     Overflow,
 }
-
-impl std::fmt::Display for BtcAmountParseError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            BtcAmountParseError::Empty => write!(f, "bitcoin amount was empty"),
-            BtcAmountParseError::Negative => write!(f, "bitcoin amount must not be negative"),
-            BtcAmountParseError::Invalid => {
-                write!(f, "bitcoin amount must be a base-10 integer or decimal")
-            }
-            BtcAmountParseError::TooPrecise => {
-                write!(f, "bitcoin amount must not have more than 8 decimal places")
-            }
-            BtcAmountParseError::Overflow => write!(f, "bitcoin amount overflowed satoshi range"),
-        }
-    }
-}
-
-impl std::error::Error for BtcAmountParseError {}
 
 /// Response from `getblockchaininfo`.
 #[derive(Clone, Debug, Deserialize)]

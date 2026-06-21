@@ -9,6 +9,7 @@ category = "operation"
 
 [dependencies]
 serde_json = { workspace = true }
+thiserror = { workspace = true }
 
 mfm-authored-config = { path = "../../authored-config" }
 mfm-canonical = { path = "../../kernel/canonical" }

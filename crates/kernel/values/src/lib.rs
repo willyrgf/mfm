@@ -20,7 +20,6 @@
 //! ```
 
 use std::collections::BTreeMap;
-use std::fmt;
 use std::marker::PhantomData;
 
 use mfm_canonical::{CanonicalJsonBytes, CanonicalValue};
@@ -67,13 +66,16 @@ const SECRET_MARKERS: &[&str] = &[
 pub type Result<T> = std::result::Result<T, ValueError>;
 
 /// Error returned by value/config descriptor helpers.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ValueError {
     /// Descriptor construction failed.
+    #[error("descriptor error: {0}")]
     Descriptor(String),
     /// Identity parsing failed.
+    #[error("identity error: {0}")]
     Identity(String),
     /// Artifact reference identity does not match the expected value type.
+    #[error("artifact reference {field} mismatch: expected {expected}, got {actual}")]
     ArtifactTypeMismatch {
         /// Field that mismatched.
         field: &'static str,
@@ -83,28 +85,9 @@ pub enum ValueError {
         actual: String,
     },
     /// Config validation failed.
+    #[error("config error: {0}")]
     Config(String),
 }
-
-impl fmt::Display for ValueError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Descriptor(message) => write!(f, "descriptor error: {message}"),
-            Self::Identity(message) => write!(f, "identity error: {message}"),
-            Self::ArtifactTypeMismatch {
-                field,
-                expected,
-                actual,
-            } => write!(
-                f,
-                "artifact reference {field} mismatch: expected {expected}, got {actual}"
-            ),
-            Self::Config(message) => write!(f, "config error: {message}"),
-        }
-    }
-}
-
-impl std::error::Error for ValueError {}
 
 /// Returns `true` when `input` matches MFM's high-signal secret-marker policy.
 ///
@@ -147,7 +130,8 @@ fn looks_like_mnemonic_phrase(input: &str) -> bool {
 }
 
 /// Error returned by typed planning config validation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{message}")]
 pub struct ConfigError {
     message: String,
 }
@@ -165,14 +149,6 @@ impl ConfigError {
         &self.message
     }
 }
-
-impl fmt::Display for ConfigError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.message)
-    }
-}
-
-impl std::error::Error for ConfigError {}
 
 /// Terminal policy for cells containing a value type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

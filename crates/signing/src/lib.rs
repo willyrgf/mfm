@@ -720,9 +720,10 @@ pub enum SigningProviderError {
 }
 
 /// Redaction-safe signing contract error.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SigningError {
     /// A signing identifier failed validation.
+    #[error("invalid signing {}: {}", kind.as_str(), validation_reason(*reason))]
     InvalidIdentifier {
         /// Identifier category.
         kind: SigningIdentifierKind,
@@ -730,11 +731,13 @@ pub enum SigningError {
         reason: SigningValidationError,
     },
     /// A signing request failed validation.
+    #[error("{}", request_reason(*reason))]
     InvalidRequest {
         /// Closed request validation reason.
         reason: SigningRequestError,
     },
     /// Returned public identity did not match the request expectation.
+    #[error("signer {signer_ref} public identity mismatch for {field}")]
     PublicIdentityMismatch {
         /// Signer reference whose identity did not match.
         signer_ref: SignerRef,
@@ -742,6 +745,7 @@ pub enum SigningError {
         field: &'static str,
     },
     /// Provider failed without exposing source details.
+    #[error("signing provider failed")]
     Provider {
         /// Closed provider failure reason.
         reason: SigningProviderError,
@@ -756,33 +760,6 @@ impl SigningError {
         }
     }
 }
-
-impl fmt::Display for SigningError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidIdentifier { kind, reason } => {
-                write!(
-                    f,
-                    "invalid signing {}: {}",
-                    kind.as_str(),
-                    validation_reason(*reason)
-                )
-            }
-            Self::InvalidRequest { reason } => f.write_str(request_reason(*reason)),
-            Self::PublicIdentityMismatch { signer_ref, field } => {
-                write!(
-                    f,
-                    "signer {signer_ref} public identity mismatch for {field}"
-                )
-            }
-            Self::Provider { reason } => match reason {
-                SigningProviderError::Failed => f.write_str("signing provider failed"),
-            },
-        }
-    }
-}
-
-impl std::error::Error for SigningError {}
 
 fn validate_public_id(kind: SigningIdentifierKind, value: &str) -> Result<()> {
     validate_id_len(kind, value, MAX_PUBLIC_ID_LEN)?;

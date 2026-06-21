@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
 use std::str::FromStr;
 
 use mfm_events::v1 as events;
@@ -22,27 +21,18 @@ use sqlx::{postgres::PgRow, PgPool, Postgres, Row, Transaction};
 use crate::schema::{connect_pool, validate_pool};
 
 /// Error returned by the PostgreSQL typed run event store.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum PostgresTypedStoreError {
     /// Typed store contract validation failed.
+    #[error("{0}")]
     Store(StoreError),
     /// PostgreSQL operation failed.
+    #[error("postgres typed store error: {0}")]
     Database(&'static str),
     /// Persisted typed store rows are corrupt.
+    #[error("postgres typed store corruption: {0}")]
     Corruption(String),
 }
-
-impl fmt::Display for PostgresTypedStoreError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Store(error) => write!(f, "{error}"),
-            Self::Database(message) => write!(f, "postgres typed store error: {message}"),
-            Self::Corruption(message) => write!(f, "postgres typed store corruption: {message}"),
-        }
-    }
-}
-
-impl std::error::Error for PostgresTypedStoreError {}
 
 impl StoreErrorInspection for PostgresTypedStoreError {
     fn as_store_error(&self) -> Option<&StoreError> {

@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::fmt;
 use std::num::NonZeroU64;
 
 use mfm_program_derive::{MfmConfig, MfmValue, PublicOutputs};
@@ -749,51 +748,61 @@ pub struct PortfolioQuoteTotal {
 }
 
 /// Validation errors for canonical portfolio configs.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum PortfolioConfigError {
     /// The JSON payload could not be decoded into the canonical type.
+    #[error("portfolio config decode failed: {0}")]
     Decode(String),
     /// `portfolio_id` did not satisfy the portfolio identifier grammar.
+    #[error("portfolio_id is invalid: {source}")]
     InvalidPortfolioId {
         /// Underlying scalar validation failure.
         source: PortfolioScalarError,
     },
     /// Portfolio metadata contained a secret-shaped key or value.
+    #[error("portfolio metadata key `{key}` contains secret-shaped content")]
     MetadataContainsSecret {
         /// Metadata key associated with the rejected content.
         key: String,
     },
     /// `network_id` did not satisfy the portfolio identifier grammar.
+    #[error("network_id is invalid: {source}")]
     InvalidNetworkId {
         /// Underlying scalar validation failure.
         source: PortfolioScalarError,
     },
     /// `control_scope` did not satisfy the portfolio identifier grammar.
+    #[error("control_scope is invalid: {source}")]
     InvalidNetworkControlScope {
         /// Underlying scalar validation failure.
         source: PortfolioScalarError,
     },
     /// EVM networks require an explicit chain id.
+    #[error("network `{network_id}` with family `evm` must declare chain_id")]
     MissingEvmChainId {
         /// Network id associated with the failure.
         network_id: String,
     },
     /// EVM networks require a non-zero chain id.
+    #[error("network `{network_id}` with family `evm` must declare non-zero chain_id")]
     InvalidEvmChainId {
         /// Network id associated with the failure.
         network_id: String,
     },
     /// Bitcoin networks must not declare an EVM chain id.
+    #[error("network `{network_id}` with family `bitcoin` must not declare chain_id")]
     UnexpectedBitcoinChainId {
         /// Network id associated with the failure.
         network_id: String,
     },
     /// Two networks shared the same network id.
+    #[error("network_id `{network_id}` must be unique")]
     DuplicateNetworkId {
         /// Duplicate network id.
         network_id: String,
     },
     /// Network metadata contained a secret-shaped key or value.
+    #[error("network `{network_id}` metadata key `{key}` contains secret-shaped content")]
     NetworkMetadataContainsSecret {
         /// Network associated with the rejected metadata.
         network_id: String,
@@ -801,11 +810,13 @@ pub enum PortfolioConfigError {
         key: String,
     },
     /// Two wallets shared the same wallet id.
+    #[error("wallet_id `{wallet_id}` must be unique")]
     DuplicateWalletId {
         /// Duplicate wallet id.
         wallet_id: String,
     },
     /// Wallet referenced an unknown network.
+    #[error("wallet `{wallet_id}` referenced unknown network `{network_id}`")]
     UnknownWalletNetwork {
         /// Wallet id associated with the failure.
         wallet_id: String,
@@ -813,6 +824,7 @@ pub enum PortfolioConfigError {
         network_id: String,
     },
     /// Wallet subject family did not match the referenced network family.
+    #[error("wallet `{wallet_id}` subject_kind `{wallet_subject_kind:?}` did not match network `{network_id}` family `{network_family:?}`")]
     WalletSubjectNetworkFamilyMismatch {
         /// Wallet id associated with the failure.
         wallet_id: String,
@@ -824,6 +836,7 @@ pub enum PortfolioConfigError {
         network_family: NetworkFamilyConfig,
     },
     /// Wallet referenced an unknown symbol.
+    #[error("wallet `{wallet_id}` referenced unknown symbol `{symbol_id}`")]
     UnknownWalletSymbol {
         /// Wallet id associated with the failure.
         wallet_id: String,
@@ -831,6 +844,7 @@ pub enum PortfolioConfigError {
         symbol_id: String,
     },
     /// Wallet referenced a symbol configured for a different network.
+    #[error("wallet `{wallet_id}` on network `{wallet_network_id}` referenced symbol `{symbol_id}` on network `{symbol_network_id}`")]
     WalletSymbolNetworkMismatch {
         /// Wallet id associated with the failure.
         wallet_id: String,
@@ -842,11 +856,13 @@ pub enum PortfolioConfigError {
         symbol_network_id: String,
     },
     /// Two symbols shared the same symbol id.
+    #[error("symbol_id `{symbol_id}` must be unique")]
     DuplicateSymbolId {
         /// Duplicate symbol id.
         symbol_id: String,
     },
     /// A symbol config failed local validation.
+    #[error("symbol `{symbol_id}` is invalid: {source}")]
     InvalidSymbolConfig {
         /// Symbol id associated with the validation failure.
         symbol_id: String,
@@ -854,6 +870,7 @@ pub enum PortfolioConfigError {
         source: Box<SymbolConfigError>,
     },
     /// Symbol used a reader or symbol kind unsupported by the referenced network family.
+    #[error("symbol `{symbol_id}` used unsupported kind/reader for network `{network_id}` family `{network_family:?}`")]
     UnsupportedSymbolNetworkFamily {
         /// Symbol id associated with the failure.
         symbol_id: String,
@@ -863,6 +880,7 @@ pub enum PortfolioConfigError {
         network_family: NetworkFamilyConfig,
     },
     /// Symbol referenced an unknown network.
+    #[error("symbol `{symbol_id}` referenced unknown network `{network_id}`")]
     UnknownSymbolNetwork {
         /// Symbol id associated with the failure.
         symbol_id: String,
@@ -870,11 +888,13 @@ pub enum PortfolioConfigError {
         network_id: String,
     },
     /// Quote codes must be unique at the portfolio level.
+    #[error("portfolio quote `{quote}` must be unique")]
     DuplicateQuoteCode {
         /// Duplicate quote code.
         quote: QuoteCode,
     },
     /// Symbol did not provide a route for one requested quote.
+    #[error("symbol `{symbol_id}` is missing valuation route for quote `{quote}`")]
     MissingValuationQuote {
         /// Symbol id associated with the failure.
         symbol_id: String,
@@ -882,6 +902,7 @@ pub enum PortfolioConfigError {
         quote: QuoteCode,
     },
     /// Symbol defined a quote route that was not requested by the portfolio.
+    #[error("symbol `{symbol_id}` defined unexpected valuation route for quote `{quote}`")]
     UnexpectedValuationQuote {
         /// Symbol id associated with the failure.
         symbol_id: String,
@@ -889,6 +910,7 @@ pub enum PortfolioConfigError {
         quote: QuoteCode,
     },
     /// A valuation route referenced an unknown priced symbol.
+    #[error("symbol `{symbol_id}` quote `{quote}` referenced unknown priced_symbol_id `{priced_symbol_id}`")]
     UnknownPricedSymbol {
         /// Symbol id associated with the failure.
         symbol_id: String,
@@ -898,6 +920,9 @@ pub enum PortfolioConfigError {
         priced_symbol_id: String,
     },
     /// `underlying_symbol_id` referenced an unknown symbol.
+    #[error(
+        "symbol `{symbol_id}` referenced unknown underlying_symbol_id `{underlying_symbol_id}`"
+    )]
     UnknownUnderlyingSymbol {
         /// Symbol id associated with the failure.
         symbol_id: String,
@@ -905,6 +930,7 @@ pub enum PortfolioConfigError {
         underlying_symbol_id: String,
     },
     /// A price source referenced an unknown network.
+    #[error("symbol `{symbol_id}` quote `{quote}` reader `{reader_kind}` referenced unknown network `{network_id}`")]
     UnknownPriceSourceNetwork {
         /// Symbol id associated with the failure.
         symbol_id: String,
@@ -916,11 +942,13 @@ pub enum PortfolioConfigError {
         reader_kind: &'static str,
     },
     /// The valuation source registry failed local validation.
+    #[error("valuation source registry is invalid: {source}")]
     InvalidValuationSourceRegistry {
         /// Underlying registry validation failure.
         source: ValuationSourceRegistryError,
     },
     /// A valuation source registry entry referenced an unknown network.
+    #[error("valuation source `{source_id}` referenced unknown network `{network_id}`")]
     UnknownValuationSourceNetwork {
         /// Valuation source id associated with the failure.
         source_id: String,
@@ -928,6 +956,9 @@ pub enum PortfolioConfigError {
         network_id: String,
     },
     /// A price source ref did not resolve through the valuation source registry.
+    #[error(
+        "symbol `{symbol_id}` quote `{quote}` referenced unknown valuation source `{source_id}`"
+    )]
     UnknownValuationSource {
         /// Symbol id associated with the failure.
         symbol_id: String,
@@ -937,6 +968,7 @@ pub enum PortfolioConfigError {
         source_id: String,
     },
     /// A resolved valuation source entry did not match the referring source ref.
+    #[error("symbol `{symbol_id}` quote `{quote}` source `{source_id}` mismatched registry field `{field}`")]
     ValuationSourceMismatch {
         /// Symbol id associated with the failure.
         symbol_id: String,
@@ -947,186 +979,6 @@ pub enum PortfolioConfigError {
         /// Registry field that mismatched the ref.
         field: &'static str,
     },
-}
-
-impl fmt::Display for PortfolioConfigError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Decode(message) => write!(f, "portfolio config decode failed: {message}"),
-            Self::InvalidPortfolioId { source } => {
-                write!(f, "portfolio_id is invalid: {source}")
-            }
-            Self::MetadataContainsSecret { key } => {
-                write!(f, "portfolio metadata key `{key}` contains secret-shaped content")
-            }
-            Self::InvalidNetworkId { source } => {
-                write!(f, "network_id is invalid: {source}")
-            }
-            Self::InvalidNetworkControlScope { source } => {
-                write!(f, "control_scope is invalid: {source}")
-            }
-            Self::MissingEvmChainId { network_id } => {
-                write!(
-                    f,
-                    "network `{network_id}` with family `evm` must declare chain_id"
-                )
-            }
-            Self::InvalidEvmChainId { network_id } => {
-                write!(
-                    f,
-                    "network `{network_id}` with family `evm` must declare non-zero chain_id"
-                )
-            }
-            Self::UnexpectedBitcoinChainId { network_id } => {
-                write!(
-                    f,
-                    "network `{network_id}` with family `bitcoin` must not declare chain_id"
-                )
-            }
-            Self::DuplicateNetworkId { network_id } => {
-                write!(f, "network_id `{network_id}` must be unique")
-            }
-            Self::NetworkMetadataContainsSecret { network_id, key } => write!(
-                f,
-                "network `{network_id}` metadata key `{key}` contains secret-shaped content"
-            ),
-            Self::DuplicateWalletId { wallet_id } => {
-                write!(f, "wallet_id `{wallet_id}` must be unique")
-            }
-            Self::UnknownWalletNetwork {
-                wallet_id,
-                network_id,
-            } => write!(
-                f,
-                "wallet `{wallet_id}` referenced unknown network `{network_id}`"
-            ),
-            Self::WalletSubjectNetworkFamilyMismatch {
-                wallet_id,
-                network_id,
-                wallet_subject_kind,
-                network_family,
-            } => write!(
-                f,
-                "wallet `{wallet_id}` subject_kind `{wallet_subject_kind:?}` did not match network `{network_id}` family `{network_family:?}`"
-            ),
-            Self::UnknownWalletSymbol {
-                wallet_id,
-                symbol_id,
-            } => write!(
-                f,
-                "wallet `{wallet_id}` referenced unknown symbol `{symbol_id}`"
-            ),
-            Self::WalletSymbolNetworkMismatch {
-                wallet_id,
-                symbol_id,
-                wallet_network_id,
-                symbol_network_id,
-            } => write!(
-                f,
-                "wallet `{wallet_id}` on network `{wallet_network_id}` referenced symbol `{symbol_id}` on network `{symbol_network_id}`"
-            ),
-            Self::DuplicateSymbolId { symbol_id } => {
-                write!(f, "symbol_id `{symbol_id}` must be unique")
-            }
-            Self::InvalidSymbolConfig { symbol_id, source } => {
-                write!(f, "symbol `{symbol_id}` is invalid: {source}")
-            }
-            Self::UnsupportedSymbolNetworkFamily {
-                symbol_id,
-                network_id,
-                network_family,
-            } => write!(
-                f,
-                "symbol `{symbol_id}` used unsupported kind/reader for network `{network_id}` family `{network_family:?}`"
-            ),
-            Self::UnknownSymbolNetwork {
-                symbol_id,
-                network_id,
-            } => write!(
-                f,
-                "symbol `{symbol_id}` referenced unknown network `{network_id}`"
-            ),
-            Self::DuplicateQuoteCode { quote } => {
-                write!(f, "portfolio quote `{quote}` must be unique")
-            }
-            Self::MissingValuationQuote { symbol_id, quote } => {
-                write!(
-                    f,
-                    "symbol `{symbol_id}` is missing valuation route for quote `{quote}`"
-                )
-            }
-            Self::UnexpectedValuationQuote { symbol_id, quote } => {
-                write!(
-                    f,
-                    "symbol `{symbol_id}` defined unexpected valuation route for quote `{quote}`"
-                )
-            }
-            Self::UnknownPricedSymbol {
-                symbol_id,
-                quote,
-                priced_symbol_id,
-            } => write!(
-                f,
-                "symbol `{symbol_id}` quote `{quote}` referenced unknown priced_symbol_id `{priced_symbol_id}`"
-            ),
-            Self::UnknownUnderlyingSymbol {
-                symbol_id,
-                underlying_symbol_id,
-            } => write!(
-                f,
-                "symbol `{symbol_id}` referenced unknown underlying_symbol_id `{underlying_symbol_id}`"
-            ),
-            Self::UnknownPriceSourceNetwork {
-                symbol_id,
-                quote,
-                network_id,
-                reader_kind,
-            } => write!(
-                f,
-                "symbol `{symbol_id}` quote `{quote}` reader `{reader_kind}` referenced unknown network `{network_id}`"
-            ),
-            Self::InvalidValuationSourceRegistry { source } => {
-                write!(f, "valuation source registry is invalid: {source}")
-            }
-            Self::UnknownValuationSourceNetwork {
-                source_id,
-                network_id,
-            } => write!(
-                f,
-                "valuation source `{source_id}` referenced unknown network `{network_id}`"
-            ),
-            Self::UnknownValuationSource {
-                symbol_id,
-                quote,
-                source_id,
-            } => write!(
-                f,
-                "symbol `{symbol_id}` quote `{quote}` referenced unknown valuation source `{source_id}`"
-            ),
-            Self::ValuationSourceMismatch {
-                symbol_id,
-                quote,
-                source_id,
-                field,
-            } => write!(
-                f,
-                "symbol `{symbol_id}` quote `{quote}` source `{source_id}` mismatched registry field `{field}`"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for PortfolioConfigError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::InvalidPortfolioId { source }
-            | Self::InvalidNetworkId { source }
-            | Self::InvalidNetworkControlScope { source } => Some(source),
-            Self::InvalidSymbolConfig { source, .. } => Some(source.as_ref()),
-            Self::InvalidValuationSourceRegistry { source } => Some(source),
-            _ => None,
-        }
-    }
 }
 
 /// Decodes and validates a canonical portfolio config.

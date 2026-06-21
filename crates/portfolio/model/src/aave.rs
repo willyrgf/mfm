@@ -197,24 +197,30 @@ impl AaveProtocolPositionConfig {
 }
 
 /// Validation and decode errors for canonical Aave portfolio-position config.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum AavePortfolioConfigError {
     /// `symbol.kind` did not match the Aave protocol-position contract.
+    #[error("symbol `{symbol_id}` must use kind `protocol_position` for protocol `aave_v3`")]
     SymbolKindMismatch {
         /// Symbol that violated the contract.
         symbol_id: String,
     },
     /// `symbol.protocol` did not match `aave_v3`.
+    #[error("symbol `{symbol_id}` must declare protocol `aave_v3`")]
     SymbolProtocolMismatch {
         /// Symbol that violated the contract.
         symbol_id: String,
     },
     /// `symbol.underlying_symbol_id` was required but absent.
+    #[error("symbol `{symbol_id}` must set underlying_symbol_id for protocol `aave_v3`")]
     MissingUnderlyingSymbolId {
         /// Symbol that violated the contract.
         symbol_id: String,
     },
     /// One quote route used a priced symbol other than the declared underlying symbol.
+    #[error(
+        "symbol `{symbol_id}` quote `{quote}` must use priced_symbol_id `{underlying_symbol_id}`"
+    )]
     ValuationMustUseUnderlyingSymbolId {
         /// Symbol that violated the contract.
         symbol_id: String,
@@ -224,6 +230,7 @@ pub enum AavePortfolioConfigError {
         underlying_symbol_id: String,
     },
     /// Reader id was not supported by the Aave portfolio module.
+    #[error("symbol `{symbol_id}` reader `{reader}` is not supported for protocol `aave_v3`")]
     UnsupportedReader {
         /// Symbol that violated the contract.
         symbol_id: String,
@@ -231,6 +238,7 @@ pub enum AavePortfolioConfigError {
         reader: String,
     },
     /// The typed reader config could not be decoded.
+    #[error("symbol `{symbol_id}` reader config decode failed: {reason}")]
     ReaderConfigDecode {
         /// Symbol that violated the contract.
         symbol_id: String,
@@ -238,6 +246,7 @@ pub enum AavePortfolioConfigError {
         reason: String,
     },
     /// The referenced portfolio network was not found.
+    #[error("symbol `{symbol_id}` referenced unknown network `{network_id}`")]
     UnknownPortfolioNetwork {
         /// Symbol that violated the contract.
         symbol_id: String,
@@ -245,6 +254,7 @@ pub enum AavePortfolioConfigError {
         network_id: String,
     },
     /// A market metadata entry contained a secret-shaped key or value.
+    #[error("symbol `{symbol_id}` market `{market_id}` metadata key `{key}` contains secret-shaped content")]
     MarketMetadataContainsSecret {
         /// Symbol that violated the contract.
         symbol_id: String,
@@ -254,6 +264,7 @@ pub enum AavePortfolioConfigError {
         key: String,
     },
     /// A reserve metadata entry contained a secret-shaped key or value.
+    #[error("symbol `{symbol_id}` market `{market_id}` reserve `{reserve_id}` metadata key `{key}` contains secret-shaped content")]
     ReserveMetadataContainsSecret {
         /// Symbol that violated the contract.
         symbol_id: String,
@@ -265,6 +276,7 @@ pub enum AavePortfolioConfigError {
         key: String,
     },
     /// A market-level config invariant failed.
+    #[error("symbol `{symbol_id}` market config is invalid: {reason}")]
     InvalidMarketConfig {
         /// Symbol that violated the contract.
         symbol_id: String,
@@ -272,6 +284,7 @@ pub enum AavePortfolioConfigError {
         reason: String,
     },
     /// The configured reserve id was not present in the embedded market config.
+    #[error("symbol `{symbol_id}` reserve `{reserve_id}` was not found in market `{market_id}`")]
     UnknownReserve {
         /// Symbol that violated the contract.
         symbol_id: String,
@@ -281,6 +294,7 @@ pub enum AavePortfolioConfigError {
         reserve_id: String,
     },
     /// A debt reader requested a token family that was not configured on the reserve.
+    #[error("symbol `{symbol_id}` debt_position requires a `{debt_kind}` debt token address for reserve `{reserve_id}`")]
     MissingDebtTokenAddress {
         /// Symbol that violated the contract.
         symbol_id: String,
@@ -290,16 +304,19 @@ pub enum AavePortfolioConfigError {
         debt_kind: AaveDebtKind,
     },
     /// `reserve_position` was paired with a debt role.
+    #[error("symbol `{symbol_id}` reserve_position must not use role `debt`")]
     ReserveRoleInvalid {
         /// Symbol that violated the contract.
         symbol_id: String,
     },
     /// `debt_position` was paired with a non-debt role.
+    #[error("symbol `{symbol_id}` debt_position must use role `debt`")]
     DebtRoleInvalid {
         /// Symbol that violated the contract.
         symbol_id: String,
     },
     /// The same logical market id appeared with different definitions.
+    #[error("symbol `{symbol_id}` market `{market_id}` conflicted with the first declared market config")]
     ConflictingMarketDefinition {
         /// Symbol that violated the contract.
         symbol_id: String,
@@ -307,98 +324,6 @@ pub enum AavePortfolioConfigError {
         market_id: String,
     },
 }
-
-impl fmt::Display for AavePortfolioConfigError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::SymbolKindMismatch { symbol_id } => write!(
-                f,
-                "symbol `{symbol_id}` must use kind `protocol_position` for protocol `aave_v3`"
-            ),
-            Self::SymbolProtocolMismatch { symbol_id } => {
-                write!(f, "symbol `{symbol_id}` must declare protocol `aave_v3`")
-            }
-            Self::MissingUnderlyingSymbolId { symbol_id } => write!(
-                f,
-                "symbol `{symbol_id}` must set underlying_symbol_id for protocol `aave_v3`"
-            ),
-            Self::ValuationMustUseUnderlyingSymbolId {
-                symbol_id,
-                quote,
-                underlying_symbol_id,
-            } => write!(
-                f,
-                "symbol `{symbol_id}` quote `{quote}` must use priced_symbol_id `{underlying_symbol_id}`"
-            ),
-            Self::UnsupportedReader { symbol_id, reader } => write!(
-                f,
-                "symbol `{symbol_id}` reader `{reader}` is not supported for protocol `aave_v3`"
-            ),
-            Self::ReaderConfigDecode { symbol_id, reason } => {
-                write!(f, "symbol `{symbol_id}` reader config decode failed: {reason}")
-            }
-            Self::UnknownPortfolioNetwork {
-                symbol_id,
-                network_id,
-            } => write!(
-                f,
-                "symbol `{symbol_id}` referenced unknown network `{network_id}`"
-            ),
-            Self::MarketMetadataContainsSecret {
-                symbol_id,
-                market_id,
-                key,
-            } => write!(
-                f,
-                "symbol `{symbol_id}` market `{market_id}` metadata key `{key}` contains secret-shaped content"
-            ),
-            Self::ReserveMetadataContainsSecret {
-                symbol_id,
-                market_id,
-                reserve_id,
-                key,
-            } => write!(
-                f,
-                "symbol `{symbol_id}` market `{market_id}` reserve `{reserve_id}` metadata key `{key}` contains secret-shaped content"
-            ),
-            Self::InvalidMarketConfig { symbol_id, reason } => {
-                write!(f, "symbol `{symbol_id}` market config is invalid: {reason}")
-            }
-            Self::UnknownReserve {
-                symbol_id,
-                reserve_id,
-                market_id,
-            } => write!(
-                f,
-                "symbol `{symbol_id}` reserve `{reserve_id}` was not found in market `{market_id}`"
-            ),
-            Self::MissingDebtTokenAddress {
-                symbol_id,
-                reserve_id,
-                debt_kind,
-            } => write!(
-                f,
-                "symbol `{symbol_id}` debt_position requires a `{debt_kind}` debt token address for reserve `{reserve_id}`"
-            ),
-            Self::ReserveRoleInvalid { symbol_id } => write!(
-                f,
-                "symbol `{symbol_id}` reserve_position must not use role `debt`"
-            ),
-            Self::DebtRoleInvalid { symbol_id } => {
-                write!(f, "symbol `{symbol_id}` debt_position must use role `debt`")
-            }
-            Self::ConflictingMarketDefinition {
-                symbol_id,
-                market_id,
-            } => write!(
-                f,
-                "symbol `{symbol_id}` market `{market_id}` conflicted with the first declared market config"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for AavePortfolioConfigError {}
 
 /// Returns `true` when `symbol` is configured for the Aave V3 protocol-position runtime.
 pub fn is_aave_protocol_position(symbol: &SymbolConfig) -> bool {

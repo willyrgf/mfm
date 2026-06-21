@@ -644,33 +644,24 @@ pub enum EvmProviderFailure {
 }
 
 /// Redaction-safe EVM capability error.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EvmCapabilityError {
     /// Request failed contract validation.
+    #[error("EVM capability request was invalid")]
     InvalidRequest {
         /// Closed invalid-request reason.
         reason: EvmInvalidRequest,
     },
     /// Provider failed without exposing concrete source details.
+    #[error("EVM capability provider failed")]
     Provider {
         /// Closed provider failure reason.
         reason: EvmProviderFailure,
     },
     /// A transaction receipt is not available yet.
+    #[error("EVM transaction receipt is pending")]
     ReceiptPending,
 }
-
-impl fmt::Display for EvmCapabilityError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidRequest { .. } => f.write_str("EVM capability request was invalid"),
-            Self::Provider { .. } => f.write_str("EVM capability provider failed"),
-            Self::ReceiptPending => f.write_str("EVM transaction receipt is pending"),
-        }
-    }
-}
-
-impl std::error::Error for EvmCapabilityError {}
 
 impl EvmCapabilityError {
     /// Builds a redacted provider failure, discarding source details.

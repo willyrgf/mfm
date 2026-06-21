@@ -888,44 +888,33 @@ fn parse_log_entry(value: &Value) -> TransportResult<EvmLogEntry> {
 }
 
 /// Redaction-safe EVM transport setup/runtime error.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum EvmTransportError {
     /// Runtime source registry was invalid.
+    #[error("EVM source registry was invalid")]
     InvalidRegistry,
     /// Requested source policy was unavailable.
+    #[error("EVM source policy was unavailable")]
     PolicyUnavailable,
     /// Requested source was unavailable.
+    #[error("EVM source was unavailable")]
     SourceUnavailable,
     /// Requested source is not allowed by the policy.
+    #[error("EVM source was not allowed by policy")]
     SourceNotAllowed,
     /// Source chain id did not match the expected chain.
+    #[error("EVM source chain id did not match expected chain")]
     ChainIdMismatch,
     /// JSON-RPC request failed.
+    #[error("EVM JSON-RPC request failed")]
     RequestFailed,
     /// JSON-RPC response failed contract validation.
+    #[error("EVM JSON-RPC response was invalid")]
     InvalidResponse,
     /// Transaction receipt is not yet available.
+    #[error("EVM transaction receipt is pending")]
     ReceiptPending,
 }
-
-impl fmt::Display for EvmTransportError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidRegistry => f.write_str("EVM source registry was invalid"),
-            Self::PolicyUnavailable => f.write_str("EVM source policy was unavailable"),
-            Self::SourceUnavailable => f.write_str("EVM source was unavailable"),
-            Self::SourceNotAllowed => f.write_str("EVM source was not allowed by policy"),
-            Self::ChainIdMismatch => {
-                f.write_str("EVM source chain id did not match expected chain")
-            }
-            Self::RequestFailed => f.write_str("EVM JSON-RPC request failed"),
-            Self::InvalidResponse => f.write_str("EVM JSON-RPC response was invalid"),
-            Self::ReceiptPending => f.write_str("EVM transaction receipt is pending"),
-        }
-    }
-}
-
-impl std::error::Error for EvmTransportError {}
 
 #[cfg(test)]
 mod tests {

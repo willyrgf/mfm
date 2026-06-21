@@ -1,5 +1,4 @@
 use serde::Serialize;
-use std::fmt;
 
 use mfm_app::PublicSafeMessage;
 use mfm_evm_core::util_error::UtilError;
@@ -28,7 +27,8 @@ impl<T> CommandOutput<T> {
 }
 
 /// Standardized error type for all CLI commands
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, thiserror::Error)]
+#[error("{message}")]
 pub(crate) struct CommandError {
     /// Stable machine-readable error code.
     pub(crate) code: String,
@@ -53,14 +53,6 @@ impl CommandError {
         Self::new(code, PublicSafeMessage::backend(message))
     }
 }
-
-impl fmt::Display for CommandError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.message)
-    }
-}
-
-impl std::error::Error for CommandError {}
 
 impl From<Box<dyn std::error::Error>> for CommandError {
     fn from(_err: Box<dyn std::error::Error>) -> Self {

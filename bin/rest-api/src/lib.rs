@@ -75,7 +75,8 @@ fn json_ok<T: Serialize>(data: T) -> Result<Json<serde_json::Value>, ApiError> {
 }
 
 /// Error payload mapped onto HTTP responses.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("{code}: {message}")]
 pub struct ApiError {
     /// HTTP status to return.
     pub status: StatusCode,
@@ -162,14 +163,6 @@ impl From<JsonRejection> for ApiError {
         Self::invalid_json()
     }
 }
-
-impl std::fmt::Display for ApiError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {}", self.code, self.message)
-    }
-}
-
-impl std::error::Error for ApiError {}
 
 impl axum::response::IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {

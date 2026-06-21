@@ -2422,64 +2422,53 @@ fn runtime_state_error(error: mfm_program::StateError) -> mfm_runtime::RuntimeEr
 }
 
 /// Redaction-safe contract adapter error.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum EvmContractAdapterError {
     /// Stable identity construction failed.
+    #[error("contract adapter identity failed: {0}")]
     Identity(String),
     /// State contract failed.
+    #[error("contract state failed: {0}")]
     State(String),
     /// EVM capability provider failed.
+    #[error("EVM capability failed: {0}")]
     EvmCapability(mfm_evm_capabilities::EvmCapabilityError),
     /// Signing provider failed.
+    #[error("signing provider failed: {0}")]
     Signing(mfm_signing::SigningError),
     /// EVM signing bridge failed.
+    #[error("EVM signing failed: {0}")]
     EvmSigning(mfm_evm_signing::EvmSigningError),
     /// Artifact read failed.
+    #[error("artifact read failed: {0}")]
     ArtifactRead(mfm_artifact_capabilities::ArtifactReadError),
     /// Pure contract model preparation failed.
+    #[error("contract model failed: {0}")]
     Model(String),
     /// Prepared invocation did not match state intent.
+    #[error("contract intent did not match state config")]
     IntentMismatch,
     /// Observed chain id did not match typed config.
+    #[error("contract lifecycle chain id mismatch")]
     ChainMismatch,
     /// Required contract artifact was absent.
+    #[error("contract artifact is required for this lifecycle phase")]
     MissingContractArtifact,
     /// Fee data was unavailable for the requested transaction style.
+    #[error("EVM fee data unavailable for transaction style")]
     FeeUnavailable,
     /// Transaction hash did not match across signing/submission/receipt.
+    #[error("EVM transaction hash mismatch")]
     TransactionHashMismatch,
     /// Transaction receipt reported failure.
+    #[error("EVM transaction failed")]
     TransactionFailed,
     /// Prepared invocation evidence was malformed.
+    #[error("prepared invocation was invalid")]
     InvalidPreparedInvocation,
     /// Prepared invocation evidence carried forbidden live or secret-bearing data.
+    #[error("prepared invocation exposed forbidden runtime data")]
     PreparedInvocationLeak,
-}
-
-impl fmt::Display for EvmContractAdapterError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Identity(message) => write!(f, "contract adapter identity failed: {message}"),
-            Self::State(message) => write!(f, "contract state failed: {message}"),
-            Self::EvmCapability(error) => write!(f, "EVM capability failed: {error}"),
-            Self::Signing(error) => write!(f, "signing provider failed: {error}"),
-            Self::EvmSigning(error) => write!(f, "EVM signing failed: {error}"),
-            Self::ArtifactRead(error) => write!(f, "artifact read failed: {error}"),
-            Self::Model(message) => write!(f, "contract model failed: {message}"),
-            Self::IntentMismatch => f.write_str("contract intent did not match state config"),
-            Self::ChainMismatch => f.write_str("contract lifecycle chain id mismatch"),
-            Self::MissingContractArtifact => {
-                f.write_str("contract artifact is required for this lifecycle phase")
-            }
-            Self::FeeUnavailable => f.write_str("EVM fee data unavailable for transaction style"),
-            Self::TransactionHashMismatch => f.write_str("EVM transaction hash mismatch"),
-            Self::TransactionFailed => f.write_str("EVM transaction failed"),
-            Self::InvalidPreparedInvocation => f.write_str("prepared invocation was invalid"),
-            Self::PreparedInvocationLeak => {
-                f.write_str("prepared invocation exposed forbidden runtime data")
-            }
-        }
-    }
 }
 
 impl From<mfm_program::PlanError> for EvmContractAdapterError {
@@ -2526,8 +2515,6 @@ impl From<EvmContractAdapterError> for replay::ReplayError {
         )
     }
 }
-
-impl std::error::Error for EvmContractAdapterError {}
 
 #[cfg(test)]
 mod tests {

@@ -9,7 +9,6 @@ use alloy_primitives::Address;
 use alloy_primitives::U256;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fmt;
 
 /// Supported token families in static configuration.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -39,9 +38,10 @@ pub struct TokenNetwork {
 }
 
 /// Errors raised while parsing configured slippage values.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum SlippageParseError {
     /// The configured slippage string was malformed or out of range.
+    #[error("invalid slippage {value:?}: {reason}")]
     InvalidSlippage {
         /// Original configured value.
         value: String,
@@ -49,18 +49,6 @@ pub enum SlippageParseError {
         reason: String,
     },
 }
-
-impl fmt::Display for SlippageParseError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidSlippage { value, reason } => {
-                write!(f, "invalid slippage {value:?}: {reason}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for SlippageParseError {}
 
 impl TokenNetwork {
     /// Parses slippage (in percent, e.g. `"0.50"` for 0.50%) into basis points (bps).

@@ -22,6 +22,7 @@ mfm-ids = { path = "../ids" }
 mfm-manual-auth = { path = "../manual-auth" }
 mfm-spec = { path = "../spec" }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 mfm-certify = { path = "../certify" }

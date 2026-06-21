@@ -19,3 +19,4 @@ mfm-canonical = { path = "../canonical" }
 mfm-ids = { path = "../ids" }
 mfm-spec = { path = "../spec" }
 serde_json = { workspace = true }
+thiserror = { workspace = true }

@@ -11,6 +11,7 @@ category = "signer-contract"
 
 [dependencies]
 serde = { workspace = true }
+thiserror = { workspace = true }
 
 mfm-canonical = { path = "../kernel/canonical" }
 mfm-capabilities = { path = "../kernel/capabilities" }

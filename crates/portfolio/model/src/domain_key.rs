@@ -2,7 +2,6 @@ use mfm_canonical::{CanonicalBytes, CanonicalError, PlainCanonicalJsonBytes};
 use mfm_program_derive::MfmValue;
 use mfm_values::{MfmValue, SchemaDescriptor};
 use serde::{Deserialize, Serialize};
-use std::fmt;
 
 /// Stable domain key contract for portfolio fanout/fanin instances.
 pub trait StableDomainKey: MfmValue {
@@ -116,21 +115,25 @@ impl mfm_program::StableDomainKey for ObservationBatchDomainKey {}
 impl mfm_program::StableDomainKey for ReportDomainKey {}
 
 /// Errors returned when validating stable domain keys.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum StableDomainKeyError {
     /// The key was empty.
+    #[error("domain key must be non-empty")]
     Empty,
     /// The full key exceeded the supported length.
+    #[error("domain key `{value}` exceeded 256 bytes")]
     TooLong {
         /// Rejected key.
         value: String,
     },
     /// A segment was empty.
+    #[error("domain key `{value}` contained an empty segment")]
     EmptySegment {
         /// Rejected key.
         value: String,
     },
     /// A segment exceeded the supported length.
+    #[error("domain key segment `{segment}` in `{value}` exceeded 64 bytes")]
     SegmentTooLong {
         /// Rejected key.
         value: String,
@@ -138,6 +141,7 @@ pub enum StableDomainKeyError {
         segment: String,
     },
     /// The key used a reserved prefix.
+    #[error("domain key `{value}` used reserved prefix `{prefix}`")]
     ReservedPrefix {
         /// Rejected key.
         value: String,
@@ -145,6 +149,7 @@ pub enum StableDomainKeyError {
         prefix: &'static str,
     },
     /// The key contained a character outside the author-key grammar.
+    #[error("domain key `{value}` contained invalid character `{ch}`")]
     InvalidCharacter {
         /// Rejected key.
         value: String,
@@ -152,6 +157,7 @@ pub enum StableDomainKeyError {
         ch: char,
     },
     /// One segment did not start with `[a-z0-9]`.
+    #[error("domain key segment `{segment}` in `{value}` must start with [a-z0-9]")]
     InvalidSegmentStart {
         /// Rejected key.
         value: String,
@@ -159,34 +165,6 @@ pub enum StableDomainKeyError {
         segment: String,
     },
 }
-
-impl fmt::Display for StableDomainKeyError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Empty => f.write_str("domain key must be non-empty"),
-            Self::TooLong { value } => write!(f, "domain key `{value}` exceeded 256 bytes"),
-            Self::EmptySegment { value } => {
-                write!(f, "domain key `{value}` contained an empty segment")
-            }
-            Self::SegmentTooLong { value, segment } => write!(
-                f,
-                "domain key segment `{segment}` in `{value}` exceeded 64 bytes"
-            ),
-            Self::ReservedPrefix { value, prefix } => {
-                write!(f, "domain key `{value}` used reserved prefix `{prefix}`")
-            }
-            Self::InvalidCharacter { value, ch } => {
-                write!(f, "domain key `{value}` contained invalid character `{ch}`")
-            }
-            Self::InvalidSegmentStart { value, segment } => write!(
-                f,
-                "domain key segment `{segment}` in `{value}` must start with [a-z0-9]"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for StableDomainKeyError {}
 
 /// Validates the RFC author-key grammar used by stable domain keys.
 pub fn validate_author_key(value: &str) -> Result<(), StableDomainKeyError> {

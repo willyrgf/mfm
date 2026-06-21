@@ -1,7 +1,5 @@
 //! Observability setup shared by typed app binaries.
 
-use std::fmt;
-
 use serde::{Deserialize, Serialize};
 use tracing_subscriber::filter::EnvFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
@@ -29,21 +27,14 @@ pub struct ObservabilityConfig {
 }
 
 /// Observability setup error.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{code}: {message}")]
 pub struct ObservabilityError {
     /// Stable error code.
     pub code: String,
     /// Redaction-safe error message.
     pub message: String,
 }
-
-impl fmt::Display for ObservabilityError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: {}", self.code, self.message)
-    }
-}
-
-impl std::error::Error for ObservabilityError {}
 
 /// Builds observability config from environment variables.
 #[allow(clippy::disallowed_methods)]

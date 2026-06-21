@@ -327,24 +327,15 @@ pub fn plan_portfolio_snapshot_entry_point(
 }
 
 /// Error returned while planning a portfolio snapshot entry point.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum PortfolioSnapshotPlanError {
     /// Authored portfolio snapshot config failed canonical validation.
+    #[error("portfolio snapshot config failed: {0}")]
     Config(PortfolioSnapshotConfigError),
     /// Program drafting or config material selection failed.
+    #[error("portfolio snapshot planning failed: {0}")]
     Plan(mfm_program::PlanError),
 }
-
-impl std::fmt::Display for PortfolioSnapshotPlanError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Config(error) => write!(f, "portfolio snapshot config failed: {error}"),
-            Self::Plan(error) => write!(f, "portfolio snapshot planning failed: {error}"),
-        }
-    }
-}
-
-impl std::error::Error for PortfolioSnapshotPlanError {}
 
 impl From<PortfolioSnapshotConfigError> for PortfolioSnapshotPlanError {
     fn from(error: PortfolioSnapshotConfigError) -> Self {

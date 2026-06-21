@@ -41,7 +41,8 @@ pub type Result<T> = std::result::Result<T, CanonicalError>;
 
 /// Error returned when canonical JSON, decimal, or byte grammar validation
 /// fails.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{message}")]
 pub struct CanonicalError {
     message: String,
 }
@@ -58,14 +59,6 @@ impl CanonicalError {
         &self.message
     }
 }
-
-impl fmt::Display for CanonicalError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.message)
-    }
-}
-
-impl std::error::Error for CanonicalError {}
 
 /// Canonical JSON bytes that have passed the typed-kernel v1
 /// canonicalization contract.

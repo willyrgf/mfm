@@ -210,7 +210,8 @@ pub struct EntryPointDescriptor {
 }
 
 /// Error returned while creating or normalizing authored config.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{code}: {message}")]
 pub struct AuthoredConfigError {
     code: String,
     message: String,
@@ -235,14 +236,6 @@ impl AuthoredConfigError {
         &self.message
     }
 }
-
-impl fmt::Display for AuthoredConfigError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: {}", self.code, self.message)
-    }
-}
-
-impl std::error::Error for AuthoredConfigError {}
 
 /// Detects the preferred authored format from the leading non-whitespace character.
 pub fn detect_authored_config_format(raw: &str) -> AuthoredConfigFormat {

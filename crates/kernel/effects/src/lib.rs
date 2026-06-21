@@ -16,8 +16,6 @@
 //! }
 //! ```
 
-use std::fmt;
-
 use mfm_canonical::sha256_digest_bytes;
 use mfm_ids::{DigestAlgorithm, EffectKind, EffectVersion};
 
@@ -28,21 +26,12 @@ mod tests;
 pub type Result<T> = std::result::Result<T, EffectError>;
 
 /// Error returned by effect descriptor construction.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EffectError {
     /// Effect identity or version construction failed.
+    #[error("effect identity error: {0}")]
     Identity(String),
 }
-
-impl fmt::Display for EffectError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Identity(message) => write!(f, "effect identity error: {message}"),
-        }
-    }
-}
-
-impl std::error::Error for EffectError {}
 
 /// Pure deterministic computation with no external capability access.
 pub enum Pure {}

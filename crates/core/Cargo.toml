@@ -38,6 +38,7 @@ alloy-primitives = { workspace = true, features = ["serde", "k256"] }
 hex = "0.4.3"
 ring = "0.17.14"
 fs2 = "0.4.3"
+thiserror = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3.8"

@@ -38,7 +38,6 @@ use mfm_state_evm_contracts::{
     DeployContractState, ValidateContractInputHandles, ValidateContractState,
 };
 use serde::{Deserialize, Serialize};
-use std::fmt;
 
 const OP_NAMESPACE: &str = "mfm.evm.contract";
 const ROOT_SCOPE: &str = "evm_contract";
@@ -605,32 +604,11 @@ pub fn plan_contract_lifecycle_entry_point(
 }
 
 /// Error returned while planning a contract lifecycle entry point.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ContractLifecyclePlanError {
     /// Program planning failed.
-    Plan(mfm_program::PlanError),
-}
-
-impl fmt::Display for ContractLifecyclePlanError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Plan(error) => write!(f, "contract lifecycle planning failed: {error}"),
-        }
-    }
-}
-
-impl std::error::Error for ContractLifecyclePlanError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Plan(error) => Some(error),
-        }
-    }
-}
-
-impl From<mfm_program::PlanError> for ContractLifecyclePlanError {
-    fn from(error: mfm_program::PlanError) -> Self {
-        Self::Plan(error)
-    }
+    #[error("contract lifecycle planning failed: {0}")]
+    Plan(#[from] mfm_program::PlanError),
 }
 
 fn contract_lifecycle_draft_config_material(

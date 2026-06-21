@@ -16,7 +16,6 @@
 //! ```
 
 use std::ffi::{OsStr, OsString};
-use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -45,14 +44,16 @@ static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 pub type TypedArtifactResult<T> = std::result::Result<T, FsTypedArtifactError>;
 
 /// Error returned by [`FsTypedArtifactStore`].
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum FsTypedArtifactError {
     /// Artifact bytes or metadata were not present.
+    #[error("typed artifact {artifact_id} not found")]
     NotFound {
         /// Missing artifact id.
         artifact_id: Box<ArtifactId>,
     },
     /// Persisted bytes or metadata are internally inconsistent.
+    #[error("typed artifact {artifact_id} corruption: {message}")]
     Corruption {
         /// Corrupt artifact id.
         artifact_id: Box<ArtifactId>,
@@ -60,6 +61,7 @@ pub enum FsTypedArtifactError {
         message: String,
     },
     /// Supplied or persisted evidence does not match the artifact bytes or expected evidence.
+    #[error("typed artifact {artifact_id} evidence mismatch for {field}")]
     EvidenceMismatch {
         /// Artifact id being checked.
         artifact_id: Box<ArtifactId>,
@@ -67,60 +69,31 @@ pub enum FsTypedArtifactError {
         field: &'static str,
     },
     /// Garbage collection refused an artifact retained by a verified projection.
+    #[error("typed artifact {artifact_id} is retained")]
     RetainedArtifactRefused {
         /// Retained artifact id.
         artifact_id: Box<ArtifactId>,
     },
     /// Artifact evidence violates the typed artifact contract.
+    #[error("{message}")]
     InvalidEvidence {
         /// Stable diagnostic message without artifact bytes.
         message: String,
     },
     /// Identity or typed spec metadata failed validation.
+    #[error("{message}")]
     InvalidIdentity {
         /// Stable diagnostic message.
         message: String,
     },
     /// Filesystem operation failed.
+    #[error("{context}: {source}")]
     Io {
         /// Operation context.
         context: &'static str,
         /// Source I/O error.
         source: io::Error,
     },
-}
-
-impl fmt::Display for FsTypedArtifactError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NotFound { artifact_id } => write!(f, "typed artifact {artifact_id} not found"),
-            Self::Corruption {
-                artifact_id,
-                message,
-            } => write!(f, "typed artifact {artifact_id} corruption: {message}"),
-            Self::EvidenceMismatch { artifact_id, field } => {
-                write!(
-                    f,
-                    "typed artifact {artifact_id} evidence mismatch for {field}"
-                )
-            }
-            Self::RetainedArtifactRefused { artifact_id } => {
-                write!(f, "typed artifact {artifact_id} is retained")
-            }
-            Self::InvalidEvidence { message } => f.write_str(message),
-            Self::InvalidIdentity { message } => f.write_str(message),
-            Self::Io { context, source } => write!(f, "{context}: {source}"),
-        }
-    }
-}
-
-impl std::error::Error for FsTypedArtifactError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Io { source, .. } => Some(source),
-            _ => None,
-        }
-    }
 }
 
 impl From<IdentityError> for FsTypedArtifactError {

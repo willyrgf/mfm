@@ -473,7 +473,8 @@ impl EntryPointOpRegistry {
 }
 
 /// Error returned while resolving or registering entry-point operations.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{code}: {message}")]
 pub struct EntryPointOpResolveError {
     code: String,
     message: String,
@@ -499,16 +500,9 @@ impl EntryPointOpResolveError {
     }
 }
 
-impl fmt::Display for EntryPointOpResolveError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: {}", self.code, self.message)
-    }
-}
-
-impl std::error::Error for EntryPointOpResolveError {}
-
 /// Error returned while planning an entry-point operation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{code}: {message}")]
 pub struct OpLaunchError {
     code: String,
     message: String,
@@ -533,14 +527,6 @@ impl OpLaunchError {
         &self.message
     }
 }
-
-impl fmt::Display for OpLaunchError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: {}", self.code, self.message)
-    }
-}
-
-impl std::error::Error for OpLaunchError {}
 
 impl From<AuthoredConfigError> for OpLaunchError {
     fn from(error: AuthoredConfigError) -> Self {

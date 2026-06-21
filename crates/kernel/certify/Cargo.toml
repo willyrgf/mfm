@@ -15,6 +15,7 @@ name = "mfm_certify"
 path = "src/lib.rs"
 
 [dependencies]
+thiserror = { workspace = true }
 mfm-capabilities = { path = "../capabilities" }
 mfm-canonical = { path = "../canonical" }
 mfm-effects = { path = "../effects" }

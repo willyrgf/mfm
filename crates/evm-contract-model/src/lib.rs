@@ -76,14 +76,16 @@ use serde_json::Value;
 pub use common_abi::{AbiEvent, AbiFunction, ParsedAbi};
 
 /// Error returned when constructing EVM contract scalar authorities.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum EvmContractScalarError {
     /// A string scalar was empty or whitespace-only.
+    #[error("{kind} must be non-empty")]
     Empty {
         /// Human-readable scalar kind.
         kind: &'static str,
     },
     /// A wei quantity failed canonical quantity parsing.
+    #[error("{kind} must be a valid EVM quantity: {message}")]
     InvalidQuantity {
         /// Human-readable scalar kind.
         kind: &'static str,
@@ -91,6 +93,7 @@ pub enum EvmContractScalarError {
         message: String,
     },
     /// A typed identity failed category-specific parsing.
+    #[error("{kind} must be a valid typed identity: {message}")]
     InvalidIdentity {
         /// Human-readable scalar kind.
         kind: &'static str,
@@ -98,22 +101,6 @@ pub enum EvmContractScalarError {
         message: String,
     },
 }
-
-impl fmt::Display for EvmContractScalarError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Empty { kind } => write!(f, "{kind} must be non-empty"),
-            Self::InvalidQuantity { kind, message } => {
-                write!(f, "{kind} must be a valid EVM quantity: {message}")
-            }
-            Self::InvalidIdentity { kind, message } => {
-                write!(f, "{kind} must be a valid typed identity: {message}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for EvmContractScalarError {}
 
 fn require_non_empty(kind: &'static str, value: &str) -> Result<(), EvmContractScalarError> {
     if value.trim().is_empty() {

@@ -78,7 +78,8 @@ pub enum ErrorClass {
 }
 
 /// Stable error payload returned by typed application helpers.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{code}: {message}")]
 pub struct AppError {
     /// High-level error classification for HTTP/CLI mapping.
     pub class: ErrorClass,
@@ -150,14 +151,6 @@ impl AppError {
         Self::new(ErrorClass::NotFound, code, message)
     }
 }
-
-impl fmt::Display for AppError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: {}", self.code, self.message)
-    }
-}
-
-impl std::error::Error for AppError {}
 
 impl From<mfm_runtime::RuntimeError> for AppError {
     fn from(error: mfm_runtime::RuntimeError) -> Self {

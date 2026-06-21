@@ -1,67 +1,50 @@
 /// Simplified error types for minimal keystore
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum KeystoreError {
     /// The supplied password did not unlock the keystore.
+    #[error("Invalid password")]
     InvalidPassword,
 
     /// The keystore must be unlocked before the operation can proceed.
+    #[error("Keystore is locked")]
     Locked,
 
     /// The requested key identifier does not exist in the keystore.
+    #[error("Key not found: {0}")]
     KeyNotFound(uuid::Uuid),
 
     /// The supplied private key bytes or hex string were invalid.
+    #[error("Invalid private key format")]
     InvalidPrivateKey,
 
     /// The supplied mnemonic phrase failed validation.
+    #[error("Invalid mnemonic: {0}")]
     InvalidMnemonic(String),
 
     /// The supplied derivation path failed validation.
+    #[error("Invalid derivation path: {0}")]
     InvalidDerivationPath(String),
 
     /// A cryptographic primitive returned an error.
+    #[error("Cryptographic operation failed: {0}")]
     CryptoError(String),
 
     /// A filesystem operation failed.
+    #[error("File operation failed: {0}")]
     FileError(String),
 
     /// Serialization or deserialization failed.
+    #[error("Serialization failed: {0}")]
     SerializationError(String),
 
     /// The caller supplied an invalid input value.
+    #[error("Invalid input: {0}")]
     InvalidInput(String),
 
     /// The requested operation is disabled by policy.
+    #[error("Operation not permitted: {0}")]
     OperationNotPermitted(String),
 }
-
-impl std::fmt::Display for KeystoreError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::InvalidPassword => f.write_str("Invalid password"),
-            Self::Locked => f.write_str("Keystore is locked"),
-            Self::KeyNotFound(id) => write!(f, "Key not found: {id}"),
-            Self::InvalidPrivateKey => f.write_str("Invalid private key format"),
-            Self::InvalidMnemonic(message) => write!(f, "Invalid mnemonic: {message}"),
-            Self::InvalidDerivationPath(message) => {
-                write!(f, "Invalid derivation path: {message}")
-            }
-            Self::CryptoError(message) => {
-                write!(f, "Cryptographic operation failed: {message}")
-            }
-            Self::FileError(message) => write!(f, "File operation failed: {message}"),
-            Self::SerializationError(message) => {
-                write!(f, "Serialization failed: {message}")
-            }
-            Self::InvalidInput(message) => write!(f, "Invalid input: {message}"),
-            Self::OperationNotPermitted(message) => {
-                write!(f, "Operation not permitted: {message}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for KeystoreError {}
 
 // Convert from common error types
 impl From<std::io::Error> for KeystoreError {

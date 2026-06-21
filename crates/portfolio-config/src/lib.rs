@@ -96,7 +96,6 @@ use mfm_portfolio_model::symbol::ValuationSourceRegistry;
 use mfm_program_derive::{MfmConfig, MfmValue, PublicOutputs};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::fmt;
 
 fn artifact_id_for_json(value: &Value) -> Result<ArtifactId, CanonicalError> {
     let canonical = PlainCanonicalJsonBytes::from_json_str(&value.to_string())?;
@@ -195,21 +194,25 @@ impl PortfolioSnapshotBuildReport {
 }
 
 /// Errors returned while parsing or canonicalizing portfolio snapshot config.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum PortfolioSnapshotConfigError {
     /// JSON authored config parsing failed.
+    #[error("failed to parse portfolio authored config as json: {source}")]
     InvalidJson {
         /// Underlying parser error.
         source: serde_json::Error,
     },
     /// TOML authored config parsing failed.
+    #[error("failed to parse portfolio authored config as toml: {source}")]
     InvalidToml {
         /// Underlying parser error.
         source: toml::de::Error,
     },
     /// Canonical bundle validation failed.
-    InvalidBundle(PortfolioConfigError),
+    #[error("invalid portfolio bundle: {0}")]
+    InvalidBundle(#[from] PortfolioConfigError),
     /// Decoding an already-parsed JSON value into a typed config failed.
+    #[error("failed to decode {stage}: {source}")]
     Decode {
         /// Stage being decoded.
         stage: &'static str,
@@ -217,6 +220,7 @@ pub enum PortfolioSnapshotConfigError {
         source: serde_json::Error,
     },
     /// Serializing a typed config to JSON failed.
+    #[error("failed to serialize {stage}: {source}")]
     Serialize {
         /// Stage being serialized.
         stage: &'static str,
@@ -224,60 +228,13 @@ pub enum PortfolioSnapshotConfigError {
         source: serde_json::Error,
     },
     /// Canonical JSON hashing failed.
+    #[error("failed to hash {stage} as canonical json: {source}")]
     CanonicalJson {
         /// Stage being hashed.
         stage: &'static str,
         /// Underlying canonical-json error.
         source: CanonicalError,
     },
-}
-
-impl fmt::Display for PortfolioSnapshotConfigError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidJson { source } => {
-                write!(
-                    f,
-                    "failed to parse portfolio authored config as json: {source}"
-                )
-            }
-            Self::InvalidToml { source } => {
-                write!(
-                    f,
-                    "failed to parse portfolio authored config as toml: {source}"
-                )
-            }
-            Self::InvalidBundle(error) => write!(f, "invalid portfolio bundle: {error}"),
-            Self::Decode { stage, source } => {
-                write!(f, "failed to decode {stage}: {source}")
-            }
-            Self::Serialize { stage, source } => {
-                write!(f, "failed to serialize {stage}: {source}")
-            }
-            Self::CanonicalJson { stage, source } => {
-                write!(f, "failed to hash {stage} as canonical json: {source}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for PortfolioSnapshotConfigError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::InvalidJson { source }
-            | Self::Decode { source, .. }
-            | Self::Serialize { source, .. } => Some(source),
-            Self::InvalidToml { source } => Some(source),
-            Self::InvalidBundle(error) => Some(error),
-            Self::CanonicalJson { source, .. } => Some(source),
-        }
-    }
-}
-
-impl From<PortfolioConfigError> for PortfolioSnapshotConfigError {
-    fn from(error: PortfolioConfigError) -> Self {
-        Self::InvalidBundle(error)
-    }
 }
 
 /// Parses authored portfolio snapshot config using the supplied format.

@@ -419,14 +419,16 @@ pub enum ArtifactReadBackendError {
 }
 
 /// Redaction-safe artifact-read error.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ArtifactReadError {
     /// Artifact bytes or evidence were not found.
+    #[error("artifact {artifact_id} not found")]
     NotFound {
         /// Missing artifact id.
         artifact_id: Box<ArtifactId>,
     },
     /// Artifact bytes or evidence violated a request expectation.
+    #[error("artifact {artifact_id} evidence mismatch for {field}")]
     EvidenceMismatch {
         /// Artifact id whose evidence failed verification.
         artifact_id: Box<ArtifactId>,
@@ -434,11 +436,13 @@ pub enum ArtifactReadError {
         field: &'static str,
     },
     /// The request cannot be satisfied by artifact bytes.
+    #[error("skipped cells do not have artifact bytes")]
     InvalidRequest {
         /// Closed redaction-safe reason.
         reason: ArtifactReadInvalidRequest,
     },
     /// Verified bytes could not be decoded.
+    #[error("artifact {artifact_id} JSON decode failed")]
     Decode {
         /// Artifact id being decoded.
         artifact_id: Box<ArtifactId>,
@@ -446,6 +450,7 @@ pub enum ArtifactReadError {
         format: ArtifactReadDecodeFormat,
     },
     /// Backend failed without exposing endpoint, path, or secret details.
+    #[error("typed artifact backend failed")]
     Backend {
         /// Closed redaction-safe backend reason.
         reason: ArtifactReadBackendError,
@@ -460,35 +465,6 @@ impl ArtifactReadError {
         }
     }
 }
-
-impl fmt::Display for ArtifactReadError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NotFound { artifact_id } => write!(f, "artifact {artifact_id} not found"),
-            Self::EvidenceMismatch { artifact_id, field } => {
-                write!(f, "artifact {artifact_id} evidence mismatch for {field}")
-            }
-            Self::InvalidRequest { reason } => match reason {
-                ArtifactReadInvalidRequest::SkippedCell => {
-                    f.write_str("skipped cells do not have artifact bytes")
-                }
-            },
-            Self::Decode {
-                artifact_id,
-                format,
-            } => match format {
-                ArtifactReadDecodeFormat::Json => {
-                    write!(f, "artifact {artifact_id} JSON decode failed")
-                }
-            },
-            Self::Backend { reason } => match reason {
-                ArtifactReadBackendError::Failed => f.write_str("typed artifact backend failed"),
-            },
-        }
-    }
-}
-
-impl std::error::Error for ArtifactReadError {}
 
 fn verify_bytes_match_evidence(bytes: &[u8], evidence: &ArtifactEvidenceRef) -> Result<()> {
     let digest =
