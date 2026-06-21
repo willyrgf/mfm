@@ -8,9 +8,10 @@ use crate::support::typed_run::{
 };
 use clap::{Args, ValueEnum};
 use mfm_app::{
-    AuthoredConfig, ConfigFormat, EntryPointRunLaunchInput, PublicOpName,
-    TypedPublicOutputResponse, TypedRunMode, TypedRunResponse,
+    EntryPointRunLaunchInput, PublicOpName, TypedPublicOutputResponse, TypedRunMode,
+    TypedRunResponse,
 };
+use mfm_authored_config::{AuthoredConfig, AuthoredConfigFormat};
 use serde::Serialize;
 
 /// Arguments for `mfm run start`.
@@ -54,7 +55,7 @@ pub(crate) enum ConfigFormatArg {
     Json,
 }
 
-impl From<ConfigFormatArg> for ConfigFormat {
+impl From<ConfigFormatArg> for AuthoredConfigFormat {
     fn from(value: ConfigFormatArg) -> Self {
         match value {
             ConfigFormatArg::Toml => Self::Toml,

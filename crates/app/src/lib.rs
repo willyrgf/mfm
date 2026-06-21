@@ -26,6 +26,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use mfm_artifact_store_fs::{FsTypedArtifactError, FsTypedArtifactStore};
+use mfm_authored_config::AuthoredConfig;
 use mfm_canonical::sha256_digest_bytes;
 use mfm_certify::{CertificationRegistry, CertifiedTypedSpec};
 use mfm_events::v1 as events;
@@ -52,10 +53,9 @@ mod entry_points;
 mod evm_contracts;
 
 pub use entry_point::{
-    AuthoredConfig, CanonicalConfigMaterial, CanonicalSeedMaterial, ConfigFormat, EntryPointOpId,
-    EntryPointOpPlan, EntryPointOpRegistry, EntryPointOpResolveError, LaunchableOp,
-    NormalizedAuthoredConfig, OpLaunchError, OpVersion, PublicOpName,
-    DEFAULT_AUTHORED_CONFIG_FORMAT, DEFAULT_AUTHORED_CONFIG_MAX_BYTES,
+    CanonicalConfigMaterial, CanonicalSeedMaterial, EntryPointOpId, EntryPointOpPlan,
+    EntryPointOpRegistry, EntryPointOpResolveError, LaunchableOp, OpLaunchError, OpVersion,
+    PublicOpName,
 };
 
 /// Shared observability configuration used by typed binaries.

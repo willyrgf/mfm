@@ -27,11 +27,12 @@ use axum::Json;
 use axum::Router;
 use http::header::HeaderName;
 use mfm_app::{
-    AppError, AuthoredConfig, ConfigFormat, DriveMode, EntryPointRunLaunchInput, ErrorClass,
-    ManualResolutionDecision, ManualResolutionRecordRequest, PublicOpName, PublicSafeMessage,
-    RunServices, TypedPublicOutputResponse, TypedRunMode, TypedRunResponse, TypedRunStreamResponse,
+    AppError, DriveMode, EntryPointRunLaunchInput, ErrorClass, ManualResolutionDecision,
+    ManualResolutionRecordRequest, PublicOpName, PublicSafeMessage, RunServices,
+    TypedPublicOutputResponse, TypedRunMode, TypedRunResponse, TypedRunStreamResponse,
 };
 use mfm_artifact_store_fs::{FsTypedArtifactError, FsTypedArtifactStore};
+use mfm_authored_config::{AuthoredConfig, AuthoredConfigFormat};
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_events::v1::ArtifactRole;
 use mfm_ids::{ArtifactId, ContentDigest, DigestAlgorithm, RunId, SchemaId};
@@ -138,6 +139,16 @@ impl From<mfm_app::EntryPointOpResolveError> for ApiError {
 
 impl From<mfm_app::OpLaunchError> for ApiError {
     fn from(error: mfm_app::OpLaunchError) -> Self {
+        Self::new(
+            StatusCode::BAD_REQUEST,
+            error.code().to_owned(),
+            PublicSafeMessage::new(error.message().to_owned()),
+        )
+    }
+}
+
+impl From<mfm_authored_config::AuthoredConfigError> for ApiError {
+    fn from(error: mfm_authored_config::AuthoredConfigError) -> Self {
         Self::new(
             StatusCode::BAD_REQUEST,
             error.code().to_owned(),
@@ -387,7 +398,7 @@ enum RestConfigFormat {
     Json,
 }
 
-impl From<RestConfigFormat> for ConfigFormat {
+impl From<RestConfigFormat> for AuthoredConfigFormat {
     fn from(value: RestConfigFormat) -> Self {
         match value {
             RestConfigFormat::Toml => Self::Toml,
@@ -450,7 +461,7 @@ where
     let public_op_name = PublicOpName::new(&req.op)?;
     let op_version = req.op_version.map(mfm_app::OpVersion::new).transpose()?;
     let authored_config = AuthoredConfig::from_json_transport_value(
-        req.config_format.map(ConfigFormat::from),
+        req.config_format.map(AuthoredConfigFormat::from),
         &req.config,
     )?;
     let prepared = mfm_app::prepare_entry_point_run_launch(EntryPointRunLaunchInput {

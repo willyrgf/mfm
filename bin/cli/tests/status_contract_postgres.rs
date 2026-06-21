@@ -46,8 +46,11 @@ async fn run_status_reports_interrupted_attempt_and_framework_attempts_from_hist
         entry_point_registry: &entry_point_registry,
         public_op_name: mfm_app::PublicOpName::new("portfolio_snapshot").expect("op name"),
         op_version: None,
-        authored_config: mfm_app::AuthoredConfig::new(mfm_app::ConfigFormat::Json, config)
-            .expect("authored config"),
+        authored_config: mfm_authored_config::AuthoredConfig::new(
+            mfm_authored_config::AuthoredConfigFormat::Json,
+            config,
+        )
+        .expect("authored config"),
         certification_registry: &certification_registry,
         run_id: run_id.clone(),
         drive: mfm_app::DriveMode::AppendOnly,

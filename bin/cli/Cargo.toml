@@ -13,6 +13,7 @@ parity-tests = []
 tokio = { workspace = true }
 mfm-app = { path = "../../crates/app" }
 mfm-artifact-store-fs = { path = "../../crates/storages/artifact-store-fs" }
+mfm-authored-config = { path = "../../crates/authored-config" }
 mfm-canonical = { path = "../../crates/kernel/canonical" }
 mfm-stream-store-postgres = { path = "../../crates/storages/stream-store-postgres" }
 mfm-ids = { path = "../../crates/kernel/ids" }
