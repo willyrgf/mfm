@@ -120,7 +120,6 @@ pub struct EntryPointOpPlan {
     pub draft: TypedProgramDraft,
     pub config_material: Vec<CanonicalConfigMaterial>,
     pub seed_material: Vec<CanonicalSeedMaterial>,
-    pub authored_config_digest: ContentDigest,
 }
 ```
 
