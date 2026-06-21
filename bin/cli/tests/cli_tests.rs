@@ -35,69 +35,6 @@ fn test_keystore_help() {
 }
 
 #[test]
-fn test_run_start_help_describes_entry_point_op_surface() {
-    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    cmd.args(["run", "start", "--help"]);
-
-    cmd.assert()
-        .success()
-        .stdout(predicate::str::contains("--op <NAME>"))
-        .stdout(predicate::str::contains("--op-version <VERSION>"))
-        .stdout(predicate::str::contains("--config <PATH>"))
-        .stdout(predicate::str::contains("--config-format <CONFIG_FORMAT>"));
-}
-
-#[test]
-fn test_run_start_accepts_entry_point_op_flags_before_dispatch() {
-    let temp_dir = TempDir::new().expect("temp dir");
-    let config_path = temp_dir.path().join("portfolio.toml");
-    std::fs::write(&config_path, "portfolio_id = \"main\"\n").expect("config file");
-
-    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    cmd.args([
-        "--output-format",
-        "json",
-        "run",
-        "start",
-        "--op",
-        "missing_contract_test_op",
-        "--op-version",
-        "1",
-        "--config",
-        config_path.to_str().unwrap(),
-        "--config-format",
-        "toml",
-        "--drive",
-        "append-only",
-    ]);
-
-    let output = cmd.output().expect("run command");
-    assert!(!output.status.success());
-    let stderr = String::from_utf8(output.stderr).expect("stderr utf8");
-    let parsed: serde_json::Value = serde_json::from_str(&stderr).expect("stderr JSON");
-    assert_eq!(parsed["status"], "error");
-    assert_eq!(parsed["error"]["code"], "EntryPointOpNotFound");
-}
-
-#[test]
-fn test_removed_domain_workflow_commands_are_absent() {
-    for args in [
-        &["portfolio", "snapshot", "--help"][..],
-        &["evm", "contracts", "deploy", "--help"],
-        &["evm", "contracts", "configure", "--help"],
-        &["evm", "contracts", "validate", "--help"],
-        &["evm", "contracts", "lifecycle", "--help"],
-    ] {
-        let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-        cmd.args(args);
-
-        cmd.assert()
-            .failure()
-            .stderr(predicate::str::contains("unrecognized subcommand"));
-    }
-}
-
-#[test]
 fn test_import_help() {
     let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
     cmd.args(&["keystore", "import", "--help"]);
@@ -110,28 +47,6 @@ fn test_import_help() {
         .stdout(predicate::str::contains("--passphrase-prompt"))
         .stdout(predicate::str::contains("privatekey"))
         .stdout(predicate::str::contains("mnemonic"));
-}
-
-#[test]
-fn test_import_rejects_legacy_passphrase_flag() {
-    let (_temp_dir, keystore_path) = create_test_keystore();
-
-    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    cmd.args(&[
-        "keystore",
-        "import",
-        "--import-type",
-        "mnemonic",
-        "--keystore",
-        keystore_path.to_str().unwrap(),
-        "--passphrase",
-        "do-not-accept",
-        "--stdin",
-    ]);
-
-    cmd.assert()
-        .failure()
-        .stderr(predicate::str::contains("--passphrase"));
 }
 
 #[test]

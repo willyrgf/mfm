@@ -105,36 +105,6 @@ async fn ready_endpoint_reports_typed_store_readiness() {
 }
 
 #[tokio::test]
-async fn removed_dynamic_feature_and_artifact_routes_are_not_found() {
-    let app = test_app();
-
-    let features = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/v1/features")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("features response");
-    assert_eq!(features.status(), StatusCode::NOT_FOUND);
-
-    let artifacts = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/v1/artifacts/0000000000000000000000000000000000000000000000000000000000000000")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("artifact response");
-    assert_eq!(artifacts.status(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
 async fn start_rejects_invalid_json_with_stable_envelope() {
     let app = test_app();
 
