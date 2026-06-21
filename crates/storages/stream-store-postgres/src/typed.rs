@@ -679,7 +679,7 @@ fn projection_snapshot_with_resource_lanes(
     snapshot: &ProjectionSnapshot,
     resource_lanes: BTreeMap<ResourceLaneKey, ResourceLaneProjection>,
 ) -> Result<ProjectionSnapshot> {
-    ProjectionSnapshot::from_parts(ProjectionSnapshotParts {
+    Ok(ProjectionSnapshot::from_parts(ProjectionSnapshotParts {
         run_states: snapshot
             .run_states()
             .map(|(run_id, state)| (run_id.clone(), *state))
@@ -725,8 +725,7 @@ fn projection_snapshot_with_resource_lanes(
             .retentions()
             .map(|(run_id, projection)| (run_id.clone(), projection.clone()))
             .collect(),
-    })
-    .map_err(PostgresTypedStoreError::Store)
+    })?)
 }
 
 async fn load_run_stream_client(pool: &PgPool, run_id: &RunId) -> Result<Vec<KernelEventEnvelope>> {
