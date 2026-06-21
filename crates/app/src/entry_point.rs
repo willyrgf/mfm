@@ -1,13 +1,19 @@
 use std::collections::BTreeMap;
 use std::fmt;
+use std::marker::PhantomData;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use mfm_authored_config::{AuthoredConfig, AuthoredConfigError, AuthoredConfigFormat};
+use mfm_authored_config::{
+    AuthoredConfig, AuthoredConfigError, AuthoredConfigFormat, EntryPointDescriptor,
+};
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_ids::{ContentDigest, SchemaId, SeedId};
-use mfm_program::TypedProgramDraft;
+use mfm_program::{
+    TypedProgramConfigMaterial, TypedProgramDraft, TypedProgramLaunchPlan, TypedProgramSeedMaterial,
+};
 use mfm_spec::v1 as spec;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 const PUBLIC_OP_NAME_PATTERN: &str = "[a-z][a-z0-9]*(?:_[a-z0-9]+)*";
@@ -174,6 +180,44 @@ pub struct EntryPointOpPlan {
     pub seed_material: Vec<CanonicalSeedMaterial>,
 }
 
+impl From<TypedProgramLaunchPlan> for EntryPointOpPlan {
+    fn from(plan: TypedProgramLaunchPlan) -> Self {
+        Self {
+            draft: plan.draft,
+            config_material: plan
+                .config_material
+                .into_iter()
+                .map(CanonicalConfigMaterial::from)
+                .collect(),
+            seed_material: plan
+                .seed_material
+                .into_iter()
+                .map(CanonicalSeedMaterial::from)
+                .collect(),
+        }
+    }
+}
+
+impl From<TypedProgramConfigMaterial> for CanonicalConfigMaterial {
+    fn from(material: TypedProgramConfigMaterial) -> Self {
+        Self {
+            schema_id: material.schema_id,
+            bytes: material.bytes,
+            media_type: material.media_type,
+        }
+    }
+}
+
+impl From<TypedProgramSeedMaterial> for CanonicalSeedMaterial {
+    fn from(material: TypedProgramSeedMaterial) -> Self {
+        Self {
+            seed_id: material.seed_id,
+            bytes: material.bytes,
+            media_type: material.media_type,
+        }
+    }
+}
+
 /// Operation that can plan a public entry-point run from authored config.
 pub trait LaunchableOp: Send + Sync {
     /// Returns the stable entry-point operation id.
@@ -190,6 +234,81 @@ pub trait LaunchableOp: Send + Sync {
 
     /// Deterministically plans the typed program draft and launch material.
     fn plan(&self, authored_config: AuthoredConfig) -> Result<EntryPointOpPlan, OpLaunchError>;
+}
+
+/// Generic app adapter from a typed op-crate planner to [`LaunchableOp`].
+pub struct TypedEntryPointOp<TConfig, E> {
+    descriptor: EntryPointDescriptor,
+    op_id: EntryPointOpId,
+    public_name: PublicOpName,
+    version: OpVersion,
+    planner: fn(TConfig) -> Result<TypedProgramLaunchPlan, E>,
+    map_error: fn(E) -> OpLaunchError,
+    _config: PhantomData<fn() -> TConfig>,
+}
+
+impl<TConfig, E> TypedEntryPointOp<TConfig, E> {
+    /// Builds a launchable adapter from app-neutral descriptor and planner exports.
+    pub fn new(
+        descriptor: EntryPointDescriptor,
+        planner: fn(TConfig) -> Result<TypedProgramLaunchPlan, E>,
+        map_error: fn(E) -> OpLaunchError,
+    ) -> Result<Self, EntryPointOpResolveError> {
+        if descriptor.accepted_config_formats.is_empty() {
+            return Err(EntryPointOpResolveError::new(
+                "EntryPointOpConfigFormatsEmpty",
+                "entry-point op must accept at least one config format",
+            ));
+        }
+        let version = OpVersion::new(descriptor.version)?;
+        Ok(Self {
+            descriptor,
+            op_id: EntryPointOpId::new(descriptor.namespace, descriptor.name, version)?,
+            public_name: PublicOpName::new(descriptor.public_name)?,
+            version,
+            planner,
+            map_error,
+            _config: PhantomData,
+        })
+    }
+}
+
+impl<TConfig, E> LaunchableOp for TypedEntryPointOp<TConfig, E>
+where
+    TConfig: DeserializeOwned + Serialize + Send + Sync + 'static,
+    E: Send + Sync + 'static,
+{
+    fn op_id(&self) -> EntryPointOpId {
+        self.op_id.clone()
+    }
+
+    fn public_name(&self) -> PublicOpName {
+        self.public_name.clone()
+    }
+
+    fn version(&self) -> OpVersion {
+        self.version
+    }
+
+    fn accepted_config_formats(&self) -> &'static [AuthoredConfigFormat] {
+        self.descriptor.accepted_config_formats
+    }
+
+    fn plan(&self, authored_config: AuthoredConfig) -> Result<EntryPointOpPlan, OpLaunchError> {
+        if !self
+            .accepted_config_formats()
+            .contains(&authored_config.format())
+        {
+            return Err(OpLaunchError::new(
+                "EntryPointOpConfigFormatUnsupported",
+                "entry-point op does not accept the supplied config format",
+            ));
+        }
+
+        let normalized = authored_config.normalize::<TConfig>()?;
+        let planned = (self.planner)(normalized.value).map_err(self.map_error)?;
+        Ok(planned.into())
+    }
 }
 
 /// Registry that resolves public operation names and versions to launchable ops.
@@ -512,6 +631,53 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    struct AdapterConfig {
+        value: u64,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct AdapterPlanError;
+
+    static JSON_FORMAT: &[AuthoredConfigFormat] = &[AuthoredConfigFormat::Json];
+
+    fn adapter_descriptor() -> EntryPointDescriptor {
+        EntryPointDescriptor {
+            namespace: "mfm.test",
+            name: "typed_adapter",
+            public_name: "typed_adapter",
+            version: 1,
+            accepted_config_formats: FORMATS,
+        }
+    }
+
+    fn json_only_adapter_descriptor() -> EntryPointDescriptor {
+        EntryPointDescriptor {
+            namespace: "mfm.test",
+            name: "typed_adapter",
+            public_name: "typed_adapter",
+            version: 1,
+            accepted_config_formats: JSON_FORMAT,
+        }
+    }
+
+    fn adapter_plan(config: AdapterConfig) -> Result<TypedProgramLaunchPlan, AdapterPlanError> {
+        if config.value == 0 {
+            return Err(AdapterPlanError);
+        }
+        let draft = mfm_op_proof::proof_program_draft(mfm_op_proof::ProofWorkflowConfig::default())
+            .map_err(|_| AdapterPlanError)?;
+        Ok(TypedProgramLaunchPlan {
+            draft,
+            config_material: Vec::new(),
+            seed_material: Vec::new(),
+        })
+    }
+
+    fn adapter_plan_error(_error: AdapterPlanError) -> OpLaunchError {
+        OpLaunchError::new("AdapterPlanFailed", "adapter test plan failed")
+    }
+
     #[test]
     fn entry_point_registry_resolves_latest_version() {
         let name = PublicOpName::new("portfolio_snapshot").expect("public name");
@@ -630,5 +796,37 @@ mod tests {
 
         assert!(!plan.draft.state_nodes().is_empty());
         assert!(plan.config_material.is_empty());
+    }
+
+    #[test]
+    fn typed_entry_point_adapter_plans_from_typed_config() {
+        let op = TypedEntryPointOp::new(adapter_descriptor(), adapter_plan, adapter_plan_error)
+            .expect("adapter op");
+        let authored =
+            AuthoredConfig::new(AuthoredConfigFormat::Json, r#"{"value":1}"#).expect("authored");
+
+        let plan = op.plan(authored).expect("plan");
+
+        assert_eq!(op.op_id().to_string(), "mfm.test:typed_adapter:1");
+        assert_eq!(op.public_name().as_str(), "typed_adapter");
+        assert!(!plan.draft.state_nodes().is_empty());
+        assert!(plan.config_material.is_empty());
+        assert!(plan.seed_material.is_empty());
+    }
+
+    #[test]
+    fn typed_entry_point_adapter_rejects_unsupported_format_before_planning() {
+        let op = TypedEntryPointOp::new(
+            json_only_adapter_descriptor(),
+            adapter_plan,
+            adapter_plan_error,
+        )
+        .expect("adapter op");
+        let authored =
+            AuthoredConfig::new(AuthoredConfigFormat::Toml, "value = 1").expect("authored");
+
+        let err = op.plan(authored).expect_err("unsupported format");
+
+        assert_eq!(err.code(), "EntryPointOpConfigFormatUnsupported");
     }
 }
