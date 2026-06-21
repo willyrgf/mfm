@@ -104,14 +104,14 @@ mod tests {
     use super::*;
     use crate::{
         make_async_typed_services_with_certification_registry, new_run_id,
-        prepare_certified_run_launch, CertifiedRunLaunchInput, DriveMode, RunLaunchConfigArtifact,
-        RunLaunchSeedArtifact, TypedRunMode,
+        prepare_entry_point_run_launch, DriveMode, EntryPointRunLaunchInput, RunLaunchRequest,
+        RunServices, TypedRunMode,
     };
     use mfm_adapters_evm_contracts::{
         ensure_prepared_invocation_public, EvmContractRuntime, EvmContractRuntimeFactory,
         EvmContractRuntimeRoute, PreparedContractInvocation,
     };
-    use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
+    use mfm_authored_config::{AuthoredConfig, AuthoredConfigFormat};
     use mfm_capabilities::CapabilitySpec;
     use mfm_certify::CertificationRegistry;
     use mfm_core::crypto::EthereumPrivateKey;
@@ -129,37 +129,20 @@ mod tests {
     };
     use mfm_evm_contract_config::{ConfigurePhaseConfig, DeployPhaseConfig, ValidatePhaseConfig};
     use mfm_evm_contract_model::{ConfiguredContract, DeployedContract};
-    use mfm_ids::{ContentDigest, DigestAlgorithm};
-    use mfm_op_evm_contract_lifecycle::{
-        compile_contract_deploy_program, compile_contract_lifecycle_program,
-        compile_contract_validate_program, ContractLifecycleConfig,
-    };
+    use mfm_ids::RunId;
+    use mfm_op_evm_contract_lifecycle::ContractLifecycleConfig;
     use mfm_runtime::ErasedRunnerRegistry;
     use mfm_signing::{
         PublicSigningIdentity, SignatureBytes, SignerRef, SigningError, SigningFuture,
         SigningProvider, SigningRequest, SigningResult,
     };
-    use mfm_spec::v1 as spec;
     use mfm_store::v1::{self as store, AsyncTypedRunEventStore};
-    use serde::Serialize;
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::sync::Mutex;
 
     const TEST_SIGNER_HEX: &str =
         "4c0883a69102937d6231471b5dbb6204fe512961708279c2f802d6a8ebf2d3a4";
-
-    fn test_entry_point_evidence(op_name: &'static str) -> events::EntryPointLaunchEvidence {
-        events::EntryPointLaunchEvidence {
-            resolved_op_id: events::EntryPointOpId::new(format!("mfm.test:{op_name}:1"))
-                .expect("entry-point op id"),
-            entry_point_registry_digest: test_digest(b"entry-point-registry"),
-        }
-    }
-
-    fn test_digest(bytes: &[u8]) -> ContentDigest {
-        ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, sha256_digest_bytes(bytes))
-    }
 
     fn evm_forbidden_runtime_terms() -> Vec<String> {
         vec![
@@ -211,11 +194,33 @@ mod tests {
         }
     }
 
-    fn canonical_value<T: Serialize>(value: &T) -> mfm_runtime::Result<PlainCanonicalJsonBytes> {
-        let json = serde_json::to_string(value)
-            .map_err(|error| mfm_runtime::RuntimeError::Canonical(error.to_string()))?;
-        PlainCanonicalJsonBytes::from_json_str(&json)
-            .map_err(|error| mfm_runtime::RuntimeError::Canonical(error.to_string()))
+    fn prepare_evm_entry_point_request<S>(
+        services: &RunServices<S>,
+        op: &'static str,
+        config: serde_json::Value,
+        run_id: RunId,
+    ) -> RunLaunchRequest
+    where
+        S: store::AsyncTypedRunEventStore + Send + Sync,
+    {
+        let entry_point_registry =
+            crate::entry_points::production_entry_point_op_registry().expect("entry points");
+        let public_op_name = crate::PublicOpName::new(op).expect("public op name");
+        let authored_config =
+            AuthoredConfig::from_json_transport_value(Some(AuthoredConfigFormat::Json), &config)
+                .expect("authored config");
+
+        prepare_entry_point_run_launch(EntryPointRunLaunchInput {
+            entry_point_registry: &entry_point_registry,
+            public_op_name,
+            op_version: None,
+            authored_config,
+            certification_registry: services.certification_registry(),
+            run_id,
+            drive: DriveMode::AppendOnly,
+        })
+        .expect("entry-point launch request")
+        .request
     }
 
     #[tokio::test]
@@ -227,11 +232,6 @@ mod tests {
         let artifacts = FsTypedArtifactStore::new(&root);
         let config = validate_config();
         let configured = configured_contract();
-        let seed_bytes = canonical_value(&configured)
-            .expect("canonical configured")
-            .to_vec();
-        let compiled = compile_contract_validate_program(config, configured)
-            .expect("compiled validate program");
         let mut certification = CertificationRegistry::new();
         mfm_op_evm_contract_lifecycle::register_contract_lifecycle_certification_descriptors(
             &mut certification,
@@ -250,39 +250,22 @@ mod tests {
             certification,
         );
         let run_id = new_run_id();
-        let seed_id = compiled
+        let request = prepare_evm_entry_point_request(
+            &services,
+            "evm_contract_validate",
+            json!({
+                "config": config,
+                "configured": configured,
+            }),
+            run_id.clone(),
+        );
+        let public_schema_id = request
             .certified_spec
             .envelope()
             .spec
-            .seeds
-            .first()
-            .expect("validate spec has configured seed")
-            .seed_id
+            .public_outputs
+            .public_schema_id
             .clone();
-        let request = prepare_certified_run_launch(
-            CertifiedRunLaunchInput {
-                certified_spec: compiled.certified_spec.clone(),
-                registry: services.certification_registry(),
-                run_id: run_id.clone(),
-                entry_point_evidence: test_entry_point_evidence("evm_contract_validate"),
-                drive: DriveMode::AppendOnly,
-            },
-            compiled
-                .config_artifacts
-                .iter()
-                .map(|artifact| RunLaunchConfigArtifact {
-                    schema_id: artifact.schema_id.clone(),
-                    bytes: artifact.bytes.clone(),
-                    media_type: artifact.media_type.clone(),
-                })
-                .collect(),
-            vec![RunLaunchSeedArtifact {
-                seed_id,
-                bytes: seed_bytes,
-                media_type: spec::MediaType::new("application/json").expect("media"),
-            }],
-        )
-        .expect("launch request");
 
         let started = services.launch_run(request).await.expect("append start");
         assert_eq!(started.run_mode, TypedRunMode::Forward);
@@ -301,15 +284,7 @@ mod tests {
             "validated lifecycle replay should report a completed run"
         );
         let public_output = services
-            .typed_public_output(
-                &run_id,
-                &compiled
-                    .certified_spec
-                    .envelope()
-                    .spec
-                    .public_outputs
-                    .public_schema_id,
-            )
+            .typed_public_output(&run_id, &public_schema_id)
             .await
             .expect("public output");
         let rendered = public_output.json.expect("json");
@@ -330,12 +305,6 @@ mod tests {
         std::fs::create_dir_all(&root).expect("root dir");
         let artifacts = FsTypedArtifactStore::new(&root);
         let configured = configured_contract();
-        let seed_bytes = canonical_value(&configured)
-            .expect("canonical configured")
-            .to_vec();
-        let compiled =
-            compile_contract_validate_program(validate_config_with_assertions(), configured)
-                .expect("compiled contract validation program");
         let mut certification = CertificationRegistry::new();
         mfm_op_evm_contract_lifecycle::register_contract_lifecycle_certification_descriptors(
             &mut certification,
@@ -354,39 +323,15 @@ mod tests {
             certification,
         );
         let run_id = new_run_id();
-        let seed_id = compiled
-            .certified_spec
-            .envelope()
-            .spec
-            .seeds
-            .first()
-            .expect("validate spec has configured seed")
-            .seed_id
-            .clone();
-        let request = prepare_certified_run_launch(
-            CertifiedRunLaunchInput {
-                certified_spec: compiled.certified_spec.clone(),
-                registry: services.certification_registry(),
-                run_id: run_id.clone(),
-                entry_point_evidence: test_entry_point_evidence("evm_contract_validate"),
-                drive: DriveMode::AppendOnly,
-            },
-            compiled
-                .config_artifacts
-                .iter()
-                .map(|artifact| RunLaunchConfigArtifact {
-                    schema_id: artifact.schema_id.clone(),
-                    bytes: artifact.bytes.clone(),
-                    media_type: artifact.media_type.clone(),
-                })
-                .collect(),
-            vec![RunLaunchSeedArtifact {
-                seed_id,
-                bytes: seed_bytes,
-                media_type: spec::MediaType::new("application/json").expect("media"),
-            }],
-        )
-        .expect("launch request");
+        let request = prepare_evm_entry_point_request(
+            &services,
+            "evm_contract_validate",
+            json!({
+                "config": validate_config_with_assertions(),
+                "configured": configured,
+            }),
+            run_id.clone(),
+        );
 
         let started = services.launch_run(request).await.expect("append start");
         assert_eq!(started.run_mode, TypedRunMode::Forward);
@@ -431,7 +376,6 @@ mod tests {
         let artifacts = FsTypedArtifactStore::new(&root);
         let signer = test_contract_signer();
         let config = deploy_config(&signer.address);
-        let compiled = compile_contract_deploy_program(config).expect("compiled deploy program");
         let mut certification = CertificationRegistry::new();
         mfm_op_evm_contract_lifecycle::register_contract_lifecycle_certification_descriptors(
             &mut certification,
@@ -454,26 +398,19 @@ mod tests {
             certification,
         );
         let run_id = new_run_id();
-        let request = prepare_certified_run_launch(
-            CertifiedRunLaunchInput {
-                certified_spec: compiled.certified_spec.clone(),
-                registry: services.certification_registry(),
-                run_id: run_id.clone(),
-                entry_point_evidence: test_entry_point_evidence("evm_contract_deploy"),
-                drive: DriveMode::AppendOnly,
-            },
-            compiled
-                .config_artifacts
-                .iter()
-                .map(|artifact| RunLaunchConfigArtifact {
-                    schema_id: artifact.schema_id.clone(),
-                    bytes: artifact.bytes.clone(),
-                    media_type: artifact.media_type.clone(),
-                })
-                .collect(),
-            Vec::new(),
-        )
-        .expect("launch request");
+        let request = prepare_evm_entry_point_request(
+            &services,
+            "evm_contract_deploy",
+            serde_json::to_value(config).expect("deploy config json"),
+            run_id.clone(),
+        );
+        let public_schema_id = request
+            .certified_spec
+            .envelope()
+            .spec
+            .public_outputs
+            .public_schema_id
+            .clone();
 
         let started = services.launch_run(request).await.expect("append start");
         assert_eq!(started.run_mode, TypedRunMode::Forward);
@@ -492,15 +429,7 @@ mod tests {
             "deploy lifecycle replay should report a completed run"
         );
         let public_output = services
-            .typed_public_output(
-                &run_id,
-                &compiled
-                    .certified_spec
-                    .envelope()
-                    .spec
-                    .public_outputs
-                    .public_schema_id,
-            )
+            .typed_public_output(&run_id, &public_schema_id)
             .await
             .expect("public output");
         let rendered = public_output.json.expect("json");
@@ -530,8 +459,6 @@ mod tests {
             configure_config(&signer.address),
             validate_config(),
         );
-        let compiled =
-            compile_contract_lifecycle_program(config).expect("compiled lifecycle program");
         let mut certification = CertificationRegistry::new();
         mfm_op_evm_contract_lifecycle::register_contract_lifecycle_certification_descriptors(
             &mut certification,
@@ -554,26 +481,19 @@ mod tests {
             certification,
         );
         let run_id = new_run_id();
-        let request = prepare_certified_run_launch(
-            CertifiedRunLaunchInput {
-                certified_spec: compiled.certified_spec.clone(),
-                registry: services.certification_registry(),
-                run_id: run_id.clone(),
-                entry_point_evidence: test_entry_point_evidence("evm_contract_lifecycle"),
-                drive: DriveMode::AppendOnly,
-            },
-            compiled
-                .config_artifacts
-                .iter()
-                .map(|artifact| RunLaunchConfigArtifact {
-                    schema_id: artifact.schema_id.clone(),
-                    bytes: artifact.bytes.clone(),
-                    media_type: artifact.media_type.clone(),
-                })
-                .collect(),
-            Vec::new(),
-        )
-        .expect("launch request");
+        let request = prepare_evm_entry_point_request(
+            &services,
+            "evm_contract_lifecycle",
+            serde_json::to_value(config).expect("lifecycle config json"),
+            run_id.clone(),
+        );
+        let public_schema_id = request
+            .certified_spec
+            .envelope()
+            .spec
+            .public_outputs
+            .public_schema_id
+            .clone();
 
         let started = services.launch_run(request).await.expect("append start");
         assert_eq!(started.run_mode, TypedRunMode::Forward);
@@ -587,15 +507,7 @@ mod tests {
             .await
             .expect("replay full lifecycle");
         let public_output = services
-            .typed_public_output(
-                &run_id,
-                &compiled
-                    .certified_spec
-                    .envelope()
-                    .spec
-                    .public_outputs
-                    .public_schema_id,
-            )
+            .typed_public_output(&run_id, &public_schema_id)
             .await
             .expect("public output");
         let rendered = public_output.json.expect("json");

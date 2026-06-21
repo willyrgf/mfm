@@ -1,16 +1,4 @@
-use mfm_authored_config::{
-    AuthoredConfig, AuthoredConfigFormat, TOML_JSON_AUTHORED_CONFIG_FORMATS,
-};
-use mfm_canonical::PlainCanonicalJsonBytes;
-use mfm_evm_contract_config::{ConfigurePhaseConfig, DeployPhaseConfig, ValidatePhaseConfig};
-use mfm_evm_contract_model::{ConfiguredContract, DeployedContract};
-use mfm_op_evm_contract_lifecycle::ContractLifecycleConfig;
-use serde::{Deserialize, Serialize};
-
-use crate::{
-    CanonicalConfigMaterial, CanonicalSeedMaterial, EntryPointOpId, EntryPointOpPlan,
-    EntryPointOpRegistry, LaunchableOp, OpLaunchError, OpVersion, PublicOpName, TypedEntryPointOp,
-};
+use crate::{EntryPointOpRegistry, OpLaunchError, TypedEntryPointOp};
 
 /// Builds the production entry-point operation registry for this process.
 pub(crate) fn production_entry_point_op_registry() -> Result<EntryPointOpRegistry, crate::AppError>
@@ -21,9 +9,26 @@ pub(crate) fn production_entry_point_op_registry() -> Result<EntryPointOpRegistr
         mfm_op_portfolio_tracker::plan_portfolio_snapshot_entry_point,
         portfolio_snapshot_plan_error,
     )?)?;
-    for kind in EvmContractEntryPointKind::ALL {
-        registry.register(EvmContractEntryPointOp { kind })?;
-    }
+    registry.register(TypedEntryPointOp::new(
+        mfm_op_evm_contract_lifecycle::CONTRACT_DEPLOY_ENTRY_POINT,
+        mfm_op_evm_contract_lifecycle::plan_contract_deploy_entry_point,
+        evm_contract_plan_error,
+    )?)?;
+    registry.register(TypedEntryPointOp::new(
+        mfm_op_evm_contract_lifecycle::CONTRACT_CONFIGURE_ENTRY_POINT,
+        mfm_op_evm_contract_lifecycle::plan_contract_configure_entry_point,
+        evm_contract_plan_error,
+    )?)?;
+    registry.register(TypedEntryPointOp::new(
+        mfm_op_evm_contract_lifecycle::CONTRACT_VALIDATE_ENTRY_POINT,
+        mfm_op_evm_contract_lifecycle::plan_contract_validate_entry_point,
+        evm_contract_plan_error,
+    )?)?;
+    registry.register(TypedEntryPointOp::new(
+        mfm_op_evm_contract_lifecycle::CONTRACT_LIFECYCLE_ENTRY_POINT,
+        mfm_op_evm_contract_lifecycle::plan_contract_lifecycle_entry_point,
+        evm_contract_plan_error,
+    )?)?;
     Ok(registry)
 }
 
@@ -36,169 +41,8 @@ fn portfolio_snapshot_plan_error(
     )
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EvmContractEntryPointKind {
-    Deploy,
-    Configure,
-    Validate,
-    Lifecycle,
-}
-
-impl EvmContractEntryPointKind {
-    const ALL: [Self; 4] = [
-        Self::Deploy,
-        Self::Configure,
-        Self::Validate,
-        Self::Lifecycle,
-    ];
-
-    fn public_name(self) -> &'static str {
-        match self {
-            Self::Deploy => "evm_contract_deploy",
-            Self::Configure => "evm_contract_configure",
-            Self::Validate => "evm_contract_validate",
-            Self::Lifecycle => "evm_contract_lifecycle",
-        }
-    }
-
-    fn name(self) -> &'static str {
-        match self {
-            Self::Deploy => "contract_deploy",
-            Self::Configure => "contract_configure",
-            Self::Validate => "contract_validate",
-            Self::Lifecycle => "contract_lifecycle",
-        }
-    }
-}
-
-struct EvmContractEntryPointOp {
-    kind: EvmContractEntryPointKind,
-}
-
-impl LaunchableOp for EvmContractEntryPointOp {
-    fn op_id(&self) -> EntryPointOpId {
-        EntryPointOpId::new("mfm.evm.contract", self.kind.name(), self.version())
-            .expect("static EVM contract entry-point op id is valid")
-    }
-
-    fn public_name(&self) -> PublicOpName {
-        PublicOpName::new(self.kind.public_name())
-            .expect("static EVM contract public op name is valid")
-    }
-
-    fn version(&self) -> OpVersion {
-        OpVersion::new(1).expect("static EVM contract entry-point op version is valid")
-    }
-
-    fn accepted_config_formats(&self) -> &'static [AuthoredConfigFormat] {
-        TOML_JSON_AUTHORED_CONFIG_FORMATS
-    }
-
-    fn plan(&self, authored_config: AuthoredConfig) -> Result<EntryPointOpPlan, OpLaunchError> {
-        if !self
-            .accepted_config_formats()
-            .contains(&authored_config.format())
-        {
-            return Err(OpLaunchError::new(
-                "EntryPointOpConfigFormatUnsupported",
-                "entry-point op does not accept the supplied config format",
-            ));
-        }
-        match self.kind {
-            EvmContractEntryPointKind::Deploy => {
-                let normalized = authored_config.normalize::<DeployPhaseConfig>()?;
-                let planned =
-                    mfm_op_evm_contract_lifecycle::plan_contract_deploy_program(normalized.value)
-                        .map_err(evm_contract_plan_error)?;
-                self.entry_plan(planned)
-            }
-            EvmContractEntryPointKind::Configure => {
-                let normalized = authored_config.normalize::<ConfigureEntryPointConfig>()?;
-                let planned = mfm_op_evm_contract_lifecycle::plan_contract_configure_program(
-                    normalized.value.config,
-                    normalized.value.deployed,
-                )
-                .map_err(evm_contract_plan_error)?;
-                self.entry_plan(planned)
-            }
-            EvmContractEntryPointKind::Validate => {
-                let normalized = authored_config.normalize::<ValidateEntryPointConfig>()?;
-                let planned = mfm_op_evm_contract_lifecycle::plan_contract_validate_program(
-                    normalized.value.config,
-                    normalized.value.configured,
-                )
-                .map_err(evm_contract_plan_error)?;
-                self.entry_plan(planned)
-            }
-            EvmContractEntryPointKind::Lifecycle => {
-                let normalized = authored_config.normalize::<ContractLifecycleConfig>()?;
-                let planned = mfm_op_evm_contract_lifecycle::plan_contract_lifecycle_program(
-                    normalized.value,
-                )
-                .map_err(evm_contract_plan_error)?;
-                self.entry_plan(planned)
-            }
-        }
-    }
-}
-
-impl EvmContractEntryPointOp {
-    fn entry_plan(
-        &self,
-        planned: mfm_op_evm_contract_lifecycle::PlannedContractLifecycleProgram,
-    ) -> Result<EntryPointOpPlan, OpLaunchError> {
-        Ok(EntryPointOpPlan {
-            draft: planned.draft,
-            config_material: evm_config_material(planned.config_artifacts)?,
-            seed_material: planned
-                .seed_artifacts
-                .into_iter()
-                .map(|seed| CanonicalSeedMaterial {
-                    seed_id: seed.seed_id,
-                    bytes: seed.bytes,
-                    media_type: seed.media_type,
-                })
-                .collect(),
-        })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct ConfigureEntryPointConfig {
-    config: ConfigurePhaseConfig,
-    deployed: DeployedContract,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct ValidateEntryPointConfig {
-    config: ValidatePhaseConfig,
-    configured: ConfiguredContract,
-}
-
-fn evm_config_material(
-    artifacts: Vec<mfm_op_evm_contract_lifecycle::ContractLifecycleConfigArtifact>,
-) -> Result<Vec<CanonicalConfigMaterial>, OpLaunchError> {
-    artifacts
-        .into_iter()
-        .map(|artifact| {
-            let bytes = PlainCanonicalJsonBytes::from_canonical_json_slice(&artifact.bytes)
-                .map_err(|_| {
-                    OpLaunchError::new(
-                        "EntryPointOpConfigMaterialInvalid",
-                        "entry-point op produced invalid canonical config material",
-                    )
-                })?;
-            Ok(CanonicalConfigMaterial {
-                schema_id: artifact.schema_id,
-                bytes,
-                media_type: artifact.media_type,
-            })
-        })
-        .collect()
-}
-
 fn evm_contract_plan_error(
-    _error: mfm_op_evm_contract_lifecycle::ContractLifecycleCompileError,
+    _error: mfm_op_evm_contract_lifecycle::ContractLifecyclePlanError,
 ) -> OpLaunchError {
     OpLaunchError::new(
         "EvmContractPlanFailed",
@@ -209,6 +53,8 @@ fn evm_contract_plan_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{OpVersion, PublicOpName};
+    use mfm_authored_config::{AuthoredConfig, AuthoredConfigFormat};
 
     #[test]
     fn production_registry_resolves_portfolio_snapshot_latest() {
