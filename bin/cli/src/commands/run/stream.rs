@@ -1,9 +1,7 @@
 use crate::commands::result::{CommandError, CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
-use crate::support::typed_run::{
-    command_error_from_app_error, connect_run_services, parse_typed_run_id, TypedRunStoresArgs,
-};
+use crate::support::typed_run::{connect_run_services, parse_typed_run_id, TypedRunStoresArgs};
 use clap::Args;
 use mfm_app::TypedRunStreamResponse;
 
@@ -50,10 +48,7 @@ async fn execute_internal(args: &StreamArgs) -> CommandResult<TypedRunStreamResp
 
     let run_id = parse_typed_run_id(&args.run_id)?;
     let services = connect_run_services(&args.stores).await?;
-    let response = services
-        .run_stream(&run_id)
-        .await
-        .map_err(command_error_from_app_error)?;
+    let response = services.run_stream(&run_id).await?;
     let response = TypedRunStreamResponse {
         run_id: response.run_id,
         head_seq: response.head_seq,

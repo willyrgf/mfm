@@ -4,8 +4,7 @@ use crate::commands::result::{CommandError, CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
 use crate::support::typed_run::{
-    command_error_from_app_error, connect_run_services, drive_mode, parse_typed_run_id,
-    TypedDriveArg, TypedRunStoresArgs,
+    connect_run_services, drive_mode, parse_typed_run_id, TypedDriveArg, TypedRunStoresArgs,
 };
 use clap::{Args, ValueEnum};
 use mfm_app::{ManualResolutionDecision, ManualResolutionRecordRequest, TypedRunResponse};
@@ -90,8 +89,7 @@ async fn execute_internal(args: &ManualResolutionArgs) -> CommandResult<TypedRun
             note: args.note.clone(),
             drive: drive_mode(args.drive),
         })
-        .await
-        .map_err(command_error_from_app_error)?;
+        .await?;
     Ok(CommandOutput::new(response))
 }
 

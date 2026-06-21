@@ -7,7 +7,6 @@ use mfm_evm_core::tx::{
     eip1559_signing_hash, encode_signed_eip1559_tx_hex, parse_address, parse_data_hex,
     parse_u128_quantity, Eip1559TxToSign,
 };
-use mfm_evm_core::util_error::UtilError;
 use std::io::{self, Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -343,20 +342,17 @@ pub(crate) fn sign_transaction(req: TxSignRequest) -> Result<SignedTx, CommandEr
     let mut keystore = load_unlocked_keystore(&req.keystore_path)?;
     let key_id = resolve_key_id(&keystore, req.id.as_deref(), req.by_label.as_deref())?;
     let tx = Eip1559TxToSign {
-        to: Some(parse_address(&req.to, "to").map_err(command_error_from_util)?),
-        value_wei: parse_u128_quantity(&req.value_wei, "value-wei")
-            .map_err(command_error_from_util)?,
+        to: Some(parse_address(&req.to, "to")?),
+        value_wei: parse_u128_quantity(&req.value_wei, "value-wei")?,
         chain_id: req.chain_id,
         nonce: req.nonce,
-        max_fee_per_gas: parse_u128_quantity(&req.max_fee_per_gas, "max-fee-per-gas")
-            .map_err(command_error_from_util)?,
+        max_fee_per_gas: parse_u128_quantity(&req.max_fee_per_gas, "max-fee-per-gas")?,
         max_priority_fee_per_gas: parse_u128_quantity(
             &req.max_priority_fee_per_gas,
             "max-priority-fee-per-gas",
-        )
-        .map_err(command_error_from_util)?,
+        )?,
         gas_limit: req.gas_limit,
-        data: parse_data_hex(&req.data).map_err(command_error_from_util)?,
+        data: parse_data_hex(&req.data)?,
     };
 
     if tx.max_priority_fee_per_gas > tx.max_fee_per_gas {
@@ -911,10 +907,6 @@ fn admin_error_from_keystore(err: KeystoreError) -> CommandError {
         }
         _ => CommandError::backend("keystore_error", "Keystore operation failed"),
     }
-}
-
-fn command_error_from_util(err: UtilError) -> CommandError {
-    CommandError::new(err.code, err.message)
 }
 
 fn key_type_code(key_type: &KeyType) -> &'static str {

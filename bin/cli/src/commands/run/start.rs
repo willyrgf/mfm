@@ -5,8 +5,7 @@ use crate::commands::result::{CommandError, CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
 use crate::support::typed_run::{
-    command_error_from_app_error, connect_run_services, drive_mode, parse_typed_run_id,
-    TypedDriveArg, TypedRunStoresArgs,
+    connect_run_services, drive_mode, parse_typed_run_id, TypedDriveArg, TypedRunStoresArgs,
 };
 use clap::{Args, ValueEnum};
 use mfm_app::{
@@ -114,10 +113,8 @@ async fn execute_internal(args: &StartArgs) -> CommandResult<StartOutput> {
         .await
         .map_err(|_| CommandError::backend("AuthoredConfigReadFailed", "Failed to read config"))?;
     let authored_config = AuthoredConfig::new(args.config_format.into(), config_bytes)?;
-    let entry_point_registry =
-        mfm_app::production_entry_point_op_registry().map_err(command_error_from_app_error)?;
-    let certification_registry =
-        mfm_app::production_certification_registry().map_err(command_error_from_app_error)?;
+    let entry_point_registry = mfm_app::production_entry_point_op_registry()?;
+    let certification_registry = mfm_app::production_certification_registry()?;
     let prepared = mfm_app::prepare_entry_point_run_launch(EntryPointRunLaunchInput {
         entry_point_registry: &entry_point_registry,
         public_op_name,
@@ -129,22 +126,13 @@ async fn execute_internal(args: &StartArgs) -> CommandResult<StartOutput> {
         source_revision: &args.source_revision,
         launched_at_unix_ms: launch_unix_ms()?,
         drive: drive_mode(args.drive),
-    })
-    .map_err(command_error_from_app_error)?;
+    })?;
     let public_output_schema_id = prepared.public_output_schema_id.clone();
     let services = connect_run_services(&args.stores).await?;
-    let run = services
-        .launch_run(prepared.request)
-        .await
-        .map_err(command_error_from_app_error)?;
+    let run = services.launch_run(prepared.request).await?;
     let public_output = if run.run_mode == TypedRunMode::Completed {
         match public_output_schema_id {
-            Some(schema_id) => Some(
-                services
-                    .typed_public_output(&run_id, &schema_id)
-                    .await
-                    .map_err(command_error_from_app_error)?,
-            ),
+            Some(schema_id) => Some(services.typed_public_output(&run_id, &schema_id).await?),
             None => None,
         }
     } else {
