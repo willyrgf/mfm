@@ -33,12 +33,18 @@ pub(crate) fn production_entry_point_op_registry() -> Result<EntryPointOpRegistr
 }
 
 fn portfolio_snapshot_plan_error(
-    _error: mfm_op_portfolio_tracker::PortfolioSnapshotPlanError,
+    error: mfm_op_portfolio_tracker::PortfolioSnapshotPlanError,
 ) -> OpLaunchError {
-    OpLaunchError::new(
-        "PortfolioSnapshotPlanFailed",
-        "portfolio snapshot entry-point planning failed",
-    )
+    match error {
+        mfm_op_portfolio_tracker::PortfolioSnapshotPlanError::Config(_) => OpLaunchError::new(
+            "PortfolioSnapshotConfigInvalid",
+            "portfolio snapshot config validation failed",
+        ),
+        mfm_op_portfolio_tracker::PortfolioSnapshotPlanError::Plan(_) => OpLaunchError::new(
+            "PortfolioSnapshotPlanFailed",
+            "portfolio snapshot entry-point planning failed",
+        ),
+    }
 }
 
 fn evm_contract_plan_error(
@@ -87,6 +93,24 @@ mod tests {
         assert!(!plan.draft.state_nodes().is_empty());
         assert!(!plan.config_material.is_empty());
         assert!(plan.seed_material.is_empty());
+    }
+
+    #[test]
+    fn portfolio_snapshot_entry_point_preserves_config_validation_error_code() {
+        let registry = production_entry_point_op_registry().expect("registry");
+        let name =
+            PublicOpName::new(mfm_op_portfolio_tracker::PORTFOLIO_SNAPSHOT_ENTRY_POINT.public_name)
+                .expect("name");
+        let op = registry.resolve_latest(&name).expect("portfolio op");
+        let mut config: serde_json::Value =
+            serde_json::from_str(&sample_portfolio_config_json()).expect("portfolio json");
+        config["portfolio"]["wallets"][0]["network_id"] = serde_json::json!("missing-network");
+        let authored = AuthoredConfig::new(AuthoredConfigFormat::Json, config.to_string())
+            .expect("authored config");
+
+        let error = op.plan(authored).expect_err("invalid portfolio config");
+
+        assert_eq!(error.code(), "PortfolioSnapshotConfigInvalid");
     }
 
     #[test]
