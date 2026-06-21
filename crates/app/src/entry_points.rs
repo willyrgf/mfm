@@ -5,109 +5,30 @@ use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_evm_contract_config::{ConfigurePhaseConfig, DeployPhaseConfig, ValidatePhaseConfig};
 use mfm_evm_contract_model::{ConfiguredContract, DeployedContract};
 use mfm_op_evm_contract_lifecycle::ContractLifecycleConfig;
-use mfm_portfolio_config::{
-    canonicalize_portfolio_snapshot_authored_config, PortfolioSnapshotAuthoredConfig,
-    PortfolioSnapshotConfigError,
-};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     CanonicalConfigMaterial, CanonicalSeedMaterial, EntryPointOpId, EntryPointOpPlan,
-    EntryPointOpRegistry, LaunchableOp, OpLaunchError, OpVersion, PublicOpName,
+    EntryPointOpRegistry, LaunchableOp, OpLaunchError, OpVersion, PublicOpName, TypedEntryPointOp,
 };
-
-const PORTFOLIO_SNAPSHOT_PUBLIC_NAME: &str = "portfolio_snapshot";
-const PORTFOLIO_SNAPSHOT_NAMESPACE: &str = "mfm.portfolio";
-const PORTFOLIO_SNAPSHOT_VERSION: u32 = 1;
 
 /// Builds the production entry-point operation registry for this process.
 pub(crate) fn production_entry_point_op_registry() -> Result<EntryPointOpRegistry, crate::AppError>
 {
     let mut registry = EntryPointOpRegistry::new();
-    registry.register(PortfolioSnapshotEntryPointOp)?;
+    registry.register(TypedEntryPointOp::new(
+        mfm_op_portfolio_tracker::PORTFOLIO_SNAPSHOT_ENTRY_POINT,
+        mfm_op_portfolio_tracker::plan_portfolio_snapshot_entry_point,
+        portfolio_snapshot_plan_error,
+    )?)?;
     for kind in EvmContractEntryPointKind::ALL {
         registry.register(EvmContractEntryPointOp { kind })?;
     }
     Ok(registry)
 }
 
-struct PortfolioSnapshotEntryPointOp;
-
-impl LaunchableOp for PortfolioSnapshotEntryPointOp {
-    fn op_id(&self) -> EntryPointOpId {
-        EntryPointOpId::new(
-            PORTFOLIO_SNAPSHOT_NAMESPACE,
-            PORTFOLIO_SNAPSHOT_PUBLIC_NAME,
-            self.version(),
-        )
-        .expect("static portfolio entry-point op id is valid")
-    }
-
-    fn public_name(&self) -> PublicOpName {
-        PublicOpName::new(PORTFOLIO_SNAPSHOT_PUBLIC_NAME)
-            .expect("static portfolio public op name is valid")
-    }
-
-    fn version(&self) -> OpVersion {
-        OpVersion::new(PORTFOLIO_SNAPSHOT_VERSION)
-            .expect("static portfolio entry-point op version is valid")
-    }
-
-    fn accepted_config_formats(&self) -> &'static [AuthoredConfigFormat] {
-        TOML_JSON_AUTHORED_CONFIG_FORMATS
-    }
-
-    fn plan(&self, authored_config: AuthoredConfig) -> Result<EntryPointOpPlan, OpLaunchError> {
-        if !self
-            .accepted_config_formats()
-            .contains(&authored_config.format())
-        {
-            return Err(OpLaunchError::new(
-                "EntryPointOpConfigFormatUnsupported",
-                "entry-point op does not accept the supplied config format",
-            ));
-        }
-
-        let authored = authored_config.normalize::<PortfolioSnapshotAuthoredConfig>()?;
-        let canonical = canonicalize_portfolio_snapshot_authored_config(authored.value.clone())
-            .map_err(portfolio_config_error)?;
-        let planned = mfm_op_portfolio_tracker::plan_portfolio_snapshot_program(canonical)
-            .map_err(portfolio_plan_error)?;
-        let config_material = planned
-            .config_artifacts
-            .into_iter()
-            .map(|artifact| {
-                let bytes = PlainCanonicalJsonBytes::from_canonical_json_slice(&artifact.bytes)
-                    .map_err(|_| {
-                        OpLaunchError::new(
-                            "EntryPointOpConfigMaterialInvalid",
-                            "entry-point op produced invalid canonical config material",
-                        )
-                    })?;
-                Ok(CanonicalConfigMaterial {
-                    schema_id: artifact.schema_id,
-                    bytes,
-                    media_type: artifact.media_type,
-                })
-            })
-            .collect::<Result<Vec<_>, OpLaunchError>>()?;
-        Ok(EntryPointOpPlan {
-            draft: planned.draft,
-            config_material,
-            seed_material: Vec::new(),
-        })
-    }
-}
-
-fn portfolio_config_error(_error: PortfolioSnapshotConfigError) -> OpLaunchError {
-    OpLaunchError::new(
-        "PortfolioSnapshotConfigInvalid",
-        "portfolio snapshot config is invalid",
-    )
-}
-
-fn portfolio_plan_error(
-    _error: mfm_op_portfolio_tracker::PortfolioSnapshotCompileError,
+fn portfolio_snapshot_plan_error(
+    _error: mfm_op_portfolio_tracker::PortfolioSnapshotPlanError,
 ) -> OpLaunchError {
     OpLaunchError::new(
         "PortfolioSnapshotPlanFailed",
@@ -292,7 +213,9 @@ mod tests {
     #[test]
     fn production_registry_resolves_portfolio_snapshot_latest() {
         let registry = production_entry_point_op_registry().expect("registry");
-        let name = PublicOpName::new(PORTFOLIO_SNAPSHOT_PUBLIC_NAME).expect("name");
+        let name =
+            PublicOpName::new(mfm_op_portfolio_tracker::PORTFOLIO_SNAPSHOT_ENTRY_POINT.public_name)
+                .expect("name");
         let op = registry.resolve_latest(&name).expect("portfolio op");
 
         assert_eq!(op.version(), OpVersion::new(1).unwrap());
@@ -305,7 +228,9 @@ mod tests {
     #[test]
     fn portfolio_snapshot_entry_point_plans_from_json_config() {
         let registry = production_entry_point_op_registry().expect("registry");
-        let name = PublicOpName::new(PORTFOLIO_SNAPSHOT_PUBLIC_NAME).expect("name");
+        let name =
+            PublicOpName::new(mfm_op_portfolio_tracker::PORTFOLIO_SNAPSHOT_ENTRY_POINT.public_name)
+                .expect("name");
         let op = registry.resolve_latest(&name).expect("portfolio op");
         let authored =
             AuthoredConfig::new(AuthoredConfigFormat::Json, sample_portfolio_config_json())
@@ -322,7 +247,9 @@ mod tests {
     fn app_prepare_entry_point_run_launch_records_evidence_and_certifies() {
         let entry_point_registry = production_entry_point_op_registry().expect("registry");
         let certification_registry = crate::production_certification_registry().expect("cert");
-        let public_op_name = PublicOpName::new(PORTFOLIO_SNAPSHOT_PUBLIC_NAME).expect("name");
+        let public_op_name =
+            PublicOpName::new(mfm_op_portfolio_tracker::PORTFOLIO_SNAPSHOT_ENTRY_POINT.public_name)
+                .expect("name");
         let authored =
             AuthoredConfig::new(AuthoredConfigFormat::Json, sample_portfolio_config_json())
                 .expect("authored config");
@@ -342,7 +269,7 @@ mod tests {
 
         assert_eq!(
             prepared.evidence.resolved_op_id.name,
-            PORTFOLIO_SNAPSHOT_PUBLIC_NAME
+            mfm_op_portfolio_tracker::PORTFOLIO_SNAPSHOT_ENTRY_POINT.name
         );
         assert_eq!(
             prepared.evidence.entry_point_registry_digest,

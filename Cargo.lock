@@ -2389,6 +2389,7 @@ dependencies = [
 name = "mfm-op-portfolio-tracker"
 version = "0.1.0"
 dependencies = [
+ "mfm-authored-config",
  "mfm-canonical",
  "mfm-certify",
  "mfm-ids",
