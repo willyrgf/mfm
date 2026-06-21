@@ -4,7 +4,8 @@
 //! codes without pulling in transport- or runtime-specific error wrappers.
 
 /// Error returned by low-level EVM utility helpers.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{code}: {message}")]
 pub struct UtilError {
     /// Stable machine-readable error code.
     pub code: &'static str,
@@ -21,11 +22,3 @@ impl UtilError {
         }
     }
 }
-
-impl std::fmt::Display for UtilError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {}", self.code, self.message)
-    }
-}
-
-impl std::error::Error for UtilError {}

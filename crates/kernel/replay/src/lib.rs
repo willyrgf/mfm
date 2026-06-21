@@ -9,7 +9,6 @@
 /// Versioned v1 typed replay contracts.
 pub mod v1 {
     use std::collections::BTreeMap;
-    use std::fmt;
 
     use mfm_capabilities::CapabilitySetDescriptor;
     use mfm_certify::{CertifiedRemediationLink, CertifiedSideEffectContract};
@@ -34,7 +33,8 @@ pub mod v1 {
     pub type Result<T> = std::result::Result<T, ReplayError>;
 
     /// Typed replay validation error.
-    #[derive(Debug, Clone, PartialEq, Eq)]
+    #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+    #[error("{}: {message}", .kind.code())]
     pub struct ReplayError {
         /// Stable replay error category.
         pub kind: ReplayErrorKind,
@@ -56,14 +56,6 @@ pub mod v1 {
             self.kind.code()
         }
     }
-
-    impl fmt::Display for ReplayError {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(f, "{}: {}", self.code(), self.message)
-        }
-    }
-
-    impl std::error::Error for ReplayError {}
 
     impl From<SpecError> for ReplayError {
         fn from(error: SpecError) -> Self {

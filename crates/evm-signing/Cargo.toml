@@ -11,6 +11,7 @@ category = "signer-contract"
 
 [dependencies]
 alloy-primitives = { workspace = true, features = ["k256"] }
+thiserror = { workspace = true }
 
 mfm-evm-core = { path = "../evm-core" }
 mfm-ids = { path = "../kernel/ids" }

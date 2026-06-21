@@ -40,7 +40,8 @@ pub type Result<T> = std::result::Result<T, IdentityError>;
 
 /// Error returned when an identity, version, algorithm, or digest violates the
 /// typed kernel grammar.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{message}")]
 pub struct IdentityError {
     message: String,
 }
@@ -57,14 +58,6 @@ impl IdentityError {
         &self.message
     }
 }
-
-impl fmt::Display for IdentityError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.message)
-    }
-}
-
-impl std::error::Error for IdentityError {}
 
 /// Digest algorithm identifiers accepted by typed kernel identity strings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

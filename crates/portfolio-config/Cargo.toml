@@ -13,6 +13,7 @@ category = "domain-config"
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = "0.8"
+thiserror = { workspace = true }
 
 mfm-authored-config = { path = "../authored-config", version = "0.1.0" }
 mfm-canonical = { path = "../kernel/canonical" }

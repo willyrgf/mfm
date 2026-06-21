@@ -11,6 +11,7 @@ parity-tests = []
 
 [dependencies]
 tokio = { workspace = true }
+thiserror = { workspace = true }
 mfm-app = { path = "../../crates/app" }
 mfm-artifact-store-fs = { path = "../../crates/storages/artifact-store-fs" }
 mfm-authored-config = { path = "../../crates/authored-config" }

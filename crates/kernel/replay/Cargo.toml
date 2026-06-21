@@ -25,6 +25,7 @@ mfm-runtime = { path = "../runtime" }
 mfm-spec = { path = "../spec" }
 mfm-store = { path = "../store" }
 serde_json = { version = "1.0" }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 k256 = { version = "0.13.0", features = ["ecdsa"] }

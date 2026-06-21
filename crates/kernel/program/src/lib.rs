@@ -9,7 +9,6 @@
 extern crate self as mfm_program;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
@@ -48,120 +47,93 @@ const LOWERING_VERSION: &str = "mfm.typed.lowering.v1";
 pub type Result<T> = std::result::Result<T, PlanError>;
 
 /// Error returned by typed program authoring operations.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PlanError {
     /// Author-supplied stable key failed validation.
+    #[error("invalid typed program key: {0}")]
     Key(String),
     /// Value descriptor construction failed.
+    #[error("typed value descriptor error: {0}")]
     Value(String),
     /// Canonical seed construction failed.
+    #[error("canonical seed error: {0}")]
     Canonical(String),
     /// JSON serialization failed before canonicalization.
+    #[error("seed serialization error: {0}")]
     Serialize(String),
     /// A root seed key was declared more than once.
+    #[error("duplicate root seed key {0}")]
     DuplicateSeedKey(String),
     /// A child scope key was declared more than once under the same parent.
+    #[error("duplicate child scope key {0}")]
     DuplicateChildScopeKey(String),
     /// A bridge key was declared more than once in the same child scope session.
+    #[error("duplicate bridge key {0}")]
     DuplicateBridgeKey(String),
     /// A state key was declared more than once in the same scope.
+    #[error("duplicate state key {0}")]
     DuplicateStateKey(String),
     /// An operation key was declared more than once in the same scope.
+    #[error("duplicate operation key {0}")]
     DuplicateOperationKey(String),
     /// A stable domain key appeared more than once in a canonical collection.
+    #[error("duplicate stable domain key {0}")]
     DuplicateDomainKey(String),
     /// A public output field path was declared more than once.
+    #[error("duplicate public output field path {0}")]
     DuplicatePublicOutputPath(String),
     /// Root public outputs were bound more than once.
+    #[error("root public outputs already bound")]
     PublicOutputsAlreadyBound,
     /// Public output binding must contain at least one cell.
+    #[error("root public output binding is empty")]
     EmptyPublicOutputs,
     /// A non-empty input collection was empty.
+    #[error("non-empty input collection is empty")]
     EmptyNonEmptyInput,
     /// A derived input struct had the same field path more than once.
+    #[error("duplicate input field path {0}")]
     DuplicateInputFieldPath(String),
     /// Input binding tree did not match the declared state input descriptor.
+    #[error("input binding shape mismatch: {0}")]
     InputBindingShape(String),
     /// Same-type same-scope lineage did not match the required lineage.
+    #[error("value lineage mismatch: {0}")]
     LineageMismatch(String),
     /// State registry authority rejected planning.
+    #[error("state registry error: {0}")]
     Registry(String),
     /// Live bridge evidence did not belong to the active child scope session.
+    #[error("invalid bridge evidence: {0}")]
     InvalidBridgeEvidence(String),
     /// A persisted bridge reference was not backed by an emitted bridge node.
+    #[error("bridge ref is not backed by an emitted node")]
     UnknownBridgeRef,
     /// Saga policy was declared more than once.
+    #[error("saga policy was already declared")]
     SagaPolicyAlreadySet,
     /// A side-effecting draft did not declare its run-level saga policy.
+    #[error("side-effecting programs must declare a saga policy")]
     MissingSagaPolicy,
     /// A side-effecting state was planned through a builder that cannot declare a resource claim.
+    #[error("side-effect resource claim required: {0}")]
     SideEffectClaimRequired(String),
     /// The declared saga policy disagreed with the authored graph shape.
+    #[error("saga policy graph mismatch: {0}")]
     SagaPolicyGraphMismatch(String),
     /// A compensating saga policy left a forward side-effect node unlinked.
+    #[error("saga compensation coverage gap: {0}")]
     SagaCoverageGap(String),
     /// A remediation node binding referenced cells outside the linked forward node scope.
+    #[error("remediation binding scope violation: {0}")]
     RemediationBindingScope(String),
     /// Manual-resolution policy construction failed.
+    #[error("manual policy error: {0}")]
     ManualPolicy(String),
     /// Resource claim construction failed.
+    #[error("resource claim error: {0}")]
     ResourceClaim(String),
 }
-
-impl fmt::Display for PlanError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Key(message) => write!(f, "invalid typed program key: {message}"),
-            Self::Value(message) => write!(f, "typed value descriptor error: {message}"),
-            Self::Canonical(message) => write!(f, "canonical seed error: {message}"),
-            Self::Serialize(message) => write!(f, "seed serialization error: {message}"),
-            Self::DuplicateSeedKey(key) => write!(f, "duplicate root seed key {key}"),
-            Self::DuplicateChildScopeKey(key) => write!(f, "duplicate child scope key {key}"),
-            Self::DuplicateBridgeKey(key) => write!(f, "duplicate bridge key {key}"),
-            Self::DuplicateStateKey(key) => write!(f, "duplicate state key {key}"),
-            Self::DuplicateOperationKey(key) => write!(f, "duplicate operation key {key}"),
-            Self::DuplicateDomainKey(key) => write!(f, "duplicate stable domain key {key}"),
-            Self::DuplicatePublicOutputPath(path) => {
-                write!(f, "duplicate public output field path {path}")
-            }
-            Self::PublicOutputsAlreadyBound => f.write_str("root public outputs already bound"),
-            Self::EmptyPublicOutputs => f.write_str("root public output binding is empty"),
-            Self::EmptyNonEmptyInput => f.write_str("non-empty input collection is empty"),
-            Self::DuplicateInputFieldPath(path) => {
-                write!(f, "duplicate input field path {path}")
-            }
-            Self::InputBindingShape(message) => {
-                write!(f, "input binding shape mismatch: {message}")
-            }
-            Self::LineageMismatch(message) => write!(f, "value lineage mismatch: {message}"),
-            Self::Registry(message) => write!(f, "state registry error: {message}"),
-            Self::InvalidBridgeEvidence(message) => {
-                write!(f, "invalid bridge evidence: {message}")
-            }
-            Self::UnknownBridgeRef => f.write_str("bridge ref is not backed by an emitted node"),
-            Self::SagaPolicyAlreadySet => f.write_str("saga policy was already declared"),
-            Self::MissingSagaPolicy => {
-                f.write_str("side-effecting programs must declare a saga policy")
-            }
-            Self::SideEffectClaimRequired(message) => {
-                write!(f, "side-effect resource claim required: {message}")
-            }
-            Self::SagaPolicyGraphMismatch(message) => {
-                write!(f, "saga policy graph mismatch: {message}")
-            }
-            Self::SagaCoverageGap(message) => {
-                write!(f, "saga compensation coverage gap: {message}")
-            }
-            Self::RemediationBindingScope(message) => {
-                write!(f, "remediation binding scope violation: {message}")
-            }
-            Self::ManualPolicy(message) => write!(f, "manual policy error: {message}"),
-            Self::ResourceClaim(message) => write!(f, "resource claim error: {message}"),
-        }
-    }
-}
-
-impl std::error::Error for PlanError {}
 
 /// Stable root or child scope author key.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -364,21 +336,12 @@ impl<T: MfmValue> CanonicalSeed<T> {
 }
 
 /// Error returned while executing a typed state.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum StateError {
     /// Stable, redacted state error message.
+    #[error("{0}")]
     Message(String),
 }
-
-impl fmt::Display for StateError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Message(message) => f.write_str(message),
-        }
-    }
-}
-
-impl std::error::Error for StateError {}
 
 /// Result type returned by executable state traits.
 pub type StateResult<T> = std::result::Result<T, StateError>;
@@ -1062,11 +1025,13 @@ impl OperationDescriptorIdentity {
 }
 
 /// Error returned by typed registry operations.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RegistryError {
     /// State descriptor construction failed.
+    #[error("state descriptor error: {0}")]
     Descriptor(String),
     /// No registered state matched the requested kind/version.
+    #[error("state {kind}@{version} is not registered")]
     UnregisteredState {
         /// Requested state kind.
         kind: String,
@@ -1074,6 +1039,7 @@ pub enum RegistryError {
         version: String,
     },
     /// A different descriptor already owns this kind/version pair.
+    #[error("duplicate state registration for {kind}@{version}")]
     DuplicateStateRegistration {
         /// Registered state kind.
         kind: String,
@@ -1081,6 +1047,7 @@ pub enum RegistryError {
         version: String,
     },
     /// Registry record and descriptor evidence diverged.
+    #[error("state registry descriptor mismatch for {kind}@{version}")]
     DescriptorMismatch {
         /// Registered state kind.
         kind: String,
@@ -1088,6 +1055,7 @@ pub enum RegistryError {
         version: String,
     },
     /// No registered operation matched the requested kind/version.
+    #[error("operation {kind}@{version} is not registered")]
     UnregisteredOperation {
         /// Requested operation kind.
         kind: String,
@@ -1095,6 +1063,7 @@ pub enum RegistryError {
         version: String,
     },
     /// A different descriptor already owns this operation kind/version pair.
+    #[error("duplicate operation registration for {kind}@{version}")]
     DuplicateOperationRegistration {
         /// Registered operation kind.
         kind: String,
@@ -1102,6 +1071,7 @@ pub enum RegistryError {
         version: String,
     },
     /// Registry record and operation descriptor evidence diverged.
+    #[error("operation registry descriptor mismatch for {kind}@{version}")]
     OperationDescriptorMismatch {
         /// Registered operation kind.
         kind: String,
@@ -1109,37 +1079,6 @@ pub enum RegistryError {
         version: String,
     },
 }
-
-impl fmt::Display for RegistryError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Descriptor(message) => write!(f, "state descriptor error: {message}"),
-            Self::UnregisteredState { kind, version } => {
-                write!(f, "state {kind}@{version} is not registered")
-            }
-            Self::DuplicateStateRegistration { kind, version } => {
-                write!(f, "duplicate state registration for {kind}@{version}")
-            }
-            Self::DescriptorMismatch { kind, version } => {
-                write!(f, "state registry descriptor mismatch for {kind}@{version}")
-            }
-            Self::UnregisteredOperation { kind, version } => {
-                write!(f, "operation {kind}@{version} is not registered")
-            }
-            Self::DuplicateOperationRegistration { kind, version } => {
-                write!(f, "duplicate operation registration for {kind}@{version}")
-            }
-            Self::OperationDescriptorMismatch { kind, version } => {
-                write!(
-                    f,
-                    "operation registry descriptor mismatch for {kind}@{version}"
-                )
-            }
-        }
-    }
-}
-
-impl std::error::Error for RegistryError {}
 
 impl From<RegistryError> for PlanError {
     fn from(error: RegistryError) -> Self {

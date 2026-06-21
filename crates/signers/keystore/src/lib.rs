@@ -442,100 +442,53 @@ pub enum RuntimeSourceKind {
 }
 
 /// Redaction-safe keystore signer provider error.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum KeystoreSignerError {
     /// No registry entry exists for the requested signer.
+    #[error("keystore signer provider has no binding for signer {signer_ref}")]
     UnknownSigner {
         /// Requested signer reference.
         signer_ref: SignerRef,
     },
     /// The request used a signing algorithm this provider does not support.
+    #[error("keystore signer provider does not support the requested algorithm")]
     UnsupportedAlgorithm,
     /// The request used a signing domain this provider does not support.
+    #[error("keystore signer provider does not support the requested domain")]
     UnsupportedDomain,
     /// The request used a signing purpose this provider does not support.
+    #[error("keystore signer provider does not support the requested purpose")]
     UnsupportedPurpose,
     /// The request did not bind the expected public identity.
+    #[error("keystore signer provider requires expected public identity")]
     MissingExpectedIdentity,
     /// A required process-local runtime source was missing.
+    #[error("keystore signer provider runtime source was missing")]
     MissingRuntimeSource {
         /// Missing runtime source category.
         kind: RuntimeSourceKind,
     },
     /// A process-local runtime source was malformed.
+    #[error("keystore signer provider runtime source was invalid")]
     InvalidRuntimeSource {
         /// Invalid runtime source category.
         kind: RuntimeSourceKind,
     },
     /// The keystore could not be opened.
+    #[error("keystore signer provider could not open keystore")]
     KeystoreUnavailable,
     /// The keystore could not be unlocked.
+    #[error("keystore signer provider could not unlock keystore")]
     KeystoreUnlockFailed,
     /// The configured keystore entry was unavailable.
+    #[error("keystore signer provider key entry was unavailable")]
     KeyUnavailable,
     /// The provider could not produce a signature.
+    #[error("keystore signer provider failed to sign request")]
     SigningFailed,
     /// Generic signing contract validation failed.
-    SigningContract(SigningError),
-}
-
-impl fmt::Display for KeystoreSignerError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::UnknownSigner { signer_ref } => {
-                write!(
-                    f,
-                    "keystore signer provider has no binding for signer {signer_ref}"
-                )
-            }
-            Self::UnsupportedAlgorithm => {
-                f.write_str("keystore signer provider does not support the requested algorithm")
-            }
-            Self::UnsupportedDomain => {
-                f.write_str("keystore signer provider does not support the requested domain")
-            }
-            Self::UnsupportedPurpose => {
-                f.write_str("keystore signer provider does not support the requested purpose")
-            }
-            Self::MissingExpectedIdentity => {
-                f.write_str("keystore signer provider requires expected public identity")
-            }
-            Self::MissingRuntimeSource { .. } => {
-                f.write_str("keystore signer provider runtime source was missing")
-            }
-            Self::InvalidRuntimeSource { .. } => {
-                f.write_str("keystore signer provider runtime source was invalid")
-            }
-            Self::KeystoreUnavailable => {
-                f.write_str("keystore signer provider could not open keystore")
-            }
-            Self::KeystoreUnlockFailed => {
-                f.write_str("keystore signer provider could not unlock keystore")
-            }
-            Self::KeyUnavailable => {
-                f.write_str("keystore signer provider key entry was unavailable")
-            }
-            Self::SigningFailed => f.write_str("keystore signer provider failed to sign request"),
-            Self::SigningContract(_) => {
-                f.write_str("keystore signer provider result failed signing contract validation")
-            }
-        }
-    }
-}
-
-impl std::error::Error for KeystoreSignerError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::SigningContract(error) => Some(error),
-            _ => None,
-        }
-    }
-}
-
-impl From<SigningError> for KeystoreSignerError {
-    fn from(error: SigningError) -> Self {
-        Self::SigningContract(error)
-    }
+    #[error("keystore signer provider result failed signing contract validation")]
+    SigningContract(#[from] SigningError),
 }
 
 #[cfg(test)]

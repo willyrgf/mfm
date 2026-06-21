@@ -4,8 +4,6 @@
 //! This crate owns the closed v1 event payload set used by typed run storage,
 //! replay, resume, public output evidence, and retention projection.
 
-use std::fmt;
-
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind, CapabilityVersion, CellId,
@@ -22,9 +20,10 @@ use mfm_spec::v1::{
 pub type Result<T> = std::result::Result<T, EventError>;
 
 /// Error returned by typed kernel event helpers.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EventError {
     /// A checked event string field failed validation.
+    #[error("invalid {field} string {value:?}")]
     InvalidString {
         /// Field label.
         field: &'static str,
@@ -32,6 +31,7 @@ pub enum EventError {
         value: String,
     },
     /// A public diagnostic field failed redaction-safety validation.
+    #[error("invalid public diagnostic {field}: {reason}")]
     InvalidPublicDiagnostic {
         /// Field label.
         field: &'static str,
@@ -39,30 +39,15 @@ pub enum EventError {
         reason: &'static str,
     },
     /// Identity construction failed.
+    #[error("identity error: {0}")]
     Identity(String),
     /// JSON serialization failed before canonicalization.
+    #[error("event JSON serialization error: {0}")]
     Serialize(String),
     /// Canonical JSON construction failed.
+    #[error("event canonicalization error: {0}")]
     Canonical(String),
 }
-
-impl fmt::Display for EventError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidString { field, value } => {
-                write!(f, "invalid {field} string {value:?}")
-            }
-            Self::InvalidPublicDiagnostic { field, reason } => {
-                write!(f, "invalid public diagnostic {field}: {reason}")
-            }
-            Self::Identity(message) => write!(f, "identity error: {message}"),
-            Self::Serialize(message) => write!(f, "event JSON serialization error: {message}"),
-            Self::Canonical(message) => write!(f, "event canonicalization error: {message}"),
-        }
-    }
-}
-
-impl std::error::Error for EventError {}
 
 impl From<IdentityError> for EventError {
     fn from(error: IdentityError) -> Self {

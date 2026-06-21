@@ -13,6 +13,7 @@ category = "signer-provider"
 alloy-primitives = { workspace = true, features = ["k256"] }
 uuid = { version = "1.8.0", features = ["v4"] }
 zeroize = "1.7"
+thiserror = { workspace = true }
 
 mfm-core = { package = "mfm_core", path = "../../core" }
 mfm-evm-signing = { path = "../../evm-signing" }

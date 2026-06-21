@@ -272,47 +272,30 @@ fn digest_from_hash(hash: B256) -> mfm_ids::DigestBytes {
 }
 
 /// Redaction-safe EVM signing bridge error.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EvmSigningError {
     /// Generic signing contract failed.
+    #[error("EVM signing request failed: {0}")]
     Signing(SigningError),
     /// Provider result did not match the request.
+    #[error("EVM signing result mismatch for {field}")]
     SigningResultMismatch {
         /// Result field that mismatched.
         field: &'static str,
     },
     /// Provider signature was invalid for EVM signing.
+    #[error("{reason}")]
     InvalidSignature {
         /// Closed signature failure reason.
         reason: EvmSignatureError,
     },
     /// Recovered address did not match the expected sender.
+    #[error("EVM recovered signer address did not match expected address")]
     RecoveredAddressMismatch,
     /// Raw transaction bytes were invalid.
+    #[error("EVM raw transaction was invalid")]
     InvalidRawTransaction,
 }
-
-impl fmt::Display for EvmSigningError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Signing(error) => write!(f, "EVM signing request failed: {error}"),
-            Self::SigningResultMismatch { field } => {
-                write!(f, "EVM signing result mismatch for {field}")
-            }
-            Self::InvalidSignature { reason } => match reason {
-                EvmSignatureError::InvalidLength => f.write_str("EVM signature length was invalid"),
-                EvmSignatureError::InvalidParity => f.write_str("EVM signature parity was invalid"),
-                EvmSignatureError::RecoveryFailed => f.write_str("EVM signature recovery failed"),
-            },
-            Self::RecoveredAddressMismatch => {
-                f.write_str("EVM recovered signer address did not match expected address")
-            }
-            Self::InvalidRawTransaction => f.write_str("EVM raw transaction was invalid"),
-        }
-    }
-}
-
-impl std::error::Error for EvmSigningError {}
 
 impl From<SigningError> for EvmSigningError {
     fn from(error: SigningError) -> Self {
@@ -321,13 +304,16 @@ impl From<SigningError> for EvmSigningError {
 }
 
 /// Closed EVM signature validation failures.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum EvmSignatureError {
     /// Signature bytes were not 65 bytes.
+    #[error("EVM signature length was invalid")]
     InvalidLength,
     /// Signature parity byte was invalid.
+    #[error("EVM signature parity was invalid")]
     InvalidParity,
     /// Public address recovery failed.
+    #[error("EVM signature recovery failed")]
     RecoveryFailed,
 }
 

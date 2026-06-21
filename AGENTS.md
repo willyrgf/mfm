@@ -169,8 +169,19 @@ These are typical, review-friendly change patterns (focus on a single outcome).
 ### Error Handling
 
 - Libraries:
-  - Prefer typed errors (e.g. `thiserror`) for stable, testable behavior.
-  - Use `anyhow` primarily for glue code or when error typing adds little value.
+  - Prefer typed error enums/structs for stable, testable behavior.
+  - Use `thiserror` for structured error enums/structs when it can preserve the
+    intended public message, source chain, and redaction boundary.
+  - Use reusable `impl From<LowerLevelError> for DomainError` conversions as the
+    standard propagation pattern. Prefer `#[from]` on `thiserror` variants when
+    the conversion is a direct source-preserving wrapper, and prefer manual
+    `From` impls when the mapping classifies, redacts, or sanitizes lower-level
+    diagnostics.
+  - Keep conversion boundaries intentional: retain source errors in variants when
+    callers need to inspect them, and convert to public-safe strings/codes at
+    CLI/API or trust boundaries.
+  - Use `anyhow` only for executable/glue code where the error is not part of a
+    library contract.
 - CLI:
   - Preserve stable, machine-readable error codes (see `bin/cli/README.md`).
   - Avoid breaking the JSON output schema.

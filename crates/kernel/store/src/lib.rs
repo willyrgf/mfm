@@ -52,13 +52,16 @@ pub mod v1 {
         Pin<Box<dyn Future<Output = std::result::Result<T, E>> + Send + 'a>>;
 
     /// Error returned by typed store contract validation.
-    #[derive(Debug, Clone, PartialEq, Eq)]
+    #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
     pub enum StoreError {
         /// A commit contained no payloads.
+        #[error("typed commit cannot be empty")]
         EmptyCommit,
         /// Stream sequence arithmetic overflowed.
+        #[error("typed stream sequence overflowed")]
         SequenceOverflow,
         /// A payload was bound to a different run.
+        #[error("payload run mismatch: expected {expected}, got {actual}")]
         PayloadRunMismatch {
             /// Run supplied to the commit API.
             expected: Box<RunId>,
@@ -66,6 +69,7 @@ pub mod v1 {
             actual: Box<RunId>,
         },
         /// Payloads in one commit carried different certified spec hashes.
+        #[error("payload spec hash mismatch: expected {expected}, got {actual}")]
         PayloadSpecHashMismatch {
             /// First payload spec hash.
             expected: Box<SpecHash>,
@@ -73,6 +77,7 @@ pub mod v1 {
             actual: Box<SpecHash>,
         },
         /// A purpose-specific prepared commit constructor rejected the payload/precondition shape.
+        #[error("invalid prepared {purpose} commit: {message}")]
         InvalidPreparedCommitPurpose {
             /// Purpose constructor that rejected the request.
             purpose: &'static str,
@@ -80,11 +85,13 @@ pub mod v1 {
             message: String,
         },
         /// The commit key was reused for a different canonical commit.
+        #[error("commit key reused for different payloads: {commit_key}")]
         CommitConflict {
             /// Reused commit key.
             commit_key: CommitKey,
         },
         /// The caller's expected next sequence is stale.
+        #[error("stale expected_next_seq: expected {expected}, actual {actual}")]
         StaleExpectedNextSeq {
             /// Expected sequence supplied by the caller.
             expected: StreamSeq,
@@ -92,6 +99,7 @@ pub mod v1 {
             actual: StreamSeq,
         },
         /// A required logical key precondition failed.
+        #[error("logical key precondition failed for {logical_key}: {message}")]
         LogicalKeyPreconditionFailed {
             /// Logical key that failed the precondition.
             logical_key: LogicalEventKey,
@@ -99,6 +107,7 @@ pub mod v1 {
             message: String,
         },
         /// A run-state precondition failed.
+        #[error("run state precondition failed: required {required:?}, actual {actual:?}")]
         RunStatePreconditionFailed {
             /// Required run state.
             required: RequiredRunState,
@@ -106,6 +115,7 @@ pub mod v1 {
             actual: RunState,
         },
         /// A cell-state precondition failed.
+        #[error("cell state precondition failed for {cell_id}: required {required:?}")]
         CellStatePreconditionFailed {
             /// Cell id that failed the precondition.
             cell_id: CellId,
@@ -113,6 +123,7 @@ pub mod v1 {
             required: RequiredCellState,
         },
         /// A side-effect-state precondition failed.
+        #[error("side-effect state precondition failed for {ledger_key}: required {required:?}")]
         SideEffectStatePreconditionFailed {
             /// Ledger key that failed the precondition.
             ledger_key: events::SideEffectLedgerKey,
@@ -120,13 +131,16 @@ pub mod v1 {
             required: RequiredSideEffectState,
         },
         /// A public output was already projected when absence was required.
+        #[error("public output absence precondition failed")]
         PublicOutputPreconditionFailed,
         /// A referenced artifact is missing from the store-owned artifact evidence table.
+        #[error("missing artifact evidence for {artifact_id}")]
         MissingArtifact {
             /// Missing artifact id.
             artifact_id: ArtifactId,
         },
         /// Stored artifact evidence does not match a required artifact reference.
+        #[error("artifact evidence mismatch for {artifact_id} field {field}")]
         ArtifactEvidenceMismatch {
             /// Artifact id with mismatched evidence.
             artifact_id: ArtifactId,
@@ -134,27 +148,32 @@ pub mod v1 {
             field: &'static str,
         },
         /// Artifact bytes or metadata could not be loaded from retained evidence storage.
+        #[error("failed to read retained artifact {artifact_id}")]
         ArtifactReadFailed {
             /// Artifact id whose retained bytes could not be loaded.
             artifact_id: ArtifactId,
         },
         /// A prepared commit tried to admit artifact evidence that no event in the commit
         /// references.
+        #[error("prepared commit admitted unreferenced artifact evidence {artifact_id}")]
         UnreferencedArtifactEvidence {
             /// Unreferenced artifact id.
             artifact_id: ArtifactId,
         },
         /// A logical key that must be unique already exists.
+        #[error("duplicate logical key {logical_key}")]
         DuplicateLogicalKey {
             /// Duplicate logical key.
             logical_key: LogicalEventKey,
         },
         /// A logical key conflict would corrupt an existing projection.
+        #[error("logical key conflict {logical_key}")]
         LogicalKeyConflict {
             /// Conflicting logical key.
             logical_key: LogicalEventKey,
         },
         /// A projection transition would corrupt an existing projection.
+        #[error("projection conflict for {key}: {message}")]
         ProjectionConflict {
             /// Projection key.
             key: String,
@@ -162,6 +181,7 @@ pub mod v1 {
             message: String,
         },
         /// An exclusive resource lane is held by a different run-scoped ledger.
+        #[error("resource lane {}:{} is held by run {} ledger {}", lane_key.namespace, lane_key.key, holder.run_id, holder.ledger_key)]
         ResourceLaneBlocked {
             /// Blocked resource lane.
             lane_key: Box<ResourceLaneKey>,
@@ -169,6 +189,7 @@ pub mod v1 {
             holder: Box<SideEffectLedgerRef>,
         },
         /// A persisted event row disagrees with store-derived typed event fields.
+        #[error("persisted event mismatch for {field}: {message}")]
         PersistedEventMismatch {
             /// Mismatched field label.
             field: &'static str,
@@ -176,110 +197,18 @@ pub mod v1 {
             message: String,
         },
         /// Identity construction failed.
+        #[error("identity error: {0}")]
         Identity(String),
         /// JSON serialization failed before canonicalization.
+        #[error("store JSON serialization error: {0}")]
         Serialize(String),
         /// Canonical JSON construction failed.
+        #[error("store canonicalization error: {0}")]
         Canonical(String),
         /// Event schema id construction failed.
+        #[error("event contract error: {0}")]
         Event(String),
     }
-
-    impl fmt::Display for StoreError {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            match self {
-                Self::EmptyCommit => f.write_str("typed commit cannot be empty"),
-                Self::SequenceOverflow => f.write_str("typed stream sequence overflowed"),
-                Self::PayloadRunMismatch { expected, actual } => {
-                    write!(f, "payload run mismatch: expected {expected}, got {actual}")
-                }
-                Self::PayloadSpecHashMismatch { expected, actual } => {
-                    write!(
-                        f,
-                        "payload spec hash mismatch: expected {expected}, got {actual}"
-                    )
-                }
-                Self::InvalidPreparedCommitPurpose { purpose, message } => {
-                    write!(f, "invalid prepared {purpose} commit: {message}")
-                }
-                Self::CommitConflict { commit_key } => {
-                    write!(f, "commit key reused for different payloads: {commit_key}")
-                }
-                Self::StaleExpectedNextSeq { expected, actual } => write!(
-                    f,
-                    "stale expected_next_seq: expected {expected}, actual {actual}"
-                ),
-                Self::LogicalKeyPreconditionFailed {
-                    logical_key,
-                    message,
-                } => write!(
-                    f,
-                    "logical key precondition failed for {logical_key}: {message}"
-                ),
-                Self::RunStatePreconditionFailed { required, actual } => {
-                    write!(
-                        f,
-                        "run state precondition failed: required {required:?}, actual {actual:?}"
-                    )
-                }
-                Self::CellStatePreconditionFailed { cell_id, required } => write!(
-                    f,
-                    "cell state precondition failed for {cell_id}: required {required:?}"
-                ),
-                Self::SideEffectStatePreconditionFailed {
-                    ledger_key,
-                    required,
-                } => write!(
-                    f,
-                    "side-effect state precondition failed for {ledger_key}: required {required:?}"
-                ),
-                Self::PublicOutputPreconditionFailed => {
-                    f.write_str("public output absence precondition failed")
-                }
-                Self::MissingArtifact { artifact_id } => {
-                    write!(f, "missing artifact evidence for {artifact_id}")
-                }
-                Self::ArtifactEvidenceMismatch { artifact_id, field } => {
-                    write!(
-                        f,
-                        "artifact evidence mismatch for {artifact_id} field {field}"
-                    )
-                }
-                Self::ArtifactReadFailed { artifact_id } => {
-                    write!(f, "failed to read retained artifact {artifact_id}")
-                }
-                Self::UnreferencedArtifactEvidence { artifact_id } => {
-                    write!(
-                        f,
-                        "prepared commit admitted unreferenced artifact evidence {artifact_id}"
-                    )
-                }
-                Self::DuplicateLogicalKey { logical_key } => {
-                    write!(f, "duplicate logical key {logical_key}")
-                }
-                Self::LogicalKeyConflict { logical_key } => {
-                    write!(f, "logical key conflict {logical_key}")
-                }
-                Self::ProjectionConflict { key, message } => {
-                    write!(f, "projection conflict for {key}: {message}")
-                }
-                Self::ResourceLaneBlocked { lane_key, holder } => write!(
-                    f,
-                    "resource lane {}:{} is held by run {} ledger {}",
-                    lane_key.namespace, lane_key.key, holder.run_id, holder.ledger_key
-                ),
-                Self::PersistedEventMismatch { field, message } => {
-                    write!(f, "persisted event mismatch for {field}: {message}")
-                }
-                Self::Identity(message) => write!(f, "identity error: {message}"),
-                Self::Serialize(message) => write!(f, "store JSON serialization error: {message}"),
-                Self::Canonical(message) => write!(f, "store canonicalization error: {message}"),
-                Self::Event(message) => write!(f, "event contract error: {message}"),
-            }
-        }
-    }
-
-    impl std::error::Error for StoreError {}
 
     /// Exposes wrapped typed store errors without parsing display strings.
     pub trait StoreErrorInspection {
@@ -336,11 +265,13 @@ pub mod v1 {
     ///
     /// The codec is reused by the in-memory store and the Postgres adapter; each backend maps this
     /// into its own error type via `From`, so the parse/encode logic lives in exactly one place.
-    #[derive(Debug, Clone, PartialEq, Eq)]
+    #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
     pub enum CodecError {
         /// A required JSON field was missing or had the wrong shape.
+        #[error("codec field error: {0}")]
         Field(String),
         /// A typed identity, digest, or enum tag failed to parse.
+        #[error("codec identity error: {0}")]
         Identity(String),
     }
 

@@ -132,7 +132,8 @@ pub type PortfolioReadFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, PortfolioReadError>> + Send + 'a>>;
 
 /// Redaction-safe external read error reported by portfolio read backends.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{code}: {message}")]
 pub struct PortfolioReadError {
     /// Stable machine-readable error code.
     pub code: String,
@@ -149,14 +150,6 @@ impl PortfolioReadError {
         }
     }
 }
-
-impl std::fmt::Display for PortfolioReadError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {}", self.code, self.message)
-    }
-}
-
-impl std::error::Error for PortfolioReadError {}
 
 /// Runtime backend used by read portfolio states to observe external chain data.
 pub trait PortfolioReadBackend: Send + Sync {
@@ -1895,17 +1888,10 @@ impl QuoteTotalsAccumulator {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 enum DecimalArithmeticError {
+    #[error("invalid decimal string `{value}`")]
     InvalidDecimalString { value: String },
-}
-
-impl std::fmt::Display for DecimalArithmeticError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::InvalidDecimalString { value } => write!(f, "invalid decimal string `{value}`"),
-        }
-    }
 }
 
 fn multiply_decimal_strings(left: &str, right: &str) -> Result<String, DecimalArithmeticError> {

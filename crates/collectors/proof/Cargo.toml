@@ -8,6 +8,7 @@ category = "state"
 
 [dependencies]
 serde = { workspace = true }
+thiserror = { workspace = true }
 mfm-capabilities = { path = "../../kernel/capabilities" }
 mfm-canonical = { path = "../../kernel/canonical" }
 mfm-effects = { path = "../../kernel/effects" }

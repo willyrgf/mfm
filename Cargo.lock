@@ -2017,6 +2017,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "tempfile",
+ "thiserror",
  "tokio",
  "uuid",
  "zeroize",
@@ -2030,6 +2031,7 @@ dependencies = [
  "mfm-capabilities",
  "mfm-evm-capabilities",
  "mfm-ids",
+ "thiserror",
 ]
 
 [[package]]
@@ -2058,6 +2060,7 @@ dependencies = [
  "mfm-values",
  "serde",
  "serde_json",
+ "thiserror",
  "tokio",
 ]
 
@@ -2119,6 +2122,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror",
  "tokio",
  "toml 0.8.23",
  "tracing-subscriber",
@@ -2138,6 +2142,7 @@ dependencies = [
  "mfm-store",
  "serde",
  "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -2153,6 +2158,7 @@ dependencies = [
  "mfm-store",
  "serde_json",
  "tempfile",
+ "thiserror",
  "tokio",
 ]
 
@@ -2164,6 +2170,7 @@ dependencies = [
  "mfm-ids",
  "serde",
  "serde_json",
+ "thiserror",
  "toml 0.8.23",
 ]
 
@@ -2175,6 +2182,7 @@ dependencies = [
  "ring",
  "serde",
  "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -2183,6 +2191,7 @@ version = "0.1.0"
 dependencies = [
  "mfm-effects",
  "mfm-ids",
+ "thiserror",
  "trybuild",
 ]
 
@@ -2201,6 +2210,7 @@ dependencies = [
  "mfm-values",
  "serde",
  "serde_json",
+ "thiserror",
  "trybuild",
 ]
 
@@ -2211,6 +2221,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "thiserror",
  "tracing",
 ]
 
@@ -2227,6 +2238,7 @@ dependencies = [
  "mfm-values",
  "serde",
  "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -2235,6 +2247,7 @@ version = "0.1.0"
 dependencies = [
  "mfm-canonical",
  "mfm-ids",
+ "thiserror",
 ]
 
 [[package]]
@@ -2245,6 +2258,7 @@ dependencies = [
  "mfm-ids",
  "mfm-spec",
  "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -2255,6 +2269,7 @@ dependencies = [
  "mfm-canonical",
  "mfm-capabilities",
  "mfm-ids",
+ "thiserror",
 ]
 
 [[package]]
@@ -2284,6 +2299,7 @@ dependencies = [
  "mfm-values",
  "serde",
  "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -2294,6 +2310,7 @@ dependencies = [
  "hex",
  "serde",
  "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -2308,12 +2325,16 @@ dependencies = [
  "mfm-signing",
  "mfm-values",
  "serde",
+ "thiserror",
  "trybuild",
 ]
 
 [[package]]
 name = "mfm-ids"
 version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
 
 [[package]]
 name = "mfm-integration-tests"
@@ -2364,6 +2385,7 @@ dependencies = [
  "mfm-ids",
  "mfm-spec",
  "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -2383,6 +2405,7 @@ dependencies = [
  "mfm-values",
  "serde",
  "serde_json",
+ "thiserror",
  "trybuild",
 ]
 
@@ -2400,6 +2423,7 @@ dependencies = [
  "mfm-spec",
  "mfm-state-portfolio",
  "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -2426,6 +2450,7 @@ dependencies = [
  "mfm-values",
  "serde",
  "serde_json",
+ "thiserror",
  "toml 0.8.23",
 ]
 
@@ -2443,6 +2468,7 @@ dependencies = [
  "mfm-values",
  "serde",
  "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -2458,6 +2484,7 @@ dependencies = [
  "mfm-values",
  "serde",
  "serde_json",
+ "thiserror",
  "trybuild",
 ]
 
@@ -2492,6 +2519,7 @@ dependencies = [
  "mfm-spec",
  "mfm-store",
  "serde_json",
+ "thiserror",
  "trybuild",
 ]
 
@@ -2518,6 +2546,7 @@ dependencies = [
  "mfm-stream-store-postgres",
  "serde",
  "serde_json",
+ "thiserror",
  "tokio",
  "tower",
  "tower-http",
@@ -2543,6 +2572,7 @@ dependencies = [
  "mfm-values",
  "serde",
  "serde_json",
+ "thiserror",
  "tokio",
  "trybuild",
 ]
@@ -2557,6 +2587,7 @@ dependencies = [
  "mfm-signing",
  "mfm_core",
  "tempfile",
+ "thiserror",
  "uuid",
  "zeroize",
 ]
@@ -2571,6 +2602,7 @@ dependencies = [
  "mfm-program-derive",
  "mfm-values",
  "serde",
+ "thiserror",
  "trybuild",
 ]
 
@@ -2582,6 +2614,7 @@ dependencies = [
  "mfm-capabilities",
  "mfm-ids",
  "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -2624,6 +2657,7 @@ dependencies = [
  "num-traits",
  "serde",
  "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -2638,6 +2672,7 @@ dependencies = [
  "mfm-manual-auth",
  "mfm-spec",
  "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -2652,6 +2687,7 @@ dependencies = [
  "mfm-store",
  "serde_json",
  "sqlx",
+ "thiserror",
  "tokio",
 ]
 
@@ -2665,6 +2701,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "thiserror",
  "tokio",
 ]
 
@@ -2696,6 +2733,7 @@ dependencies = [
  "mfm-ids",
  "serde",
  "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -2719,6 +2757,7 @@ dependencies = [
  "static_assertions",
  "subtle",
  "tempfile",
+ "thiserror",
  "tiny-keccak",
  "tracing",
  "tracing-subscriber",

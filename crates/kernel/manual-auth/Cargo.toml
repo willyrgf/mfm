@@ -16,6 +16,7 @@ mfm-events = { path = "../events", version = "0.1.0" }
 mfm-ids = { path = "../ids", version = "0.1.0" }
 mfm-spec = { path = "../spec", version = "0.1.0" }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 k256 = { version = "0.13.0", features = ["ecdsa"] }

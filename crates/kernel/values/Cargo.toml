@@ -18,6 +18,7 @@ path = "src/lib.rs"
 mfm-canonical = { path = "../canonical" }
 mfm-ids = { path = "../ids" }
 serde = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

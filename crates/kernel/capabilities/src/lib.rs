@@ -8,7 +8,6 @@
 //! [`CapabilitySetFor`] manually to widen an effect's authority.
 
 use std::collections::BTreeSet;
-use std::fmt;
 
 pub use mfm_effects::{
     ApplySideEffect, EffectClass, EffectSpec, ManagedPlatformWrite, Pure, ReadExternal,
@@ -22,13 +21,16 @@ mod tests;
 pub type Result<T> = std::result::Result<T, CapabilityError>;
 
 /// Error returned by capability descriptor and role validation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CapabilityError {
     /// Capability descriptor construction failed.
+    #[error("capability descriptor error: {0}")]
     Descriptor(String),
     /// Capability identity or version construction failed.
+    #[error("capability identity error: {0}")]
     Identity(String),
     /// A capability set contains the same capability kind/version more than once.
+    #[error("duplicate capability descriptor for kind {kind} version {version}")]
     DuplicateCapability {
         /// Duplicate capability kind.
         kind: String,
@@ -36,6 +38,7 @@ pub enum CapabilityError {
         version: String,
     },
     /// A descriptor set violates the v1 effect-role rules.
+    #[error("invalid capability set for effect {effect}: {message}")]
     InvalidCapabilitySet {
         /// Effect class being validated.
         effect: &'static str,
@@ -43,24 +46,6 @@ pub enum CapabilityError {
         message: String,
     },
 }
-
-impl fmt::Display for CapabilityError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Descriptor(message) => write!(f, "capability descriptor error: {message}"),
-            Self::Identity(message) => write!(f, "capability identity error: {message}"),
-            Self::DuplicateCapability { kind, version } => write!(
-                f,
-                "duplicate capability descriptor for kind {kind} version {version}"
-            ),
-            Self::InvalidCapabilitySet { effect, message } => {
-                write!(f, "invalid capability set for effect {effect}: {message}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for CapabilityError {}
 
 /// Capability role marker contract.
 pub trait CapabilityRoleSpec: private::RoleSealed + Send + Sync + 'static {

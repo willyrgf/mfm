@@ -588,15 +588,19 @@ impl VerifiedManualResolution {
 }
 
 /// Redaction-safe manual authorization error.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ManualAuthorizationError {
     /// JSON was not canonical.
+    #[error("manual authorization canonical error: {0}")]
     Canonical(String),
     /// Persisted proof or claim shape was invalid.
+    #[error("manual authorization shape error: {0}")]
     InvalidShape(String),
     /// Proof does not match the certified policy or expected claim.
+    #[error("manual authorization proof does not match certified {0}")]
     PolicyMismatch(&'static str),
     /// Proof did not satisfy certified quorum.
+    #[error("manual authorization quorum unsatisfied: required {required}, accepted {accepted}")]
     QuorumUnsatisfied {
         /// Required unique operator signatures.
         required: u32,
@@ -604,50 +608,15 @@ pub enum ManualAuthorizationError {
         accepted: usize,
     },
     /// Verifier id is not registered in the process-local verifier registry.
+    #[error("manual authorization verifier {0} is not registered")]
     UnknownVerifier(spec::ManualAuthorizationVerifierId),
     /// Verifier id was registered more than once.
+    #[error("manual authorization verifier {0} is already registered")]
     VerifierAlreadyRegistered(spec::ManualAuthorizationVerifierId),
     /// Scheme-specific verifier rejected the proof.
+    #[error("manual authorization verifier rejected proof: {0}")]
     VerificationFailed(String),
 }
-
-impl fmt::Display for ManualAuthorizationError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Canonical(message) => {
-                write!(f, "manual authorization canonical error: {message}")
-            }
-            Self::InvalidShape(message) => {
-                write!(f, "manual authorization shape error: {message}")
-            }
-            Self::PolicyMismatch(field) => {
-                write!(
-                    f,
-                    "manual authorization proof does not match certified {field}"
-                )
-            }
-            Self::QuorumUnsatisfied { required, accepted } => write!(
-                f,
-                "manual authorization quorum unsatisfied: required {required}, accepted {accepted}"
-            ),
-            Self::UnknownVerifier(verifier_id) => {
-                write!(
-                    f,
-                    "manual authorization verifier {verifier_id} is not registered"
-                )
-            }
-            Self::VerifierAlreadyRegistered(verifier_id) => write!(
-                f,
-                "manual authorization verifier {verifier_id} is already registered"
-            ),
-            Self::VerificationFailed(message) => {
-                write!(f, "manual authorization verifier rejected proof: {message}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for ManualAuthorizationError {}
 
 fn validate_policy_claim_proof(
     policy: &spec::ManualResolutionAuthorizationSpec,

@@ -678,7 +678,8 @@ pub trait ProofReplayVerifier: Send + Sync {
 }
 
 /// Proof replay verification error.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{message}")]
 pub struct ProofReplayError {
     /// Redaction-safe message.
     pub message: String,
@@ -692,14 +693,6 @@ impl ProofReplayError {
         }
     }
 }
-
-impl std::fmt::Display for ProofReplayError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)
-    }
-}
-
-impl std::error::Error for ProofReplayError {}
 
 #[cfg(test)]
 mod tests {

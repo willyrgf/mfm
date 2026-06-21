@@ -600,41 +600,49 @@ pub struct ObservationSource {
 }
 
 /// Validation errors for canonical symbol configs.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum SymbolConfigError {
     /// The JSON payload could not be decoded into the canonical type.
+    #[error("symbol config decode failed: {0}")]
     Decode(String),
     /// `symbol_id` did not satisfy the portfolio identifier grammar.
+    #[error("symbol_id is invalid: {source}")]
     InvalidSymbolId {
         /// Underlying scalar validation failure.
         source: PortfolioScalarError,
     },
     /// `network_id` did not satisfy the portfolio identifier grammar.
+    #[error("network_id is invalid: {source}")]
     InvalidNetworkId {
         /// Underlying scalar validation failure.
         source: PortfolioScalarError,
     },
     /// `protocol` was present but empty.
+    #[error("protocol is invalid: {source}")]
     InvalidProtocol {
         /// Underlying scalar validation failure.
         source: PortfolioScalarError,
     },
     /// `underlying_symbol_id` did not satisfy the portfolio identifier grammar.
+    #[error("underlying_symbol_id is invalid: {source}")]
     InvalidUnderlyingSymbolId {
         /// Underlying scalar validation failure.
         source: PortfolioScalarError,
     },
     /// Symbol metadata contained a secret-shaped key or value.
+    #[error("metadata key `{key}` contains secret-shaped content")]
     MetadataContainsSecret {
         /// Metadata key associated with the rejected content.
         key: String,
     },
     /// A quote route appeared more than once.
+    #[error("valuation quote `{quote}` must be unique per symbol")]
     DuplicateQuoteValuation {
         /// Duplicate quote code.
         quote: QuoteCode,
     },
     /// `priced_symbol_id` did not satisfy the portfolio identifier grammar.
+    #[error("priced_symbol_id is invalid for quote `{quote}`: {source}")]
     InvalidPricedSymbolId {
         /// Quote whose route was invalid.
         quote: QuoteCode,
@@ -642,6 +650,7 @@ pub enum SymbolConfigError {
         source: PortfolioScalarError,
     },
     /// Derived price source quotes did not match.
+    #[error("derived_unit_price quotes must match for quote `{quote}` (got `{numerator_quote}` and `{denominator_quote}`)")]
     DerivedPriceQuoteMismatch {
         /// Quote whose route was invalid.
         quote: QuoteCode,
@@ -652,75 +661,32 @@ pub enum SymbolConfigError {
     },
 }
 
-impl fmt::Display for SymbolConfigError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Decode(message) => write!(f, "symbol config decode failed: {message}"),
-            Self::InvalidSymbolId { source } => {
-                write!(f, "symbol_id is invalid: {source}")
-            }
-            Self::InvalidNetworkId { source } => {
-                write!(f, "network_id is invalid: {source}")
-            }
-            Self::InvalidProtocol { source } => write!(f, "protocol is invalid: {source}"),
-            Self::InvalidUnderlyingSymbolId { source } => {
-                write!(f, "underlying_symbol_id is invalid: {source}")
-            }
-            Self::MetadataContainsSecret { key } => {
-                write!(f, "metadata key `{key}` contains secret-shaped content")
-            }
-            Self::DuplicateQuoteValuation { quote } => {
-                write!(f, "valuation quote `{quote}` must be unique per symbol")
-            }
-            Self::InvalidPricedSymbolId { quote, source } => {
-                write!(f, "priced_symbol_id is invalid for quote `{quote}`: {source}")
-            }
-            Self::DerivedPriceQuoteMismatch {
-                quote,
-                numerator_quote,
-                denominator_quote,
-            } => write!(
-                f,
-                "derived_unit_price quotes must match for quote `{quote}` (got `{numerator_quote}` and `{denominator_quote}`)"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for SymbolConfigError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::InvalidSymbolId { source }
-            | Self::InvalidNetworkId { source }
-            | Self::InvalidProtocol { source }
-            | Self::InvalidUnderlyingSymbolId { source }
-            | Self::InvalidPricedSymbolId { source, .. } => Some(source),
-            _ => None,
-        }
-    }
-}
-
 /// Validation errors for valuation source registries.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ValuationSourceRegistryError {
     /// The JSON payload could not be decoded into the canonical type.
+    #[error("valuation source registry decode failed: {0}")]
     Decode(String),
     /// `source_id` did not satisfy the portfolio identifier grammar.
+    #[error("source_id is invalid: {source}")]
     InvalidSourceId {
         /// Underlying scalar validation failure.
         source: PortfolioScalarError,
     },
     /// `network_id` did not satisfy the portfolio identifier grammar.
+    #[error("network_id is invalid: {source}")]
     InvalidNetworkId {
         /// Underlying scalar validation failure.
         source: PortfolioScalarError,
     },
     /// `base_symbol_id` did not satisfy the portfolio identifier grammar.
+    #[error("base_symbol_id is invalid: {source}")]
     InvalidBaseSymbolId {
         /// Underlying scalar validation failure.
         source: PortfolioScalarError,
     },
     /// Registry metadata contained a secret-shaped key or value.
+    #[error("valuation source `{source_id}` metadata key `{key}` contains secret-shaped content")]
     MetadataContainsSecret {
         /// Valuation source associated with the rejected metadata.
         source_id: String,
@@ -728,45 +694,11 @@ pub enum ValuationSourceRegistryError {
         key: String,
     },
     /// The same `source_id` appeared more than once.
+    #[error("valuation source `{source_id}` must be unique")]
     DuplicateSourceId {
         /// Duplicate valuation source id.
         source_id: String,
     },
-}
-
-impl fmt::Display for ValuationSourceRegistryError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Decode(message) => {
-                write!(f, "valuation source registry decode failed: {message}")
-            }
-            Self::InvalidSourceId { source } => write!(f, "source_id is invalid: {source}"),
-            Self::InvalidNetworkId { source } => {
-                write!(f, "network_id is invalid: {source}")
-            }
-            Self::InvalidBaseSymbolId { source } => {
-                write!(f, "base_symbol_id is invalid: {source}")
-            }
-            Self::MetadataContainsSecret { source_id, key } => write!(
-                f,
-                "valuation source `{source_id}` metadata key `{key}` contains secret-shaped content"
-            ),
-            Self::DuplicateSourceId { source_id } => {
-                write!(f, "valuation source `{source_id}` must be unique")
-            }
-        }
-    }
-}
-
-impl std::error::Error for ValuationSourceRegistryError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::InvalidSourceId { source }
-            | Self::InvalidNetworkId { source }
-            | Self::InvalidBaseSymbolId { source } => Some(source),
-            _ => None,
-        }
-    }
 }
 
 /// Decodes and validates a canonical symbol config.

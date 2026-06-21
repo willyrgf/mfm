@@ -4,8 +4,6 @@
 //! This crate owns the persisted v1 typed execution spec shape and canonical spec-hash boundary
 //! used by typed certification, runtime, replay, and storage.
 
-use std::fmt;
-
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_ids::{ContentDigest, DigestAlgorithm, IdentityError, SchemaId, SemanticTypeId, SpecHash};
 
@@ -13,9 +11,10 @@ use mfm_ids::{ContentDigest, DigestAlgorithm, IdentityError, SchemaId, SemanticT
 pub type Result<T> = std::result::Result<T, SpecError>;
 
 /// Error returned by typed execution spec helpers.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SpecError {
     /// A stable string field failed validation.
+    #[error("invalid {field} string {value:?}")]
     InvalidString {
         /// Field label.
         field: &'static str,
@@ -23,14 +22,19 @@ pub enum SpecError {
         value: String,
     },
     /// Identity construction failed.
+    #[error("identity error: {0}")]
     Identity(String),
     /// JSON serialization failed before canonicalization.
+    #[error("spec JSON serialization error: {0}")]
     Serialize(String),
     /// Persisted JSON decoding failed.
+    #[error("spec JSON decoding error: {0}")]
     Json(String),
     /// Canonical JSON construction failed.
+    #[error("spec canonicalization error: {0}")]
     Canonical(String),
     /// Envelope hash did not match the canonical spec bytes.
+    #[error("certified spec hash mismatch: expected {expected}, recomputed {actual}")]
     HashMismatch {
         /// Hash carried by the envelope.
         expected: Box<SpecHash>,
@@ -38,29 +42,9 @@ pub enum SpecError {
         actual: Box<SpecHash>,
     },
     /// Obsolete pre-v1 sketch shape was detected.
+    #[error("obsolete spec shape: {0}")]
     ObsoleteSketchShape(String),
 }
-
-impl fmt::Display for SpecError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidString { field, value } => {
-                write!(f, "invalid {field} string {value:?}")
-            }
-            Self::Identity(message) => write!(f, "identity error: {message}"),
-            Self::Serialize(message) => write!(f, "spec JSON serialization error: {message}"),
-            Self::Json(message) => write!(f, "spec JSON decoding error: {message}"),
-            Self::Canonical(message) => write!(f, "spec canonicalization error: {message}"),
-            Self::HashMismatch { expected, actual } => write!(
-                f,
-                "certified spec hash mismatch: expected {expected}, recomputed {actual}"
-            ),
-            Self::ObsoleteSketchShape(message) => write!(f, "obsolete spec shape: {message}"),
-        }
-    }
-}
-
-impl std::error::Error for SpecError {}
 
 impl From<IdentityError> for SpecError {
     fn from(error: IdentityError) -> Self {

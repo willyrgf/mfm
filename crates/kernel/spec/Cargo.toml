@@ -19,3 +19,4 @@ mfm-capabilities = { path = "../capabilities" }
 mfm-canonical = { path = "../canonical" }
 mfm-ids = { path = "../ids" }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
