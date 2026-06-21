@@ -23,7 +23,7 @@ use mfm_authored_config::{EntryPointDescriptor, TOML_JSON_AUTHORED_CONFIG_FORMAT
 use mfm_ids::{DigestAlgorithm, OperationKind, OperationVersion};
 use mfm_portfolio_config::{
     canonicalize_portfolio_snapshot_authored_config, PortfolioSnapshotAuthoredConfig,
-    PortfolioSnapshotCanonicalConfig, PortfolioSnapshotConfigError,
+    PortfolioSnapshotConfigError,
 };
 use mfm_portfolio_model::domain_key::{
     ObservationBatchDomainKey, ReportDomainKey, SourceDomainKey, SubjectDomainKey,
@@ -316,13 +316,6 @@ pub fn plan_portfolio_snapshot_entry_point(
     authored: PortfolioSnapshotAuthoredConfig,
 ) -> Result<TypedProgramLaunchPlan, PortfolioSnapshotPlanError> {
     let canonical = canonicalize_portfolio_snapshot_authored_config(authored)?;
-    plan_portfolio_snapshot_program(canonical)
-}
-
-/// Plans a portfolio snapshot entry-point program from canonical non-secret config.
-pub fn plan_portfolio_snapshot_program(
-    canonical: PortfolioSnapshotCanonicalConfig,
-) -> Result<TypedProgramLaunchPlan, PortfolioSnapshotPlanError> {
     let workflow_config: PortfolioWorkflowConfig = canonical.into();
     let draft = portfolio_program_draft(workflow_config)?;
     let config_material = portfolio_draft_config_material(&draft)?;
@@ -365,8 +358,7 @@ impl From<mfm_program::PlanError> for PortfolioSnapshotPlanError {
     }
 }
 
-/// Returns all author-emitted config material from a portfolio draft.
-pub fn portfolio_draft_config_material(
+fn portfolio_draft_config_material(
     draft: &mfm_program::TypedProgramDraft,
 ) -> mfm_program::Result<Vec<TypedProgramConfigMaterial>> {
     let media_type = MediaType::new("application/json")
@@ -537,13 +529,12 @@ mod tests {
 
     #[test]
     fn portfolio_snapshot_entry_point_plan_is_draft_only() {
-        let canonical = mfm_portfolio_config::PortfolioSnapshotCanonicalConfig {
+        let authored = mfm_portfolio_config::PortfolioSnapshotAuthoredConfig {
             portfolio: sample_portfolio_config(),
             valuation_source_registry: sample_valuation_source_registry(),
-        }
-        .normalized();
+        };
 
-        let planned = plan_portfolio_snapshot_program(canonical).expect("entry-point plan");
+        let planned = plan_portfolio_snapshot_entry_point(authored).expect("entry-point plan");
 
         assert!(!planned.draft.state_nodes().is_empty());
         assert!(!planned.config_material.is_empty());
