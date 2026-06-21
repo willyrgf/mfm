@@ -338,10 +338,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         config: &ValidatedConfig<DeployPhaseConfig>,
         intent: &ContractDeployIntent,
     ) -> Result<PreparedContractMutation> {
-        let expected = DeployContractState::new(config.clone())
-            .map_err(state_error)?
-            .prepare_intent(&())
-            .map_err(state_runtime_error)?;
+        let expected = DeployContractState::new(config.clone())?.prepare_intent(&())?;
         if &expected != intent {
             return Err(EvmContractAdapterError::IntentMismatch);
         }
@@ -379,10 +376,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         input: &ConfigureContractInput,
         intent: &ContractConfigureIntent,
     ) -> Result<PreparedContractMutation> {
-        let expected = ConfigureContractState::new(config.clone())
-            .map_err(state_error)?
-            .prepare_intent(input)
-            .map_err(state_runtime_error)?;
+        let expected = ConfigureContractState::new(config.clone())?.prepare_intent(input)?;
         if &expected != intent {
             return Err(EvmContractAdapterError::IntentMismatch);
         }
@@ -416,10 +410,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         intent: &ContractDeployIntent,
         evidence: &PreparedContractInvocation,
     ) -> Result<PreparedContractMutation> {
-        let expected = DeployContractState::new(config.clone())
-            .map_err(state_error)?
-            .prepare_intent(&())
-            .map_err(state_runtime_error)?;
+        let expected = DeployContractState::new(config.clone())?.prepare_intent(&())?;
         if &expected != intent {
             return Err(EvmContractAdapterError::IntentMismatch);
         }
@@ -454,10 +445,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         intent: &ContractConfigureIntent,
         evidence: &PreparedContractInvocation,
     ) -> Result<PreparedContractMutation> {
-        let expected = ConfigureContractState::new(config.clone())
-            .map_err(state_error)?
-            .prepare_intent(input)
-            .map_err(state_runtime_error)?;
+        let expected = ConfigureContractState::new(config.clone())?.prepare_intent(input)?;
         if &expected != intent {
             return Err(EvmContractAdapterError::IntentMismatch);
         }
@@ -491,18 +479,14 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
                 .mutation
                 .signer
                 .sign(signing_request.signing_request())
-                .await
-                .map_err(EvmContractAdapterError::Signing)?;
-            let raw = signing_request
-                .materialize_signed_payload(&result)
-                .map_err(EvmContractAdapterError::EvmSigning)?;
+                .await?;
+            let raw = signing_request.materialize_signed_payload(&result)?;
             let expected_hash = raw
                 .transaction_hash()
                 .parse::<B256>()
                 .map_err(|_| EvmContractAdapterError::TransactionHashMismatch)?;
             let payload =
-                SignedEvmPayload::from_verified_bytes(raw.bytes().to_vec(), expected_hash)
-                    .map_err(EvmContractAdapterError::EvmCapability)?;
+                SignedEvmPayload::from_verified_bytes(raw.bytes().to_vec(), expected_hash)?;
             let response = self
                 .mutation
                 .submit
@@ -511,8 +495,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
                     policy_id: self.route().policy_id().clone(),
                     signed_payload: payload,
                 })
-                .await
-                .map_err(EvmContractAdapterError::EvmCapability)?;
+                .await?;
             if response.transaction_hash != expected_hash {
                 return Err(EvmContractAdapterError::TransactionHashMismatch);
             }
@@ -544,8 +527,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
                     policy_id: self.route().policy_id().clone(),
                     transaction_hash,
                 })
-                .await
-                .map_err(EvmContractAdapterError::EvmCapability)?;
+                .await?;
             if response.transaction_hash != transaction_hash {
                 return Err(EvmContractAdapterError::TransactionHashMismatch);
             }
@@ -571,16 +553,14 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         receipt: ContractTransactionReceipt,
         contract_address: Address,
     ) -> Result<mfm_evm_contract_model::DeployedContract> {
-        let state = DeployContractState::new(config.clone()).map_err(state_error)?;
+        let state = DeployContractState::new(config.clone())?;
         let confirmation = ContractDeployConfirmation {
             confirmation_version: 1,
             contract_address: normalize_address(&format!("{contract_address:?}"))
                 .map_err(EvmContractAdapterError::Model)?,
             receipt,
         };
-        state
-            .output_from_confirmation(&(), intent, &confirmation)
-            .map_err(state_runtime_error)
+        Ok(state.output_from_confirmation(&(), intent, &confirmation)?)
     }
 
     /// Projects configure output from confirmed configure receipts.
@@ -591,15 +571,13 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         intent: &ContractConfigureIntent,
         receipts: Vec<ContractTransactionReceipt>,
     ) -> Result<ConfiguredContract> {
-        let state = ConfigureContractState::new(config.clone()).map_err(state_error)?;
+        let state = ConfigureContractState::new(config.clone())?;
         let confirmation = ContractConfigureConfirmation {
             confirmation_version: 1,
             configured_block_number: receipts.iter().map(|receipt| receipt.block_number).max(),
             receipts,
         };
-        state
-            .output_from_confirmation(input, intent, &confirmation)
-            .map_err(state_runtime_error)
+        Ok(state.output_from_confirmation(input, intent, &confirmation)?)
     }
 
     /// Executes validation reads and projects a validation response.
@@ -609,10 +587,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         input: &ValidateContractInput,
         request: &ContractValidationReadRequest,
     ) -> Result<ContractValidationReadResponse> {
-        let expected = ValidateContractState::new(config.clone())
-            .map_err(state_error)?
-            .read_request(input)
-            .map_err(state_runtime_error)?;
+        let expected = ValidateContractState::new(config.clone())?.read_request(input)?;
         if &expected != request {
             return Err(EvmContractAdapterError::IntentMismatch);
         }
@@ -624,8 +599,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
                 source_ref: self.route().source_ref().clone(),
                 policy_id: self.route().policy_id().clone(),
             })
-            .await
-            .map_err(EvmContractAdapterError::EvmCapability)?;
+            .await?;
         if chain.chain_id != request.expected_chain_id {
             return Err(EvmContractAdapterError::ChainMismatch);
         }
@@ -681,8 +655,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
                 source_ref: self.route().source_ref().clone(),
                 policy_id: self.route().policy_id().clone(),
             })
-            .await
-            .map_err(EvmContractAdapterError::EvmCapability)?;
+            .await?;
         if chain.chain_id != expected_chain_id {
             return Err(EvmContractAdapterError::ChainMismatch);
         }
@@ -696,8 +669,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
                 account: expected_signer,
                 block: EvmBlockSelector::Latest,
             })
-            .await
-            .map_err(EvmContractAdapterError::EvmCapability)?
+            .await?
             .nonce;
         let fees = self
             .mutation
@@ -706,8 +678,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
                 source_ref: self.route().source_ref().clone(),
                 policy_id: self.route().policy_id().clone(),
             })
-            .await
-            .map_err(EvmContractAdapterError::EvmCapability)?;
+            .await?;
 
         let mut evidence = Vec::with_capacity(tx_inputs.len());
         let mut signing_requests = Vec::with_capacity(tx_inputs.len());
@@ -725,8 +696,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
                             value_wei: input.value_wei,
                             data: input.data.clone(),
                         })
-                        .await
-                        .map_err(EvmContractAdapterError::EvmCapability)?
+                        .await?
                         .gas_limit
                 }
             };
@@ -755,8 +725,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
                         data: input.data.clone(),
                     };
                     let request =
-                        EvmSigningRequest::eip1559(signer_ref.clone(), tx, expected_signer)
-                            .map_err(EvmContractAdapterError::EvmSigning)?;
+                        EvmSigningRequest::eip1559(signer_ref.clone(), tx, expected_signer)?;
                     PreparedTransaction {
                         style: PreparedContractTransactionStyle::Eip1559,
                         request,
@@ -779,8 +748,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
                         data: input.data.clone(),
                     };
                     let request =
-                        EvmSigningRequest::legacy(signer_ref.clone(), tx, expected_signer)
-                            .map_err(EvmContractAdapterError::EvmSigning)?;
+                        EvmSigningRequest::legacy(signer_ref.clone(), tx, expected_signer)?;
                     PreparedTransaction {
                         style: PreparedContractTransactionStyle::Legacy,
                         request,
@@ -858,8 +826,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
                         .map_err(EvmContractAdapterError::Model)?,
                     block: EvmBlockSelector::Latest,
                 })
-                .await
-                .map_err(EvmContractAdapterError::EvmCapability)?;
+                .await?;
             let actual_json = decode_single_output_to_json(
                 &prepared.outputs,
                 &bytes_to_hex_prefixed(&response.return_data),
@@ -893,8 +860,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
                     address: Some(address),
                     topics: vec![topic],
                 })
-                .await
-                .map_err(EvmContractAdapterError::EvmCapability)?;
+                .await?;
             let observed_count = logs.logs.len() as u64;
             event_results.push(ValidationEventResult {
                 event: prepared.event.clone(),
@@ -1024,7 +990,7 @@ pub fn replay_verifier_id() -> Result<events::ReplayVerifierId> {
 
 fn contract_side_effect_replay_evidence() -> mfm_runtime::Result<SideEffectReplayEvidence> {
     Ok(SideEffectReplayEvidence {
-        replay_verifier_id: replay_verifier_id().map_err(runtime_adapter_error)?,
+        replay_verifier_id: replay_verifier_id()?,
         resource_touched_set: None,
     })
 }
@@ -1037,8 +1003,7 @@ pub fn verify_contract_lifecycle_replay(broker: &replay::ReplayBroker) -> replay
     if frames.is_empty() {
         return Ok(false);
     }
-    let verifier =
-        EvmContractLifecycleReplayVerifier::new().map_err(replay_contract_adapter_error)?;
+    let verifier = EvmContractLifecycleReplayVerifier::new()?;
     for frame in &frames {
         verify_contract_lifecycle_replay_frame(broker, &verifier, frame)?;
     }
@@ -1129,13 +1094,6 @@ fn contract_lifecycle_side_effect_missing(phase: &str) -> replay::ReplayError {
     replay::ReplayError::new(
         replay::ReplayErrorKind::SideEffectMissing,
         format!("missing contract lifecycle {phase} evidence"),
-    )
-}
-
-fn replay_contract_adapter_error(error: EvmContractAdapterError) -> replay::ReplayError {
-    replay::ReplayError::new(
-        replay::ReplayErrorKind::SideEffectMismatch,
-        error.to_string(),
     )
 }
 
@@ -1251,8 +1209,7 @@ fn reconstruct_prepared_mutation(
                         data: input.data,
                     },
                     expected_signer,
-                )
-                .map_err(EvmContractAdapterError::EvmSigning)?
+                )?
             }
             PreparedContractTransactionStyle::Legacy => {
                 let gas_price_wei =
@@ -1274,8 +1231,7 @@ fn reconstruct_prepared_mutation(
                         data: input.data,
                     },
                     expected_signer,
-                )
-                .map_err(EvmContractAdapterError::EvmSigning)?
+                )?
             }
         };
         if transaction.signing_digest != format!("{:?}", signing_request.signing_hash()) {
@@ -1359,14 +1315,6 @@ fn ensure_schema(
             format!("{label} schema did not match contract lifecycle schema"),
         ))
     }
-}
-
-fn state_error(error: mfm_program::PlanError) -> EvmContractAdapterError {
-    EvmContractAdapterError::State(error.to_string())
-}
-
-fn state_runtime_error(error: mfm_program::StateError) -> EvmContractAdapterError {
-    EvmContractAdapterError::State(error.to_string())
 }
 
 fn replay_adapter_error(error: mfm_adapter_contracts::AdapterContractError) -> replay::ReplayError {
@@ -1667,8 +1615,7 @@ impl SideEffectDriverCallbacks for DeploySideEffectCallbacks<'_> {
             let prepared = runtime
                 .adapter()
                 .prepare_deploy_invocation(&self.plan.config, &self.plan.intent)
-                .await
-                .map_err(runtime_adapter_error)?;
+                .await?;
             Ok(SideEffectPreparedInvocationPlan::with_prepared_invocation(
                 prepared.evidence().clone(),
             ))
@@ -1709,21 +1656,14 @@ impl SideEffectDriverCallbacks for DeploySideEffectCallbacks<'_> {
             let runtime = self
                 .factory
                 .runtime_for(self.plan.config.as_ref().network().network_id())?;
-            let prepared = runtime
-                .adapter()
-                .reconstruct_deploy_invocation(
-                    &self.plan.config,
-                    &self.plan.intent,
-                    &stored_prepared,
-                )
-                .map_err(runtime_adapter_error)?;
+            let prepared = runtime.adapter().reconstruct_deploy_invocation(
+                &self.plan.config,
+                &self.plan.intent,
+                &stored_prepared,
+            )?;
             let submissions = ContractTransactionSubmissions {
                 submissions_version: 1,
-                transactions: runtime
-                    .adapter()
-                    .submit_prepared(&prepared)
-                    .await
-                    .map_err(runtime_adapter_error)?,
+                transactions: runtime.adapter().submit_prepared(&prepared).await?,
             };
             Ok(SideEffectSubmissionDecision::Observed(submissions))
         })
@@ -1791,8 +1731,7 @@ impl SideEffectDriverCallbacks for DeploySideEffectCallbacks<'_> {
             Ok(SideEffectObservedEvidence {
                 evidence: ContractDeployConfirmation {
                     confirmation_version: 1,
-                    contract_address: deploy_contract_address_from_prepared(&prepared)
-                        .map_err(runtime_adapter_error)?,
+                    contract_address: deploy_contract_address_from_prepared(&prepared)?,
                     receipt,
                 },
                 replay: contract_side_effect_replay_evidence()?,
@@ -1878,8 +1817,7 @@ impl SideEffectDriverCallbacks for ConfigureSideEffectCallbacks<'_> {
                     &self.plan.input,
                     &self.plan.intent,
                 )
-                .await
-                .map_err(runtime_adapter_error)?;
+                .await?;
             Ok(SideEffectPreparedInvocationPlan::with_prepared_invocation(
                 prepared.evidence().clone(),
             ))
@@ -1920,22 +1858,15 @@ impl SideEffectDriverCallbacks for ConfigureSideEffectCallbacks<'_> {
             let runtime = self
                 .factory
                 .runtime_for(self.plan.config.as_ref().network().network_id())?;
-            let prepared = runtime
-                .adapter()
-                .reconstruct_configure_invocation(
-                    &self.plan.config,
-                    &self.plan.input,
-                    &self.plan.intent,
-                    &stored_prepared,
-                )
-                .map_err(runtime_adapter_error)?;
+            let prepared = runtime.adapter().reconstruct_configure_invocation(
+                &self.plan.config,
+                &self.plan.input,
+                &self.plan.intent,
+                &stored_prepared,
+            )?;
             let submissions = ContractTransactionSubmissions {
                 submissions_version: 1,
-                transactions: runtime
-                    .adapter()
-                    .submit_prepared(&prepared)
-                    .await
-                    .map_err(runtime_adapter_error)?,
+                transactions: runtime.adapter().submit_prepared(&prepared).await?,
             };
             Ok(SideEffectSubmissionDecision::Observed(submissions))
         })
@@ -2082,8 +2013,7 @@ async fn run_validate(
     let response = runtime
         .adapter()
         .validate_contract(&config, &input, &request)
-        .await
-        .map_err(runtime_adapter_error)?;
+        .await?;
     let report = state
         .report_from_response(&input, response.clone())
         .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))?;
@@ -2152,7 +2082,7 @@ async fn read_receipts_with_poll(
                 }
                 sleep(Duration::from_millis(receipt_policy.poll_interval_ms())).await;
             }
-            Err(error) => return Err(runtime_adapter_error(error)),
+            Err(error) => return Err(error.into()),
         }
     }
 
@@ -2235,7 +2165,7 @@ async fn load_prepared_invocation(
     let prepared =
         load_side_effect_value::<PreparedContractInvocation>(artifact, role, ctx, artifacts)
             .await?;
-    ensure_prepared_invocation_public(&prepared).map_err(runtime_adapter_error)?;
+    ensure_prepared_invocation_public(&prepared)?;
     Ok(prepared)
 }
 
@@ -2486,10 +2416,6 @@ fn runtime_artifact_read_error(
     mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
 }
 
-fn runtime_adapter_error(error: EvmContractAdapterError) -> mfm_runtime::RuntimeError {
-    mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
-}
-
 fn runtime_plan_error(error: mfm_program::PlanError) -> mfm_runtime::RuntimeError {
     mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
 }
@@ -2556,6 +2482,51 @@ impl fmt::Display for EvmContractAdapterError {
                 f.write_str("prepared invocation exposed forbidden runtime data")
             }
         }
+    }
+}
+
+impl From<mfm_program::PlanError> for EvmContractAdapterError {
+    fn from(error: mfm_program::PlanError) -> Self {
+        Self::State(error.to_string())
+    }
+}
+
+impl From<mfm_program::StateError> for EvmContractAdapterError {
+    fn from(error: mfm_program::StateError) -> Self {
+        Self::State(error.to_string())
+    }
+}
+
+impl From<mfm_evm_capabilities::EvmCapabilityError> for EvmContractAdapterError {
+    fn from(error: mfm_evm_capabilities::EvmCapabilityError) -> Self {
+        Self::EvmCapability(error)
+    }
+}
+
+impl From<mfm_signing::SigningError> for EvmContractAdapterError {
+    fn from(error: mfm_signing::SigningError) -> Self {
+        Self::Signing(error)
+    }
+}
+
+impl From<mfm_evm_signing::EvmSigningError> for EvmContractAdapterError {
+    fn from(error: mfm_evm_signing::EvmSigningError) -> Self {
+        Self::EvmSigning(error)
+    }
+}
+
+impl From<EvmContractAdapterError> for mfm_runtime::RuntimeError {
+    fn from(error: EvmContractAdapterError) -> Self {
+        Self::InvalidRunnerOutput(error.to_string())
+    }
+}
+
+impl From<EvmContractAdapterError> for replay::ReplayError {
+    fn from(error: EvmContractAdapterError) -> Self {
+        Self::new(
+            replay::ReplayErrorKind::SideEffectMismatch,
+            error.to_string(),
+        )
     }
 }
 
