@@ -42,11 +42,8 @@ impl CertifiedRuntimeSpec {
             mfm_certify::CertifiedSpecCertificateEvidence {
                 certificate_version: mfm_certify::CERTIFICATE_VERSION.to_owned(),
                 media_type: mfm_certify::CERTIFICATE_MEDIA_TYPE.to_owned(),
-                certifier_version: "mfm-runtime-test-placeholder".to_owned(),
-                certifier_algorithm: "mfm-runtime-test-placeholder".to_owned(),
-                certificate_canonicalization: DigestAlgorithm::Sha256JcsV1,
+                certifier_algorithm: mfm_certify::CERTIFIER_ALGORITHM.to_owned(),
                 spec_hash: envelope.spec_hash.clone(),
-                spec_canonicalization: envelope.spec.canonicalization,
                 registry_digest: ContentDigest::from_digest(
                     DigestAlgorithm::Sha256JcsV1,
                     mfm_ids::DigestBytes::from_array([0; 32]),
@@ -55,23 +52,6 @@ impl CertifiedRuntimeSpec {
                 schema_role_grants: Vec::new(),
                 manual_authorization_verifiers: Vec::new(),
                 operator_authority_snapshots: Vec::new(),
-                lowering_version: envelope.spec.lowering_version.clone(),
-                public_output_schema_id: envelope.spec.public_outputs.public_schema_id.clone(),
-                public_output_canonicalizer_identity: envelope
-                    .spec
-                    .public_outputs
-                    .renderer_descriptor
-                    .canonicalizer_identity
-                    .clone(),
-                audit: mfm_certify::CertifiedSpecAuditMetadata {
-                    problem_classes_covered: Vec::new(),
-                    scope_count: envelope.spec.scopes.len() as u64,
-                    operation_lineage_count: envelope.spec.planning_lineage.len() as u64,
-                    node_count: envelope.spec.nodes.len() as u64,
-                    cell_count: envelope.spec.cells.len() as u64,
-                    seed_count: envelope.spec.seeds.len() as u64,
-                    descriptor_count: envelope.spec.descriptor_identities.len() as u64,
-                },
             },
         )
         .map_err(|error| RuntimeError::InvalidSpec(error.to_string()))?;

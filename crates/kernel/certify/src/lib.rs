@@ -13,8 +13,8 @@ use mfm_effects::{ApplySideEffect, EffectClass, EffectSpec, ManagedPlatformWrite
 use mfm_events::v1 as events;
 use mfm_ids::{
     ArtifactId, CellId, ContentDigest, DescriptorId, DigestAlgorithm, DigestBytes, EffectKind,
-    LoweringVersion, NodeId, OperationInstanceId, RunId, SchemaId, ScopeId, SemanticTypeId,
-    SpecHash, StateKind, StateVersion,
+    NodeId, OperationInstanceId, RunId, SchemaId, ScopeId, SemanticTypeId, SpecHash, StateKind,
+    StateVersion,
 };
 use mfm_program as program;
 use mfm_spec::v1 as spec;
@@ -28,8 +28,6 @@ pub const CERTIFICATE_VERSION: &str = "mfm.certified_typed_spec_certificate.v1";
 /// Media type for canonical persisted typed-spec certificate JSON.
 pub const CERTIFICATE_MEDIA_TYPE: &str =
     "application/vnd.mfm.certified-typed-spec-certificate+json;version=1";
-/// Version string for this certifier implementation.
-pub const CERTIFIER_VERSION: &str = "mfm-certify.v1";
 /// Stable identifier for the v1 certification algorithm.
 pub const CERTIFIER_ALGORITHM: &str = "mfm-certify.registry-validation.v1";
 /// Stable identifier for the v1 registry digest payload.
@@ -64,17 +62,6 @@ impl ProblemClass {
             Self::InvalidDataShape => "invalid_data_shape_rejected",
             Self::InvalidDataMeaning => "invalid_data_meaning_rejected",
             Self::InvalidTerminalShape => "invalid_terminal_shape_rejected",
-        }
-    }
-
-    fn certificate_key(self) -> &'static str {
-        match self {
-            Self::InvalidTopology => "invalid_topology",
-            Self::InvalidInterfaceWiring => "invalid_interface_wiring",
-            Self::InvalidSemanticTransition => "invalid_semantic_transition",
-            Self::InvalidDataShape => "invalid_data_shape",
-            Self::InvalidDataMeaning => "invalid_data_meaning",
-            Self::InvalidTerminalShape => "invalid_terminal_shape",
         }
     }
 }
@@ -957,18 +944,10 @@ pub struct CertifiedSpecCertificateEvidence {
     pub certificate_version: String,
     /// Persisted certificate media type.
     pub media_type: String,
-    /// Certifier implementation version.
-    pub certifier_version: String,
     /// Certifier algorithm identity.
     pub certifier_algorithm: String,
-    /// Digest algorithm used for certificate canonicalization and hashing.
-    pub certificate_canonicalization: DigestAlgorithm,
     /// Spec hash that this certificate covers.
     pub spec_hash: SpecHash,
-    /// Canonicalization algorithm declared by the typed spec.
-    pub spec_canonicalization: DigestAlgorithm,
-    /// Lowering algorithm identity declared by the typed spec.
-    pub lowering_version: LoweringVersion,
     /// Digest of the certification registry authority.
     pub registry_digest: ContentDigest,
     /// Descriptor identities and digests covered by certification.
@@ -979,12 +958,6 @@ pub struct CertifiedSpecCertificateEvidence {
     pub manual_authorization_verifiers: Vec<CertifiedManualAuthorizationVerifierEvidence>,
     /// Operator authority snapshots resolved during certification.
     pub operator_authority_snapshots: Vec<CertifiedOperatorAuthoritySnapshotEvidence>,
-    /// Public output schema id covered by certification.
-    pub public_output_schema_id: SchemaId,
-    /// Public output renderer canonicalizer identity covered by certification.
-    pub public_output_canonicalizer_identity: spec::CanonicalizerIdentity,
-    /// Non-semantic audit metadata that explains the certification decision.
-    pub audit: CertifiedSpecAuditMetadata,
 }
 
 impl CertifiedSpecCertificateEvidence {
@@ -995,11 +968,8 @@ impl CertifiedSpecCertificateEvidence {
 
     fn json(&self) -> serde_json::Value {
         serde_json::json!({
-            "audit": self.audit.json(),
-            "certificate_canonicalization": self.certificate_canonicalization.as_str(),
             "certificate_version": self.certificate_version.as_str(),
             "certifier_algorithm": self.certifier_algorithm.as_str(),
-            "certifier_version": self.certifier_version.as_str(),
             "descriptor_identities": self
                 .descriptor_identities
                 .iter()
@@ -1010,24 +980,18 @@ impl CertifiedSpecCertificateEvidence {
                 .iter()
                 .map(CertifiedManualAuthorizationVerifierEvidence::json)
                 .collect::<Vec<_>>(),
-            "lowering_version": self.lowering_version.as_str(),
             "media_type": self.media_type.as_str(),
             "operator_authority_snapshots": self
                 .operator_authority_snapshots
                 .iter()
                 .map(CertifiedOperatorAuthoritySnapshotEvidence::json)
                 .collect::<Vec<_>>(),
-            "public_output_canonicalizer_identity": self
-                .public_output_canonicalizer_identity
-                .as_str(),
-            "public_output_schema_id": self.public_output_schema_id.as_str(),
             "registry_digest": self.registry_digest.as_str(),
             "schema_role_grants": self
                 .schema_role_grants
                 .iter()
                 .map(CertifiedSchemaRoleGrantEvidence::json)
                 .collect::<Vec<_>>(),
-            "spec_canonicalization": self.spec_canonicalization.as_str(),
             "spec_hash": self.spec_hash.as_str(),
         })
     }
@@ -1158,39 +1122,6 @@ impl CertifiedDescriptorEvidence {
             "descriptor_digest": self.descriptor_digest.as_str(),
             "descriptor_family": self.descriptor_family.as_str(),
             "descriptor_id": self.descriptor_id.as_str(),
-        })
-    }
-}
-
-/// Audit metadata explaining a successful certification decision.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CertifiedSpecAuditMetadata {
-    /// Stable names of problem classes covered by the certifier.
-    pub problem_classes_covered: Vec<String>,
-    /// Number of scopes in the certified spec.
-    pub scope_count: u64,
-    /// Number of seed cells in the certified spec.
-    pub seed_count: u64,
-    /// Number of nodes in the certified spec.
-    pub node_count: u64,
-    /// Number of cells in the certified spec.
-    pub cell_count: u64,
-    /// Number of descriptor identities in the certified spec.
-    pub descriptor_count: u64,
-    /// Number of operation lineage frames in the certified spec.
-    pub operation_lineage_count: u64,
-}
-
-impl CertifiedSpecAuditMetadata {
-    fn json(&self) -> serde_json::Value {
-        serde_json::json!({
-            "cell_count": self.cell_count,
-            "descriptor_count": self.descriptor_count,
-            "node_count": self.node_count,
-            "operation_lineage_count": self.operation_lineage_count,
-            "problem_classes_covered": self.problem_classes_covered,
-            "scope_count": self.scope_count,
-            "seed_count": self.seed_count,
         })
     }
 }
@@ -1916,28 +1847,6 @@ fn verify_untrusted_spec_certificate_parts(
             "operator authority snapshot evidence does not match persisted spec",
         ));
     }
-    if expected_certificate.evidence.spec_canonicalization != spec_ref.canonicalization {
-        return Err(certificate("spec canonicalization mismatch"));
-    }
-    if expected_certificate.evidence.lowering_version != spec_ref.lowering_version {
-        return Err(certificate("lowering version mismatch"));
-    }
-    if expected_certificate.evidence.public_output_schema_id
-        != spec_ref.public_outputs.public_schema_id
-    {
-        return Err(certificate("public output schema mismatch"));
-    }
-    if expected_certificate
-        .evidence
-        .public_output_canonicalizer_identity
-        != spec_ref
-            .public_outputs
-            .renderer_descriptor
-            .canonicalizer_identity
-    {
-        return Err(certificate("public output canonicalizer mismatch"));
-    }
-
     let certified = certify_typed_spec(spec, registry)?;
     if certified.certificate != expected_certificate {
         return Err(certificate(
@@ -1954,12 +1863,8 @@ fn certificate_for_envelope(
     CertifiedSpecCertificate::from_evidence(CertifiedSpecCertificateEvidence {
         certificate_version: CERTIFICATE_VERSION.to_owned(),
         media_type: CERTIFICATE_MEDIA_TYPE.to_owned(),
-        certifier_version: CERTIFIER_VERSION.to_owned(),
         certifier_algorithm: CERTIFIER_ALGORITHM.to_owned(),
-        certificate_canonicalization: DigestAlgorithm::Sha256JcsV1,
         spec_hash: envelope.spec_hash.clone(),
-        spec_canonicalization: envelope.spec.canonicalization,
-        lowering_version: envelope.spec.lowering_version.clone(),
         registry_digest: registry.digest()?,
         descriptor_identities: descriptor_evidence_for_spec(&envelope.spec)?,
         schema_role_grants: schema_role_grants_for_spec(&envelope.spec, registry)?,
@@ -1971,14 +1876,6 @@ fn certificate_for_envelope(
             &envelope.spec,
             registry,
         )?,
-        public_output_schema_id: envelope.spec.public_outputs.public_schema_id.clone(),
-        public_output_canonicalizer_identity: envelope
-            .spec
-            .public_outputs
-            .renderer_descriptor
-            .canonicalizer_identity
-            .clone(),
-        audit: certificate_audit_for_spec(&envelope.spec),
     })
 }
 
@@ -2160,28 +2057,6 @@ fn manual_resolution_specs(
         | spec::SagaPolicySpec::CompensateCompleted { .. } => {}
     }
     manuals
-}
-
-fn certificate_audit_for_spec(spec: &spec::TypedExecutionSpec) -> CertifiedSpecAuditMetadata {
-    CertifiedSpecAuditMetadata {
-        problem_classes_covered: [
-            ProblemClass::InvalidTopology,
-            ProblemClass::InvalidInterfaceWiring,
-            ProblemClass::InvalidSemanticTransition,
-            ProblemClass::InvalidDataShape,
-            ProblemClass::InvalidDataMeaning,
-            ProblemClass::InvalidTerminalShape,
-        ]
-        .into_iter()
-        .map(|class| class.certificate_key().to_owned())
-        .collect(),
-        scope_count: spec.scopes.len() as u64,
-        seed_count: spec.seeds.len() as u64,
-        node_count: spec.nodes.len() as u64,
-        cell_count: spec.cells.len() as u64,
-        descriptor_count: spec.descriptor_identities.len() as u64,
-        operation_lineage_count: spec.planning_lineage.len() as u64,
-    }
 }
 
 fn lower_program_draft_with_registry(
@@ -5348,7 +5223,6 @@ fn parse_certificate_evidence(
             "unsupported certificate media_type {media_type:?}"
         )));
     }
-    let certifier_version = required_str(object, "certifier_version")?.to_owned();
     let certifier_algorithm = required_str(object, "certifier_algorithm")?.to_owned();
     if certifier_algorithm != CERTIFIER_ALGORITHM {
         return Err(certificate(format!(
@@ -5358,15 +5232,8 @@ fn parse_certificate_evidence(
     Ok(CertifiedSpecCertificateEvidence {
         certificate_version,
         media_type,
-        certifier_version,
         certifier_algorithm,
-        certificate_canonicalization: parse_identity(required_str(
-            object,
-            "certificate_canonicalization",
-        )?)?,
         spec_hash: parse_identity(required_str(object, "spec_hash")?)?,
-        spec_canonicalization: parse_identity(required_str(object, "spec_canonicalization")?)?,
-        lowering_version: parse_identity(required_str(object, "lowering_version")?)?,
         registry_digest: parse_identity(required_str(object, "registry_digest")?)?,
         descriptor_identities: parse_array(
             required(object, "descriptor_identities")?,
@@ -5384,13 +5251,6 @@ fn parse_certificate_evidence(
             required(object, "operator_authority_snapshots")?,
             parse_operator_authority_snapshot_evidence,
         )?,
-        public_output_schema_id: parse_identity(required_str(object, "public_output_schema_id")?)?,
-        public_output_canonicalizer_identity: spec::CanonicalizerIdentity::new(required_str(
-            object,
-            "public_output_canonicalizer_identity",
-        )?)
-        .map_err(|error| certificate(error.to_string()))?,
-        audit: parse_certificate_audit(required(object, "audit")?)?,
     })
 }
 
@@ -5457,31 +5317,11 @@ fn parse_descriptor_evidence(value: &serde_json::Value) -> Result<CertifiedDescr
     })
 }
 
-fn parse_certificate_audit(value: &serde_json::Value) -> Result<CertifiedSpecAuditMetadata> {
-    let object = json_object(value, "certificate audit")?;
-    Ok(CertifiedSpecAuditMetadata {
-        problem_classes_covered: parse_string_array(required(object, "problem_classes_covered")?)?,
-        scope_count: required_u64(object, "scope_count")?,
-        seed_count: required_u64(object, "seed_count")?,
-        node_count: required_u64(object, "node_count")?,
-        cell_count: required_u64(object, "cell_count")?,
-        descriptor_count: required_u64(object, "descriptor_count")?,
-        operation_lineage_count: required_u64(object, "operation_lineage_count")?,
-    })
-}
-
 fn parse_array<T>(
     value: &serde_json::Value,
     parser: fn(&serde_json::Value) -> Result<T>,
 ) -> Result<Vec<T>> {
     json_array(value, "array")?.iter().map(parser).collect()
-}
-
-fn parse_string_array(value: &serde_json::Value) -> Result<Vec<String>> {
-    json_array(value, "string array")?
-        .iter()
-        .map(|value| json_string(value, "string array item").map(str::to_owned))
-        .collect::<Result<Vec<_>>>()
 }
 
 fn parse_identity<T>(value: &str) -> Result<T>
@@ -5526,15 +5366,6 @@ fn required_str<'a>(
     field: &'static str,
 ) -> Result<&'a str> {
     json_string(required(object, field)?, field)
-}
-
-fn required_u64(
-    object: &serde_json::Map<String, serde_json::Value>,
-    field: &'static str,
-) -> Result<u64> {
-    required(object, field)?
-        .as_u64()
-        .ok_or_else(|| certificate(format!("{field} must be an unsigned integer")))
 }
 
 fn json_string<'a>(value: &'a serde_json::Value, field: &'static str) -> Result<&'a str> {
@@ -6683,10 +6514,6 @@ mod tests {
             .verify_hash()
             .expect("certificate hash verifies");
         assert_eq!(
-            certified.certificate().evidence.certifier_version,
-            CERTIFIER_VERSION
-        );
-        assert_eq!(
             certified.certificate().evidence.certifier_algorithm,
             CERTIFIER_ALGORITHM
         );
@@ -6696,7 +6523,7 @@ mod tests {
         );
         assert_eq!(
             certified.certificate_hash().as_str(),
-            "content:sha256-jcs-v1:fc5b2201f11bed85e4eba8cb75f9e5073ed2eb3f57bdd4d01cb397f53384ed40"
+            "content:sha256-jcs-v1:b10ace9a11f373d953d1e0056bba864d524667b3fa54fa386203622987496b93"
         );
         assert_eq!(
             certified.envelope().spec.public_outputs.public_schema_id,
