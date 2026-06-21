@@ -71,3 +71,13 @@ jobs:
         run: |
           nix -L -v --log-format bar-with-logs run .#ci
 
+      - name: Upload Nixfied failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nixfied-failure-${{ matrix.runner }}
+          path: |
+            ${{ runner.temp }}/nixfied-state/**/runs/**/logs/**
+            ${{ runner.temp }}/nixfied-state/**/runs/**/artifacts/**
+          if-no-files-found: warn
+          retention-days: 7
