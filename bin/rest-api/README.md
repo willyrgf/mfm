@@ -26,8 +26,6 @@ Environment variables:
 - `MFM_TYPED_ARTIFACT_ROOT`: typed artifact root (default: `~/.mfm/typed_run_artifacts`)
 - `MFM_SOURCE_REVISION`: optional source revision evidence for typed run starts
 - `MFM_EVM_RPC_SOURCES_JSON`: runtime-only EVM source registry for EVM contract entry-point runs
-- `MFM_EVM_CONTRACT_SOURCE_REF`: optional EVM source id for EVM contract entry-point runs
-- `MFM_EVM_CONTRACT_SOURCE_POLICY_ID`: optional EVM source policy id for EVM contract entry-point runs
 - `MFM_EVM_SIGNERS_JSON`: runtime-only signer provider registry for EVM contract entry-point runs
 
 The REST API validates the PostgreSQL schema on startup and does not create or
@@ -176,8 +174,10 @@ EVM contract lifecycle:
 ```
 
 EVM configs carry semantic network intent, expected chain id, artifact refs, and non-secret signer
-intent. Process-local RPC endpoints and keystore paths are resolved only through
-`MFM_EVM_RPC_SOURCES_JSON` and `MFM_EVM_SIGNERS_JSON`.
+intent. The runtime derives EVM source and policy ids from the config's `network.network_id`, and
+resolves them against `MFM_EVM_RPC_SOURCES_JSON`. The config's `signer.signer_ref` resolves against
+`MFM_EVM_SIGNERS_JSON`. Process-local RPC endpoints and keystore paths never belong in the
+entry-point config.
 
 Stable launch error codes:
 

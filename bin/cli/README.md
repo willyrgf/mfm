@@ -497,8 +497,11 @@ The CLI's behavior can be modified using environment variables, which is ideal f
 
 - Typed EVM RPC source configuration requires `expected_chain_id` on every configured source and at
   least one policy with an ordered source list.
-- Typed EVM contract requests use semantic `network_id` plus `expected_chain_id`; process-local
-  source and policy refs come from runtime environment.
+- Typed EVM contract requests use semantic `network_id` plus `expected_chain_id`; the app runtime
+  uses `network_id` as the process-local EVM source and policy id when resolving
+  `MFM_EVM_RPC_SOURCES_JSON`.
+- Typed EVM contract requests use non-secret `signer_ref`; the app runtime resolves it against
+  `MFM_EVM_SIGNERS_JSON`.
 - Portfolio configs may also use `control_scope` when source-selection partitioning is part of the
   domain request identity.
 

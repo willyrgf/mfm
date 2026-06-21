@@ -17,9 +17,6 @@ Typed EVM transports discover RPC sources from environment variables:
 
 - `MFM_EVM_RPC_SOURCES_JSON`: JSON source registry with endpoint-bearing `sources` and ordered
   fallback `policies`.
-- `MFM_EVM_CONTRACT_SOURCE_REF`: optional process-local source id used by contract lifecycle routes.
-- `MFM_EVM_CONTRACT_SOURCE_POLICY_ID`: optional source policy id used by contract lifecycle routes
-  to select a runtime policy.
 - `MFM_EVM_SIGNERS_JSON`: JSON array of runtime signer-provider entries used by contract lifecycle
   routes.
 
@@ -69,6 +66,11 @@ Example:
 Do not persist `rpc_url` or authorization material in typed values, specs, events, artifacts, public
 outputs, or fixtures.
 
+Contract lifecycle configs carry `network.network_id`; app runtime assembly uses that value as both
+the process-local source id and policy id when resolving `MFM_EVM_RPC_SOURCES_JSON`. The runtime
+registry must therefore define matching `sources[].id` and `policies[].id` entries for each
+contract lifecycle `network_id`.
+
 ## `control_scope`
 
 Portfolio configs still carry a non-secret `control_scope`. In the typed runtime it is part of the
@@ -99,7 +101,8 @@ Live typed transports must not:
 - accept per-request raw RPC URL overrides from workflow configs
 
 Contract lifecycle configs carry only signer intent: a non-secret `signer_ref` and expected signer
-address. `MFM_EVM_SIGNERS_JSON` maps `signer_ref` to a process-local provider entry, for example:
+address. `MFM_EVM_SIGNERS_JSON` maps that config `signer_ref` to a process-local provider entry,
+for example:
 
 ```json
 [
