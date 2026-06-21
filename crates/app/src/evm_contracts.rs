@@ -9,8 +9,6 @@ use mfm_transports_evm::EvmJsonRpcClient;
 use serde::Deserialize;
 use uuid::Uuid;
 
-const ENV_CONTRACT_SOURCE_REF: &str = "MFM_EVM_CONTRACT_SOURCE_REF";
-const ENV_CONTRACT_SOURCE_POLICY_ID: &str = "MFM_EVM_CONTRACT_SOURCE_POLICY_ID";
 const ENV_EVM_SIGNERS_JSON: &str = "MFM_EVM_SIGNERS_JSON";
 
 #[derive(Clone)]
@@ -36,15 +34,8 @@ impl mfm_adapters_evm_contracts::EvmContractRuntimeFactory for EnvEvmContractRun
         network_id: &str,
     ) -> mfm_runtime::Result<mfm_adapters_evm_contracts::EvmContractRuntime> {
         let route = mfm_adapters_evm_contracts::EvmContractRuntimeRoute::new(
-            EvmSourceRef::new(
-                std::env::var(ENV_CONTRACT_SOURCE_REF).unwrap_or_else(|_| network_id.to_owned()),
-            )
-            .map_err(runtime_evm_capability_error)?,
-            EvmSourcePolicyId::new(
-                std::env::var(ENV_CONTRACT_SOURCE_POLICY_ID)
-                    .unwrap_or_else(|_| network_id.to_owned()),
-            )
-            .map_err(runtime_evm_capability_error)?,
+            EvmSourceRef::new(network_id).map_err(runtime_evm_capability_error)?,
+            EvmSourcePolicyId::new(network_id).map_err(runtime_evm_capability_error)?,
         );
         let evm = Arc::new(EvmJsonRpcClient::from_env().map_err(runtime_evm_transport_error)?);
         let signer = Arc::new(keystore_signer_provider_from_env()?);

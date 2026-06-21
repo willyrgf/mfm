@@ -11,8 +11,6 @@ const NETWORK_ID: &str = "reth-local";
 const DEFAULT_PARITY_RETH_HTTP_PORT: &str = "8565";
 const ENV_EVM_RPC_SOURCES_JSON: &str = "MFM_EVM_RPC_SOURCES_JSON";
 const ENV_EVM_SIGNERS_JSON: &str = "MFM_EVM_SIGNERS_JSON";
-const ENV_EVM_CONTRACT_SOURCE_REF: &str = "MFM_EVM_CONTRACT_SOURCE_REF";
-const ENV_EVM_CONTRACT_SOURCE_POLICY_ID: &str = "MFM_EVM_CONTRACT_SOURCE_POLICY_ID";
 static EVM_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[tokio::test]
@@ -32,8 +30,6 @@ async fn parity_reth_contract_lifecycle_rest_route_completes_and_replays() {
             ENV_EVM_SIGNERS_JSON,
             wallet.runtime_signer_registry_json().to_string(),
         ),
-        (ENV_EVM_CONTRACT_SOURCE_REF, NETWORK_ID.to_owned()),
-        (ENV_EVM_CONTRACT_SOURCE_POLICY_ID, NETWORK_ID.to_owned()),
     ]);
 
     let app = rest_test_app();
@@ -153,8 +149,6 @@ async fn parity_reth_contract_phase_routes_deploy_configure_and_validate_contrac
             ENV_EVM_SIGNERS_JSON,
             wallet.runtime_signer_registry_json().to_string(),
         ),
-        (ENV_EVM_CONTRACT_SOURCE_REF, NETWORK_ID.to_owned()),
-        (ENV_EVM_CONTRACT_SOURCE_POLICY_ID, NETWORK_ID.to_owned()),
     ]);
 
     let artifact = configurable_contract_artifact();
