@@ -3337,18 +3337,17 @@ pub mod v1 {
             .iter()
             .map(parse_capability_descriptor)
             .collect::<Result<Vec<_>>>()?;
-        CapabilitySetDescriptor::new(capabilities).map_err(SpecError::from)
+        Ok(CapabilitySetDescriptor::new(capabilities)?)
     }
 
     fn parse_capability_descriptor(value: &serde_json::Value) -> Result<CapabilityDescriptor> {
         let object = object(value, "capability descriptor")?;
-        CapabilityDescriptor::new(
+        Ok(CapabilityDescriptor::new(
             identity(required_str(object, "kind")?)?,
             version(required_str(object, "version")?)?,
             parse_capability_role(required_str(object, "role")?)?,
             required_str(object, "name")?,
-        )
-        .map_err(SpecError::from)
+        )?)
     }
 
     fn parse_capability_role(value: &str) -> Result<CapabilityRole> {

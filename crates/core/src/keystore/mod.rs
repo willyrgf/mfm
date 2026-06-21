@@ -1112,7 +1112,7 @@ impl Keystore {
             aad: additional_data,
         };
 
-        cipher.encrypt(nonce, payload).map_err(KeystoreError::from)
+        Ok(cipher.encrypt(nonce, payload)?)
     }
 
     fn decrypt_data(
@@ -1132,10 +1132,7 @@ impl Keystore {
             aad: additional_data,
         };
 
-        cipher
-            .decrypt(nonce, payload)
-            .map(Zeroizing::new)
-            .map_err(KeystoreError::from)
+        Ok(Zeroizing::new(cipher.decrypt(nonce, payload)?))
     }
 
     fn save_to_disk(&mut self) -> Result<(), KeystoreError> {
@@ -1413,7 +1410,7 @@ impl Keystore {
             "file_integrity_mac".to_string(),
             serde_json::to_value([0u8; 32])?,
         );
-        serde_json::to_vec(&value).map_err(KeystoreError::from)
+        Ok(serde_json::to_vec(&value)?)
     }
 
     fn ensure_target_path_is_safe(&self) -> Result<(), KeystoreError> {

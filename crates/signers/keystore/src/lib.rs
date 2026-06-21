@@ -298,12 +298,9 @@ impl KeystoreSignerProvider {
             request.algorithm().clone(),
             None,
             Some(format!("{address:?}")),
-        )
-        .map_err(KeystoreSignerError::SigningContract)?;
-        let signature = SignatureBytes::new(signature.as_bytes().to_vec())
-            .map_err(KeystoreSignerError::SigningContract)?;
-        SigningResult::for_request(request, identity, signature)
-            .map_err(KeystoreSignerError::SigningContract)
+        )?;
+        let signature = SignatureBytes::new(signature.as_bytes().to_vec())?;
+        Ok(SigningResult::for_request(request, identity, signature)?)
     }
 }
 
@@ -532,6 +529,12 @@ impl std::error::Error for KeystoreSignerError {
             Self::SigningContract(error) => Some(error),
             _ => None,
         }
+    }
+}
+
+impl From<SigningError> for KeystoreSignerError {
+    fn from(error: SigningError) -> Self {
+        Self::SigningContract(error)
     }
 }
 

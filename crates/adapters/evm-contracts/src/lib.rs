@@ -2451,11 +2451,10 @@ fn receipts_with_evidence(
 fn idempotency_key_ref(
     idempotency: &ContractTransactionIdempotency,
 ) -> mfm_runtime::Result<events::IdempotencyKeyRef> {
-    events::IdempotencyKeyRef::new(format!(
+    Ok(events::IdempotencyKeyRef::new(format!(
         "mfm.evm.contract.idem.{}",
         short_stable_key(&idempotency.key)
-    ))
-    .map_err(Into::into)
+    ))?)
 }
 
 fn short_stable_key(value: &str) -> String {

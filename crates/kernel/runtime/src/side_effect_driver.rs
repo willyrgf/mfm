@@ -669,8 +669,10 @@ fn runtime_ledger_key(
         "run_id": ctx.run_id().as_str(),
         "spec_hash": ctx.spec_hash().as_str(),
     }))?;
-    events::SideEffectLedgerKey::new(format!("mfm.runtime.side_effect.{}", short_digest(&digest)))
-        .map_err(Into::into)
+    Ok(events::SideEffectLedgerKey::new(format!(
+        "mfm.runtime.side_effect.{}",
+        short_digest(&digest)
+    ))?)
 }
 
 fn runtime_claim_authority(
@@ -701,8 +703,10 @@ fn runtime_claim_owner(
         "node_id": ctx.node().node_id.as_str(),
         "run_id": ctx.run_id().as_str(),
     }))?;
-    events::RunnerInvocationId::new(format!("mfm.runtime.owner.{}", short_digest(&digest)))
-        .map_err(Into::into)
+    Ok(events::RunnerInvocationId::new(format!(
+        "mfm.runtime.owner.{}",
+        short_digest(&digest)
+    ))?)
 }
 
 fn runtime_claim_fencing_token(
@@ -717,8 +721,10 @@ fn runtime_claim_fencing_token(
         "node_id": ctx.node().node_id.as_str(),
         "purpose": "side-effect-claim-fencing",
     }))?;
-    side_effect::ClaimFencingToken::new(format!("mfm.runtime.token.{}", short_digest(&digest)))
-        .map_err(Into::into)
+    Ok(side_effect::ClaimFencingToken::new(format!(
+        "mfm.runtime.token.{}",
+        short_digest(&digest)
+    ))?)
 }
 
 fn validate_prepared_resource_key(

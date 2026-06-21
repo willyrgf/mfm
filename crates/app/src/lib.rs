@@ -1231,8 +1231,10 @@ impl VerifiedRunReadContext {
         &self,
         global_projection: &store::ProjectionSnapshot,
     ) -> Result<store::ProjectionSnapshot, AppError> {
-        status_projection_from_verified_view_with_resource_lanes(&self.view, global_projection)
-            .map_err(Into::into)
+        Ok(status_projection_from_verified_view_with_resource_lanes(
+            &self.view,
+            global_projection,
+        )?)
     }
 }
 
@@ -1360,7 +1362,7 @@ async fn load_runtime_spec_for_run(
     stream: &[store::KernelEventEnvelope],
 ) -> Result<CertifiedRuntimeSpec, AppError> {
     let certified = load_certified_spec_for_run(artifacts, registry, run_id, stream).await?;
-    CertifiedRuntimeSpec::new(certified).map_err(Into::into)
+    Ok(CertifiedRuntimeSpec::new(certified)?)
 }
 
 /// Builds sealed replay read authority from a verified run-history view.
@@ -1368,8 +1370,10 @@ pub fn replay_read_authority_for_run(
     runtime_spec: &CertifiedRuntimeSpec,
     verified_view: &VerifiedRunHistoryView,
 ) -> Result<ReplayReadAuthority, AppError> {
-    ReplayReadAuthority::from_verified_run_history_view(runtime_spec, verified_view)
-        .map_err(Into::into)
+    Ok(ReplayReadAuthority::from_verified_run_history_view(
+        runtime_spec,
+        verified_view,
+    )?)
 }
 
 fn certified_spec_launch_artifact(

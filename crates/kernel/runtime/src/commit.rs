@@ -301,11 +301,10 @@ impl CommitPlanner {
             Vec::new(),
             preconditions,
         )?;
-        store::PreparedCommit::<store::StateAttemptStarted>::new(
+        Ok(store::PreparedCommit::<store::StateAttemptStarted>::new(
             request,
             store::CommitArtifactEvidenceSet::empty(),
-        )
-        .map_err(RuntimeError::from)
+        )?)
     }
 
     pub(crate) fn prepare_runner_output(

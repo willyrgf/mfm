@@ -239,9 +239,7 @@ pub(crate) fn import_key(req: ImportKeyRequest) -> Result<ImportedKey, CommandEr
             let label = req
                 .label
                 .unwrap_or_else(|| format!("imported-key-{}", Utc::now().format("%Y%m%d-%H%M%S")));
-            let key_id = ks
-                .import_private_key(Some(label), normalized.as_str())
-                .map_err(admin_error_from_keystore)?;
+            let key_id = ks.import_private_key(Some(label), normalized.as_str())?;
             imported_key_from_keystore(&ks, key_id)
         }
         ImportKind::Mnemonic => {
@@ -251,14 +249,12 @@ pub(crate) fn import_key(req: ImportKeyRequest) -> Result<ImportedKey, CommandEr
                 .label
                 .unwrap_or_else(|| format!("imported-hd-{}", Utc::now().format("%Y%m%d-%H%M%S")));
             let extra = read_bip39_extra(req.bip39_extra, &mut input)?;
-            let key_id = ks
-                .import_mnemonic(
-                    Some(label),
-                    material.as_str(),
-                    &req.derivation_path,
-                    extra.as_ref().map(|v| v.as_str()),
-                )
-                .map_err(admin_error_from_keystore)?;
+            let key_id = ks.import_mnemonic(
+                Some(label),
+                material.as_str(),
+                &req.derivation_path,
+                extra.as_ref().map(|v| v.as_str()),
+            )?;
             imported_key_from_keystore(&ks, key_id)
         }
     }
@@ -268,8 +264,7 @@ pub(crate) fn import_key(req: ImportKeyRequest) -> Result<ImportedKey, CommandEr
 pub(crate) fn list_keys(req: ListKeysRequest) -> Result<ListedKeys, CommandError> {
     let keystore = load_unlocked_keystore(&req.keystore_path)?;
     let mut keys: Vec<ListedKey> = keystore
-        .list_keys()
-        .map_err(admin_error_from_keystore)?
+        .list_keys()?
         .into_iter()
         .map(|key| ListedKey {
             id: key.id.to_string(),
@@ -307,8 +302,7 @@ pub(crate) fn delete_key(req: DeleteKeyRequest) -> Result<DeletedKey, CommandErr
     let mut keystore = load_unlocked_keystore(&req.keystore_path)?;
     let key_id = resolve_delete_key_id(&keystore, req.id.as_deref(), req.by_label.as_deref())?;
     let key_to_delete = keystore
-        .list_keys()
-        .map_err(admin_error_from_keystore)?
+        .list_keys()?
         .into_iter()
         .find(|key| key.id == key_id)
         .ok_or_else(|| CommandError::new("key_not_found", "Key not found"))?;
@@ -327,9 +321,7 @@ pub(crate) fn delete_key(req: DeleteKeyRequest) -> Result<DeletedKey, CommandErr
         }
     }
 
-    keystore
-        .delete_key(key_id)
-        .map_err(admin_error_from_keystore)?;
+    keystore.delete_key(key_id)?;
 
     Ok(DeletedKey {
         id: key_to_delete.id.to_string(),
@@ -415,8 +407,7 @@ fn imported_key_from_keystore(
     key_id: Uuid,
 ) -> Result<ImportedKey, CommandError> {
     let key_info = keystore
-        .list_keys()
-        .map_err(admin_error_from_keystore)?
+        .list_keys()?
         .into_iter()
         .find(|key| key.id == key_id)
         .ok_or_else(|| {
@@ -662,7 +653,7 @@ fn resolve_delete_key_id(
         (Some(raw), None) => Uuid::parse_str(raw)
             .map_err(|_| CommandError::new("invalid_uuid", "Invalid UUID format")),
         (None, Some(label)) => {
-            let keys = keystore.list_keys().map_err(admin_error_from_keystore)?;
+            let keys = keystore.list_keys()?;
             let matching: Vec<_> = keys
                 .iter()
                 .filter(|key| key.alias.as_deref() == Some(label))
@@ -906,6 +897,12 @@ fn admin_error_from_keystore(err: KeystoreError) -> CommandError {
             CommandError::new("key_not_found", "Requested key does not exist")
         }
         _ => CommandError::backend("keystore_error", "Keystore operation failed"),
+    }
+}
+
+impl From<KeystoreError> for CommandError {
+    fn from(err: KeystoreError) -> Self {
+        admin_error_from_keystore(err)
     }
 }
 
