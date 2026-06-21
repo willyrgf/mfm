@@ -36,15 +36,10 @@ async fn parity_reth_contract_lifecycle_rest_route_completes_and_replays() {
     let config = lifecycle_config(chain_id, wallet.signer_json());
     let compiled_config: mfm_op_evm_contract_lifecycle::ContractLifecycleConfig =
         serde_json::from_value(config.clone()).expect("contract lifecycle config");
-    let public_schema_id =
-        mfm_op_evm_contract_lifecycle::compile_contract_lifecycle_program(compiled_config)
-            .expect("compiled lifecycle")
-            .certified_spec
-            .envelope()
-            .spec
-            .public_outputs
-            .public_schema_id
-            .to_string();
+    let public_schema_id = public_schema_id_from_plan(
+        mfm_op_evm_contract_lifecycle::plan_contract_lifecycle_entry_point(compiled_config)
+            .expect("planned lifecycle"),
+    );
 
     let start = app
         .clone()
@@ -468,14 +463,10 @@ fn hex_encode(bytes: &[u8]) -> String {
 fn deploy_public_schema_id(config: serde_json::Value) -> String {
     let config: mfm_evm_contract_config::DeployPhaseConfig =
         serde_json::from_value(config).expect("deploy phase config");
-    mfm_op_evm_contract_lifecycle::compile_contract_deploy_program(config)
-        .expect("compiled deploy")
-        .certified_spec
-        .envelope()
-        .spec
-        .public_outputs
-        .public_schema_id
-        .to_string()
+    public_schema_id_from_plan(
+        mfm_op_evm_contract_lifecycle::plan_contract_deploy_entry_point(config)
+            .expect("planned deploy"),
+    )
 }
 
 fn configure_public_schema_id(config: serde_json::Value, deployed: serde_json::Value) -> String {
@@ -483,14 +474,12 @@ fn configure_public_schema_id(config: serde_json::Value, deployed: serde_json::V
         serde_json::from_value(config).expect("configure phase config");
     let deployed: mfm_evm_contract_model::DeployedContract =
         serde_json::from_value(deployed).expect("deployed contract");
-    mfm_op_evm_contract_lifecycle::compile_contract_configure_program(config, deployed)
-        .expect("compiled configure")
-        .certified_spec
-        .envelope()
-        .spec
-        .public_outputs
-        .public_schema_id
-        .to_string()
+    public_schema_id_from_plan(
+        mfm_op_evm_contract_lifecycle::plan_contract_configure_entry_point(
+            mfm_op_evm_contract_lifecycle::ContractConfigureEntryPointConfig { config, deployed },
+        )
+        .expect("planned configure"),
+    )
 }
 
 fn validate_public_schema_id(config: serde_json::Value, configured: serde_json::Value) -> String {
@@ -498,9 +487,17 @@ fn validate_public_schema_id(config: serde_json::Value, configured: serde_json::
         serde_json::from_value(config).expect("validate phase config");
     let configured: mfm_evm_contract_model::ConfiguredContract =
         serde_json::from_value(configured).expect("configured contract");
-    mfm_op_evm_contract_lifecycle::compile_contract_validate_program(config, configured)
-        .expect("compiled validate")
-        .certified_spec
+    public_schema_id_from_plan(
+        mfm_op_evm_contract_lifecycle::plan_contract_validate_entry_point(
+            mfm_op_evm_contract_lifecycle::ContractValidateEntryPointConfig { config, configured },
+        )
+        .expect("planned validate"),
+    )
+}
+
+fn public_schema_id_from_plan(plan: mfm_program::TypedProgramLaunchPlan) -> String {
+    mfm_certify::certify_program_draft(&plan.draft)
+        .expect("certified entry-point plan")
         .envelope()
         .spec
         .public_outputs

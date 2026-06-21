@@ -18,22 +18,21 @@
 //! # }
 //! ```
 
+use mfm_authored_config::{EntryPointDescriptor, TOML_JSON_AUTHORED_CONFIG_FORMATS};
 use mfm_canonical::PlainCanonicalJsonBytes;
-use mfm_certify::{certify_program_draft, CertifiedTypedSpec};
 use mfm_evm_contract_config::{
     ConfigurePhaseConfig, DeployPhaseConfig, EvmNetworkIntent, ValidatePhaseConfig,
 };
 use mfm_evm_contract_model::{ConfiguredContract, DeployedContract, ValidationReport};
-use mfm_ids::{
-    ArtifactId, ContentDigest, DigestAlgorithm, OperationKind, OperationVersion, SchemaId, SeedId,
-};
+use mfm_ids::{DigestAlgorithm, OperationKind, OperationVersion};
 use mfm_program::{
     build_root_with_registries, CanonicalSeed, Handle, Operation, OperationExpansion, OperationKey,
     OperationRegistryBuilder, PublicOutputKey, ResourceClaim, RootBound, RootBuilder, ScopeKey,
-    SeedKey, SideEffectSagaPolicy, StateKey, StateRegistryBuilder,
+    SeedKey, SideEffectSagaPolicy, StateKey, StateRegistryBuilder, TypedProgramConfigMaterial,
+    TypedProgramLaunchPlan, TypedProgramSeedMaterial,
 };
 use mfm_program_derive::{MfmConfig, OperationOutput, PublicOutputs};
-use mfm_spec::v1 as spec;
+use mfm_spec::v1::MediaType;
 use mfm_state_evm_contracts::{
     ConfigureContractInputHandles, ConfigureContractState, ContractLifecyclePublicOutputs,
     DeployContractState, ValidateContractInputHandles, ValidateContractState,
@@ -50,6 +49,50 @@ const LIFECYCLE_OP_KEY: &str = "contract_lifecycle";
 const DEPLOY_SEED_KEY: &str = "deployed_contract";
 const CONFIGURED_SEED_KEY: &str = "configured_contract";
 const PUBLIC_OUTPUT_KEY: &str = "contract";
+
+/// Public deploy-only EVM contract entry-point descriptor.
+pub const CONTRACT_DEPLOY_ENTRY_POINT: EntryPointDescriptor = EntryPointDescriptor {
+    namespace: OP_NAMESPACE,
+    name: DEPLOY_OP_KEY,
+    public_name: "evm_contract_deploy",
+    version: 1,
+    accepted_config_formats: TOML_JSON_AUTHORED_CONFIG_FORMATS,
+};
+
+/// Public configure-only EVM contract entry-point descriptor.
+pub const CONTRACT_CONFIGURE_ENTRY_POINT: EntryPointDescriptor = EntryPointDescriptor {
+    namespace: OP_NAMESPACE,
+    name: CONFIGURE_OP_KEY,
+    public_name: "evm_contract_configure",
+    version: 1,
+    accepted_config_formats: TOML_JSON_AUTHORED_CONFIG_FORMATS,
+};
+
+/// Public validate-only EVM contract entry-point descriptor.
+pub const CONTRACT_VALIDATE_ENTRY_POINT: EntryPointDescriptor = EntryPointDescriptor {
+    namespace: OP_NAMESPACE,
+    name: VALIDATE_OP_KEY,
+    public_name: "evm_contract_validate",
+    version: 1,
+    accepted_config_formats: TOML_JSON_AUTHORED_CONFIG_FORMATS,
+};
+
+/// Public full lifecycle EVM contract entry-point descriptor.
+pub const CONTRACT_LIFECYCLE_ENTRY_POINT: EntryPointDescriptor = EntryPointDescriptor {
+    namespace: OP_NAMESPACE,
+    name: LIFECYCLE_OP_KEY,
+    public_name: "evm_contract_lifecycle",
+    version: 1,
+    accepted_config_formats: TOML_JSON_AUTHORED_CONFIG_FORMATS,
+};
+
+/// Public EVM contract entry-point descriptors exported by this operation crate.
+pub const CONTRACT_ENTRY_POINTS: [EntryPointDescriptor; 4] = [
+    CONTRACT_DEPLOY_ENTRY_POINT,
+    CONTRACT_CONFIGURE_ENTRY_POINT,
+    CONTRACT_VALIDATE_ENTRY_POINT,
+    CONTRACT_LIFECYCLE_ENTRY_POINT,
+];
 
 /// Aggregate full lifecycle authored config owned by the operation layer.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, MfmConfig)]
@@ -102,6 +145,26 @@ impl<'de> Deserialize<'de> for ContractLifecycleConfig {
 fn validate_contract_lifecycle_config(config: &ContractLifecycleConfig) -> Result<(), String> {
     ensure_phase_networks_match(&config.deploy, &config.configure, &config.validate)
         .map_err(|error| error.to_string())
+}
+
+/// Configure entry-point config carrying the phase config and deployed typestate seed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContractConfigureEntryPointConfig {
+    /// Configure phase config.
+    pub config: ConfigurePhaseConfig,
+    /// Deployed contract typestate seed.
+    pub deployed: DeployedContract,
+}
+
+/// Validate entry-point config carrying the phase config and configured typestate seed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContractValidateEntryPointConfig {
+    /// Validate phase config.
+    pub config: ValidatePhaseConfig,
+    /// Configured contract typestate seed.
+    pub configured: ConfiguredContract,
 }
 
 /// Output handles produced by deploy-only operation planning.
@@ -505,274 +568,107 @@ pub fn contract_lifecycle_program_draft(
     })
 }
 
-/// Builds and certifies the typed full lifecycle program.
-pub fn certified_contract_lifecycle_spec(
-    config: ContractLifecycleConfig,
-) -> mfm_certify::Result<CertifiedTypedSpec> {
-    let draft = contract_lifecycle_program_draft(config)
-        .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?;
-    certify_program_draft(&draft)
-}
-
-/// Deterministic EVM contract entry-point plan before certification.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlannedContractLifecycleProgram {
-    /// Typed program draft to be certified by app assembly.
-    pub draft: mfm_program::TypedProgramDraft,
-    /// Author-emitted config artifacts required by the draft.
-    pub config_artifacts: Vec<ContractLifecycleConfigArtifact>,
-    /// Canonical seed artifacts required by the draft.
-    pub seed_artifacts: Vec<ContractLifecycleSeedArtifact>,
-}
-
-/// Canonical bytes for one launch seed required by a typed lifecycle draft.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ContractLifecycleSeedArtifact {
-    /// Derived seed id required by the draft.
-    pub seed_id: SeedId,
-    /// Canonical JSON bytes.
-    pub bytes: PlainCanonicalJsonBytes,
-    /// Seed media type.
-    pub media_type: spec::MediaType,
-}
-
 /// Plans a deploy-only EVM contract entry-point program.
-pub fn plan_contract_deploy_program(
+pub fn plan_contract_deploy_entry_point(
     config: DeployPhaseConfig,
-) -> Result<PlannedContractLifecycleProgram, ContractLifecycleCompileError> {
+) -> Result<TypedProgramLaunchPlan, ContractLifecyclePlanError> {
     plan_draft(deploy_contract_program_draft(config)?, Vec::new())
 }
 
 /// Plans a configure-only EVM contract entry-point program with its launch seed.
-pub fn plan_contract_configure_program(
-    config: ConfigurePhaseConfig,
-    deployed: DeployedContract,
-) -> Result<PlannedContractLifecycleProgram, ContractLifecycleCompileError> {
-    let seed = CanonicalSeed::from_value(&deployed)?;
+pub fn plan_contract_configure_entry_point(
+    config: ContractConfigureEntryPointConfig,
+) -> Result<TypedProgramLaunchPlan, ContractLifecyclePlanError> {
+    let seed = CanonicalSeed::from_value(&config.deployed)?;
     plan_draft(
-        configure_contract_program_draft(config, deployed)?,
+        configure_contract_program_draft(config.config, config.deployed)?,
         vec![seed.canonical_json().clone()],
     )
 }
 
 /// Plans a validate-only EVM contract entry-point program with its launch seed.
-pub fn plan_contract_validate_program(
-    config: ValidatePhaseConfig,
-    configured: ConfiguredContract,
-) -> Result<PlannedContractLifecycleProgram, ContractLifecycleCompileError> {
-    let seed = CanonicalSeed::from_value(&configured)?;
+pub fn plan_contract_validate_entry_point(
+    config: ContractValidateEntryPointConfig,
+) -> Result<TypedProgramLaunchPlan, ContractLifecyclePlanError> {
+    let seed = CanonicalSeed::from_value(&config.configured)?;
     plan_draft(
-        validate_contract_program_draft(config, configured)?,
+        validate_contract_program_draft(config.config, config.configured)?,
         vec![seed.canonical_json().clone()],
     )
 }
 
 /// Plans a full lifecycle EVM contract entry-point program.
-pub fn plan_contract_lifecycle_program(
+pub fn plan_contract_lifecycle_entry_point(
     config: ContractLifecycleConfig,
-) -> Result<PlannedContractLifecycleProgram, ContractLifecycleCompileError> {
+) -> Result<TypedProgramLaunchPlan, ContractLifecyclePlanError> {
     plan_draft(contract_lifecycle_program_draft(config)?, Vec::new())
 }
 
-/// Fully compiled contract lifecycle launch program.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CompiledContractLifecycleProgram {
-    /// Certifier-backed typed spec authority.
-    pub certified_spec: CertifiedTypedSpec,
-    /// Config artifacts required to launch the certified spec.
-    pub config_artifacts: Vec<ContractLifecycleConfigArtifact>,
-}
-
-/// Error returned while compiling a contract lifecycle program.
+/// Error returned while planning a contract lifecycle entry point.
 #[derive(Debug)]
-pub enum ContractLifecycleCompileError {
+pub enum ContractLifecyclePlanError {
     /// Program planning failed.
     Plan(mfm_program::PlanError),
-    /// Certification failed.
-    Certify(mfm_certify::CertifyError),
 }
 
-impl fmt::Display for ContractLifecycleCompileError {
+impl fmt::Display for ContractLifecyclePlanError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Plan(error) => write!(f, "contract lifecycle planning failed: {error}"),
-            Self::Certify(error) => write!(f, "contract lifecycle certification failed: {error}"),
         }
     }
 }
 
-impl std::error::Error for ContractLifecycleCompileError {
+impl std::error::Error for ContractLifecyclePlanError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Plan(error) => Some(error),
-            Self::Certify(error) => Some(error),
         }
     }
 }
 
-impl From<mfm_program::PlanError> for ContractLifecycleCompileError {
+impl From<mfm_program::PlanError> for ContractLifecyclePlanError {
     fn from(error: mfm_program::PlanError) -> Self {
         Self::Plan(error)
     }
 }
 
-impl From<mfm_certify::CertifyError> for ContractLifecycleCompileError {
-    fn from(error: mfm_certify::CertifyError) -> Self {
-        Self::Certify(error)
-    }
-}
-
-/// Builds, certifies, and gathers launch config artifacts for a deploy-only program.
-pub fn compile_contract_deploy_program(
-    config: DeployPhaseConfig,
-) -> Result<CompiledContractLifecycleProgram, ContractLifecycleCompileError> {
-    compile_draft(deploy_contract_program_draft(config)?)
-}
-
-/// Builds, certifies, and gathers launch config artifacts for a configure-only program.
-pub fn compile_contract_configure_program(
-    config: ConfigurePhaseConfig,
-    deployed: DeployedContract,
-) -> Result<CompiledContractLifecycleProgram, ContractLifecycleCompileError> {
-    compile_draft(configure_contract_program_draft(config, deployed)?)
-}
-
-/// Builds, certifies, and gathers launch config artifacts for a validate-only program.
-pub fn compile_contract_validate_program(
-    config: ValidatePhaseConfig,
-    configured: ConfiguredContract,
-) -> Result<CompiledContractLifecycleProgram, ContractLifecycleCompileError> {
-    compile_draft(validate_contract_program_draft(config, configured)?)
-}
-
-/// Builds, certifies, and gathers launch config artifacts for a full lifecycle program.
-pub fn compile_contract_lifecycle_program(
-    config: ContractLifecycleConfig,
-) -> Result<CompiledContractLifecycleProgram, ContractLifecycleCompileError> {
-    compile_draft(contract_lifecycle_program_draft(config)?)
-}
-
-/// Canonical bytes for one config artifact required by a typed lifecycle spec.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ContractLifecycleConfigArtifact {
-    /// Canonical JSON bytes.
-    pub bytes: Vec<u8>,
-    /// Config schema id.
-    pub schema_id: SchemaId,
-    /// Config media type.
-    pub media_type: spec::MediaType,
-}
-
-/// Returns all author-emitted config artifacts from a lifecycle draft.
-pub fn contract_lifecycle_draft_config_artifacts(
+/// Returns all author-emitted config material from a lifecycle draft.
+pub fn contract_lifecycle_draft_config_material(
     draft: &mfm_program::TypedProgramDraft,
-) -> mfm_program::Result<Vec<ContractLifecycleConfigArtifact>> {
-    let media_type = spec::MediaType::new("application/json")
+) -> mfm_program::Result<Vec<TypedProgramConfigMaterial>> {
+    let media_type = MediaType::new("application/json")
         .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
     Ok(draft
         .state_nodes()
         .iter()
         .map(|node| &node.config)
         .chain(draft.operation_lineage().iter().map(|frame| &frame.config))
-        .map(|config| {
-            config_artifact(
-                config.canonical_json.clone(),
-                config.schema_id.clone(),
-                media_type.clone(),
-            )
+        .map(|config| TypedProgramConfigMaterial {
+            schema_id: config.schema_id.clone(),
+            bytes: config.canonical_json.clone(),
+            media_type: media_type.clone(),
         })
         .collect())
-}
-
-/// Returns framework config artifacts introduced during certification.
-pub fn contract_lifecycle_framework_config_artifacts(
-    typed_spec: &spec::TypedExecutionSpec,
-) -> mfm_program::Result<Vec<ContractLifecycleConfigArtifact>> {
-    let mut artifacts = Vec::new();
-    for node in &typed_spec.nodes {
-        let Some(framework) = &node.framework else {
-            continue;
-        };
-        let bytes = spec::framework_config_canonical_json(framework.config_kind(), &node.node_id)
-            .map_err(|error| mfm_program::PlanError::Canonical(error.to_string()))?;
-        if bytes.content_digest() != node.config_ref.digest
-            || bytes.as_bytes().len() as u64 != node.config_ref.byte_len
-        {
-            return Err(mfm_program::PlanError::Canonical(format!(
-                "framework config helper did not match certified config ref for node {}",
-                node.node_id
-            )));
-        }
-        artifacts.push(config_artifact(
-            bytes,
-            node.config_ref.schema_id.clone(),
-            node.config_ref.media_type.clone(),
-        ));
-    }
-    Ok(artifacts)
-}
-
-/// Returns only config artifacts required by the certified spec.
-pub fn contract_lifecycle_config_artifacts_for_spec(
-    draft: &mfm_program::TypedProgramDraft,
-    typed_spec: &spec::TypedExecutionSpec,
-) -> mfm_program::Result<Vec<ContractLifecycleConfigArtifact>> {
-    let mut candidates = contract_lifecycle_draft_config_artifacts(draft)?;
-    candidates.extend(contract_lifecycle_framework_config_artifacts(typed_spec)?);
-    let mut selected = Vec::new();
-    for config_ref in &typed_spec.config_refs {
-        let artifact = candidates
-            .iter()
-            .find(|artifact| {
-                let digest = artifact_digest(&artifact.bytes);
-                let artifact_id = ArtifactId::from_digest(digest.algorithm(), *digest.digest());
-                artifact_id == config_ref.artifact_id
-                    && digest == config_ref.digest
-                    && artifact.bytes.len() as u64 == config_ref.byte_len
-                    && artifact.media_type == config_ref.media_type
-                    && artifact.schema_id == config_ref.schema_id
-            })
-            .cloned()
-            .ok_or_else(|| {
-                mfm_program::PlanError::Key(format!(
-                    "missing typed config artifact for {}",
-                    config_ref.artifact_id
-                ))
-            })?;
-        selected.push(artifact);
-    }
-    Ok(selected)
-}
-
-fn compile_draft(
-    draft: mfm_program::TypedProgramDraft,
-) -> Result<CompiledContractLifecycleProgram, ContractLifecycleCompileError> {
-    let certified_spec = certify_program_draft(&draft)?;
-    let config_artifacts =
-        contract_lifecycle_config_artifacts_for_spec(&draft, &certified_spec.envelope().spec)?;
-    Ok(CompiledContractLifecycleProgram {
-        certified_spec,
-        config_artifacts,
-    })
 }
 
 fn plan_draft(
     draft: mfm_program::TypedProgramDraft,
     seed_bytes: Vec<PlainCanonicalJsonBytes>,
-) -> Result<PlannedContractLifecycleProgram, ContractLifecycleCompileError> {
-    let config_artifacts = contract_lifecycle_draft_config_artifacts(&draft)?;
-    let seed_artifacts = seed_artifacts_for_draft(&draft, seed_bytes)?;
-    Ok(PlannedContractLifecycleProgram {
+) -> Result<TypedProgramLaunchPlan, ContractLifecyclePlanError> {
+    let config_material = contract_lifecycle_draft_config_material(&draft)?;
+    let seed_material = seed_material_for_draft(&draft, seed_bytes)?;
+    Ok(TypedProgramLaunchPlan {
         draft,
-        config_artifacts,
-        seed_artifacts,
+        config_material,
+        seed_material,
     })
 }
 
-fn seed_artifacts_for_draft(
+fn seed_material_for_draft(
     draft: &mfm_program::TypedProgramDraft,
     seed_bytes: Vec<PlainCanonicalJsonBytes>,
-) -> mfm_program::Result<Vec<ContractLifecycleSeedArtifact>> {
+) -> mfm_program::Result<Vec<TypedProgramSeedMaterial>> {
     if draft.seeds().len() != seed_bytes.len() {
         return Err(mfm_program::PlanError::Key(format!(
             "entry-point seed material count mismatch: draft requires {}, supplied {}",
@@ -780,7 +676,7 @@ fn seed_artifacts_for_draft(
             seed_bytes.len()
         )));
     }
-    let media_type = spec::MediaType::new("application/json")
+    let media_type = MediaType::new("application/json")
         .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
     draft
         .seeds()
@@ -795,7 +691,7 @@ fn seed_artifacts_for_draft(
                     seed.seed_id
                 )));
             }
-            Ok(ContractLifecycleSeedArtifact {
+            Ok(TypedProgramSeedMaterial {
                 seed_id: seed.seed_id.clone(),
                 bytes,
                 media_type: media_type.clone(),
@@ -883,28 +779,10 @@ fn ensure_network_matches_configured(
     ensure_network_matches_deployed(network, &configured.deployed)
 }
 
-fn config_artifact(
-    bytes: mfm_canonical::PlainCanonicalJsonBytes,
-    schema_id: SchemaId,
-    media_type: spec::MediaType,
-) -> ContractLifecycleConfigArtifact {
-    ContractLifecycleConfigArtifact {
-        bytes: bytes.to_vec(),
-        schema_id,
-        media_type,
-    }
-}
-
-fn artifact_digest(bytes: &[u8]) -> ContentDigest {
-    ContentDigest::from_digest(
-        DigestAlgorithm::Sha256JcsV1,
-        mfm_canonical::sha256_digest_bytes(bytes),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mfm_certify::certify_program_draft;
 
     fn network_json() -> serde_json::Value {
         network_json_for_chain(1)
@@ -1091,43 +969,58 @@ mod tests {
 
     #[test]
     fn entry_point_plan_helpers_are_draft_only_and_preserve_seeds() {
-        let deploy = plan_contract_deploy_program(deploy_config()).expect("deploy plan");
-        let configure = plan_contract_configure_program(configure_config(), deployed_contract())
-            .expect("configure plan");
-        let validate = plan_contract_validate_program(validate_config(), configured_contract())
-            .expect("validate plan");
+        let deploy = plan_contract_deploy_entry_point(deploy_config()).expect("deploy plan");
+        let configure = plan_contract_configure_entry_point(ContractConfigureEntryPointConfig {
+            config: configure_config(),
+            deployed: deployed_contract(),
+        })
+        .expect("configure plan");
+        let validate = plan_contract_validate_entry_point(ContractValidateEntryPointConfig {
+            config: validate_config(),
+            configured: configured_contract(),
+        })
+        .expect("validate plan");
         let lifecycle =
-            plan_contract_lifecycle_program(lifecycle_config()).expect("lifecycle plan");
+            plan_contract_lifecycle_entry_point(lifecycle_config()).expect("lifecycle plan");
 
         assert_eq!(deploy.draft.state_nodes().len(), 1);
-        assert!(deploy.seed_artifacts.is_empty());
+        assert!(deploy.seed_material.is_empty());
         assert_eq!(configure.draft.state_nodes().len(), 1);
-        assert_eq!(configure.seed_artifacts.len(), 1);
+        assert_eq!(configure.seed_material.len(), 1);
         assert_eq!(
-            configure.seed_artifacts[0].seed_id,
+            configure.seed_material[0].seed_id,
             configure.draft.seeds()[0].seed_id
         );
         assert_eq!(validate.draft.state_nodes().len(), 1);
-        assert_eq!(validate.seed_artifacts.len(), 1);
+        assert_eq!(validate.seed_material.len(), 1);
         assert_eq!(
-            validate.seed_artifacts[0].seed_id,
+            validate.seed_material[0].seed_id,
             validate.draft.seeds()[0].seed_id
         );
         assert_eq!(lifecycle.draft.state_nodes().len(), 3);
-        assert!(lifecycle.seed_artifacts.is_empty());
-        assert!(!lifecycle.config_artifacts.is_empty());
+        assert!(lifecycle.seed_material.is_empty());
+        assert!(!lifecycle.config_material.is_empty());
     }
 
     #[test]
-    fn compile_lifecycle_program_gathers_config_artifacts() {
-        let compiled =
-            compile_contract_lifecycle_program(lifecycle_config()).expect("compiled lifecycle");
-
-        assert!(!compiled.config_artifacts.is_empty());
-        assert!(compiled
-            .config_artifacts
+    fn entry_point_descriptors_are_public_launch_surface() {
+        assert_eq!(
+            CONTRACT_ENTRY_POINTS
+                .iter()
+                .map(|descriptor| descriptor.public_name)
+                .collect::<Vec<_>>(),
+            vec![
+                "evm_contract_deploy",
+                "evm_contract_configure",
+                "evm_contract_validate",
+                "evm_contract_lifecycle"
+            ]
+        );
+        assert!(CONTRACT_ENTRY_POINTS
             .iter()
-            .all(|artifact| artifact.media_type.as_str() == "application/json"));
+            .all(|descriptor| descriptor.namespace == OP_NAMESPACE
+                && descriptor.version == 1
+                && descriptor.accepted_config_formats == TOML_JSON_AUTHORED_CONFIG_FORMATS));
     }
 
     #[test]

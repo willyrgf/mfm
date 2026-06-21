@@ -2370,6 +2370,7 @@ dependencies = [
 name = "mfm-op-evm-contract-lifecycle"
 version = "0.1.0"
 dependencies = [
+ "mfm-authored-config",
  "mfm-canonical",
  "mfm-certify",
  "mfm-evm-contract-config",

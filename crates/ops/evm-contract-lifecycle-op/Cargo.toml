@@ -12,6 +12,7 @@ category = "operation"
 [dependencies]
 serde = { workspace = true }
 
+mfm-authored-config = { path = "../../authored-config" }
 mfm-canonical = { path = "../../kernel/canonical" }
 mfm-certify = { path = "../../kernel/certify" }
 mfm-evm-contract-config = { path = "../../evm-contract-config" }
