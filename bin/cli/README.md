@@ -257,8 +257,9 @@ Run ids use the typed identity format `run:<algorithm>:<digest>`. Old UUID dynam
 accepted by the typed CLI run surface.
 
 Old dynamic op launch, pipeline launch, context snapshots, and generic artifact reads have been
-removed from the `run` subcommand. The CLI starts only from certified typed execution specs and
-resumes/replays only from stored typed run streams.
+removed from the `run` subcommand. The CLI starts only through registered entry-point ops that app
+assembly plans and certifies into typed execution specs, and it resumes/replays only from stored
+typed run streams.
 
 Old dynamic runs are not silently migrated into certified typed runs. Historical dynamic run data can
 only be inspected through explicit operational tooling outside this typed run surface.
@@ -299,9 +300,9 @@ mfm_cli run start --op evm_contract_lifecycle --config lifecycle.toml --op-versi
 Run start always resolves runner executable identities before `RunAdmitted`, because those identities
 are replay authority. `--drive append-only` suppresses post-start execution only; it does not bypass
 runner resolution. Specs that reference unported domain state descriptors fail with
-`LaunchRunnerUnavailable` before any typed run event is written. The current production CLI registry
-contains the runtime built-in framework public-output renderer; domain runners are added by their
-typed porting commits.
+`LaunchRunnerUnavailable` before any typed run event is written. The production CLI runner registry
+contains the framework public-output renderer plus the portfolio and EVM contract domain runners
+used by registered entry-point ops.
 
 Stable launch errors include:
 
