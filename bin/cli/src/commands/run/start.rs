@@ -273,6 +273,32 @@ mod tests {
         assert_eq!(err.code, "MissingDatabaseUrl");
     }
 
+    #[tokio::test]
+    async fn start_accepts_evm_entry_points_before_store_connection() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        for (index, (op, config)) in evm_entry_point_configs().into_iter().enumerate() {
+            let config_path = tmp.path().join(format!("{op}-{index}.json"));
+            std::fs::write(&config_path, config.to_string()).expect("write config");
+            let mut args = start_args(
+                config_path,
+                TypedRunStoresArgs {
+                    typed_artifact_root: Some(tmp.path().join(format!("artifacts-{index}"))),
+                    database_url: None,
+                },
+            );
+            args.op = op.to_owned();
+            args.op_version = Some(1);
+            args.config_format = ConfigFormatArg::Json;
+
+            let err = execute_internal(&args)
+                .await
+                .expect_err("valid EVM entry-point launch proceeds to store construction");
+
+            assert_eq!(err.code, "MissingDatabaseUrl", "{op}");
+        }
+    }
+
     fn start_args(config: PathBuf, stores: TypedRunStoresArgs) -> StartArgs {
         StartArgs {
             op: "portfolio_snapshot".to_owned(),
@@ -403,5 +429,96 @@ unit_price_dec = "1800.00"
 sources = []
 "#
         .to_owned()
+    }
+
+    fn evm_entry_point_configs() -> [(&'static str, serde_json::Value); 4] {
+        [
+            ("evm_contract_deploy", deploy_config_json()),
+            ("evm_contract_configure", configure_entry_config_json()),
+            ("evm_contract_validate", validate_entry_config_json()),
+            ("evm_contract_lifecycle", lifecycle_config_json()),
+        ]
+    }
+
+    fn network_json() -> serde_json::Value {
+        serde_json::json!({
+            "network_id": "ethereum-mainnet",
+            "expected_chain_id": 1,
+        })
+    }
+
+    fn signer_json() -> serde_json::Value {
+        serde_json::json!({
+            "signer_ref": "deployer",
+            "expected_signer_address": "0x000000000000000000000000000000000000dead",
+        })
+    }
+
+    fn deploy_config_json() -> serde_json::Value {
+        serde_json::json!({
+            "network": network_json(),
+            "signer": signer_json(),
+        })
+    }
+
+    fn configure_config_json() -> serde_json::Value {
+        serde_json::json!({
+            "network": network_json(),
+            "signer": signer_json(),
+            "calls": [],
+        })
+    }
+
+    fn validate_config_json() -> serde_json::Value {
+        serde_json::json!({
+            "network": network_json(),
+        })
+    }
+
+    fn lifecycle_config_json() -> serde_json::Value {
+        serde_json::json!({
+            "deploy": deploy_config_json(),
+            "configure": configure_config_json(),
+            "validate": validate_config_json(),
+        })
+    }
+
+    fn deployed_contract_json() -> serde_json::Value {
+        serde_json::json!({
+            "lifecycle_version": 1,
+            "network_id": "ethereum-mainnet",
+            "expected_chain_id": 1,
+            "contract_address": "0x000000000000000000000000000000000000dead",
+            "deploy_tx_hash": "0x01",
+            "deploy_receipt_evidence": null,
+            "deployed_block_number": 1,
+        })
+    }
+
+    fn configured_contract_json() -> serde_json::Value {
+        serde_json::json!({
+            "lifecycle_version": 1,
+            "deployed": deployed_contract_json(),
+            "configure_calls": [],
+            "confirmation_read_assertions": [],
+            "confirmation_event_assertions": [],
+            "configure_tx_hashes": [],
+            "configure_receipt_evidence": [],
+            "configured_block_number": 2,
+        })
+    }
+
+    fn configure_entry_config_json() -> serde_json::Value {
+        serde_json::json!({
+            "config": configure_config_json(),
+            "deployed": deployed_contract_json(),
+        })
+    }
+
+    fn validate_entry_config_json() -> serde_json::Value {
+        serde_json::json!({
+            "config": validate_config_json(),
+            "configured": configured_contract_json(),
+        })
     }
 }
