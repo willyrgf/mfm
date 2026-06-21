@@ -572,6 +572,8 @@ pub mod v1 {
     pub struct RunAdmitted {
         /// Run id bound to this event stream.
         pub run_id: RunId,
+        /// Public entry-point operation evidence selected by app assembly.
+        pub entry_point: EntryPointLaunchEvidence,
         /// Certified typed spec hash.
         pub spec_hash: SpecHash,
         /// Certified spec artifact evidence.
@@ -606,6 +608,108 @@ pub mod v1 {
         pub launched_at_unix_ms: u64,
         /// Seed cells materialized at run start.
         pub seed_cells: Vec<SeedCellRef>,
+    }
+
+    /// Public entry-point operation evidence bound into `RunAdmitted`.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct EntryPointLaunchEvidence {
+        /// Public op name submitted by the caller.
+        pub submitted_public_op_name: EntryPointPublicOpName,
+        /// Fully resolved app entry-point op id.
+        pub resolved_op_id: EntryPointOpId,
+        /// Resolved op version selected by app assembly.
+        pub resolved_op_version: u32,
+        /// Digest of the registered entry-point operation set.
+        pub entry_point_registry_digest: ContentDigest,
+        /// Deterministic lowering identity declared by the entry-point op.
+        pub lowering_identity: EntryPointLoweringIdentity,
+        /// Config canonicalizer identity declared by the entry-point op.
+        pub canonicalizer_identity: CanonicalizerIdentity,
+        /// Authored config format accepted by the op.
+        pub config_format: EntryPointConfigFormat,
+        /// Digest of the original authored config bytes.
+        pub authored_config_digest: ContentDigest,
+        /// Digest of the canonical op config.
+        pub canonical_config_digest: ContentDigest,
+    }
+
+    /// Public operation name submitted to run start.
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct EntryPointPublicOpName(String);
+
+    impl EntryPointPublicOpName {
+        /// Creates a checked public op name.
+        pub fn new(value: impl AsRef<str>) -> Result<Self> {
+            checked_ascii_token("entry point public op name", value).map(Self)
+        }
+
+        /// Returns the public op name string.
+        pub fn as_str(&self) -> &str {
+            &self.0
+        }
+    }
+
+    /// Fully qualified app entry-point operation id.
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct EntryPointOpId(String);
+
+    impl EntryPointOpId {
+        /// Creates a checked entry-point op id.
+        pub fn new(value: impl AsRef<str>) -> Result<Self> {
+            checked_ascii_token("entry point op id", value).map(Self)
+        }
+
+        /// Returns the entry-point op id string.
+        pub fn as_str(&self) -> &str {
+            &self.0
+        }
+    }
+
+    /// Deterministic lowering identity declared by an entry-point op.
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct EntryPointLoweringIdentity(String);
+
+    impl EntryPointLoweringIdentity {
+        /// Creates a checked entry-point lowering identity.
+        pub fn new(value: impl AsRef<str>) -> Result<Self> {
+            checked_ascii_token("entry point lowering identity", value).map(Self)
+        }
+
+        /// Returns the lowering identity string.
+        pub fn as_str(&self) -> &str {
+            &self.0
+        }
+    }
+
+    /// Authored config format used for entry-point launch.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum EntryPointConfigFormat {
+        /// TOML authored config.
+        Toml,
+        /// JSON authored config.
+        Json,
+    }
+
+    impl EntryPointConfigFormat {
+        /// Returns the canonical event string for this format.
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                Self::Toml => "toml",
+                Self::Json => "json",
+            }
+        }
+
+        /// Parses the canonical event string for this format.
+        pub fn parse(value: &str) -> Result<Self> {
+            match value {
+                "toml" => Ok(Self::Toml),
+                "json" => Ok(Self::Json),
+                _ => Err(EventError::InvalidString {
+                    field: "entry point config format",
+                    value: value.to_owned(),
+                }),
+            }
+        }
     }
 
     /// Seed cell evidence bound by `RunAdmitted`.
@@ -2732,6 +2836,7 @@ pub mod v1 {
             "MediaType" | "CanonicalizerIdentity" | "RendererVersion" => {
                 checked_token_type(type_name)
             }
+            "EntryPointConfigFormat" => unit_enum_type("EntryPointConfigFormat", &["toml", "json"]),
             "PublicFieldPath" => public_field_path_type(),
             "ResourceNamespace" => resource_namespace_type(),
             "RendererKind" => checked_author_key_type(type_name),
@@ -2750,7 +2855,60 @@ pub mod v1 {
             | "ReplayVerifierId"
             | "AmbiguityCode"
             | "ErrorCode"
-            | "ClaimFencingToken" => checked_token_type(type_name),
+            | "ClaimFencingToken"
+            | "EntryPointPublicOpName"
+            | "EntryPointOpId"
+            | "EntryPointLoweringIdentity" => checked_token_type(type_name),
+            "EntryPointLaunchEvidence" => struct_type(
+                "EntryPointLaunchEvidence",
+                vec![
+                    schema_field(
+                        "submitted_public_op_name",
+                        "EntryPointPublicOpName",
+                        EventFieldCardinality::Required,
+                    ),
+                    schema_field(
+                        "resolved_op_id",
+                        "EntryPointOpId",
+                        EventFieldCardinality::Required,
+                    ),
+                    schema_field(
+                        "resolved_op_version",
+                        "u32",
+                        EventFieldCardinality::Required,
+                    ),
+                    schema_field(
+                        "entry_point_registry_digest",
+                        "ContentDigest",
+                        EventFieldCardinality::Required,
+                    ),
+                    schema_field(
+                        "lowering_identity",
+                        "EntryPointLoweringIdentity",
+                        EventFieldCardinality::Required,
+                    ),
+                    schema_field(
+                        "canonicalizer_identity",
+                        "CanonicalizerIdentity",
+                        EventFieldCardinality::Required,
+                    ),
+                    schema_field(
+                        "config_format",
+                        "EntryPointConfigFormat",
+                        EventFieldCardinality::Required,
+                    ),
+                    schema_field(
+                        "authored_config_digest",
+                        "ContentDigest",
+                        EventFieldCardinality::Required,
+                    ),
+                    schema_field(
+                        "canonical_config_digest",
+                        "ContentDigest",
+                        EventFieldCardinality::Required,
+                    ),
+                ],
+            ),
             "DescriptorIdentity" => enum_type(
                 "DescriptorIdentity",
                 vec![
@@ -3376,6 +3534,7 @@ pub mod v1 {
         schema_version: EVENT_SCHEMA_VERSION,
         fields: fields![
             EventFieldDescriptor::required("run_id", "RunId"),
+            EventFieldDescriptor::required("entry_point", "EntryPointLaunchEvidence"),
             EventFieldDescriptor::required("spec_hash", "SpecHash"),
             EventFieldDescriptor::required("spec_artifact", "RunArtifactEvidenceRef"),
             EventFieldDescriptor::required("certificate_artifact", "RunArtifactEvidenceRef"),
@@ -4030,6 +4189,24 @@ pub mod v1 {
         fn run_admitted_payload() -> KernelEventPayload {
             KernelEventPayload::RunAdmitted(Box::new(RunAdmitted {
                 run_id: run_id(1),
+                entry_point: EntryPointLaunchEvidence {
+                    submitted_public_op_name: EntryPointPublicOpName::new("portfolio_snapshot")
+                        .expect("public op name"),
+                    resolved_op_id: EntryPointOpId::new("mfm.portfolio/snapshot@1").expect("op id"),
+                    resolved_op_version: 1,
+                    entry_point_registry_digest: content_digest(18),
+                    lowering_identity: EntryPointLoweringIdentity::new(
+                        "mfm.portfolio.snapshot.lowering.v1",
+                    )
+                    .expect("lowering identity"),
+                    canonicalizer_identity: CanonicalizerIdentity::new(
+                        "mfm.portfolio.snapshot.canonicalizer.v1",
+                    )
+                    .expect("entry config canonicalizer"),
+                    config_format: EntryPointConfigFormat::Toml,
+                    authored_config_digest: content_digest(19),
+                    canonical_config_digest: content_digest(20),
+                },
                 spec_hash: spec_hash(2),
                 spec_artifact: run_artifact_ref(
                     artifact_id(3),
@@ -4469,7 +4646,7 @@ retention_manifest schema=absent semantic=absent producer=middleware_no_seed sta
 
             assert_eq!(
                 rows,
-                "mfm.events.v1.run_admitted schema:mfm.events.v1.run_admitted:1:sha256-jcs-v1:867fbc43edab8e3889fcfbe2f1492791268362265d45d84828532d26ba3becc9 [RunSpec,RunCertificate,RunConfig,SeedCell]\n\
+                "mfm.events.v1.run_admitted schema:mfm.events.v1.run_admitted:1:sha256-jcs-v1:61d91db775aa03c6c1ed10039b2bc2143533e9e02ec4920db374be400f8bb427 [RunSpec,RunCertificate,RunConfig,SeedCell]\n\
 mfm.events.v1.state_attempt_started schema:mfm.events.v1.state_attempt_started:1:sha256-jcs-v1:986f35aa39938713b9862192cab7d2b9b3a37219f5872bd242f8a06e7957ff1b []\n\
 mfm.events.v1.fact_recorded schema:mfm.events.v1.fact_recorded:1:sha256-jcs-v1:e708d591505935c8d5b12e833e34e6883c3e62fc548758a53ed5199e94218f70 [FactResponse]\n\
 mfm.events.v1.artifact_referenced schema:mfm.events.v1.artifact_referenced:1:sha256-jcs-v1:c5965f6401628c580d907568a57b29e06638d4cf1740b1ea781eae88df4d592c [ArtifactReferenced]\n\
@@ -4542,7 +4719,7 @@ retention_manifest"
             assert_eq!(all_event_schema_descriptors().len(), 27);
             assert_eq!(
                 rows,
-                "mfm_events::v1::RunAdmitted schema:mfm.events.v1.run_admitted:1:sha256-jcs-v1:867fbc43edab8e3889fcfbe2f1492791268362265d45d84828532d26ba3becc9\n\
+                "mfm_events::v1::RunAdmitted schema:mfm.events.v1.run_admitted:1:sha256-jcs-v1:61d91db775aa03c6c1ed10039b2bc2143533e9e02ec4920db374be400f8bb427\n\
 mfm_events::v1::StateAttemptStarted schema:mfm.events.v1.state_attempt_started:1:sha256-jcs-v1:986f35aa39938713b9862192cab7d2b9b3a37219f5872bd242f8a06e7957ff1b\n\
 mfm_events::v1::FactRecorded schema:mfm.events.v1.fact_recorded:1:sha256-jcs-v1:e708d591505935c8d5b12e833e34e6883c3e62fc548758a53ed5199e94218f70\n\
 mfm_events::v1::ArtifactReferenced schema:mfm.events.v1.artifact_referenced:1:sha256-jcs-v1:c5965f6401628c580d907568a57b29e06638d4cf1740b1ea781eae88df4d592c\n\

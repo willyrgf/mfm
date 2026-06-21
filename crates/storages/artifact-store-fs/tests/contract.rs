@@ -176,6 +176,7 @@ async fn verified_retention_projection_for(
         vec![KernelEventPayload::RunAdmitted(Box::new(
             mfm_events::v1::RunAdmitted {
                 run_id: run_id.clone(),
+                entry_point: entry_point_launch_evidence(),
                 spec_hash: spec_hash.clone(),
                 spec_artifact: run_artifact_ref(&spec_evidence),
                 certificate_artifact: run_artifact_ref(&certificate_evidence),
@@ -259,6 +260,24 @@ async fn verified_retention_projection_for(
         .expect("load run stream");
     VerifiedRetentionProjectionSet::from_synthetic_run_streams(vec![(run_id, stream.as_slice())])
         .expect("verified retention projection")
+}
+
+fn entry_point_launch_evidence() -> mfm_events::v1::EntryPointLaunchEvidence {
+    mfm_events::v1::EntryPointLaunchEvidence {
+        submitted_public_op_name: mfm_events::v1::EntryPointPublicOpName::new("portfolio_snapshot")
+            .expect("public op name"),
+        resolved_op_id: mfm_events::v1::EntryPointOpId::new("mfm.test:portfolio_snapshot:1")
+            .expect("entry-point op id"),
+        resolved_op_version: 1,
+        entry_point_registry_digest: content_digest(b"entry-point-registry"),
+        lowering_identity: mfm_events::v1::EntryPointLoweringIdentity::new("mfm.test.lowering.v1")
+            .expect("lowering identity"),
+        canonicalizer_identity: CanonicalizerIdentity::new("mfm.test.canonicalizer.v1")
+            .expect("canonicalizer identity"),
+        config_format: mfm_events::v1::EntryPointConfigFormat::Toml,
+        authored_config_digest: content_digest(b"authored-config"),
+        canonical_config_digest: content_digest(b"canonical-config"),
+    }
 }
 
 #[tokio::test]

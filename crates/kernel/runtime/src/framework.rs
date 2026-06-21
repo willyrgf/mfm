@@ -741,6 +741,7 @@ fn retention_manifest_json(
         "config_artifacts": runtime_spec.spec().config_refs.iter().map(config_artifact_json).collect::<Vec<_>>(),
         "descriptor_digests": runtime_spec.spec().descriptor_identities.iter().map(descriptor_digest_json).collect::<Vec<_>>(),
         "descriptor_identities": runtime_spec.spec().descriptor_identities.iter().map(descriptor_identity_json).collect::<Vec<_>>(),
+        "entry_point": entry_point_launch_evidence_json(&run_admitted.entry_point),
         "event_schema_ids": event_schema_ids,
         "manifest_seq": manifest_seq,
         "previous_manifest_digest": previous_manifest_digest.map(ContentDigest::as_str),
@@ -759,6 +760,22 @@ fn retention_manifest_json(
         "spec_hash": runtime_spec.spec_hash().as_str(),
         "value_artifacts": retained_by_role.value_artifacts,
     }))
+}
+
+fn entry_point_launch_evidence_json(
+    evidence: &events::EntryPointLaunchEvidence,
+) -> serde_json::Value {
+    serde_json::json!({
+        "authored_config_digest": evidence.authored_config_digest.as_str(),
+        "canonical_config_digest": evidence.canonical_config_digest.as_str(),
+        "canonicalizer_identity": evidence.canonicalizer_identity.as_str(),
+        "config_format": evidence.config_format.as_str(),
+        "entry_point_registry_digest": evidence.entry_point_registry_digest.as_str(),
+        "lowering_identity": evidence.lowering_identity.as_str(),
+        "resolved_op_id": evidence.resolved_op_id.as_str(),
+        "resolved_op_version": evidence.resolved_op_version,
+        "submitted_public_op_name": evidence.submitted_public_op_name.as_str(),
+    })
 }
 
 struct RetainedRefsByRole {
