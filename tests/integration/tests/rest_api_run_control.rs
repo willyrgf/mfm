@@ -249,6 +249,48 @@ async fn start_accepts_entry_point_json_object_config_shape() {
 }
 
 #[tokio::test]
+async fn evm_contract_start_accepts_all_entry_point_ops_append_only() {
+    let (root, state) = in_memory_state_with_root();
+    let app = mfm_rest_api::make_app(state.clone());
+
+    for (op, config) in evm_entry_point_configs() {
+        let run_id = mfm_app::new_run_id();
+        let resp = app
+            .clone()
+            .oneshot(json_post(
+                "/v1/runs/start",
+                serde_json::json!({
+                    "op": op,
+                    "op_version": 1,
+                    "config_format": "json",
+                    "config": config,
+                    "run_id": run_id.as_str(),
+                    "framework_version": "mfm.integration.rest.evm_contracts.typed.v1",
+                    "source_revision": "integration-test",
+                    "drive": "append_only"
+                }),
+            ))
+            .await
+            .expect("EVM entry-point start response");
+        let status = resp.status();
+        let body = response_json(resp).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["status"], "success");
+        assert_eq!(body["data"]["run"]["run_mode"], "forward", "{body}");
+        assert_eq!(body["data"]["run"]["run_id"], run_id.as_str());
+
+        let stream = state
+            .store
+            .load_run_stream(&run_id)
+            .await
+            .expect("run stream");
+        assert_evm_entry_point_evidence(&stream, op, config);
+    }
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn portfolio_status_route_reports_interrupted_attempt_and_framework_attempts_from_history() {
     let _env_guard = RPC_ENV_LOCK.lock().await;
     let rpc_url = start_rpc_mock().await;
@@ -573,6 +615,155 @@ fn portfolio_snapshot_config() -> serde_json::Value {
             "sources": []
         }
     })
+}
+
+fn evm_entry_point_configs() -> [(&'static str, serde_json::Value); 4] {
+    [
+        ("evm_contract_deploy", evm_deploy_config_json()),
+        ("evm_contract_configure", evm_configure_entry_config_json()),
+        ("evm_contract_validate", evm_validate_entry_config_json()),
+        ("evm_contract_lifecycle", evm_lifecycle_config_json()),
+    ]
+}
+
+fn evm_network_json() -> serde_json::Value {
+    serde_json::json!({
+        "network_id": "ethereum-mainnet",
+        "expected_chain_id": 1,
+    })
+}
+
+fn evm_signer_json() -> serde_json::Value {
+    serde_json::json!({
+        "signer_ref": "deployer",
+        "expected_signer_address": "0x000000000000000000000000000000000000dead",
+    })
+}
+
+fn evm_deploy_config_json() -> serde_json::Value {
+    serde_json::json!({
+        "network": evm_network_json(),
+        "signer": evm_signer_json(),
+    })
+}
+
+fn evm_configure_config_json() -> serde_json::Value {
+    serde_json::json!({
+        "network": evm_network_json(),
+        "signer": evm_signer_json(),
+        "calls": [],
+    })
+}
+
+fn evm_validate_config_json() -> serde_json::Value {
+    serde_json::json!({
+        "network": evm_network_json(),
+    })
+}
+
+fn evm_lifecycle_config_json() -> serde_json::Value {
+    serde_json::json!({
+        "deploy": evm_deploy_config_json(),
+        "configure": evm_configure_config_json(),
+        "validate": evm_validate_config_json(),
+    })
+}
+
+fn evm_deployed_contract_json() -> serde_json::Value {
+    serde_json::json!({
+        "lifecycle_version": 1,
+        "network_id": "ethereum-mainnet",
+        "expected_chain_id": 1,
+        "contract_address": "0x000000000000000000000000000000000000dead",
+        "deploy_tx_hash": "0x01",
+        "deploy_receipt_evidence": null,
+        "deployed_block_number": 1,
+    })
+}
+
+fn evm_configured_contract_json() -> serde_json::Value {
+    serde_json::json!({
+        "lifecycle_version": 1,
+        "deployed": evm_deployed_contract_json(),
+        "configure_calls": [],
+        "confirmation_read_assertions": [],
+        "confirmation_event_assertions": [],
+        "configure_tx_hashes": [],
+        "configure_receipt_evidence": [],
+        "configured_block_number": 2,
+    })
+}
+
+fn evm_configure_entry_config_json() -> serde_json::Value {
+    serde_json::json!({
+        "config": evm_configure_config_json(),
+        "deployed": evm_deployed_contract_json(),
+    })
+}
+
+fn evm_validate_entry_config_json() -> serde_json::Value {
+    serde_json::json!({
+        "config": evm_validate_config_json(),
+        "configured": evm_configured_contract_json(),
+    })
+}
+
+fn assert_evm_entry_point_evidence(
+    stream: &[store::KernelEventEnvelope],
+    op_name: &str,
+    config: serde_json::Value,
+) {
+    let evidence = stream
+        .iter()
+        .find_map(|event| match event.payload() {
+            events::KernelEventPayload::RunAdmitted(payload) => Some(&payload.entry_point),
+            _ => None,
+        })
+        .expect("RunAdmitted entry-point evidence");
+    let registry = mfm_app::production_entry_point_op_registry().expect("entry-point registry");
+    let public_name = mfm_app::PublicOpName::new(op_name).expect("public op name");
+    let op = registry
+        .resolve(
+            &public_name,
+            Some(mfm_app::OpVersion::new(1).expect("op version")),
+        )
+        .expect("EVM entry-point op");
+    let authored = mfm_app::AuthoredConfig::from_json_transport_value(
+        Some(mfm_app::ConfigFormat::Json),
+        &config,
+    )
+    .expect("authored JSON config");
+    let plan = op.plan(authored.clone()).expect("EVM entry-point plan");
+
+    assert_eq!(evidence.submitted_public_op_name.as_str(), op_name);
+    assert_eq!(evidence.resolved_op_id.as_str(), op.op_id().to_string());
+    assert_eq!(evidence.resolved_op_version, 1);
+    assert_eq!(evidence.config_format, events::EntryPointConfigFormat::Json);
+    assert_eq!(
+        evidence.entry_point_registry_digest,
+        registry.registry_digest().expect("registry digest")
+    );
+    assert_eq!(evidence.authored_config_digest, *authored.authored_digest());
+    assert_eq!(
+        evidence.authored_config_digest.algorithm(),
+        DigestAlgorithm::Sha256JcsV1
+    );
+    assert_eq!(
+        evidence.canonical_config_digest,
+        plan.canonical_config_digest
+    );
+    assert_eq!(
+        evidence.canonical_config_digest.algorithm(),
+        DigestAlgorithm::Sha256JcsV1
+    );
+    assert_eq!(
+        evidence.lowering_identity.as_str(),
+        plan.lowering_identity.as_str()
+    );
+    assert_eq!(
+        evidence.canonicalizer_identity.as_str(),
+        plan.canonicalizer_identity.as_str()
+    );
 }
 
 async fn start_rpc_mock() -> String {
