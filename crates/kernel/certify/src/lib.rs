@@ -95,7 +95,7 @@ pub enum CertifyError {
     Canonical(String),
     /// Spec contract validation failed.
     Spec(String),
-    /// Persisted certificate or bundle verification failed.
+    /// Persisted spec/certificate verification failed.
     Certificate(String),
 }
 
@@ -858,8 +858,8 @@ impl CertifiedTypedSpec {
     }
 
     /// Builds canonical persisted spec and certificate bytes for storage.
-    pub fn bundle(&self) -> Result<CertifiedSpecBundle> {
-        CertifiedSpecBundle::from_certified(self)
+    pub fn to_persisted_parts(&self) -> Result<PersistedSpecCertificateParts> {
+        PersistedSpecCertificateParts::from_certified(self)
     }
 }
 
@@ -879,7 +879,8 @@ pub struct CertifiedTypedSpecParts {
 /// Persisted typed-spec certificate.
 ///
 /// This is durable evidence only. Parsed or constructed certificate data is hostile until
-/// [`verify_certified_bundle`] validates it against a registry and returns [`CertifiedTypedSpec`].
+/// [`verify_persisted_spec_certificate`] validates it against a registry and returns
+/// [`CertifiedTypedSpec`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CertifiedSpecCertificate {
     /// Hash of the hash-defining certificate evidence.
@@ -891,8 +892,8 @@ pub struct CertifiedSpecCertificate {
 impl CertifiedSpecCertificate {
     /// Builds persisted certificate evidence and computes its deterministic certificate hash.
     ///
-    /// This does not mint runtime authority. Call [`verify_certified_bundle`] to turn persisted
-    /// bytes into [`CertifiedTypedSpec`].
+    /// This does not mint runtime authority. Call [`verify_persisted_spec_certificate`] to turn
+    /// persisted bytes into [`CertifiedTypedSpec`].
     pub fn from_evidence(evidence: CertifiedSpecCertificateEvidence) -> Result<Self> {
         let certificate_hash = evidence.canonical_json()?.content_digest();
         Ok(Self {
@@ -1196,15 +1197,15 @@ impl CertifiedSpecAuditMetadata {
 
 /// Canonical persisted bytes for a certified spec and its certificate.
 ///
-/// This is a storage/transport container only. Parsing it yields [`UntrustedCertifiedSpecBundle`],
-/// not runtime authority.
+/// This is a storage container only. Parsing it yields [`UntrustedSpecCertificateParts`], not
+/// runtime authority.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CertifiedSpecBundle {
+pub struct PersistedSpecCertificateParts {
     spec_bytes: Vec<u8>,
     certificate_bytes: Vec<u8>,
 }
 
-impl CertifiedSpecBundle {
+impl PersistedSpecCertificateParts {
     /// Builds persisted canonical bytes from an in-memory certified authority.
     pub fn from_certified(certified: &CertifiedTypedSpec) -> Result<Self> {
         Ok(Self {
@@ -1237,22 +1238,22 @@ impl CertifiedSpecBundle {
     }
 
     /// Parses the persisted bytes as hostile data.
-    pub fn parse_untrusted(&self) -> Result<UntrustedCertifiedSpecBundle> {
+    pub fn parse_untrusted(&self) -> Result<UntrustedSpecCertificateParts> {
         let spec = spec::UntrustedTypedSpec::from_json_slice(&self.spec_bytes)
             .map_err(|error| CertifyError::Spec(error.to_string()))?;
         let certificate = CertifiedSpecCertificate::from_json_slice(&self.certificate_bytes)?;
-        Ok(UntrustedCertifiedSpecBundle { spec, certificate })
+        Ok(UntrustedSpecCertificateParts { spec, certificate })
     }
 }
 
 /// Parsed persisted spec and certificate data that has not been verified.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UntrustedCertifiedSpecBundle {
+pub struct UntrustedSpecCertificateParts {
     spec: spec::UntrustedTypedSpec,
     certificate: CertifiedSpecCertificate,
 }
 
-impl UntrustedCertifiedSpecBundle {
+impl UntrustedSpecCertificateParts {
     /// Returns the parsed typed spec data.
     pub fn spec(&self) -> &spec::TypedExecutionSpec {
         self.spec.spec()
@@ -1390,7 +1391,7 @@ impl CertificationRegistry {
     ///
     /// This is for registry assembly code whose descriptor source is already trusted. Do not derive
     /// this identity from the same persisted spec that will be certified; persisted spec bytes are
-    /// hostile until [`verify_certified_bundle`] succeeds.
+    /// hostile until [`verify_persisted_spec_certificate`] succeeds.
     pub fn register_state_descriptor(
         &mut self,
         descriptor: spec::StateDescriptorIdentity,
@@ -1402,7 +1403,7 @@ impl CertificationRegistry {
     ///
     /// This is for registry assembly code whose descriptor source is already trusted. Do not derive
     /// this identity from the same persisted spec that will be certified; persisted spec bytes are
-    /// hostile until [`verify_certified_bundle`] succeeds.
+    /// hostile until [`verify_persisted_spec_certificate`] succeeds.
     pub fn register_operation_descriptor(
         &mut self,
         descriptor: spec::OperationDescriptorIdentity,
@@ -1826,30 +1827,34 @@ pub fn certify_typed_spec(
 /// Hash matches alone are insufficient: this parses hostile persisted data, compares spec and
 /// certificate evidence, re-runs registry-backed certification, and only then returns the
 /// non-forgeable in-memory authority.
-pub fn verify_certified_bundle(
+pub fn verify_persisted_spec_certificate(
     spec_bytes: &[u8],
     certificate_bytes: &[u8],
     registry: &CertificationRegistry,
 ) -> Result<CertifiedTypedSpec> {
-    let bundle =
-        CertifiedSpecBundle::from_untrusted_bytes(spec_bytes.to_vec(), certificate_bytes.to_vec());
-    verify_untrusted_bundle(bundle.parse_untrusted()?, registry)
+    let persisted_parts = PersistedSpecCertificateParts::from_untrusted_bytes(
+        spec_bytes.to_vec(),
+        certificate_bytes.to_vec(),
+    );
+    verify_untrusted_spec_certificate_parts(persisted_parts.parse_untrusted()?, registry)
 }
 
 /// Verifies persisted spec and certificate bytes against a trusted registry superset.
 ///
 /// The parsed spec is used only to select descriptor identities from `trusted_registry`; the
 /// resulting scoped registry must match the certificate's registry digest and descriptor evidence.
-pub fn verify_certified_bundle_with_trusted_registry(
+pub fn verify_persisted_spec_certificate_with_trusted_registry(
     spec_bytes: &[u8],
     certificate_bytes: &[u8],
     trusted_registry: &CertificationRegistry,
 ) -> Result<CertifiedTypedSpec> {
-    let bundle =
-        CertifiedSpecBundle::from_untrusted_bytes(spec_bytes.to_vec(), certificate_bytes.to_vec());
-    let untrusted = bundle.parse_untrusted()?;
+    let persisted_parts = PersistedSpecCertificateParts::from_untrusted_bytes(
+        spec_bytes.to_vec(),
+        certificate_bytes.to_vec(),
+    );
+    let untrusted = persisted_parts.parse_untrusted()?;
     let scoped = trusted_registry.scoped_for_spec(untrusted.spec())?;
-    verify_untrusted_bundle(untrusted, &scoped)
+    verify_untrusted_spec_certificate_parts(untrusted, &scoped)
 }
 
 /// Lowers a typed program draft into a v1 spec without minting certification authority.
@@ -1858,14 +1863,14 @@ pub fn lower_program_draft(draft: &program::TypedProgramDraft) -> Result<Lowered
     lower_program_draft_with_registry(draft, &registry)
 }
 
-fn verify_untrusted_bundle(
-    bundle: UntrustedCertifiedSpecBundle,
+fn verify_untrusted_spec_certificate_parts(
+    persisted_parts: UntrustedSpecCertificateParts,
     registry: &CertificationRegistry,
 ) -> Result<CertifiedTypedSpec> {
-    let UntrustedCertifiedSpecBundle {
+    let UntrustedSpecCertificateParts {
         spec,
         certificate: expected_certificate,
-    } = bundle;
+    } = persisted_parts;
     expected_certificate.verify_hash()?;
     let actual_spec_hash = spec
         .spec()
@@ -6716,24 +6721,27 @@ mod tests {
     }
 
     #[test]
-    fn verifies_persisted_certified_bundle() {
-        let (registry, certified, bundle) = reference_certified_bundle();
-        let verified =
-            verify_certified_bundle(bundle.spec_bytes(), bundle.certificate_bytes(), &registry)
-                .expect("verified bundle");
+    fn verifies_persisted_spec_certificate_parts() {
+        let (registry, certified, persisted_parts) = reference_persisted_spec_certificate_parts();
+        let verified = verify_persisted_spec_certificate(
+            persisted_parts.spec_bytes(),
+            persisted_parts.certificate_bytes(),
+            &registry,
+        )
+        .expect("verified persisted spec/certificate");
         assert_eq!(verified.spec_hash(), certified.spec_hash());
         assert_eq!(verified.certificate_hash(), certified.certificate_hash());
     }
 
     #[test]
-    fn registry_digest_mismatch_rejects_bundle() {
-        let (registry, certified, bundle) = reference_certified_bundle();
+    fn registry_digest_mismatch_rejects_persisted_parts() {
+        let (registry, certified, persisted_parts) = reference_persisted_spec_certificate_parts();
         let mut evidence = certified.certificate().evidence.clone();
         evidence.registry_digest =
             ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, digest_byte(0x72));
         let certificate = CertifiedSpecCertificate::from_evidence(evidence).expect("certificate");
-        let error = verify_certified_bundle(
-            bundle.spec_bytes(),
+        let error = verify_persisted_spec_certificate(
+            persisted_parts.spec_bytes(),
             &certificate_bytes(&certificate),
             &registry,
         )
@@ -6742,16 +6750,16 @@ mod tests {
     }
 
     #[test]
-    fn descriptor_identity_or_digest_mismatch_rejects_bundle() {
-        let (registry, certified, bundle) = reference_certified_bundle();
+    fn descriptor_identity_or_digest_mismatch_rejects_persisted_parts() {
+        let (registry, certified, persisted_parts) = reference_persisted_spec_certificate_parts();
 
         let mut identity_mismatch = certified.certificate().evidence.clone();
         identity_mismatch.descriptor_identities[0].descriptor_id =
             DescriptorId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_byte(0x73));
         let identity_certificate =
             CertifiedSpecCertificate::from_evidence(identity_mismatch).expect("certificate");
-        let error = verify_certified_bundle(
-            bundle.spec_bytes(),
+        let error = verify_persisted_spec_certificate(
+            persisted_parts.spec_bytes(),
             &certificate_bytes(&identity_certificate),
             &registry,
         )
@@ -6763,8 +6771,8 @@ mod tests {
             ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, digest_byte(0x74));
         let digest_certificate =
             CertifiedSpecCertificate::from_evidence(digest_mismatch).expect("certificate");
-        let error = verify_certified_bundle(
-            bundle.spec_bytes(),
+        let error = verify_persisted_spec_certificate(
+            persisted_parts.spec_bytes(),
             &certificate_bytes(&digest_certificate),
             &registry,
         )
@@ -6773,13 +6781,13 @@ mod tests {
     }
 
     #[test]
-    fn certificate_spec_hash_mismatch_rejects_bundle() {
-        let (registry, certified, bundle) = reference_certified_bundle();
+    fn certificate_spec_hash_mismatch_rejects_persisted_parts() {
+        let (registry, certified, persisted_parts) = reference_persisted_spec_certificate_parts();
         let mut evidence = certified.certificate().evidence.clone();
         evidence.spec_hash = SpecHash::from_digest(DigestAlgorithm::Sha256JcsV1, digest_byte(0x75));
         let certificate = CertifiedSpecCertificate::from_evidence(evidence).expect("certificate");
-        let error = verify_certified_bundle(
-            bundle.spec_bytes(),
+        let error = verify_persisted_spec_certificate(
+            persisted_parts.spec_bytes(),
             &certificate_bytes(&certificate),
             &registry,
         )
@@ -6788,19 +6796,21 @@ mod tests {
     }
 
     #[test]
-    fn parsed_bundle_is_untrusted_until_verifier_succeeds() {
-        let (_registry, _certified, bundle) = reference_certified_bundle();
-        let untrusted = bundle.parse_untrusted().expect("parsed untrusted bundle");
+    fn parsed_persisted_parts_are_untrusted_until_verifier_succeeds() {
+        let (_registry, _certified, persisted_parts) = reference_persisted_spec_certificate_parts();
+        let untrusted = persisted_parts
+            .parse_untrusted()
+            .expect("parsed untrusted persisted parts");
         assert_eq!(
             untrusted.spec().spec_hash().expect("untrusted spec hash"),
             untrusted.certificate().evidence.spec_hash
         );
-        let error = verify_certified_bundle(
-            bundle.spec_bytes(),
-            bundle.certificate_bytes(),
+        let error = verify_persisted_spec_certificate(
+            persisted_parts.spec_bytes(),
+            persisted_parts.certificate_bytes(),
             &CertificationRegistry::new(),
         )
-        .expect_err("parsed bundle needs registry-backed verifier success");
+        .expect_err("parsed persisted parts need registry-backed verifier success");
         assert!(matches!(error, CertifyError::Certificate(_)), "{error}");
     }
 
@@ -8637,10 +8647,10 @@ mod tests {
         DigestBytes::from_array([byte; 32])
     }
 
-    fn reference_certified_bundle() -> (
+    fn reference_persisted_spec_certificate_parts() -> (
         CertificationRegistry,
         CertifiedTypedSpec,
-        CertifiedSpecBundle,
+        PersistedSpecCertificateParts,
     ) {
         let draft = reference_draft();
         let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
@@ -8649,8 +8659,10 @@ mod tests {
             certified.certificate().evidence.registry_digest,
             registry.digest().expect("registry digest")
         );
-        let bundle = certified.bundle().expect("bundle");
-        (registry, certified, bundle)
+        let persisted_parts = certified
+            .to_persisted_parts()
+            .expect("persisted spec/certificate parts");
+        (registry, certified, persisted_parts)
     }
 
     fn certificate_bytes(certificate: &CertifiedSpecCertificate) -> Vec<u8> {

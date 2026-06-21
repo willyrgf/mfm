@@ -8,8 +8,8 @@ public `StateGraph`, `DependencyEdge`, `DynContext`, or generic `IoProvider` sur
 
 `CertifiedRuntimeSpec::new` accepts only `mfm_certify::CertifiedTypedSpec`. Runtime callers cannot
 construct runtime authority from a parsed `TypedExecutionSpec`, a hash-only
-`mfm_spec::v1::HashedSpecEnvelope`, or parsed persisted bundle data. Persisted spec/certificate
-bytes must pass through the certifier verifier before they can reach this crate.
+`mfm_spec::v1::HashedSpecEnvelope`, or parsed persisted spec/certificate data. Persisted
+spec/certificate bytes must pass through the certifier verifier before they can reach this crate.
 
 `CertifiedRuntimeSpec` indexes certified semantics and derives erased runner plans for execution.
 The runner plan is not authority by itself. Runtime-only checks remain runtime-owned: runner

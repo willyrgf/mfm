@@ -21,7 +21,7 @@ transport-only surfaces.
 typed or authored input
   -> operation crate builds typed program draft
   -> mfm-certify lowers, validates, and emits certified typed execution spec
-  -> app verifies certified bundle and assembles launch material
+  -> app verifies persisted spec/certificate evidence and assembles launch material
   -> runtime rebuilds verified history from the append-only run stream
   -> deterministic frontier scheduler selects one certified node or terminal decision
   -> sealed runner invocation produces typed intent, staged artifacts, or sealed handles
