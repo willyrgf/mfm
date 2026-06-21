@@ -5,15 +5,13 @@ use std::str::FromStr;
 use mfm_evm_core::encoding::normalize_address;
 use mfm_program_derive::MfmValue;
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 
 use crate::domain_key::{validate_author_key, StableDomainKeyError};
 
 /// Error returned when constructing portfolio scalar authorities.
-#[derive(Clone, Debug, PartialEq, Eq, Error)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PortfolioScalarError {
     /// A scalar identifier did not satisfy the portfolio author-key grammar.
-    #[error("{kind} `{value}` did not satisfy portfolio author-key grammar: {source}")]
     InvalidAuthorKey {
         /// Human-readable scalar kind.
         kind: &'static str,
@@ -23,7 +21,6 @@ pub enum PortfolioScalarError {
         source: StableDomainKeyError,
     },
     /// A scalar was not a normalized EVM address.
-    #[error("{kind} `{value}` must be a normalized EVM address")]
     InvalidEvmAddress {
         /// Human-readable scalar kind.
         kind: &'static str,
@@ -31,13 +28,42 @@ pub enum PortfolioScalarError {
         value: String,
     },
     /// A scalar was not a non-negative decimal string.
-    #[error("{kind} `{value}` must be a non-negative decimal string")]
     InvalidDecimalString {
         /// Human-readable scalar kind.
         kind: &'static str,
         /// Rejected scalar value.
         value: String,
     },
+}
+
+impl fmt::Display for PortfolioScalarError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidAuthorKey {
+                kind,
+                value,
+                source,
+            } => write!(
+                f,
+                "{kind} `{value}` did not satisfy portfolio author-key grammar: {source}"
+            ),
+            Self::InvalidEvmAddress { kind, value } => {
+                write!(f, "{kind} `{value}` must be a normalized EVM address")
+            }
+            Self::InvalidDecimalString { kind, value } => {
+                write!(f, "{kind} `{value}` must be a non-negative decimal string")
+            }
+        }
+    }
+}
+
+impl std::error::Error for PortfolioScalarError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InvalidAuthorKey { source, .. } => Some(source),
+            _ => None,
+        }
+    }
 }
 
 macro_rules! portfolio_id_type {

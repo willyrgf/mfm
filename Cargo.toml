@@ -64,7 +64,6 @@ anyhow = "1.0.75"
 tokio = { version = "1.44", features = ["full"] }
 clap = { version = "4.4", features = ["derive"] }
 url = "2.5"
-thiserror = "2.0"
 hex = "0.4"
 rand = "0.9"
 async-trait = "0.1"

@@ -14,4 +14,3 @@ mfm-canonical = { path = "../kernel/canonical" }
 mfm-capabilities = { path = "../kernel/capabilities" }
 mfm-evm-capabilities = { path = "../evm-capabilities" }
 mfm-ids = { path = "../kernel/ids" }
-thiserror = { workspace = true }

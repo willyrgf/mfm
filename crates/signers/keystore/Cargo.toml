@@ -11,7 +11,6 @@ category = "signer-provider"
 
 [dependencies]
 alloy-primitives = { workspace = true, features = ["k256"] }
-thiserror = { workspace = true }
 uuid = { version = "1.8.0", features = ["v4"] }
 zeroize = "1.7"
 

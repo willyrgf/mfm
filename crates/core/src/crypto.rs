@@ -22,25 +22,37 @@
 use alloy_primitives::{Address, PrimitiveSignature, B256};
 use k256::ecdsa::SigningKey;
 use k256::SecretKey;
+use std::fmt;
 use tiny_keccak::{Hasher, Keccak};
 use zeroize::Zeroizing;
 
 /// Error returned by Ethereum private-key helpers.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EthereumKeyError {
     /// The supplied key was not valid hex.
-    #[error("signing key hex was invalid")]
     InvalidHex,
     /// The supplied key did not decode to exactly 32 bytes.
-    #[error("signing key must be exactly 32 bytes")]
     InvalidLength,
     /// The supplied bytes did not form a valid secp256k1 private key.
-    #[error("signing key did not form a valid secp256k1 key")]
     InvalidPrivateKey,
     /// The signing primitive failed.
-    #[error("failed to sign prehashed payload")]
     SigningFailed,
 }
+
+impl fmt::Display for EthereumKeyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidHex => f.write_str("signing key hex was invalid"),
+            Self::InvalidLength => f.write_str("signing key must be exactly 32 bytes"),
+            Self::InvalidPrivateKey => {
+                f.write_str("signing key did not form a valid secp256k1 key")
+            }
+            Self::SigningFailed => f.write_str("failed to sign prehashed payload"),
+        }
+    }
+}
+
+impl std::error::Error for EthereumKeyError {}
 
 /// Zeroizing wrapper for a raw Ethereum secp256k1 private key.
 pub struct EthereumPrivateKey {

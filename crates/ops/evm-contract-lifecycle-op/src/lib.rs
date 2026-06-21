@@ -39,6 +39,7 @@ use mfm_state_evm_contracts::{
     DeployContractState, ValidateContractInputHandles, ValidateContractState,
 };
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 const OP_NAMESPACE: &str = "mfm.evm.contract";
 const ROOT_SCOPE: &str = "evm_contract";
@@ -591,14 +592,42 @@ pub struct CompiledContractLifecycleProgram {
 }
 
 /// Error returned while compiling a contract lifecycle program.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum ContractLifecycleCompileError {
     /// Program planning failed.
-    #[error("contract lifecycle planning failed: {0}")]
-    Plan(#[from] mfm_program::PlanError),
+    Plan(mfm_program::PlanError),
     /// Certification failed.
-    #[error("contract lifecycle certification failed: {0}")]
-    Certify(#[from] mfm_certify::CertifyError),
+    Certify(mfm_certify::CertifyError),
+}
+
+impl fmt::Display for ContractLifecycleCompileError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Plan(error) => write!(f, "contract lifecycle planning failed: {error}"),
+            Self::Certify(error) => write!(f, "contract lifecycle certification failed: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for ContractLifecycleCompileError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Plan(error) => Some(error),
+            Self::Certify(error) => Some(error),
+        }
+    }
+}
+
+impl From<mfm_program::PlanError> for ContractLifecycleCompileError {
+    fn from(error: mfm_program::PlanError) -> Self {
+        Self::Plan(error)
+    }
+}
+
+impl From<mfm_certify::CertifyError> for ContractLifecycleCompileError {
+    fn from(error: mfm_certify::CertifyError) -> Self {
+        Self::Certify(error)
+    }
 }
 
 /// Builds, certifies, and gathers launch config artifacts for a deploy-only program.
