@@ -1061,29 +1061,15 @@ mod tests {
             admitted_binding_digest: content_digest(9),
             canonicalizer_identity: CanonicalizerIdentity::new("mfm.jcs.v1")
                 .expect("canonicalizer"),
-            framework_version: events::FrameworkVersion::new("mfm.test.1")
-                .expect("framework version"),
-            source_revision: events::SourceRevision::new("test-revision").expect("source revision"),
-            launched_at_unix_ms: 1_700_000_000_000,
             seed_cells: Vec::new(),
         }))
     }
 
     fn entry_point_launch_evidence() -> events::EntryPointLaunchEvidence {
         events::EntryPointLaunchEvidence {
-            submitted_public_op_name: events::EntryPointPublicOpName::new("portfolio_snapshot")
-                .expect("public op name"),
             resolved_op_id: events::EntryPointOpId::new("mfm.test:portfolio_snapshot:1")
                 .expect("entry-point op id"),
-            resolved_op_version: 1,
             entry_point_registry_digest: content_digest(30),
-            lowering_identity: events::EntryPointLoweringIdentity::new("mfm.test.lowering.v1")
-                .expect("lowering identity"),
-            canonicalizer_identity: CanonicalizerIdentity::new("mfm.test.canonicalizer.v1")
-                .expect("canonicalizer identity"),
-            config_format: events::EntryPointConfigFormat::Toml,
-            authored_config_digest: content_digest(31),
-            canonical_config_digest: content_digest(32),
         }
     }
 

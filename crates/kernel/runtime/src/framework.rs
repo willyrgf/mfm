@@ -766,15 +766,8 @@ fn entry_point_launch_evidence_json(
     evidence: &events::EntryPointLaunchEvidence,
 ) -> serde_json::Value {
     serde_json::json!({
-        "authored_config_digest": evidence.authored_config_digest.as_str(),
-        "canonical_config_digest": evidence.canonical_config_digest.as_str(),
-        "canonicalizer_identity": evidence.canonicalizer_identity.as_str(),
-        "config_format": evidence.config_format.as_str(),
         "entry_point_registry_digest": evidence.entry_point_registry_digest.as_str(),
-        "lowering_identity": evidence.lowering_identity.as_str(),
         "resolved_op_id": evidence.resolved_op_id.as_str(),
-        "resolved_op_version": evidence.resolved_op_version,
-        "submitted_public_op_name": evidence.submitted_public_op_name.as_str(),
     })
 }
 

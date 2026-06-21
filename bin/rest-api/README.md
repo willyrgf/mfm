@@ -78,8 +78,6 @@ Request shape:
     "...": "entry-point config"
   },
   "run_id": "run:sha256-jcs-v1:<optional-digest>",
-  "framework_version": "mfm.rest_api.typed.v1",
-  "source_revision": "git-or-build-id",
   "drive": "until_blocked"
 }
 ```

@@ -43,12 +43,6 @@ pub struct RunLaunchEvidence {
     pub certificate_artifact: RunLaunchArtifact,
     /// Staged config artifacts for every certified config reference.
     pub config_artifacts: Vec<RunLaunchArtifact>,
-    /// Framework build/version identity.
-    pub framework_version: events::FrameworkVersion,
-    /// Source revision identity.
-    pub source_revision: events::SourceRevision,
-    /// Caller-supplied launch time in Unix milliseconds.
-    pub launched_at_unix_ms: u64,
     /// Adapter executable identities bound to the run.
     pub adapter_executables: Vec<events::ExecutableIdentity>,
     /// Seed cells materialized at run start.
@@ -209,9 +203,6 @@ impl CommitPlanner {
                 .renderer_descriptor
                 .canonicalizer_identity
                 .clone(),
-            framework_version: evidence.framework_version,
-            source_revision: evidence.source_revision,
-            launched_at_unix_ms: evidence.launched_at_unix_ms,
             seed_cells: seed_cell_refs,
         };
         let admitted_artifacts = required_artifacts.clone();

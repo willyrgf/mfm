@@ -2,10 +2,10 @@
 
 use k256::ecdsa::SigningKey;
 use mfm_app::{
-    AuthoredConfig, CanonicalConfigMaterial, CanonicalizerIdentity, ConfigFormat, DriveMode,
-    EntryPointOpId, EntryPointOpPlan, EntryPointOpRegistry, EntryPointRunLaunchInput, LaunchableOp,
-    LoweringIdentity, ManualResolutionDecision, ManualResolutionRecordRequest, OpLaunchError,
-    OpVersion, PublicOpName, TypedRunMode,
+    AuthoredConfig, CanonicalConfigMaterial, ConfigFormat, DriveMode, EntryPointOpId,
+    EntryPointOpPlan, EntryPointOpRegistry, EntryPointRunLaunchInput, LaunchableOp,
+    ManualResolutionDecision, ManualResolutionRecordRequest, OpLaunchError, OpVersion,
+    PublicOpName, TypedRunMode,
 };
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_events::v1 as events;
@@ -55,9 +55,6 @@ async fn public_manual_resolution_scenario_records_resolution_and_hides_proof_by
         authored_config,
         certification_registry: &registry,
         run_id: run_id.clone(),
-        framework_version: "mfm.app.test.manual_resolution.v1",
-        source_revision: "manual-resolution-test",
-        launched_at_unix_ms: 1,
         drive: DriveMode::UntilBlocked,
     })
     .expect("launch request");
@@ -195,16 +192,11 @@ impl LaunchableOp for ManualResolutionProofEntryPointOp {
         .map_err(|error| {
             OpLaunchError::new("ManualResolutionProofPlanFailed", error.to_string())
         })?;
-        let public_output_schema_id = draft.public_output_spec().public_schema_id().clone();
         Ok(EntryPointOpPlan {
             config_material: config_material_for_draft(&draft)?,
             draft,
             seed_material: Vec::new(),
-            public_output_schema_id: Some(public_output_schema_id),
-            lowering_identity: LoweringIdentity::new("mfm.test.manual.lowering.v1")?,
-            canonicalizer_identity: CanonicalizerIdentity::new("mfm.test.manual.canonicalizer.v1")?,
             authored_config_digest: normalized.authored_digest,
-            canonical_config_digest: normalized.canonical_digest,
         })
     }
 }

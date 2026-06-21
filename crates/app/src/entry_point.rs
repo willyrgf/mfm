@@ -304,52 +304,6 @@ pub struct CanonicalSeedMaterial {
     pub media_type: spec::MediaType,
 }
 
-/// Stable identity for the deterministic lowering used by an entry-point plan.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct LoweringIdentity(String);
-
-impl LoweringIdentity {
-    /// Creates a checked lowering identity.
-    pub fn new(value: impl AsRef<str>) -> Result<Self, OpLaunchError> {
-        checked_identity("lowering identity", value.as_ref()).map(Self)
-    }
-
-    /// Returns the identity string.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for LoweringIdentity {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-/// Stable identity for the config canonicalizer used by an entry-point plan.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct CanonicalizerIdentity(String);
-
-impl CanonicalizerIdentity {
-    /// Creates a checked canonicalizer identity.
-    pub fn new(value: impl AsRef<str>) -> Result<Self, OpLaunchError> {
-        checked_identity("canonicalizer identity", value.as_ref()).map(Self)
-    }
-
-    /// Returns the identity string.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for CanonicalizerIdentity {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
 /// Deterministic plan returned by a launchable entry-point operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntryPointOpPlan {
@@ -359,16 +313,8 @@ pub struct EntryPointOpPlan {
     pub config_material: Vec<CanonicalConfigMaterial>,
     /// Canonical seed artifacts required by the draft.
     pub seed_material: Vec<CanonicalSeedMaterial>,
-    /// Public output schema id exposed by the op, when the workflow has one.
-    pub public_output_schema_id: Option<SchemaId>,
-    /// Deterministic lowering identity that produced the draft.
-    pub lowering_identity: LoweringIdentity,
-    /// Config canonicalizer identity that produced config material.
-    pub canonicalizer_identity: CanonicalizerIdentity,
     /// Digest of the original authored config bytes.
     pub authored_config_digest: ContentDigest,
-    /// Digest of the canonical op config bytes.
-    pub canonical_config_digest: ContentDigest,
 }
 
 /// Operation that can plan a public entry-point run from authored config.
@@ -854,26 +800,6 @@ fn validate_namespace_segment(value: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn checked_identity(label: &'static str, value: &str) -> Result<String, OpLaunchError> {
-    if value.is_empty() {
-        return Err(OpLaunchError::new(
-            "InvalidEntryPointOpIdentity",
-            format!("{label} must not be empty"),
-        ));
-    }
-    if value.bytes().any(|byte| {
-        !(byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-'))
-    }) {
-        return Err(OpLaunchError::new(
-            "InvalidEntryPointOpIdentity",
-            format!(
-                "{label} must use lowercase ASCII letters, digits, dots, underscores, or dashes"
-            ),
-        ));
-    }
-    Ok(value.to_owned())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -925,16 +851,9 @@ mod tests {
                 draft,
                 config_material: Vec::new(),
                 seed_material: Vec::new(),
-                public_output_schema_id: None,
-                lowering_identity: LoweringIdentity::new("mfm.test.lowering.v1")?,
-                canonicalizer_identity: CanonicalizerIdentity::new("mfm.test.canonicalizer.v1")?,
                 authored_config_digest: ContentDigest::from_digest(
                     DigestAlgorithm::Sha256JcsV1,
                     mfm_canonical::sha256_digest_bytes(b"authored"),
-                ),
-                canonical_config_digest: ContentDigest::from_digest(
-                    DigestAlgorithm::Sha256JcsV1,
-                    mfm_canonical::sha256_digest_bytes(b"canonical"),
                 ),
             })
         }

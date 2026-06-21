@@ -52,10 +52,10 @@ mod entry_points;
 mod evm_contracts;
 
 pub use entry_point::{
-    AuthoredConfig, CanonicalConfigMaterial, CanonicalSeedMaterial, CanonicalizerIdentity,
-    ConfigFormat, EntryPointOpId, EntryPointOpPlan, EntryPointOpRegistry, EntryPointOpResolveError,
-    LaunchableOp, LoweringIdentity, NormalizedAuthoredConfig, OpLaunchError, OpVersion,
-    PublicOpName, DEFAULT_AUTHORED_CONFIG_FORMAT, DEFAULT_AUTHORED_CONFIG_MAX_BYTES,
+    AuthoredConfig, CanonicalConfigMaterial, CanonicalSeedMaterial, ConfigFormat, EntryPointOpId,
+    EntryPointOpPlan, EntryPointOpRegistry, EntryPointOpResolveError, LaunchableOp,
+    NormalizedAuthoredConfig, OpLaunchError, OpVersion, PublicOpName,
+    DEFAULT_AUTHORED_CONFIG_FORMAT, DEFAULT_AUTHORED_CONFIG_MAX_BYTES,
 };
 
 /// Shared observability configuration used by typed binaries.
@@ -475,12 +475,6 @@ pub struct EntryPointRunLaunchInput<'a> {
     pub certification_registry: &'a CertificationRegistry,
     /// Store-owned run id to bind.
     pub run_id: RunId,
-    /// Framework version evidence to bind to the run start event.
-    pub framework_version: &'a str,
-    /// Source revision evidence to bind to the run start event.
-    pub source_revision: &'a str,
-    /// Caller-supplied launch time in Unix milliseconds.
-    pub launched_at_unix_ms: u64,
     /// Scheduler drive policy after start.
     pub drive: DriveMode,
 }
@@ -488,24 +482,10 @@ pub struct EntryPointRunLaunchInput<'a> {
 /// App-level evidence for a prepared entry-point op launch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntryPointLaunchEvidence {
-    /// Public operation name submitted by the caller.
-    pub submitted_public_op_name: PublicOpName,
     /// Typed entry-point op id resolved from the registry.
     pub resolved_op_id: EntryPointOpId,
-    /// Public operation version selected from the registry.
-    pub resolved_op_version: OpVersion,
     /// Canonical digest of the entry-point registry used for resolution.
     pub entry_point_registry_digest: ContentDigest,
-    /// Deterministic lowering identity used by the selected op.
-    pub lowering_identity: LoweringIdentity,
-    /// Config canonicalizer identity used by the selected op.
-    pub canonicalizer_identity: CanonicalizerIdentity,
-    /// Authored config format accepted by the selected op.
-    pub config_format: ConfigFormat,
-    /// Digest of the submitted authored config bytes.
-    pub authored_config_digest: ContentDigest,
-    /// Digest of the canonical op config bytes.
-    pub canonical_config_digest: ContentDigest,
 }
 
 /// Prepared entry-point op launch material accepted by app runtime services.
@@ -1817,14 +1797,11 @@ pub fn prepare_entry_point_run_launch(
     input: EntryPointRunLaunchInput<'_>,
 ) -> Result<PreparedEntryPointRunLaunch, AppError> {
     let registry_digest = input.entry_point_registry.registry_digest()?;
-    let submitted_public_op_name = input.public_op_name.clone();
-    let config_format = input.authored_config.format();
     let authored_config_digest = input.authored_config.authored_digest().clone();
     let op = input
         .entry_point_registry
         .resolve(&input.public_op_name, input.op_version)?;
     let resolved_op_id = op.op_id();
-    let resolved_op_version = op.version();
     let plan = op.plan(input.authored_config)?;
     if plan.authored_config_digest != authored_config_digest {
         return Err(entry_point_launch_internal_error(
@@ -1833,7 +1810,6 @@ pub fn prepare_entry_point_run_launch(
         ));
     }
 
-    let public_output_schema_id = plan.public_output_schema_id.clone();
     let mut config_inputs = plan
         .config_material
         .iter()
@@ -1860,44 +1836,39 @@ pub fn prepare_entry_point_run_launch(
         .map_err(entry_point_certification_error)?;
     let certified_spec = mfm_certify::certify_typed_spec(lowered, &scoped_registry)
         .map_err(entry_point_certification_error)?;
-    config_inputs.extend(framework_config_launch_artifacts_for_spec(
-        &certified_spec.envelope().spec,
-    )?);
-    if let Some(expected_public_schema_id) = &public_output_schema_id {
-        let actual_public_schema_id = &certified_spec
+    let public_output_schema_id = Some(
+        certified_spec
             .envelope()
             .spec
             .public_outputs
-            .public_schema_id;
-        if actual_public_schema_id != expected_public_schema_id {
-            return Err(entry_point_launch_internal_error(
-                "EntryPointOpPublicOutputMismatch",
-                "entry-point op public output schema does not match the certified spec",
-            ));
-        }
-    }
+            .public_schema_id
+            .clone(),
+    );
+    config_inputs.extend(framework_config_launch_artifacts_for_spec(
+        &certified_spec.envelope().spec,
+    )?);
 
     let evidence = EntryPointLaunchEvidence {
-        submitted_public_op_name,
         resolved_op_id,
-        resolved_op_version,
         entry_point_registry_digest: registry_digest,
-        lowering_identity: plan.lowering_identity,
-        canonicalizer_identity: plan.canonicalizer_identity,
-        config_format,
-        authored_config_digest,
-        canonical_config_digest: plan.canonical_config_digest,
     };
-    let runtime_entry_point_evidence = runtime_entry_point_launch_evidence(&evidence)?;
+    let runtime_entry_point_evidence = events::EntryPointLaunchEvidence {
+        resolved_op_id: events::EntryPointOpId::new(evidence.resolved_op_id.to_string()).map_err(
+            |_| {
+                entry_point_launch_internal_error(
+                    "EntryPointLaunchEvidenceInvalid",
+                    "entry-point launch evidence is invalid",
+                )
+            },
+        )?,
+        entry_point_registry_digest: evidence.entry_point_registry_digest.clone(),
+    };
     let request = prepare_certified_run_launch(
         CertifiedRunLaunchInput {
             certified_spec,
             registry: &scoped_registry,
             run_id: input.run_id,
             entry_point_evidence: runtime_entry_point_evidence,
-            framework_version: input.framework_version,
-            source_revision: input.source_revision,
-            launched_at_unix_ms: input.launched_at_unix_ms,
             drive: input.drive,
         },
         config_inputs,
@@ -1907,56 +1878,6 @@ pub fn prepare_entry_point_run_launch(
         request,
         evidence,
         public_output_schema_id,
-    })
-}
-
-fn runtime_entry_point_launch_evidence(
-    evidence: &EntryPointLaunchEvidence,
-) -> Result<events::EntryPointLaunchEvidence, AppError> {
-    Ok(events::EntryPointLaunchEvidence {
-        submitted_public_op_name: events::EntryPointPublicOpName::new(
-            evidence.submitted_public_op_name.as_str(),
-        )
-        .map_err(|_| {
-            entry_point_launch_internal_error(
-                "EntryPointLaunchEvidenceInvalid",
-                "entry-point launch evidence is invalid",
-            )
-        })?,
-        resolved_op_id: events::EntryPointOpId::new(evidence.resolved_op_id.to_string()).map_err(
-            |_| {
-                entry_point_launch_internal_error(
-                    "EntryPointLaunchEvidenceInvalid",
-                    "entry-point launch evidence is invalid",
-                )
-            },
-        )?,
-        resolved_op_version: evidence.resolved_op_version.get(),
-        entry_point_registry_digest: evidence.entry_point_registry_digest.clone(),
-        lowering_identity: events::EntryPointLoweringIdentity::new(
-            evidence.lowering_identity.as_str(),
-        )
-        .map_err(|_| {
-            entry_point_launch_internal_error(
-                "EntryPointLaunchEvidenceInvalid",
-                "entry-point launch evidence is invalid",
-            )
-        })?,
-        canonicalizer_identity: spec::CanonicalizerIdentity::new(
-            evidence.canonicalizer_identity.as_str(),
-        )
-        .map_err(|_| {
-            entry_point_launch_internal_error(
-                "EntryPointLaunchEvidenceInvalid",
-                "entry-point launch evidence is invalid",
-            )
-        })?,
-        config_format: match evidence.config_format {
-            ConfigFormat::Toml => events::EntryPointConfigFormat::Toml,
-            ConfigFormat::Json => events::EntryPointConfigFormat::Json,
-        },
-        authored_config_digest: evidence.authored_config_digest.clone(),
-        canonical_config_digest: evidence.canonical_config_digest.clone(),
     })
 }
 
@@ -1982,12 +1903,6 @@ pub(crate) struct CertifiedRunLaunchInput<'a> {
     pub(crate) run_id: RunId,
     /// Public entry-point operation evidence selected by app assembly.
     pub(crate) entry_point_evidence: events::EntryPointLaunchEvidence,
-    /// Framework version evidence to bind to the run start event.
-    pub(crate) framework_version: &'a str,
-    /// Source revision evidence to bind to the run start event.
-    pub(crate) source_revision: &'a str,
-    /// Caller-supplied launch time in Unix milliseconds.
-    pub(crate) launched_at_unix_ms: u64,
     /// Drive mode used for the initial scheduler invocation.
     pub(crate) drive: DriveMode,
 }
@@ -2012,27 +1927,6 @@ fn prepare_certified_run_launch(
             spec_artifact,
             certificate_artifact,
             config_artifacts,
-            framework_version: events::FrameworkVersion::new(input.framework_version).map_err(
-                |error| {
-                    let _ = error;
-                    AppError::new(
-                        ErrorClass::BadRequest,
-                        "FrameworkVersionInvalid",
-                        "Framework version is invalid",
-                    )
-                },
-            )?,
-            source_revision: events::SourceRevision::new(input.source_revision).map_err(
-                |error| {
-                    let _ = error;
-                    AppError::new(
-                        ErrorClass::BadRequest,
-                        "SourceRevisionInvalid",
-                        "Source revision is invalid",
-                    )
-                },
-            )?,
-            launched_at_unix_ms: input.launched_at_unix_ms,
             adapter_executables: Vec::new(),
             seed_cells,
         },

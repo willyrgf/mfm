@@ -7021,15 +7021,12 @@ pub mod v1 {
                 "descriptor_identities": payload.descriptor_identities.iter().map(descriptor_identity_json).collect::<Vec<_>>(),
                 "adapter_executables": payload.adapter_executables.iter().map(executable_identity_json).collect::<Vec<_>>(),
                 "entry_point": entry_point_launch_evidence_json(&payload.entry_point),
-                "framework_version": payload.framework_version.as_str(),
-                "launched_at_unix_ms": payload.launched_at_unix_ms,
                 "lowering_version": payload.lowering_version.as_str(),
                 "public_output_schema_id": payload.public_output_schema_id.as_str(),
                 "run_id": payload.run_id.as_str(),
                 "runner_executables": payload.runner_executables.iter().map(executable_identity_json).collect::<Vec<_>>(),
                 "saga_policy_digest": payload.saga_policy_digest.as_str(),
                 "seed_cells": payload.seed_cells.iter().map(seed_cell_ref_json).collect::<Vec<_>>(),
-                "source_revision": payload.source_revision.as_str(),
                 "spec_artifact": run_artifact_json(&payload.spec_artifact),
                 "spec_hash": payload.spec_hash.as_str(),
                 "spec_version": payload.spec_version.as_str(),
@@ -7370,19 +7367,10 @@ pub mod v1 {
                         "canonicalizer_identity",
                     )?)
                     .map_err(|error| StoreError::Identity(error.to_string()))?,
-                    framework_version: events::FrameworkVersion::new(required_str(
-                        json,
-                        "framework_version",
-                    )?)?,
-                    source_revision: events::SourceRevision::new(required_str(
-                        json,
-                        "source_revision",
-                    )?)?,
                     admitted_binding_digest: parse_identity(required_str(
                         json,
                         "admitted_binding_digest",
                     )?)?,
-                    launched_at_unix_ms: required_u64(json, "launched_at_unix_ms")?,
                     seed_cells: parse_vec(json, "seed_cells", parse_seed_cell_ref)?,
                 },
             ))),
@@ -8070,33 +8058,10 @@ pub mod v1 {
         json: &serde_json::Value,
     ) -> Result<events::EntryPointLaunchEvidence> {
         Ok(events::EntryPointLaunchEvidence {
-            submitted_public_op_name: events::EntryPointPublicOpName::new(required_str(
-                json,
-                "submitted_public_op_name",
-            )?)?,
             resolved_op_id: events::EntryPointOpId::new(required_str(json, "resolved_op_id")?)?,
-            resolved_op_version: required_u32(json, "resolved_op_version")?,
             entry_point_registry_digest: parse_identity(required_str(
                 json,
                 "entry_point_registry_digest",
-            )?)?,
-            lowering_identity: events::EntryPointLoweringIdentity::new(required_str(
-                json,
-                "lowering_identity",
-            )?)?,
-            canonicalizer_identity: CanonicalizerIdentity::new(required_str(
-                json,
-                "canonicalizer_identity",
-            )?)
-            .map_err(|error| StoreError::Identity(error.to_string()))?,
-            config_format: events::EntryPointConfigFormat::parse(required_str(
-                json,
-                "config_format",
-            )?)?,
-            authored_config_digest: parse_identity(required_str(json, "authored_config_digest")?)?,
-            canonical_config_digest: parse_identity(required_str(
-                json,
-                "canonical_config_digest",
             )?)?,
         })
     }
@@ -8421,15 +8386,8 @@ pub mod v1 {
         evidence: &events::EntryPointLaunchEvidence,
     ) -> serde_json::Value {
         serde_json::json!({
-            "authored_config_digest": evidence.authored_config_digest.as_str(),
-            "canonical_config_digest": evidence.canonical_config_digest.as_str(),
-            "canonicalizer_identity": evidence.canonicalizer_identity.as_str(),
-            "config_format": evidence.config_format.as_str(),
             "entry_point_registry_digest": evidence.entry_point_registry_digest.as_str(),
-            "lowering_identity": evidence.lowering_identity.as_str(),
             "resolved_op_id": evidence.resolved_op_id.as_str(),
-            "resolved_op_version": evidence.resolved_op_version,
-            "submitted_public_op_name": evidence.submitted_public_op_name.as_str(),
         })
     }
 
