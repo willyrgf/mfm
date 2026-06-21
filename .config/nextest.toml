@@ -1,3 +1,24 @@
 [profile.default]
 # Origin parity flows include source fetch + compile + deploy and can exceed 60s.
 slow-timeout = { period = "120s", terminate-after = 4 }
+
+[test-groups]
+trybuild-ui = { max-threads = 1 }
+
+[[profile.default.overrides]]
+# Trybuild suites spawn nested Cargo builds under the shared target directory.
+# Keep them serialized so CI runners do not spend the test timeout waiting on
+# Cargo's build lock while unrelated tests continue to run in parallel.
+filter = '''
+binary(=capability_ui)
+| binary(=certify_authority_ui)
+| binary(=compile_fail)
+| binary(=derive_ui)
+| binary(=evm_signing_ui)
+| binary(=program_ui)
+| binary(=public_output_authority_ui)
+| binary(=replay_authority_ui)
+| binary(=runtime_authority_ui)
+| binary(=signing_ui)
+'''
+test-group = "trybuild-ui"
