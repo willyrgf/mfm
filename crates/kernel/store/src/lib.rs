@@ -494,32 +494,6 @@ pub mod v1 {
         }
     }
 
-    /// Store-owned audit metadata carried beside an event payload.
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub struct KernelEventAudit {
-        store_contract_version: &'static str,
-        payload_canonical_byte_len: u64,
-    }
-
-    impl KernelEventAudit {
-        fn new(payload_canonical_byte_len: u64) -> Self {
-            Self {
-                store_contract_version: "mfm.store.v1",
-                payload_canonical_byte_len,
-            }
-        }
-
-        /// Returns the store contract version that produced the envelope.
-        pub const fn store_contract_version(&self) -> &'static str {
-            self.store_contract_version
-        }
-
-        /// Returns the canonical payload byte length used for hashing.
-        pub const fn payload_canonical_byte_len(&self) -> u64 {
-            self.payload_canonical_byte_len
-        }
-    }
-
     /// Store-owned typed event envelope.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct KernelEventEnvelope {
@@ -533,7 +507,6 @@ pub mod v1 {
         logical_key: LogicalEventKey,
         payload_hash: ContentDigest,
         payload: KernelEventPayload,
-        audit: KernelEventAudit,
     }
 
     /// Raw persisted event row loaded from an authoritative typed run stream.
@@ -563,8 +536,6 @@ pub mod v1 {
         pub payload_hash: ContentDigest,
         /// Persisted typed event payload.
         pub payload: KernelEventPayload,
-        /// Persisted canonical payload byte length.
-        pub payload_canonical_byte_len: u64,
     }
 
     impl KernelEventEnvelope {
@@ -580,14 +551,6 @@ pub mod v1 {
                 return Err(StoreError::PersistedEventMismatch {
                     field: "payload_hash",
                     message: "persisted payload hash does not match canonical payload".to_owned(),
-                });
-            }
-            let derived_byte_len = canonical_payload.as_bytes().len() as u64;
-            if derived_byte_len != record.payload_canonical_byte_len {
-                return Err(StoreError::PersistedEventMismatch {
-                    field: "payload_canonical_byte_len",
-                    message: "persisted payload byte length does not match canonical payload"
-                        .to_owned(),
                 });
             }
             let derived_schema_id = record.payload.event_schema_id()?;
@@ -636,7 +599,6 @@ pub mod v1 {
                 logical_key: record.logical_key,
                 payload_hash: record.payload_hash,
                 payload: record.payload,
-                audit: KernelEventAudit::new(record.payload_canonical_byte_len),
             })
         }
 
@@ -688,11 +650,6 @@ pub mod v1 {
         /// Typed event payload.
         pub fn payload(&self) -> &KernelEventPayload {
             &self.payload
-        }
-
-        /// Store-owned audit metadata.
-        pub fn audit(&self) -> &KernelEventAudit {
-            &self.audit
         }
     }
 
@@ -4968,7 +4925,6 @@ pub mod v1 {
                 logical_key,
                 payload_hash,
                 payload,
-                audit: KernelEventAudit::new(canonical_payload.as_bytes().len() as u64),
             };
 
             let key = (request.run_id.clone(), envelope.logical_key.clone());
@@ -5069,7 +5025,6 @@ pub mod v1 {
                 logical_key,
                 payload_hash,
                 payload,
-                audit: KernelEventAudit::new(canonical_payload.as_bytes().len() as u64),
             });
         }
 

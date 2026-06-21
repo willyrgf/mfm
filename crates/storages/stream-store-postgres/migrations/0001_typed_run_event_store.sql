@@ -14,12 +14,10 @@ CREATE TABLE typed_run_events (
   commit_key TEXT NOT NULL,
   logical_key TEXT NOT NULL,
   payload_hash TEXT NOT NULL,
-  payload_canonical_byte_len BIGINT NOT NULL,
   payload_json JSONB NOT NULL,
   PRIMARY KEY (run_id, seq, ordinal),
   CONSTRAINT typed_run_events_seq_positive CHECK (seq >= 1),
   CONSTRAINT typed_run_events_ordinal_nonnegative CHECK (ordinal >= 0),
-  CONSTRAINT typed_run_events_payload_len_nonnegative CHECK (payload_canonical_byte_len >= 0),
   CONSTRAINT typed_run_events_run_fk FOREIGN KEY (run_id) REFERENCES typed_run_heads(run_id) ON DELETE CASCADE,
   UNIQUE (run_id, event_id)
 );
