@@ -859,9 +859,9 @@ mod tests {
         assert_eq!(
             executable_identity_summary([READ_FACTORY, SIDE_EFFECT_FACTORY, PURE_FACTORY]),
             [
-                "factory=read_external;source=mfm-transports-proof-built-in;package=mfm-transports-proof;version=0.1.0;cargo_digest=content:sha256-jcs-v1:8e5756e097f23f2a6d5fe8c69846ba7ca609c5a7816528a85d7718cd760357f2;binary_digest=content:sha256-jcs-v1:67de41659eff846aa936862dfb86e7bb6acc9405aeb40f46bddfc4e287cb7f1b;nix_derivation=false;nix_output=false",
-                "factory=apply_side_effect;source=mfm-transports-proof-built-in;package=mfm-transports-proof;version=0.1.0;cargo_digest=content:sha256-jcs-v1:8e5756e097f23f2a6d5fe8c69846ba7ca609c5a7816528a85d7718cd760357f2;binary_digest=content:sha256-jcs-v1:67de41659eff846aa936862dfb86e7bb6acc9405aeb40f46bddfc4e287cb7f1b;nix_derivation=false;nix_output=false",
-                "factory=pure;source=mfm-transports-proof-built-in;package=mfm-transports-proof;version=0.1.0;cargo_digest=content:sha256-jcs-v1:8e5756e097f23f2a6d5fe8c69846ba7ca609c5a7816528a85d7718cd760357f2;binary_digest=content:sha256-jcs-v1:67de41659eff846aa936862dfb86e7bb6acc9405aeb40f46bddfc4e287cb7f1b;nix_derivation=false;nix_output=false",
+                "factory=read_external;cargo_digest=content:sha256-jcs-v1:8e5756e097f23f2a6d5fe8c69846ba7ca609c5a7816528a85d7718cd760357f2;binary_digest=content:sha256-jcs-v1:67de41659eff846aa936862dfb86e7bb6acc9405aeb40f46bddfc4e287cb7f1b;nix_derivation=false;nix_output=false",
+                "factory=apply_side_effect;cargo_digest=content:sha256-jcs-v1:8e5756e097f23f2a6d5fe8c69846ba7ca609c5a7816528a85d7718cd760357f2;binary_digest=content:sha256-jcs-v1:67de41659eff846aa936862dfb86e7bb6acc9405aeb40f46bddfc4e287cb7f1b;nix_derivation=false;nix_output=false",
+                "factory=pure;cargo_digest=content:sha256-jcs-v1:8e5756e097f23f2a6d5fe8c69846ba7ca609c5a7816528a85d7718cd760357f2;binary_digest=content:sha256-jcs-v1:67de41659eff846aa936862dfb86e7bb6acc9405aeb40f46bddfc4e287cb7f1b;nix_derivation=false;nix_output=false",
             ]
         );
     }
