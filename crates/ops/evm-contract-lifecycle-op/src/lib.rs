@@ -633,8 +633,7 @@ impl From<mfm_program::PlanError> for ContractLifecyclePlanError {
     }
 }
 
-/// Returns all author-emitted config material from a lifecycle draft.
-pub fn contract_lifecycle_draft_config_material(
+fn contract_lifecycle_draft_config_material(
     draft: &mfm_program::TypedProgramDraft,
 ) -> mfm_program::Result<Vec<TypedProgramConfigMaterial>> {
     let media_type = MediaType::new("application/json")
