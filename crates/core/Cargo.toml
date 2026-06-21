@@ -36,7 +36,6 @@ chrono = { version = "0.4.38", features = ["serde"] }
 rand = "0.9.3"
 alloy-primitives = { workspace = true, features = ["serde", "k256"] }
 hex = "0.4.3"
-thiserror = "2.0.12"
 ring = "0.17.14"
 fs2 = "0.4.3"
 

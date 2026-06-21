@@ -6,7 +6,7 @@
 use alloy_primitives::U256;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use thiserror::Error;
+use std::fmt;
 
 use super::decimal;
 
@@ -44,10 +44,9 @@ pub struct Network {
 }
 
 /// Errors raised while converting configured network values into runtime primitives.
-#[derive(Debug, Error)]
+#[derive(Debug)]
 pub enum NetworkValueError {
     /// `min_balance_coin` could not be parsed into base units.
-    #[error("invalid min_balance_coin {value:?}: {reason}")]
     InvalidMinBalance {
         /// Original configured value.
         value: String,
@@ -55,6 +54,18 @@ pub enum NetworkValueError {
         reason: String,
     },
 }
+
+impl fmt::Display for NetworkValueError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidMinBalance { value, reason } => {
+                write!(f, "invalid min_balance_coin {value:?}: {reason}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for NetworkValueError {}
 
 impl Network {
     /// Parses `min_balance_coin` as a decimal coin amount into base units (e.g. wei).

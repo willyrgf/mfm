@@ -7,7 +7,6 @@ use bs58;
 use mfm_program_derive::MfmValue;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use thiserror::Error;
 
 use crate::ids::{
     ExternalSignerId, KeystoreEntryId, NetworkId, NormalizedEvmAddress, PortfolioScalarError,
@@ -349,19 +348,16 @@ pub struct ResolvedWallet {
 }
 
 /// Validation errors for canonical wallet configs.
-#[derive(Clone, Debug, PartialEq, Eq, Error)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WalletConfigError {
     /// The JSON payload could not be decoded into the canonical type.
-    #[error("wallet config decode failed: {0}")]
     Decode(String),
     /// `wallet_id` did not satisfy the portfolio identifier grammar.
-    #[error("wallet_id is invalid: {source}")]
     InvalidWalletId {
         /// Underlying scalar validation failure.
         source: PortfolioScalarError,
     },
     /// `address` was invalid for the selected subject kind.
-    #[error("address must be valid for subject_kind `{subject_kind:?}`: {address}")]
     InvalidAddress {
         /// Invalid wallet address input.
         address: String,
@@ -369,13 +365,11 @@ pub enum WalletConfigError {
         subject_kind: WalletSubjectKind,
     },
     /// `network_id` did not satisfy the portfolio identifier grammar.
-    #[error("network_id is invalid: {source}")]
     InvalidNetworkId {
         /// Underlying scalar validation failure.
         source: PortfolioScalarError,
     },
     /// One of the symbol refs did not satisfy the portfolio identifier grammar.
-    #[error("wallet symbol_id ref `{symbol_id}` is invalid: {source}")]
     InvalidSymbolIdRef {
         /// Rejected symbol id.
         symbol_id: String,
@@ -383,11 +377,48 @@ pub enum WalletConfigError {
         source: PortfolioScalarError,
     },
     /// Wallet metadata contained a secret-shaped key or value.
-    #[error("metadata key `{key}` contains secret-shaped content")]
     MetadataContainsSecret {
         /// Metadata key associated with the rejected content.
         key: String,
     },
+}
+
+impl fmt::Display for WalletConfigError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Decode(message) => write!(f, "wallet config decode failed: {message}"),
+            Self::InvalidWalletId { source } => {
+                write!(f, "wallet_id is invalid: {source}")
+            }
+            Self::InvalidAddress {
+                address,
+                subject_kind,
+            } => write!(
+                f,
+                "address must be valid for subject_kind `{subject_kind:?}`: {address}"
+            ),
+            Self::InvalidNetworkId { source } => {
+                write!(f, "network_id is invalid: {source}")
+            }
+            Self::InvalidSymbolIdRef { symbol_id, source } => {
+                write!(f, "wallet symbol_id ref `{symbol_id}` is invalid: {source}")
+            }
+            Self::MetadataContainsSecret { key } => {
+                write!(f, "metadata key `{key}` contains secret-shaped content")
+            }
+        }
+    }
+}
+
+impl std::error::Error for WalletConfigError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InvalidWalletId { source }
+            | Self::InvalidNetworkId { source }
+            | Self::InvalidSymbolIdRef { source, .. } => Some(source),
+            _ => None,
+        }
+    }
 }
 
 /// Decodes and validates a canonical wallet config.

@@ -19,6 +19,7 @@
 //! ```
 
 use std::collections::BTreeSet;
+use std::fmt;
 
 use mfm_canonical::sha256_digest_bytes;
 use mfm_capabilities::{CapabilityError, CapabilitySpec};
@@ -165,24 +166,44 @@ fn capability_error(error: CapabilityError) -> AdapterContractError {
 }
 
 /// Adapter contract descriptor error.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdapterContractError {
     /// Adapter identity construction failed.
-    #[error("adapter contract identity failed: {0}")]
     Identity(String),
     /// Capability contract identity construction failed.
-    #[error("adapter contract capability failed: {0}")]
     Capability(String),
     /// Binding descriptors must declare explicit capability authority.
-    #[error("adapter contract binding requires at least one capability")]
     EmptyCapabilitySet,
     /// Binding descriptor declared a capability more than once.
-    #[error("adapter contract binding has duplicate capability {capability}")]
     DuplicateCapability {
         /// Duplicate capability kind.
         capability: CapabilityKind,
     },
 }
+
+impl fmt::Display for AdapterContractError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Identity(message) => {
+                write!(f, "adapter contract identity failed: {message}")
+            }
+            Self::Capability(message) => {
+                write!(f, "adapter contract capability failed: {message}")
+            }
+            Self::EmptyCapabilitySet => {
+                f.write_str("adapter contract binding requires at least one capability")
+            }
+            Self::DuplicateCapability { capability } => {
+                write!(
+                    f,
+                    "adapter contract binding has duplicate capability {capability}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for AdapterContractError {}
 
 #[cfg(test)]
 mod tests {

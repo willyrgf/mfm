@@ -14,7 +14,6 @@ alloy-primitives = { workspace = true, features = ["serde"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
 
 mfm-evm-capabilities = { path = "../../evm-capabilities" }
 mfm-evm-core = { path = "../../evm-core" }
