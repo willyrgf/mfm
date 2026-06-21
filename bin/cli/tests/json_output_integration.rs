@@ -379,6 +379,39 @@ fn test_run_start_rejects_unknown_entry_point_op_before_store_access() {
 }
 
 #[test]
+fn test_run_start_accepts_portfolio_snapshot_toml_before_store_access() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("portfolio.toml");
+    std::fs::write(&config_path, sample_portfolio_config_toml()).expect("config fixture");
+
+    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+    let output = cmd
+        .env_remove("DATABASE_URL")
+        .args([
+            "--output-format",
+            "json",
+            "run",
+            "start",
+            "--op",
+            "portfolio_snapshot",
+            "--config",
+            config_path.to_str().unwrap(),
+            "--run-id",
+            "run:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000001",
+            "--drive",
+            "append-only",
+        ])
+        .output()
+        .expect("Failed to execute command");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let parsed = verify_error_response(&stderr);
+    assert_eq!(parsed.error.code, "MissingDatabaseUrl");
+}
+
+#[test]
 fn test_run_start_rejects_legacy_op_id_flag() {
     let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
     let output = cmd
@@ -543,4 +576,62 @@ fn test_json_response_structure_consistency() {
     assert_eq!(error_json["status"], expected_error_structure["status"]);
     assert_eq!(error_json["error"]["code"], "ErrorCode");
     assert_eq!(error_json["error"]["message"], "Error message");
+}
+
+fn sample_portfolio_config_toml() -> String {
+    r#"[portfolio]
+portfolio_id = "portfolio_main"
+quote_codes = ["USD"]
+
+[portfolio.metadata]
+
+[[portfolio.networks]]
+network_id = "ethereum-mainnet"
+family = "evm"
+chain_id = 1
+control_scope = "shared"
+
+[portfolio.networks.metadata]
+
+[[portfolio.wallets]]
+wallet_id = "wallet_main"
+network_id = "ethereum-mainnet"
+symbol_ids = ["eth.native.ethereum-mainnet"]
+
+[portfolio.wallets.subject]
+kind = "evm_address"
+address = "0x000000000000000000000000000000000000dead"
+
+[portfolio.wallets.implementation]
+kind = "address_only"
+
+[portfolio.wallets.metadata]
+
+[[portfolio.symbol_configs]]
+symbol_id = "eth.native.ethereum-mainnet"
+display_symbol = "ETH"
+kind = "native_balance"
+role = "native"
+network_id = "ethereum-mainnet"
+decimals = 18
+
+[portfolio.symbol_configs.balance_reader]
+kind = "native_balance"
+
+[portfolio.symbol_configs.valuation]
+
+[[portfolio.symbol_configs.valuation.quotes]]
+quote = "USD"
+priced_symbol_id = "eth.native.ethereum-mainnet"
+
+[portfolio.symbol_configs.valuation.quotes.reader]
+kind = "fixed_unit_price"
+unit_price_dec = "1800.00"
+
+[portfolio.symbol_configs.metadata]
+
+[valuation_source_registry]
+sources = []
+"#
+    .to_owned()
 }

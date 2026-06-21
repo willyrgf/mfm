@@ -3,8 +3,9 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::{routing::post, Json, Router};
-use mfm_app::TypedRunMode;
+use mfm_app::{AuthoredConfig, ConfigFormat, PublicOpName, TypedRunMode};
 use mfm_events::v1 as events;
+use mfm_ids::DigestAlgorithm;
 use mfm_ids::RunId;
 use mfm_store::v1::{self as store, AsyncTypedRunEventStore};
 use serde_json::json;
@@ -111,6 +112,59 @@ async fn rest_portfolio_snapshot_matches_typed_public_output() {
 }
 
 #[tokio::test]
+async fn rest_portfolio_snapshot_defaults_toml_and_renders_public_output() {
+    let _env_guard = RPC_ENV_LOCK.lock().await;
+    let rpc_url = start_rpc_mock().await;
+    set_rpc_env(rpc_url);
+
+    let root =
+        std::env::temp_dir().join(format!("mfm-rest-portfolio-toml-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).expect("typed artifact root");
+    let state = support::in_memory_rest_app_state(&root);
+    let store = state.store.clone();
+    let app = mfm_rest_api::make_app(state);
+    let response = app
+        .oneshot(json_post(
+            "/v1/runs/start",
+            json!({
+                "op": "portfolio_snapshot",
+                "config": portfolio_payload_toml(),
+                "framework_version": "mfm.integration.rest.portfolio.typed.v1",
+                "source_revision": "integration-test",
+                "drive": "until_blocked"
+            }),
+        ))
+        .await
+        .expect("portfolio toml rest response");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = response_json(response).await;
+    assert_eq!(body["status"], "success");
+    assert_eq!(body["data"]["run"]["run_mode"], "completed");
+    assert_eq!(
+        body["data"]["public_output"]["json"]["snapshot"]["portfolio_id"],
+        "typed-local"
+    );
+    assert_eq!(
+        body["data"]["public_output"]["json"]["snapshot"]["wallets"][0]["observations"][0]
+            ["values"][0]["value_dec"],
+        "2.500000000000000000"
+    );
+
+    let run_id = RunId::parse(body["data"]["run"]["run_id"].as_str().expect("run id"))
+        .expect("typed run id");
+    let stream = store.load_run_stream(&run_id).await.expect("run stream");
+    assert_portfolio_entry_point_evidence(
+        &stream,
+        AuthoredConfig::new(ConfigFormat::Toml, portfolio_payload_toml())
+            .expect("authored toml config"),
+        events::EntryPointConfigFormat::Toml,
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn portfolio_runner_output_summary_matches_golden() {
     let _env_guard = RPC_ENV_LOCK.lock().await;
     let rpc_url = start_rpc_mock().await;
@@ -129,6 +183,12 @@ async fn portfolio_runner_output_summary_matches_golden() {
         .expect("typed run id");
     let stream = store.load_run_stream(&run_id).await.expect("run stream");
 
+    assert_portfolio_entry_point_evidence(
+        &stream,
+        AuthoredConfig::from_json_transport_value(Some(ConfigFormat::Json), &portfolio_payload())
+            .expect("authored json config"),
+        events::EntryPointConfigFormat::Json,
+    );
     assert_eq!(
         portfolio_runner_output_summary(&stream),
         [
@@ -315,6 +375,123 @@ fn portfolio_payload() -> serde_json::Value {
             "sources": []
         }
     })
+}
+
+fn portfolio_payload_toml() -> String {
+    format!(
+        r#"[portfolio]
+portfolio_id = "typed-local"
+quote_codes = ["USD"]
+
+[portfolio.metadata]
+
+[[portfolio.networks]]
+network_id = "{NETWORK_ID}"
+family = "evm"
+chain_id = 31337
+control_scope = "typed-local"
+
+[portfolio.networks.metadata]
+
+[[portfolio.wallets]]
+wallet_id = "wallet_local"
+network_id = "{NETWORK_ID}"
+symbol_ids = ["eth.native.typed-local-eth"]
+
+[portfolio.wallets.subject]
+kind = "evm_address"
+address = "0x000000000000000000000000000000000000dead"
+
+[portfolio.wallets.implementation]
+kind = "address_only"
+
+[portfolio.wallets.metadata]
+
+[[portfolio.symbol_configs]]
+symbol_id = "eth.native.typed-local-eth"
+display_symbol = "ETH"
+kind = "native_balance"
+role = "native"
+network_id = "{NETWORK_ID}"
+decimals = 18
+
+[portfolio.symbol_configs.balance_reader]
+kind = "native_balance"
+
+[portfolio.symbol_configs.valuation]
+
+[[portfolio.symbol_configs.valuation.quotes]]
+quote = "USD"
+priced_symbol_id = "eth.native.typed-local-eth"
+
+[portfolio.symbol_configs.valuation.quotes.reader]
+kind = "fixed_unit_price"
+unit_price_dec = "2.50"
+
+[portfolio.symbol_configs.metadata]
+
+[valuation_source_registry]
+sources = []
+"#
+    )
+}
+
+fn assert_portfolio_entry_point_evidence(
+    stream: &[store::KernelEventEnvelope],
+    authored_config: AuthoredConfig,
+    expected_format: events::EntryPointConfigFormat,
+) {
+    let evidence = stream
+        .iter()
+        .find_map(|event| match event.payload() {
+            events::KernelEventPayload::RunAdmitted(payload) => Some(&payload.entry_point),
+            _ => None,
+        })
+        .expect("RunAdmitted entry-point evidence");
+    let registry = mfm_app::production_entry_point_op_registry().expect("entry-point registry");
+    let public_name = PublicOpName::new("portfolio_snapshot").expect("public op name");
+    let op = registry
+        .resolve(&public_name, None)
+        .expect("portfolio latest op");
+    let plan = op
+        .plan(authored_config.clone())
+        .expect("portfolio entry-point plan");
+
+    assert_eq!(
+        evidence.submitted_public_op_name.as_str(),
+        "portfolio_snapshot"
+    );
+    assert_eq!(evidence.resolved_op_id.as_str(), op.op_id().to_string());
+    assert_eq!(evidence.resolved_op_version, op.version().get());
+    assert_eq!(evidence.config_format, expected_format);
+    assert_eq!(
+        evidence.entry_point_registry_digest,
+        registry.registry_digest().expect("registry digest")
+    );
+    assert_eq!(
+        evidence.authored_config_digest,
+        *authored_config.authored_digest()
+    );
+    assert_eq!(
+        evidence.authored_config_digest.algorithm(),
+        DigestAlgorithm::Sha256JcsV1
+    );
+    assert_eq!(
+        evidence.canonical_config_digest,
+        plan.canonical_config_digest
+    );
+    assert_eq!(
+        evidence.canonical_config_digest.algorithm(),
+        DigestAlgorithm::Sha256JcsV1
+    );
+    assert_eq!(
+        evidence.lowering_identity.as_str(),
+        plan.lowering_identity.as_str()
+    );
+    assert_eq!(
+        evidence.canonicalizer_identity.as_str(),
+        plan.canonicalizer_identity.as_str()
+    );
 }
 
 fn portfolio_runner_output_summary(stream: &[store::KernelEventEnvelope]) -> Vec<String> {

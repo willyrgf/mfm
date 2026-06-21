@@ -251,6 +251,28 @@ mod tests {
         assert_eq!(err.code, "MissingDatabaseUrl");
     }
 
+    #[tokio::test]
+    async fn start_defaults_config_format_to_toml_before_store_connection() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config = tmp.path().join("portfolio.toml");
+        std::fs::write(&config, sample_portfolio_config_toml()).expect("write config");
+
+        let mut args = start_args(
+            config,
+            TypedRunStoresArgs {
+                typed_artifact_root: Some(tmp.path().join("artifacts")),
+                database_url: None,
+            },
+        );
+        args.config_format = ConfigFormatArg::Toml;
+
+        let err = execute_internal(&args)
+            .await
+            .expect_err("valid TOML entry-point launch proceeds to store construction");
+
+        assert_eq!(err.code, "MissingDatabaseUrl");
+    }
+
     fn start_args(config: PathBuf, stores: TypedRunStoresArgs) -> StartArgs {
         StartArgs {
             op: "portfolio_snapshot".to_owned(),
@@ -323,5 +345,63 @@ mod tests {
             "valuation_source_registry": { "sources": [] }
         })
         .to_string()
+    }
+
+    fn sample_portfolio_config_toml() -> String {
+        r#"[portfolio]
+portfolio_id = "portfolio_main"
+quote_codes = ["USD"]
+
+[portfolio.metadata]
+
+[[portfolio.networks]]
+network_id = "ethereum-mainnet"
+family = "evm"
+chain_id = 1
+control_scope = "shared"
+
+[portfolio.networks.metadata]
+
+[[portfolio.wallets]]
+wallet_id = "wallet_main"
+network_id = "ethereum-mainnet"
+symbol_ids = ["eth.native.ethereum-mainnet"]
+
+[portfolio.wallets.subject]
+kind = "evm_address"
+address = "0x000000000000000000000000000000000000dead"
+
+[portfolio.wallets.implementation]
+kind = "address_only"
+
+[portfolio.wallets.metadata]
+
+[[portfolio.symbol_configs]]
+symbol_id = "eth.native.ethereum-mainnet"
+display_symbol = "ETH"
+kind = "native_balance"
+role = "native"
+network_id = "ethereum-mainnet"
+decimals = 18
+
+[portfolio.symbol_configs.balance_reader]
+kind = "native_balance"
+
+[portfolio.symbol_configs.valuation]
+
+[[portfolio.symbol_configs.valuation.quotes]]
+quote = "USD"
+priced_symbol_id = "eth.native.ethereum-mainnet"
+
+[portfolio.symbol_configs.valuation.quotes.reader]
+kind = "fixed_unit_price"
+unit_price_dec = "1800.00"
+
+[portfolio.symbol_configs.metadata]
+
+[valuation_source_registry]
+sources = []
+"#
+        .to_owned()
     }
 }
