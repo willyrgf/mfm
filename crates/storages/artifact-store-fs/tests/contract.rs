@@ -2,8 +2,7 @@ use mfm_artifact_store_fs::{FsTypedArtifactError, FsTypedArtifactStore, TypedArt
 use mfm_canonical::sha256_digest_bytes;
 use mfm_events::v1::{
     ArtifactEvidenceRef as EventArtifactEvidenceRef, ArtifactProducerScope, ArtifactRole,
-    ArtifactSchemaPolicy, ArtifactSemanticPolicy, FrameworkVersion, KernelEventPayload,
-    RetentionReason, SeedCellRef, SourceRevision,
+    ArtifactSchemaPolicy, ArtifactSemanticPolicy, KernelEventPayload, RetentionReason, SeedCellRef,
 };
 use mfm_ids::{
     ArtifactId, CellId, ContentDigest, DigestAlgorithm, DigestBytes, LoweringVersion, NodeId,
@@ -195,9 +194,6 @@ async fn verified_retention_projection_for(
                 admitted_binding_digest: content_digest(b"binding"),
                 canonicalizer_identity: CanonicalizerIdentity::new("mfm.jcs.v1")
                     .expect("canonicalizer"),
-                framework_version: FrameworkVersion::new("mfm.test.1").expect("framework version"),
-                source_revision: SourceRevision::new("test-revision").expect("source revision"),
-                launched_at_unix_ms: 1_700_000_000_000,
                 seed_cells: Vec::new(),
             },
         ))],
@@ -264,19 +260,9 @@ async fn verified_retention_projection_for(
 
 fn entry_point_launch_evidence() -> mfm_events::v1::EntryPointLaunchEvidence {
     mfm_events::v1::EntryPointLaunchEvidence {
-        submitted_public_op_name: mfm_events::v1::EntryPointPublicOpName::new("portfolio_snapshot")
-            .expect("public op name"),
         resolved_op_id: mfm_events::v1::EntryPointOpId::new("mfm.test:portfolio_snapshot:1")
             .expect("entry-point op id"),
-        resolved_op_version: 1,
         entry_point_registry_digest: content_digest(b"entry-point-registry"),
-        lowering_identity: mfm_events::v1::EntryPointLoweringIdentity::new("mfm.test.lowering.v1")
-            .expect("lowering identity"),
-        canonicalizer_identity: CanonicalizerIdentity::new("mfm.test.canonicalizer.v1")
-            .expect("canonicalizer identity"),
-        config_format: mfm_events::v1::EntryPointConfigFormat::Toml,
-        authored_config_digest: content_digest(b"authored-config"),
-        canonical_config_digest: content_digest(b"canonical-config"),
     }
 }
 

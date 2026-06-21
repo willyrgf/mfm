@@ -10,16 +10,13 @@ use mfm_portfolio_config::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AuthoredConfig, CanonicalConfigMaterial, CanonicalSeedMaterial, CanonicalizerIdentity,
-    ConfigFormat, EntryPointOpId, EntryPointOpPlan, EntryPointOpRegistry, LaunchableOp,
-    LoweringIdentity, OpLaunchError, OpVersion, PublicOpName,
+    AuthoredConfig, CanonicalConfigMaterial, CanonicalSeedMaterial, ConfigFormat, EntryPointOpId,
+    EntryPointOpPlan, EntryPointOpRegistry, LaunchableOp, OpLaunchError, OpVersion, PublicOpName,
 };
 
 const PORTFOLIO_SNAPSHOT_PUBLIC_NAME: &str = "portfolio_snapshot";
 const PORTFOLIO_SNAPSHOT_NAMESPACE: &str = "mfm.portfolio";
 const PORTFOLIO_SNAPSHOT_VERSION: u32 = 1;
-const PORTFOLIO_SNAPSHOT_LOWERING_IDENTITY: &str = "mfm.portfolio.snapshot.lowering.v1";
-const PORTFOLIO_SNAPSHOT_CANONICALIZER_IDENTITY: &str = "mfm.portfolio.snapshot.canonicalizer.v1";
 static ENTRY_POINT_CONFIG_FORMATS: &[ConfigFormat] = &[ConfigFormat::Toml, ConfigFormat::Json];
 
 /// Builds the production entry-point operation registry for this process.
@@ -73,7 +70,6 @@ impl LaunchableOp for PortfolioSnapshotEntryPointOp {
         let authored = authored_config.normalize::<PortfolioSnapshotAuthoredConfig>()?;
         let canonical = canonicalize_portfolio_snapshot_authored_config(authored.value.clone())
             .map_err(portfolio_config_error)?;
-        let canonical_config_digest = canonical_portfolio_config_digest(&canonical)?;
         let planned = mfm_op_portfolio_tracker::plan_portfolio_snapshot_program(canonical)
             .map_err(portfolio_plan_error)?;
         let config_material = planned
@@ -98,28 +94,9 @@ impl LaunchableOp for PortfolioSnapshotEntryPointOp {
             draft: planned.draft,
             config_material,
             seed_material: Vec::new(),
-            public_output_schema_id: Some(planned.public_schema_id),
-            lowering_identity: LoweringIdentity::new(PORTFOLIO_SNAPSHOT_LOWERING_IDENTITY)?,
-            canonicalizer_identity: CanonicalizerIdentity::new(
-                PORTFOLIO_SNAPSHOT_CANONICALIZER_IDENTITY,
-            )?,
             authored_config_digest: authored.authored_digest,
-            canonical_config_digest,
         })
     }
-}
-
-fn canonical_portfolio_config_digest(
-    canonical: &mfm_portfolio_config::PortfolioSnapshotCanonicalConfig,
-) -> Result<ContentDigest, OpLaunchError> {
-    let value = canonical.to_json_value().map_err(portfolio_config_error)?;
-    let bytes = PlainCanonicalJsonBytes::from_json_str(&value.to_string()).map_err(|_| {
-        OpLaunchError::new(
-            "PortfolioSnapshotConfigInvalid",
-            "portfolio snapshot config could not be canonicalized",
-        )
-    })?;
-    Ok(bytes.content_digest())
 }
 
 fn portfolio_config_error(_error: PortfolioSnapshotConfigError) -> OpLaunchError {
@@ -171,24 +148,6 @@ impl EvmContractEntryPointKind {
             Self::Lifecycle => "contract_lifecycle",
         }
     }
-
-    fn lowering_identity(self) -> &'static str {
-        match self {
-            Self::Deploy => "mfm.evm.contract.deploy.lowering.v1",
-            Self::Configure => "mfm.evm.contract.configure.lowering.v1",
-            Self::Validate => "mfm.evm.contract.validate.lowering.v1",
-            Self::Lifecycle => "mfm.evm.contract.lifecycle.lowering.v1",
-        }
-    }
-
-    fn canonicalizer_identity(self) -> &'static str {
-        match self {
-            Self::Deploy => "mfm.evm.contract.deploy.canonicalizer.v1",
-            Self::Configure => "mfm.evm.contract.configure.canonicalizer.v1",
-            Self::Validate => "mfm.evm.contract.validate.canonicalizer.v1",
-            Self::Lifecycle => "mfm.evm.contract.lifecycle.canonicalizer.v1",
-        }
-    }
 }
 
 struct EvmContractEntryPointOp {
@@ -230,11 +189,7 @@ impl LaunchableOp for EvmContractEntryPointOp {
                 let planned =
                     mfm_op_evm_contract_lifecycle::plan_contract_deploy_program(normalized.value)
                         .map_err(evm_contract_plan_error)?;
-                self.entry_plan(
-                    planned,
-                    normalized.authored_digest,
-                    normalized.canonical_digest,
-                )
+                self.entry_plan(planned, normalized.authored_digest)
             }
             EvmContractEntryPointKind::Configure => {
                 let normalized = authored_config.normalize::<ConfigureEntryPointConfig>()?;
@@ -243,11 +198,7 @@ impl LaunchableOp for EvmContractEntryPointOp {
                     normalized.value.deployed,
                 )
                 .map_err(evm_contract_plan_error)?;
-                self.entry_plan(
-                    planned,
-                    normalized.authored_digest,
-                    normalized.canonical_digest,
-                )
+                self.entry_plan(planned, normalized.authored_digest)
             }
             EvmContractEntryPointKind::Validate => {
                 let normalized = authored_config.normalize::<ValidateEntryPointConfig>()?;
@@ -256,11 +207,7 @@ impl LaunchableOp for EvmContractEntryPointOp {
                     normalized.value.configured,
                 )
                 .map_err(evm_contract_plan_error)?;
-                self.entry_plan(
-                    planned,
-                    normalized.authored_digest,
-                    normalized.canonical_digest,
-                )
+                self.entry_plan(planned, normalized.authored_digest)
             }
             EvmContractEntryPointKind::Lifecycle => {
                 let normalized = authored_config.normalize::<ContractLifecycleConfig>()?;
@@ -268,11 +215,7 @@ impl LaunchableOp for EvmContractEntryPointOp {
                     normalized.value,
                 )
                 .map_err(evm_contract_plan_error)?;
-                self.entry_plan(
-                    planned,
-                    normalized.authored_digest,
-                    normalized.canonical_digest,
-                )
+                self.entry_plan(planned, normalized.authored_digest)
             }
         }
     }
@@ -283,7 +226,6 @@ impl EvmContractEntryPointOp {
         &self,
         planned: mfm_op_evm_contract_lifecycle::PlannedContractLifecycleProgram,
         authored_config_digest: ContentDigest,
-        canonical_config_digest: ContentDigest,
     ) -> Result<EntryPointOpPlan, OpLaunchError> {
         Ok(EntryPointOpPlan {
             draft: planned.draft,
@@ -297,11 +239,7 @@ impl EvmContractEntryPointOp {
                     media_type: seed.media_type,
                 })
                 .collect(),
-            public_output_schema_id: Some(planned.public_schema_id),
-            lowering_identity: LoweringIdentity::new(self.kind.lowering_identity())?,
-            canonicalizer_identity: CanonicalizerIdentity::new(self.kind.canonicalizer_identity())?,
             authored_config_digest,
-            canonical_config_digest,
         })
     }
 }
@@ -379,15 +317,6 @@ mod tests {
         assert!(!plan.draft.state_nodes().is_empty());
         assert!(!plan.config_material.is_empty());
         assert!(plan.seed_material.is_empty());
-        assert!(plan.public_output_schema_id.is_some());
-        assert_eq!(
-            plan.lowering_identity.as_str(),
-            PORTFOLIO_SNAPSHOT_LOWERING_IDENTITY
-        );
-        assert_eq!(
-            plan.canonicalizer_identity.as_str(),
-            PORTFOLIO_SNAPSHOT_CANONICALIZER_IDENTITY
-        );
     }
 
     #[test]
@@ -397,7 +326,6 @@ mod tests {
         let public_op_name = PublicOpName::new(PORTFOLIO_SNAPSHOT_PUBLIC_NAME).expect("name");
         let authored = AuthoredConfig::new(ConfigFormat::Json, sample_portfolio_config_json())
             .expect("authored config");
-        let authored_digest = authored.authored_digest().clone();
         let registry_digest = entry_point_registry.registry_digest().expect("digest");
         let run_id = crate::new_run_id();
 
@@ -408,28 +336,18 @@ mod tests {
             authored_config: authored,
             certification_registry: &certification_registry,
             run_id: run_id.clone(),
-            framework_version: "mfm.test.entry_point.v1",
-            source_revision: "entry-point-test",
-            launched_at_unix_ms: 1,
             drive: crate::DriveMode::AppendOnly,
         })
         .expect("prepared entry-point launch");
 
-        assert_eq!(prepared.evidence.submitted_public_op_name, public_op_name);
         assert_eq!(
             prepared.evidence.resolved_op_id.name,
             PORTFOLIO_SNAPSHOT_PUBLIC_NAME
         );
         assert_eq!(
-            prepared.evidence.resolved_op_version,
-            OpVersion::new(1).unwrap()
-        );
-        assert_eq!(
             prepared.evidence.entry_point_registry_digest,
             registry_digest
         );
-        assert_eq!(prepared.evidence.config_format, ConfigFormat::Json);
-        assert_eq!(prepared.evidence.authored_config_digest, authored_digest);
         assert!(prepared.public_output_schema_id.is_some());
         assert_eq!(prepared.request.run_id, run_id);
         assert!(!prepared.request.evidence.config_artifacts.is_empty());
@@ -472,7 +390,6 @@ mod tests {
             assert!(!plan.draft.state_nodes().is_empty());
             assert!(!plan.config_material.is_empty());
             assert!(plan.seed_material.is_empty());
-            assert!(plan.public_output_schema_id.is_some());
         }
     }
 

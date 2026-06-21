@@ -50,8 +50,6 @@ async fn parity_reth_contract_lifecycle_rest_route_completes_and_replays() {
                 "op": "evm_contract_lifecycle",
                 "config_format": "json",
                 "config": config,
-                "framework_version": "mfm.integration.rest.evm_contracts.typed.v1",
-                "source_revision": "integration-test",
                 "drive": "until_blocked"
             }),
         ))
@@ -509,8 +507,6 @@ async fn start_contract_phase(
                 "op": op,
                 "config_format": "json",
                 "config": config,
-                "framework_version": "mfm.integration.rest.evm_contracts.typed.v1",
-                "source_revision": "integration-test",
                 "drive": "until_blocked"
             }),
         ))

@@ -16,7 +16,7 @@
 //! }
 //! ```
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::extract::rejection::{JsonRejection, QueryRejection};
@@ -370,10 +370,6 @@ struct TypedRunStartBody {
     config: serde_json::Value,
     #[serde(default)]
     run_id: Option<String>,
-    #[serde(default = "default_framework_version")]
-    framework_version: String,
-    #[serde(default = "default_source_revision")]
-    source_revision: String,
     #[serde(default)]
     drive: RestDriveMode,
 }
@@ -439,35 +435,6 @@ fn default_json_media_type_string() -> String {
     "application/json".to_owned()
 }
 
-fn default_framework_version() -> String {
-    "mfm.rest_api.typed.v1".to_owned()
-}
-
-#[allow(clippy::disallowed_methods)]
-fn default_source_revision() -> String {
-    std::env::var("MFM_SOURCE_REVISION").unwrap_or_else(|_| "unknown".to_owned())
-}
-
-fn launch_unix_ms() -> Result<u64, ApiError> {
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| {
-            ApiError::backend(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "LaunchClockUnavailable",
-                "System clock is unavailable",
-            )
-        })?
-        .as_millis();
-    u64::try_from(millis).map_err(|_| {
-        ApiError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "LaunchClockOverflow",
-            "current Unix timestamp in milliseconds does not fit in u64",
-        )
-    })
-}
-
 #[instrument(level = "info", skip(state, body))]
 async fn runs_start<S>(
     State(state): State<RouterState<S>>,
@@ -493,9 +460,6 @@ where
         authored_config,
         certification_registry: services.certification_registry(),
         run_id: run_id.clone(),
-        framework_version: &req.framework_version,
-        source_revision: &req.source_revision,
-        launched_at_unix_ms: launch_unix_ms()?,
         drive: req.drive.into_app(),
     })?;
     let public_output_schema_id = prepared.public_output_schema_id.clone();

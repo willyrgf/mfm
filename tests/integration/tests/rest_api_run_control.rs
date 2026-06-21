@@ -235,8 +235,6 @@ async fn evm_contract_start_accepts_all_entry_point_ops_append_only() {
                     "config_format": "json",
                     "config": config,
                     "run_id": run_id.as_str(),
-                    "framework_version": "mfm.integration.rest.evm_contracts.typed.v1",
-                    "source_revision": "integration-test",
                     "drive": "append_only"
                 }),
             ))
@@ -254,7 +252,7 @@ async fn evm_contract_start_accepts_all_entry_point_ops_append_only() {
             .load_run_stream(&run_id)
             .await
             .expect("run stream");
-        assert_evm_entry_point_evidence(&stream, op, config);
+        assert_evm_entry_point_evidence(&stream, op);
     }
 
     let _ = std::fs::remove_dir_all(root);
@@ -280,8 +278,6 @@ async fn portfolio_status_route_reports_interrupted_attempt_and_framework_attemp
                 "config_format": "json",
                 "config": config,
                 "run_id": run_id.as_str(),
-                "framework_version": "mfm.integration.rest.portfolio.typed.v1",
-                "source_revision": "integration-test",
                 "drive": "append_only"
             }),
         ))
@@ -678,11 +674,7 @@ fn evm_validate_entry_config_json() -> serde_json::Value {
     })
 }
 
-fn assert_evm_entry_point_evidence(
-    stream: &[store::KernelEventEnvelope],
-    op_name: &str,
-    config: serde_json::Value,
-) {
+fn assert_evm_entry_point_evidence(stream: &[store::KernelEventEnvelope], op_name: &str) {
     let evidence = stream
         .iter()
         .find_map(|event| match event.payload() {
@@ -698,41 +690,11 @@ fn assert_evm_entry_point_evidence(
             Some(mfm_app::OpVersion::new(1).expect("op version")),
         )
         .expect("EVM entry-point op");
-    let authored = mfm_app::AuthoredConfig::from_json_transport_value(
-        Some(mfm_app::ConfigFormat::Json),
-        &config,
-    )
-    .expect("authored JSON config");
-    let plan = op.plan(authored.clone()).expect("EVM entry-point plan");
 
-    assert_eq!(evidence.submitted_public_op_name.as_str(), op_name);
     assert_eq!(evidence.resolved_op_id.as_str(), op.op_id().to_string());
-    assert_eq!(evidence.resolved_op_version, 1);
-    assert_eq!(evidence.config_format, events::EntryPointConfigFormat::Json);
     assert_eq!(
         evidence.entry_point_registry_digest,
         registry.registry_digest().expect("registry digest")
-    );
-    assert_eq!(evidence.authored_config_digest, *authored.authored_digest());
-    assert_eq!(
-        evidence.authored_config_digest.algorithm(),
-        DigestAlgorithm::Sha256JcsV1
-    );
-    assert_eq!(
-        evidence.canonical_config_digest,
-        plan.canonical_config_digest
-    );
-    assert_eq!(
-        evidence.canonical_config_digest.algorithm(),
-        DigestAlgorithm::Sha256JcsV1
-    );
-    assert_eq!(
-        evidence.lowering_identity.as_str(),
-        plan.lowering_identity.as_str()
-    );
-    assert_eq!(
-        evidence.canonicalizer_identity.as_str(),
-        plan.canonicalizer_identity.as_str()
     );
 }
 

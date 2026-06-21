@@ -120,9 +120,7 @@ pub struct EntryPointOpPlan {
     pub draft: TypedProgramDraft,
     pub config_material: Vec<CanonicalConfigMaterial>,
     pub seed_material: Vec<CanonicalSeedMaterial>,
-    pub public_output_schema_id: Option<SchemaId>,
-    pub lowering_identity: LoweringIdentity,
-    pub canonicalizer_identity: CanonicalizerIdentity,
+    pub authored_config_digest: ContentDigest,
 }
 ```
 
@@ -144,11 +142,11 @@ start run
 render run response and public output when available
 ```
 
-The app-facing launch response and `RunAdmitted` evidence must record the submitted public op name,
-resolved typed op id and version, entry-point registry digest, lowering identity, canonicalizer
-identity, config format, authored config digest, and canonical config digest. This keeps the
-`latest` default auditable: two requests that use the same public name at different times may
-resolve to different versions, but the admitted run records exactly what was selected.
+The app-facing launch response and `RunAdmitted` evidence record the resolved typed op id and the
+entry-point registry digest. The op id already carries the selected public name and version, while
+the registry digest identifies the descriptor set used for resolution. Other launch facts are
+derived from the certified typed spec and canonical config artifacts instead of being persisted as
+weaker duplicate evidence.
 
 ### CLI Surface
 

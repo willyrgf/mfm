@@ -151,19 +151,9 @@ mod tests {
 
     fn test_entry_point_evidence(op_name: &'static str) -> events::EntryPointLaunchEvidence {
         events::EntryPointLaunchEvidence {
-            submitted_public_op_name: events::EntryPointPublicOpName::new(op_name)
-                .expect("public op name"),
             resolved_op_id: events::EntryPointOpId::new(format!("mfm.test:{op_name}:1"))
                 .expect("entry-point op id"),
-            resolved_op_version: 1,
             entry_point_registry_digest: test_digest(b"entry-point-registry"),
-            lowering_identity: events::EntryPointLoweringIdentity::new("mfm.test.lowering.v1")
-                .expect("lowering identity"),
-            canonicalizer_identity: spec::CanonicalizerIdentity::new("mfm.test.canonicalizer.v1")
-                .expect("canonicalizer identity"),
-            config_format: events::EntryPointConfigFormat::Toml,
-            authored_config_digest: test_digest(b"authored-config"),
-            canonical_config_digest: test_digest(b"canonical-config"),
         }
     }
 
@@ -275,9 +265,6 @@ mod tests {
                 registry: services.certification_registry(),
                 run_id: run_id.clone(),
                 entry_point_evidence: test_entry_point_evidence("evm_contract_validate"),
-                framework_version: "mfm.test.contract",
-                source_revision: "test-source",
-                launched_at_unix_ms: 1_700_000_000_000,
                 drive: DriveMode::AppendOnly,
             },
             compiled
@@ -374,9 +361,6 @@ mod tests {
                 registry: services.certification_registry(),
                 run_id: run_id.clone(),
                 entry_point_evidence: test_entry_point_evidence("evm_contract_validate"),
-                framework_version: "mfm.test.contract",
-                source_revision: "test-source",
-                launched_at_unix_ms: 1_700_000_000_000,
                 drive: DriveMode::AppendOnly,
             },
             compiled
@@ -468,9 +452,6 @@ mod tests {
                 registry: services.certification_registry(),
                 run_id: run_id.clone(),
                 entry_point_evidence: test_entry_point_evidence("evm_contract_deploy"),
-                framework_version: "mfm.test.contract",
-                source_revision: "test-source",
-                launched_at_unix_ms: 1_700_000_000_000,
                 drive: DriveMode::AppendOnly,
             },
             compiled
@@ -563,9 +544,6 @@ mod tests {
                 registry: services.certification_registry(),
                 run_id: run_id.clone(),
                 entry_point_evidence: test_entry_point_evidence("evm_contract_lifecycle"),
-                framework_version: "mfm.test.contract",
-                source_revision: "test-source",
-                launched_at_unix_ms: 1_700_000_000_000,
                 drive: DriveMode::AppendOnly,
             },
             compiled

@@ -1,5 +1,4 @@
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::commands::result::{CommandError, CommandOutput, CommandResult};
 use crate::commands::CommandContext;
@@ -36,14 +35,6 @@ pub(crate) struct StartArgs {
     /// Optional typed run id (`run:<algorithm>:<digest>`). Defaults to a generated typed id.
     #[arg(long)]
     pub run_id: Option<String>,
-
-    /// Framework version evidence recorded in RunAdmitted.
-    #[arg(long, default_value = "mfm.cli.entry_point.v1")]
-    pub framework_version: String,
-
-    /// Source revision evidence recorded in RunAdmitted.
-    #[arg(long, env = "MFM_SOURCE_REVISION", default_value = "unknown")]
-    pub source_revision: String,
 
     /// Scheduler drive policy after the typed RunAdmitted event is committed.
     #[arg(long, value_enum, default_value_t = TypedDriveArg::UntilBlocked)]
@@ -122,9 +113,6 @@ async fn execute_internal(args: &StartArgs) -> CommandResult<StartOutput> {
         authored_config,
         certification_registry: &certification_registry,
         run_id: run_id.clone(),
-        framework_version: &args.framework_version,
-        source_revision: &args.source_revision,
-        launched_at_unix_ms: launch_unix_ms()?,
         drive: drive_mode(args.drive),
     })?;
     let public_output_schema_id = prepared.public_output_schema_id.clone();
@@ -139,21 +127,6 @@ async fn execute_internal(args: &StartArgs) -> CommandResult<StartOutput> {
         None
     };
     Ok(CommandOutput::new(StartOutput { run, public_output }))
-}
-
-fn launch_unix_ms() -> Result<u64, CommandError> {
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| {
-            CommandError::backend("LaunchClockUnavailable", "System clock is unavailable")
-        })?
-        .as_millis();
-    u64::try_from(millis).map_err(|_| {
-        CommandError::new(
-            "LaunchClockOverflow",
-            "current Unix timestamp in milliseconds does not fit in u64",
-        )
-    })
 }
 
 #[cfg(test)]
@@ -275,8 +248,6 @@ mod tests {
             op_version: None,
             config_format: ConfigFormatArg::Json,
             run_id: None,
-            framework_version: "mfm.cli.test".to_owned(),
-            source_revision: "test-source".to_owned(),
             drive: TypedDriveArg::AppendOnly,
             stores,
         }

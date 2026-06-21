@@ -43,9 +43,6 @@ async fn run_status_reports_interrupted_attempt_and_framework_attempts_from_hist
             .expect("authored config"),
         certification_registry: &certification_registry,
         run_id: run_id.clone(),
-        framework_version: "mfm.cli.test",
-        source_revision: "status-contract-test",
-        launched_at_unix_ms: 1,
         drive: mfm_app::DriveMode::AppendOnly,
     })
     .expect("prepared entry-point launch");

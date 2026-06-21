@@ -600,12 +600,6 @@ pub mod v1 {
         pub admitted_binding_digest: ContentDigest,
         /// Canonicalizer identity used for the certified spec.
         pub canonicalizer_identity: CanonicalizerIdentity,
-        /// Framework version.
-        pub framework_version: FrameworkVersion,
-        /// Source revision.
-        pub source_revision: SourceRevision,
-        /// Caller-supplied launch time in Unix milliseconds.
-        pub launched_at_unix_ms: u64,
         /// Seed cells materialized at run start.
         pub seed_cells: Vec<SeedCellRef>,
     }
@@ -613,40 +607,10 @@ pub mod v1 {
     /// Public entry-point operation evidence bound into `RunAdmitted`.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct EntryPointLaunchEvidence {
-        /// Public op name submitted by the caller.
-        pub submitted_public_op_name: EntryPointPublicOpName,
         /// Fully resolved app entry-point op id.
         pub resolved_op_id: EntryPointOpId,
-        /// Resolved op version selected by app assembly.
-        pub resolved_op_version: u32,
         /// Digest of the registered entry-point operation set.
         pub entry_point_registry_digest: ContentDigest,
-        /// Deterministic lowering identity declared by the entry-point op.
-        pub lowering_identity: EntryPointLoweringIdentity,
-        /// Config canonicalizer identity declared by the entry-point op.
-        pub canonicalizer_identity: CanonicalizerIdentity,
-        /// Authored config format accepted by the op.
-        pub config_format: EntryPointConfigFormat,
-        /// Digest of the original authored config bytes.
-        pub authored_config_digest: ContentDigest,
-        /// Digest of the canonical op config.
-        pub canonical_config_digest: ContentDigest,
-    }
-
-    /// Public operation name submitted to run start.
-    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    pub struct EntryPointPublicOpName(String);
-
-    impl EntryPointPublicOpName {
-        /// Creates a checked public op name.
-        pub fn new(value: impl AsRef<str>) -> Result<Self> {
-            checked_ascii_token("entry point public op name", value).map(Self)
-        }
-
-        /// Returns the public op name string.
-        pub fn as_str(&self) -> &str {
-            &self.0
-        }
     }
 
     /// Fully qualified app entry-point operation id.
@@ -662,53 +626,6 @@ pub mod v1 {
         /// Returns the entry-point op id string.
         pub fn as_str(&self) -> &str {
             &self.0
-        }
-    }
-
-    /// Deterministic lowering identity declared by an entry-point op.
-    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    pub struct EntryPointLoweringIdentity(String);
-
-    impl EntryPointLoweringIdentity {
-        /// Creates a checked entry-point lowering identity.
-        pub fn new(value: impl AsRef<str>) -> Result<Self> {
-            checked_ascii_token("entry point lowering identity", value).map(Self)
-        }
-
-        /// Returns the lowering identity string.
-        pub fn as_str(&self) -> &str {
-            &self.0
-        }
-    }
-
-    /// Authored config format used for entry-point launch.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub enum EntryPointConfigFormat {
-        /// TOML authored config.
-        Toml,
-        /// JSON authored config.
-        Json,
-    }
-
-    impl EntryPointConfigFormat {
-        /// Returns the canonical event string for this format.
-        pub const fn as_str(self) -> &'static str {
-            match self {
-                Self::Toml => "toml",
-                Self::Json => "json",
-            }
-        }
-
-        /// Parses the canonical event string for this format.
-        pub fn parse(value: &str) -> Result<Self> {
-            match value {
-                "toml" => Ok(Self::Toml),
-                "json" => Ok(Self::Json),
-                _ => Err(EventError::InvalidString {
-                    field: "entry point config format",
-                    value: value.to_owned(),
-                }),
-            }
         }
     }
 
@@ -2836,7 +2753,6 @@ pub mod v1 {
             "MediaType" | "CanonicalizerIdentity" | "RendererVersion" => {
                 checked_token_type(type_name)
             }
-            "EntryPointConfigFormat" => unit_enum_type("EntryPointConfigFormat", &["toml", "json"]),
             "PublicFieldPath" => public_field_path_type(),
             "ResourceNamespace" => resource_namespace_type(),
             "RendererKind" => checked_author_key_type(type_name),
@@ -2856,54 +2772,17 @@ pub mod v1 {
             | "AmbiguityCode"
             | "ErrorCode"
             | "ClaimFencingToken"
-            | "EntryPointPublicOpName"
-            | "EntryPointOpId"
-            | "EntryPointLoweringIdentity" => checked_token_type(type_name),
+            | "EntryPointOpId" => checked_token_type(type_name),
             "EntryPointLaunchEvidence" => struct_type(
                 "EntryPointLaunchEvidence",
                 vec![
-                    schema_field(
-                        "submitted_public_op_name",
-                        "EntryPointPublicOpName",
-                        EventFieldCardinality::Required,
-                    ),
                     schema_field(
                         "resolved_op_id",
                         "EntryPointOpId",
                         EventFieldCardinality::Required,
                     ),
                     schema_field(
-                        "resolved_op_version",
-                        "u32",
-                        EventFieldCardinality::Required,
-                    ),
-                    schema_field(
                         "entry_point_registry_digest",
-                        "ContentDigest",
-                        EventFieldCardinality::Required,
-                    ),
-                    schema_field(
-                        "lowering_identity",
-                        "EntryPointLoweringIdentity",
-                        EventFieldCardinality::Required,
-                    ),
-                    schema_field(
-                        "canonicalizer_identity",
-                        "CanonicalizerIdentity",
-                        EventFieldCardinality::Required,
-                    ),
-                    schema_field(
-                        "config_format",
-                        "EntryPointConfigFormat",
-                        EventFieldCardinality::Required,
-                    ),
-                    schema_field(
-                        "authored_config_digest",
-                        "ContentDigest",
-                        EventFieldCardinality::Required,
-                    ),
-                    schema_field(
-                        "canonical_config_digest",
                         "ContentDigest",
                         EventFieldCardinality::Required,
                     ),
@@ -3546,9 +3425,6 @@ pub mod v1 {
             EventFieldDescriptor::repeated("adapter_executables", "ExecutableIdentity"),
             EventFieldDescriptor::required("admitted_binding_digest", "ContentDigest"),
             EventFieldDescriptor::required("canonicalizer_identity", "CanonicalizerIdentity"),
-            EventFieldDescriptor::required("framework_version", "FrameworkVersion"),
-            EventFieldDescriptor::required("source_revision", "SourceRevision"),
-            EventFieldDescriptor::required("launched_at_unix_ms", "u64"),
             EventFieldDescriptor::repeated("seed_cells", "SeedCellRef"),
         ],
     };
@@ -4189,22 +4065,8 @@ pub mod v1 {
             KernelEventPayload::RunAdmitted(Box::new(RunAdmitted {
                 run_id: run_id(1),
                 entry_point: EntryPointLaunchEvidence {
-                    submitted_public_op_name: EntryPointPublicOpName::new("portfolio_snapshot")
-                        .expect("public op name"),
                     resolved_op_id: EntryPointOpId::new("mfm.portfolio/snapshot@1").expect("op id"),
-                    resolved_op_version: 1,
                     entry_point_registry_digest: content_digest(18),
-                    lowering_identity: EntryPointLoweringIdentity::new(
-                        "mfm.portfolio.snapshot.lowering.v1",
-                    )
-                    .expect("lowering identity"),
-                    canonicalizer_identity: CanonicalizerIdentity::new(
-                        "mfm.portfolio.snapshot.canonicalizer.v1",
-                    )
-                    .expect("entry config canonicalizer"),
-                    config_format: EntryPointConfigFormat::Toml,
-                    authored_config_digest: content_digest(19),
-                    canonical_config_digest: content_digest(20),
                 },
                 spec_hash: spec_hash(2),
                 spec_artifact: run_artifact_ref(
@@ -4239,9 +4101,6 @@ pub mod v1 {
                 admitted_binding_digest: content_digest(17),
                 canonicalizer_identity: CanonicalizerIdentity::new("mfm.jcs.v1")
                     .expect("canonicalizer"),
-                framework_version: FrameworkVersion::new("mfm.test.1").expect("framework"),
-                source_revision: SourceRevision::new("test-revision").expect("source"),
-                launched_at_unix_ms: 42,
                 seed_cells: vec![SeedCellRef {
                     seed_id: seed_id(7),
                     cell_id: cell_id(8),

@@ -8777,9 +8777,6 @@ fn run_start_evidence(
             .iter()
             .map(|config| config_artifact(&fixture.runtime_spec, config))
             .collect(),
-        framework_version: events::FrameworkVersion::new("mfm.test.1").expect("framework"),
-        source_revision: events::SourceRevision::new("test-rev").expect("source"),
-        launched_at_unix_ms: 1_700_000_000_000,
         adapter_executables: Vec::new(),
         seed_cells: seed_cells.into_iter().map(seed_launch_cell).collect(),
     }
@@ -8787,19 +8784,9 @@ fn run_start_evidence(
 
 fn entry_point_launch_evidence() -> events::EntryPointLaunchEvidence {
     events::EntryPointLaunchEvidence {
-        submitted_public_op_name: events::EntryPointPublicOpName::new("portfolio_snapshot")
-            .expect("public op name"),
         resolved_op_id: events::EntryPointOpId::new("mfm.test:portfolio_snapshot:1")
             .expect("entry-point op id"),
-        resolved_op_version: 1,
         entry_point_registry_digest: digest_for_bytes(b"entry-point-registry"),
-        lowering_identity: events::EntryPointLoweringIdentity::new("mfm.test.lowering.v1")
-            .expect("lowering identity"),
-        canonicalizer_identity: spec::CanonicalizerIdentity::new("mfm.test.canonicalizer.v1")
-            .expect("canonicalizer identity"),
-        config_format: events::EntryPointConfigFormat::Toml,
-        authored_config_digest: digest_for_bytes(b"authored-config"),
-        canonical_config_digest: digest_for_bytes(b"canonical-config"),
     }
 }
 

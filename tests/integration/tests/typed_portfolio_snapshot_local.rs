@@ -3,9 +3,8 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::{routing::post, Json, Router};
-use mfm_app::{AuthoredConfig, ConfigFormat, PublicOpName, TypedRunMode};
+use mfm_app::{PublicOpName, TypedRunMode};
 use mfm_events::v1 as events;
-use mfm_ids::DigestAlgorithm;
 use mfm_ids::RunId;
 use mfm_store::v1::{self as store, AsyncTypedRunEventStore};
 use serde_json::json;
@@ -82,8 +81,6 @@ async fn rest_portfolio_snapshot_matches_typed_public_output() {
                 "op": "portfolio_snapshot",
                 "config_format": "json",
                 "config": portfolio_payload(),
-                "framework_version": "mfm.integration.rest.portfolio.typed.v1",
-                "source_revision": "integration-test",
                 "drive": "until_blocked"
             }),
         ))
@@ -129,8 +126,6 @@ async fn rest_portfolio_snapshot_defaults_toml_and_renders_public_output() {
             json!({
                 "op": "portfolio_snapshot",
                 "config": portfolio_payload_toml(),
-                "framework_version": "mfm.integration.rest.portfolio.typed.v1",
-                "source_revision": "integration-test",
                 "drive": "until_blocked"
             }),
         ))
@@ -154,12 +149,7 @@ async fn rest_portfolio_snapshot_defaults_toml_and_renders_public_output() {
     let run_id = RunId::parse(body["data"]["run"]["run_id"].as_str().expect("run id"))
         .expect("typed run id");
     let stream = store.load_run_stream(&run_id).await.expect("run stream");
-    assert_portfolio_entry_point_evidence(
-        &stream,
-        AuthoredConfig::new(ConfigFormat::Toml, portfolio_payload_toml())
-            .expect("authored toml config"),
-        events::EntryPointConfigFormat::Toml,
-    );
+    assert_portfolio_entry_point_evidence(&stream);
 
     let _ = std::fs::remove_dir_all(root);
 }
@@ -183,12 +173,7 @@ async fn portfolio_runner_output_summary_matches_golden() {
         .expect("typed run id");
     let stream = store.load_run_stream(&run_id).await.expect("run stream");
 
-    assert_portfolio_entry_point_evidence(
-        &stream,
-        AuthoredConfig::from_json_transport_value(Some(ConfigFormat::Json), &portfolio_payload())
-            .expect("authored json config"),
-        events::EntryPointConfigFormat::Json,
-    );
+    assert_portfolio_entry_point_evidence(&stream);
     assert_eq!(
         portfolio_runner_output_summary(&stream),
         [
@@ -231,8 +216,6 @@ async fn local_portfolio_snapshot_post(
                 "op": "portfolio_snapshot",
                 "config_format": "json",
                 "config": payload,
-                "framework_version": "mfm.integration.rest.portfolio.typed.v1",
-                "source_revision": "integration-test",
                 "drive": drive,
             }),
         ))
@@ -436,11 +419,7 @@ sources = []
     )
 }
 
-fn assert_portfolio_entry_point_evidence(
-    stream: &[store::KernelEventEnvelope],
-    authored_config: AuthoredConfig,
-    expected_format: events::EntryPointConfigFormat,
-) {
+fn assert_portfolio_entry_point_evidence(stream: &[store::KernelEventEnvelope]) {
     let evidence = stream
         .iter()
         .find_map(|event| match event.payload() {
@@ -453,44 +432,11 @@ fn assert_portfolio_entry_point_evidence(
     let op = registry
         .resolve(&public_name, None)
         .expect("portfolio latest op");
-    let plan = op
-        .plan(authored_config.clone())
-        .expect("portfolio entry-point plan");
 
-    assert_eq!(
-        evidence.submitted_public_op_name.as_str(),
-        "portfolio_snapshot"
-    );
     assert_eq!(evidence.resolved_op_id.as_str(), op.op_id().to_string());
-    assert_eq!(evidence.resolved_op_version, op.version().get());
-    assert_eq!(evidence.config_format, expected_format);
     assert_eq!(
         evidence.entry_point_registry_digest,
         registry.registry_digest().expect("registry digest")
-    );
-    assert_eq!(
-        evidence.authored_config_digest,
-        *authored_config.authored_digest()
-    );
-    assert_eq!(
-        evidence.authored_config_digest.algorithm(),
-        DigestAlgorithm::Sha256JcsV1
-    );
-    assert_eq!(
-        evidence.canonical_config_digest,
-        plan.canonical_config_digest
-    );
-    assert_eq!(
-        evidence.canonical_config_digest.algorithm(),
-        DigestAlgorithm::Sha256JcsV1
-    );
-    assert_eq!(
-        evidence.lowering_identity.as_str(),
-        plan.lowering_identity.as_str()
-    );
-    assert_eq!(
-        evidence.canonicalizer_identity.as_str(),
-        plan.canonicalizer_identity.as_str()
     );
 }
 
