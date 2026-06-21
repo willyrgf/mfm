@@ -314,7 +314,7 @@ struct EvmContractRuntimeRouteRef<'a> {
 }
 
 impl<'a> EvmContractLifecycleAdapter<'a> {
-    /// Creates an adapter from process-local routing and provider bundles.
+    /// Creates an adapter from process-local routing and provider sets.
     pub fn new(
         route: &'a EvmContractRuntimeRoute,
         mutation: EvmContractMutationProviders<'a>,
@@ -1412,7 +1412,7 @@ const CAPABILITY_IMPLEMENTATION_ID: &str = "mfm.evm_contracts.runtime.v1";
 /// EVM capability provider set required by contract lifecycle runners.
 ///
 /// Concrete implementations are supplied by app assembly or tests; this trait
-/// only bundles the capability contracts the adapter needs.
+/// only groups the capability contracts the adapter needs.
 pub trait EvmContractProvider:
     EvmChainIdentityProvider
     + EvmNonceReadProvider
@@ -1446,7 +1446,7 @@ pub trait EvmContractRuntimeFactory: Send + Sync {
     fn runtime_for(&self, network_id: &str) -> mfm_runtime::Result<EvmContractRuntime>;
 }
 
-/// Process-local runtime capability bundle for one EVM contract lifecycle route.
+/// Process-local runtime capability set for one EVM contract lifecycle route.
 #[derive(Clone)]
 pub struct EvmContractRuntime {
     route: EvmContractRuntimeRoute,

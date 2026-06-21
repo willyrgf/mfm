@@ -1344,7 +1344,7 @@ pub async fn load_certified_spec_for_run(
         .get_artifact_by_id(&run_admitted.certificate_artifact.artifact_id)
         .await?;
     validate_certificate_artifact_evidence(run_admitted, &certificate_evidence)?;
-    let certified = mfm_certify::verify_certified_bundle_with_trusted_registry(
+    let certified = mfm_certify::verify_persisted_spec_certificate_with_trusted_registry(
         &spec_bytes,
         &certificate_bytes,
         registry,

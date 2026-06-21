@@ -1,8 +1,8 @@
 error[E0308]: mismatched types
- --> tests/ui/fail/parsed_bundle.rs:7:39
+ --> tests/ui/fail/parsed_persisted_spec.rs:8:39
   |
-7 |     let _ = CertifiedRuntimeSpec::new(parsed);
-  |             ------------------------- ^^^^^^ expected `CertifiedTypedSpec`, found `UntrustedCertifiedSpecBundle`
+8 |     let _ = CertifiedRuntimeSpec::new(parsed);
+  |             ------------------------- ^^^^^^ expected `CertifiedTypedSpec`, found `UntrustedSpecCertificateParts`
   |             |
   |             arguments to this function are incorrect
   |

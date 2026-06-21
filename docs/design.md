@@ -51,8 +51,8 @@ Typed-core code distinguishes data, evidence, authority, and implementation arti
 | `mfm_certify::LoweredTypedSpec` | no | Program-lowered draft data. It is the certifier input for authored programs, not runtime authority. |
 | `mfm_certify::ValidatedTypedExecutionSpec` | no, certifier-private | Registry-validated spec authority used inside certification to mint certified objects and certificates. It does not cross into runtime as a mutable execution surface. |
 | `mfm_spec::v1::HashedSpecEnvelope` | no | Hash-only envelope for canonical spec bytes and non-semantic audit metadata. It cannot certify a spec. |
-| `CertifiedSpecCertificate` bytes/evidence | no | Persisted certificate evidence. Hostile until the bundle verifier checks spec hash, certificate hash, registry digest, descriptor identities/digests, lowering/canonicalizer identity, public-output schema id, and audit metadata. |
-| `mfm_certify::CertifiedTypedSpec` | yes | Non-forgeable in-memory authority minted only by registry-backed certification or verified persisted bundle input. |
+| `CertifiedSpecCertificate` bytes/evidence | no | Persisted certificate evidence. Hostile until the certifier verifier checks spec hash, certificate hash, registry digest, descriptor identities/digests, lowering/canonicalizer identity, public-output schema id, and audit metadata. |
+| `mfm_certify::CertifiedTypedSpec` | yes | Non-forgeable in-memory authority minted only by registry-backed certification or verified persisted spec/certificate evidence. |
 | `CertifiedDescriptorSet` / `CertifiedFrameworkLifecycle` | yes, within certified spec authority | Certified descriptor and framework lifecycle views derived from a validated spec. Runtime consumes these views instead of recertifying raw descriptor tables. |
 | `mfm_runtime::CertifiedRuntimeSpec` | yes, runtime-only | Runtime wrapper derived only from `CertifiedTypedSpec`; owns scheduler indexes and erased runner derivation. |
 | `PreparedCommit<Purpose>` / `PreparedCommitPlan` | yes, store mutation | Purpose-specific commit authority built by runtime/app authority. The store rejects mismatched payload purpose, missing saga proof, and missing admitted artifact evidence. |
@@ -83,7 +83,7 @@ Typed kernel crates are framework-owned and domain-free:
 | `crates/kernel/program` | Typed state-program authoring, handles, scopes, registries, lineage, and lowering evidence |
 | `crates/kernel/program-derive` | Derives for typed values, configs, state inputs, operation outputs, and public outputs |
 | `crates/kernel/spec` | Versioned typed execution-spec data model and hash-only spec envelopes |
-| `crates/kernel/certify` | Certification checks, non-forgeable certified typed-spec authority, and certificate bundles |
+| `crates/kernel/certify` | Certification checks, non-forgeable certified typed-spec authority, and persisted certificate verification |
 | `crates/kernel/events` | Versioned typed kernel event schemas |
 | `crates/kernel/store` | Typed commit API, side-effect ledger rules, projection contract, and retention refs |
 | `crates/kernel/manual-auth` | Canonical manual-resolution authorization claims, proofs, and verifier contracts |

@@ -3322,15 +3322,17 @@ fn certified_runtime_spec_accepts_certifier_authority() {
 }
 
 #[test]
-fn certified_runtime_spec_accepts_verified_bundle_authority() {
+fn certified_runtime_spec_accepts_verified_persisted_parts_authority() {
     let (certified, registry) = certifier_backed_runtime_authority();
-    let bundle = certified.bundle().expect("certified bundle");
-    let verified = mfm_certify::verify_certified_bundle(
-        bundle.spec_bytes(),
-        bundle.certificate_bytes(),
+    let persisted_parts = certified
+        .to_persisted_parts()
+        .expect("persisted spec/certificate parts");
+    let verified = mfm_certify::verify_persisted_spec_certificate(
+        persisted_parts.spec_bytes(),
+        persisted_parts.certificate_bytes(),
         &registry,
     )
-    .expect("verified persisted bundle");
+    .expect("verified persisted spec/certificate");
     let runtime = CertifiedRuntimeSpec::new(verified).expect("runtime authority");
     assert!(!runtime.topological_order().is_empty());
 }
