@@ -265,7 +265,7 @@ async fn portfolio_status_route_reports_interrupted_attempt_and_framework_attemp
     let _env_restore = set_rpc_env(rpc_url);
     let (root, state) = in_memory_state_with_root();
     let config = portfolio_snapshot_config();
-    let certified = certified_portfolio_spec_for_config(&config);
+    let certified = portfolio_status_spec_for_config(&config);
     let run_id = mfm_app::new_run_id();
     let app = mfm_rest_api::make_app(state.clone());
 
@@ -779,9 +779,7 @@ impl Drop for EnvVarRestore {
     }
 }
 
-fn certified_portfolio_spec_for_config(
-    config: &serde_json::Value,
-) -> mfm_certify::CertifiedTypedSpec {
+fn portfolio_status_spec_for_config(config: &serde_json::Value) -> mfm_certify::CertifiedTypedSpec {
     let authored: PortfolioSnapshotAuthoredConfig =
         serde_json::from_value(config.clone()).expect("portfolio authored config");
     let canonical = canonicalize_portfolio_snapshot_authored_config(authored)
