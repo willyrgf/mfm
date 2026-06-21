@@ -2,8 +2,7 @@ use crate::commands::result::{CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
 use crate::support::typed_run::{
-    command_error_from_app_error, connect_run_services, drive_mode, parse_typed_run_id,
-    TypedDriveArg, TypedRunStoresArgs,
+    connect_run_services, drive_mode, parse_typed_run_id, TypedDriveArg, TypedRunStoresArgs,
 };
 use clap::Args;
 use mfm_app::TypedRunResponse;
@@ -34,7 +33,6 @@ async fn execute_internal(args: &ResumeArgs) -> CommandResult<TypedRunResponse> 
     let services = connect_run_services(&args.stores).await?;
     let response = services
         .resume_stored_run(&run_id, drive_mode(args.drive))
-        .await
-        .map_err(command_error_from_app_error)?;
+        .await?;
     Ok(CommandOutput::new(response))
 }

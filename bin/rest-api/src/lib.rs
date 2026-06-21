@@ -127,20 +127,24 @@ impl From<AppError> for ApiError {
     }
 }
 
-fn api_error_from_op_resolution(error: mfm_app::EntryPointOpResolveError) -> ApiError {
-    ApiError::new(
-        StatusCode::BAD_REQUEST,
-        error.code().to_owned(),
-        PublicSafeMessage::new(error.message().to_owned()),
-    )
+impl From<mfm_app::EntryPointOpResolveError> for ApiError {
+    fn from(error: mfm_app::EntryPointOpResolveError) -> Self {
+        Self::new(
+            StatusCode::BAD_REQUEST,
+            error.code().to_owned(),
+            PublicSafeMessage::new(error.message().to_owned()),
+        )
+    }
 }
 
-fn api_error_from_op_launch(error: mfm_app::OpLaunchError) -> ApiError {
-    ApiError::new(
-        StatusCode::BAD_REQUEST,
-        error.code().to_owned(),
-        PublicSafeMessage::new(error.message().to_owned()),
-    )
+impl From<mfm_app::OpLaunchError> for ApiError {
+    fn from(error: mfm_app::OpLaunchError) -> Self {
+        Self::new(
+            StatusCode::BAD_REQUEST,
+            error.code().to_owned(),
+            PublicSafeMessage::new(error.message().to_owned()),
+        )
+    }
 }
 
 impl std::fmt::Display for ApiError {
@@ -473,17 +477,12 @@ where
     let run_id = parse_optional_run_id(req.run_id)?;
     let services = state.services()?;
     let entry_point_registry = mfm_app::production_entry_point_op_registry()?;
-    let public_op_name = PublicOpName::new(&req.op).map_err(api_error_from_op_resolution)?;
-    let op_version = req
-        .op_version
-        .map(mfm_app::OpVersion::new)
-        .transpose()
-        .map_err(api_error_from_op_resolution)?;
+    let public_op_name = PublicOpName::new(&req.op)?;
+    let op_version = req.op_version.map(mfm_app::OpVersion::new).transpose()?;
     let authored_config = AuthoredConfig::from_json_transport_value(
         req.config_format.map(ConfigFormat::from),
         &req.config,
-    )
-    .map_err(api_error_from_op_launch)?;
+    )?;
     let prepared = mfm_app::prepare_entry_point_run_launch(EntryPointRunLaunchInput {
         entry_point_registry: &entry_point_registry,
         public_op_name,

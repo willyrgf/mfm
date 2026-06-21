@@ -7,7 +7,7 @@ use clap::{Args, ValueEnum};
 use mfm_app::{DriveMode, RunServices};
 use mfm_artifact_store_fs::FsTypedArtifactStore;
 use mfm_ids::{RunId, SchemaId};
-use mfm_stream_store_postgres::{PostgresTypedRunEventStore, PostgresTypedStoreError};
+use mfm_stream_store_postgres::PostgresTypedRunEventStore;
 
 /// Shared typed run store selection arguments.
 #[derive(Args, Debug, Clone)]
@@ -59,9 +59,7 @@ pub(crate) async fn make_typed_run_store(
         }
     };
 
-    PostgresTypedRunEventStore::connect(&database_url)
-        .await
-        .map_err(command_error_from_typed_store_error)
+    Ok(PostgresTypedRunEventStore::connect(&database_url).await?)
 }
 
 /// Builds typed app services for CLI commands backed by the certified typed stores.
@@ -70,10 +68,8 @@ pub(crate) async fn connect_run_services(
 ) -> Result<RunServices<PostgresTypedRunEventStore>, CommandError> {
     let store = make_typed_run_store(args).await?;
     let artifacts = make_typed_artifact_store(args);
-    let runners = mfm_app::production_typed_runner_registry(artifacts.clone())
-        .map_err(command_error_from_app_error)?;
-    let certification_registry =
-        mfm_app::production_certification_registry().map_err(command_error_from_app_error)?;
+    let runners = mfm_app::production_typed_runner_registry(artifacts.clone())?;
+    let certification_registry = mfm_app::production_certification_registry()?;
     Ok(
         mfm_app::make_async_typed_services_with_certification_registry(
             runners,
@@ -111,24 +107,4 @@ pub(crate) fn parse_typed_schema_id(value: &str) -> Result<SchemaId, CommandErro
             "Schema id must use the typed schema identity format",
         )
     })
-}
-
-/// Converts a typed app error into the CLI command error contract.
-pub(crate) fn command_error_from_app_error(err: mfm_app::AppError) -> CommandError {
-    CommandError::new(err.code, err.message)
-}
-
-pub(crate) fn command_error_from_typed_store_error(err: PostgresTypedStoreError) -> CommandError {
-    match err {
-        PostgresTypedStoreError::Store(_) => CommandError::backend(
-            "RunStoreRejected",
-            "Run store rejected the requested operation",
-        ),
-        PostgresTypedStoreError::Database(_) => {
-            CommandError::backend("RunStoreUnavailable", "Run store is unavailable")
-        }
-        PostgresTypedStoreError::Corruption(_) => {
-            CommandError::backend("RunStoreCorruption", "Run store returned invalid data")
-        }
-    }
 }

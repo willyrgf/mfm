@@ -1,9 +1,7 @@
 use crate::commands::result::{CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
-use crate::support::typed_run::{
-    command_error_from_app_error, connect_run_services, parse_typed_run_id, TypedRunStoresArgs,
-};
+use crate::support::typed_run::{connect_run_services, parse_typed_run_id, TypedRunStoresArgs};
 use clap::Args;
 use mfm_app::TypedReplayResponse;
 
@@ -27,9 +25,6 @@ pub(crate) async fn execute(ctx: &CommandContext, args: &ReplayArgs) -> ! {
 async fn execute_internal(args: &ReplayArgs) -> CommandResult<TypedReplayResponse> {
     let run_id = parse_typed_run_id(&args.run_id)?;
     let services = connect_run_services(&args.stores).await?;
-    let response = services
-        .verify_replay_for_run(&run_id)
-        .await
-        .map_err(command_error_from_app_error)?;
+    let response = services.verify_replay_for_run(&run_id).await?;
     Ok(CommandOutput::new(response))
 }
