@@ -4459,7 +4459,7 @@ retention_manifest schema=absent semantic=absent producer=middleware_no_seed sta
 
             assert_eq!(
                 rows,
-                "mfm.events.v1.run_admitted schema:mfm.events.v1.run_admitted:1:sha256-jcs-v1:61d91db775aa03c6c1ed10039b2bc2143533e9e02ec4920db374be400f8bb427 [RunSpec,RunCertificate,RunConfig,SeedCell]\n\
+                "mfm.events.v1.run_admitted schema:mfm.events.v1.run_admitted:1:sha256-jcs-v1:54a09a13587e3048ddd955d8bc3c9b4ba9bf2c2dd2914cb214dda96d859b4aac [RunSpec,RunCertificate,RunConfig,SeedCell]\n\
 mfm.events.v1.state_attempt_started schema:mfm.events.v1.state_attempt_started:1:sha256-jcs-v1:986f35aa39938713b9862192cab7d2b9b3a37219f5872bd242f8a06e7957ff1b []\n\
 mfm.events.v1.fact_recorded schema:mfm.events.v1.fact_recorded:1:sha256-jcs-v1:e708d591505935c8d5b12e833e34e6883c3e62fc548758a53ed5199e94218f70 [FactResponse]\n\
 mfm.events.v1.artifact_referenced schema:mfm.events.v1.artifact_referenced:1:sha256-jcs-v1:c5965f6401628c580d907568a57b29e06638d4cf1740b1ea781eae88df4d592c [ArtifactReferenced]\n\
@@ -4532,7 +4532,7 @@ retention_manifest"
             assert_eq!(all_event_schema_descriptors().len(), 27);
             assert_eq!(
                 rows,
-                "mfm_events::v1::RunAdmitted schema:mfm.events.v1.run_admitted:1:sha256-jcs-v1:61d91db775aa03c6c1ed10039b2bc2143533e9e02ec4920db374be400f8bb427\n\
+                "mfm_events::v1::RunAdmitted schema:mfm.events.v1.run_admitted:1:sha256-jcs-v1:54a09a13587e3048ddd955d8bc3c9b4ba9bf2c2dd2914cb214dda96d859b4aac\n\
 mfm_events::v1::StateAttemptStarted schema:mfm.events.v1.state_attempt_started:1:sha256-jcs-v1:986f35aa39938713b9862192cab7d2b9b3a37219f5872bd242f8a06e7957ff1b\n\
 mfm_events::v1::FactRecorded schema:mfm.events.v1.fact_recorded:1:sha256-jcs-v1:e708d591505935c8d5b12e833e34e6883c3e62fc548758a53ed5199e94218f70\n\
 mfm_events::v1::ArtifactReferenced schema:mfm.events.v1.artifact_referenced:1:sha256-jcs-v1:c5965f6401628c580d907568a57b29e06638d4cf1740b1ea781eae88df4d592c\n\
