@@ -164,7 +164,8 @@ fn evm_contract_lifecycle_runners_live_in_adapter_not_app() {
         "pub fn register_contract_lifecycle_runners_with_factory",
         "impl ErasedNodeRunner for ContractMutationRunner",
         "impl ErasedNodeRunner for ContractValidateRunner",
-        "mfm-adapters-evm-contracts-built-in",
+        "const READ_FACTORY: &str = \"read_external\"",
+        "const SIDE_EFFECT_FACTORY: &str = \"apply_side_effect\"",
     ] {
         assert!(
             adapter.contains(required),
