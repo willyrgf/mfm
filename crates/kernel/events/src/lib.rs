@@ -165,29 +165,9 @@ pub mod v1 {
     pub const EVENT_SCHEMA_VERSION: &str = "1";
 
     checked_string_type!(
-        /// Framework build/version identity persisted in `RunAdmitted`.
-        FrameworkVersion,
-        "framework version"
-    );
-    checked_string_type!(
-        /// Source revision identity persisted in events and executable identities.
-        SourceRevision,
-        "source revision"
-    );
-    checked_string_type!(
         /// Runner or adapter factory id.
         RunnerFactoryId,
         "runner factory id"
-    );
-    checked_string_type!(
-        /// Cargo package name.
-        PackageName,
-        "package name"
-    );
-    checked_string_type!(
-        /// Cargo package version.
-        PackageVersion,
-        "package version"
     );
     checked_string_type!(
         /// Nix derivation hash or equivalent build input hash.
@@ -947,12 +927,6 @@ pub mod v1 {
     pub struct ExecutableIdentity {
         /// Logical runner or adapter factory id.
         pub factory_id: RunnerFactoryId,
-        /// Source revision.
-        pub source_revision: SourceRevision,
-        /// Cargo package name.
-        pub cargo_package_name: PackageName,
-        /// Cargo package version.
-        pub cargo_package_version: PackageVersion,
         /// Cargo package digest.
         pub cargo_package_digest: ContentDigest,
         /// Binary digest.
@@ -2756,11 +2730,7 @@ pub mod v1 {
             "PublicFieldPath" => public_field_path_type(),
             "ResourceNamespace" => resource_namespace_type(),
             "RendererKind" => checked_author_key_type(type_name),
-            "FrameworkVersion"
-            | "SourceRevision"
-            | "RunnerFactoryId"
-            | "PackageName"
-            | "PackageVersion"
+            "RunnerFactoryId"
             | "NixDerivationHash"
             | "NixOutputHash"
             | "FactKey"
@@ -3001,21 +2971,6 @@ pub mod v1 {
                     schema_field(
                         "factory_id",
                         "RunnerFactoryId",
-                        EventFieldCardinality::Required,
-                    ),
-                    schema_field(
-                        "source_revision",
-                        "SourceRevision",
-                        EventFieldCardinality::Required,
-                    ),
-                    schema_field(
-                        "cargo_package_name",
-                        "PackageName",
-                        EventFieldCardinality::Required,
-                    ),
-                    schema_field(
-                        "cargo_package_version",
-                        "PackageVersion",
                         EventFieldCardinality::Required,
                     ),
                     schema_field(

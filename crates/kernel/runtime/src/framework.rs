@@ -59,9 +59,6 @@ fn framework_public_output_executable(
     }))?;
     Ok(events::ExecutableIdentity {
         factory_id,
-        source_revision: events::SourceRevision::new("mfm-runtime-built-in")?,
-        cargo_package_name: events::PackageName::new("mfm-runtime")?,
-        cargo_package_version: events::PackageVersion::new(env!("CARGO_PKG_VERSION"))?,
         cargo_package_digest: package_digest,
         binary_digest,
         nix_derivation_hash: None,
@@ -118,9 +115,6 @@ fn framework_retention_manifest_executable(
     }))?;
     Ok(events::ExecutableIdentity {
         factory_id,
-        source_revision: events::SourceRevision::new("mfm-runtime-built-in")?,
-        cargo_package_name: events::PackageName::new("mfm-runtime")?,
-        cargo_package_version: events::PackageVersion::new(env!("CARGO_PKG_VERSION"))?,
         cargo_package_digest: package_digest,
         binary_digest,
         nix_derivation_hash: None,
@@ -177,9 +171,6 @@ fn framework_complete_run_executable(
     }))?;
     Ok(events::ExecutableIdentity {
         factory_id,
-        source_revision: events::SourceRevision::new("mfm-runtime-built-in")?,
-        cargo_package_name: events::PackageName::new("mfm-runtime")?,
-        cargo_package_version: events::PackageVersion::new(env!("CARGO_PKG_VERSION"))?,
         cargo_package_digest: package_digest,
         binary_digest,
         nix_derivation_hash: None,
@@ -228,9 +219,6 @@ fn framework_resolve_saga_terminal_executable(
     }))?;
     Ok(events::ExecutableIdentity {
         factory_id,
-        source_revision: events::SourceRevision::new("mfm-runtime-built-in")?,
-        cargo_package_name: events::PackageName::new("mfm-runtime")?,
-        cargo_package_version: events::PackageVersion::new(env!("CARGO_PKG_VERSION"))?,
         cargo_package_digest: package_digest,
         binary_digest,
         nix_derivation_hash: None,
@@ -859,12 +847,9 @@ fn executable_json(identity: &events::ExecutableIdentity) -> serde_json::Value {
     serde_json::json!({
         "binary_digest": identity.binary_digest.as_str(),
         "cargo_package_digest": identity.cargo_package_digest.as_str(),
-        "cargo_package_name": identity.cargo_package_name.as_str(),
-        "cargo_package_version": identity.cargo_package_version.as_str(),
         "factory_id": identity.factory_id.as_str(),
         "nix_derivation_hash": identity.nix_derivation_hash.as_ref().map(events::NixDerivationHash::as_str),
         "nix_output_hash": identity.nix_output_hash.as_ref().map(events::NixOutputHash::as_str),
-        "source_revision": identity.source_revision.as_str(),
     })
 }
 

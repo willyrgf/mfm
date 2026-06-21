@@ -1492,9 +1492,6 @@ fn executable(
 ) -> mfm_runtime::Result<events::ExecutableIdentity> {
     Ok(events::ExecutableIdentity {
         factory_id,
-        source_revision: events::SourceRevision::new("mfm-adapters-evm-contracts-built-in")?,
-        cargo_package_name: events::PackageName::new("mfm-adapters-evm-contracts")?,
-        cargo_package_version: events::PackageVersion::new(env!("CARGO_PKG_VERSION"))?,
         cargo_package_digest: digest_json(serde_json::json!({
             "crate": "mfm-adapters-evm-contracts",
             "version": env!("CARGO_PKG_VERSION"),
@@ -3124,11 +3121,8 @@ mod tests {
                     executable(events::RunnerFactoryId::new(factory).expect("factory id"))
                         .expect("executable identity");
                 format!(
-                    "factory={};source={};package={};version={};cargo_digest={};binary_digest={};nix_derivation={};nix_output={}",
+                    "factory={};cargo_digest={};binary_digest={};nix_derivation={};nix_output={}",
                     identity.factory_id,
-                    identity.source_revision,
-                    identity.cargo_package_name,
-                    identity.cargo_package_version,
                     identity.cargo_package_digest,
                     identity.binary_digest,
                     identity.nix_derivation_hash.is_some(),
