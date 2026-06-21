@@ -76,10 +76,11 @@ async fn rest_portfolio_snapshot_matches_typed_public_output() {
     let app = rest_test_app();
     let response = app
         .oneshot(json_post(
-            "/v1/portfolio/snapshot",
+            "/v1/runs/start",
             json!({
-                "kind": "portfolio_snapshot_start_v1",
-                "request": portfolio_payload(),
+                "op": "portfolio_snapshot",
+                "config_format": "json",
+                "config": portfolio_payload(),
                 "framework_version": "mfm.integration.rest.portfolio.typed.v1",
                 "source_revision": "integration-test",
                 "drive": "until_blocked"
@@ -165,10 +166,11 @@ async fn local_portfolio_snapshot_post(
     let response = app
         .clone()
         .oneshot(json_post(
-            "/v1/portfolio/snapshot",
+            "/v1/runs/start",
             json!({
-                "kind": "portfolio_snapshot_start_v1",
-                "request": payload,
+                "op": "portfolio_snapshot",
+                "config_format": "json",
+                "config": payload,
                 "framework_version": "mfm.integration.rest.portfolio.typed.v1",
                 "source_revision": "integration-test",
                 "drive": drive,

@@ -3,9 +3,9 @@
 //!
 //! `mfm-app` is the typed boundary used by binaries and process adapters. It does not plan old
 //! dynamic DAGs, own workflow semantics, or expose `mfm-machine`/`mfm-sdk` execution authority.
-//! Callers supply a certified typed spec, a runner registry, staged launch material, and a typed
-//! run store; this crate wires those parts into start, resume, replay, and public-output rendering
-//! helpers.
+//! Callers select a registered entry-point operation and authored config; this crate resolves,
+//! plans, certifies, stages launch material, and wires typed services for start, resume, replay,
+//! and public-output rendering.
 //!
 //! # Examples
 //!
@@ -26,8 +26,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use mfm_artifact_store_fs::{FsTypedArtifactError, FsTypedArtifactStore};
-use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
-use mfm_certify::{CertificationRegistry, CertifiedSpecBundle, CertifiedTypedSpec};
+use mfm_canonical::sha256_digest_bytes;
+use mfm_certify::{CertificationRegistry, CertifiedTypedSpec};
 use mfm_events::v1 as events;
 use mfm_ids::{
     ArtifactId, ContentDigest, DigestAlgorithm, EventId, RunId, SchemaId, SeedId, SemanticTypeId,
@@ -63,8 +63,6 @@ pub mod observability;
 
 const ENV_TYPED_ARTIFACT_ROOT: &str = "MFM_TYPED_ARTIFACT_ROOT";
 const DEFAULT_TYPED_ARTIFACT_SUBDIR: &str = "typed_run_artifacts";
-/// Transport kind for a certified typed spec bundle accepted by app frontends.
-pub const CERTIFIED_SPEC_BUNDLE_KIND: &str = "certified_typed_spec_bundle_v1";
 
 /// High-level error classes used by typed application-facing APIs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -250,8 +248,8 @@ impl From<mfm_certify::CertifyError> for AppError {
     fn from(_error: mfm_certify::CertifyError) -> Self {
         Self::backend(
             ErrorClass::BadRequest,
-            "CertifiedBundleVerificationFailed",
-            "Certified typed spec bundle verification failed",
+            "CertifiedSpecVerificationFailed",
+            "Certified typed spec verification failed",
         )
     }
 }
@@ -359,7 +357,7 @@ pub fn production_typed_runner_registry(
     Ok(registry)
 }
 
-/// Builds the trusted production certification registry for bundled spec verification.
+/// Builds the trusted production certification registry for typed spec certification and replay verification.
 pub fn production_certification_registry() -> Result<CertificationRegistry, AppError> {
     let mut registry = CertificationRegistry::new();
     mfm_op_evm_contract_lifecycle::register_contract_lifecycle_certification_descriptors(
@@ -542,24 +540,24 @@ pub struct ManualResolutionRecordRequest {
 
 /// Config bytes supplied to a typed run start request.
 #[derive(Debug, Clone)]
-pub struct RunLaunchConfigArtifact {
+pub(crate) struct RunLaunchConfigArtifact {
     /// Certified config schema id.
-    pub schema_id: SchemaId,
+    pub(crate) schema_id: SchemaId,
     /// Canonical config artifact bytes.
-    pub bytes: Vec<u8>,
+    pub(crate) bytes: Vec<u8>,
     /// Config artifact media type.
-    pub media_type: spec::MediaType,
+    pub(crate) media_type: spec::MediaType,
 }
 
 /// Seed bytes supplied to a typed run start request.
 #[derive(Debug, Clone)]
-pub struct RunLaunchSeedArtifact {
+pub(crate) struct RunLaunchSeedArtifact {
     /// Seed id from the certified spec.
-    pub seed_id: SeedId,
+    pub(crate) seed_id: SeedId,
     /// Canonical seed value bytes.
-    pub bytes: Vec<u8>,
+    pub(crate) bytes: Vec<u8>,
     /// Persisted seed artifact media type.
-    pub media_type: spec::MediaType,
+    pub(crate) media_type: spec::MediaType,
 }
 
 /// Stable semantic run mode for typed run responses.
@@ -1021,7 +1019,7 @@ where
         &self.store
     }
 
-    /// Returns the trusted certification registry used for stored bundle verification.
+    /// Returns the trusted certification registry used for stored spec verification.
     pub fn certification_registry(&self) -> &CertificationRegistry {
         &self.certification_registry
     }
@@ -1810,90 +1808,6 @@ pub fn json_media_type() -> Result<spec::MediaType, AppError> {
     })
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CertifiedSpecBundleJson {
-    kind: String,
-    spec: Value,
-    certificate: Value,
-}
-
-/// Parses a certified typed spec bundle transport JSON document as untrusted bytes.
-///
-/// The returned bundle is not runtime authority. Callers must pass its spec and certificate bytes
-/// through the certifier verifier before starting, resuming, replaying, or rendering a run.
-pub fn parse_certified_spec_bundle_json_bytes(
-    bytes: &[u8],
-) -> Result<CertifiedSpecBundle, AppError> {
-    let parsed: CertifiedSpecBundleJson = serde_json::from_slice(bytes).map_err(|error| {
-        let _ = error;
-        AppError::new(
-            ErrorClass::BadRequest,
-            "CertifiedBundleInvalid",
-            "Certified typed spec bundle JSON is invalid",
-        )
-    })?;
-    certified_spec_bundle_from_json(parsed)
-}
-
-/// Parses a certified typed spec bundle JSON value as untrusted bytes.
-///
-/// This helper exists for transports that already parsed the request envelope. It does not mint
-/// certified authority; verification is still required before any runtime contract is constructed.
-pub fn parse_certified_spec_bundle_json_value(
-    value: &Value,
-) -> Result<CertifiedSpecBundle, AppError> {
-    let parsed: CertifiedSpecBundleJson =
-        serde_json::from_value(value.clone()).map_err(|error| {
-            let _ = error;
-            AppError::new(
-                ErrorClass::BadRequest,
-                "CertifiedBundleInvalid",
-                "Certified typed spec bundle is invalid",
-            )
-        })?;
-    certified_spec_bundle_from_json(parsed)
-}
-
-fn certified_spec_bundle_from_json(
-    parsed: CertifiedSpecBundleJson,
-) -> Result<CertifiedSpecBundle, AppError> {
-    if parsed.kind != CERTIFIED_SPEC_BUNDLE_KIND {
-        return Err(AppError::new(
-            ErrorClass::BadRequest,
-            "CertifiedBundleInvalid",
-            format!("certified typed spec bundle kind must be {CERTIFIED_SPEC_BUNDLE_KIND:?}"),
-        ));
-    }
-    let spec_bytes = canonical_json_value_bytes(&parsed.spec, "spec")?;
-    let certificate_bytes = canonical_json_value_bytes(&parsed.certificate, "certificate")?;
-    Ok(CertifiedSpecBundle::from_untrusted_bytes(
-        spec_bytes,
-        certificate_bytes,
-    ))
-}
-
-fn canonical_json_value_bytes(value: &Value, field: &'static str) -> Result<Vec<u8>, AppError> {
-    let json = serde_json::to_string(value).map_err(|error| {
-        let _ = (field, error);
-        AppError::backend(
-            ErrorClass::Internal,
-            "CertifiedBundleSerializationFailed",
-            "Certified typed spec bundle serialization failed",
-        )
-    })?;
-    PlainCanonicalJsonBytes::from_json_str(&json)
-        .map(|canonical| canonical.to_vec())
-        .map_err(|error| {
-            let _ = (field, error);
-            AppError::new(
-                ErrorClass::BadRequest,
-                "CertifiedBundleInvalid",
-                "Certified typed spec bundle field is not canonical JSON",
-            )
-        })
-}
-
 /// Resolves, plans, certifies, and prepares an entry-point op run launch.
 pub fn prepare_entry_point_run_launch(
     input: EntryPointRunLaunchInput<'_>,
@@ -1936,7 +1850,11 @@ pub fn prepare_entry_point_run_launch(
         .collect::<Vec<_>>();
     let lowered =
         mfm_certify::lower_program_draft(&plan.draft).map_err(entry_point_certification_error)?;
-    let certified_spec = mfm_certify::certify_typed_spec(lowered, input.certification_registry)
+    let scoped_registry = input
+        .certification_registry
+        .scoped_for_spec(lowered.spec())
+        .map_err(entry_point_certification_error)?;
+    let certified_spec = mfm_certify::certify_typed_spec(lowered, &scoped_registry)
         .map_err(entry_point_certification_error)?;
     config_inputs.extend(framework_config_launch_artifacts_for_spec(
         &certified_spec.envelope().spec,
@@ -1969,7 +1887,7 @@ pub fn prepare_entry_point_run_launch(
     let request = prepare_certified_run_launch(
         CertifiedRunLaunchInput {
             certified_spec,
-            registry: input.certification_registry,
+            registry: &scoped_registry,
             run_id: input.run_id,
             framework_version: input.framework_version,
             source_revision: input.source_revision,
@@ -1998,76 +1916,26 @@ fn entry_point_launch_internal_error(code: &'static str, message: &'static str) 
     AppError::backend(ErrorClass::Internal, code, message)
 }
 
-/// Untrusted persisted certified bundle bytes plus launch inputs for a typed run start.
-pub struct UntrustedCertifiedBundleLaunchInput<'a> {
-    /// Canonical JSON bytes for the persisted typed execution spec.
-    pub spec_bytes: &'a [u8],
-    /// Canonical JSON bytes for the persisted typed spec certificate.
-    pub certificate_bytes: &'a [u8],
-    /// Trusted registry used to verify descriptor evidence in the certificate.
-    pub registry: &'a CertificationRegistry,
-    /// Run id to record in the started run stream.
-    pub run_id: RunId,
-    /// Framework version evidence to bind to the run start event.
-    pub framework_version: &'a str,
-    /// Source revision evidence to bind to the run start event.
-    pub source_revision: &'a str,
-    /// Caller-supplied launch time in Unix milliseconds.
-    pub launched_at_unix_ms: u64,
-    /// Drive mode used for the initial scheduler invocation.
-    pub drive: DriveMode,
-}
-
 /// Certifier-backed typed spec authority plus launch metadata for a typed run start.
-pub struct CertifiedRunLaunchInput<'a> {
+pub(crate) struct CertifiedRunLaunchInput<'a> {
     /// Certifier-backed typed spec authority.
-    pub certified_spec: CertifiedTypedSpec,
+    pub(crate) certified_spec: CertifiedTypedSpec,
     /// Trusted registry used to validate launch config artifacts.
-    pub registry: &'a CertificationRegistry,
+    pub(crate) registry: &'a CertificationRegistry,
     /// Run id to record in the started run stream.
-    pub run_id: RunId,
+    pub(crate) run_id: RunId,
     /// Framework version evidence to bind to the run start event.
-    pub framework_version: &'a str,
+    pub(crate) framework_version: &'a str,
     /// Source revision evidence to bind to the run start event.
-    pub source_revision: &'a str,
+    pub(crate) source_revision: &'a str,
     /// Caller-supplied launch time in Unix milliseconds.
-    pub launched_at_unix_ms: u64,
+    pub(crate) launched_at_unix_ms: u64,
     /// Drive mode used for the initial scheduler invocation.
-    pub drive: DriveMode,
-}
-
-/// Verifies untrusted persisted certified bundle bytes and builds a typed run-start request.
-///
-/// This helper is for transport and storage boundaries that receive serialized bundle data. It
-/// verifies the spec and certificate against the trusted registry before producing a request that
-/// can reach the runtime boundary.
-pub fn prepare_verified_bundle_launch(
-    input: UntrustedCertifiedBundleLaunchInput<'_>,
-    config_inputs: Vec<RunLaunchConfigArtifact>,
-    seed_inputs: Vec<RunLaunchSeedArtifact>,
-) -> Result<RunLaunchRequest, AppError> {
-    let certified_spec = mfm_certify::verify_certified_bundle_with_trusted_registry(
-        input.spec_bytes,
-        input.certificate_bytes,
-        input.registry,
-    )?;
-    prepare_certified_run_launch(
-        CertifiedRunLaunchInput {
-            certified_spec,
-            registry: input.registry,
-            run_id: input.run_id,
-            framework_version: input.framework_version,
-            source_revision: input.source_revision,
-            launched_at_unix_ms: input.launched_at_unix_ms,
-            drive: input.drive,
-        },
-        config_inputs,
-        seed_inputs,
-    )
+    pub(crate) drive: DriveMode,
 }
 
 /// Builds a typed run-start request from certifier-backed typed spec authority and launch inputs.
-pub fn prepare_certified_run_launch(
+fn prepare_certified_run_launch(
     input: CertifiedRunLaunchInput<'_>,
     config_inputs: Vec<RunLaunchConfigArtifact>,
     seed_inputs: Vec<RunLaunchSeedArtifact>,

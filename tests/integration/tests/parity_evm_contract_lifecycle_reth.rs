@@ -49,9 +49,10 @@ async fn parity_reth_contract_lifecycle_rest_route_completes_and_replays() {
     let start = app
         .clone()
         .oneshot(json_post(
-            "/v1/evm/contracts/lifecycle",
+            "/v1/runs/start",
             serde_json::json!({
-                "kind": "evm_contract_lifecycle_start_v1",
+                "op": "evm_contract_lifecycle",
+                "config_format": "json",
                 "config": config,
                 "framework_version": "mfm.integration.rest.evm_contracts.typed.v1",
                 "source_revision": "integration-test",
@@ -162,14 +163,8 @@ async fn parity_reth_contract_phase_routes_deploy_configure_and_validate_contrac
     let deploy_schema_id = deploy_public_schema_id(deploy_config.clone());
     let (_, deploy_output) = start_contract_phase(
         &deploy_app,
-        "/v1/evm/contracts/deploy",
-        serde_json::json!({
-            "kind": "evm_contract_deploy_start_v1",
-            "config": deploy_config,
-            "framework_version": "mfm.integration.rest.evm_contracts.typed.v1",
-            "source_revision": "integration-test",
-            "drive": "until_blocked"
-        }),
+        "evm_contract_deploy",
+        deploy_config,
         &deploy_schema_id,
         &wallet,
     )
@@ -194,14 +189,10 @@ async fn parity_reth_contract_phase_routes_deploy_configure_and_validate_contrac
         configure_public_schema_id(configure_config.clone(), deployed.clone());
     let (_, configure_output) = start_contract_phase(
         &configure_app,
-        "/v1/evm/contracts/configure",
+        "evm_contract_configure",
         serde_json::json!({
-            "kind": "evm_contract_configure_start_v1",
             "config": configure_config,
-            "deployed": deployed,
-            "framework_version": "mfm.integration.rest.evm_contracts.typed.v1",
-            "source_revision": "integration-test",
-            "drive": "until_blocked"
+            "deployed": deployed
         }),
         &configure_schema_id,
         &wallet,
@@ -238,14 +229,10 @@ async fn parity_reth_contract_phase_routes_deploy_configure_and_validate_contrac
     let validate_schema_id = validate_public_schema_id(validate_config.clone(), configured.clone());
     let (_, validate_output) = start_contract_phase(
         &validate_app,
-        "/v1/evm/contracts/validate",
+        "evm_contract_validate",
         serde_json::json!({
-            "kind": "evm_contract_validate_start_v1",
             "config": validate_config,
-            "configured": configured,
-            "framework_version": "mfm.integration.rest.evm_contracts.typed.v1",
-            "source_revision": "integration-test",
-            "drive": "until_blocked"
+            "configured": configured
         }),
         &validate_schema_id,
         &wallet,
@@ -515,14 +502,24 @@ fn validate_public_schema_id(config: serde_json::Value, configured: serde_json::
 
 async fn start_contract_phase(
     app: &axum::Router,
-    uri: &str,
-    request: serde_json::Value,
+    op: &str,
+    config: serde_json::Value,
     public_schema_id: &str,
     wallet: &test_support::FundedRethKeystoreWallet,
 ) -> (String, serde_json::Value) {
     let start = app
         .clone()
-        .oneshot(json_post(uri, request))
+        .oneshot(json_post(
+            "/v1/runs/start",
+            serde_json::json!({
+                "op": op,
+                "config_format": "json",
+                "config": config,
+                "framework_version": "mfm.integration.rest.evm_contracts.typed.v1",
+                "source_revision": "integration-test",
+                "drive": "until_blocked"
+            }),
+        ))
         .await
         .expect("contract phase start response");
     let start_status = start.status();

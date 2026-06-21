@@ -25,10 +25,10 @@ Environment variables:
 - `DATABASE_URL`: Postgres URL for the certified typed run-event store (required)
 - `MFM_TYPED_ARTIFACT_ROOT`: typed artifact root (default: `~/.mfm/typed_run_artifacts`)
 - `MFM_SOURCE_REVISION`: optional source revision evidence for typed run starts
-- `MFM_EVM_RPC_SOURCES_JSON`: runtime-only EVM source registry for contract lifecycle routes
-- `MFM_EVM_CONTRACT_SOURCE_REF`: optional EVM source id for contract lifecycle routes
-- `MFM_EVM_CONTRACT_SOURCE_POLICY_ID`: optional EVM source policy id for contract lifecycle routes
-- `MFM_EVM_SIGNERS_JSON`: runtime-only signer provider registry for contract lifecycle routes
+- `MFM_EVM_RPC_SOURCES_JSON`: runtime-only EVM source registry for EVM contract entry-point runs
+- `MFM_EVM_CONTRACT_SOURCE_REF`: optional EVM source id for EVM contract entry-point runs
+- `MFM_EVM_CONTRACT_SOURCE_POLICY_ID`: optional EVM source policy id for EVM contract entry-point runs
+- `MFM_EVM_SIGNERS_JSON`: runtime-only signer provider registry for EVM contract entry-point runs
 
 The REST API validates the PostgreSQL schema on startup and does not create or
 alter tables. Apply the `mfm-stream-store-postgres` migrations before starting
@@ -50,11 +50,6 @@ Endpoints:
 
 - `GET /v1/health`
 - `GET /v1/ready`
-- `POST /v1/portfolio/snapshot`
-- `POST /v1/evm/contracts/deploy`
-- `POST /v1/evm/contracts/configure`
-- `POST /v1/evm/contracts/validate`
-- `POST /v1/evm/contracts/lifecycle`
 - `POST /v1/runs/start`
 - `POST /v1/runs/:run_id/resume`
 - `POST /v1/runs/:run_id/manual-resolution`
@@ -68,130 +63,23 @@ Probe semantics:
 - `/v1/health`: liveness only (process is running)
 - `/v1/ready`: typed run store and typed artifact store probes must succeed
 
-## Start A Portfolio Snapshot
+## Start A Run
 
-`POST /v1/portfolio/snapshot` accepts the same documented portfolio snapshot request JSON as
-`mfm_cli portfolio snapshot`, compiles it into a certified typed portfolio spec, passes the
-required typed config launch material to runtime middleware, and starts the certified run:
+`POST /v1/runs/start` accepts only entry-point operation requests. The REST layer decodes HTTP
+input and delegates registry resolution, planning, certification, launch preparation, run
+admission, and verified public-output rendering to app assembly.
+
+Request shape:
 
 ```json
 {
-  "kind": "portfolio_snapshot_start_v1",
-  "request": {
-    "portfolio": { "...": "PortfolioConfig" },
-    "valuation_source_registry": { "sources": [] }
+  "op": "portfolio_snapshot",
+  "op_version": 1,
+  "config_format": "json",
+  "config": {
+    "...": "entry-point config"
   },
   "run_id": "run:sha256-jcs-v1:<optional-digest>",
-  "framework_version": "mfm.rest_api.portfolio.typed.v1",
-  "source_revision": "git-or-build-id",
-  "drive": "until_blocked"
-}
-```
-
-The response is `{"run": ..., "public_output": ...}` inside the standard success envelope.
-`public_output` is present when the run completes during the selected drive mode. This route never
-submits old dynamic `portfolio_tracker`, `portfolio_execute`, or `portfolio_config_build` ops.
-
-## Start EVM Contract Runs
-
-The EVM contract routes compile typed contract lifecycle programs and start certified runs through
-the same run middleware as `/v1/runs/start`. Config JSON carries semantic network intent,
-expected chain id, artifact refs, and non-secret signer intent. Process-local RPC endpoints and
-keystore paths are resolved only through `MFM_EVM_RPC_SOURCES_JSON` and `MFM_EVM_SIGNERS_JSON`.
-
-Deploy:
-
-```json
-{
-  "kind": "evm_contract_deploy_start_v1",
-  "config": {
-    "...": "DeployPhaseConfig JSON"
-  },
-  "run_id": "run:sha256-jcs-v1:<optional-digest>",
-  "framework_version": "mfm.rest_api.evm_contracts.typed.v1",
-  "source_revision": "git-or-build-id",
-  "drive": "until_blocked"
-}
-```
-
-Configure:
-
-```json
-{
-  "kind": "evm_contract_configure_start_v1",
-  "config": {
-    "...": "ConfigurePhaseConfig JSON"
-  },
-  "deployed": {
-    "...": "DeployedContract JSON"
-  },
-  "drive": "until_blocked"
-}
-```
-
-Validate:
-
-```json
-{
-  "kind": "evm_contract_validate_start_v1",
-  "config": {
-    "...": "ValidatePhaseConfig JSON"
-  },
-  "configured": {
-    "...": "ConfiguredContract JSON"
-  },
-  "drive": "until_blocked"
-}
-```
-
-Full lifecycle:
-
-```json
-{
-  "kind": "evm_contract_lifecycle_start_v1",
-  "config": {
-    "...": "ContractLifecycleConfig JSON"
-  },
-  "drive": "until_blocked"
-}
-```
-
-The response is `{"run": ..., "public_output": ...}` inside the standard success envelope.
-`public_output` is present when the selected drive mode completes the run.
-
-## Start A Typed Run
-
-`POST /v1/runs/start` accepts only a certified typed spec bundle request:
-
-```json
-{
-  "kind": "typed_run_start_v1",
-  "bundle": {
-    "kind": "certified_typed_spec_bundle_v1",
-    "spec": {
-      "...": "TypedExecutionSpec JSON"
-    },
-    "certificate": {
-      "...": "CertifiedSpecCertificate JSON"
-    }
-  },
-  "run_id": "run:sha256-jcs-v1:<optional-digest>",
-  "configs": [
-    {
-      "schema_id": "schema:<name>:<version>:<algorithm>:<digest>",
-      "json": {
-        "...": "canonical config value"
-      }
-    }
-  ],
-  "seeds": [
-    {
-      "seed_id": "seed:sha256-jcs-v1:<digest>",
-      "json": {
-        "...": "canonical seed value"
-      }
-    }
-  ],
   "framework_version": "mfm.rest_api.typed.v1",
   "source_revision": "git-or-build-id",
   "drive": "until_blocked"
@@ -200,27 +88,109 @@ The response is `{"run": ..., "public_output": ...}` inside the standard success
 
 Request notes:
 
-- `kind` must be `typed_run_start_v1`.
-- `bundle.kind` must be `certified_typed_spec_bundle_v1`.
-- The bundle is parsed as untrusted transport data. The server verifies the contained spec and
-  certificate against the production certification registry before `RunAdmitted`.
-- Hash-only spec envelopes, raw typed spec JSON, certificate bytes, and summaries are not runtime
-  authority.
+- `op` is required and selects a public entry-point operation.
+- `op_version` is optional. When omitted, the latest registered version for `op` is used.
+- `config_format` is `toml` or `json`; it defaults to `toml`.
+- `config` is required. With `config_format: "toml"`, it must be a string. With
+  `config_format: "json"`, it may be a JSON object/array/value accepted by the selected op.
 - `run_id` is optional; the server generates a typed digest run id when omitted.
-- `configs[*].json` and `seeds[*].json` are canonicalized and staged by runtime middleware before
-  their evidence is admitted by the same prepared start commit that first references it.
 - `drive` is `until_blocked`, `append_only`, or `once`; it defaults to `until_blocked`.
-- Specs that reference unported domain descriptors fail before `RunAdmitted` with
-  `LaunchRunnerUnavailable`.
+
+The response is `{"run": ..., "public_output": ...}` inside the standard success envelope.
+`public_output` is present when the run completes during the selected drive mode and the op exposes
+a public output schema id.
+
+Portfolio snapshot:
+
+```json
+{
+  "op": "portfolio_snapshot",
+  "config_format": "json",
+  "config": {
+    "portfolio": { "...": "PortfolioConfig JSON" },
+    "valuation_source_registry": { "sources": [] }
+  }
+}
+```
+
+EVM contract deploy:
+
+```json
+{
+  "op": "evm_contract_deploy",
+  "config_format": "json",
+  "config": {
+    "...": "DeployPhaseConfig JSON"
+  },
+  "drive": "until_blocked"
+}
+```
+
+EVM contract configure:
+
+```json
+{
+  "op": "evm_contract_configure",
+  "config_format": "json",
+  "config": {
+    "config": {
+      "...": "ConfigurePhaseConfig JSON"
+    },
+    "deployed": {
+      "...": "DeployedContract JSON"
+    }
+  },
+  "drive": "until_blocked"
+}
+```
+
+EVM contract validate:
+
+```json
+{
+  "op": "evm_contract_validate",
+  "config_format": "json",
+  "config": {
+    "config": {
+      "...": "ValidatePhaseConfig JSON"
+    },
+    "configured": {
+      "...": "ConfiguredContract JSON"
+    }
+  },
+  "drive": "until_blocked"
+}
+```
+
+EVM contract lifecycle:
+
+```json
+{
+  "op": "evm_contract_lifecycle",
+  "config_format": "json",
+  "config": {
+    "...": "ContractLifecycleConfig JSON"
+  },
+  "drive": "until_blocked"
+}
+```
+
+EVM configs carry semantic network intent, expected chain id, artifact refs, and non-secret signer
+intent. Process-local RPC endpoints and keystore paths are resolved only through
+`MFM_EVM_RPC_SOURCES_JSON` and `MFM_EVM_SIGNERS_JSON`.
 
 Stable launch error codes:
 
 - `InvalidJson`: the request envelope is not accepted by the route schema.
-- `CertifiedBundleInvalid`: the bundle is malformed, has the wrong kind, is missing fields, contains
-  unknown fields, or cannot be canonicalized.
-- `CertifiedBundleVerificationFailed`: certificate/spec hash, registry digest, descriptor identity/digest,
-  lowering/canonicalizer identity, public-output schema evidence, or certifier validation failed.
-- `MissingLaunchConfigArtifact`: a certified config reference was not supplied in `configs`.
+- `InvalidPublicOpName`: `op` is not a valid public entry-point name.
+- `InvalidOpVersion`: `op_version` is zero.
+- `EntryPointOpNotFound`: no op is registered for the supplied public name.
+- `EntryPointOpVersionNotFound`: the requested explicit version is not registered.
+- `AuthoredConfigDecodeFailed`: the supplied config cannot be decoded for the selected op.
+- `AuthoredConfigFormatShapeMismatch`: `config_format` and `config` shape do not match.
+- `PortfolioSnapshotConfigInvalid`: portfolio snapshot config validation failed.
+- `EvmContractPlanFailed`: EVM contract entry-point planning failed.
+- `EntryPointOpCertificationFailed`: the planned spec failed app-owned certification.
 - `LaunchRunnerUnavailable`: the verified spec references a state descriptor without a production
   runner binding.
 
