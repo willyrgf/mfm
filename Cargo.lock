@@ -1990,6 +1990,7 @@ dependencies = [
  "k256",
  "mfm-app",
  "mfm-artifact-store-fs",
+ "mfm-authored-config",
  "mfm-canonical",
  "mfm-certify",
  "mfm-events",
@@ -2090,6 +2091,7 @@ dependencies = [
  "mfm-adapters-portfolio",
  "mfm-artifact-capabilities",
  "mfm-artifact-store-fs",
+ "mfm-authored-config",
  "mfm-canonical",
  "mfm-capabilities",
  "mfm-certify",
@@ -2157,6 +2159,13 @@ dependencies = [
 [[package]]
 name = "mfm-authored-config"
 version = "0.1.0"
+dependencies = [
+ "mfm-canonical",
+ "mfm-ids",
+ "serde",
+ "serde_json",
+ "toml 0.8.23",
+]
 
 [[package]]
 name = "mfm-canonical"
@@ -2492,6 +2501,7 @@ dependencies = [
  "http",
  "mfm-app",
  "mfm-artifact-store-fs",
+ "mfm-authored-config",
  "mfm-canonical",
  "mfm-events",
  "mfm-evm-contract-config",

@@ -2,11 +2,11 @@
 
 use k256::ecdsa::SigningKey;
 use mfm_app::{
-    AuthoredConfig, CanonicalConfigMaterial, ConfigFormat, DriveMode, EntryPointOpId,
-    EntryPointOpPlan, EntryPointOpRegistry, EntryPointRunLaunchInput, LaunchableOp,
-    ManualResolutionDecision, ManualResolutionRecordRequest, OpLaunchError, OpVersion,
-    PublicOpName, TypedRunMode,
+    CanonicalConfigMaterial, DriveMode, EntryPointOpId, EntryPointOpPlan, EntryPointOpRegistry,
+    EntryPointRunLaunchInput, LaunchableOp, ManualResolutionDecision,
+    ManualResolutionRecordRequest, OpLaunchError, OpVersion, PublicOpName, TypedRunMode,
 };
+use mfm_authored_config::{AuthoredConfig, AuthoredConfigFormat};
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_events::v1 as events;
 use mfm_ids::{ArtifactId, ContentDigest, DigestAlgorithm, RunId};
@@ -47,7 +47,7 @@ async fn public_manual_resolution_scenario_records_resolution_and_hides_proof_by
         .expect("register manual proof entry point");
     let run_id = mfm_app::new_run_id();
     let authored_config =
-        AuthoredConfig::new(ConfigFormat::Json, b"{}".to_vec()).expect("authored config");
+        AuthoredConfig::new(AuthoredConfigFormat::Json, b"{}".to_vec()).expect("authored config");
     let launch = mfm_app::prepare_entry_point_run_launch(EntryPointRunLaunchInput {
         entry_point_registry: &entry_points,
         public_op_name: PublicOpName::new("manual_resolution_proof").expect("public op name"),
@@ -162,7 +162,7 @@ async fn public_manual_resolution_scenario_records_resolution_and_hides_proof_by
     }
 }
 
-static CONFIG_FORMATS: &[ConfigFormat] = &[ConfigFormat::Json];
+static CONFIG_FORMATS: &[AuthoredConfigFormat] = &[AuthoredConfigFormat::Json];
 
 struct ManualResolutionProofEntryPointOp;
 
@@ -180,7 +180,7 @@ impl LaunchableOp for ManualResolutionProofEntryPointOp {
         OpVersion::new(1).expect("op version")
     }
 
-    fn accepted_config_formats(&self) -> &'static [ConfigFormat] {
+    fn accepted_config_formats(&self) -> &'static [AuthoredConfigFormat] {
         CONFIG_FORMATS
     }
 

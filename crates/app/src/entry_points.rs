@@ -1,3 +1,6 @@
+use mfm_authored_config::{
+    AuthoredConfig, AuthoredConfigFormat, TOML_JSON_AUTHORED_CONFIG_FORMATS,
+};
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_evm_contract_config::{ConfigurePhaseConfig, DeployPhaseConfig, ValidatePhaseConfig};
 use mfm_evm_contract_model::{ConfiguredContract, DeployedContract};
@@ -9,14 +12,13 @@ use mfm_portfolio_config::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AuthoredConfig, CanonicalConfigMaterial, CanonicalSeedMaterial, ConfigFormat, EntryPointOpId,
-    EntryPointOpPlan, EntryPointOpRegistry, LaunchableOp, OpLaunchError, OpVersion, PublicOpName,
+    CanonicalConfigMaterial, CanonicalSeedMaterial, EntryPointOpId, EntryPointOpPlan,
+    EntryPointOpRegistry, LaunchableOp, OpLaunchError, OpVersion, PublicOpName,
 };
 
 const PORTFOLIO_SNAPSHOT_PUBLIC_NAME: &str = "portfolio_snapshot";
 const PORTFOLIO_SNAPSHOT_NAMESPACE: &str = "mfm.portfolio";
 const PORTFOLIO_SNAPSHOT_VERSION: u32 = 1;
-static ENTRY_POINT_CONFIG_FORMATS: &[ConfigFormat] = &[ConfigFormat::Toml, ConfigFormat::Json];
 
 /// Builds the production entry-point operation registry for this process.
 pub(crate) fn production_entry_point_op_registry() -> Result<EntryPointOpRegistry, crate::AppError>
@@ -51,8 +53,8 @@ impl LaunchableOp for PortfolioSnapshotEntryPointOp {
             .expect("static portfolio entry-point op version is valid")
     }
 
-    fn accepted_config_formats(&self) -> &'static [ConfigFormat] {
-        ENTRY_POINT_CONFIG_FORMATS
+    fn accepted_config_formats(&self) -> &'static [AuthoredConfigFormat] {
+        TOML_JSON_AUTHORED_CONFIG_FORMATS
     }
 
     fn plan(&self, authored_config: AuthoredConfig) -> Result<EntryPointOpPlan, OpLaunchError> {
@@ -167,8 +169,8 @@ impl LaunchableOp for EvmContractEntryPointOp {
         OpVersion::new(1).expect("static EVM contract entry-point op version is valid")
     }
 
-    fn accepted_config_formats(&self) -> &'static [ConfigFormat] {
-        ENTRY_POINT_CONFIG_FORMATS
+    fn accepted_config_formats(&self) -> &'static [AuthoredConfigFormat] {
+        TOML_JSON_AUTHORED_CONFIG_FORMATS
     }
 
     fn plan(&self, authored_config: AuthoredConfig) -> Result<EntryPointOpPlan, OpLaunchError> {
@@ -296,7 +298,7 @@ mod tests {
         assert_eq!(op.version(), OpVersion::new(1).unwrap());
         assert_eq!(
             op.accepted_config_formats(),
-            &[ConfigFormat::Toml, ConfigFormat::Json]
+            &[AuthoredConfigFormat::Toml, AuthoredConfigFormat::Json]
         );
     }
 
@@ -305,8 +307,9 @@ mod tests {
         let registry = production_entry_point_op_registry().expect("registry");
         let name = PublicOpName::new(PORTFOLIO_SNAPSHOT_PUBLIC_NAME).expect("name");
         let op = registry.resolve_latest(&name).expect("portfolio op");
-        let authored = AuthoredConfig::new(ConfigFormat::Json, sample_portfolio_config_json())
-            .expect("authored config");
+        let authored =
+            AuthoredConfig::new(AuthoredConfigFormat::Json, sample_portfolio_config_json())
+                .expect("authored config");
 
         let plan = op.plan(authored).expect("portfolio plan");
 
@@ -320,8 +323,9 @@ mod tests {
         let entry_point_registry = production_entry_point_op_registry().expect("registry");
         let certification_registry = crate::production_certification_registry().expect("cert");
         let public_op_name = PublicOpName::new(PORTFOLIO_SNAPSHOT_PUBLIC_NAME).expect("name");
-        let authored = AuthoredConfig::new(ConfigFormat::Json, sample_portfolio_config_json())
-            .expect("authored config");
+        let authored =
+            AuthoredConfig::new(AuthoredConfigFormat::Json, sample_portfolio_config_json())
+                .expect("authored config");
         let registry_digest = entry_point_registry.registry_digest().expect("digest");
         let run_id = crate::new_run_id();
 
@@ -379,7 +383,8 @@ mod tests {
             let op = registry
                 .resolve_latest(&PublicOpName::new(name).expect("name"))
                 .expect("EVM contract op");
-            let authored = AuthoredConfig::new(ConfigFormat::Json, config).expect("authored");
+            let authored =
+                AuthoredConfig::new(AuthoredConfigFormat::Json, config).expect("authored");
             let plan = op.plan(authored).expect("EVM contract plan");
 
             assert!(!plan.draft.state_nodes().is_empty());
@@ -405,7 +410,8 @@ mod tests {
             let op = registry
                 .resolve_latest(&PublicOpName::new(name).expect("name"))
                 .expect("EVM contract op");
-            let authored = AuthoredConfig::new(ConfigFormat::Json, config).expect("authored");
+            let authored =
+                AuthoredConfig::new(AuthoredConfigFormat::Json, config).expect("authored");
             let plan = op.plan(authored).expect("EVM contract plan");
 
             assert_eq!(plan.seed_material.len(), 1);
