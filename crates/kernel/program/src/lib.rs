@@ -24,6 +24,7 @@ use mfm_ids::{
     EffectKind, NodeId, OperationInstanceId, OperationKind, OperationVersion, SchemaId, ScopeId,
     SeedId, SemanticTypeId, StateKind, StateVersion,
 };
+use mfm_spec::v1::MediaType;
 use mfm_spec::v1::{
     ManualAuthorizationQuorumSpec, ManualResolutionAuthorizationSpec, ManualResolutionEvidenceSpec,
     OperatorAuthoritySnapshotSpec, ResourceClaimSpec,
@@ -3517,6 +3518,39 @@ impl TypedProgramDraft {
         }
         Ok(())
     }
+}
+
+/// Pre-certification typed program plus launch material produced by deterministic planning.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypedProgramLaunchPlan {
+    /// Typed program draft to be lowered and certified by app assembly.
+    pub draft: TypedProgramDraft,
+    /// Canonical non-secret config material required by the draft.
+    pub config_material: Vec<TypedProgramConfigMaterial>,
+    /// Canonical non-secret seed material required by the draft.
+    pub seed_material: Vec<TypedProgramSeedMaterial>,
+}
+
+/// Canonical non-secret config material required to launch a typed program draft.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypedProgramConfigMaterial {
+    /// Config schema id consumed by the typed program.
+    pub schema_id: SchemaId,
+    /// Canonical JSON config bytes.
+    pub bytes: PlainCanonicalJsonBytes,
+    /// Media type for the canonical config bytes.
+    pub media_type: MediaType,
+}
+
+/// Canonical non-secret seed material required to launch a typed program draft.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypedProgramSeedMaterial {
+    /// Seed id consumed by the typed program.
+    pub seed_id: SeedId,
+    /// Canonical JSON seed bytes.
+    pub bytes: PlainCanonicalJsonBytes,
+    /// Media type for the canonical seed bytes.
+    pub media_type: MediaType,
 }
 
 /// Root-scope builder for a typed program.
