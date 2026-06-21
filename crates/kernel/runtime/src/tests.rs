@@ -8431,7 +8431,6 @@ fn rewrite_envelope(
         logical_key: event.logical_key().clone(),
         payload_hash: event.payload_hash().clone(),
         payload: event.payload().clone(),
-        payload_canonical_byte_len: event.audit().payload_canonical_byte_len(),
     })
     .expect("rewritten envelope")
 }
