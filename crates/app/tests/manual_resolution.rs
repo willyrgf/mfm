@@ -2,8 +2,10 @@
 
 use k256::ecdsa::SigningKey;
 use mfm_app::{
-    DriveMode, ManualResolutionDecision, ManualResolutionRecordRequest, RunLaunchConfigArtifact,
-    TypedRunMode,
+    AuthoredConfig, CanonicalConfigMaterial, CanonicalizerIdentity, ConfigFormat, DriveMode,
+    EntryPointOpId, EntryPointOpPlan, EntryPointOpRegistry, EntryPointRunLaunchInput, LaunchableOp,
+    LoweringIdentity, ManualResolutionDecision, ManualResolutionRecordRequest, OpLaunchError,
+    OpVersion, PublicOpName, TypedRunMode,
 };
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_events::v1 as events;
@@ -39,30 +41,29 @@ async fn public_manual_resolution_scenario_records_resolution_and_hides_proof_by
         registry.clone(),
     );
 
-    let proof_config = mfm_op_proof::ProofWorkflowConfig::default();
-    let draft = mfm_op_proof::manual_resolution_proof_program_draft(proof_config.clone())
-        .expect("manual proof draft");
-    let certified = mfm_op_proof::certified_manual_resolution_proof_spec(proof_config)
-        .expect("manual proof spec");
-    let bundle = certified.bundle().expect("manual proof bundle");
+    let mut entry_points = EntryPointOpRegistry::new();
+    entry_points
+        .register(ManualResolutionProofEntryPointOp)
+        .expect("register manual proof entry point");
     let run_id = mfm_app::new_run_id();
-    let launch = mfm_app::prepare_verified_bundle_launch(
-        mfm_app::UntrustedCertifiedBundleLaunchInput {
-            spec_bytes: bundle.spec_bytes(),
-            certificate_bytes: bundle.certificate_bytes(),
-            registry: &registry,
-            run_id: run_id.clone(),
-            framework_version: "mfm.app.test.manual_resolution.v1",
-            source_revision: "manual-resolution-test",
-            launched_at_unix_ms: 1,
-            drive: DriveMode::UntilBlocked,
-        },
-        config_artifacts_for_draft_and_spec(&draft, &certified.envelope().spec),
-        Vec::new(),
-    )
+    let authored_config =
+        AuthoredConfig::new(ConfigFormat::Json, b"{}".to_vec()).expect("authored config");
+    let launch = mfm_app::prepare_entry_point_run_launch(EntryPointRunLaunchInput {
+        entry_point_registry: &entry_points,
+        public_op_name: PublicOpName::new("manual_resolution_proof").expect("public op name"),
+        op_version: Some(OpVersion::new(1).expect("op version")),
+        authored_config,
+        certification_registry: &registry,
+        run_id: run_id.clone(),
+        framework_version: "mfm.app.test.manual_resolution.v1",
+        source_revision: "manual-resolution-test",
+        launched_at_unix_ms: 1,
+        drive: DriveMode::UntilBlocked,
+    })
     .expect("launch request");
 
-    let blocked = services.launch_run(launch).await.expect("launch");
+    let certified = launch.request.certified_spec.clone();
+    let blocked = services.launch_run(launch.request).await.expect("launch");
     assert_eq!(blocked.run_mode, TypedRunMode::ManualBlocked);
     let blocked_replay = services
         .verify_replay_for_run(&run_id)
@@ -164,48 +165,85 @@ async fn public_manual_resolution_scenario_records_resolution_and_hides_proof_by
     }
 }
 
-fn config_artifacts_for_draft_and_spec(
+static CONFIG_FORMATS: &[ConfigFormat] = &[ConfigFormat::Json];
+
+struct ManualResolutionProofEntryPointOp;
+
+impl LaunchableOp for ManualResolutionProofEntryPointOp {
+    fn op_id(&self) -> EntryPointOpId {
+        EntryPointOpId::new("mfm.test.manual", "manual_resolution_proof", self.version())
+            .expect("test op id")
+    }
+
+    fn public_name(&self) -> PublicOpName {
+        PublicOpName::new("manual_resolution_proof").expect("public op name")
+    }
+
+    fn version(&self) -> OpVersion {
+        OpVersion::new(1).expect("op version")
+    }
+
+    fn accepted_config_formats(&self) -> &'static [ConfigFormat] {
+        CONFIG_FORMATS
+    }
+
+    fn plan(&self, authored_config: AuthoredConfig) -> Result<EntryPointOpPlan, OpLaunchError> {
+        let normalized = authored_config.normalize::<Value>()?;
+        let draft = mfm_op_proof::manual_resolution_proof_program_draft(
+            mfm_op_proof::ProofWorkflowConfig::default(),
+        )
+        .map_err(|error| {
+            OpLaunchError::new("ManualResolutionProofPlanFailed", error.to_string())
+        })?;
+        let public_output_schema_id = draft.public_output_spec().public_schema_id().clone();
+        Ok(EntryPointOpPlan {
+            config_material: config_material_for_draft(&draft)?,
+            draft,
+            seed_material: Vec::new(),
+            public_output_schema_id: Some(public_output_schema_id),
+            lowering_identity: LoweringIdentity::new("mfm.test.manual.lowering.v1")?,
+            canonicalizer_identity: CanonicalizerIdentity::new("mfm.test.manual.canonicalizer.v1")?,
+            authored_config_digest: normalized.authored_digest,
+            canonical_config_digest: normalized.canonical_digest,
+        })
+    }
+}
+
+fn config_material_for_draft(
     draft: &mfm_program::TypedProgramDraft,
-    certified_spec: &spec::TypedExecutionSpec,
-) -> Vec<RunLaunchConfigArtifact> {
-    let media_type = mfm_app::json_media_type().expect("json media type");
-    let mut configs = draft
+) -> Result<Vec<CanonicalConfigMaterial>, OpLaunchError> {
+    let media_type = spec::MediaType::new("application/json").map_err(|_| {
+        OpLaunchError::new(
+            "ManualResolutionProofConfigMaterialInvalid",
+            "JSON media type is invalid",
+        )
+    })?;
+    draft
         .state_nodes()
         .iter()
-        .map(|node| RunLaunchConfigArtifact {
-            schema_id: node.config.schema_id.clone(),
-            bytes: node.config.canonical_json.as_bytes().to_vec(),
-            media_type: media_type.clone(),
-        })
+        .map(|node| (&node.config.schema_id, &node.config.canonical_json))
         .chain(
             draft
                 .operation_lineage()
                 .iter()
-                .map(|frame| RunLaunchConfigArtifact {
-                    schema_id: frame.config.schema_id.clone(),
-                    bytes: frame.config.canonical_json.as_bytes().to_vec(),
-                    media_type: media_type.clone(),
-                }),
+                .map(|frame| (&frame.config.schema_id, &frame.config.canonical_json)),
         )
-        .collect::<Vec<_>>();
-    configs.extend(certified_spec.nodes.iter().filter_map(|node| {
-        node.framework.as_ref().map(|framework| {
+        .map(|(schema_id, canonical_json)| {
             let bytes =
-                spec::framework_config_canonical_json(framework.config_kind(), &node.node_id)
-                    .expect("framework config");
-            assert_eq!(
-                bytes.content_digest(),
-                node.config_ref.digest,
-                "framework config helper must match certified config ref"
-            );
-            RunLaunchConfigArtifact {
-                schema_id: node.config_ref.schema_id.clone(),
-                bytes: bytes.as_bytes().to_vec(),
+                PlainCanonicalJsonBytes::from_canonical_json_slice(canonical_json.as_bytes())
+                    .map_err(|_| {
+                        OpLaunchError::new(
+                            "ManualResolutionProofConfigMaterialInvalid",
+                            "test op produced invalid canonical config material",
+                        )
+                    })?;
+            Ok(CanonicalConfigMaterial {
+                schema_id: schema_id.clone(),
+                bytes,
                 media_type: media_type.clone(),
-            }
+            })
         })
-    }));
-    configs
+        .collect()
 }
 
 async fn signed_manual_resolution_proof_bytes(

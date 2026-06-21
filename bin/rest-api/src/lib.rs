@@ -27,29 +27,15 @@ use axum::Json;
 use axum::Router;
 use http::header::HeaderName;
 use mfm_app::{
-    AppError, DriveMode, ErrorClass, ManualResolutionDecision, ManualResolutionRecordRequest,
-    PublicSafeMessage, RunLaunchConfigArtifact, RunLaunchSeedArtifact, RunServices,
-    TypedPublicOutputResponse, TypedRunMode, TypedRunResponse, TypedRunStreamResponse,
+    AppError, AuthoredConfig, ConfigFormat, DriveMode, EntryPointRunLaunchInput, ErrorClass,
+    ManualResolutionDecision, ManualResolutionRecordRequest, PublicOpName, PublicSafeMessage,
+    RunServices, TypedPublicOutputResponse, TypedRunMode, TypedRunResponse, TypedRunStreamResponse,
 };
 use mfm_artifact_store_fs::{FsTypedArtifactError, FsTypedArtifactStore};
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_events::v1::ArtifactRole;
-use mfm_evm_contract_config::{ConfigurePhaseConfig, DeployPhaseConfig, ValidatePhaseConfig};
-use mfm_evm_contract_model::{ConfiguredContract, DeployedContract};
-use mfm_ids::{ArtifactId, ContentDigest, DigestAlgorithm, RunId, SchemaId, SeedId};
-use mfm_op_evm_contract_lifecycle::{
-    compile_contract_configure_program, compile_contract_deploy_program,
-    compile_contract_lifecycle_program, compile_contract_validate_program,
-    CompiledContractLifecycleProgram, ContractLifecycleCompileError, ContractLifecycleConfig,
-    ContractLifecycleConfigArtifact,
-};
-use mfm_op_portfolio_tracker::{compile_portfolio_snapshot_program, PortfolioConfigArtifact};
-use mfm_portfolio_config::{
-    canonicalize_portfolio_snapshot_authored_config, parse_portfolio_snapshot_authored_config,
-    AuthoredConfigFormat, PortfolioSnapshotConfigError,
-};
+use mfm_ids::{ArtifactId, ContentDigest, DigestAlgorithm, RunId, SchemaId};
 use mfm_spec::v1 as spec;
-use mfm_state_portfolio::PortfolioWorkflowConfig;
 use mfm_store::v1 as store;
 use mfm_store::v1::AsyncTypedRunEventStore;
 use mfm_stream_store_postgres::{PostgresTypedRunEventStore, PostgresTypedStoreError};
@@ -141,6 +127,22 @@ impl From<AppError> for ApiError {
     }
 }
 
+fn api_error_from_op_resolution(error: mfm_app::EntryPointOpResolveError) -> ApiError {
+    ApiError::new(
+        StatusCode::BAD_REQUEST,
+        error.code().to_owned(),
+        PublicSafeMessage::new(error.message().to_owned()),
+    )
+}
+
+fn api_error_from_op_launch(error: mfm_app::OpLaunchError) -> ApiError {
+    ApiError::new(
+        StatusCode::BAD_REQUEST,
+        error.code().to_owned(),
+        PublicSafeMessage::new(error.message().to_owned()),
+    )
+}
+
 impl std::fmt::Display for ApiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}: {}", self.code, self.message)
@@ -222,20 +224,6 @@ where
     Router::new()
         .route("/v1/health", get(health))
         .route("/v1/ready", get(ready::<S>))
-        .route("/v1/portfolio/snapshot", post(portfolio_snapshot::<S>))
-        .route("/v1/evm/contracts/deploy", post(evm_contract_deploy::<S>))
-        .route(
-            "/v1/evm/contracts/configure",
-            post(evm_contract_configure::<S>),
-        )
-        .route(
-            "/v1/evm/contracts/validate",
-            post(evm_contract_validate::<S>),
-        )
-        .route(
-            "/v1/evm/contracts/lifecycle",
-            post(evm_contract_lifecycle::<S>),
-        )
         .route("/v1/runs/start", post(runs_start::<S>))
         .route("/v1/runs/:run_id/resume", post(runs_resume::<S>))
         .route(
@@ -341,44 +329,8 @@ async fn not_found() -> (StatusCode, Json<serde_json::Value>) {
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum TypedRunStartKind {
-    TypedRunStartV1,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(rename_all = "snake_case")]
 enum ManualResolutionKind {
     ManualResolutionV1,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum PortfolioSnapshotStartKind {
-    PortfolioSnapshotStartV1,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum EvmContractDeployStartKind {
-    EvmContractDeployStartV1,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum EvmContractConfigureStartKind {
-    EvmContractConfigureStartV1,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum EvmContractValidateStartKind {
-    EvmContractValidateStartV1,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum EvmContractLifecycleStartKind {
-    EvmContractLifecycleStartV1,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
@@ -403,14 +355,14 @@ impl RestDriveMode {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TypedRunStartBody {
-    kind: TypedRunStartKind,
-    bundle: serde_json::Value,
+    op: String,
+    #[serde(default)]
+    op_version: Option<u32>,
+    #[serde(default)]
+    config_format: Option<RestConfigFormat>,
+    config: serde_json::Value,
     #[serde(default)]
     run_id: Option<String>,
-    #[serde(default)]
-    configs: Vec<TypedConfigBody>,
-    #[serde(default)]
-    seeds: Vec<TypedSeedBody>,
     #[serde(default = "default_framework_version")]
     framework_version: String,
     #[serde(default = "default_source_revision")]
@@ -419,107 +371,26 @@ struct TypedRunStartBody {
     drive: RestDriveMode,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct TypedConfigBody {
-    schema_id: String,
-    json: serde_json::Value,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PortfolioSnapshotStartBody {
-    kind: PortfolioSnapshotStartKind,
-    request: serde_json::Value,
-    #[serde(default)]
-    run_id: Option<String>,
-    #[serde(default = "default_portfolio_framework_version")]
-    framework_version: String,
-    #[serde(default = "default_source_revision")]
-    source_revision: String,
-    #[serde(default)]
-    drive: RestDriveMode,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct EvmContractDeployStartBody {
-    kind: EvmContractDeployStartKind,
-    config: serde_json::Value,
-    #[serde(default)]
-    run_id: Option<String>,
-    #[serde(default = "default_evm_contract_framework_version")]
-    framework_version: String,
-    #[serde(default = "default_source_revision")]
-    source_revision: String,
-    #[serde(default)]
-    drive: RestDriveMode,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct EvmContractConfigureStartBody {
-    kind: EvmContractConfigureStartKind,
-    config: serde_json::Value,
-    deployed: serde_json::Value,
-    #[serde(default)]
-    run_id: Option<String>,
-    #[serde(default = "default_evm_contract_framework_version")]
-    framework_version: String,
-    #[serde(default = "default_source_revision")]
-    source_revision: String,
-    #[serde(default)]
-    drive: RestDriveMode,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct EvmContractValidateStartBody {
-    kind: EvmContractValidateStartKind,
-    config: serde_json::Value,
-    configured: serde_json::Value,
-    #[serde(default)]
-    run_id: Option<String>,
-    #[serde(default = "default_evm_contract_framework_version")]
-    framework_version: String,
-    #[serde(default = "default_source_revision")]
-    source_revision: String,
-    #[serde(default)]
-    drive: RestDriveMode,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct EvmContractLifecycleStartBody {
-    kind: EvmContractLifecycleStartKind,
-    config: serde_json::Value,
-    #[serde(default)]
-    run_id: Option<String>,
-    #[serde(default = "default_evm_contract_framework_version")]
-    framework_version: String,
-    #[serde(default = "default_source_revision")]
-    source_revision: String,
-    #[serde(default)]
-    drive: RestDriveMode,
-}
-
 #[derive(Debug, Serialize)]
-struct PortfolioSnapshotStartResponse {
+struct TypedRunStartResponse {
     run: TypedRunResponse,
     public_output: Option<TypedPublicOutputResponse>,
 }
 
-#[derive(Debug, Serialize)]
-struct EvmContractStartResponse {
-    run: TypedRunResponse,
-    public_output: Option<TypedPublicOutputResponse>,
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RestConfigFormat {
+    Toml,
+    Json,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct TypedSeedBody {
-    seed_id: String,
-    json: serde_json::Value,
+impl From<RestConfigFormat> for ConfigFormat {
+    fn from(value: RestConfigFormat) -> Self {
+        match value {
+            RestConfigFormat::Toml => Self::Toml,
+            RestConfigFormat::Json => Self::Json,
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -565,14 +436,6 @@ fn default_framework_version() -> String {
     "mfm.rest_api.typed.v1".to_owned()
 }
 
-fn default_portfolio_framework_version() -> String {
-    "mfm.rest_api.portfolio.typed.v1".to_owned()
-}
-
-fn default_evm_contract_framework_version() -> String {
-    "mfm.rest_api.evm_contracts.typed.v1".to_owned()
-}
-
 #[allow(clippy::disallowed_methods)]
 fn default_source_revision() -> String {
     std::env::var("MFM_SOURCE_REVISION").unwrap_or_else(|_| "unknown".to_owned())
@@ -599,174 +462,6 @@ fn launch_unix_ms() -> Result<u64, ApiError> {
 }
 
 #[instrument(level = "info", skip(state, body))]
-async fn portfolio_snapshot<S>(
-    State(state): State<RouterState<S>>,
-    body: Result<Json<PortfolioSnapshotStartBody>, JsonRejection>,
-) -> Result<Json<serde_json::Value>, ApiError>
-where
-    S: AsyncTypedRunEventStore + Clone + Send + Sync,
-{
-    let Json(req) = body.map_err(|_| ApiError::invalid_json())?;
-    match req.kind {
-        PortfolioSnapshotStartKind::PortfolioSnapshotStartV1 => {}
-    }
-    let canonical = parse_portfolio_snapshot_request(&req.request)?;
-    let workflow_config = PortfolioWorkflowConfig::from(canonical);
-    let compiled = compile_portfolio_snapshot_program(workflow_config).map_err(|error| {
-        let _ = error;
-        ApiError::backend(
-            StatusCode::BAD_REQUEST,
-            "PortfolioCompileInvalid",
-            "Portfolio snapshot request failed validation",
-        )
-    })?;
-    let public_schema_id = compiled.public_schema_id.clone();
-
-    let run_id = parse_optional_run_id(req.run_id)?;
-    let services = state.services()?;
-    let config_inputs = run_launch_config_artifacts(compiled.config_artifacts);
-    let start = mfm_app::prepare_certified_run_launch(
-        mfm_app::CertifiedRunLaunchInput {
-            certified_spec: compiled.certified_spec,
-            registry: services.certification_registry(),
-            run_id: run_id.clone(),
-            framework_version: &req.framework_version,
-            source_revision: &req.source_revision,
-            launched_at_unix_ms: launch_unix_ms()?,
-            drive: req.drive.into_app(),
-        },
-        config_inputs,
-        Vec::new(),
-    )?;
-    let run = services.launch_run(start).await?;
-    let public_output = if run.run_mode == TypedRunMode::Completed {
-        Some(
-            services
-                .typed_public_output(&run_id, &public_schema_id)
-                .await?,
-        )
-    } else {
-        None
-    };
-
-    json_ok(PortfolioSnapshotStartResponse { run, public_output })
-}
-
-#[instrument(level = "info", skip(state, body))]
-async fn evm_contract_deploy<S>(
-    State(state): State<RouterState<S>>,
-    body: Result<Json<EvmContractDeployStartBody>, JsonRejection>,
-) -> Result<Json<serde_json::Value>, ApiError>
-where
-    S: AsyncTypedRunEventStore + Clone + Send + Sync,
-{
-    let Json(req) = body.map_err(|_| ApiError::invalid_json())?;
-    match req.kind {
-        EvmContractDeployStartKind::EvmContractDeployStartV1 => {}
-    }
-    let config = deserialize_request_value::<DeployPhaseConfig>(&req.config)?;
-    let compiled =
-        compile_contract_deploy_program(config).map_err(api_error_from_contract_compile)?;
-    evm_contract_start(
-        state,
-        req.run_id,
-        req.framework_version,
-        req.source_revision,
-        req.drive,
-        compiled,
-        Vec::new(),
-    )
-    .await
-}
-
-#[instrument(level = "info", skip(state, body))]
-async fn evm_contract_configure<S>(
-    State(state): State<RouterState<S>>,
-    body: Result<Json<EvmContractConfigureStartBody>, JsonRejection>,
-) -> Result<Json<serde_json::Value>, ApiError>
-where
-    S: AsyncTypedRunEventStore + Clone + Send + Sync,
-{
-    let Json(req) = body.map_err(|_| ApiError::invalid_json())?;
-    match req.kind {
-        EvmContractConfigureStartKind::EvmContractConfigureStartV1 => {}
-    }
-    let config = deserialize_request_value::<ConfigurePhaseConfig>(&req.config)?;
-    let deployed = deserialize_request_value::<DeployedContract>(&req.deployed)?;
-    let seed_bytes = canonical_request_value_bytes(&deployed)?;
-    let compiled = compile_contract_configure_program(config, deployed)
-        .map_err(api_error_from_contract_compile)?;
-    let seed = seed_artifact_for_single_contract_seed(&compiled, seed_bytes)?;
-    evm_contract_start(
-        state,
-        req.run_id,
-        req.framework_version,
-        req.source_revision,
-        req.drive,
-        compiled,
-        vec![seed],
-    )
-    .await
-}
-
-#[instrument(level = "info", skip(state, body))]
-async fn evm_contract_validate<S>(
-    State(state): State<RouterState<S>>,
-    body: Result<Json<EvmContractValidateStartBody>, JsonRejection>,
-) -> Result<Json<serde_json::Value>, ApiError>
-where
-    S: AsyncTypedRunEventStore + Clone + Send + Sync,
-{
-    let Json(req) = body.map_err(|_| ApiError::invalid_json())?;
-    match req.kind {
-        EvmContractValidateStartKind::EvmContractValidateStartV1 => {}
-    }
-    let config = deserialize_request_value::<ValidatePhaseConfig>(&req.config)?;
-    let configured = deserialize_request_value::<ConfiguredContract>(&req.configured)?;
-    let seed_bytes = canonical_request_value_bytes(&configured)?;
-    let compiled = compile_contract_validate_program(config, configured)
-        .map_err(api_error_from_contract_compile)?;
-    let seed = seed_artifact_for_single_contract_seed(&compiled, seed_bytes)?;
-    evm_contract_start(
-        state,
-        req.run_id,
-        req.framework_version,
-        req.source_revision,
-        req.drive,
-        compiled,
-        vec![seed],
-    )
-    .await
-}
-
-#[instrument(level = "info", skip(state, body))]
-async fn evm_contract_lifecycle<S>(
-    State(state): State<RouterState<S>>,
-    body: Result<Json<EvmContractLifecycleStartBody>, JsonRejection>,
-) -> Result<Json<serde_json::Value>, ApiError>
-where
-    S: AsyncTypedRunEventStore + Clone + Send + Sync,
-{
-    let Json(req) = body.map_err(|_| ApiError::invalid_json())?;
-    match req.kind {
-        EvmContractLifecycleStartKind::EvmContractLifecycleStartV1 => {}
-    }
-    let config = deserialize_request_value::<ContractLifecycleConfig>(&req.config)?;
-    let compiled =
-        compile_contract_lifecycle_program(config).map_err(api_error_from_contract_compile)?;
-    evm_contract_start(
-        state,
-        req.run_id,
-        req.framework_version,
-        req.source_revision,
-        req.drive,
-        compiled,
-        Vec::new(),
-    )
-    .await
-}
-
-#[instrument(level = "info", skip(state, body))]
 async fn runs_start<S>(
     State(state): State<RouterState<S>>,
     body: Result<Json<TypedRunStartBody>, JsonRejection>,
@@ -775,54 +470,44 @@ where
     S: AsyncTypedRunEventStore + Clone + Send + Sync,
 {
     let Json(req) = body.map_err(|_| ApiError::invalid_json())?;
-    match req.kind {
-        TypedRunStartKind::TypedRunStartV1 => {}
-    }
     let run_id = parse_optional_run_id(req.run_id)?;
-    let bundle = mfm_app::parse_certified_spec_bundle_json_value(&req.bundle)?;
-    let config_media_type = mfm_app::json_media_type()?;
-    let mut configs = Vec::with_capacity(req.configs.len());
-    for config in req.configs {
-        configs.push(RunLaunchConfigArtifact {
-            schema_id: SchemaId::parse(&config.schema_id).map_err(|_| {
-                ApiError::new(
-                    StatusCode::BAD_REQUEST,
-                    "LaunchConfigSchemaInvalid",
-                    "typed config schema id is invalid",
-                )
-            })?,
-            bytes: canonical_json_value_bytes(&config.json, "LaunchConfigInvalid")?,
-            media_type: config_media_type.clone(),
-        });
-    }
-    let seed_media_type = mfm_app::json_media_type()?;
-    let mut seeds = Vec::with_capacity(req.seeds.len());
-    for seed in req.seeds {
-        seeds.push(RunLaunchSeedArtifact {
-            seed_id: parse_seed_id(&seed.seed_id)?,
-            bytes: canonical_json_value_bytes(&seed.json, "LaunchSeedInvalid")?,
-            media_type: seed_media_type.clone(),
-        });
-    }
-
     let services = state.services()?;
-    let start = mfm_app::prepare_verified_bundle_launch(
-        mfm_app::UntrustedCertifiedBundleLaunchInput {
-            spec_bytes: bundle.spec_bytes(),
-            certificate_bytes: bundle.certificate_bytes(),
-            registry: services.certification_registry(),
-            run_id,
-            framework_version: &req.framework_version,
-            source_revision: &req.source_revision,
-            launched_at_unix_ms: launch_unix_ms()?,
-            drive: req.drive.into_app(),
-        },
-        configs,
-        seeds,
-    )?;
-    let data = services.launch_run(start).await?;
+    let entry_point_registry = mfm_app::production_entry_point_op_registry()?;
+    let public_op_name = PublicOpName::new(&req.op).map_err(api_error_from_op_resolution)?;
+    let op_version = req
+        .op_version
+        .map(mfm_app::OpVersion::new)
+        .transpose()
+        .map_err(api_error_from_op_resolution)?;
+    let authored_config = AuthoredConfig::from_json_transport_value(
+        req.config_format.map(ConfigFormat::from),
+        &req.config,
+    )
+    .map_err(api_error_from_op_launch)?;
+    let prepared = mfm_app::prepare_entry_point_run_launch(EntryPointRunLaunchInput {
+        entry_point_registry: &entry_point_registry,
+        public_op_name,
+        op_version,
+        authored_config,
+        certification_registry: services.certification_registry(),
+        run_id: run_id.clone(),
+        framework_version: &req.framework_version,
+        source_revision: &req.source_revision,
+        launched_at_unix_ms: launch_unix_ms()?,
+        drive: req.drive.into_app(),
+    })?;
+    let public_output_schema_id = prepared.public_output_schema_id.clone();
+    let run = services.launch_run(prepared.request).await?;
+    let public_output = if run.run_mode == TypedRunMode::Completed {
+        match public_output_schema_id {
+            Some(schema_id) => Some(services.typed_public_output(&run_id, &schema_id).await?),
+            None => None,
+        }
+    } else {
+        None
+    };
 
-    json_ok(data)
+    json_ok(TypedRunStartResponse { run, public_output })
 }
 
 #[instrument(level = "info", skip(state, body), fields(run_id = run_id.as_str()))]
@@ -971,127 +656,6 @@ where
     json_ok(data)
 }
 
-async fn evm_contract_start<S>(
-    state: RouterState<S>,
-    run_id: Option<String>,
-    framework_version: String,
-    source_revision: String,
-    drive: RestDriveMode,
-    compiled: CompiledContractLifecycleProgram,
-    seed_inputs: Vec<RunLaunchSeedArtifact>,
-) -> Result<Json<serde_json::Value>, ApiError>
-where
-    S: AsyncTypedRunEventStore + Clone + Send + Sync,
-{
-    let run_id = parse_optional_run_id(run_id)?;
-    let public_schema_id = compiled.public_schema_id.clone();
-    let services = state.services()?;
-    let start = mfm_app::prepare_certified_run_launch(
-        mfm_app::CertifiedRunLaunchInput {
-            certified_spec: compiled.certified_spec,
-            registry: services.certification_registry(),
-            run_id: run_id.clone(),
-            framework_version: &framework_version,
-            source_revision: &source_revision,
-            launched_at_unix_ms: launch_unix_ms()?,
-            drive: drive.into_app(),
-        },
-        evm_contract_config_artifacts(compiled.config_artifacts),
-        seed_inputs,
-    )?;
-    let run = services.launch_run(start).await?;
-    let public_output = if run.run_mode == TypedRunMode::Completed {
-        Some(
-            services
-                .typed_public_output(&run_id, &public_schema_id)
-                .await?,
-        )
-    } else {
-        None
-    };
-
-    json_ok(EvmContractStartResponse { run, public_output })
-}
-
-fn evm_contract_config_artifacts(
-    configs: Vec<ContractLifecycleConfigArtifact>,
-) -> Vec<RunLaunchConfigArtifact> {
-    configs
-        .into_iter()
-        .map(|config| RunLaunchConfigArtifact {
-            schema_id: config.schema_id,
-            bytes: config.bytes,
-            media_type: config.media_type,
-        })
-        .collect()
-}
-
-fn seed_artifact_for_single_contract_seed(
-    compiled: &CompiledContractLifecycleProgram,
-    bytes: Vec<u8>,
-) -> Result<RunLaunchSeedArtifact, ApiError> {
-    let seeds = &compiled.certified_spec.envelope().spec.seeds;
-    let [seed] = seeds.as_slice() else {
-        return Err(ApiError::new(
-            StatusCode::BAD_REQUEST,
-            "EvmContractCompileInvalid",
-            format!(
-                "expected exactly one contract launch seed, found {}",
-                seeds.len()
-            ),
-        ));
-    };
-    Ok(RunLaunchSeedArtifact {
-        seed_id: seed.seed_id.clone(),
-        bytes,
-        media_type: mfm_app::json_media_type()?,
-    })
-}
-
-fn deserialize_request_value<T>(value: &serde_json::Value) -> Result<T, ApiError>
-where
-    T: DeserializeOwned,
-{
-    serde_json::from_value(value.clone()).map_err(|_| {
-        ApiError::backend(
-            StatusCode::BAD_REQUEST,
-            "InvalidEvmContractRequest",
-            "Invalid EVM contract request",
-        )
-    })
-}
-
-fn canonical_request_value_bytes<T>(value: &T) -> Result<Vec<u8>, ApiError>
-where
-    T: Serialize,
-{
-    let json = serde_json::to_string(value).map_err(|_| {
-        ApiError::backend(
-            StatusCode::BAD_REQUEST,
-            "InvalidEvmContractRequest",
-            "Failed to serialize EVM contract request",
-        )
-    })?;
-    PlainCanonicalJsonBytes::from_json_str(&json)
-        .map(|canonical| canonical.to_vec())
-        .map_err(|_| {
-            ApiError::backend(
-                StatusCode::BAD_REQUEST,
-                "InvalidEvmContractRequest",
-                "Failed to canonicalize EVM contract request",
-            )
-        })
-}
-
-fn api_error_from_contract_compile(error: ContractLifecycleCompileError) -> ApiError {
-    let _ = error;
-    ApiError::backend(
-        StatusCode::BAD_REQUEST,
-        "EvmContractCompileInvalid",
-        "EVM contract lifecycle request failed validation",
-    )
-}
-
 fn parse_run_id(value: &str) -> Result<RunId, ApiError> {
     RunId::parse(value).map_err(|_| {
         ApiError::new(
@@ -1115,16 +679,6 @@ fn parse_schema_id(value: &str) -> Result<SchemaId, ApiError> {
             StatusCode::BAD_REQUEST,
             "InvalidSchemaId",
             "Schema id must use the typed schema identity format",
-        )
-    })
-}
-
-fn parse_seed_id(value: &str) -> Result<SeedId, ApiError> {
-    SeedId::parse(value).map_err(|_| {
-        ApiError::new(
-            StatusCode::BAD_REQUEST,
-            "InvalidSeedId",
-            "Seed id must use the typed seed identity format",
         )
     })
 }
@@ -1159,58 +713,6 @@ fn canonical_json_value_bytes(
                 "Request JSON is not canonical JSON",
             )
         })
-}
-
-fn parse_portfolio_snapshot_request(
-    value: &serde_json::Value,
-) -> Result<mfm_portfolio_config::PortfolioSnapshotCanonicalConfig, ApiError> {
-    let raw = serde_json::to_string(value).map_err(|_| {
-        ApiError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "SerializationError",
-            "Failed to serialize portfolio request JSON",
-        )
-    })?;
-    let authored = parse_portfolio_snapshot_authored_config(&raw, AuthoredConfigFormat::Json)
-        .map_err(api_error_from_portfolio_config_error)?;
-    canonicalize_portfolio_snapshot_authored_config(authored)
-        .map_err(api_error_from_portfolio_config_error)
-}
-
-fn run_launch_config_artifacts(
-    configs: Vec<PortfolioConfigArtifact>,
-) -> Vec<RunLaunchConfigArtifact> {
-    configs
-        .into_iter()
-        .map(|config| RunLaunchConfigArtifact {
-            schema_id: config.schema_id,
-            bytes: config.bytes,
-            media_type: config.media_type,
-        })
-        .collect()
-}
-
-fn api_error_from_portfolio_config_error(error: PortfolioSnapshotConfigError) -> ApiError {
-    match error {
-        PortfolioSnapshotConfigError::InvalidJson { .. } => ApiError::new(
-            StatusCode::BAD_REQUEST,
-            "InvalidJson",
-            "Failed to parse request body as JSON",
-        ),
-        PortfolioSnapshotConfigError::InvalidToml { .. } => ApiError::new(
-            StatusCode::BAD_REQUEST,
-            "InvalidToml",
-            "Failed to parse request body as TOML",
-        ),
-        PortfolioSnapshotConfigError::InvalidBundle(_)
-        | PortfolioSnapshotConfigError::Decode { .. }
-        | PortfolioSnapshotConfigError::Serialize { .. }
-        | PortfolioSnapshotConfigError::CanonicalJson { .. } => ApiError::backend(
-            StatusCode::BAD_REQUEST,
-            "InvalidPortfolioRequest",
-            "Portfolio request failed validation",
-        ),
-    }
 }
 
 fn validate_sequence_range(from_seq: u64, to_seq: Option<u64>) -> Result<(), ApiError> {
@@ -1351,91 +853,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn evm_contract_routes_accept_append_only_starts() {
-        for (route, body) in [
-            (
-                "/v1/evm/contracts/deploy",
-                json!({
-                    "kind": "evm_contract_deploy_start_v1",
-                    "config": deploy_config_json(),
-                    "drive": "append_only"
-                }),
-            ),
-            (
-                "/v1/evm/contracts/configure",
-                json!({
-                    "kind": "evm_contract_configure_start_v1",
-                    "config": configure_config_json(),
-                    "deployed": deployed_contract_json(),
-                    "drive": "append_only"
-                }),
-            ),
-            (
-                "/v1/evm/contracts/validate",
-                json!({
-                    "kind": "evm_contract_validate_start_v1",
-                    "config": validate_config_json(),
-                    "configured": configured_contract_json(),
-                    "drive": "append_only"
-                }),
-            ),
-            (
-                "/v1/evm/contracts/lifecycle",
-                json!({
-                    "kind": "evm_contract_lifecycle_start_v1",
-                    "config": {
-                        "deploy": deploy_config_json(),
-                        "configure": configure_config_json(),
-                        "validate": validate_config_json()
-                    },
-                    "drive": "append_only"
-                }),
-            ),
-        ] {
-            let response = test_app()
-                .oneshot(json_post(route, body))
-                .await
-                .expect("response");
-
-            assert_eq!(response.status(), StatusCode::OK, "route {route}");
-            let value = response_json(response).await;
-            assert_eq!(value["status"], "success");
-            assert_eq!(value["data"]["run"]["run_mode"], "forward");
-            assert!(
-                value["data"]["run"]["attempt_dispositions"].is_array(),
-                "route {route} must expose attempt-level dispositions"
-            );
-            assert_eq!(value["data"]["public_output"], serde_json::Value::Null);
-        }
-    }
-
-    #[tokio::test]
-    async fn removed_legacy_contract_route_is_not_found() {
-        let route = ["/v1/evm/", "d", "c", "v", "/deploy"].concat();
+    async fn run_start_accepts_entry_point_shape() {
         let response = test_app()
             .oneshot(json_post(
-                &route,
+                "/v1/runs/start",
                 json!({
-                    "kind": "evm_contract_deploy_start_v1",
-                    "config": deploy_config_json(),
-                    "drive": "append_only"
-                }),
-            ))
-            .await
-            .expect("response");
-
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn removed_legacy_contract_start_kind_rejects() {
-        let removed_kind = ["evm_", "d", "c", "v", "_deploy_start_v1"].concat();
-        let response = test_app()
-            .oneshot(json_post(
-                "/v1/evm/contracts/deploy",
-                json!({
-                    "kind": removed_kind,
-                    "config": deploy_config_json(),
+                    "op": "missing_entry_point_op",
+                    "config": "portfolio_id = \"main\"\n",
                     "drive": "append_only"
                 }),
             ))
@@ -1445,7 +869,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let value = response_json(response).await;
         assert_eq!(value["status"], "error");
-        assert_eq!(value["error"]["code"], "InvalidJson");
+        assert_eq!(value["error"]["code"], "EntryPointOpNotFound");
     }
 
     #[test]
@@ -1501,65 +925,5 @@ mod tests {
             .await
             .expect("body");
         serde_json::from_slice(&bytes).expect("response json")
-    }
-
-    fn deploy_config_json() -> serde_json::Value {
-        json!({
-            "network": network_json(),
-            "signer": signer_json()
-        })
-    }
-
-    fn configure_config_json() -> serde_json::Value {
-        json!({
-            "network": network_json(),
-            "signer": signer_json(),
-            "calls": []
-        })
-    }
-
-    fn validate_config_json() -> serde_json::Value {
-        json!({
-            "network": network_json()
-        })
-    }
-
-    fn network_json() -> serde_json::Value {
-        json!({
-            "network_id": "ethereum-mainnet",
-            "expected_chain_id": 1
-        })
-    }
-
-    fn signer_json() -> serde_json::Value {
-        json!({
-            "signer_ref": "deployer",
-            "expected_signer_address": "0x000000000000000000000000000000000000dead"
-        })
-    }
-
-    fn deployed_contract_json() -> serde_json::Value {
-        json!({
-            "lifecycle_version": 1,
-            "network_id": "ethereum-mainnet",
-            "expected_chain_id": 1,
-            "contract_address": "0x000000000000000000000000000000000000c0de",
-            "deploy_tx_hash": "0xabc123",
-            "deploy_receipt_evidence": null,
-            "deployed_block_number": 100
-        })
-    }
-
-    fn configured_contract_json() -> serde_json::Value {
-        json!({
-            "lifecycle_version": 1,
-            "deployed": deployed_contract_json(),
-            "configure_calls": [],
-            "confirmation_read_assertions": [],
-            "confirmation_event_assertions": [],
-            "configure_tx_hashes": [],
-            "configure_receipt_evidence": [],
-            "configured_block_number": 101
-        })
     }
 }

@@ -2,9 +2,10 @@
 
 Typed application assembly for certified MFM runs.
 
-`mfm-app` wires certified typed runtime pieces only:
+`mfm-app` wires entry-point operation launch and certified typed runtime pieces only:
 
-- certified runtime specs
+- entry-point operation registries
+- app-owned typed spec certification
 - typed runner registries
 - typed run event stores
 - typed artifact stores
@@ -19,14 +20,13 @@ factory.
 It does not depend on old dynamic machine or SDK crates, dynamic DAG planning, context snapshots,
 or generic IO providers.
 
-Generic start parses certified bundle JSON as untrusted transport data, verifies the spec and
-certificate through `mfm-certify`, verifies config and seed inputs against the certified spec, and
-hands typed launch material to runtime middleware. The runtime stages the referenced artifacts and
-admits their evidence in the same prepared start commit that appends `RunAdmitted`. Domain start
-routes may accept domain inputs, but they build typed drafts and certify them before runtime start.
-Resume and replay reload stored spec/certificate artifacts, verify them against the production
-registry, compare them to `RunAdmitted`, and rebuild stream evidence before constructing runtime or
-replay authority.
+Entry-point start resolves a registered public op name and version, normalizes authored config,
+plans a typed draft, certifies it through `mfm-certify`, verifies config and seed inputs against the
+certified spec, and hands typed launch material to runtime middleware. The runtime stages the
+referenced artifacts and admits their evidence in the same prepared start commit that appends
+`RunAdmitted`. Resume and replay reload stored spec/certificate artifacts, verify them against the
+production registry, compare them to `RunAdmitted`, and rebuild stream evidence before constructing
+runtime or replay authority.
 
 Run status exposes manual-resolution requirements from certified policy only: evidence schema,
 manual authorization verifier, signing scheme, certified operator authority id, allowed operator

@@ -136,10 +136,11 @@ async fn portfolio_snapshot_post(
     let response = app
         .clone()
         .oneshot(json_post(
-            "/v1/portfolio/snapshot",
+            "/v1/runs/start",
             json!({
-                "kind": "portfolio_snapshot_start_v1",
-                "request": payload,
+                "op": "portfolio_snapshot",
+                "config_format": "json",
+                "config": payload,
                 "framework_version": "mfm.integration.rest.portfolio.typed.v1",
                 "source_revision": "integration-test",
                 "drive": drive,

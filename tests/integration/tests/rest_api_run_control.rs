@@ -3,18 +3,10 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use mfm_events::v1 as events;
-use mfm_ids::{
-    ArtifactId, AttemptId, ContentDigest, DigestAlgorithm, DigestBytes, RunId, SpecHash,
-};
+use mfm_ids::{AttemptId, DigestAlgorithm, DigestBytes, RunId, SpecHash};
 use mfm_integration_tests::test_support;
-use mfm_manual_auth::{
-    ManualAuthorizationSignatureBytes, ManualResolutionAuthorizationProof,
-    ManualResolutionAuthorizationSignature, ManualResolutionEvidenceRef,
-    ManualResolutionPrefixAuthority,
-};
-use mfm_runtime::{
-    manual_resolution_block_reason, manual_resolution_stream_prefix_digest,
-    unresolved_manual_obligations_digest,
+use mfm_portfolio_config::{
+    canonicalize_portfolio_snapshot_authored_config, PortfolioSnapshotAuthoredConfig,
 };
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
@@ -26,6 +18,8 @@ const VALID_RUN_ID: &str =
     "run:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000001";
 const VALID_SCHEMA_ID: &str =
     "schema:mfm.test.public:1:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000002";
+const PORTFOLIO_NETWORK_ID: &str = "rest-control-eth";
+static RPC_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn json_post(uri: &str, body: serde_json::Value) -> Request<Body> {
     let s = serde_json::to_string(&body).expect("json request must serialize");
@@ -50,16 +44,6 @@ async fn response_json(resp: axum::response::Response) -> serde_json::Value {
         .await
         .expect("body bytes");
     serde_json::from_slice(&bytes).expect("json response")
-}
-
-fn certified_bundle_json(spec_bytes: &[u8], certificate_bytes: &[u8]) -> serde_json::Value {
-    serde_json::json!({
-        "kind": "certified_typed_spec_bundle_v1",
-        "spec": serde_json::from_slice::<serde_json::Value>(spec_bytes)
-            .expect("spec bundle JSON"),
-        "certificate": serde_json::from_slice::<serde_json::Value>(certificate_bytes)
-            .expect("certificate bundle JSON")
-    })
 }
 
 fn test_app() -> axum::Router {
@@ -173,17 +157,14 @@ async fn start_rejects_invalid_json_with_stable_envelope() {
 }
 
 #[tokio::test]
-async fn start_rejects_dynamic_single_op_payloads() {
+async fn start_rejects_unknown_start_fields() {
     let app = test_app();
 
     let resp = app
         .oneshot(json_post(
             "/v1/runs/start",
             serde_json::json!({
-                "kind": "single_op_start_v1",
-                "op_id": "proof",
-                "op_version": "v1",
-                "op_config": {}
+                "unexpected": true
             }),
         ))
         .await
@@ -203,8 +184,7 @@ async fn start_accepts_entry_point_toml_shape_with_default_format() {
         .oneshot(json_post(
             "/v1/runs/start",
             serde_json::json!({
-                "kind": "typed_run_start_v1",
-                "op": "__missing_contract_test_op__",
+                "op": "missing_contract_test_op",
                 "config": "portfolio_id = \"main\"\n",
                 "drive": "append_only"
             }),
@@ -226,8 +206,7 @@ async fn start_accepts_entry_point_toml_shape_with_explicit_version() {
         .oneshot(json_post(
             "/v1/runs/start",
             serde_json::json!({
-                "kind": "typed_run_start_v1",
-                "op": "__missing_contract_test_op__",
+                "op": "missing_contract_test_op",
                 "op_version": 1,
                 "config_format": "toml",
                 "config": "portfolio_id = \"main\"\n",
@@ -251,8 +230,7 @@ async fn start_accepts_entry_point_json_object_config_shape() {
         .oneshot(json_post(
             "/v1/runs/start",
             serde_json::json!({
-                "kind": "typed_run_start_v1",
-                "op": "__missing_contract_test_op__",
+                "op": "missing_contract_test_op",
                 "config_format": "json",
                 "config": {
                     "portfolio_id": "main",
@@ -271,451 +249,13 @@ async fn start_accepts_entry_point_json_object_config_shape() {
 }
 
 #[tokio::test]
-async fn start_parses_certified_bundle_and_rejects_invalid_spec() {
-    let app = test_app();
-
-    let resp = app
-        .clone()
-        .oneshot(json_post(
-            "/v1/runs/start",
-            serde_json::json!({
-                "kind": "typed_run_start_v1",
-                "run_id": VALID_RUN_ID,
-                "bundle": {
-                    "kind": "certified_typed_spec_bundle_v1",
-                    "spec": {},
-                    "certificate": {}
-                },
-                "drive": "append_only"
-            }),
-        ))
-        .await
-        .expect("response");
-
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    let v = response_json(resp).await;
-    assert_eq!(v["status"], "error");
-    assert_eq!(v["error"]["code"], "CertifiedBundleVerificationFailed");
-
-    let status = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!("/v1/runs/{VALID_RUN_ID}/status"))
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("status response");
-    assert_eq!(status.status(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-async fn start_rejects_invalid_certified_bundle_before_stream_creation() {
-    let app = test_app();
-
-    let resp = app
-        .clone()
-        .oneshot(json_post(
-            "/v1/runs/start",
-            serde_json::json!({
-                "kind": "typed_run_start_v1",
-                "run_id": VALID_RUN_ID,
-                "bundle": {
-                    "unexpected": "field"
-                },
-                "drive": "append_only"
-            }),
-        ))
-        .await
-        .expect("response");
-
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    let v = response_json(resp).await;
-    assert_eq!(v["status"], "error");
-    assert_eq!(v["error"]["code"], "CertifiedBundleInvalid");
-
-    let status = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!("/v1/runs/{VALID_RUN_ID}/status"))
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("status response");
-    assert_eq!(status.status(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-async fn start_rejects_certifier_invalid_runtime_shape_valid_bundle_before_stream_creation() {
-    let app = test_app();
-    let certified =
-        mfm_op_proof::certified_proof_spec(mfm_op_proof::ProofWorkflowConfig::default())
-            .expect("proof spec");
-    let mut invalid_spec = certified.validated_spec().spec().clone();
-    invalid_spec.config_refs.clear();
-    let invalid_spec_bytes = invalid_spec
-        .canonical_json()
-        .expect("invalid spec remains parseable")
-        .to_vec();
-    let mut evidence = certified.certificate().evidence.clone();
-    evidence.spec_hash = invalid_spec.spec_hash().expect("invalid spec hash");
-    let certificate =
-        mfm_certify::CertifiedSpecCertificate::from_evidence(evidence).expect("certificate");
-    let certificate_bytes = certificate
-        .canonical_json()
-        .expect("certificate json")
-        .to_vec();
-
-    let resp = app
-        .clone()
-        .oneshot(json_post(
-            "/v1/runs/start",
-            serde_json::json!({
-                "kind": "typed_run_start_v1",
-                "run_id": VALID_RUN_ID,
-                "bundle": certified_bundle_json(&invalid_spec_bytes, &certificate_bytes),
-                "drive": "append_only"
-            }),
-        ))
-        .await
-        .expect("response");
-
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    let v = response_json(resp).await;
-    assert_eq!(v["status"], "error");
-    assert_eq!(v["error"]["code"], "CertifiedBundleVerificationFailed");
-
-    let status = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!("/v1/runs/{VALID_RUN_ID}/status"))
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("status response");
-    assert_eq!(status.status(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-async fn start_rejects_missing_config_inputs_before_stream_creation() {
-    let app = test_app();
-    let certified =
-        mfm_op_proof::certified_proof_spec(mfm_op_proof::ProofWorkflowConfig::default())
-            .expect("proof spec");
-    let bundle = certified.bundle().expect("proof bundle");
-    let bundle_json = certified_bundle_json(bundle.spec_bytes(), bundle.certificate_bytes());
-
-    let resp = app
-        .clone()
-        .oneshot(json_post(
-            "/v1/runs/start",
-            serde_json::json!({
-                "kind": "typed_run_start_v1",
-                "run_id": VALID_RUN_ID,
-                "bundle": bundle_json,
-                "drive": "append_only"
-            }),
-        ))
-        .await
-        .expect("response");
-
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    let v = response_json(resp).await;
-    assert_eq!(v["status"], "error");
-    assert_eq!(v["error"]["code"], "MissingLaunchConfigArtifact");
-
-    let status = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!("/v1/runs/{VALID_RUN_ID}/status"))
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("status response");
-    assert_eq!(status.status(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-async fn proof_http_start_replay_uses_certified_bundle_evidence() {
-    let root = std::env::temp_dir().join(format!("mfm-rest-proof-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&root).expect("artifact root");
-    let state = test_support::in_memory_rest_app_state(root.clone());
-    let proof_config = mfm_op_proof::ProofWorkflowConfig::default();
-    let draft = mfm_op_proof::proof_program_draft(proof_config.clone()).expect("proof draft");
-    let certified = mfm_op_proof::certified_proof_spec(proof_config).expect("proof spec");
-    let configs = config_bodies_for_draft_and_spec(&draft, &certified.envelope().spec);
-    let public_schema_id = certified
-        .envelope()
-        .spec
-        .public_outputs
-        .public_schema_id
-        .as_str()
-        .to_owned();
-    let bundle = certified.bundle().expect("proof bundle");
-    let bundle_json = certified_bundle_json(bundle.spec_bytes(), bundle.certificate_bytes());
-    let run_id = mfm_app::new_run_id().to_string();
-    let app = mfm_rest_api::make_app(state);
-
-    let start = app
-        .clone()
-        .oneshot(json_post(
-            "/v1/runs/start",
-            serde_json::json!({
-                "kind": "typed_run_start_v1",
-                "run_id": run_id,
-                "bundle": bundle_json,
-                "configs": configs,
-                "framework_version": "mfm.integration.rest.proof.typed.v1",
-                "source_revision": "integration-test",
-                "drive": "until_blocked"
-            }),
-        ))
-        .await
-        .expect("start response");
-    assert_eq!(start.status(), StatusCode::OK);
-    let start_body = response_json(start).await;
-    assert_eq!(start_body["status"], "success");
-    assert_eq!(start_body["data"]["run_mode"], "completed");
-    assert_eq!(
-        start_body["data"]["spec_hash"],
-        certified.spec_hash().as_str()
-    );
-    let status = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!("/v1/runs/{run_id}/status"))
-                .body(Body::empty())
-                .expect("status request"),
-        )
-        .await
-        .expect("status response");
-    assert_eq!(status.status(), StatusCode::OK);
-    let status_body = response_json(status).await;
-    assert_eq!(status_body["status"], "success");
-    assert_eq!(status_body["data"]["run_id"], run_id);
-    assert_eq!(
-        status_body["data"]["spec_hash"],
-        start_body["data"]["spec_hash"]
-    );
-    assert_eq!(status_body["data"]["run_mode"], "completed");
-    assert_eq!(status_body["data"]["scheduler_status"], "observed");
-    assert!(
-        status_body["data"]["attempt_dispositions"]
-            .as_array()
-            .is_some_and(|attempts| !attempts.is_empty()),
-        "status route must expose attempt dispositions"
-    );
-
-    let replay = app
-        .clone()
-        .oneshot(empty_post(&format!("/v1/runs/{run_id}/replay")))
-        .await
-        .expect("replay response");
-    assert_eq!(replay.status(), StatusCode::OK);
-    let replay_body = response_json(replay).await;
-    assert_eq!(replay_body["status"], "success");
-    assert_eq!(replay_body["data"]["run_mode"], "completed");
-    assert_eq!(
-        replay_body["data"]["spec_hash"],
-        start_body["data"]["spec_hash"]
-    );
-    assert!(
-        replay_body["data"]["retained_artifacts"]
-            .as_u64()
-            .expect("retained artifact count")
-            > 0,
-        "replay must be backed by retained recorded evidence"
-    );
-
-    let public_output = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!(
-                    "/v1/runs/{run_id}/public-output/{public_schema_id}"
-                ))
-                .body(Body::empty())
-                .expect("public output request"),
-        )
-        .await
-        .expect("public output response");
-    assert_eq!(public_output.status(), StatusCode::OK);
-    let public_body = response_json(public_output).await;
-    assert_eq!(
-        public_body["data"]["json"]["output"]["fact"]["n"],
-        serde_json::json!(1)
-    );
-    assert_eq!(
-        public_body["data"]["json"]["output"]["side_effect"]["status"],
-        "confirmed"
-    );
-
-    let _ = std::fs::remove_dir_all(root);
-}
-
-#[tokio::test]
-async fn manual_resolution_route_records_resolution_and_hides_proof_bytes() {
-    let (root, state) = in_memory_state_with_root();
-    let proof_config = mfm_op_proof::ProofWorkflowConfig::default();
-    let draft = mfm_op_proof::manual_resolution_proof_program_draft(proof_config.clone())
-        .expect("manual proof draft");
-    let certified = mfm_op_proof::certified_manual_resolution_proof_spec(proof_config)
-        .expect("manual proof spec");
-    let configs = config_bodies_for_draft_and_spec(&draft, &certified.envelope().spec);
-    let bundle = certified.bundle().expect("manual proof bundle");
-    let bundle_json = certified_bundle_json(bundle.spec_bytes(), bundle.certificate_bytes());
-    let run_id = mfm_app::new_run_id();
-    let app = mfm_rest_api::make_app(state.clone());
-
-    let start = app
-        .clone()
-        .oneshot(json_post(
-            "/v1/runs/start",
-            serde_json::json!({
-                "kind": "typed_run_start_v1",
-                "run_id": run_id.as_str(),
-                "bundle": bundle_json,
-                "configs": configs,
-                "framework_version": "mfm.integration.rest.manual_resolution.v1",
-                "source_revision": "integration-test",
-                "drive": "until_blocked"
-            }),
-        ))
-        .await
-        .expect("start response");
-    assert_eq!(start.status(), StatusCode::OK);
-    let start_body = response_json(start).await;
-    assert_eq!(start_body["status"], "success");
-    assert_eq!(start_body["data"]["run_mode"], "manual_blocked");
-    assert_eq!(
-        start_body["data"]["saga"]["manual_block_reason"],
-        "policy_manual_resolution"
-    );
-
-    let evidence_json = serde_json::json!({"operator_note":"reviewed"});
-    let evidence_bytes = serde_json::to_vec(&evidence_json).expect("evidence JSON");
-    let proof_bytes = signed_manual_resolution_proof_bytes(
-        &state.store,
-        &run_id,
-        &certified,
-        manual_policy(&certified),
-        &evidence_bytes,
-    )
-    .await;
-    let proof_json: Value = serde_json::from_slice(&proof_bytes).expect("proof JSON");
-
-    let resolved = app
-        .clone()
-        .oneshot(json_post(
-            &format!("/v1/runs/{run_id}/manual-resolution"),
-            serde_json::json!({
-                "kind": "manual_resolution_v1",
-                "outcome": "confirm_remediated",
-                "evidence_json": evidence_json,
-                "authorization_proof": proof_json,
-                "note": "reviewed externally",
-                "drive": "until_blocked"
-            }),
-        ))
-        .await
-        .expect("manual resolution response");
-    assert_eq!(resolved.status(), StatusCode::OK);
-    let resolved_body = response_json(resolved).await;
-    assert_eq!(resolved_body["status"], "success");
-    assert_eq!(resolved_body["data"]["run_mode"], "manually_resolved");
-    assert_eq!(
-        resolved_body["data"]["saga"]["terminal_resolution"]["claim"],
-        "manual_resolution"
-    );
-
-    let status = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!("/v1/runs/{run_id}/status"))
-                .body(Body::empty())
-                .expect("status request"),
-        )
-        .await
-        .expect("status response");
-    assert_eq!(status.status(), StatusCode::OK);
-    let status_body = response_json(status).await;
-    assert_eq!(status_body["data"]["run_mode"], "manually_resolved");
-    assert!(
-        status_body["data"]["attempt_dispositions"]
-            .as_array()
-            .expect("attempts")
-            .iter()
-            .any(|attempt| {
-                attempt["disposition"] == "completed"
-                    && resolve_saga_node_ids(&certified.envelope().spec)
-                        .contains(&attempt["node_id"].as_str().unwrap_or_default())
-            }),
-        "missing completed ResolveSagaTerminal attempt"
-    );
-
-    let raw_stream = state
-        .store
-        .load_run_stream(&run_id)
-        .await
-        .expect("raw run stream");
-    assert!(
-        raw_stream.iter().any(|event| matches!(
-            event.payload(),
-            events::KernelEventPayload::ManualResolutionRecorded(_)
-        )),
-        "stream must contain manual resolution event"
-    );
-    assert_framework_started_before_run_completed(&raw_stream, &certified.envelope().spec);
-
-    let stream = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!("/v1/runs/{run_id}/stream"))
-                .body(Body::empty())
-                .expect("stream request"),
-        )
-        .await
-        .expect("stream response");
-    assert_eq!(stream.status(), StatusCode::OK);
-    let stream_body = response_json(stream).await;
-    let rendered = serde_json::to_string(&serde_json::json!([
-        start_body,
-        resolved_body,
-        status_body,
-        stream_body
-    ]))
-    .expect("render public JSON");
-    let proof_rendered = std::str::from_utf8(&proof_bytes).expect("proof utf8");
-    let proof: Value = serde_json::from_slice(&proof_bytes).expect("proof JSON");
-    let signature = proof["signatures"][0]["signature_hex"]
-        .as_str()
-        .expect("signature");
-    assert!(!rendered.contains(proof_rendered));
-    assert!(!rendered.contains(signature));
-
-    let _ = std::fs::remove_dir_all(root);
-}
-
-#[tokio::test]
 async fn status_route_reports_interrupted_attempt_and_framework_attempts_from_history() {
+    let _env_guard = RPC_ENV_LOCK.lock().await;
+    let rpc_url = start_rpc_mock().await;
+    let _env_restore = set_rpc_env(rpc_url);
     let (root, state) = in_memory_state_with_root();
-    let proof_config = mfm_op_proof::ProofWorkflowConfig::default();
-    let draft = mfm_op_proof::proof_program_draft(proof_config.clone()).expect("proof draft");
-    let certified = mfm_op_proof::certified_proof_spec(proof_config).expect("proof spec");
-    let configs = config_bodies_for_draft_and_spec(&draft, &certified.envelope().spec);
-    let bundle = certified.bundle().expect("proof bundle");
+    let config = portfolio_snapshot_config();
+    let certified = certified_portfolio_spec_for_config(&config);
     let run_id = mfm_app::new_run_id();
     let app = mfm_rest_api::make_app(state.clone());
 
@@ -724,11 +264,11 @@ async fn status_route_reports_interrupted_attempt_and_framework_attempts_from_hi
         .oneshot(json_post(
             "/v1/runs/start",
             serde_json::json!({
-                "kind": "typed_run_start_v1",
+                "op": "portfolio_snapshot",
+                "config_format": "json",
+                "config": config,
                 "run_id": run_id.as_str(),
-                "bundle": certified_bundle_json(bundle.spec_bytes(), bundle.certificate_bytes()),
-                "configs": configs,
-                "framework_version": "mfm.integration.rest.proof.typed.v1",
+                "framework_version": "mfm.integration.rest.portfolio.typed.v1",
                 "source_revision": "integration-test",
                 "drive": "append_only"
             }),
@@ -738,7 +278,7 @@ async fn status_route_reports_interrupted_attempt_and_framework_attempts_from_hi
     assert_eq!(start.status(), StatusCode::OK);
     let start_body = response_json(start).await;
     assert_eq!(start_body["status"], "success");
-    assert_eq!(start_body["data"]["run_mode"], "forward");
+    assert_eq!(start_body["data"]["run"]["run_mode"], "forward");
 
     let interrupted_node = certified
         .envelope()
@@ -970,41 +510,161 @@ fn stream_filters_range_after_authoritative_run_stream_validation() {
     assert!(authoritative_read < range_filter);
 }
 
-fn config_bodies_for_draft_and_spec(
-    draft: &mfm_program::TypedProgramDraft,
-    typed_spec: &spec::TypedExecutionSpec,
-) -> Vec<serde_json::Value> {
-    let mut configs = draft
-        .state_nodes()
-        .iter()
-        .map(|node| &node.config)
-        .chain(draft.operation_lineage().iter().map(|frame| &frame.config))
-        .map(|config| config_body(config.schema_id.as_str(), config.canonical_json.as_bytes()))
-        .collect::<Vec<_>>();
-    for node in &typed_spec.nodes {
-        let Some(framework) = &node.framework else {
-            continue;
-        };
-        let bytes = spec::framework_config_canonical_json(framework.config_kind(), &node.node_id)
-            .expect("canonical framework config");
-        assert_eq!(
-            bytes.content_digest(),
-            node.config_ref.digest,
-            "framework config helper must match certified config ref"
-        );
-        configs.push(config_body(
-            node.config_ref.schema_id.as_str(),
-            bytes.as_bytes(),
-        ));
-    }
-    configs
+fn portfolio_snapshot_config() -> serde_json::Value {
+    serde_json::json!({
+        "portfolio": {
+            "portfolio_id": "rest-control",
+            "quote_codes": ["USD"],
+            "networks": [
+                {
+                    "network_id": PORTFOLIO_NETWORK_ID,
+                    "family": "evm",
+                    "chain_id": 31337,
+                    "control_scope": "rest-control",
+                    "metadata": {}
+                }
+            ],
+            "wallets": [
+                {
+                    "wallet_id": "wallet_rest_control",
+                    "subject": {
+                        "kind": "evm_address",
+                        "address": "0x000000000000000000000000000000000000dead"
+                    },
+                    "implementation": {
+                        "kind": "address_only"
+                    },
+                    "network_id": PORTFOLIO_NETWORK_ID,
+                    "symbol_ids": ["eth.native.rest-control-eth"],
+                    "metadata": {}
+                }
+            ],
+            "symbol_configs": [
+                {
+                    "symbol_id": "eth.native.rest-control-eth",
+                    "display_symbol": "ETH",
+                    "kind": "native_balance",
+                    "role": "native",
+                    "network_id": PORTFOLIO_NETWORK_ID,
+                    "protocol": null,
+                    "balance_reader": {
+                        "kind": "native_balance"
+                    },
+                    "valuation": {
+                        "quotes": [
+                            {
+                                "quote": "USD",
+                                "priced_symbol_id": "eth.native.rest-control-eth",
+                                "reader": {
+                                    "kind": "fixed_unit_price",
+                                    "unit_price_dec": "2.50"
+                                }
+                            }
+                        ]
+                    },
+                    "decimals": 18,
+                    "underlying_symbol_id": null,
+                    "metadata": {}
+                }
+            ],
+            "metadata": {}
+        },
+        "valuation_source_registry": {
+            "sources": []
+        }
+    })
 }
 
-fn config_body(schema_id: &str, bytes: &[u8]) -> serde_json::Value {
-    serde_json::json!({
-        "schema_id": schema_id,
-        "json": serde_json::from_slice::<serde_json::Value>(bytes).expect("config JSON"),
-    })
+async fn start_rpc_mock() -> String {
+    let app = axum::Router::new().route("/", axum::routing::post(rpc_handler));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind rpc mock");
+    let addr = listener.local_addr().expect("rpc mock addr");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("rpc mock serve");
+    });
+    format!("http://{addr}")
+}
+
+async fn rpc_handler(
+    axum::Json(request): axum::Json<serde_json::Value>,
+) -> axum::Json<serde_json::Value> {
+    let id = request
+        .get("id")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!(1));
+    let method = request
+        .get("method")
+        .and_then(|value| value.as_str())
+        .expect("json-rpc method");
+    let result = match method {
+        "eth_chainId" => serde_json::json!("0x7a69"),
+        "eth_getBlockByNumber" => serde_json::json!({
+            "number": "0x64",
+            "hash": "0x1111111111111111111111111111111111111111111111111111111111111111"
+        }),
+        "eth_getBalance" => serde_json::json!("0xde0b6b3a7640000"),
+        other => panic!("unexpected rpc method {other}"),
+    };
+    axum::Json(serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": result
+    }))
+}
+
+fn set_rpc_env(rpc_url: String) -> EnvVarRestore {
+    let previous = std::env::var("MFM_EVM_RPC_SOURCES_JSON").ok();
+    std::env::set_var(
+        "MFM_EVM_RPC_SOURCES_JSON",
+        serde_json::json!({
+            "sources": [
+                {
+                    "id": PORTFOLIO_NETWORK_ID,
+                    "expected_chain_id": 31337,
+                    "rpc_url": rpc_url,
+                    "authorization": null
+                }
+            ],
+            "policies": [
+                {
+                    "id": PORTFOLIO_NETWORK_ID,
+                    "ordered_sources": [PORTFOLIO_NETWORK_ID]
+                }
+            ]
+        })
+        .to_string(),
+    );
+    EnvVarRestore {
+        name: "MFM_EVM_RPC_SOURCES_JSON",
+        previous,
+    }
+}
+
+struct EnvVarRestore {
+    name: &'static str,
+    previous: Option<String>,
+}
+
+impl Drop for EnvVarRestore {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => std::env::set_var(self.name, value),
+            None => std::env::remove_var(self.name),
+        }
+    }
+}
+
+fn certified_portfolio_spec_for_config(
+    config: &serde_json::Value,
+) -> mfm_certify::CertifiedTypedSpec {
+    let authored: PortfolioSnapshotAuthoredConfig =
+        serde_json::from_value(config.clone()).expect("portfolio authored config");
+    let canonical = canonicalize_portfolio_snapshot_authored_config(authored)
+        .expect("portfolio canonical config");
+    mfm_op_portfolio_tracker::certified_portfolio_spec(canonical.into())
+        .expect("certified portfolio spec")
 }
 
 async fn append_interrupted_attempt(
@@ -1230,123 +890,4 @@ fn stream_event_position(
         .iter()
         .position(predicate)
         .unwrap_or_else(|| panic!("missing stream event for {label}"))
-}
-
-async fn signed_manual_resolution_proof_bytes(
-    store: &store::AsyncInMemoryTypedRunStore,
-    run_id: &RunId,
-    certified: &mfm_certify::CertifiedTypedSpec,
-    manual: spec::ManualResolutionEvidenceSpec,
-    evidence_bytes: &[u8],
-) -> Vec<u8> {
-    let evidence_hash = ContentDigest::from_digest(
-        DigestAlgorithm::Sha256JcsV1,
-        mfm_canonical::sha256_digest_bytes(evidence_bytes),
-    );
-    let evidence = ManualResolutionEvidenceRef {
-        schema_id: manual.evidence_schema.clone(),
-        artifact_id: ArtifactId::from_digest(evidence_hash.algorithm(), *evidence_hash.digest()),
-        content_hash: evidence_hash,
-    };
-    let stream = store.load_run_stream(run_id).await.expect("run stream");
-    let projection =
-        store::ProjectionSnapshot::rebuild_from_run_stream(&stream).expect("projection rebuild");
-    let saga = projection.derive_saga_projection(run_id, &certified.envelope().spec.saga);
-    let reason = saga.manual_block_reason.expect("manual block reason");
-    let expected_next_seq = store
-        .expected_next_seq(run_id)
-        .await
-        .expect("expected next seq");
-    let prefix = ManualResolutionPrefixAuthority::new(
-        run_id.clone(),
-        certified.spec_hash().clone(),
-        expected_next_seq.as_u64(),
-        manual_resolution_stream_prefix_digest(&stream).expect("prefix digest"),
-        manual_resolution_block_reason(reason),
-        unresolved_manual_obligations_digest(&saga).expect("obligation digest"),
-        manual.clone(),
-    )
-    .expect("manual prefix");
-    let claim = prefix
-        .authorization_claim(events::ManualResolutionOutcome::ConfirmRemediated, evidence)
-        .expect("manual claim");
-    let operator = manual.authorization.authority.operators[0].clone();
-    let claim_digest = claim.digest().expect("claim digest");
-    let proof = ManualResolutionAuthorizationProof {
-        verifier_id: manual.authorization.verifier_id,
-        signing_scheme: manual.authorization.signing_scheme,
-        claim,
-        signatures: vec![ManualResolutionAuthorizationSignature {
-            operator_id: operator.operator_id,
-            public_identity: operator.public_identity,
-            signature: ManualAuthorizationSignatureBytes::new(sign_manual_claim_digest(
-                &test_manual_signing_key(),
-                claim_digest.digest().as_bytes(),
-            ))
-            .expect("signature"),
-        }],
-    };
-    proof
-        .canonical_json()
-        .expect("canonical manual proof")
-        .to_vec()
-}
-
-fn manual_policy(
-    certified: &mfm_certify::CertifiedTypedSpec,
-) -> spec::ManualResolutionEvidenceSpec {
-    match &certified.envelope().spec.saga {
-        spec::SagaPolicySpec::ManualResolution { manual } => manual.clone(),
-        _ => panic!("manual proof scenario must carry manual policy"),
-    }
-}
-
-fn resolve_saga_node_ids(spec: &spec::TypedExecutionSpec) -> Vec<&str> {
-    spec.nodes
-        .iter()
-        .filter(|node| {
-            matches!(
-                node.framework,
-                Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_))
-            )
-        })
-        .map(|node| node.node_id.as_str())
-        .collect()
-}
-
-fn assert_framework_started_before_run_completed(
-    stream: &[store::KernelEventEnvelope],
-    spec: &spec::TypedExecutionSpec,
-) {
-    let resolve_nodes = resolve_saga_node_ids(spec);
-    let started = stream
-        .iter()
-        .position(|event| match event.payload() {
-            events::KernelEventPayload::StateAttemptStarted(payload) => {
-                resolve_nodes.contains(&payload.node_id.as_str())
-            }
-            _ => false,
-        })
-        .expect("ResolveSagaTerminal attempt start");
-    let completed = stream
-        .iter()
-        .position(|event| matches!(event.payload(), events::KernelEventPayload::RunCompleted(_)))
-        .expect("RunCompleted event");
-    assert!(started < completed);
-}
-
-fn test_manual_signing_key() -> k256::ecdsa::SigningKey {
-    let mut key_bytes = [0u8; 32];
-    key_bytes[31] = 1;
-    let secret_key = k256::SecretKey::from_slice(&key_bytes).expect("test key");
-    k256::ecdsa::SigningKey::from(&secret_key)
-}
-
-fn sign_manual_claim_digest(signing_key: &k256::ecdsa::SigningKey, digest: &[u8; 32]) -> Vec<u8> {
-    let (signature, recovery_id) = signing_key
-        .sign_prehash_recoverable(digest)
-        .expect("manual signature");
-    let mut signature_bytes = signature.to_bytes().to_vec();
-    signature_bytes.push(u8::from(recovery_id.is_y_odd()));
-    signature_bytes
 }
