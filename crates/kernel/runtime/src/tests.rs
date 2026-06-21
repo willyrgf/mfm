@@ -2374,9 +2374,6 @@ fn runner_registration_builder_preserves_explicit_binding_authority() {
     let factory_id = events::RunnerFactoryId::new("read").expect("factory");
     let executable = events::ExecutableIdentity {
         factory_id: factory_id.clone(),
-        source_revision: events::SourceRevision::new("test-rev").expect("source"),
-        cargo_package_name: events::PackageName::new("mfm-test").expect("package"),
-        cargo_package_version: events::PackageVersion::new("0.1.0").expect("version"),
         cargo_package_digest: content(0xe1),
         binary_digest: content(0xe2),
         nix_derivation_hash: None,
@@ -10183,9 +10180,6 @@ fn binding<R: ErasedNodeRunner + 'static>(
         factory_id.clone(),
         events::ExecutableIdentity {
             factory_id,
-            source_revision: events::SourceRevision::new("test-rev").expect("source"),
-            cargo_package_name: events::PackageName::new("mfm-test").expect("package"),
-            cargo_package_version: events::PackageVersion::new("0.1.0").expect("version"),
             cargo_package_digest: content(0xe1),
             binary_digest: content(0xe2),
             nix_derivation_hash: None,

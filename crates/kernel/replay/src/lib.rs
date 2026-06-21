@@ -2555,12 +2555,9 @@ pub mod v1 {
         serde_json::json!({
             "binary_digest": identity.binary_digest.as_str(),
             "cargo_package_digest": identity.cargo_package_digest.as_str(),
-            "cargo_package_name": identity.cargo_package_name.as_str(),
-            "cargo_package_version": identity.cargo_package_version.as_str(),
             "factory_id": identity.factory_id.as_str(),
             "nix_derivation_hash": identity.nix_derivation_hash.as_ref().map(|value| value.as_str()),
             "nix_output_hash": identity.nix_output_hash.as_ref().map(|value| value.as_str()),
-            "source_revision": identity.source_revision.as_str(),
         })
     }
 

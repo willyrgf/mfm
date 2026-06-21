@@ -7952,15 +7952,6 @@ pub mod v1 {
     fn parse_executable(json: &serde_json::Value) -> Result<events::ExecutableIdentity> {
         Ok(events::ExecutableIdentity {
             factory_id: events::RunnerFactoryId::new(required_str(json, "factory_id")?)?,
-            source_revision: events::SourceRevision::new(required_str(json, "source_revision")?)?,
-            cargo_package_name: events::PackageName::new(required_str(
-                json,
-                "cargo_package_name",
-            )?)?,
-            cargo_package_version: events::PackageVersion::new(required_str(
-                json,
-                "cargo_package_version",
-            )?)?,
             cargo_package_digest: parse_identity(required_str(json, "cargo_package_digest")?)?,
             binary_digest: parse_identity(required_str(json, "binary_digest")?)?,
             nix_derivation_hash: optional_str(json, "nix_derivation_hash")?
@@ -8395,12 +8386,9 @@ pub mod v1 {
         serde_json::json!({
             "binary_digest": identity.binary_digest.as_str(),
             "cargo_package_digest": identity.cargo_package_digest.as_str(),
-            "cargo_package_name": identity.cargo_package_name.as_str(),
-            "cargo_package_version": identity.cargo_package_version.as_str(),
             "factory_id": identity.factory_id.as_str(),
             "nix_derivation_hash": identity.nix_derivation_hash.as_ref().map(|value| value.as_str()),
             "nix_output_hash": identity.nix_output_hash.as_ref().map(|value| value.as_str()),
-            "source_revision": identity.source_revision.as_str(),
         })
     }
 
