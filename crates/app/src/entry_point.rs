@@ -17,6 +17,10 @@ pub const DEFAULT_AUTHORED_CONFIG_FORMAT: ConfigFormat = ConfigFormat::Toml;
 /// Maximum authored config payload size accepted before parsing.
 pub const DEFAULT_AUTHORED_CONFIG_MAX_BYTES: usize = 256 * 1024;
 
+const PUBLIC_OP_NAME_PATTERN: &str = "[a-z][a-z0-9]*(?:_[a-z0-9]+)*";
+const ENTRY_POINT_NAMESPACE_PATTERN: &str =
+    "[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:\\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*)*";
+
 /// Public entry-point operation name accepted by CLI and REST transports.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -26,8 +30,12 @@ impl PublicOpName {
     /// Creates a checked public operation name.
     pub fn new(value: impl AsRef<str>) -> Result<Self, EntryPointOpResolveError> {
         let value = value.as_ref();
-        validate_public_op_name(value)
-            .map_err(|message| EntryPointOpResolveError::new("InvalidPublicOpName", message))?;
+        if !matches_segmented_ascii_identifier(value, b'_') {
+            return Err(EntryPointOpResolveError::new(
+                "InvalidPublicOpName",
+                format!("public op name must match {PUBLIC_OP_NAME_PATTERN}"),
+            ));
+        }
         Ok(Self(value.to_owned()))
     }
 
@@ -114,10 +122,18 @@ impl EntryPointOpId {
     ) -> Result<Self, EntryPointOpResolveError> {
         let namespace = namespace.as_ref();
         let name = name.as_ref();
-        validate_namespace(namespace)
-            .map_err(|message| EntryPointOpResolveError::new("InvalidEntryPointOpId", message))?;
-        validate_public_op_name(name)
-            .map_err(|message| EntryPointOpResolveError::new("InvalidEntryPointOpId", message))?;
+        if !matches_entry_point_namespace(namespace) {
+            return Err(EntryPointOpResolveError::new(
+                "InvalidEntryPointOpId",
+                format!("entry-point op namespace must match {ENTRY_POINT_NAMESPACE_PATTERN}"),
+            ));
+        }
+        if !matches_segmented_ascii_identifier(name, b'_') {
+            return Err(EntryPointOpResolveError::new(
+                "InvalidEntryPointOpId",
+                format!("entry-point op name must match {PUBLIC_OP_NAME_PATTERN}"),
+            ));
+        }
         Ok(Self {
             namespace: namespace.to_owned(),
             name: name.to_owned(),
@@ -730,72 +746,31 @@ fn unknown_authored_config_field() -> OpLaunchError {
     )
 }
 
-fn validate_public_op_name(value: &str) -> Result<(), String> {
-    if value.is_empty() {
-        return Err("public op name must not be empty".to_owned());
+fn matches_entry_point_namespace(value: &str) -> bool {
+    value
+        .split('.')
+        .all(|segment| matches_segmented_ascii_identifier(segment, b'-'))
+}
+
+fn matches_segmented_ascii_identifier(value: &str, separator: u8) -> bool {
+    let Some((&first, rest)) = value.as_bytes().split_first() else {
+        return false;
+    };
+    if !first.is_ascii_lowercase() {
+        return false;
     }
-    let mut previous_underscore = false;
-    for (index, byte) in value.bytes().enumerate() {
-        let valid =
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || (index > 0 && byte == b'_');
-        if !valid {
-            return Err(
-                "public op name must use lowercase ASCII letters, digits, and underscores"
-                    .to_owned(),
-            );
-        }
-        if index == 0 && !byte.is_ascii_lowercase() {
-            return Err("public op name must start with a lowercase ASCII letter".to_owned());
-        }
-        if byte == b'_' {
-            if previous_underscore {
-                return Err("public op name must not contain consecutive underscores".to_owned());
-            }
-            previous_underscore = true;
+
+    let mut previous_separator = false;
+    for &byte in rest {
+        if byte.is_ascii_lowercase() || byte.is_ascii_digit() {
+            previous_separator = false;
+        } else if byte == separator && !previous_separator {
+            previous_separator = true;
         } else {
-            previous_underscore = false;
+            return false;
         }
     }
-    if value.ends_with('_') {
-        return Err("public op name must not end with an underscore".to_owned());
-    }
-    Ok(())
-}
-
-fn validate_namespace(value: &str) -> Result<(), String> {
-    if value.is_empty() {
-        return Err("entry-point op namespace must not be empty".to_owned());
-    }
-    for segment in value.split('.') {
-        if segment.is_empty() {
-            return Err("entry-point op namespace must not contain empty segments".to_owned());
-        }
-        validate_namespace_segment(segment)?;
-    }
-    Ok(())
-}
-
-fn validate_namespace_segment(value: &str) -> Result<(), String> {
-    for (index, byte) in value.bytes().enumerate() {
-        let valid =
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || (index > 0 && byte == b'-');
-        if !valid {
-            return Err(
-                "entry-point op namespace must use lowercase ASCII letters, digits, dots, and dashes"
-                    .to_owned(),
-            );
-        }
-        if index == 0 && !byte.is_ascii_lowercase() {
-            return Err(
-                "entry-point op namespace segments must start with a lowercase ASCII letter"
-                    .to_owned(),
-            );
-        }
-    }
-    if value.ends_with('-') {
-        return Err("entry-point op namespace segments must not end with a dash".to_owned());
-    }
-    Ok(())
+    !previous_separator
 }
 
 #[cfg(test)]
