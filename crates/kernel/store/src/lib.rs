@@ -180,14 +180,6 @@ pub mod v1 {
             /// Stable diagnostic.
             message: String,
         },
-        /// An exclusive resource lane is held by a different run-scoped ledger.
-        #[error("resource lane {}:{} is held by run {} ledger {}", lane_key.namespace, lane_key.key, holder.run_id, holder.ledger_key)]
-        ResourceLaneBlocked {
-            /// Blocked resource lane.
-            lane_key: Box<ResourceLaneKey>,
-            /// Current holder of the lane.
-            holder: Box<SideEffectLedgerRef>,
-        },
         /// A run observation cursor was malformed, tampered, or belongs to an unsupported format.
         #[error("invalid run observation cursor: {message}")]
         InvalidCursor {
@@ -2192,15 +2184,27 @@ pub mod v1 {
         Appended(CommittedBatch),
         /// The commit key had already appended the same canonical batch.
         Idempotent(CommittedBatch),
+        /// A resource-lane claim was blocked by an existing holder and no rows were persisted.
+        ResourceLaneClaimBlocked(ResourceLaneClaimBlock),
     }
 
     impl CommitOutcome {
-        /// Returns the committed batch for either outcome.
-        pub fn batch(&self) -> &CommittedBatch {
+        /// Returns the committed batch when this outcome persisted or found one.
+        pub fn committed_batch(&self) -> Option<&CommittedBatch> {
             match self {
-                Self::Appended(batch) | Self::Idempotent(batch) => batch,
+                Self::Appended(batch) | Self::Idempotent(batch) => Some(batch),
+                Self::ResourceLaneClaimBlocked(_) => None,
             }
         }
+    }
+
+    /// Non-persisted result of a resource-lane claim blocked by another run-scoped ledger.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ResourceLaneClaimBlock {
+        /// Blocked resource lane.
+        pub lane_key: ResourceLaneKey,
+        /// Current holder of the lane.
+        pub holder: SideEffectLedgerRef,
     }
 
     /// Cell terminal projection derived from committed run events.
@@ -5047,6 +5051,25 @@ pub mod v1 {
         }
     }
 
+    /// Result of staging an absent commit key before durable insertion.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum StagedCommitOutcome {
+        /// The commit staged successfully and is ready for durable insertion.
+        Staged(StagedCommit),
+        /// The commit's resource-lane claim was blocked; no rows should be persisted.
+        ResourceLaneClaimBlocked(ResourceLaneClaimBlock),
+    }
+
+    impl StagedCommitOutcome {
+        /// Consumes this outcome into a staged commit when one exists.
+        pub fn into_staged(self) -> Option<StagedCommit> {
+            match self {
+                Self::Staged(staged) => Some(staged),
+                Self::ResourceLaneClaimBlocked(_) => None,
+            }
+        }
+    }
+
     /// Private in-memory implementation behind the async typed store test backend.
     #[derive(Debug, Clone, Default)]
     struct RunMemoryCore {
@@ -5246,11 +5269,31 @@ pub mod v1 {
     pub fn stage_prepared_commit_plan(
         base: &CommitBase,
         plan: &PreparedCommitPlan,
-    ) -> Result<StagedCommit> {
+    ) -> Result<StagedCommitOutcome> {
         let fingerprint = prepared_commit_plan_fingerprint(plan)?;
-        let (request, resource_lane_authority) =
-            materialize_resource_lane_intents(base, plan.request(), &fingerprint)?;
-        stage_run_commit_with_fingerprint(base, &request, fingerprint, resource_lane_authority)
+        match materialize_resource_lane_intents(base, plan.request(), &fingerprint)? {
+            ResourceLaneMaterialization::Materialized {
+                request,
+                resource_lane_authority,
+            } => stage_run_commit_with_fingerprint(
+                base,
+                &request,
+                fingerprint,
+                resource_lane_authority,
+            )
+            .map(StagedCommitOutcome::Staged),
+            ResourceLaneMaterialization::Blocked(block) => {
+                Ok(StagedCommitOutcome::ResourceLaneClaimBlocked(block))
+            }
+        }
+    }
+
+    enum ResourceLaneMaterialization {
+        Materialized {
+            request: CommitRequest,
+            resource_lane_authority: ResourceLaneAuthoritySet,
+        },
+        Blocked(ResourceLaneClaimBlock),
     }
 
     fn stage_run_commit_with_fingerprint(
@@ -5384,7 +5427,7 @@ pub mod v1 {
         base: &CommitBase,
         request: &CommitRequest,
         fingerprint: &CommitFingerprint,
-    ) -> Result<(CommitRequest, ResourceLaneAuthoritySet)> {
+    ) -> Result<ResourceLaneMaterialization> {
         let mut resource_lane_authority = base.resource_lane_authority.clone();
         let mut active_lanes = materialized_active_resource_lanes(&base.projections);
         let mut materialized_payloads = Vec::with_capacity(request.payloads.len());
@@ -5409,10 +5452,12 @@ pub mod v1 {
                     }
                     if let Some(existing) = active_lanes.get(&lane_key) {
                         if existing.holder != holder {
-                            return Err(StoreError::ResourceLaneBlocked {
-                                lane_key: Box::new(lane_key),
-                                holder: Box::new(existing.holder.clone()),
-                            });
+                            return Ok(ResourceLaneMaterialization::Blocked(
+                                ResourceLaneClaimBlock {
+                                    lane_key,
+                                    holder: existing.holder.clone(),
+                                },
+                            ));
                         }
                     }
 
@@ -5547,7 +5592,10 @@ pub mod v1 {
             request.required_artifacts.clone(),
             request.preconditions.clone(),
         )?;
-        Ok((request, resource_lane_authority))
+        Ok(ResourceLaneMaterialization::Materialized {
+            request,
+            resource_lane_authority,
+        })
     }
 
     impl MaterializedActiveLane {
@@ -5767,7 +5815,12 @@ pub mod v1 {
                 resource_lane_authority: self.resource_lane_authority.clone(),
                 actual_next_seq: self.expected_next_seq(&request.run_id),
             };
-            let staged = stage_prepared_commit_plan(&base, plan)?;
+            let staged = match stage_prepared_commit_plan(&base, plan)? {
+                StagedCommitOutcome::Staged(staged) => staged,
+                StagedCommitOutcome::ResourceLaneClaimBlocked(block) => {
+                    return Ok(CommitOutcome::ResourceLaneClaimBlocked(block));
+                }
+            };
             let (
                 batch,
                 staged_logical_keys,

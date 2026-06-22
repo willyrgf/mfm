@@ -549,15 +549,11 @@ fn assert_event_error_contains(error: StoreError, expected: &str) {
     );
 }
 
-fn assert_resource_lane_blocked(error: StoreError, expected_lane_key: &ResourceLaneKey) {
-    assert!(
-        matches!(
-            &error,
-            StoreError::ResourceLaneBlocked { lane_key, .. }
-                if lane_key.as_ref() == expected_lane_key
-        ),
-        "unexpected error: {error:?}"
-    );
+fn assert_resource_lane_blocked(outcome: CommitOutcome, expected_lane_key: &ResourceLaneKey) {
+    let CommitOutcome::ResourceLaneClaimBlocked(block) = outcome else {
+        panic!("unexpected outcome: {outcome:?}");
+    };
+    assert_eq!(&block.lane_key, expected_lane_key);
 }
 
 fn side_effect_attempt_started() -> KernelEventPayload {
@@ -2889,7 +2885,10 @@ fn store_owns_envelope_sequence_ordinal_and_event_id() {
     let first = store
         .append_prepared_commit(run_start_request(run_id.clone(), "run-start"))
         .expect("append run start");
-    let first_event = &first.batch().events()[0];
+    let first_event = &first
+        .committed_batch()
+        .expect("run start committed batch")
+        .events()[0];
     assert_eq!(first_event.seq(), StreamSeq::FIRST);
     assert_eq!(first_event.ordinal().as_u32(), 0);
     assert_eq!(first_event.commit_key().as_str(), "run-start");
@@ -2908,7 +2907,10 @@ fn store_owns_envelope_sequence_ordinal_and_event_id() {
             },
         })
         .expect("append attempt start");
-    let second_event = &second.batch().events()[0];
+    let second_event = &second
+        .committed_batch()
+        .expect("attempt start committed batch")
+        .events()[0];
     assert_eq!(second_event.seq(), StreamSeq::new(2).unwrap());
     assert_eq!(second_event.ordinal().as_u32(), 0);
     assert_ne!(first_event.event_id(), second_event.event_id());
@@ -3938,7 +3940,7 @@ fn resource_lane_rejects_same_key_for_other_ledgers_same_run_and_cross_run() {
         true,
     );
 
-    let same_run_error = {
+    let same_run_outcome = {
         let branch_node = node_id(73);
         let branch_attempt = attempt_id(74);
         let mut intent = side_effect_intent(artifact_id(22), content_digest(23));
@@ -3982,11 +3984,11 @@ fn resource_lane_rejects_same_key_for_other_ledgers_same_run_and_cross_run() {
                 )],
                 preconditions: CommitPreconditions::default(),
             })
-            .expect_err("same-run lane conflict rejects")
+            .expect("same-run lane conflict blocks")
     };
-    assert_resource_lane_blocked(same_run_error, &resource_lane_key("wallet-1"));
+    assert_resource_lane_blocked(same_run_outcome, &resource_lane_key("wallet-1"));
 
-    let cross_run_error = {
+    let cross_run_outcome = {
         let branch_node = node_id(75);
         let branch_attempt = attempt_id(76);
         let mut intent = side_effect_intent(artifact_id(24), content_digest(25));
@@ -4030,9 +4032,9 @@ fn resource_lane_rejects_same_key_for_other_ledgers_same_run_and_cross_run() {
                 )],
                 preconditions: CommitPreconditions::default(),
             })
-            .expect_err("cross-run lane conflict rejects")
+            .expect("cross-run lane conflict blocks")
     };
-    assert_resource_lane_blocked(cross_run_error, &resource_lane_key("wallet-1"));
+    assert_resource_lane_blocked(cross_run_outcome, &resource_lane_key("wallet-1"));
 }
 
 #[test]
@@ -4097,7 +4099,7 @@ fn resource_lane_holder_identity_includes_run_for_same_ledger_key_across_runs() 
             preconditions: CommitPreconditions::default(),
         })
         .expect("append branch attempt start");
-    let cross_run_same_resource_error = store
+    let cross_run_same_resource_outcome = store
         .append_prepared_commit(typed_commit_request! {
             run_id: run_b.clone(),
             expected_next_seq: store.expected_next_seq(&run_b),
@@ -4110,8 +4112,8 @@ fn resource_lane_holder_identity_includes_run_for_same_ledger_key_across_runs() 
             )],
             preconditions: CommitPreconditions::default(),
         })
-        .expect_err("same resource remains exclusive across runs");
-    assert_resource_lane_blocked(cross_run_same_resource_error, &lane_a);
+        .expect("same resource remains exclusive across runs");
+    assert_resource_lane_blocked(cross_run_same_resource_outcome, &lane_a);
 
     append_side_effect_prepare_for_ledger_on_attempt(
         &mut store,
@@ -6562,7 +6564,8 @@ fn side_effect_submission_unknown_recovery_uses_one_submission_result_key() {
             preconditions: CommitPreconditions::default(),
         })
         .expect("append submission unknown")
-        .batch()
+        .committed_batch()
+        .expect("submission unknown committed batch")
         .clone();
     let submission_result_key = format!(
         "sidefx:forward:{}:invocation:1:submission_result",
@@ -6594,7 +6597,8 @@ fn side_effect_submission_unknown_recovery_uses_one_submission_result_key() {
             preconditions: CommitPreconditions::default(),
         })
         .expect("refresh submission unknown")
-        .batch()
+        .committed_batch()
+        .expect("refreshed submission unknown committed batch")
         .clone();
     assert_eq!(
         refreshed_unknown.events()[0].logical_key().as_str(),
@@ -6633,7 +6637,8 @@ fn side_effect_submission_unknown_recovery_uses_one_submission_result_key() {
             preconditions: CommitPreconditions::default(),
         })
         .expect("recover observed submission")
-        .batch()
+        .committed_batch()
+        .expect("observed submission committed batch")
         .clone();
     assert_eq!(
         observed.events()[0].logical_key().as_str(),

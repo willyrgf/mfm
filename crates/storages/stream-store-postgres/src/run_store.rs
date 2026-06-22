@@ -18,8 +18,8 @@ use mfm_store::v1::{
     PersistedKernelEventRecord, PreparedArtifactBytes, PreparedCommitBundle, ProjectionSnapshot,
     ProjectionSnapshotParts, ResourceLaneAuthoritySet, ResourceLaneKey, ResourceLaneProjection,
     RetainedArtifactReadFuture, RetainedArtifactReadProvider, RunEventStore, RunObservation,
-    RunObservationPage, RunObservationQuery, RunObservationStore, RunState, StoreError,
-    StoreErrorInspection, StreamSeq, VerifiedRunArtifactBytes,
+    RunObservationPage, RunObservationQuery, RunObservationStore, RunState, StagedCommitOutcome,
+    StoreError, StoreErrorInspection, StreamSeq, VerifiedRunArtifactBytes,
 };
 use ring::hmac;
 use serde_json::Value;
@@ -201,7 +201,12 @@ impl PostgresRunStore {
             resource_lane_authority,
             actual_next_seq: next_seq_from_head(head)?,
         };
-        let staged = stage_prepared_commit_plan(&base, plan)?;
+        let staged = match stage_prepared_commit_plan(&base, plan)? {
+            StagedCommitOutcome::Staged(staged) => staged,
+            StagedCommitOutcome::ResourceLaneClaimBlocked(block) => {
+                return Ok(CommitOutcome::ResourceLaneClaimBlocked(block));
+            }
+        };
         let batch = staged.batch().clone();
         let commit_id = derive_commit_id(
             request.run_id(),
@@ -3707,17 +3712,16 @@ mod tests {
     }
 
     fn assert_resource_lane_blocked(
-        error: PostgresStoreError,
+        outcome: CommitOutcome,
         expected_lane_key: &ResourceLaneKey,
         expected_holder_run: &RunId,
     ) {
-        let PostgresStoreError::Store(StoreError::ResourceLaneBlocked { lane_key, holder }) = error
-        else {
-            panic!("expected typed resource lane block, got {error:?}");
+        let CommitOutcome::ResourceLaneClaimBlocked(block) = outcome else {
+            panic!("expected typed resource lane block, got {outcome:?}");
         };
-        assert_eq!(&*lane_key, expected_lane_key);
-        assert_eq!(&holder.run_id, expected_holder_run);
-        assert_eq!(holder.ledger_key, side_effect_ledger_key());
+        assert_eq!(&block.lane_key, expected_lane_key);
+        assert_eq!(&block.holder.run_id, expected_holder_run);
+        assert_eq!(block.holder.ledger_key, side_effect_ledger_key());
     }
 
     #[tokio::test]
@@ -4151,11 +4155,11 @@ mod tests {
             .load_run_stream(&contender)
             .await
             .expect("contender stream before conflict");
-        let error =
+        let outcome =
             append_resource_lane_prepare(&store, &contender, "contender-prepare", lane_value, 30)
                 .await
-                .expect_err("resource lane stream authority blocks contender");
-        assert_resource_lane_blocked(error, &lane_key, &holder_run);
+                .expect("resource lane stream authority blocks contender");
+        assert_resource_lane_blocked(outcome, &lane_key, &holder_run);
         assert_eq!(
             store
                 .load_run_stream(&contender)
@@ -4610,7 +4614,8 @@ mod tests {
         )
         .await
         .expect("submission unknown")
-        .batch()
+        .committed_batch()
+        .expect("submission unknown committed batch")
         .clone();
         let submission_result_key = format!(
             "sidefx:forward:{}:invocation:1:submission_result",
@@ -4643,7 +4648,8 @@ mod tests {
         )
         .await
         .expect("submission observed recovery")
-        .batch()
+        .committed_batch()
+        .expect("submission observed committed batch")
         .clone();
         assert_eq!(
             observed.events()[0].logical_key().as_str(),

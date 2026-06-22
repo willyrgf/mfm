@@ -218,7 +218,18 @@ impl<'a> AttemptLifecycle<'a> {
                 )?;
                 let bundle = store::PreparedCommitBundle::without_artifacts(start_commit.into())?;
                 match store.append_prepared_commit_bundle(bundle).await {
-                    Ok(_) => {}
+                    Ok(store::CommitOutcome::Appended(_) | store::CommitOutcome::Idempotent(_)) => {
+                    }
+                    Ok(store::CommitOutcome::ResourceLaneClaimBlocked(block)) => {
+                        return Err(RuntimeError::InvalidRunStream(format!(
+                            "attempt start for node {} was blocked by resource lane {}:{} held by run {} ledger {}",
+                            selected_attempt.phase.node.node_id,
+                            block.lane_key.namespace,
+                            block.lane_key.key,
+                            block.holder.run_id,
+                            block.holder.ledger_key
+                        )));
+                    }
                     Err(error) if async_error_is_stale_expected_next_seq(&error) => {
                         return Ok(AttemptRunStatus::StaleView);
                     }
@@ -341,22 +352,28 @@ impl<'a> AttemptLifecycle<'a> {
         let bundle =
             prepared_commit_bundle(terminal_output.commit, terminal_output.artifact_admissions)?;
         match store.append_prepared_commit_bundle(bundle).await {
-            Ok(_) => {
+            Ok(store::CommitOutcome::Appended(_) | store::CommitOutcome::Idempotent(_)) => {
                 let _terminal_committed_attempt = Attempt {
                     phase: TerminalCommitted,
                 };
                 Ok(AttemptRunStatus::Advanced)
             }
+            Ok(store::CommitOutcome::ResourceLaneClaimBlocked(block))
+                if has_resource_lane_claim =>
+            {
+                Ok(AttemptRunStatus::BlockedOnResourceLane {
+                    witness: resource_lane_block_witness_from_outcome(&node.node_id, block),
+                    advanced,
+                })
+            }
+            Ok(store::CommitOutcome::ResourceLaneClaimBlocked(block)) => {
+                Err(RuntimeError::InvalidRunStream(format!(
+                    "commit without resource-lane claim was blocked by lane {}:{}",
+                    block.lane_key.namespace, block.lane_key.key
+                )))
+            }
             Err(error) if async_error_is_stale_expected_next_seq(&error) => {
                 Ok(AttemptRunStatus::StaleView)
-            }
-            Err(error)
-                if has_resource_lane_claim
-                    && async_resource_lane_block_witness(&node.node_id, &error).is_some() =>
-            {
-                let witness = async_resource_lane_block_witness(&node.node_id, &error)
-                    .expect("resource lane block witness");
-                Ok(AttemptRunStatus::BlockedOnResourceLane { witness, advanced })
             }
             Err(error) => Err(async_store_error(error)),
         }
@@ -561,38 +578,14 @@ fn request_has_resource_lane_claim(request: &store::CommitRequest) -> bool {
     })
 }
 
-#[cfg(test)]
-fn store_error_is_resource_lane_block(error: &store::StoreError) -> bool {
-    matches!(error, store::StoreError::ResourceLaneBlocked { .. })
-}
-
-fn resource_lane_block_witness_from_store_error(
+fn resource_lane_block_witness_from_outcome(
     node_id: &NodeId,
-    error: &store::StoreError,
-) -> Option<ResourceLaneBlockWitness> {
-    match error {
-        store::StoreError::ResourceLaneBlocked { lane_key, .. } => Some(ResourceLaneBlockWitness {
-            node_id: node_id.clone(),
-            lane_key: (**lane_key).clone(),
-        }),
-        _ => None,
+    block: store::ResourceLaneClaimBlock,
+) -> ResourceLaneBlockWitness {
+    ResourceLaneBlockWitness {
+        node_id: node_id.clone(),
+        lane_key: block.lane_key,
     }
-}
-
-#[cfg(test)]
-fn async_error_is_resource_lane_block(error: &impl store::StoreErrorInspection) -> bool {
-    error
-        .as_store_error()
-        .is_some_and(store_error_is_resource_lane_block)
-}
-
-fn async_resource_lane_block_witness(
-    node_id: &NodeId,
-    error: &impl store::StoreErrorInspection,
-) -> Option<ResourceLaneBlockWitness> {
-    error
-        .as_store_error()
-        .and_then(|error| resource_lane_block_witness_from_store_error(node_id, error))
 }
 
 fn node_resource_claims_lane_namespace(
@@ -649,11 +642,11 @@ pub(crate) fn async_error_is_stale_expected_next_seq(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mfm_ids::{DigestAlgorithm, DigestBytes, SchemaId};
+    use mfm_ids::{DigestAlgorithm, DigestBytes, NodeId, SchemaId};
     use mfm_spec::v1::ResourceNamespace;
 
     #[test]
-    fn resource_lane_block_detection_uses_typed_store_error() {
+    fn resource_lane_block_detection_uses_typed_commit_outcome() {
         let lane_key = store::ResourceLaneKey {
             namespace: ResourceNamespace::new("mfm.test.account_nonce").expect("namespace"),
             key_schema_id: SchemaId::new(
@@ -672,20 +665,24 @@ mod tests {
             ),
             events::SideEffectLedgerKey::new("ledger-key-1").expect("ledger key"),
         );
+        let node_id = NodeId::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            DigestBytes::from_array([7; 32]),
+        );
 
-        let typed = store::StoreError::ResourceLaneBlocked {
-            lane_key: Box::new(lane_key),
-            holder: Box::new(holder),
-        };
-        assert!(store_error_is_resource_lane_block(&typed));
-        assert!(async_error_is_resource_lane_block(&typed));
-
-        let prose = store::StoreError::ProjectionConflict {
-            key: "resource_lane:mfm.test.account_nonce:wallet-1".to_owned(),
-            message: "resource lane already held by a different display message".to_owned(),
-        };
-        assert!(!store_error_is_resource_lane_block(&prose));
-        assert!(!async_error_is_resource_lane_block(&prose));
+        let witness = resource_lane_block_witness_from_outcome(
+            &node_id,
+            store::ResourceLaneClaimBlock { lane_key, holder },
+        );
+        assert_eq!(witness.node_id, node_id);
+        assert_eq!(
+            witness.lane_key.namespace,
+            ResourceNamespace::new("mfm.test.account_nonce").expect("namespace")
+        );
+        assert_eq!(
+            witness.lane_key.key,
+            events::ResourceKey::new("wallet-1").expect("resource key")
+        );
     }
 
     #[test]

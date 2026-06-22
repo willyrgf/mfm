@@ -19,9 +19,12 @@ pub(super) fn acquire_resource_lane(
     }
     if let Some(existing) = projections.resource_lanes.get(&lane_key) {
         if existing.holder != holder {
-            return Err(StoreError::ResourceLaneBlocked {
-                lane_key: Box::new(lane_key),
-                holder: Box::new(existing.holder.clone()),
+            return Err(StoreError::ProjectionConflict {
+                key: format!("resource_lane:{}:{}", lane_key.namespace, lane_key.key),
+                message: format!(
+                    "resource lane already held by run {} ledger {}",
+                    existing.holder.run_id, existing.holder.ledger_key
+                ),
             });
         }
     }
