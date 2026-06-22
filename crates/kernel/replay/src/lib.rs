@@ -1004,6 +1004,24 @@ pub mod v1 {
                             &payload.attempt_id,
                         )?;
                     }
+                    KernelEventPayload::ResourceLaneClaimed(payload) => {
+                        self.verify_resource_lane_claim(payload, &mut resource_keys)?;
+                    }
+                    KernelEventPayload::ResourceLaneReleased(payload) => {
+                        self.verify_side_effect_event_against_intent(
+                            &payload.ledger_key,
+                            payload.invocation_epoch,
+                            &payload.node_id,
+                            &payload.attempt_id,
+                        )?;
+                    }
+                    KernelEventPayload::ResourceLaneClaimIntent(_)
+                    | KernelEventPayload::ResourceLaneReleaseIntent(_) => {
+                        return Err(ReplayError::new(
+                            ReplayErrorKind::InvalidRunStream,
+                            "replay stream contains unmaterialized resource-lane intent",
+                        ));
+                    }
                     KernelEventPayload::SideEffectInvocationStarted(payload) => {
                         self.verify_side_effect_event_against_intent(
                             &payload.ledger_key,
@@ -1075,7 +1093,7 @@ pub mod v1 {
                             &payload.node_id,
                             &payload.attempt_id,
                         )?;
-                        self.verify_invocation_prepared_resource_key(payload, &mut resource_keys)?;
+                        self.verify_invocation_prepared_resource_key(payload, &resource_keys)?;
                         self.authorize_event_artifacts(envelope.payload())?;
                     }
                     KernelEventPayload::SideEffectNotSubmittedProven(payload) => {
@@ -1506,7 +1524,7 @@ pub mod v1 {
         fn verify_invocation_prepared_resource_key(
             &self,
             payload: &side_effect::InvocationPrepared,
-            resource_keys: &mut BTreeMap<events::SideEffectLedgerKey, events::ResourceKeyEvidence>,
+            resource_keys: &BTreeMap<events::SideEffectLedgerKey, events::ResourceKeyEvidence>,
         ) -> Result<()> {
             self.node(&payload.node_id)?;
             let contract =
@@ -1518,9 +1536,30 @@ pub mod v1 {
                     payload.resource_key.as_ref(),
                 )
                 .map_err(certified_contract_mismatch)?;
-            if let Some(resource_key) = payload.resource_key.as_ref() {
-                resource_keys.insert(payload.ledger_key.clone(), resource_key.clone());
-            }
+            Ok(())
+        }
+
+        fn verify_resource_lane_claim(
+            &self,
+            payload: &events::ResourceLaneClaimed,
+            resource_keys: &mut BTreeMap<events::SideEffectLedgerKey, events::ResourceKeyEvidence>,
+        ) -> Result<()> {
+            self.verify_side_effect_event_against_intent(
+                &payload.ledger_key,
+                payload.invocation_epoch,
+                &payload.node_id,
+                &payload.attempt_id,
+            )?;
+            let contract =
+                CertifiedSideEffectContract::for_node(&self.certified_spec.spec, &payload.node_id)
+                    .map_err(certified_contract_mismatch)?;
+            contract
+                .validate_epoch_resource_consistency(
+                    resource_keys.get(&payload.ledger_key),
+                    Some(&payload.resource_key),
+                )
+                .map_err(certified_contract_mismatch)?;
+            resource_keys.insert(payload.ledger_key.clone(), payload.resource_key.clone());
             Ok(())
         }
 

@@ -47,6 +47,10 @@ pub enum RunnerEventPayload {
     SideEffectClaimed(events::side_effect::Claimed),
     /// Side-effect claim takeover event.
     SideEffectClaimTakenOver(events::side_effect::ClaimTakenOver),
+    /// Resource lane claim intent before store fill.
+    ResourceLaneClaimIntent(events::ResourceLaneClaimIntent),
+    /// Resource lane release intent before store fill.
+    ResourceLaneReleaseIntent(events::ResourceLaneReleaseIntent),
     /// Side-effect invocation prepared event.
     SideEffectInvocationPrepared(events::side_effect::InvocationPrepared),
     /// Side-effect invocation started event.
@@ -83,6 +87,12 @@ impl From<RunnerEventPayload> for events::KernelEventPayload {
             RunnerEventPayload::SideEffectClaimed(payload) => Self::SideEffectClaimed(payload),
             RunnerEventPayload::SideEffectClaimTakenOver(payload) => {
                 Self::SideEffectClaimTakenOver(payload)
+            }
+            RunnerEventPayload::ResourceLaneClaimIntent(payload) => {
+                Self::ResourceLaneClaimIntent(payload)
+            }
+            RunnerEventPayload::ResourceLaneReleaseIntent(payload) => {
+                Self::ResourceLaneReleaseIntent(payload)
             }
             RunnerEventPayload::SideEffectInvocationPrepared(payload) => {
                 Self::SideEffectInvocationPrepared(payload)

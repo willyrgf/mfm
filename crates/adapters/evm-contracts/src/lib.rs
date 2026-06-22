@@ -72,13 +72,14 @@ use mfm_runtime::{
     SideEffectSubmissionDecision, SideEffectSubmissionDecisionFuture,
 };
 use mfm_signing::{PublicKeyBytes, SignerRef, SigningProvider};
+use mfm_spec::v1 as spec;
 use mfm_state_evm_contracts::{
-    ConfigureContractInput, ConfigureContractState, ContractConfigureConfirmation,
-    ContractConfigureIntent, ContractDeployConfirmation, ContractDeployIntent,
-    ContractTransactionIdempotency, ContractTransactionReceipt, ContractTransactionReceipts,
-    ContractTransactionSubmission, ContractTransactionSubmissions, ContractValidationReadRequest,
-    ContractValidationReadResponse, DeployContractState, ValidateContractInput,
-    ValidateContractState,
+    account_nonce_resource_key_schema_id, account_nonce_resource_namespace, ConfigureContractInput,
+    ConfigureContractState, ContractConfigureConfirmation, ContractConfigureIntent,
+    ContractDeployConfirmation, ContractDeployIntent, ContractTransactionIdempotency,
+    ContractTransactionReceipt, ContractTransactionReceipts, ContractTransactionSubmission,
+    ContractTransactionSubmissions, ContractValidationReadRequest, ContractValidationReadResponse,
+    DeployContractState, ValidateContractInput, ValidateContractState,
 };
 use mfm_store::v1 as store;
 use mfm_values::{MfmConfig, MfmValue};
@@ -1559,6 +1560,47 @@ struct ConfigureMutationPlan {
     idempotency: ContractTransactionIdempotency,
 }
 
+fn account_nonce_resource_key(
+    ctx: &ErasedRunCtx<'_>,
+    expected_chain_id: u64,
+    expected_signer_address: &str,
+) -> Result<Option<events::ResourceKeyEvidence>> {
+    let Some(side_effect) = &ctx.node().side_effect else {
+        return Ok(None);
+    };
+    let spec::ResourceClaimSpec::Exclusive {
+        namespace,
+        key_schema,
+    } = &side_effect.resource_claim
+    else {
+        return Ok(None);
+    };
+
+    let expected_namespace = account_nonce_resource_namespace()
+        .map_err(|error| EvmContractAdapterError::State(error.to_string()))?;
+    let expected_key_schema = account_nonce_resource_key_schema_id()
+        .map_err(|error| EvmContractAdapterError::State(error.to_string()))?;
+    if namespace != &expected_namespace || key_schema != &expected_key_schema {
+        return Err(EvmContractAdapterError::State(
+            "EVM mutation side effect must declare the account nonce resource claim".to_owned(),
+        ));
+    }
+
+    let account =
+        normalize_address(expected_signer_address).map_err(EvmContractAdapterError::Model)?;
+    let key = events::ResourceKey::new(format!(
+        r#"{{"account":"{}","chain_id":{}}}"#,
+        account, expected_chain_id
+    ))
+    .map_err(|error| EvmContractAdapterError::Model(error.to_string()))?;
+
+    Ok(Some(events::ResourceKeyEvidence {
+        namespace: namespace.clone(),
+        key_schema_id: key_schema.clone(),
+        key,
+    }))
+}
+
 async fn run_deploy_mutation(
     ctx: ErasedRunCtx<'_>,
     factory: &dyn EvmContractRuntimeFactory,
@@ -1616,6 +1658,25 @@ impl SideEffectDriverCallbacks for DeploySideEffectCallbacks<'_> {
             Ok(SideEffectPreparedInvocationPlan::with_prepared_invocation(
                 prepared.evidence().clone(),
             ))
+        })
+    }
+
+    fn resolve_resource_lane<'a, 'ctx>(
+        &'a self,
+        ctx: &'a ErasedRunCtx<'ctx>,
+        _plan: &'a SideEffectIntentPlan<Self::Intent, Self::Idempotency>,
+    ) -> SideEffectDriverFuture<'a, Option<events::ResourceKeyEvidence>> {
+        Box::pin(async move {
+            account_nonce_resource_key(
+                ctx,
+                self.plan.config.as_ref().network().expected_chain_id(),
+                self.plan
+                    .config
+                    .as_ref()
+                    .signer()
+                    .expected_signer_address_str(),
+            )
+            .map_err(mfm_runtime::RuntimeError::from)
         })
     }
 
@@ -1818,6 +1879,25 @@ impl SideEffectDriverCallbacks for ConfigureSideEffectCallbacks<'_> {
             Ok(SideEffectPreparedInvocationPlan::with_prepared_invocation(
                 prepared.evidence().clone(),
             ))
+        })
+    }
+
+    fn resolve_resource_lane<'a, 'ctx>(
+        &'a self,
+        ctx: &'a ErasedRunCtx<'ctx>,
+        _plan: &'a SideEffectIntentPlan<Self::Intent, Self::Idempotency>,
+    ) -> SideEffectDriverFuture<'a, Option<events::ResourceKeyEvidence>> {
+        Box::pin(async move {
+            account_nonce_resource_key(
+                ctx,
+                self.plan.config.as_ref().network().expected_chain_id(),
+                self.plan
+                    .config
+                    .as_ref()
+                    .signer()
+                    .expected_signer_address_str(),
+            )
+            .map_err(mfm_runtime::RuntimeError::from)
         })
     }
 

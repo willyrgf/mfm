@@ -9,7 +9,7 @@ use crate::admission::{RunAdmissionAuthority, RunAdmissionLifecycle};
 use crate::artifacts::RuntimeArtifactStore;
 use crate::attempt::{AttemptLifecycle, AttemptRunStatus, ResourceLaneBlockWitness};
 use crate::binding::{BoundRuntimeContext, BoundRuntimeContextLoader};
-use crate::commit::{PreparedRunLaunch, PreparedStagedArtifact, RunLaunchEvidence};
+use crate::commit::{prepared_commit_bundle, PreparedRunLaunch, RunLaunchEvidence};
 use crate::error::async_store_error;
 use crate::framework_lifecycle::FrameworkAttemptLifecycle;
 use crate::history::{RuntimeRunView, VerifiedRunContextLoader};
@@ -99,31 +99,29 @@ impl SerialTypedScheduler {
     }
 
     /// Appends the prepared typed admission commit through an async typed store.
-    pub async fn start_run<S: store::AsyncTypedRunEventStore + ?Sized>(
+    pub async fn start_run<S: store::RunEventStore + ?Sized>(
         &self,
         store: &S,
         launch: PreparedRunLaunch,
     ) -> Result<store::CommitOutcome> {
-        self.stage_prepared_artifacts(&launch.artifacts_to_stage)
-            .await?;
+        let bundle = prepared_commit_bundle(launch.commit.into(), launch.artifacts_to_stage)?;
         store
-            .append_prepared_commit_plan(launch.commit.into())
+            .append_prepared_commit_bundle(bundle)
             .await
             .map_err(async_store_error)
     }
 
     /// Appends admission and reloads verified admission authority for the run.
-    pub async fn start_run_admitted<S: store::AsyncTypedRunEventStore + ?Sized>(
+    pub async fn start_run_admitted<S: store::RunEventStore + ?Sized>(
         &self,
         store: &S,
         runtime_spec: &CertifiedRuntimeSpec,
         launch: PreparedRunLaunch,
     ) -> Result<RunAdmissionAuthority> {
         let run_id = launch.commit.request().run_id().clone();
-        self.stage_prepared_artifacts(&launch.artifacts_to_stage)
-            .await?;
+        let bundle = prepared_commit_bundle(launch.commit.into(), launch.artifacts_to_stage)?;
         store
-            .append_prepared_commit_plan(launch.commit.into())
+            .append_prepared_commit_bundle(bundle)
             .await
             .map_err(async_store_error)?;
         let stream = store
@@ -135,7 +133,7 @@ impl SerialTypedScheduler {
     }
 
     /// Appends a verified manual resolution through an async durable typed store.
-    pub async fn record_manual_resolution<S: store::AsyncTypedRunEventStore + ?Sized>(
+    pub async fn record_manual_resolution<S: store::RunEventStore + ?Sized>(
         &self,
         store: &S,
         runtime_spec: &CertifiedRuntimeSpec,
@@ -175,15 +173,15 @@ impl SerialTypedScheduler {
             evidence_artifact,
             note,
         )?;
-        self.stage_prepared_artifacts(&artifacts_to_stage).await?;
+        let bundle = prepared_commit_bundle(commit.into(), artifacts_to_stage)?;
         store
-            .append_prepared_commit_plan(commit.into())
+            .append_prepared_commit_bundle(bundle)
             .await
             .map_err(async_store_error)
     }
 
     /// Runs one deterministic runnable node against an async durable typed store, if any.
-    pub async fn drive_once<S: store::AsyncTypedRunEventStore + ?Sized>(
+    pub async fn drive_once<S: store::RunEventStore + ?Sized>(
         &self,
         store: &S,
         runtime_spec: &CertifiedRuntimeSpec,
@@ -216,7 +214,7 @@ impl SerialTypedScheduler {
     }
 
     /// Runs deterministic runnable nodes against an async durable typed store until blocked.
-    pub async fn drive_until_blocked<S: store::AsyncTypedRunEventStore + ?Sized>(
+    pub async fn drive_until_blocked<S: store::RunEventStore + ?Sized>(
         &self,
         store: &S,
         runtime_spec: &CertifiedRuntimeSpec,
@@ -255,7 +253,7 @@ impl SerialTypedScheduler {
         }
     }
 
-    async fn drive_once_with_blocked_lanes<S: store::AsyncTypedRunEventStore + ?Sized>(
+    async fn drive_once_with_blocked_lanes<S: store::RunEventStore + ?Sized>(
         &self,
         store: &S,
         runtime_spec: &CertifiedRuntimeSpec,
@@ -302,7 +300,7 @@ impl SerialTypedScheduler {
         }
     }
 
-    async fn run_node_attempt<S: store::AsyncTypedRunEventStore + ?Sized>(
+    async fn run_node_attempt<S: store::RunEventStore + ?Sized>(
         &self,
         store: &S,
         runtime_spec: &CertifiedRuntimeSpec,
@@ -327,18 +325,9 @@ impl SerialTypedScheduler {
                 .run(store, runtime_spec, run_id, view, bound_context, attempt)
                 .await;
         }
-        AttemptLifecycle::new(self.artifact_store.as_ref())
+        AttemptLifecycle::new()
             .run(store, runtime_spec, run_id, view, bound_context, attempt)
             .await
-    }
-
-    async fn stage_prepared_artifacts(&self, artifacts: &[PreparedStagedArtifact]) -> Result<()> {
-        for artifact in artifacts {
-            self.artifact_store
-                .stage_verified_artifact(artifact.bytes.clone(), artifact.evidence.clone())
-                .await?;
-        }
-        Ok(())
     }
 }
 

@@ -150,9 +150,7 @@ impl AttemptRecoveryLifecycle {
     }
 
     /// Dispatches recovery-owned async work for a selected open attempt.
-    pub(crate) async fn dispatch_open_attempt_for_attempt<
-        S: store::AsyncTypedRunEventStore + ?Sized,
-    >(
+    pub(crate) async fn dispatch_open_attempt_for_attempt<S: store::RunEventStore + ?Sized>(
         store: &S,
         runtime_spec: &CertifiedRuntimeSpec,
         run_id: &RunId,
@@ -173,7 +171,7 @@ impl AttemptRecoveryLifecycle {
     }
 
     /// Appends the recovery-owned interruption evidence for a resumable async store.
-    pub(crate) async fn interrupt_attempt<S: store::AsyncTypedRunEventStore + ?Sized>(
+    pub(crate) async fn interrupt_attempt<S: store::RunEventStore + ?Sized>(
         store: &S,
         runtime_spec: &CertifiedRuntimeSpec,
         run_id: &RunId,
@@ -188,7 +186,8 @@ impl AttemptRecoveryLifecycle {
             attempt_id,
             view,
         })?;
-        match store.append_prepared_commit_plan(commit).await {
+        let bundle = store::PreparedCommitBundle::without_artifacts(commit)?;
+        match store.append_prepared_commit_bundle(bundle).await {
             Ok(_) => Ok(AttemptRunStatus::Advanced),
             Err(error) if async_error_is_stale_expected_next_seq(&error) => {
                 Ok(AttemptRunStatus::StaleView)

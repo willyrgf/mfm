@@ -41,9 +41,8 @@ mod transition;
 
 pub use admission::RunAdmissionAuthority;
 pub use artifacts::{
-    RuntimeArtifactStageFuture, RuntimeArtifactStager, RuntimeArtifactStore, StagedArtifact,
-    StagedArtifactBindingKind, StagedArtifactHandle, StagedRetentionRefs,
-    StagedSideEffectArtifactPhase,
+    RuntimeArtifactStore, StagedArtifact, StagedArtifactBindingKind, StagedArtifactHandle,
+    StagedRetentionRefs, StagedSideEffectArtifactPhase,
 };
 pub use binding::{
     BoundCapabilityAuthority, BoundFrameworkHandlerAuthority, BoundFrameworkHandlerKind,
@@ -75,14 +74,13 @@ pub use runners::{
 pub use scheduler::{ManualResolutionRequest, SchedulerStatus, SerialTypedScheduler};
 pub use side_effect_driver::{
     SideEffectDriver, SideEffectDriverCallbacks, SideEffectDriverFuture, SideEffectIntentPlan,
-    SideEffectObservedEvidence, SideEffectPreparedInvocationPlan, SideEffectProtocolAction,
-    SideEffectReplayEvidence, SideEffectSubmissionDecision, SideEffectSubmissionDecisionFuture,
+    SideEffectLaneClaimEvidence, SideEffectObservedEvidence, SideEffectPreparedInvocationPlan,
+    SideEffectProtocolAction, SideEffectReplayEvidence, SideEffectSubmissionDecision,
+    SideEffectSubmissionDecisionFuture,
 };
 pub use side_effect_lifecycle::SideEffectAttemptView;
 pub use spec_authority::CertifiedRuntimeSpec;
 
-#[cfg(test)]
-use artifacts::verify_artifact_bytes;
 #[cfg(test)]
 use artifacts::{staged_artifact_binding_kind, staged_side_effect_artifact_phase};
 

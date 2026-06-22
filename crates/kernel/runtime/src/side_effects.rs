@@ -17,6 +17,7 @@ use crate::{
 pub(crate) enum HistoricalSideEffectPhase {
     IntentPersisted,
     Claimed,
+    ResourceLaneClaimed,
     InvocationPrepared,
     InvocationStarted,
     NotSubmittedProven,
@@ -35,6 +36,7 @@ impl From<events::SideEffectEventKind> for HistoricalSideEffectPhase {
             events::SideEffectEventKind::Claimed | events::SideEffectEventKind::ClaimTakenOver => {
                 Self::Claimed
             }
+            events::SideEffectEventKind::ResourceLaneClaimed => Self::ResourceLaneClaimed,
             events::SideEffectEventKind::InvocationPrepared => Self::InvocationPrepared,
             events::SideEffectEventKind::InvocationStarted => Self::InvocationStarted,
             events::SideEffectEventKind::NotSubmittedProven => Self::NotSubmittedProven,
@@ -44,6 +46,7 @@ impl From<events::SideEffectEventKind> for HistoricalSideEffectPhase {
             events::SideEffectEventKind::ConfirmationObserved => Self::ConfirmationObserved,
             events::SideEffectEventKind::Ambiguous => Self::Ambiguous,
             events::SideEffectEventKind::Failed => Self::Failed,
+            events::SideEffectEventKind::ResourceLaneReleased => Self::ResourceLaneClaimed,
         }
     }
 }
@@ -140,14 +143,17 @@ pub(crate) fn validate_historical_side_effect_payload(
                     ledger_key
                 )));
             }
-            if let events::KernelEventPayload::SideEffectInvocationPrepared(payload) = payload {
+            if let events::KernelEventPayload::ResourceLaneClaimed(payload) = payload {
                 contract
                     .validate_epoch_resource_consistency(
                         ledger.resource_key.as_ref(),
-                        payload.resource_key.as_ref(),
+                        Some(&payload.resource_key),
                     )
                     .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
-                ledger.resource_key = payload.resource_key.clone();
+                ledger.resource_key = Some(payload.resource_key.clone());
+            }
+            if matches!(payload, events::KernelEventPayload::ResourceLaneReleased(_)) {
+                return Ok(());
             }
             ledger.phase = phase;
         }
@@ -510,6 +516,11 @@ fn validate_side_effect_resource_claim(
     payload: &events::KernelEventPayload,
 ) -> Result<()> {
     match payload {
+        events::KernelEventPayload::ResourceLaneClaimed(payload) => {
+            contract
+                .validate_resource_key(Some(&payload.resource_key))
+                .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))?;
+        }
         events::KernelEventPayload::SideEffectInvocationPrepared(payload) => {
             contract
                 .validate_resource_key(payload.resource_key.as_ref())

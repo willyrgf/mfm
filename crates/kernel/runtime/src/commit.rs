@@ -125,12 +125,50 @@ pub(crate) struct SealedTerminalCommitValidation<'a> {
 
 pub(crate) struct PreparedRunnerOutput {
     pub(crate) commit: store::PreparedCommitPlan,
-    pub(crate) artifacts_to_stage: Vec<PreparedStagedArtifact>,
+    pub(crate) artifact_admissions: Vec<PreparedArtifactAdmission>,
 }
 
 pub(crate) struct PreparedStagedArtifact {
     pub(crate) bytes: Vec<u8>,
     pub(crate) evidence: store::ArtifactEvidenceRef,
+}
+
+pub(crate) enum PreparedArtifactAdmission {
+    Bytes(Box<PreparedStagedArtifact>),
+    Existing(store::ExistingArtifactAdmission),
+}
+
+impl From<PreparedStagedArtifact> for PreparedArtifactAdmission {
+    fn from(artifact: PreparedStagedArtifact) -> Self {
+        Self::Bytes(Box::new(artifact))
+    }
+}
+
+pub(crate) fn prepared_commit_bundle<A>(
+    commit: store::PreparedCommitPlan,
+    artifacts: Vec<A>,
+) -> Result<store::PreparedCommitBundle>
+where
+    A: Into<PreparedArtifactAdmission>,
+{
+    let mut artifact_bytes = Vec::new();
+    let mut existing_artifacts = Vec::new();
+    for artifact in artifacts {
+        match artifact.into() {
+            PreparedArtifactAdmission::Bytes(artifact) => {
+                let artifact = *artifact;
+                artifact_bytes.push(
+                    store::PreparedArtifactBytes::new(artifact.bytes, artifact.evidence)
+                        .map_err(RuntimeError::from)?,
+                );
+            }
+            PreparedArtifactAdmission::Existing(existing) => {
+                existing_artifacts.push(existing);
+            }
+        }
+    }
+    store::PreparedCommitBundle::new(commit, artifact_bytes, existing_artifacts)
+        .map_err(RuntimeError::from)
 }
 
 pub(crate) struct CommitPlanner;
@@ -207,7 +245,7 @@ impl CommitPlanner {
         };
         let admitted_artifacts = required_artifacts.clone();
         let start_payload = events::KernelEventPayload::RunAdmitted(Box::new(run_admitted));
-        let request = store::TypedCommitRequest::from_payloads(
+        let request = store::CommitRequest::from_payloads(
             run_id,
             expected_next_seq,
             store::CommitKey::new(format!(
@@ -284,7 +322,7 @@ impl CommitPlanner {
         preconditions
             .required_cell_states
             .extend(node_cell_preconditions(runtime_spec, node)?);
-        let request = store::TypedCommitRequest::from_payloads(
+        let request = store::CommitRequest::from_payloads(
             run_id.clone(),
             view.next_seq,
             store::CommitKey::new(format!("attempt-start:{}:{}", node.node_id, attempt_id))?,
@@ -375,15 +413,25 @@ impl CommitPlanner {
             &payloads,
             &payload_bound_artifacts,
         ));
-        let artifacts_to_stage = staged_artifacts
+        let artifact_admissions = staged_artifacts
             .iter()
-            .filter_map(|artifact| {
-                artifact.bytes.as_ref().map(|bytes| PreparedStagedArtifact {
-                    bytes: bytes.clone(),
-                    evidence: artifact.evidence.clone(),
+            .map(|artifact| {
+                Ok(match artifact.bytes.as_ref() {
+                    Some(bytes) => {
+                        PreparedArtifactAdmission::Bytes(Box::new(PreparedStagedArtifact {
+                            bytes: bytes.clone(),
+                            evidence: artifact.evidence.clone(),
+                        }))
+                    }
+                    None => {
+                        PreparedArtifactAdmission::Existing(store::ExistingArtifactAdmission::new(
+                            artifact.evidence.artifact_id.clone(),
+                            artifact.evidence.evidence_hash()?,
+                        ))
+                    }
                 })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>>>()?;
         let admitted_artifacts = staged_artifacts
             .iter()
             .map(|artifact| artifact.evidence.clone())
@@ -415,7 +463,7 @@ impl CommitPlanner {
             &payloads,
             true,
         )?;
-        let request = store::TypedCommitRequest::from_payloads(
+        let request = store::CommitRequest::from_payloads(
             input.run_id.clone(),
             input.view.next_seq,
             runner_output_commit_key(input.node, input.attempt_id, &payloads)?,
@@ -430,7 +478,7 @@ impl CommitPlanner {
         )?;
         Ok(PreparedRunnerOutput {
             commit,
-            artifacts_to_stage,
+            artifact_admissions,
         })
     }
 
@@ -484,7 +532,11 @@ impl CommitPlanner {
                     },
                 ));
                 let evidence = artifact.evidence.clone();
-                (vec![evidence.clone()], vec![evidence], vec![artifact])
+                (
+                    vec![evidence.clone()],
+                    vec![evidence],
+                    vec![PreparedArtifactAdmission::Bytes(Box::new(artifact))],
+                )
             } else {
                 (Vec::new(), Vec::new(), Vec::new())
             };
@@ -517,7 +569,7 @@ impl CommitPlanner {
             .extend(node_cell_preconditions(input.runtime_spec, input.node)?);
         let required_artifacts =
             required_artifacts_for_payloads(input.view, required_artifacts, &payloads)?;
-        let request = store::TypedCommitRequest::from_payloads(
+        let request = store::CommitRequest::from_payloads(
             input.run_id.clone(),
             input.view.next_seq,
             store::CommitKey::new(format!(
@@ -535,7 +587,7 @@ impl CommitPlanner {
         )?;
         Ok(PreparedRunnerOutput {
             commit,
-            artifacts_to_stage,
+            artifact_admissions: artifacts_to_stage,
         })
     }
 
@@ -592,7 +644,7 @@ impl CommitPlanner {
         preconditions
             .required_cell_states
             .extend(node_cell_preconditions(input.runtime_spec, input.node)?);
-        let request = store::TypedCommitRequest::from_payloads(
+        let request = store::CommitRequest::from_payloads(
             input.run_id.clone(),
             input.view.next_seq,
             store::CommitKey::new(format!(
@@ -608,7 +660,7 @@ impl CommitPlanner {
 }
 
 fn prepare_runner_output_commit_plan(
-    request: store::TypedCommitRequest,
+    request: store::CommitRequest,
     artifacts: store::CommitArtifactEvidenceSet,
     saga_terminal_proof: Option<store::SagaTerminalProof>,
 ) -> Result<store::PreparedCommitPlan> {
@@ -623,6 +675,11 @@ fn prepare_runner_output_commit_plan(
         })?;
         return Ok(
             store::PreparedCommit::<store::SagaTerminal>::new(request, artifacts, &proof)?.into(),
+        );
+    }
+    if payloads.iter().any(is_run_completed_payload) {
+        return Ok(
+            store::PreparedCommit::<store::AttemptTerminal>::new(request, artifacts)?.into(),
         );
     }
     if payloads.iter().any(is_side_effect_terminal_payload) {
@@ -645,6 +702,10 @@ fn is_saga_terminal_payload(payload: &events::KernelEventPayload) -> bool {
     matches!(payload, events::KernelEventPayload::RunCompleted(_))
 }
 
+fn is_run_completed_payload(payload: &events::KernelEventPayload) -> bool {
+    matches!(payload, events::KernelEventPayload::RunCompleted(_))
+}
+
 fn is_retention_payload(payload: &events::KernelEventPayload) -> bool {
     matches!(
         payload,
@@ -663,6 +724,8 @@ fn is_side_effect_terminal_payload(payload: &events::KernelEventPayload) -> bool
             | events::KernelEventPayload::SideEffectConfirmationObserved(_)
             | events::KernelEventPayload::SideEffectAmbiguous(_)
             | events::KernelEventPayload::SideEffectFailed(_)
+            | events::KernelEventPayload::ResourceLaneReleased(_)
+            | events::KernelEventPayload::ResourceLaneReleaseIntent(_)
     )
 }
 
@@ -825,6 +888,14 @@ fn runner_output_commit_fragment(payload: &events::KernelEventPayload) -> String
             "sidefx-claim-takeover:{}:{}:{}",
             payload.ledger_key, payload.invocation_epoch, payload.claim_generation
         ),
+        events::KernelEventPayload::ResourceLaneClaimed(payload) => format!(
+            "resource-lane-claimed:{}:{}:{}",
+            payload.ledger_key, payload.invocation_epoch, payload.claim_id
+        ),
+        events::KernelEventPayload::ResourceLaneClaimIntent(payload) => format!(
+            "resource-lane-claim-intent:{}:{}",
+            payload.ledger_key, payload.invocation_epoch
+        ),
         events::KernelEventPayload::SideEffectInvocationPrepared(payload) => format!(
             "sidefx-prepared:{}:{}",
             payload.ledger_key, payload.invocation_epoch
@@ -859,6 +930,14 @@ fn runner_output_commit_fragment(payload: &events::KernelEventPayload) -> String
         events::KernelEventPayload::SideEffectFailed(payload) => format!(
             "sidefx-failed:{}:{}",
             payload.ledger_key, payload.invocation_epoch
+        ),
+        events::KernelEventPayload::ResourceLaneReleased(payload) => format!(
+            "resource-lane-released:{}:{}:{}",
+            payload.ledger_key, payload.invocation_epoch, payload.release_id
+        ),
+        events::KernelEventPayload::ResourceLaneReleaseIntent(payload) => format!(
+            "resource-lane-release-intent:{}:{}:{}",
+            payload.ledger_key, payload.invocation_epoch, payload.claim_id
         ),
         events::KernelEventPayload::RetentionManifestProjected(payload) => {
             format!(
@@ -1969,7 +2048,9 @@ fn validate_runner_output(input: RunnerOutputValidation<'_>) -> Result<()> {
             | events::KernelEventPayload::RunCompleted(_)
             | events::KernelEventPayload::RetentionRefsAppended(_)
             | events::KernelEventPayload::RetentionManifestProjected(_)
-            | events::KernelEventPayload::StateAttemptStarted(_) => {
+            | events::KernelEventPayload::StateAttemptStarted(_)
+            | events::KernelEventPayload::ResourceLaneClaimed(_)
+            | events::KernelEventPayload::ResourceLaneReleased(_) => {
                 return Err(RuntimeError::InvalidRunnerOutput(format!(
                     "runner for node {} returned scheduler-owned payload",
                     node.node_id
@@ -1978,6 +2059,7 @@ fn validate_runner_output(input: RunnerOutputValidation<'_>) -> Result<()> {
             events::KernelEventPayload::SideEffectIntentPersisted(_)
             | events::KernelEventPayload::SideEffectClaimed(_)
             | events::KernelEventPayload::SideEffectClaimTakenOver(_)
+            | events::KernelEventPayload::ResourceLaneClaimIntent(_)
             | events::KernelEventPayload::SideEffectInvocationPrepared(_)
             | events::KernelEventPayload::SideEffectInvocationStarted(_)
             | events::KernelEventPayload::SideEffectNotSubmittedProven(_)
@@ -1986,7 +2068,8 @@ fn validate_runner_output(input: RunnerOutputValidation<'_>) -> Result<()> {
             | events::KernelEventPayload::SideEffectReceiptObserved(_)
             | events::KernelEventPayload::SideEffectConfirmationObserved(_)
             | events::KernelEventPayload::SideEffectAmbiguous(_)
-            | events::KernelEventPayload::SideEffectFailed(_) => {
+            | events::KernelEventPayload::SideEffectFailed(_)
+            | events::KernelEventPayload::ResourceLaneReleaseIntent(_) => {
                 validate_runner_side_effect_payload(
                     runtime_spec,
                     run_id,

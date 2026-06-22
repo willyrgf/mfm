@@ -192,7 +192,7 @@ impl VerifiedRunContextLoader {
         store: &S,
     ) -> Result<VerifiedRunContext>
     where
-        S: store::AsyncTypedRunEventStore + ?Sized,
+        S: store::RunEventStore + ?Sized,
     {
         let stream = store
             .load_run_stream(run_id)
@@ -230,7 +230,7 @@ impl VerifiedRunHistory {
         artifacts: store::VerifiedRunArtifactStore,
     ) -> Result<Self>
     where
-        S: store::AsyncTypedRunEventStore + ?Sized,
+        S: store::RunEventStore + ?Sized,
     {
         Ok(Self {
             view: VerifiedRunHistoryView::from_async_store(runtime_spec, run_id, store, artifacts)
@@ -298,7 +298,7 @@ impl VerifiedRunHistoryView {
         artifacts: store::VerifiedRunArtifactStore,
     ) -> Result<Self>
     where
-        S: store::AsyncTypedRunEventStore + ?Sized,
+        S: store::RunEventStore + ?Sized,
     {
         let committed = store::CommittedRunStream::from_events(
             run_id.clone(),
@@ -1055,9 +1055,16 @@ fn validate_historical_run_stream(
                 .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
                 validate_historical_public_output_failed(projections, payload)?;
             }
+            events::KernelEventPayload::ResourceLaneClaimIntent(_)
+            | events::KernelEventPayload::ResourceLaneReleaseIntent(_) => {
+                return Err(RuntimeError::InvalidRunStream(
+                    "run stream contains unmaterialized resource-lane intent".to_owned(),
+                ));
+            }
             events::KernelEventPayload::SideEffectIntentPersisted(_)
             | events::KernelEventPayload::SideEffectClaimed(_)
             | events::KernelEventPayload::SideEffectClaimTakenOver(_)
+            | events::KernelEventPayload::ResourceLaneClaimed(_)
             | events::KernelEventPayload::SideEffectInvocationPrepared(_)
             | events::KernelEventPayload::SideEffectInvocationStarted(_)
             | events::KernelEventPayload::SideEffectNotSubmittedProven(_)
@@ -1066,7 +1073,8 @@ fn validate_historical_run_stream(
             | events::KernelEventPayload::SideEffectReceiptObserved(_)
             | events::KernelEventPayload::SideEffectConfirmationObserved(_)
             | events::KernelEventPayload::SideEffectAmbiguous(_)
-            | events::KernelEventPayload::SideEffectFailed(_) => {
+            | events::KernelEventPayload::SideEffectFailed(_)
+            | events::KernelEventPayload::ResourceLaneReleased(_) => {
                 validate_historical_side_effect_payload(
                     runtime_spec,
                     event.run_id(),

@@ -2,7 +2,6 @@ use super::*;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
@@ -23,7 +22,7 @@ use mfm_program::{
     StateKey, StateRegistryBuilder, StateResult, StateSpec,
 };
 use mfm_program_derive::{MfmConfig, MfmValue, PublicOutputs};
-use mfm_store::v1::AsyncTypedRunEventStore;
+use mfm_store::v1::RunEventStore;
 use serde::{Deserialize, Serialize};
 
 const D0: DigestBytes = DigestBytes::from_array([0x10; 32]);
@@ -55,7 +54,7 @@ macro_rules! store_typed_commit_request {
         required_artifacts: $required_artifacts:expr,
         preconditions: $preconditions:expr $(,)?
     ) => {
-        store::TypedCommitRequest::from_payloads(
+        store::CommitRequest::from_payloads(
             $run_id,
             $expected_next_seq,
             $commit_key,
@@ -70,23 +69,39 @@ macro_rules! store_typed_commit_request {
 trait TestPreparedCommitExt {
     fn append_prepared_commit(
         &mut self,
-        request: store::TypedCommitRequest,
+        request: store::CommitRequest,
     ) -> store::Result<store::CommitOutcome>;
 }
 
 impl TestPreparedCommitExt for TestTypedRunStore {
     fn append_prepared_commit(
         &mut self,
-        request: store::TypedCommitRequest,
+        request: store::CommitRequest,
     ) -> store::Result<store::CommitOutcome> {
         let admitted_artifacts = request.required_artifacts().to_vec();
         let plan = test_prepared_commit_plan(request, admitted_artifacts)?;
-        self.append_prepared_commit_plan(plan)
+        self.append_test_commit_plan(plan)
     }
 }
 
+fn test_bundle_from_plan(
+    plan: store::PreparedCommitPlan,
+) -> store::Result<store::PreparedCommitBundle> {
+    let existing = plan
+        .admitted_artifacts()
+        .iter()
+        .map(|evidence| {
+            Ok(store::ExistingArtifactAdmission::new(
+                evidence.artifact_id.clone(),
+                evidence.evidence_hash()?,
+            ))
+        })
+        .collect::<store::Result<Vec<_>>>()?;
+    store::PreparedCommitBundle::new(plan, Vec::new(), existing)
+}
+
 fn test_prepared_commit_plan(
-    request: store::TypedCommitRequest,
+    request: store::CommitRequest,
     admitted_artifacts: Vec<store::ArtifactEvidenceRef>,
 ) -> store::Result<store::PreparedCommitPlan> {
     let artifacts = store::CommitArtifactEvidenceSet::new(
@@ -110,6 +125,10 @@ fn test_prepared_commit_plan(
         preconditions.required_run_state = store::RequiredRunState::NotCompleted;
         let request = request.with_preconditions(preconditions);
         return store::PreparedCommit::<store::StateAttemptStarted>::new(request, artifacts)
+            .map(store::PreparedCommitPlan::from);
+    }
+    if request.payloads().iter().any(test_is_run_completed_payload) {
+        return store::PreparedCommit::<store::AttemptTerminal>::new(request, artifacts)
             .map(store::PreparedCommitPlan::from);
     }
     if request
@@ -144,6 +163,10 @@ fn test_is_retention_payload(payload: &events::KernelEventPayload) -> bool {
     )
 }
 
+fn test_is_run_completed_payload(payload: &events::KernelEventPayload) -> bool {
+    matches!(payload, events::KernelEventPayload::RunCompleted(_))
+}
+
 fn test_is_side_effect_terminal_payload(payload: &events::KernelEventPayload) -> bool {
     matches!(
         payload,
@@ -154,6 +177,7 @@ fn test_is_side_effect_terminal_payload(payload: &events::KernelEventPayload) ->
             | events::KernelEventPayload::SideEffectConfirmationObserved(_)
             | events::KernelEventPayload::SideEffectAmbiguous(_)
             | events::KernelEventPayload::SideEffectFailed(_)
+            | events::KernelEventPayload::ResourceLaneReleased(_)
     )
 }
 
@@ -175,9 +199,9 @@ fn block_on_ready<F: Future>(future: F) -> F::Output {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct TestTypedRunStore {
-    inner: store::AsyncInMemoryTypedRunStore,
+    inner: store::AsyncInMemoryRunStore,
 }
 
 impl TestTypedRunStore {
@@ -185,11 +209,12 @@ impl TestTypedRunStore {
         Self::default()
     }
 
-    fn append_prepared_commit_plan(
+    fn append_test_commit_plan(
         &self,
         plan: store::PreparedCommitPlan,
     ) -> store::Result<store::CommitOutcome> {
-        block_on_ready(self.inner.append_prepared_commit_plan(plan))
+        let bundle = test_bundle_from_plan(plan)?;
+        block_on_ready(self.inner.append_prepared_commit_bundle(bundle))
     }
 
     fn load_run_stream(&self, run_id: &RunId) -> Vec<store::KernelEventEnvelope> {
@@ -207,14 +232,14 @@ impl TestTypedRunStore {
     }
 }
 
-impl store::AsyncTypedRunEventStore for TestTypedRunStore {
+impl store::RunEventStore for TestTypedRunStore {
     type Error = store::StoreError;
 
-    fn append_prepared_commit_plan<'a>(
+    fn append_prepared_commit_bundle<'a>(
         &'a self,
-        plan: store::PreparedCommitPlan,
+        bundle: store::PreparedCommitBundle,
     ) -> store::AsyncStoreFuture<'a, store::CommitOutcome, Self::Error> {
-        self.inner.append_prepared_commit_plan(plan)
+        self.inner.append_prepared_commit_bundle(bundle)
     }
 
     fn load_run_stream<'a>(
@@ -239,6 +264,15 @@ impl store::AsyncTypedRunEventStore for TestTypedRunStore {
     }
 }
 
+impl store::RetainedArtifactReadProvider for TestTypedRunStore {
+    fn read_retained_artifact<'a>(
+        &'a self,
+        requirement: &'a store::EventArtifactRequirement,
+    ) -> store::RetainedArtifactReadFuture<'a> {
+        self.inner.read_retained_artifact(requirement)
+    }
+}
+
 #[derive(Clone)]
 struct RecordedPreparedCommit {
     seq: store::StreamSeq,
@@ -248,14 +282,14 @@ struct RecordedPreparedCommit {
 }
 
 struct RecordingTypedRunStore {
-    inner: store::AsyncInMemoryTypedRunStore,
+    inner: store::AsyncInMemoryRunStore,
     commits: Arc<Mutex<Vec<RecordedPreparedCommit>>>,
 }
 
 impl RecordingTypedRunStore {
     fn new() -> Self {
         Self {
-            inner: store::AsyncInMemoryTypedRunStore::new(),
+            inner: store::AsyncInMemoryRunStore::new(),
             commits: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -283,14 +317,14 @@ impl RecordingTypedRunStore {
 }
 
 struct StaleOnceTypedRunStore {
-    inner: store::AsyncInMemoryTypedRunStore,
+    inner: store::AsyncInMemoryRunStore,
     stale_terminal_injected: Mutex<bool>,
 }
 
 impl StaleOnceTypedRunStore {
     fn new() -> Self {
         Self {
-            inner: store::AsyncInMemoryTypedRunStore::new(),
+            inner: store::AsyncInMemoryRunStore::new(),
             stale_terminal_injected: Mutex::new(false),
         }
     }
@@ -303,17 +337,17 @@ impl StaleOnceTypedRunStore {
     }
 }
 
-impl store::AsyncTypedRunEventStore for RecordingTypedRunStore {
+impl store::RunEventStore for RecordingTypedRunStore {
     type Error = store::StoreError;
 
-    fn append_prepared_commit_plan<'a>(
+    fn append_prepared_commit_bundle<'a>(
         &'a self,
-        plan: store::PreparedCommitPlan,
+        bundle: store::PreparedCommitBundle,
     ) -> store::AsyncStoreFuture<'a, store::CommitOutcome, Self::Error> {
-        let payloads = plan.request().payloads().to_vec();
-        let admitted_artifacts = plan.admitted_artifacts().to_vec();
+        let payloads = bundle.request().payloads().to_vec();
+        let admitted_artifacts = bundle.admitted_artifacts().to_vec();
         Box::pin(async move {
-            let outcome = self.inner.append_prepared_commit_plan(plan).await?;
+            let outcome = self.inner.append_prepared_commit_bundle(bundle).await?;
             if let store::CommitOutcome::Appended(batch) = &outcome {
                 self.commits
                     .lock()
@@ -353,20 +387,20 @@ impl store::AsyncTypedRunEventStore for RecordingTypedRunStore {
     }
 }
 
-impl store::AsyncTypedRunEventStore for StaleOnceTypedRunStore {
+impl store::RunEventStore for StaleOnceTypedRunStore {
     type Error = store::StoreError;
 
-    fn append_prepared_commit_plan<'a>(
+    fn append_prepared_commit_bundle<'a>(
         &'a self,
-        plan: store::PreparedCommitPlan,
+        bundle: store::PreparedCommitBundle,
     ) -> store::AsyncStoreFuture<'a, store::CommitOutcome, Self::Error> {
         Box::pin(async move {
-            let is_run_start = plan
+            let is_run_start = bundle
                 .request()
                 .payloads()
                 .iter()
                 .any(|payload| matches!(payload, events::KernelEventPayload::RunAdmitted(_)));
-            let has_terminal = plan.request().payloads().iter().any(|payload| {
+            let has_terminal = bundle.request().payloads().iter().any(|payload| {
                 matches!(
                     payload,
                     events::KernelEventPayload::StateAttemptCompleted(_)
@@ -385,15 +419,15 @@ impl store::AsyncTypedRunEventStore for StaleOnceTypedRunStore {
                 should_inject
             };
             if should_inject {
-                let expected = plan.request().expected_next_seq();
-                let run_id = plan.request().run_id().clone();
-                self.inner.append_prepared_commit_plan(plan).await?;
+                let expected = bundle.request().expected_next_seq();
+                let run_id = bundle.request().run_id().clone();
+                self.inner.append_prepared_commit_bundle(bundle).await?;
                 return Err(store::StoreError::StaleExpectedNextSeq {
                     expected,
                     actual: self.inner.expected_next_seq(&run_id).await?,
                 });
             }
-            self.inner.append_prepared_commit_plan(plan).await
+            self.inner.append_prepared_commit_bundle(bundle).await
         })
     }
 
@@ -422,28 +456,11 @@ impl store::AsyncTypedRunEventStore for StaleOnceTypedRunStore {
 type TestArtifactMap = BTreeMap<ArtifactId, (Vec<u8>, store::ArtifactEvidenceRef)>;
 
 #[derive(Clone, Default)]
-struct TestRuntimeArtifactStager {
+struct TestRuntimeArtifactStore {
     artifacts: Arc<Mutex<TestArtifactMap>>,
 }
 
-impl RuntimeArtifactStager for TestRuntimeArtifactStager {
-    fn stage_verified_artifact<'a>(
-        &'a self,
-        bytes: Vec<u8>,
-        evidence: store::ArtifactEvidenceRef,
-    ) -> RuntimeArtifactStageFuture<'a> {
-        Box::pin(async move {
-            verify_artifact_bytes(&bytes, &evidence)?;
-            self.artifacts
-                .lock()
-                .expect("test artifact stager lock")
-                .insert(evidence.artifact_id.clone(), (bytes, evidence));
-            Ok(())
-        })
-    }
-}
-
-impl store::RetainedArtifactReadProvider for TestRuntimeArtifactStager {
+impl store::RetainedArtifactReadProvider for TestRuntimeArtifactStore {
     fn read_retained_artifact<'a>(
         &'a self,
         requirement: &'a store::EventArtifactRequirement,
@@ -466,33 +483,11 @@ impl store::RetainedArtifactReadProvider for TestRuntimeArtifactStager {
 }
 
 #[derive(Clone)]
-struct RecordingRuntimeArtifactStager {
-    staged: Arc<Mutex<Vec<store::ArtifactEvidenceRef>>>,
+struct RecordingRuntimeArtifactStore {
     artifacts: Arc<Mutex<TestArtifactMap>>,
 }
 
-impl RuntimeArtifactStager for RecordingRuntimeArtifactStager {
-    fn stage_verified_artifact<'a>(
-        &'a self,
-        bytes: Vec<u8>,
-        evidence: store::ArtifactEvidenceRef,
-    ) -> RuntimeArtifactStageFuture<'a> {
-        Box::pin(async move {
-            verify_artifact_bytes(&bytes, &evidence)?;
-            self.staged
-                .lock()
-                .expect("recording stager lock")
-                .push(evidence.clone());
-            self.artifacts
-                .lock()
-                .expect("recording artifact stager lock")
-                .insert(evidence.artifact_id.clone(), (bytes, evidence));
-            Ok(())
-        })
-    }
-}
-
-impl store::RetainedArtifactReadProvider for RecordingRuntimeArtifactStager {
+impl store::RetainedArtifactReadProvider for RecordingRuntimeArtifactStore {
     fn read_retained_artifact<'a>(
         &'a self,
         requirement: &'a store::EventArtifactRequirement,
@@ -514,140 +509,60 @@ impl store::RetainedArtifactReadProvider for RecordingRuntimeArtifactStager {
     }
 }
 
-struct FailingAfterRuntimeArtifactStager {
-    remaining_successes: AtomicUsize,
-    artifacts: Mutex<TestArtifactMap>,
+#[derive(Clone)]
+struct FilteringRuntimeArtifactStore {
+    source: TestTypedRunStore,
+    missing_artifacts: Arc<Mutex<BTreeSet<ArtifactId>>>,
 }
 
-struct FailingNodeStateOutputArtifactStager {
-    failed_node_id: NodeId,
-    artifacts: Mutex<TestArtifactMap>,
-}
-
-impl FailingNodeStateOutputArtifactStager {
-    fn new(failed_node_id: NodeId) -> Self {
+impl FilteringRuntimeArtifactStore {
+    fn new(source: TestTypedRunStore) -> Self {
         Self {
-            failed_node_id,
-            artifacts: Mutex::new(BTreeMap::new()),
+            source,
+            missing_artifacts: Arc::new(Mutex::new(BTreeSet::new())),
         }
     }
-}
 
-impl RuntimeArtifactStager for FailingNodeStateOutputArtifactStager {
-    fn stage_verified_artifact<'a>(
-        &'a self,
-        bytes: Vec<u8>,
-        evidence: store::ArtifactEvidenceRef,
-    ) -> RuntimeArtifactStageFuture<'a> {
-        Box::pin(async move {
-            verify_artifact_bytes(&bytes, &evidence)?;
-            if evidence.artifact_role == events::ArtifactRole::StateOutput
-                && evidence.producer_node_id.as_ref() == Some(&self.failed_node_id)
-            {
-                return Err(RuntimeError::Store(
-                    "test node state-output staging failure".to_owned(),
-                ));
-            }
-            self.artifacts
-                .lock()
-                .expect("node-failing artifact stager lock")
-                .insert(evidence.artifact_id.clone(), (bytes, evidence));
-            Ok(())
-        })
+    fn hide_artifact(&self, artifact_id: ArtifactId) {
+        self.missing_artifacts
+            .lock()
+            .expect("filtering artifact store")
+            .insert(artifact_id);
     }
 }
 
-impl store::RetainedArtifactReadProvider for FailingNodeStateOutputArtifactStager {
+impl store::RetainedArtifactReadProvider for FilteringRuntimeArtifactStore {
     fn read_retained_artifact<'a>(
         &'a self,
         requirement: &'a store::EventArtifactRequirement,
     ) -> store::RetainedArtifactReadFuture<'a> {
         Box::pin(async move {
-            let (bytes, evidence) = self
-                .artifacts
-                .lock()
-                .map_err(|_| store::StoreError::ArtifactReadFailed {
-                    artifact_id: requirement.artifact_id.clone(),
-                })?
-                .get(&requirement.artifact_id)
-                .cloned()
-                .ok_or_else(|| store::StoreError::MissingArtifact {
-                    artifact_id: requirement.artifact_id.clone(),
-                })?;
-            store::VerifiedRunArtifactBytes::new(bytes, evidence, requirement)
-        })
-    }
-}
-
-impl FailingAfterRuntimeArtifactStager {
-    fn after(successes: usize) -> Self {
-        Self {
-            remaining_successes: AtomicUsize::new(successes),
-            artifacts: Mutex::new(BTreeMap::new()),
-        }
-    }
-}
-
-impl RuntimeArtifactStager for FailingAfterRuntimeArtifactStager {
-    fn stage_verified_artifact<'a>(
-        &'a self,
-        bytes: Vec<u8>,
-        evidence: store::ArtifactEvidenceRef,
-    ) -> RuntimeArtifactStageFuture<'a> {
-        Box::pin(async move {
-            verify_artifact_bytes(&bytes, &evidence)?;
             if self
-                .remaining_successes
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
-                    remaining.checked_sub(1)
-                })
-                .is_ok()
-            {
-                self.artifacts
-                    .lock()
-                    .expect("failing artifact stager lock")
-                    .insert(evidence.artifact_id.clone(), (bytes, evidence));
-                Ok(())
-            } else {
-                Err(RuntimeError::Store(
-                    "test artifact staging failure".to_owned(),
-                ))
-            }
-        })
-    }
-}
-
-impl store::RetainedArtifactReadProvider for FailingAfterRuntimeArtifactStager {
-    fn read_retained_artifact<'a>(
-        &'a self,
-        requirement: &'a store::EventArtifactRequirement,
-    ) -> store::RetainedArtifactReadFuture<'a> {
-        Box::pin(async move {
-            let (bytes, evidence) = self
-                .artifacts
+                .missing_artifacts
                 .lock()
                 .map_err(|_| store::StoreError::ArtifactReadFailed {
                     artifact_id: requirement.artifact_id.clone(),
                 })?
-                .get(&requirement.artifact_id)
-                .cloned()
-                .ok_or_else(|| store::StoreError::MissingArtifact {
+                .contains(&requirement.artifact_id)
+            {
+                return Err(store::StoreError::MissingArtifact {
                     artifact_id: requirement.artifact_id.clone(),
-                })?;
-            store::VerifiedRunArtifactBytes::new(bytes, evidence, requirement)
+                });
+            }
+            self.source.read_retained_artifact(requirement).await
         })
     }
 }
 
 fn test_scheduler(registry: ErasedRunnerRegistry) -> SerialTypedScheduler {
-    test_scheduler_with_stager(registry, Arc::new(TestRuntimeArtifactStager::default()))
+    test_scheduler_with_artifacts(registry, Arc::new(TestRuntimeArtifactStore::default()))
 }
 
-fn test_scheduler_with_stager(
+fn test_scheduler_with_artifacts(
     registry: ErasedRunnerRegistry,
-    artifact_stager: Arc<dyn RuntimeArtifactStore>,
+    artifact_store: Arc<dyn RuntimeArtifactStore>,
 ) -> SerialTypedScheduler {
-    SerialTypedScheduler::new(registry, artifact_stager)
+    SerialTypedScheduler::new(registry, artifact_store)
 }
 
 fn register_fixture_capabilities(
@@ -1333,7 +1248,6 @@ fn side_effect_evidence_builder_prepares_and_stages_claimed_invocation() {
         events::RunnerInvocationId::new("mfm.test.side_effect_builder.owner").expect("claim owner");
     let token = events::side_effect::ClaimFencingToken::new("mfm.test.side_effect_builder.token")
         .expect("token");
-    let resource_key = exclusive_resource_key(&fixture, "wallet-builder");
     let idempotency_key = events::IdempotencyKeyRef::new("mfm.test.side_effect_builder.idem")
         .expect("idempotency key");
     let capability_binding = RunnerCapabilityBinding {
@@ -1358,7 +1272,7 @@ fn side_effect_evidence_builder_prepares_and_stages_claimed_invocation() {
                     claim_owner: owner.clone(),
                     claim_generation: 9,
                     claim_fencing_token: token.clone(),
-                    resource_key: Some(resource_key.clone()),
+                    resource_key: None,
                 },
                 intent: &intent,
                 idempotency: &idempotency,
@@ -1399,7 +1313,6 @@ fn side_effect_evidence_builder_prepares_and_stages_claimed_invocation() {
                 assert!(payload.prepared_hash.is_some());
                 assert_eq!(payload.claim_generation, 9);
                 assert_eq!(payload.claim_fencing_token, token);
-                assert_eq!(payload.resource_key.as_ref(), Some(&resource_key));
             }
             other => panic!("expected side-effect prepared payload: {other:?}"),
         }
@@ -1616,20 +1529,24 @@ impl SideEffectDriverCallbacks for TestSideEffectDriverCallbacks {
     {
         let node_id = ctx.node().node_id.as_str().to_owned();
         let attempt_id = ctx.attempt_id().as_str().to_owned();
-        let resource_key = test_driver_resource_key(ctx);
         Box::pin(async move {
-            let plan =
-                SideEffectPreparedInvocationPlan::with_prepared_invocation(serde_json::json!({
+            Ok(SideEffectPreparedInvocationPlan::with_prepared_invocation(
+                serde_json::json!({
                     "attempt_id": attempt_id,
                     "node_id": node_id,
                     "prepared": true
-                }));
-            Ok(if let Some(resource_key) = resource_key {
-                plan.with_resource_key(resource_key)
-            } else {
-                plan
-            })
+                }),
+            ))
         })
+    }
+
+    fn resolve_resource_lane<'a, 'ctx>(
+        &'a self,
+        ctx: &'a ErasedRunCtx<'ctx>,
+        _plan: &'a SideEffectIntentPlan<Self::Intent, Self::Idempotency>,
+    ) -> SideEffectDriverFuture<'a, Option<events::ResourceKeyEvidence>> {
+        let resource_key = test_driver_resource_key(ctx);
+        Box::pin(async move { Ok(resource_key) })
     }
 
     fn reconstruct_prepared_invocation<'a, 'ctx>(
@@ -1851,8 +1768,8 @@ async fn side_effect_driver_preserves_concrete_exclusive_resource_key_across_run
         .load_run_stream(&fixture.run_id)
         .iter()
         .find_map(|event| match event.payload() {
-            events::KernelEventPayload::SideEffectInvocationPrepared(payload) => {
-                payload.resource_key.clone()
+            events::KernelEventPayload::ResourceLaneClaimed(payload) => {
+                Some(payload.resource_key.clone())
             }
             _ => None,
         })
@@ -1988,14 +1905,21 @@ async fn side_effect_driver_persists_submission_recovery_decisions() {
             drive_side_effect_driver_from_store(&fixture, &store, node, &attempt_id, &callbacks)
                 .await
                 .expect("driver output");
-        let actual = match &output.payloads[0] {
-            RunnerEventPayload::SideEffectSubmissionUnknown(_) => "side_effect.submission_unknown",
-            RunnerEventPayload::SideEffectNotSubmittedProven(_) => {
-                "side_effect.not_submitted_proven"
-            }
-            RunnerEventPayload::SideEffectAmbiguous(_) => "side_effect.ambiguous",
-            other => panic!("unexpected recovery payload: {other:?}"),
-        };
+        let actual = output
+            .payloads
+            .iter()
+            .find_map(|payload| match payload {
+                RunnerEventPayload::SideEffectSubmissionUnknown(_) => {
+                    Some("side_effect.submission_unknown")
+                }
+                RunnerEventPayload::SideEffectNotSubmittedProven(_) => {
+                    Some("side_effect.not_submitted_proven")
+                }
+                RunnerEventPayload::SideEffectAmbiguous(_) => Some("side_effect.ambiguous"),
+                RunnerEventPayload::ResourceLaneReleaseIntent(_) => None,
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("unexpected recovery payloads: {:?}", output.payloads));
         assert_eq!(actual, expected);
     }
 }
@@ -2727,11 +2651,9 @@ async fn no_second_authority_full_run_stages_and_admits_first_artifact_reference
             },
         ))
         .expect("binding b");
-    let staged = Arc::new(Mutex::new(Vec::new()));
-    let scheduler = test_scheduler_with_stager(
+    let scheduler = test_scheduler_with_artifacts(
         register_fixture_capabilities(registry, &fixture),
-        Arc::new(RecordingRuntimeArtifactStager {
-            staged: Arc::clone(&staged),
+        Arc::new(RecordingRuntimeArtifactStore {
             artifacts: Arc::new(Mutex::new(BTreeMap::new())),
         }),
     );
@@ -2779,7 +2701,6 @@ async fn no_second_authority_full_run_stages_and_admits_first_artifact_reference
         Some(spec::FrameworkNodeSpec::CompleteRun(_))
     ));
 
-    let staged_artifacts = staged.lock().expect("staged artifact lock").clone();
     let mut first_reference_by_artifact = BTreeMap::<ArtifactId, usize>::new();
     let commits = store.commits();
     for (commit_index, commit) in commits.iter().enumerate() {
@@ -2798,11 +2719,6 @@ async fn no_second_authority_full_run_stages_and_admits_first_artifact_reference
                 commit_references.contains(&admitted.artifact_id),
                 "commit {} admitted unreferenced artifact {}",
                 commit.commit_key,
-                admitted.artifact_id
-            );
-            assert!(
-                staged_artifacts.contains(admitted),
-                "artifact {} was admitted without runtime staging",
                 admitted.artifact_id
             );
         }
@@ -2832,13 +2748,11 @@ async fn no_second_authority_full_run_stages_and_admits_first_artifact_reference
 }
 
 #[tokio::test]
-async fn run_launch_commits_single_admission_root_and_stages_launch_artifacts() {
+async fn run_launch_commits_single_admission_root_and_admits_launch_artifacts() {
     let fixture = fixture();
-    let staged = Arc::new(Mutex::new(Vec::new()));
-    let scheduler = test_scheduler_with_stager(
+    let scheduler = test_scheduler_with_artifacts(
         registered_fixture_runners(&fixture),
-        Arc::new(RecordingRuntimeArtifactStager {
-            staged: Arc::clone(&staged),
+        Arc::new(RecordingRuntimeArtifactStore {
             artifacts: Arc::new(Mutex::new(BTreeMap::new())),
         }),
     );
@@ -2862,29 +2776,26 @@ async fn run_launch_commits_single_admission_root_and_stages_launch_artifacts() 
     assert_eq!(admission_commit.len(), 1);
     assert_eq!(admission_commit[0].ordinal(), store::CommitOrdinal::new(0));
 
-    let staged = staged.lock().expect("recording stager lock");
     let run_admitted = match admission_commit[0].payload() {
         events::KernelEventPayload::RunAdmitted(payload) => payload,
         _ => panic!("first admission event must be RunAdmitted"),
     };
-    assert!(staged.iter().any(|evidence| {
-        evidence.artifact_id == run_admitted.spec_artifact.artifact_id
-            && evidence.artifact_role == events::ArtifactRole::TypedExecutionSpec
-    }));
-    assert!(staged.iter().any(|evidence| {
-        evidence.artifact_id == run_admitted.certificate_artifact.artifact_id
-            && evidence.artifact_role == events::ArtifactRole::TypedSpecCertificate
-    }));
-    for config in &run_admitted.config_artifacts {
-        assert!(staged.iter().any(|evidence| {
-            evidence.artifact_id == config.artifact_id
-                && evidence.artifact_role == events::ArtifactRole::TypedConfig
-        }));
-    }
-    assert!(staged.iter().any(|evidence| {
-        evidence.artifact_id == fixture.seed_ref.seed_artifact.artifact_id
-            && evidence.artifact_role == events::ArtifactRole::SeedInput
-    }));
+    assert_eq!(
+        run_admitted.spec_artifact.role,
+        events::ArtifactRole::TypedExecutionSpec
+    );
+    assert_eq!(
+        run_admitted.certificate_artifact.role,
+        events::ArtifactRole::TypedSpecCertificate
+    );
+    assert!(run_admitted
+        .config_artifacts
+        .iter()
+        .all(|artifact| artifact.role == events::ArtifactRole::TypedConfig));
+    assert_eq!(
+        fixture.seed_ref.seed_artifact.role,
+        events::ArtifactRole::SeedInput
+    );
     assert!(stream.iter().all(|event| {
         !matches!(
             event.payload(),
@@ -2895,101 +2806,6 @@ async fn run_launch_commits_single_admission_root_and_stages_launch_artifacts() 
                 | events::KernelEventPayload::RetentionRefsAppended(_)
         )
     }));
-}
-
-#[tokio::test]
-async fn run_launch_staging_failure_prevents_start_commit() {
-    let fixture = fixture();
-    let scheduler = test_scheduler_with_stager(
-        registered_fixture_runners(&fixture),
-        Arc::new(FailingAfterRuntimeArtifactStager::after(0)),
-    );
-    let mut store = TestTypedRunStore::new();
-    assert!(matches!(
-        start_fixture_run(
-            &scheduler,
-            &mut store,
-            &fixture,
-            vec![fixture.seed_ref.clone()],
-        )
-        .await,
-        Err(RuntimeError::Store(message))
-            if message.contains("test artifact staging failure")
-    ));
-    assert!(store.load_run_stream(&fixture.run_id).is_empty());
-}
-
-#[tokio::test]
-async fn public_output_receipt_staging_failure_leaves_open_attempt() {
-    let fixture = fixture();
-    let scheduler = test_scheduler_with_stager(
-        registered_fixture_runners(&fixture),
-        Arc::new(FailingNodeStateOutputArtifactStager::new(
-            fixture.render_node.clone(),
-        )),
-    );
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
-    drive_once(
-        &scheduler,
-        &mut store,
-        &fixture.runtime_spec,
-        &fixture.run_id,
-    )
-    .await
-    .expect("drive a");
-    drive_once(
-        &scheduler,
-        &mut store,
-        &fixture.runtime_spec,
-        &fixture.run_id,
-    )
-    .await
-    .expect("drive b");
-
-    let stream_len_before = store.load_run_stream(&fixture.run_id).len();
-    assert!(matches!(
-        drive_once(&scheduler, &mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await,
-        Err(RuntimeError::Store(message))
-            if message.contains("test node state-output staging failure")
-    ));
-    assert_eq!(
-        store.load_run_stream(&fixture.run_id).len(),
-        stream_len_before + 1
-    );
-    assert!(store
-        .projection_snapshot()
-        .cell_terminal(&fixture.render_cell)
-        .is_none());
-    assert!(store.load_run_stream(&fixture.run_id).iter().all(|event| {
-        !matches!(
-            event.payload(),
-            events::KernelEventPayload::PublicOutputProduced(_)
-        )
-    }));
-    let render_attempt = attempt_id(
-        &fixture.run_id,
-        fixture.runtime_spec.spec_hash(),
-        &fixture.render_node,
-        1,
-    )
-    .expect("render attempt id");
-    assert!(matches!(
-        store
-            .projection_snapshot()
-            .attempt(&fixture.render_node, &render_attempt)
-            .expect("open render attempt")
-            .status,
-        store::AttemptStatus::Started { .. }
-    ));
 }
 
 #[tokio::test]
@@ -6961,12 +6777,12 @@ async fn runtime_resolves_manual_resolution_terminal() {
             },
         ))
         .expect("binding read");
-    let artifact_store = Arc::new(TestRuntimeArtifactStager::default());
-    let scheduler = test_scheduler_with_stager(
+    let mut store = TestTypedRunStore::new();
+    let artifact_store = Arc::new(store.clone());
+    let scheduler = test_scheduler_with_artifacts(
         register_fixture_capabilities(registry.clone(), &fixture),
         artifact_store.clone(),
     );
-    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -7137,12 +6953,12 @@ async fn runtime_missing_manual_terminal_authorization_artifact_leaves_open_atte
             },
         ))
         .expect("binding read");
-    let artifact_store = Arc::new(TestRuntimeArtifactStager::default());
-    let scheduler = test_scheduler_with_stager(
+    let mut store = TestTypedRunStore::new();
+    let artifact_store = Arc::new(FilteringRuntimeArtifactStore::new(store.clone()));
+    let scheduler = test_scheduler_with_artifacts(
         register_fixture_capabilities(registry, &fixture),
         artifact_store.clone(),
     );
-    let mut store = TestTypedRunStore::new();
     start_fixture_run(
         &scheduler,
         &mut store,
@@ -7180,12 +6996,7 @@ async fn runtime_missing_manual_terminal_authorization_artifact_leaves_open_atte
             _ => None,
         })
         .expect("manual resolution recorded");
-    artifact_store
-        .artifacts
-        .lock()
-        .expect("test artifact store")
-        .remove(&manual.authorization_artifact_id)
-        .expect("authorization artifact was staged");
+    artifact_store.hide_artifact(manual.authorization_artifact_id.clone());
     let stream_len_before = store.load_run_stream(&fixture.run_id).len();
 
     let resolve_node = fixture
@@ -8319,14 +8130,18 @@ impl<'a> StaleStreamStore<'a> {
     }
 }
 
-impl store::AsyncTypedRunEventStore for StaleStreamStore<'_> {
+impl store::RunEventStore for StaleStreamStore<'_> {
     type Error = store::StoreError;
 
-    fn append_prepared_commit_plan<'a>(
+    fn append_prepared_commit_bundle<'a>(
         &'a self,
-        plan: store::PreparedCommitPlan,
+        bundle: store::PreparedCommitBundle,
     ) -> store::AsyncStoreFuture<'a, store::CommitOutcome, Self::Error> {
-        let result = self.inner.borrow_mut().append_prepared_commit_plan(plan);
+        let result = block_on_ready(
+            self.inner
+                .borrow_mut()
+                .append_prepared_commit_bundle(bundle),
+        );
         Box::pin(std::future::ready(result))
     }
 
@@ -8368,14 +8183,18 @@ impl<'a> MissingInputArtifactRefStore<'a> {
     }
 }
 
-impl store::AsyncTypedRunEventStore for MissingInputArtifactRefStore<'_> {
+impl store::RunEventStore for MissingInputArtifactRefStore<'_> {
     type Error = store::StoreError;
 
-    fn append_prepared_commit_plan<'a>(
+    fn append_prepared_commit_bundle<'a>(
         &'a self,
-        plan: store::PreparedCommitPlan,
+        bundle: store::PreparedCommitBundle,
     ) -> store::AsyncStoreFuture<'a, store::CommitOutcome, Self::Error> {
-        let result = self.inner.borrow_mut().append_prepared_commit_plan(plan);
+        let result = block_on_ready(
+            self.inner
+                .borrow_mut()
+                .append_prepared_commit_bundle(bundle),
+        );
         Box::pin(std::future::ready(result))
     }
 
@@ -8602,6 +8421,10 @@ fn referenced_artifact_ids_for_payload(payload: &events::KernelEventPayload) -> 
                 artifacts.push(artifact_id.clone());
             }
         }
+        events::KernelEventPayload::ResourceLaneClaimed(_)
+        | events::KernelEventPayload::ResourceLaneClaimIntent(_)
+        | events::KernelEventPayload::ResourceLaneReleased(_)
+        | events::KernelEventPayload::ResourceLaneReleaseIntent(_) => {}
         events::KernelEventPayload::SideEffectNotSubmittedProven(payload) => {
             artifacts.push(payload.proof_artifact_id.clone());
         }
@@ -8671,7 +8494,7 @@ async fn start_fixture_run(
     scheduler_start_run(scheduler, store, launch).await
 }
 
-async fn start_fixture_run_async_store<S: store::AsyncTypedRunEventStore + ?Sized>(
+async fn start_fixture_run_async_store<S: store::RunEventStore + ?Sized>(
     scheduler: &SerialTypedScheduler,
     store: &S,
     fixture: &Fixture,
@@ -9166,6 +8989,15 @@ fn append_synthetic_exclusive_prepare(
         "run": run_id.as_str(),
     }))
     .expect("intent digest");
+    let resource_key = exclusive_resource_key(fixture, key);
+    let resource_lane_requirement_digest = content_digest_json(serde_json::json!({
+        "acquisition": "pre_state_invocation",
+        "hold": "until_side_effect_terminal",
+        "key_schema_id": resource_key.key_schema_id.as_str(),
+        "mode": "exclusive",
+        "namespace": resource_key.namespace.as_str(),
+    }))
+    .expect("resource lane requirement digest");
     let intent_artifact_id =
         ArtifactId::from_digest(intent_hash.algorithm(), *intent_hash.digest());
     let intent_artifact = store::ArtifactEvidenceRef {
@@ -9221,6 +9053,20 @@ fn append_synthetic_exclusive_prepare(
                     claim_fencing_token: events::side_effect::ClaimFencingToken::new("token-1")
                         .expect("fencing token"),
                 }),
+                events::KernelEventPayload::ResourceLaneClaimIntent(events::ResourceLaneClaimIntent {
+                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                    node_id: node.node_id.clone(),
+                    attempt_id: attempt_id.clone(),
+                    ledger_key: ledger.clone(),
+                    ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                    invocation_epoch: 1,
+                    resource_key: resource_key.clone(),
+                    requirement_digest: resource_lane_requirement_digest,
+                    resolved_by_capability_impl: events::RunnerFactoryId::new(
+                        "mfm.test.side_effect_driver",
+                    )
+                    .expect("runner factory"),
+                }),
                 events::KernelEventPayload::SideEffectInvocationPrepared(
                     events::side_effect::InvocationPrepared {
                         spec_hash: fixture.runtime_spec.spec_hash().clone(),
@@ -9232,9 +9078,9 @@ fn append_synthetic_exclusive_prepare(
                         claim_generation: 1,
                         claim_fencing_token: events::side_effect::ClaimFencingToken::new("token-1")
                             .expect("fencing token"),
+                        resource_key: Some(resource_key),
                         prepared_artifact_id: None,
                         prepared_hash: None,
-                        resource_key: Some(exclusive_resource_key(fixture, key)),
                     },
                 ),
             ],
@@ -9395,6 +9241,34 @@ fn append_synthetic_receipt_observed(
         .expect("append synthetic receipt observed");
 }
 
+fn synthetic_resource_lane_release(
+    store: &TestTypedRunStore,
+    fixture: &Fixture,
+    run_id: &RunId,
+    node: &spec::NodeSpec,
+    attempt_id: &AttemptId,
+    ledger: &events::SideEffectLedgerKey,
+    reason: &str,
+) -> Option<events::KernelEventPayload> {
+    let holder = store::SideEffectLedgerRef::new(run_id.clone(), ledger.clone());
+    let snapshot = store.projection_snapshot();
+    let (_, lane) = snapshot
+        .resource_lanes()
+        .find(|(_, projection)| projection.holder == holder)?;
+    Some(events::KernelEventPayload::ResourceLaneReleaseIntent(
+        events::ResourceLaneReleaseIntent {
+            spec_hash: fixture.runtime_spec.spec_hash().clone(),
+            node_id: node.node_id.clone(),
+            attempt_id: attempt_id.clone(),
+            ledger_key: ledger.clone(),
+            ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+            invocation_epoch: lane.invocation_epoch,
+            claim_id: lane.claim_id.clone(),
+            release_reason: events::ResourceLaneReleaseReason::new(reason).expect("release reason"),
+        },
+    ))
+}
+
 fn append_synthetic_confirmation_observed(
     store: &mut TestTypedRunStore,
     fixture: &Fixture,
@@ -9411,27 +9285,41 @@ fn append_synthetic_confirmation_observed(
         digest.clone(),
         events::ArtifactRole::Confirmation,
     );
+    let release = synthetic_resource_lane_release(
+        store,
+        fixture,
+        &fixture.run_id,
+        node,
+        attempt_id,
+        ledger,
+        "side_effect.confirmed",
+    );
+    let mut payloads = Vec::new();
+    if let Some(release) = release {
+        payloads.push(release);
+    }
+    payloads.push(events::KernelEventPayload::SideEffectConfirmationObserved(
+        events::side_effect::ConfirmationObserved {
+            spec_hash: fixture.runtime_spec.spec_hash().clone(),
+            node_id: node.node_id.clone(),
+            attempt_id: attempt_id.clone(),
+            ledger_key: ledger.clone(),
+            ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+            invocation_epoch: 1,
+            confirmation_schema_id: node.config_ref.schema_id.clone(),
+            confirmation_hash: digest,
+            confirmation_artifact_id: artifact_id,
+            replay_verifier_id: events::ReplayVerifierId::new("mfm.test.driver.replay")
+                .expect("replay verifier"),
+            resource_touched_set: None,
+        },
+    ));
     store
         .append_prepared_commit(store_typed_commit_request! {
             run_id: fixture.run_id.clone(),
             expected_next_seq: store.expected_next_seq(&fixture.run_id),
             commit_key: store::CommitKey::new(commit_key).expect("commit key"),
-            payloads: vec![events::KernelEventPayload::SideEffectConfirmationObserved(
-                events::side_effect::ConfirmationObserved {
-                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
-                    node_id: node.node_id.clone(),
-                    attempt_id: attempt_id.clone(),
-                    ledger_key: ledger.clone(),
-                    ledger_purpose: events::SideEffectLedgerPurpose::Forward,
-                    invocation_epoch: 1,
-                    confirmation_schema_id: node.config_ref.schema_id.clone(),
-                    confirmation_hash: digest,
-                    confirmation_artifact_id: artifact_id,
-                    replay_verifier_id: events::ReplayVerifierId::new("mfm.test.driver.replay")
-                        .expect("replay verifier"),
-                    resource_touched_set: None,
-                },
-            )],
+            payloads: payloads,
             required_artifacts: vec![evidence],
             preconditions: store::CommitPreconditions {
                 required_run_state: store::RequiredRunState::NotCompleted,
@@ -9486,32 +9374,48 @@ fn append_synthetic_ambiguous(
         producer_seed_id: None,
         artifact_role: events::ArtifactRole::AmbiguityEvidence,
     };
+    let release = synthetic_resource_lane_release(
+        store,
+        fixture,
+        run_id,
+        node,
+        attempt_id,
+        ledger,
+        "side_effect.ambiguous",
+    );
+    let mut payloads = Vec::new();
+    if let Some(release) = release {
+        payloads.push(release);
+    }
+    payloads.push(events::KernelEventPayload::SideEffectAmbiguous(
+        events::side_effect::Ambiguous {
+            spec_hash: fixture.runtime_spec.spec_hash().clone(),
+            node_id: node.node_id.clone(),
+            attempt_id: attempt_id.clone(),
+            ledger_key: ledger.clone(),
+            ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+            invocation_epoch: 1,
+            ambiguity_code: events::AmbiguityCode::new("unknown").expect("ambiguity"),
+            evidence_schema_id: node.config_ref.schema_id.clone(),
+            evidence_hash,
+            evidence_artifact_id,
+        },
+    ));
+    payloads.push(events::KernelEventPayload::StateAttemptFailed(
+        events::StateAttemptFailed {
+            spec_hash: fixture.runtime_spec.spec_hash().clone(),
+            node_id: node.node_id.clone(),
+            attempt_id: attempt_id.clone(),
+            retryable: false,
+            error: side_effect_error(false),
+        },
+    ));
     store
         .append_prepared_commit(store_typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(run_id),
             commit_key: store::CommitKey::new(commit_key).expect("commit key"),
-            payloads: vec![
-                events::KernelEventPayload::SideEffectAmbiguous(events::side_effect::Ambiguous {
-                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
-                    node_id: node.node_id.clone(),
-                    attempt_id: attempt_id.clone(),
-                    ledger_key: ledger.clone(),
-                    ledger_purpose: events::SideEffectLedgerPurpose::Forward,
-                    invocation_epoch: 1,
-                    ambiguity_code: events::AmbiguityCode::new("unknown").expect("ambiguity"),
-                    evidence_schema_id: node.config_ref.schema_id.clone(),
-                    evidence_hash,
-                    evidence_artifact_id,
-                }),
-                events::KernelEventPayload::StateAttemptFailed(events::StateAttemptFailed {
-                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
-                    node_id: node.node_id.clone(),
-                    attempt_id: attempt_id.clone(),
-                    retryable: false,
-                    error: side_effect_error(false),
-                }),
-            ],
+            payloads: payloads,
             required_artifacts: vec![evidence],
             preconditions: store::CommitPreconditions {
                 required_run_state: store::RequiredRunState::NotCompleted,
@@ -12328,9 +12232,9 @@ fn side_effect_prepared_with_resource_key(
         invocation_epoch,
         claim_generation,
         claim_fencing_token: side_effect_fencing_token(ctx.attempt_no(), claim_generation),
+        resource_key,
         prepared_artifact_id: None,
         prepared_hash: None,
-        resource_key,
     })
 }
 

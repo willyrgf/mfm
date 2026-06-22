@@ -3,11 +3,10 @@ use mfm_ids::{ArtifactId, AttemptId, DigestAlgorithm, NodeId, RunId, SchemaId};
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 
-use crate::artifacts::RuntimeArtifactStager;
 use crate::binding::BoundRuntimeContext;
 use crate::commit::{
-    AttemptFailureCommitInput, CommitPlanner, PreparedRunnerOutput, PreparedStagedArtifact,
-    RunnerOutputCommitInput,
+    prepared_commit_bundle, AttemptFailureCommitInput, CommitPlanner, PreparedRunnerOutput,
+    PreparedStagedArtifact, RunnerOutputCommitInput,
 };
 use crate::error::async_store_error;
 use crate::history::RuntimeRunView;
@@ -75,7 +74,7 @@ impl ResourceLaneBlockWitness {
 /// invocation construction, so observed materialization and runner-output validation failures can
 /// terminalize through runtime-owned failure-safe evidence.
 pub(crate) struct AttemptLifecycle<'a> {
-    artifact_store: &'a dyn RuntimeArtifactStager,
+    _marker: std::marker::PhantomData<&'a ()>,
 }
 
 struct Attempt<P> {
@@ -161,13 +160,15 @@ enum ObservedFailureClass {
 }
 
 impl<'a> AttemptLifecycle<'a> {
-    /// Creates a lifecycle bound to runtime-owned artifact staging.
-    pub(crate) fn new(artifact_store: &'a dyn RuntimeArtifactStager) -> Self {
-        Self { artifact_store }
+    /// Creates a lifecycle bound to runtime-owned append planning.
+    pub(crate) fn new() -> Self {
+        Self {
+            _marker: std::marker::PhantomData,
+        }
     }
 
     /// Runs one ordinary attempt against an async typed store.
-    pub(crate) async fn run<S: store::AsyncTypedRunEventStore + ?Sized>(
+    pub(crate) async fn run<S: store::RunEventStore + ?Sized>(
         &self,
         store: &S,
         runtime_spec: &CertifiedRuntimeSpec,
@@ -215,7 +216,8 @@ impl<'a> AttemptLifecycle<'a> {
                     selected_attempt.phase.attempt_no,
                     view,
                 )?;
-                match store.append_prepared_commit_plan(start_commit.into()).await {
+                let bundle = store::PreparedCommitBundle::without_artifacts(start_commit.into())?;
+                match store.append_prepared_commit_bundle(bundle).await {
                     Ok(_) => {}
                     Err(error) if async_error_is_stale_expected_next_seq(&error) => {
                         return Ok(AttemptRunStatus::StaleView);
@@ -266,13 +268,7 @@ impl<'a> AttemptLifecycle<'a> {
         {
             Ok(invocation) => invocation,
             Err(error) => {
-                return terminalize_observed_failure(
-                    self.artifact_store,
-                    store,
-                    failure_context,
-                    error,
-                )
-                .await;
+                return terminalize_observed_failure(store, failure_context, error).await;
             }
         };
         let output = match binding
@@ -282,13 +278,7 @@ impl<'a> AttemptLifecycle<'a> {
         {
             Ok(output) => output,
             Err(error) => {
-                return terminalize_observed_failure(
-                    self.artifact_store,
-                    store,
-                    failure_context,
-                    error,
-                )
-                .await;
+                return terminalize_observed_failure(store, failure_context, error).await;
             }
         };
         let invoked_attempt = Attempt {
@@ -320,13 +310,7 @@ impl<'a> AttemptLifecycle<'a> {
         }) {
             Ok(output) => output,
             Err(error) => {
-                return terminalize_observed_failure(
-                    self.artifact_store,
-                    store,
-                    failure_context,
-                    error,
-                )
-                .await;
+                return terminalize_observed_failure(store, failure_context, error).await;
             }
         };
         let terminal_planned_attempt = Attempt {
@@ -346,7 +330,7 @@ impl<'a> AttemptLifecycle<'a> {
         ) {
             return Ok(AttemptRunStatus::BlockedOnResourceLane { witness, advanced });
         }
-        let has_resource_lane_prepare = request_has_resource_lane_prepare(
+        let has_resource_lane_claim = request_has_resource_lane_claim(
             terminal_planned_attempt
                 .phase
                 .terminal_output
@@ -354,11 +338,9 @@ impl<'a> AttemptLifecycle<'a> {
                 .request(),
         );
         let terminal_output = terminal_planned_attempt.phase.terminal_output;
-        stage_prepared_artifacts(self.artifact_store, &terminal_output.artifacts_to_stage).await?;
-        match store
-            .append_prepared_commit_plan(terminal_output.commit)
-            .await
-        {
+        let bundle =
+            prepared_commit_bundle(terminal_output.commit, terminal_output.artifact_admissions)?;
+        match store.append_prepared_commit_bundle(bundle).await {
             Ok(_) => {
                 let _terminal_committed_attempt = Attempt {
                     phase: TerminalCommitted,
@@ -369,7 +351,7 @@ impl<'a> AttemptLifecycle<'a> {
                 Ok(AttemptRunStatus::StaleView)
             }
             Err(error)
-                if has_resource_lane_prepare
+                if has_resource_lane_claim
                     && async_resource_lane_block_witness(&node.node_id, &error).is_some() =>
             {
                 let witness = async_resource_lane_block_witness(&node.node_id, &error)
@@ -381,8 +363,7 @@ impl<'a> AttemptLifecycle<'a> {
     }
 }
 
-pub(crate) async fn terminalize_observed_failure<S: store::AsyncTypedRunEventStore + ?Sized>(
-    artifact_store: &dyn RuntimeArtifactStager,
+pub(crate) async fn terminalize_observed_failure<S: store::RunEventStore + ?Sized>(
     store: &S,
     context: ObservedFailureContext<'_>,
     error: RuntimeError,
@@ -417,8 +398,8 @@ pub(crate) async fn terminalize_observed_failure<S: store::AsyncTypedRunEventSto
         error: error_info,
         diagnostic_artifact: Some(diagnostic_artifact),
     })?;
-    stage_prepared_artifacts(artifact_store, &failure.artifacts_to_stage).await?;
-    match store.append_prepared_commit_plan(failure.commit).await {
+    let bundle = prepared_commit_bundle(failure.commit, failure.artifact_admissions)?;
+    match store.append_prepared_commit_bundle(bundle).await {
         Ok(_) => Ok(AttemptRunStatus::Advanced),
         Err(error) if async_error_is_stale_expected_next_seq(&error) => {
             Ok(AttemptRunStatus::StaleView)
@@ -552,14 +533,13 @@ fn redacted_attempt_failure_diagnostic_schema_id() -> Result<SchemaId> {
 
 fn resource_lane_block_for_request(
     projections: &store::ProjectionSnapshot,
-    request: &store::TypedCommitRequest,
+    request: &store::CommitRequest,
 ) -> Option<ResourceLaneBlockWitness> {
     request.payloads().iter().find_map(|payload| {
-        let events::KernelEventPayload::SideEffectInvocationPrepared(payload) = payload else {
+        let events::KernelEventPayload::ResourceLaneClaimIntent(payload) = payload else {
             return None;
         };
-        let resource_key = payload.resource_key.as_ref()?;
-        let lane_key = store::ResourceLaneKey::from_evidence(resource_key);
+        let lane_key = store::ResourceLaneKey::from_evidence(&payload.resource_key);
         let holder =
             store::SideEffectLedgerRef::new(request.run_id().clone(), payload.ledger_key.clone());
         projections
@@ -572,12 +552,11 @@ fn resource_lane_block_for_request(
     })
 }
 
-fn request_has_resource_lane_prepare(request: &store::TypedCommitRequest) -> bool {
+fn request_has_resource_lane_claim(request: &store::CommitRequest) -> bool {
     request.payloads().iter().any(|payload| {
         matches!(
             payload,
-            events::KernelEventPayload::SideEffectInvocationPrepared(payload)
-                if payload.resource_key.is_some()
+            events::KernelEventPayload::ResourceLaneClaimIntent(_)
         )
     })
 }
@@ -667,28 +646,23 @@ pub(crate) fn async_error_is_stale_expected_next_seq(
         .is_some_and(store_error_is_stale_expected_next_seq)
 }
 
-async fn stage_prepared_artifacts(
-    artifact_store: &dyn RuntimeArtifactStager,
-    artifacts: &[PreparedStagedArtifact],
-) -> Result<()> {
-    for artifact in artifacts {
-        artifact_store
-            .stage_verified_artifact(artifact.bytes.clone(), artifact.evidence.clone())
-            .await?;
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mfm_ids::{DigestAlgorithm, DigestBytes};
+    use mfm_ids::{DigestAlgorithm, DigestBytes, SchemaId};
     use mfm_spec::v1::ResourceNamespace;
 
     #[test]
     fn resource_lane_block_detection_uses_typed_store_error() {
         let lane_key = store::ResourceLaneKey {
             namespace: ResourceNamespace::new("mfm.test.account_nonce").expect("namespace"),
+            key_schema_id: SchemaId::new(
+                "mfm.test.resource_key",
+                "1",
+                DigestAlgorithm::Sha256JcsV1,
+                DigestBytes::from_array([0x7b; 32]),
+            )
+            .expect("schema id"),
             key: events::ResourceKey::new("wallet-1").expect("resource key"),
         };
         let holder = store::SideEffectLedgerRef::new(

@@ -27,15 +27,16 @@ use mfm_evm_contract_model::{ConfiguredContract, DeployedContract, ValidationRep
 use mfm_ids::{DigestAlgorithm, OperationKind, OperationVersion};
 use mfm_program::{
     build_root_with_registries, CanonicalSeed, Handle, Operation, OperationExpansion, OperationKey,
-    OperationRegistryBuilder, PublicOutputKey, ResourceClaim, RootBound, RootBuilder, ScopeKey,
-    SeedKey, SideEffectSagaPolicy, StateKey, StateRegistryBuilder, TypedProgramConfigMaterial,
+    OperationRegistryBuilder, PublicOutputKey, RootBound, RootBuilder, ScopeKey, SeedKey,
+    SideEffectSagaPolicy, StateKey, StateRegistryBuilder, TypedProgramConfigMaterial,
     TypedProgramLaunchPlan, TypedProgramSeedMaterial,
 };
 use mfm_program_derive::{MfmConfig, OperationOutput, PublicOutputs};
 use mfm_spec::v1::MediaType;
 use mfm_state_evm_contracts::{
-    ConfigureContractInputHandles, ConfigureContractState, ContractLifecyclePublicOutputs,
-    DeployContractState, ValidateContractInputHandles, ValidateContractState,
+    account_nonce_resource_claim, ConfigureContractInputHandles, ConfigureContractState,
+    ContractLifecyclePublicOutputs, DeployContractState, ValidateContractInputHandles,
+    ValidateContractState,
 };
 use serde::{Deserialize, Serialize};
 
@@ -259,7 +260,7 @@ impl Operation for DeployContractOperation {
                 StateKey::new("deploy")?,
                 config,
                 (),
-                ResourceClaim::manual_only(),
+                account_nonce_resource_claim()?,
             )?
             .into_handle();
         Ok(ContractDeployOperationOutputs { deployed })
@@ -299,7 +300,7 @@ impl Operation for ConfigureContractOperation {
                 StateKey::new("configure")?,
                 config,
                 ConfigureContractInputHandles { deployed },
-                ResourceClaim::manual_only(),
+                account_nonce_resource_claim()?,
             )?
             .into_handle();
         Ok(ContractConfigureOperationOutputs { configured })
@@ -376,7 +377,7 @@ impl Operation for ContractLifecycleOperation {
                 StateKey::new("deploy")?,
                 config.deploy,
                 (),
-                ResourceClaim::manual_only(),
+                account_nonce_resource_claim()?,
             )?
             .into_handle();
         let configured = builder
@@ -386,7 +387,7 @@ impl Operation for ContractLifecycleOperation {
                 ConfigureContractInputHandles {
                     deployed: deployed.clone(),
                 },
-                ResourceClaim::manual_only(),
+                account_nonce_resource_claim()?,
             )?
             .into_handle();
         let validation_report = builder.state::<ValidateContractState, _>(

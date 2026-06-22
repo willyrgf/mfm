@@ -298,7 +298,7 @@ pub struct RunnerPreparedInvocationBinding {
     pub claim_generation: u32,
     /// Claim fencing token.
     pub claim_fencing_token: side_effect::ClaimFencingToken,
-    /// Optional exclusive resource lane key evidence.
+    /// Optional exclusive resource lane key evidence echoed from the held lane.
     pub resource_key: Option<events::ResourceKeyEvidence>,
 }
 
@@ -438,6 +438,46 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
         })
     }
 
+    /// Builds a `ResourceLaneClaimIntent` runner payload for pre-invocation lane authority.
+    pub fn resource_lane_claim_intent(
+        &self,
+        side_effect: RunnerSideEffectBinding,
+        resource_key: events::ResourceKeyEvidence,
+        requirement_digest: ContentDigest,
+        resolved_by_capability_impl: events::RunnerFactoryId,
+    ) -> RunnerEventPayload {
+        RunnerEventPayload::ResourceLaneClaimIntent(events::ResourceLaneClaimIntent {
+            spec_hash: self.ctx.spec_hash().clone(),
+            node_id: self.ctx.node().node_id.clone(),
+            attempt_id: self.ctx.attempt_id().clone(),
+            ledger_key: side_effect.ledger_key,
+            ledger_purpose: side_effect.ledger_purpose,
+            invocation_epoch: side_effect.invocation_epoch,
+            resource_key,
+            requirement_digest,
+            resolved_by_capability_impl,
+        })
+    }
+
+    /// Builds a `ResourceLaneReleaseIntent` runner payload for terminal lane release.
+    pub fn resource_lane_release_intent(
+        &self,
+        side_effect: RunnerSideEffectBinding,
+        claim_id: events::ResourceLaneClaimId,
+        release_reason: events::ResourceLaneReleaseReason,
+    ) -> RunnerEventPayload {
+        RunnerEventPayload::ResourceLaneReleaseIntent(events::ResourceLaneReleaseIntent {
+            spec_hash: self.ctx.spec_hash().clone(),
+            node_id: self.ctx.node().node_id.clone(),
+            attempt_id: self.ctx.attempt_id().clone(),
+            ledger_key: side_effect.ledger_key,
+            ledger_purpose: side_effect.ledger_purpose,
+            invocation_epoch: side_effect.invocation_epoch,
+            claim_id,
+            release_reason,
+        })
+    }
+
     /// Builds a `SideEffectInvocationPrepared` runner payload.
     pub fn side_effect_invocation_prepared(
         &self,
@@ -458,10 +498,10 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
                 invocation_epoch: side_effect.invocation_epoch,
                 claim_generation: prepared_binding.claim_generation,
                 claim_fencing_token: prepared_binding.claim_fencing_token,
+                resource_key: prepared_binding.resource_key,
                 prepared_artifact_id: prepared
                     .map(|artifact| artifact.evidence.artifact_id.clone()),
                 prepared_hash: prepared.map(|artifact| artifact.evidence.digest.clone()),
-                resource_key: prepared_binding.resource_key,
             },
         ))
     }

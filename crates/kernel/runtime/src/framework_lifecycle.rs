@@ -10,7 +10,7 @@ use crate::attempt::{
     ObservedFailureContext, ObservedFailureRetryabilityPolicy,
 };
 use crate::binding::BoundRuntimeContext;
-use crate::commit::{CommitPlanner, PreparedStagedArtifact, RunnerOutputCommitInput};
+use crate::commit::{prepared_commit_bundle, CommitPlanner, RunnerOutputCommitInput};
 use crate::error::async_store_error;
 use crate::history::RuntimeRunView;
 use crate::invocation::{ErasedRunCtx, InvocationBuilder, InvocationBuilderInput};
@@ -46,7 +46,7 @@ impl<'a> FrameworkAttemptLifecycle<'a> {
     }
 
     /// Runs one framework attempt against an async typed store.
-    pub(crate) async fn run<S: store::AsyncTypedRunEventStore + ?Sized>(
+    pub(crate) async fn run<S: store::RunEventStore + ?Sized>(
         &self,
         store: &S,
         runtime_spec: &CertifiedRuntimeSpec,
@@ -76,7 +76,8 @@ impl<'a> FrameworkAttemptLifecycle<'a> {
                     attempt_no,
                     view,
                 )?;
-                match store.append_prepared_commit_plan(start_commit.into()).await {
+                let bundle = store::PreparedCommitBundle::without_artifacts(start_commit.into())?;
+                match store.append_prepared_commit_bundle(bundle).await {
                     Ok(_) => {}
                     Err(error) if async_error_is_stale_expected_next_seq(&error) => {
                         return Ok(AttemptRunStatus::StaleView);
@@ -115,20 +116,12 @@ impl<'a> FrameworkAttemptLifecycle<'a> {
         {
             Ok(output) => output,
             Err(error) => {
-                return terminalize_observed_failure(
-                    self.artifact_store,
-                    store,
-                    failure_context,
-                    error,
-                )
-                .await;
+                return terminalize_observed_failure(store, failure_context, error).await;
             }
         };
-        stage_prepared_artifacts(self.artifact_store, &terminal_output.artifacts_to_stage).await?;
-        match store
-            .append_prepared_commit_plan(terminal_output.commit)
-            .await
-        {
+        let bundle =
+            prepared_commit_bundle(terminal_output.commit, terminal_output.artifact_admissions)?;
+        match store.append_prepared_commit_bundle(bundle).await {
             Ok(_) => Ok(AttemptRunStatus::Advanced),
             Err(error) if async_error_is_stale_expected_next_seq(&error) => {
                 Ok(AttemptRunStatus::StaleView)
@@ -356,16 +349,4 @@ fn is_resolve_saga_terminal(node: &spec::NodeSpec) -> bool {
         &node.framework,
         Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_))
     )
-}
-
-async fn stage_prepared_artifacts(
-    artifact_store: &dyn RuntimeArtifactStore,
-    artifacts: &[PreparedStagedArtifact],
-) -> Result<()> {
-    for artifact in artifacts {
-        artifact_store
-            .stage_verified_artifact(artifact.bytes.clone(), artifact.evidence.clone())
-            .await?;
-    }
-    Ok(())
 }

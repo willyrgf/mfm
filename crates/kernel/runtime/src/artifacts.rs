@@ -1,6 +1,3 @@
-use std::future::Future;
-use std::pin::Pin;
-
 use mfm_canonical::sha256_digest_bytes;
 use mfm_events::v1 as events;
 use mfm_ids::{ArtifactId, AttemptId, ContentDigest, DigestAlgorithm, NodeId, RunId};
@@ -8,33 +5,10 @@ use mfm_store::v1 as store;
 
 use crate::{ErasedRunCtx, Result, RuntimeError};
 
-/// Boxed future returned by runtime-owned artifact staging.
-pub type RuntimeArtifactStageFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
-
-/// Runtime-owned artifact staging capability used before admitting run authority.
-///
-/// This capability is held by the scheduler/middleware boundary, not by domain runners. Failed
-/// store commits may leave bytes staged here, but run-store artifact evidence is admitted only by
-/// the prepared typed commit that references the artifact.
-pub trait RuntimeArtifactStager: Send + Sync {
-    /// Stages verified artifact bytes for middleware-owned promotion before the run commit.
-    fn stage_verified_artifact<'a>(
-        &'a self,
-        bytes: Vec<u8>,
-        evidence: store::ArtifactEvidenceRef,
-    ) -> RuntimeArtifactStageFuture<'a>;
-}
-
 /// Runtime artifact capability used by the scheduler.
-pub trait RuntimeArtifactStore:
-    RuntimeArtifactStager + store::RetainedArtifactReadProvider
-{
-}
+pub trait RuntimeArtifactStore: store::RetainedArtifactReadProvider {}
 
-impl<T> RuntimeArtifactStore for T where
-    T: RuntimeArtifactStager + store::RetainedArtifactReadProvider
-{
-}
+impl<T> RuntimeArtifactStore for T where T: store::RetainedArtifactReadProvider {}
 
 /// Runtime-owned artifact binding kind for one staged attempt artifact.
 #[derive(Debug, Clone, PartialEq, Eq)]

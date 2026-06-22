@@ -178,7 +178,7 @@ pub(crate) fn prepare_manual_resolution_commit(
     };
     verify_artifact_bytes(verified.proof_bytes(), &authorization_ref)?;
 
-    let request = store::TypedCommitRequest::from_payloads(
+    let request = store::CommitRequest::from_payloads(
         claim.run_id.clone(),
         expected_next_seq,
         store::CommitKey::new(format!(

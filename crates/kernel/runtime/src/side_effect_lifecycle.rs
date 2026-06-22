@@ -114,6 +114,8 @@ pub(crate) enum SideEffectOpenAttemptDisposition {
 /// Side-effect phase classes that can be resumed by the side-effect lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SideEffectRecoveryPhase {
+    /// A side-effect claim exists and must continue under its original attempt authority.
+    Claimed,
     /// Invocation preparation recorded the resource boundary.
     Prepared,
     /// Invocation start crossed the external uncertainty boundary.
@@ -198,8 +200,15 @@ impl SideEffectLifecycle {
             .ledger_state()
             .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
         match state.phase() {
-            store::SideEffectLedgerPhase::IntentPersisted { .. }
-            | store::SideEffectLedgerPhase::Claimed { .. } => {
+            store::SideEffectLedgerPhase::IntentPersisted { .. } => {
+                Ok(SideEffectOpenAttemptDisposition::InterruptBeforeInvocationPrepared)
+            }
+            store::SideEffectLedgerPhase::Claimed { .. } if projection.resource_key.is_some() => {
+                Ok(SideEffectOpenAttemptDisposition::DelegateRecovery {
+                    phase: SideEffectRecoveryPhase::Claimed,
+                })
+            }
+            store::SideEffectLedgerPhase::Claimed { .. } => {
                 Ok(SideEffectOpenAttemptDisposition::InterruptBeforeInvocationPrepared)
             }
             store::SideEffectLedgerPhase::Prepared { .. } => {

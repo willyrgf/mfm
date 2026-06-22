@@ -33,16 +33,18 @@ use mfm_evm_contract_model::{
     EventAssertionConfig, LifecycleArtifactEvidenceRef, ReadAssertionConfig, ValidationEventResult,
     ValidationReadResult, ValidationReport,
 };
-use mfm_ids::{DigestAlgorithm, StateKind, StateVersion};
+use mfm_ids::{DigestAlgorithm, SchemaId, StateKind, StateVersion};
 use mfm_program::{
-    AdapterBindingSpec, IdempotencyKey, PureState, ReadState, SideEffectState, StateError,
-    StateResult, StateSpec,
+    AdapterBindingSpec, IdempotencyKey, PureState, ReadState, ResourceClaim, ResourceNamespace,
+    SideEffectState, StateError, StateResult, StateSpec,
 };
 use mfm_program_derive::{MfmConfig, MfmValue, OperationOutput, PublicOutputs, StateInput};
 use mfm_signing::SigningCapability;
 use serde::{Deserialize, Serialize};
 
 const NAMESPACE: &str = "mfm.evm.contract";
+const ACCOUNT_NONCE_RESOURCE_NAMESPACE: &str = "mfm.evm.contract.account_nonce";
+const ACCOUNT_NONCE_RESOURCE_KEY_SCHEMA: &str = "mfm.evm.contract.resource_key.account_nonce";
 
 type ContractMutationCaps = (
     EvmChainIdentityCapability,
@@ -82,6 +84,31 @@ fn state_kind(name: &'static str) -> mfm_program::Result<StateKind> {
 fn state_version(name: &'static str) -> mfm_program::Result<StateVersion> {
     StateVersion::new(format!("mfm.evm.contract.state.{name}.v1"))
         .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
+}
+
+/// Returns the exclusive resource namespace for signer account nonce mutation lanes.
+pub fn account_nonce_resource_namespace() -> mfm_program::Result<ResourceNamespace> {
+    ResourceNamespace::new(ACCOUNT_NONCE_RESOURCE_NAMESPACE)
+        .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
+}
+
+/// Returns the schema id for signer account nonce resource-key evidence.
+pub fn account_nonce_resource_key_schema_id() -> mfm_program::Result<SchemaId> {
+    SchemaId::new(
+        ACCOUNT_NONCE_RESOURCE_KEY_SCHEMA,
+        "1",
+        DigestAlgorithm::Sha256JcsV1,
+        sha256_digest_bytes(ACCOUNT_NONCE_RESOURCE_KEY_SCHEMA.as_bytes()),
+    )
+    .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
+}
+
+/// Returns the exclusive side-effect claim used by deploy/configure mutations.
+pub fn account_nonce_resource_claim() -> mfm_program::Result<ResourceClaim> {
+    Ok(ResourceClaim::exclusive(
+        account_nonce_resource_namespace()?,
+        account_nonce_resource_key_schema_id()?,
+    ))
 }
 
 fn adapter_required_error(state_name: &'static str) -> StateError {
