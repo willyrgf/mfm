@@ -3,7 +3,7 @@ use mfm_events::v1 as events;
 use mfm_ids::{ArtifactId, AttemptId, ContentDigest, DigestAlgorithm, NodeId, RunId};
 use mfm_store::v1 as store;
 
-use crate::{ErasedRunCtx, Result, RuntimeError};
+use crate::{ErasedRunCtx, PreInvocationRunCtx, Result, RuntimeError};
 
 /// Runtime artifact capability used by the scheduler.
 pub trait RuntimeArtifactStore: store::RetainedArtifactReadProvider {}
@@ -105,6 +105,28 @@ impl StagedArtifactHandle {
         })
     }
 
+    fn for_pre_invocation(
+        ctx: &PreInvocationRunCtx<'_>,
+        evidence: store::ArtifactEvidenceRef,
+        binding: StagedArtifactBindingKind,
+    ) -> Result<Self> {
+        if staged_artifact_binding_role(&binding) != evidence.artifact_role {
+            return Err(RuntimeError::InvalidRunnerOutput(format!(
+                "node {} staged artifact role {} with mismatched binding",
+                ctx.node().node_id,
+                artifact_role_name(evidence.artifact_role)
+            )));
+        }
+        validate_staged_artifact_producer_for_node(&ctx.node().node_id, &evidence)?;
+        Ok(Self {
+            run_id: ctx.run_id().clone(),
+            node_id: ctx.node().node_id.clone(),
+            attempt_id: ctx.attempt_id().clone(),
+            binding,
+            evidence,
+        })
+    }
+
     /// Returns the run id this handle is sealed to.
     pub fn run_id(&self) -> &RunId {
         &self.run_id
@@ -131,29 +153,28 @@ impl StagedArtifactHandle {
     }
 }
 
-fn invalid_staged_artifact_producer(
-    ctx: &ErasedRunCtx<'_>,
-    evidence: &store::ArtifactEvidenceRef,
-) -> RuntimeError {
-    RuntimeError::InvalidRunnerOutput(format!(
-        "node {} staged artifact {} with producer evidence outside its attempt",
-        ctx.node().node_id,
-        evidence.artifact_id
-    ))
-}
-
 fn validate_staged_artifact_producer(
     ctx: &ErasedRunCtx<'_>,
     evidence: &store::ArtifactEvidenceRef,
 ) -> Result<()> {
+    validate_staged_artifact_producer_for_node(&ctx.node().node_id, evidence)
+}
+
+fn validate_staged_artifact_producer_for_node(
+    node_id: &NodeId,
+    evidence: &store::ArtifactEvidenceRef,
+) -> Result<()> {
     match evidence.artifact_role.contract().producer {
         events::ArtifactProducerScope::NodeRequired => {
-            if evidence.producer_node_id.as_ref() == Some(&ctx.node().node_id)
+            if evidence.producer_node_id.as_ref() == Some(node_id)
                 && evidence.producer_seed_id.is_none()
             {
                 Ok(())
             } else {
-                Err(invalid_staged_artifact_producer(ctx, evidence))
+                Err(RuntimeError::InvalidRunnerOutput(format!(
+                    "node {node_id} staged artifact {} with producer evidence outside its attempt",
+                    evidence.artifact_id
+                )))
             }
         }
         events::ArtifactProducerScope::DiagnosticOptionalNodeNoSeed => {
@@ -161,9 +182,12 @@ fn validate_staged_artifact_producer(
                 || evidence
                     .producer_node_id
                     .as_ref()
-                    .is_some_and(|node_id| node_id != &ctx.node().node_id)
+                    .is_some_and(|producer_node_id| producer_node_id != node_id)
             {
-                Err(invalid_staged_artifact_producer(ctx, evidence))
+                Err(RuntimeError::InvalidRunnerOutput(format!(
+                    "node {node_id} staged artifact {} with producer evidence outside its attempt",
+                    evidence.artifact_id
+                )))
             } else {
                 Ok(())
             }
@@ -174,11 +198,17 @@ fn validate_staged_artifact_producer(
             if evidence.producer_node_id.is_none() && evidence.producer_seed_id.is_none() {
                 Ok(())
             } else {
-                Err(invalid_staged_artifact_producer(ctx, evidence))
+                Err(RuntimeError::InvalidRunnerOutput(format!(
+                    "node {node_id} staged artifact {} with producer evidence outside its attempt",
+                    evidence.artifact_id
+                )))
             }
         }
         events::ArtifactProducerScope::SeedRequired => {
-            Err(invalid_staged_artifact_producer(ctx, evidence))
+            Err(RuntimeError::InvalidRunnerOutput(format!(
+                "node {node_id} staged artifact {} with producer evidence outside its attempt",
+                evidence.artifact_id
+            )))
         }
     }
 }
@@ -232,6 +262,33 @@ impl StagedArtifact {
                 phase,
             },
         )
+    }
+
+    /// Creates an inline staged side-effect artifact from pre-invocation lane preflight.
+    pub fn inline_pre_invocation_side_effect_artifact(
+        ctx: &PreInvocationRunCtx<'_>,
+        bytes: Vec<u8>,
+        evidence: store::ArtifactEvidenceRef,
+        ledger_key: events::SideEffectLedgerKey,
+        invocation_epoch: u32,
+    ) -> Result<Self> {
+        let phase = staged_side_effect_artifact_phase(evidence.artifact_role).ok_or_else(|| {
+            RuntimeError::InvalidRunnerOutput(format!(
+                "node {} staged artifact role {} outside side-effect artifact authority",
+                ctx.node().node_id,
+                artifact_role_name(evidence.artifact_role)
+            ))
+        })?;
+        let binding = StagedArtifactBindingKind::SideEffectEvidence {
+            ledger_key,
+            invocation_epoch,
+            phase,
+        };
+        verify_artifact_bytes(&bytes, &evidence)?;
+        Ok(Self {
+            handle: StagedArtifactHandle::for_pre_invocation(ctx, evidence, binding)?,
+            bytes: Some(bytes),
+        })
     }
 
     fn inline_attempt_artifact_with_binding(

@@ -65,11 +65,12 @@ use mfm_replay::v1 as replay;
 use mfm_runtime::{
     CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture,
     ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCell, MaterializedCellTerminal,
-    MaterializedInputNode, RunnerArtifactBuilder, RunnerCapabilityBinding, RunnerOutputBuilder,
-    RunnerPayloadBuilder, RunnerRegistrationBuilder, SideEffectDriver, SideEffectDriverCallbacks,
-    SideEffectDriverFuture, SideEffectIntentPlan, SideEffectObservedEvidence,
-    SideEffectPreparedInvocationPlan, SideEffectProtocolAction, SideEffectReplayEvidence,
-    SideEffectSubmissionDecision, SideEffectSubmissionDecisionFuture,
+    MaterializedInputNode, PreInvocationRunCtx, PreInvocationRunnerFuture, RunnerArtifactBuilder,
+    RunnerCapabilityBinding, RunnerOutputBuilder, RunnerPayloadBuilder, RunnerRegistrationBuilder,
+    SideEffectDriver, SideEffectDriverCallbacks, SideEffectDriverFuture, SideEffectIntentPlan,
+    SideEffectLanePreclaimBuilder, SideEffectObservedEvidence, SideEffectPreparedInvocationPlan,
+    SideEffectProtocolAction, SideEffectReplayEvidence, SideEffectSubmissionDecision,
+    SideEffectSubmissionDecisionFuture,
 };
 use mfm_signing::{PublicKeyBytes, SignerRef, SigningProvider};
 use mfm_spec::v1 as spec;
@@ -1529,6 +1530,15 @@ struct ContractMutationRunner {
 }
 
 impl ErasedNodeRunner for ContractMutationRunner {
+    fn preclaim_resource_lane<'a>(
+        &'a self,
+        ctx: &'a PreInvocationRunCtx<'a>,
+    ) -> PreInvocationRunnerFuture<'a> {
+        Box::pin(
+            async move { preclaim_mutation_lane(ctx, self.factory.as_ref(), self.phase).await },
+        )
+    }
+
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move { run_mutation(ctx, self.factory.as_ref(), self.phase).await })
     }
@@ -1542,6 +1552,47 @@ async fn run_mutation(
     match phase {
         ContractMutationRunnerPhase::Deploy => run_deploy_mutation(ctx, factory).await,
         ContractMutationRunnerPhase::Configure => run_configure_mutation(ctx, factory).await,
+    }
+}
+
+async fn preclaim_mutation_lane(
+    ctx: &PreInvocationRunCtx<'_>,
+    factory: &dyn EvmContractRuntimeFactory,
+    phase: ContractMutationRunnerPhase,
+) -> mfm_runtime::Result<ErasedRunnerOutput> {
+    match phase {
+        ContractMutationRunnerPhase::Deploy => {
+            let plan = deploy_mutation_plan_for_node(ctx.node(), factory.artifacts()).await?;
+            let resource_key = mutation_resource_key(
+                ctx.node(),
+                plan.config.as_ref().network().expected_chain_id(),
+                plan.config.as_ref().signer().expected_signer_address_str(),
+            )?;
+            SideEffectLanePreclaimBuilder::new(ctx).claim_resource_lane(
+                &plan.intent,
+                &plan.idempotency,
+                idempotency_key_ref(&plan.idempotency)?,
+                evm_transaction_submit_binding()?,
+                resource_key,
+            )
+        }
+        ContractMutationRunnerPhase::Configure => {
+            let plan =
+                configure_mutation_plan_for_inputs(ctx.node(), ctx.inputs(), factory.artifacts())
+                    .await?;
+            let resource_key = mutation_resource_key(
+                ctx.node(),
+                plan.config.as_ref().network().expected_chain_id(),
+                plan.config.as_ref().signer().expected_signer_address_str(),
+            )?;
+            SideEffectLanePreclaimBuilder::new(ctx).claim_resource_lane(
+                &plan.intent,
+                &plan.idempotency,
+                idempotency_key_ref(&plan.idempotency)?,
+                evm_transaction_submit_binding()?,
+                resource_key,
+            )
+        }
     }
 }
 
@@ -1560,12 +1611,12 @@ struct ConfigureMutationPlan {
     idempotency: ContractTransactionIdempotency,
 }
 
-fn account_nonce_resource_key(
-    ctx: &ErasedRunCtx<'_>,
+fn account_nonce_resource_key_for_node(
+    node: &spec::NodeSpec,
     expected_chain_id: u64,
     expected_signer_address: &str,
 ) -> Result<Option<events::ResourceKeyEvidence>> {
-    let Some(side_effect) = &ctx.node().side_effect else {
+    let Some(side_effect) = &node.side_effect else {
         return Ok(None);
     };
     let spec::ResourceClaimSpec::Exclusive {
@@ -1599,6 +1650,21 @@ fn account_nonce_resource_key(
         key_schema_id: key_schema.clone(),
         key,
     }))
+}
+
+fn mutation_resource_key(
+    node: &spec::NodeSpec,
+    expected_chain_id: u64,
+    expected_signer_address: &str,
+) -> mfm_runtime::Result<events::ResourceKeyEvidence> {
+    account_nonce_resource_key_for_node(node, expected_chain_id, expected_signer_address)
+        .map_err(mfm_runtime::RuntimeError::from)?
+        .ok_or_else(|| {
+            mfm_runtime::RuntimeError::InvalidRunnerOutput(format!(
+                "EVM mutation node {} requires an exclusive account nonce resource claim",
+                node.node_id
+            ))
+        })
 }
 
 async fn run_deploy_mutation(
@@ -1658,25 +1724,6 @@ impl SideEffectDriverCallbacks for DeploySideEffectCallbacks<'_> {
             Ok(SideEffectPreparedInvocationPlan::with_prepared_invocation(
                 prepared.evidence().clone(),
             ))
-        })
-    }
-
-    fn resolve_resource_lane<'a, 'ctx>(
-        &'a self,
-        ctx: &'a ErasedRunCtx<'ctx>,
-        _plan: &'a SideEffectIntentPlan<Self::Intent, Self::Idempotency>,
-    ) -> SideEffectDriverFuture<'a, Option<events::ResourceKeyEvidence>> {
-        Box::pin(async move {
-            account_nonce_resource_key(
-                ctx,
-                self.plan.config.as_ref().network().expected_chain_id(),
-                self.plan
-                    .config
-                    .as_ref()
-                    .signer()
-                    .expected_signer_address_str(),
-            )
-            .map_err(mfm_runtime::RuntimeError::from)
         })
     }
 
@@ -1882,25 +1929,6 @@ impl SideEffectDriverCallbacks for ConfigureSideEffectCallbacks<'_> {
         })
     }
 
-    fn resolve_resource_lane<'a, 'ctx>(
-        &'a self,
-        ctx: &'a ErasedRunCtx<'ctx>,
-        _plan: &'a SideEffectIntentPlan<Self::Intent, Self::Idempotency>,
-    ) -> SideEffectDriverFuture<'a, Option<events::ResourceKeyEvidence>> {
-        Box::pin(async move {
-            account_nonce_resource_key(
-                ctx,
-                self.plan.config.as_ref().network().expected_chain_id(),
-                self.plan
-                    .config
-                    .as_ref()
-                    .signer()
-                    .expected_signer_address_str(),
-            )
-            .map_err(mfm_runtime::RuntimeError::from)
-        })
-    }
-
     fn reconstruct_prepared_invocation<'a, 'ctx>(
         &'a self,
         ctx: &'a ErasedRunCtx<'ctx>,
@@ -2039,7 +2067,14 @@ async fn deploy_mutation_plan(
     ctx: &ErasedRunCtx<'_>,
     artifacts: &dyn ArtifactReadProvider,
 ) -> mfm_runtime::Result<DeployMutationPlan> {
-    let config = load_config::<DeployPhaseConfig>(ctx, artifacts).await?;
+    deploy_mutation_plan_for_node(ctx.node(), artifacts).await
+}
+
+async fn deploy_mutation_plan_for_node(
+    node: &spec::NodeSpec,
+    artifacts: &dyn ArtifactReadProvider,
+) -> mfm_runtime::Result<DeployMutationPlan> {
+    let config = load_config_for_node::<DeployPhaseConfig>(node, artifacts).await?;
     let state = DeployContractState::new(config.clone()).map_err(runtime_plan_error)?;
     let intent = state.prepare_intent(&()).map_err(runtime_state_error)?;
     let idempotency = state
@@ -2057,9 +2092,17 @@ async fn configure_mutation_plan(
     ctx: &ErasedRunCtx<'_>,
     artifacts: &dyn ArtifactReadProvider,
 ) -> mfm_runtime::Result<ConfigureMutationPlan> {
-    let config = load_config::<ConfigurePhaseConfig>(ctx, artifacts).await?;
+    configure_mutation_plan_for_inputs(ctx.node(), ctx.inputs(), artifacts).await
+}
+
+async fn configure_mutation_plan_for_inputs(
+    node: &spec::NodeSpec,
+    inputs: &mfm_runtime::MaterializedInputs,
+    artifacts: &dyn ArtifactReadProvider,
+) -> mfm_runtime::Result<ConfigureMutationPlan> {
+    let config = load_config_for_node::<ConfigurePhaseConfig>(node, artifacts).await?;
     let deployed =
-        load_struct_input_value::<DeployedContract>(ctx.inputs(), "deployed", artifacts).await?;
+        load_struct_input_value::<DeployedContract>(inputs, "deployed", artifacts).await?;
     let input = ConfigureContractInput { deployed };
     let state = ConfigureContractState::new(config.clone()).map_err(runtime_plan_error)?;
     let intent = state.prepare_intent(&input).map_err(runtime_state_error)?;
@@ -2221,7 +2264,17 @@ async fn load_config<T>(
 where
     T: MfmConfig + DeserializeOwned,
 {
-    let request = ArtifactReadRequest::from_certified_config_ref(&ctx.node().config_ref);
+    load_config_for_node(ctx.node(), artifacts).await
+}
+
+async fn load_config_for_node<T>(
+    node: &spec::NodeSpec,
+    artifacts: &dyn ArtifactReadProvider,
+) -> mfm_runtime::Result<ValidatedConfig<T>>
+where
+    T: MfmConfig + DeserializeOwned,
+{
+    let request = ArtifactReadRequest::from_certified_config_ref(&node.config_ref);
     let verified = artifacts
         .read_artifact(&request)
         .await

@@ -194,6 +194,123 @@ impl<'a> InvocationBuilder<'a> {
             run_stream: &self.view.stream,
         })
     }
+
+    /// Builds pure pre-invocation context for resource-lane preflight only.
+    pub(crate) fn build_pre_invocation(self) -> Result<PreInvocationRunCtx<'a>> {
+        let config_artifact = committed_config_artifact(self.node, self.view)?;
+        let inputs = materialize_inputs(self.runtime_spec, self.node, self.view)?;
+        let caps = CertifiedRuntimeCapabilities::new(
+            self.node.node_id.clone(),
+            self.node.capability_bindings.clone(),
+        );
+        let recorded_facts = recorded_facts_for_attempt(
+            &self.view.projections,
+            &self.node.node_id,
+            self.attempt_id,
+        )?;
+        Ok(PreInvocationRunCtx {
+            runtime_spec: self.runtime_spec,
+            run_id: self.run_id,
+            spec_hash: self.runtime_spec.spec_hash(),
+            node: self.node,
+            descriptor: self.descriptor,
+            output_cell: self.output_cell,
+            attempt_id: self.attempt_id,
+            attempt_no: self.attempt_no,
+            config_artifact,
+            inputs,
+            caps,
+            recorded_facts,
+            projections: &self.view.projections,
+        })
+    }
+}
+
+/// Pure pre-invocation context supplied only to resource-lane preflight hooks.
+///
+/// This context is built before [`PreparedRunnerInvocation`] and before runner execution. It
+/// exposes certified config/input/fact evidence needed to resolve lane authority, but it is not a
+/// live invocation boundary and must not be used for transport, signing, clock, or other ambient IO.
+pub struct PreInvocationRunCtx<'a> {
+    pub(crate) runtime_spec: &'a CertifiedRuntimeSpec,
+    pub(crate) run_id: &'a RunId,
+    pub(crate) spec_hash: &'a SpecHash,
+    pub(crate) node: &'a spec::NodeSpec,
+    pub(crate) descriptor: &'a spec::StateDescriptorIdentity,
+    pub(crate) output_cell: &'a spec::CellSpec,
+    pub(crate) attempt_id: &'a AttemptId,
+    pub(crate) attempt_no: u32,
+    pub(crate) config_artifact: store::ArtifactEvidenceRef,
+    pub(crate) inputs: MaterializedInputs,
+    pub(crate) caps: CertifiedRuntimeCapabilities,
+    pub(crate) recorded_facts: RecordedFacts,
+    pub(crate) projections: &'a store::ProjectionSnapshot,
+}
+
+impl<'a> PreInvocationRunCtx<'a> {
+    /// Run id being preflighted.
+    pub fn run_id(&self) -> &'a RunId {
+        self.run_id
+    }
+
+    /// Certified typed spec hash.
+    pub fn spec_hash(&self) -> &'a SpecHash {
+        self.spec_hash
+    }
+
+    /// Certified node spec.
+    pub fn node(&self) -> &'a spec::NodeSpec {
+        self.node
+    }
+
+    /// Certified state descriptor identity for the node.
+    pub fn descriptor(&self) -> &'a spec::StateDescriptorIdentity {
+        self.descriptor
+    }
+
+    /// Certified output cell spec for the node.
+    pub fn output_cell(&self) -> &'a spec::CellSpec {
+        self.output_cell
+    }
+
+    /// Store-owned attempt id minted by the scheduler.
+    pub fn attempt_id(&self) -> &'a AttemptId {
+        self.attempt_id
+    }
+
+    /// Attempt number for this node.
+    pub const fn attempt_no(&self) -> u32 {
+        self.attempt_no
+    }
+
+    /// Store-committed typed config artifact evidence matching the certified config ref.
+    pub fn config_artifact(&self) -> &store::ArtifactEvidenceRef {
+        &self.config_artifact
+    }
+
+    /// Materialized input evidence derived only from certified cells and validated stream state.
+    pub fn inputs(&self) -> &MaterializedInputs {
+        &self.inputs
+    }
+
+    /// Runtime capabilities minted only from the certified node capability set.
+    pub fn caps(&self) -> &CertifiedRuntimeCapabilities {
+        &self.caps
+    }
+
+    /// Facts already committed for this attempt and therefore reusable after recovery.
+    pub fn recorded_facts(&self) -> &RecordedFacts {
+        &self.recorded_facts
+    }
+
+    /// Store-owned projection snapshot observed before invocation construction.
+    pub fn projections(&self) -> &store::ProjectionSnapshot {
+        self.projections
+    }
+
+    pub(crate) fn runtime_spec(&self) -> &'a CertifiedRuntimeSpec {
+        self.runtime_spec
+    }
 }
 
 /// Context supplied to an erased node runner.

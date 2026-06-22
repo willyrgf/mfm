@@ -61,7 +61,7 @@ impl ResourceLaneBlockWitness {
         if !node_resource_claims_lane_namespace(node, &self.lane_key) {
             return false;
         }
-        projected_started_attempt_lane_key(projections, node)
+        projected_started_attempt_active_lane_key(projections, node)
             .map(|lane_key| lane_key == self.lane_key)
             .unwrap_or(true)
     }
@@ -241,11 +241,83 @@ impl<'a> AttemptLifecycle<'a> {
             Some(attempt_id) => (attempt_id, selected_attempt.phase.attempt_no),
         };
 
-        let latest_stream = store
+        let mut latest_stream = store
             .load_run_stream(run_id)
             .await
             .map_err(async_store_error)?;
-        let latest_view = RuntimeRunView::from_stream(runtime_spec, run_id, &latest_stream)?;
+        let mut latest_view = RuntimeRunView::from_stream(runtime_spec, run_id, &latest_stream)?;
+        if node_requires_pre_invocation_lane_claim(selected_attempt.phase.node)
+            && projected_started_attempt_active_lane_key(
+                &latest_view.projections,
+                selected_attempt.phase.node,
+            )
+            .is_none()
+        {
+            {
+                let pre_invocation = InvocationBuilder::new(InvocationBuilderInput {
+                    runtime_spec,
+                    run_id,
+                    node: selected_attempt.phase.node,
+                    descriptor,
+                    output_cell,
+                    attempt_id: &attempt_id,
+                    attempt_no,
+                    view: &latest_view,
+                })
+                .build_pre_invocation()
+                .map_err(|error| {
+                    RuntimeError::InvalidRunStream(format!(
+                        "failed to build resource-lane preflight context for node {}: {error}",
+                        selected_attempt.phase.node.node_id
+                    ))
+                })?;
+                let output = binding
+                    .runner
+                    .preclaim_resource_lane(&pre_invocation)
+                    .await?;
+                let preclaim = CommitPlanner::prepare_runner_output(RunnerOutputCommitInput {
+                    runtime_spec,
+                    run_id,
+                    node: selected_attempt.phase.node,
+                    attempt_id: &attempt_id,
+                    caps: pre_invocation.caps(),
+                    recorded_facts: pre_invocation.recorded_facts(),
+                    view: &latest_view,
+                    saga_terminal_proof: None,
+                    output,
+                })?;
+                if !request_has_resource_lane_claim(preclaim.commit.request()) {
+                    return Err(RuntimeError::InvalidRunnerOutput(format!(
+                        "exclusive side-effect node {} did not emit pre-invocation resource-lane claim",
+                        selected_attempt.phase.node.node_id
+                    )));
+                }
+                let bundle = prepared_commit_bundle(preclaim.commit, preclaim.artifact_admissions)?;
+                match store.append_prepared_commit_bundle(bundle).await {
+                    Ok(store::CommitOutcome::Appended(_) | store::CommitOutcome::Idempotent(_)) => {
+                        advanced = true;
+                    }
+                    Ok(store::CommitOutcome::ResourceLaneClaimBlocked(block)) => {
+                        return Ok(AttemptRunStatus::BlockedOnResourceLane {
+                            witness: resource_lane_block_witness_from_outcome(
+                                &selected_attempt.phase.node.node_id,
+                                block,
+                            ),
+                            advanced,
+                        });
+                    }
+                    Err(error) if async_error_is_stale_expected_next_seq(&error) => {
+                        return Ok(AttemptRunStatus::StaleView);
+                    }
+                    Err(error) => return Err(async_store_error(error)),
+                }
+            }
+            latest_stream = store
+                .load_run_stream(run_id)
+                .await
+                .map_err(async_store_error)?;
+            latest_view = RuntimeRunView::from_stream(runtime_spec, run_id, &latest_stream)?;
+        }
         let started_attempt = Attempt {
             phase: Started {
                 node: selected_attempt.phase.node,
@@ -604,25 +676,29 @@ fn node_resource_claims_lane_namespace(
     }
 }
 
-fn projected_started_attempt_lane_key(
+fn node_requires_pre_invocation_lane_claim(node: &spec::NodeSpec) -> bool {
+    matches!(
+        node.side_effect
+            .as_ref()
+            .map(|side_effect| &side_effect.resource_claim),
+        Some(spec::ResourceClaimSpec::Exclusive { .. })
+    )
+}
+
+fn projected_started_attempt_active_lane_key(
     projections: &store::ProjectionSnapshot,
     node: &spec::NodeSpec,
 ) -> Option<store::ResourceLaneKey> {
-    for ((attempt_node_id, attempt_id), attempt) in projections.attempts() {
-        if attempt_node_id != &node.node_id
-            || !matches!(attempt.status, store::AttemptStatus::Started { .. })
-        {
+    for (lane_key, lane) in projections.resource_lanes() {
+        if lane.node_id != node.node_id {
             continue;
         }
-        let Some(resource_key) = projections.side_effects().find_map(|(_, projection)| {
-            (projection.intent.node_id == node.node_id
-                && projection.intent.attempt_id == *attempt_id)
-                .then_some(projection.resource_key.as_ref())
-                .flatten()
-        }) else {
+        let Some(attempt) = projections.attempt(&node.node_id, &lane.attempt_id) else {
             continue;
         };
-        return Some(store::ResourceLaneKey::from_evidence(resource_key));
+        if matches!(attempt.status, store::AttemptStatus::Started { .. }) {
+            return Some(lane_key.clone());
+        }
     }
     None
 }

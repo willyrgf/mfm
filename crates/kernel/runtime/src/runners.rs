@@ -13,10 +13,16 @@ use crate::framework::{
     framework_complete_run_binding, framework_public_output_binding,
     framework_resolve_saga_terminal_binding, framework_retention_manifest_binding,
 };
-use crate::{ErasedRunCtx, Result, RuntimeError, StagedArtifact, StagedRetentionRefs};
+use crate::{
+    ErasedRunCtx, PreInvocationRunCtx, Result, RuntimeError, StagedArtifact, StagedRetentionRefs,
+};
 
 /// Boxed future returned by an erased typed runner.
 pub type ErasedRunnerFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<ErasedRunnerOutput>> + Send + 'a>>;
+
+/// Boxed future returned by a pre-invocation resource-lane hook.
+pub type PreInvocationRunnerFuture<'a> =
     Pin<Box<dyn Future<Output = Result<ErasedRunnerOutput>> + Send + 'a>>;
 
 /// Object-safe erased runner boundary used after typed spec certification.
@@ -24,6 +30,14 @@ pub type ErasedRunnerFuture<'a> =
 /// Runner selection is keyed by the certified node descriptor id. The runner receives only
 /// store-verified input cell evidence and certified capability descriptors.
 pub trait ErasedNodeRunner: Send + Sync {
+    /// Emits pre-invocation resource-lane claim evidence, if this runner owns such a claim.
+    fn preclaim_resource_lane<'a>(
+        &'a self,
+        _ctx: &'a PreInvocationRunCtx<'a>,
+    ) -> PreInvocationRunnerFuture<'a> {
+        Box::pin(async { Ok(ErasedRunnerOutput::new(Vec::new())) })
+    }
+
     /// Executes one certified node attempt.
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a>;
 }

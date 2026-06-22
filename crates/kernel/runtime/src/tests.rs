@@ -1473,6 +1473,33 @@ impl TestSideEffectDriverCallbacks {
         self.submission_decision = decision;
         self
     }
+
+    fn intent_plan_for(
+        &self,
+        node_id: String,
+        attempt_id: String,
+    ) -> Result<SideEffectIntentPlan<FixtureSideEffectEvidence, FixtureSideEffectEvidence>> {
+        Ok(SideEffectIntentPlan {
+            intent: FixtureSideEffectEvidence {
+                amount: 21,
+                node_id: node_id.clone(),
+                attempt_id: attempt_id.clone(),
+            },
+            idempotency: FixtureSideEffectEvidence {
+                amount: 34,
+                node_id,
+                attempt_id,
+            },
+            idempotency_key: events::IdempotencyKeyRef::new("mfm.test.driver.idem")
+                .expect("idempotency key"),
+            capability_binding: RunnerCapabilityBinding {
+                capability_kind: self.cap_kind.clone(),
+                capability_version: self.cap_version.clone(),
+                adapter_kind: self.adapter_kind.clone(),
+                adapter_version: self.adapter_version.clone(),
+            },
+        })
+    }
 }
 
 impl SideEffectDriverCallbacks for TestSideEffectDriverCallbacks {
@@ -1491,34 +1518,9 @@ impl SideEffectDriverCallbacks for TestSideEffectDriverCallbacks {
         &'a self,
         ctx: &'a ErasedRunCtx<'ctx>,
     ) -> SideEffectDriverFuture<'a, SideEffectIntentPlan<Self::Intent, Self::Idempotency>> {
-        let cap_kind = self.cap_kind.clone();
-        let cap_version = self.cap_version.clone();
-        let adapter_kind = self.adapter_kind.clone();
-        let adapter_version = self.adapter_version.clone();
         let node_id = ctx.node().node_id.as_str().to_owned();
         let attempt_id = ctx.attempt_id().as_str().to_owned();
-        Box::pin(async move {
-            Ok(SideEffectIntentPlan {
-                intent: FixtureSideEffectEvidence {
-                    amount: 21,
-                    node_id: node_id.clone(),
-                    attempt_id: attempt_id.clone(),
-                },
-                idempotency: FixtureSideEffectEvidence {
-                    amount: 34,
-                    node_id,
-                    attempt_id,
-                },
-                idempotency_key: events::IdempotencyKeyRef::new("mfm.test.driver.idem")
-                    .expect("idempotency key"),
-                capability_binding: RunnerCapabilityBinding {
-                    capability_kind: cap_kind,
-                    capability_version: cap_version,
-                    adapter_kind,
-                    adapter_version,
-                },
-            })
-        })
+        Box::pin(async move { self.intent_plan_for(node_id, attempt_id) })
     }
 
     fn prepare_invocation<'a, 'ctx>(
@@ -1538,15 +1540,6 @@ impl SideEffectDriverCallbacks for TestSideEffectDriverCallbacks {
                 }),
             ))
         })
-    }
-
-    fn resolve_resource_lane<'a, 'ctx>(
-        &'a self,
-        ctx: &'a ErasedRunCtx<'ctx>,
-        _plan: &'a SideEffectIntentPlan<Self::Intent, Self::Idempotency>,
-    ) -> SideEffectDriverFuture<'a, Option<events::ResourceKeyEvidence>> {
-        let resource_key = test_driver_resource_key(ctx);
-        Box::pin(async move { Ok(resource_key) })
     }
 
     fn reconstruct_prepared_invocation<'a, 'ctx>(
@@ -1676,7 +1669,7 @@ fn test_driver_replay_evidence() -> SideEffectReplayEvidence {
     }
 }
 
-fn test_driver_resource_key(ctx: &ErasedRunCtx<'_>) -> Option<events::ResourceKeyEvidence> {
+fn test_driver_resource_key_for_node(node: &spec::NodeSpec) -> Option<events::ResourceKeyEvidence> {
     let Some(spec::SideEffectContractSpec {
         resource_claim:
             spec::ResourceClaimSpec::Exclusive {
@@ -1684,7 +1677,7 @@ fn test_driver_resource_key(ctx: &ErasedRunCtx<'_>) -> Option<events::ResourceKe
                 key_schema,
             },
         ..
-    }) = &ctx.node().side_effect
+    }) = &node.side_effect
     else {
         return None;
     };
@@ -1761,11 +1754,32 @@ async fn side_effect_driver_preserves_concrete_exclusive_resource_key_across_run
             &fixture.run_id,
         )
         .await
-        .expect("first run prepares side effect"),
+        .expect("first run claims resource lane"),
         SchedulerStatus::Advanced
     );
-    let resource_key = store
-        .load_run_stream(&fixture.run_id)
+    let first_stream = store.load_run_stream(&fixture.run_id);
+    let claim_seq = first_stream
+        .iter()
+        .find_map(|event| {
+            matches!(
+                event.payload(),
+                events::KernelEventPayload::ResourceLaneClaimed(_)
+            )
+            .then_some(event.seq())
+        })
+        .expect("first run recorded resource lane claim");
+    let prepared_seq = first_stream.iter().find_map(|event| {
+        matches!(
+            event.payload(),
+            events::KernelEventPayload::SideEffectInvocationPrepared(_)
+        )
+        .then_some(event.seq())
+    });
+    assert!(
+        prepared_seq.is_none_or(|prepared_seq| claim_seq < prepared_seq),
+        "exclusive invocation prepare must be committed after ResourceLaneClaimed"
+    );
+    let resource_key = first_stream
         .iter()
         .find_map(|event| match event.payload() {
             events::KernelEventPayload::ResourceLaneClaimed(payload) => {
@@ -7695,6 +7709,28 @@ impl DriverSideEffectRunner {
 }
 
 impl ErasedNodeRunner for DriverSideEffectRunner {
+    fn preclaim_resource_lane<'a>(
+        &'a self,
+        ctx: &'a PreInvocationRunCtx<'a>,
+    ) -> PreInvocationRunnerFuture<'a> {
+        Box::pin(async move {
+            let Some(resource_key) = test_driver_resource_key_for_node(ctx.node()) else {
+                return Ok(ErasedRunnerOutput::new(Vec::new()));
+            };
+            let plan = self.callbacks.intent_plan_for(
+                ctx.node().node_id.as_str().to_owned(),
+                ctx.attempt_id().as_str().to_owned(),
+            )?;
+            SideEffectLanePreclaimBuilder::new(ctx).claim_resource_lane(
+                &plan.intent,
+                &plan.idempotency,
+                plan.idempotency_key,
+                plan.capability_binding,
+                resource_key,
+            )
+        })
+    }
+
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move { SideEffectDriver::drive(ctx, &self.callbacks).await })
     }
@@ -7805,6 +7841,13 @@ impl TouchedSetSideEffectRunner {
 }
 
 impl ErasedNodeRunner for TouchedSetSideEffectRunner {
+    fn preclaim_resource_lane<'a>(
+        &'a self,
+        ctx: &'a PreInvocationRunCtx<'a>,
+    ) -> PreInvocationRunnerFuture<'a> {
+        self.inner.preclaim_resource_lane(ctx)
+    }
+
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
             let mut output = self.inner.run_erased(ctx).await?;
@@ -7861,6 +7904,13 @@ impl FailActiveSideEffectAfterSagaRunner {
 }
 
 impl ErasedNodeRunner for FailActiveSideEffectAfterSagaRunner {
+    fn preclaim_resource_lane<'a>(
+        &'a self,
+        ctx: &'a PreInvocationRunCtx<'a>,
+    ) -> PreInvocationRunnerFuture<'a> {
+        self.inner.preclaim_resource_lane(ctx)
+    }
+
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
             let saga = ctx
@@ -8017,6 +8067,13 @@ impl RemediationEmitsForwardPurposeRunner {
 }
 
 impl ErasedNodeRunner for RemediationEmitsForwardPurposeRunner {
+    fn preclaim_resource_lane<'a>(
+        &'a self,
+        ctx: &'a PreInvocationRunCtx<'a>,
+    ) -> PreInvocationRunnerFuture<'a> {
+        self.inner.preclaim_resource_lane(ctx)
+    }
+
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
             if ctx

@@ -4,7 +4,7 @@ use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 
 use crate::history::VerifiedRunContext;
-use crate::invocation::ErasedRunCtx;
+use crate::invocation::{ErasedRunCtx, PreInvocationRunCtx};
 use crate::{Result, RuntimeError};
 
 /// Store-verified side-effect ledger view for one certified node attempt.
@@ -21,6 +21,12 @@ impl<'a> SideEffectAttemptView<'a> {
     /// Builds a side-effect attempt view from a prepared runner context.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn from_erased_context(ctx: &'a ErasedRunCtx<'_>) -> Result<Self> {
+        Self::from_verified_parts(ctx.projections(), ctx.node(), ctx.attempt_id())
+    }
+
+    /// Builds a side-effect attempt view from a pre-invocation resource-lane context.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn from_pre_invocation_context(ctx: &'a PreInvocationRunCtx<'_>) -> Result<Self> {
         Self::from_verified_parts(ctx.projections(), ctx.node(), ctx.attempt_id())
     }
 

@@ -222,14 +222,6 @@ impl SideEffectDriverCallbacks for ProofSideEffectCallbacks {
         Box::pin(async { Ok(SideEffectPreparedInvocationPlan::none()) })
     }
 
-    fn resolve_resource_lane<'a, 'ctx>(
-        &'a self,
-        _ctx: &'a ErasedRunCtx<'ctx>,
-        _plan: &'a SideEffectIntentPlan<Self::Intent, Self::Idempotency>,
-    ) -> SideEffectDriverFuture<'a, Option<events::ResourceKeyEvidence>> {
-        Box::pin(async { Ok(None) })
-    }
-
     fn reconstruct_prepared_invocation<'a, 'ctx>(
         &'a self,
         _ctx: &'a ErasedRunCtx<'ctx>,

@@ -55,8 +55,8 @@ pub use history::{
 };
 pub use invocation::{
     CertifiedRuntimeCapabilities, ErasedRunCtx, MaterializedCell, MaterializedCellTerminal,
-    MaterializedInputNode, MaterializedInputs, NamedMaterializedInput, PreparedRunnerInvocation,
-    RecordedFact, RecordedFacts,
+    MaterializedInputNode, MaterializedInputs, NamedMaterializedInput, PreInvocationRunCtx,
+    PreparedRunnerInvocation, RecordedFact, RecordedFacts,
 };
 pub use manual_resolution::{
     manual_resolution_block_reason, manual_resolution_stream_prefix_digest,
@@ -69,12 +69,12 @@ pub use runner_kit::{
 pub use runners::{
     CapabilityImplementationBinding, CapabilityImplementationId, ErasedNodeRunner,
     ErasedRunnerBinding, ErasedRunnerFuture, ErasedRunnerOutput, ErasedRunnerRegistry,
-    RunnerEventPayload,
+    PreInvocationRunnerFuture, RunnerEventPayload,
 };
 pub use scheduler::{ManualResolutionRequest, SchedulerStatus, SerialTypedScheduler};
 pub use side_effect_driver::{
     SideEffectDriver, SideEffectDriverCallbacks, SideEffectDriverFuture, SideEffectIntentPlan,
-    SideEffectLaneClaimEvidence, SideEffectObservedEvidence, SideEffectPreparedInvocationPlan,
+    SideEffectLanePreclaimBuilder, SideEffectObservedEvidence, SideEffectPreparedInvocationPlan,
     SideEffectProtocolAction, SideEffectReplayEvidence, SideEffectSubmissionDecision,
     SideEffectSubmissionDecisionFuture,
 };
