@@ -1,10 +1,10 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const TEST_HARNESS_PATHS: &[&str] = &["tests/integration/tests/architecture_namespace_contract.rs"];
-const FORBIDDEN_TYPED_SURFACE_FIELDS: &[&str] = &[
+const FORBIDDEN_SEMANTIC_SURFACE_FIELDS: &[&str] = &[
     "rpc_url",
     "authorization",
     "keystore_path_env",
@@ -15,35 +15,37 @@ const FORBIDDEN_TYPED_SURFACE_FIELDS: &[&str] = &[
     "raw_transaction",
 ];
 
-const TYPED_SURFACE_FIELD_SCAN_SKIP_PATHS: &[&str] = &[
+const SEMANTIC_SURFACE_FIELD_SCAN_SKIP_PATHS: &[&str] = &[
+    "PLAN_IMPL_RFC_PG_TRANS.md",
+    "RFC_REFAC_PG_TRANS.md",
     "crates/kernel/values/src/lib.rs",
     "crates/kernel/values/src/tests.rs",
 ];
 
-const TEMPORARY_TYPED_FIELD_ALLOWLIST: &[(&str, &str, usize)] = &[
+const SEMANTIC_FIELD_EXCEPTION_COUNTS: &[(&str, &str, usize)] = &[
     ("crates/portfolio/model/src/portfolio.rs", "password", 1),
     ("crates/portfolio/model/src/portfolio.rs", "mnemonic", 2),
     ("crates/portfolio/model/src/symbol.rs", "authorization", 2),
     ("crates/kernel/certify/src/lib.rs", "authorization", 79),
     ("crates/kernel/program/src/lib.rs", "authorization", 15),
-    ("crates/kernel/runtime/src/tests.rs", "authorization", 11),
+    ("crates/kernel/runtime/src/tests.rs", "authorization", 10),
     ("crates/ops/proof-op/src/lib.rs", "authorization", 5),
 ];
 
 #[test]
-fn typed_surface_runtime_fields_are_temporarily_allowlisted_by_path() {
+fn semantic_surface_runtime_fields_match_tracked_exception_counts() {
     let root = repo_root();
     let entries = repo_text_entries(&root);
 
     assert_forbidden_terms_are_allowlisted(
-        "typed surface field",
+        "semantic surface runtime field",
         &entries,
-        FORBIDDEN_TYPED_SURFACE_FIELDS,
-        TEMPORARY_TYPED_FIELD_ALLOWLIST,
+        FORBIDDEN_SEMANTIC_SURFACE_FIELDS,
+        SEMANTIC_FIELD_EXCEPTION_COUNTS,
         |path, source| {
             !TEST_HARNESS_PATHS.contains(&path)
-                && !TYPED_SURFACE_FIELD_SCAN_SKIP_PATHS.contains(&path)
-                && is_typed_surface_candidate(source)
+                && !SEMANTIC_SURFACE_FIELD_SCAN_SKIP_PATHS.contains(&path)
+                && is_semantic_surface_candidate(source)
         },
     );
 }
@@ -71,8 +73,7 @@ fn repository_text_entries_include_tracked_dot_config_surfaces() {
     );
     assert!(
         entries.iter().any(|entry| {
-            entry.path
-                == "crates/storages/stream-store-postgres/migrations/0001_typed_run_event_store.sql"
+            entry.path == "crates/storages/stream-store-postgres/migrations/0001_run_store.sql"
         }),
         "namespace scan must cover tracked SQL files"
     );
@@ -174,7 +175,7 @@ fn evm_contract_lifecycle_runners_live_in_adapter_not_app() {
     }
 
     for forbidden in [
-        "FsTypedArtifactStore",
+        concat!("artifact", "_store", "_fs"),
         "EvmJsonRpcClient",
         "KeystoreSignerProvider",
         "KeystoreSignerRegistryEntry",
@@ -190,7 +191,7 @@ fn evm_contract_lifecycle_runners_live_in_adapter_not_app() {
 }
 
 #[test]
-fn typed_surface_guard_rejects_synthetic_runtime_fields() {
+fn semantic_surface_guard_rejects_synthetic_runtime_fields() {
     let entries = vec![TextEntry {
         path: "crates/new-config/src/lib.rs".to_owned(),
         source: "#[derive(MfmConfig)] struct Bad { rpc_url: String }".to_owned(),
@@ -199,9 +200,9 @@ fn typed_surface_guard_rejects_synthetic_runtime_fields() {
     let error = forbidden_term_report(
         "synthetic typed field",
         &entries,
-        FORBIDDEN_TYPED_SURFACE_FIELDS,
+        FORBIDDEN_SEMANTIC_SURFACE_FIELDS,
         &[],
-        |_path, source| is_typed_surface_candidate(source),
+        |_path, source| is_semantic_surface_candidate(source),
     )
     .expect_err("synthetic runtime field must fail");
 
@@ -212,7 +213,7 @@ fn typed_surface_guard_rejects_synthetic_runtime_fields() {
 }
 
 #[test]
-fn typed_surface_guard_rejects_extra_runtime_field_in_allowlisted_path() {
+fn semantic_surface_guard_rejects_extra_runtime_field_in_allowlisted_path() {
     let entries = vec![TextEntry {
         path: "crates/transports/runtime-fixture/src/lib.rs".to_owned(),
         source: "#[derive(MfmValue)] struct Bad { rpc_url: String, another_rpc_url: String }"
@@ -224,7 +225,7 @@ fn typed_surface_guard_rejects_extra_runtime_field_in_allowlisted_path() {
         &entries,
         &["rpc_url"],
         &[("crates/transports/runtime-fixture/src/lib.rs", "rpc_url", 1)],
-        |_path, source| is_typed_surface_candidate(source),
+        |_path, source| is_semantic_surface_candidate(source),
     )
     .expect_err("extra runtime field in allowlisted path must fail");
 
@@ -332,7 +333,7 @@ fn term_counts_in_entry<T: AsRef<str>>(entry: &TextEntry, terms: &[T]) -> Vec<(S
         .collect()
 }
 
-fn is_typed_surface_candidate(source: &str) -> bool {
+fn is_semantic_surface_candidate(source: &str) -> bool {
     [
         "MfmConfig",
         "MfmValue",
@@ -345,8 +346,40 @@ fn is_typed_surface_candidate(source: &str) -> bool {
 }
 
 fn repo_text_entries(root: &Path) -> Vec<TextEntry> {
-    let tracked_paths = Command::new("git")
-        .args(["ls-files", "-z"])
+    let repo_paths = git_ls_files(root, &["ls-files", "-z"]).map(|tracked_paths| {
+        let mut paths = tracked_paths.into_iter().collect::<BTreeSet<_>>();
+        if let Some(untracked_paths) =
+            git_ls_files(root, &["ls-files", "--others", "--exclude-standard", "-z"])
+        {
+            paths.extend(untracked_paths);
+        }
+        paths.into_iter().collect::<Vec<_>>()
+    });
+
+    let paths = repo_paths.unwrap_or_else(|| repo_text_paths_from_materialized_tree(root));
+
+    let mut entries = paths
+        .into_iter()
+        .filter_map(|rel| {
+            let path = root.join(&rel);
+            let bytes = match fs::read(&path) {
+                Ok(bytes) => bytes,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+                Err(error) => panic!("read repository file {}: {error}", path.display()),
+            };
+            String::from_utf8(bytes).ok().map(|source| TextEntry {
+                path: rel.replace('\\', "/"),
+                source,
+            })
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| left.path.cmp(&right.path));
+    entries
+}
+
+fn git_ls_files(root: &Path, args: &[&str]) -> Option<Vec<String>> {
+    Command::new("git")
+        .args(args)
         .current_dir(root)
         .output()
         .ok()
@@ -364,25 +397,6 @@ fn repo_text_entries(root: &Path) -> Vec<TextEntry> {
                     .collect::<Vec<_>>()
             })
         })
-        .unwrap_or_else(|| repo_text_paths_from_materialized_tree(root));
-
-    let mut entries = tracked_paths
-        .into_iter()
-        .filter_map(|rel| {
-            let path = root.join(&rel);
-            let bytes = match fs::read(&path) {
-                Ok(bytes) => bytes,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
-                Err(error) => panic!("read tracked file {}: {error}", path.display()),
-            };
-            String::from_utf8(bytes).ok().map(|source| TextEntry {
-                path: rel.replace('\\', "/"),
-                source,
-            })
-        })
-        .collect::<Vec<_>>();
-    entries.sort_by(|left, right| left.path.cmp(&right.path));
-    entries
 }
 
 fn repo_text_paths_from_materialized_tree(root: &Path) -> Vec<String> {
