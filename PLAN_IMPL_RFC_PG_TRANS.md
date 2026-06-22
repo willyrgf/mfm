@@ -114,7 +114,6 @@ Scope:
 - Rewrite the `docs/saga.md` "Resource Claims" section for the pre-invocation `ResourceLaneClaimed`
   lifecycle, the claim-kind-to-lane mapping (`Exclusive` only), and the no-deadlock invariant; this
   lands in the resource-lane cutover merge unit (a planned-change callout already points to the RFC).
-- Document the Data Lifecycle contract: append-only growth bounded by maintenance-role
   partition-detach archival (not production delete), the artifact-size limit, and the dedicated-MFM-
   database requirement driven by cluster-wide `xmin` coupling.
 - Document the read-your-writes caveat (list/watch lag the sealed frontier; strict status is

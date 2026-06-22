@@ -2002,45 +2002,6 @@ source_ordinal INTEGER NOT NULL
 source_commit_id TEXT NOT NULL
 ```
 
-## Data Lifecycle And Archival
-
-Append-only authority with no production `DELETE` is correct for integrity, but it makes storage grow
-monotonically forever, and this refactor moves artifact bytes — the largest growth driver — into the
-same database. "Never delete, no archival path" is not a complete design. The growth story must be
-explicit, even though the v1 *implementation* may ship before the archival *tooling* does.
-
-Two things must be true in v1 so that bounding growth later does not require a schema rewrite:
-
-- **Authority tables that grow per run are declared as partitioned tables from the start.** `commits`,
-  `run_events`, `artifact_blobs`, the artifact evidence/admission tables, the lane mirror tables, and
-  `run_commit_log` are range/hash partitioned on a stable key (by `run_id` hash, or by a coarse
-  time/sequence bucket for the cursor log). A fresh database has one partition per table; the point is
-  that detaching and archiving an old partition later is a metadata operation, which is impossible to
-  do cheaply if the tables were created unpartitioned. This is the one schema affordance v1 must not
-  skip.
-- **The artifact-byte size limit is enforced** (application/schema constant plus DB `CHECK`, as
-  already specified), because uncapped `BYTEA` in `artifact_blobs` is the fastest path to an
-  unmanageable database and to long append transactions.
-
-The archival contract (tooling may land after v1, but the design is fixed now):
-
-- Archival is a **maintenance-role, offline operation**, never an app-role `DELETE`. It detaches a
-  completed-run partition, copies it (and the referenced `artifact_blobs` partition) to cold storage
-  preserving all provenance and hashes, and only then drops the detached partition.
-- Archived data is re-importable read-only for historical inspection and replay; replay over archived
-  runs verifies the same hashes it would over live rows. Archival never rewrites or re-hashes
-  authority.
-- Detaching partitions that contain `run_commit_log` rows changes the cursor domain, so archival
-  triggers a `store_epoch` reseed (consistent with the cursor-domain rule above); outstanding watch
-  cursors re-list.
-- Observation facts, change summaries, and materialized caches are rebuildable, so their old rows can
-  be dropped and rebuilt in cache namespaces independently of authority archival.
-
-Until the archival tooling exists, operators bound growth by provisioning and by the artifact-size
-limit, and the runbook states plainly that authority tables are append-only and that growth is
-managed by maintenance-role archival, not by production deletion. What is *not* acceptable is shipping
-unpartitioned authority tables and discovering later that there is no cheap way to archive them.
-
 ## Guardrails
 
 Database guardrails:
@@ -2056,8 +2017,6 @@ Database guardrails:
 - if local development uses a single physical database role, those procedures must still require an
   explicit maintenance entry point and must not be exposed through production app services
 - avoid `ON DELETE CASCADE` on authority tables
-- declare per-run-growth authority tables as partitioned from the start so archival can detach
-  partitions later (see Data Lifecycle And Archival)
 - validate required functions/views during schema validation; do not mandate deferrable constraint
   triggers that duplicate Rust multi-row folds, and require a parity test for any SQL check that does
   duplicate a Rust fold
@@ -2141,8 +2100,7 @@ here; it is part of this merge gate, not optional follow-up.
   cursor-domain seal/fingerprint subsystem)
 - the read-your-writes caveat: list/watch lag the sealed frontier while strict per-run status is
   immediate
-- append-only authority with a maintenance-role partition-detach archival path (Data Lifecycle), and a
-  dedicated-database requirement driven by cluster-wide `xmin` coupling
+- append-only authority with a dedicated-database requirement driven by cluster-wide `xmin` coupling
 - maintenance-role requirements for read-model rebuild/validation, archival, and epoch-reseed
   procedures
 - the breaking dev-branch cutover posture and lack of compatibility with old `typed_*` tables
