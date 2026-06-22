@@ -4,44 +4,18 @@ pub(super) fn acquire_resource_lane(
     projections: &mut ProjectionSnapshot,
     run_id: &RunId,
     event_id: &EventId,
-    payload: &side_effect::InvocationPrepared,
-) -> Result<Option<events::ResourceKeyEvidence>> {
+    payload: &events::ResourceLaneClaimed,
+) -> Result<()> {
     let holder = SideEffectLedgerRef::new(run_id.clone(), payload.ledger_key.clone());
-    let resource_key = match (
-        projections
-            .side_effects
-            .get(&holder)
-            .and_then(|projection| projection.resource_key.as_ref()),
-        payload.resource_key.as_ref(),
-    ) {
-        (Some(previous), Some(current)) if previous == current => Some(current.clone()),
-        (Some(_), Some(_)) => {
-            return Err(StoreError::ProjectionConflict {
-                key: format!("resource_lane:{}", payload.ledger_key),
-                message: "resource key evidence changed for ledger".to_owned(),
-            });
-        }
-        (Some(_), None) => {
-            return Err(StoreError::ProjectionConflict {
-                key: format!("resource_lane:{}", payload.ledger_key),
-                message: "resource key evidence is required after prior resource key".to_owned(),
-            });
-        }
-        (None, current) => current.cloned(),
-    };
-
-    let Some(resource_key) = resource_key.as_ref() else {
-        return Ok(None);
-    };
-
-    let lane_key = ResourceLaneKey::from_evidence(resource_key);
+    let lane_key = ResourceLaneKey::from_evidence(&payload.resource_key);
     if let Some(existing_key) = resource_lane_key_for_holder(projections, &holder) {
-        if existing_key != lane_key {
-            return Err(StoreError::ProjectionConflict {
-                key: format!("resource_lane:{}", payload.ledger_key),
-                message: "resource lane key changed for ledger".to_owned(),
-            });
-        }
+        return Err(StoreError::ProjectionConflict {
+            key: format!("resource_lane:{}", payload.ledger_key),
+            message: format!(
+                "side-effect holder already has active resource lane {}:{}",
+                existing_key.namespace, existing_key.key
+            ),
+        });
     }
     if let Some(existing) = projections.resource_lanes.get(&lane_key) {
         if existing.holder != holder {
@@ -61,9 +35,12 @@ pub(super) fn acquire_resource_lane(
             node_id: payload.node_id.clone(),
             attempt_id: payload.attempt_id.clone(),
             invocation_epoch: payload.invocation_epoch,
+            claim_id: payload.claim_id.clone(),
+            claim_fencing_token: payload.claim_fencing_token,
+            lane_transition_seq: payload.lane_transition_seq,
         },
     );
-    Ok(Some(resource_key.clone()))
+    Ok(())
 }
 
 fn resource_lane_key_for_holder(
@@ -76,17 +53,66 @@ fn resource_lane_key_for_holder(
         .find_map(|(key, projection)| (projection.holder == *holder).then(|| key.clone()))
 }
 
-pub(super) fn release_resource_lane_for_holder(
+pub(super) fn release_resource_lane(
     projections: &mut ProjectionSnapshot,
-    holder: &SideEffectLedgerRef,
-) {
-    if let Some(key) = resource_lane_key_for_holder(projections, holder) {
-        projections.resource_lanes.remove(&key);
+    run_id: &RunId,
+    payload: &events::ResourceLaneReleased,
+) -> Result<()> {
+    let holder = SideEffectLedgerRef::new(run_id.clone(), payload.ledger_key.clone());
+    let Some(key) = resource_lane_key_for_holder(projections, &holder) else {
+        return Err(StoreError::ProjectionConflict {
+            key: format!("resource_lane:{}", payload.ledger_key),
+            message: "resource lane release requires an active claim".to_owned(),
+        });
+    };
+    let active = projections
+        .resource_lanes
+        .get(&key)
+        .expect("resource lane key was found from projection");
+    if active.node_id != payload.node_id
+        || active.attempt_id != payload.attempt_id
+        || active.ledger_purpose != payload.ledger_purpose
+        || active.invocation_epoch != payload.invocation_epoch
+        || active.claim_id != payload.claim_id
+        || active.claim_fencing_token != payload.claim_fencing_token
+    {
+        return Err(StoreError::ProjectionConflict {
+            key: format!("resource_lane:{}:{}", key.namespace, key.key),
+            message: "resource lane release does not match active claim".to_owned(),
+        });
     }
+    projections.resource_lanes.remove(&key);
+    Ok(())
 }
 
-pub(super) fn release_resource_lanes_for_run(projections: &mut ProjectionSnapshot, run_id: &RunId) {
-    projections
+pub(super) fn require_no_resource_lane_for_holder(
+    projections: &ProjectionSnapshot,
+    holder: &SideEffectLedgerRef,
+    context: &str,
+) -> Result<()> {
+    if let Some(key) = resource_lane_key_for_holder(projections, holder) {
+        return Err(StoreError::ProjectionConflict {
+            key: format!("resource_lane:{}:{}", key.namespace, key.key),
+            message: format!("{context} requires a prior ResourceLaneReleased event"),
+        });
+    }
+    Ok(())
+}
+
+pub(super) fn require_no_resource_lanes_for_run(
+    projections: &ProjectionSnapshot,
+    run_id: &RunId,
+    context: &str,
+) -> Result<()> {
+    if let Some((key, _)) = projections
         .resource_lanes
-        .retain(|_, projection| projection.holder.run_id != *run_id);
+        .iter()
+        .find(|(_, projection)| projection.holder.run_id == *run_id)
+    {
+        return Err(StoreError::ProjectionConflict {
+            key: format!("resource_lane:{}:{}", key.namespace, key.key),
+            message: format!("{context} requires prior ResourceLaneReleased events"),
+        });
+    }
+    Ok(())
 }

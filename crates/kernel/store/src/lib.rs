@@ -188,6 +188,47 @@ pub mod v1 {
             /// Current holder of the lane.
             holder: Box<SideEffectLedgerRef>,
         },
+        /// A run observation cursor was malformed, tampered, or belongs to an unsupported format.
+        #[error("invalid run observation cursor: {message}")]
+        InvalidCursor {
+            /// Stable diagnostic.
+            message: String,
+        },
+        /// A run observation cursor belongs to a previous store epoch.
+        #[error("run observation cursor expired")]
+        CursorExpired,
+        /// A run observation limit was outside the supported v1 range.
+        #[error("run observation limit {limit} is outside 1..={max}")]
+        LimitOutOfRange {
+            /// Requested limit.
+            limit: u32,
+            /// Maximum accepted limit.
+            max: u32,
+        },
+        /// Required observation rows were unavailable or corrupt.
+        #[error("run observation unavailable: {message}")]
+        ObservationUnavailable {
+            /// Stable diagnostic.
+            message: String,
+        },
+        /// A prepared commit bundle did not carry bytes or exact existing evidence for an admitted artifact.
+        #[error("prepared commit bundle missing artifact bytes for {artifact_id}")]
+        MissingPreparedArtifactBytes {
+            /// Artifact id missing from the bundle.
+            artifact_id: ArtifactId,
+        },
+        /// A prepared commit bundle carried artifact bytes not admitted by the prepared authority.
+        #[error("prepared commit bundle carried extra artifact bytes for {artifact_id}")]
+        ExtraPreparedArtifactBytes {
+            /// Extra artifact id carried by the bundle.
+            artifact_id: ArtifactId,
+        },
+        /// A prepared commit bundle carried duplicate artifact bytes or evidence references.
+        #[error("prepared commit bundle carried duplicate artifact evidence for {artifact_id}")]
+        DuplicatePreparedArtifactBytes {
+            /// Duplicated artifact id.
+            artifact_id: ArtifactId,
+        },
         /// A persisted event row disagrees with store-derived typed event fields.
         #[error("persisted event mismatch for {field}: {message}")]
         PersistedEventMismatch {
@@ -417,6 +458,11 @@ pub mod v1 {
         pub fn as_digest(&self) -> &ContentDigest {
             &self.0
         }
+
+        /// Reconstructs a commit fingerprint loaded from durable authority rows.
+        pub fn from_digest(digest: ContentDigest) -> Self {
+            Self(digest)
+        }
     }
 
     impl fmt::Display for CommitFingerprint {
@@ -605,6 +651,13 @@ pub mod v1 {
         pub producer_seed_id: Option<SeedId>,
         /// Artifact role.
         pub artifact_role: ArtifactRole,
+    }
+
+    impl ArtifactEvidenceRef {
+        /// Computes the canonical evidence hash used by exact-evidence artifact authority.
+        pub fn evidence_hash(&self) -> Result<ContentDigest> {
+            Ok(canonical_json(store_artifact_json(self))?.content_digest())
+        }
     }
 
     /// Run state used by typed commit preconditions and projections.
@@ -1341,7 +1394,7 @@ pub mod v1 {
 
     /// Payload-level typed commit request.
     #[derive(Debug, Clone, PartialEq, Eq)]
-    pub struct TypedCommitRequest {
+    pub struct CommitRequest {
         /// Run id to append to.
         run_id: RunId,
         /// Caller's expected next store-owned stream sequence.
@@ -1356,7 +1409,7 @@ pub mod v1 {
         preconditions: CommitPreconditions,
     }
 
-    impl TypedCommitRequest {
+    impl CommitRequest {
         /// Creates a typed commit request from a validated non-empty payload batch.
         pub fn new(
             run_id: RunId,
@@ -1579,9 +1632,9 @@ pub mod v1 {
 
     impl<Purpose: CommitPurpose> PreparedCommit<Purpose> {
         fn prepare_with_authority(
-            request: TypedCommitRequest,
+            request: CommitRequest,
             artifacts: CommitArtifactEvidenceSet,
-            validate: impl FnOnce(&TypedCommitRequest) -> Result<()>,
+            validate: impl FnOnce(&CommitRequest) -> Result<()>,
             allow_saga_terminal: bool,
             allow_manual_resolution: bool,
         ) -> Result<Self> {
@@ -1592,6 +1645,7 @@ pub mod v1 {
                 ));
             }
             validate_required_artifacts_cover_payload_references(Purpose::NAME, &request)?;
+            reject_store_materialized_resource_lane_payloads(Purpose::NAME, &request)?;
             validate(&request)?;
             let inner = PreparedCommitInner::new_with_authority(
                 request,
@@ -1606,15 +1660,15 @@ pub mod v1 {
         }
 
         fn prepare_with(
-            request: TypedCommitRequest,
+            request: CommitRequest,
             artifacts: CommitArtifactEvidenceSet,
-            validate: impl FnOnce(&TypedCommitRequest) -> Result<()>,
+            validate: impl FnOnce(&CommitRequest) -> Result<()>,
         ) -> Result<Self> {
             Self::prepare_with_authority(request, artifacts, validate, false, false)
         }
 
         /// Returns the typed request sealed into this prepared commit.
-        pub fn request(&self) -> &TypedCommitRequest {
+        pub fn request(&self) -> &CommitRequest {
             self.inner.request()
         }
 
@@ -1633,7 +1687,7 @@ pub mod v1 {
             impl PreparedCommit<$purpose> {
                 #[doc = $doc]
                 pub fn new(
-                    request: TypedCommitRequest,
+                    request: CommitRequest,
                     artifacts: CommitArtifactEvidenceSet,
                 ) -> Result<Self> {
                     Self::prepare_with(request, artifacts, $validator)
@@ -1675,7 +1729,7 @@ pub mod v1 {
     impl PreparedCommit<ManualResolution> {
         /// Prepares a proof-backed manual-resolution commit.
         pub fn new(
-            request: TypedCommitRequest,
+            request: CommitRequest,
             artifacts: CommitArtifactEvidenceSet,
             proof: &VerifiedManualResolutionForPrefix,
         ) -> Result<Self> {
@@ -1692,7 +1746,7 @@ pub mod v1 {
     impl PreparedCommit<SagaTerminal> {
         /// Prepares a saga terminal-resolution commit.
         pub fn new(
-            request: TypedCommitRequest,
+            request: CommitRequest,
             artifacts: CommitArtifactEvidenceSet,
             proof: &SagaTerminalProof,
         ) -> Result<Self> {
@@ -1728,8 +1782,22 @@ pub mod v1 {
     }
 
     impl PreparedCommitPlan {
+        /// Stable prepared commit purpose name.
+        pub fn purpose_name(&self) -> &'static str {
+            match self {
+                Self::RunAdmission(_) => RunAdmission::NAME,
+                Self::StateAttemptStarted(_) => StateAttemptStarted::NAME,
+                Self::AttemptTerminal(_) => AttemptTerminal::NAME,
+                Self::SideEffectTerminal(_) => SideEffectTerminal::NAME,
+                Self::SideEffectProgress(_) => SideEffectProgress::NAME,
+                Self::Retention(_) => Retention::NAME,
+                Self::ManualResolution(_) => ManualResolution::NAME,
+                Self::SagaTerminal(_) => SagaTerminal::NAME,
+            }
+        }
+
         /// Returns the sealed request for read-only planning decisions.
-        pub fn request(&self) -> &TypedCommitRequest {
+        pub fn request(&self) -> &CommitRequest {
             match self {
                 Self::RunAdmission(commit) => commit.request(),
                 Self::StateAttemptStarted(commit) => commit.request(),
@@ -1780,15 +1848,199 @@ pub mod v1 {
     impl_prepared_commit_plan_from!(ManualResolution, ManualResolution);
     impl_prepared_commit_plan_from!(SagaTerminal, SagaTerminal);
 
+    /// Verified artifact bytes carried by a prepared commit bundle.
+    ///
+    /// This proof object is the only production path for new artifact bytes to accompany run
+    /// authority. Construction verifies content addressing and typed evidence before storage is
+    /// called; durable stores must verify the same facts again inside their append transaction.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct PreparedArtifactBytes {
+        bytes: Vec<u8>,
+        evidence: ArtifactEvidenceRef,
+        evidence_hash: ContentDigest,
+    }
+
+    impl PreparedArtifactBytes {
+        /// Verifies artifact bytes against exact typed evidence and returns a proof object.
+        pub fn new(bytes: Vec<u8>, evidence: ArtifactEvidenceRef) -> Result<Self> {
+            verify_retained_artifact_bytes(&bytes, &evidence)?;
+            let evidence_hash = evidence.evidence_hash()?;
+            Ok(Self {
+                bytes,
+                evidence,
+                evidence_hash,
+            })
+        }
+
+        /// Returns verified artifact bytes.
+        pub fn bytes(&self) -> &[u8] {
+            &self.bytes
+        }
+
+        /// Returns exact typed artifact evidence.
+        pub fn evidence(&self) -> &ArtifactEvidenceRef {
+            &self.evidence
+        }
+
+        /// Returns canonical evidence hash for exact-evidence authority.
+        pub fn evidence_hash(&self) -> &ContentDigest {
+            &self.evidence_hash
+        }
+
+        /// Consumes this proof object into its verified parts.
+        pub fn into_parts(self) -> (Vec<u8>, ArtifactEvidenceRef, ContentDigest) {
+            (self.bytes, self.evidence, self.evidence_hash)
+        }
+    }
+
+    /// Exact existing artifact evidence reused by a prepared commit bundle.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ExistingArtifactAdmission {
+        artifact_id: ArtifactId,
+        evidence_hash: ContentDigest,
+    }
+
+    impl ExistingArtifactAdmission {
+        /// Creates an exact-evidence existing artifact admission reference.
+        pub fn new(artifact_id: ArtifactId, evidence_hash: ContentDigest) -> Self {
+            Self {
+                artifact_id,
+                evidence_hash,
+            }
+        }
+
+        /// Artifact id being reused.
+        pub fn artifact_id(&self) -> &ArtifactId {
+            &self.artifact_id
+        }
+
+        /// Canonical evidence hash required for reuse.
+        pub fn evidence_hash(&self) -> &ContentDigest {
+            &self.evidence_hash
+        }
+    }
+
+    /// Production append authority: a prepared commit plus exact artifact byte/evidence material.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct PreparedCommitBundle {
+        plan: PreparedCommitPlan,
+        artifact_bytes: Vec<PreparedArtifactBytes>,
+        existing_artifacts: Vec<ExistingArtifactAdmission>,
+    }
+
+    impl PreparedCommitBundle {
+        /// Builds a prepared commit bundle and verifies exact artifact coverage.
+        pub fn new(
+            plan: PreparedCommitPlan,
+            artifact_bytes: Vec<PreparedArtifactBytes>,
+            existing_artifacts: Vec<ExistingArtifactAdmission>,
+        ) -> Result<Self> {
+            validate_prepared_bundle_artifacts(&plan, &artifact_bytes, &existing_artifacts)?;
+            Ok(Self {
+                plan,
+                artifact_bytes,
+                existing_artifacts,
+            })
+        }
+
+        /// Builds a zero-artifact bundle for commit plans that admit no artifact evidence.
+        pub fn without_artifacts(plan: PreparedCommitPlan) -> Result<Self> {
+            Self::new(plan, Vec::new(), Vec::new())
+        }
+
+        /// Returns the prepared commit plan sealed into the bundle.
+        pub fn plan(&self) -> &PreparedCommitPlan {
+            &self.plan
+        }
+
+        /// Returns the sealed request for read-only planning decisions.
+        pub fn request(&self) -> &CommitRequest {
+            self.plan.request()
+        }
+
+        /// Returns artifact evidence to admit atomically with the event batch.
+        pub fn admitted_artifacts(&self) -> &[ArtifactEvidenceRef] {
+            self.plan.admitted_artifacts()
+        }
+
+        /// Returns verified artifact bytes carried by the bundle.
+        pub fn artifact_bytes(&self) -> &[PreparedArtifactBytes] {
+            &self.artifact_bytes
+        }
+
+        /// Returns exact existing artifact admissions carried by the bundle.
+        pub fn existing_artifacts(&self) -> &[ExistingArtifactAdmission] {
+            &self.existing_artifacts
+        }
+    }
+
+    fn validate_prepared_bundle_artifacts(
+        plan: &PreparedCommitPlan,
+        artifact_bytes: &[PreparedArtifactBytes],
+        existing_artifacts: &[ExistingArtifactAdmission],
+    ) -> Result<()> {
+        let mut admitted = BTreeMap::<(ArtifactId, ContentDigest), &ArtifactEvidenceRef>::new();
+        for evidence in plan.admitted_artifacts() {
+            admitted.insert(
+                (evidence.artifact_id.clone(), evidence.evidence_hash()?),
+                evidence,
+            );
+        }
+
+        let mut covered = BTreeSet::<(ArtifactId, ContentDigest)>::new();
+        for artifact in artifact_bytes {
+            let key = (
+                artifact.evidence().artifact_id.clone(),
+                artifact.evidence_hash().clone(),
+            );
+            if !admitted.contains_key(&key) {
+                return Err(StoreError::ExtraPreparedArtifactBytes {
+                    artifact_id: artifact.evidence().artifact_id.clone(),
+                });
+            }
+            if !covered.insert(key) {
+                return Err(StoreError::DuplicatePreparedArtifactBytes {
+                    artifact_id: artifact.evidence().artifact_id.clone(),
+                });
+            }
+        }
+
+        for existing in existing_artifacts {
+            let key = (
+                existing.artifact_id().clone(),
+                existing.evidence_hash().clone(),
+            );
+            if !admitted.contains_key(&key) {
+                return Err(StoreError::ExtraPreparedArtifactBytes {
+                    artifact_id: existing.artifact_id().clone(),
+                });
+            }
+            if !covered.insert(key) {
+                return Err(StoreError::DuplicatePreparedArtifactBytes {
+                    artifact_id: existing.artifact_id().clone(),
+                });
+            }
+        }
+
+        for (artifact_id, evidence_hash) in admitted.keys() {
+            if !covered.contains(&(artifact_id.clone(), evidence_hash.clone())) {
+                return Err(StoreError::MissingPreparedArtifactBytes {
+                    artifact_id: artifact_id.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct PreparedCommitInner {
-        request: TypedCommitRequest,
+        request: CommitRequest,
         admitted_artifacts: Vec<ArtifactEvidenceRef>,
     }
 
     impl PreparedCommitInner {
         fn new_with_authority(
-            request: TypedCommitRequest,
+            request: CommitRequest,
             admitted_artifacts: Vec<ArtifactEvidenceRef>,
             allow_saga_terminal: bool,
             allow_manual_resolution: bool,
@@ -1838,7 +2090,7 @@ pub mod v1 {
             })
         }
 
-        fn request(&self) -> &TypedCommitRequest {
+        fn request(&self) -> &CommitRequest {
             &self.request
         }
 
@@ -1881,6 +2133,55 @@ pub mod v1 {
         /// Store-owned envelopes created for this batch.
         pub fn events(&self) -> &[KernelEventEnvelope] {
             &self.events
+        }
+
+        /// Reconstructs one committed batch from strict-loaded durable event rows.
+        pub fn from_persisted_events(
+            run_id: RunId,
+            commit_key: CommitKey,
+            fingerprint: CommitFingerprint,
+            seq: StreamSeq,
+            events: Vec<KernelEventEnvelope>,
+        ) -> Result<Self> {
+            if events.is_empty() {
+                return Err(StoreError::PersistedEventMismatch {
+                    field: "event_count",
+                    message: "persisted commit has no events".to_owned(),
+                });
+            }
+            for (index, event) in events.iter().enumerate() {
+                if event.run_id() != &run_id {
+                    return Err(StoreError::PersistedEventMismatch {
+                        field: "run_id",
+                        message: "persisted commit event has a different run id".to_owned(),
+                    });
+                }
+                if event.seq() != seq {
+                    return Err(StoreError::PersistedEventMismatch {
+                        field: "seq",
+                        message: "persisted commit event has a different sequence".to_owned(),
+                    });
+                }
+                if event.commit_key() != &commit_key {
+                    return Err(StoreError::PersistedEventMismatch {
+                        field: "commit_key",
+                        message: "persisted commit event has a different commit key".to_owned(),
+                    });
+                }
+                if event.ordinal().as_u32() as usize != index {
+                    return Err(StoreError::PersistedEventMismatch {
+                        field: "ordinal",
+                        message: "persisted commit event ordinals are not contiguous".to_owned(),
+                    });
+                }
+            }
+            Ok(Self {
+                run_id,
+                commit_key,
+                fingerprint,
+                seq,
+                events,
+            })
         }
     }
 
@@ -1954,7 +2255,7 @@ pub mod v1 {
         pub intent: SideEffectIntentProjection,
         /// Prepared invocation artifact evidence, when one has been recorded.
         pub prepared_invocation: Option<SideEffectArtifactProjection>,
-        /// Exclusive resource key evidence recorded at invocation preparation.
+        /// Exclusive resource key evidence recorded by `ResourceLaneClaimed`.
         pub resource_key: Option<events::ResourceKeyEvidence>,
         /// Submission artifact evidence, when one has been recorded.
         pub submission: Option<SideEffectArtifactProjection>,
@@ -3236,6 +3537,8 @@ pub mod v1 {
     pub struct ResourceLaneKey {
         /// Resource namespace.
         pub namespace: ResourceNamespace,
+        /// Schema id for the typed resource-key evidence.
+        pub key_schema_id: SchemaId,
         /// Store-comparable resource key.
         pub key: events::ResourceKey,
     }
@@ -3245,6 +3548,7 @@ pub mod v1 {
         pub fn from_evidence(evidence: &events::ResourceKeyEvidence) -> Self {
             Self {
                 namespace: evidence.namespace.clone(),
+                key_schema_id: evidence.key_schema_id.clone(),
                 key: evidence.key.clone(),
             }
         }
@@ -3265,7 +3569,25 @@ pub mod v1 {
         pub attempt_id: AttemptId,
         /// Invocation epoch that prepared the invocation.
         pub invocation_epoch: u32,
+        /// Store-visible claim id for the active lane claim.
+        pub claim_id: events::ResourceLaneClaimId,
+        /// Lane-local fencing token for the active claim.
+        pub claim_fencing_token: u64,
+        /// Lane-local transition sequence that acquired the active claim.
+        pub lane_transition_seq: u64,
     }
+
+    /// Durable lane-local authority folded from committed resource-lane transitions.
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct ResourceLaneAuthority {
+        /// Highest committed lane-local transition sequence for this lane.
+        pub last_transition_seq: u64,
+        /// Highest committed lane-local fencing token assigned to a claim for this lane.
+        pub last_claim_fencing_token: u64,
+    }
+
+    /// Resource-lane authority rows keyed by lane identity.
+    pub type ResourceLaneAuthoritySet = BTreeMap<ResourceLaneKey, ResourceLaneAuthority>;
 
     /// Side-effect artifact evidence retained by the projection.
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4482,19 +4804,111 @@ pub mod v1 {
         Ok(())
     }
 
-    /// Async typed run event store commit contract for durable stores.
+    /// Observation-only status for run list/watch pages.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum ObservedRunStatus {
+        /// The run has been admitted and has not completed in the observed frontier.
+        Started,
+        /// The run has a committed terminal event in the observed frontier.
+        Completed,
+    }
+
+    impl ObservedRunStatus {
+        /// Returns the stable public tag.
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                Self::Started => "started",
+                Self::Completed => "completed",
+            }
+        }
+
+        /// Parses a stable public tag.
+        pub fn parse(value: &str) -> Result<Self> {
+            match value {
+                "started" => Ok(Self::Started),
+                "completed" => Ok(Self::Completed),
+                other => Err(StoreError::ObservationUnavailable {
+                    message: format!("unknown observed run status {other}"),
+                }),
+            }
+        }
+    }
+
+    /// One run row returned by the observation list/watch API.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct RunObservation {
+        /// Run id.
+        pub run_id: RunId,
+        /// Observed stream head at the sealed frontier.
+        pub head_seq: StreamSeq,
+        /// Observation-only run status.
+        pub observed_status: ObservedRunStatus,
+        /// First observed commit timestamp as RFC3339 text.
+        pub started_at: String,
+        /// Latest observed commit timestamp as RFC3339 text.
+        pub updated_at: String,
+        /// Completion timestamp when the observed status is completed.
+        pub completed_at: Option<String>,
+        /// Optional opaque change identifier for this observation row.
+        pub change_id: Option<String>,
+    }
+
+    /// Query for the shared run observation list/watch API.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct RunObservationQuery {
+        /// Opaque cursor returned by a previous page.
+        pub cursor: Option<String>,
+        /// Maximum rows to return. v1 has no separate list-page cursor.
+        pub limit: u32,
+        /// Long-poll wait in milliseconds. A timeout returns an empty successful page.
+        pub wait_ms: u64,
+    }
+
+    impl RunObservationQuery {
+        /// Creates a bounded observation query.
+        pub fn new(cursor: Option<String>, limit: u32, wait_ms: u64) -> Self {
+            Self {
+                cursor,
+                limit,
+                wait_ms,
+            }
+        }
+    }
+
+    /// One run observation list/watch page.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct RunObservationPage {
+        /// Opaque cursor for the returned sealed frontier.
+        pub next_cursor: String,
+        /// Observed run rows.
+        pub runs: Vec<RunObservation>,
+    }
+
+    /// Internal storage boundary for observation list/watch pages.
+    pub trait RunObservationStore {
+        /// Backend-specific error.
+        type Error: Send + Sync + 'static;
+
+        /// Reads one bounded list/watch observation page.
+        fn read_run_observations<'a>(
+            &'a self,
+            query: RunObservationQuery,
+        ) -> AsyncStoreFuture<'a, RunObservationPage, Self::Error>;
+    }
+
+    /// Async run event store commit contract for durable stores.
     ///
     /// Runtime execution code must derive run-local read views from the authoritative stream
     /// returned by [`Self::load_run_stream`]. App status rendering may additionally request
     /// store-owned cross-run projection authority through [`Self::status_projection_snapshot`].
-    pub trait AsyncTypedRunEventStore {
+    pub trait RunEventStore {
         /// Store-specific error type.
         type Error: StoreErrorInspection + fmt::Display + Send + Sync + 'static;
 
-        /// Atomically appends one purpose-specific prepared commit plan.
-        fn append_prepared_commit_plan<'a>(
+        /// Atomically appends one purpose-specific prepared commit bundle.
+        fn append_prepared_commit_bundle<'a>(
             &'a self,
-            plan: PreparedCommitPlan,
+            bundle: PreparedCommitBundle,
         ) -> AsyncStoreFuture<'a, CommitOutcome, Self::Error>;
 
         /// Loads the authoritative run stream.
@@ -4539,7 +4953,7 @@ pub mod v1 {
     /// the storage implementation's responsibility because the RFC requires that lookup to precede
     /// stale `expected_next_seq` checks.
     #[derive(Debug, Clone, PartialEq, Eq)]
-    pub struct TypedCommitBase {
+    pub struct CommitBase {
         /// Artifact evidence recorded before event commit.
         pub artifacts: BTreeMap<ArtifactId, ArtifactEvidenceRef>,
         /// Logical keys already present in the run stream.
@@ -4553,20 +4967,35 @@ pub mod v1 {
         pub unique_logical_payloads: UniqueLogicalPayloads,
         /// Current projections derived from the authoritative run stream.
         pub projections: ProjectionSnapshot,
+        /// Lane-local transition authority folded from committed resource-lane history.
+        pub resource_lane_authority: ResourceLaneAuthoritySet,
         /// Store-owned next sequence for the run being committed.
         pub actual_next_seq: StreamSeq,
     }
 
-    /// Staged result of validating a typed commit against a [`TypedCommitBase`].
     #[derive(Debug, Clone, PartialEq, Eq)]
-    pub struct StagedTypedCommit {
+    struct MaterializedActiveLane {
+        holder: SideEffectLedgerRef,
+        ledger_purpose: events::SideEffectLedgerPurpose,
+        node_id: NodeId,
+        attempt_id: AttemptId,
+        invocation_epoch: u32,
+        claim_id: events::ResourceLaneClaimId,
+        claim_fencing_token: u64,
+        lane_transition_seq: u64,
+    }
+
+    /// Staged result of validating a typed commit against a [`CommitBase`].
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct StagedCommit {
         batch: CommittedBatch,
         logical_keys: LogicalKeySet,
         unique_logical_payloads: UniqueLogicalPayloads,
         projections: ProjectionSnapshot,
+        resource_lane_authority: ResourceLaneAuthoritySet,
     }
 
-    impl StagedTypedCommit {
+    impl StagedCommit {
         /// Store-owned committed batch.
         pub fn batch(&self) -> &CommittedBatch {
             &self.batch
@@ -4587,6 +5016,11 @@ pub mod v1 {
             &self.projections
         }
 
+        /// Staged resource-lane authority after this commit.
+        pub fn resource_lane_authority(&self) -> &ResourceLaneAuthoritySet {
+            &self.resource_lane_authority
+        }
+
         /// Consumes this staged commit into owned parts.
         pub fn into_parts(
             self,
@@ -4595,28 +5029,32 @@ pub mod v1 {
             LogicalKeySet,
             UniqueLogicalPayloads,
             ProjectionSnapshot,
+            ResourceLaneAuthoritySet,
         ) {
             (
                 self.batch,
                 self.logical_keys,
                 self.unique_logical_payloads,
                 self.projections,
+                self.resource_lane_authority,
             )
         }
     }
 
     /// Private in-memory implementation behind the async typed store test backend.
     #[derive(Debug, Clone, Default)]
-    struct TypedRunMemoryCore {
+    struct RunMemoryCore {
         streams: BTreeMap<RunId, Vec<CommittedBatch>>,
         commit_keys: BTreeMap<(RunId, CommitKey), CommitKeyRecord>,
         artifacts: BTreeMap<ArtifactId, ArtifactEvidenceRef>,
+        artifact_bytes: BTreeMap<(ArtifactId, ContentDigest), (Vec<u8>, ArtifactEvidenceRef)>,
         logical_keys: BTreeSet<(RunId, LogicalEventKey)>,
         unique_logical_payloads: BTreeMap<(RunId, LogicalEventKey), ContentDigest>,
         projections: ProjectionSnapshot,
+        resource_lane_authority: ResourceLaneAuthoritySet,
     }
 
-    impl TypedRunMemoryCore {
+    impl RunMemoryCore {
         fn stream_events(&self, run_id: &RunId) -> Vec<KernelEventEnvelope> {
             self.streams
                 .get(run_id)
@@ -4697,7 +5135,7 @@ pub mod v1 {
             validate_artifact_requirement_against_evidence(requirement, stored)
         }
 
-        fn validate_preconditions(&self, request: &TypedCommitRequest) -> Result<()> {
+        fn validate_preconditions(&self, request: &CommitRequest) -> Result<()> {
             let actual_run_state = self.projections.run_state(&request.run_id);
             let run_state_ok = match request.preconditions.required_run_state {
                 RequiredRunState::Any => true,
@@ -4779,18 +5217,21 @@ pub mod v1 {
     /// The returned batch fingerprint covers the full prepared mutation, including the artifact
     /// evidence admitted atomically with the event payloads.
     pub fn stage_prepared_commit_plan(
-        base: &TypedCommitBase,
+        base: &CommitBase,
         plan: &PreparedCommitPlan,
-    ) -> Result<StagedTypedCommit> {
+    ) -> Result<StagedCommit> {
         let fingerprint = prepared_commit_plan_fingerprint(plan)?;
-        stage_typed_run_commit_with_fingerprint(base, plan.request(), fingerprint)
+        let (request, resource_lane_authority) =
+            materialize_resource_lane_intents(base, plan.request(), &fingerprint)?;
+        stage_run_commit_with_fingerprint(base, &request, fingerprint, resource_lane_authority)
     }
 
-    fn stage_typed_run_commit_with_fingerprint(
-        base: &TypedCommitBase,
-        request: &TypedCommitRequest,
+    fn stage_run_commit_with_fingerprint(
+        base: &CommitBase,
+        request: &CommitRequest,
         fingerprint: CommitFingerprint,
-    ) -> Result<StagedTypedCommit> {
+        staged_resource_lane_authority: ResourceLaneAuthoritySet,
+    ) -> Result<StagedCommit> {
         if request.expected_next_seq != base.actual_next_seq {
             return Err(StoreError::StaleExpectedNextSeq {
                 expected: request.expected_next_seq,
@@ -4807,13 +5248,15 @@ pub mod v1 {
         validate_retention_manifest_pairs(&request.payloads)?;
         validate_payload_public_diagnostics(&request.payloads)?;
 
-        let verifier = TypedRunMemoryCore {
+        let verifier = RunMemoryCore {
             streams: BTreeMap::new(),
             commit_keys: BTreeMap::new(),
             artifacts: base.artifacts.clone(),
+            artifact_bytes: BTreeMap::new(),
             logical_keys: base.logical_keys.clone(),
             unique_logical_payloads: base.unique_logical_payloads.clone(),
             projections: base.projections.clone(),
+            resource_lane_authority: base.resource_lane_authority.clone(),
         };
         verifier.validate_preconditions(request)?;
 
@@ -4895,7 +5338,7 @@ pub mod v1 {
             events.push(envelope);
         }
 
-        Ok(StagedTypedCommit {
+        Ok(StagedCommit {
             batch: CommittedBatch {
                 run_id: request.run_id.clone(),
                 commit_key: request.commit_key.clone(),
@@ -4906,7 +5349,301 @@ pub mod v1 {
             logical_keys: staged_logical_keys,
             unique_logical_payloads: staged_unique_payloads,
             projections: staged_projections,
+            resource_lane_authority: staged_resource_lane_authority,
         })
+    }
+
+    fn materialize_resource_lane_intents(
+        base: &CommitBase,
+        request: &CommitRequest,
+        fingerprint: &CommitFingerprint,
+    ) -> Result<(CommitRequest, ResourceLaneAuthoritySet)> {
+        let mut resource_lane_authority = base.resource_lane_authority.clone();
+        let mut active_lanes = materialized_active_resource_lanes(&base.projections);
+        let mut materialized_payloads = Vec::with_capacity(request.payloads.len());
+
+        for payload in &request.payloads {
+            match payload {
+                KernelEventPayload::ResourceLaneClaimIntent(intent) => {
+                    let lane_key = ResourceLaneKey::from_evidence(&intent.resource_key);
+                    let holder =
+                        SideEffectLedgerRef::new(request.run_id.clone(), intent.ledger_key.clone());
+                    if let Some((existing_key, _)) = active_lanes
+                        .iter()
+                        .find(|(_, active)| active.holder == holder)
+                    {
+                        return Err(StoreError::ProjectionConflict {
+                            key: format!("resource_lane:{}", intent.ledger_key),
+                            message: format!(
+                                "side-effect holder already has active resource lane {}:{}",
+                                existing_key.namespace, existing_key.key
+                            ),
+                        });
+                    }
+                    if let Some(existing) = active_lanes.get(&lane_key) {
+                        if existing.holder != holder {
+                            return Err(StoreError::ResourceLaneBlocked {
+                                lane_key: Box::new(lane_key),
+                                holder: Box::new(existing.holder.clone()),
+                            });
+                        }
+                    }
+
+                    let authority = resource_lane_authority.entry(lane_key.clone()).or_default();
+                    let lane_transition_seq = checked_lane_increment(
+                        authority.last_transition_seq,
+                        "resource lane transition sequence",
+                    )?;
+                    let claim_fencing_token = checked_lane_increment(
+                        authority.last_claim_fencing_token,
+                        "resource lane fencing token",
+                    )?;
+                    let claim_id = derive_resource_lane_claim_id(
+                        &request.run_id,
+                        &lane_key,
+                        intent,
+                        claim_fencing_token,
+                        lane_transition_seq,
+                        fingerprint,
+                    )?;
+                    let claimed = events::ResourceLaneClaimed {
+                        spec_hash: intent.spec_hash.clone(),
+                        node_id: intent.node_id.clone(),
+                        attempt_id: intent.attempt_id.clone(),
+                        ledger_key: intent.ledger_key.clone(),
+                        ledger_purpose: intent.ledger_purpose.clone(),
+                        invocation_epoch: intent.invocation_epoch,
+                        resource_key: intent.resource_key.clone(),
+                        requirement_digest: intent.requirement_digest.clone(),
+                        resolved_by_capability_impl: intent.resolved_by_capability_impl.clone(),
+                        claim_id,
+                        claim_fencing_token,
+                        lane_transition_seq,
+                    };
+                    authority.last_transition_seq = lane_transition_seq;
+                    authority.last_claim_fencing_token = claim_fencing_token;
+                    active_lanes.insert(
+                        lane_key,
+                        MaterializedActiveLane::from_claimed(&request.run_id, &claimed),
+                    );
+                    materialized_payloads.push(KernelEventPayload::ResourceLaneClaimed(claimed));
+                }
+                KernelEventPayload::ResourceLaneReleaseIntent(intent) => {
+                    let holder =
+                        SideEffectLedgerRef::new(request.run_id.clone(), intent.ledger_key.clone());
+                    let Some((lane_key, active)) = active_lanes
+                        .iter()
+                        .find(|(_, active)| active.holder == holder)
+                        .map(|(lane_key, active)| (lane_key.clone(), active.clone()))
+                    else {
+                        return Err(StoreError::ProjectionConflict {
+                            key: format!("resource_lane:{}", intent.ledger_key),
+                            message: "resource lane release requires an active claim".to_owned(),
+                        });
+                    };
+                    if active.node_id != intent.node_id
+                        || active.attempt_id != intent.attempt_id
+                        || active.ledger_purpose != intent.ledger_purpose
+                        || active.invocation_epoch != intent.invocation_epoch
+                        || active.claim_id != intent.claim_id
+                    {
+                        return Err(StoreError::ProjectionConflict {
+                            key: format!("resource_lane:{}:{}", lane_key.namespace, lane_key.key),
+                            message: "resource lane release intent does not match active claim"
+                                .to_owned(),
+                        });
+                    }
+                    let authority =
+                        resource_lane_authority.get_mut(&lane_key).ok_or_else(|| {
+                            StoreError::ProjectionConflict {
+                                key: format!(
+                                    "resource_lane:{}:{}",
+                                    lane_key.namespace, lane_key.key
+                                ),
+                                message: "resource lane authority missing active claim history"
+                                    .to_owned(),
+                            }
+                        })?;
+                    if authority.last_transition_seq < active.lane_transition_seq
+                        || authority.last_claim_fencing_token < active.claim_fencing_token
+                    {
+                        return Err(StoreError::ProjectionConflict {
+                            key: format!("resource_lane:{}:{}", lane_key.namespace, lane_key.key),
+                            message: "resource lane authority is behind active claim".to_owned(),
+                        });
+                    }
+                    let lane_transition_seq = checked_lane_increment(
+                        authority.last_transition_seq,
+                        "resource lane transition sequence",
+                    )?;
+                    let release_id = derive_resource_lane_release_id(
+                        &request.run_id,
+                        &lane_key,
+                        intent,
+                        active.claim_fencing_token,
+                        lane_transition_seq,
+                        fingerprint,
+                    )?;
+                    let released = events::ResourceLaneReleased {
+                        spec_hash: intent.spec_hash.clone(),
+                        node_id: intent.node_id.clone(),
+                        attempt_id: intent.attempt_id.clone(),
+                        ledger_key: intent.ledger_key.clone(),
+                        ledger_purpose: intent.ledger_purpose.clone(),
+                        invocation_epoch: intent.invocation_epoch,
+                        claim_id: intent.claim_id.clone(),
+                        release_id,
+                        claim_fencing_token: active.claim_fencing_token,
+                        release_reason: intent.release_reason.clone(),
+                        lane_transition_seq,
+                    };
+                    authority.last_transition_seq = lane_transition_seq;
+                    active_lanes.remove(&lane_key);
+                    materialized_payloads.push(KernelEventPayload::ResourceLaneReleased(released));
+                }
+                KernelEventPayload::ResourceLaneClaimed(_)
+                | KernelEventPayload::ResourceLaneReleased(_) => {
+                    return Err(StoreError::Event(
+                        "prepared commits must use resource-lane intents, not store-filled lane events"
+                            .to_owned(),
+                    ));
+                }
+                _ => materialized_payloads.push(payload.clone()),
+            }
+        }
+
+        let request = CommitRequest::from_payloads(
+            request.run_id.clone(),
+            request.expected_next_seq,
+            request.commit_key.clone(),
+            materialized_payloads,
+            request.required_artifacts.clone(),
+            request.preconditions.clone(),
+        )?;
+        Ok((request, resource_lane_authority))
+    }
+
+    impl MaterializedActiveLane {
+        fn from_projection(projection: &ResourceLaneProjection) -> Self {
+            Self {
+                holder: projection.holder.clone(),
+                ledger_purpose: projection.ledger_purpose.clone(),
+                node_id: projection.node_id.clone(),
+                attempt_id: projection.attempt_id.clone(),
+                invocation_epoch: projection.invocation_epoch,
+                claim_id: projection.claim_id.clone(),
+                claim_fencing_token: projection.claim_fencing_token,
+                lane_transition_seq: projection.lane_transition_seq,
+            }
+        }
+
+        fn from_claimed(run_id: &RunId, payload: &events::ResourceLaneClaimed) -> Self {
+            Self {
+                holder: SideEffectLedgerRef::new(run_id.clone(), payload.ledger_key.clone()),
+                ledger_purpose: payload.ledger_purpose.clone(),
+                node_id: payload.node_id.clone(),
+                attempt_id: payload.attempt_id.clone(),
+                invocation_epoch: payload.invocation_epoch,
+                claim_id: payload.claim_id.clone(),
+                claim_fencing_token: payload.claim_fencing_token,
+                lane_transition_seq: payload.lane_transition_seq,
+            }
+        }
+    }
+
+    fn materialized_active_resource_lanes(
+        projections: &ProjectionSnapshot,
+    ) -> BTreeMap<ResourceLaneKey, MaterializedActiveLane> {
+        projections
+            .resource_lanes()
+            .map(|(lane_key, projection)| {
+                (
+                    lane_key.clone(),
+                    MaterializedActiveLane::from_projection(projection),
+                )
+            })
+            .collect()
+    }
+
+    fn checked_lane_increment(value: u64, label: &'static str) -> Result<u64> {
+        value
+            .checked_add(1)
+            .filter(|value| *value > 0)
+            .ok_or_else(|| StoreError::Event(format!("{label} overflow")))
+    }
+
+    fn derive_resource_lane_claim_id(
+        run_id: &RunId,
+        lane_key: &ResourceLaneKey,
+        intent: &events::ResourceLaneClaimIntent,
+        claim_fencing_token: u64,
+        lane_transition_seq: u64,
+        fingerprint: &CommitFingerprint,
+    ) -> Result<events::ResourceLaneClaimId> {
+        let digest = canonical_json(serde_json::json!({
+            "attempt_id": intent.attempt_id.as_str(),
+            "claim_fencing_token": claim_fencing_token,
+            "commit_fingerprint": fingerprint.as_digest().as_str(),
+            "invocation_epoch": intent.invocation_epoch,
+            "lane_key": {
+                "key": lane_key.key.as_str(),
+                "namespace": lane_key.namespace.as_str(),
+            },
+            "lane_transition_seq": lane_transition_seq,
+            "ledger_key": intent.ledger_key.as_str(),
+            "ledger_purpose": side_effect_ledger_purpose_json(&intent.ledger_purpose),
+            "node_id": intent.node_id.as_str(),
+            "run_id": run_id.as_str(),
+        }))?
+        .content_digest();
+        Ok(events::ResourceLaneClaimId::new(format!(
+            "mfm.store.lane.claim.{}",
+            short_digest(&digest)
+        ))?)
+    }
+
+    fn derive_resource_lane_release_id(
+        run_id: &RunId,
+        lane_key: &ResourceLaneKey,
+        intent: &events::ResourceLaneReleaseIntent,
+        claim_fencing_token: u64,
+        lane_transition_seq: u64,
+        fingerprint: &CommitFingerprint,
+    ) -> Result<events::ResourceLaneReleaseId> {
+        let digest = canonical_json(serde_json::json!({
+            "attempt_id": intent.attempt_id.as_str(),
+            "claim_fencing_token": claim_fencing_token,
+            "claim_id": intent.claim_id.as_str(),
+            "commit_fingerprint": fingerprint.as_digest().as_str(),
+            "invocation_epoch": intent.invocation_epoch,
+            "lane_key": {
+                "key": lane_key.key.as_str(),
+                "namespace": lane_key.namespace.as_str(),
+            },
+            "lane_transition_seq": lane_transition_seq,
+            "ledger_key": intent.ledger_key.as_str(),
+            "ledger_purpose": side_effect_ledger_purpose_json(&intent.ledger_purpose),
+            "node_id": intent.node_id.as_str(),
+            "release_reason": intent.release_reason.as_str(),
+            "run_id": run_id.as_str(),
+        }))?
+        .content_digest();
+        Ok(events::ResourceLaneReleaseId::new(format!(
+            "mfm.store.lane.release.{}",
+            short_digest(&digest)
+        ))?)
+    }
+
+    fn short_digest(digest: &ContentDigest) -> String {
+        digest
+            .as_str()
+            .rsplit(':')
+            .next()
+            .unwrap_or(digest.as_str())
+            .chars()
+            .filter(|ch| ch.is_ascii_alphanumeric())
+            .take(32)
+            .collect()
     }
 
     /// Builds a store-owned committed batch for an already persisted prepared commit plan.
@@ -4922,7 +5659,7 @@ pub mod v1 {
     }
 
     fn build_committed_batch_with_fingerprint(
-        request: &TypedCommitRequest,
+        request: &CommitRequest,
         committed_seq: StreamSeq,
         fingerprint: CommitFingerprint,
     ) -> Result<CommittedBatch> {
@@ -4968,17 +5705,18 @@ pub mod v1 {
         })
     }
 
-    impl TypedRunMemoryCore {
+    impl RunMemoryCore {
         fn projection_snapshot(&self) -> &ProjectionSnapshot {
             &self.projections
         }
 
-        fn append_prepared_commit_plan(
+        fn append_prepared_commit_bundle(
             &mut self,
-            plan: PreparedCommitPlan,
+            bundle: PreparedCommitBundle,
         ) -> Result<CommitOutcome> {
+            let plan = bundle.plan();
             let request = plan.request();
-            let fingerprint = prepared_commit_plan_fingerprint(&plan)?;
+            let fingerprint = prepared_commit_plan_fingerprint(plan)?;
 
             if let Some(record) = self
                 .commit_keys
@@ -4993,17 +5731,41 @@ pub mod v1 {
             }
 
             let mut artifacts = self.artifacts.clone();
-            admit_artifact_evidence(&mut artifacts, plan.admitted_artifacts())?;
-            let base = TypedCommitBase {
+            admit_artifact_evidence(&mut artifacts, bundle.admitted_artifacts())?;
+            let base = CommitBase {
                 artifacts,
                 logical_keys: self.logical_keys.clone(),
                 unique_logical_payloads: self.unique_logical_payloads.clone(),
                 projections: self.projections.clone(),
+                resource_lane_authority: self.resource_lane_authority.clone(),
                 actual_next_seq: self.expected_next_seq(&request.run_id),
             };
-            let staged = stage_prepared_commit_plan(&base, &plan)?;
-            let (batch, staged_logical_keys, staged_unique_payloads, staged_projections) =
-                staged.into_parts();
+            let staged = stage_prepared_commit_plan(&base, plan)?;
+            let (
+                batch,
+                staged_logical_keys,
+                staged_unique_payloads,
+                staged_projections,
+                staged_resource_lane_authority,
+            ) = staged.into_parts();
+            for artifact in bundle.artifact_bytes() {
+                let verified = PreparedArtifactBytes::new(
+                    artifact.bytes().to_vec(),
+                    artifact.evidence().clone(),
+                )?;
+                let (bytes, evidence, evidence_hash) = verified.into_parts();
+                let key = (evidence.artifact_id.clone(), evidence_hash);
+                if let Some((stored_bytes, stored_evidence)) = self.artifact_bytes.get(&key) {
+                    if stored_bytes != &bytes || stored_evidence != &evidence {
+                        return Err(StoreError::ArtifactEvidenceMismatch {
+                            artifact_id: evidence.artifact_id,
+                            field: "artifact",
+                        });
+                    }
+                } else {
+                    self.artifact_bytes.insert(key, (bytes, evidence));
+                }
+            }
             self.streams
                 .entry(request.run_id.clone())
                 .or_default()
@@ -5019,6 +5781,7 @@ pub mod v1 {
             self.logical_keys = staged_logical_keys;
             self.unique_logical_payloads = staged_unique_payloads;
             self.projections = staged_projections;
+            self.resource_lane_authority = staged_resource_lane_authority;
             Ok(CommitOutcome::Appended(batch))
         }
 
@@ -5037,16 +5800,16 @@ pub mod v1 {
         }
     }
 
-    /// Non-durable async wrapper around a private in-memory typed store core.
+    /// Non-durable async wrapper around a private in-memory run store core.
     ///
     /// This is intended for contract tests and single-process local tools that need the async typed
     /// store API without a durable backend. It must not be used as a production persistence store.
     #[derive(Debug, Clone, Default)]
-    pub struct AsyncInMemoryTypedRunStore {
-        inner: Arc<Mutex<TypedRunMemoryCore>>,
+    pub struct AsyncInMemoryRunStore {
+        inner: Arc<Mutex<RunMemoryCore>>,
     }
 
-    impl AsyncInMemoryTypedRunStore {
+    impl AsyncInMemoryRunStore {
         /// Creates an empty async in-memory typed run store.
         pub fn new() -> Self {
             Self::default()
@@ -5058,23 +5821,23 @@ pub mod v1 {
                 .map(|store| store.projection_snapshot().clone())
         }
 
-        fn lock_inner(&self) -> Result<MutexGuard<'_, TypedRunMemoryCore>> {
+        fn lock_inner(&self) -> Result<MutexGuard<'_, RunMemoryCore>> {
             self.inner.lock().map_err(|_| {
-                StoreError::Event("async in-memory typed run store lock poisoned".to_owned())
+                StoreError::Event("async in-memory run store lock poisoned".to_owned())
             })
         }
     }
 
-    impl AsyncTypedRunEventStore for AsyncInMemoryTypedRunStore {
+    impl RunEventStore for AsyncInMemoryRunStore {
         type Error = StoreError;
 
-        fn append_prepared_commit_plan<'a>(
+        fn append_prepared_commit_bundle<'a>(
             &'a self,
-            plan: PreparedCommitPlan,
+            bundle: PreparedCommitBundle,
         ) -> AsyncStoreFuture<'a, CommitOutcome, Self::Error> {
             let result = self
                 .lock_inner()
-                .and_then(|mut store| store.append_prepared_commit_plan(plan));
+                .and_then(|mut store| store.append_prepared_commit_bundle(bundle));
             Box::pin(std::future::ready(result))
         }
 
@@ -5115,6 +5878,158 @@ pub mod v1 {
                     )
                 })
                 .and_then(|result| result);
+            Box::pin(std::future::ready(result))
+        }
+    }
+
+    impl RunObservationStore for AsyncInMemoryRunStore {
+        type Error = StoreError;
+
+        fn read_run_observations<'a>(
+            &'a self,
+            query: RunObservationQuery,
+        ) -> AsyncStoreFuture<'a, RunObservationPage, Self::Error> {
+            let result = self.lock_inner().and_then(|store| {
+                const MAX_LIMIT: u32 = 100;
+                if query.limit == 0 || query.limit > MAX_LIMIT {
+                    return Err(StoreError::LimitOutOfRange {
+                        limit: query.limit,
+                        max: MAX_LIMIT,
+                    });
+                }
+                let mut commits = Vec::<(&RunId, &CommittedBatch)>::new();
+                for (run_id, batches) in &store.streams {
+                    for batch in batches {
+                        commits.push((run_id, batch));
+                    }
+                }
+                commits.sort_by(|left, right| {
+                    left.1
+                        .seq
+                        .cmp(&right.1.seq)
+                        .then_with(|| left.0.cmp(right.0))
+                });
+                let total_commits = commits.len();
+                let timestamp = "1970-01-01T00:00:00.000000Z".to_owned();
+                let rows = if let Some(cursor) = query.cursor.as_deref() {
+                    let start = parse_memory_observation_cursor(cursor)?;
+                    commits
+                        .into_iter()
+                        .enumerate()
+                        .skip(start)
+                        .take(query.limit as usize)
+                        .map(|(index, (run_id, batch))| {
+                            memory_observation_row(
+                                &store.projections,
+                                run_id,
+                                batch.seq,
+                                timestamp.clone(),
+                                Some(format!("memory:{index}")),
+                            )
+                        })
+                        .collect::<Result<Vec<_>>>()?
+                } else {
+                    store
+                        .streams
+                        .iter()
+                        .filter_map(|(run_id, batches)| {
+                            batches.last().map(|batch| (run_id.clone(), batch.seq))
+                        })
+                        .take(query.limit as usize)
+                        .map(|(run_id, seq)| {
+                            memory_observation_row(
+                                &store.projections,
+                                &run_id,
+                                seq,
+                                timestamp.clone(),
+                                None,
+                            )
+                        })
+                        .collect::<Result<Vec<_>>>()?
+                };
+                Ok(RunObservationPage {
+                    next_cursor: format!("memory:{total_commits}"),
+                    runs: rows,
+                })
+            });
+            Box::pin(std::future::ready(result))
+        }
+    }
+
+    fn parse_memory_observation_cursor(cursor: &str) -> Result<usize> {
+        let Some(value) = cursor.strip_prefix("memory:") else {
+            return Err(StoreError::InvalidCursor {
+                message: "in-memory observation cursor has an unsupported format".to_owned(),
+            });
+        };
+        value
+            .parse::<usize>()
+            .map_err(|_| StoreError::InvalidCursor {
+                message: "in-memory observation cursor has an invalid position".to_owned(),
+            })
+    }
+
+    fn memory_observation_row(
+        projections: &ProjectionSnapshot,
+        run_id: &RunId,
+        head_seq: StreamSeq,
+        timestamp: String,
+        change_id: Option<String>,
+    ) -> Result<RunObservation> {
+        let observed_status = match projections.run_state(run_id) {
+            RunState::Started => ObservedRunStatus::Started,
+            RunState::Completed => ObservedRunStatus::Completed,
+            RunState::Absent => {
+                return Err(StoreError::ObservationUnavailable {
+                    message: "in-memory observation had absent run state".to_owned(),
+                })
+            }
+        };
+        Ok(RunObservation {
+            run_id: run_id.clone(),
+            head_seq,
+            observed_status,
+            started_at: timestamp.clone(),
+            updated_at: timestamp.clone(),
+            completed_at: (observed_status == ObservedRunStatus::Completed).then_some(timestamp),
+            change_id,
+        })
+    }
+
+    impl RetainedArtifactReadProvider for AsyncInMemoryRunStore {
+        fn read_retained_artifact<'a>(
+            &'a self,
+            requirement: &'a EventArtifactRequirement,
+        ) -> RetainedArtifactReadFuture<'a> {
+            let result = self.lock_inner().and_then(|store| {
+                let mut saw_mismatch = false;
+                for ((artifact_id, _), (bytes, evidence)) in &store.artifact_bytes {
+                    if artifact_id != &requirement.artifact_id {
+                        continue;
+                    }
+                    match VerifiedRunArtifactBytes::new(
+                        bytes.clone(),
+                        evidence.clone(),
+                        requirement,
+                    ) {
+                        Ok(artifact) => return Ok(artifact),
+                        Err(StoreError::ArtifactEvidenceMismatch { .. }) => {
+                            saw_mismatch = true;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                if saw_mismatch {
+                    Err(StoreError::ArtifactEvidenceMismatch {
+                        artifact_id: requirement.artifact_id.clone(),
+                        field: "artifact",
+                    })
+                } else {
+                    Err(StoreError::MissingArtifact {
+                        artifact_id: requirement.artifact_id.clone(),
+                    })
+                }
+            });
             Box::pin(std::future::ready(result))
         }
     }
@@ -5302,7 +6217,7 @@ pub mod v1 {
 
     fn validate_required_artifacts_cover_payload_references(
         purpose: &'static str,
-        request: &TypedCommitRequest,
+        request: &CommitRequest,
     ) -> Result<()> {
         let required = request
             .required_artifacts
@@ -5322,6 +6237,25 @@ pub mod v1 {
                 })?;
                 validate_required_artifact_requirement(purpose, &requirement, evidence)?;
             }
+        }
+        Ok(())
+    }
+
+    fn reject_store_materialized_resource_lane_payloads(
+        purpose: &'static str,
+        request: &CommitRequest,
+    ) -> Result<()> {
+        if request.payloads.iter().any(|payload| {
+            matches!(
+                payload,
+                KernelEventPayload::ResourceLaneClaimed(_)
+                    | KernelEventPayload::ResourceLaneReleased(_)
+            )
+        }) {
+            return Err(invalid_prepared_commit_purpose(
+                purpose,
+                "prepared commits must use resource-lane intents, not store-filled lane events",
+            ));
         }
         Ok(())
     }
@@ -5759,7 +6693,7 @@ pub mod v1 {
         Ok(())
     }
 
-    fn validate_run_start_commit(request: &TypedCommitRequest) -> Result<()> {
+    fn validate_run_start_commit(request: &CommitRequest) -> Result<()> {
         if request.payloads.len() != 1
             || !matches!(
                 request.payloads.first(),
@@ -5780,7 +6714,7 @@ pub mod v1 {
         Ok(())
     }
 
-    fn validate_state_attempt_started_commit(request: &TypedCommitRequest) -> Result<()> {
+    fn validate_state_attempt_started_commit(request: &CommitRequest) -> Result<()> {
         if request.payloads.len() != 1
             || !matches!(
                 request.payloads.first(),
@@ -5801,7 +6735,7 @@ pub mod v1 {
         Ok(())
     }
 
-    fn validate_attempt_terminal_commit(request: &TypedCommitRequest) -> Result<()> {
+    fn validate_attempt_terminal_commit(request: &CommitRequest) -> Result<()> {
         reject_wrong_purpose_payloads(
             AttemptTerminal::NAME,
             request,
@@ -5814,10 +6748,11 @@ pub mod v1 {
             is_attempt_terminal_payload,
             "missing attempt-terminal payload",
         )?;
+        validate_attempt_terminal_resource_lane_release_batch(request)?;
         validate_terminal_attempt_cell_pairs(&request.payloads)
     }
 
-    fn validate_side_effect_terminal_commit(request: &TypedCommitRequest) -> Result<()> {
+    fn validate_side_effect_terminal_commit(request: &CommitRequest) -> Result<()> {
         reject_wrong_purpose_payloads(
             SideEffectTerminal::NAME,
             request,
@@ -5827,13 +6762,14 @@ pub mod v1 {
         require_purpose_payload(
             SideEffectTerminal::NAME,
             request,
-            is_side_effect_terminal_payload,
+            is_side_effect_terminal_disposition_payload,
             "missing side-effect terminal payload",
         )?;
+        validate_side_effect_terminal_resource_lane_release_batch(request)?;
         validate_terminal_attempt_cell_pairs(&request.payloads)
     }
 
-    fn validate_side_effect_progress_commit(request: &TypedCommitRequest) -> Result<()> {
+    fn validate_side_effect_progress_commit(request: &CommitRequest) -> Result<()> {
         reject_wrong_purpose_payloads(
             SideEffectProgress::NAME,
             request,
@@ -5848,7 +6784,7 @@ pub mod v1 {
         )
     }
 
-    fn validate_retention_commit(request: &TypedCommitRequest) -> Result<()> {
+    fn validate_retention_commit(request: &CommitRequest) -> Result<()> {
         reject_wrong_purpose_payloads(
             Retention::NAME,
             request,
@@ -5864,7 +6800,7 @@ pub mod v1 {
         validate_terminal_attempt_cell_pairs(&request.payloads)
     }
 
-    fn validate_manual_resolution_commit(request: &TypedCommitRequest) -> Result<()> {
+    fn validate_manual_resolution_commit(request: &CommitRequest) -> Result<()> {
         if request.payloads.len() != 1
             || !matches!(
                 request.payloads.first(),
@@ -5892,7 +6828,7 @@ pub mod v1 {
     }
 
     fn validate_manual_resolution_commit_with_proof(
-        request: &TypedCommitRequest,
+        request: &CommitRequest,
         proof: &VerifiedManualResolutionForPrefix,
     ) -> Result<()> {
         validate_manual_resolution_commit(request)?;
@@ -5978,7 +6914,7 @@ pub mod v1 {
         Ok(())
     }
 
-    fn validate_saga_terminal_commit(request: &TypedCommitRequest) -> Result<()> {
+    fn validate_saga_terminal_commit(request: &CommitRequest) -> Result<()> {
         reject_wrong_purpose_payloads(
             SagaTerminal::NAME,
             request,
@@ -6007,7 +6943,7 @@ pub mod v1 {
     }
 
     fn validate_saga_terminal_commit_with_proof(
-        request: &TypedCommitRequest,
+        request: &CommitRequest,
         proof: &SagaTerminalProof,
     ) -> Result<()> {
         validate_saga_terminal_commit(request)?;
@@ -6083,7 +7019,7 @@ pub mod v1 {
 
     fn require_purpose_payload(
         purpose: &'static str,
-        request: &TypedCommitRequest,
+        request: &CommitRequest,
         predicate: impl Fn(&KernelEventPayload) -> bool,
         message: &'static str,
     ) -> Result<()> {
@@ -6096,7 +7032,7 @@ pub mod v1 {
 
     fn reject_wrong_purpose_payloads(
         purpose: &'static str,
-        request: &TypedCommitRequest,
+        request: &CommitRequest,
         predicate: impl Fn(&KernelEventPayload) -> bool,
         message: &'static str,
     ) -> Result<()> {
@@ -6108,6 +7044,126 @@ pub mod v1 {
         } else {
             Ok(())
         }
+    }
+
+    fn validate_attempt_terminal_resource_lane_release_batch(
+        request: &CommitRequest,
+    ) -> Result<()> {
+        reject_terminal_resource_lane_claims(AttemptTerminal::NAME, request)?;
+        for (release_index, release) in request
+            .payloads
+            .iter()
+            .enumerate()
+            .filter(|(_, payload)| is_resource_lane_release_payload(payload))
+        {
+            let Some(release_ref) = release.side_effect_ref() else {
+                continue;
+            };
+            let matched_terminal =
+                request
+                    .payloads
+                    .iter()
+                    .enumerate()
+                    .any(|(terminal_index, terminal)| {
+                        terminal_index > release_index
+                            && (attempt_terminal_matches_release(terminal, &release_ref)
+                                || is_run_completed_payload(terminal))
+                    });
+            if !matched_terminal {
+                return Err(invalid_prepared_commit_purpose(
+                    AttemptTerminal::NAME,
+                    "resource lane release must precede a matching terminal attempt payload",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_side_effect_terminal_resource_lane_release_batch(
+        request: &CommitRequest,
+    ) -> Result<()> {
+        reject_terminal_resource_lane_claims(SideEffectTerminal::NAME, request)?;
+        for (release_index, release) in request
+            .payloads
+            .iter()
+            .enumerate()
+            .filter(|(_, payload)| is_resource_lane_release_payload(payload))
+        {
+            let Some(release_ref) = release.side_effect_ref() else {
+                continue;
+            };
+            let matched_terminal =
+                request
+                    .payloads
+                    .iter()
+                    .enumerate()
+                    .any(|(terminal_index, terminal)| {
+                        terminal_index > release_index
+                            && side_effect_terminal_disposition_matches_release(
+                                terminal,
+                                &release_ref,
+                            )
+                    });
+            if !matched_terminal {
+                return Err(invalid_prepared_commit_purpose(
+                    SideEffectTerminal::NAME,
+                    "resource lane release must precede a matching side-effect terminal payload",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn reject_terminal_resource_lane_claims(
+        purpose: &'static str,
+        request: &CommitRequest,
+    ) -> Result<()> {
+        if request.payloads.iter().any(is_resource_lane_claim_payload) {
+            return Err(invalid_prepared_commit_purpose(
+                purpose,
+                "terminal commits cannot acquire resource lanes",
+            ));
+        }
+        Ok(())
+    }
+
+    fn attempt_terminal_matches_release(
+        terminal: &KernelEventPayload,
+        release: &events::SideEffectEventRef<'_>,
+    ) -> bool {
+        match terminal {
+            KernelEventPayload::StateAttemptCompleted(payload) => {
+                payload.node_id == *release.node_id && payload.attempt_id == *release.attempt_id
+            }
+            KernelEventPayload::StateAttemptInterrupted(payload) => {
+                payload.node_id == *release.node_id && payload.attempt_id == *release.attempt_id
+            }
+            KernelEventPayload::StateAttemptFailed(payload) => {
+                payload.node_id == *release.node_id && payload.attempt_id == *release.attempt_id
+            }
+            _ => false,
+        }
+    }
+
+    fn side_effect_terminal_disposition_matches_release(
+        terminal: &KernelEventPayload,
+        release: &events::SideEffectEventRef<'_>,
+    ) -> bool {
+        is_side_effect_terminal_disposition_payload(terminal)
+            && terminal
+                .side_effect_ref()
+                .is_some_and(|terminal_ref| side_effect_refs_share_lane(&terminal_ref, release))
+    }
+
+    fn side_effect_refs_share_lane(
+        left: &events::SideEffectEventRef<'_>,
+        right: &events::SideEffectEventRef<'_>,
+    ) -> bool {
+        left.node_id == right.node_id
+            && left.attempt_id == right.attempt_id
+            && left.ledger_key == right.ledger_key
+            && left.ledger_purpose == right.ledger_purpose
+            && left.invocation_epoch == right.invocation_epoch
     }
 
     fn is_attempt_terminal_payload(payload: &KernelEventPayload) -> bool {
@@ -6127,7 +7183,13 @@ pub mod v1 {
     }
 
     fn is_attempt_terminal_commit_payload(payload: &KernelEventPayload) -> bool {
-        is_attempt_terminal_payload(payload) || is_retention_ref_payload(payload)
+        is_attempt_terminal_payload(payload)
+            || matches!(
+                payload,
+                KernelEventPayload::ResourceLaneReleased(_)
+                    | KernelEventPayload::ResourceLaneReleaseIntent(_)
+            )
+            || is_retention_ref_payload(payload)
     }
 
     fn is_side_effect_terminal_payload(payload: &KernelEventPayload) -> bool {
@@ -6140,7 +7202,13 @@ pub mod v1 {
                 | KernelEventPayload::SideEffectConfirmationObserved(_)
                 | KernelEventPayload::SideEffectAmbiguous(_)
                 | KernelEventPayload::SideEffectFailed(_)
+                | KernelEventPayload::ResourceLaneReleased(_)
+                | KernelEventPayload::ResourceLaneReleaseIntent(_)
         )
+    }
+
+    fn is_side_effect_terminal_disposition_payload(payload: &KernelEventPayload) -> bool {
+        is_side_effect_terminal_payload(payload) && !is_resource_lane_release_payload(payload)
     }
 
     fn is_side_effect_terminal_commit_payload(payload: &KernelEventPayload) -> bool {
@@ -6156,6 +7224,22 @@ pub mod v1 {
 
     fn is_side_effect_payload(payload: &KernelEventPayload) -> bool {
         payload.side_effect_ref().is_some()
+    }
+
+    fn is_resource_lane_claim_payload(payload: &KernelEventPayload) -> bool {
+        matches!(
+            payload,
+            KernelEventPayload::ResourceLaneClaimed(_)
+                | KernelEventPayload::ResourceLaneClaimIntent(_)
+        )
+    }
+
+    fn is_resource_lane_release_payload(payload: &KernelEventPayload) -> bool {
+        matches!(
+            payload,
+            KernelEventPayload::ResourceLaneReleased(_)
+                | KernelEventPayload::ResourceLaneReleaseIntent(_)
+        )
     }
 
     fn is_retention_payload(payload: &KernelEventPayload) -> bool {
@@ -6200,7 +7284,7 @@ pub mod v1 {
             || is_retention_ref_payload(payload)
     }
 
-    fn request_contains_saga_terminal_outcome(request: &TypedCommitRequest) -> bool {
+    fn request_contains_saga_terminal_outcome(request: &CommitRequest) -> bool {
         request.payloads.iter().any(|payload| {
             matches!(
                 payload,
@@ -6214,7 +7298,7 @@ pub mod v1 {
         })
     }
 
-    fn request_contains_manual_resolution(request: &TypedCommitRequest) -> bool {
+    fn request_contains_manual_resolution(request: &CommitRequest) -> bool {
         request
             .payloads
             .iter()
@@ -6734,6 +7818,19 @@ pub mod v1 {
                 payload.invocation_epoch,
                 payload.claim_generation
             ),
+            KernelEventPayload::ResourceLaneClaimed(payload) => format!(
+                "resource_lane:{}:{}:claim:{}",
+                side_effect_ledger_purpose_key(&payload.ledger_purpose),
+                payload.ledger_key,
+                payload.claim_id
+            ),
+            KernelEventPayload::ResourceLaneClaimIntent(_)
+            | KernelEventPayload::ResourceLaneReleaseIntent(_) => {
+                return Err(StoreError::Event(
+                    "resource-lane intent payload reached persisted logical-key derivation"
+                        .to_owned(),
+                ));
+            }
             KernelEventPayload::SideEffectInvocationPrepared(payload) => format!(
                 "sidefx:{}:{}:invocation:{}:prepared:{}",
                 side_effect_ledger_purpose_key(&payload.ledger_purpose),
@@ -6790,6 +7887,12 @@ pub mod v1 {
                 payload.ledger_key,
                 payload.invocation_epoch
             ),
+            KernelEventPayload::ResourceLaneReleased(payload) => format!(
+                "resource_lane:{}:{}:release:{}",
+                side_effect_ledger_purpose_key(&payload.ledger_purpose),
+                payload.ledger_key,
+                payload.release_id
+            ),
             KernelEventPayload::PublicOutputProduced(payload) => {
                 format!("public_output:{}", payload.public_schema_id)
             }
@@ -6818,7 +7921,7 @@ pub mod v1 {
     }
 
     fn unique_logical_key_rewrite_allowed(
-        base: &TypedCommitBase,
+        base: &CommitBase,
         run_id: &RunId,
         logical_key: &LogicalEventKey,
         payload: &KernelEventPayload,
@@ -6883,7 +7986,8 @@ pub mod v1 {
     mod projection;
 
     use self::resource_lanes::{
-        acquire_resource_lane, release_resource_lane_for_holder, release_resource_lanes_for_run,
+        acquire_resource_lane, release_resource_lane, require_no_resource_lane_for_holder,
+        require_no_resource_lanes_for_run,
     };
     use self::side_effects::{
         note_saga_engagement, prepared_invocation_projection,
@@ -7023,6 +8127,33 @@ pub mod v1 {
                 "spec_hash": payload.spec_hash.as_str(),
                 "variant": "SideEffectClaimTakenOver",
             }),
+            KernelEventPayload::ResourceLaneClaimed(payload) => serde_json::json!({
+                "attempt_id": payload.attempt_id.as_str(),
+                "claim_fencing_token": payload.claim_fencing_token,
+                "claim_id": payload.claim_id.as_str(),
+                "invocation_epoch": payload.invocation_epoch,
+                "lane_transition_seq": payload.lane_transition_seq,
+                "ledger_key": payload.ledger_key.as_str(),
+                "ledger_purpose": side_effect_ledger_purpose_json(&payload.ledger_purpose),
+                "node_id": payload.node_id.as_str(),
+                "requirement_digest": payload.requirement_digest.as_str(),
+                "resolved_by_capability_impl": payload.resolved_by_capability_impl.as_str(),
+                "resource_key": resource_key_evidence_json(&payload.resource_key),
+                "spec_hash": payload.spec_hash.as_str(),
+                "variant": "ResourceLaneClaimed",
+            }),
+            KernelEventPayload::ResourceLaneClaimIntent(payload) => serde_json::json!({
+                "attempt_id": payload.attempt_id.as_str(),
+                "invocation_epoch": payload.invocation_epoch,
+                "ledger_key": payload.ledger_key.as_str(),
+                "ledger_purpose": side_effect_ledger_purpose_json(&payload.ledger_purpose),
+                "node_id": payload.node_id.as_str(),
+                "requirement_digest": payload.requirement_digest.as_str(),
+                "resolved_by_capability_impl": payload.resolved_by_capability_impl.as_str(),
+                "resource_key": resource_key_evidence_json(&payload.resource_key),
+                "spec_hash": payload.spec_hash.as_str(),
+                "variant": "ResourceLaneClaimIntent",
+            }),
             KernelEventPayload::SideEffectInvocationPrepared(payload) => serde_json::json!({
                 "attempt_id": payload.attempt_id.as_str(),
                 "claim_fencing_token": payload.claim_fencing_token.as_str(),
@@ -7031,9 +8162,9 @@ pub mod v1 {
                 "ledger_key": payload.ledger_key.as_str(),
                 "ledger_purpose": side_effect_ledger_purpose_json(&payload.ledger_purpose),
                 "node_id": payload.node_id.as_str(),
+                "resource_key": payload.resource_key.as_ref().map(resource_key_evidence_json),
                 "prepared_artifact_id": payload.prepared_artifact_id.as_ref().map(ArtifactId::as_str),
                 "prepared_hash": payload.prepared_hash.as_ref().map(ContentDigest::as_str),
-                "resource_key": payload.resource_key.as_ref().map(resource_key_evidence_json),
                 "spec_hash": payload.spec_hash.as_str(),
                 "variant": "SideEffectInvocationPrepared",
             }),
@@ -7137,6 +8268,31 @@ pub mod v1 {
                 "retryable": payload.retryable,
                 "spec_hash": payload.spec_hash.as_str(),
                 "variant": "SideEffectFailed",
+            }),
+            KernelEventPayload::ResourceLaneReleased(payload) => serde_json::json!({
+                "attempt_id": payload.attempt_id.as_str(),
+                "claim_fencing_token": payload.claim_fencing_token,
+                "claim_id": payload.claim_id.as_str(),
+                "invocation_epoch": payload.invocation_epoch,
+                "lane_transition_seq": payload.lane_transition_seq,
+                "ledger_key": payload.ledger_key.as_str(),
+                "ledger_purpose": side_effect_ledger_purpose_json(&payload.ledger_purpose),
+                "node_id": payload.node_id.as_str(),
+                "release_id": payload.release_id.as_str(),
+                "release_reason": payload.release_reason.as_str(),
+                "spec_hash": payload.spec_hash.as_str(),
+                "variant": "ResourceLaneReleased",
+            }),
+            KernelEventPayload::ResourceLaneReleaseIntent(payload) => serde_json::json!({
+                "attempt_id": payload.attempt_id.as_str(),
+                "claim_id": payload.claim_id.as_str(),
+                "invocation_epoch": payload.invocation_epoch,
+                "ledger_key": payload.ledger_key.as_str(),
+                "ledger_purpose": side_effect_ledger_purpose_json(&payload.ledger_purpose),
+                "node_id": payload.node_id.as_str(),
+                "release_reason": payload.release_reason.as_str(),
+                "spec_hash": payload.spec_hash.as_str(),
+                "variant": "ResourceLaneReleaseIntent",
             }),
             KernelEventPayload::PublicOutputProduced(payload) => serde_json::json!({
                 "attempt_id": payload.attempt_id.as_str(),
@@ -7417,6 +8573,31 @@ pub mod v1 {
                     )?)?,
                 },
             )),
+            "ResourceLaneClaimed" => Ok(KernelEventPayload::ResourceLaneClaimed(
+                events::ResourceLaneClaimed {
+                    spec_hash: parse_identity(required_str(json, "spec_hash")?)?,
+                    node_id: parse_identity(required_str(json, "node_id")?)?,
+                    attempt_id: parse_identity(required_str(json, "attempt_id")?)?,
+                    ledger_key: events::SideEffectLedgerKey::new(required_str(
+                        json,
+                        "ledger_key",
+                    )?)?,
+                    ledger_purpose: parse_side_effect_ledger_purpose(required_obj(
+                        json,
+                        "ledger_purpose",
+                    )?)?,
+                    invocation_epoch: required_u32(json, "invocation_epoch")?,
+                    resource_key: parse_resource_key_evidence(required_obj(json, "resource_key")?)?,
+                    requirement_digest: parse_identity(required_str(json, "requirement_digest")?)?,
+                    resolved_by_capability_impl: events::RunnerFactoryId::new(required_str(
+                        json,
+                        "resolved_by_capability_impl",
+                    )?)?,
+                    claim_id: events::ResourceLaneClaimId::new(required_str(json, "claim_id")?)?,
+                    claim_fencing_token: required_u64(json, "claim_fencing_token")?,
+                    lane_transition_seq: required_u64(json, "lane_transition_seq")?,
+                },
+            )),
             "SideEffectInvocationPrepared" => Ok(KernelEventPayload::SideEffectInvocationPrepared(
                 side_effect::InvocationPrepared {
                     spec_hash: parse_identity(required_str(json, "spec_hash")?)?,
@@ -7436,14 +8617,14 @@ pub mod v1 {
                         json,
                         "claim_fencing_token",
                     )?)?,
+                    resource_key: optional_obj(json, "resource_key")?
+                        .map(parse_resource_key_evidence)
+                        .transpose()?,
                     prepared_artifact_id: optional_str(json, "prepared_artifact_id")?
                         .map(parse_identity)
                         .transpose()?,
                     prepared_hash: optional_str(json, "prepared_hash")?
                         .map(parse_identity)
-                        .transpose()?,
-                    resource_key: optional_obj(json, "resource_key")?
-                        .map(parse_resource_key_evidence)
                         .transpose()?,
                 },
             )),
@@ -7644,6 +8825,33 @@ pub mod v1 {
                 retryable: required_bool(json, "retryable")?,
                 error: parse_error_info(required_obj(json, "error")?)?,
             })),
+            "ResourceLaneReleased" => Ok(KernelEventPayload::ResourceLaneReleased(
+                events::ResourceLaneReleased {
+                    spec_hash: parse_identity(required_str(json, "spec_hash")?)?,
+                    node_id: parse_identity(required_str(json, "node_id")?)?,
+                    attempt_id: parse_identity(required_str(json, "attempt_id")?)?,
+                    ledger_key: events::SideEffectLedgerKey::new(required_str(
+                        json,
+                        "ledger_key",
+                    )?)?,
+                    ledger_purpose: parse_side_effect_ledger_purpose(required_obj(
+                        json,
+                        "ledger_purpose",
+                    )?)?,
+                    invocation_epoch: required_u32(json, "invocation_epoch")?,
+                    claim_id: events::ResourceLaneClaimId::new(required_str(json, "claim_id")?)?,
+                    release_id: events::ResourceLaneReleaseId::new(required_str(
+                        json,
+                        "release_id",
+                    )?)?,
+                    claim_fencing_token: required_u64(json, "claim_fencing_token")?,
+                    release_reason: events::ResourceLaneReleaseReason::new(required_str(
+                        json,
+                        "release_reason",
+                    )?)?,
+                    lane_transition_seq: required_u64(json, "lane_transition_seq")?,
+                },
+            )),
             "PublicOutputProduced" => Ok(KernelEventPayload::PublicOutputProduced(
                 events::PublicOutputProduced {
                     spec_hash: parse_identity(required_str(json, "spec_hash")?)?,
@@ -8884,9 +10092,13 @@ pub mod v1 {
     ) -> serde_json::Value {
         serde_json::json!({
             "attempt_id": projection.attempt_id.as_str(),
+            "claim_fencing_token": projection.claim_fencing_token,
+            "claim_id": projection.claim_id.as_str(),
             "event_id": projection.event_id.as_str(),
             "invocation_epoch": projection.invocation_epoch,
             "key": lane_key.key.as_str(),
+            "key_schema_id": lane_key.key_schema_id.as_str(),
+            "lane_transition_seq": projection.lane_transition_seq,
             "ledger_key": projection.holder.ledger_key.as_str(),
             "ledger_purpose": side_effect_ledger_purpose_json(&projection.ledger_purpose),
             "namespace": lane_key.namespace.as_str(),
@@ -8902,6 +10114,7 @@ pub mod v1 {
         let lane_key = ResourceLaneKey {
             namespace: ResourceNamespace::new(required_str(json, "namespace")?)
                 .map_err(|error| CodecError::Identity(error.to_string()))?,
+            key_schema_id: parse_identity(required_str(json, "key_schema_id")?)?,
             key: events::ResourceKey::new(required_str(json, "key")?)?,
         };
         let projection = ResourceLaneProjection {
@@ -8917,6 +10130,9 @@ pub mod v1 {
             node_id: parse_identity(required_str(json, "node_id")?)?,
             attempt_id: parse_identity(required_str(json, "attempt_id")?)?,
             invocation_epoch: required_u32(json, "invocation_epoch")?,
+            claim_id: events::ResourceLaneClaimId::new(required_str(json, "claim_id")?)?,
+            claim_fencing_token: required_u64(json, "claim_fencing_token")?,
+            lane_transition_seq: required_u64(json, "lane_transition_seq")?,
         };
         Ok((lane_key, projection))
     }

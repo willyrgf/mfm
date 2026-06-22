@@ -5,7 +5,7 @@ pub fn event_artifact_requirements(payload: &KernelEventPayload) -> Vec<EventArt
     payload.artifact_requirements()
 }
 
-pub(super) fn referenced_artifact_ids(request: &TypedCommitRequest) -> BTreeSet<ArtifactId> {
+pub(super) fn referenced_artifact_ids(request: &CommitRequest) -> BTreeSet<ArtifactId> {
     let mut artifact_ids = BTreeSet::new();
     for payload in &request.payloads {
         for requirement in event_artifact_requirements(payload) {

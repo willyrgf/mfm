@@ -36,6 +36,16 @@ pub(super) fn apply_projection(
         KernelEventPayload::SideEffectClaimTakenOver(payload) => {
             apply_side_effect_claim_taken_over(projections, envelope, payload)?;
         }
+        KernelEventPayload::ResourceLaneClaimed(payload) => {
+            apply_resource_lane_claimed(projections, envelope, payload)?;
+        }
+        KernelEventPayload::ResourceLaneClaimIntent(_)
+        | KernelEventPayload::ResourceLaneReleaseIntent(_) => {
+            return Err(StoreError::ProjectionConflict {
+                key: "resource_lane:intent".to_owned(),
+                message: "resource-lane intents must be store-filled before projection".to_owned(),
+            });
+        }
         KernelEventPayload::SideEffectInvocationPrepared(payload) => {
             apply_side_effect_invocation_prepared(projections, envelope, payload)?;
         }
@@ -62,6 +72,9 @@ pub(super) fn apply_projection(
         }
         KernelEventPayload::SideEffectFailed(payload) => {
             apply_side_effect_failed(projections, envelope, payload)?;
+        }
+        KernelEventPayload::ResourceLaneReleased(payload) => {
+            apply_resource_lane_released(projections, envelope, payload)?;
         }
         KernelEventPayload::PublicOutputProduced(payload) => {
             apply_public_output_produced(projections, &envelope.event_id, payload)?;
@@ -152,6 +165,7 @@ fn apply_run_completed(
         });
     }
     require_forward_quiescence(projections, &payload.run_id)?;
+    require_no_resource_lanes_for_run(projections, &payload.run_id, "run completion")?;
     projections
         .run_states
         .insert(payload.run_id.clone(), RunState::Completed);
@@ -162,7 +176,6 @@ fn apply_run_completed(
             outcome: payload.outcome.clone(),
         },
     );
-    release_resource_lanes_for_run(projections, &payload.run_id);
     Ok(())
 }
 
@@ -464,10 +477,44 @@ fn apply_side_effect_invocation_prepared(
         &payload.ledger_key,
     )?
     .or_else(|| previous.prepared_invocation.clone());
-    let previous_projection = previous.clone();
-    let resource_key =
-        acquire_resource_lane(projections, envelope.run_id(), &envelope.event_id, payload)?;
-    let projection = OwnedSideEffectLedgerState::from_projection(previous_projection)?
+    let resource_key = match (&previous.resource_key, &payload.resource_key) {
+        (Some(held), Some(prepared)) if held == prepared => Some(held.clone()),
+        (Some(_), Some(_)) => {
+            return Err(StoreError::ProjectionConflict {
+                key: format!("sidefx:{}", payload.ledger_key),
+                message: "prepared invocation resource key must match the held resource lane"
+                    .to_owned(),
+            });
+        }
+        (Some(_), None) => {
+            return Err(StoreError::ProjectionConflict {
+                key: format!("sidefx:{}", payload.ledger_key),
+                message: "prepared invocation must echo the held resource lane key".to_owned(),
+            });
+        }
+        (None, Some(_)) => {
+            return Err(StoreError::ProjectionConflict {
+                key: format!("sidefx:{}", payload.ledger_key),
+                message: "resource lane must be claimed before invocation prepare".to_owned(),
+            });
+        }
+        (None, None) => None,
+    };
+    if let Some(resource_key) = &resource_key {
+        let lane_key = ResourceLaneKey::from_evidence(resource_key);
+        let holder =
+            SideEffectLedgerRef::new(envelope.run_id().clone(), payload.ledger_key.clone());
+        if projections
+            .resource_lane(&lane_key)
+            .is_none_or(|projection| projection.holder != holder)
+        {
+            return Err(StoreError::ProjectionConflict {
+                key: format!("sidefx:{}", payload.ledger_key),
+                message: "resource lane must be claimed before invocation prepare".to_owned(),
+            });
+        }
+    }
+    let projection = OwnedSideEffectLedgerState::from_projection(previous.clone())?
         .prepare(
             envelope.event_id.clone(),
             payload,
@@ -480,6 +527,52 @@ fn apply_side_effect_invocation_prepared(
         projection,
     );
     Ok(())
+}
+
+fn apply_resource_lane_claimed(
+    projections: &mut ProjectionSnapshot,
+    envelope: &KernelEventEnvelope,
+    payload: &events::ResourceLaneClaimed,
+) -> Result<()> {
+    require_active_attempt_for_side_effect(
+        projections,
+        &payload.node_id,
+        &payload.attempt_id,
+        &payload.ledger_key,
+    )?;
+    let previous = require_side_effect_phase(
+        projections,
+        envelope.run_id(),
+        &payload.ledger_key,
+        "claim",
+        |state| matches!(state.phase(), SideEffectLedgerPhase::Claimed { .. }),
+    )?;
+    require_side_effect_purpose(previous, &payload.ledger_key, &payload.ledger_purpose)?;
+    let mut projection = previous.clone();
+    if let Some(existing) = &projection.resource_key {
+        if existing != &payload.resource_key {
+            return Err(StoreError::ProjectionConflict {
+                key: format!("sidefx:{}", payload.ledger_key),
+                message: "resource lane claim changed held resource key".to_owned(),
+            });
+        }
+    }
+    acquire_resource_lane(projections, envelope.run_id(), &envelope.event_id, payload)?;
+    projection.event_id = envelope.event_id.clone();
+    projection.resource_key = Some(payload.resource_key.clone());
+    projections.side_effects.insert(
+        SideEffectLedgerRef::new(envelope.run_id().clone(), payload.ledger_key.clone()),
+        projection,
+    );
+    Ok(())
+}
+
+fn apply_resource_lane_released(
+    projections: &mut ProjectionSnapshot,
+    envelope: &KernelEventEnvelope,
+    payload: &events::ResourceLaneReleased,
+) -> Result<()> {
+    release_resource_lane(projections, envelope.run_id(), payload)
 }
 
 fn apply_side_effect_invocation_started(
@@ -538,10 +631,11 @@ fn apply_side_effect_not_submitted_proven(
         },
         |state| state.mark_not_submitted(envelope.event_id.clone(), payload),
     )?;
-    release_resource_lane_for_holder(
+    require_no_resource_lane_for_holder(
         projections,
         &SideEffectLedgerRef::new(envelope.run_id().clone(), payload.ledger_key.clone()),
-    );
+        "not-submitted proof",
+    )?;
     Ok(())
 }
 
@@ -638,10 +732,11 @@ fn apply_side_effect_confirmation_observed(
         },
         |state| state.confirm(envelope.event_id.clone(), payload),
     )?;
-    release_resource_lane_for_holder(
+    require_no_resource_lane_for_holder(
         projections,
         &SideEffectLedgerRef::new(envelope.run_id().clone(), payload.ledger_key.clone()),
-    );
+        "confirmation",
+    )?;
     Ok(())
 }
 
@@ -666,10 +761,11 @@ fn apply_side_effect_ambiguous(
         },
         |state| state.mark_ambiguous(envelope.event_id.clone(), payload),
     )?;
-    release_resource_lane_for_holder(
+    require_no_resource_lane_for_holder(
         projections,
         &SideEffectLedgerRef::new(envelope.run_id().clone(), payload.ledger_key.clone()),
-    );
+        "ambiguity",
+    )?;
     if matches!(
         payload.ledger_purpose,
         events::SideEffectLedgerPurpose::Forward
@@ -705,10 +801,11 @@ fn apply_side_effect_failed(
         payload,
         envelope.event_id.clone(),
     )?;
-    release_resource_lane_for_holder(
+    require_no_resource_lane_for_holder(
         projections,
         &SideEffectLedgerRef::new(envelope.run_id().clone(), payload.ledger_key.clone()),
-    );
+        "side-effect failure",
+    )?;
     if !payload.retryable {
         note_saga_engagement(
             projections,
@@ -838,6 +935,7 @@ fn apply_manual_resolution_recorded(
     }
     projections.require_no_open_semantic_attempts_for_run(&payload.run_id)?;
     require_forward_quiescence(projections, &payload.run_id)?;
+    require_no_resource_lanes_for_run(projections, &payload.run_id, "manual resolution")?;
     projections.manual_resolutions.insert(
         payload.run_id.clone(),
         ManualResolutionProjection {
@@ -852,7 +950,6 @@ fn apply_manual_resolution_recorded(
             note: payload.note.clone(),
         },
     );
-    release_resource_lanes_for_run(projections, &payload.run_id);
     Ok(())
 }
 

@@ -180,6 +180,21 @@ pub mod v1 {
         "resource key"
     );
     checked_string_type!(
+        /// Store-assigned resource-lane claim id.
+        ResourceLaneClaimId,
+        "resource lane claim id"
+    );
+    checked_string_type!(
+        /// Store-assigned resource-lane release id.
+        ResourceLaneReleaseId,
+        "resource lane release id"
+    );
+    checked_string_type!(
+        /// Resource-lane release reason.
+        ResourceLaneReleaseReason,
+        "resource lane release reason"
+    );
+    checked_string_type!(
         /// Runner invocation identity.
         RunnerInvocationId,
         "runner invocation id"
@@ -219,6 +234,106 @@ pub mod v1 {
         pub key_schema_id: SchemaId,
         /// Store-comparable resource key.
         pub key: ResourceKey,
+    }
+
+    /// Store-materialized exclusive resource-lane claim event.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ResourceLaneClaimed {
+        /// Certified typed spec hash.
+        pub spec_hash: SpecHash,
+        /// Node id that owns the side-effect attempt.
+        pub node_id: NodeId,
+        /// Attempt id holding the lane.
+        pub attempt_id: AttemptId,
+        /// Side-effect ledger key.
+        pub ledger_key: SideEffectLedgerKey,
+        /// Side-effect ledger purpose.
+        pub ledger_purpose: SideEffectLedgerPurpose,
+        /// Invocation epoch protected by the lane.
+        pub invocation_epoch: u32,
+        /// Exact resource key evidence resolved before invocation.
+        pub resource_key: ResourceKeyEvidence,
+        /// Digest of the certified resource-lane requirement.
+        pub requirement_digest: ContentDigest,
+        /// Capability implementation that resolved the lane.
+        pub resolved_by_capability_impl: RunnerFactoryId,
+        /// Store-assigned claim id.
+        pub claim_id: ResourceLaneClaimId,
+        /// Store-assigned lane-local fencing token.
+        pub claim_fencing_token: u64,
+        /// Store-assigned lane-local transition sequence.
+        pub lane_transition_seq: u64,
+    }
+
+    /// Prepared exclusive resource-lane claim authority before store fill.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ResourceLaneClaimIntent {
+        /// Certified typed spec hash.
+        pub spec_hash: SpecHash,
+        /// Node id that owns the side-effect attempt.
+        pub node_id: NodeId,
+        /// Attempt id requesting the lane.
+        pub attempt_id: AttemptId,
+        /// Side-effect ledger key.
+        pub ledger_key: SideEffectLedgerKey,
+        /// Side-effect ledger purpose.
+        pub ledger_purpose: SideEffectLedgerPurpose,
+        /// Invocation epoch protected by the lane.
+        pub invocation_epoch: u32,
+        /// Exact resource key evidence resolved before invocation.
+        pub resource_key: ResourceKeyEvidence,
+        /// Digest of the certified resource-lane requirement.
+        pub requirement_digest: ContentDigest,
+        /// Capability implementation that resolved the lane.
+        pub resolved_by_capability_impl: RunnerFactoryId,
+    }
+
+    /// Store-materialized exclusive resource-lane release event.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ResourceLaneReleased {
+        /// Certified typed spec hash.
+        pub spec_hash: SpecHash,
+        /// Node id that held the side-effect lane.
+        pub node_id: NodeId,
+        /// Attempt id that held the lane.
+        pub attempt_id: AttemptId,
+        /// Side-effect ledger key.
+        pub ledger_key: SideEffectLedgerKey,
+        /// Side-effect ledger purpose.
+        pub ledger_purpose: SideEffectLedgerPurpose,
+        /// Invocation epoch protected by the lane.
+        pub invocation_epoch: u32,
+        /// Claim being released.
+        pub claim_id: ResourceLaneClaimId,
+        /// Store-assigned release id.
+        pub release_id: ResourceLaneReleaseId,
+        /// Fencing token from the active claim.
+        pub claim_fencing_token: u64,
+        /// Reason the lane is being released.
+        pub release_reason: ResourceLaneReleaseReason,
+        /// Store-assigned lane-local transition sequence.
+        pub lane_transition_seq: u64,
+    }
+
+    /// Prepared exclusive resource-lane release authority before store fill.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ResourceLaneReleaseIntent {
+        /// Certified typed spec hash.
+        pub spec_hash: SpecHash,
+        /// Node id that held the side-effect lane.
+        pub node_id: NodeId,
+        /// Attempt id that held the lane.
+        pub attempt_id: AttemptId,
+        /// Side-effect ledger key.
+        pub ledger_key: SideEffectLedgerKey,
+        /// Side-effect ledger purpose.
+        pub ledger_purpose: SideEffectLedgerPurpose,
+        /// Invocation epoch protected by the lane.
+        pub invocation_epoch: u32,
+        /// Claim being released.
+        pub claim_id: ResourceLaneClaimId,
+        /// Reason the lane is being released.
+        pub release_reason: ResourceLaneReleaseReason,
     }
 
     /// Typed evidence for an exact touched resource set.
@@ -300,6 +415,10 @@ pub mod v1 {
         SideEffectClaimed(side_effect::Claimed),
         /// Side-effect claim takeover event.
         SideEffectClaimTakenOver(side_effect::ClaimTakenOver),
+        /// Resource lane claimed before side-effect invocation.
+        ResourceLaneClaimed(ResourceLaneClaimed),
+        /// Prepared resource-lane claim before store fill.
+        ResourceLaneClaimIntent(ResourceLaneClaimIntent),
         /// Side-effect invocation prepared event.
         SideEffectInvocationPrepared(side_effect::InvocationPrepared),
         /// Side-effect invocation started event.
@@ -318,6 +437,10 @@ pub mod v1 {
         SideEffectAmbiguous(side_effect::Ambiguous),
         /// Side-effect failure event.
         SideEffectFailed(side_effect::Failed),
+        /// Resource lane released after side-effect terminal evidence or cleanup.
+        ResourceLaneReleased(ResourceLaneReleased),
+        /// Prepared resource-lane release before store fill.
+        ResourceLaneReleaseIntent(ResourceLaneReleaseIntent),
         /// Public output produced event.
         PublicOutputProduced(PublicOutputProduced),
         /// Public output render failure audit event.
@@ -351,6 +474,8 @@ pub mod v1 {
                 Self::SideEffectIntentPersisted(_) => SIDE_EFFECT_INTENT_PERSISTED_SCHEMA,
                 Self::SideEffectClaimed(_) => SIDE_EFFECT_CLAIMED_SCHEMA,
                 Self::SideEffectClaimTakenOver(_) => SIDE_EFFECT_CLAIM_TAKEN_OVER_SCHEMA,
+                Self::ResourceLaneClaimed(_) => RESOURCE_LANE_CLAIMED_SCHEMA,
+                Self::ResourceLaneClaimIntent(_) => RESOURCE_LANE_CLAIM_INTENT_SCHEMA,
                 Self::SideEffectInvocationPrepared(_) => SIDE_EFFECT_INVOCATION_PREPARED_SCHEMA,
                 Self::SideEffectInvocationStarted(_) => SIDE_EFFECT_INVOCATION_STARTED_SCHEMA,
                 Self::SideEffectNotSubmittedProven(_) => SIDE_EFFECT_NOT_SUBMITTED_PROVEN_SCHEMA,
@@ -360,6 +485,8 @@ pub mod v1 {
                 Self::SideEffectConfirmationObserved(_) => SIDE_EFFECT_CONFIRMATION_OBSERVED_SCHEMA,
                 Self::SideEffectAmbiguous(_) => SIDE_EFFECT_AMBIGUOUS_SCHEMA,
                 Self::SideEffectFailed(_) => SIDE_EFFECT_FAILED_SCHEMA,
+                Self::ResourceLaneReleased(_) => RESOURCE_LANE_RELEASED_SCHEMA,
+                Self::ResourceLaneReleaseIntent(_) => RESOURCE_LANE_RELEASE_INTENT_SCHEMA,
                 Self::PublicOutputProduced(_) => PUBLIC_OUTPUT_PRODUCED_SCHEMA,
                 Self::PublicOutputRenderFailed(_) => PUBLIC_OUTPUT_RENDER_FAILED_SCHEMA,
                 Self::StateAttemptCompleted(_) => STATE_ATTEMPT_COMPLETED_SCHEMA,
@@ -404,6 +531,8 @@ pub mod v1 {
                 Self::SideEffectIntentPersisted(payload) => &payload.spec_hash,
                 Self::SideEffectClaimed(payload) => &payload.spec_hash,
                 Self::SideEffectClaimTakenOver(payload) => &payload.spec_hash,
+                Self::ResourceLaneClaimed(payload) => &payload.spec_hash,
+                Self::ResourceLaneClaimIntent(payload) => &payload.spec_hash,
                 Self::SideEffectInvocationPrepared(payload) => &payload.spec_hash,
                 Self::SideEffectInvocationStarted(payload) => &payload.spec_hash,
                 Self::SideEffectNotSubmittedProven(payload) => &payload.spec_hash,
@@ -413,6 +542,8 @@ pub mod v1 {
                 Self::SideEffectConfirmationObserved(payload) => &payload.spec_hash,
                 Self::SideEffectAmbiguous(payload) => &payload.spec_hash,
                 Self::SideEffectFailed(payload) => &payload.spec_hash,
+                Self::ResourceLaneReleased(payload) => &payload.spec_hash,
+                Self::ResourceLaneReleaseIntent(payload) => &payload.spec_hash,
                 Self::PublicOutputProduced(payload) => &payload.spec_hash,
                 Self::PublicOutputRenderFailed(payload) => &payload.spec_hash,
                 Self::StateAttemptCompleted(payload) => &payload.spec_hash,
@@ -451,6 +582,12 @@ pub mod v1 {
                 Self::SideEffectClaimTakenOver(payload) => {
                     side_effect_ref!(payload, ClaimTakenOver, Some(payload.claim_generation))
                 }
+                Self::ResourceLaneClaimed(payload) => {
+                    side_effect_ref!(payload, ResourceLaneClaimed, None)
+                }
+                Self::ResourceLaneClaimIntent(payload) => {
+                    side_effect_ref!(payload, ResourceLaneClaimed, None)
+                }
                 Self::SideEffectInvocationPrepared(payload) => {
                     side_effect_ref!(payload, InvocationPrepared, Some(payload.claim_generation))
                 }
@@ -474,6 +611,12 @@ pub mod v1 {
                 }
                 Self::SideEffectAmbiguous(payload) => side_effect_ref!(payload, Ambiguous, None),
                 Self::SideEffectFailed(payload) => side_effect_ref!(payload, Failed, None),
+                Self::ResourceLaneReleased(payload) => {
+                    side_effect_ref!(payload, ResourceLaneReleased, None)
+                }
+                Self::ResourceLaneReleaseIntent(payload) => {
+                    side_effect_ref!(payload, ResourceLaneReleased, None)
+                }
                 _ => None,
             }
         }
@@ -493,6 +636,8 @@ pub mod v1 {
         Claimed,
         /// Claim taken over.
         ClaimTakenOver,
+        /// Resource lane claimed.
+        ResourceLaneClaimed,
         /// Invocation prepared.
         InvocationPrepared,
         /// Invocation started.
@@ -511,6 +656,8 @@ pub mod v1 {
         Ambiguous,
         /// Side effect failed.
         Failed,
+        /// Resource lane released.
+        ResourceLaneReleased,
     }
 
     /// Borrowed side-effect fields common to side-effect event payloads.
@@ -1896,7 +2043,11 @@ pub mod v1 {
             | KernelEventPayload::CellSkipped(_)
             | KernelEventPayload::SideEffectClaimed(_)
             | KernelEventPayload::SideEffectClaimTakenOver(_)
+            | KernelEventPayload::ResourceLaneClaimed(_)
+            | KernelEventPayload::ResourceLaneClaimIntent(_)
             | KernelEventPayload::SideEffectInvocationStarted(_)
+            | KernelEventPayload::ResourceLaneReleased(_)
+            | KernelEventPayload::ResourceLaneReleaseIntent(_)
             | KernelEventPayload::StateAttemptCompleted(_)
             | KernelEventPayload::StateAttemptInterrupted(_) => {}
         }
@@ -2343,12 +2494,12 @@ pub mod v1 {
             pub claim_generation: u32,
             /// Claim fencing token.
             pub claim_fencing_token: ClaimFencingToken,
+            /// Optional exclusive resource lane key evidence echoed from the held lane.
+            pub resource_key: Option<ResourceKeyEvidence>,
             /// Optional prepared artifact id.
             pub prepared_artifact_id: Option<ArtifactId>,
             /// Optional prepared artifact hash.
             pub prepared_hash: Option<ContentDigest>,
-            /// Optional exclusive resource lane key evidence.
-            pub resource_key: Option<ResourceKeyEvidence>,
         }
 
         /// Side-effect invocation started event payload.
@@ -2721,6 +2872,9 @@ pub mod v1 {
             | "FactKey"
             | "SideEffectLedgerKey"
             | "ResourceKey"
+            | "ResourceLaneClaimId"
+            | "ResourceLaneReleaseId"
+            | "ResourceLaneReleaseReason"
             | "RunnerInvocationId"
             | "IdempotencyKeyRef"
             | "ReplayVerifierId"
@@ -3319,6 +3473,8 @@ pub mod v1 {
             SIDE_EFFECT_INTENT_PERSISTED_SCHEMA,
             SIDE_EFFECT_CLAIMED_SCHEMA,
             SIDE_EFFECT_CLAIM_TAKEN_OVER_SCHEMA,
+            RESOURCE_LANE_CLAIMED_SCHEMA,
+            RESOURCE_LANE_CLAIM_INTENT_SCHEMA,
             SIDE_EFFECT_INVOCATION_PREPARED_SCHEMA,
             SIDE_EFFECT_INVOCATION_STARTED_SCHEMA,
             SIDE_EFFECT_NOT_SUBMITTED_PROVEN_SCHEMA,
@@ -3328,6 +3484,8 @@ pub mod v1 {
             SIDE_EFFECT_CONFIRMATION_OBSERVED_SCHEMA,
             SIDE_EFFECT_AMBIGUOUS_SCHEMA,
             SIDE_EFFECT_FAILED_SCHEMA,
+            RESOURCE_LANE_RELEASED_SCHEMA,
+            RESOURCE_LANE_RELEASE_INTENT_SCHEMA,
             PUBLIC_OUTPUT_PRODUCED_SCHEMA,
             PUBLIC_OUTPUT_RENDER_FAILED_SCHEMA,
             STATE_ATTEMPT_COMPLETED_SCHEMA,
@@ -3514,6 +3672,43 @@ pub mod v1 {
         ],
     };
 
+    const RESOURCE_LANE_CLAIMED_SCHEMA: EventSchemaDescriptor = EventSchemaDescriptor {
+        schema_name: "mfm.events.v1.resource_lane.claimed",
+        rust_type_path: "mfm_events::v1::ResourceLaneClaimed",
+        schema_version: EVENT_SCHEMA_VERSION,
+        fields: fields![
+            EventFieldDescriptor::required("spec_hash", "SpecHash"),
+            EventFieldDescriptor::required("node_id", "NodeId"),
+            EventFieldDescriptor::required("attempt_id", "AttemptId"),
+            EventFieldDescriptor::required("ledger_key", "SideEffectLedgerKey"),
+            EventFieldDescriptor::required("ledger_purpose", "SideEffectLedgerPurpose"),
+            EventFieldDescriptor::required("invocation_epoch", "u32"),
+            EventFieldDescriptor::required("resource_key", "ResourceKeyEvidence"),
+            EventFieldDescriptor::required("requirement_digest", "ContentDigest"),
+            EventFieldDescriptor::required("resolved_by_capability_impl", "RunnerFactoryId"),
+            EventFieldDescriptor::required("claim_id", "ResourceLaneClaimId"),
+            EventFieldDescriptor::required("claim_fencing_token", "u64"),
+            EventFieldDescriptor::required("lane_transition_seq", "u64"),
+        ],
+    };
+
+    const RESOURCE_LANE_CLAIM_INTENT_SCHEMA: EventSchemaDescriptor = EventSchemaDescriptor {
+        schema_name: "mfm.events.v1.resource_lane.claim_intent",
+        rust_type_path: "mfm_events::v1::ResourceLaneClaimIntent",
+        schema_version: EVENT_SCHEMA_VERSION,
+        fields: fields![
+            EventFieldDescriptor::required("spec_hash", "SpecHash"),
+            EventFieldDescriptor::required("node_id", "NodeId"),
+            EventFieldDescriptor::required("attempt_id", "AttemptId"),
+            EventFieldDescriptor::required("ledger_key", "SideEffectLedgerKey"),
+            EventFieldDescriptor::required("ledger_purpose", "SideEffectLedgerPurpose"),
+            EventFieldDescriptor::required("invocation_epoch", "u32"),
+            EventFieldDescriptor::required("resource_key", "ResourceKeyEvidence"),
+            EventFieldDescriptor::required("requirement_digest", "ContentDigest"),
+            EventFieldDescriptor::required("resolved_by_capability_impl", "RunnerFactoryId"),
+        ],
+    };
+
     const SIDE_EFFECT_INVOCATION_PREPARED_SCHEMA: EventSchemaDescriptor = EventSchemaDescriptor {
         schema_name: "mfm.events.v1.side_effect.invocation_prepared",
         rust_type_path: "mfm_events::v1::side_effect::InvocationPrepared",
@@ -3527,9 +3722,9 @@ pub mod v1 {
             EventFieldDescriptor::required("invocation_epoch", "u32"),
             EventFieldDescriptor::required("claim_generation", "u32"),
             EventFieldDescriptor::required("claim_fencing_token", "ClaimFencingToken"),
+            EventFieldDescriptor::optional("resource_key", "ResourceKeyEvidence"),
             EventFieldDescriptor::optional("prepared_artifact_id", "ArtifactId"),
             EventFieldDescriptor::optional("prepared_hash", "ContentDigest"),
-            EventFieldDescriptor::optional("resource_key", "ResourceKeyEvidence"),
         ],
     };
 
@@ -3671,6 +3866,41 @@ pub mod v1 {
             EventFieldDescriptor::required("failure_phase", "FailurePhase"),
             EventFieldDescriptor::required("retryable", "bool"),
             EventFieldDescriptor::required("error", "MfmErrorInfo"),
+        ],
+    };
+
+    const RESOURCE_LANE_RELEASED_SCHEMA: EventSchemaDescriptor = EventSchemaDescriptor {
+        schema_name: "mfm.events.v1.resource_lane.released",
+        rust_type_path: "mfm_events::v1::ResourceLaneReleased",
+        schema_version: EVENT_SCHEMA_VERSION,
+        fields: fields![
+            EventFieldDescriptor::required("spec_hash", "SpecHash"),
+            EventFieldDescriptor::required("node_id", "NodeId"),
+            EventFieldDescriptor::required("attempt_id", "AttemptId"),
+            EventFieldDescriptor::required("ledger_key", "SideEffectLedgerKey"),
+            EventFieldDescriptor::required("ledger_purpose", "SideEffectLedgerPurpose"),
+            EventFieldDescriptor::required("invocation_epoch", "u32"),
+            EventFieldDescriptor::required("claim_id", "ResourceLaneClaimId"),
+            EventFieldDescriptor::required("release_id", "ResourceLaneReleaseId"),
+            EventFieldDescriptor::required("claim_fencing_token", "u64"),
+            EventFieldDescriptor::required("release_reason", "ResourceLaneReleaseReason"),
+            EventFieldDescriptor::required("lane_transition_seq", "u64"),
+        ],
+    };
+
+    const RESOURCE_LANE_RELEASE_INTENT_SCHEMA: EventSchemaDescriptor = EventSchemaDescriptor {
+        schema_name: "mfm.events.v1.resource_lane.release_intent",
+        rust_type_path: "mfm_events::v1::ResourceLaneReleaseIntent",
+        schema_version: EVENT_SCHEMA_VERSION,
+        fields: fields![
+            EventFieldDescriptor::required("spec_hash", "SpecHash"),
+            EventFieldDescriptor::required("node_id", "NodeId"),
+            EventFieldDescriptor::required("attempt_id", "AttemptId"),
+            EventFieldDescriptor::required("ledger_key", "SideEffectLedgerKey"),
+            EventFieldDescriptor::required("ledger_purpose", "SideEffectLedgerPurpose"),
+            EventFieldDescriptor::required("invocation_epoch", "u32"),
+            EventFieldDescriptor::required("claim_id", "ResourceLaneClaimId"),
+            EventFieldDescriptor::required("release_reason", "ResourceLaneReleaseReason"),
         ],
     };
 
@@ -4419,7 +4649,11 @@ retention_manifest schema=absent semantic=absent producer=middleware_no_seed sta
                 | "mfm.events.v1.cell_skipped"
                 | "mfm.events.v1.side_effect.claimed"
                 | "mfm.events.v1.side_effect.claim_taken_over"
+                | "mfm.events.v1.resource_lane.claimed"
+                | "mfm.events.v1.resource_lane.claim_intent"
                 | "mfm.events.v1.side_effect.invocation_started"
+                | "mfm.events.v1.resource_lane.released"
+                | "mfm.events.v1.resource_lane.release_intent"
                 | "mfm.events.v1.state_attempt_completed"
                 | "mfm.events.v1.state_attempt_interrupted"
                 | "mfm.events.v1.run_completed" => "",
@@ -4453,7 +4687,9 @@ mfm.events.v1.cell_skipped schema:mfm.events.v1.cell_skipped:1:sha256-jcs-v1:e82
 mfm.events.v1.side_effect.intent_persisted schema:mfm.events.v1.side_effect.intent_persisted:1:sha256-jcs-v1:d2f3042ed5189e6e5081b781b205886e3c7d469e4cadb0fa4a61e460926c7cce [SideEffectIntent]\n\
 mfm.events.v1.side_effect.claimed schema:mfm.events.v1.side_effect.claimed:1:sha256-jcs-v1:264b474d74a9349bbc1b126e0c13ec3b29ec63124d54db6925fa41e2a7e8ef78 []\n\
 mfm.events.v1.side_effect.claim_taken_over schema:mfm.events.v1.side_effect.claim_taken_over:1:sha256-jcs-v1:358052910361a392a93a34fbb8bcccfd3edde420caa19289e1cd6136a7421a9f []\n\
-mfm.events.v1.side_effect.invocation_prepared schema:mfm.events.v1.side_effect.invocation_prepared:1:sha256-jcs-v1:11e7ee2739d17eea6fa1957d3da20db6eec8a58e15990c5193ba4f532af57f59 [PreparedInvocation]\n\
+mfm.events.v1.resource_lane.claimed schema:mfm.events.v1.resource_lane.claimed:1:sha256-jcs-v1:70c71d26e3d33b89b03658020fd54c9ef49c540950d2c88d8d5dc325cbd1eff5 []\n\
+mfm.events.v1.resource_lane.claim_intent schema:mfm.events.v1.resource_lane.claim_intent:1:sha256-jcs-v1:c154e0529a2c8c2682b90fcb3d6a4c81fe0652af95309df10dcdf6dcc717f1d4 []\n\
+mfm.events.v1.side_effect.invocation_prepared schema:mfm.events.v1.side_effect.invocation_prepared:1:sha256-jcs-v1:b29e66771e9baf546e35e94a819a7a9e5bb0813e5aab5e1a58d542f6edac953a [PreparedInvocation]\n\
 mfm.events.v1.side_effect.invocation_started schema:mfm.events.v1.side_effect.invocation_started:1:sha256-jcs-v1:51cbcca15a2cd022b87a78b71e7652f2928e3dcb011f47312cb5becaa8729002 []\n\
 mfm.events.v1.side_effect.not_submitted_proven schema:mfm.events.v1.side_effect.not_submitted_proven:1:sha256-jcs-v1:795bf7a92342608ce42e42335ab318b060fce28353e4bf91ca56dda72d4da0f7 [NotSubmittedProof]\n\
 mfm.events.v1.side_effect.submission_observed schema:mfm.events.v1.side_effect.submission_observed:1:sha256-jcs-v1:08c47a5f1a00a0052bdc66fdbf6273eb6dd39670ee7936b9e68c982fa333c714 [Submission]\n\
@@ -4462,6 +4698,8 @@ mfm.events.v1.side_effect.receipt_observed schema:mfm.events.v1.side_effect.rece
 mfm.events.v1.side_effect.confirmation_observed schema:mfm.events.v1.side_effect.confirmation_observed:1:sha256-jcs-v1:c6bc63539dd02ff1ea441f8313014a8d537f51504ea3ed827fc8c97a5654c601 [Confirmation,ResourceTouchedSet]\n\
 mfm.events.v1.side_effect.ambiguous schema:mfm.events.v1.side_effect.ambiguous:1:sha256-jcs-v1:dfc9030e0d4fbbeb1800317623cecea3fbb1256c5a1b5d0e272bcda5fa4ef823 [AmbiguityEvidence]\n\
 mfm.events.v1.side_effect.failed schema:mfm.events.v1.side_effect.failed:1:sha256-jcs-v1:8c7e57736bd909ecd65d435f3f91187c623d4e01ce3d5e5fcc4602a690c26a0d [SideEffectFailureDiagnostic]\n\
+mfm.events.v1.resource_lane.released schema:mfm.events.v1.resource_lane.released:1:sha256-jcs-v1:98a51465fcc3e3738689dcd931ac49ad0d87d595d8456cce52b6e9ea82dd21c6 []\n\
+mfm.events.v1.resource_lane.release_intent schema:mfm.events.v1.resource_lane.release_intent:1:sha256-jcs-v1:2006c79bf8406080688d563243e38db065bc14cef62ba3c0a66ea1af4d893b9a []\n\
 mfm.events.v1.public_output_produced schema:mfm.events.v1.public_output_produced:1:sha256-jcs-v1:00d2531467818398553aa59e62c034fa0cd054e7856b89f425aeb4510f9c6776 [PublicOutputCell,PublicOutputRendered]\n\
 mfm.events.v1.public_output_render_failed schema:mfm.events.v1.public_output_render_failed:1:sha256-jcs-v1:38c7cf4189e8525be1c51f1d0601c024b69769e961b6cf5fd43193211e143d9d [PublicOutputRenderFailureDiagnostic]\n\
 mfm.events.v1.state_attempt_completed schema:mfm.events.v1.state_attempt_completed:1:sha256-jcs-v1:36800f9d3ae748d407bc2ea24339049471c8ffe40aa86c53b35b6c7c6cd6ee80 []\n\
@@ -4514,7 +4752,7 @@ retention_manifest"
                 .collect::<Vec<_>>()
                 .join("\n");
 
-            assert_eq!(all_event_schema_descriptors().len(), 27);
+            assert_eq!(all_event_schema_descriptors().len(), 31);
             assert_eq!(
                 rows,
                 "mfm_events::v1::RunAdmitted schema:mfm.events.v1.run_admitted:1:sha256-jcs-v1:54a09a13587e3048ddd955d8bc3c9b4ba9bf2c2dd2914cb214dda96d859b4aac\n\
@@ -4526,7 +4764,9 @@ mfm_events::v1::CellSkipped schema:mfm.events.v1.cell_skipped:1:sha256-jcs-v1:e8
 mfm_events::v1::side_effect::IntentPersisted schema:mfm.events.v1.side_effect.intent_persisted:1:sha256-jcs-v1:d2f3042ed5189e6e5081b781b205886e3c7d469e4cadb0fa4a61e460926c7cce\n\
 mfm_events::v1::side_effect::Claimed schema:mfm.events.v1.side_effect.claimed:1:sha256-jcs-v1:264b474d74a9349bbc1b126e0c13ec3b29ec63124d54db6925fa41e2a7e8ef78\n\
 mfm_events::v1::side_effect::ClaimTakenOver schema:mfm.events.v1.side_effect.claim_taken_over:1:sha256-jcs-v1:358052910361a392a93a34fbb8bcccfd3edde420caa19289e1cd6136a7421a9f\n\
-mfm_events::v1::side_effect::InvocationPrepared schema:mfm.events.v1.side_effect.invocation_prepared:1:sha256-jcs-v1:11e7ee2739d17eea6fa1957d3da20db6eec8a58e15990c5193ba4f532af57f59\n\
+mfm_events::v1::ResourceLaneClaimed schema:mfm.events.v1.resource_lane.claimed:1:sha256-jcs-v1:70c71d26e3d33b89b03658020fd54c9ef49c540950d2c88d8d5dc325cbd1eff5\n\
+mfm_events::v1::ResourceLaneClaimIntent schema:mfm.events.v1.resource_lane.claim_intent:1:sha256-jcs-v1:c154e0529a2c8c2682b90fcb3d6a4c81fe0652af95309df10dcdf6dcc717f1d4\n\
+mfm_events::v1::side_effect::InvocationPrepared schema:mfm.events.v1.side_effect.invocation_prepared:1:sha256-jcs-v1:b29e66771e9baf546e35e94a819a7a9e5bb0813e5aab5e1a58d542f6edac953a\n\
 mfm_events::v1::side_effect::InvocationStarted schema:mfm.events.v1.side_effect.invocation_started:1:sha256-jcs-v1:51cbcca15a2cd022b87a78b71e7652f2928e3dcb011f47312cb5becaa8729002\n\
 mfm_events::v1::side_effect::NotSubmittedProven schema:mfm.events.v1.side_effect.not_submitted_proven:1:sha256-jcs-v1:795bf7a92342608ce42e42335ab318b060fce28353e4bf91ca56dda72d4da0f7\n\
 mfm_events::v1::side_effect::SubmissionObserved schema:mfm.events.v1.side_effect.submission_observed:1:sha256-jcs-v1:08c47a5f1a00a0052bdc66fdbf6273eb6dd39670ee7936b9e68c982fa333c714\n\
@@ -4535,6 +4775,8 @@ mfm_events::v1::side_effect::ReceiptObserved schema:mfm.events.v1.side_effect.re
 mfm_events::v1::side_effect::ConfirmationObserved schema:mfm.events.v1.side_effect.confirmation_observed:1:sha256-jcs-v1:c6bc63539dd02ff1ea441f8313014a8d537f51504ea3ed827fc8c97a5654c601\n\
 mfm_events::v1::side_effect::Ambiguous schema:mfm.events.v1.side_effect.ambiguous:1:sha256-jcs-v1:dfc9030e0d4fbbeb1800317623cecea3fbb1256c5a1b5d0e272bcda5fa4ef823\n\
 mfm_events::v1::side_effect::Failed schema:mfm.events.v1.side_effect.failed:1:sha256-jcs-v1:8c7e57736bd909ecd65d435f3f91187c623d4e01ce3d5e5fcc4602a690c26a0d\n\
+mfm_events::v1::ResourceLaneReleased schema:mfm.events.v1.resource_lane.released:1:sha256-jcs-v1:98a51465fcc3e3738689dcd931ac49ad0d87d595d8456cce52b6e9ea82dd21c6\n\
+mfm_events::v1::ResourceLaneReleaseIntent schema:mfm.events.v1.resource_lane.release_intent:1:sha256-jcs-v1:2006c79bf8406080688d563243e38db065bc14cef62ba3c0a66ea1af4d893b9a\n\
 mfm_events::v1::PublicOutputProduced schema:mfm.events.v1.public_output_produced:1:sha256-jcs-v1:00d2531467818398553aa59e62c034fa0cd054e7856b89f425aeb4510f9c6776\n\
 mfm_events::v1::PublicOutputRenderFailed schema:mfm.events.v1.public_output_render_failed:1:sha256-jcs-v1:38c7cf4189e8525be1c51f1d0601c024b69769e961b6cf5fd43193211e143d9d\n\
 mfm_events::v1::StateAttemptCompleted schema:mfm.events.v1.state_attempt_completed:1:sha256-jcs-v1:36800f9d3ae748d407bc2ea24339049471c8ffe40aa86c53b35b6c7c6cd6ee80\n\
@@ -4655,7 +4897,7 @@ mfm_events::v1::RetentionManifestProjected schema:mfm.events.v1.retention_manife
             schema_names.sort_unstable();
             schema_names.dedup();
 
-            assert_eq!(original_len, 27);
+            assert_eq!(original_len, 31);
             assert_eq!(schema_names.len(), original_len);
         }
 
@@ -4894,9 +5136,9 @@ mfm_events::v1::RetentionManifestProjected schema:mfm.events.v1.retention_manife
                             claim_generation: 1,
                             claim_fencing_token: side_effect::ClaimFencingToken::new("token-1")
                                 .expect("token"),
+                            resource_key: None,
                             prepared_artifact_id: Some(artifact_id(119)),
                             prepared_hash: Some(content_digest(120)),
-                            resource_key: None,
                         },
                     ),
                     vec![EventArtifactReferenceSource::PreparedInvocation],
