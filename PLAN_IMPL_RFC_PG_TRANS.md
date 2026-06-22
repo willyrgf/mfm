@@ -33,7 +33,7 @@ decomposes into three separable, individually coherent cutovers that land in dep
 with no compatibility shims:
 
 1. Append/artifact cutover: `PreparedCommitBundle`, artifact bytes/evidence into Postgres, filesystem
-   artifact store removal, the append-only authority schema (partitioned), and the constraint/payload
+   artifact store removal, the append-only authority schema, and the constraint/payload
    simplifications.
 2. Resource-lane cutover: the pre-invocation lane lifecycle, per-lane admission, `lane_id`-keyed
    lane-transition authority, the no-deadlock single-claim invariant, and the `docs/saga.md`
@@ -114,8 +114,7 @@ Scope:
 - Rewrite the `docs/saga.md` "Resource Claims" section for the pre-invocation `ResourceLaneClaimed`
   lifecycle, the claim-kind-to-lane mapping (`Exclusive` only), and the no-deadlock invariant; this
   lands in the resource-lane cutover merge unit (a planned-change callout already points to the RFC).
-  partition-detach archival (not production delete), the artifact-size limit, and the dedicated-MFM-
-  database requirement driven by cluster-wide `xmin` coupling.
+- Document the dedicated-MFM-database requirement driven by cluster-wide `xmin` coupling.
 - Document the read-your-writes caveat (list/watch lag the sealed frontier; strict status is
   immediate) and the operator `reseed_store_epoch` step after physical restore/clone.
 - Update the storage README/runbook with the destructive fresh-database cutover stance.
@@ -262,8 +261,7 @@ Scope:
 - Split the Postgres implementation into clear run, artifact, read-model, schema, locking, and
   rebuild modules as needed.
 - Replace the old `typed_*` migration baseline with target non-`typed_` tables.
-- Add append-only authority tables, declared partitioned on a stable per-run key so archival can
-  detach partitions later:
+- Add append-only authority tables:
   `commits`, `run_events`, `artifact_blobs`, `artifact_admissions`,
   `run_artifact_admissions`, `commit_artifact_evidence`, `resource_lane_claim_events`,
   `resource_lane_release_events`, and `resource_lane_transitions` (lane tables keyed on `lane_id`).
@@ -289,7 +287,7 @@ Scope:
   destructive reset, restore, clone, import, or rollback; it rotates `store_epoch` and invalidates
   outstanding cursors. Startup does not auto-detect physical-domain changes.
 - Add no-update/no-delete/no-truncate guards for the app role.
-- Add maintenance-role-only rebuild/validation/archival/reseed procedure boundaries.
+- Add maintenance-role-only rebuild/validation/reseed procedure boundaries.
 - Make schema validation reject stale old `typed_*` schemas or old migration checksums.
 
 Deletion requirement:

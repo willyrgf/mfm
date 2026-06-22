@@ -133,6 +133,9 @@ The desired hybrid is:
 - Do not replace the Rust store admission/projection proof logic with PL/pgSQL semantic admission.
 - Do not make materialized views semantic authority.
 - Do not silently migrate uncertified historical runs into certified run history.
+- Do not solve data lifecycle in this RFC. Archival, table partitioning, and growth-bounding for the
+  append-only authority tables are deferred to a future RFC. v1 is append-only; growth is managed
+  operationally (provisioning plus the artifact-size limit) until that RFC lands.
 
 Artifact bytes moving into Postgres does not move the secret boundary into Postgres. Private keys,
 mnemonics, passwords, decrypted wallet material, signer runtime sources, signature scalars, raw
@@ -1569,8 +1572,8 @@ must not block independent run appends. Two consequences need explicit handling:
   transactions and large artifacts.
 
 There is also a **read-your-writes caveat** for list/watch: because the frontier only serves rows with
-`append_xid < safe_before_xid`, a run you just started does not appear in `list_runs`/`watch` until
-`xmin` advances past its commit. This is expected and must be documented in the public API: strict
+`append_xid < safe_before_xid`, a run you just started does not appear in `read_run_observations`
+until `xmin` advances past its commit. This is expected and must be documented in the public API: strict
 per-run `run_status(run_id)` is immediate and authoritative, while list/watch are sealed-frontier
 observation surfaces that lag by the current oldest in-flight transaction.
 
@@ -1712,6 +1715,27 @@ read_run_observations(query) -> RunObservationPage
 limit, an optional opaque cursor, and optional long-poll wait time. List, poll, and watch are modes
 of this one observation read. There must not be separate `list_runs`, `poll_run_changes`, or
 `watch_run_changes` app contracts.
+
+The presence of the cursor selects the mode, and both modes seal exactly one frontier per request:
+
+- **List mode (no cursor):** the response is the current set of runs matching the query, read from
+  the `current_*` observation views bounded by one snapshot-sealed frontier, up to `limit` rows.
+  `next_cursor` is that sealed frontier's exclusive lower bound.
+- **Poll/watch mode (with cursor):** the response is the runs whose `run_commit_log` changes fall
+  after the cursor and at or before a freshly sealed frontier, up to `limit` rows, with `next_cursor`
+  advanced to the new frontier. An empty page (including a long-poll timeout) returns the advanced
+  `next_cursor`, not an error.
+
+Because every request seals one frontier and `next_cursor` is always that frontier's exclusive lower
+bound, a client can list and then watch from the returned cursor without skipping changes at the
+boundary XID.
+
+Known limitation: the list-mode snapshot is capped at `limit` and is not separately paginated.
+Listing an active or historical set larger than `limit`, or filtering by a historical time window
+beyond what the forward change feed carries, is deferred to a separate list-pagination design. That
+design must use its own page cursor and must not reuse the watch cursor, so "next page of this list"
+and "next change after this sealed point" never alias. v1 deliberately ships the smaller capability:
+the most recent matching runs plus a coherent forward watch.
 
 Existing strict APIs remain the way callers obtain authority-bearing per-run state:
 
@@ -2018,7 +2042,7 @@ Database guardrails:
   one trigger class that earns its keep; multi-row structural invariants are owned by the Rust append
   path, not by PL/pgSQL re-implementations)
 - add equivalent guards for read fact tables except inside controlled rebuild procedures
-- production rebuild/validate/archival/epoch-reseed procedures are executable only by an explicit
+- production rebuild/validate/epoch-reseed procedures are executable only by an explicit
   maintenance role, not by normal app/CLI/REST runtime credentials
 - if local development uses a single physical database role, those procedures must still require an
   explicit maintenance entry point and must not be exposed through production app services
@@ -2107,8 +2131,7 @@ here; it is part of this merge gate, not optional follow-up.
 - the read-your-writes caveat: list/watch lag the sealed frontier while strict per-run status is
   immediate
 - append-only authority with a dedicated-database requirement driven by cluster-wide `xmin` coupling
-- maintenance-role requirements for read-model rebuild/validation, archival, and epoch-reseed
-  procedures
+- maintenance-role requirements for read-model rebuild/validation and epoch-reseed procedures
 - the breaking dev-branch cutover posture and lack of compatibility with old `typed_*` tables
 
 `docs/architecture.md` must be updated to describe:
@@ -2177,8 +2200,8 @@ This is a breaking dev-branch cutover, not an online compatibility migration.
    - Add `commits`, `run_events`, `artifact_blobs`, artifact evidence/admission tables,
      resource-lane claim/release and lane-transition authority tables (keyed on `lane_id`),
      `run_commit_log`, projection-versioned observation facts, views, functions, and
-     build/validation tools using target names. Declare per-run-growth authority tables as
-     partitioned. Do not add a `logical_key_observations` index (deferred) and do not add the
+     build/validation tools using target names. Do not add a `logical_key_observations` index
+     (deferred) and do not add the
      cursor-domain seal/fingerprint subsystem (replaced by epoch + operator reseed).
    - Move same-run ordering from mutable run-head rows to advisory locking plus inserted commit
      authority.
@@ -2325,7 +2348,6 @@ Required new tests:
 - a maintenance-role sweep reclaims unreferenced (orphan) `artifact_blobs`; the app role cannot delete
 - missing, extra, or mismatched artifact bytes are rejected before authority rows commit
 - `run_events` stores only canonical payload bytes (no `payload_json` query copy)
-- per-run-growth authority tables are partitioned so a completed-run partition can be detached
 - run-level artifact admissions prove the exact first `binding_kind = 'admitted'`
   `commit_artifact_evidence` row
 - every runtime append path passes a `PreparedCommitBundle`, not a plan-only append
@@ -2403,10 +2425,9 @@ Required new tests:
   field-size limit is 1 GB, but MFM should enforce lower artifact-size limits before insert and with
   database checks. Large blobs may be content-addressed in a short transaction before the append
   transaction; orphan content-addressed blobs are acceptable and reclaimed by a maintenance sweep.
-- Append-only growth is bounded by maintenance-role partition-detach archival, not production delete.
-  Per-run-growth authority tables are declared partitioned from the start so this is possible later.
-  The MFM store runs on a database instance dedicated to MFM, because watch-frontier liveness is
-  coupled to cluster-wide `xmin`.
+- The MFM store runs on a database instance dedicated to MFM, because watch-frontier liveness is
+  coupled to cluster-wide `xmin`. Data lifecycle (archival, partitioning, growth-bounding) is
+  deferred to a future RFC; v1 is append-only with growth managed operationally.
 - The first observation models should cover observed run summary, immutable commit cursor log,
   projection-versioned change summaries, observed public-output summary, and observed attempt
   summary. Those are enough for the first public list/watch API.
