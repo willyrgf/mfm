@@ -18,7 +18,6 @@ tower-http = { version = "0.6", features = ["request-id", "trace"] }
 http = "1"
 
 mfm-app = { path = "../../crates/app" }
-mfm-artifact-store-fs = { path = "../../crates/storages/artifact-store-fs", default-features = false }
 mfm-authored-config = { path = "../../crates/authored-config" }
 mfm-canonical = { path = "../../crates/kernel/canonical" }
 mfm-evm-contract-config = { path = "../../crates/evm-contract-config" }

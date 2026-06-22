@@ -22,8 +22,7 @@ nix run .#mfm_rest_api
 Environment variables:
 
 - `MFM_REST_API_ADDR`: bind address (default: `127.0.0.1:3001`)
-- `DATABASE_URL`: Postgres URL for the certified typed run-event store (required)
-- `MFM_TYPED_ARTIFACT_ROOT`: typed artifact root (default: `~/.mfm/typed_run_artifacts`)
+- `DATABASE_URL`: Postgres URL for the certified run store (required)
 - `MFM_SOURCE_REVISION`: optional source revision evidence for typed run starts
 - `MFM_EVM_RPC_SOURCES_JSON`: runtime-only EVM source registry for EVM contract entry-point runs
 - `MFM_EVM_SIGNERS_JSON`: runtime-only signer provider registry for EVM contract entry-point runs
@@ -48,6 +47,7 @@ Endpoints:
 
 - `GET /v1/health`
 - `GET /v1/ready`
+- `GET /v1/runs?cursor=<opaque>&limit=<n>&wait_ms=<n>`
 - `POST /v1/runs/start`
 - `POST /v1/runs/:run_id/resume`
 - `POST /v1/runs/:run_id/manual-resolution`
@@ -59,7 +59,31 @@ Endpoints:
 Probe semantics:
 
 - `/v1/health`: liveness only (process is running)
-- `/v1/ready`: typed run store and typed artifact store probes must succeed
+- `/v1/ready`: run store probe must succeed
+
+## List Runs
+
+`GET /v1/runs` returns one observation-only page. Without `cursor`, it lists the latest observed
+run rows bounded by one sealed frontier. With `cursor`, it returns changes after that cursor and a
+fresh `next_cursor`. A long-poll timeout is a successful empty page.
+
+Response shape:
+
+```json
+{
+  "next_cursor": "opaque",
+  "runs": [
+    {
+      "run_id": "run:sha256-jcs-v1:...",
+      "head_seq": 3,
+      "observed_status": "started",
+      "started_at": "2026-01-01T00:00:00.000000Z",
+      "updated_at": "2026-01-01T00:00:01.000000Z",
+      "completed_at": null
+    }
+  ]
+}
+```
 
 ## Start A Run
 
@@ -259,9 +283,10 @@ phase. `run_mode` is one of `forward`, `remediating`, `manual_blocked`, `complet
 `manually_resolved`, or `failed_without_acdc_claim`. The nested `saga` object reports the certified
 policy, derived per-forward-ledger obligations, linked remediation ledgers, manual-block reason and
 manual authorization requirements when applicable, terminal resolution claim when present,
-projected resource ledgers with declared claim/key/touched-set evidence, and active exclusive lane
-holders referenced by the target run's persisted live side-effect ledgers. Status does not serialize
-unrelated global lane holders or scheduler waiters that blocked before appending lane evidence.
+projected resource ledgers with declared claim/touched-set evidence and resource-key digests, and
+active exclusive lane holders referenced by the target run's persisted live side-effect ledgers.
+Status does not serialize raw resource keys, unrelated global lane holders, or scheduler waiters
+that blocked before appending lane evidence.
 `attempt_dispositions` reports committed attempt-level lifecycle status separately from `run_mode`;
 each entry has `node_id`, `attempt_id`, `disposition` (`started`, `completed`, `failed`, or
 `interrupted`), and status-specific fields such as `attempt_no`, `retryable`, or `output_cell_id`.

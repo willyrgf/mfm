@@ -8,22 +8,20 @@ use axum::http::{Request, StatusCode};
 use sqlx::{AssertSqlSafe, PgPool};
 use tower::ServiceExt;
 
-use mfm_stream_store_postgres::{
-    PostgresSchema, PostgresTypedRunEventStore, PostgresTypedStoreError,
-};
+use mfm_stream_store_postgres::{PostgresRunStore, PostgresSchema, PostgresStoreError};
 
 const VALID_RUN_ID: &str =
     "run:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000033";
 
-async fn connect_typed_postgres_with_retry(
+async fn connect_postgres_with_retry(
     database_url: &str,
     max_attempts: u32,
     delay_ms: u64,
-) -> PostgresTypedRunEventStore {
-    let mut last_err: Option<PostgresTypedStoreError> = None;
+) -> PostgresRunStore {
+    let mut last_err: Option<PostgresStoreError> = None;
     for _ in 0..max_attempts {
         match PostgresSchema::migrate(database_url).await {
-            Ok(()) => match PostgresTypedRunEventStore::connect(database_url).await {
+            Ok(()) => match PostgresRunStore::connect(database_url).await {
                 Ok(store) => return store,
                 Err(err) => {
                     last_err = Some(err);
@@ -86,20 +84,14 @@ async fn response_json(resp: axum::response::Response) -> serde_json::Value {
 }
 
 #[tokio::test]
-async fn parity_typed_rest_postgres_smoke() {
+async fn parity_rest_postgres_smoke() {
     let database_url =
         std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for parity tests");
     let schema = unique_schema();
     create_schema(&database_url, &schema).await;
     let scoped_database_url = schema_scoped_database_url(&database_url, &schema);
-    let store = connect_typed_postgres_with_retry(&scoped_database_url, 20, 250).await;
-    let artifact_root =
-        std::env::temp_dir().join(format!("mfm-rest-parity-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&artifact_root).expect("typed artifact root");
-    let app = mfm_rest_api::make_app(mfm_rest_api::AppState {
-        store,
-        artifacts: mfm_artifact_store_fs::FsTypedArtifactStore::new(&artifact_root),
-    });
+    let store = connect_postgres_with_retry(&scoped_database_url, 20, 250).await;
+    let app = mfm_rest_api::make_app(mfm_rest_api::AppState { store });
 
     let ready = app
         .clone()
@@ -115,7 +107,7 @@ async fn parity_typed_rest_postgres_smoke() {
     assert_eq!(ready.status(), StatusCode::OK);
     let ready_v = response_json(ready).await;
     assert_eq!(ready_v["status"], "success");
-    assert_eq!(ready_v["data"]["checks"]["typed_run_store"], "ready");
+    assert_eq!(ready_v["data"]["checks"]["run_store"], "ready");
 
     let absent_status = app
         .oneshot(

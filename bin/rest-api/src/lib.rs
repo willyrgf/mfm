@@ -28,17 +28,15 @@ use axum::Router;
 use http::header::HeaderName;
 use mfm_app::{
     AppError, DriveMode, EntryPointRunLaunchInput, ErrorClass, ManualResolutionDecision,
-    ManualResolutionRecordRequest, PublicOpName, PublicSafeMessage, RunServices,
-    TypedPublicOutputResponse, TypedRunMode, TypedRunResponse, TypedRunStreamResponse,
+    ManualResolutionRecordRequest, PublicOpName, PublicOutputResponse, PublicSafeMessage,
+    RunModeStatus, RunResponse, RunServices, RunStreamResponse,
 };
-use mfm_artifact_store_fs::{FsTypedArtifactError, FsTypedArtifactStore};
 use mfm_authored_config::{AuthoredConfig, AuthoredConfigFormat};
-use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
-use mfm_events::v1::ArtifactRole;
-use mfm_ids::{ArtifactId, ContentDigest, DigestAlgorithm, RunId, SchemaId};
+use mfm_canonical::PlainCanonicalJsonBytes;
+use mfm_ids::{RunId, SchemaId};
 use mfm_store::v1 as store;
-use mfm_store::v1::AsyncTypedRunEventStore;
-use mfm_stream_store_postgres::{PostgresTypedRunEventStore, PostgresTypedStoreError};
+use mfm_store::v1::{RunEventStore, RunObservationStore};
+use mfm_stream_store_postgres::{PostgresRunStore, PostgresStoreError};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -171,15 +169,13 @@ impl axum::response::IntoResponse for ApiError {
 }
 
 /// Default production REST API state.
-pub type DefaultAppState = AppState<PostgresTypedRunEventStore>;
+pub type DefaultAppState = AppState<PostgresRunStore>;
 
 /// Shared router state injected into request handlers.
 #[derive(Clone)]
-pub struct AppState<S = PostgresTypedRunEventStore> {
-    /// Certified typed run-event store.
+pub struct AppState<S = PostgresRunStore> {
+    /// Certified typed run-event and artifact authority store.
     pub store: S,
-    /// Certified typed filesystem artifact store.
-    pub artifacts: FsTypedArtifactStore,
 }
 
 #[derive(Clone)]
@@ -189,44 +185,44 @@ struct RouterState<S> {
 
 impl<S> RouterState<S>
 where
-    S: AsyncTypedRunEventStore + Clone + Send + Sync,
+    S: RunEventStore + store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
 {
-    fn services(&self) -> Result<RunServices<S>, ApiError> {
-        let runners = mfm_app::production_typed_runner_registry(self.app.artifacts.clone())?;
+    fn services(&self) -> Result<RunServices<S, S>, ApiError> {
+        let runners = mfm_app::production_runner_registry(
+            mfm_app::artifact_read_provider_from_retained(self.app.store.clone()),
+        )?;
         let certification_registry = mfm_app::production_certification_registry()?;
-        Ok(
-            mfm_app::make_async_typed_services_with_certification_registry(
-                runners,
-                self.app.store.clone(),
-                self.app.artifacts.clone(),
-                certification_registry,
-            ),
-        )
+        Ok(mfm_app::make_run_services_with_certification_registry(
+            runners,
+            self.app.store.clone(),
+            self.app.store.clone(),
+            certification_registry,
+        ))
     }
 }
 
-/// Builds the default certified typed filesystem artifact store.
-pub fn make_default_typed_artifact_store() -> FsTypedArtifactStore {
-    mfm_app::make_default_typed_artifact_store()
-}
-
-/// Connects to the default certified typed run-event store.
-pub async fn make_default_typed_run_store() -> Result<PostgresTypedRunEventStore, ApiError> {
-    Ok(PostgresTypedRunEventStore::connect_env().await?)
+/// Connects to the default certified run store.
+pub async fn make_default_run_store() -> Result<PostgresRunStore, ApiError> {
+    Ok(PostgresRunStore::connect_env().await?)
 }
 
 /// Builds default production REST API state from environment-selected stores.
 pub async fn make_default_app_state() -> Result<DefaultAppState, ApiError> {
     Ok(AppState {
-        store: make_default_typed_run_store().await?,
-        artifacts: make_default_typed_artifact_store(),
+        store: make_default_run_store().await?,
     })
 }
 
 /// Builds the `axum` router for the public REST API surface.
 pub fn make_app<S>(state: AppState<S>) -> Router
 where
-    S: AsyncTypedRunEventStore + Clone + Send + Sync + 'static,
+    S: RunEventStore
+        + RunObservationStore<Error = <S as RunEventStore>::Error>
+        + store::RetainedArtifactReadProvider
+        + Clone
+        + Send
+        + Sync
+        + 'static,
 {
     let request_id_header = HeaderName::from_static("x-request-id");
     let make_span_header = request_id_header.clone();
@@ -235,6 +231,7 @@ where
     Router::new()
         .route("/v1/health", get(health))
         .route("/v1/ready", get(ready::<S>))
+        .route("/v1/runs", get(runs_list::<S>))
         .route("/v1/runs/start", post(runs_start::<S>))
         .route("/v1/runs/:run_id/resume", post(runs_resume::<S>))
         .route(
@@ -296,7 +293,7 @@ async fn health() -> Json<serde_json::Value> {
 #[instrument(level = "debug", skip(state))]
 async fn ready<S>(State(state): State<RouterState<S>>) -> Result<Json<serde_json::Value>, ApiError>
 where
-    S: AsyncTypedRunEventStore + Clone + Send + Sync,
+    S: RunEventStore + store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
 {
     state
         .app
@@ -307,29 +304,14 @@ where
             ApiError::new(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "NotReady",
-                "typed run store is not ready",
-            )
-        })?;
-
-    let probe = readiness_artifact_probe()?;
-    state
-        .app
-        .artifacts
-        .has_artifact(&probe)
-        .await
-        .map_err(|_| {
-            ApiError::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "NotReady",
-                "typed artifact store is not ready",
+                "run store is not ready",
             )
         })?;
 
     Ok(Json(ok(json!({
       "ok": true,
       "checks": {
-        "typed_run_store": "ready",
-        "typed_artifact_store": "ready"
+        "run_store": "ready"
       }
     }))))
 }
@@ -365,7 +347,7 @@ impl RestDriveMode {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct TypedRunStartBody {
+struct RunStartBody {
     op: String,
     #[serde(default)]
     op_version: Option<u32>,
@@ -379,9 +361,9 @@ struct TypedRunStartBody {
 }
 
 #[derive(Debug, Serialize)]
-struct TypedRunStartResponse {
-    run: TypedRunResponse,
-    public_output: Option<TypedPublicOutputResponse>,
+struct RunStartResponse {
+    run: RunResponse,
+    public_output: Option<PublicOutputResponse>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -402,7 +384,7 @@ impl From<RestConfigFormat> for AuthoredConfigFormat {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct TypedRunResumeBody {
+struct RunResumeBody {
     #[serde(default)]
     drive: RestDriveMode,
 }
@@ -431,6 +413,62 @@ struct RunStreamQuery {
     to_seq: Option<u64>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunListQuery {
+    #[serde(default)]
+    cursor: Option<String>,
+    #[serde(default)]
+    limit: Option<u32>,
+    #[serde(default)]
+    wait_ms: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+struct RunObservationPageResponse {
+    next_cursor: String,
+    runs: Vec<RunObservationResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct RunObservationResponse {
+    run_id: String,
+    head_seq: u64,
+    observed_status: String,
+    started_at: String,
+    updated_at: String,
+    completed_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    change_id: Option<String>,
+}
+
+impl From<store::RunObservationPage> for RunObservationPageResponse {
+    fn from(page: store::RunObservationPage) -> Self {
+        Self {
+            next_cursor: page.next_cursor,
+            runs: page
+                .runs
+                .into_iter()
+                .map(RunObservationResponse::from)
+                .collect(),
+        }
+    }
+}
+
+impl From<store::RunObservation> for RunObservationResponse {
+    fn from(row: store::RunObservation) -> Self {
+        Self {
+            run_id: row.run_id.to_string(),
+            head_seq: row.head_seq.as_u64(),
+            observed_status: row.observed_status.as_str().to_owned(),
+            started_at: row.started_at,
+            updated_at: row.updated_at,
+            completed_at: row.completed_at,
+            change_id: row.change_id,
+        }
+    }
+}
+
 fn default_from_seq() -> u64 {
     1
 }
@@ -439,13 +477,45 @@ fn default_json_media_type_string() -> String {
     "application/json".to_owned()
 }
 
+#[instrument(level = "debug", skip(state, query))]
+async fn runs_list<S>(
+    State(state): State<RouterState<S>>,
+    query: Result<Query<RunListQuery>, QueryRejection>,
+) -> Result<Json<serde_json::Value>, ApiError>
+where
+    S: RunEventStore
+        + RunObservationStore<Error = <S as RunEventStore>::Error>
+        + store::RetainedArtifactReadProvider
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+{
+    let Query(query) = query.map_err(|_| {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "InvalidQuery",
+            "Failed to parse run list query",
+        )
+    })?;
+    let services = state.services()?;
+    let page = services
+        .read_run_observations(store::RunObservationQuery::new(
+            query.cursor,
+            query.limit.unwrap_or(50),
+            query.wait_ms.unwrap_or(0),
+        ))
+        .await?;
+    json_ok(RunObservationPageResponse::from(page))
+}
+
 #[instrument(level = "info", skip(state, body))]
 async fn runs_start<S>(
     State(state): State<RouterState<S>>,
-    body: Result<Json<TypedRunStartBody>, JsonRejection>,
+    body: Result<Json<RunStartBody>, JsonRejection>,
 ) -> Result<Json<serde_json::Value>, ApiError>
 where
-    S: AsyncTypedRunEventStore + Clone + Send + Sync,
+    S: RunEventStore + store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
 {
     let Json(req) = body?;
     let run_id = parse_optional_run_id(req.run_id)?;
@@ -475,17 +545,17 @@ where
         .public_schema_id
         .clone();
     let run = services.launch_run(prepared.request).await?;
-    let public_output = if run.run_mode == TypedRunMode::Completed {
+    let public_output = if run.run_mode == RunModeStatus::Completed {
         Some(
             services
-                .typed_public_output(&run_id, &public_output_schema_id)
+                .public_output(&run_id, &public_output_schema_id)
                 .await?,
         )
     } else {
         None
     };
 
-    json_ok(TypedRunStartResponse { run, public_output })
+    json_ok(RunStartResponse { run, public_output })
 }
 
 #[instrument(level = "info", skip(state, body), fields(run_id = run_id.as_str()))]
@@ -495,10 +565,10 @@ async fn runs_resume<S>(
     body: Bytes,
 ) -> Result<Json<serde_json::Value>, ApiError>
 where
-    S: AsyncTypedRunEventStore + Clone + Send + Sync,
+    S: RunEventStore + store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
 {
     let run_id = parse_run_id(&run_id)?;
-    let req: TypedRunResumeBody = parse_optional_body(body)?;
+    let req: RunResumeBody = parse_optional_body(body)?;
     let data = state
         .services()?
         .resume_stored_run(&run_id, req.drive.into_app())
@@ -514,7 +584,7 @@ async fn runs_manual_resolution<S>(
     body: Result<Json<ManualResolutionBody>, JsonRejection>,
 ) -> Result<Json<serde_json::Value>, ApiError>
 where
-    S: AsyncTypedRunEventStore + Clone + Send + Sync,
+    S: RunEventStore + store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
 {
     let run_id = parse_run_id(&run_id)?;
     let Json(req) = body?;
@@ -547,7 +617,7 @@ async fn runs_status<S>(
     Path(run_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError>
 where
-    S: AsyncTypedRunEventStore + Clone + Send + Sync,
+    S: RunEventStore + store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
 {
     let run_id = parse_run_id(&run_id)?;
     let data = state.services()?.run_status(&run_id).await?;
@@ -566,7 +636,7 @@ async fn runs_stream<S>(
     query: Result<Query<RunStreamQuery>, QueryRejection>,
 ) -> Result<Json<serde_json::Value>, ApiError>
 where
-    S: AsyncTypedRunEventStore + Clone + Send + Sync,
+    S: RunEventStore + store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
 {
     let Query(query) = query.map_err(|_| {
         ApiError::new(
@@ -579,7 +649,7 @@ where
 
     let run_id = parse_run_id(&run_id)?;
     let response = state.services()?.run_stream(&run_id).await?;
-    let data = TypedRunStreamResponse {
+    let data = RunStreamResponse {
         run_id: response.run_id,
         head_seq: response.head_seq,
         events: response
@@ -604,7 +674,7 @@ async fn runs_replay<S>(
     Path(run_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError>
 where
-    S: AsyncTypedRunEventStore + Clone + Send + Sync,
+    S: RunEventStore + store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
 {
     let run_id = parse_run_id(&run_id)?;
     let data = state.services()?.verify_replay_for_run(&run_id).await?;
@@ -622,14 +692,11 @@ async fn runs_public_output<S>(
     Path((run_id, schema_id)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, ApiError>
 where
-    S: AsyncTypedRunEventStore + Clone + Send + Sync,
+    S: RunEventStore + store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
 {
     let run_id = parse_run_id(&run_id)?;
     let schema_id = parse_schema_id(&schema_id)?;
-    let data = state
-        .services()?
-        .typed_public_output(&run_id, &schema_id)
-        .await?;
+    let data = state.services()?.public_output(&run_id, &schema_id).await?;
 
     json_ok(data)
 }
@@ -713,36 +780,19 @@ fn validate_sequence_range(from_seq: u64, to_seq: Option<u64>) -> Result<(), Api
     Ok(())
 }
 
-fn readiness_artifact_probe() -> Result<store::ArtifactEvidenceRef, ApiError> {
-    let bytes = b"null";
-    let digest =
-        ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, sha256_digest_bytes(bytes));
-    Ok(store::ArtifactEvidenceRef {
-        artifact_id: ArtifactId::from_digest(DigestAlgorithm::Sha256JcsV1, *digest.digest()),
-        digest,
-        byte_len: bytes.len() as u64,
-        media_type: mfm_app::json_media_type()?,
-        schema_id: None,
-        semantic_type_id: None,
-        producer_node_id: None,
-        producer_seed_id: None,
-        artifact_role: ArtifactRole::RetentionManifest,
-    })
-}
-
-fn api_error_from_typed_store_error(error: PostgresTypedStoreError) -> ApiError {
+fn api_error_from_store_error(error: PostgresStoreError) -> ApiError {
     match error {
-        PostgresTypedStoreError::Store(_) => ApiError::backend(
+        PostgresStoreError::Store(_) => ApiError::backend(
             StatusCode::CONFLICT,
             "RunStoreRejected",
             "Run store rejected the requested operation",
         ),
-        PostgresTypedStoreError::Database(_) => ApiError::backend(
+        PostgresStoreError::Database(_) => ApiError::backend(
             StatusCode::SERVICE_UNAVAILABLE,
             "RunStoreUnavailable",
             "Run store is unavailable",
         ),
-        PostgresTypedStoreError::Corruption(_) => ApiError::backend(
+        PostgresStoreError::Corruption(_) => ApiError::backend(
             StatusCode::INTERNAL_SERVER_ERROR,
             "RunStoreCorruption",
             "Run store returned invalid data",
@@ -750,47 +800,9 @@ fn api_error_from_typed_store_error(error: PostgresTypedStoreError) -> ApiError 
     }
 }
 
-impl From<PostgresTypedStoreError> for ApiError {
-    fn from(error: PostgresTypedStoreError) -> Self {
-        api_error_from_typed_store_error(error)
-    }
-}
-
-fn api_error_from_typed_artifact_error(error: FsTypedArtifactError) -> ApiError {
-    match error {
-        FsTypedArtifactError::NotFound { .. } => ApiError::backend(
-            StatusCode::NOT_FOUND,
-            "ArtifactNotFound",
-            "Typed artifact was not found",
-        ),
-        FsTypedArtifactError::InvalidEvidence { .. }
-        | FsTypedArtifactError::InvalidIdentity { .. }
-        | FsTypedArtifactError::EvidenceMismatch { .. } => ApiError::backend(
-            StatusCode::CONFLICT,
-            "ArtifactRejected",
-            "Typed artifact evidence was rejected",
-        ),
-        FsTypedArtifactError::RetainedArtifactRefused { .. } => ApiError::backend(
-            StatusCode::CONFLICT,
-            "ArtifactRetained",
-            "Typed artifact is retained",
-        ),
-        FsTypedArtifactError::Corruption { .. } => ApiError::backend(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "ArtifactCorruption",
-            "Typed artifact store returned invalid data",
-        ),
-        FsTypedArtifactError::Io { .. } => ApiError::backend(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "ArtifactStoreUnavailable",
-            "Typed artifact store is unavailable",
-        ),
-    }
-}
-
-impl From<FsTypedArtifactError> for ApiError {
-    fn from(value: FsTypedArtifactError) -> Self {
-        api_error_from_typed_artifact_error(value)
+impl From<PostgresStoreError> for ApiError {
+    fn from(error: PostgresStoreError) -> Self {
+        api_error_from_store_error(error)
     }
 }
 
@@ -823,7 +835,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_run_id_is_typed_error() {
+    fn invalid_run_id_has_domain_error() {
         let err = parse_run_id("not-a-uuid").expect_err("dynamic ids are rejected");
 
         assert_eq!(err.status, StatusCode::BAD_REQUEST);
@@ -877,15 +889,8 @@ mod tests {
     }
 
     fn test_app() -> axum::Router {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system time")
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("mfm-rest-api-contract-test-{unique}"));
-        std::fs::create_dir_all(&root).expect("artifact root");
         make_app(AppState {
-            store: store::AsyncInMemoryTypedRunStore::default(),
-            artifacts: FsTypedArtifactStore::new(root),
+            store: store::AsyncInMemoryRunStore::default(),
         })
     }
 

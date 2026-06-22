@@ -10,7 +10,7 @@ use mfm_portfolio_config::{
 };
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
-use mfm_store::v1::AsyncTypedRunEventStore;
+use mfm_store::v1::RunEventStore;
 use serde_json::Value;
 use tower::ServiceExt;
 
@@ -47,17 +47,12 @@ async fn response_json(resp: axum::response::Response) -> serde_json::Value {
 }
 
 fn test_app() -> axum::Router {
-    let root = std::env::temp_dir().join(format!("mfm-rest-api-test-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&root).expect("artifact root");
-    let state = test_support::in_memory_rest_app_state(root);
+    let state = test_support::in_memory_rest_app_state();
     mfm_rest_api::make_app(state)
 }
 
-fn in_memory_state_with_root() -> (std::path::PathBuf, test_support::InMemoryRestAppState) {
-    let root = std::env::temp_dir().join(format!("mfm-rest-api-test-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&root).expect("artifact root");
-    let state = test_support::in_memory_rest_app_state(root.clone());
-    (root, state)
+fn in_memory_state() -> test_support::InMemoryRestAppState {
+    test_support::in_memory_rest_app_state()
 }
 
 #[tokio::test]
@@ -82,7 +77,7 @@ async fn health_endpoint_reports_liveness() {
 }
 
 #[tokio::test]
-async fn ready_endpoint_reports_typed_store_readiness() {
+async fn ready_endpoint_reports_run_store_readiness() {
     let app = test_app();
 
     let resp = app
@@ -100,8 +95,7 @@ async fn ready_endpoint_reports_typed_store_readiness() {
     let v = response_json(resp).await;
     assert_eq!(v["status"], "success");
     assert_eq!(v["data"]["ok"], true);
-    assert_eq!(v["data"]["checks"]["typed_run_store"], "ready");
-    assert_eq!(v["data"]["checks"]["typed_artifact_store"], "ready");
+    assert_eq!(v["data"]["checks"]["run_store"], "ready");
 }
 
 #[tokio::test]
@@ -220,7 +214,7 @@ async fn start_accepts_entry_point_json_object_config_shape() {
 
 #[tokio::test]
 async fn evm_contract_start_accepts_all_entry_point_ops_append_only() {
-    let (root, state) = in_memory_state_with_root();
+    let state = in_memory_state();
     let app = mfm_rest_api::make_app(state.clone());
 
     for (op, config) in evm_entry_point_configs() {
@@ -254,8 +248,6 @@ async fn evm_contract_start_accepts_all_entry_point_ops_append_only() {
             .expect("run stream");
         assert_evm_entry_point_evidence(&stream, op);
     }
-
-    let _ = std::fs::remove_dir_all(root);
 }
 
 #[tokio::test]
@@ -263,7 +255,7 @@ async fn portfolio_status_route_reports_interrupted_attempt_and_framework_attemp
     let _env_guard = RPC_ENV_LOCK.lock().await;
     let rpc_url = start_rpc_mock().await;
     let _env_restore = set_rpc_env(rpc_url);
-    let (root, state) = in_memory_state_with_root();
+    let state = in_memory_state();
     let config = portfolio_snapshot_config();
     let certified = portfolio_status_spec_for_config(&config);
     let run_id = mfm_app::new_run_id();
@@ -397,12 +389,10 @@ async fn portfolio_status_route_reports_interrupted_attempt_and_framework_attemp
         &certified.envelope().spec.nodes,
         &run_id,
     );
-
-    let _ = std::fs::remove_dir_all(root);
 }
 
 #[tokio::test]
-async fn status_invalid_run_id_is_typed_error() {
+async fn status_invalid_run_id_has_domain_error() {
     let app = test_app();
 
     let resp = app
@@ -423,7 +413,7 @@ async fn status_invalid_run_id_is_typed_error() {
 }
 
 #[tokio::test]
-async fn absent_typed_run_status_resume_replay_and_public_output_are_not_found() {
+async fn absent_run_status_resume_replay_and_public_output_are_not_found() {
     let app = test_app();
 
     let status = app
@@ -790,13 +780,13 @@ fn portfolio_status_spec_for_config(config: &serde_json::Value) -> mfm_certify::
 }
 
 async fn append_interrupted_attempt(
-    store: &store::AsyncInMemoryTypedRunStore,
+    store: &store::AsyncInMemoryRunStore,
     run_id: &RunId,
     spec_hash: &SpecHash,
     node: &spec::NodeSpec,
     attempt_id: &AttemptId,
 ) {
-    let start = store::TypedCommitRequest::from_payloads(
+    let start = store::CommitRequest::from_payloads(
         run_id.clone(),
         store
             .expected_next_seq(run_id)
@@ -824,9 +814,9 @@ async fn append_interrupted_attempt(
         },
     )
     .expect("attempt start request");
-    append_typed_commit(store, start).await;
+    append_run_commit(store, start).await;
 
-    let interrupted = store::TypedCommitRequest::from_payloads(
+    let interrupted = store::CommitRequest::from_payloads(
         run_id.clone(),
         store
             .expected_next_seq(run_id)
@@ -851,13 +841,10 @@ async fn append_interrupted_attempt(
         },
     )
     .expect("attempt interrupted request");
-    append_typed_commit(store, interrupted).await;
+    append_run_commit(store, interrupted).await;
 }
 
-async fn append_typed_commit(
-    store: &store::AsyncInMemoryTypedRunStore,
-    request: store::TypedCommitRequest,
-) {
+async fn append_run_commit(store: &store::AsyncInMemoryRunStore, request: store::CommitRequest) {
     let admitted_artifacts = request.required_artifacts().to_vec();
     let artifacts = store::CommitArtifactEvidenceSet::new(
         request.required_artifacts().to_vec(),
@@ -877,10 +864,27 @@ async fn append_typed_commit(
             .expect("prepared attempt-terminal commit")
             .into()
     };
+    let bundle = test_bundle_from_plan(plan).expect("prepared commit bundle");
     store
-        .append_prepared_commit_plan(plan)
+        .append_prepared_commit_bundle(bundle)
         .await
         .expect("append typed commit");
+}
+
+fn test_bundle_from_plan(
+    plan: store::PreparedCommitPlan,
+) -> store::Result<store::PreparedCommitBundle> {
+    let existing = plan
+        .admitted_artifacts()
+        .iter()
+        .map(|evidence| {
+            Ok(store::ExistingArtifactAdmission::new(
+                evidence.artifact_id.clone(),
+                evidence.evidence_hash()?,
+            ))
+        })
+        .collect::<store::Result<Vec<_>>>()?;
+    store::PreparedCommitBundle::new(plan, Vec::new(), existing)
 }
 
 fn fixed_attempt_id(byte: u8) -> AttemptId {

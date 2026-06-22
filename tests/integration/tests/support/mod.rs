@@ -1,6 +1,6 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use mfm_app::{TypedPublicOutputResponse, TypedRunMode, TypedRunResponse};
+use mfm_app::{PublicOutputResponse, RunModeStatus, RunResponse};
 use mfm_certify::certify_program_draft;
 use mfm_op_portfolio_tracker::portfolio_program_draft;
 use mfm_portfolio_config::{
@@ -9,7 +9,6 @@ use mfm_portfolio_config::{
 };
 use serde_json::json;
 use tower::ServiceExt;
-use uuid::Uuid;
 
 #[allow(unused_imports)]
 pub use mfm_integration_tests::test_support::*;
@@ -35,31 +34,29 @@ pub struct TypedPortfolioSnapshotAuthority {
 #[derive(Debug, Clone)]
 pub struct TypedPortfolioSnapshotResponse {
     /// Run returned by the typed snapshot request.
-    pub started: TypedRunResponse,
+    pub started: RunResponse,
     /// Run returned by resume.
-    pub resumed: TypedRunResponse,
+    pub resumed: RunResponse,
     /// Alias for the terminal run response used by parity-style assertions.
-    pub run: TypedRunResponse,
+    pub run: RunResponse,
     /// Rendered public output for the portfolio workflow.
-    pub public_output: TypedPublicOutputResponse,
+    pub public_output: PublicOutputResponse,
     /// Replay-derived authority for output validation.
     pub authority: TypedPortfolioSnapshotAuthority,
 }
 
 /// Starts a typed portfolio snapshot run and lets it execute until blocked.
 #[allow(dead_code)]
-pub async fn run_typed_portfolio_snapshot(
-    payload: serde_json::Value,
-) -> TypedPortfolioSnapshotResponse {
+pub async fn run_portfolio_snapshot(payload: serde_json::Value) -> TypedPortfolioSnapshotResponse {
     let app = rest_test_app();
     let response = portfolio_snapshot_post(&app, &payload, "until_blocked").await;
-    let run = parse_typed_run_response(&response["data"]["run"]);
-    let public_output = parse_typed_public_output_response(
+    let run = parse_run_response(&response["data"]["run"]);
+    let public_output = parse_public_output_response(
         response["data"]
             .get("public_output")
             .expect("portfolio snapshot should return public output"),
     );
-    assert_eq!(run.run_mode, TypedRunMode::Completed);
+    assert_eq!(run.run_mode, RunModeStatus::Completed);
 
     let authority = replay_and_public_output_authority(&app, &run, &payload).await;
     TypedPortfolioSnapshotResponse {
@@ -73,13 +70,13 @@ pub async fn run_typed_portfolio_snapshot(
 
 /// Starts a typed portfolio snapshot run with `append_only` and then resumes it to completion.
 #[allow(dead_code)]
-pub async fn resume_typed_portfolio_snapshot(
+pub async fn resume_portfolio_snapshot(
     payload: serde_json::Value,
 ) -> TypedPortfolioSnapshotResponse {
     let app = rest_test_app();
     let response = portfolio_snapshot_post(&app, &payload, "append_only").await;
-    let started = parse_typed_run_response(&response["data"]["run"]);
-    assert_eq!(started.run_mode, TypedRunMode::Forward);
+    let started = parse_run_response(&response["data"]["run"]);
+    assert_eq!(started.run_mode, RunModeStatus::Forward);
 
     let run_id = &started.run_id;
     let resume = app
@@ -90,7 +87,7 @@ pub async fn resume_typed_portfolio_snapshot(
     assert_eq!(resume.status(), StatusCode::OK);
     let resumed_payload = response_json(resume).await;
     assert_eq!(resumed_payload["status"], "success");
-    let resumed = parse_typed_run_response(&resumed_payload["data"]);
+    let resumed = parse_run_response(&resumed_payload["data"]);
 
     let authority = replay_and_public_output_authority(&app, &resumed, &payload).await;
     let public_output =
@@ -106,9 +103,7 @@ pub async fn resume_typed_portfolio_snapshot(
 }
 
 fn rest_test_app() -> axum::Router {
-    let root = std::env::temp_dir().join(format!("mfm-rest-portfolio-tests-{}", Uuid::new_v4()));
-    std::fs::create_dir_all(&root).expect("typed artifact root");
-    mfm_rest_api::make_app(in_memory_rest_app_state(root))
+    mfm_rest_api::make_app(in_memory_rest_app_state())
 }
 
 fn json_post(uri: &str, body: serde_json::Value) -> Request<Body> {
@@ -165,12 +160,12 @@ async fn response_json(response: axum::response::Response) -> serde_json::Value 
     serde_json::from_slice(&bytes).expect("response json")
 }
 
-fn parse_typed_run_response(value: &serde_json::Value) -> TypedRunResponse {
+fn parse_run_response(value: &serde_json::Value) -> RunResponse {
     serde_json::from_value(value.clone()).expect("typed run response")
 }
 
-fn parse_typed_public_output_response(value: &serde_json::Value) -> TypedPublicOutputResponse {
-    TypedPublicOutputResponse {
+fn parse_public_output_response(value: &serde_json::Value) -> PublicOutputResponse {
+    PublicOutputResponse {
         run_id: value["run_id"]
             .as_str()
             .expect("typed public-output run id")
@@ -214,7 +209,7 @@ fn parse_public_schema_id(value: &serde_json::Value) -> String {
 
 async fn replay_and_public_output_authority(
     app: &axum::Router,
-    run: &TypedRunResponse,
+    run: &RunResponse,
     payload: &serde_json::Value,
 ) -> TypedPortfolioSnapshotAuthority {
     let replay = app
@@ -249,7 +244,7 @@ async fn fetch_public_output(
     app: &axum::Router,
     run_id: &str,
     public_schema_id: &str,
-) -> TypedPublicOutputResponse {
+) -> PublicOutputResponse {
     let response = app
         .clone()
         .oneshot(
@@ -266,5 +261,5 @@ async fn fetch_public_output(
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
     assert_eq!(body["status"], "success");
-    parse_typed_public_output_response(&body["data"])
+    parse_public_output_response(&body["data"])
 }

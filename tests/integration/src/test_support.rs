@@ -8,13 +8,12 @@ use mfm_core::keystore::{Keystore, KeystoreConfig};
 use mfm_store::v1 as store;
 
 /// In-memory REST app state used by integration tests.
-pub type InMemoryRestAppState = mfm_rest_api::AppState<store::AsyncInMemoryTypedRunStore>;
+pub type InMemoryRestAppState = mfm_rest_api::AppState<store::AsyncInMemoryRunStore>;
 
-/// Builds in-memory REST app state rooted at `artifact_root`.
-pub fn in_memory_rest_app_state(artifact_root: impl Into<PathBuf>) -> InMemoryRestAppState {
+/// Builds in-memory REST app state.
+pub fn in_memory_rest_app_state() -> InMemoryRestAppState {
     mfm_rest_api::AppState {
-        store: store::AsyncInMemoryTypedRunStore::default(),
-        artifacts: mfm_artifact_store_fs::FsTypedArtifactStore::new(artifact_root),
+        store: store::AsyncInMemoryRunStore::default(),
     }
 }
 
