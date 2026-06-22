@@ -3,13 +3,12 @@ use std::path::PathBuf;
 use crate::commands::result::{CommandError, CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
-use crate::support::typed_run::{
-    connect_run_services, drive_mode, parse_typed_run_id, TypedDriveArg, TypedRunStoresArgs,
+use crate::support::run_store::{
+    connect_run_services, drive_mode, parse_run_id, DriveArg, RunStoresArgs,
 };
 use clap::{Args, ValueEnum};
 use mfm_app::{
-    EntryPointRunLaunchInput, PublicOpName, TypedPublicOutputResponse, TypedRunMode,
-    TypedRunResponse,
+    EntryPointRunLaunchInput, PublicOpName, PublicOutputResponse, RunModeStatus, RunResponse,
 };
 use mfm_authored_config::{AuthoredConfig, AuthoredConfigFormat};
 use serde::Serialize;
@@ -38,12 +37,12 @@ pub(crate) struct StartArgs {
     pub run_id: Option<String>,
 
     /// Scheduler drive policy after the typed RunAdmitted event is committed.
-    #[arg(long, value_enum, default_value_t = TypedDriveArg::UntilBlocked)]
-    pub drive: TypedDriveArg,
+    #[arg(long, value_enum, default_value_t = DriveArg::UntilBlocked)]
+    pub drive: DriveArg,
 
     /// Storage configuration for certified typed run events and artifacts.
     #[command(flatten)]
-    pub stores: TypedRunStoresArgs,
+    pub stores: RunStoresArgs,
 }
 
 /// CLI spelling for authored config formats.
@@ -75,8 +74,8 @@ impl std::fmt::Display for ConfigFormatArg {
 
 #[derive(Debug, Clone, Serialize)]
 struct StartOutput {
-    run: TypedRunResponse,
-    public_output: Option<TypedPublicOutputResponse>,
+    run: RunResponse,
+    public_output: Option<PublicOutputResponse>,
 }
 
 impl std::fmt::Display for StartOutput {
@@ -96,7 +95,7 @@ pub(crate) async fn execute(ctx: &CommandContext, args: &StartArgs) -> ! {
 
 async fn execute_internal(args: &StartArgs) -> CommandResult<StartOutput> {
     let run_id = match &args.run_id {
-        Some(run_id) => parse_typed_run_id(run_id)?,
+        Some(run_id) => parse_run_id(run_id)?,
         None => mfm_app::new_run_id(),
     };
     let public_op_name = PublicOpName::new(&args.op)?;
@@ -126,10 +125,10 @@ async fn execute_internal(args: &StartArgs) -> CommandResult<StartOutput> {
         .clone();
     let services = connect_run_services(&args.stores).await?;
     let run = services.launch_run(prepared.request).await?;
-    let public_output = if run.run_mode == TypedRunMode::Completed {
+    let public_output = if run.run_mode == RunModeStatus::Completed {
         Some(
             services
-                .typed_public_output(&run_id, &public_output_schema_id)
+                .public_output(&run_id, &public_output_schema_id)
                 .await?,
         )
     } else {
@@ -148,13 +147,7 @@ mod tests {
         let config = tmp.path().join("portfolio.json");
         std::fs::write(&config, "{}").expect("write config");
 
-        let mut args = start_args(
-            config,
-            TypedRunStoresArgs {
-                typed_artifact_root: Some(tmp.path().join("artifacts")),
-                database_url: None,
-            },
-        );
+        let mut args = start_args(config, RunStoresArgs { database_url: None });
         args.op = "unknown_op".to_owned();
 
         let err = execute_internal(&args)
@@ -170,15 +163,9 @@ mod tests {
         let config = tmp.path().join("portfolio.json");
         std::fs::write(&config, r#"{"portfolio":{"portfolio_id":1}}"#).expect("write config");
 
-        let err = execute_internal(&start_args(
-            config,
-            TypedRunStoresArgs {
-                typed_artifact_root: Some(tmp.path().join("artifacts")),
-                database_url: None,
-            },
-        ))
-        .await
-        .expect_err("invalid config rejects before store construction");
+        let err = execute_internal(&start_args(config, RunStoresArgs { database_url: None }))
+            .await
+            .expect_err("invalid config rejects before store construction");
 
         assert_eq!(err.code, "AuthoredConfigDecodeFailed");
     }
@@ -189,15 +176,9 @@ mod tests {
         let config = tmp.path().join("portfolio.json");
         std::fs::write(&config, sample_portfolio_config_json()).expect("write config");
 
-        let err = execute_internal(&start_args(
-            config,
-            TypedRunStoresArgs {
-                typed_artifact_root: Some(tmp.path().join("artifacts")),
-                database_url: None,
-            },
-        ))
-        .await
-        .expect_err("valid entry-point launch proceeds to store construction");
+        let err = execute_internal(&start_args(config, RunStoresArgs { database_url: None }))
+            .await
+            .expect_err("valid entry-point launch proceeds to store construction");
 
         assert_eq!(err.code, "MissingDatabaseUrl");
     }
@@ -208,13 +189,7 @@ mod tests {
         let config = tmp.path().join("portfolio.toml");
         std::fs::write(&config, sample_portfolio_config_toml()).expect("write config");
 
-        let mut args = start_args(
-            config,
-            TypedRunStoresArgs {
-                typed_artifact_root: Some(tmp.path().join("artifacts")),
-                database_url: None,
-            },
-        );
+        let mut args = start_args(config, RunStoresArgs { database_url: None });
         args.config_format = ConfigFormatArg::Toml;
 
         let err = execute_internal(&args)
@@ -231,13 +206,7 @@ mod tests {
         for (index, (op, config)) in evm_entry_point_configs().into_iter().enumerate() {
             let config_path = tmp.path().join(format!("{op}-{index}.json"));
             std::fs::write(&config_path, config.to_string()).expect("write config");
-            let mut args = start_args(
-                config_path,
-                TypedRunStoresArgs {
-                    typed_artifact_root: Some(tmp.path().join(format!("artifacts-{index}"))),
-                    database_url: None,
-                },
-            );
+            let mut args = start_args(config_path, RunStoresArgs { database_url: None });
             args.op = op.to_owned();
             args.op_version = Some(1);
             args.config_format = ConfigFormatArg::Json;
@@ -250,14 +219,14 @@ mod tests {
         }
     }
 
-    fn start_args(config: PathBuf, stores: TypedRunStoresArgs) -> StartArgs {
+    fn start_args(config: PathBuf, stores: RunStoresArgs) -> StartArgs {
         StartArgs {
             op: "portfolio_snapshot".to_owned(),
             config,
             op_version: None,
             config_format: ConfigFormatArg::Json,
             run_id: None,
-            drive: TypedDriveArg::AppendOnly,
+            drive: DriveArg::AppendOnly,
             stores,
         }
     }

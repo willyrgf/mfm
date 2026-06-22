@@ -1,9 +1,9 @@
 use crate::commands::result::{CommandError, CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
-use crate::support::typed_run::{connect_run_services, parse_typed_run_id, TypedRunStoresArgs};
+use crate::support::run_store::{connect_run_services, parse_run_id, RunStoresArgs};
 use clap::Args;
-use mfm_app::TypedRunStreamResponse;
+use mfm_app::RunStreamResponse;
 
 /// Arguments for `mfm run stream`.
 #[derive(Args)]
@@ -21,7 +21,7 @@ pub(crate) struct StreamArgs {
 
     /// Storage configuration for certified typed run events and artifacts.
     #[command(flatten)]
-    pub stores: TypedRunStoresArgs,
+    pub stores: RunStoresArgs,
 }
 
 /// Executes the stream command and terminates the process.
@@ -30,7 +30,7 @@ pub(crate) async fn execute(ctx: &CommandContext, args: &StreamArgs) -> ! {
     handle_command_result(result, &ctx.output_format);
 }
 
-async fn execute_internal(args: &StreamArgs) -> CommandResult<TypedRunStreamResponse> {
+async fn execute_internal(args: &StreamArgs) -> CommandResult<RunStreamResponse> {
     if args.from_seq == 0 {
         return Err(CommandError::new(
             "InvalidSequenceRange",
@@ -46,10 +46,10 @@ async fn execute_internal(args: &StreamArgs) -> CommandResult<TypedRunStreamResp
         }
     }
 
-    let run_id = parse_typed_run_id(&args.run_id)?;
+    let run_id = parse_run_id(&args.run_id)?;
     let services = connect_run_services(&args.stores).await?;
     let response = services.run_stream(&run_id).await?;
-    let response = TypedRunStreamResponse {
+    let response = RunStreamResponse {
         run_id: response.run_id,
         head_seq: response.head_seq,
         events: response

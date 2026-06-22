@@ -13,11 +13,11 @@ parity-tests = []
 tokio = { workspace = true }
 thiserror = { workspace = true }
 mfm-app = { path = "../../crates/app" }
-mfm-artifact-store-fs = { path = "../../crates/storages/artifact-store-fs" }
 mfm-authored-config = { path = "../../crates/authored-config" }
 mfm-canonical = { path = "../../crates/kernel/canonical" }
 mfm-stream-store-postgres = { path = "../../crates/storages/stream-store-postgres" }
 mfm-ids = { path = "../../crates/kernel/ids" }
+mfm-store = { path = "../../crates/kernel/store" }
 mfm-op-portfolio-tracker = { path = "../../crates/ops/portfolio-tracker-op" }
 mfm-portfolio-config = { path = "../../crates/portfolio-config" }
 mfm-op-evm-contract-lifecycle = { path = "../../crates/ops/evm-contract-lifecycle-op" }
@@ -44,7 +44,6 @@ mfm-op-proof = { path = "../../crates/ops/proof-op" }
 mfm-program = { path = "../../crates/kernel/program" }
 mfm-runtime = { path = "../../crates/kernel/runtime" }
 mfm-spec = { path = "../../crates/kernel/spec" }
-mfm-store = { path = "../../crates/kernel/store" }
 tempfile = "3.0"
 assert_cmd = "2.0"
 predicates = "3.0"

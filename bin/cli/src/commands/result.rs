@@ -2,7 +2,7 @@ use serde::Serialize;
 
 use mfm_app::PublicSafeMessage;
 use mfm_evm_core::util_error::UtilError;
-use mfm_stream_store_postgres::PostgresTypedStoreError;
+use mfm_stream_store_postgres::PostgresStoreError;
 
 /// Standardized result type for all CLI commands
 pub(crate) type CommandResult<T> = Result<CommandOutput<T>, CommandError>;
@@ -93,17 +93,17 @@ impl From<mfm_app::AppError> for CommandError {
     }
 }
 
-impl From<PostgresTypedStoreError> for CommandError {
-    fn from(error: PostgresTypedStoreError) -> Self {
+impl From<PostgresStoreError> for CommandError {
+    fn from(error: PostgresStoreError) -> Self {
         match error {
-            PostgresTypedStoreError::Store(_) => Self::backend(
+            PostgresStoreError::Store(_) => Self::backend(
                 "RunStoreRejected",
                 "Run store rejected the requested operation",
             ),
-            PostgresTypedStoreError::Database(_) => {
+            PostgresStoreError::Database(_) => {
                 Self::backend("RunStoreUnavailable", "Run store is unavailable")
             }
-            PostgresTypedStoreError::Corruption(_) => {
+            PostgresStoreError::Corruption(_) => {
                 Self::backend("RunStoreCorruption", "Run store returned invalid data")
             }
         }

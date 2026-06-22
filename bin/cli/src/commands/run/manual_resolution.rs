@@ -3,11 +3,11 @@ use std::path::PathBuf;
 use crate::commands::result::{CommandError, CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
-use crate::support::typed_run::{
-    connect_run_services, drive_mode, parse_typed_run_id, TypedDriveArg, TypedRunStoresArgs,
+use crate::support::run_store::{
+    connect_run_services, drive_mode, parse_run_id, DriveArg, RunStoresArgs,
 };
 use clap::{Args, ValueEnum};
-use mfm_app::{ManualResolutionDecision, ManualResolutionRecordRequest, TypedRunResponse};
+use mfm_app::{ManualResolutionDecision, ManualResolutionRecordRequest, RunResponse};
 use mfm_canonical::PlainCanonicalJsonBytes;
 
 /// Arguments for `mfm run manual-resolution`.
@@ -37,12 +37,12 @@ pub(crate) struct ManualResolutionArgs {
     pub note: Option<String>,
 
     /// Scheduler drive policy after the manual-resolution event is committed.
-    #[arg(long, value_enum, default_value_t = TypedDriveArg::UntilBlocked)]
-    pub drive: TypedDriveArg,
+    #[arg(long, value_enum, default_value_t = DriveArg::UntilBlocked)]
+    pub drive: DriveArg,
 
     /// Storage configuration for certified typed run events and artifacts.
     #[command(flatten)]
-    pub stores: TypedRunStoresArgs,
+    pub stores: RunStoresArgs,
 }
 
 /// Manual-resolution outcomes accepted by the CLI.
@@ -69,8 +69,8 @@ pub(crate) async fn execute(ctx: &CommandContext, args: &ManualResolutionArgs) -
     handle_command_result(result, &ctx.output_format);
 }
 
-async fn execute_internal(args: &ManualResolutionArgs) -> CommandResult<TypedRunResponse> {
-    let run_id = parse_typed_run_id(&args.run_id)?;
+async fn execute_internal(args: &ManualResolutionArgs) -> CommandResult<RunResponse> {
+    let run_id = parse_run_id(&args.run_id)?;
     let evidence_bytes = tokio::fs::read(&args.evidence).await.map_err(|_| {
         CommandError::backend(
             "ManualResolutionEvidenceReadFailed",

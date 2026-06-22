@@ -6,7 +6,7 @@ use mfm_events::v1 as events;
 use mfm_ids::{AttemptId, DigestAlgorithm, DigestBytes, RunId, SpecHash};
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
-use mfm_stream_store_postgres::{PostgresSchema, PostgresTypedRunEventStore};
+use mfm_stream_store_postgres::{PostgresRunStore, PostgresSchema};
 use serde_json::Value;
 use sqlx::{AssertSqlSafe, PgPool};
 use std::process::Output;
@@ -30,12 +30,10 @@ async fn run_status_reports_interrupted_attempt_and_framework_attempts_from_hist
     PostgresSchema::migrate(&scoped_database_url)
         .await
         .expect("migrate typed postgres schema");
-    let store = PostgresTypedRunEventStore::connect(&scoped_database_url)
+    let store = PostgresRunStore::connect(&scoped_database_url)
         .await
         .expect("connect typed postgres store");
     let temp = TempDir::new().expect("temp dir");
-    let artifact_root = temp.path().join("typed-artifacts");
-    std::fs::create_dir_all(&artifact_root).expect("artifact root");
     let config_path = temp.path().join("portfolio.json");
     let config = sample_portfolio_config_json();
     std::fs::write(&config_path, &config).expect("write portfolio config");
@@ -73,8 +71,6 @@ async fn run_status_reports_interrupted_attempt_and_framework_attempts_from_hist
         run_id.as_str().to_owned(),
         "--drive".to_owned(),
         "append-only".to_owned(),
-        "--typed-artifact-root".to_owned(),
-        artifact_root.display().to_string(),
         "--database-url".to_owned(),
         scoped_database_url.clone(),
     ];
@@ -108,8 +104,6 @@ async fn run_status_reports_interrupted_attempt_and_framework_attempts_from_hist
         run_id.as_str().to_owned(),
         "--drive".to_owned(),
         "until-blocked".to_owned(),
-        "--typed-artifact-root".to_owned(),
-        artifact_root.display().to_string(),
         "--database-url".to_owned(),
         scoped_database_url.clone(),
     ]);
@@ -123,8 +117,6 @@ async fn run_status_reports_interrupted_attempt_and_framework_attempts_from_hist
         "run".to_owned(),
         "status".to_owned(),
         run_id.as_str().to_owned(),
-        "--typed-artifact-root".to_owned(),
-        artifact_root.display().to_string(),
         "--database-url".to_owned(),
         scoped_database_url.clone(),
     ]);
@@ -182,8 +174,6 @@ async fn run_status_reports_interrupted_attempt_and_framework_attempts_from_hist
         "run".to_owned(),
         "stream".to_owned(),
         run_id.as_str().to_owned(),
-        "--typed-artifact-root".to_owned(),
-        artifact_root.display().to_string(),
         "--database-url".to_owned(),
         scoped_database_url,
     ]);
@@ -385,13 +375,13 @@ impl Drop for EnvVarRestore {
 }
 
 async fn append_interrupted_attempt(
-    store: &PostgresTypedRunEventStore,
+    store: &PostgresRunStore,
     run_id: &RunId,
     spec_hash: &SpecHash,
     node: &spec::NodeSpec,
     attempt_id: &AttemptId,
 ) {
-    let start = store::TypedCommitRequest::from_payloads(
+    let start = store::CommitRequest::from_payloads(
         run_id.clone(),
         store
             .expected_next_seq(run_id)
@@ -419,9 +409,9 @@ async fn append_interrupted_attempt(
         },
     )
     .expect("attempt start request");
-    append_typed_commit(store, start).await;
+    append_run_commit(store, start).await;
 
-    let interrupted = store::TypedCommitRequest::from_payloads(
+    let interrupted = store::CommitRequest::from_payloads(
         run_id.clone(),
         store
             .expected_next_seq(run_id)
@@ -446,13 +436,10 @@ async fn append_interrupted_attempt(
         },
     )
     .expect("attempt interrupted request");
-    append_typed_commit(store, interrupted).await;
+    append_run_commit(store, interrupted).await;
 }
 
-async fn append_typed_commit(
-    store: &PostgresTypedRunEventStore,
-    request: store::TypedCommitRequest,
-) {
+async fn append_run_commit(store: &PostgresRunStore, request: store::CommitRequest) {
     let admitted_artifacts = request.required_artifacts().to_vec();
     let artifacts = store::CommitArtifactEvidenceSet::new(
         request.required_artifacts().to_vec(),
@@ -472,10 +459,27 @@ async fn append_typed_commit(
             .expect("prepared attempt-terminal commit")
             .into()
     };
+    let bundle = test_bundle_from_plan(plan).expect("prepared commit bundle");
     store
-        .append_prepared_commit_plan(plan)
+        .append_prepared_commit_bundle(bundle)
         .await
         .expect("append typed commit");
+}
+
+fn test_bundle_from_plan(
+    plan: store::PreparedCommitPlan,
+) -> store::Result<store::PreparedCommitBundle> {
+    let existing = plan
+        .admitted_artifacts()
+        .iter()
+        .map(|evidence| {
+            Ok(store::ExistingArtifactAdmission::new(
+                evidence.artifact_id.clone(),
+                evidence.evidence_hash()?,
+            ))
+        })
+        .collect::<store::Result<Vec<_>>>()?;
+    store::PreparedCommitBundle::new(plan, Vec::new(), existing)
 }
 
 fn fixed_attempt_id(byte: u8) -> AttemptId {

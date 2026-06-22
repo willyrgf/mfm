@@ -2,6 +2,8 @@ use clap::Subcommand;
 
 use super::CommandContext;
 
+/// Run list/watch observation command implementation.
+mod list;
 /// Manual-resolution recording command implementation.
 mod manual_resolution;
 /// Typed public-output rendering command implementation.
@@ -25,6 +27,12 @@ pub(crate) enum RunCommand {
         /// Parsed arguments for the start command.
         #[command(flatten)]
         args: start::StartArgs,
+    },
+    /// List or watch observed runs
+    List {
+        /// Parsed arguments for the list command.
+        #[command(flatten)]
+        args: list::ListArgs,
     },
     /// Resume a certified typed run by id
     Resume {
@@ -69,6 +77,7 @@ impl RunCommand {
     pub(crate) async fn execute(&self, ctx: &CommandContext) -> ! {
         match self {
             RunCommand::Start { args } => start::execute(ctx, args).await,
+            RunCommand::List { args } => list::execute(ctx, args).await,
             RunCommand::Resume { args } => resume::execute(ctx, args).await,
             RunCommand::Status { args } => status::execute(ctx, args).await,
             RunCommand::Stream { args } => stream::execute(ctx, args).await,
@@ -106,7 +115,7 @@ mod tests {
             }
             paths.push(path);
         }
-        paths.push(manifest_dir.join("src/support/typed_run.rs"));
+        paths.push(manifest_dir.join("src/support/run_store.rs"));
 
         for path in paths {
             let source = std::fs::read_to_string(&path).expect("read run command source");

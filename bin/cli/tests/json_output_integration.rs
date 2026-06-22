@@ -412,7 +412,7 @@ fn test_run_start_accepts_portfolio_snapshot_toml_before_store_access() {
 }
 
 #[test]
-fn test_run_replay_requires_typed_store_after_valid_run_id() {
+fn test_run_replay_requires_run_store_after_valid_run_id() {
     let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
     let output = cmd
         .env_remove("DATABASE_URL")
@@ -433,7 +433,7 @@ fn test_run_replay_requires_typed_store_after_valid_run_id() {
 }
 
 #[test]
-fn test_run_status_json_error_invalid_typed_run_id() {
+fn test_run_status_json_error_invalid_run_id() {
     let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
     let output = cmd
         .env_remove("DATABASE_URL")

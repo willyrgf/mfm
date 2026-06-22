@@ -244,14 +244,12 @@ mfm_cli --output-format json keystore tx-sign \
 
 Typed certified run dispatch and inspection are available under the `run` subcommand.
 
-These commands use:
-
-- the certified typed PostgreSQL run-event store (requires `DATABASE_URL` or `--database-url`)
-- the typed filesystem artifact store (defaults to `$MFM_TYPED_ARTIFACT_ROOT` or `~/.mfm/typed_run_artifacts`, or use `--typed-artifact-root`)
+These commands use the certified PostgreSQL run store (requires `DATABASE_URL` or
+`--database-url`).
 
 The CLI validates the PostgreSQL schema on connect and does not create or alter
-tables. Apply the `mfm-stream-store-postgres` migrations before running typed
-run commands.
+tables. Apply the `mfm-stream-store-postgres` migrations against a fresh or
+explicitly reset local database before running typed run commands.
 
 Run ids use the typed identity format `run:<algorithm>:<digest>`. Old UUID dynamic run ids are not
 accepted by the typed CLI run surface.
@@ -288,7 +286,6 @@ mfm_cli run start --op <NAME> --config <PATH> [OPTIONS]
 - `--source-revision <VALUE>`: Source revision evidence recorded in `RunAdmitted` (or `MFM_SOURCE_REVISION`).
 - `--drive <append-only|once|until-blocked>`: Scheduler drive policy after `RunAdmitted`.
 - `--database-url <URL>`: PostgreSQL connection string (default: `$DATABASE_URL`)
-- `--typed-artifact-root <PATH>`: Typed artifact store root directory
 
 Examples:
 
@@ -353,7 +350,6 @@ mfm_cli run manual-resolution <RUN_ID> \
 - `--note <TEXT>`: Optional redaction-safe operator note.
 - `--drive <append-only|once|until-blocked>`: Scheduler drive policy after the manual-resolution event.
 - `--database-url <URL>`: PostgreSQL connection string (default: `$DATABASE_URL`)
-- `--typed-artifact-root <PATH>`: Typed artifact store root directory
 
 Stable manual-resolution errors include:
 
@@ -365,6 +361,24 @@ Stable manual-resolution errors include:
 - `LaunchRuntimeError`: runtime rejected the prefix or proof binding.
 - `RunStoreRejected`: the prepared commit was stale or violated typed store admission.
 
+### `run list`
+
+Lists observation-only run rows or reads changes from a previous cursor. Strict per-run status and
+stream authority remain available through `run status` and `run stream`; list/watch output is bounded
+by the sealed observation frontier and may lag a just-written commit until the frontier advances.
+
+**Usage:**
+```sh
+mfm_cli run list [OPTIONS]
+```
+
+**Key Options:**
+- `--cursor <OPAQUE>`: Cursor returned by a previous page.
+- `--limit <N>`: Maximum run rows to return (default: 50).
+- `--wait-ms <N>`: Long-poll wait in milliseconds.
+- `--watch`: Read changes from `--cursor`; requires a cursor from a previous list page.
+- `--database-url <URL>`: PostgreSQL connection string (default: `$DATABASE_URL`).
+
 ### `run status`
 
 Shows certified typed run status without executing states. JSON output uses semantic saga status:
@@ -372,9 +386,10 @@ Shows certified typed run status without executing states. JSON output uses sema
 `manually_resolved`, or `failed_without_acdc_claim`. The `saga` object reports the certified policy,
 derived obligations per forward ledger, linked remediation ledgers, manual-block reason and manual
 authorization requirements when applicable, terminal resolution claim when present, projected
-resource ledgers with declared claim/key/touched-set evidence, and active exclusive lane holders
-referenced by the target run's persisted live side-effect ledgers. It does not serialize unrelated
-global lane holders or scheduler waiters that blocked before appending lane evidence.
+resource ledgers with declared claim/touched-set evidence and resource-key digests, and active
+exclusive lane holders referenced by the target run's persisted live side-effect ledgers. It does
+not serialize raw resource keys, unrelated global lane holders, or scheduler waiters that blocked
+before appending lane evidence.
 `attempt_dispositions` reports committed attempt-level lifecycle status separately from `run_mode`;
 each entry has `node_id`, `attempt_id`, `disposition` (`started`, `completed`, `failed`, or
 `interrupted`), and status-specific fields such as `attempt_no`, `retryable`, or `output_cell_id`.
@@ -457,12 +472,6 @@ The CLI's behavior can be modified using environment variables, which is ideal f
   export DATABASE_URL="postgresql://postgres:postgres@localhost:5432/mfm_test"
   cargo sqlx migrate run --source crates/storages/stream-store-postgres/migrations
   mfm_cli run status "run:sha256-jcs-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-  ```
-
-- **`MFM_TYPED_ARTIFACT_ROOT`**: Filesystem typed artifact store root used by typed `run` commands (unless `--typed-artifact-root` is provided).
-  ```sh
-  export MFM_TYPED_ARTIFACT_ROOT="/tmp/mfm_typed_artifacts"
-  mfm_cli run public-output "run:sha256-jcs-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" --schema-id "<SCHEMA_ID>"
   ```
 
 - **`MFM_EVM_RPC_SOURCES_JSON`**: Optional JSON source registry used by typed EVM RPC
