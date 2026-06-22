@@ -182,8 +182,10 @@ resource_lane_release_events
 ```
 
 Derived admission indexes such as `logical_key_observations` are append-only and may be written in
-the same transaction, but they are not authority tables. They are useful only when strict load and
-append paths can prove one-to-one equivalence with `run_events`.
+the same transaction, but they are not authority tables. In the initial implementation they are
+read-side and validation hints only. They may influence append admission only if a later design adds
+an explicit completeness proof for the exact stream prefix, not merely a one-to-one FK from present
+observation rows to `run_events`.
 
 `commits` records one accepted commit for one run sequence.
 
@@ -214,13 +216,25 @@ UNIQUE (run_id, commit_key)
 UNIQUE (run_id, seq, commit_key)
 UNIQUE (run_id, seq, commit_key, commit_id)
 UNIQUE (commit_id, run_id, seq, commit_key, event_count, commit_batch_hash, append_xid)
+UNIQUE (commit_id, run_id, seq, event_count, commit_batch_hash, append_xid)
 CHECK (seq >= 1)
 CHECK (event_count >= 1)
 ```
 
 `commit_id` is the stable identity for one accepted run commit. It is not a global ordering value
-and must not be used as platform-wide semantic order. It should be derived from canonical committed
-content or otherwise assigned by the storage layer as an immutable identity after Rust staging.
+and must not be used as platform-wide semantic order. The initial algorithm is closed and
+non-circular:
+
+```text
+commit_id =
+  hash("mfm.commit.id.v1" || canonical(run_id, seq, commit_key, commit_purpose,
+       prepared_authority_hash))
+```
+
+`commit_id` is known before final event-envelope hashing. Event envelopes and
+`commit_batch_hash` may therefore include `commit_id` without a store-assigned identity cycle.
+Storage must not assign `commit_id` after Rust staging unless a future RFC defines an explicit
+store-filled commit-id protocol and updates every affected hash contract.
 
 `append_xid` is the PostgreSQL top-level transaction id that inserted the commit. It is assigned by
 Postgres with `pg_current_xact_id()` and is used only for snapshot-sealed observation cursors in
@@ -250,9 +264,13 @@ hashes from persisted canonical bytes instead of treating them as append-time-on
 
 `commit_batch_hash` binds the commit row to the stored ordered event batch and commit artifact
 evidence. It must be computed from canonical MFM bytes over the resulting event envelopes and
-artifact evidence bindings. Rust staging computes and validates this hash before commit; strict load
-recomputes it from persisted canonical bytes before minting authority. Database checks should remain
-structural unless a DB-side MFM canonicalizer is promoted to a first-class maintained component.
+artifact evidence bindings. Rust staging computes and validates this hash before commit for commits
+whose final event payloads are fully known before storage admission. For store-filled fields such as
+resource-lane fencing tokens, Rust staging validates the claim intent and store-fill policy, and the
+Postgres append path computes the final `commit_batch_hash` after materializing the store-filled
+event payload. Strict load recomputes the final hash from persisted canonical bytes before minting
+authority. Database checks should remain structural unless a DB-side MFM canonicalizer is promoted
+to a first-class maintained component.
 
 The implementation must enforce structurally before commit that:
 
@@ -276,6 +294,7 @@ run_id TEXT NOT NULL
 seq BIGINT NOT NULL
 ordinal INTEGER NOT NULL
 event_id TEXT NOT NULL
+event_type TEXT NOT NULL
 event_schema_id TEXT NOT NULL
 spec_hash TEXT NOT NULL
 commit_key TEXT NOT NULL
@@ -291,7 +310,9 @@ Constraints:
 PRIMARY KEY (run_id, seq, ordinal)
 UNIQUE (commit_id, ordinal)
 UNIQUE (run_id, event_id)
+UNIQUE (run_id, seq, ordinal, event_id, commit_id, event_type, payload_hash)
 UNIQUE (run_id, seq, ordinal, event_id, payload_hash, logical_key, commit_id)
+UNIQUE (run_id, seq, ordinal, event_id, event_type, payload_hash, logical_key, commit_id)
 FOREIGN KEY (run_id, seq, commit_key, commit_id)
   REFERENCES commits(run_id, seq, commit_key, commit_id)
   ON DELETE RESTRICT
@@ -414,6 +435,7 @@ run_artifact_admissions
   first_commit_id TEXT NOT NULL
   first_seq BIGINT NOT NULL
   first_commit_key TEXT NOT NULL
+  first_binding_kind TEXT NOT NULL CHECK (first_binding_kind = 'admitted')
 
 commit_artifact_evidence
   run_id TEXT NOT NULL
@@ -434,6 +456,7 @@ run_artifact_admissions:
 
 commit_artifact_evidence:
   PRIMARY KEY (run_id, seq, binding_kind, artifact_id, evidence_hash)
+  UNIQUE (run_id, seq, commit_key, commit_id, binding_kind, artifact_id, evidence_hash)
 ```
 
 Artifact identity is not evidence identity. `artifact_id` is digest-derived content identity, while
@@ -519,6 +542,7 @@ commit_id TEXT NOT NULL
 seq BIGINT NOT NULL
 ordinal INTEGER NOT NULL
 event_id TEXT NOT NULL
+event_type TEXT NOT NULL
 payload_hash TEXT NOT NULL
 is_unique BOOLEAN NOT NULL
 unique_observation_kind TEXT NULL
@@ -532,8 +556,17 @@ Constraints:
 ```text
 PRIMARY KEY (run_id, logical_key, seq, ordinal)
 UNIQUE (run_id, seq, ordinal)
-FOREIGN KEY (run_id, seq, ordinal, event_id, payload_hash, logical_key, commit_id)
-  REFERENCES run_events(run_id, seq, ordinal, event_id, payload_hash, logical_key, commit_id)
+FOREIGN KEY (run_id, seq, ordinal, event_id, event_type, payload_hash, logical_key, commit_id)
+  REFERENCES run_events(
+    run_id,
+    seq,
+    ordinal,
+    event_id,
+    event_type,
+    payload_hash,
+    logical_key,
+    commit_id
+  )
   ON DELETE RESTRICT
 CHECK (
   (is_unique = FALSE AND unique_observation_kind IS NULL)
@@ -541,9 +574,11 @@ CHECK (
 )
 ```
 
-Fold order is `(seq, ordinal)`. Append and strict load paths may use this index only after verifying
-that every row is bound to exactly one referenced `run_events` row and that folding the index matches
-folding the authoritative event stream with the Rust logical-key admission rules.
+Fold order is `(seq, ordinal)`. Append admission and strict semantic load must fold authoritative
+`run_events` rows to prove logical-key presence, absence, uniqueness, and recoverable rewrite
+legality. `logical_key_observations` may be used only as a non-authoritative index hint to locate
+candidate event ranges. It must not prove that a logical key is absent, because a missing
+observation row is indistinguishable from an absent key unless a separate completeness proof exists.
 
 - `LogicalKeySet` is rebuilt by collecting every distinct `(run_id, logical_key)`.
 - `UniqueLogicalPayloads` is rebuilt by folding only `is_unique = TRUE` rows.
@@ -552,9 +587,16 @@ folding the authoritative event stream with the Rust logical-key admission rules
 - A repeated unique logical key with a different payload hash is invalid unless Rust admission
   proves the recoverable submission-result exception against the projection prefix before that
   event.
-- Corrupt, missing, or extra observation rows are drift/corruption and must cause strict load or
-  append-base validation to fall back to authority rows or fail closed; they must not alter semantic
-  admission.
+- Corrupt, missing, or extra observation rows are drift/corruption and must cause strict load,
+  append-base validation, or rebuild validation to fall back to authority rows or fail closed; they
+  must not alter semantic admission.
+
+The initial implementation must not use `logical_key_observations` as admission authority. A future
+optimization may do so only after adding an explicit completeness proof, such as a per-run prefix
+seal that records the observed event count, source range, ordered observation hash, and authority
+prefix hash for the exact stream prefix being used. That proof must be inserted atomically with the
+observations, verified before admission use, and invalidated by any missing, extra, or hash-mismatched
+observation row.
 
 The recoverable submission-result exception must be explicit in the observation row:
 
@@ -587,8 +629,11 @@ The commit base used by Rust staging must be built from:
 - `commits`
 - `run_events`
 - artifact admission/evidence authority
-- append-only logical-key observations
 - Rust projections rebuilt or verified from those authority rows inside the same append path
+
+Append-only indexes such as `logical_key_observations` may be loaded beside the base only as hints.
+They do not prove absence or legality unless the append path first verifies an explicit completeness
+proof for the exact authority prefix. Without that proof, Rust staging must fold `run_events`.
 
 A semantic append must pass through the Rust store staging path:
 
@@ -598,8 +643,8 @@ PreparedCommitBundle
   -> verify pending artifact bytes against admitted evidence
   -> Rust stage/validate commit
   -> insert authority rows
-  -> Postgres storage layer records mechanical observation facts and persists authority-computed
-     observation rows
+  -> Postgres storage layer records mechanical observation facts
+  -> future authority-computed observation rows enter only through explicit authority-layer APIs
   -> commit transaction
 ```
 
@@ -671,6 +716,15 @@ ResolvedResourceLaneClaim
   key_canonical_json
   mode
   resolved_by_capability_impl
+
+ResourceLaneClaimIntent
+  resolved_claim
+  run_id
+  node_id
+  attempt_id
+  ledger_key
+  invocation_epoch
+  store_fill_policy_id      # initially resource_lane_fencing_v1
 ```
 
 Resolvers are pure. They may inspect certified config, typed inputs, non-secret runtime binding
@@ -690,12 +744,14 @@ Runtime lifecycle for lane-bearing states:
    bindings, side-effect identity, and the committed open attempt.
 4. Runtime derives intent/idempotency and ledger identity using pure callbacks.
 5. Runtime asks capability/adapter lane resolvers for required `ResolvedResourceLaneClaim`s.
-6. Runtime builds a separate certified pre-invocation commit containing `ResourceLaneClaimed` for
-   that already-started attempt.
+6. Runtime builds a separate certified pre-invocation commit containing `ResourceLaneClaimIntent`
+   for that already-started attempt.
 7. The store admits the `ResourceLaneClaimed` commit only if the attempt has a prior committed
    `StateAttemptStarted`, the attempt is still open, the claim matches certified capability
-   requirements and preflight evidence, and no active conflicting lane claim exists. It inserts the
-   run event and relational lane claim row atomically with that commit.
+   requirements and preflight evidence, and no active conflicting lane claim exists. While holding
+   the per-lane admission lock, the store assigns the next lane-local fencing token, materializes the
+   final `ResourceLaneClaimed` event, and inserts the run event and relational lane claim row
+   atomically with that commit.
 8. Only after that claim commit succeeds does runtime receive a `HeldResourceLaneSet` and build or
    run the state invocation.
 9. Runtime validates that any `SideEffectInvocationPrepared.resource_key` exactly matches the held
@@ -710,14 +766,24 @@ must first verify an active committed held lane or commit a certified recovery c
 lane before IO. If a prepared resource key already exists, recovery uses that exact key; otherwise it
 reruns deterministic preflight and records the claim in the stream before IO.
 
-`ResourceLaneClaimed` is an attempt-bound, stream-authoritative, pre-invocation event. It is not
-pre-attempt authority and it must not be combined with `StateAttemptStarted` in the same commit.
-Strict load and append admission must reject `ResourceLaneClaimed` unless it is preceded by a
-separate committed `StateAttemptStarted` for the same `(run_id, node_id, attempt_id)`.
+`ResourceLaneClaimed` is an attempt-bound, stream-authoritative, pre-invocation event materialized
+by the store from a runtime-provided `ResourceLaneClaimIntent`. It is not pre-attempt authority and
+it must not be combined with `StateAttemptStarted` in the same commit. Strict load and append
+admission must reject `ResourceLaneClaimed` unless it is preceded by a separate committed
+`StateAttemptStarted` for the same `(run_id, node_id, attempt_id)`.
+
+Normal contention is not corruption and not an attempt failure. If the claim intent is valid but an
+active conflicting lane exists, the store returns `ResourceLaneClaimBlocked` without inserting a
+commit, run event, lane mirror row, or terminal attempt event. The attempt remains open and parked
+before invocation. Scheduler/recovery may retry claim admission when the conflicting lane releases,
+run independent work with a scoped independence witness, or interrupt/fail the still-pre-invocation
+attempt under the ordinary no-side-effect-authority rules. This blocked outcome may be recorded as
+an operational observation, but it is not semantic stream authority.
 
 Crash behavior is stream-driven:
 
-- before `ResourceLaneClaimed`, recovery retries pure preflight and claim admission, or interrupts/
+- before `ResourceLaneClaimed`, including after a `ResourceLaneClaimBlocked` outcome, recovery
+  retries pure preflight and claim admission, parks the open attempt as lane-blocked, or interrupts/
   fails the open attempt if no side-effect authority was acquired
 - after `ResourceLaneClaimed` but before `SideEffectInvocationPrepared`, recovery continues the same
   attempt using the committed held claim or releases it through a certified cleanup/interruption
@@ -738,7 +804,8 @@ submission, or submission recovery. Read-only EVM capabilities do not require th
 The store API should expose lane authority only through prepared commit admission and strict reads:
 
 ```text
-append_prepared_commit_bundle(bundle_with_lane_claims_or_releases) -> CommitOutcome
+append_prepared_commit_bundle(bundle_with_lane_intents_or_releases)
+  -> CommitOutcome | ResourceLaneClaimBlocked
 load_active_resource_lanes(...)
 load_lane_history(...)
 ```
@@ -756,6 +823,29 @@ Execution-duration authority is represented by committed lane claim/release even
 relational rows. Where operational leases with fencing tokens are needed, they must be tied to a
 committed claim and remain operational observations; mutable lease rows are not semantic replay
 authority.
+
+Fencing tokens are store-assigned, lane-local, and monotonic. Runtime must not assign or guess them.
+While holding the concrete lane admission lock, storage computes the next token from append-only
+claim history for `(namespace, key_schema_id, key_canonical_json, mode)` and inserts exactly one
+claim row with that token. This is a lane-local sequence, not a global counter and not a mutable
+resource-lane state row.
+
+The prepared claim commit uses a store-filled-field protocol:
+
+- `prepared_authority_hash` covers the `ResourceLaneClaimIntent`, holder identity, certified
+  requirement digest, preflight evidence, and `store_fill_policy_id`
+- `prepared_authority_hash` does not include the final fencing token, because the runtime cannot
+  know it
+- `commit_id` is derived from the prepared authority hash before store fill
+- while admitting the commit, storage assigns the fencing token, materializes the final
+  `ResourceLaneClaimed` event payload, and computes `commit_batch_hash` over the final event
+  envelope and evidence set
+- strict load recomputes both the prepared authority hash and final batch hash, and verifies that
+  the stored token is the unique next lane-local token under the same append-only claim prefix
+
+`claim_id` should be derived from the committed holder identity, lane identity, fencing token, and
+`commit_id`, or otherwise be covered by the final `ResourceLaneClaimed` canonical payload. It must
+not be a runtime-supplied arbitrary identifier.
 
 Required lane authority rows:
 
@@ -900,6 +990,11 @@ At append time, the store must reject:
 - terminal/recovery commits from a holder that does not own the lane
 - standalone resource-lane acquire/release APIs that mint authority outside prepared commits
 - any storage-derived global lane, single `global` lock row, or payload-inferred lane claim
+
+The store must distinguish invalid lane claims from normal contention. A malformed claim, stale
+attempt, unknown requirement, mismatched holder, or illegal phase is an admission error. A valid
+claim intent blocked by an active conflicting lane is `ResourceLaneClaimBlocked` and leaves the
+stream unchanged.
 
 The old global resource-lane mutex/table shape must be deleted, not hidden behind a compatibility
 path.
@@ -1066,10 +1161,15 @@ Use trigger-derived insert-only read facts when:
 
 Do not implement saga mode, side-effect ledger legality, manual-resolution state, public-output
 authority, or retention proof as independent PL/pgSQL projections. Those are semantic projections
-owned by Rust/kernel/runtime/app code. If list/watch needs to display related fields, the Postgres
-storage crate may persist only projection-versioned observation rows produced from shared Rust
-projection code and authority rows. Those rows must be labeled as observations and must not mint or
-substitute for strict semantic authority.
+owned by the authority layers, not by the Postgres storage implementation. The initial observation
+layer must be limited to mechanical facts derived from scalar/canonical-byte authority columns and
+views over those facts. If list/watch needs semantic-looking summaries later, the projection code
+must live in the crate that owns that contract: `mfm-store` for spec-independent stream projection
+contracts, `mfm-runtime` for spec-aware lifecycle/recovery semantics, and `mfm-app` only for
+orchestration and public authority construction. The Postgres storage crate may persist
+projection-versioned rows handed to it through an explicit authority-layer API, but it must not call
+runtime/app projection code internally or become the owner of those semantics. Such rows must be
+labeled as observations and must not mint or substitute for strict semantic authority.
 
 Trigger-derived read facts must not hash Postgres `jsonb::text`. Each hash-bearing fact must define
 a canonical row schema and canonicalizer identity. The implementation must either provide a
@@ -1096,10 +1196,12 @@ schema_contract_version TEXT NOT NULL
 created_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp()
 ```
 
-`store_epoch` is generated once for a freshly migrated schema/database. Dropping/recreating the
-schema, destructive reset, or any maintenance restore that can discard previously issued cursor rows
-must create a new epoch. Observation rebuilds, cache refreshes, and new projection/observation
-versions must not change it.
+`store_epoch` is generated once for a freshly migrated schema/database and identifies the
+PostgreSQL transaction-id ordering domain that public watch cursors belong to. Dropping/recreating
+the schema, destructive reset, logical restore, clone, import, point-in-time rollback, row discard,
+or any maintenance operation that does not preserve both `run_commit_log` rows and their original
+`append_xid` ordering domain must create a new epoch. Observation rebuilds, cache refreshes, and
+new projection/observation versions must not change it when the cursor domain is unchanged.
 
 `run_commit_log` is the durable cursor source for run list/watch observation APIs. It is insert-only
 and atomic with the authority rows for the same commit. It is not projection-versioned and does not
@@ -1252,29 +1354,37 @@ The append flow should be:
 4. Take a transaction-scoped advisory lock for `run_id`.
 5. Re-check `(run_id, commit_key)` after acquiring the run lock.
 6. For commits that acquire, use, or release resource lanes, require the prevalidated bundle to
-   carry concrete lane claims and holder proofs already resolved by runtime preflight. Take sorted
-   per-lane transaction-scoped advisory locks for those concrete lane keys before checking active
-   conflicting claims, and hold them through claim/release row insertion. These locks serialize
-   admission only; they are not the execution-duration
-   resource lock. A global resource-lane lock is not acceptable in the target design because it
-   serializes independent runs and still arrives too late for nonce-like live IO.
-7. Load committed event history, artifact authority, logical-key authority, and non-authoritative
-   index hints needed to build the Rust commit base.
+   carry concrete lane claim intents, release intents, and holder proofs already resolved by runtime
+   preflight. Take sorted per-lane transaction-scoped advisory locks for those concrete lane keys
+   before checking active conflicting claims, and hold them through claim/release row insertion.
+   These locks serialize admission only; they are not the execution-duration resource lock. A global
+   resource-lane lock is not acceptable in the target design because it serializes independent runs
+   and still arrives too late for nonce-like live IO.
+7. Load committed event history, artifact authority, and non-authoritative index hints needed to
+   build the Rust commit base. Logical-key absence and uniqueness must be proven by folding
+   `run_events` unless an explicit completeness proof for the exact prefix is verified.
 8. Stage and validate the prepared commit in Rust against the loaded authority base. Reverify
-   artifact byte/evidence matches inside the transaction before inserting authority rows.
-9. Insert or reuse `artifact_blobs` and artifact evidence/admission rows as needed.
-10. Insert `commits`. The row receives `append_xid` from `pg_current_xact_id()`; this value is
+   artifact byte/evidence matches inside the transaction before inserting authority rows. For a
+   valid lane claim intent that conflicts with an active held lane, return `ResourceLaneClaimBlocked`
+   without inserting rows.
+9. For an admitted lane claim, assign store-filled fields while holding the lane lock: lane-local
+   fencing token, final claim id, and final `ResourceLaneClaimed` event payload. Compute the final
+   `commit_batch_hash` over the materialized event envelopes and evidence set.
+10. Insert or reuse `artifact_blobs` and artifact evidence/admission rows as needed.
+11. Insert `commits`. The row receives `append_xid` from `pg_current_xact_id()`; this value is
     observation cursor metadata only.
-11. Insert `run_events`.
-12. Insert or mechanically derive `logical_key_observations`.
-13. Insert `commit_artifact_evidence` and `run_artifact_admissions`.
-14. Insert `run_commit_log` with the same `append_xid` and `commit_id` bound to the commit row.
-15. Insert resource-lane claim/release authority rows when the bundle carries lane operations.
-16. Insert bounded mechanical observation facts and projection-versioned observation summaries that
-    are required to be atomic with the append.
-17. Emit `NOTIFY` after authority rows, commit-log rows, and synchronous observation rows are
+12. Insert `run_events`.
+13. Insert or mechanically derive `logical_key_observations`.
+14. Insert `commit_artifact_evidence` and `run_artifact_admissions`.
+15. Insert resource-lane claim/release authority rows when the bundle carries admitted lane
+    operations.
+16. Insert `run_commit_log` with the same `append_xid` and `commit_id` bound to the commit row.
+17. Insert bounded mechanical observation facts and any explicitly authority-provided observation
+    rows that are required to be atomic with the append. The initial implementation should keep this
+    mechanical only.
+18. Emit `NOTIFY` after authority rows, commit-log rows, and synchronous observation rows are
     inserted. `NOTIFY` remains only a wakeup and is delivered at commit.
-18. Commit.
+19. Commit.
 
 There is no global commit-order lock, global counter row, table-level append serialization, or
 global `commit_pos`/`change_pos` allocation step in this flow. Any design or implementation that
@@ -1472,12 +1582,15 @@ surfaces with proof-bearing request types.
 `mfm-app` should be generic over the run store, observation store, and narrow artifact read
 capabilities it actually needs. Runner registration should receive an artifact reader only when the
 capability contract mints an exact `ArtifactReadAuthority` from verified run history, certified
-config/seed authority, or side-effect/public-output evidence. Partial artifact-read request
-constructors are convenience materialization helpers, not semantic authority. Strict status/replay
-paths should use retained artifact authority derived from committed event requirements. Public-output
-rendering should use a reader that accepts `PublicOutputReadAuthority` or exact event/projection-
-derived evidence, not an arbitrary artifact id. CLI and REST should not construct filesystem stores
-and should not query Postgres directly.
+config/seed authority, or side-effect/public-output evidence. Production artifact-read requests must
+carry exact `(artifact_id, evidence_hash)` authority or exact event-derived requirements before they
+can reach a reader. Partial artifact-read constructors must not exist on production read surfaces;
+if tests or private authority-minting code need builders, those builders must be unable to issue a
+readable request until verified history, config, and evidence fill every proof field. Strict
+status/replay paths should use retained artifact authority derived from committed event
+requirements. Public-output rendering should use a reader that accepts `PublicOutputReadAuthority`
+or exact event/projection-derived evidence, not an arbitrary artifact id. CLI and REST should not
+construct filesystem stores and should not query Postgres directly.
 
 No observation store trait may return `ProjectionSnapshot`. Strict status must rebuild or verify the
 projection from authority rows and verified artifacts through the strict store/runtime path.
@@ -1621,6 +1734,10 @@ Database guardrails:
   responses do not expose those implementation fields
 - validate that real `run_commit_log.commit_sort_key` rows cannot use the all-zero cursor sentinel
   and that sort-key collisions fail closed
+- validate that logical-key observation hints cannot be used as admission authority without an
+  explicit prefix-completeness proof
+- validate that `store_epoch` changes after restore, clone, import, rollback, destructive reset, or
+  any operation that changes the `append_xid` ordering domain
 - validate that hash-bearing rows use canonical MFM bytes and never `jsonb::text`
 
 Code guardrails:
@@ -1631,6 +1748,8 @@ Code guardrails:
   filesystem artifact storage crates
 - no production reference to filesystem artifact storage
 - no production reference to in-memory stores
+- no production partial artifact-read constructor can issue a read without exact
+  `(artifact_id, evidence_hash)` authority or exact event-derived requirements
 - scans reject `UPDATE`, `DELETE`, and `TRUNCATE` in MFM domain SQL except migration/admin repair
   code with explicit labels
 - scans reject `typed_` target table names in new migrations
@@ -1787,6 +1906,8 @@ Required new tests:
 - commit rows reject or detect event_count, commit_key, ordinal, and batch-hash mismatches
 - commit idempotency hashes and full prepared-authority hashes reverify from persisted commit
   purpose and canonical request material
+- commit ids are deterministically derived before event batch hashing and cannot be assigned
+  post-hash by storage
 - artifact ids are verified as derived from digests
 - artifact evidence rows reject digest/length/id mismatches against blob rows
 - snapshot-sealed XID watch cursors cannot skip rows when an older transaction commits after a
@@ -1796,6 +1917,8 @@ Required new tests:
 - public watch tests prove no global commit-order advisory lock, global counter row, or table-level
   append serialization is needed
 - watch cursor resumes after disconnect
+- watch cursors from a prior `store_epoch` fail after restore, clone, import, rollback, destructive
+  reset, or any operation that changes the PostgreSQL XID ordering domain
 - stale cursor-format versions are rejected or explicitly migrated
 - unavailable projection-version summaries return `ProjectionUnavailable` or trigger an explicit
   build path before data is returned
@@ -1807,6 +1930,8 @@ Required new tests:
 - same-run concurrent appends serialize correctly
 - idempotent commit-key retry still wins before stale sequence checks
 - cross-run resource-lane contention admits only one conflicting claimant
+- valid resource-lane contention returns `ResourceLaneClaimBlocked`, leaves the stream unchanged,
+  and parks the already-started attempt before invocation
 - independent cross-run appends that do not share resource lanes can commit concurrently
 - same chain/account EVM mutation runs cannot both reach nonce read, signing, or submission
 - different chain/account EVM mutation runs can execute concurrently
@@ -1818,6 +1943,8 @@ Required new tests:
 - Postgres code has no global resource-lane table lock or single `global` lock row
 - Postgres admission proves active resource-lane conflicts under concurrent transactions cannot
   double-admit the same exclusive lane
+- resource-lane fencing tokens are store-assigned, lane-local, monotonic, and verified by strict
+  load from append-only claim history
 - lane claim/release mirror rows prove exact source event and exact holder/lane ownership
 - artifact bytes and evidence are inserted atomically with the commit bundle
 - missing, extra, or mismatched artifact bytes are rejected before authority rows commit
@@ -1825,10 +1952,13 @@ Required new tests:
   `commit_artifact_evidence` row
 - every runtime append path passes a `PreparedCommitBundle`, not a plan-only append
 - `logical_key_observations` fold to the same logical-key sets as the authority stream
+- missing `logical_key_observations` rows cannot prove logical-key absence or change append
+  admission
 - recoverable submission-result rewrites match Rust staging parity tests
 - retained artifact reads require event-derived requirements
 - adapter artifact reads require exact `ArtifactReadAuthority`
 - public-output artifact reads require public-output authority or event/projection-derived evidence
+- artifact read helpers cannot construct production-readable requests from partial artifact ids
 - compile-fail tests prove secret-bearing signer/runtime/raw-transaction types cannot become typed
   persisted or public surfaces
 - artifact BYTEA insertion tests verify content-addressing, evidence, role, producer, same-commit,
@@ -1857,10 +1987,19 @@ Required new tests:
   several traits, but production code should not expose broad arbitrary artifact-id reads.
 - Artifact identity is bound by artifact id derivation from digest, byte-length checks, canonical
   evidence hashes, and composite foreign keys from evidence/admission rows to blob rows.
-- SQL derivation is limited to mechanical scalar/canonical-byte facts. Semantic-looking fields
-  displayed by list/watch must be projection-versioned observation rows, may be produced by shared
-  Rust projection code from authority rows, and must be rebuilt by re-running that same code over
-  authority rows. They must not mint strict semantic authority.
+- SQL derivation is limited to mechanical scalar/canonical-byte facts in the initial
+  implementation. Semantic-looking fields displayed by list/watch must be projection-versioned
+  observation rows produced by the authority layer that owns the relevant semantics, then persisted
+  by storage through an explicit API. Storage must not call runtime/app projection code internally,
+  and observation rows must not mint strict semantic authority.
+- Logical-key observations are non-authoritative hints. Append admission folds `run_events` unless a
+  future reviewed design adds an explicit completeness proof for the exact stream prefix.
+- Resource-lane contention is represented as `ResourceLaneClaimBlocked`, which leaves the stream
+  unchanged and parks the already-started attempt before invocation.
+- Resource-lane fencing tokens are store-assigned, lane-local, monotonic values filled during claim
+  admission under the concrete lane lock.
+- Commit ids are deterministic pre-batch identities derived from prepared authority material, so
+  event envelopes and `commit_batch_hash` have no post-hash storage-assignment cycle.
 - Read-model rebuild procedures should use an explicit maintenance role in production. Local
   development can use a single physical database role only if rebuild functions are still hidden
   behind an explicit maintenance entry point and are not exposed through app/CLI/REST runtime paths.

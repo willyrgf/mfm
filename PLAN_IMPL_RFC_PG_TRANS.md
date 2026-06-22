@@ -119,11 +119,16 @@ Scope:
 - Add `PreparedCommitBundle` and `PreparedArtifactBytes` to `crates/kernel/store`.
 - Persist canonical prepared request material in the commit authority contract:
   commit purpose, prepared request hash, and canonical request bytes.
+- Define deterministic `commit_id` derivation before event batch hashing; do not leave commit id as
+  a post-staging storage-assigned value.
 - Replace `AsyncTypedRunEventStore::append_prepared_commit_plan` with
   `append_prepared_commit_bundle`.
 - Add resource-lane authority types and event payloads for capability-declared requirements,
-  resolved claims, committed `ResourceLaneClaimed`/`ResourceLaneReleased`, held lane sets, and holder
-  proofs.
+  resolved claims, `ResourceLaneClaimIntent`, store-filled committed
+  `ResourceLaneClaimed`/`ResourceLaneReleased`, `ResourceLaneClaimBlocked`, held lane sets, and
+  holder proofs.
+- Define the store-filled fencing-token protocol: prepared authority covers claim intent and fill
+  policy, while final commit batch hashes cover the store-assigned lane-local token.
 - Make artifact evidence identity evidence-keyed: APIs and strict reads must carry
   `(artifact_id, evidence_hash)` or exact event-derived requirements when typed meaning matters.
 - Update in-memory test store helpers to use bundles.
@@ -149,8 +154,11 @@ Scope:
 - Split side-effect lifecycle so lane-bearing capabilities can resolve concrete resource-lane claims
   during pure preflight after `StateAttemptStarted` and before invocation construction or live IO.
 - Keep `StateAttemptStarted` as a separate first attempt commit.
-- Commit `ResourceLaneClaimed` as a separate certified pre-invocation commit for the already-started
-  open attempt, then pass the committed `HeldResourceLaneSet` into invocation preparation.
+- Commit `ResourceLaneClaimIntent` as a separate certified pre-invocation commit for the
+  already-started open attempt; storage materializes the final `ResourceLaneClaimed` event and then
+  returns the committed `HeldResourceLaneSet` for invocation preparation.
+- Treat valid lane contention as `ResourceLaneClaimBlocked`, leaving the attempt open and parked
+  before invocation; do not convert normal contention into attempt failure or stream corruption.
 - Require side-effect output to echo held lane claims and reject mismatches before append.
 - Verify the same committed held lane, or commit a certified recovery claim/release, before any
   recovery path that may touch live IO.
@@ -205,6 +213,10 @@ Scope:
 - Add observation/read tables:
   `logical_key_observations`, `run_commit_log`, `run_observation_change_summaries`,
   observation facts, observation derivation tables.
+- Add schema constraints/validation triggers for `event_type` source-event bindings, exact first
+  artifact admission bindings, `run_commit_log` commit bindings, and lane holder ownership proofs.
+- Add `store_epoch` handling that changes on destructive reset, restore, clone, import, rollback, or
+  any operation that changes the PostgreSQL XID ordering domain behind public cursors.
 - Add no-update/no-delete/no-truncate guards.
 - Add maintenance-role-only rebuild/validation procedure boundaries.
 - Make schema validation reject stale old `typed_*` schemas or old migration checksums.
@@ -229,13 +241,17 @@ Scope:
 - Verify artifact bytes/evidence inside the transaction before inserting authority rows.
 - Insert `commits`, `artifact_blobs`, artifact evidence/admission rows, `run_events`,
   `logical_key_observations`, resource-lane claim/release rows, and `run_commit_log` atomically.
-- For lane acquire/use/release commits, require committed lane claim/release event payloads and
-  holder proofs inside the prepared bundle. Use sorted per-lane transaction locks only while
-  admitting those commit-bound rows; do not expose standalone lane acquire/release APIs, derive lanes
-  in storage, or add a global commit-order lock, global resource-lane lock, global counter row,
-  table-level append serialization, or `commit_pos`/`change_pos` allocation.
+- For lane claim/release commits, require committed lane claim/release intents and holder proofs in
+  the prepared bundle. Use sorted per-lane transaction locks while admitting those commit-bound
+  rows, assign store-filled lane-local fencing tokens under the lock, and return
+  `ResourceLaneClaimBlocked` without appending rows for valid contention. Do not expose standalone
+  lane acquire/release APIs, derive lanes in storage, or add a global commit-order lock, global
+  resource-lane lock, global counter row, table-level append serialization, or `commit_pos`/
+  `change_pos` allocation.
 - Enforce batch-hash integrity structurally in SQL and semantically in Rust from persisted canonical
   bytes; do not create a SQL canonicalization engine.
+- Build logical-key admission from authoritative `run_events`; use `logical_key_observations` only
+  as non-authoritative hints unless a prefix-completeness proof is implemented and verified.
 - Insert `run_commit_log.append_xid` from PostgreSQL `pg_current_xact_id()` and use it only for
   snapshot-sealed observation cursors.
 - Remove mutable helper writes: no run-head updates, no unique logical-key upserts, no current-state
@@ -245,6 +261,8 @@ Verification:
 
 - same-run concurrent append tests
 - cross-run resource-lane contention tests
+- valid lane contention returns `ResourceLaneClaimBlocked` and leaves the attempt open before
+  invocation
 - independent cross-run append tests proving unrelated runs do not block each other
 - crash after lane-bearing `StateAttemptStarted` but before `ResourceLaneClaimed` retries pure
   preflight and claim admission or interrupts/fails without live IO
@@ -279,7 +297,9 @@ Verification:
 
 Scope:
 
-- Fold `logical_key_observations` into `LogicalKeySet` and `UniqueLogicalPayloads`.
+- Fold authoritative `run_events` into `LogicalKeySet` and `UniqueLogicalPayloads` for admission.
+- Keep `logical_key_observations` as rebuildable, non-authoritative hints unless a reviewed
+  prefix-completeness proof is added.
 - Preserve the recoverable submission-result exception through explicit observation fields.
 - Prove parity with folding the authoritative event stream.
 
@@ -288,14 +308,15 @@ Verification:
 - accepted recoverable submission-result rewrite test
 - rejected repeated unique logical-key tests
 - parity tests comparing observation fold to stream fold
+- tests proving missing observation rows cannot make admission believe a logical key is absent
 
 ### Commit 10: implement Postgres-owned read models
 
 Scope:
 
 - Implement mechanical SQL facts only for scalar/canonical-byte derivations.
-- Persist only observation rows handed to storage by kernel/runtime/app authority layers or derived
-  mechanically from scalar/canonical-byte authority columns.
+- Persist only mechanical observation rows derived from scalar/canonical-byte authority columns in
+  the initial implementation. Do not call runtime/app semantic projection code from storage.
 - Implement `run_observation_change_summaries` separate from immutable `run_commit_log`.
 - Add `current_*` views over observation facts.
 - Add `build_projection_version`, validate, and drift tooling behind maintenance role boundaries.
@@ -523,8 +544,11 @@ The refactor is done when all of the following are true:
 - A fresh Postgres database can migrate to the target schema.
 - A stale old `typed_*` database is rejected.
 - Production appends insert events, artifact bytes/evidence keyed by evidence hash, committed
-  resource-lane claim/release rows, logical-key observations, commit-log rows, and required
+  resource-lane claim/release rows, logical-key observation hints, commit-log rows, and required
   observation facts atomically.
+- Logical-key admission is proven from authoritative `run_events`, not from observation-row absence.
+- Resource-lane contention parks open attempts through `ResourceLaneClaimBlocked` without writing
+  corrupt or terminal stream authority.
 - Read models rebuild from authority rows and can be drift-checked.
 - Strict status, stream, replay, and public output do not trust read models.
 - CLI/REST expose one shared app list/watch API.
