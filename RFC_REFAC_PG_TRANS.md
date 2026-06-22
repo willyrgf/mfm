@@ -171,16 +171,18 @@ logical_key_observations
 Important columns:
 
 ```text
-commit_pos BIGINT NOT NULL
+commit_id TEXT NOT NULL
 run_id TEXT NOT NULL
 seq BIGINT NOT NULL
 commit_key TEXT NOT NULL
 commit_purpose TEXT NOT NULL
-commit_fingerprint TEXT NOT NULL
-prepared_request_hash TEXT NOT NULL
-prepared_request_canonical_json BYTEA NOT NULL
+commit_idempotency_hash TEXT NOT NULL
+idempotency_canonical_json BYTEA NOT NULL
+prepared_authority_hash TEXT NOT NULL
+prepared_authority_canonical_json BYTEA NOT NULL
 commit_batch_hash TEXT NOT NULL
 event_count INTEGER NOT NULL
+append_xid XID8 NOT NULL DEFAULT pg_current_xact_id()
 committed_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp()
 ```
 
@@ -188,31 +190,44 @@ Constraints:
 
 ```text
 PRIMARY KEY (run_id, seq)
-UNIQUE (commit_pos)
+UNIQUE (commit_id)
 UNIQUE (run_id, commit_key)
-UNIQUE (run_id, seq, commit_key, commit_pos)
+UNIQUE (run_id, seq, commit_key)
+UNIQUE (run_id, seq, commit_key, commit_id)
+UNIQUE (commit_id, run_id, seq, commit_key, event_count, commit_batch_hash, append_xid)
 CHECK (seq >= 1)
 CHECK (event_count >= 1)
 ```
 
-`commit_pos` is the durable global order for committed MFM run commits. It is unique and
-monotonic, but it is not required to be gapless. It must be assigned only while holding the global
-commit-order serialization point described in the write flow. Plain PostgreSQL identity or sequence
-values are not valid public watch cursors unless allocation is serialized this way and the
-serialization point is held until the transaction commits. `committed_at` is audit/display data, not
-ordering authority.
+`commit_id` is the stable identity for one accepted run commit. It is not a global ordering value
+and must not be used as platform-wide semantic order. It should be derived from canonical committed
+content or otherwise assigned by the storage layer as an immutable identity after Rust staging.
 
-`commit_purpose` is the stable purpose tag for the prepared commit variant. `prepared_request_hash`
-and `prepared_request_canonical_json` persist the canonical request material needed to reverify the
-commit fingerprint. The persisted canonical request must bind at least the run id, commit key,
-purpose, payloads, preconditions, required artifact evidence, and admitted artifact evidence. It
-should not include `expected_next_seq`; otherwise a valid idempotent retry after the first commit
-cannot be recognized. Artifact byte payloads do not need to be included directly if their evidence
-binds digest and byte length and the store verifies bytes before insert.
+`append_xid` is the PostgreSQL top-level transaction id that inserted the commit. It is assigned by
+Postgres with `pg_current_xact_id()` and is used only for snapshot-sealed observation cursors in
+`run_commit_log`. It is not semantic authority, not commit-time order, and not a substitute for
+run-local stream order. Strict authority remains `(run_id, seq, ordinal)` plus committed artifact
+evidence and Rust verification.
 
-`commit_fingerprint` is the idempotency digest over the canonical prepared request material. Because
-the canonical request bytes are persisted, strict load/rebuild tooling can reverify the fingerprint
-instead of treating it as append-time-only metadata.
+The target architecture must not introduce a global commit-order advisory lock, table lock, global
+counter row, or equivalent serialization point to assign platform-wide commit positions. Independent
+runs must be able to commit concurrently unless they contend on the same run id or on explicitly
+claimed resource lanes.
+
+`commit_purpose` is the stable purpose tag for the prepared commit variant. The persisted request
+material is split into two canonical records:
+
+- `commit_idempotency_hash` and `idempotency_canonical_json` exclude `expected_next_seq` so a valid
+  retry of an already accepted `(run_id, commit_key)` can be recognized before stale sequence
+  checks.
+- `prepared_authority_hash` and `prepared_authority_canonical_json` include the full accepted
+  authority record, including `expected_next_seq`, purpose, payloads, preconditions, required
+  artifact evidence, admitted artifact evidence, and the accepted base stream identity or base
+  stream hash.
+
+Artifact byte payloads do not need to be included directly if their evidence binds digest and byte
+length and the store verifies bytes before insert. Strict load/rebuild tooling must reverify both
+hashes from persisted canonical bytes instead of treating them as append-time-only metadata.
 
 `commit_batch_hash` binds the commit row to the stored ordered event batch and commit artifact
 evidence. It must be computed from canonical MFM bytes over the resulting event envelopes and
@@ -220,10 +235,10 @@ artifact evidence bindings. The implementation must enforce before commit, eithe
 validation plus a deferrable constraint trigger or with equivalent database checks, that:
 
 - event ordinals for a commit are contiguous `0..event_count-1`
-- every event row for `(run_id, seq)` carries the commit row's `commit_key` and `commit_pos`
+- every event row for `(run_id, seq)` carries the commit row's `commit_key` and `commit_id`
 - the number of inserted event rows equals `event_count`
 - the ordered event rows rebuild `commit_batch_hash`
-- commit artifact evidence rows are bound to the same `(run_id, seq, commit_key)`
+- commit artifact evidence rows are bound to the same `(run_id, seq, commit_key, commit_id)`
 
 Strict load paths must also cross-check these invariants so database corruption is detected before
 authority objects are minted.
@@ -233,7 +248,7 @@ authority objects are minted.
 Important columns:
 
 ```text
-commit_pos BIGINT NOT NULL
+commit_id TEXT NOT NULL
 run_id TEXT NOT NULL
 seq BIGINT NOT NULL
 ordinal INTEGER NOT NULL
@@ -251,10 +266,11 @@ Constraints:
 
 ```text
 PRIMARY KEY (run_id, seq, ordinal)
-UNIQUE (commit_pos, ordinal)
+UNIQUE (commit_id, ordinal)
 UNIQUE (run_id, event_id)
-FOREIGN KEY (run_id, seq, commit_key, commit_pos)
-  REFERENCES commits(run_id, seq, commit_key, commit_pos)
+UNIQUE (run_id, seq, ordinal, event_id, payload_hash, logical_key, commit_id)
+FOREIGN KEY (run_id, seq, commit_key, commit_id)
+  REFERENCES commits(run_id, seq, commit_key, commit_id)
   ON DELETE RESTRICT
 CHECK (seq >= 1)
 CHECK (ordinal >= 0)
@@ -262,14 +278,16 @@ CHECK (ordinal >= 0)
 
 The store must keep validating persisted rows by reconstructing event identity, payload hash,
 schema id, spec hash, logical key, ordering, and commit grouping through the Rust store contract.
-Global event order is `(commit_pos, ordinal)`. A generated identity event column may exist as a
-debug surrogate, but it must not drive public watch cursors or semantic stream order.
+Semantic event order is run-local `(run_id, seq, ordinal)`. There is intentionally no global
+semantic event order across independent runs. A generated identity event column may exist as a debug
+surrogate, but it must not drive public watch cursors or semantic stream order.
 
-`payload_json` is a query copy only. `payload_hash`, `commit_fingerprint`, `commit_batch_hash`, and
-read-model row hashes must be computed from MFM canonical JSON bytes, not from `jsonb::text` or any
-Postgres JSONB serialization. Hashed structured data must continue to reject floats. The initial
-implementation should store `payload_canonical_json` so strict load paths and rebuild tools can
-verify the query copy and hashes without trusting JSONB formatting.
+`payload_json` is a query copy only. `payload_hash`, `commit_idempotency_hash`,
+`prepared_authority_hash`, `commit_batch_hash`, and read-model row hashes must be computed from MFM
+canonical JSON bytes, not from `jsonb::text` or any Postgres JSONB serialization. Hashed structured
+data must continue to reject floats. The initial implementation should store
+`payload_canonical_json` so strict load paths and rebuild tools can verify the query copy and hashes
+without trusting JSONB formatting.
 
 `artifact_blobs` stores immutable content-addressed bytes.
 
@@ -349,7 +367,7 @@ run_artifact_admissions
   run_id TEXT NOT NULL
   artifact_id TEXT NOT NULL
   evidence_hash TEXT NOT NULL
-  first_commit_pos BIGINT NOT NULL
+  first_commit_id TEXT NOT NULL
   first_seq BIGINT NOT NULL
   first_commit_key TEXT NOT NULL
 
@@ -357,12 +375,29 @@ commit_artifact_evidence
   run_id TEXT NOT NULL
   seq BIGINT NOT NULL
   commit_key TEXT NOT NULL
-  commit_pos BIGINT NOT NULL
+  commit_id TEXT NOT NULL
   artifact_id TEXT NOT NULL
   evidence_hash TEXT NOT NULL
   binding_kind TEXT NOT NULL CHECK (binding_kind IN ('required', 'admitted'))
   requirement_source TEXT NULL
 ```
+
+Binding tables must enforce set semantics in the database, matching the Rust commit contract:
+
+```text
+run_artifact_admissions:
+  PRIMARY KEY (run_id, artifact_id, evidence_hash)
+  UNIQUE (run_id, artifact_id)
+
+commit_artifact_evidence:
+  PRIMARY KEY (run_id, seq, binding_kind, artifact_id, evidence_hash)
+  UNIQUE (run_id, seq, binding_kind, artifact_id)
+```
+
+If a future commit format permits multiple bindings for the same artifact and binding kind, it must
+add an explicit `binding_ordinal` and include it in the canonical evidence set and primary key.
+Duplicates must never be allowed to distort rebuild counts, retained-artifact requirements, or
+`commit_batch_hash`.
 
 Both binding tables must use composite foreign keys that bind the artifact id to the exact evidence:
 
@@ -375,22 +410,22 @@ FOREIGN KEY (artifact_id, evidence_hash)
 `run_artifact_admissions` must also bind the first admission to the commit that admitted it:
 
 ```text
-FOREIGN KEY (run_id, first_seq, first_commit_key, first_commit_pos)
-  REFERENCES commits(run_id, seq, commit_key, commit_pos)
+FOREIGN KEY (run_id, first_seq, first_commit_key, first_commit_id)
+  REFERENCES commits(run_id, seq, commit_key, commit_id)
   ON DELETE RESTRICT
 ```
 
 `commit_artifact_evidence` must bind each requirement/admission row to its commit:
 
 ```text
-FOREIGN KEY (run_id, seq, commit_key, commit_pos)
-  REFERENCES commits(run_id, seq, commit_key, commit_pos)
+FOREIGN KEY (run_id, seq, commit_key, commit_id)
+  REFERENCES commits(run_id, seq, commit_key, commit_id)
   ON DELETE RESTRICT
 ```
 
 The required/admitted distinction is part of commit authority. It must be possible to rebuild the
-commit fingerprint and retained artifact requirements from inserted commit artifact evidence plus
-the committed events.
+commit idempotency hash, full prepared authority hash, `commit_batch_hash`, and retained artifact
+requirements from the deduplicated inserted commit artifact evidence plus the committed events.
 
 `logical_key_observations` replaces mutable logical-key helper tables with an append-only authority
 index. It records exactly what each committed event contributed to logical-key admission.
@@ -400,7 +435,7 @@ Important columns:
 ```text
 run_id TEXT NOT NULL
 logical_key TEXT NOT NULL
-commit_pos BIGINT NOT NULL
+commit_id TEXT NOT NULL
 seq BIGINT NOT NULL
 ordinal INTEGER NOT NULL
 event_id TEXT NOT NULL
@@ -416,8 +451,8 @@ Constraints:
 ```text
 PRIMARY KEY (run_id, logical_key, seq, ordinal)
 UNIQUE (run_id, seq, ordinal)
-FOREIGN KEY (run_id, seq, ordinal)
-  REFERENCES run_events(run_id, seq, ordinal)
+FOREIGN KEY (run_id, seq, ordinal, event_id, payload_hash, logical_key, commit_id)
+  REFERENCES run_events(run_id, seq, ordinal, event_id, payload_hash, logical_key, commit_id)
   ON DELETE RESTRICT
 CHECK (
   (is_unique = FALSE AND unique_observation_kind IS NULL)
@@ -519,17 +554,31 @@ This requires an explicit kernel/runtime/store API cutover:
 
 ### 3. Postgres-Owned Read-Model Layer
 
-Read models live in Postgres and are owned by the Postgres storage layer. Ownership may be
-implemented by storage migrations, SQL functions/views/triggers, or Rust projection code inside the
-Postgres storage crate writing canonical read facts in the same append transaction. App/framework
-code does not write these rows directly.
+Read models live in Postgres and are owned by the Postgres storage layer as observation surfaces.
+Ownership may be implemented by storage migrations, SQL functions/views/triggers, or Rust
+observation projection code in the Postgres storage crate writing canonical read facts. App and
+framework code do not write these rows directly.
 
 SQL must not become a second semantic projection engine. SQL derivation is limited to mechanical
 facts that can be copied or deterministically reshaped from committed scalar/canonical-byte columns
-without interpreting certified runtime policy. Any read fact that requires `ProjectionSnapshot`,
-certified saga policy, side-effect legality, manual-resolution proof state, retention authority, or
-public-output authority must be emitted by the shared Rust projection/admission code inside the
-storage transaction, then stored in Postgres with provenance and rebuild support.
+without interpreting certified runtime policy.
+
+Read facts are split from semantic authority:
+
+- Observation facts may be stored in Postgres for list/watch/dashboard/search. They are
+  projection-versioned, provenance-bearing, rebuildable, and never authority for execution.
+- Semantic authority is still minted by Rust app/runtime/store strict paths from committed stream
+  rows plus verified artifacts. This includes `ProjectionSnapshot`, certified saga policy,
+  side-effect legality, manual-resolution proof state, retention authority, public-output
+  authority, resume, replay, and strict status.
+
+If an observation row displays semantic-looking data such as saga/run mode, public-output status,
+manual-resolution state, retention status, or side-effect state, it must be labeled and documented
+as projection-versioned observation data. The Postgres storage crate may call shared pure Rust
+projection code to produce such observation rows, but it must not mint `PublicOutputReadAuthority`,
+manual-resolution authority, retention authority, side-effect recovery authority, or strict
+resume/replay/status authority. Those remain app/runtime/store strict-read responsibilities outside
+the read-model layer.
 
 Read models are for:
 
@@ -565,8 +614,9 @@ projection_version TEXT NOT NULL
 source_run_id TEXT NOT NULL
 source_seq BIGINT NOT NULL
 source_ordinal INTEGER NOT NULL
-source_commit_pos BIGINT NOT NULL
+source_commit_id TEXT NOT NULL
 source_event_id TEXT NOT NULL
+source_logical_key TEXT NOT NULL
 source_payload_hash TEXT NOT NULL
 source_event_schema_id TEXT NOT NULL
 derived_key TEXT NOT NULL
@@ -577,10 +627,23 @@ derived_row_hash TEXT NOT NULL
 The provenance tuple must reference the source event:
 
 ```text
-FOREIGN KEY (source_run_id, source_seq, source_ordinal)
-  REFERENCES run_events(run_id, seq, ordinal)
+FOREIGN KEY (
+  source_run_id,
+  source_seq,
+  source_ordinal,
+  source_event_id,
+  source_payload_hash,
+  source_logical_key,
+  source_commit_id
+)
+  REFERENCES run_events(run_id, seq, ordinal, event_id, payload_hash, logical_key, commit_id)
   ON DELETE RESTRICT
 ```
+
+The concrete schema may use a deferrable validation trigger instead of a wide foreign key if needed,
+but it must bind the source event id, payload hash, logical key, and commit id to the referenced
+authority event row. A fact row must not rely on `(run_id, seq, ordinal)` alone when it stores
+redundant source metadata.
 
 Aggregate summaries are not one-event facts. A current run summary, saga mode, latest state,
 attempt summary, public-output summary, or dashboard row depends on a stream prefix, a commit
@@ -589,12 +652,13 @@ facts or carry aggregate provenance:
 
 ```text
 projection_version TEXT NOT NULL
-source_kind TEXT NOT NULL CHECK (source_kind IN ('run_prefix', 'global_prefix', 'multi_event'))
+source_kind TEXT NOT NULL CHECK (source_kind IN ('run_prefix', 'platform_prefix', 'multi_event'))
 source_run_id TEXT NULL
 source_from_seq BIGINT NULL
 source_to_seq BIGINT NULL
 source_last_ordinal INTEGER NULL
-source_high_commit_pos BIGINT NOT NULL
+source_high_append_xid XID8 NULL
+source_high_commit_id TEXT NULL
 source_event_count BIGINT NOT NULL
 source_input_hash TEXT NOT NULL
 derived_key TEXT NOT NULL
@@ -618,8 +682,10 @@ current_public_outputs
 current_resource_lanes
 ```
 
-These views use run sequence, source ordinal, `commit_pos`, and aggregate high-watermarks to select
-the latest fact. They must not be written by app code.
+These views use run sequence, source ordinal, source commit id, and aggregate high-watermarks to
+select the latest fact. Global observation freshness is described by snapshot-sealed append-XID
+frontiers, not by a semantic global commit position. Current-state views must not be written by app
+code.
 
 ## Trigger And View Strategy
 
@@ -628,8 +694,8 @@ Start with the simplest derivations as SQL views:
 - run admission summary
 - run completion summary
 - run head by `max(seq)`
-- public output produced/render-failed summary
-- change feed by `run_commit_log.change_pos`
+- observed public output produced/render-failed summary
+- change feed by `run_commit_log.append_xid`
 
 Use trigger-derived insert-only read facts when:
 
@@ -641,10 +707,10 @@ Use trigger-derived insert-only read facts when:
 
 Do not implement saga mode, side-effect ledger legality, manual-resolution state, public-output
 authority, or retention proof as independent PL/pgSQL projections. Those are semantic projections
-owned by Rust/kernel/runtime code. If list/watch needs those fields, the Postgres storage crate must
-call the shared Rust projection code while appending and insert the resulting canonical read facts
-inside the same transaction, with rebuild tooling that re-runs the same Rust projection over
-authority rows.
+owned by Rust/kernel/runtime/app code. If list/watch needs to display related fields, the Postgres
+storage crate may persist only projection-versioned observation rows produced from shared Rust
+projection code and authority rows. Those rows must be labeled as observations and must not mint or
+substitute for strict semantic authority.
 
 Trigger-derived read facts must not hash Postgres `jsonb::text`. Each hash-bearing fact must define
 a canonical row schema and canonicalizer identity. The implementation must either provide a
@@ -670,9 +736,9 @@ without mutating cursor authority or conflicting with old cursor rows.
 Required columns:
 
 ```text
-change_pos BIGINT PRIMARY KEY
+commit_id TEXT PRIMARY KEY
+append_xid XID8 NOT NULL DEFAULT pg_current_xact_id()
 run_id TEXT NOT NULL
-commit_pos BIGINT NOT NULL REFERENCES commits(commit_pos) ON DELETE RESTRICT
 seq BIGINT NOT NULL
 first_ordinal INTEGER NOT NULL
 last_ordinal INTEGER NOT NULL
@@ -681,40 +747,99 @@ commit_batch_hash TEXT NOT NULL
 created_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp()
 ```
 
-The initial API should use one commit-log row per committed run commit. `change_pos` may equal
-`commit_pos`, or it may be a separate value assigned under the same global commit-order
-serialization point. If a later design emits multiple changes per commit, the cursor must become
-`(commit_pos, change_ordinal)` or `change_pos` must still be assigned under the same global
-serialization point before commit.
+Constraints:
+
+```text
+UNIQUE (append_xid, commit_id)
+FOREIGN KEY (commit_id, run_id, seq, event_count, commit_batch_hash, append_xid)
+  REFERENCES commits(commit_id, run_id, seq, event_count, commit_batch_hash, append_xid)
+  ON DELETE RESTRICT
+```
+
+The initial API should use one commit-log row per committed run commit. There is intentionally no
+global `commit_pos`, no global `change_pos`, and no global commit-order lock. Public list/watch
+delivery is ordered by the observation tuple `(append_xid, commit_id)`, where `append_xid` is the
+PostgreSQL top-level transaction id that inserted the row and `commit_id` is a deterministic
+tie-breaker for rows written by the same transaction.
+
+This observation order is not semantic commit order. It exists only to provide no-skip list/watch
+delivery for operational APIs. Per-run strict order remains `(run_id, seq, ordinal)`. Resource-lane
+conflict order is defined by explicit resource-lane claims and locks. Resume, replay, strict status,
+manual-resolution authority, retention proof, and public-output authority must ignore observation
+cursor order.
+
+Plain PostgreSQL sequences or identity columns are not valid durable public watch cursors. They are
+not transactional: sequence changes are visible immediately and are not rolled back when a
+transaction aborts. A transaction can therefore allocate a later sequence value, commit first, and
+cause a watcher to advance past an earlier sequence value whose transaction commits later. The
+target design avoids that failure mode without serializing all writers.
+
+Snapshot-sealed watch polling uses PostgreSQL transaction snapshots:
+
+```text
+safe_before_xid = pg_snapshot_xmin(pg_current_snapshot())
+
+SELECT ...
+FROM run_commit_log
+WHERE append_xid < safe_before_xid
+  AND (
+    append_xid > cursor.append_xid
+    OR (append_xid = cursor.append_xid AND commit_id > cursor.commit_id)
+  )
+ORDER BY append_xid ASC, commit_id ASC
+LIMIT $limit
+```
+
+PostgreSQL defines snapshot `xmin` as the lowest transaction id still active; transaction ids below
+that frontier are closed, meaning committed-visible or rolled back/dead for the current snapshot.
+Therefore a watcher may safely advance across absent rows below `safe_before_xid`: no still-active
+older transaction can later commit a row with `append_xid < safe_before_xid`.
+
+Public watch cursors are opaque exclusive lower-bound cursors over `(append_xid, commit_id)`. They
+must include at least:
+
+```text
+cursor_version
+store_epoch
+append_xid
+commit_id
+```
+
+The empty/default `commit_id` value sorts before real commit ids. When a page is empty, the service
+may advance the cursor to `(safe_before_xid, empty_commit_id)` and report that value as the sealed
+high-watermark. That means every MFM change with `append_xid < safe_before_xid` has either been
+delivered or proven absent/aborted. Rows with `append_xid = safe_before_xid` remain eligible for
+later pages once a future snapshot seals them.
+
+If rows are returned, `next_cursor` is the last returned `(append_xid, commit_id)`. A page may split
+rows with the same `append_xid`; the commit-id tie-breaker prevents skipped rows. Duplicate delivery
+is allowed after client retries, so change records must be idempotent for consumers.
+
+Long-running write transactions with old assigned XIDs can delay watch high-watermark advancement,
+but they must not block independent run appends. The implementation should keep append transactions
+short, validate large artifact bytes before opening the transaction where possible, set bounded
+statement/idle-in-transaction timeouts, and expose watch-frontier lag as an operational metric.
 
 Projection-versioned summaries live in `run_change_summaries`:
 
 ```text
 projection_version TEXT NOT NULL
-change_pos BIGINT NOT NULL REFERENCES run_commit_log(change_pos) ON DELETE RESTRICT
+commit_id TEXT NOT NULL REFERENCES run_commit_log(commit_id) ON DELETE RESTRICT
 summary_kind TEXT NOT NULL
 summary_row_hash TEXT NOT NULL
 summary_row_canonical_json BYTEA NOT NULL
-PRIMARY KEY (projection_version, change_pos, summary_kind)
+PRIMARY KEY (projection_version, commit_id, summary_kind)
 ```
 
 Rebuilding a new projection version inserts new summary rows for the same immutable
-`run_commit_log.change_pos` values. It must not update old summaries or rewrite cursor authority.
-If a requested projection version is unavailable for a visible change, the API must either return a
-documented `ProjectionUnavailable` response or run an explicit rebuild path before returning data.
+`run_commit_log.commit_id` values. It must not update old summaries or rewrite cursor authority. If
+a requested projection version is unavailable for a sealed visible change, the API must either
+return a documented `ProjectionUnavailable` response or run an explicit rebuild path before
+returning data.
 
-Public watch cursors are opaque exclusive lower-bound cursors over `run_commit_log.change_pos`.
-They must include a cursor format version and may include a cursor epoch if the cursor contract
-itself changes. Projection version is response/query metadata, not cursor authority. The service
-must reject stale incompatible cursor-format versions or explicitly migrate them; it must never
-silently continue a cursor across incompatible cursor contracts.
-
-`poll_run_changes(cursor, limit)` returns rows strictly greater than the decoded cursor, ordered by
-`change_pos ASC`. If rows are returned, `next_cursor` is the last returned `change_pos`. If no rows
-are returned, the response includes the latest visible high-watermark and may advance the cursor to
-that high-watermark because `change_pos` is commit-order serialized. Clients get no-skip delivery
-when they persist the returned cursor only after processing the page. Duplicate delivery is allowed
-after client retries, so change records must be idempotent for consumers.
+Projection version is response/query metadata, not cursor authority. The service must reject stale
+incompatible cursor-format versions or explicitly migrate them; it must never silently continue a
+cursor across incompatible cursor contracts.
 
 `watch_run_changes` must poll durable rows before and after waiting. `LISTEN/NOTIFY` can only wake
 the waiter; it must not be treated as the data source and may be missed or coalesced.
@@ -723,32 +848,44 @@ the waiter; it must not be treated as the data source and may be missed or coale
 
 The append flow should be:
 
-1. Begin transaction.
-2. Check `(run_id, commit_key)` for idempotency before stale sequence checks.
-3. Take a transaction-scoped advisory lock for `run_id`.
-4. Re-check `(run_id, commit_key)` after acquiring the lock.
-5. Take a conservative resource-lane advisory lock. Start with one global lock; refine to sorted
-   per-lane locks only after extraction and contention tests are strong.
-6. Load committed event history, artifact authority, logical-key authority, and non-authoritative
+1. Validate the prepared commit bundle in Rust before opening the database transaction where
+   possible, including artifact byte/evidence checks, canonical request material, and payload
+   shape. Large byte hashing should happen before the transaction unless the check specifically
+   needs transaction-visible authority rows.
+2. Begin transaction.
+3. Check `(run_id, commit_key)` for idempotency using `commit_idempotency_hash` before stale
+   sequence checks.
+4. Take a transaction-scoped advisory lock for `run_id`.
+5. Re-check `(run_id, commit_key)` after acquiring the run lock.
+6. Take sorted transaction-scoped advisory locks for only the resource lanes explicitly claimed by
+   the prepared commit. A global resource-lane lock is not acceptable in the target design because
+   it serializes independent runs.
+7. Load committed event history, artifact authority, logical-key authority, and non-authoritative
    index hints needed to build the Rust commit base.
-7. Stage and validate the prepared commit bundle in Rust, including artifact byte/evidence checks.
-8. Acquire the global commit-order serialization point before assigning `commit_pos`, `change_pos`,
-   or any other global cursor/order position. This can be a transaction-scoped advisory lock taken
-   before sequence allocation, or another transactional mechanism that serializes allocation and is
-   held until commit. This serialization point is independent of resource-lane locking and must
-   remain even if resource-lane locking is later refined to per-lane locks.
-9. Insert `commits`.
-10. Insert `artifact_blobs` and artifact evidence/admission rows as needed.
+8. Stage and validate the prepared commit in Rust against the loaded authority base. Reverify
+   artifact byte/evidence matches inside the transaction before inserting authority rows.
+9. Insert or reuse `artifact_blobs` and artifact evidence/admission rows as needed.
+10. Insert `commits`. The row receives `append_xid` from `pg_current_xact_id()`; this value is
+    observation cursor metadata only.
 11. Insert `run_events`.
 12. Insert or mechanically derive `logical_key_observations`.
-13. Insert `run_commit_log`.
-14. Let the Postgres storage layer insert mechanical SQL facts and Rust-derived canonical read facts,
-    including projection-versioned `run_change_summaries`.
-15. Emit `NOTIFY` after authority rows, read facts, commit-log rows, and summary rows are inserted.
-16. Commit.
+13. Insert `commit_artifact_evidence` and `run_artifact_admissions`.
+14. Insert `run_commit_log` with the same `append_xid` and `commit_id` bound to the commit row.
+15. Insert bounded mechanical observation facts and projection-versioned observation summaries that
+    are required to be atomic with the append.
+16. Emit `NOTIFY` after authority rows, commit-log rows, and synchronous observation rows are
+    inserted. `NOTIFY` remains only a wakeup and is delivered at commit.
+17. Commit.
 
-If synchronous trigger derivation fails, the whole transaction must roll back. That preserves
-atomicity between authority rows and read-model facts.
+There is no global commit-order lock, global counter row, table-level append serialization, or
+global `commit_pos`/`change_pos` allocation step in this flow. Any design or implementation that
+needs such a point to make watch cursors correct is outside this RFC.
+
+If synchronous trigger/observation derivation fails, the whole transaction must roll back. That
+preserves atomicity for the minimal observation rows the public API depends on. Expensive dashboard
+models may be rebuilt asynchronously from authority rows, but then list/watch must surface
+`ProjectionUnavailable` or omit those optional summaries until the requested projection version is
+available.
 
 ## Read Flow
 
@@ -824,25 +961,33 @@ cursor
 next_cursor
 cursor_version
 projection_version
-high_watermark
+sealed_high_watermark
+watch_frontier_lag
 runs[]
 changes[]
 ```
 
-Minimum run summary fields:
+Minimum list/watch run observation fields:
 
 ```text
 run_id
 head_seq
-commit_pos
-status_kind
-run_mode
+commit_id
+append_xid
+observed_status_kind
 started_at
 updated_at
 completed_at
-public_output_summary
-attempt_summary
+projection_summary
 ```
+
+Fields that look semantic must be nested under a projection-versioned observation envelope, for
+example `projection_summary.observed_run_mode`, `projection_summary.observed_attempts`, or
+`projection_summary.observed_public_output`. List/watch must not expose bare `run_mode`,
+`public_output_summary`, `attempt_summary`, manual-resolution authority, retention proof, or
+public-output authority. Callers that need semantic saga status, public-output authority,
+retention/replay proof, or manual-resolution authority must call strict per-run status/stream
+APIs.
 
 Stable public error codes must include at least:
 
@@ -861,10 +1006,11 @@ same stable schema as REST where practical. The implementation must update `bin/
 `bin/rest-api/README.md`, and contract tests in the same change that introduces these commands and
 routes.
 
-The watch cursor is opaque publicly. Internally it encodes `run_commit_log.change_pos` as an
-exclusive lower bound plus a cursor format version. Projection version is response/query metadata,
-not cursor authority. The cursor must not encode plain identity sequence values that are allocated
-outside the global commit-order serialization point.
+The watch cursor is opaque publicly. Internally it encodes `(run_commit_log.append_xid,
+run_commit_log.commit_id)` as an exclusive lower bound plus a cursor format version and store epoch.
+Projection version is response/query metadata, not cursor authority. The cursor must not encode
+plain identity sequence values, global counters, wall-clock timestamps, or values that require a
+global commit-order lock.
 
 `mfm run watch` and `GET /v1/runs/watch` are observation APIs backed by `run_commit_log`,
 `run_change_summaries`, and other Postgres-owned read models.
@@ -1010,11 +1156,12 @@ source_kind TEXT NOT NULL
 source_run_id TEXT NULL
 source_seq BIGINT NULL
 source_ordinal INTEGER NULL
-source_commit_pos BIGINT NULL
+source_commit_id TEXT NULL
 source_event_id TEXT NULL
 source_payload_hash TEXT NULL
 source_event_schema_id TEXT NULL
-source_high_commit_pos BIGINT NOT NULL
+source_high_append_xid XID8 NULL
+source_high_commit_id TEXT NULL
 source_event_count BIGINT NOT NULL
 source_input_hash TEXT NOT NULL
 derived_row_canonical_json BYTEA NOT NULL
@@ -1034,7 +1181,7 @@ derived_key TEXT NOT NULL
 source_run_id TEXT NOT NULL
 source_seq BIGINT NOT NULL
 source_ordinal INTEGER NOT NULL
-source_commit_pos BIGINT NOT NULL
+source_commit_id TEXT NOT NULL
 ```
 
 ## Guardrails
@@ -1050,8 +1197,10 @@ Database guardrails:
   explicit maintenance entry point and must not be exposed through production app services
 - avoid `ON DELETE CASCADE` on authority tables
 - validate required triggers/functions/views during schema validation
-- validate that global watch/order positions are assigned only under the global commit-order
-  serialization point
+- reject global commit-order locks, global counter rows, table-level append serialization, or any
+  global `commit_pos`/`change_pos` allocation logic in production append paths
+- validate that public watch cursors use snapshot-sealed `run_commit_log.append_xid` plus
+  `commit_id`, not PostgreSQL identity/sequence values
 - validate that hash-bearing rows use canonical MFM bytes and never `jsonb::text`
 
 Code guardrails:
@@ -1086,7 +1235,8 @@ authoritative project docs in the same change set as the storage/runtime/API ref
   production design
 - Postgres-owned read models as rebuildable observation surfaces, not semantic authority
 - strict status/replay/public-output reads rebuilding from committed stream and verified artifacts
-- immutable `run_commit_log` cursor authority separate from projection-versioned summaries
+- snapshot-sealed `run_commit_log.append_xid` observation cursors separate from
+  projection-versioned summaries
 - maintenance-role requirements for read-model rebuild/validation procedures
 - the breaking dev-branch cutover posture and lack of compatibility with old `typed_*` tables
 
@@ -1138,7 +1288,9 @@ This is a breaking dev-branch cutover, not an online compatibility migration.
      triggers/functions, and rebuild/validation tools using target names.
    - Move same-run ordering from mutable run-head rows to advisory locking plus inserted commit
      authority.
-   - Add global commit-order serialization before assigning `commit_pos` or `change_pos`.
+   - Use sorted resource-lane locks only for explicitly claimed lanes.
+   - Use snapshot-sealed `append_xid` observation cursors for list/watch. Do not add global
+     commit-order serialization, global counter rows, or `commit_pos`/`change_pos` allocation.
    - Replace helper upserts that encode current state with append-only observations/facts or
      rebuildable views.
    - Replace plan-only append with commit bundles that carry admitted artifact bytes into the
@@ -1193,10 +1345,16 @@ Required new tests:
 - read facts are not used as append-admission authority
 - hash-bearing rows are computed from canonical MFM bytes, not JSONB text
 - commit rows reject or detect event_count, commit_key, ordinal, and batch-hash mismatches
-- commit fingerprints reverify from persisted commit purpose and canonical request material
+- commit idempotency hashes and full prepared-authority hashes reverify from persisted commit
+  purpose and canonical request material
 - artifact ids are verified as derived from digests
 - artifact evidence rows reject digest/length/id mismatches against blob rows
-- global watch cursors cannot skip later-committed rows after concurrent transactions
+- snapshot-sealed XID watch cursors cannot skip rows when an older transaction commits after a
+  newer transaction
+- aborted older transactions do not block watch cursor advancement after the snapshot frontier
+  passes them
+- public watch tests prove no global commit-order advisory lock, global counter row, or table-level
+  append serialization is needed
 - watch cursor resumes after disconnect
 - stale cursor-format versions are rejected or explicitly migrated
 - unavailable projection-version summaries return `ProjectionUnavailable` or trigger an explicit
@@ -1204,10 +1362,12 @@ Required new tests:
 - empty watch pages return a well-defined high-watermark
 - `LISTEN/NOTIFY` is not required for correctness
 - strict `run stream --watch` tails authority rows and does not use read-model summaries
-- `run_commit_log` cursor rows remain immutable across projection-version rebuilds
+- `run_commit_log` cursor rows remain immutable across projection-version rebuilds and are ordered
+  by `(append_xid, commit_id)` only for observation delivery
 - same-run concurrent appends serialize correctly
 - idempotent commit-key retry still wins before stale sequence checks
 - cross-run resource-lane contention admits only one conflicting claimant
+- independent cross-run appends that do not share resource lanes can commit concurrently
 - artifact bytes and evidence are inserted atomically with the commit bundle
 - missing, extra, or mismatched artifact bytes are rejected before authority rows commit
 - every runtime append path passes a `PreparedCommitBundle`, not a plan-only append
@@ -1237,25 +1397,30 @@ Required new tests:
   several traits, but production code should not expose broad arbitrary artifact-id reads.
 - Artifact identity is bound by artifact id derivation from digest, byte-length checks, canonical
   evidence hashes, and composite foreign keys from evidence/admission rows to blob rows.
-- SQL derivation is limited to mechanical scalar/canonical-byte facts. Semantic projections required
-  for list/watch summaries should be emitted by shared Rust projection code inside the Postgres
-  storage transaction and rebuilt by re-running that same code over authority rows.
+- SQL derivation is limited to mechanical scalar/canonical-byte facts. Semantic-looking fields
+  displayed by list/watch must be projection-versioned observation rows, may be produced by shared
+  Rust projection code from authority rows, and must be rebuilt by re-running that same code over
+  authority rows. They must not mint strict semantic authority.
 - Read-model rebuild procedures should use an explicit maintenance role in production. Local
   development can use a single physical database role only if rebuild functions are still hidden
   behind an explicit maintenance entry point and are not exposed through app/CLI/REST runtime paths.
 - Artifact bytes should be stored in Postgres `bytea` columns. PostgreSQL's current documented hard
   field-size limit is 1 GB, but MFM should enforce lower artifact-size limits before insert and with
   database checks.
-- The first observation models should cover run summary, immutable commit cursor log,
-  projection-versioned change summaries, public output summary, and attempt summary. Those are
-  enough for the first public list/watch API.
+- The first observation models should cover observed run summary, immutable commit cursor log,
+  projection-versioned change summaries, observed public-output summary, and observed attempt
+  summary. Those are enough for the first public list/watch API.
 - Per-run strict status should continue to return full saga detail through verified stream and
   artifact authority. List/watch should return operational summaries unless the caller explicitly
   asks for strict per-run status.
-- Public watch cursors should be based on `run_commit_log.change_pos` assigned in commit order, not
-  plain PostgreSQL identity allocation order.
-- Cursor authority and projection summaries are split: `run_commit_log` is immutable cursor
-  authority, while `run_change_summaries` is projection-versioned and rebuildable.
+- Public watch cursors should be based on snapshot-sealed `(run_commit_log.append_xid, commit_id)`,
+  not PostgreSQL identity allocation order, wall-clock timestamps, or globally serialized commit
+  positions.
+- Cursor authority and projection summaries are split: `run_commit_log` is immutable observation
+  cursor authority, while `run_change_summaries` is projection-versioned and rebuildable.
+- The target architecture intentionally has no global commit-order lock, global counter row, or
+  global `commit_pos`/`change_pos` allocation. Cross-run semantic order does not exist unless
+  created by explicit resource-lane authority.
 - This RFC is a breaking dev-branch cutover. Old `typed_*` data, filesystem artifact roots, CLI
   flags, REST environment variables, and storage names do not need compatibility shims.
 

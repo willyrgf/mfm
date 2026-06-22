@@ -201,7 +201,11 @@ Scope:
 - Verify artifact bytes/evidence inside the transaction before inserting authority rows.
 - Insert `commits`, `artifact_blobs`, artifact evidence/admission rows, `run_events`,
   `logical_key_observations`, and `run_commit_log` atomically.
-- Assign `commit_pos`/`change_pos` under global commit-order serialization held until commit.
+- Use run locks and sorted locks for only explicitly claimed resource lanes; do not add a global
+  commit-order lock, global counter row, table-level append serialization, or `commit_pos`/
+  `change_pos` allocation.
+- Insert `run_commit_log.append_xid` from PostgreSQL `pg_current_xact_id()` and use it only for
+  snapshot-sealed observation cursors.
 - Remove mutable helper writes: no run-head updates, no unique logical-key upserts, no current-state
   table updates.
 
@@ -209,8 +213,10 @@ Verification:
 
 - same-run concurrent append tests
 - cross-run resource-lane contention tests
+- independent cross-run append tests proving unrelated runs do not block each other
 - idempotent commit-key retry tests
 - artifact mismatch/missing/extra-byte rejection tests
+- snapshot-sealed watch cursor tests with older slow transactions and newer fast transactions
 - SQL scan showing no production domain `UPDATE`, `DELETE`, or `TRUNCATE`
 
 ### Commit 8: implement strict Postgres load and artifact authority reads
@@ -268,7 +274,8 @@ Scope:
 
 - Add app-level `list_runs`, `poll_run_changes`, `watch_run_changes`, `run_status`, and
   `run_stream` APIs.
-- Implement opaque cursor encoding over `run_commit_log.change_pos` with cursor format version.
+- Implement opaque cursor encoding over `(run_commit_log.append_xid, run_commit_log.commit_id)`
+  with cursor format version and store epoch.
 - Keep `run_status` and `run_stream` strict authority reads.
 - Keep list/watch as observation reads over Postgres read models.
 
