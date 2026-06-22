@@ -28,6 +28,13 @@ fn exclusive_resource_claim(name: &'static str, byte: u8) -> ResourceClaim {
     )
 }
 
+fn seed_id(byte: u8) -> SeedId {
+    SeedId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        DigestBytes::from_array([byte; 32]),
+    )
+}
+
 fn operator_member(name: &str, byte: u8) -> OperatorAuthorityMemberSpec {
     OperatorAuthorityMemberSpec {
         operator_id: OperatorId::new(format!("mfm.program.test.operator.{name}"))
@@ -480,6 +487,214 @@ fn root_builder_binds_seed_and_public_output_specs() {
         &draft.seeds()[0].cell_id
     );
     assert_eq!(public.outputs()[0].cell().scope_id(), draft.root_scope_id());
+}
+
+#[test]
+fn typed_program_launch_plan_collects_config_material() {
+    let mut state_registry = StateRegistryBuilder::new();
+    state_registry
+        .register::<MultiplyState>()
+        .expect("state registers");
+    let mut operation_registry = OperationRegistryBuilder::new();
+    operation_registry
+        .register::<MultiplyOperation>()
+        .expect("operation registers");
+    let seed = CanonicalSeed::from_value(&LaunchValue {
+        amount: 4,
+        label: "operation".to_owned(),
+    })
+    .expect("seed");
+    let seed_bytes = seed.canonical_json().clone();
+    let draft = build_root_with_registries(
+        ScopeKey::new("portfolio/root").expect("scope key"),
+        state_registry.snapshot(),
+        operation_registry.snapshot(),
+        |root| {
+            let input = root.seed(SeedKey::new("launch-input")?, seed)?;
+            let result = root.scope().call::<MultiplyOperation, _>(
+                OperationKey::new("multiply-operation")?,
+                MultiplyOperation,
+                LaunchConfig { multiplier: 8 },
+                input,
+            )?;
+            root.bind_public_outputs(
+                PublicOutputKey::new("terminal")?,
+                &LaunchPublicOutputs {
+                    result: result.result,
+                },
+            )
+        },
+    )
+    .expect("root builds");
+    let expected_len = draft.state_nodes().len() + draft.operation_lineage().len();
+    let seed_material =
+        std::collections::BTreeMap::from([(draft.seeds()[0].seed_id.clone(), seed_bytes)]);
+
+    let plan = TypedProgramLaunchPlan::from_draft_and_seed_material(draft.clone(), seed_material)
+        .expect("launch plan");
+
+    assert_eq!(plan.config_material.len(), expected_len);
+    for node in draft.state_nodes() {
+        assert!(plan
+            .config_material
+            .iter()
+            .any(|material| material.schema_id == node.config.schema_id
+                && material.bytes == node.config.canonical_json));
+    }
+    for frame in draft.operation_lineage() {
+        assert!(plan
+            .config_material
+            .iter()
+            .any(|material| material.schema_id == frame.config.schema_id
+                && material.bytes == frame.config.canonical_json));
+    }
+    assert_eq!(plan.seed_material.len(), 1);
+}
+
+#[test]
+fn typed_program_launch_plan_matches_seed_material_by_seed_id() {
+    let first_seed = CanonicalSeed::from_value(&LaunchValue {
+        amount: 1,
+        label: "first".to_owned(),
+    })
+    .expect("first seed");
+    let first_bytes = first_seed.canonical_json().clone();
+    let second_seed = CanonicalSeed::from_value(&LaunchValue {
+        amount: 2,
+        label: "second".to_owned(),
+    })
+    .expect("second seed");
+    let second_bytes = second_seed.canonical_json().clone();
+    let draft = build_root(ScopeKey::new("root").expect("scope key"), |root| {
+        let first = root.seed(SeedKey::new("first")?, first_seed)?;
+        let _second = root.seed(SeedKey::new("second")?, second_seed)?;
+        root.bind_public_outputs(
+            PublicOutputKey::new("terminal")?,
+            &LaunchPublicOutputs { result: first },
+        )
+    })
+    .expect("root builds");
+    let first_id = draft
+        .seeds()
+        .iter()
+        .find(|seed| seed.key.as_str() == "first")
+        .expect("first seed spec")
+        .seed_id
+        .clone();
+    let second_id = draft
+        .seeds()
+        .iter()
+        .find(|seed| seed.key.as_str() == "second")
+        .expect("second seed spec")
+        .seed_id
+        .clone();
+    let seeds =
+        std::collections::BTreeMap::from([(second_id, second_bytes), (first_id, first_bytes)]);
+
+    let plan = TypedProgramLaunchPlan::from_draft_and_seed_material(draft.clone(), seeds)
+        .expect("launch plan");
+
+    let planned_seed_ids = plan
+        .seed_material
+        .iter()
+        .map(|material| material.seed_id.clone())
+        .collect::<Vec<_>>();
+    let draft_seed_ids = draft
+        .seeds()
+        .iter()
+        .map(|seed| seed.seed_id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(planned_seed_ids, draft_seed_ids);
+}
+
+#[test]
+fn typed_program_launch_plan_rejects_missing_seed_material() {
+    let seed = CanonicalSeed::from_value(&LaunchValue {
+        amount: 1,
+        label: "first".to_owned(),
+    })
+    .expect("seed");
+    let draft = build_root(ScopeKey::new("root").expect("scope key"), |root| {
+        let handle = root.seed(SeedKey::new("first")?, seed)?;
+        root.bind_public_outputs(
+            PublicOutputKey::new("terminal")?,
+            &LaunchPublicOutputs { result: handle },
+        )
+    })
+    .expect("root builds");
+
+    let error = TypedProgramLaunchPlan::from_draft_and_seed_material(
+        draft,
+        std::collections::BTreeMap::new(),
+    )
+    .expect_err("missing seed material rejects");
+
+    assert!(
+        matches!(error, PlanError::Key(message) if message.contains("missing entry-point seed material"))
+    );
+}
+
+#[test]
+fn typed_program_launch_plan_rejects_unknown_seed_material() {
+    let seed = CanonicalSeed::from_value(&LaunchValue {
+        amount: 1,
+        label: "first".to_owned(),
+    })
+    .expect("seed");
+    let seed_bytes = seed.canonical_json().clone();
+    let draft = build_root(ScopeKey::new("root").expect("scope key"), |root| {
+        let handle = root.seed(SeedKey::new("first")?, seed)?;
+        root.bind_public_outputs(
+            PublicOutputKey::new("terminal")?,
+            &LaunchPublicOutputs { result: handle },
+        )
+    })
+    .expect("root builds");
+    let expected_id = draft.seeds()[0].seed_id.clone();
+    let seeds = std::collections::BTreeMap::from([
+        (expected_id, seed_bytes.clone()),
+        (seed_id(0xab), seed_bytes),
+    ]);
+
+    let error = TypedProgramLaunchPlan::from_draft_and_seed_material(draft, seeds)
+        .expect_err("unknown seed material rejects");
+
+    assert!(
+        matches!(error, PlanError::Key(message) if message.contains("unknown entry-point seed material"))
+    );
+}
+
+#[test]
+fn typed_program_launch_plan_rejects_mismatched_seed_material() {
+    let seed = CanonicalSeed::from_value(&LaunchValue {
+        amount: 1,
+        label: "first".to_owned(),
+    })
+    .expect("seed");
+    let mismatched_bytes = CanonicalSeed::from_value(&LaunchValue {
+        amount: 2,
+        label: "wrong".to_owned(),
+    })
+    .expect("mismatched seed")
+    .canonical_json()
+    .clone();
+    let draft = build_root(ScopeKey::new("root").expect("scope key"), |root| {
+        let handle = root.seed(SeedKey::new("first")?, seed)?;
+        root.bind_public_outputs(
+            PublicOutputKey::new("terminal")?,
+            &LaunchPublicOutputs { result: handle },
+        )
+    })
+    .expect("root builds");
+    let seeds =
+        std::collections::BTreeMap::from([(draft.seeds()[0].seed_id.clone(), mismatched_bytes)]);
+
+    let error = TypedProgramLaunchPlan::from_draft_and_seed_material(draft, seeds)
+        .expect_err("mismatched seed material rejects");
+
+    assert!(
+        matches!(error, PlanError::Canonical(message) if message.contains("did not match draft seed"))
+    );
 }
 
 #[test]

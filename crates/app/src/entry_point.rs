@@ -8,11 +8,10 @@ use mfm_authored_config::{
     AuthoredConfig, AuthoredConfigError, AuthoredConfigFormat, EntryPointDescriptor,
 };
 use mfm_canonical::PlainCanonicalJsonBytes;
-use mfm_ids::{ContentDigest, SchemaId, SeedId};
+use mfm_ids::ContentDigest;
 use mfm_program::{
     TypedProgramConfigMaterial, TypedProgramDraft, TypedProgramLaunchPlan, TypedProgramSeedMaterial,
 };
-use mfm_spec::v1 as spec;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -147,73 +146,23 @@ impl fmt::Display for EntryPointOpId {
     }
 }
 
-/// Canonical non-secret config material emitted by entry-point operation planning.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CanonicalConfigMaterial {
-    /// Config schema id consumed by the certified typed spec.
-    pub schema_id: SchemaId,
-    /// Canonical JSON config bytes.
-    pub bytes: PlainCanonicalJsonBytes,
-    /// Media type for the canonical config bytes.
-    pub media_type: spec::MediaType,
-}
-
-/// Canonical non-secret seed material emitted by entry-point operation planning.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CanonicalSeedMaterial {
-    /// Seed id consumed by the certified typed spec.
-    pub seed_id: SeedId,
-    /// Canonical JSON seed bytes.
-    pub bytes: PlainCanonicalJsonBytes,
-    /// Media type for the canonical seed bytes.
-    pub media_type: spec::MediaType,
-}
-
 /// Deterministic plan returned by a launchable entry-point operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntryPointOpPlan {
     /// Typed program draft to certify before runtime launch.
     pub draft: TypedProgramDraft,
     /// Canonical config artifacts required by the draft.
-    pub config_material: Vec<CanonicalConfigMaterial>,
+    pub config_material: Vec<TypedProgramConfigMaterial>,
     /// Canonical seed artifacts required by the draft.
-    pub seed_material: Vec<CanonicalSeedMaterial>,
+    pub seed_material: Vec<TypedProgramSeedMaterial>,
 }
 
 impl From<TypedProgramLaunchPlan> for EntryPointOpPlan {
     fn from(plan: TypedProgramLaunchPlan) -> Self {
         Self {
             draft: plan.draft,
-            config_material: plan
-                .config_material
-                .into_iter()
-                .map(CanonicalConfigMaterial::from)
-                .collect(),
-            seed_material: plan
-                .seed_material
-                .into_iter()
-                .map(CanonicalSeedMaterial::from)
-                .collect(),
-        }
-    }
-}
-
-impl From<TypedProgramConfigMaterial> for CanonicalConfigMaterial {
-    fn from(material: TypedProgramConfigMaterial) -> Self {
-        Self {
-            schema_id: material.schema_id,
-            bytes: material.bytes,
-            media_type: material.media_type,
-        }
-    }
-}
-
-impl From<TypedProgramSeedMaterial> for CanonicalSeedMaterial {
-    fn from(material: TypedProgramSeedMaterial) -> Self {
-        Self {
-            seed_id: material.seed_id,
-            bytes: material.bytes,
-            media_type: material.media_type,
+            config_material: plan.config_material,
+            seed_material: plan.seed_material,
         }
     }
 }
