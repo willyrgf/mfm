@@ -629,12 +629,7 @@ async fn rpc_chain_id(rpc_url: &str) -> u64 {
 }
 
 fn rest_test_app() -> axum::Router {
-    let root = std::env::temp_dir().join(format!(
-        "mfm-rest-contract-lifecycle-{}",
-        uuid::Uuid::new_v4()
-    ));
-    std::fs::create_dir_all(&root).expect("typed artifact root");
-    mfm_rest_api::make_app(test_support::in_memory_rest_app_state(root))
+    mfm_rest_api::make_app(test_support::in_memory_rest_app_state())
 }
 
 fn json_post(uri: &str, body: serde_json::Value) -> Request<Body> {
