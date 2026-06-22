@@ -237,7 +237,7 @@ pub trait LaunchableOp: Send + Sync {
 }
 
 /// Generic app adapter from a typed op-crate planner to [`LaunchableOp`].
-pub struct TypedEntryPointOp<TConfig, E> {
+pub struct EntryPointPlannerAdapter<TConfig, E> {
     descriptor: EntryPointDescriptor,
     op_id: EntryPointOpId,
     public_name: PublicOpName,
@@ -247,7 +247,7 @@ pub struct TypedEntryPointOp<TConfig, E> {
     _config: PhantomData<fn() -> TConfig>,
 }
 
-impl<TConfig, E> TypedEntryPointOp<TConfig, E> {
+impl<TConfig, E> EntryPointPlannerAdapter<TConfig, E> {
     /// Builds a launchable adapter from app-neutral descriptor and planner exports.
     pub fn new(
         descriptor: EntryPointDescriptor,
@@ -273,7 +273,7 @@ impl<TConfig, E> TypedEntryPointOp<TConfig, E> {
     }
 }
 
-impl<TConfig, E> LaunchableOp for TypedEntryPointOp<TConfig, E>
+impl<TConfig, E> LaunchableOp for EntryPointPlannerAdapter<TConfig, E>
 where
     TConfig: DeserializeOwned + Serialize + Send + Sync + 'static,
     E: Send + Sync + 'static,
@@ -630,8 +630,8 @@ mod tests {
     fn adapter_descriptor() -> EntryPointDescriptor {
         EntryPointDescriptor {
             namespace: "mfm.test",
-            name: "typed_adapter",
-            public_name: "typed_adapter",
+            name: "planner_adapter",
+            public_name: "planner_adapter",
             version: 1,
             accepted_config_formats: FORMATS,
         }
@@ -640,8 +640,8 @@ mod tests {
     fn json_only_adapter_descriptor() -> EntryPointDescriptor {
         EntryPointDescriptor {
             namespace: "mfm.test",
-            name: "typed_adapter",
-            public_name: "typed_adapter",
+            name: "planner_adapter",
+            public_name: "planner_adapter",
             version: 1,
             accepted_config_formats: JSON_FORMAT,
         }
@@ -785,24 +785,25 @@ mod tests {
     }
 
     #[test]
-    fn typed_entry_point_adapter_plans_from_typed_config() {
-        let op = TypedEntryPointOp::new(adapter_descriptor(), adapter_plan, adapter_plan_error)
-            .expect("adapter op");
+    fn entry_point_planner_adapter_plans_from_authored_config() {
+        let op =
+            EntryPointPlannerAdapter::new(adapter_descriptor(), adapter_plan, adapter_plan_error)
+                .expect("adapter op");
         let authored =
             AuthoredConfig::new(AuthoredConfigFormat::Json, r#"{"value":1}"#).expect("authored");
 
         let plan = op.plan(authored).expect("plan");
 
-        assert_eq!(op.op_id().to_string(), "mfm.test:typed_adapter:1");
-        assert_eq!(op.public_name().as_str(), "typed_adapter");
+        assert_eq!(op.op_id().to_string(), "mfm.test:planner_adapter:1");
+        assert_eq!(op.public_name().as_str(), "planner_adapter");
         assert!(!plan.draft.state_nodes().is_empty());
         assert!(plan.config_material.is_empty());
         assert!(plan.seed_material.is_empty());
     }
 
     #[test]
-    fn typed_entry_point_adapter_rejects_unsupported_format_before_planning() {
-        let op = TypedEntryPointOp::new(
+    fn entry_point_planner_adapter_rejects_unsupported_format_before_planning() {
+        let op = EntryPointPlannerAdapter::new(
             json_only_adapter_descriptor(),
             adapter_plan,
             adapter_plan_error,

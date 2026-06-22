@@ -10,24 +10,21 @@
 //! # Examples
 //!
 //! ```rust
-//! use mfm_app::{make_async_typed_services, ErasedRunnerRegistry};
-//! use mfm_artifact_store_fs::FsTypedArtifactStore;
-//! use mfm_store::v1::AsyncInMemoryTypedRunStore;
+//! use mfm_app::{make_run_services, ErasedRunnerRegistry};
+//! use mfm_store::v1::AsyncInMemoryRunStore;
 //!
 //! let runners = ErasedRunnerRegistry::new();
-//! let artifacts = FsTypedArtifactStore::new("/tmp/mfm-typed-artifacts");
-//! let store = AsyncInMemoryTypedRunStore::default();
-//! let _services = make_async_typed_services(runners, store, artifacts);
+//! let store = AsyncInMemoryRunStore::default();
+//! let _services = make_run_services(runners, store.clone(), store);
 //! ```
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::path::PathBuf;
 use std::sync::Arc;
 
-use mfm_artifact_store_fs::{FsTypedArtifactError, FsTypedArtifactStore};
+use mfm_artifact_capabilities::ArtifactReadProvider;
 use mfm_authored_config::AuthoredConfig;
-use mfm_canonical::sha256_digest_bytes;
+use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_certify::{CertificationRegistry, CertifiedTypedSpec};
 use mfm_events::v1 as events;
 use mfm_ids::{
@@ -37,8 +34,8 @@ use mfm_ids::{
 use mfm_replay::v1::{ReplayBroker, ReplayError, ReplayReadAuthority};
 use mfm_runtime::{
     CertifiedRuntimeSpec, ManualResolutionEvidenceArtifact, ManualResolutionRequest,
-    RunLaunchArtifact, RunLaunchEvidence, RunLaunchSeedCell, RuntimeArtifactStageFuture,
-    RuntimeArtifactStager, SchedulerStatus, SerialTypedScheduler, VerifiedRunHistoryView,
+    RunLaunchArtifact, RunLaunchEvidence, RunLaunchSeedCell, SchedulerStatus, SerialTypedScheduler,
+    VerifiedRunHistoryView,
 };
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
@@ -54,15 +51,12 @@ mod evm_contracts;
 
 pub use entry_point::{
     CanonicalConfigMaterial, CanonicalSeedMaterial, EntryPointOpId, EntryPointOpPlan,
-    EntryPointOpRegistry, EntryPointOpResolveError, LaunchableOp, OpLaunchError, OpVersion,
-    PublicOpName, TypedEntryPointOp,
+    EntryPointOpRegistry, EntryPointOpResolveError, EntryPointPlannerAdapter, LaunchableOp,
+    OpLaunchError, OpVersion, PublicOpName,
 };
 
 /// Shared observability configuration used by typed binaries.
 pub mod observability;
-
-const ENV_TYPED_ARTIFACT_ROOT: &str = "MFM_TYPED_ARTIFACT_ROOT";
-const DEFAULT_TYPED_ARTIFACT_SUBDIR: &str = "typed_run_artifacts";
 
 /// High-level error classes used by typed application-facing APIs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -183,35 +177,26 @@ impl From<mfm_runtime::RuntimeError> for AppError {
 }
 
 impl From<store::StoreError> for AppError {
-    fn from(_error: store::StoreError) -> Self {
-        Self::backend(
-            ErrorClass::Conflict,
-            "RunStoreRejected",
-            "Run store rejected the requested operation",
-        )
-    }
-}
-
-impl From<FsTypedArtifactError> for AppError {
-    fn from(error: FsTypedArtifactError) -> Self {
+    fn from(error: store::StoreError) -> Self {
         match error {
-            FsTypedArtifactError::NotFound { artifact_id } => Self::not_found(
+            store::StoreError::MissingArtifact { artifact_id } => Self::not_found(
                 "ArtifactNotFound",
                 format!("typed artifact {artifact_id} was not found"),
             ),
-            FsTypedArtifactError::RetainedArtifactRefused { artifact_id } => Self::new(
-                ErrorClass::Conflict,
-                "ArtifactRetained",
-                format!("typed artifact {artifact_id} is retained"),
-            ),
-            FsTypedArtifactError::Corruption { .. }
-            | FsTypedArtifactError::EvidenceMismatch { .. }
-            | FsTypedArtifactError::InvalidEvidence { .. }
-            | FsTypedArtifactError::InvalidIdentity { .. }
-            | FsTypedArtifactError::Io { .. } => Self::backend(
+            store::StoreError::ArtifactReadFailed { .. } => Self::backend(
                 ErrorClass::Internal,
-                "ArtifactError",
-                "Typed artifact store rejected the requested operation",
+                "ArtifactReadFailed",
+                "Typed artifact bytes could not be loaded",
+            ),
+            store::StoreError::ArtifactEvidenceMismatch { .. } => Self::backend(
+                ErrorClass::Internal,
+                "ArtifactEvidenceMismatch",
+                "Typed artifact evidence did not match the requested authority",
+            ),
+            _ => Self::backend(
+                ErrorClass::Conflict,
+                "RunStoreRejected",
+                "Run store rejected the requested operation",
             ),
         }
     }
@@ -267,36 +252,17 @@ impl From<OpLaunchError> for AppError {
     }
 }
 
-/// Returns the default typed artifact root from `MFM_TYPED_ARTIFACT_ROOT` or
-/// `$HOME/.mfm/typed_run_artifacts`.
-#[allow(clippy::disallowed_methods)]
-pub fn default_typed_artifact_root() -> PathBuf {
-    std::env::var(ENV_TYPED_ARTIFACT_ROOT)
-        .ok()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-            PathBuf::from(home)
-                .join(".mfm")
-                .join(DEFAULT_TYPED_ARTIFACT_SUBDIR)
-        })
-}
-
-/// Builds the default certified typed filesystem artifact store.
-pub fn make_default_typed_artifact_store() -> FsTypedArtifactStore {
-    FsTypedArtifactStore::new(default_typed_artifact_root())
-}
-
 /// Builds typed app services backed by a durable async typed run event store.
-pub fn make_async_typed_services<S>(
+pub fn make_run_services<S, A>(
     runners: ErasedRunnerRegistry,
     store: S,
-    artifacts: FsTypedArtifactStore,
-) -> RunServices<S>
+    artifacts: A,
+) -> RunServices<S, A>
 where
-    S: store::AsyncTypedRunEventStore + Send + Sync,
+    S: store::RunEventStore + Send + Sync,
+    A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
 {
-    make_async_typed_services_with_certification_registry(
+    make_run_services_with_certification_registry(
         runners,
         store,
         artifacts,
@@ -305,20 +271,19 @@ where
 }
 
 /// Builds typed async app services with an explicit trusted certification registry.
-pub fn make_async_typed_services_with_certification_registry<S>(
+pub fn make_run_services_with_certification_registry<S, A>(
     runners: ErasedRunnerRegistry,
     store: S,
-    artifacts: FsTypedArtifactStore,
+    artifacts: A,
     certification_registry: CertificationRegistry,
-) -> RunServices<S>
+) -> RunServices<S, A>
 where
-    S: store::AsyncTypedRunEventStore + Send + Sync,
+    S: store::RunEventStore + Send + Sync,
+    A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
 {
-    let artifact_stager = Arc::new(FsRuntimeArtifactStager {
-        artifacts: artifacts.clone(),
-    });
+    let runtime_artifacts = Arc::new(artifacts.clone());
     RunServices::new_with_certification_registry(
-        SerialTypedScheduler::new(runners, artifact_stager),
+        SerialTypedScheduler::new(runners, runtime_artifacts),
         store,
         artifacts,
         certification_registry,
@@ -329,12 +294,12 @@ where
 ///
 /// Framework public-output render nodes are resolved by `mfm-runtime` as built-ins. Enabled
 /// domain runners register here as certified typed descriptor bindings.
-pub fn production_typed_runner_registry(
-    artifacts: FsTypedArtifactStore,
+pub fn production_runner_registry(
+    artifacts: Arc<dyn ArtifactReadProvider>,
 ) -> Result<ErasedRunnerRegistry, AppError> {
     let mut registry = ErasedRunnerRegistry::new();
     let portfolio_artifacts: Arc<dyn mfm_artifact_capabilities::ArtifactReadProvider> =
-        Arc::new(artifacts.clone());
+        artifacts.clone();
     let portfolio_evm: Arc<dyn mfm_adapters_portfolio::PortfolioEvmProvider> =
         match mfm_transports_evm::EvmJsonRpcClient::from_env() {
             Ok(client) => Arc::new(client),
@@ -348,6 +313,75 @@ pub fn production_typed_runner_registry(
     evm_contracts::register_contract_lifecycle_runners(&mut registry, artifacts)?;
     mfm_transports_proof::register_deterministic_proof_runners(&mut registry)?;
     Ok(registry)
+}
+
+/// Builds an adapter-facing artifact read provider from a retained artifact reader.
+pub fn artifact_read_provider_from_retained<A>(artifacts: A) -> Arc<dyn ArtifactReadProvider>
+where
+    A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
+{
+    Arc::new(RetainedArtifactReadAdapter { artifacts })
+}
+
+#[derive(Clone)]
+struct RetainedArtifactReadAdapter<A> {
+    artifacts: A,
+}
+
+impl<A> ArtifactReadProvider for RetainedArtifactReadAdapter<A>
+where
+    A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
+{
+    fn read_artifact<'a>(
+        &'a self,
+        request: &'a mfm_artifact_capabilities::ArtifactReadRequest,
+    ) -> mfm_artifact_capabilities::ArtifactReadFuture<'a> {
+        Box::pin(async move {
+            let requirement = store::EventArtifactRequirement {
+                source: store::EventArtifactReferenceSource::ArtifactReferenced,
+                artifact_id: request.artifact_id().clone(),
+                digest: None,
+                byte_len: None,
+                media_type: None,
+                schema_id: None,
+                semantic_type_id: None,
+                producer_node_id: None,
+                producer_seed_id: None,
+                artifact_role: None,
+            };
+            let artifact = self
+                .artifacts
+                .read_retained_artifact(&requirement)
+                .await
+                .map_err(capability_artifact_error_from_store)?;
+            let evidence =
+                mfm_artifact_capabilities::ArtifactEvidenceRef::from(artifact.evidence().clone());
+            mfm_artifact_capabilities::VerifiedArtifactBytes::new(
+                artifact.into_bytes(),
+                evidence,
+                request,
+            )
+        })
+    }
+}
+
+fn capability_artifact_error_from_store(
+    error: store::StoreError,
+) -> mfm_artifact_capabilities::ArtifactReadError {
+    match error {
+        store::StoreError::MissingArtifact { artifact_id } => {
+            mfm_artifact_capabilities::ArtifactReadError::NotFound {
+                artifact_id: Box::new(artifact_id),
+            }
+        }
+        store::StoreError::ArtifactEvidenceMismatch { artifact_id, field } => {
+            mfm_artifact_capabilities::ArtifactReadError::EvidenceMismatch {
+                artifact_id: Box::new(artifact_id),
+                field,
+            }
+        }
+        error => mfm_artifact_capabilities::ArtifactReadError::redacted_backend_failure(error),
+    }
 }
 
 /// Builds the trusted production certification registry for typed spec certification and replay verification.
@@ -364,36 +398,6 @@ pub fn production_certification_registry() -> Result<CertificationRegistry, AppE
 /// Builds the production entry-point operation registry for this process.
 pub fn production_entry_point_op_registry() -> Result<EntryPointOpRegistry, AppError> {
     entry_points::production_entry_point_op_registry()
-}
-
-#[derive(Clone)]
-struct FsRuntimeArtifactStager {
-    artifacts: FsTypedArtifactStore,
-}
-
-impl RuntimeArtifactStager for FsRuntimeArtifactStager {
-    fn stage_verified_artifact<'a>(
-        &'a self,
-        bytes: Vec<u8>,
-        evidence: store::ArtifactEvidenceRef,
-    ) -> RuntimeArtifactStageFuture<'a> {
-        Box::pin(async move {
-            self.artifacts
-                .put_verified_artifact(bytes, evidence)
-                .await
-                .map_err(|error| mfm_runtime::RuntimeError::Store(error.to_string()))?;
-            Ok(())
-        })
-    }
-}
-
-impl store::RetainedArtifactReadProvider for FsRuntimeArtifactStager {
-    fn read_retained_artifact<'a>(
-        &'a self,
-        requirement: &'a store::EventArtifactRequirement,
-    ) -> store::RetainedArtifactReadFuture<'a> {
-        self.artifacts.read_retained_artifact(requirement)
-    }
 }
 
 /// Generates a digest-only typed run id from a random UUID.
@@ -534,7 +538,7 @@ pub(crate) struct RunLaunchSeedArtifact {
 /// Stable semantic run mode for typed run responses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum TypedRunMode {
+pub enum RunModeStatus {
     /// Forward graph execution is active.
     Forward,
     /// Remediation graph execution is active.
@@ -551,7 +555,7 @@ pub enum TypedRunMode {
     FailedWithoutAcdcClaim,
 }
 
-impl TypedRunMode {
+impl RunModeStatus {
     fn as_store_run_mode(self) -> store::RunMode {
         match self {
             Self::Forward => store::RunMode::Forward,
@@ -565,7 +569,7 @@ impl TypedRunMode {
     }
 }
 
-impl From<store::RunMode> for TypedRunMode {
+impl From<store::RunMode> for RunModeStatus {
     fn from(mode: store::RunMode) -> Self {
         match mode {
             store::RunMode::Forward => Self::Forward,
@@ -579,7 +583,7 @@ impl From<store::RunMode> for TypedRunMode {
     }
 }
 
-impl fmt::Display for TypedRunMode {
+impl fmt::Display for RunModeStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_store_run_mode().as_str())
     }
@@ -587,37 +591,37 @@ impl fmt::Display for TypedRunMode {
 
 /// Public saga status derived from certified policy and stream evidence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TypedSagaStatus {
+pub struct SagaStatus {
     /// Certified saga policy variant and manual authorization requirements.
-    pub policy: TypedSagaPolicyStatus,
+    pub policy: SagaPolicyStatus,
     /// Derived per-forward-ledger obligations.
-    pub obligations: Vec<TypedSagaObligationStatus>,
+    pub obligations: Vec<SagaObligationStatus>,
     /// Resource claims and recorded evidence for all projected side-effect ledgers.
-    pub resource_ledgers: Vec<TypedResourceLedgerStatus>,
+    pub resource_ledgers: Vec<ResourceLedgerStatus>,
     /// Active exclusive resource lane holders referenced by this run's live side-effect ledgers.
-    pub resource_lanes: Vec<TypedResourceLaneHolderStatus>,
+    pub resource_lanes: Vec<ResourceLaneHolderStatus>,
     /// Manual-block reason when the derived run mode is `manual_blocked`.
     pub manual_block_reason: Option<String>,
     /// Required manual authorization when an authorized decision can resolve the current block.
-    pub required_manual_authorization: Option<TypedManualAuthorizationRequirements>,
+    pub required_manual_authorization: Option<ManualAuthorizationRequirements>,
     /// Terminal completion evidence, when the run has resolved.
-    pub terminal_resolution: Option<TypedTerminalResolutionStatus>,
+    pub terminal_resolution: Option<TerminalResolutionStatus>,
 }
 
 /// Public certified saga policy summary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TypedSagaPolicyStatus {
+pub struct SagaPolicyStatus {
     /// Certified policy variant.
     pub variant: String,
     /// Manual authorization requirements certified directly by the policy, when present.
-    pub manual_authorization: Option<TypedManualAuthorizationRequirements>,
+    pub manual_authorization: Option<ManualAuthorizationRequirements>,
     /// Unresolved-remediation directive under compensating policy.
     pub on_remediation_unresolved: Option<String>,
 }
 
 /// Public manual authorization requirements.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TypedManualAuthorizationRequirements {
+pub struct ManualAuthorizationRequirements {
     /// Schema id for the operator evidence artifact.
     pub evidence_schema_id: String,
     /// Manual authorization verifier id.
@@ -634,7 +638,7 @@ pub struct TypedManualAuthorizationRequirements {
 
 /// Public obligation state for one forward ledger.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TypedSagaObligationStatus {
+pub struct SagaObligationStatus {
     /// Forward ledger key.
     pub forward_ledger_key: String,
     /// Current forward side-effect phase.
@@ -642,14 +646,14 @@ pub struct TypedSagaObligationStatus {
     /// Derived forward classification.
     pub classification: String,
     /// Declared resource claim and recorded evidence for the forward ledger.
-    pub resource: Option<TypedResourceLedgerStatus>,
+    pub resource: Option<ResourceLedgerStatus>,
     /// Linked remediation ledger, when one exists.
-    pub remediation: Option<TypedRemediationLedgerStatus>,
+    pub remediation: Option<RemediationLedgerStatus>,
 }
 
 /// Public remediation state linked to a forward ledger.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TypedRemediationLedgerStatus {
+pub struct RemediationLedgerStatus {
     /// Remediation ledger key.
     pub ledger_key: String,
     /// Forward ledger key this remediation closes.
@@ -657,7 +661,7 @@ pub struct TypedRemediationLedgerStatus {
     /// Current remediation side-effect phase.
     pub phase: String,
     /// Declared resource claim and recorded evidence for the remediation ledger.
-    pub resource: Option<TypedResourceLedgerStatus>,
+    pub resource: Option<ResourceLedgerStatus>,
     /// Whether remediation confirmation closed the obligation.
     pub closed: bool,
     /// Unresolved reason if remediation cannot close the obligation.
@@ -666,7 +670,7 @@ pub struct TypedRemediationLedgerStatus {
 
 /// Public resource-claim and evidence status for one side-effect ledger.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TypedResourceLedgerStatus {
+pub struct ResourceLedgerStatus {
     /// Side-effect ledger key.
     pub ledger_key: String,
     /// Ledger purpose.
@@ -676,20 +680,20 @@ pub struct TypedResourceLedgerStatus {
     /// Current projected side-effect phase.
     pub phase: String,
     /// Certified resource claim declared by the side-effect node.
-    pub claim: TypedResourceClaimStatus,
+    pub claim: ResourceClaimStatus,
     /// Recorded exclusive key evidence, when the claim is `exclusive` and preparation occurred.
-    pub key: Option<TypedResourceKeyStatus>,
+    pub key: Option<ResourceKeyStatus>,
     /// Recorded exact touched-set evidence, when the claim is `exact_touched_set`.
-    pub touched_set: Option<TypedResourceTouchedSetStatus>,
+    pub touched_set: Option<ResourceTouchedSetStatus>,
     /// Active lane holder when this ledger currently owns its exclusive lane.
-    pub active_lane: Option<TypedResourceLaneHolderStatus>,
+    pub active_lane: Option<ResourceLaneHolderStatus>,
     /// Active holder of the same recorded key when this ledger is not the holder.
-    pub blocked_by_lane: Option<TypedResourceLaneHolderStatus>,
+    pub blocked_by_lane: Option<ResourceLaneHolderStatus>,
 }
 
 /// Public certified resource claim summary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TypedResourceClaimStatus {
+pub struct ResourceClaimStatus {
     /// Claim variant: `exclusive`, `exact_touched_set`, or `manual_only`.
     pub kind: String,
     /// Resource namespace for `exclusive` and `exact_touched_set` claims.
@@ -702,18 +706,18 @@ pub struct TypedResourceClaimStatus {
 
 /// Public exclusive resource key evidence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TypedResourceKeyStatus {
+pub struct ResourceKeyStatus {
     /// Resource namespace.
     pub namespace: String,
     /// Key schema id.
     pub key_schema_id: String,
-    /// Store-comparable resource key.
-    pub key: String,
+    /// Stable digest of the store-comparable resource key evidence.
+    pub key_digest: String,
 }
 
 /// Public exact touched-set evidence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TypedResourceTouchedSetStatus {
+pub struct ResourceTouchedSetStatus {
     /// Resource namespace.
     pub namespace: String,
     /// Evidence schema id.
@@ -726,11 +730,13 @@ pub struct TypedResourceTouchedSetStatus {
 
 /// Public active exclusive resource lane holder referenced by the target run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TypedResourceLaneHolderStatus {
+pub struct ResourceLaneHolderStatus {
     /// Resource namespace.
     pub namespace: String,
-    /// Store-comparable resource key.
-    pub key: String,
+    /// Key schema id.
+    pub key_schema_id: String,
+    /// Stable digest of the store-comparable resource lane key.
+    pub key_digest: String,
     /// Run id holding the lane.
     pub holding_run_id: String,
     /// Ledger key holding the lane.
@@ -749,7 +755,7 @@ pub struct TypedResourceLaneHolderStatus {
 
 /// Public attempt lifecycle disposition derived from committed attempt projections.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TypedAttemptDispositionStatus {
+pub struct AttemptDispositionStatus {
     /// Node id that owns the attempt.
     pub node_id: String,
     /// Attempt id.
@@ -766,7 +772,7 @@ pub struct TypedAttemptDispositionStatus {
 
 /// Public terminal resolution summary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TypedTerminalResolutionStatus {
+pub struct TerminalResolutionStatus {
     /// Terminal outcome.
     pub outcome: String,
     /// Public claim carried by the terminal outcome.
@@ -775,17 +781,17 @@ pub struct TypedTerminalResolutionStatus {
 
 /// Response returned after typed start or resume dispatch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TypedRunResponse {
+pub struct RunResponse {
     /// Run id.
     pub run_id: String,
     /// Certified spec hash.
     pub spec_hash: String,
     /// Current semantic run mode.
-    pub run_mode: TypedRunMode,
+    pub run_mode: RunModeStatus,
     /// Derived saga status.
-    pub saga: TypedSagaStatus,
+    pub saga: SagaStatus,
     /// Attempt-level dispositions, distinct from semantic run mode.
-    pub attempt_dispositions: Vec<TypedAttemptDispositionStatus>,
+    pub attempt_dispositions: Vec<AttemptDispositionStatus>,
     /// Last scheduler status observed by the app dispatch loop.
     ///
     /// Read-only status reports `observed`; start/resume dispatch reports `advanced`, `blocked`, or
@@ -795,7 +801,7 @@ pub struct TypedRunResponse {
     pub head_seq: u64,
 }
 
-impl fmt::Display for TypedRunResponse {
+impl fmt::Display for RunResponse {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -807,7 +813,7 @@ impl fmt::Display for TypedRunResponse {
 
 /// Typed public-output rendering response.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct TypedPublicOutputResponse {
+pub struct PublicOutputResponse {
     /// Run id.
     pub run_id: String,
     /// Public output schema id.
@@ -822,7 +828,7 @@ pub struct TypedPublicOutputResponse {
     pub json: Option<serde_json::Value>,
 }
 
-impl fmt::Display for TypedPublicOutputResponse {
+impl fmt::Display for PublicOutputResponse {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.json {
             Some(json) => write!(
@@ -883,16 +889,16 @@ impl PublicOutputReadAuthority {
 
 /// Typed run event stream response.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct TypedRunStreamResponse {
+pub struct RunStreamResponse {
     /// Run id.
     pub run_id: String,
     /// Current typed run-stream head sequence.
     pub head_seq: u64,
     /// Store-owned typed event references.
-    pub events: Vec<TypedRunEventRef>,
+    pub events: Vec<RunEventRef>,
 }
 
-impl fmt::Display for TypedRunStreamResponse {
+impl fmt::Display for RunStreamResponse {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -906,7 +912,7 @@ impl fmt::Display for TypedRunStreamResponse {
 
 /// Transport-safe reference to one store-owned typed event envelope.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct TypedRunEventRef {
+pub struct RunEventRef {
     /// Store-derived event id.
     pub event_id: String,
     /// Event schema id.
@@ -925,24 +931,24 @@ pub struct TypedRunEventRef {
 
 /// Response returned after verifying replay authority for a typed run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TypedReplayResponse {
+pub struct ReplayResponse {
     /// Run id.
     pub run_id: String,
     /// Certified spec hash.
     pub spec_hash: String,
     /// Current semantic run mode.
-    pub run_mode: TypedRunMode,
+    pub run_mode: RunModeStatus,
     /// Derived saga status.
-    pub saga: TypedSagaStatus,
+    pub saga: SagaStatus,
     /// Attempt-level dispositions, distinct from semantic run mode.
-    pub attempt_dispositions: Vec<TypedAttemptDispositionStatus>,
+    pub attempt_dispositions: Vec<AttemptDispositionStatus>,
     /// Current typed run-stream head sequence.
     pub head_seq: u64,
     /// Retained artifact evidence entries supplied to the replay broker.
     pub retained_artifacts: usize,
 }
 
-impl fmt::Display for TypedReplayResponse {
+impl fmt::Display for ReplayResponse {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -954,22 +960,23 @@ impl fmt::Display for TypedReplayResponse {
 
 /// Application facade for certified typed runtime dispatch.
 #[derive(Clone)]
-pub struct RunServices<S> {
+pub struct RunServices<S, A> {
     scheduler: SerialTypedScheduler,
     store: S,
-    artifacts: FsTypedArtifactStore,
+    artifacts: A,
     certification_registry: CertificationRegistry,
 }
 
-impl<S> RunServices<S>
+impl<S, A> RunServices<S, A>
 where
-    S: store::AsyncTypedRunEventStore + Send + Sync,
+    S: store::RunEventStore + Send + Sync,
+    A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
 {
     /// Creates typed async app services with an explicit trusted certification registry.
     pub fn new_with_certification_registry(
         scheduler: SerialTypedScheduler,
         store: S,
-        artifacts: FsTypedArtifactStore,
+        artifacts: A,
         certification_registry: CertificationRegistry,
     ) -> Self {
         Self {
@@ -981,7 +988,7 @@ where
     }
 
     /// Returns the typed artifact store.
-    pub fn artifacts(&self) -> &FsTypedArtifactStore {
+    pub fn artifacts(&self) -> &A {
         &self.artifacts
     }
 
@@ -996,7 +1003,7 @@ where
     }
 
     /// Starts a certified typed run against a durable async typed store.
-    pub async fn launch_run(&self, req: RunLaunchRequest) -> Result<TypedRunResponse, AppError> {
+    pub async fn launch_run(&self, req: RunLaunchRequest) -> Result<RunResponse, AppError> {
         let runtime_spec = CertifiedRuntimeSpec::new(req.certified_spec)?;
         let expected_next_seq = self
             .store
@@ -1022,7 +1029,7 @@ where
         &self,
         run_id: &RunId,
         drive: DriveMode,
-    ) -> Result<TypedRunResponse, AppError> {
+    ) -> Result<RunResponse, AppError> {
         let runtime_spec = self
             .load_verified_run_read_context(run_id)
             .await?
@@ -1036,7 +1043,7 @@ where
     pub async fn record_manual_resolution(
         &self,
         req: ManualResolutionRecordRequest,
-    ) -> Result<TypedRunResponse, AppError> {
+    ) -> Result<RunResponse, AppError> {
         let run_id = req.run_id.clone();
         let drive = req.drive;
         let runtime_spec = self
@@ -1054,7 +1061,7 @@ where
     }
 
     /// Returns typed run status by rebuilding projection from the authoritative run stream.
-    pub async fn run_status(&self, run_id: &RunId) -> Result<TypedRunResponse, AppError> {
+    pub async fn run_status(&self, run_id: &RunId) -> Result<RunResponse, AppError> {
         let context = load_async_verified_status_read_context(
             &self.store,
             &self.artifacts,
@@ -1062,7 +1069,7 @@ where
             run_id,
         )
         .await?;
-        typed_run_status_from_projection(
+        run_status_from_projection(
             run_id,
             context.runtime_spec(),
             context.events(),
@@ -1074,7 +1081,7 @@ where
         &self,
         run_id: &RunId,
         status: SchedulerStatus,
-    ) -> Result<TypedRunResponse, AppError> {
+    ) -> Result<RunResponse, AppError> {
         let context = load_async_verified_status_read_context(
             &self.store,
             &self.artifacts,
@@ -1082,7 +1089,7 @@ where
             run_id,
         )
         .await?;
-        typed_run_response_from_projection(
+        run_response_from_projection(
             run_id,
             context.runtime_spec(),
             context.events(),
@@ -1092,16 +1099,29 @@ where
     }
 
     /// Returns the authoritative typed run stream.
-    pub async fn run_stream(&self, run_id: &RunId) -> Result<TypedRunStreamResponse, AppError> {
+    pub async fn run_stream(&self, run_id: &RunId) -> Result<RunStreamResponse, AppError> {
         let context = self.load_verified_run_read_context(run_id).await?;
-        Ok(typed_run_stream_response_from_verified_context(&context))
+        Ok(run_stream_response_from_verified_context(&context))
+    }
+
+    /// Reads one observation-only run list/watch page.
+    pub async fn read_run_observations(
+        &self,
+        query: store::RunObservationQuery,
+    ) -> Result<store::RunObservationPage, AppError>
+    where
+        S: store::RunObservationStore,
+        <S as store::RunObservationStore>::Error:
+            store::StoreErrorInspection + fmt::Display + Send + Sync + 'static,
+    {
+        self.store
+            .read_run_observations(query)
+            .await
+            .map_err(observation_app_store_error)
     }
 
     /// Verifies replay authority for a run using retained typed artifact evidence only.
-    pub async fn verify_replay_for_run(
-        &self,
-        run_id: &RunId,
-    ) -> Result<TypedReplayResponse, AppError> {
+    pub async fn verify_replay_for_run(&self, run_id: &RunId) -> Result<ReplayResponse, AppError> {
         let context = self.load_verified_run_read_context(run_id).await?;
         let authority = replay_read_authority_for_run(context.runtime_spec(), context.view())?;
         let broker = ReplayBroker::from_read_authority(authority)?;
@@ -1114,27 +1134,23 @@ where
             .retention(run_id)
             .map(|retention| retention.refs.len())
             .unwrap_or_default();
-        Ok(TypedReplayResponse {
+        Ok(ReplayResponse {
             run_id: run_id.as_str().to_owned(),
             spec_hash: broker.certified_spec().spec_hash.as_str().to_owned(),
-            run_mode: typed_run_mode(saga.run_mode),
-            saga: typed_saga_status_with_resources(
-                context.runtime_spec().spec(),
-                projection,
-                &saga,
-            ),
-            attempt_dispositions: typed_attempt_dispositions(projection),
+            run_mode: run_mode_status(saga.run_mode),
+            saga: saga_status_with_resources(context.runtime_spec().spec(), projection, &saga),
+            attempt_dispositions: attempt_dispositions(projection),
             head_seq: stream_head(stream),
             retained_artifacts,
         })
     }
 
     /// Renders typed public output from store-owned projection and typed artifact bytes.
-    pub async fn typed_public_output(
+    pub async fn public_output(
         &self,
         run_id: &RunId,
         public_schema_id: &SchemaId,
-    ) -> Result<TypedPublicOutputResponse, AppError> {
+    ) -> Result<PublicOutputResponse, AppError> {
         let context = self.load_verified_run_read_context(run_id).await?;
         let authority = public_output_read_authority_for_run(
             &self.artifacts,
@@ -1143,7 +1159,7 @@ where
             public_schema_id,
         )
         .await?;
-        render_typed_public_output(&self.artifacts, &authority).await
+        render_public_output(&self.artifacts, &authority).await
     }
 
     async fn load_verified_run_read_context(
@@ -1229,14 +1245,15 @@ impl VerifiedStatusReadContext {
     }
 }
 
-async fn load_async_verified_run_read_context<S>(
+async fn load_async_verified_run_read_context<S, A>(
     store: &S,
-    artifacts: &FsTypedArtifactStore,
+    artifacts: &A,
     registry: &CertificationRegistry,
     run_id: &RunId,
 ) -> Result<VerifiedRunReadContext, AppError>
 where
-    S: store::AsyncTypedRunEventStore + Send + Sync,
+    S: store::RunEventStore + Send + Sync,
+    A: store::RetainedArtifactReadProvider + ?Sized,
 {
     let stream = store
         .load_run_stream(run_id)
@@ -1245,14 +1262,15 @@ where
     verified_run_read_context_from_events(artifacts, registry, run_id, stream).await
 }
 
-async fn load_async_verified_status_read_context<S>(
+async fn load_async_verified_status_read_context<S, A>(
     store: &S,
-    artifacts: &FsTypedArtifactStore,
+    artifacts: &A,
     registry: &CertificationRegistry,
     run_id: &RunId,
 ) -> Result<VerifiedStatusReadContext, AppError>
 where
-    S: store::AsyncTypedRunEventStore + Send + Sync,
+    S: store::RunEventStore + Send + Sync,
+    A: store::RetainedArtifactReadProvider + ?Sized,
 {
     let stream = store
         .load_run_stream(run_id)
@@ -1266,7 +1284,7 @@ where
 }
 
 async fn verified_status_read_context_from_events(
-    artifacts: &FsTypedArtifactStore,
+    artifacts: &(impl store::RetainedArtifactReadProvider + ?Sized),
     registry: &CertificationRegistry,
     run_id: &RunId,
     stream: Vec<store::KernelEventEnvelope>,
@@ -1278,7 +1296,7 @@ async fn verified_status_read_context_from_events(
 }
 
 async fn verified_run_read_context_from_events(
-    artifacts: &FsTypedArtifactStore,
+    artifacts: &(impl store::RetainedArtifactReadProvider + ?Sized),
     registry: &CertificationRegistry,
     run_id: &RunId,
     stream: Vec<store::KernelEventEnvelope>,
@@ -1303,20 +1321,32 @@ async fn verified_run_read_context_from_events(
 
 /// Loads and verifies the certified spec artifact bound by a typed run stream.
 pub async fn load_certified_spec_for_run(
-    artifacts: &FsTypedArtifactStore,
+    artifacts: &(impl store::RetainedArtifactReadProvider + ?Sized),
     registry: &CertificationRegistry,
     run_id: &RunId,
     stream: &[store::KernelEventEnvelope],
 ) -> Result<CertifiedTypedSpec, AppError> {
     let run_admitted = run_admitted_payload(run_id, stream)?;
-    let (spec_bytes, spec_evidence) = artifacts
-        .get_artifact_by_id(&run_admitted.spec_artifact.artifact_id)
+    let spec_artifact = artifacts
+        .read_retained_artifact(&run_artifact_requirement(
+            store::EventArtifactReferenceSource::RunSpec,
+            &run_admitted.spec_artifact,
+            events::ArtifactRole::TypedExecutionSpec,
+        ))
         .await?;
+    let spec_evidence = spec_artifact.evidence().clone();
     validate_spec_artifact_evidence(run_admitted, &spec_evidence)?;
-    let (certificate_bytes, certificate_evidence) = artifacts
-        .get_artifact_by_id(&run_admitted.certificate_artifact.artifact_id)
+    let spec_bytes = spec_artifact.into_bytes();
+    let certificate_artifact = artifacts
+        .read_retained_artifact(&run_artifact_requirement(
+            store::EventArtifactReferenceSource::RunCertificate,
+            &run_admitted.certificate_artifact,
+            events::ArtifactRole::TypedSpecCertificate,
+        ))
         .await?;
+    let certificate_evidence = certificate_artifact.evidence().clone();
     validate_certificate_artifact_evidence(run_admitted, &certificate_evidence)?;
+    let certificate_bytes = certificate_artifact.into_bytes();
     let certified = mfm_certify::verify_persisted_spec_certificate_with_trusted_registry(
         &spec_bytes,
         &certificate_bytes,
@@ -1327,7 +1357,7 @@ pub async fn load_certified_spec_for_run(
 }
 
 async fn load_runtime_spec_for_run(
-    artifacts: &FsTypedArtifactStore,
+    artifacts: &(impl store::RetainedArtifactReadProvider + ?Sized),
     registry: &CertificationRegistry,
     run_id: &RunId,
     stream: &[store::KernelEventEnvelope],
@@ -1480,10 +1510,10 @@ fn config_launch_artifacts_for_spec(
 }
 
 fn framework_config_launch_artifacts_for_spec(
-    typed_spec: &spec::TypedExecutionSpec,
+    execution_spec: &spec::TypedExecutionSpec,
 ) -> Result<Vec<RunLaunchConfigArtifact>, AppError> {
     let mut artifacts = Vec::new();
-    for node in &typed_spec.nodes {
+    for node in &execution_spec.nodes {
         let Some(framework) = &node.framework else {
             continue;
         };
@@ -1509,11 +1539,11 @@ fn framework_config_launch_artifacts_for_spec(
 }
 
 fn framework_config_matches_ref(
-    typed_spec: &spec::TypedExecutionSpec,
+    execution_spec: &spec::TypedExecutionSpec,
     config_ref: &spec::ConfigRef,
     bytes: &[u8],
 ) -> Result<bool, AppError> {
-    for node in &typed_spec.nodes {
+    for node in &execution_spec.nodes {
         if &node.config_ref != config_ref {
             continue;
         }
@@ -1914,6 +1944,35 @@ fn async_app_store_error(_error: impl fmt::Display) -> AppError {
     )
 }
 
+fn observation_app_store_error<E>(error: E) -> AppError
+where
+    E: store::StoreErrorInspection + fmt::Display,
+{
+    match error.as_store_error() {
+        Some(store::StoreError::InvalidCursor { .. }) => AppError::new(
+            ErrorClass::BadRequest,
+            "InvalidCursor",
+            "Run observation cursor is invalid",
+        ),
+        Some(store::StoreError::CursorExpired) => AppError::new(
+            ErrorClass::BadRequest,
+            "CursorExpired",
+            "Run observation cursor has expired",
+        ),
+        Some(store::StoreError::LimitOutOfRange { .. }) => AppError::new(
+            ErrorClass::BadRequest,
+            "LimitOutOfRange",
+            "Run observation limit is out of range",
+        ),
+        Some(store::StoreError::ObservationUnavailable { .. }) => AppError::backend(
+            ErrorClass::Internal,
+            "ObservationUnavailable",
+            "Run observations are unavailable",
+        ),
+        _ => async_app_store_error(error),
+    }
+}
+
 fn manual_resolution_runtime_request(
     req: ManualResolutionRecordRequest,
 ) -> Result<ManualResolutionRequest, AppError> {
@@ -1948,56 +2007,50 @@ fn manual_resolution_runtime_request(
     })
 }
 
-fn typed_run_status_from_projection(
+fn run_status_from_projection(
     run_id: &RunId,
     runtime_spec: &CertifiedRuntimeSpec,
     stream: &[store::KernelEventEnvelope],
     projection: &store::ProjectionSnapshot,
-) -> Result<TypedRunResponse, AppError> {
+) -> Result<RunResponse, AppError> {
     let spec_hash = run_admitted_spec_hash(stream)?;
-    typed_run_status_from_projection_with_spec_hash(
-        run_id,
-        runtime_spec,
-        stream,
-        projection,
-        &spec_hash,
-    )
+    run_status_from_projection_with_spec_hash(run_id, runtime_spec, stream, projection, &spec_hash)
 }
 
-fn typed_run_status_from_projection_with_spec_hash(
+fn run_status_from_projection_with_spec_hash(
     run_id: &RunId,
     runtime_spec: &CertifiedRuntimeSpec,
     stream: &[store::KernelEventEnvelope],
     projection: &store::ProjectionSnapshot,
     spec_hash: &SpecHash,
-) -> Result<TypedRunResponse, AppError> {
+) -> Result<RunResponse, AppError> {
     let saga = projection.derive_saga_projection(run_id, &runtime_spec.spec().saga);
-    Ok(TypedRunResponse {
+    Ok(RunResponse {
         run_id: run_id.as_str().to_owned(),
         spec_hash: spec_hash.as_str().to_owned(),
-        run_mode: typed_run_mode(saga.run_mode),
-        saga: typed_saga_status_with_resources(runtime_spec.spec(), projection, &saga),
-        attempt_dispositions: typed_attempt_dispositions(projection),
+        run_mode: run_mode_status(saga.run_mode),
+        saga: saga_status_with_resources(runtime_spec.spec(), projection, &saga),
+        attempt_dispositions: attempt_dispositions(projection),
         scheduler_status: "observed".to_owned(),
         head_seq: stream_head(stream),
     })
 }
 
-fn typed_run_stream_response_from_verified_context(
+fn run_stream_response_from_verified_context(
     context: &VerifiedRunReadContext,
-) -> TypedRunStreamResponse {
+) -> RunStreamResponse {
     let events = context.events();
-    TypedRunStreamResponse {
+    RunStreamResponse {
         run_id: context.view().run_id().as_str().to_owned(),
         head_seq: stream_head(events),
-        events: events.iter().map(typed_event_ref).collect(),
+        events: events.iter().map(run_event_ref).collect(),
     }
 }
 
 /// Builds typed public-output read authority from certified runtime authority, verified run-history
 /// view, rebuilt projection, and verified typed artifact evidence.
 pub async fn public_output_read_authority_for_run(
-    artifacts: &FsTypedArtifactStore,
+    artifacts: &(impl store::RetainedArtifactReadProvider + ?Sized),
     runtime_spec: &CertifiedRuntimeSpec,
     verified_view: &VerifiedRunHistoryView,
     public_schema_id: &SchemaId,
@@ -2060,17 +2113,36 @@ pub async fn public_output_read_authority_for_run(
 }
 
 async fn verify_public_output_authority_artifacts(
-    artifacts: &FsTypedArtifactStore,
+    artifacts: &(impl store::RetainedArtifactReadProvider + ?Sized),
     payload: &events::PublicOutputProduced,
     rendered_artifact_id: Option<&ArtifactId>,
     rendered_digest: &ContentDigest,
 ) -> Result<(), AppError> {
     for cell in &payload.cells {
-        let (_, evidence) = artifacts.get_artifact_by_id(&cell.artifact_id).await?;
+        let artifact = artifacts
+            .read_retained_artifact(&public_output_cell_artifact_requirement(cell))
+            .await?;
+        let evidence = artifact.evidence().clone();
         verify_public_output_cell_evidence(cell, &evidence)?;
     }
     if let Some(artifact_id) = rendered_artifact_id {
-        let (_, evidence) = artifacts.get_artifact_by_id(artifact_id).await?;
+        let json_media_type = spec::MediaType::new("application/json").map_err(|error| {
+            let _ = error;
+            AppError::backend(
+                ErrorClass::Internal,
+                "PublicOutputMediaTypeInvalid",
+                "Public-output JSON media type is invalid",
+            )
+        })?;
+        let artifact = artifacts
+            .read_retained_artifact(&public_output_rendered_artifact_requirement(
+                payload,
+                artifact_id,
+                rendered_digest,
+                json_media_type,
+            ))
+            .await?;
+        let evidence = artifact.evidence().clone();
         verify_public_output_rendered_artifact_evidence(
             &evidence,
             artifact_id,
@@ -2082,10 +2154,10 @@ async fn verify_public_output_authority_artifacts(
 }
 
 /// Renders typed public output from app-verified read authority and typed artifact bytes.
-pub async fn render_typed_public_output(
-    artifacts: &FsTypedArtifactStore,
+pub async fn render_public_output(
+    artifacts: &(impl store::RetainedArtifactReadProvider + ?Sized),
     authority: &PublicOutputReadAuthority,
-) -> Result<TypedPublicOutputResponse, AppError> {
+) -> Result<PublicOutputResponse, AppError> {
     let json = match authority.rendered_artifact_id() {
         Some(artifact_id) => Some(
             load_public_output_json(
@@ -2098,7 +2170,7 @@ pub async fn render_typed_public_output(
         ),
         None => Some(render_public_output_json_from_authority(artifacts, authority).await?),
     };
-    Ok(TypedPublicOutputResponse {
+    Ok(PublicOutputResponse {
         run_id: authority.run_id().as_str().to_owned(),
         public_schema_id: authority.public_schema_id().as_str().to_owned(),
         event_id: authority.event_id().as_str().to_owned(),
@@ -2140,13 +2212,17 @@ fn public_output_payload_from_stream<'a>(
 }
 
 async fn render_public_output_json_from_authority(
-    artifacts: &FsTypedArtifactStore,
+    artifacts: &(impl store::RetainedArtifactReadProvider + ?Sized),
     authority: &PublicOutputReadAuthority,
 ) -> Result<Value, AppError> {
     let mut root = Map::new();
     for cell in &authority.payload.cells {
-        let (bytes, evidence) = artifacts.get_artifact_by_id(&cell.artifact_id).await?;
+        let artifact = artifacts
+            .read_retained_artifact(&public_output_cell_artifact_requirement(cell))
+            .await?;
+        let evidence = artifact.evidence().clone();
         verify_public_output_cell_evidence(cell, &evidence)?;
+        let bytes = artifact.into_bytes();
         let value = serde_json::from_slice(&bytes).map_err(|error| {
             let _ = error;
             AppError::backend(
@@ -2214,18 +2290,35 @@ fn insert_public_output_value(
 }
 
 async fn load_public_output_json(
-    artifacts: &FsTypedArtifactStore,
+    artifacts: &(impl store::RetainedArtifactReadProvider + ?Sized),
     artifact_id: &ArtifactId,
     rendered_digest: &mfm_ids::ContentDigest,
     payload: &events::PublicOutputProduced,
 ) -> Result<serde_json::Value, AppError> {
-    let (bytes, evidence) = artifacts.get_artifact_by_id(artifact_id).await?;
+    let json_media_type = spec::MediaType::new("application/json").map_err(|error| {
+        let _ = error;
+        AppError::backend(
+            ErrorClass::Internal,
+            "PublicOutputMediaTypeInvalid",
+            "Public-output JSON media type is invalid",
+        )
+    })?;
+    let artifact = artifacts
+        .read_retained_artifact(&public_output_rendered_artifact_requirement(
+            payload,
+            artifact_id,
+            rendered_digest,
+            json_media_type,
+        ))
+        .await?;
+    let evidence = artifact.evidence().clone();
     verify_public_output_rendered_artifact_evidence(
         &evidence,
         artifact_id,
         rendered_digest,
         payload,
     )?;
+    let bytes = artifact.into_bytes();
     serde_json::from_slice(&bytes).map_err(|error| {
         let _ = error;
         AppError::backend(
@@ -2387,20 +2480,20 @@ fn validate_run_admitted_matches_spec(
     Ok(())
 }
 
-fn typed_run_response_from_projection(
+fn run_response_from_projection(
     run_id: &RunId,
     runtime_spec: &CertifiedRuntimeSpec,
     stream: &[store::KernelEventEnvelope],
     projection: &store::ProjectionSnapshot,
     status: SchedulerStatus,
-) -> Result<TypedRunResponse, AppError> {
+) -> Result<RunResponse, AppError> {
     let saga = projection.derive_saga_projection(run_id, &runtime_spec.spec().saga);
-    Ok(TypedRunResponse {
+    Ok(RunResponse {
         run_id: run_id.as_str().to_owned(),
         spec_hash: runtime_spec.spec_hash().as_str().to_owned(),
-        run_mode: typed_run_mode(saga.run_mode),
-        saga: typed_saga_status_with_resources(runtime_spec.spec(), projection, &saga),
-        attempt_dispositions: typed_attempt_dispositions(projection),
+        run_mode: run_mode_status(saga.run_mode),
+        saga: saga_status_with_resources(runtime_spec.spec(), projection, &saga),
+        attempt_dispositions: attempt_dispositions(projection),
         scheduler_status: scheduler_status_str(status).to_owned(),
         head_seq: stream_head(stream),
     })
@@ -2476,20 +2569,18 @@ fn stream_head(stream: &[store::KernelEventEnvelope]) -> u64 {
     stream.last().map_or(0, |event| event.seq().as_u64())
 }
 
-fn typed_run_mode(mode: store::RunMode) -> TypedRunMode {
+fn run_mode_status(mode: store::RunMode) -> RunModeStatus {
     mode.into()
 }
 
-fn typed_attempt_dispositions(
-    projection: &store::ProjectionSnapshot,
-) -> Vec<TypedAttemptDispositionStatus> {
+fn attempt_dispositions(projection: &store::ProjectionSnapshot) -> Vec<AttemptDispositionStatus> {
     projection
         .attempts()
-        .map(|(_key, attempt)| typed_attempt_disposition(attempt))
+        .map(|(_key, attempt)| attempt_disposition(attempt))
         .collect()
 }
 
-fn typed_attempt_disposition(attempt: &store::AttemptProjection) -> TypedAttemptDispositionStatus {
+fn attempt_disposition(attempt: &store::AttemptProjection) -> AttemptDispositionStatus {
     let (disposition, attempt_no, retryable, output_cell_id) = match &attempt.status {
         store::AttemptStatus::Started { attempt_no, .. } => {
             ("started", Some(*attempt_no), None, None)
@@ -2503,7 +2594,7 @@ fn typed_attempt_disposition(attempt: &store::AttemptProjection) -> TypedAttempt
         store::AttemptStatus::Failed { retryable, .. } => ("failed", None, Some(*retryable), None),
         store::AttemptStatus::Interrupted => ("interrupted", None, None, None),
     };
-    TypedAttemptDispositionStatus {
+    AttemptDispositionStatus {
         node_id: attempt.node_id.as_str().to_owned(),
         attempt_id: attempt.attempt_id.as_str().to_owned(),
         disposition: disposition.to_owned(),
@@ -2513,12 +2604,12 @@ fn typed_attempt_disposition(attempt: &store::AttemptProjection) -> TypedAttempt
     }
 }
 
-fn typed_saga_status_with_resources(
+fn saga_status_with_resources(
     certified_spec: &spec::TypedExecutionSpec,
     projection: &store::ProjectionSnapshot,
     saga: &store::SagaProjection,
-) -> TypedSagaStatus {
-    typed_saga_status_inner(
+) -> SagaStatus {
+    saga_status_inner(
         &certified_spec.saga,
         Some(certified_spec),
         Some(projection),
@@ -2526,29 +2617,29 @@ fn typed_saga_status_with_resources(
     )
 }
 
-fn typed_saga_status_inner(
+fn saga_status_inner(
     policy: &spec::SagaPolicySpec,
     certified_spec: Option<&spec::TypedExecutionSpec>,
     projection: Option<&store::ProjectionSnapshot>,
     saga: &store::SagaProjection,
-) -> TypedSagaStatus {
-    TypedSagaStatus {
-        policy: typed_saga_policy_status(policy),
+) -> SagaStatus {
+    SagaStatus {
+        policy: saga_policy_status(policy),
         obligations: saga
             .obligations
             .values()
             .map(|obligation| {
-                typed_obligation_status(&saga.run_id, obligation, certified_spec, projection)
+                obligation_status(&saga.run_id, obligation, certified_spec, projection)
             })
             .collect(),
         resource_ledgers: match (certified_spec, projection) {
             (Some(certified_spec), Some(projection)) => {
-                typed_resource_ledgers_for_run(certified_spec, projection, &saga.run_id)
+                resource_ledgers_for_run(certified_spec, projection, &saga.run_id)
             }
             _ => Vec::new(),
         },
         resource_lanes: projection
-            .map(|projection| typed_resource_lanes_for_run(projection, &saga.run_id))
+            .map(|projection| resource_lanes_for_run(projection, &saga.run_id))
             .unwrap_or_default(),
         manual_block_reason: saga.manual_block_reason.map(manual_block_reason_str),
         required_manual_authorization: matches!(saga.run_mode, store::RunMode::ManualBlocked)
@@ -2557,25 +2648,25 @@ fn typed_saga_status_inner(
         terminal_resolution: saga
             .run_completion
             .as_ref()
-            .map(|completion| typed_terminal_resolution(&completion.outcome)),
+            .map(|completion| terminal_resolution_status(&completion.outcome)),
     }
 }
 
-fn typed_saga_policy_status(policy: &spec::SagaPolicySpec) -> TypedSagaPolicyStatus {
+fn saga_policy_status(policy: &spec::SagaPolicySpec) -> SagaPolicyStatus {
     match policy {
-        spec::SagaPolicySpec::NoSideEffects => TypedSagaPolicyStatus {
+        spec::SagaPolicySpec::NoSideEffects => SagaPolicyStatus {
             variant: "no_side_effects".to_owned(),
             manual_authorization: None,
             on_remediation_unresolved: None,
         },
-        spec::SagaPolicySpec::FailWithoutAcdcClaim => TypedSagaPolicyStatus {
+        spec::SagaPolicySpec::FailWithoutAcdcClaim => SagaPolicyStatus {
             variant: "fail_without_acdc_claim".to_owned(),
             manual_authorization: None,
             on_remediation_unresolved: None,
         },
-        spec::SagaPolicySpec::ManualResolution { manual } => TypedSagaPolicyStatus {
+        spec::SagaPolicySpec::ManualResolution { manual } => SagaPolicyStatus {
             variant: "manual_resolution".to_owned(),
-            manual_authorization: Some(typed_manual_authorization_requirements(manual)),
+            manual_authorization: Some(manual_authorization_requirements(manual)),
             on_remediation_unresolved: None,
         },
         spec::SagaPolicySpec::CompensateCompleted {
@@ -2584,13 +2675,13 @@ fn typed_saga_policy_status(policy: &spec::SagaPolicySpec) -> TypedSagaPolicySta
             let (directive, manual_authorization) = match on_remediation_unresolved {
                 spec::RemediationUnresolvedSpec::ManualResolution { manual } => (
                     "manual_resolution",
-                    Some(typed_manual_authorization_requirements(manual)),
+                    Some(manual_authorization_requirements(manual)),
                 ),
                 spec::RemediationUnresolvedSpec::FailWithoutAcdcClaim => {
                     ("fail_without_acdc_claim", None)
                 }
             };
-            TypedSagaPolicyStatus {
+            SagaPolicyStatus {
                 variant: "compensate_completed".to_owned(),
                 manual_authorization,
                 on_remediation_unresolved: Some(directive.to_owned()),
@@ -2601,14 +2692,14 @@ fn typed_saga_policy_status(policy: &spec::SagaPolicySpec) -> TypedSagaPolicySta
 
 fn manual_authorization_for_policy(
     policy: &spec::SagaPolicySpec,
-) -> Option<TypedManualAuthorizationRequirements> {
+) -> Option<ManualAuthorizationRequirements> {
     match policy {
         spec::SagaPolicySpec::ManualResolution { manual } => {
-            Some(typed_manual_authorization_requirements(manual))
+            Some(manual_authorization_requirements(manual))
         }
         spec::SagaPolicySpec::CompensateCompleted {
             on_remediation_unresolved: spec::RemediationUnresolvedSpec::ManualResolution { manual },
-        } => Some(typed_manual_authorization_requirements(manual)),
+        } => Some(manual_authorization_requirements(manual)),
         spec::SagaPolicySpec::NoSideEffects
         | spec::SagaPolicySpec::FailWithoutAcdcClaim
         | spec::SagaPolicySpec::CompensateCompleted {
@@ -2617,10 +2708,10 @@ fn manual_authorization_for_policy(
     }
 }
 
-fn typed_manual_authorization_requirements(
+fn manual_authorization_requirements(
     manual: &spec::ManualResolutionEvidenceSpec,
-) -> TypedManualAuthorizationRequirements {
-    TypedManualAuthorizationRequirements {
+) -> ManualAuthorizationRequirements {
+    ManualAuthorizationRequirements {
         evidence_schema_id: manual.evidence_schema.as_str().to_owned(),
         verifier_id: manual.authorization.verifier_id.as_str().to_owned(),
         signing_scheme: manual.authorization.signing_scheme.as_str().to_owned(),
@@ -2641,20 +2732,18 @@ fn typed_manual_authorization_requirements(
     }
 }
 
-fn typed_obligation_status(
+fn obligation_status(
     run_id: &RunId,
     obligation: &store::SagaObligationProjection,
     certified_spec: Option<&spec::TypedExecutionSpec>,
     projection: Option<&store::ProjectionSnapshot>,
-) -> TypedSagaObligationStatus {
+) -> SagaObligationStatus {
     let forward_resource = projection
         .and_then(|projection| {
             projection.side_effect_for_run(run_id, &obligation.forward_ledger_key)
         })
-        .and_then(|side_effect| {
-            typed_resource_ledger_status(certified_spec?, projection?, side_effect)
-        });
-    TypedSagaObligationStatus {
+        .and_then(|side_effect| resource_ledger_status(certified_spec?, projection?, side_effect));
+    SagaObligationStatus {
         forward_ledger_key: obligation.forward_ledger_key.as_str().to_owned(),
         forward_phase: side_effect_phase_str(&obligation.forward_phase),
         classification: forward_classification_str(obligation.classification),
@@ -2665,9 +2754,9 @@ fn typed_obligation_status(
                     projection.side_effect_for_run(run_id, &remediation.ledger_key)
                 })
                 .and_then(|side_effect| {
-                    typed_resource_ledger_status(certified_spec?, projection?, side_effect)
+                    resource_ledger_status(certified_spec?, projection?, side_effect)
                 });
-            TypedRemediationLedgerStatus {
+            RemediationLedgerStatus {
                 ledger_key: remediation.ledger_key.as_str().to_owned(),
                 forward_ledger_key: obligation.forward_ledger_key.as_str().to_owned(),
                 phase: side_effect_phase_str(&remediation.phase),
@@ -2679,21 +2768,18 @@ fn typed_obligation_status(
     }
 }
 
-fn typed_resource_ledger_status(
+fn resource_ledger_status(
     certified_spec: &spec::TypedExecutionSpec,
     projection: &store::ProjectionSnapshot,
     side_effect: &store::SideEffectProjection,
-) -> Option<TypedResourceLedgerStatus> {
+) -> Option<ResourceLedgerStatus> {
     let node = certified_node(certified_spec, &side_effect.intent.node_id)?;
     let claim = &node.side_effect.as_ref()?.resource_claim;
-    let key = side_effect
-        .resource_key
-        .as_ref()
-        .map(typed_resource_key_status);
+    let key = side_effect.resource_key.as_ref().map(resource_key_status);
     let touched_set = side_effect
         .resource_touched_set
         .as_ref()
-        .map(typed_resource_touched_set_status);
+        .map(resource_touched_set_status);
     let (active_lane, blocked_by_lane) =
         if side_effect_phase_has_live_resource_lane_interest(&side_effect.phase) {
             side_effect
@@ -2706,7 +2792,7 @@ fn typed_resource_ledger_status(
                         .map(|lane| (lane_key, lane))
                 })
                 .map(|(lane_key, lane)| {
-                    let holder = typed_resource_lane_holder(&lane_key, lane);
+                    let holder = resource_lane_holder_status(&lane_key, lane);
                     let side_effect_ref = store::SideEffectLedgerRef::new(
                         side_effect.run_id.clone(),
                         side_effect.ledger_key.clone(),
@@ -2721,15 +2807,14 @@ fn typed_resource_ledger_status(
         } else {
             (None, None)
         };
-    let (ledger_purpose, forward_ledger_key) =
-        typed_ledger_purpose_status(&side_effect.ledger_purpose);
+    let (ledger_purpose, forward_ledger_key) = ledger_purpose_status(&side_effect.ledger_purpose);
 
-    Some(TypedResourceLedgerStatus {
+    Some(ResourceLedgerStatus {
         ledger_key: side_effect.ledger_key.as_str().to_owned(),
         ledger_purpose,
         forward_ledger_key,
         phase: side_effect_phase_str(&side_effect.phase),
-        claim: typed_resource_claim_status(claim),
+        claim: resource_claim_status(claim),
         key,
         touched_set,
         active_lane,
@@ -2737,16 +2822,16 @@ fn typed_resource_ledger_status(
     })
 }
 
-fn typed_resource_ledgers_for_run(
+fn resource_ledgers_for_run(
     certified_spec: &spec::TypedExecutionSpec,
     projection: &store::ProjectionSnapshot,
     run_id: &RunId,
-) -> Vec<TypedResourceLedgerStatus> {
+) -> Vec<ResourceLedgerStatus> {
     projection
         .side_effects()
         .filter_map(|(_, side_effect)| {
             if &side_effect.run_id == run_id {
-                typed_resource_ledger_status(certified_spec, projection, side_effect)
+                resource_ledger_status(certified_spec, projection, side_effect)
             } else {
                 None
             }
@@ -2754,10 +2839,10 @@ fn typed_resource_ledgers_for_run(
         .collect()
 }
 
-fn typed_resource_lanes_for_run(
+fn resource_lanes_for_run(
     projection: &store::ProjectionSnapshot,
     run_id: &RunId,
-) -> Vec<TypedResourceLaneHolderStatus> {
+) -> Vec<ResourceLaneHolderStatus> {
     let referenced_lane_keys = projection
         .side_effects()
         .filter_map(|(_, side_effect)| {
@@ -2777,7 +2862,7 @@ fn typed_resource_lanes_for_run(
     projection
         .resource_lanes()
         .filter(|(lane_key, _lane)| referenced_lane_keys.contains(*lane_key))
-        .map(|(lane_key, lane)| typed_resource_lane_holder(lane_key, lane))
+        .map(|(lane_key, lane)| resource_lane_holder_status(lane_key, lane))
         .collect()
 }
 
@@ -2792,12 +2877,12 @@ fn side_effect_phase_has_live_resource_lane_interest(phase: &store::SideEffectPh
     )
 }
 
-fn typed_resource_claim_status(claim: &spec::ResourceClaimSpec) -> TypedResourceClaimStatus {
+fn resource_claim_status(claim: &spec::ResourceClaimSpec) -> ResourceClaimStatus {
     match claim {
         spec::ResourceClaimSpec::Exclusive {
             namespace,
             key_schema,
-        } => TypedResourceClaimStatus {
+        } => ResourceClaimStatus {
             kind: "exclusive".to_owned(),
             namespace: Some(namespace.as_str().to_owned()),
             key_schema_id: Some(key_schema.as_str().to_owned()),
@@ -2806,13 +2891,13 @@ fn typed_resource_claim_status(claim: &spec::ResourceClaimSpec) -> TypedResource
         spec::ResourceClaimSpec::ExactTouchedSet {
             namespace,
             evidence_schema,
-        } => TypedResourceClaimStatus {
+        } => ResourceClaimStatus {
             kind: "exact_touched_set".to_owned(),
             namespace: Some(namespace.as_str().to_owned()),
             key_schema_id: None,
             evidence_schema_id: Some(evidence_schema.as_str().to_owned()),
         },
-        spec::ResourceClaimSpec::ManualOnly => TypedResourceClaimStatus {
+        spec::ResourceClaimSpec::ManualOnly => ResourceClaimStatus {
             kind: "manual_only".to_owned(),
             namespace: None,
             key_schema_id: None,
@@ -2821,18 +2906,18 @@ fn typed_resource_claim_status(claim: &spec::ResourceClaimSpec) -> TypedResource
     }
 }
 
-fn typed_resource_key_status(evidence: &events::ResourceKeyEvidence) -> TypedResourceKeyStatus {
-    TypedResourceKeyStatus {
+fn resource_key_status(evidence: &events::ResourceKeyEvidence) -> ResourceKeyStatus {
+    ResourceKeyStatus {
         namespace: evidence.namespace.as_str().to_owned(),
         key_schema_id: evidence.key_schema_id.as_str().to_owned(),
-        key: evidence.key.as_str().to_owned(),
+        key_digest: resource_key_evidence_digest(evidence),
     }
 }
 
-fn typed_resource_touched_set_status(
+fn resource_touched_set_status(
     evidence: &events::ResourceTouchedSetEvidence,
-) -> TypedResourceTouchedSetStatus {
-    TypedResourceTouchedSetStatus {
+) -> ResourceTouchedSetStatus {
+    ResourceTouchedSetStatus {
         namespace: evidence.namespace.as_str().to_owned(),
         evidence_schema_id: evidence.evidence_schema_id.as_str().to_owned(),
         evidence_hash: evidence.evidence_hash.as_str().to_owned(),
@@ -2840,15 +2925,16 @@ fn typed_resource_touched_set_status(
     }
 }
 
-fn typed_resource_lane_holder(
+fn resource_lane_holder_status(
     lane_key: &store::ResourceLaneKey,
     lane: &store::ResourceLaneProjection,
-) -> TypedResourceLaneHolderStatus {
+) -> ResourceLaneHolderStatus {
     let (holding_ledger_purpose, holding_forward_ledger_key) =
-        typed_ledger_purpose_status(&lane.ledger_purpose);
-    TypedResourceLaneHolderStatus {
+        ledger_purpose_status(&lane.ledger_purpose);
+    ResourceLaneHolderStatus {
         namespace: lane_key.namespace.as_str().to_owned(),
-        key: lane_key.key.as_str().to_owned(),
+        key_schema_id: lane_key.key_schema_id.as_str().to_owned(),
+        key_digest: resource_lane_key_digest(lane_key),
         holding_run_id: lane.holder.run_id.as_str().to_owned(),
         holding_ledger_key: lane.holder.ledger_key.as_str().to_owned(),
         holding_ledger_purpose,
@@ -2859,9 +2945,41 @@ fn typed_resource_lane_holder(
     }
 }
 
-fn typed_ledger_purpose_status(
-    purpose: &events::SideEffectLedgerPurpose,
-) -> (String, Option<String>) {
+#[derive(Serialize)]
+struct ResourceKeyDigestMaterial<'a> {
+    key: &'a str,
+    key_schema_id: &'a str,
+    namespace: &'a str,
+}
+
+fn resource_key_evidence_digest(evidence: &events::ResourceKeyEvidence) -> String {
+    resource_key_digest_material(ResourceKeyDigestMaterial {
+        key: evidence.key.as_str(),
+        key_schema_id: evidence.key_schema_id.as_str(),
+        namespace: evidence.namespace.as_str(),
+    })
+}
+
+fn resource_lane_key_digest(lane_key: &store::ResourceLaneKey) -> String {
+    resource_key_digest_material(ResourceKeyDigestMaterial {
+        key: lane_key.key.as_str(),
+        key_schema_id: lane_key.key_schema_id.as_str(),
+        namespace: lane_key.namespace.as_str(),
+    })
+}
+
+fn resource_key_digest_material(material: ResourceKeyDigestMaterial<'_>) -> String {
+    let json = serde_json::to_string(&material).expect("resource key digest material serializes");
+    let canonical = PlainCanonicalJsonBytes::from_json_str(&json)
+        .expect("resource key digest material is JSON");
+    ContentDigest::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        sha256_digest_bytes(canonical.as_bytes()),
+    )
+    .to_string()
+}
+
+fn ledger_purpose_status(purpose: &events::SideEffectLedgerPurpose) -> (String, Option<String>) {
     match purpose {
         events::SideEffectLedgerPurpose::Forward => ("forward".to_owned(), None),
         events::SideEffectLedgerPurpose::Remediation { forward_ledger_key } => (
@@ -2882,10 +3000,8 @@ fn certified_node<'a>(
         .find(|node| &node.node_id == node_id)
 }
 
-fn typed_terminal_resolution(
-    outcome: &events::RunCompletionOutcome,
-) -> TypedTerminalResolutionStatus {
-    TypedTerminalResolutionStatus {
+fn terminal_resolution_status(outcome: &events::RunCompletionOutcome) -> TerminalResolutionStatus {
+    TerminalResolutionStatus {
         outcome: store::codec::run_completion_outcome_str(outcome).to_owned(),
         claim: store::codec::run_completion_claim_str(outcome).to_owned(),
     }
@@ -2939,8 +3055,8 @@ fn scheduler_status_str(status: SchedulerStatus) -> &'static str {
     }
 }
 
-fn typed_event_ref(event: &store::KernelEventEnvelope) -> TypedRunEventRef {
-    TypedRunEventRef {
+fn run_event_ref(event: &store::KernelEventEnvelope) -> RunEventRef {
+    RunEventRef {
         event_id: event.event_id().as_str().to_owned(),
         event_schema_id: event.event_schema_id().as_str().to_owned(),
         seq: event.seq().as_u64(),
@@ -2948,5 +3064,36 @@ fn typed_event_ref(event: &store::KernelEventEnvelope) -> TypedRunEventRef {
         commit_key: event.commit_key().as_str().to_owned(),
         logical_key: event.logical_key().as_str().to_owned(),
         payload_hash: event.payload_hash().as_str().to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resource_key_status_redacts_raw_key() {
+        let raw_key = "0x000000000000000000000000000000000000dead";
+        let evidence = events::ResourceKeyEvidence {
+            namespace: spec::ResourceNamespace::new("mfm.test.account_nonce")
+                .expect("resource namespace"),
+            key_schema_id: SchemaId::new(
+                "mfm.test.account_nonce.resource_key",
+                "1",
+                DigestAlgorithm::Sha256JcsV1,
+                sha256_digest_bytes(b"mfm.test.account_nonce.resource_key"),
+            )
+            .expect("schema id"),
+            key: events::ResourceKey::new(raw_key).expect("resource key"),
+        };
+
+        let status = resource_key_status(&evidence);
+        let rendered = serde_json::to_string(&status).expect("status JSON");
+
+        assert_eq!(status.namespace, "mfm.test.account_nonce");
+        assert_ne!(status.key_digest, raw_key);
+        assert!(rendered.contains("key_digest"));
+        assert!(!rendered.contains(raw_key));
+        assert!(!rendered.contains("\"key\""));
     }
 }

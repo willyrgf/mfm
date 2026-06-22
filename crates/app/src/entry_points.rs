@@ -1,30 +1,30 @@
-use crate::{EntryPointOpRegistry, OpLaunchError, TypedEntryPointOp};
+use crate::{EntryPointOpRegistry, EntryPointPlannerAdapter, OpLaunchError};
 
 /// Builds the production entry-point operation registry for this process.
 pub(crate) fn production_entry_point_op_registry() -> Result<EntryPointOpRegistry, crate::AppError>
 {
     let mut registry = EntryPointOpRegistry::new();
-    registry.register(TypedEntryPointOp::new(
+    registry.register(EntryPointPlannerAdapter::new(
         mfm_op_portfolio_tracker::PORTFOLIO_SNAPSHOT_ENTRY_POINT,
         mfm_op_portfolio_tracker::plan_portfolio_snapshot_entry_point,
         portfolio_snapshot_plan_error,
     )?)?;
-    registry.register(TypedEntryPointOp::new(
+    registry.register(EntryPointPlannerAdapter::new(
         mfm_op_evm_contract_lifecycle::CONTRACT_DEPLOY_ENTRY_POINT,
         mfm_op_evm_contract_lifecycle::plan_contract_deploy_entry_point,
         evm_contract_plan_error,
     )?)?;
-    registry.register(TypedEntryPointOp::new(
+    registry.register(EntryPointPlannerAdapter::new(
         mfm_op_evm_contract_lifecycle::CONTRACT_CONFIGURE_ENTRY_POINT,
         mfm_op_evm_contract_lifecycle::plan_contract_configure_entry_point,
         evm_contract_plan_error,
     )?)?;
-    registry.register(TypedEntryPointOp::new(
+    registry.register(EntryPointPlannerAdapter::new(
         mfm_op_evm_contract_lifecycle::CONTRACT_VALIDATE_ENTRY_POINT,
         mfm_op_evm_contract_lifecycle::plan_contract_validate_entry_point,
         evm_contract_plan_error,
     )?)?;
-    registry.register(TypedEntryPointOp::new(
+    registry.register(EntryPointPlannerAdapter::new(
         mfm_op_evm_contract_lifecycle::CONTRACT_LIFECYCLE_ENTRY_POINT,
         mfm_op_evm_contract_lifecycle::plan_contract_lifecycle_entry_point,
         evm_contract_plan_error,

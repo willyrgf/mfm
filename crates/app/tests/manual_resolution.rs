@@ -4,7 +4,7 @@ use k256::ecdsa::SigningKey;
 use mfm_app::{
     CanonicalConfigMaterial, DriveMode, EntryPointOpId, EntryPointOpPlan, EntryPointOpRegistry,
     EntryPointRunLaunchInput, LaunchableOp, ManualResolutionDecision,
-    ManualResolutionRecordRequest, OpLaunchError, OpVersion, PublicOpName, TypedRunMode,
+    ManualResolutionRecordRequest, OpLaunchError, OpVersion, PublicOpName, RunModeStatus,
 };
 use mfm_authored_config::{AuthoredConfig, AuthoredConfigFormat};
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
@@ -20,24 +20,23 @@ use mfm_runtime::{
     unresolved_manual_obligations_digest,
 };
 use mfm_spec::v1 as spec;
-use mfm_store::v1::{self as store, AsyncTypedRunEventStore};
+use mfm_store::v1::{self as store, RunEventStore};
 use serde_json::Value;
-use tempfile::TempDir;
 
 const PROOF_SECRET_SENTINEL: &str = "manual-secret-proof-sentinel";
 
 #[tokio::test]
 async fn public_manual_resolution_scenario_records_resolution_and_hides_proof_bytes() {
-    let temp = TempDir::new().expect("temp dir");
-    let artifact_root = temp.path().join("typed-artifacts");
-    std::fs::create_dir_all(&artifact_root).expect("artifact root");
-    let artifacts = mfm_artifact_store_fs::FsTypedArtifactStore::new(&artifact_root);
-    let runners = mfm_app::production_typed_runner_registry(artifacts.clone()).expect("runners");
+    let store = store::AsyncInMemoryRunStore::default();
+    let runners = mfm_app::production_runner_registry(
+        mfm_app::artifact_read_provider_from_retained(store.clone()),
+    )
+    .expect("runners");
     let registry = mfm_app::production_certification_registry().expect("cert registry");
-    let services = mfm_app::make_async_typed_services_with_certification_registry(
+    let services = mfm_app::make_run_services_with_certification_registry(
         runners,
-        store::AsyncInMemoryTypedRunStore::default(),
-        artifacts,
+        store.clone(),
+        store,
         registry.clone(),
     );
 
@@ -61,12 +60,12 @@ async fn public_manual_resolution_scenario_records_resolution_and_hides_proof_by
 
     let certified = launch.request.certified_spec.clone();
     let blocked = services.launch_run(launch.request).await.expect("launch");
-    assert_eq!(blocked.run_mode, TypedRunMode::ManualBlocked);
+    assert_eq!(blocked.run_mode, RunModeStatus::ManualBlocked);
     let blocked_replay = services
         .verify_replay_for_run(&run_id)
         .await
         .expect("manual-blocked proof replay");
-    assert_eq!(blocked_replay.run_mode, TypedRunMode::ManualBlocked);
+    assert_eq!(blocked_replay.run_mode, RunModeStatus::ManualBlocked);
     assert_eq!(
         blocked.saga.manual_block_reason.as_deref(),
         Some("policy_manual_resolution")
@@ -110,7 +109,7 @@ async fn public_manual_resolution_scenario_records_resolution_and_hides_proof_by
         .await
         .expect("manual resolution");
 
-    assert_eq!(resolved.run_mode, TypedRunMode::ManuallyResolved);
+    assert_eq!(resolved.run_mode, RunModeStatus::ManuallyResolved);
     assert_eq!(resolved.saga.manual_block_reason, None);
     assert_eq!(resolved.saga.required_manual_authorization, None);
     let terminal = resolved
@@ -130,7 +129,7 @@ async fn public_manual_resolution_scenario_records_resolution_and_hides_proof_by
     );
 
     let status = services.run_status(&run_id).await.expect("status");
-    assert_eq!(status.run_mode, TypedRunMode::ManuallyResolved);
+    assert_eq!(status.run_mode, RunModeStatus::ManuallyResolved);
 
     let stream = services
         .store()
@@ -238,7 +237,7 @@ fn config_material_for_draft(
 }
 
 async fn signed_manual_resolution_proof_bytes(
-    services: &mfm_app::RunServices<store::AsyncInMemoryTypedRunStore>,
+    services: &mfm_app::RunServices<store::AsyncInMemoryRunStore, store::AsyncInMemoryRunStore>,
     run_id: &RunId,
     certified: &mfm_certify::CertifiedTypedSpec,
     manual: spec::ManualResolutionEvidenceSpec,

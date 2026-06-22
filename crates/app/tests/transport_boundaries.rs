@@ -1,7 +1,7 @@
 #![allow(clippy::disallowed_methods)]
 
 #[test]
-fn production_typed_app_links_only_typed_transport_crates() {
+fn production_app_links_only_supported_transport_crates() {
     let manifest = include_str!("../Cargo.toml");
     for required in [
         "mfm-adapters-portfolio",
@@ -10,7 +10,7 @@ fn production_typed_app_links_only_typed_transport_crates() {
     ] {
         assert!(
             manifest.contains(required),
-            "typed app manifest must link {required}"
+            "production app manifest must link {required}"
         );
     }
     for forbidden in [
@@ -26,13 +26,13 @@ fn production_typed_app_links_only_typed_transport_crates() {
     ] {
         assert!(
             !manifest.contains(forbidden),
-            "typed app manifest must not link legacy transport dependency {forbidden}"
+            "production app manifest must not link legacy transport dependency {forbidden}"
         );
     }
 }
 
 #[test]
-fn typed_transport_sources_exclude_legacy_io_surfaces() {
+fn transport_sources_exclude_legacy_io_surfaces() {
     for (name, source) in [
         ("proof", include_str!("../../transports/proof/src/lib.rs")),
         (
@@ -59,7 +59,7 @@ fn typed_transport_sources_exclude_legacy_io_surfaces() {
         ] {
             assert!(
                 !source.contains(banned),
-                "typed transport {name} must not expose legacy IO surface {banned}"
+                "transport {name} must not expose legacy IO surface {banned}"
             );
         }
     }
