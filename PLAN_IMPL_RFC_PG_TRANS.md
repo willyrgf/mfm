@@ -28,10 +28,22 @@ states. Any commit that would make `docs/design.md`, runtime authority, storage 
 APIs, or binary wiring disagree must stay in an unmerged stack until the matching replacement and
 deletion commits are present.
 
-This is not a storage-only refactor. The lane lifecycle, `PreparedCommitBundle`, artifact evidence
-identity, strict-vs-observation store traits, app factory, CLI/REST contracts, schema validation, and
-docs contract must land as one coherent cutover. Do not merge a partial state where runtime
-authority, storage behavior, public APIs, and docs disagree.
+This is not a storage-only refactor, but it does not have to land as one monolithic merge. It
+decomposes into three separable, individually coherent cutovers that land in dependency order, each
+with no compatibility shims:
+
+1. Append/artifact cutover: `PreparedCommitBundle`, artifact bytes/evidence into Postgres, filesystem
+   artifact store removal, the append-only authority schema (partitioned), and the constraint/payload
+   simplifications.
+2. Resource-lane cutover: the pre-invocation lane lifecycle, per-lane admission, `lane_id`-keyed
+   lane-transition authority, the no-deadlock single-claim invariant, and the `docs/saga.md`
+   resource-claim rewrite.
+3. Observation cutover: the read-model layer, `run_commit_log` epoch-tagged watch cursors, the shared
+   CLI/REST list/watch API, and the `typed_` -> target naming baseline.
+
+Within each cutover do not merge a partial state where runtime authority, storage behavior, public
+APIs, and docs disagree. Prefer three landable cutovers over one big-bang merge so each new primitive
+(bundle append, lanes, watch cursors) is validated independently.
 
 ## Target Outcome
 
@@ -99,6 +111,14 @@ Scope:
 - Document lane-local transition authority, store-assigned fencing tokens, and
   `ResourceLaneClaimBlocked` as a parked-attempt outcome that cannot itself authorize terminal
   failure.
+- Rewrite the `docs/saga.md` "Resource Claims" section for the pre-invocation `ResourceLaneClaimed`
+  lifecycle, the claim-kind-to-lane mapping (`Exclusive` only), and the no-deadlock invariant; this
+  lands in the resource-lane cutover merge unit (a planned-change callout already points to the RFC).
+- Document the Data Lifecycle contract: append-only growth bounded by maintenance-role
+  partition-detach archival (not production delete), the artifact-size limit, and the dedicated-MFM-
+  database requirement driven by cluster-wide `xmin` coupling.
+- Document the read-your-writes caveat (list/watch lag the sealed frontier; strict status is
+  immediate) and the operator `reseed_store_epoch` step after physical restore/clone.
 - Update the storage README/runbook with the destructive fresh-database cutover stance.
 - Mark filesystem artifact storage as removed from production architecture.
 - Mark in-memory storage as test-only.
@@ -151,7 +171,11 @@ Scope:
 - Add resource-lane authority types and event payloads for capability-declared requirements,
   resolved claims, `ResourceLaneClaimIntent`, store-filled committed
   `ResourceLaneClaimed`/`ResourceLaneReleased`, `ResourceLaneClaimBlocked`, held lane sets, and
-  holder proofs, plus lane-local transition authority.
+  holder proofs, plus lane-local transition authority keyed on a fixed-width `lane_id`.
+- Only `Exclusive` claims take a lane; `ExactTouchedSet` and `ManualOnly` take none. Encode the
+  no-deadlock invariant in the types/contract: an attempt acquires all its lanes in one
+  all-or-nothing `ResourceLaneClaimed` commit and never holds a lane while issuing a second blocking
+  claim.
 - Define the store-filled fencing-token protocol: prepared authority covers claim intent and fill
   policy, while final commit batch hashes cover the store-assigned lane-local token.
 - Make artifact evidence identity evidence-keyed: APIs and strict reads must carry
@@ -239,34 +263,35 @@ Scope:
 - Split the Postgres implementation into clear run, artifact, read-model, schema, locking, and
   rebuild modules as needed.
 - Replace the old `typed_*` migration baseline with target non-`typed_` tables.
-- Add append-only authority tables:
+- Add append-only authority tables, declared partitioned on a stable per-run key so archival can
+  detach partitions later:
   `commits`, `run_events`, `artifact_blobs`, `artifact_admissions`,
   `run_artifact_admissions`, `commit_artifact_evidence`, `resource_lane_claim_events`,
-  `resource_lane_release_events`, and `resource_lane_transitions`.
+  `resource_lane_release_events`, and `resource_lane_transitions` (lane tables keyed on `lane_id`).
+- Keep only the real uniqueness facts (`commits` PK + `commit_id` + `(run_id, commit_key)`); do not
+  add redundant composite UNIQUE supersets. `run_events` stores canonical payload bytes only (no
+  `payload_json JSONB`). Child FKs target the natural key (`commits(run_id, seq)`/`(commit_id)`,
+  `run_events(run_id, seq, ordinal)`).
 - Add observation/read tables:
-  `logical_key_observations`, `run_commit_log`, `run_observation_change_summaries`,
-  observation facts, observation derivation tables.
-- Add cursor-domain tables/metadata such as `store_metadata` and `cursor_domain_seals`.
-- Implement the closed cursor-domain fingerprint/frontier-hash algorithm and enforce one valid seal
-  per live `store_epoch`.
-- Add schema constraints/validation triggers for `event_type` source-event bindings, exact first
-  artifact admission bindings, `run_commit_log` commit bindings, reverse commit-to-commit-log
-  completeness, lane event/mirror/transition completeness, lane holder ownership proofs, and
-  lane-local transition sequence/hash continuity.
+  `run_commit_log`, `run_observation_change_summaries`, observation facts, observation derivation
+  tables. Do not add `logical_key_observations` (deferred to a future RFC with its completeness proof).
+- Add `store_metadata` with an opaque `store_epoch`. Do not add `cursor_domain_seals` or the
+  XID-domain fingerprint/frontier-hash subsystem.
+- Use single-enforcer integrity: SQL relational constraints (FK/UNIQUE/CHECK/NOT NULL) plus the
+  database-owned `append_xid` assignment and the no-update/no-delete triggers. Do not add deferrable
+  constraint triggers that re-implement multi-row folds (contiguity, cardinality, reverse
+  commit-to-commit-log completeness, lane completeness/ordering); those are owned by the Rust append
+  path and re-checked by strict load. Any SQL check that duplicates a Rust fold needs a parity test.
 - Add database-owned `append_xid` assignment for `commits` and `run_commit_log`; production insert
   statements must not be able to override cursor transaction ids.
 - Add run-commit-log ordinal constraints (`first_ordinal = 0`,
   `last_ordinal = event_count - 1`) for the one-row-per-commit cursor log.
-- Add `store_epoch` handling that changes on destructive reset, restore, clone, import, rollback, or
-  any operation that changes the PostgreSQL XID ordering domain behind public cursors.
-- Add explicit cursor-domain reseal/reseed maintenance entry points that run outside normal
-  app/CLI/REST credentials.
-- Add no-update/no-delete/no-truncate guards.
-- Add maintenance-role-only rebuild/validation procedure boundaries.
+- Add an explicit `reseed_store_epoch` maintenance entry point (maintenance role only) for use after
+  destructive reset, restore, clone, import, or rollback; it rotates `store_epoch` and invalidates
+  outstanding cursors. Startup does not auto-detect physical-domain changes.
+- Add no-update/no-delete/no-truncate guards for the app role.
+- Add maintenance-role-only rebuild/validation/archival/reseed procedure boundaries.
 - Make schema validation reject stale old `typed_*` schemas or old migration checksums.
-- Make schema validation reject restored/imported cursor rows without a valid cursor-domain seal.
-- Make startup validation recompute the live cursor-domain fingerprint and frontier hash before
-  accepting public cursors.
 
 Deletion requirement:
 
@@ -287,22 +312,25 @@ Scope:
 - Implement `append_prepared_commit_bundle` in the Postgres storage crate.
 - Verify artifact bytes/evidence inside the transaction before inserting authority rows.
 - Insert `commits`, `artifact_blobs`, artifact evidence/admission rows, `run_events`,
-  `logical_key_observations`, resource-lane claim/release/transition rows, and `run_commit_log`
-  atomically.
+  resource-lane claim/release/transition rows, and `run_commit_log` atomically. Large artifact bytes
+  may be content-addressed in a short preceding transaction; the append transaction then verifies the
+  blob digest/length and inserts only the small evidence/admission/event rows.
 - For lane claim/release commits, require committed lane claim/release intents and holder proofs in
-  the prepared bundle. Use sorted per-lane transaction locks while admitting those commit-bound
-  rows, assign store-filled lane-local transition sequences and fencing tokens under the lock, and
-  return `ResourceLaneClaimBlocked` without appending authority rows or persisted read-model facts
-  for valid contention. Do not expose standalone lane acquire/release APIs, derive lanes in storage,
-  or add a global commit-order lock, global resource-lane lock, global counter row, table-level
-  append serialization, or `commit_pos`/`change_pos` allocation.
+  the prepared bundle. Use sorted per-`lane_id` transaction advisory locks (two-argument
+  `pg_advisory_xact_lock(classid, objid)` with a lane class id distinct from the run-lock class id)
+  while admitting those commit-bound rows, assign store-filled lane-local transition sequences and
+  fencing tokens under the lock, and return `ResourceLaneClaimBlocked` without appending authority
+  rows or persisted read-model facts for valid contention. Do not expose standalone lane
+  acquire/release APIs, derive lanes in storage, or add a global commit-order lock, global
+  resource-lane lock, global counter row, table-level append serialization, or
+  `commit_pos`/`change_pos` allocation.
 - Enforce terminal lane-release scope rules so attempt, side-effect, saga, and run terminal commits
   cannot leave release-required lane claims active unless the verified prefix or closed same-commit
   terminal-release rule proves release.
-- Enforce batch-hash integrity structurally in SQL and semantically in Rust from persisted canonical
-  bytes; do not create a SQL canonicalization engine.
-- Build logical-key admission from authoritative `run_events`; use `logical_key_observations` only
-  as non-authoritative hints unless a prefix-completeness proof is implemented and verified.
+- Enforce batch-hash integrity in Rust from persisted canonical bytes; SQL keeps only relational
+  constraints. Do not create a SQL canonicalization engine.
+- Build logical-key admission by folding authoritative `run_events`; there is no observation index in
+  v1, so observation-row absence can never influence admission.
 - Let database-owned triggers/functions assign `commits.append_xid` and
   `run_commit_log.append_xid` from PostgreSQL `pg_current_xact_id()` and use it only for
   snapshot-sealed observation cursors.
@@ -331,6 +359,10 @@ Verification:
 - lane-transition sequence/hash continuity and terminal-release scope tests
 - idempotent commit-key retry tests
 - artifact mismatch/missing/extra-byte rejection tests
+- large-blob pre-commit + short append-transaction test; maintenance-role orphan-blob sweep test
+- no-deadlock invariant test: a history holding a lane then committing a further `ResourceLaneClaimed`
+  is rejected
+- lane and run advisory locks use distinct class ids
 - snapshot-sealed watch cursor tests with older slow transactions and newer fast transactions
 - SQL scan showing no production domain `UPDATE`, `DELETE`, or `TRUNCATE`
 
@@ -352,22 +384,21 @@ Verification:
 - public-output authority artifact tests
 - adapter artifact request tests
 
-### Commit 9: implement logical-key observation rebuild parity
+### Commit 9: implement logical-key admission folding
 
 Scope:
 
-- Fold authoritative `run_events` into `LogicalKeySet` and `UniqueLogicalPayloads` for admission.
-- Keep `logical_key_observations` as rebuildable, non-authoritative hints unless a reviewed
-  prefix-completeness proof is added.
-- Preserve the recoverable submission-result exception through explicit observation fields.
-- Prove parity with folding the authoritative event stream.
+- Fold authoritative `run_events` into `LogicalKeySet` and `UniqueLogicalPayloads` for admission and
+  strict load. There is no `logical_key_observations` table in v1.
+- Keep the recoverable submission-result exception in the Rust staging rule, applied against the
+  folded `run_events` prefix.
+- A future RFC may add an observation index together with its prefix-completeness proof; not here.
 
 Verification:
 
 - accepted recoverable submission-result rewrite test
 - rejected repeated unique logical-key tests
-- parity tests comparing observation fold to stream fold
-- tests proving missing observation rows cannot make admission believe a logical key is absent
+- tests proving logical-key admission is derived only from `run_events` folds (no index to be absent)
 
 ### Commit 10: implement Postgres-owned read models
 
@@ -406,8 +437,10 @@ Scope:
 - Make `list_runs` and watch polling use one snapshot-sealed frontier for returned rows, joined
   summaries, projection version, and watch cursor. Page cursors, if added, must be separate from
   watch cursors.
-- Keep `run_status` and `run_stream` strict authority reads.
-- Keep list/watch as observation reads over Postgres read models.
+- Reject cursors whose `store_epoch` does not match the live row with `StaleStoreEpoch`.
+- Keep `run_status` and `run_stream` strict authority reads (immediate, no frontier lag).
+- Keep list/watch as observation reads over Postgres read models. Document the read-your-writes
+  caveat: a just-created run appears in list/watch only after the sealed frontier advances past it.
 
 Verification:
 
@@ -529,9 +562,9 @@ Verification:
 
 Scope:
 
-- Reconcile `docs/design.md` and `docs/architecture.md` against the implemented cutover before the
-  stack merges. This is final consistency review, not permission to delay authoritative doc updates
-  until after merge.
+- Reconcile `docs/design.md`, `docs/architecture.md`, and `docs/saga.md` against the implemented
+  cutover before the stack merges. This is final consistency review, not permission to delay
+  authoritative doc updates until after merge.
 - Update `bin/cli/README.md`.
 - Update `bin/rest-api/README.md`.
 - Update storage crate README/runbook with fresh DB reset instructions.
@@ -631,14 +664,14 @@ The refactor is done when all of the following are true:
 - A fresh Postgres database can migrate to the target schema.
 - A stale old `typed_*` database is rejected.
 - Production appends insert events, artifact bytes/evidence keyed by evidence hash, committed
-  resource-lane claim/release/transition rows, logical-key observation hints, commit-log rows, and
-  required observation facts atomically.
-- Logical-key admission is proven from authoritative `run_events`, not from observation-row absence.
+  resource-lane claim/release/transition rows, commit-log rows, and required observation facts
+  atomically.
+- Logical-key admission is proven by folding authoritative `run_events`; there is no admission index.
 - Resource-lane contention parks open attempts through `ResourceLaneClaimBlocked` without writing
-  corrupt or terminal stream authority.
+  corrupt or terminal stream authority, and the no-deadlock single-claim invariant holds.
 - Ordinary resource-lane contention does not authorize attempt/saga/run failure.
-- Cursor-domain seals and database-owned `append_xid` assignment protect list/watch cursors across
-  fresh stores, restores, clones, imports, and reseals.
+- Opaque epoch-tagged cursors plus database-owned `append_xid` assignment protect list/watch cursors;
+  `reseed_store_epoch` invalidates them after restore/clone/import/rollback.
 - Read models rebuild from authority rows and can be drift-checked.
 - Strict status, stream, replay, and public output do not trust read models.
 - CLI/REST expose one shared app list/watch API.
@@ -647,5 +680,6 @@ The refactor is done when all of the following are true:
 - Filesystem storage is deleted from production.
 - In-memory storage exists only behind test-only modules or test-support crates for tests that
   intentionally avoid Postgres.
-- `docs/design.md`, `docs/architecture.md`, CLI docs, and REST docs match the implementation.
+- `docs/design.md`, `docs/architecture.md`, `docs/saga.md`, CLI docs, and REST docs match the
+  implementation.
 - No permanent compatibility shims, old aliases, or fallback paths remain.

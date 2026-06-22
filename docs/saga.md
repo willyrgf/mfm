@@ -148,6 +148,16 @@ independently proved that the external domain state is correct.
 
 ## Resource Claims
 
+> Planned change — `RFC_REFAC_PG_TRANS.md` (proposed). The exclusive-lane lifecycle below changes in
+> the resource-lane cutover: lanes move from being *derived from invocation-prepared resource key
+> evidence* to being acquired *before* invocation through a separate committed `ResourceLaneClaimed`
+> event with a store-assigned lane-local fencing token, ordered by `resource_lane_transitions`.
+> Contention becomes `ResourceLaneClaimBlocked` (a parked attempt that never authorizes terminal
+> failure), and the no-deadlock invariant requires an attempt to claim all its lanes in one
+> all-or-nothing commit. Only `Exclusive` takes a lane; `ExactTouchedSet` and `ManualOnly` take none.
+> This section is rewritten in the same merge unit as that cutover; until then it describes current
+> behavior.
+
 Every side-effect contract declares a resource claim:
 
 - `Exclusive`: adapter records a concrete exclusive key before crossing the uncertainty boundary.
@@ -198,3 +208,10 @@ The following remain outside the current certified saga contract:
 - generic retry/replan/continuation policy;
 - cancellation semantics against remediation;
 - lane fairness, queueing, deadlock detection, or global scheduling policy.
+
+> Planned change — `RFC_REFAC_PG_TRANS.md` (proposed). The resource-lane cutover does not add lane
+> *deadlock detection*; it instead excludes the deadlock class structurally (an attempt claims all its
+> lanes in one all-or-nothing commit and never holds a lane while issuing a second blocking claim), so
+> detection stays unnecessary rather than deferred. It adds best-effort liveness (capped backoff plus
+> lane-release wakeups) but still defers lane *fairness/queueing*; callers must not assume starvation
+> freedom under sustained single-lane contention.
