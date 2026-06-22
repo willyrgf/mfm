@@ -12,14 +12,14 @@ use mfm_store::v1::codec::{
 };
 use mfm_store::v1::{
     payload_from_json_value, prepared_commit_plan_fingerprint, stage_prepared_commit_plan,
-    ArtifactEvidenceRef, AsyncStoreFuture, CodecError, CommitBase, CommitFingerprint, CommitKey,
-    CommitOrdinal, CommitOutcome, CommittedBatch, EventArtifactRequirement, KernelEventEnvelope,
-    LogicalEventKey, ObservedRunStatus, PersistedKernelEventRecord, PreparedArtifactBytes,
-    PreparedCommitBundle, ProjectionSnapshot, ProjectionSnapshotParts, ResourceLaneAuthoritySet,
-    ResourceLaneKey, ResourceLaneProjection, RetainedArtifactReadFuture,
-    RetainedArtifactReadProvider, RunEventStore, RunObservation, RunObservationPage,
-    RunObservationQuery, RunObservationStore, RunState, StoreError, StoreErrorInspection,
-    StreamSeq, VerifiedRunArtifactBytes,
+    ArtifactAuthorityMap, ArtifactEvidenceRef, AsyncStoreFuture, CodecError, CommitBase,
+    CommitFingerprint, CommitKey, CommitOrdinal, CommitOutcome, CommittedBatch,
+    EventArtifactRequirement, KernelEventEnvelope, LogicalEventKey, ObservedRunStatus,
+    PersistedKernelEventRecord, PreparedArtifactBytes, PreparedCommitBundle, ProjectionSnapshot,
+    ProjectionSnapshotParts, ResourceLaneAuthoritySet, ResourceLaneKey, ResourceLaneProjection,
+    RetainedArtifactReadFuture, RetainedArtifactReadProvider, RunEventStore, RunObservation,
+    RunObservationPage, RunObservationQuery, RunObservationStore, RunState, StoreError,
+    StoreErrorInspection, StreamSeq, VerifiedRunArtifactBytes,
 };
 use ring::hmac;
 use serde_json::Value;
@@ -730,11 +730,12 @@ fn frontier_sort_key() -> Vec<u8> {
 }
 
 fn admit_artifact_evidence(
-    artifacts: &mut BTreeMap<ArtifactId, ArtifactEvidenceRef>,
+    artifacts: &mut ArtifactAuthorityMap,
     admitted_artifacts: &[ArtifactEvidenceRef],
 ) -> Result<()> {
     for evidence in admitted_artifacts {
-        if let Some(existing) = artifacts.get(&evidence.artifact_id) {
+        let key = (evidence.artifact_id.clone(), evidence.evidence_hash()?);
+        if let Some(existing) = artifacts.get(&key) {
             if existing != evidence {
                 return Err(StoreError::ArtifactEvidenceMismatch {
                     artifact_id: evidence.artifact_id.clone(),
@@ -744,7 +745,7 @@ fn admit_artifact_evidence(
             }
             continue;
         }
-        artifacts.insert(evidence.artifact_id.clone(), evidence.clone());
+        artifacts.insert(key, evidence.clone());
     }
     Ok(())
 }
@@ -1859,9 +1860,9 @@ fn commit_authority_row_from_row(row: PgRow) -> Result<CommitAuthorityRow> {
 async fn load_artifacts(
     tx: &mut Transaction<'_, Postgres>,
     run_id: &RunId,
-) -> Result<BTreeMap<ArtifactId, ArtifactEvidenceRef>> {
+) -> Result<ArtifactAuthorityMap> {
     let rows = sqlx::query(
-        "SELECT a.artifact_id, a.digest, a.byte_len, a.media_type, a.schema_id, \
+        "SELECT a.artifact_id, a.evidence_hash, a.digest, a.byte_len, a.media_type, a.schema_id, \
          a.semantic_type_id, a.producer_node_id, a.producer_seed_id, a.artifact_role \
          FROM artifact_admissions a \
          INNER JOIN run_artifact_admissions ra \
@@ -1878,6 +1879,10 @@ async fn load_artifacts(
             .try_get("artifact_id")
             .map_err(|error| database_error("failed to decode artifact evidence row", error))?;
         let artifact_id = parse_identity::<ArtifactId>(&artifact_id)?;
+        let evidence_hash: String = row
+            .try_get("evidence_hash")
+            .map_err(|error| database_error("failed to decode artifact evidence row", error))?;
+        let evidence_hash = parse_identity::<ContentDigest>(&evidence_hash)?;
         let evidence = ArtifactEvidenceParts {
             artifact_id: artifact_id.clone(),
             digest: row
@@ -1906,7 +1911,15 @@ async fn load_artifacts(
                 .map_err(|error| database_error("failed to decode artifact evidence row", error))?,
         }
         .into_evidence_ref()?;
-        if let Some(existing) = artifacts.get(&artifact_id) {
+        if evidence.evidence_hash()? != evidence_hash {
+            return Err(StoreError::ArtifactEvidenceMismatch {
+                artifact_id,
+                field: "evidence_hash",
+            }
+            .into());
+        }
+        let key = (artifact_id.clone(), evidence_hash);
+        if let Some(existing) = artifacts.get(&key) {
             if existing != &evidence {
                 return Err(StoreError::ArtifactEvidenceMismatch {
                     artifact_id,
@@ -1915,7 +1928,7 @@ async fn load_artifacts(
                 .into());
             }
         } else {
-            artifacts.insert(artifact_id, evidence);
+            artifacts.insert(key, evidence);
         }
     }
     Ok(artifacts)
@@ -3427,6 +3440,22 @@ mod tests {
         digest: ContentDigest,
         role: ArtifactRole,
     ) -> KernelEventPayload {
+        retention_refs_appended_with_reason(
+            run_id,
+            artifact_id,
+            digest,
+            role,
+            events::RetentionReason::RuntimeEvidence,
+        )
+    }
+
+    fn retention_refs_appended_with_reason(
+        run_id: RunId,
+        artifact_id: ArtifactId,
+        digest: ContentDigest,
+        role: ArtifactRole,
+        reason: events::RetentionReason,
+    ) -> KernelEventPayload {
         KernelEventPayload::RetentionRefsAppended(events::RetentionRefsAppended {
             run_id,
             spec_hash: spec_hash(1),
@@ -3435,7 +3464,7 @@ mod tests {
                 role,
                 content_digest: digest,
             }],
-            reason: events::RetentionReason::RuntimeEvidence,
+            reason,
         })
     }
 
@@ -3737,6 +3766,82 @@ mod tests {
             error,
             PostgresStoreError::Store(StoreError::CommitConflict { .. })
         ));
+
+        drop_schema(&store, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn artifact_authority_accepts_distinct_evidence_for_same_artifact_id() {
+        let (store, schema) = test_store().await;
+        let run = run_id(122);
+        let artifact = artifact_id(123);
+        let digest = content_digest(123);
+        let first_evidence =
+            store_artifact_ref(artifact.clone(), digest.clone(), ArtifactRole::StateOutput);
+        let mut second_evidence = first_evidence.clone();
+        second_evidence.schema_id = Some(schema_id("mfm.test.alternate_position", 124));
+        assert_ne!(
+            first_evidence.evidence_hash().expect("first evidence hash"),
+            second_evidence
+                .evidence_hash()
+                .expect("second evidence hash")
+        );
+
+        append_prepared(
+            &store,
+            request(
+                run.clone(),
+                1,
+                "same-id-run-start",
+                vec![run_admitted(run.clone())],
+            ),
+            vec![spec_artifact_ref(), certificate_artifact_ref()],
+        )
+        .await
+        .expect("run start");
+
+        let first_request = mfm_store::v1::CommitRequest::from_payloads(
+            run.clone(),
+            store.expected_next_seq(&run).await.expect("next seq"),
+            CommitKey::new("same-id-first-evidence").expect("commit key"),
+            vec![retention_refs_appended(
+                run.clone(),
+                artifact.clone(),
+                digest.clone(),
+                ArtifactRole::StateOutput,
+            )],
+            vec![first_evidence.clone()],
+            CommitPreconditions {
+                required_run_state: RequiredRunState::Started,
+                ..CommitPreconditions::default()
+            },
+        )
+        .expect("typed first request");
+        append_prepared(&store, first_request, vec![first_evidence])
+            .await
+            .expect("append first evidence");
+
+        let second_request = mfm_store::v1::CommitRequest::from_payloads(
+            run.clone(),
+            store.expected_next_seq(&run).await.expect("next seq"),
+            CommitKey::new("same-id-second-evidence").expect("commit key"),
+            vec![retention_refs_appended_with_reason(
+                run.clone(),
+                artifact,
+                digest,
+                ArtifactRole::StateOutput,
+                events::RetentionReason::PublicOutput,
+            )],
+            vec![second_evidence.clone()],
+            CommitPreconditions {
+                required_run_state: RequiredRunState::Started,
+                ..CommitPreconditions::default()
+            },
+        )
+        .expect("typed second request");
+        append_prepared(&store, second_request, vec![second_evidence])
+            .await
+            .expect("append second evidence for same artifact id");
 
         drop_schema(&store, &schema).await;
     }

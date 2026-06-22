@@ -3043,6 +3043,82 @@ fn prepared_commit_idempotency_fingerprint_includes_admitted_artifacts() {
 }
 
 #[test]
+fn artifact_authority_accepts_distinct_evidence_for_same_artifact_id() {
+    let run_id = run_id(121);
+    let artifact_id = artifact_id(122);
+    let digest = content_digest(122);
+    let first_evidence = store_artifact_ref(artifact_id.clone(), digest.clone());
+    let mut second_evidence = first_evidence.clone();
+    second_evidence.schema_id = Some(schema_id("mfm.test.alternate_position", 124));
+    assert_ne!(
+        first_evidence.evidence_hash().expect("first evidence hash"),
+        second_evidence
+            .evidence_hash()
+            .expect("second evidence hash")
+    );
+
+    let mut store = StoreContractRunStore::new();
+    store
+        .append_prepared_commit(run_start_request(run_id.clone(), "same-id-run-start"))
+        .expect("append run start");
+    store
+        .append_prepared_commit_with_artifacts(
+            typed_commit_request! {
+                run_id: run_id.clone(),
+                expected_next_seq: store.expected_next_seq(&run_id),
+                commit_key: CommitKey::new("same-id-first-evidence").expect("commit key"),
+                payloads: vec![KernelEventPayload::RetentionRefsAppended(
+                    events::RetentionRefsAppended {
+                        run_id: run_id.clone(),
+                        spec_hash: spec_hash(1),
+                        refs: vec![events::RetentionRef {
+                            artifact_id: artifact_id.clone(),
+                            role: ArtifactRole::StateOutput,
+                            content_digest: digest.clone(),
+                        }],
+                        reason: events::RetentionReason::RuntimeEvidence,
+                    },
+                )],
+                required_artifacts: vec![first_evidence.clone()],
+                preconditions: CommitPreconditions {
+                    required_run_state: RequiredRunState::Started,
+                    ..CommitPreconditions::default()
+                },
+            },
+            vec![first_evidence],
+        )
+        .expect("append first evidence");
+
+    store
+        .append_prepared_commit_with_artifacts(
+            typed_commit_request! {
+                run_id: run_id.clone(),
+                expected_next_seq: store.expected_next_seq(&run_id),
+                commit_key: CommitKey::new("same-id-second-evidence").expect("commit key"),
+                payloads: vec![KernelEventPayload::RetentionRefsAppended(
+                    events::RetentionRefsAppended {
+                        run_id: run_id.clone(),
+                        spec_hash: spec_hash(1),
+                        refs: vec![events::RetentionRef {
+                            artifact_id,
+                            role: ArtifactRole::StateOutput,
+                            content_digest: digest,
+                        }],
+                        reason: events::RetentionReason::PublicOutput,
+                    },
+                )],
+                required_artifacts: vec![second_evidence.clone()],
+                preconditions: CommitPreconditions {
+                    required_run_state: RequiredRunState::Started,
+                    ..CommitPreconditions::default()
+                },
+            },
+            vec![second_evidence],
+        )
+        .expect("append second evidence for same artifact id");
+}
+
+#[test]
 fn admitted_artifacts_are_rolled_back_when_commit_validation_fails() {
     let run_id = run_id(56);
     let artifact_id = artifact_id(57);

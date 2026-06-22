@@ -4946,6 +4946,12 @@ pub mod v1 {
     /// Unique logical-key payload hashes already present for run streams.
     pub type UniqueLogicalPayloads = BTreeMap<(RunId, LogicalEventKey), ContentDigest>;
 
+    /// Exact artifact authority key: content identity plus canonical evidence identity.
+    pub type ArtifactAuthorityKey = (ArtifactId, ContentDigest);
+
+    /// Artifact authority indexed by exact `(artifact_id, evidence_hash)`.
+    pub type ArtifactAuthorityMap = BTreeMap<ArtifactAuthorityKey, ArtifactEvidenceRef>;
+
     /// Authoritative state needed to validate and stage one absent commit-key append.
     ///
     /// Durable stores load this from their run stream, artifact table, logical-key table, and
@@ -4954,8 +4960,8 @@ pub mod v1 {
     /// stale `expected_next_seq` checks.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct CommitBase {
-        /// Artifact evidence recorded before event commit.
-        pub artifacts: BTreeMap<ArtifactId, ArtifactEvidenceRef>,
+        /// Exact artifact evidence recorded before event commit.
+        pub artifacts: ArtifactAuthorityMap,
         /// Logical keys already present in the run stream.
         pub logical_keys: LogicalKeySet,
         /// Unique logical keys and their current payload hash.
@@ -5046,7 +5052,7 @@ pub mod v1 {
     struct RunMemoryCore {
         streams: BTreeMap<RunId, Vec<CommittedBatch>>,
         commit_keys: BTreeMap<(RunId, CommitKey), CommitKeyRecord>,
-        artifacts: BTreeMap<ArtifactId, ArtifactEvidenceRef>,
+        artifacts: ArtifactAuthorityMap,
         artifact_bytes: BTreeMap<(ArtifactId, ContentDigest), (Vec<u8>, ArtifactEvidenceRef)>,
         logical_keys: BTreeSet<(RunId, LogicalEventKey)>,
         unique_logical_payloads: BTreeMap<(RunId, LogicalEventKey), ContentDigest>,
@@ -5065,7 +5071,15 @@ pub mod v1 {
         }
 
         fn validate_artifact_evidence(&self, evidence: &ArtifactEvidenceRef) -> Result<()> {
-            let Some(stored) = self.artifacts.get(&evidence.artifact_id) else {
+            let key = artifact_authority_key(evidence)?;
+            let stored = self.artifacts.get(&key).or_else(|| {
+                self.artifacts
+                    .iter()
+                    .find_map(|((artifact_id, _), stored)| {
+                        (artifact_id == &evidence.artifact_id).then_some(stored)
+                    })
+            });
+            let Some(stored) = stored else {
                 return Err(StoreError::MissingArtifact {
                     artifact_id: evidence.artifact_id.clone(),
                 });
@@ -5127,12 +5141,25 @@ pub mod v1 {
             &self,
             requirement: &EventArtifactRequirement,
         ) -> Result<()> {
-            let Some(stored) = self.artifacts.get(&requirement.artifact_id) else {
+            let mut saw_artifact_id = false;
+            for ((artifact_id, _), evidence) in &self.artifacts {
+                if artifact_id != &requirement.artifact_id {
+                    continue;
+                }
+                saw_artifact_id = true;
+                if validate_artifact_requirement_against_evidence(requirement, evidence).is_ok() {
+                    return Ok(());
+                }
+            }
+            if !saw_artifact_id {
                 return Err(StoreError::MissingArtifact {
                     artifact_id: requirement.artifact_id.clone(),
                 });
-            };
-            validate_artifact_requirement_against_evidence(requirement, stored)
+            }
+            Err(StoreError::ArtifactEvidenceMismatch {
+                artifact_id: requirement.artifact_id.clone(),
+                field: "artifact",
+            })
         }
 
         fn validate_preconditions(&self, request: &CommitRequest) -> Result<()> {
@@ -6088,11 +6115,12 @@ pub mod v1 {
     }
 
     fn admit_artifact_evidence(
-        artifacts: &mut BTreeMap<ArtifactId, ArtifactEvidenceRef>,
+        artifacts: &mut ArtifactAuthorityMap,
         admitted_artifacts: &[ArtifactEvidenceRef],
     ) -> Result<()> {
         for evidence in admitted_artifacts {
-            if let Some(existing) = artifacts.get(&evidence.artifact_id) {
+            let key = artifact_authority_key(evidence)?;
+            if let Some(existing) = artifacts.get(&key) {
                 if existing != evidence {
                     return Err(StoreError::ArtifactEvidenceMismatch {
                         artifact_id: evidence.artifact_id.clone(),
@@ -6101,9 +6129,13 @@ pub mod v1 {
                 }
                 continue;
             }
-            artifacts.insert(evidence.artifact_id.clone(), evidence.clone());
+            artifacts.insert(key, evidence.clone());
         }
         Ok(())
+    }
+
+    fn artifact_authority_key(evidence: &ArtifactEvidenceRef) -> Result<ArtifactAuthorityKey> {
+        Ok((evidence.artifact_id.clone(), evidence.evidence_hash()?))
     }
 
     fn compare_artifact_field<T: PartialEq>(
