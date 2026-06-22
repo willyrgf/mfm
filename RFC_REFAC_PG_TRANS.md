@@ -179,6 +179,7 @@ run_artifact_admissions
 commit_artifact_evidence
 resource_lane_claim_events
 resource_lane_release_events
+resource_lane_transitions
 ```
 
 Derived admission indexes such as `logical_key_observations` are append-only and may be written in
@@ -242,6 +243,13 @@ Postgres with `pg_current_xact_id()` and is used only for snapshot-sealed observ
 run-local stream order. Strict authority remains `(run_id, seq, ordinal)` plus committed artifact
 evidence and Rust verification.
 
+`append_xid` must be database-owned. The `DEFAULT pg_current_xact_id()` shown in the schema is not
+enough by itself, because production inserts could otherwise override it. The migration must install
+a `BEFORE INSERT` trigger or equivalent database-owned mechanism that overwrites `commits.append_xid`
+and `run_commit_log.append_xid` with the inserting top-level transaction id. Production insert
+statements must not provide `append_xid`, and schema validation must verify the trigger/function is
+present.
+
 The target architecture must not introduce a global commit-order advisory lock, table lock, global
 counter row, or equivalent serialization point to assign platform-wide commit positions. Independent
 runs must be able to commit concurrently unless they contend on the same run id or on explicitly
@@ -258,9 +266,30 @@ material is split into two canonical records:
   artifact evidence, admitted artifact evidence, and the accepted base stream identity or base
   stream hash.
 
+For commits with store-filled fields, the persisted prepared authority record must distinguish
+prepared intent from materialized event payload. `prepared_authority_hash` covers
+`prepared_payload_intent`, store-fill policy ids, holder identities, preconditions, and evidence
+requirements. It does not pretend to hash values that runtime cannot know yet, such as a
+store-assigned resource-lane fencing token. The materialized event payloads, including every
+store-filled value, are persisted in `run_events.payload_canonical_json` and bound by
+`commit_batch_hash`. Strict load verifies both records: prepared intent proves what runtime asked
+storage to admit, while the materialized event payload proves what storage committed.
+
 Artifact byte payloads do not need to be included directly if their evidence binds digest and byte
 length and the store verifies bytes before insert. Strict load/rebuild tooling must reverify both
 hashes from persisted canonical bytes instead of treating them as append-time-only metadata.
+
+The idempotency record must include every field that can change the committed event batch, artifact
+evidence set, semantic authority, or public outcome, excluding only a closed list of retry-volatile
+precondition fields needed to recognize an already accepted `(run_id, commit_key)` before stale
+sequence checks. On duplicate `(run_id, commit_key)`, the store must compare the request's
+idempotency canonical bytes with the persisted bytes. A mismatch is `IdempotencyConflict`. A match
+returns the persisted commit/result from stored rows; it must not return request-computed
+`commit_id`, request-computed batch hashes, or request-local authority objects. If
+`prepared_authority_hash` differs for a matching idempotency record, the store may still return the
+persisted result only when the difference is in the closed retry-volatile field set and the
+persisted canonical authority proves the accepted commit. Any other difference is
+`IdempotencyConflict`.
 
 `commit_batch_hash` binds the commit row to the stored ordered event batch and commit artifact
 evidence. It must be computed from canonical MFM bytes over the resulting event envelopes and
@@ -272,17 +301,49 @@ event payload. Strict load recomputes the final hash from persisted canonical by
 authority. Database checks should remain structural unless a DB-side MFM canonicalizer is promoted
 to a first-class maintained component.
 
+All commit-level hashes must be domain-separated and versioned. The persisted canonical bytes for
+`commit_idempotency_hash`, `prepared_authority_hash`, and `commit_batch_hash` must include or be
+paired with the canonicalizer identity and hash-domain version used to compute them. Strict load must
+reject unknown or mismatched canonicalizer identities instead of silently recomputing with a different
+schema.
+
 The implementation must enforce structurally before commit that:
 
 - event ordinals for a commit are contiguous `0..event_count-1`
 - every event row for `(run_id, seq)` carries the commit row's `commit_key` and `commit_id`
 - the number of inserted event rows equals `event_count`
 - commit artifact evidence rows are bound to the same `(run_id, seq, commit_key, commit_id)`
+- every commit has exactly one `run_commit_log` row bound to the same
+  `(commit_id, run_id, seq, event_count, commit_batch_hash, append_xid)`
+- any commit containing `ResourceLaneClaimed` or `ResourceLaneReleased` has exact one-to-one
+  event-to-mirror-to-transition completeness
 - the canonical bytes needed for Rust strict-load hash verification are persisted without relying on
   Postgres `jsonb::text`
 
 Strict load paths must also cross-check these invariants so database corruption is detected before
 authority objects are minted.
+
+The structural checks above must be commit-time checks, not best-effort comments. The Postgres
+schema must use deferrable constraint triggers or an equivalent transaction-final validation path to
+verify each `(run_id, seq)` commit before it can commit: event count matches `event_count`, ordinals
+are exactly contiguous, event rows all bind to the same commit key/id, and commit artifact evidence
+rows bind to the same commit tuple. Rust strict-load checks remain mandatory, but they are a
+corruption guard, not the only thing preventing malformed authority rows from being committed.
+
+The same transaction-final validation must reject committed authority rows without cursor authority:
+every inserted `commits` row must have exactly one matching `run_commit_log` row in the same
+transaction before commit. That row must bind the same `(commit_id, run_id, seq, event_count,
+commit_batch_hash, append_xid)` and describe the committed event ordinal range. The
+`run_commit_log -> commits` foreign key rejects orphan cursor rows; the reverse validation rejects
+committed authority rows that would be invisible to list/watch.
+
+For lane-bearing commits, transaction-final validation must also prove exact one-to-one
+event-to-mirror-to-transition completeness. No `ResourceLaneClaimed` or `ResourceLaneReleased` event
+may commit without its corresponding claim/release mirror row and lane-transition row, and no
+mirror/transition row may commit without the exact source event. The same validation must prove
+lane-local transition sequence continuity, previous-transition hash, active-holder release legality,
+and claim-token monotonicity for the affected lanes. Strict load repeats these checks, but they are
+commit-time admission requirements.
 
 `run_events` records store-owned event envelopes.
 
@@ -398,11 +459,15 @@ evidence_hash TEXT PRIMARY KEY
 artifact_id TEXT NOT NULL REFERENCES artifact_blobs(artifact_id) ON DELETE RESTRICT
 digest TEXT NOT NULL
 byte_len BIGINT NOT NULL
+evidence_schema_version TEXT NOT NULL
 media_type TEXT NOT NULL
 schema_id TEXT NULL
 semantic_type_id TEXT NULL
 producer_node_id TEXT NULL
 producer_seed_id TEXT NULL
+producer_descriptor_hash TEXT NULL
+certified_spec_hash TEXT NULL
+requirement_provenance_hash TEXT NULL
 artifact_role TEXT NOT NULL
 evidence_canonical_json BYTEA NOT NULL
 inserted_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp()
@@ -424,6 +489,14 @@ The evidence hash is canonical MFM evidence, not a hash of JSONB text. The evide
 against the blob artifact id, digest, and byte length before insertion. The evidence canonical bytes
 must contain the same `artifact_id`, `digest`, and `byte_len` stored in the relational columns, and
 strict load paths must recompute `evidence_hash` from `evidence_canonical_json`.
+
+At minimum, canonical evidence must bind the evidence schema version, artifact content identity
+(`artifact_id`, digest, byte length), media/schema/semantic type, artifact role, producer identity,
+certified spec or descriptor context needed to interpret producer ids, and requirement provenance
+when the artifact satisfies a run/event requirement. Nullable relational convenience columns are
+only query copies of this canonical evidence. If a column such as `producer_node_id` or
+`producer_seed_id` is present, the canonical evidence must also bind the certified descriptor/spec
+context that gives that id meaning.
 
 `run_artifact_admissions` and `commit_artifact_evidence` bind evidence to run/commit authority:
 
@@ -750,15 +823,15 @@ Runtime lifecycle for lane-bearing states:
    `StateAttemptStarted`, the attempt is still open, the claim matches certified capability
    requirements and preflight evidence, and no active conflicting lane claim exists. While holding
    the per-lane admission lock, the store assigns the next lane-local fencing token, materializes the
-   final `ResourceLaneClaimed` event, and inserts the run event and relational lane claim row
-   atomically with that commit.
+   final `ResourceLaneClaimed` event, and inserts the run event, relational lane claim row, and
+   lane-transition row atomically with that commit.
 8. Only after that claim commit succeeds does runtime receive a `HeldResourceLaneSet` and build or
    run the state invocation.
 9. Runtime validates that any `SideEffectInvocationPrepared.resource_key` exactly matches the held
    preflight claim.
 10. Runtime releases the lane only through terminal side-effect, recovery, cleanup, or another
     certified release prepared commit that emits `ResourceLaneReleased` and is admitted by the
-    store.
+    store with the exact release mirror row and lane-transition row.
 
 State or adapter output must echo the held lane claim. A mismatch is a runtime/store admission error,
 not a recoverable state result. Recovery paths that may touch live IO for a lane-bearing side effect
@@ -776,15 +849,23 @@ Normal contention is not corruption and not an attempt failure. If the claim int
 active conflicting lane exists, the store returns `ResourceLaneClaimBlocked` without inserting a
 commit, run event, lane mirror row, or terminal attempt event. The attempt remains open and parked
 before invocation. Scheduler/recovery may retry claim admission when the conflicting lane releases,
-run independent work with a scoped independence witness, or interrupt/fail the still-pre-invocation
-attempt under the ordinary no-side-effect-authority rules. This blocked outcome may be recorded as
-an operational observation, but it is not semantic stream authority.
+run independent work with a scoped independence witness, or keep the attempt parked. A blocked lane
+claim by itself must never authorize `StateAttemptFailed`, saga failure, run failure, or any terminal
+attempt disposition. Termination requires separate certified cancellation, interruption, timeout, or
+operator policy unrelated to ordinary lane contention, committed through the normal prepared
+authority path. Because no authority row is committed, this blocked outcome must not be persisted in
+MFM domain tables or Postgres read-model tables as if it were derived from committed history. It may
+be emitted as ephemeral logs/metrics or stored only in non-authoritative operational telemetry
+outside the MFM transition/read-model schema. Public list/watch may derive lane-blocked display from
+verified open-attempt history plus active lane transition authority at read time, or omit that
+display.
 
 Crash behavior is stream-driven:
 
 - before `ResourceLaneClaimed`, including after a `ResourceLaneClaimBlocked` outcome, recovery
-  retries pure preflight and claim admission, parks the open attempt as lane-blocked, or interrupts/
-  fails the open attempt if no side-effect authority was acquired
+  retries pure preflight and claim admission, parks the open attempt as lane-blocked, or applies a
+  separate certified cancellation/interruption/deadline policy if one exists; ordinary contention is
+  never itself the failure proof
 - after `ResourceLaneClaimed` but before `SideEffectInvocationPrepared`, recovery continues the same
   attempt using the committed held claim or releases it through a certified cleanup/interruption
   commit
@@ -814,9 +895,10 @@ The initial Postgres implementation must use sorted per-lane transaction-scoped 
 mutating lane authority rows. The lock key must be derived from the canonical lane identity:
 `(namespace, key_schema_id, key_canonical_json, mode)`. The store must acquire those locks before
 checking active conflicting claims, and it must perform the active-claim check plus claim/release row
-insertions in the same transaction while holding the locks. A future implementation may replace
-advisory locks only with a reviewed DB-enforced mechanism that proves the same no-double-claim
-property, such as serializable admission plus mandatory retry on serialization failure.
+and lane-transition row insertions in the same transaction while holding the locks. A future
+implementation may replace advisory locks only with a reviewed DB-enforced mechanism that proves the
+same no-double-claim property, such as serializable admission plus mandatory retry on serialization
+failure.
 
 These locks serialize admission only. They are not the execution-duration resource lock.
 Execution-duration authority is represented by committed lane claim/release events and their
@@ -826,9 +908,19 @@ authority.
 
 Fencing tokens are store-assigned, lane-local, and monotonic. Runtime must not assign or guess them.
 While holding the concrete lane admission lock, storage computes the next token from append-only
-claim history for `(namespace, key_schema_id, key_canonical_json, mode)` and inserts exactly one
-claim row with that token. This is a lane-local sequence, not a global counter and not a mutable
-resource-lane state row.
+lane-transition history for `(namespace, key_schema_id, key_canonical_json, mode)` and inserts
+exactly one claim row with that token. This is a lane-local sequence, not a global counter and not a
+mutable resource-lane state row.
+
+Claim/release ordering also needs durable lane-local authority. The per-lane admission lock is only
+an admission mechanism; it is not replayable evidence. Storage must therefore assign a
+`lane_transition_seq` under the same concrete lane lock for every admitted `ResourceLaneClaimed` and
+`ResourceLaneReleased` transition. This sequence is lane-local, transactionally derived from
+committed `resource_lane_transitions` rows, and must not use PostgreSQL sequences or identity
+columns. Strict load folds `resource_lane_transitions` by `(lane identity, lane_transition_seq)` to
+prove that a claim only occurs while the lane is unheld, a release is by the active holder, and claim
+fencing tokens are the unique next lane-local claim tokens. `append_xid` and run-local `(run_id, seq,
+ordinal)` must not be used as semantic lane order across runs.
 
 The prepared claim commit uses a store-filled-field protocol:
 
@@ -893,17 +985,95 @@ resource_lane_release_events
   source_event_type TEXT NOT NULL CHECK (source_event_type = 'ResourceLaneReleased')
   source_event_payload_hash TEXT NOT NULL
   created_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp()
+
+resource_lane_transitions
+  namespace TEXT NOT NULL
+  key_schema_id TEXT NOT NULL
+  key_canonical_json BYTEA NOT NULL
+  mode TEXT NOT NULL CHECK (mode IN ('exclusive'))
+  lane_transition_seq BIGINT NOT NULL
+  transition_kind TEXT NOT NULL CHECK (transition_kind IN ('claim', 'release'))
+  claim_id TEXT NOT NULL
+  release_id TEXT NULL
+  claim_fencing_token BIGINT NOT NULL
+  previous_transition_hash TEXT NULL
+  transition_hash TEXT NOT NULL
+  run_id TEXT NOT NULL
+  commit_id TEXT NOT NULL REFERENCES commits(commit_id) ON DELETE RESTRICT
+  source_seq BIGINT NOT NULL
+  source_ordinal INTEGER NOT NULL
+  source_event_id TEXT NOT NULL
+  source_event_type TEXT NOT NULL
+  source_event_payload_hash TEXT NOT NULL
+  created_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp()
 ```
 
-Each lane claim/release row is a relational mirror of a committed lane event. Schema constraints or
-strict-load validation must bind `(run_id, source_seq, source_ordinal, source_event_id, commit_id)`
-to the corresponding `run_events` row and must verify that the event payload carries the same lane
-claim/release material.
+Each lane claim/release row is a relational mirror of a committed lane event.
+`resource_lane_transitions` is the durable lane-local ordering authority over those mirrored events.
+Schema constraints or strict-load validation must bind
+`(run_id, source_seq, source_ordinal, source_event_id, commit_id)` to the corresponding `run_events`
+row and must verify that the event payload carries the same lane claim/release material.
+
+Required lane constraints include:
+
+```text
+resource_lane_claim_events:
+  UNIQUE (namespace, key_schema_id, key_canonical_json, mode, fencing_token)
+  UNIQUE (
+    claim_id,
+    run_id,
+    node_id,
+    attempt_id,
+    ledger_key,
+    invocation_epoch,
+    namespace,
+    key_schema_id,
+    key_canonical_json,
+    mode,
+    fencing_token
+  )
+
+resource_lane_release_events:
+  UNIQUE (
+    release_id,
+    claim_id,
+    run_id,
+    node_id,
+    attempt_id,
+    ledger_key,
+    invocation_epoch,
+    namespace,
+    key_schema_id,
+    key_canonical_json,
+    mode,
+    claim_fencing_token
+  )
+
+resource_lane_transitions:
+  PRIMARY KEY (namespace, key_schema_id, key_canonical_json, mode, lane_transition_seq)
+  UNIQUE (transition_hash)
+  UNIQUE (claim_id, transition_kind)
+  UNIQUE (release_id)
+  CHECK (lane_transition_seq >= 1)
+  CHECK (
+    (transition_kind = 'claim' AND release_id IS NULL AND source_event_type = 'ResourceLaneClaimed')
+    OR
+    (transition_kind = 'release' AND release_id IS NOT NULL AND source_event_type = 'ResourceLaneReleased')
+  )
+```
+
+The transition hash is canonical MFM bytes over the lane identity, transition sequence, transition
+kind, holder identity, claim/release id, claim fencing token, source event binding, and
+`previous_transition_hash`. For `lane_transition_seq = 1`, `previous_transition_hash` is null.
+For later transitions, it must equal the previous transition's hash for the same lane. Strict load
+must verify the transition hash chain, sequence contiguity, claim-token monotonicity, and active
+holder fold before any lane authority is trusted.
 
 The implementation should prefer explicit composite bindings over loose single-column references.
 At minimum, claim rows must bind their source event by run, sequence, ordinal, event id, commit id,
 event type, and event payload hash. Release rows must bind both their release source event and the
-exact claim holder they release:
+exact claim holder they release. Transition rows must bind their source event and the exact claim or
+release mirror row they order:
 
 ```text
 resource_lane_claim_events:
@@ -972,15 +1142,44 @@ resource_lane_release_events:
       mode,
       fencing_token
     )
+
+resource_lane_transitions:
+  FOREIGN KEY (
+    run_id,
+    source_seq,
+    source_ordinal,
+    source_event_id,
+    commit_id,
+    source_event_type,
+    source_event_payload_hash
+  )
+    REFERENCES run_events(
+      run_id,
+      seq,
+      ordinal,
+      event_id,
+      commit_id,
+      event_type,
+      payload_hash
+    )
 ```
+
+Claim transitions must reference the exact `resource_lane_claim_events` row by claim id, holder,
+lane identity, fencing token, and source event binding. Release transitions must reference the exact
+`resource_lane_release_events` row by release id, claim id, holder, lane identity, claim fencing
+token, and source event binding. If nullable holder fields make direct composite FKs impractical,
+use normalized non-null sentinel columns or deferrable validation triggers with the same proof
+obligation.
 
 If PostgreSQL null semantics make a direct composite FK unsuitable for nullable holder fields such
 as `ledger_key` or `invocation_epoch`, the schema must use normalized non-null sentinel columns or a
 deferrable validation trigger with the same proof obligation. A release row that does not prove it
 belongs to the exact holder and exact lane must be rejected.
 
-`current_resource_lanes` is a view or observation table derived from claim/release rows. It is useful
-for scheduling and operations, but the authority is the append-only claim/release history plus
+`current_resource_lanes` is a view or observation table derived from lane transitions. It is useful
+for operational dashboards, wakeups, and scheduling hints, but it is not scheduling authority.
+Transition selection, independence witnesses, append admission, and recovery must use strict
+active-lane reads verified from `resource_lane_transitions`, claim/release event mirrors, and
 store-enforced holder checks.
 
 At append time, the store must reject:
@@ -988,13 +1187,36 @@ At append time, the store must reject:
 - `SideEffectInvocationPrepared` with an exclusive resource key but no active committed held lane
 - a prepared resource key that differs from the preflight claim
 - terminal/recovery commits from a holder that does not own the lane
+- an attempt or side-effect terminal commit that would leave active release-required lane claims for
+  the exact holder
+- a saga terminal commit that would leave active release-required lane claims in that saga scope
+- a run terminal commit that would leave any active release-required lane claim for that run
 - standalone resource-lane acquire/release APIs that mint authority outside prepared commits
 - any storage-derived global lane, single `global` lock row, or payload-inferred lane claim
+
+For terminal scopes, the required release may already exist earlier in the verified prefix or be
+included in the same terminal commit under a documented terminal-release rule. Otherwise append
+admission rejects the terminal commit.
+
+The same-commit terminal-release rule has a closed batch shape. It may include only releases for
+active release-required claims in the terminal scope, every release must bind the exact holder and
+lane transition authority for that claim, and unrelated releases are rejected. Batch validation must
+fold the existing lane-transition prefix plus same-commit release transitions in `(seq, ordinal)`
+order before evaluating terminal closure. Every `ResourceLaneReleased` event that satisfies a
+terminal disposition must appear at an earlier ordinal than the terminal disposition event it
+satisfies. Strict load must enforce the same ordering rule; the terminal event observes only prior
+same-commit releases plus the verified prefix. The rule does not allow acquiring a new lane in the
+same terminal commit.
 
 The store must distinguish invalid lane claims from normal contention. A malformed claim, stale
 attempt, unknown requirement, mismatched holder, or illegal phase is an admission error. A valid
 claim intent blocked by an active conflicting lane is `ResourceLaneClaimBlocked` and leaves the
 stream unchanged.
+
+Strict load must reject histories where an attempt/side-effect holder, saga scope, or run reaches a
+terminal state while release-required claims remain active for that scope, unless the verified prefix
+or same terminal commit proves the corresponding release rule. This is a strict-load invariant, not
+just a scheduler cleanup preference.
 
 The old global resource-lane mutex/table shape must be deleted, not hidden behind a compatibility
 path.
@@ -1005,13 +1227,21 @@ Read models live in Postgres and are owned by the Postgres storage layer only as
 materialization surfaces. Storage owns tables, views, indexes, rebuild procedures, drift validation,
 and durable observation cursors. It does not own runtime projection semantics.
 
-Strict semantics stay below the app assembly boundary. `mfm-store` owns stream/projection contracts,
-`ProjectionSnapshot` construction, and strict fold rules. `mfm-runtime` owns spec-aware validation,
-recovery, side-effect lifecycle, manual-resolution use, retention use, resume, replay, and strict
-status behavior. `mfm-app` assembles stores, registries, artifacts, and capabilities, orchestrates
-verified reads, and mints public read authorities only after store/runtime verification. App and
-framework code do not write observation rows directly and must not own workflow or projection
-semantics.
+Strict semantics stay below the app assembly boundary. `mfm-store` owns spec-independent stream
+contracts, projection fold contracts, and strict stream fold rules. `mfm-runtime` owns
+spec-aware `ProjectionSnapshot` construction, validation, recovery, side-effect lifecycle,
+manual-resolution use, retention use, resume, replay, and strict status behavior. `mfm-app`
+assembles stores, registries, artifacts, and capabilities, orchestrates verified reads, and mints
+public read authorities only after store/runtime verification. App and framework code do not write
+observation rows directly and must not own workflow or projection semantics.
+
+Authority-produced observation rows use one explicit sink boundary: `RunObservationSink` (name
+finalized during implementation) implemented by the Postgres observation store and called only by
+the authority-owning crates that produced the verified projection row. Initial allowed callers are
+`mfm-store` for spec-independent stream projection contracts and `mfm-runtime` for spec-aware
+lifecycle/recovery observations. `mfm-app` may orchestrate these calls as part of verified services
+but must not construct semantic observation contents itself. Every semantic-looking observation row
+must record `producer_authority`, `projection_version`, source provenance, and row hash.
 
 SQL must not become a second semantic projection engine. SQL derivation is limited to mechanical
 facts that can be copied or deterministically reshaped from committed scalar/canonical-byte columns
@@ -1099,10 +1329,17 @@ but it must bind the source event id, payload hash, logical key, and commit id t
 authority event row. A fact row must not rely on `(run_id, seq, ordinal)` alone when it stores
 redundant source metadata.
 
-Aggregate summaries are not one-event facts. A current run summary, saga mode, latest state,
-attempt summary, public-output summary, or dashboard row depends on a stream prefix, a commit
-prefix, or multiple source events. Those rows must either remain views over event-sourced delta
-facts or carry aggregate provenance:
+Aggregate summaries are not one-event facts. Mechanical aggregates such as run head, commit count,
+or change-feed frontiers may remain SQL views over event-sourced delta facts when they do not
+interpret certified runtime policy. Semantic-looking summaries such as saga mode, latest state,
+attempt state, side-effect state, manual-resolution state, retention state, or public-output status
+must be produced by the authority layer that owns the corresponding semantics and then persisted as
+projection-versioned observation rows with aggregate provenance, or omitted from the observation
+API. SQL views may present those persisted observations, but SQL must not derive the semantic
+meaning independently.
+
+Aggregate rows that are not pure mechanical views depend on a stream prefix, a commit prefix, or
+multiple source events. Those rows must carry aggregate provenance:
 
 ```text
 projection_version TEXT NOT NULL
@@ -1113,6 +1350,7 @@ source_to_seq BIGINT NULL
 source_last_ordinal INTEGER NULL
 source_high_append_xid XID8 NULL
 source_high_commit_id TEXT NULL
+source_high_commit_sort_key BYTEA NULL
 source_event_count BIGINT NOT NULL
 source_input_hash TEXT NOT NULL
 derived_key TEXT NOT NULL
@@ -1123,7 +1361,10 @@ derived_row_hash TEXT NOT NULL
 Sparse multi-source or dashboard rows must additionally write `observation_derivation_sources` rows
 that reference each source event, or use a documented prefix hash chain that proves the same source
 set. A single `(source_run_id, source_seq, source_ordinal)` tuple is only sufficient for one-event
-delta facts.
+delta facts. For platform-prefix summaries that reference a watch frontier, provenance must either
+store the full cursor tuple `(source_high_append_xid, source_high_commit_sort_key)` or reference a
+`run_commit_log(commit_id)` row from which that tuple is recovered. `source_high_commit_id` alone is
+not an ordering value.
 
 Current-state views are views over inserted facts, for example:
 
@@ -1148,7 +1389,8 @@ Start with the simplest derivations as SQL views:
 - run admission summary
 - run completion summary
 - run head by `max(seq)`
-- observed public output produced/render-failed summary
+- observed public output produced/render-failed event-label summary, mechanical only and not
+  public-output authority
 - change feed by `run_commit_log.append_xid`
 
 Use trigger-derived insert-only read facts when:
@@ -1167,9 +1409,9 @@ views over those facts. If list/watch needs semantic-looking summaries later, th
 must live in the crate that owns that contract: `mfm-store` for spec-independent stream projection
 contracts, `mfm-runtime` for spec-aware lifecycle/recovery semantics, and `mfm-app` only for
 orchestration and public authority construction. The Postgres storage crate may persist
-projection-versioned rows handed to it through an explicit authority-layer API, but it must not call
-runtime/app projection code internally or become the owner of those semantics. Such rows must be
-labeled as observations and must not mint or substitute for strict semantic authority.
+projection-versioned rows handed to `RunObservationSink`, but it must not call runtime/app
+projection code internally or become the owner of those semantics. Such rows must be labeled as
+observations and must not mint or substitute for strict semantic authority.
 
 Trigger-derived read facts must not hash Postgres `jsonb::text`. Each hash-bearing fact must define
 a canonical row schema and canonicalizer identity. The implementation must either provide a
@@ -1196,12 +1438,86 @@ schema_contract_version TEXT NOT NULL
 created_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp()
 ```
 
+`cursor_domain_seals` records the reviewed cursor-domain state for the live epoch:
+
+```text
+seal_id TEXT PRIMARY KEY
+target_store_epoch TEXT NOT NULL
+source_store_epoch TEXT NULL
+method TEXT NOT NULL CHECK (method IN ('fresh', 'physical_preserve', 'offline_reseal'))
+source_xid_domain_fingerprint TEXT NULL
+target_xid_domain_fingerprint TEXT NOT NULL
+run_commit_log_count BIGINT NOT NULL
+run_commit_log_frontier_hash TEXT NOT NULL
+sealing_append_xid XID8 NOT NULL
+sealed_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp()
+sealed_by TEXT NOT NULL
+UNIQUE (target_store_epoch)
+CHECK (run_commit_log_count >= 0)
+```
+
+For a fresh schema, `method = 'fresh'`. For physical restore, the seal must prove the physical XID
+domain and `run_commit_log.append_xid` ordering were preserved. For offline re-sealing, the seal
+must prove that all `commits` and `run_commit_log` rows were rewritten through database-owned
+append-XID assignment in the new domain before app/CLI/REST service opened. The frontier hash is a
+canonical MFM hash over every visible `run_commit_log` cursor row in deterministic
+`(append_xid, commit_sort_key)` order, including `commit_id`, `run_id`, `seq`, `event_count`, and
+`commit_batch_hash`.
+
+The XID-domain fingerprint is not an ad hoc string. It must be computed as:
+
+```text
+target_xid_domain_fingerprint =
+  hash("mfm.cursor_domain.xid.v1" || canonical(
+    target_store_epoch,
+    method,
+    postgres_system_identifier,
+    postgres_timeline_or_null,
+    sealing_append_xid,
+    run_commit_log_count,
+    run_commit_log_frontier_hash
+  ))
+```
+
+`postgres_system_identifier` and `postgres_timeline_or_null` come from a reviewed
+Postgres-owned/maintenance-role function. If a deployment cannot expose those physical-domain
+values to the app role, startup validation must call a privileged validation function rather than
+guessing. Physical-domain preservation must recompute the same fingerprint for the live database.
+Offline re-sealing must insert a new `target_store_epoch`, new `sealing_append_xid`, new frontier
+hash, and new fingerprint after all cursor rows are rewritten into the new XID domain.
+
 `store_epoch` is generated once for a freshly migrated schema/database and identifies the
 PostgreSQL transaction-id ordering domain that public watch cursors belong to. Dropping/recreating
 the schema, destructive reset, logical restore, clone, import, point-in-time rollback, row discard,
 or any maintenance operation that does not preserve both `run_commit_log` rows and their original
 `append_xid` ordering domain must create a new epoch. Observation rebuilds, cache refreshes, and
 new projection/observation versions must not change it when the cursor domain is unchanged.
+
+A live `store_epoch` must contain one comparable `append_xid` domain. Rotating `store_epoch` only
+invalidates old cursors; it does not make old-domain XID values comparable with the new database's
+`pg_snapshot_xmin(...)`. Any restore, clone, import, or rollback that changes the PostgreSQL XID
+domain must choose one reviewed path before app/CLI/REST service starts:
+
+- physical restore that preserves the original XID domain and `run_commit_log.append_xid` ordering
+- offline re-sealing/re-import that rewrites `commits` and `run_commit_log` through database-owned
+  append-XID assignment in the new domain before the store is opened
+- a future explicit baseline cursor stratum included in the public cursor ordering contract
+
+The initial implementation chooses physical-domain preservation or offline re-sealing. It must not
+serve a database with mixed old-domain and new-domain `append_xid` rows under one live epoch. Schema
+validation must fail closed when restored/imported `run_commit_log` rows are detected without a
+validated cursor-domain preservation or re-sealing record.
+Exactly one current `cursor_domain_seals` row must match `store_metadata.store_epoch` before normal
+service starts. The `UNIQUE (target_store_epoch)` constraint makes multiple live seals for one epoch
+invalid; startup validation must also recompute the fingerprint and frontier hash before accepting
+the store.
+
+The storage crate must provide an explicit maintenance entry point for cursor-domain re-sealing or
+store-epoch reseeding. It must run outside normal app/CLI/REST runtime credentials, rewrite or
+validate the affected cursor-domain metadata, insert the matching `cursor_domain_seals` row, and
+document that restored, cloned, or imported dumps reject old public cursors until this maintenance
+step succeeds. Startup/schema validation must not silently generate a new epoch over mixed-domain
+rows.
 
 `run_commit_log` is the durable cursor source for run list/watch observation APIs. It is insert-only
 and atomic with the authority rows for the same commit. It is not projection-versioned and does not
@@ -1228,6 +1544,8 @@ Constraints:
 ```text
 CHECK (octet_length(commit_sort_key) = 32)
 CHECK (get_byte(commit_sort_key, 0) = 1)
+CHECK (first_ordinal = 0)
+CHECK (last_ordinal = event_count - 1)
 UNIQUE (append_xid, commit_sort_key)
 FOREIGN KEY (commit_id, run_id, seq, event_count, commit_batch_hash, append_xid)
   REFERENCES commits(commit_id, run_id, seq, event_count, commit_batch_hash, append_xid)
@@ -1259,9 +1577,9 @@ key algorithm ad hoc or by falling back to text ordering.
 
 This observation order is not semantic commit order. It exists only to provide no-skip list/watch
 delivery for operational APIs. Per-run strict order remains `(run_id, seq, ordinal)`. Resource-lane
-conflict order is defined by held lane claims and store-enforced claim/release authority. Resume,
-replay, strict status, manual-resolution authority, retention proof, and public-output authority must
-ignore observation cursor order.
+conflict order is defined by held lane claims and store-enforced lane-transition authority. Resume,
+replay, strict status, manual-resolution authority, retention proof, and public-output authority
+must ignore observation cursor order.
 
 Plain PostgreSQL sequences or identity columns are not valid durable public watch cursors. They are
 not transactional: sequence changes are visible immediately and are not rolled back when a
@@ -1300,6 +1618,25 @@ append_xid
 commit_sort_key
 ```
 
+Cursor bytes must be integrity-protected. The implementation should use either server-issued
+opaque tokens or a versioned sealed/MACed encoding that covers `cursor_version`, `store_epoch`,
+`append_xid`, `commit_sort_key`, and projection/query compatibility metadata. Forged, tampered, or
+future lower-bound cursors must be rejected with stable cursor errors rather than allowing clients
+to silently skip observation rows.
+
+The initial implementation should prefer a sealed/MACed stateless cursor codec. The cursor contract
+must define:
+
+- `cursor_key_id`
+- durable key source for app/CLI/REST restarts
+- accepted old-key window during rotation
+- stable errors for unknown, missing, retired, or mismatched cursor keys
+- whether projection/query compatibility metadata is part of the MACed payload
+
+If a future implementation chooses server-issued opaque tokens instead, it must define an
+insert-only token table or equivalent durable token authority, token expiry/retention behavior, and
+the same stable error cases before exposing the public API.
+
 The empty/default `commit_sort_key` is the all-zero 32-byte value and sorts before real commit sort
 keys. Real rows cannot use the sentinel because of the `commit_sort_key` prefix check. When a page
 is empty, the service may advance the cursor to `(safe_before_xid, zero_sort_key)` and report that
@@ -1329,8 +1666,10 @@ PRIMARY KEY (projection_version, commit_id, summary_kind)
 
 Rebuilding a new projection version inserts new summary rows for the same immutable
 `run_commit_log.commit_id` values. It must not update old summaries or rewrite cursor authority. If
-a requested projection version is unavailable for a sealed visible change, the API must either
-return a documented `ProjectionUnavailable` response or run an explicit build path before
+a requested projection version is unavailable for a sealed visible change, normal app/CLI/REST
+handlers must return a documented `ProjectionUnavailable` response or omit optional summaries
+according to the public contract. Projection builds are explicit out-of-band maintenance operations;
+public list/watch handlers must not silently run rebuild procedures with runtime credentials before
 returning data.
 
 Projection version is response/query metadata, not cursor authority. The service must reject stale
@@ -1356,10 +1695,11 @@ The append flow should be:
 6. For commits that acquire, use, or release resource lanes, require the prevalidated bundle to
    carry concrete lane claim intents, release intents, and holder proofs already resolved by runtime
    preflight. Take sorted per-lane transaction-scoped advisory locks for those concrete lane keys
-   before checking active conflicting claims, and hold them through claim/release row insertion.
-   These locks serialize admission only; they are not the execution-duration resource lock. A global
-   resource-lane lock is not acceptable in the target design because it serializes independent runs
-   and still arrives too late for nonce-like live IO.
+   before checking active conflicting claims, and hold them through lane-transition sequence
+   assignment plus claim/release/transition row insertion. These locks serialize admission only; they
+   are not the execution-duration resource lock. A global resource-lane lock is not acceptable in the
+   target design because it serializes independent runs and still arrives too late for nonce-like
+   live IO.
 7. Load committed event history, artifact authority, and non-authoritative index hints needed to
    build the Rust commit base. Logical-key absence and uniqueness must be proven by folding
    `run_events` unless an explicit completeness proof for the exact prefix is verified.
@@ -1367,17 +1707,18 @@ The append flow should be:
    artifact byte/evidence matches inside the transaction before inserting authority rows. For a
    valid lane claim intent that conflicts with an active held lane, return `ResourceLaneClaimBlocked`
    without inserting rows.
-9. For an admitted lane claim, assign store-filled fields while holding the lane lock: lane-local
-   fencing token, final claim id, and final `ResourceLaneClaimed` event payload. Compute the final
-   `commit_batch_hash` over the materialized event envelopes and evidence set.
+9. For an admitted lane claim or release, assign store-filled fields while holding the lane lock:
+   lane-local transition sequence, lane-local fencing token for claims, final claim/release id when
+   store-filled, and final `ResourceLaneClaimed`/`ResourceLaneReleased` event payload. Compute the
+   final `commit_batch_hash` over the materialized event envelopes and evidence set.
 10. Insert or reuse `artifact_blobs` and artifact evidence/admission rows as needed.
-11. Insert `commits`. The row receives `append_xid` from `pg_current_xact_id()`; this value is
-    observation cursor metadata only.
+11. Insert `commits`. The database-owned trigger overwrites `append_xid` with
+    `pg_current_xact_id()`; this value is observation cursor metadata only.
 12. Insert `run_events`.
 13. Insert or mechanically derive `logical_key_observations`.
 14. Insert `commit_artifact_evidence` and `run_artifact_admissions`.
-15. Insert resource-lane claim/release authority rows when the bundle carries admitted lane
-    operations.
+15. Insert resource-lane claim/release and lane-transition authority rows when the bundle carries
+    admitted lane operations.
 16. Insert `run_commit_log` with the same `append_xid` and `commit_id` bound to the commit row.
 17. Insert bounded mechanical observation facts and any explicitly authority-provided observation
     rows that are required to be atomic with the append. The initial implementation should keep this
@@ -1394,7 +1735,8 @@ If synchronous trigger/observation derivation fails, the whole transaction must 
 preserves atomicity for the minimal observation rows the public API depends on. Expensive dashboard
 models may be rebuilt asynchronously from authority rows, but then list/watch must surface
 `ProjectionUnavailable` or omit those optional summaries until the requested projection version is
-available.
+available. Public app/CLI/REST request handlers must not invoke privileged rebuild procedures as an
+implicit fallback.
 
 ## Read Flow
 
@@ -1402,8 +1744,8 @@ There are two classes of reads.
 
 ### Strict Authority Reads
 
-These must load committed event rows and verified artifact evidence, then rebuild/verify through
-Rust authority:
+These must load committed event rows, verified artifact evidence, and lane-transition authority for
+lane-bearing histories, then rebuild/verify through Rust authority:
 
 - resume
 - replay
@@ -1498,6 +1840,14 @@ public-output authority. Callers that need semantic saga status, public-output a
 retention/replay proof, or manual-resolution authority must call strict per-run status/stream
 APIs.
 
+`list_runs` must use the same snapshot-sealed frontier algorithm as watch polling. The returned
+list state, `projection_version`, and `sealed_high_watermark` must be mutually consistent: rows in
+the response are bounded by the sealed frontier, and the returned watch cursor is the sealed
+high-watermark lower bound from which later watch calls resume without skipping rows at the frontier
+XID. If list pagination is added, it must use a separate page cursor from the watch cursor so
+clients cannot confuse "next page of this list" with "next change after this sealed observation
+point."
+
 Stable public error codes must include at least:
 
 ```text
@@ -1560,6 +1910,9 @@ RunObservationStore
   poll_run_observation_changes(...)
   wait_run_observation_change(...)
 
+RunObservationSink
+  insert_authority_observations(...)
+
 CommitArtifactWriteSet
   verified bytes and evidence carried by PreparedCommitBundle
 
@@ -1572,6 +1925,13 @@ ArtifactReadProvider
 PublicOutputArtifactReader
   read_public_output_artifact(PublicOutputReadAuthority)
 ```
+
+`RunObservationStore` methods that return list/watch data must compute one snapshot-sealed frontier
+for the request and bound every returned row, summary join, and cursor by that same frontier. They
+must not call an unparameterized `current_*` view that can race ahead of the returned watch cursor.
+`RunObservationSink` accepts only projection-versioned observation rows produced by the authority
+layer that owns the semantics and must preserve provenance/hash metadata; it is not a general app
+write surface.
 
 There should not be a broad production `ArtifactStore` trait with arbitrary `get_artifact_by_id`,
 `has_artifact`, or unscoped read methods. Runtime staging, retained-artifact reads for verified
@@ -1589,7 +1949,10 @@ if tests or private authority-minting code need builders, those builders must be
 readable request until verified history, config, and evidence fill every proof field. Strict
 status/replay paths should use retained artifact authority derived from committed event
 requirements. Public-output rendering should use a reader that accepts `PublicOutputReadAuthority`
-or exact event/projection-derived evidence, not an arbitrary artifact id. CLI and REST should not
+or a narrowly named request such as `VerifiedPublicOutputArtifactRequirement` with private
+constructors from strict `VerifiedRunHistoryView` and public-output authority verification. It must
+not accept arbitrary artifact ids or projection-versioned observation rows from list/watch.
+Observation/read-model projection data cannot authorize artifact reads. CLI and REST should not
 construct filesystem stores and should not query Postgres directly.
 
 No observation store trait may return `ProjectionSnapshot`. Strict status must rebuild or verify the
@@ -1690,6 +2053,7 @@ source_payload_hash TEXT NULL
 source_event_schema_id TEXT NULL
 source_high_append_xid XID8 NULL
 source_high_commit_id TEXT NULL
+source_high_commit_sort_key BYTEA NULL
 source_event_count BIGINT NOT NULL
 source_input_hash TEXT NOT NULL
 derived_row_canonical_json BYTEA NOT NULL
@@ -1717,6 +2081,8 @@ source_commit_id TEXT NOT NULL
 Database guardrails:
 
 - deny `UPDATE`, `DELETE`, and `TRUNCATE` on MFM domain tables for the app role
+- deny app/CLI/REST role mutation of `store_metadata`, `cursor_domain_seals`, and cursor
+  codec/key metadata
 - add database triggers that reject update/delete on authority tables
 - add equivalent guards for read fact tables except inside controlled rebuild procedures
 - production rebuild/validate procedures should be executable only by an explicit maintenance role,
@@ -1738,6 +2104,7 @@ Database guardrails:
   explicit prefix-completeness proof
 - validate that `store_epoch` changes after restore, clone, import, rollback, destructive reset, or
   any operation that changes the `append_xid` ordering domain
+- validate `cursor_domain_seals` before accepting a restored/imported store
 - validate that hash-bearing rows use canonical MFM bytes and never `jsonb::text`
 
 Code guardrails:
@@ -1775,6 +2142,10 @@ Code guardrails:
 
 This RFC changes the design contract, not only an implementation detail. The cutover must update the
 authoritative project docs in the same change set as the storage/runtime/API refactor.
+Those doc updates are a merge gate for the implementation cutover. The implementation must not land
+with `docs/design.md` or `docs/architecture.md` still describing filesystem artifact production
+storage, plan-only durable appends, mutable helper authority, or concrete storage dependencies that
+this RFC removes.
 
 `docs/design.md` must be updated to describe:
 
@@ -1810,6 +2181,11 @@ authoritative project docs in the same change set as the storage/runtime/API ref
 
 CLI and REST docs must also be updated when the public list/watch routes and commands are added.
 
+The persisted/public surface inventory must be created or updated as part of the same cutover. It
+must list the new Postgres artifact bytes, artifact evidence, event payload canonical/query copies,
+lane authority rows, observation facts, cursor metadata, and CLI/REST output surfaces, with their
+secret-boundary and authority classifications.
+
 ## Migration And Cutover Plan
 
 This is a breaking dev-branch cutover, not an online compatibility migration.
@@ -1841,9 +2217,9 @@ This is a breaking dev-branch cutover, not an online compatibility migration.
 
 5. Implement the target store directly.
    - Add `commits`, `run_events`, `artifact_blobs`, artifact evidence/admission tables,
-     resource-lane claim/release authority tables, `logical_key_observations`, `run_commit_log`,
-     projection-versioned observation facts, views, triggers/functions, and build/validation tools
-     using target names.
+     resource-lane claim/release and lane-transition authority tables, `logical_key_observations`,
+     `run_commit_log`, projection-versioned observation facts, views, triggers/functions, and
+     build/validation tools using target names.
    - Move same-run ordering from mutable run-head rows to advisory locking plus inserted commit
      authority.
    - Use runtime-preflight resolved resource-lane claims and sorted per-lane admission locks only for
@@ -1898,7 +2274,9 @@ Required new tests:
 - authority tables reject update/delete/truncate for app role
 - read fact rows have valid source-event provenance
 - read facts rebuild exactly from authority rows
-- SQL read models match Rust projection rebuild for representative runs
+- mechanical SQL observations match authority-derived rebuilds for representative runs
+- semantic-looking observation rows are produced by the owning authority layer and match strict
+  projection rebuilds
 - SQL-only read derivations are limited to mechanical scalar/canonical-byte facts
 - corrupt read facts do not affect resume/replay/public-output authority
 - read facts are not used as append-admission authority
@@ -1908,6 +2286,10 @@ Required new tests:
   purpose and canonical request material
 - commit ids are deterministically derived before event batch hashing and cannot be assigned
   post-hash by storage
+- `append_xid` is assigned by database-owned insert triggers/functions and cannot be overridden by
+  production insert statements
+- a commit without exactly one matching `run_commit_log` row rolls back before commit
+- a mismatched `run_commit_log` binding or ordinal range rolls back before commit
 - artifact ids are verified as derived from digests
 - artifact evidence rows reject digest/length/id mismatches against blob rows
 - snapshot-sealed XID watch cursors cannot skip rows when an older transaction commits after a
@@ -1919,9 +2301,28 @@ Required new tests:
 - watch cursor resumes after disconnect
 - watch cursors from a prior `store_epoch` fail after restore, clone, import, rollback, destructive
   reset, or any operation that changes the PostgreSQL XID ordering domain
+- schema validation rejects mixed old-domain and new-domain `run_commit_log.append_xid` rows under
+  one live `store_epoch`
+- restore/import paths either preserve the physical XID domain, offline re-seal all cursor rows into
+  the new domain, or fail closed before app/CLI/REST service starts
+- `cursor_domain_seals` must match the live `store_epoch`, row count, and frontier hash before
+  service starts after fresh migration, physical restore, or offline re-seal
+- forged, tampered, or future public watch cursors are rejected by the sealed/server-issued cursor
+  contract instead of silently skipping rows
+- cursor codec tests cover key id, durable key source across restarts, accepted old-key rotation
+  window, unknown-key rejection, and retired-key rejection
 - stale cursor-format versions are rejected or explicitly migrated
-- unavailable projection-version summaries return `ProjectionUnavailable` or trigger an explicit
-  build path before data is returned
+- unavailable projection-version summaries return `ProjectionUnavailable` or are omitted according
+  to the public contract; normal app/CLI/REST handlers do not run privileged rebuild procedures as
+  implicit fallbacks
+- `list_runs` returns list rows, projection version, sealed high-watermark, and watch cursor from one
+  consistent snapshot-sealed frontier, with page cursors kept separate from watch cursors
+- `RunObservationStore` list/watch methods do not join against unbounded `current_*` views that can
+  race ahead of the returned frontier
+- `RunObservationSink` accepts only authority-produced projection-versioned observations with
+  provenance and hash metadata
+- aggregate observation provenance stores or recovers the full watch frontier tuple when it claims a
+  platform-prefix high watermark
 - empty watch pages return a well-defined high-watermark
 - `LISTEN/NOTIFY` is not required for correctness
 - strict `run stream --watch` tails authority rows and does not use read-model summaries
@@ -1932,6 +2333,8 @@ Required new tests:
 - cross-run resource-lane contention admits only one conflicting claimant
 - valid resource-lane contention returns `ResourceLaneClaimBlocked`, leaves the stream unchanged,
   and parks the already-started attempt before invocation
+- `ResourceLaneClaimBlocked` does not insert MFM domain rows or persisted Postgres read-model facts
+  that claim derivation from committed history
 - independent cross-run appends that do not share resource lanes can commit concurrently
 - same chain/account EVM mutation runs cannot both reach nonce read, signing, or submission
 - different chain/account EVM mutation runs can execute concurrently
@@ -1944,8 +2347,16 @@ Required new tests:
 - Postgres admission proves active resource-lane conflicts under concurrent transactions cannot
   double-admit the same exclusive lane
 - resource-lane fencing tokens are store-assigned, lane-local, monotonic, and verified by strict
-  load from append-only claim history
-- lane claim/release mirror rows prove exact source event and exact holder/lane ownership
+  load from append-only lane-transition history
+- lane-transition rows prove durable claim/release order, transition hash chains, contiguous
+  lane-local transition sequences, exact source events, and exact holder/lane ownership
+- lane claim/release events cannot commit without exact mirror and lane-transition rows, and
+  mirror/transition rows cannot commit without exact source events
+- terminal side-effect/attempt/saga/run commits cannot leave release-required lane claims active
+  in their respective scopes unless the verified authority prefix proves an explicit terminal
+  release rule
+- same-commit terminal release batches contain only exact in-scope active-claim releases, reject
+  unrelated releases, and cannot acquire new lanes
 - artifact bytes and evidence are inserted atomically with the commit bundle
 - missing, extra, or mismatched artifact bytes are rejected before authority rows commit
 - run-level artifact admissions prove the exact first `binding_kind = 'admitted'`
@@ -1957,7 +2368,9 @@ Required new tests:
 - recoverable submission-result rewrites match Rust staging parity tests
 - retained artifact reads require event-derived requirements
 - adapter artifact reads require exact `ArtifactReadAuthority`
-- public-output artifact reads require public-output authority or event/projection-derived evidence
+- public-output artifact reads require `PublicOutputReadAuthority` or strict
+  `VerifiedPublicOutputArtifactRequirement`; observation/read-model projection rows cannot authorize
+  artifact reads
 - artifact read helpers cannot construct production-readable requests from partial artifact ids
 - compile-fail tests prove secret-bearing signer/runtime/raw-transaction types cannot become typed
   persisted or public surfaces
@@ -1998,6 +2411,9 @@ Required new tests:
   unchanged and parks the already-started attempt before invocation.
 - Resource-lane fencing tokens are store-assigned, lane-local, monotonic values filled during claim
   admission under the concrete lane lock.
+- Resource-lane claim/release order is durable lane-local authority in `resource_lane_transitions`,
+  not advisory-lock timing, `append_xid`, wall-clock time, or run-local sequence from independent
+  runs.
 - Commit ids are deterministic pre-batch identities derived from prepared authority material, so
   event envelopes and `commit_batch_hash` have no post-hash storage-assignment cycle.
 - Read-model rebuild procedures should use an explicit maintenance role in production. Local
