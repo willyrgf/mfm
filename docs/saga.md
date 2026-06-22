@@ -148,26 +148,33 @@ independently proved that the external domain state is correct.
 
 ## Resource Claims
 
-> Planned change — `RFC_REFAC_PG_TRANS.md` (proposed). The exclusive-lane lifecycle below changes in
-> the resource-lane cutover: lanes move from being *derived from invocation-prepared resource key
-> evidence* to being acquired *before* invocation through a separate committed `ResourceLaneClaimed`
-> event with a store-assigned lane-local fencing token, ordered by `resource_lane_transitions`.
-> Contention becomes `ResourceLaneClaimBlocked` (a parked attempt that never authorizes terminal
-> failure), and the no-deadlock invariant requires an attempt to claim all its lanes in one
-> all-or-nothing commit. Only `Exclusive` takes a lane; `ExactTouchedSet` and `ManualOnly` take none.
-> This section is rewritten in the same merge unit as that cutover; until then it describes current
-> behavior.
-
 Every side-effect contract declares a resource claim:
 
-- `Exclusive`: adapter records a concrete exclusive key before crossing the uncertainty boundary.
+- `Exclusive`: pure preflight resolves a concrete exclusive key before invocation construction or
+  live IO.
 - `ExactTouchedSet`: adapter records exact touched-key evidence after execution.
 - `ManualOnly`: MFM makes no framework-derived cross-run concurrency claim.
 
-Exclusive lanes are derived from recorded invocation-prepared resource key evidence. A held lane
-blocks other ledgers for the same `(namespace, key)` across runs. The lane releases when the holding
-ledger records terminal evidence or the holding run reaches sealed terminal resolution. Remediation
-ledgers acquire lanes under the same rules as forward ledgers.
+Only `Exclusive` takes a lane. `ExactTouchedSet` and `ManualOnly` do not acquire lane authority.
+For `Exclusive`, runtime appends `StateAttemptStarted`, resolves all concrete lane keys through pure
+capability preflight, and submits one `ResourceLaneClaimIntent` commit before invocation
+construction. The store admits that intent only when every requested lane can be acquired together;
+it materializes the committed `ResourceLaneClaimed` event, assigns the lane-local fencing token and
+transition sequence, and records the matching `resource_lane_claim_events` and
+`resource_lane_transitions` rows. A held lane blocks other ledgers for the same
+`(namespace, key_schema_id, key, exclusive)` lane across runs.
+
+Ordinary contention returns `ResourceLaneClaimBlocked`. That outcome parks the open attempt before
+live IO; it is not a run event, not lane-transition authority, not a persisted read-model fact, and
+never authorizes attempt, saga, or run terminal failure. Parked attempts retry with bounded backoff
+and may wake on lane-release notifications, but notifications are only wakeups; the durable signal is
+the append-only lane authority.
+
+The no-deadlock invariant is structural: an attempt claims all required exclusive lanes in one
+all-or-nothing claim commit and never holds one lane while issuing a second blocking claim. Lanes
+release through committed `ResourceLaneReleaseIntent`/`ResourceLaneReleased` authority tied to the
+active claim and fencing token. Remediation ledgers acquire and release lanes under the same rules as
+forward ledgers.
 
 Exact touched-set evidence is schema-checked at admission and replay, but the kernel does not infer
 domain isolation from it without a future domain verifier.
@@ -209,9 +216,5 @@ The following remain outside the current certified saga contract:
 - cancellation semantics against remediation;
 - lane fairness, queueing, deadlock detection, or global scheduling policy.
 
-> Planned change — `RFC_REFAC_PG_TRANS.md` (proposed). The resource-lane cutover does not add lane
-> *deadlock detection*; it instead excludes the deadlock class structurally (an attempt claims all its
-> lanes in one all-or-nothing commit and never holds a lane while issuing a second blocking claim), so
-> detection stays unnecessary rather than deferred. It adds best-effort liveness (capped backoff plus
-> lane-release wakeups) but still defers lane *fairness/queueing*; callers must not assume starvation
-> freedom under sustained single-lane contention.
+Lane fairness and queueing remain outside the current certified saga contract; callers must not
+assume starvation freedom under sustained single-lane contention.

@@ -314,15 +314,16 @@ be the sole authority for resume, replay, public output, retention, or side-effe
 The first certified persistent storage path is:
 
 ```text
-crates/storages/stream-store-postgres + crates/storages/artifact-store-fs
+crates/storages/stream-store-postgres
 ```
 
-Postgres stores typed event envelopes, commit keys, logical-key indexes, and resource-lane locks.
-Its schema and migrations are owned by `crates/storages/stream-store-postgres`; runtime callers
-validate schema compatibility and must not run startup auto-DDL. Read projections are rebuilt from
-append-only `typed_run_events`; they are not persisted semantic authority.
-The filesystem artifact store keeps immutable canonical bytes by digest for local development,
-tests, replay fixtures, and typed workflow ports.
+Postgres is the only production persistence backend. It stores append-only `commits`, canonical
+`run_events`, artifact blobs/evidence, resource-lane claim/release/transition rows,
+`run_commit_log` cursor authority, and rebuildable observation summaries. Its schema and migrations
+are owned by `crates/storages/stream-store-postgres`; runtime callers validate schema compatibility
+and must not run startup auto-DDL. Logical-key admission folds authoritative `run_events`; there is
+no logical-key admission index. Observation rows and list/watch cursors are never semantic authority
+for resume, replay, public-output rendering, side-effect legality, or completion.
 
 ## Runtime
 
@@ -408,14 +409,15 @@ evidence. Root artifact retention is projection-derived from `RunAdmitted`; laun
 attempt, cell, artifact-reference, or retention-ref payloads. Ordinary states, `PublicOutputRender`,
 `ProjectRetentionManifest`, `CompleteRun`, and `ResolveSagaTerminal` append
 `StateAttemptStarted` before sealed invocation construction, then use the same guarded terminal
-commit path: staged artifacts are persisted before the prepared commit, output and reference
-bindings are checked against the certified graph, side-effect protocol rules are enforced, commit
-preconditions are built, and run-store artifact evidence is admitted only in the commit that first
-references it. Production callers submit `PreparedCommit<Purpose>` values through
-`PreparedCommitPlan`; stores do not expose or accept a raw typed-batch escape hatch. Purpose
-constructors reject purpose mismatches, missing `SagaAdmitToken`, missing
-`SagaTerminalProof`, or artifact evidence that was not admitted in the same commit. Failed commits
-may leave orphan artifact-store bytes, but orphan run-store evidence is not authority.
+commit path: output/reference bindings are checked against the certified graph, side-effect
+protocol rules are enforced, commit preconditions are built, and artifact bytes/evidence are
+admitted only by the commit that first references them. Production callers submit
+`PreparedCommitBundle` values built from purpose-specific `PreparedCommit<Purpose>` authority;
+stores do not expose or accept a raw typed-batch or plan-only append escape hatch. Purpose
+constructors reject purpose mismatches, missing `SagaAdmitToken`, missing `SagaTerminalProof`, or
+artifact evidence that was not admitted in the same commit. Failed appends may leave immutable
+content-addressed orphan blobs for maintenance cleanup, but orphan run-store evidence is not
+authority.
 
 Framework lifecycle work is represented by certified graph nodes, not ad hoc runtime side effects.
 Run admission is the sole pre-attempt root authority and is not represented by a certified graph
@@ -464,18 +466,15 @@ optional-field projection heuristic. Forward side-effect ambiguity is admissible
 the same commit with the non-retryable attempt failure that engages saga handling.
 The store is the source of truth for forward-fence admission after saga engagement; runtime
 early-rejects are scheduling convenience and cannot substitute for store validation.
-Resource-lane scheduling remains conservative. A lane-blocked attempt may be skipped only with a
-scoped independence witness. If another side-effect node has concrete lane evidence, the witness is
-compared against that concrete key. If the node has not yet reached invocation preparation, the
-runtime knows only the certified resource namespace, so same-namespace work waits until the parked
-lane releases or concrete evidence exists. Different namespaces may still advance.
-Standalone interruption is legal for a side-effect attempt only before
-`SideEffectInvocationPrepared`. A no-projection open side-effect attempt has no acquired ledger
-evidence and recovery continues the same attempt. `SideEffectIntentPersisted` and
-`SideEffectClaimed` are pre-prepare phases and do not by themselves hold a resource lane/open ledger
-that must be released by side-effect recovery, so recovery may interrupt them with ordinary attempt
-evidence. `SideEffectInvocationPrepared` and every later phase are owned by
-`SideEffectLifecycle`; recovery either resumes from the concrete ledger phase, records
+Resource-lane scheduling remains conservative. A lane-blocked attempt is parked before invocation
+and may be retried after bounded backoff or a lane-release wakeup; ordinary contention is not
+terminal evidence. Runtime resolves concrete exclusive lane keys in pure preflight, then asks the
+store to materialize `ResourceLaneClaimed` from `ResourceLaneClaimIntent`. The store assigns the
+lane-local fencing token and transition sequence and records the lane mirror/transition rows in the
+same append transaction. `ResourceLaneClaimed` is therefore held-lane authority and recovery must
+either reuse that committed held lane for the same invocation or release it through certified
+cleanup authority before interruption. `SideEffectInvocationPrepared` and every later phase are
+owned by `SideEffectLifecycle`; recovery either resumes from the concrete ledger phase, records
 evidence-backed terminal side-effect outcome, or reports an operational block.
 
 Prepared-invocation artifacts may retain unsigned mutation plans, expected hashes, and non-secret
@@ -504,8 +503,9 @@ CLI and REST outputs are public API surfaces, but they are not semantic executio
 
 - decode JSON/TOML/user input
 - build typed configs and certified specs through operation crates
-- select typed stores, artifacts, runners, and capabilities
+- construct the production Postgres run store and app services
 - start, resume, replay, inspect, and render typed runs through app services
+- read observation-only run list/watch pages through the shared app API
 - preserve stable response envelopes
 
 They must not:
@@ -515,6 +515,7 @@ They must not:
 - bypass typed certification
 - infer public outputs from untyped snapshots
 - migrate uncertified historical runs into certified typed runs
+- depend directly on SQLx, filesystem artifact stores, or alternate production storage selectors
 
 ## Architecture Placement
 

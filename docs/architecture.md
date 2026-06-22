@@ -478,21 +478,22 @@ corruption, or low-level storage contract fixtures.
 
 - typed runner registries
 - typed capability backends
-- typed run-event stores
-- typed artifact stores
+- the production Postgres run store
+- narrow artifact read providers over run-store evidence
 - certified start/resume/replay services
 - typed public-output rendering
 
 `crates/app` must not own workflow planning, state behavior, or adapter runner behavior. It may
-construct concrete process-local resources such as stores, artifact stores, protocol clients, and
+construct concrete process-local resources such as the Postgres run store, protocol clients, and
 signer providers, then pass them into adapter-owned runner factories.
 
 `bin/cli` and `bin/rest-api` may:
 
 - decode JSON/TOML/user input
 - build typed configs and certified specs through operation crates
-- select stores, artifacts, runners, and capabilities through app services
+- construct app services over the Postgres run store
 - start, resume, replay, inspect, and render typed runs
+- read run list/watch observations through the shared app API
 - preserve stable response envelopes
 
 `bin/cli` and `bin/rest-api` must not:
@@ -502,6 +503,7 @@ signer providers, then pass them into adapter-owned runner factories.
 - bypass typed certification
 - infer public outputs from untyped snapshots
 - migrate uncertified historical runs into certified typed runs
+- depend directly on SQLx, filesystem artifact stores, or alternate production storage selectors
 
 ## Public Naming Rules
 
