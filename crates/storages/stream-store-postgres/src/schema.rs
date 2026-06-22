@@ -2,15 +2,15 @@ use std::collections::BTreeSet;
 
 use sqlx::PgPool;
 
-use crate::typed::{PostgresTypedStoreError, Result};
+use crate::run_store::{PostgresStoreError, Result};
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
-/// PostgreSQL schema management for the typed run-event store.
+/// PostgreSQL schema management for the run store.
 pub struct PostgresSchema;
 
 impl PostgresSchema {
-    /// Applies all pending typed run-event store migrations.
+    /// Applies all pending run-store migrations.
     pub async fn migrate(database_url: &str) -> Result<()> {
         let pool = connect_pool(database_url).await?;
         migrate_pool(&pool).await?;
@@ -40,14 +40,14 @@ pub(crate) async fn migrate_pool(pool: &PgPool) -> Result<()> {
     MIGRATOR
         .run(pool)
         .await
-        .map_err(|_| PostgresTypedStoreError::Database("migration failed"))?;
+        .map_err(|_| PostgresStoreError::Database("migration failed"))?;
     Ok(())
 }
 
 pub(crate) async fn connect_pool(database_url: &str) -> Result<PgPool> {
     PgPool::connect(database_url)
         .await
-        .map_err(|_| PostgresTypedStoreError::Database("connect failed"))
+        .map_err(|_| PostgresStoreError::Database("connect failed"))
 }
 
 pub(crate) async fn validate_pool(pool: &PgPool) -> Result<()> {
@@ -56,8 +56,7 @@ pub(crate) async fn validate_pool(pool: &PgPool) -> Result<()> {
 }
 
 fn database_url_env() -> Result<String> {
-    std::env::var("DATABASE_URL")
-        .map_err(|_| PostgresTypedStoreError::Database("missing DATABASE_URL"))
+    std::env::var("DATABASE_URL").map_err(|_| PostgresStoreError::Database("missing DATABASE_URL"))
 }
 
 async fn validate_migrations(pool: &PgPool) -> Result<()> {
@@ -65,10 +64,10 @@ async fn validate_migrations(pool: &PgPool) -> Result<()> {
         sqlx::query!("SELECT version, success, checksum FROM _sqlx_migrations ORDER BY version")
             .fetch_all(pool)
             .await
-            .map_err(|_| PostgresTypedStoreError::Database("schema migrations missing"))?;
+            .map_err(|_| PostgresStoreError::Database("schema migrations missing"))?;
 
     if rows.len() != MIGRATOR.iter().count() {
-        return Err(PostgresTypedStoreError::Database(
+        return Err(PostgresStoreError::Database(
             "schema migration count mismatch",
         ));
     }
@@ -77,14 +76,12 @@ async fn validate_migrations(pool: &PgPool) -> Result<()> {
         let row = rows
             .iter()
             .find(|row| row.version == migration.version)
-            .ok_or(PostgresTypedStoreError::Database(
-                "schema migration missing",
-            ))?;
+            .ok_or(PostgresStoreError::Database("schema migration missing"))?;
         if !row.success {
-            return Err(PostgresTypedStoreError::Database("schema migration failed"));
+            return Err(PostgresStoreError::Database("schema migration failed"));
         }
         if row.checksum.as_slice() != migration.checksum.as_ref() {
-            return Err(PostgresTypedStoreError::Database(
+            return Err(PostgresStoreError::Database(
                 "schema migration checksum mismatch",
             ));
         }
@@ -101,7 +98,7 @@ async fn validate_catalog(pool: &PgPool) -> Result<()> {
     )
     .fetch_all(pool)
     .await
-    .map_err(|_| PostgresTypedStoreError::Database("failed to inspect schema tables"))?;
+    .map_err(|_| PostgresStoreError::Database("failed to inspect schema tables"))?;
     let tables = table_rows
         .into_iter()
         .map(|row| row.table_name)
@@ -109,16 +106,14 @@ async fn validate_catalog(pool: &PgPool) -> Result<()> {
 
     for table in REQUIRED_TABLES {
         if !tables.contains(*table) {
-            return Err(PostgresTypedStoreError::Database(
+            return Err(PostgresStoreError::Database(
                 "required schema table missing",
             ));
         }
     }
     for table in FORBIDDEN_TABLES {
         if tables.contains(*table) {
-            return Err(PostgresTypedStoreError::Database(
-                "stale schema table present",
-            ));
+            return Err(PostgresStoreError::Database("stale schema table present"));
         }
     }
 
@@ -127,6 +122,21 @@ async fn validate_catalog(pool: &PgPool) -> Result<()> {
 
 const REQUIRED_TABLES: &[&str] = &[
     "_sqlx_migrations",
+    "store_metadata",
+    "commits",
+    "run_events",
+    "artifact_blobs",
+    "artifact_admissions",
+    "commit_artifact_evidence",
+    "run_artifact_admissions",
+    "resource_lane_claim_events",
+    "resource_lane_release_events",
+    "resource_lane_transitions",
+    "run_commit_log",
+    "run_observation_change_summaries",
+];
+
+const FORBIDDEN_TABLES: &[&str] = &[
     "typed_run_heads",
     "typed_run_events",
     "typed_commit_keys",
@@ -135,9 +145,6 @@ const REQUIRED_TABLES: &[&str] = &[
     "typed_logical_keys",
     "typed_unique_logical_payloads",
     "typed_resource_lane_locks",
-];
-
-const FORBIDDEN_TABLES: &[&str] = &[
     "typed_retention_projection",
     "typed_retention_manifests",
     "typed_run_projection",
@@ -149,5 +156,5 @@ const FORBIDDEN_TABLES: &[&str] = &[
     "typed_fact_projection",
     "typed_side_effect_projection",
     "typed_resource_lane_projection",
-    "typed_public_output_projection",
+    "public_output_projection",
 ];

@@ -1,19 +1,19 @@
 #![warn(missing_docs)]
-//! Postgres-backed typed run-event store.
+//! Postgres-backed run store.
 //!
-//! This crate exposes only the certified typed store implementation. The old dynamic stream-store
-//! surface was removed with the typed-core rewrite so it cannot act as semantic authority for
-//! certified typed runs.
+//! This crate exposes only the certified Postgres run-store implementation. The old dynamic
+//! stream-store surface was removed with the typed-core rewrite so it cannot act as semantic
+//! authority for certified runs.
 //!
 //! # Examples
 //!
 //! ```no_run
-//! # async fn example() -> Result<(), mfm_stream_store_postgres::PostgresTypedStoreError> {
+//! # async fn example() -> Result<(), mfm_stream_store_postgres::PostgresStoreError> {
 //! mfm_stream_store_postgres::PostgresSchema::migrate(
 //!     "postgres://postgres:postgres@localhost/mfm",
 //! )
 //! .await?;
-//! let _store = mfm_stream_store_postgres::PostgresTypedRunEventStore::connect(
+//! let _store = mfm_stream_store_postgres::PostgresRunStore::connect(
 //!     "postgres://postgres:postgres@localhost/mfm",
 //! )
 //! .await?;
@@ -21,8 +21,8 @@
 //! # }
 //! ```
 
+mod run_store;
 mod schema;
-mod typed;
 
+pub use run_store::{PostgresRunStore, PostgresStoreError};
 pub use schema::PostgresSchema;
-pub use typed::{PostgresTypedRunEventStore, PostgresTypedStoreError};

@@ -1,11 +1,12 @@
 # mfm-stream-store-postgres
 
-PostgreSQL typed run-event store implementation. This crate is the only owner
-of the MFM typed run-event PostgreSQL schema.
+PostgreSQL run-store implementation. This crate is the only owner of the MFM
+run-store PostgreSQL schema.
 
-`PostgresTypedRunEventStore` is the certified typed submit/resume surface for
-durable run streams. It persists typed event envelopes, commit keys, artifact
-evidence, logical-key indexes, and resource-lane locks through `mfm-store`.
+`PostgresRunStore` is the certified submit/resume surface for durable run
+streams. It persists append-only commits, canonical event payload bytes,
+artifact blobs/evidence, resource-lane transition authority, and observation
+cursor rows through `mfm-store`.
 It owns the PostgreSQL migrations, crate-local SQLx query metadata, and runtime
 schema compatibility checks for that store.
 
@@ -16,9 +17,9 @@ the embedded migrations explicitly before starting CLI, REST, or library
 callers:
 
 ```rust
-# async fn example() -> Result<(), mfm_stream_store_postgres::PostgresTypedStoreError> {
+# async fn example() -> Result<(), mfm_stream_store_postgres::PostgresStoreError> {
 mfm_stream_store_postgres::PostgresSchema::migrate_env().await?;
-let _store = mfm_stream_store_postgres::PostgresTypedRunEventStore::connect_env().await?;
+let _store = mfm_stream_store_postgres::PostgresRunStore::connect_env().await?;
 # Ok(())
 # }
 ```
@@ -53,9 +54,9 @@ After regenerating metadata, run `nix run .#test-db`.
 
 ## Compatibility
 
-The old dynamic stream-store surface has been removed from this crate. New run
-submission, resume, and replay paths go through the typed `mfm-store` contract
-only.
+The old dynamic stream-store surface and old `typed_*` schema are removed from
+this crate. This is a destructive dev-branch baseline: use a fresh database or
+drop/recreate the existing local schema before applying migrations.
 
 ## Data Limits
 
