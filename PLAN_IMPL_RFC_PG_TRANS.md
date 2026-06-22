@@ -39,7 +39,7 @@ with no compatibility shims:
    lane-transition authority, the no-deadlock single-claim invariant, and the `docs/saga.md`
    resource-claim rewrite.
 3. Observation cutover: the read-model layer, `run_commit_log` epoch-tagged watch cursors, the shared
-   CLI/REST list/watch API, and the `typed_` -> target naming baseline.
+   CLI/REST run observation API, and the `typed_` -> target naming baseline.
 
 Within each cutover do not merge a partial state where runtime authority, storage behavior, public
 APIs, and docs disagree. Prefer three landable cutovers over one big-bang merge so each new primitive
@@ -406,37 +406,42 @@ Scope:
 - Implement mechanical SQL facts only for scalar/canonical-byte derivations.
 - Persist only mechanical observation rows derived from scalar/canonical-byte authority columns in
   the initial implementation. Do not call runtime/app semantic projection code from storage.
-- Add `RunObservationSink` only for authority-produced projection-versioned observations with
-  provenance and row hashes. It is not a general app/framework write surface.
 - Implement `run_observation_change_summaries` separate from immutable `run_commit_log`.
 - Add `current_*` views over observation facts.
 - Add `build_projection_version`, validate, and drift tooling behind maintenance role boundaries.
+- Do not add a production-public observation sink trait in this RFC. Observation rows are written only
+  by the append/rebuild pipeline that owns the authority and provenance for the row.
 
 Verification:
 
 - observation facts rebuild exactly from authority rows
 - SQL-only derivations are mechanical
 - observation rows produced by authority-layer projection code match strict projection rebuilds
-- `RunObservationSink` rejects rows without producer authority, provenance, projection version, and
-  canonical row hash
+- no public/app observation sink can write rows outside the append/rebuild pipeline
 - corrupt observation facts do not affect strict resume/replay/public-output reads
 
-### Commit 11: expose app-level list/watch/read APIs
+### Commit 11: expose one app-level run observation API
 
 Scope:
 
-- Add app-level `list_runs`, `poll_run_changes`, `watch_run_changes`, `run_status`, and
-  `run_stream` APIs.
+- Add one app-level `read_run_observations(query) -> RunObservationPage` API.
+- Do not add separate `list_runs`, `poll_run_changes`, or `watch_run_changes` app contracts.
+- Reuse the existing strict `run_status`, strict `run_stream`, and public-output authority paths;
+  rename them only as part of removing `typed` prefixes.
 - Implement opaque cursor encoding over `(run_commit_log.append_xid, run_commit_log.commit_sort_key)`
   with cursor format version and store epoch.
 - Use sealed/MACed stateless cursors or server-issued opaque tokens with defined key/source,
   rotation, and stable cursor errors. Tampered or future lower-bound cursors must fail closed.
 - Keep `append_xid`, `commit_sort_key`, and PostgreSQL transaction ids out of public JSON/text
-  output; expose opaque cursors/high-watermarks and domain observation ids instead.
-- Make `list_runs` and watch polling use one snapshot-sealed frontier for returned rows, joined
-  summaries, projection version, and watch cursor. Page cursors, if added, must be separate from
-  watch cursors.
-- Reject cursors whose `store_epoch` does not match the live row with `StaleStoreEpoch`.
+  output; expose only `next_cursor` and, if necessary, an opaque `change_id`.
+- Keep `cursor_version`, `store_epoch`, `projection_version`, high-watermarks, frontier lag,
+  commit ids, observation ids, artifact ids, evidence hashes, lane keys, holder proofs, and fencing
+  tokens out of public JSON/text output.
+- Make `read_run_observations` use one snapshot-sealed frontier for returned rows and the next
+  cursor. Page cursors, if added later, must be a separate design from watch cursors.
+- Return long-poll timeout as a successful empty page with a fresh cursor, not as an error.
+- Reject cursors whose `store_epoch` does not match the live row with the public `CursorExpired`
+  error.
 - Keep `run_status` and `run_stream` strict authority reads (immediate, no frontier lag).
 - Keep list/watch as observation reads over Postgres read models. Document the read-your-writes
   caveat: a just-created run appears in list/watch only after the sealed frontier advances past it.
@@ -448,9 +453,9 @@ Verification:
 - cursor key rotation tests
 - no-skip watch cursor tests
 - list/watch single-frontier consistency tests
-- stale cursor-version tests
-- stale store-epoch tests
-- `ProjectionUnavailable` tests
+- expired cursor tests
+- `ObservationUnavailable` tests
+- successful empty-page long-poll timeout tests
 - strict stream watch tests proving authority stream reads
 
 ### Commit 12: refactor app construction around production Postgres factory
@@ -475,10 +480,13 @@ Verification:
 
 Scope:
 
-- Add `mfm run list`.
-- Add `mfm run watch --from <cursor>`.
+- Add `mfm run list [--cursor <opaque>] [--limit <n>] [--wait-ms <n>] [--watch]`.
+- Do not add a separate first-class `mfm run watch` command in this RFC. If ergonomics require it
+  later, add it as an alias over `mfm run list --watch` in a separate change.
 - Preserve strict `mfm run stream <RUN_ID> --from-seq <N> --watch`.
 - Define stable JSON output and compact text output.
+- Expose only the minimal observation page fields: `next_cursor`, `runs[]`, and optionally opaque
+  `change_id`.
 - Remove `--typed-artifact-root` and `MFM_TYPED_ARTIFACT_ROOT`.
 - Remove direct `sqlx`, Postgres storage crate, and filesystem artifact store dependencies from
   CLI production manifest.
@@ -497,12 +505,14 @@ Verification:
 
 Scope:
 
-- Add REST `GET /v1/runs`.
-- Add REST `GET /v1/runs/watch?from=<cursor>&limit=<n>&wait_ms=<n>`.
+- Add REST `GET /v1/runs?cursor=<opaque>&limit=<n>&wait_ms=<n>`.
+- Do not add `GET /v1/runs/watch` in this RFC. Future SSE/WebSocket streaming must be a separate
+  proposal if long-poll pages are insufficient.
 - Keep strict status/stream routes strict.
 - Define stable JSON schemas and error codes:
-  `InvalidCursor`, `StaleCursorVersion`, `StaleStoreEpoch`, `ProjectionUnavailable`,
-  `LimitOutOfRange`, `RunNotFound`, `StrictStatusRequired`, `WatchTimedOut`.
+  `InvalidCursor`, `CursorExpired`, `LimitOutOfRange`, `RunNotFound`,
+  `ObservationUnavailable`.
+- Treat long-poll timeout as HTTP 200 with an empty page and fresh cursor.
 - Remove direct concrete storage and filesystem artifact store dependencies from REST production
   manifest.
 
@@ -673,7 +683,7 @@ The refactor is done when all of the following are true:
   `reseed_store_epoch` invalidates them after restore/clone/import/rollback.
 - Read models rebuild from authority rows and can be drift-checked.
 - Strict status, stream, replay, and public output do not trust read models.
-- CLI/REST expose one shared app list/watch API.
+- CLI/REST expose one shared app run observation API.
 - CLI/REST no longer expose filesystem artifact roots.
 - CLI/REST no longer depend directly on `sqlx`, Postgres storage crates, or filesystem stores.
 - Filesystem storage is deleted from production.

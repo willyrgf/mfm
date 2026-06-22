@@ -28,7 +28,7 @@ each with no compatibility shims:
 2. Resource-lane cutover: pre-invocation lane lifecycle, per-lane admission, lane-transition
    authority, and the `saga.md` resource-claim reconciliation.
 3. Observation cutover: the read-model layer, `run_commit_log` watch cursors, and the shared
-   CLI/REST list/watch API, plus the `typed_` -> target naming baseline.
+   CLI/REST run observation API, plus the `typed_` -> target naming baseline.
 
 Within each cutover, reviewable commit slices are required, but partial merges that leave runtime
 authority, storage behavior, public APIs, and docs disagree are not an acceptable intermediate state.
@@ -1176,13 +1176,13 @@ assembles stores, registries, artifacts, and capabilities, orchestrates verified
 public read authorities only after store/runtime verification. App and framework code do not write
 observation rows directly and must not own workflow or projection semantics.
 
-Authority-produced observation rows use one explicit sink boundary: `RunObservationSink` (name
-finalized during implementation) implemented by the Postgres observation store and called only by
-the authority-owning crates that produced the verified projection row. Initial allowed callers are
-`mfm-store` for spec-independent stream projection contracts and `mfm-runtime` for spec-aware
-lifecycle/recovery observations. `mfm-app` may orchestrate these calls as part of verified services
-but must not construct semantic observation contents itself. Every semantic-looking observation row
-must record `producer_authority`, `projection_version`, source provenance, and row hash.
+Authority-produced observation rows are written only by the append/rebuild pipeline that already
+owns the verified input and provenance for the row. This RFC does not add a production-public
+observation sink trait. Initial allowed producers are `mfm-store` for spec-independent stream
+projection contracts and `mfm-runtime` for spec-aware lifecycle/recovery observations. `mfm-app` may
+orchestrate these writes as part of verified services but must not construct semantic observation
+contents itself. Every semantic-looking observation row must record `producer_authority`,
+`projection_version`, source provenance, and row hash.
 
 SQL must not become a second semantic projection engine. SQL derivation is limited to mechanical
 facts that can be copied or deterministically reshaped from committed scalar/canonical-byte columns
@@ -1342,9 +1342,9 @@ views over those facts. If list/watch needs semantic-looking summaries later, th
 must live in the crate that owns that contract: `mfm-store` for spec-independent stream projection
 contracts, `mfm-runtime` for spec-aware lifecycle/recovery semantics, and `mfm-app` only for
 orchestration and public authority construction. The Postgres storage crate may persist
-projection-versioned rows handed to `RunObservationSink`, but it must not call runtime/app
-projection code internally or become the owner of those semantics. Such rows must be labeled as
-observations and must not mint or substitute for strict semantic authority.
+projection-versioned rows handed to it by the append/rebuild pipeline, but it must not call
+runtime/app projection code internally or become the owner of those semantics. Such rows must be
+labeled as observations and must not mint or substitute for strict semantic authority.
 
 Trigger-derived read facts must not hash Postgres `jsonb::text`. Each hash-bearing fact must define
 a canonical row schema and canonicalizer identity. The implementation must either provide a
@@ -1373,7 +1373,9 @@ created_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp()
 
 `store_epoch` is a random opaque id generated once at fresh migration. Public watch cursors carry it
 (see the cursor codec below); a cursor whose `store_epoch` does not match the live row is rejected
-with `StaleStoreEpoch`. That is the entire cursor-domain contract.
+with the public `CursorExpired` error. Internal diagnostics may record the stale epoch reason, but
+the public API does not expose store epochs or epoch-specific error names. That is the entire
+cursor-domain contract.
 
 Earlier drafts added a `cursor_domain_seals` table, an XID-domain fingerprint computed from the
 PostgreSQL system identifier and timeline through privileged functions, a frontier hash over every
@@ -1386,7 +1388,7 @@ need.
 The cursor-domain rule is now an explicit operator responsibility with one enforcement point:
 
 - Fresh migration generates a new `store_epoch`. Cursors from any prior epoch are rejected with
-  `StaleStoreEpoch`, and the client re-lists from the current sealed high-watermark.
+  `CursorExpired`, and the client re-lists to obtain a fresh cursor.
 - Observation rebuilds, cache refreshes, and new projection/observation versions do not change the
   epoch; the cursor domain is unchanged.
 - Any operation that changes the PostgreSQL XID ordering domain behind existing cursor rows —
@@ -1549,7 +1551,8 @@ must not block independent run appends. Two consequences need explicit handling:
   for every watcher. The MFM store must therefore run on a database instance dedicated to MFM (no
   co-tenant write workloads), and that requirement is part of the operational contract, not just a
   recommendation. Keep append transactions short, set bounded statement and
-  idle-in-transaction timeouts, and expose `watch_frontier_lag` as an operational metric.
+  idle-in-transaction timeouts, and expose frontier lag only as an internal/maintenance metric, not
+  as a public list/watch field.
 
 - **Large artifact bytes vs. short append transactions are in direct tension.** The `PreparedCommitBundle`
   inserts artifact `BYTEA` inside the append transaction, and a multi-megabyte insert is inherently a
@@ -1585,17 +1588,18 @@ PRIMARY KEY (projection_version, commit_id, summary_kind)
 Rebuilding a new projection version inserts new summary rows for the same immutable
 `run_commit_log.commit_id` values. It must not update old summaries or rewrite cursor authority. If
 a requested projection version is unavailable for a sealed visible change, normal app/CLI/REST
-handlers must return a documented `ProjectionUnavailable` response or omit optional summaries
-according to the public contract. Projection builds are explicit out-of-band maintenance operations;
-public list/watch handlers must not silently run rebuild procedures with runtime credentials before
+handlers must omit optional summaries or return `ObservationUnavailable` if required observation
+rows are unavailable. Projection builds are explicit out-of-band maintenance operations; public
+list/watch handlers must not silently run rebuild procedures with runtime credentials before
 returning data.
 
 Projection version is response/query metadata, not cursor authority. The service must reject stale
 incompatible cursor-format versions or explicitly migrate them; it must never silently continue a
 cursor across incompatible cursor contracts.
 
-`watch_run_changes` must poll durable rows before and after waiting. `LISTEN/NOTIFY` can only wake
-the waiter; it must not be treated as the data source and may be missed or coalesced.
+`read_run_observations` with a wait time must poll durable rows before and after waiting.
+`LISTEN/NOTIFY` can only wake the waiter; it must not be treated as the data source and may be
+missed or coalesced.
 
 ## Write Flow
 
@@ -1654,7 +1658,7 @@ needs such a point to make watch cursors correct is outside this RFC.
 If synchronous trigger/observation derivation fails, the whole transaction must roll back. That
 preserves atomicity for the minimal observation rows the public API depends on. Expensive dashboard
 models may be rebuilt asynchronously from authority rows, but then list/watch must surface
-`ProjectionUnavailable` or omit those optional summaries until the requested projection version is
+`ObservationUnavailable` or omit those optional summaries until the requested projection version is
 available. Public app/CLI/REST request handlers must not invoke privileged rebuild procedures as an
 implicit fallback.
 
@@ -1693,92 +1697,103 @@ strict status remains available per run when a verified semantic view is require
 
 ## Public API
 
-Add one shared app-level API used by CLI and REST.
+Add one new shared app-level capability used by CLI and REST: cross-run operational observation.
+Everything else should reuse existing strict authority APIs or be deleted during the breaking
+refactor. If a doubtful surface is later needed, recover it from git history or introduce it in a
+separate RFC with proof that the existing surfaces cannot carry it.
 
-App-facing methods:
+App-facing API:
 
 ```text
-list_runs(query) -> RunListResponse
-poll_run_changes(cursor, limit) -> RunChangePage
-watch_run_changes(cursor, options) -> RunChangePage or stream
-run_status(run_id) -> RunResponse
-run_stream(run_id, range) -> RunStreamResponse
+read_run_observations(query) -> RunObservationPage
 ```
+
+`read_run_observations` is the only new public app method in this RFC. The query carries filters,
+limit, an optional opaque cursor, and optional long-poll wait time. List, poll, and watch are modes
+of this one observation read. There must not be separate `list_runs`, `poll_run_changes`, or
+`watch_run_changes` app contracts.
+
+Existing strict APIs remain the way callers obtain authority-bearing per-run state:
+
+```text
+run_status(run_id)      // strict authority read, existing surface
+run_stream(run_id, ...) // strict authority stream, existing surface
+typed_public_output(...) or its renamed replacement // public-output authority path
+```
+
+Those methods may be renamed as part of removing `typed` prefixes, but they must not be duplicated
+as observation APIs.
 
 CLI:
 
 ```text
-mfm run list
-mfm run watch --from <cursor>
+mfm run list [--cursor <opaque>] [--limit <n>] [--wait-ms <n>] [--watch]
 mfm run stream <RUN_ID> --from-seq <N> --watch
 ```
+
+`mfm run list --watch` is only CLI sugar over repeated/long-poll observation reads. Do not add a
+separate first-class `mfm run watch` command in this RFC.
 
 REST:
 
 ```text
-GET /v1/runs
-GET /v1/runs/watch?from=<cursor>&limit=<n>&wait_ms=<n>
+GET /v1/runs?cursor=<opaque>&limit=<n>&wait_ms=<n>
 GET /v1/runs/:run_id/status
 GET /v1/runs/:run_id/stream?from_seq=<n>&to_seq=<n>
 ```
 
+Do not add `GET /v1/runs/watch` in this RFC. Future SSE/WebSocket streaming can be proposed later
+if long-poll pages over `GET /v1/runs` are not enough.
+
 These are public contracts. The implementation must define stable response structs, JSON schemas,
 text output, and error codes before the routes/commands are considered complete.
 
-Minimum list/watch JSON fields:
+Minimum run-observation page fields:
 
 ```text
-cursor
 next_cursor
-cursor_version
-projection_version
-sealed_high_watermark
-watch_frontier_lag
 runs[]
-changes[]
 ```
 
-Minimum list/watch run observation fields:
+`next_cursor` is an opaque exclusive lower-bound cursor. A long-poll timeout is a successful empty
+page with a fresh cursor, not an error.
+
+Minimum run observation fields:
 
 ```text
 run_id
 head_seq
-commit_id
-last_observation_id
-observed_status_kind
+observed_status
 started_at
 updated_at
 completed_at
-projection_summary
 ```
 
-Fields that look semantic must be nested under a projection-versioned observation envelope, for
-example `projection_summary.observed_run_mode`, `projection_summary.observed_attempts`, or
-`projection_summary.observed_public_output`. List/watch must not expose bare `run_mode`,
-`public_output_summary`, `attempt_summary`, manual-resolution authority, retention proof, or
-public-output authority. Callers that need semantic saga status, public-output authority,
-retention/replay proof, or manual-resolution authority must call strict per-run status/stream
-APIs.
+If clients need idempotent change de-duplication, expose an opaque `change_id`. Do not expose
+`projection_version`, `sealed_high_watermark`, `watch_frontier_lag`, `commit_id`,
+`last_observation_id`, `projection_summary`, `append_xid`, `commit_sort_key`, artifact ids,
+evidence hashes, lane keys, fencing tokens, or holder proofs in the public list/watch contract.
 
-`list_runs` must use the same snapshot-sealed frontier algorithm as watch polling. The returned
-list state, `projection_version`, and `sealed_high_watermark` must be mutually consistent: rows in
-the response are bounded by the sealed frontier, and the returned watch cursor is the sealed
-high-watermark lower bound from which later watch calls resume without skipping rows at the frontier
-XID. If list pagination is added, it must use a separate page cursor from the watch cursor so
-clients cannot confuse "next page of this list" with "next change after this sealed observation
-point."
+Fields that look semantic must either be omitted from the observation API or nested under a clearly
+observation-only envelope. List/watch must not expose bare `run_mode`, `public_output_summary`,
+`attempt_summary`, manual-resolution authority, retention proof, or public-output authority.
+Callers that need semantic saga status, public-output authority, retention/replay proof, or
+manual-resolution authority must call strict per-run status/stream/public-output APIs.
+
+`read_run_observations` must use one snapshot-sealed frontier for the whole request. Rows in the
+response are bounded by the sealed frontier, and `next_cursor` resumes from the sealed lower bound
+without skipping rows at the frontier XID. If list pagination is added later, it must be a separate
+explicit design from watch cursors so clients cannot confuse "next page of this list" with "next
+change after this sealed observation point."
 
 Stable public error codes must include at least:
 
 ```text
 InvalidCursor
-StaleCursorVersion
-ProjectionUnavailable
-StaleStoreEpoch
+CursorExpired
 LimitOutOfRange
 RunNotFound
-StrictStatusRequired
-WatchTimedOut
+ObservationUnavailable
 ```
 
 CLI text output should be compact and line-oriented for list/watch, while JSON output must use the
@@ -1792,14 +1807,12 @@ run_commit_log.commit_sort_key)` as an exclusive lower bound plus a cursor forma
 Projection version is response/query metadata, not cursor authority. The cursor must not encode
 plain identity sequence values, global counters, wall-clock timestamps, or values that require a
 global commit-order lock. Cursor decode must reject mismatched `store_epoch` with
-`StaleStoreEpoch`, distinct from malformed cursor bytes.
+`CursorExpired`, distinct from malformed cursor bytes.
 
 Public list/watch responses must not expose `append_xid`, `commit_sort_key`, PostgreSQL transaction
-ids, or text-collation-dependent ordering keys. If clients need a visible progress token, expose an
-opaque domain-neutral value such as `sealed_high_watermark`, `next_cursor`, or `last_observation_id`.
-
-`mfm run watch` and `GET /v1/runs/watch` are observation APIs backed by `run_commit_log`,
-`run_observation_change_summaries`, and other Postgres-owned read models.
+ids, text-collation-dependent ordering keys, cursor versions, store epochs, projection versions, or
+read-model watermarks. If clients need a visible progress token, expose only `next_cursor` or an
+opaque `change_id`.
 
 `mfm run stream <RUN_ID> --watch` is a strict authority stream tail, not a read-model watch. It must
 emit data loaded from the authoritative run stream and ordered by `(seq, ordinal)`. It may use
@@ -1816,7 +1829,7 @@ retention/replay proof must use per-run strict status or stream APIs.
 
 The target storage API should split semantic append/load from observation reads.
 
-Proposed storage traits:
+Proposed public or semi-public crate traits:
 
 ```text
 RunEventStore
@@ -1825,39 +1838,33 @@ RunEventStore
   expected_next_seq(...)
 
 RunObservationStore
-  list_run_observations(...)
-  get_run_observation(...)
-  poll_run_observation_changes(...)
-  wait_run_observation_change(...)
-
-RunObservationSink
-  insert_authority_observations(...)
-
-CommitArtifactWriteSet
-  verified bytes and evidence carried by PreparedCommitBundle
+  read_run_observations(query) -> RunObservationPage
 
 RetainedArtifactReadProvider
   read_retained_artifact(EventArtifactRequirement)
 
 ArtifactReadProvider
   read_artifact(ArtifactReadAuthority)
-
-PublicOutputArtifactReader
-  read_public_output_artifact(PublicOutputReadAuthority)
 ```
 
-`RunObservationStore` methods that return list/watch data must compute one snapshot-sealed frontier
-for the request and bound every returned row, summary join, and cursor by that same frontier. They
-must not call an unparameterized `current_*` view that can race ahead of the returned watch cursor.
-`RunObservationSink` accepts only projection-versioned observation rows produced by the authority
-layer that owns the semantics and must preserve provenance/hash metadata; it is not a general app
-write surface.
+`RunObservationStore` is an internal app/storage boundary, not a CLI/REST dependency and not an
+external extension point. It must expose one page read only. It must not expose `get_run_observation`
+as a status-lite API, separate poll/watch methods, sink writes, active-lane inspection, projection
+maintenance, cursor internals, or Postgres implementation details.
+
+Do not add a production-public observation sink trait in this RFC. Observation rows are
+written only by the append/rebuild pipeline that already owns the authority and provenance for the
+row. If a future projection system needs an explicit sink abstraction, it must be introduced as a
+sealed internal trait or a separate RFC.
+
+Do not add a standalone public commit artifact write-set trait. Verified bytes and evidence are
+part of `PreparedCommitBundle`; splitting them back out risks recreating the plan-only append path.
 
 There should not be a broad production `ArtifactStore` trait with arbitrary `get_artifact_by_id`,
 `has_artifact`, or unscoped read methods. Runtime staging, retained-artifact reads for verified
 history, adapter artifact-read capabilities, and public-output artifact reads are distinct authority
-surfaces. They may be implemented by one concrete Postgres type, but they must remain separate trait
-surfaces with proof-bearing request types.
+surfaces. They may be implemented by one concrete Postgres type, but artifact reads must remain
+proof-bearing request surfaces.
 
 `mfm-app` should be generic over the run store, observation store, and narrow artifact read
 capabilities it actually needs. Runner registration should receive an artifact reader only when the
@@ -1868,10 +1875,9 @@ can reach a reader. Partial artifact-read constructors must not exist on product
 if tests or private authority-minting code need builders, those builders must be unable to issue a
 readable request until verified history, config, and evidence fill every proof field. Strict
 status/replay paths should use retained artifact authority derived from committed event
-requirements. Public-output rendering should use a reader that accepts `PublicOutputReadAuthority`
-or a narrowly named request such as `VerifiedPublicOutputArtifactRequirement` with private
-constructors from strict `VerifiedRunHistoryView` and public-output authority verification. It must
-not accept arbitrary artifact ids or projection-versioned observation rows from list/watch.
+requirements. Public-output rendering must reuse the existing `PublicOutputReadAuthority` path or
+its renamed replacement. Do not add a new public-output artifact reader trait in this RFC. It
+must not accept arbitrary artifact ids or projection-versioned observation rows from list/watch.
 Observation/read-model projection data cannot authorize artifact reads. CLI and REST should not
 construct filesystem stores and should not query Postgres directly.
 
@@ -2037,7 +2043,7 @@ Database guardrails:
   folding `run_events`, and observation-row absence can never influence admission
 - reseed `store_epoch` after restore, clone, import, rollback, destructive reset, or any operation
   that changes the `append_xid` ordering domain; reject cursors from a prior `store_epoch` with
-  `StaleStoreEpoch`
+  public `CursorExpired`
 - validate that hash-bearing rows use canonical MFM bytes and never `jsonb::text`
 
 Code guardrails:
@@ -2253,7 +2259,7 @@ Required new tests:
 - public watch tests prove no global commit-order advisory lock, global counter row, or table-level
   append serialization is needed
 - watch cursor resumes after disconnect
-- watch cursors carrying a prior `store_epoch` are rejected with `StaleStoreEpoch` after fresh
+- watch cursors carrying a prior `store_epoch` are rejected with `CursorExpired` after fresh
   migration, destructive reset, or an explicit `reseed_store_epoch`
 - `reseed_store_epoch` rotates `store_epoch`, runs only under the maintenance role, and invalidates
   outstanding cursors (clients re-list)
@@ -2262,18 +2268,17 @@ Required new tests:
 - cursor codec tests cover key id, durable key source across restarts, accepted old-key rotation
   window, unknown-key rejection, and retired-key rejection
 - stale cursor-format versions are rejected or explicitly migrated
-- unavailable projection-version summaries return `ProjectionUnavailable` or are omitted according
-  to the public contract; normal app/CLI/REST handlers do not run privileged rebuild procedures as
-  implicit fallbacks
-- `list_runs` returns list rows, projection version, sealed high-watermark, and watch cursor from one
-  consistent snapshot-sealed frontier, with page cursors kept separate from watch cursors
-- `RunObservationStore` list/watch methods do not join against unbounded `current_*` views that can
+- unavailable required observation rows return `ObservationUnavailable`; optional summaries are
+  omitted according to the public contract; normal app/CLI/REST handlers do not run privileged
+  rebuild procedures as implicit fallbacks
+- `read_run_observations` returns list rows and `next_cursor` from one consistent snapshot-sealed
+  frontier, with any future page cursor kept separate from watch cursors
+- `RunObservationStore` observation reads do not join against unbounded `current_*` views that can
   race ahead of the returned frontier
-- `RunObservationSink` accepts only authority-produced projection-versioned observations with
-  provenance and hash metadata
+- no public/app observation sink can write rows outside the append/rebuild pipeline
 - aggregate observation provenance stores or recovers the full watch frontier tuple when it claims a
   platform-prefix high watermark
-- empty watch pages return a well-defined high-watermark
+- empty watch pages return a fresh `next_cursor`
 - `LISTEN/NOTIFY` is not required for correctness
 - strict `run stream --watch` tails authority rows and does not use read-model summaries
 - `run_commit_log` cursor rows remain immutable across projection-version rebuilds and are ordered
