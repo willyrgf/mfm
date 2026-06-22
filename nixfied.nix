@@ -246,7 +246,7 @@ in
         "--features"
         "parity-tests"
         "--test"
-        "parity_rest_api_postgres_typed_smoke"
+        "parity_rest_api_postgres_smoke"
         "--"
         "--nocapture"
       ];

@@ -1,7 +1,7 @@
 #![cfg(feature = "parity-tests")]
 #![allow(clippy::disallowed_methods)]
 
-use mfm_app::TypedRunMode;
+use mfm_app::RunModeStatus;
 use serde::Deserialize;
 
 mod support;
@@ -173,13 +173,13 @@ async fn parity_portfolio_snapshot_feature_against_reth_eth_only() {
     // support/configuration in the node.
     let wallet_address = "0x000000000000000000000000000000000000dead";
 
-    let response = support::run_typed_portfolio_snapshot(canonical_portfolio_snapshot_payload(
+    let response = support::run_portfolio_snapshot(canonical_portfolio_snapshot_payload(
         wallet_address,
         chain_id,
         &control_scope,
     ))
     .await;
-    assert_eq!(response.run.run_mode, TypedRunMode::Completed);
+    assert_eq!(response.run.run_mode, RunModeStatus::Completed);
     let public_output = response
         .public_output
         .json

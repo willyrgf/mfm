@@ -3,10 +3,10 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::{routing::post, Json, Router};
-use mfm_app::{PublicOpName, TypedRunMode};
+use mfm_app::{PublicOpName, RunModeStatus};
 use mfm_events::v1 as events;
 use mfm_ids::RunId;
-use mfm_store::v1::{self as store, AsyncTypedRunEventStore};
+use mfm_store::v1::{self as store, RunEventStore};
 use serde_json::json;
 use tower::ServiceExt;
 
@@ -16,14 +16,14 @@ const NETWORK_ID: &str = "typed-local-eth";
 static RPC_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[tokio::test]
-async fn typed_portfolio_snapshot_resumes_from_append_only_start() {
+async fn portfolio_snapshot_resumes_from_append_only_start() {
     let _env_guard = RPC_ENV_LOCK.lock().await;
     let rpc_url = start_rpc_mock().await;
     set_rpc_env(rpc_url);
 
-    let result = support::resume_typed_portfolio_snapshot(portfolio_payload()).await;
-    assert_eq!(result.started.run_mode, TypedRunMode::Forward);
-    assert_eq!(result.resumed.run_mode, TypedRunMode::Completed);
+    let result = support::resume_portfolio_snapshot(portfolio_payload()).await;
+    assert_eq!(result.started.run_mode, RunModeStatus::Forward);
+    assert_eq!(result.resumed.run_mode, RunModeStatus::Completed);
     assert_eq!(result.started.spec_hash, result.resumed.spec_hash);
     assert_eq!(result.authority.spec_hash, result.resumed.spec_hash);
     assert!(!result.authority.certificate_hash.is_empty());
@@ -62,12 +62,12 @@ async fn typed_portfolio_snapshot_resumes_from_append_only_start() {
 }
 
 #[tokio::test]
-async fn rest_portfolio_snapshot_matches_typed_public_output() {
+async fn rest_portfolio_snapshot_matches_public_output() {
     let _env_guard = RPC_ENV_LOCK.lock().await;
     let rpc_url = start_rpc_mock().await;
     set_rpc_env(rpc_url);
 
-    let expected = support::run_typed_portfolio_snapshot(portfolio_payload()).await;
+    let expected = support::run_portfolio_snapshot(portfolio_payload()).await;
     let expected_public_output = expected
         .public_output
         .json
@@ -114,10 +114,7 @@ async fn rest_portfolio_snapshot_defaults_toml_and_renders_public_output() {
     let rpc_url = start_rpc_mock().await;
     set_rpc_env(rpc_url);
 
-    let root =
-        std::env::temp_dir().join(format!("mfm-rest-portfolio-toml-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&root).expect("typed artifact root");
-    let state = support::in_memory_rest_app_state(&root);
+    let state = support::in_memory_rest_app_state();
     let store = state.store.clone();
     let app = mfm_rest_api::make_app(state);
     let response = app
@@ -150,8 +147,6 @@ async fn rest_portfolio_snapshot_defaults_toml_and_renders_public_output() {
         .expect("typed run id");
     let stream = store.load_run_stream(&run_id).await.expect("run stream");
     assert_portfolio_entry_point_evidence(&stream);
-
-    let _ = std::fs::remove_dir_all(root);
 }
 
 #[tokio::test]
@@ -160,12 +155,7 @@ async fn portfolio_runner_output_summary_matches_golden() {
     let rpc_url = start_rpc_mock().await;
     set_rpc_env(rpc_url);
 
-    let root = std::env::temp_dir().join(format!(
-        "mfm-rest-portfolio-runner-output-{}",
-        uuid::Uuid::new_v4()
-    ));
-    std::fs::create_dir_all(&root).expect("typed artifact root");
-    let state = support::in_memory_rest_app_state(&root);
+    let state = support::in_memory_rest_app_state();
     let store = state.store.clone();
     let app = mfm_rest_api::make_app(state);
     let response = local_portfolio_snapshot_post(&app, &portfolio_payload(), "until_blocked").await;
@@ -187,8 +177,6 @@ async fn portfolio_runner_output_summary_matches_golden() {
             "attempt-output:mfm.portfolio/project_report:cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+retention_refs_appended[roles=state_output]",
         ]
     );
-
-    let _ = std::fs::remove_dir_all(root);
 }
 
 async fn start_rpc_mock() -> String {
@@ -251,9 +239,7 @@ fn set_rpc_env(rpc_url: String) {
 }
 
 fn rest_test_app() -> axum::Router {
-    let root = std::env::temp_dir().join(format!("mfm-rest-portfolio-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&root).expect("typed artifact root");
-    mfm_rest_api::make_app(support::in_memory_rest_app_state(root))
+    mfm_rest_api::make_app(support::in_memory_rest_app_state())
 }
 
 fn json_post(uri: &str, body: serde_json::Value) -> Request<Body> {
