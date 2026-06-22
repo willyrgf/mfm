@@ -20,6 +20,11 @@ Every implementation PR/branch should include an explicit commit plan before cod
 should be reviewable, have a narrow purpose, and either compile on its own or clearly state why it
 is part of an agreed short-lived compile-breaking sequence. Prefer compile-clean commits.
 
+This is not a storage-only refactor. The lane lifecycle, `PreparedCommitBundle`, artifact evidence
+identity, strict-vs-observation store traits, app factory, CLI/REST contracts, schema validation, and
+docs contract must land as one coherent cutover. Do not merge a partial state where runtime
+authority, storage behavior, public APIs, and docs disagree.
+
 ## Target Outcome
 
 The finished refactor has one production persistence story:
@@ -73,6 +78,10 @@ Scope:
 - Update `docs/design.md` with the new Postgres-only production persistence contract.
 - Update `docs/architecture.md` with storage boundaries, SQLx ownership, artifact authority
   surfaces, and CLI/REST dependency rules.
+- Document that artifact `BYTEA` safety comes from typed/signer/keystore/transient adapter
+  boundaries, not storage-side secret scanning.
+- Document resource lanes as capability-declared, runtime-preflight-resolved authority acquired
+  before live IO and enforced by the store without global locks.
 - Update the storage README/runbook with the destructive fresh-database cutover stance.
 - Mark filesystem artifact storage as removed from production architecture.
 - Mark in-memory storage as test-only.
@@ -112,6 +121,11 @@ Scope:
   commit purpose, prepared request hash, and canonical request bytes.
 - Replace `AsyncTypedRunEventStore::append_prepared_commit_plan` with
   `append_prepared_commit_bundle`.
+- Add resource-lane authority types and event payloads for capability-declared requirements,
+  resolved claims, committed `ResourceLaneClaimed`/`ResourceLaneReleased`, held lane sets, and holder
+  proofs.
+- Make artifact evidence identity evidence-keyed: APIs and strict reads must carry
+  `(artifact_id, evidence_hash)` or exact event-derived requirements when typed meaning matters.
 - Update in-memory test store helpers to use bundles.
 - Delete the plan-only production append API.
 
@@ -132,6 +146,14 @@ Scope:
   run admission, attempt start, attempt terminal, side-effect progress, side-effect terminal,
   framework lifecycle output, retention, manual resolution, saga terminal, recovery, and observed
   failure diagnostics.
+- Split side-effect lifecycle so lane-bearing capabilities can resolve concrete resource-lane claims
+  during pure preflight after `StateAttemptStarted` and before invocation construction or live IO.
+- Keep `StateAttemptStarted` as a separate first attempt commit.
+- Commit `ResourceLaneClaimed` as a separate certified pre-invocation commit for the already-started
+  open attempt, then pass the committed `HeldResourceLaneSet` into invocation preparation.
+- Require side-effect output to echo held lane claims and reject mismatches before append.
+- Verify the same committed held lane, or commit a certified recovery claim/release, before any
+  recovery path that may touch live IO.
 - Remove production `RuntimeArtifactStager` and `stage_prepared_artifacts` flows.
 - Keep only narrow in-memory test bundle helpers.
 - Ensure recovery/resume never appends newly admitted artifact evidence without bytes in the bundle.
@@ -144,16 +166,20 @@ Verification:
 
 - `cargo test -p mfm-runtime`
 - runtime tests covering artifact-producing commit paths
+- runtime tests proving same account/chain EVM mutations cannot both reach nonce read/signing
+- runtime tests proving read-only capabilities do not acquire exclusive lanes
 
 ### Commit 5: define narrow artifact authority surfaces
 
 Scope:
 
 - Keep artifact reads behind proof-bearing request types:
-  retained run-history reads, adapter `ArtifactReadRequest`, and public-output authority reads.
+  retained run-history reads, exact adapter `ArtifactReadAuthority`, and public-output authority
+  reads.
 - Remove broad production artifact APIs such as arbitrary `get_artifact_by_id`, `has_artifact`,
   or unscoped reads from app-facing surfaces.
-- Add or update secret-boundary validation/redaction contracts for artifact bytes/evidence.
+- Add or update type-boundary and redaction contracts proving secret-bearing signer/runtime/raw-
+  transaction types cannot become typed persisted/public surfaces.
 
 Verification:
 
@@ -166,7 +192,7 @@ Verification:
 Scope:
 
 - Replace public storage type names with target names such as `PostgresRunStore`,
-  `PostgresArtifactStore`, `PostgresReadModelStore`, and `PostgresStoreError`.
+  `PostgresArtifactStore`, `PostgresObservationStore`, and `PostgresStoreError`.
 - Delete old `PostgresTyped*` aliases and old `typed.rs` style modules instead of keeping
   forwarding wrappers.
 - Split the Postgres implementation into clear run, artifact, read-model, schema, locking, and
@@ -174,9 +200,11 @@ Scope:
 - Replace the old `typed_*` migration baseline with target non-`typed_` tables.
 - Add append-only authority tables:
   `commits`, `run_events`, `artifact_blobs`, `artifact_admissions`,
-  `run_artifact_admissions`, `commit_artifact_evidence`, `logical_key_observations`.
+  `run_artifact_admissions`, `commit_artifact_evidence`, `resource_lane_claim_events`,
+  `resource_lane_release_events`.
 - Add observation/read tables:
-  `run_commit_log`, `run_change_summaries`, read facts, projection derivation tables.
+  `logical_key_observations`, `run_commit_log`, `run_observation_change_summaries`,
+  observation facts, observation derivation tables.
 - Add no-update/no-delete/no-truncate guards.
 - Add maintenance-role-only rebuild/validation procedure boundaries.
 - Make schema validation reject stale old `typed_*` schemas or old migration checksums.
@@ -200,10 +228,14 @@ Scope:
 - Implement `append_prepared_commit_bundle` in the Postgres storage crate.
 - Verify artifact bytes/evidence inside the transaction before inserting authority rows.
 - Insert `commits`, `artifact_blobs`, artifact evidence/admission rows, `run_events`,
-  `logical_key_observations`, and `run_commit_log` atomically.
-- Use run locks and sorted locks for only explicitly claimed resource lanes; do not add a global
-  commit-order lock, global counter row, table-level append serialization, or `commit_pos`/
-  `change_pos` allocation.
+  `logical_key_observations`, resource-lane claim/release rows, and `run_commit_log` atomically.
+- For lane acquire/use/release commits, require committed lane claim/release event payloads and
+  holder proofs inside the prepared bundle. Use sorted per-lane transaction locks only while
+  admitting those commit-bound rows; do not expose standalone lane acquire/release APIs, derive lanes
+  in storage, or add a global commit-order lock, global resource-lane lock, global counter row,
+  table-level append serialization, or `commit_pos`/`change_pos` allocation.
+- Enforce batch-hash integrity structurally in SQL and semantically in Rust from persisted canonical
+  bytes; do not create a SQL canonicalization engine.
 - Insert `run_commit_log.append_xid` from PostgreSQL `pg_current_xact_id()` and use it only for
   snapshot-sealed observation cursors.
 - Remove mutable helper writes: no run-head updates, no unique logical-key upserts, no current-state
@@ -214,6 +246,13 @@ Verification:
 - same-run concurrent append tests
 - cross-run resource-lane contention tests
 - independent cross-run append tests proving unrelated runs do not block each other
+- crash after lane-bearing `StateAttemptStarted` but before `ResourceLaneClaimed` retries pure
+  preflight and claim admission or interrupts/fails without live IO
+- crash after `ResourceLaneClaimed` but before invocation preparation recovers the same committed
+  held lane or releases it through a certified cleanup/interruption commit
+- Postgres rejects prepared invocation resource keys without a committed held lane
+- Postgres rejects prepared invocation keys that differ from preflight claims
+- SQL/code scans prove no global resource-lane table lock or single `global` lock row remains
 - idempotent commit-key retry tests
 - artifact mismatch/missing/extra-byte rejection tests
 - snapshot-sealed watch cursor tests with older slow transactions and newer fast transactions
@@ -255,18 +294,18 @@ Verification:
 Scope:
 
 - Implement mechanical SQL facts only for scalar/canonical-byte derivations.
-- Emit semantic read facts by calling shared Rust projection code inside the Postgres storage
-  transaction.
-- Implement `run_change_summaries` separate from immutable `run_commit_log`.
-- Add `current_*` views over read facts.
-- Add rebuild/validate/drift tooling behind maintenance role boundaries.
+- Persist only observation rows handed to storage by kernel/runtime/app authority layers or derived
+  mechanically from scalar/canonical-byte authority columns.
+- Implement `run_observation_change_summaries` separate from immutable `run_commit_log`.
+- Add `current_*` views over observation facts.
+- Add `build_projection_version`, validate, and drift tooling behind maintenance role boundaries.
 
 Verification:
 
-- read facts rebuild exactly from authority rows
+- observation facts rebuild exactly from authority rows
 - SQL-only derivations are mechanical
-- Rust projection facts match strict projection rebuilds
-- corrupt read facts do not affect strict resume/replay/public-output reads
+- observation rows produced by authority-layer projection code match strict projection rebuilds
+- corrupt observation facts do not affect strict resume/replay/public-output reads
 
 ### Commit 11: expose app-level list/watch/read APIs
 
@@ -274,8 +313,10 @@ Scope:
 
 - Add app-level `list_runs`, `poll_run_changes`, `watch_run_changes`, `run_status`, and
   `run_stream` APIs.
-- Implement opaque cursor encoding over `(run_commit_log.append_xid, run_commit_log.commit_id)`
+- Implement opaque cursor encoding over `(run_commit_log.append_xid, run_commit_log.commit_sort_key)`
   with cursor format version and store epoch.
+- Keep `append_xid`, `commit_sort_key`, and PostgreSQL transaction ids out of public JSON/text
+  output; expose opaque cursors/high-watermarks and domain observation ids instead.
 - Keep `run_status` and `run_stream` strict authority reads.
 - Keep list/watch as observation reads over Postgres read models.
 
@@ -284,6 +325,7 @@ Verification:
 - cursor decode/encode tests
 - no-skip watch cursor tests
 - stale cursor-version tests
+- stale store-epoch tests
 - `ProjectionUnavailable` tests
 - strict stream watch tests proving authority stream reads
 
@@ -291,7 +333,7 @@ Verification:
 
 Scope:
 
-- Make app services generic over run store, read-model store, and narrow artifact read surfaces.
+- Make app services generic over run store, observation store, and narrow artifact read surfaces.
 - Add one production factory that composes the Postgres run/artifact/read-model surfaces.
 - Remove app construction that accepts filesystem artifact stores for production.
 - Remove direct concrete storage wiring from CLI/REST paths.
@@ -331,8 +373,8 @@ Scope:
 - Add REST `GET /v1/runs/watch?from=<cursor>&limit=<n>&wait_ms=<n>`.
 - Keep strict status/stream routes strict.
 - Define stable JSON schemas and error codes:
-  `InvalidCursor`, `StaleCursorVersion`, `ProjectionUnavailable`, `LimitOutOfRange`,
-  `RunNotFound`, `StrictStatusRequired`, `WatchTimedOut`.
+  `InvalidCursor`, `StaleCursorVersion`, `StaleStoreEpoch`, `ProjectionUnavailable`,
+  `LimitOutOfRange`, `RunNotFound`, `StrictStatusRequired`, `WatchTimedOut`.
 - Remove direct concrete storage and filesystem artifact store dependencies from REST production
   manifest.
 
@@ -467,6 +509,8 @@ Spawn an architect-agent before proceeding when:
 - a proposal adds fallback behavior or compatibility aliases
 - a cursor/order change could skip or duplicate durable watch events
 - artifact reads can happen by arbitrary id without proof-bearing request authority
+- resource-lane claims are derived in storage, discovered after live IO, created outside prepared
+  commit authority, or guarded by a global lock
 - CLI/REST need a direct dependency on a concrete storage crate
 
 The expected output from the architect-agent is a clear recommendation and a commit-sized path
@@ -478,8 +522,9 @@ The refactor is done when all of the following are true:
 
 - A fresh Postgres database can migrate to the target schema.
 - A stale old `typed_*` database is rejected.
-- Production appends insert events, artifact bytes/evidence, logical-key observations, commit-log
-  rows, and read facts atomically.
+- Production appends insert events, artifact bytes/evidence keyed by evidence hash, committed
+  resource-lane claim/release rows, logical-key observations, commit-log rows, and required
+  observation facts atomically.
 - Read models rebuild from authority rows and can be drift-checked.
 - Strict status, stream, replay, and public output do not trust read models.
 - CLI/REST expose one shared app list/watch API.
