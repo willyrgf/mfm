@@ -275,22 +275,27 @@ BEFORE INSERT ON run_commit_log
 FOR EACH ROW EXECUTE FUNCTION mfm_set_append_xid();
 
 CREATE TABLE run_observation_change_summaries (
-  commit_id TEXT PRIMARY KEY REFERENCES run_commit_log(commit_id) ON DELETE RESTRICT,
+  projection_version TEXT NOT NULL,
+  commit_id TEXT NOT NULL REFERENCES run_commit_log(commit_id) ON DELETE RESTRICT,
+  summary_kind TEXT NOT NULL CHECK (summary_kind = 'run'),
   run_id TEXT NOT NULL,
   head_seq BIGINT NOT NULL,
   observed_status TEXT NOT NULL CHECK (observed_status IN ('started', 'completed')),
   started_at TIMESTAMPTZ NOT NULL,
   updated_at TIMESTAMPTZ NOT NULL,
   completed_at TIMESTAMPTZ NULL,
-  projection_version TEXT NOT NULL,
   source_authority_hash TEXT NOT NULL,
-  source_event_count INTEGER NOT NULL CHECK (source_event_count >= 1),
+  source_event_count BIGINT NOT NULL CHECK (source_event_count >= 1),
+  summary_row_hash TEXT NOT NULL,
+  summary_row_canonical_json BYTEA NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp(),
+  PRIMARY KEY (projection_version, commit_id, summary_kind),
   CONSTRAINT run_observation_change_summaries_commit_fk FOREIGN KEY (run_id, head_seq) REFERENCES commits(run_id, seq) ON DELETE RESTRICT
 );
 
 CREATE VIEW current_run_observations AS
 SELECT DISTINCT ON (run_id)
+  projection_version,
   run_id,
   head_seq,
   observed_status,
@@ -299,6 +304,7 @@ SELECT DISTINCT ON (run_id)
   completed_at,
   commit_id
 FROM run_observation_change_summaries
+WHERE projection_version = 'mfm.run_observation.v1' AND summary_kind = 'run'
 ORDER BY run_id, head_seq DESC;
 
 CREATE TRIGGER store_metadata_no_update

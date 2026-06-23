@@ -86,11 +86,91 @@ pub(crate) type Result<T> = std::result::Result<T, PostgresStoreError>;
 const HASH_DOMAIN_VERSION: &str = "mfm.hash-domain.v1";
 const CANONICALIZER_IDENTITY: &str = "sha256-jcs-v1";
 const PROJECTION_VERSION: &str = "mfm.run_observation.v1";
+const RUN_OBSERVATION_SUMMARY_KIND: &str = "run";
 const CURSOR_VERSION: &str = "mfm.run_observation.cursor.v1";
 const MAX_OBSERVATION_LIMIT: u32 = 100;
 
 fn database_error(context: &'static str, _error: sqlx::Error) -> PostgresStoreError {
     PostgresStoreError::Database(context)
+}
+
+/// Maintenance build mode for projection-versioned Postgres read models.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadModelBuildMode {
+    /// Insert only missing rows for the requested projection version and verify existing rows.
+    MissingOnly,
+    /// Build rows for a projection version without rewriting any existing version.
+    NewVersion,
+}
+
+/// Result of a read-model build operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadModelBuildReport {
+    /// Projection version that was built or verified.
+    pub projection_version: String,
+    /// Rows inserted by the build.
+    pub inserted_rows: u64,
+    /// Existing rows whose hashes matched the rebuilt authority row.
+    pub verified_rows: u64,
+}
+
+/// Result of validating a projection-versioned read model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadModelValidationReport {
+    /// Projection version that was checked.
+    pub projection_version: String,
+    /// Authority commits checked against the read model.
+    pub checked_commits: u64,
+    /// Missing read-model rows for the requested version.
+    pub missing_rows: u64,
+    /// Rows present but not equal to the rebuilt authority-derived row.
+    pub drift_rows: u64,
+}
+
+/// High watermark for immutable commit-log cursor authority and observation summaries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadModelHighWatermark {
+    /// Number of immutable commit-log rows.
+    pub commit_log_rows: u64,
+    /// Number of projection-versioned observation summary rows.
+    pub summary_rows: u64,
+    /// Highest sealed append transaction id currently present in the commit log.
+    pub high_append_xid: Option<String>,
+    /// Commit id at the high watermark.
+    pub high_commit_id: Option<String>,
+    /// RFC v1 bytewise commit sort key at the high watermark.
+    pub high_commit_sort_key: Option<Vec<u8>>,
+}
+
+/// One read-model drift finding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadModelDrift {
+    /// Projection version of the affected row.
+    pub projection_version: String,
+    /// Commit id of the affected summary.
+    pub commit_id: String,
+    /// Kind of summary row.
+    pub summary_kind: String,
+    /// Drift class.
+    pub kind: ReadModelDriftKind,
+}
+
+/// Read-model drift class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadModelDriftKind {
+    /// An authority commit has no corresponding summary row.
+    Missing,
+    /// A summary row's stored hash or canonical bytes do not match the rebuilt row.
+    Mismatched,
+    /// A summary row references no live commit authority row.
+    Orphaned,
+}
+
+/// Report of read-model drift across projection versions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadModelDriftReport {
+    /// Drift findings.
+    pub findings: Vec<ReadModelDrift>,
 }
 
 /// PostgreSQL-backed typed run event store.
@@ -283,6 +363,7 @@ impl PostgresRunStore {
             .await
             .map_err(|error| database_error("failed to insert run event", error))?;
         }
+        let source_event_count = count_run_events_tx(&mut tx, request.run_id()).await?;
         insert_resource_lane_authority_rows_tx(&mut tx, &commit_id, batch.events()).await?;
         insert_run_commit_log_tx(
             &mut tx,
@@ -299,7 +380,7 @@ impl PostgresRunStore {
             request.run_id(),
             &commit_id,
             batch.seq(),
-            batch.events().len(),
+            source_event_count,
         )
         .await?;
 
@@ -341,6 +422,63 @@ impl PostgresRunStore {
         query: RunObservationQuery,
     ) -> Result<RunObservationPage> {
         read_run_observations_from_pool(&self.pool, query).await
+    }
+}
+
+/// Explicit maintenance surface for Postgres read models and cursor epoch rotation.
+///
+/// Production deployments should construct this with maintenance database credentials, not with the
+/// normal app/CLI/REST runtime credentials.
+#[derive(Clone)]
+pub struct PostgresMaintenance {
+    pool: PgPool,
+}
+
+impl PostgresMaintenance {
+    /// Connects to PostgreSQL, validates the typed schema, and returns the maintenance surface.
+    pub async fn connect(database_url: &str) -> Result<Self> {
+        let pool = connect_pool(database_url).await?;
+        validate_pool(&pool).await?;
+        Ok(Self { pool })
+    }
+
+    /// Connects using the `DATABASE_URL` environment variable.
+    pub async fn connect_env() -> Result<Self> {
+        let database_url = std::env::var("DATABASE_URL")
+            .map_err(|_| PostgresStoreError::Database("missing DATABASE_URL"))?;
+        Self::connect(&database_url).await
+    }
+
+    /// Builds or verifies a projection-versioned read model from authority rows.
+    pub async fn build_projection_version(
+        &self,
+        projection_version: &str,
+        mode: ReadModelBuildMode,
+    ) -> Result<ReadModelBuildReport> {
+        build_projection_version_from_pool(&self.pool, projection_version, mode).await
+    }
+
+    /// Validates one projection-versioned read model without mutating it.
+    pub async fn validate_read_models(
+        &self,
+        projection_version: &str,
+    ) -> Result<ReadModelValidationReport> {
+        validate_read_models_from_pool(&self.pool, projection_version).await
+    }
+
+    /// Reads the commit-log and summary high watermark for operational maintenance.
+    pub async fn read_model_high_watermark(&self) -> Result<ReadModelHighWatermark> {
+        read_model_high_watermark_from_pool(&self.pool).await
+    }
+
+    /// Returns drift findings across projection-versioned read models.
+    pub async fn read_model_drift_report(&self) -> Result<ReadModelDriftReport> {
+        read_model_drift_report_from_pool(&self.pool).await
+    }
+
+    /// Rotates the store epoch and cursor MAC secret after restore, clone, import, or rollback.
+    pub async fn reseed_store_epoch(&self) -> Result<String> {
+        reseed_store_epoch_from_pool(&self.pool).await
     }
 }
 
@@ -560,12 +698,16 @@ async fn read_observation_list_rows(
            FROM run_observation_change_summaries s \
            INNER JOIN run_commit_log l ON l.commit_id = s.commit_id \
            WHERE l.append_xid < $1::xid8 \
+             AND s.projection_version = $3 \
+             AND s.summary_kind = $4 \
            ORDER BY s.run_id, s.head_seq DESC \
          ) \
          SELECT * FROM bounded ORDER BY updated_at DESC, run_id ASC LIMIT $2",
     )
     .bind(frontier_xid)
     .bind(i64::from(limit))
+    .bind(PROJECTION_VERSION)
+    .bind(RUN_OBSERVATION_SUMMARY_KIND)
     .fetch_all(pool)
     .await
     .map_err(|error| database_error("failed to read run observation list", error))?;
@@ -589,6 +731,8 @@ async fn read_observation_watch_rows(
          FROM run_commit_log l \
          INNER JOIN run_observation_change_summaries s ON s.commit_id = l.commit_id \
          WHERE l.append_xid < $1::xid8 \
+           AND s.projection_version = $6 \
+           AND s.summary_kind = $7 \
            AND ( \
              ($4 AND l.append_xid >= $2::xid8) \
              OR \
@@ -602,6 +746,8 @@ async fn read_observation_watch_rows(
     .bind(cursor.commit_sort_key.as_slice())
     .bind(cursor.kind == CursorKind::Frontier)
     .bind(i64::from(limit))
+    .bind(PROJECTION_VERSION)
+    .bind(RUN_OBSERVATION_SUMMARY_KIND)
     .fetch_all(pool)
     .await
     .map_err(|error| database_error("failed to read run observation changes", error))?;
@@ -1225,44 +1371,144 @@ async fn insert_run_observation_summary_tx(
     run_id: &RunId,
     commit_id: &str,
     head_seq: StreamSeq,
-    source_event_count: usize,
+    source_event_count: i64,
 ) -> Result<()> {
     let observed_status = observed_status_from_run_state(projections.run_state(run_id))?;
-    let source_event_count = i32::try_from(source_event_count).map_err(|_| {
-        PostgresStoreError::Corruption("observation source event count overflow".to_owned())
-    })?;
-    let source_authority_hash = observation_authority_hash(
+    let summary = materialize_run_observation_summary_tx(
+        tx,
+        PROJECTION_VERSION,
+        run_id,
+        commit_id,
+        head_seq,
+        observed_status,
+        source_event_count,
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO run_observation_change_summaries \
+         (projection_version, commit_id, summary_kind, run_id, head_seq, observed_status, \
+          started_at, updated_at, completed_at, source_authority_hash, source_event_count, \
+          summary_row_hash, summary_row_canonical_json) \
+         SELECT $1, $2, $3, $4, $5, $6, \
+           (SELECT MIN(committed_at) FROM commits WHERE run_id = $4), \
+           c.committed_at, \
+           CASE WHEN $6 = 'completed' THEN c.committed_at ELSE NULL END, \
+           $7, $8, $9, $10 \
+         FROM commits c WHERE c.commit_id = $2",
+    )
+    .bind(summary.projection_version.as_str())
+    .bind(summary.commit_id.as_str())
+    .bind(summary.summary_kind)
+    .bind(summary.run_id.as_str())
+    .bind(u64_to_i64(
+        summary.head_seq.as_u64(),
+        "run_observation_change_summaries.head_seq",
+    )?)
+    .bind(summary.observed_status.as_str())
+    .bind(summary.source_authority_hash.as_str())
+    .bind(summary.source_event_count)
+    .bind(summary.summary_row_hash.as_str())
+    .bind(summary.summary_row_canonical_json.as_bytes())
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| database_error("failed to insert run observation summary", error))?;
+    Ok(())
+}
+
+struct RunObservationSummaryMaterialization {
+    projection_version: String,
+    commit_id: String,
+    summary_kind: &'static str,
+    run_id: RunId,
+    head_seq: StreamSeq,
+    observed_status: ObservedRunStatus,
+    started_at: String,
+    updated_at: String,
+    completed_at: Option<String>,
+    source_authority_hash: String,
+    source_event_count: i64,
+    summary_row_hash: String,
+    summary_row_canonical_json: PlainCanonicalJsonBytes,
+}
+
+async fn materialize_run_observation_summary_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    projection_version: &str,
+    run_id: &RunId,
+    commit_id: &str,
+    head_seq: StreamSeq,
+    observed_status: ObservedRunStatus,
+    source_event_count: i64,
+) -> Result<RunObservationSummaryMaterialization> {
+    if source_event_count < 1 {
+        return Err(PostgresStoreError::Corruption(
+            "observation source event count must be positive".to_owned(),
+        ));
+    }
+    let row = sqlx::query(
+        "SELECT \
+           to_char((SELECT MIN(committed_at) FROM commits WHERE run_id = $1) AT TIME ZONE 'UTC', \
+             'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS started_at, \
+           to_char(c.committed_at AT TIME ZONE 'UTC', \
+             'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS updated_at, \
+           CASE WHEN $2 = 'completed' THEN \
+             to_char(c.committed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') \
+           ELSE NULL END AS completed_at \
+         FROM commits c WHERE c.commit_id = $3",
+    )
+    .bind(run_id.as_str())
+    .bind(observed_status.as_str())
+    .bind(commit_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|error| database_error("failed to materialize observation timestamps", error))?;
+    let started_at: String = row
+        .try_get("started_at")
+        .map_err(|error| database_error("failed to decode observation started_at", error))?;
+    let updated_at: String = row
+        .try_get("updated_at")
+        .map_err(|error| database_error("failed to decode observation updated_at", error))?;
+    let completed_at: Option<String> = row
+        .try_get("completed_at")
+        .map_err(|error| database_error("failed to decode observation completed_at", error))?;
+    let source_authority_hash = observation_source_authority_hash(
         run_id,
         commit_id,
         head_seq,
         observed_status,
         source_event_count,
     )?;
-    sqlx::query(
-        "INSERT INTO run_observation_change_summaries \
-         (commit_id, run_id, head_seq, observed_status, started_at, updated_at, completed_at, \
-          projection_version, source_authority_hash, source_event_count) \
-         SELECT $1, $2, $3, $4, \
-           (SELECT MIN(committed_at) FROM commits WHERE run_id = $2), \
-           c.committed_at, \
-           CASE WHEN $4 = 'completed' THEN c.committed_at ELSE NULL END, \
-           $5, $6, $7 \
-         FROM commits c WHERE c.commit_id = $1",
-    )
-    .bind(commit_id)
-    .bind(run_id.as_str())
-    .bind(u64_to_i64(
-        head_seq.as_u64(),
-        "run_observation_change_summaries.head_seq",
-    )?)
-    .bind(observed_status.as_str())
-    .bind(PROJECTION_VERSION)
-    .bind(source_authority_hash)
-    .bind(source_event_count)
-    .execute(&mut **tx)
-    .await
-    .map_err(|error| database_error("failed to insert run observation summary", error))?;
-    Ok(())
+    let summary_row_canonical_json = run_observation_summary_canonical_json(
+        projection_version,
+        run_id,
+        commit_id,
+        head_seq,
+        observed_status,
+        &started_at,
+        &updated_at,
+        completed_at.as_deref(),
+        &source_authority_hash,
+        source_event_count,
+    )?;
+    let summary_row_hash = summary_row_canonical_json
+        .content_digest()
+        .as_str()
+        .to_owned();
+    Ok(RunObservationSummaryMaterialization {
+        projection_version: projection_version.to_owned(),
+        commit_id: commit_id.to_owned(),
+        summary_kind: RUN_OBSERVATION_SUMMARY_KIND,
+        run_id: run_id.clone(),
+        head_seq,
+        observed_status,
+        started_at,
+        updated_at,
+        completed_at,
+        source_authority_hash,
+        source_event_count,
+        summary_row_hash,
+        summary_row_canonical_json,
+    })
 }
 
 fn observed_status_from_run_state(run_state: RunState) -> Result<ObservedRunStatus> {
@@ -1276,25 +1522,484 @@ fn observed_status_from_run_state(run_state: RunState) -> Result<ObservedRunStat
     }
 }
 
-fn observation_authority_hash(
+fn observation_source_authority_hash(
     run_id: &RunId,
     commit_id: &str,
     head_seq: StreamSeq,
     observed_status: ObservedRunStatus,
-    source_event_count: i32,
+    source_event_count: i64,
 ) -> Result<String> {
     Ok(canonical_json(serde_json::json!({
         "commit_id": commit_id,
-        "domain": "mfm.run_observation.summary.v1",
+        "domain": "mfm.run_observation.summary.source.v1",
         "head_seq": head_seq.as_u64(),
         "observed_status": observed_status.as_str(),
-        "projection_version": PROJECTION_VERSION,
         "run_id": run_id.as_str(),
         "source_event_count": source_event_count,
     }))?
     .content_digest()
     .as_str()
     .to_owned())
+}
+
+fn run_observation_summary_canonical_json(
+    projection_version: &str,
+    run_id: &RunId,
+    commit_id: &str,
+    head_seq: StreamSeq,
+    observed_status: ObservedRunStatus,
+    started_at: &str,
+    updated_at: &str,
+    completed_at: Option<&str>,
+    source_authority_hash: &str,
+    source_event_count: i64,
+) -> Result<PlainCanonicalJsonBytes> {
+    canonical_json(serde_json::json!({
+        "commit_id": commit_id,
+        "completed_at": completed_at,
+        "domain": "mfm.run_observation.summary.row.v1",
+        "head_seq": head_seq.as_u64(),
+        "observed_status": observed_status.as_str(),
+        "projection_version": projection_version,
+        "run_id": run_id.as_str(),
+        "source_authority_hash": source_authority_hash,
+        "source_event_count": source_event_count,
+        "started_at": started_at,
+        "summary_kind": RUN_OBSERVATION_SUMMARY_KIND,
+        "updated_at": updated_at,
+    }))
+    .map_err(PostgresStoreError::from)
+}
+
+async fn build_projection_version_from_pool(
+    pool: &PgPool,
+    projection_version: &str,
+    mode: ReadModelBuildMode,
+) -> Result<ReadModelBuildReport> {
+    validate_projection_version(projection_version)?;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| database_error("failed to start read-model build transaction", error))?;
+    let summaries =
+        materialize_all_run_observation_summaries_tx(&mut tx, projection_version).await?;
+    let mut report = ReadModelBuildReport {
+        projection_version: projection_version.to_owned(),
+        inserted_rows: 0,
+        verified_rows: 0,
+    };
+    for summary in summaries {
+        match compare_existing_run_observation_summary_tx(&mut tx, &summary).await? {
+            SummaryComparison::Match => {
+                report.verified_rows = report.verified_rows.checked_add(1).ok_or_else(|| {
+                    PostgresStoreError::Corruption(
+                        "read-model verified row count overflow".to_owned(),
+                    )
+                })?;
+            }
+            SummaryComparison::Missing => {
+                if matches!(
+                    mode,
+                    ReadModelBuildMode::MissingOnly | ReadModelBuildMode::NewVersion
+                ) {
+                    if insert_materialized_run_observation_summary_tx(&mut tx, &summary).await? {
+                        report.inserted_rows =
+                            report.inserted_rows.checked_add(1).ok_or_else(|| {
+                                PostgresStoreError::Corruption(
+                                    "read-model inserted row count overflow".to_owned(),
+                                )
+                            })?;
+                    }
+                }
+            }
+            SummaryComparison::Mismatch => {
+                return Err(PostgresStoreError::Corruption(format!(
+                    "read-model drift for projection {} commit {}",
+                    summary.projection_version, summary.commit_id
+                )));
+            }
+        }
+    }
+    tx.commit()
+        .await
+        .map_err(|error| database_error("failed to commit read-model build", error))?;
+    Ok(report)
+}
+
+async fn validate_read_models_from_pool(
+    pool: &PgPool,
+    projection_version: &str,
+) -> Result<ReadModelValidationReport> {
+    validate_projection_version(projection_version)?;
+    let mut tx = pool.begin().await.map_err(|error| {
+        database_error("failed to start read-model validation transaction", error)
+    })?;
+    let summaries =
+        materialize_all_run_observation_summaries_tx(&mut tx, projection_version).await?;
+    let mut report = ReadModelValidationReport {
+        projection_version: projection_version.to_owned(),
+        checked_commits: 0,
+        missing_rows: 0,
+        drift_rows: 0,
+    };
+    for summary in summaries {
+        report.checked_commits = report.checked_commits.checked_add(1).ok_or_else(|| {
+            PostgresStoreError::Corruption("read-model checked row count overflow".to_owned())
+        })?;
+        match compare_existing_run_observation_summary_tx(&mut tx, &summary).await? {
+            SummaryComparison::Match => {}
+            SummaryComparison::Missing => {
+                report.missing_rows = report.missing_rows.checked_add(1).ok_or_else(|| {
+                    PostgresStoreError::Corruption(
+                        "read-model missing row count overflow".to_owned(),
+                    )
+                })?;
+            }
+            SummaryComparison::Mismatch => {
+                report.drift_rows = report.drift_rows.checked_add(1).ok_or_else(|| {
+                    PostgresStoreError::Corruption("read-model drift row count overflow".to_owned())
+                })?;
+            }
+        }
+    }
+    tx.commit()
+        .await
+        .map_err(|error| database_error("failed to commit read-model validation", error))?;
+    Ok(report)
+}
+
+async fn read_model_high_watermark_from_pool(pool: &PgPool) -> Result<ReadModelHighWatermark> {
+    let commit_log_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM run_commit_log")
+        .fetch_one(pool)
+        .await
+        .map_err(|error| database_error("failed to count commit-log rows", error))?;
+    let summary_rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM run_observation_change_summaries")
+            .fetch_one(pool)
+            .await
+            .map_err(|error| database_error("failed to count observation summary rows", error))?;
+    let high = sqlx::query(
+        "SELECT append_xid::text AS append_xid, commit_id, commit_sort_key \
+         FROM run_commit_log ORDER BY append_xid DESC, commit_sort_key DESC LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| database_error("failed to read read-model high watermark", error))?;
+    let (high_append_xid, high_commit_id, high_commit_sort_key) = if let Some(row) = high {
+        (
+            Some(row.try_get("append_xid").map_err(|error| {
+                database_error("failed to decode high-watermark append xid", error)
+            })?),
+            Some(row.try_get("commit_id").map_err(|error| {
+                database_error("failed to decode high-watermark commit id", error)
+            })?),
+            Some(row.try_get("commit_sort_key").map_err(|error| {
+                database_error("failed to decode high-watermark sort key", error)
+            })?),
+        )
+    } else {
+        (None, None, None)
+    };
+    Ok(ReadModelHighWatermark {
+        commit_log_rows: i64_to_nonnegative_u64(commit_log_rows, "run_commit_log.count")?,
+        summary_rows: i64_to_nonnegative_u64(
+            summary_rows,
+            "run_observation_change_summaries.count",
+        )?,
+        high_append_xid,
+        high_commit_id,
+        high_commit_sort_key,
+    })
+}
+
+async fn read_model_drift_report_from_pool(pool: &PgPool) -> Result<ReadModelDriftReport> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| database_error("failed to start read-model drift transaction", error))?;
+    let version_rows =
+        sqlx::query("SELECT DISTINCT projection_version FROM run_observation_change_summaries")
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|error| database_error("failed to load read-model versions", error))?;
+    let mut versions = BTreeSet::from([PROJECTION_VERSION.to_owned()]);
+    for row in version_rows {
+        versions.insert(row.try_get("projection_version").map_err(|error| {
+            database_error("failed to decode read-model projection version", error)
+        })?);
+    }
+
+    let mut findings = Vec::new();
+    for projection_version in versions {
+        let summaries =
+            materialize_all_run_observation_summaries_tx(&mut tx, &projection_version).await?;
+        for summary in summaries {
+            match compare_existing_run_observation_summary_tx(&mut tx, &summary).await? {
+                SummaryComparison::Match => {}
+                SummaryComparison::Missing => findings.push(ReadModelDrift {
+                    projection_version: summary.projection_version,
+                    commit_id: summary.commit_id,
+                    summary_kind: summary.summary_kind.to_owned(),
+                    kind: ReadModelDriftKind::Missing,
+                }),
+                SummaryComparison::Mismatch => findings.push(ReadModelDrift {
+                    projection_version: summary.projection_version,
+                    commit_id: summary.commit_id,
+                    summary_kind: summary.summary_kind.to_owned(),
+                    kind: ReadModelDriftKind::Mismatched,
+                }),
+            }
+        }
+    }
+    let orphan_rows = sqlx::query(
+        "SELECT s.projection_version, s.commit_id, s.summary_kind \
+         FROM run_observation_change_summaries s \
+         LEFT JOIN run_commit_log l ON l.commit_id = s.commit_id \
+         WHERE l.commit_id IS NULL",
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|error| database_error("failed to load orphaned read-model rows", error))?;
+    for row in orphan_rows {
+        findings.push(ReadModelDrift {
+            projection_version: row.try_get("projection_version").map_err(|error| {
+                database_error("failed to decode orphan projection version", error)
+            })?,
+            commit_id: row
+                .try_get("commit_id")
+                .map_err(|error| database_error("failed to decode orphan commit id", error))?,
+            summary_kind: row
+                .try_get("summary_kind")
+                .map_err(|error| database_error("failed to decode orphan summary kind", error))?,
+            kind: ReadModelDriftKind::Orphaned,
+        });
+    }
+    tx.commit()
+        .await
+        .map_err(|error| database_error("failed to commit read-model drift transaction", error))?;
+    Ok(ReadModelDriftReport { findings })
+}
+
+async fn reseed_store_epoch_from_pool(pool: &PgPool) -> Result<String> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| database_error("failed to start store epoch reseed", error))?;
+    sqlx::query("ALTER TABLE store_metadata DISABLE TRIGGER store_metadata_no_update")
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| database_error("failed to enter store epoch maintenance", error))?;
+    let row = sqlx::query(
+        "UPDATE store_metadata \
+         SET store_epoch = 'mfm.store.epoch.v1:' || encode(public.gen_random_bytes(16), 'hex'), \
+             cursor_secret = public.gen_random_bytes(32) \
+         WHERE singleton \
+         RETURNING store_epoch",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|error| database_error("failed to reseed store epoch", error))?;
+    sqlx::query("ALTER TABLE store_metadata ENABLE TRIGGER store_metadata_no_update")
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| database_error("failed to leave store epoch maintenance", error))?;
+    let store_epoch = row
+        .try_get("store_epoch")
+        .map_err(|error| database_error("failed to decode reseeded store epoch", error))?;
+    tx.commit()
+        .await
+        .map_err(|error| database_error("failed to commit store epoch reseed", error))?;
+    Ok(store_epoch)
+}
+
+fn validate_projection_version(projection_version: &str) -> Result<()> {
+    if projection_version.trim().is_empty() {
+        return Err(StoreError::ObservationUnavailable {
+            message: "projection version must not be empty".to_owned(),
+        }
+        .into());
+    }
+    Ok(())
+}
+
+enum SummaryComparison {
+    Missing,
+    Match,
+    Mismatch,
+}
+
+async fn materialize_all_run_observation_summaries_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    projection_version: &str,
+) -> Result<Vec<RunObservationSummaryMaterialization>> {
+    let rows = sqlx::query("SELECT DISTINCT run_id FROM commits ORDER BY run_id ASC")
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|error| database_error("failed to load read-model run ids", error))?;
+    let mut summaries = Vec::new();
+    for row in rows {
+        let run_id = parse_identity::<RunId>(
+            &row.try_get::<String, _>("run_id")
+                .map_err(|error| database_error("failed to decode read-model run id", error))?,
+        )?;
+        let commits = load_commit_authority_rows_tx(tx, &run_id).await?;
+        let stream = load_run_stream_tx(tx, &run_id).await?;
+        let mut prefix = Vec::new();
+        let mut cursor = 0_usize;
+        for commit in commits {
+            while cursor < stream.len() && stream[cursor].seq().as_u64() <= commit.seq.as_u64() {
+                prefix.push(stream[cursor].clone());
+                cursor += 1;
+            }
+            if prefix.last().map(KernelEventEnvelope::seq) != Some(commit.seq) {
+                return Err(PostgresStoreError::Corruption(
+                    "commit has no authority event in rebuilt observation prefix".to_owned(),
+                ));
+            }
+            let snapshot = ProjectionSnapshot::rebuild_from_run_stream(&prefix)?;
+            let observed_status = observed_status_from_run_state(snapshot.run_state(&run_id))?;
+            let source_event_count = i64::try_from(prefix.len()).map_err(|_| {
+                PostgresStoreError::Corruption(
+                    "read-model source event count exceeded PostgreSQL bigint range".to_owned(),
+                )
+            })?;
+            summaries.push(
+                materialize_run_observation_summary_tx(
+                    tx,
+                    projection_version,
+                    &run_id,
+                    &commit.commit_id,
+                    commit.seq,
+                    observed_status,
+                    source_event_count,
+                )
+                .await?,
+            );
+        }
+    }
+    Ok(summaries)
+}
+
+async fn compare_existing_run_observation_summary_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    summary: &RunObservationSummaryMaterialization,
+) -> Result<SummaryComparison> {
+    let row = sqlx::query(
+        "SELECT run_id, head_seq, observed_status, \
+          to_char(started_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS started_at, \
+          to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS updated_at, \
+          CASE WHEN completed_at IS NULL THEN NULL \
+            ELSE to_char(completed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') \
+          END AS completed_at, \
+          source_authority_hash, source_event_count, summary_row_hash, summary_row_canonical_json \
+         FROM run_observation_change_summaries \
+         WHERE projection_version = $1 AND commit_id = $2 AND summary_kind = $3",
+    )
+    .bind(summary.projection_version.as_str())
+    .bind(summary.commit_id.as_str())
+    .bind(summary.summary_kind)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| database_error("failed to load existing observation summary", error))?;
+    let Some(row) = row else {
+        return Ok(SummaryComparison::Missing);
+    };
+    let run_id_text: String = row
+        .try_get("run_id")
+        .map_err(|error| database_error("failed to decode summary run id", error))?;
+    let run_id = parse_identity::<RunId>(&run_id_text)?;
+    let head_seq = StreamSeq::new(i64_to_positive_u64(
+        row.try_get("head_seq")
+            .map_err(|error| database_error("failed to decode summary head seq", error))?,
+        "run_observation_change_summaries.head_seq",
+    )?)?;
+    let observed_status_text: String = row
+        .try_get("observed_status")
+        .map_err(|error| database_error("failed to decode summary observed status", error))?;
+    let source_event_count: i64 = row
+        .try_get("source_event_count")
+        .map_err(|error| database_error("failed to decode summary source count", error))?;
+    let summary_row_hash: String = row
+        .try_get("summary_row_hash")
+        .map_err(|error| database_error("failed to decode summary row hash", error))?;
+    let summary_row_canonical_json: Vec<u8> = row
+        .try_get("summary_row_canonical_json")
+        .map_err(|error| database_error("failed to decode summary row canonical bytes", error))?;
+    let stored_canonical = PlainCanonicalJsonBytes::from_canonical_json_slice(
+        &summary_row_canonical_json,
+    )
+    .map_err(|error| {
+        PostgresStoreError::Corruption(format!(
+            "read-model summary canonical bytes are invalid: {error}"
+        ))
+    })?;
+    if stored_canonical.content_digest().as_str() != summary_row_hash {
+        return Ok(SummaryComparison::Mismatch);
+    }
+    let matches = run_id == summary.run_id
+        && head_seq == summary.head_seq
+        && observed_status_text == summary.observed_status.as_str()
+        && row
+            .try_get::<String, _>("started_at")
+            .map_err(|error| database_error("failed to decode summary started_at", error))?
+            == summary.started_at
+        && row
+            .try_get::<String, _>("updated_at")
+            .map_err(|error| database_error("failed to decode summary updated_at", error))?
+            == summary.updated_at
+        && row
+            .try_get::<Option<String>, _>("completed_at")
+            .map_err(|error| database_error("failed to decode summary completed_at", error))?
+            == summary.completed_at
+        && row
+            .try_get::<String, _>("source_authority_hash")
+            .map_err(|error| database_error("failed to decode summary source hash", error))?
+            == summary.source_authority_hash
+        && source_event_count == summary.source_event_count
+        && summary_row_hash == summary.summary_row_hash
+        && summary_row_canonical_json == summary.summary_row_canonical_json.as_bytes();
+    Ok(if matches {
+        SummaryComparison::Match
+    } else {
+        SummaryComparison::Mismatch
+    })
+}
+
+async fn insert_materialized_run_observation_summary_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    summary: &RunObservationSummaryMaterialization,
+) -> Result<bool> {
+    let rows = sqlx::query(
+        "INSERT INTO run_observation_change_summaries \
+         (projection_version, commit_id, summary_kind, run_id, head_seq, observed_status, \
+          started_at, updated_at, completed_at, source_authority_hash, source_event_count, \
+          summary_row_hash, summary_row_canonical_json) \
+         SELECT $1, $2, $3, $4, $5, $6, \
+           (SELECT MIN(committed_at) FROM commits WHERE run_id = $4), \
+           c.committed_at, \
+           CASE WHEN $6 = 'completed' THEN c.committed_at ELSE NULL END, \
+           $7, $8, $9, $10 \
+         FROM commits c WHERE c.commit_id = $2 \
+         ON CONFLICT (projection_version, commit_id, summary_kind) DO NOTHING",
+    )
+    .bind(summary.projection_version.as_str())
+    .bind(summary.commit_id.as_str())
+    .bind(summary.summary_kind)
+    .bind(summary.run_id.as_str())
+    .bind(u64_to_i64(
+        summary.head_seq.as_u64(),
+        "run_observation_change_summaries.head_seq",
+    )?)
+    .bind(summary.observed_status.as_str())
+    .bind(summary.source_authority_hash.as_str())
+    .bind(summary.source_event_count)
+    .bind(summary.summary_row_hash.as_str())
+    .bind(summary.summary_row_canonical_json.as_bytes())
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| database_error("failed to insert rebuilt observation summary", error))?
+    .rows_affected();
+    Ok(rows == 1)
 }
 
 fn run_commit_sort_key(
@@ -1343,6 +2048,14 @@ async fn read_head_tx(tx: &mut Transaction<'_, Postgres>, run_id: &RunId) -> Res
         .try_get("head_seq")
         .map_err(|error| database_error("failed to decode run head", error))?;
     i64_to_nonnegative_u64(head_seq, "commits.seq")
+}
+
+async fn count_run_events_tx(tx: &mut Transaction<'_, Postgres>, run_id: &RunId) -> Result<i64> {
+    sqlx::query_scalar("SELECT COUNT(*) FROM run_events WHERE run_id = $1")
+        .bind(run_id.as_str())
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|error| database_error("failed to count run events", error))
 }
 
 async fn lock_run_tx(tx: &mut Transaction<'_, Postgres>, run_id: &RunId) -> Result<()> {
@@ -4310,6 +5023,218 @@ mod tests {
             .await
             .expect_err("strict load rejects corrupt lane transition hash");
         assert_corruption(error, "resource lane transition hash mismatch");
+
+        drop_schema(&store, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn read_model_maintenance_builds_validates_and_reports_watermark() {
+        let (store, schema) = test_store().await;
+        let run = run_id(130);
+        append_run_start(&store, &run, "maintenance-run-start")
+            .await
+            .expect("run start");
+        append_resource_lane_attempt_start(&store, &run, "maintenance-attempt-start")
+            .await
+            .expect("attempt start");
+        let maintenance = PostgresMaintenance {
+            pool: store.pool.clone(),
+        };
+
+        let current = maintenance
+            .validate_read_models(PROJECTION_VERSION)
+            .await
+            .expect("validate current projection");
+        assert_eq!(current.checked_commits, 2);
+        assert_eq!(current.missing_rows, 0);
+        assert_eq!(current.drift_rows, 0);
+
+        let built = maintenance
+            .build_projection_version(
+                "mfm.run_observation.test.v2",
+                ReadModelBuildMode::NewVersion,
+            )
+            .await
+            .expect("build new projection version");
+        assert_eq!(built.inserted_rows, 2);
+        assert_eq!(built.verified_rows, 0);
+        let rebuilt = maintenance
+            .build_projection_version(
+                "mfm.run_observation.test.v2",
+                ReadModelBuildMode::MissingOnly,
+            )
+            .await
+            .expect("verify rebuilt projection version");
+        assert_eq!(rebuilt.inserted_rows, 0);
+        assert_eq!(rebuilt.verified_rows, 2);
+        let validated = maintenance
+            .validate_read_models("mfm.run_observation.test.v2")
+            .await
+            .expect("validate rebuilt projection");
+        assert_eq!(validated.checked_commits, 2);
+        assert_eq!(validated.missing_rows, 0);
+        assert_eq!(validated.drift_rows, 0);
+
+        let watermark = maintenance
+            .read_model_high_watermark()
+            .await
+            .expect("read watermark");
+        assert_eq!(watermark.commit_log_rows, 2);
+        assert_eq!(watermark.summary_rows, 4);
+        assert!(watermark.high_append_xid.is_some());
+        assert!(watermark.high_commit_id.is_some());
+        assert_eq!(
+            watermark.high_commit_sort_key.as_ref().map(Vec::len),
+            Some(32)
+        );
+        let drift = maintenance
+            .read_model_drift_report()
+            .await
+            .expect("drift report");
+        assert!(drift.findings.is_empty());
+
+        drop_schema(&store, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn read_model_missing_only_rebuild_repairs_missing_rows() {
+        let (store, schema) = test_store().await;
+        let run = run_id(131);
+        append_run_start(&store, &run, "missing-read-model-run-start")
+            .await
+            .expect("run start");
+        append_resource_lane_attempt_start(&store, &run, "missing-read-model-attempt-start")
+            .await
+            .expect("attempt start");
+        let maintenance = PostgresMaintenance {
+            pool: store.pool.clone(),
+        };
+
+        sqlx::query(
+            "ALTER TABLE run_observation_change_summaries DISABLE TRIGGER \
+             run_observation_change_summaries_no_update",
+        )
+        .execute(&store.pool)
+        .await
+        .expect("disable read-model mutation guard");
+        sqlx::query(
+            "DELETE FROM run_observation_change_summaries \
+             WHERE projection_version = $1 AND summary_kind = $2 AND run_id = $3 AND head_seq = 2",
+        )
+        .bind(PROJECTION_VERSION)
+        .bind(RUN_OBSERVATION_SUMMARY_KIND)
+        .bind(run.as_str())
+        .execute(&store.pool)
+        .await
+        .expect("delete read-model row");
+        sqlx::query(
+            "ALTER TABLE run_observation_change_summaries ENABLE TRIGGER \
+             run_observation_change_summaries_no_update",
+        )
+        .execute(&store.pool)
+        .await
+        .expect("reenable read-model mutation guard");
+
+        let missing = maintenance
+            .validate_read_models(PROJECTION_VERSION)
+            .await
+            .expect("validate missing row");
+        assert_eq!(missing.missing_rows, 1);
+        assert_eq!(missing.drift_rows, 0);
+        let repaired = maintenance
+            .build_projection_version(PROJECTION_VERSION, ReadModelBuildMode::MissingOnly)
+            .await
+            .expect("repair missing row");
+        assert_eq!(repaired.inserted_rows, 1);
+        let valid = maintenance
+            .validate_read_models(PROJECTION_VERSION)
+            .await
+            .expect("validate repaired projection");
+        assert_eq!(valid.missing_rows, 0);
+        assert_eq!(valid.drift_rows, 0);
+
+        drop_schema(&store, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn read_model_validation_detects_drift() {
+        let (store, schema) = test_store().await;
+        let run = run_id(132);
+        append_run_start(&store, &run, "drift-read-model-run-start")
+            .await
+            .expect("run start");
+        let maintenance = PostgresMaintenance {
+            pool: store.pool.clone(),
+        };
+
+        sqlx::query(
+            "ALTER TABLE run_observation_change_summaries DISABLE TRIGGER \
+             run_observation_change_summaries_no_update",
+        )
+        .execute(&store.pool)
+        .await
+        .expect("disable read-model mutation guard");
+        sqlx::query(
+            "UPDATE run_observation_change_summaries \
+             SET summary_row_hash = 'tampered-summary-hash' \
+             WHERE projection_version = $1 AND summary_kind = $2 AND run_id = $3",
+        )
+        .bind(PROJECTION_VERSION)
+        .bind(RUN_OBSERVATION_SUMMARY_KIND)
+        .bind(run.as_str())
+        .execute(&store.pool)
+        .await
+        .expect("tamper read-model hash");
+
+        let validation = maintenance
+            .validate_read_models(PROJECTION_VERSION)
+            .await
+            .expect("validate drifted projection");
+        assert_eq!(validation.drift_rows, 1);
+        let drift = maintenance
+            .read_model_drift_report()
+            .await
+            .expect("drift report");
+        assert_eq!(drift.findings.len(), 1);
+        assert_eq!(drift.findings[0].kind, ReadModelDriftKind::Mismatched);
+        let error = maintenance
+            .build_projection_version(PROJECTION_VERSION, ReadModelBuildMode::MissingOnly)
+            .await
+            .expect_err("rebuild fails closed on drift");
+        assert_corruption(error, "read-model drift");
+
+        drop_schema(&store, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn reseed_store_epoch_expires_existing_observation_cursors() {
+        let (store, schema) = test_store().await;
+        let run = run_id(133);
+        append_run_start(&store, &run, "epoch-run-start")
+            .await
+            .expect("run start");
+        let page = store
+            .read_run_observations(RunObservationQuery::new(None, 10, 0))
+            .await
+            .expect("read observations before reseed");
+        let old_cursor = page.next_cursor;
+        let maintenance = PostgresMaintenance {
+            pool: store.pool.clone(),
+        };
+        let new_epoch = maintenance
+            .reseed_store_epoch()
+            .await
+            .expect("reseed store epoch");
+        assert!(new_epoch.starts_with("mfm.store.epoch.v1:"));
+
+        let error = store
+            .read_run_observations(RunObservationQuery::new(Some(old_cursor), 10, 0))
+            .await
+            .expect_err("old cursor expires after epoch reseed");
+        assert!(matches!(
+            error,
+            PostgresStoreError::Store(StoreError::CursorExpired)
+        ));
 
         drop_schema(&store, &schema).await;
     }

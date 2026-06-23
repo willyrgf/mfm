@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 
 use crate::run_store::{PostgresStoreError, Result};
 
@@ -52,7 +52,8 @@ pub(crate) async fn connect_pool(database_url: &str) -> Result<PgPool> {
 
 pub(crate) async fn validate_pool(pool: &PgPool) -> Result<()> {
     validate_migrations(pool).await?;
-    validate_catalog(pool).await
+    validate_catalog(pool).await?;
+    validate_store_metadata(pool).await
 }
 
 fn database_url_env() -> Result<String> {
@@ -117,6 +118,118 @@ async fn validate_catalog(pool: &PgPool) -> Result<()> {
         }
     }
 
+    let view_rows = sqlx::query(
+        "SELECT table_name \
+         FROM information_schema.views \
+         WHERE table_schema = current_schema()",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| PostgresStoreError::Database("failed to inspect schema views"))?;
+    let views = view_rows
+        .into_iter()
+        .map(|row| row.try_get::<String, _>("table_name"))
+        .collect::<std::result::Result<BTreeSet<_>, _>>()
+        .map_err(|_| PostgresStoreError::Database("failed to decode schema views"))?;
+    for view in REQUIRED_VIEWS {
+        if !views.contains(*view) {
+            return Err(PostgresStoreError::Database("required schema view missing"));
+        }
+    }
+
+    let trigger_rows = sqlx::query(
+        "SELECT trigger_name \
+         FROM information_schema.triggers \
+         WHERE trigger_schema = current_schema()",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| PostgresStoreError::Database("failed to inspect schema triggers"))?;
+    let triggers = trigger_rows
+        .into_iter()
+        .map(|row| row.try_get::<String, _>("trigger_name"))
+        .collect::<std::result::Result<BTreeSet<_>, _>>()
+        .map_err(|_| PostgresStoreError::Database("failed to decode schema triggers"))?;
+    for trigger in REQUIRED_TRIGGERS {
+        if !triggers.contains(*trigger) {
+            return Err(PostgresStoreError::Database(
+                "required schema trigger missing",
+            ));
+        }
+    }
+
+    let function_rows = sqlx::query(
+        "SELECT p.proname \
+         FROM pg_proc p \
+         INNER JOIN pg_namespace n ON n.oid = p.pronamespace \
+         WHERE n.nspname = current_schema()",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| PostgresStoreError::Database("failed to inspect schema functions"))?;
+    let functions = function_rows
+        .into_iter()
+        .map(|row| row.try_get::<String, _>("proname"))
+        .collect::<std::result::Result<BTreeSet<_>, _>>()
+        .map_err(|_| PostgresStoreError::Database("failed to decode schema functions"))?;
+    for function in REQUIRED_FUNCTIONS {
+        if !functions.contains(*function) {
+            return Err(PostgresStoreError::Database(
+                "required schema function missing",
+            ));
+        }
+    }
+
+    let column_rows = sqlx::query(
+        "SELECT column_name \
+         FROM information_schema.columns \
+         WHERE table_schema = current_schema() \
+           AND table_name = 'run_observation_change_summaries'",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| PostgresStoreError::Database("failed to inspect read-model columns"))?;
+    let columns = column_rows
+        .into_iter()
+        .map(|row| row.try_get::<String, _>("column_name"))
+        .collect::<std::result::Result<BTreeSet<_>, _>>()
+        .map_err(|_| PostgresStoreError::Database("failed to decode read-model columns"))?;
+    for column in REQUIRED_OBSERVATION_SUMMARY_COLUMNS {
+        if !columns.contains(*column) {
+            return Err(PostgresStoreError::Database(
+                "required read-model column missing",
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+async fn validate_store_metadata(pool: &PgPool) -> Result<()> {
+    let row = sqlx::query(
+        "SELECT COUNT(*)::bigint AS row_count, \
+          MIN(schema_contract_version) AS schema_contract_version, \
+          MIN(octet_length(cursor_secret)) AS cursor_secret_len \
+         FROM store_metadata WHERE singleton",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|_| PostgresStoreError::Database("failed to inspect store metadata"))?;
+    let row_count: i64 = row
+        .try_get("row_count")
+        .map_err(|_| PostgresStoreError::Database("failed to decode store metadata"))?;
+    let schema_contract_version: Option<String> = row
+        .try_get("schema_contract_version")
+        .map_err(|_| PostgresStoreError::Database("failed to decode store metadata"))?;
+    let cursor_secret_len: Option<i32> = row
+        .try_get("cursor_secret_len")
+        .map_err(|_| PostgresStoreError::Database("failed to decode store metadata"))?;
+    if row_count != 1
+        || schema_contract_version.as_deref() != Some("mfm.postgres.run_store.v1")
+        || cursor_secret_len != Some(32)
+    {
+        return Err(PostgresStoreError::Database("invalid store metadata"));
+    }
     Ok(())
 }
 
@@ -134,6 +247,40 @@ const REQUIRED_TABLES: &[&str] = &[
     "resource_lane_transitions",
     "run_commit_log",
     "run_observation_change_summaries",
+];
+
+const REQUIRED_VIEWS: &[&str] = &["current_run_observations"];
+
+const REQUIRED_FUNCTIONS: &[&str] = &["mfm_set_append_xid", "mfm_reject_authority_mutation"];
+
+const REQUIRED_TRIGGERS: &[&str] = &[
+    "commits_set_append_xid",
+    "run_commit_log_set_append_xid",
+    "store_metadata_no_update",
+    "commits_no_update",
+    "run_events_no_update",
+    "artifact_blobs_no_update",
+    "artifact_admissions_no_update",
+    "commit_artifact_evidence_no_update",
+    "run_artifact_admissions_no_update",
+    "resource_lane_claim_events_no_update",
+    "resource_lane_release_events_no_update",
+    "resource_lane_transitions_no_update",
+    "run_commit_log_no_update",
+    "run_observation_change_summaries_no_update",
+];
+
+const REQUIRED_OBSERVATION_SUMMARY_COLUMNS: &[&str] = &[
+    "projection_version",
+    "commit_id",
+    "summary_kind",
+    "run_id",
+    "head_seq",
+    "observed_status",
+    "source_authority_hash",
+    "source_event_count",
+    "summary_row_hash",
+    "summary_row_canonical_json",
 ];
 
 const FORBIDDEN_TABLES: &[&str] = &[
