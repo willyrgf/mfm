@@ -21,7 +21,6 @@ use mfm_store::v1::{
     RunState, StagedCommitOutcome, StoreError, StoreErrorInspection, StreamSeq,
     VerifiedRunArtifactBytes,
 };
-use ring::hmac;
 use serde_json::Value;
 use sqlx::{
     postgres::{PgListener, PgPoolOptions, PgRow},

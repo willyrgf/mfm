@@ -2666,7 +2666,6 @@ dependencies = [
  "mfm-manual-auth",
  "mfm-spec",
  "mfm-store",
- "ring",
  "serde_json",
  "sqlx",
  "thiserror",

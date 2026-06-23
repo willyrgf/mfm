@@ -419,8 +419,7 @@ async fn validate_append_xid_columns(pool: &PgPool) -> Result<()> {
 async fn validate_store_metadata(pool: &PgPool) -> Result<()> {
     let row = sqlx::query(
         "SELECT COUNT(*)::bigint AS row_count, \
-          MIN(schema_contract_version) AS schema_contract_version, \
-          MIN(octet_length(cursor_secret)) AS cursor_secret_len \
+          MIN(schema_contract_version) AS schema_contract_version \
          FROM store_metadata WHERE singleton",
     )
     .fetch_one(pool)
@@ -432,13 +431,7 @@ async fn validate_store_metadata(pool: &PgPool) -> Result<()> {
     let schema_contract_version: Option<String> = row
         .try_get("schema_contract_version")
         .map_err(|_| PostgresStoreError::Database("failed to decode store metadata"))?;
-    let cursor_secret_len: Option<i32> = row
-        .try_get("cursor_secret_len")
-        .map_err(|_| PostgresStoreError::Database("failed to decode store metadata"))?;
-    if row_count != 1
-        || schema_contract_version.as_deref() != Some("mfm.postgres.run_store.v1")
-        || cursor_secret_len != Some(32)
-    {
+    if row_count != 1 || schema_contract_version.as_deref() != Some("mfm.postgres.run_store.v1") {
         return Err(PostgresStoreError::Database("invalid store metadata"));
     }
     Ok(())
@@ -515,7 +508,6 @@ const REQUIRED_OBSERVATION_SUMMARY_COLUMNS: &[&str] = &[
 const REQUIRED_CURSOR_COLUMNS: &[&str] = &[
     "token_hash",
     "cursor_version",
-    "cursor_key_id",
     "store_epoch",
     "cursor_kind",
     "append_xid",

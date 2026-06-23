@@ -3,8 +3,6 @@ use super::*;
 #[derive(Clone)]
 pub(super) struct StoreMetadata {
     pub(super) store_epoch: String,
-    pub(super) cursor_key_id: String,
-    pub(super) cursor_secret: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -163,22 +161,14 @@ pub(super) async fn read_run_observation_page_once(
 }
 
 pub(super) async fn load_store_metadata(pool: &PgPool) -> Result<StoreMetadata> {
-    let row = sqlx::query(
-        "SELECT store_epoch, cursor_key_id, cursor_secret FROM store_metadata WHERE singleton",
-    )
-    .fetch_one(pool)
-    .await
-    .map_err(|error| database_error("failed to load store metadata", error))?;
+    let row = sqlx::query("SELECT store_epoch FROM store_metadata WHERE singleton")
+        .fetch_one(pool)
+        .await
+        .map_err(|error| database_error("failed to load store metadata", error))?;
     Ok(StoreMetadata {
         store_epoch: row
             .try_get("store_epoch")
             .map_err(|error| database_error("failed to decode store epoch", error))?,
-        cursor_key_id: row
-            .try_get("cursor_key_id")
-            .map_err(|error| database_error("failed to decode cursor key id", error))?,
-        cursor_secret: row
-            .try_get("cursor_secret")
-            .map_err(|error| database_error("failed to decode cursor secret", error))?,
     })
 }
 
@@ -320,20 +310,17 @@ pub(super) async fn encode_observation_cursor(
     metadata: &StoreMetadata,
     position: &CursorPosition,
 ) -> Result<String> {
-    let sort_key_hex = bytes_hex(&position.commit_sort_key);
-    let token =
-        observation_cursor_token(metadata, position.kind, &position.append_xid, &sort_key_hex)?;
+    let token = random_observation_cursor_token(pool).await?;
     let token_hash = observation_cursor_token_hash(&token);
     sqlx::query(
         "INSERT INTO run_observation_cursors \
-          (token_hash, cursor_version, cursor_key_id, store_epoch, cursor_kind, append_xid, \
+          (token_hash, cursor_version, store_epoch, cursor_kind, append_xid, \
            commit_sort_key) \
-         VALUES ($1, $2, $3, $4, $5, $6::xid8, $7) \
+         VALUES ($1, $2, $3, $4, $5::xid8, $6) \
          ON CONFLICT (token_hash) DO NOTHING",
     )
     .bind(&token_hash)
     .bind(CURSOR_VERSION)
-    .bind(&metadata.cursor_key_id)
     .bind(&metadata.store_epoch)
     .bind(position.kind.as_str())
     .bind(&position.append_xid)
@@ -358,7 +345,7 @@ pub(super) async fn decode_observation_cursor(
     }
     let token_hash = observation_cursor_token_hash(cursor);
     let Some(row) = sqlx::query(
-        "SELECT cursor_version, cursor_key_id, store_epoch, cursor_kind, \
+        "SELECT cursor_version, store_epoch, cursor_kind, \
           append_xid::text AS append_xid, commit_sort_key \
          FROM run_observation_cursors WHERE token_hash = $1",
     )
@@ -387,15 +374,6 @@ pub(super) async fn decode_observation_cursor(
         }
         .into());
     }
-    let cursor_key_id: String = row
-        .try_get("cursor_key_id")
-        .map_err(|error| database_error("failed to decode observation cursor key", error))?;
-    if cursor_key_id != metadata.cursor_key_id {
-        return Err(StoreError::InvalidCursor {
-            message: "unknown cursor key".to_owned(),
-        }
-        .into());
-    }
     let cursor_kind: String = row
         .try_get("cursor_kind")
         .map_err(|error| database_error("failed to decode observation cursor kind", error))?;
@@ -411,48 +389,26 @@ pub(super) async fn decode_observation_cursor(
     })
 }
 
-pub(super) fn observation_cursor_token(
-    metadata: &StoreMetadata,
-    kind: CursorKind,
-    append_xid: &str,
-    sort_key_hex: &str,
-) -> Result<String> {
-    let payload = observation_cursor_payload(metadata, kind, append_xid, sort_key_hex)?;
-    let key = hmac::Key::new(hmac::HMAC_SHA256, &metadata.cursor_secret);
-    Ok(bytes_hex(hmac::sign(&key, &payload).as_ref()))
+async fn random_observation_cursor_token(pool: &PgPool) -> Result<String> {
+    sqlx::query_scalar("SELECT encode(public.gen_random_bytes(32), 'hex')")
+        .fetch_one(pool)
+        .await
+        .map_err(|error| database_error("failed to issue observation cursor token", error))
 }
 
 pub(super) fn observation_change_id(metadata: &StoreMetadata, commit_id: &str) -> Result<String> {
-    let payload = canonical_json(serde_json::json!({
+    let canonical = canonical_json(serde_json::json!({
         "change_id_version": "mfm.run_observation.change_id.v1",
         "commit_id": commit_id,
-        "cursor_key_id": metadata.cursor_key_id.as_str(),
         "store_epoch": metadata.store_epoch.as_str(),
     }))?;
-    let key = hmac::Key::new(hmac::HMAC_SHA256, &metadata.cursor_secret);
-    Ok(bytes_hex(hmac::sign(&key, payload.as_bytes()).as_ref()))
+    Ok(bytes_hex(
+        sha256_digest_bytes(canonical.as_bytes()).as_bytes(),
+    ))
 }
 
 pub(super) fn observation_cursor_token_hash(token: &str) -> String {
     bytes_hex(sha256_digest_bytes(token.as_bytes()).as_bytes())
-}
-
-pub(super) fn observation_cursor_payload(
-    metadata: &StoreMetadata,
-    kind: CursorKind,
-    append_xid: &str,
-    sort_key_hex: &str,
-) -> Result<Vec<u8>> {
-    Ok(canonical_json(serde_json::json!({
-        "append_xid": append_xid,
-        "cursor_key_id": metadata.cursor_key_id.as_str(),
-        "cursor_version": CURSOR_VERSION,
-        "kind": kind.as_str(),
-        "sort_key": sort_key_hex,
-        "store_epoch": metadata.store_epoch.as_str(),
-    }))?
-    .as_bytes()
-    .to_vec())
 }
 
 pub(super) fn frontier_sort_key() -> Vec<u8> {

@@ -1888,7 +1888,6 @@ async fn observation_change_ids_and_cursors_do_not_expose_internal_authority() {
         assert!(!public_value.contains(commit_id.as_str()));
         assert!(!public_value.contains(commit_sort_key_hex.as_str()));
         assert!(!public_value.contains(metadata.store_epoch.as_str()));
-        assert!(!public_value.contains(metadata.cursor_key_id.as_str()));
     }
     assert_ne!(public_change_id, commit_id);
 
@@ -1976,13 +1975,13 @@ async fn observation_cursor_lifecycle_is_epoch_bound_without_ttl() {
 
     sqlx::query(
         "UPDATE run_observation_cursors \
-         SET store_epoch = 'mfm.store.epoch.v1:old', cursor_key_id = 'mfm.cursor.key.old' \
+         SET store_epoch = 'mfm.store.epoch.v1:old' \
          WHERE token_hash = $1",
     )
     .bind(&token_hash)
     .execute(&store.pool)
     .await
-    .expect("move cursor to old epoch and key");
+    .expect("move cursor to old epoch");
     let expired = decode_observation_cursor(&store.pool, &cursor, &metadata)
         .await
         .expect_err("old epoch cursor expires");
@@ -1992,7 +1991,7 @@ async fn observation_cursor_lifecycle_is_epoch_bound_without_ttl() {
 }
 
 #[tokio::test]
-async fn observation_cursor_lifecycle_rejects_retired_key_and_stale_format() {
+async fn observation_cursor_lifecycle_rejects_stale_format() {
     let (store, schema) = test_store().await;
     let run = run_id(147);
     append_run_start(&store, &run, "cursor-format-run-start")
@@ -2012,19 +2011,6 @@ async fn observation_cursor_lifecycle_rejects_retired_key_and_stale_format() {
     .await
     .expect("disable cursor mutation guard");
     sqlx::query(
-        "UPDATE run_observation_cursors SET cursor_key_id = 'mfm.cursor.key.retired' \
-         WHERE token_hash = $1",
-    )
-    .bind(&token_hash)
-    .execute(&store.pool)
-    .await
-    .expect("retire cursor key");
-    let retired = decode_observation_cursor(&store.pool, &cursor, &metadata)
-        .await
-        .expect_err("same-epoch retired key is invalid");
-    assert_invalid_cursor(retired, "unknown cursor key");
-
-    sqlx::query(
         "ALTER TABLE run_observation_cursors DROP CONSTRAINT run_observation_cursors_version_v1",
     )
     .execute(&store.pool)
@@ -2032,11 +2018,10 @@ async fn observation_cursor_lifecycle_rejects_retired_key_and_stale_format() {
     .expect("drop cursor version constraint for stale-format fixture");
     sqlx::query(
         "UPDATE run_observation_cursors \
-         SET cursor_key_id = $2, cursor_version = 'mfm.run_observation.cursor.v0' \
+         SET cursor_version = 'mfm.run_observation.cursor.v0' \
          WHERE token_hash = $1",
     )
     .bind(&token_hash)
-    .bind(&metadata.cursor_key_id)
     .execute(&store.pool)
     .await
     .expect("stale cursor format");

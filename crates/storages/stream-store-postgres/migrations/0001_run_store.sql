@@ -21,17 +21,13 @@ CREATE TABLE store_metadata (
   singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
   store_epoch TEXT NOT NULL,
   schema_contract_version TEXT NOT NULL,
-  cursor_key_id TEXT NOT NULL,
-  cursor_secret BYTEA NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp()
 );
 
-INSERT INTO store_metadata (store_epoch, schema_contract_version, cursor_key_id, cursor_secret)
+INSERT INTO store_metadata (store_epoch, schema_contract_version)
 VALUES (
   'mfm.store.epoch.v1:' || encode(public.gen_random_bytes(16), 'hex'),
-  'mfm.postgres.run_store.v1',
-  'mfm.cursor.key.v1',
-  public.gen_random_bytes(32)
+  'mfm.postgres.run_store.v1'
 );
 
 CREATE TABLE commits (
@@ -302,7 +298,6 @@ ORDER BY run_id, head_seq DESC;
 CREATE TABLE run_observation_cursors (
   token_hash TEXT PRIMARY KEY,
   cursor_version TEXT NOT NULL,
-  cursor_key_id TEXT NOT NULL,
   store_epoch TEXT NOT NULL,
   cursor_kind TEXT NOT NULL CHECK (cursor_kind IN ('frontier', 'row')),
   append_xid XID8 NOT NULL,
