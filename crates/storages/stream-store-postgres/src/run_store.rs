@@ -284,7 +284,15 @@ impl PostgresRunStore {
             .map_err(|error| database_error("failed to insert run event", error))?;
         }
         insert_resource_lane_authority_rows_tx(&mut tx, &commit_id, batch.events()).await?;
-        insert_run_commit_log_tx(&mut tx, request, &commit_id, batch.seq(), event_count).await?;
+        insert_run_commit_log_tx(
+            &mut tx,
+            request,
+            &commit_id,
+            &final_authority.commit_batch_hash,
+            batch.seq(),
+            event_count,
+        )
+        .await?;
         insert_run_observation_summary_tx(
             &mut tx,
             staged.projections(),
@@ -731,7 +739,7 @@ fn observation_cursor_mac_payload(
 }
 
 fn frontier_sort_key() -> Vec<u8> {
-    vec![0; 33]
+    vec![0; 32]
 }
 
 fn admit_artifact_evidence(
@@ -1178,13 +1186,20 @@ async fn insert_run_commit_log_tx(
     tx: &mut Transaction<'_, Postgres>,
     request: &mfm_store::v1::CommitRequest,
     commit_id: &str,
+    commit_batch_hash: &str,
     seq: StreamSeq,
     event_count: i32,
 ) -> Result<()> {
     let last_ordinal = event_count.checked_sub(1).ok_or_else(|| {
         PostgresStoreError::Corruption("run commit log event count underflow".to_owned())
     })?;
-    let commit_sort_key = run_commit_sort_key(request.run_id(), seq, commit_id)?;
+    let commit_sort_key = run_commit_sort_key(
+        request.run_id(),
+        seq,
+        request.commit_key(),
+        commit_id,
+        commit_batch_hash,
+    )?;
     sqlx::query(
         "INSERT INTO run_commit_log \
          (commit_id, run_id, seq, commit_key, first_ordinal, last_ordinal, event_count, \
@@ -1282,17 +1297,25 @@ fn observation_authority_hash(
     .to_owned())
 }
 
-fn run_commit_sort_key(run_id: &RunId, seq: StreamSeq, commit_id: &str) -> Result<Vec<u8>> {
+fn run_commit_sort_key(
+    run_id: &RunId,
+    seq: StreamSeq,
+    commit_key: &CommitKey,
+    commit_id: &str,
+    commit_batch_hash: &str,
+) -> Result<Vec<u8>> {
     let digest = canonical_json(serde_json::json!({
+        "commit_batch_hash": commit_batch_hash,
+        "commit_key": commit_key.as_str(),
         "commit_id": commit_id,
         "domain": "mfm.run_commit_log.sort_key.v1",
         "run_id": run_id.as_str(),
         "seq": seq.as_u64(),
     }))?
     .digest_bytes();
-    let mut key = Vec::with_capacity(33);
+    let mut key = Vec::with_capacity(32);
     key.push(1);
-    key.extend_from_slice(digest.as_bytes());
+    key.extend_from_slice(&digest.as_bytes()[..31]);
     Ok(key)
 }
 
@@ -3770,6 +3793,63 @@ mod tests {
             error,
             PostgresStoreError::Store(StoreError::CommitConflict { .. })
         ));
+
+        drop_schema(&store, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn run_commit_log_sort_keys_use_v1_rfc_tuple() {
+        let (store, schema) = test_store().await;
+        let run = run_id(125);
+        append_run_start(&store, &run, "sort-key-run-start")
+            .await
+            .expect("run start");
+        append_resource_lane_attempt_start(&store, &run, "sort-key-attempt-start")
+            .await
+            .expect("attempt start");
+
+        let rows = sqlx::query(
+            "SELECT l.seq, l.commit_sort_key, c.commit_key, c.commit_id, c.commit_batch_hash \
+             FROM run_commit_log l \
+             INNER JOIN commits c ON c.commit_id = l.commit_id \
+             WHERE l.run_id = $1 \
+             ORDER BY l.seq",
+        )
+        .bind(run.as_str())
+        .fetch_all(&store.pool)
+        .await
+        .expect("query commit sort keys");
+        assert_eq!(rows.len(), 2);
+        let mut previous: Option<Vec<u8>> = None;
+        for row in rows {
+            let seq: i64 = row.try_get("seq").expect("seq");
+            let commit_sort_key: Vec<u8> = row.try_get("commit_sort_key").expect("commit_sort_key");
+            let commit_key = CommitKey::new(row.try_get::<String, _>("commit_key").expect("key"))
+                .expect("commit key");
+            let commit_id: String = row.try_get("commit_id").expect("commit id");
+            let commit_batch_hash: String =
+                row.try_get("commit_batch_hash").expect("commit batch hash");
+            assert_eq!(commit_sort_key.len(), 32);
+            assert_eq!(commit_sort_key[0], 1);
+            assert_ne!(commit_sort_key, vec![0; 32]);
+            assert_eq!(
+                commit_sort_key,
+                run_commit_sort_key(
+                    &run,
+                    StreamSeq::new(
+                        i64_to_positive_u64(seq, "run_commit_log.seq").expect("positive seq"),
+                    )
+                    .expect("stream seq"),
+                    &commit_key,
+                    &commit_id,
+                    &commit_batch_hash,
+                )
+                .expect("expected sort key")
+            );
+            if let Some(previous) = previous.replace(commit_sort_key.clone()) {
+                assert_ne!(previous, commit_sort_key);
+            }
+        }
 
         drop_schema(&store, &schema).await;
     }

@@ -264,7 +264,8 @@ CREATE TABLE run_commit_log (
   CONSTRAINT run_commit_log_seq_positive CHECK (seq >= 1),
   CONSTRAINT run_commit_log_event_count_positive CHECK (event_count >= 1),
   CONSTRAINT run_commit_log_last_ordinal_matches CHECK (last_ordinal = event_count - 1),
-  CONSTRAINT run_commit_log_sort_key_not_empty CHECK (octet_length(commit_sort_key) > 0),
+  CONSTRAINT run_commit_log_sort_key_v1_length CHECK (octet_length(commit_sort_key) = 32),
+  CONSTRAINT run_commit_log_sort_key_v1_prefix CHECK (get_byte(commit_sort_key, 0) = 1),
   CONSTRAINT run_commit_log_sort_key_not_sentinel CHECK (commit_sort_key <> decode(repeat('00', 32), 'hex')),
   UNIQUE (append_xid, commit_sort_key)
 );
