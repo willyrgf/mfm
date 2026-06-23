@@ -12,10 +12,10 @@ pub(super) async fn insert_prepared_artifact_bytes_tx(
     insert_artifact_blob_tx(tx, artifact).await?;
     sqlx::query(
         "INSERT INTO artifact_admissions \
-         (evidence_hash, artifact_id, digest, byte_len, evidence_schema_version, media_type, \
+         (evidence_hash, artifact_id, digest, byte_len, media_type, \
           schema_id, semantic_type_id, producer_node_id, producer_seed_id, artifact_role, \
           evidence_canonical_json) \
-         VALUES ($1,$2,$3,$4,'mfm.artifact.evidence.v1',$5,$6,$7,$8,$9,$10,$11) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) \
          ON CONFLICT (evidence_hash) DO NOTHING",
     )
     .bind(evidence_hash.as_str())
