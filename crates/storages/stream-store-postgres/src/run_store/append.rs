@@ -1,0 +1,216 @@
+use super::*;
+
+impl PostgresRunStore {
+    /// Atomically admits artifact evidence and appends one typed run commit.
+    pub async fn append_prepared_commit_bundle(
+        &self,
+        bundle: PreparedCommitBundle,
+    ) -> Result<CommitOutcome> {
+        let plan = bundle.plan();
+        let request = plan.request();
+        let fingerprint = prepared_commit_plan_fingerprint(plan)?;
+
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| database_error("failed to start transaction", error))?;
+
+        let prepared_authority = prepared_commit_authority(plan, &fingerprint)?;
+
+        if let Some(stored) =
+            read_commit_by_key(&mut tx, request.run_id(), request.commit_key().as_str()).await?
+        {
+            if stored.commit_idempotency_hash == prepared_authority.commit_idempotency_hash {
+                let batch = load_committed_batch_tx(&mut tx, request.run_id(), stored.seq).await?;
+                tx.commit()
+                    .await
+                    .map_err(|_| PostgresStoreError::Database("failed to commit transaction"))?;
+                return Ok(CommitOutcome::Idempotent(batch));
+            }
+            return Err(StoreError::CommitConflict {
+                commit_key: request.commit_key().clone(),
+            }
+            .into());
+        }
+
+        lock_run_tx(&mut tx, request.run_id()).await?;
+        let head = read_head_tx(&mut tx, request.run_id()).await?;
+
+        // A same-run transaction may have inserted the key while this transaction waited for the
+        // run lock. Re-check before sequence validation while preserving the required initial
+        // commit-key lookup order.
+        if let Some(stored) =
+            read_commit_by_key(&mut tx, request.run_id(), request.commit_key().as_str()).await?
+        {
+            if stored.commit_idempotency_hash == prepared_authority.commit_idempotency_hash {
+                let batch = load_committed_batch_tx(&mut tx, request.run_id(), stored.seq).await?;
+                tx.commit()
+                    .await
+                    .map_err(|_| PostgresStoreError::Database("failed to commit transaction"))?;
+                return Ok(CommitOutcome::Idempotent(batch));
+            }
+            return Err(StoreError::CommitConflict {
+                commit_key: request.commit_key().clone(),
+            }
+            .into());
+        }
+
+        verify_prepared_artifact_bundle_tx(&mut tx, &bundle).await?;
+        let mut artifacts = load_artifacts(&mut tx, request.run_id()).await?;
+        admit_artifact_evidence(&mut artifacts, bundle.admitted_artifacts())?;
+        let locked_resource_lane_ids = lock_resource_lanes_for_request_tx(&mut tx, request).await?;
+        for lane_id in &locked_resource_lane_ids {
+            expire_stale_waiters_tx(&mut tx, lane_id).await?;
+        }
+        let (run_projection, stream_head) =
+            rebuild_projection_snapshot_with_head(&mut tx, request.run_id()).await?;
+        if stream_head != head {
+            return Err(PostgresStoreError::Corruption(
+                "run commit head does not match persisted event stream".to_owned(),
+            ));
+        }
+        let resource_lanes = load_active_resource_lanes_tx(&mut tx).await?;
+        let resource_lane_authority = load_resource_lane_authority_tx(&mut tx).await?;
+        let projections = projection_snapshot_with_resource_lanes(&run_projection, resource_lanes)?;
+        let claim_admission = single_lane_claim_admission(request)?;
+        let base = CommitBase {
+            artifacts,
+            logical_keys: load_logical_keys(&mut tx, request.run_id()).await?,
+            unique_logical_payloads: load_unique_logical_payloads(&mut tx, request.run_id())
+                .await?,
+            projections: projections.clone(),
+            resource_lane_authority,
+            actual_next_seq: next_seq_from_head(head)?,
+        };
+        let staged = match stage_prepared_commit_plan(&base, plan)? {
+            StagedCommitOutcome::Staged(staged) => *staged,
+            StagedCommitOutcome::ResourceLaneClaimBlocked(block) => {
+                if let Some(admission) = &claim_admission {
+                    let mut block = *block;
+                    block.waiter = Some(enqueue_or_refresh_waiter_tx(&mut tx, admission).await?);
+                    tx.commit().await.map_err(|_| {
+                        PostgresStoreError::Database("failed to commit transaction")
+                    })?;
+                    return Ok(CommitOutcome::ResourceLaneClaimBlocked(Box::new(block)));
+                }
+                return Ok(CommitOutcome::ResourceLaneClaimBlocked(block));
+            }
+        };
+        if let Some(admission) = &claim_admission {
+            if let Some(block) =
+                resource_lane_fifo_pre_gate_tx(&mut tx, &projections, admission).await?
+            {
+                tx.commit()
+                    .await
+                    .map_err(|_| PostgresStoreError::Database("failed to commit transaction"))?;
+                return Ok(CommitOutcome::ResourceLaneClaimBlocked(Box::new(block)));
+            }
+        }
+        let batch = staged.batch().clone();
+        let commit_id = derive_commit_id(
+            request.run_id(),
+            batch.seq(),
+            request.commit_key(),
+            plan.purpose_name(),
+            &prepared_authority.prepared_authority_hash,
+        )?;
+        let final_authority = final_commit_authority(plan, &bundle, &batch, &commit_id)?;
+
+        let commit_seq = u64_to_i64(batch.seq().as_u64(), "commits.seq")?;
+        let event_count = i32::try_from(batch.events().len())
+            .map_err(|_| PostgresStoreError::Corruption("event count overflow".into()))?;
+        sqlx::query(
+            "INSERT INTO commits \
+             (commit_id, run_id, seq, commit_key, commit_purpose, commit_idempotency_hash, \
+              idempotency_canonical_json, prepared_authority_hash, prepared_authority_canonical_json, \
+              commit_batch_hash, commit_batch_canonical_json, hash_domain_version, \
+              canonicalizer_identity, event_count) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
+        )
+        .bind(&commit_id)
+        .bind(request.run_id().as_str())
+        .bind(commit_seq)
+        .bind(request.commit_key().as_str())
+        .bind(plan.purpose_name())
+        .bind(&prepared_authority.commit_idempotency_hash)
+        .bind(prepared_authority.idempotency_canonical_json.as_slice())
+        .bind(&prepared_authority.prepared_authority_hash)
+        .bind(prepared_authority.prepared_authority_canonical_json.as_slice())
+        .bind(&final_authority.commit_batch_hash)
+        .bind(final_authority.commit_batch_canonical_json.as_slice())
+        .bind(HASH_DOMAIN_VERSION)
+        .bind(CANONICALIZER_IDENTITY)
+        .bind(event_count)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| database_error("failed to insert commit authority", error))?;
+
+        admit_artifact_bundle_tx(
+            &mut tx,
+            request.run_id(),
+            request.commit_key(),
+            batch.seq(),
+            &commit_id,
+            &bundle,
+        )
+        .await?;
+
+        for event in batch.events() {
+            let payload_canonical_json = payload_canonical_bytes(event.payload())?;
+            let seq = u64_to_i64(event.seq().as_u64(), "run_events.seq")?;
+            let ordinal = i32::try_from(event.ordinal().as_u32()).map_err(|_| {
+                PostgresStoreError::Corruption("run_events.ordinal overflow".into())
+            })?;
+            sqlx::query(
+                "INSERT INTO run_events \
+                 (run_id, seq, ordinal, commit_id, event_id, event_schema_id, spec_hash, commit_key, \
+                  logical_key, payload_hash, payload_canonical_json) \
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+            )
+            .bind(event.run_id().as_str())
+            .bind(seq)
+            .bind(ordinal)
+            .bind(&commit_id)
+            .bind(event.event_id().as_str())
+            .bind(event.event_schema_id().as_str())
+            .bind(event.spec_hash().as_str())
+            .bind(event.commit_key().as_str())
+            .bind(event.logical_key().as_str())
+            .bind(event.payload_hash().as_str())
+            .bind(payload_canonical_json.as_bytes())
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| database_error("failed to insert run event", error))?;
+        }
+        let source_event_count = count_run_events_tx(&mut tx, request.run_id()).await?;
+        insert_resource_lane_authority_rows_tx(&mut tx, &commit_id, batch.events()).await?;
+        if let Some(admission) = &claim_admission {
+            mark_waiter_claimed_tx(&mut tx, admission).await?;
+        }
+        insert_run_commit_log_tx(
+            &mut tx,
+            request,
+            &commit_id,
+            &final_authority.commit_batch_hash,
+            batch.seq(),
+            event_count,
+        )
+        .await?;
+        insert_run_observation_summary_tx(
+            &mut tx,
+            staged.projections(),
+            request.run_id(),
+            &commit_id,
+            batch.seq(),
+            source_event_count,
+        )
+        .await?;
+        notify_observation_change_tx(&mut tx).await?;
+
+        tx.commit()
+            .await
+            .map_err(|error| database_error("failed to commit transaction", error))?;
+        Ok(CommitOutcome::Appended(batch))
+    }
+}
