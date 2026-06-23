@@ -67,6 +67,12 @@ Probe semantics:
 run rows bounded by one sealed frontier. With `cursor`, it returns changes after that cursor and a
 fresh `next_cursor`. A long-poll timeout is a successful empty page.
 
+Run observation cursors are opaque server-issued tokens. In v1 they are epoch-bound and do not have
+wall-clock TTL or garbage collection: a cursor remains valid while its durable token row, cursor
+version, cursor key id, and store epoch still match the live store. Unknown, missing, retired-key,
+or stale-format cursors return `InvalidCursor`. Store epoch mismatches return `CursorExpired`; clients
+recover by listing again without a cursor.
+
 Response shape:
 
 ```json

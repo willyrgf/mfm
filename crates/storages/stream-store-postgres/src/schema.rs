@@ -226,6 +226,28 @@ async fn validate_catalog(pool: &PgPool) -> Result<()> {
         }
     }
 
+    let cursor_column_rows = sqlx::query(
+        "SELECT column_name \
+         FROM information_schema.columns \
+         WHERE table_schema = current_schema() \
+           AND table_name = 'run_observation_cursors'",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| PostgresStoreError::Database("failed to inspect cursor columns"))?;
+    let cursor_columns = cursor_column_rows
+        .into_iter()
+        .map(|row| row.try_get::<String, _>("column_name"))
+        .collect::<std::result::Result<BTreeSet<_>, _>>()
+        .map_err(|_| PostgresStoreError::Database("failed to decode cursor columns"))?;
+    for column in REQUIRED_CURSOR_COLUMNS {
+        if !cursor_columns.contains(*column) {
+            return Err(PostgresStoreError::Database(
+                "required cursor column missing",
+            ));
+        }
+    }
+
     Ok(())
 }
 
@@ -460,7 +482,11 @@ const REQUIRED_TRIGGERS: &[&str] = &[
     "run_observation_cursors_no_update",
 ];
 
-const REQUIRED_CONSTRAINTS: &[&str] = &["artifact_blobs_byte_len_max"];
+const REQUIRED_CONSTRAINTS: &[&str] = &[
+    "artifact_blobs_byte_len_max",
+    "run_observation_cursors_version_v1",
+    "run_observation_cursors_sort_key_v1_length",
+];
 
 const REQUIRED_OBSERVATION_SUMMARY_COLUMNS: &[&str] = &[
     "projection_version",
@@ -473,6 +499,17 @@ const REQUIRED_OBSERVATION_SUMMARY_COLUMNS: &[&str] = &[
     "source_event_count",
     "summary_row_hash",
     "summary_row_canonical_json",
+];
+
+const REQUIRED_CURSOR_COLUMNS: &[&str] = &[
+    "token_hash",
+    "cursor_version",
+    "cursor_key_id",
+    "store_epoch",
+    "cursor_kind",
+    "append_xid",
+    "commit_sort_key",
+    "issued_at",
 ];
 
 const APPEND_XID_TABLES: &[&str] = &["commits", "run_commit_log"];

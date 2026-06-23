@@ -425,7 +425,7 @@ struct StoreMetadata {
     cursor_secret: Vec<u8>,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct CursorPosition {
     append_xid: String,
     commit_sort_key: Vec<u8>,
@@ -737,11 +737,13 @@ async fn encode_observation_cursor(
     let token_hash = observation_cursor_token_hash(&token);
     sqlx::query(
         "INSERT INTO run_observation_cursors \
-          (token_hash, cursor_key_id, store_epoch, cursor_kind, append_xid, commit_sort_key) \
-         VALUES ($1, $2, $3, $4, $5::xid8, $6) \
+          (token_hash, cursor_version, cursor_key_id, store_epoch, cursor_kind, append_xid, \
+           commit_sort_key) \
+         VALUES ($1, $2, $3, $4, $5, $6::xid8, $7) \
          ON CONFLICT (token_hash) DO NOTHING",
     )
     .bind(&token_hash)
+    .bind(CURSOR_VERSION)
     .bind(&metadata.cursor_key_id)
     .bind(&metadata.store_epoch)
     .bind(position.kind.as_str())
@@ -767,8 +769,8 @@ async fn decode_observation_cursor(
     }
     let token_hash = observation_cursor_token_hash(cursor);
     let Some(row) = sqlx::query(
-        "SELECT cursor_key_id, store_epoch, cursor_kind, append_xid::text AS append_xid, \
-          commit_sort_key \
+        "SELECT cursor_version, cursor_key_id, store_epoch, cursor_kind, \
+          append_xid::text AS append_xid, commit_sort_key \
          FROM run_observation_cursors WHERE token_hash = $1",
     )
     .bind(&token_hash)
@@ -781,6 +783,21 @@ async fn decode_observation_cursor(
         }
         .into());
     };
+    let store_epoch: String = row
+        .try_get("store_epoch")
+        .map_err(|error| database_error("failed to decode observation cursor epoch", error))?;
+    if store_epoch != metadata.store_epoch {
+        return Err(StoreError::CursorExpired.into());
+    }
+    let cursor_version: String = row
+        .try_get("cursor_version")
+        .map_err(|error| database_error("failed to decode observation cursor version", error))?;
+    if cursor_version != CURSOR_VERSION {
+        return Err(StoreError::InvalidCursor {
+            message: "stale cursor format".to_owned(),
+        }
+        .into());
+    }
     let cursor_key_id: String = row
         .try_get("cursor_key_id")
         .map_err(|error| database_error("failed to decode observation cursor key", error))?;
@@ -789,12 +806,6 @@ async fn decode_observation_cursor(
             message: "unknown cursor key".to_owned(),
         }
         .into());
-    }
-    let store_epoch: String = row
-        .try_get("store_epoch")
-        .map_err(|error| database_error("failed to decode observation cursor epoch", error))?;
-    if store_epoch != metadata.store_epoch {
-        return Err(StoreError::CursorExpired.into());
     }
     let cursor_kind: String = row
         .try_get("cursor_kind")
@@ -5272,6 +5283,84 @@ mod tests {
         );
     }
 
+    fn assert_invalid_cursor(error: PostgresStoreError, expected: &str) {
+        let PostgresStoreError::Store(StoreError::InvalidCursor { message }) = error else {
+            panic!("expected invalid cursor error, got {error:?}");
+        };
+        assert!(
+            message.contains(expected),
+            "expected invalid cursor containing {expected:?}, got {message:?}"
+        );
+    }
+
+    fn assert_cursor_expired(error: PostgresStoreError) {
+        assert!(matches!(
+            error,
+            PostgresStoreError::Store(StoreError::CursorExpired)
+        ));
+    }
+
+    async fn observation_row_cursor_for_commit(
+        store: &PostgresRunStore,
+        run: &RunId,
+        seq: u64,
+    ) -> String {
+        let metadata = load_store_metadata(&store.pool)
+            .await
+            .expect("load store metadata");
+        let row = sqlx::query(
+            "SELECT append_xid::text AS append_xid, commit_sort_key \
+             FROM run_commit_log WHERE run_id = $1 AND seq = $2",
+        )
+        .bind(run.as_str())
+        .bind(i64::try_from(seq).expect("seq fits i64"))
+        .fetch_one(&store.pool)
+        .await
+        .expect("load commit cursor position");
+        encode_observation_cursor(
+            &store.pool,
+            &metadata,
+            &CursorPosition {
+                append_xid: row.try_get("append_xid").expect("append xid"),
+                commit_sort_key: row.try_get("commit_sort_key").expect("sort key"),
+                kind: CursorKind::Row,
+            },
+        )
+        .await
+        .expect("encode row cursor")
+    }
+
+    async fn append_retention_commit(
+        store: &PostgresRunStore,
+        run: &RunId,
+        seq: u64,
+        commit_key: &str,
+        artifact_byte: u8,
+    ) -> Result<CommitOutcome> {
+        let artifact = artifact_id(artifact_byte);
+        let digest = content_digest(artifact_byte);
+        let evidence =
+            store_artifact_ref(artifact.clone(), digest.clone(), ArtifactRole::StateOutput);
+        let request = mfm_store::v1::CommitRequest::from_payloads(
+            run.clone(),
+            StreamSeq::new(seq).expect("seq"),
+            CommitKey::new(commit_key).expect("commit key"),
+            vec![retention_refs_appended(
+                run.clone(),
+                artifact,
+                digest,
+                ArtifactRole::StateOutput,
+            )],
+            vec![evidence.clone()],
+            CommitPreconditions {
+                required_run_state: RequiredRunState::Started,
+                ..CommitPreconditions::default()
+            },
+        )
+        .expect("retention request");
+        append_prepared(store, request, vec![evidence]).await
+    }
+
     fn expected_resource_lane_id_v1(evidence: &events::ResourceKeyEvidence) -> Result<[u8; 32]> {
         let key_canonical_json = resource_key_canonical_json(evidence)?;
         let canonical = canonical_json(serde_json::json!({
@@ -5914,6 +6003,234 @@ mod tests {
             .await
             .expect("count cursor rows");
         assert_eq!(cursor_rows, 1);
+
+        drop_schema(&store, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn observation_cursor_lifecycle_rejects_malformed_unknown_and_missing_tokens() {
+        let (store, schema) = test_store().await;
+        let run = run_id(145);
+        append_run_start(&store, &run, "cursor-lifecycle-run-start")
+            .await
+            .expect("run start");
+        let metadata = load_store_metadata(&store.pool)
+            .await
+            .expect("load store metadata");
+
+        let malformed = decode_observation_cursor(&store.pool, "not-hex", &metadata)
+            .await
+            .expect_err("non-hex cursor is invalid");
+        assert_invalid_cursor(malformed, "hex");
+        let unknown = decode_observation_cursor(&store.pool, &"00".repeat(32), &metadata)
+            .await
+            .expect_err("unknown cursor is invalid");
+        assert_invalid_cursor(unknown, "unknown cursor");
+
+        let cursor = observation_row_cursor_for_commit(&store, &run, 1).await;
+        sqlx::query(
+            "ALTER TABLE run_observation_cursors DISABLE TRIGGER \
+             run_observation_cursors_no_update",
+        )
+        .execute(&store.pool)
+        .await
+        .expect("disable cursor mutation guard");
+        sqlx::query("DELETE FROM run_observation_cursors WHERE token_hash = $1")
+            .bind(observation_cursor_token_hash(&cursor))
+            .execute(&store.pool)
+            .await
+            .expect("delete cursor row");
+        let missing = decode_observation_cursor(&store.pool, &cursor, &metadata)
+            .await
+            .expect_err("missing cursor row is invalid");
+        assert_invalid_cursor(missing, "unknown cursor");
+
+        drop_schema(&store, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn observation_cursor_lifecycle_is_epoch_bound_without_ttl() {
+        let (store, schema) = test_store().await;
+        let run = run_id(146);
+        append_run_start(&store, &run, "cursor-ttl-run-start")
+            .await
+            .expect("run start");
+        let metadata = load_store_metadata(&store.pool)
+            .await
+            .expect("load store metadata");
+        let cursor = observation_row_cursor_for_commit(&store, &run, 1).await;
+        let token_hash = observation_cursor_token_hash(&cursor);
+
+        sqlx::query(
+            "ALTER TABLE run_observation_cursors DISABLE TRIGGER \
+             run_observation_cursors_no_update",
+        )
+        .execute(&store.pool)
+        .await
+        .expect("disable cursor mutation guard");
+        sqlx::query(
+            "UPDATE run_observation_cursors SET issued_at = '2000-01-01T00:00:00Z'::timestamptz \
+             WHERE token_hash = $1",
+        )
+        .bind(&token_hash)
+        .execute(&store.pool)
+        .await
+        .expect("age cursor");
+        decode_observation_cursor(&store.pool, &cursor, &metadata)
+            .await
+            .expect("old issued_at does not expire current-epoch cursor");
+
+        sqlx::query(
+            "UPDATE run_observation_cursors \
+             SET store_epoch = 'mfm.store.epoch.v1:old', cursor_key_id = 'mfm.cursor.key.old' \
+             WHERE token_hash = $1",
+        )
+        .bind(&token_hash)
+        .execute(&store.pool)
+        .await
+        .expect("move cursor to old epoch and key");
+        let expired = decode_observation_cursor(&store.pool, &cursor, &metadata)
+            .await
+            .expect_err("old epoch cursor expires");
+        assert_cursor_expired(expired);
+
+        drop_schema(&store, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn observation_cursor_lifecycle_rejects_retired_key_and_stale_format() {
+        let (store, schema) = test_store().await;
+        let run = run_id(147);
+        append_run_start(&store, &run, "cursor-format-run-start")
+            .await
+            .expect("run start");
+        let metadata = load_store_metadata(&store.pool)
+            .await
+            .expect("load store metadata");
+        let cursor = observation_row_cursor_for_commit(&store, &run, 1).await;
+        let token_hash = observation_cursor_token_hash(&cursor);
+
+        sqlx::query(
+            "ALTER TABLE run_observation_cursors DISABLE TRIGGER \
+             run_observation_cursors_no_update",
+        )
+        .execute(&store.pool)
+        .await
+        .expect("disable cursor mutation guard");
+        sqlx::query(
+            "UPDATE run_observation_cursors SET cursor_key_id = 'mfm.cursor.key.retired' \
+             WHERE token_hash = $1",
+        )
+        .bind(&token_hash)
+        .execute(&store.pool)
+        .await
+        .expect("retire cursor key");
+        let retired = decode_observation_cursor(&store.pool, &cursor, &metadata)
+            .await
+            .expect_err("same-epoch retired key is invalid");
+        assert_invalid_cursor(retired, "unknown cursor key");
+
+        sqlx::query("ALTER TABLE run_observation_cursors DROP CONSTRAINT run_observation_cursors_version_v1")
+            .execute(&store.pool)
+            .await
+            .expect("drop cursor version constraint for stale-format fixture");
+        sqlx::query(
+            "UPDATE run_observation_cursors \
+             SET cursor_key_id = $2, cursor_version = 'mfm.run_observation.cursor.v0' \
+             WHERE token_hash = $1",
+        )
+        .bind(&token_hash)
+        .bind(&metadata.cursor_key_id)
+        .execute(&store.pool)
+        .await
+        .expect("stale cursor format");
+        let stale = decode_observation_cursor(&store.pool, &cursor, &metadata)
+            .await
+            .expect_err("stale cursor format is invalid");
+        assert_invalid_cursor(stale, "stale cursor format");
+
+        drop_schema(&store, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn observation_cursor_uses_durable_metadata_across_store_restarts() {
+        let (store, schema) = test_store().await;
+        let run = run_id(148);
+        append_run_start(&store, &run, "cursor-restart-run-start")
+            .await
+            .expect("run start");
+        let cursor = observation_row_cursor_for_commit(&store, &run, 1).await;
+        let restarted = PostgresRunStore {
+            pool: store.pool.clone(),
+        };
+        let page = restarted
+            .read_run_observations(RunObservationQuery::new(Some(cursor), 10, 0))
+            .await
+            .expect("restarted store decodes durable cursor metadata");
+        assert!(page.runs.is_empty());
+
+        drop_schema(&store, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn observation_watch_cursor_pages_without_skipping_rows() {
+        let (store, schema) = test_store().await;
+        let run = run_id(149);
+        append_run_start(&store, &run, "cursor-noskip-run-start")
+            .await
+            .expect("run start");
+        append_retention_commit(&store, &run, 2, "cursor-noskip-retention-a", 150)
+            .await
+            .expect("append second observation row");
+        append_retention_commit(&store, &run, 3, "cursor-noskip-retention-b", 151)
+            .await
+            .expect("append third observation row");
+        let cursor = observation_row_cursor_for_commit(&store, &run, 1).await;
+
+        let first = store
+            .read_run_observations(RunObservationQuery::new(Some(cursor), 1, 0))
+            .await
+            .expect("first watch page");
+        assert_eq!(first.runs.len(), 1);
+        assert_eq!(first.runs[0].head_seq.as_u64(), 2);
+        let second = store
+            .read_run_observations(RunObservationQuery::new(Some(first.next_cursor), 1, 0))
+            .await
+            .expect("second watch page");
+        assert_eq!(second.runs.len(), 1);
+        assert_eq!(second.runs[0].head_seq.as_u64(), 3);
+        let third = store
+            .read_run_observations(RunObservationQuery::new(Some(second.next_cursor), 1, 0))
+            .await
+            .expect("third watch page");
+        assert!(third.runs.is_empty());
+
+        drop_schema(&store, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn observation_watch_polls_durable_rows_before_waiting_for_notify() {
+        let (store, schema) = test_store().await;
+        let run = run_id(152);
+        append_run_start(&store, &run, "cursor-missed-notify-run-start")
+            .await
+            .expect("run start");
+        let cursor = observation_row_cursor_for_commit(&store, &run, 1).await;
+        append_retention_commit(&store, &run, 2, "cursor-missed-notify-retention", 153)
+            .await
+            .expect("append change before watcher starts");
+
+        let started = Instant::now();
+        let page = store
+            .read_run_observations(RunObservationQuery::new(Some(cursor), 10, 5_000))
+            .await
+            .expect("watch polls durable rows before waiting");
+        assert_eq!(page.runs.len(), 1);
+        assert_eq!(page.runs[0].head_seq.as_u64(), 2);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "watch should return durable rows without waiting for notify"
+        );
 
         drop_schema(&store, &schema).await;
     }

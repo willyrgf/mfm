@@ -58,6 +58,21 @@ The old dynamic stream-store surface and old `typed_*` schema are removed from
 this crate. This is a destructive dev-branch baseline: use a fresh database or
 drop/recreate the existing local schema before applying migrations.
 
+## Observation Cursors
+
+Run observation cursors are server-issued opaque tokens backed by
+`run_observation_cursors`. The table stores only token authority metadata; public
+`next_cursor` values do not expose append XIDs, sort keys, store epochs, key ids,
+or cursor versions.
+
+The v1 lifecycle is epoch-bound and has no wall-clock TTL, accepted old-key
+window, or cursor garbage collection. A cursor remains valid only while its row,
+`cursor_version`, `cursor_key_id`, and `store_epoch` match the live
+`store_metadata` row. Unknown or pruned token rows, stale cursor formats, and
+same-epoch retired-key rows are `InvalidCursor`. Store epoch mismatch is
+`CursorExpired`, including restore/clone/import/rollback situations; clients
+recover by listing again without a cursor.
+
 ## Data Limits
 
 The backend stores event sequence and timestamp fields in PostgreSQL `BIGINT`

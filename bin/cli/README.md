@@ -366,6 +366,10 @@ Stable manual-resolution errors include:
 Lists observation-only run rows or reads changes from a previous cursor. Strict per-run status and
 stream authority remain available through `run status` and `run stream`; list/watch output is bounded
 by the sealed observation frontier and may lag a just-written commit until the frontier advances.
+Run observation cursors are opaque server-issued tokens. They are epoch-bound in v1 and have no
+wall-clock TTL or cursor garbage collection. Unknown, missing, retired-key, or stale-format cursors
+fail as `InvalidCursor`; store epoch mismatches fail as `CursorExpired`, and the recovery path is to
+run a fresh list without `--cursor`.
 
 **Usage:**
 ```sh
