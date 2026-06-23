@@ -1156,7 +1156,7 @@ async fn append_resource_lane_release(
     lane_value: &str,
 ) -> Result<CommitOutcome> {
     let projection = store
-        .projection_snapshot(run_id)
+        .status_projection_snapshot(run_id)
         .await
         .expect("resource lane projection");
     let lane_key = resource_lane_key(lane_value);
@@ -2602,7 +2602,10 @@ async fn commit_key_sequence_and_projection_rebuild_contract() {
         StreamSeq::new(4).expect("seq")
     );
 
-    let before = store.projection_snapshot(&run).await.expect("projection");
+    let before = store
+        .status_projection_snapshot(&run)
+        .await
+        .expect("projection");
     assert!(matches!(
         before.cell_terminal(&cell_id(21)),
         Some(CellTerminalProjection::Produced { .. })
@@ -2616,7 +2619,7 @@ async fn commit_key_sequence_and_projection_rebuild_contract() {
 
     assert_eq!(
         store
-            .projection_snapshot(&run)
+            .status_projection_snapshot(&run)
             .await
             .expect("stream-authoritative projection rebuilds from events"),
         before
@@ -2662,7 +2665,10 @@ async fn interrupted_attempt_projection_rebuilds_from_events() {
     .await
     .expect("attempt interrupted");
 
-    let before = store.projection_snapshot(&run).await.expect("projection");
+    let before = store
+        .status_projection_snapshot(&run)
+        .await
+        .expect("projection");
     let attempt = before
         .attempt(&node_id(20), &attempt_id(23))
         .expect("attempt projection");
@@ -2670,7 +2676,7 @@ async fn interrupted_attempt_projection_rebuilds_from_events() {
     assert!(before.saga_engagement(&run).is_none());
 
     let rebuilt = store
-        .projection_snapshot(&run)
+        .status_projection_snapshot(&run)
         .await
         .expect("projection rebuilds from events");
     assert_eq!(rebuilt, before);
@@ -2739,7 +2745,10 @@ async fn resource_lane_projection_rebuilds_from_events() {
     .await
     .expect("prepare with resource key");
 
-    let before = store.projection_snapshot(&run).await.expect("projection");
+    let before = store
+        .status_projection_snapshot(&run)
+        .await
+        .expect("projection");
     let lane = before.resource_lane(&lane_key).expect("resource lane");
     assert_eq!(lane.holder.run_id, run);
     assert_eq!(lane.holder.ledger_key, side_effect_ledger_key());
@@ -2764,7 +2773,7 @@ async fn resource_lane_projection_rebuilds_from_events() {
     .await
     .expect("peer run start");
     let peer_before = store
-        .projection_snapshot(&peer_run)
+        .status_projection_snapshot(&peer_run)
         .await
         .expect("peer projection");
     let peer_lane = peer_before
@@ -2774,7 +2783,7 @@ async fn resource_lane_projection_rebuilds_from_events() {
     assert_eq!(peer_before.resource_lanes().count(), 1);
 
     let peer_after_reload = store
-        .projection_snapshot(&peer_run)
+        .status_projection_snapshot(&peer_run)
         .await
         .expect("peer stream-authoritative projection");
     let peer_lane = peer_after_reload
@@ -2785,7 +2794,7 @@ async fn resource_lane_projection_rebuilds_from_events() {
     assert_eq!(peer_after_reload.run_state(&peer_run), RunState::Started);
     assert_eq!(
         store
-            .projection_snapshot(&run)
+            .status_projection_snapshot(&run)
             .await
             .expect("holder stream-authoritative projection"),
         before
@@ -2818,7 +2827,7 @@ async fn resource_lane_append_admission_uses_stream_authority() {
     .await
     .expect("holder resource lane prepare");
     let holder_projection = store
-        .projection_snapshot(&holder_run)
+        .status_projection_snapshot(&holder_run)
         .await
         .expect("holder projection");
     assert_eq!(
@@ -2931,7 +2940,7 @@ async fn resource_lane_waiters_enforce_single_lane_fifo_after_release() {
         .expect("first waiter claims after holder release");
     assert_eq!(
         store
-            .projection_snapshot(&first_waiter)
+            .status_projection_snapshot(&first_waiter)
             .await
             .expect("first waiter projection")
             .resource_lane(&lane_key)
@@ -3061,7 +3070,10 @@ async fn saga_projection_rebuilds_from_events() {
         )
         .await
         .expect("manual resolution");
-    let before = store.projection_snapshot(&run).await.expect("projection");
+    let before = store
+        .status_projection_snapshot(&run)
+        .await
+        .expect("projection");
     let engagement = before.saga_engagement(&run).expect("saga engagement");
     assert!(matches!(
         engagement.reason,
@@ -3171,7 +3183,7 @@ async fn saga_projection_rebuilds_from_events() {
     .await
     .expect("terminal side-effect ambiguous");
     let terminal_before_completion = store
-        .projection_snapshot(&terminal_run)
+        .status_projection_snapshot(&terminal_run)
         .await
         .expect("terminal projection before completion");
     let terminal_saga =
@@ -3211,7 +3223,7 @@ async fn saga_projection_rebuilds_from_events() {
         .expect("terminal run completed");
 
     let terminal_before = store
-        .projection_snapshot(&terminal_run)
+        .status_projection_snapshot(&terminal_run)
         .await
         .expect("terminal projection");
     assert!(matches!(
@@ -3293,7 +3305,10 @@ async fn required_artifacts_and_fact_projection_are_atomic() {
     append_prepared(&store, fact_request, vec![missing_ref])
         .await
         .expect("fact commit after artifact");
-    let projection = store.projection_snapshot(&run).await.expect("projection");
+    let projection = store
+        .status_projection_snapshot(&run)
+        .await
+        .expect("projection");
     assert!(projection
         .fact(
             &node_id(30),
@@ -3430,7 +3445,10 @@ async fn side_effect_unknown_recovery_updates_submission_result_slot() {
         submission_result_key
     );
 
-    let projection = store.projection_snapshot(&run).await.expect("projection");
+    let projection = store
+        .status_projection_snapshot(&run)
+        .await
+        .expect("projection");
     let side_effect = projection
         .side_effect(&side_effect_ledger_key())
         .expect("side-effect projection");

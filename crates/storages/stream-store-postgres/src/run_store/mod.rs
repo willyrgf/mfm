@@ -7,7 +7,7 @@ use mfm_events::v1 as events;
 use mfm_ids::{
     ArtifactId, ContentDigest, IdentityError, NodeId, RunId, SchemaId, SeedId, SemanticTypeId,
 };
-use mfm_spec::v1::{MediaType, ResourceNamespace};
+use mfm_spec::v1::MediaType;
 use mfm_store::v1::codec::parse_identity;
 use mfm_store::v1::{
     payload_from_json_value, prepared_commit_plan_fingerprint, stage_prepared_commit_plan,
@@ -144,38 +144,6 @@ impl PostgresRunStore {
         validate_pool(&pool).await?;
         Ok(Self { pool })
     }
-
-    /// Returns the next store-owned stream sequence for a run.
-    pub async fn expected_next_seq(&self, run_id: &RunId) -> Result<StreamSeq> {
-        let head = read_head(&self.pool, run_id).await?;
-        next_seq_from_head(head)
-    }
-
-    /// Loads the current projection snapshot from authoritative event rows.
-    pub async fn projection_snapshot(&self, run_id: &RunId) -> Result<ProjectionSnapshot> {
-        load_projection_snapshot_client(&self.pool, run_id).await
-    }
-
-    /// Loads the authoritative typed run stream from persisted event rows.
-    pub async fn load_run_stream(&self, run_id: &RunId) -> Result<Vec<KernelEventEnvelope>> {
-        load_run_stream_client(&self.pool, run_id).await
-    }
-
-    /// Reads retained artifact bytes from Postgres-owned artifact authority.
-    pub async fn read_retained_artifact(
-        &self,
-        requirement: &EventArtifactRequirement,
-    ) -> mfm_store::v1::Result<VerifiedRunArtifactBytes> {
-        read_retained_artifact_from_pool(&self.pool, requirement).await
-    }
-
-    /// Reads one observation list/watch page from Postgres-owned read models.
-    pub async fn read_run_observations(
-        &self,
-        query: RunObservationQuery,
-    ) -> Result<RunObservationPage> {
-        read_run_observations_from_pool(&self.pool, query).await
-    }
 }
 
 impl RunEventStore for PostgresRunStore {
@@ -192,21 +160,24 @@ impl RunEventStore for PostgresRunStore {
         &'a self,
         run_id: &'a RunId,
     ) -> AsyncStoreFuture<'a, Vec<KernelEventEnvelope>, Self::Error> {
-        Box::pin(async move { PostgresRunStore::load_run_stream(self, run_id).await })
+        Box::pin(async move { load_run_stream_client(&self.pool, run_id).await })
     }
 
     fn expected_next_seq<'a>(
         &'a self,
         run_id: &'a RunId,
     ) -> AsyncStoreFuture<'a, StreamSeq, Self::Error> {
-        Box::pin(async move { PostgresRunStore::expected_next_seq(self, run_id).await })
+        Box::pin(async move {
+            let head = read_head(&self.pool, run_id).await?;
+            next_seq_from_head(head)
+        })
     }
 
     fn status_projection_snapshot<'a>(
         &'a self,
         run_id: &'a RunId,
     ) -> AsyncStoreFuture<'a, ProjectionSnapshot, Self::Error> {
-        Box::pin(async move { PostgresRunStore::projection_snapshot(self, run_id).await })
+        Box::pin(async move { load_projection_snapshot_client(&self.pool, run_id).await })
     }
 }
 
@@ -215,7 +186,7 @@ impl RetainedArtifactReadProvider for PostgresRunStore {
         &'a self,
         requirement: &'a EventArtifactRequirement,
     ) -> RetainedArtifactReadFuture<'a> {
-        Box::pin(async move { PostgresRunStore::read_retained_artifact(self, requirement).await })
+        Box::pin(async move { read_retained_artifact_from_pool(&self.pool, requirement).await })
     }
 }
 
@@ -226,6 +197,6 @@ impl RunObservationStore for PostgresRunStore {
         &'a self,
         query: RunObservationQuery,
     ) -> mfm_store::v1::AsyncStoreFuture<'a, RunObservationPage, Self::Error> {
-        Box::pin(async move { PostgresRunStore::read_run_observations(self, query).await })
+        Box::pin(async move { read_run_observations_from_pool(&self.pool, query).await })
     }
 }

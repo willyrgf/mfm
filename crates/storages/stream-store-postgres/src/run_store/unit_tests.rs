@@ -1,5 +1,6 @@
 use super::*;
 use mfm_ids::{DigestAlgorithm, DigestBytes};
+use mfm_spec::v1::ResourceNamespace;
 
 #[test]
 fn artifact_role_contract_postgres_tag_roundtrip_uses_events_contract() {
