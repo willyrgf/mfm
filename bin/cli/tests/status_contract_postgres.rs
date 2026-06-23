@@ -8,6 +8,7 @@ use mfm_ids::{AttemptId, DigestAlgorithm, DigestBytes, RunId, SpecHash};
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 use serde_json::Value;
+use sqlx::{AssertSqlSafe, PgPool};
 use std::process::Output;
 use tempfile::TempDir;
 
@@ -22,11 +23,14 @@ async fn run_status_reports_interrupted_attempt_and_framework_attempts_from_hist
     let _rpc_restore = set_rpc_env(rpc_url);
     let database_url =
         std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for parity tests");
+    let schema = unique_schema();
+    create_schema(&database_url, &schema).await;
+    let scoped_database_url = schema_scoped_database_url(&database_url, &schema);
 
-    ProductionPostgresSchema::migrate(&database_url)
+    ProductionPostgresSchema::migrate(&scoped_database_url)
         .await
         .expect("migrate typed postgres schema");
-    let store = ProductionRunStore::connect(&database_url)
+    let store = ProductionRunStore::connect(&scoped_database_url)
         .await
         .expect("connect typed postgres store");
     let temp = TempDir::new().expect("temp dir");
@@ -68,7 +72,7 @@ async fn run_status_reports_interrupted_attempt_and_framework_attempts_from_hist
         "--drive".to_owned(),
         "append-only".to_owned(),
         "--database-url".to_owned(),
-        database_url.clone(),
+        scoped_database_url.clone(),
     ];
     let start = run_cli(&start_args);
     assert_success(&start);
@@ -101,7 +105,7 @@ async fn run_status_reports_interrupted_attempt_and_framework_attempts_from_hist
         "--drive".to_owned(),
         "until-blocked".to_owned(),
         "--database-url".to_owned(),
-        database_url.clone(),
+        scoped_database_url.clone(),
     ]);
     assert_success(&resume);
     let resume_json = parse_success_json(&resume.stdout);
@@ -114,7 +118,7 @@ async fn run_status_reports_interrupted_attempt_and_framework_attempts_from_hist
         "status".to_owned(),
         run_id.as_str().to_owned(),
         "--database-url".to_owned(),
-        database_url.clone(),
+        scoped_database_url.clone(),
     ]);
     assert_success(&status);
     let status_json = parse_success_json(&status.stdout);
@@ -171,7 +175,7 @@ async fn run_status_reports_interrupted_attempt_and_framework_attempts_from_hist
         "stream".to_owned(),
         run_id.as_str().to_owned(),
         "--database-url".to_owned(),
-        database_url,
+        scoped_database_url,
     ]);
     assert_success(&stream);
     let stream_json = parse_success_json(&stream.stdout);
@@ -182,6 +186,43 @@ async fn run_status_reports_interrupted_attempt_and_framework_attempts_from_hist
         &certified.envelope().spec.nodes,
         &run_id,
     );
+
+    drop_schema(&database_url, &schema).await;
+}
+
+fn unique_schema() -> String {
+    format!("cli_{}", uuid::Uuid::new_v4().simple())
+}
+
+async fn create_schema(database_url: &str, schema: &str) {
+    let pool = PgPool::connect(database_url)
+        .await
+        .expect("connect postgres");
+    // The schema name is UUID-derived and never comes from user input; dynamic DDL is required
+    // because PostgreSQL does not parameterize identifiers.
+    sqlx::raw_sql(AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+        .execute(&pool)
+        .await
+        .expect("create schema");
+    pool.close().await;
+}
+
+async fn drop_schema(database_url: &str, schema: &str) {
+    let pool = PgPool::connect(database_url)
+        .await
+        .expect("connect postgres");
+    sqlx::raw_sql(AssertSqlSafe(format!(
+        "DROP SCHEMA IF EXISTS {schema} CASCADE"
+    )))
+    .execute(&pool)
+    .await
+    .expect("drop schema");
+    pool.close().await;
+}
+
+fn schema_scoped_database_url(database_url: &str, schema: &str) -> String {
+    let separator = if database_url.contains('?') { '&' } else { '?' };
+    format!("{database_url}{separator}options=-csearch_path%3D{schema}")
 }
 
 fn sample_portfolio_config_json() -> String {

@@ -307,6 +307,17 @@ FROM run_observation_change_summaries
 WHERE projection_version = 'mfm.run_observation.v1' AND summary_kind = 'run'
 ORDER BY run_id, head_seq DESC;
 
+CREATE TABLE run_observation_cursors (
+  token_hash TEXT PRIMARY KEY,
+  cursor_key_id TEXT NOT NULL,
+  store_epoch TEXT NOT NULL,
+  cursor_kind TEXT NOT NULL CHECK (cursor_kind IN ('frontier', 'row')),
+  append_xid XID8 NOT NULL,
+  commit_sort_key BYTEA NOT NULL,
+  issued_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT run_observation_cursors_sort_key_v1_length CHECK (octet_length(commit_sort_key) = 32)
+);
+
 CREATE TRIGGER store_metadata_no_update
 BEFORE UPDATE OR DELETE OR TRUNCATE ON store_metadata
 FOR EACH STATEMENT EXECUTE FUNCTION mfm_reject_authority_mutation();
@@ -353,4 +364,8 @@ FOR EACH STATEMENT EXECUTE FUNCTION mfm_reject_authority_mutation();
 
 CREATE TRIGGER run_observation_change_summaries_no_update
 BEFORE UPDATE OR DELETE OR TRUNCATE ON run_observation_change_summaries
+FOR EACH STATEMENT EXECUTE FUNCTION mfm_reject_authority_mutation();
+
+CREATE TRIGGER run_observation_cursors_no_update
+BEFORE UPDATE OR DELETE OR TRUNCATE ON run_observation_cursors
 FOR EACH STATEMENT EXECUTE FUNCTION mfm_reject_authority_mutation();

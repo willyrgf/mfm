@@ -557,7 +557,7 @@ struct CursorPosition {
     kind: CursorKind,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CursorKind {
     Frontier,
     Row,
@@ -601,11 +601,10 @@ async fn read_run_observations_from_pool(
         .into());
     }
     let metadata = load_store_metadata(pool).await?;
-    let cursor = query
-        .cursor
-        .as_deref()
-        .map(|cursor| decode_observation_cursor(cursor, &metadata))
-        .transpose()?;
+    let cursor = match query.cursor.as_deref() {
+        Some(cursor) => Some(decode_observation_cursor(pool, cursor, &metadata).await?),
+        None => None,
+    };
     let mut page =
         read_run_observation_page_once(pool, &metadata, cursor.as_ref(), query.limit).await?;
     if page.runs.is_empty() && cursor.is_some() && query.wait_ms > 0 {
@@ -624,8 +623,10 @@ async fn read_run_observation_page_once(
 ) -> Result<RunObservationPage> {
     let frontier_xid = sealed_frontier_xid(pool).await?;
     let rows = match cursor {
-        Some(cursor) => read_observation_watch_rows(pool, cursor, &frontier_xid, limit).await?,
-        None => read_observation_list_rows(pool, &frontier_xid, limit).await?,
+        Some(cursor) => {
+            read_observation_watch_rows(pool, metadata, cursor, &frontier_xid, limit).await?
+        }
+        None => read_observation_list_rows(pool, metadata, &frontier_xid, limit).await?,
     };
     let next_position = if cursor.is_some() && rows.len() == limit as usize {
         let last = rows
@@ -646,7 +647,7 @@ async fn read_run_observation_page_once(
         }
     };
     Ok(RunObservationPage {
-        next_cursor: encode_observation_cursor(metadata, &next_position)?,
+        next_cursor: encode_observation_cursor(pool, metadata, &next_position).await?,
         runs: rows.into_iter().map(|row| row.observation).collect(),
     })
 }
@@ -682,6 +683,7 @@ async fn sealed_frontier_xid(pool: &PgPool) -> Result<String> {
 
 async fn read_observation_list_rows(
     pool: &PgPool,
+    metadata: &StoreMetadata,
     frontier_xid: &str,
     limit: u32,
 ) -> Result<Vec<ObservationRow>> {
@@ -711,11 +713,14 @@ async fn read_observation_list_rows(
     .fetch_all(pool)
     .await
     .map_err(|error| database_error("failed to read run observation list", error))?;
-    rows.into_iter().map(observation_row_from_row).collect()
+    rows.into_iter()
+        .map(|row| observation_row_from_row(row, metadata))
+        .collect()
 }
 
 async fn read_observation_watch_rows(
     pool: &PgPool,
+    metadata: &StoreMetadata,
     cursor: &CursorPosition,
     frontier_xid: &str,
     limit: u32,
@@ -751,10 +756,12 @@ async fn read_observation_watch_rows(
     .fetch_all(pool)
     .await
     .map_err(|error| database_error("failed to read run observation changes", error))?;
-    rows.into_iter().map(observation_row_from_row).collect()
+    rows.into_iter()
+        .map(|row| observation_row_from_row(row, metadata))
+        .collect()
 }
 
-fn observation_row_from_row(row: PgRow) -> Result<ObservationRow> {
+fn observation_row_from_row(row: PgRow, metadata: &StoreMetadata) -> Result<ObservationRow> {
     let run_id: String = row
         .try_get("run_id")
         .map_err(|error| database_error("failed to decode observation run id", error))?;
@@ -784,7 +791,7 @@ fn observation_row_from_row(row: PgRow) -> Result<ObservationRow> {
             completed_at: row.try_get("completed_at").map_err(|error| {
                 database_error("failed to decode observation completed_at", error)
             })?,
-            change_id: Some(commit_id),
+            change_id: Some(observation_change_id(metadata, &commit_id)?),
         },
         append_xid: row
             .try_get("append_xid")
@@ -795,78 +802,118 @@ fn observation_row_from_row(row: PgRow) -> Result<ObservationRow> {
     })
 }
 
-fn encode_observation_cursor(
+async fn encode_observation_cursor(
+    pool: &PgPool,
     metadata: &StoreMetadata,
     position: &CursorPosition,
 ) -> Result<String> {
     let sort_key_hex = bytes_hex(&position.commit_sort_key);
-    let mac = observation_cursor_mac(metadata, position.kind, &position.append_xid, &sort_key_hex)?;
-    Ok(format!(
-        "{CURSOR_VERSION}|{}|{}|{}|{}|{}|{}",
-        metadata.cursor_key_id,
-        position.kind.as_str(),
-        metadata.store_epoch,
-        position.append_xid,
-        sort_key_hex,
-        mac
-    ))
+    let token =
+        observation_cursor_token(metadata, position.kind, &position.append_xid, &sort_key_hex)?;
+    let token_hash = observation_cursor_token_hash(&token);
+    sqlx::query(
+        "INSERT INTO run_observation_cursors \
+          (token_hash, cursor_key_id, store_epoch, cursor_kind, append_xid, commit_sort_key) \
+         VALUES ($1, $2, $3, $4, $5::xid8, $6) \
+         ON CONFLICT (token_hash) DO NOTHING",
+    )
+    .bind(&token_hash)
+    .bind(&metadata.cursor_key_id)
+    .bind(&metadata.store_epoch)
+    .bind(position.kind.as_str())
+    .bind(&position.append_xid)
+    .bind(position.commit_sort_key.as_slice())
+    .execute(pool)
+    .await
+    .map_err(|error| database_error("failed to persist observation cursor token", error))?;
+    Ok(token)
 }
 
-fn decode_observation_cursor(cursor: &str, metadata: &StoreMetadata) -> Result<CursorPosition> {
-    let parts = cursor.split('|').collect::<Vec<_>>();
-    if parts.len() != 7 || parts[0] != CURSOR_VERSION {
+async fn decode_observation_cursor(
+    pool: &PgPool,
+    cursor: &str,
+    metadata: &StoreMetadata,
+) -> Result<CursorPosition> {
+    let token = bytes_from_hex(cursor)?;
+    if token.len() != 32 {
         return Err(StoreError::InvalidCursor {
             message: "malformed cursor".to_owned(),
         }
         .into());
     }
-    if parts[1] != metadata.cursor_key_id {
+    let token_hash = observation_cursor_token_hash(cursor);
+    let Some(row) = sqlx::query(
+        "SELECT cursor_key_id, store_epoch, cursor_kind, append_xid::text AS append_xid, \
+          commit_sort_key \
+         FROM run_observation_cursors WHERE token_hash = $1",
+    )
+    .bind(&token_hash)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| database_error("failed to load observation cursor token", error))?
+    else {
+        return Err(StoreError::InvalidCursor {
+            message: "unknown cursor".to_owned(),
+        }
+        .into());
+    };
+    let cursor_key_id: String = row
+        .try_get("cursor_key_id")
+        .map_err(|error| database_error("failed to decode observation cursor key", error))?;
+    if cursor_key_id != metadata.cursor_key_id {
         return Err(StoreError::InvalidCursor {
             message: "unknown cursor key".to_owned(),
         }
         .into());
     }
-    let kind = CursorKind::parse(parts[2])?;
-    if parts[3] != metadata.store_epoch {
+    let store_epoch: String = row
+        .try_get("store_epoch")
+        .map_err(|error| database_error("failed to decode observation cursor epoch", error))?;
+    if store_epoch != metadata.store_epoch {
         return Err(StoreError::CursorExpired.into());
     }
-    verify_observation_cursor_mac(metadata, kind, parts[4], parts[5], parts[6])?;
+    let cursor_kind: String = row
+        .try_get("cursor_kind")
+        .map_err(|error| database_error("failed to decode observation cursor kind", error))?;
+    let kind = CursorKind::parse(&cursor_kind)?;
     Ok(CursorPosition {
-        append_xid: parts[4].to_owned(),
-        commit_sort_key: bytes_from_hex(parts[5])?,
+        append_xid: row
+            .try_get("append_xid")
+            .map_err(|error| database_error("failed to decode observation cursor xid", error))?,
+        commit_sort_key: row.try_get("commit_sort_key").map_err(|error| {
+            database_error("failed to decode observation cursor sort key", error)
+        })?,
         kind,
     })
 }
 
-fn observation_cursor_mac(
+fn observation_cursor_token(
     metadata: &StoreMetadata,
     kind: CursorKind,
     append_xid: &str,
     sort_key_hex: &str,
 ) -> Result<String> {
-    let payload = observation_cursor_mac_payload(metadata, kind, append_xid, sort_key_hex)?;
+    let payload = observation_cursor_payload(metadata, kind, append_xid, sort_key_hex)?;
     let key = hmac::Key::new(hmac::HMAC_SHA256, &metadata.cursor_secret);
     Ok(bytes_hex(hmac::sign(&key, &payload).as_ref()))
 }
 
-fn verify_observation_cursor_mac(
-    metadata: &StoreMetadata,
-    kind: CursorKind,
-    append_xid: &str,
-    sort_key_hex: &str,
-    mac_hex: &str,
-) -> Result<()> {
-    let payload = observation_cursor_mac_payload(metadata, kind, append_xid, sort_key_hex)?;
-    let mac = bytes_from_hex(mac_hex)?;
+fn observation_change_id(metadata: &StoreMetadata, commit_id: &str) -> Result<String> {
+    let payload = canonical_json(serde_json::json!({
+        "change_id_version": "mfm.run_observation.change_id.v1",
+        "commit_id": commit_id,
+        "cursor_key_id": metadata.cursor_key_id.as_str(),
+        "store_epoch": metadata.store_epoch.as_str(),
+    }))?;
     let key = hmac::Key::new(hmac::HMAC_SHA256, &metadata.cursor_secret);
-    hmac::verify(&key, &payload, &mac).map_err(|_| {
-        PostgresStoreError::Store(StoreError::InvalidCursor {
-            message: "cursor authentication failed".to_owned(),
-        })
-    })
+    Ok(bytes_hex(hmac::sign(&key, payload.as_bytes()).as_ref()))
 }
 
-fn observation_cursor_mac_payload(
+fn observation_cursor_token_hash(token: &str) -> String {
+    bytes_hex(sha256_digest_bytes(token.as_bytes()).as_bytes())
+}
+
+fn observation_cursor_payload(
     metadata: &StoreMetadata,
     kind: CursorKind,
     append_xid: &str,
@@ -5205,6 +5252,89 @@ mod tests {
             .await
             .expect_err("rebuild fails closed on drift");
         assert_corruption(error, "read-model drift");
+
+        drop_schema(&store, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn observation_change_ids_and_cursors_do_not_expose_internal_authority() {
+        let (store, schema) = test_store().await;
+        let run = run_id(134);
+        append_run_start(&store, &run, "opaque-observation-run-start")
+            .await
+            .expect("run start");
+
+        let metadata = load_store_metadata(&store.pool)
+            .await
+            .expect("load store metadata");
+        let row = sqlx::query(
+            "SELECT s.run_id, s.head_seq, s.observed_status, \
+              to_char(s.started_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS started_at, \
+              to_char(s.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS updated_at, \
+              CASE WHEN s.completed_at IS NULL THEN NULL \
+                ELSE to_char(s.completed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') \
+              END AS completed_at, \
+              l.commit_id, l.append_xid::text AS append_xid, l.commit_sort_key \
+             FROM run_commit_log l \
+             INNER JOIN run_observation_change_summaries s ON s.commit_id = l.commit_id \
+             WHERE s.run_id = $1",
+        )
+        .bind(run.as_str())
+        .fetch_one(&store.pool)
+        .await
+        .expect("load observation row");
+        let commit_id: String = row.try_get("commit_id").expect("commit id");
+        let append_xid: String = row.try_get("append_xid").expect("append xid");
+        let commit_sort_key: Vec<u8> = row.try_get("commit_sort_key").expect("sort key");
+        let observation = observation_row_from_row(row, &metadata).expect("decode observation");
+        let public_change_id = observation
+            .observation
+            .change_id
+            .as_deref()
+            .expect("observation change id");
+        let position = CursorPosition {
+            append_xid,
+            commit_sort_key: commit_sort_key.clone(),
+            kind: CursorKind::Row,
+        };
+        let public_cursor = encode_observation_cursor(&store.pool, &metadata, &position)
+            .await
+            .expect("encode observation cursor");
+        let decoded = decode_observation_cursor(&store.pool, &public_cursor, &metadata)
+            .await
+            .expect("decode observation cursor");
+        assert_eq!(decoded.append_xid, position.append_xid);
+        assert_eq!(decoded.commit_sort_key, position.commit_sort_key);
+        assert_eq!(decoded.kind, CursorKind::Row);
+        assert_eq!(
+            bytes_from_hex(&public_cursor)
+                .expect("opaque cursor token is hex")
+                .len(),
+            32
+        );
+        assert_eq!(
+            bytes_from_hex(public_change_id)
+                .expect("opaque change id token is hex")
+                .len(),
+            32
+        );
+        let commit_sort_key_hex = bytes_hex(&commit_sort_key);
+
+        for public_value in [public_cursor.as_str(), public_change_id] {
+            assert!(!public_value.contains('|'));
+            assert!(!public_value.contains(CURSOR_VERSION));
+            assert!(!public_value.contains(commit_id.as_str()));
+            assert!(!public_value.contains(commit_sort_key_hex.as_str()));
+            assert!(!public_value.contains(metadata.store_epoch.as_str()));
+            assert!(!public_value.contains(metadata.cursor_key_id.as_str()));
+        }
+        assert_ne!(public_change_id, commit_id);
+
+        let cursor_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM run_observation_cursors")
+            .fetch_one(&store.pool)
+            .await
+            .expect("count cursor rows");
+        assert_eq!(cursor_rows, 1);
 
         drop_schema(&store, &schema).await;
     }

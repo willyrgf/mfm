@@ -247,6 +247,7 @@ const REQUIRED_TABLES: &[&str] = &[
     "resource_lane_transitions",
     "run_commit_log",
     "run_observation_change_summaries",
+    "run_observation_cursors",
 ];
 
 const REQUIRED_VIEWS: &[&str] = &["current_run_observations"];
@@ -268,6 +269,7 @@ const REQUIRED_TRIGGERS: &[&str] = &[
     "resource_lane_transitions_no_update",
     "run_commit_log_no_update",
     "run_observation_change_summaries_no_update",
+    "run_observation_cursors_no_update",
 ];
 
 const REQUIRED_OBSERVATION_SUMMARY_COLUMNS: &[&str] = &[
