@@ -61,6 +61,12 @@ For parity tests that need Postgres, Reth, or other live services, start those s
 run the focused Cargo test with explicit environment variables such as `DATABASE_URL`,
 `RETH_HTTP_PORT`, or `MFM_EVM_RPC_SOURCES_JSON`.
 
+For final merge-readiness validation, or when a user explicitly asks for managed live-service
+coverage instead of a local `DATABASE_URL`/service setup, use the Nixfied managed gates:
+
+- `nix run .#test-db`: managed Postgres plus SQLx schema drift checks and Postgres parity tests.
+- `nix run .#ci`: full managed CI with Postgres, Reth, and all parity tests.
+
 ## Key Docs:
 
 - `README.md`: project disclaimer.
