@@ -1863,10 +1863,11 @@ fn committed_run_stream_exposes_store_owned_authority() {
         "sidefx-prepare"
     );
     assert_eq!(committed.projection().run_state(&run_id), RunState::Started);
-    assert!(committed.saga_projection().is_none());
+    assert!(committed.projection().saga_engagement(&run_id).is_none());
     assert_eq!(
         committed
-            .side_effect_projection(&side_effect_ledger_key())
+            .projection()
+            .side_effect_for_run(&run_id, &side_effect_ledger_key())
             .expect("side-effect projection")
             .phase,
         SideEffectPhase::InvocationPrepared {

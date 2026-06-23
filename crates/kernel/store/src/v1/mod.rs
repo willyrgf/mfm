@@ -4134,32 +4134,6 @@ impl CommittedRunStreamCommit {
     }
 }
 
-/// Store-verified projection snapshot.
-///
-/// The snapshot is produced by store-owned commit/staging or committed-stream validation.
-/// Consumers use this as read authority instead of reconstructing independent projection
-/// views from raw event vectors.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VerifiedProjectionSnapshot {
-    snapshot: ProjectionSnapshot,
-}
-
-impl VerifiedProjectionSnapshot {
-    fn from_rebuilt(snapshot: ProjectionSnapshot) -> Self {
-        Self { snapshot }
-    }
-
-    /// Returns the verified projection snapshot.
-    pub fn snapshot(&self) -> &ProjectionSnapshot {
-        &self.snapshot
-    }
-
-    /// Consumes this authority into the verified snapshot.
-    pub fn into_snapshot(self) -> ProjectionSnapshot {
-        self.snapshot
-    }
-}
-
 /// Store-owned verified run-stream authority.
 ///
 /// This type proves store-level ordering, commit grouping, projection rebuild, next sequence,
@@ -4169,7 +4143,7 @@ pub struct CommittedRunStream {
     run_id: RunId,
     events: Vec<KernelEventEnvelope>,
     commits: Vec<CommittedRunStreamCommit>,
-    projection: VerifiedProjectionSnapshot,
+    projection: ProjectionSnapshot,
     next_seq: StreamSeq,
     artifact_requirements: Vec<EventArtifactRequirement>,
 }
@@ -4189,9 +4163,7 @@ impl CommittedRunStream {
         }
         ProjectionSnapshot::validate_run_stream(&events)?;
         let commits = committed_run_stream_commits(&events);
-        let projection = VerifiedProjectionSnapshot::from_rebuilt(
-            ProjectionSnapshot::rebuild_from_run_stream(&events)?,
-        );
+        let projection = ProjectionSnapshot::rebuild_from_run_stream(&events)?;
         let next_seq = next_seq_after_committed_stream(&events)?;
         let artifact_requirements = events
             .iter()
@@ -4224,11 +4196,6 @@ impl CommittedRunStream {
 
     /// Returns the projection rebuilt from this verified stream.
     pub fn projection(&self) -> &ProjectionSnapshot {
-        self.projection.snapshot()
-    }
-
-    /// Returns the verified projection authority for this stream.
-    pub fn verified_projection(&self) -> &VerifiedProjectionSnapshot {
         &self.projection
     }
 
@@ -4240,21 +4207,6 @@ impl CommittedRunStream {
     /// Returns artifact role requirements referenced by this stream.
     pub fn artifact_requirements(&self) -> &[EventArtifactRequirement] {
         &self.artifact_requirements
-    }
-
-    /// Returns the saga engagement projection for this run, when any.
-    pub fn saga_projection(&self) -> Option<&SagaEngagementProjection> {
-        self.projection.snapshot().saga_engagement(&self.run_id)
-    }
-
-    /// Returns the side-effect projection for a run-scoped ledger.
-    pub fn side_effect_projection(
-        &self,
-        ledger_key: &events::SideEffectLedgerKey,
-    ) -> Option<&SideEffectProjection> {
-        self.projection
-            .snapshot()
-            .side_effect_for_run(&self.run_id, ledger_key)
     }
 }
 
