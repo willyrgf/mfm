@@ -100,10 +100,11 @@ async fn schema_validation_proves_append_xid_trigger_contracts() {
     let commit_xid: String = sqlx::query_scalar(
         "INSERT INTO commits \
          (commit_id, run_id, seq, commit_key, commit_purpose, prepared_commit_plan_fingerprint, \
-          commit_batch_hash, event_count, append_xid) \
+          commit_batch_hash, commit_sort_key, event_count, append_xid) \
          VALUES \
          ('schema-trigger-commit', 'schema-trigger-run', 1, 'schema-trigger-key', \
-          'schema-trigger-purpose', $1, $2, 1, '1'::xid8) \
+          'schema-trigger-purpose', $1, $2, decode('01' || repeat('00', 31), 'hex'), 1, \
+          '1'::xid8) \
          RETURNING append_xid::text",
     )
     .bind(content_digest(252).as_str())
@@ -111,20 +112,7 @@ async fn schema_validation_proves_append_xid_trigger_contracts() {
     .fetch_one(&mut *tx)
     .await
     .expect("insert commit with explicit xid");
-    let log_xid: String = sqlx::query_scalar(
-        "INSERT INTO run_commit_log \
-         (commit_id, run_id, seq, commit_key, first_ordinal, last_ordinal, event_count, \
-          commit_sort_key, append_xid) \
-         VALUES \
-         ('schema-trigger-commit', 'schema-trigger-run', 1, 'schema-trigger-key', 0, 0, 1, \
-          decode('01' || repeat('00', 31), 'hex'), '1'::xid8) \
-         RETURNING append_xid::text",
-    )
-    .fetch_one(&mut *tx)
-    .await
-    .expect("insert run commit log with explicit xid");
     assert_eq!(commit_xid, expected_xid);
-    assert_eq!(log_xid, expected_xid);
     tx.rollback().await.expect("rollback manual authority rows");
     crate::schema::validate_pool(&store.pool)
         .await
@@ -1267,7 +1255,7 @@ async fn observation_row_cursor_for_commit(
         .expect("load store metadata");
     let row = sqlx::query(
         "SELECT append_xid::text AS append_xid, commit_sort_key \
-         FROM run_commit_log WHERE run_id = $1 AND seq = $2",
+         FROM commits WHERE run_id = $1 AND seq = $2",
     )
     .bind(run.as_str())
     .bind(i64::try_from(seq).expect("seq fits i64"))
@@ -1367,7 +1355,7 @@ async fn prepared_commit_idempotency_fingerprint_includes_admitted_artifacts() {
 }
 
 #[tokio::test]
-async fn run_commit_log_sort_keys_use_v1_rfc_tuple() {
+async fn commit_sort_keys_use_v1_rfc_tuple() {
     let (store, schema) = test_store().await;
     let run = run_id(125);
     append_run_start(&store, &run, "sort-key-run-start")
@@ -1378,11 +1366,10 @@ async fn run_commit_log_sort_keys_use_v1_rfc_tuple() {
         .expect("attempt start");
 
     let rows = sqlx::query(
-        "SELECT l.seq, l.commit_sort_key, c.commit_key, c.commit_id, c.commit_batch_hash \
-         FROM run_commit_log l \
-         INNER JOIN commits c ON c.commit_id = l.commit_id \
-         WHERE l.run_id = $1 \
-         ORDER BY l.seq",
+        "SELECT seq, commit_sort_key, commit_key, commit_id, commit_batch_hash \
+         FROM commits \
+         WHERE run_id = $1 \
+         ORDER BY seq",
     )
     .bind(run.as_str())
     .fetch_all(&store.pool)
@@ -1403,12 +1390,10 @@ async fn run_commit_log_sort_keys_use_v1_rfc_tuple() {
         assert_ne!(commit_sort_key, vec![0; 32]);
         assert_eq!(
             commit_sort_key,
-            run_commit_sort_key(
+            derive_commit_sort_key(
                 &run,
-                StreamSeq::new(
-                    i64_to_positive_u64(seq, "run_commit_log.seq").expect("positive seq"),
-                )
-                .expect("stream seq"),
+                StreamSeq::new(i64_to_positive_u64(seq, "commits.seq").expect("positive seq"))
+                    .expect("stream seq"),
                 &commit_key,
                 &commit_id,
                 &commit_batch_hash,
@@ -1474,7 +1459,7 @@ async fn strict_load_rejects_commit_batch_authority_rewritten_away_from_rows() {
     }))
     .expect("canonical forged batch");
     let forged_batch_hash = forged_batch.content_digest().as_str().to_owned();
-    let forged_sort_key = run_commit_sort_key(
+    let forged_sort_key = derive_commit_sort_key(
         &run,
         StreamSeq::new(1).expect("seq"),
         &commit_key,
@@ -1487,22 +1472,16 @@ async fn strict_load_rejects_commit_batch_authority_rewritten_away_from_rows() {
         .execute(&store.pool)
         .await
         .expect("disable commit mutation guard");
-    sqlx::query("ALTER TABLE run_commit_log DISABLE TRIGGER run_commit_log_no_update")
-        .execute(&store.pool)
-        .await
-        .expect("disable commit log mutation guard");
-    sqlx::query("UPDATE commits SET commit_batch_hash = $1 WHERE run_id = $2 AND seq = 1")
-        .bind(&forged_batch_hash)
-        .bind(run.as_str())
-        .execute(&store.pool)
-        .await
-        .expect("forge commit batch authority");
-    sqlx::query("UPDATE run_commit_log SET commit_sort_key = $1 WHERE commit_id = $2")
-        .bind(forged_sort_key)
-        .bind(&commit_id)
-        .execute(&store.pool)
-        .await
-        .expect("forge matching commit log sort key");
+    sqlx::query(
+        "UPDATE commits SET commit_batch_hash = $1, commit_sort_key = $2 \
+         WHERE run_id = $3 AND seq = 1",
+    )
+    .bind(&forged_batch_hash)
+    .bind(forged_sort_key)
+    .bind(run.as_str())
+    .execute(&store.pool)
+    .await
+    .expect("forge commit batch authority");
 
     let error = store
         .load_run_stream(&run)
@@ -1517,18 +1496,18 @@ async fn strict_load_rejects_commit_batch_authority_rewritten_away_from_rows() {
 }
 
 #[tokio::test]
-async fn strict_load_rejects_corrupt_run_commit_log_sort_key() {
+async fn strict_load_rejects_corrupt_commit_sort_key() {
     let (store, schema) = test_store().await;
     let run = run_id(127);
-    append_run_start(&store, &run, "strict-log-run-start")
+    append_run_start(&store, &run, "strict-sort-key-run-start")
         .await
         .expect("run start");
 
-    sqlx::query("ALTER TABLE run_commit_log DISABLE TRIGGER run_commit_log_no_update")
+    sqlx::query("ALTER TABLE commits DISABLE TRIGGER commits_no_update")
         .execute(&store.pool)
         .await
-        .expect("disable commit log mutation guard");
-    sqlx::query("UPDATE run_commit_log SET commit_sort_key = $1 WHERE run_id = $2 AND seq = 1")
+        .expect("disable commit mutation guard");
+    sqlx::query("UPDATE commits SET commit_sort_key = $1 WHERE run_id = $2 AND seq = 1")
         .bind(vec![1_u8; 32])
         .bind(run.as_str())
         .execute(&store.pool)
@@ -1538,8 +1517,8 @@ async fn strict_load_rejects_corrupt_run_commit_log_sort_key() {
     let error = store
         .load_run_stream(&run)
         .await
-        .expect_err("strict load rejects corrupt run_commit_log sort key");
-    assert_corruption(error, "run_commit_log sort key does not match");
+        .expect_err("strict load rejects corrupt commit sort key");
+    assert_corruption(error, "commit sort key does not match");
 
     drop_schema(&store, &schema).await;
 }
@@ -1564,7 +1543,7 @@ async fn observation_change_ids_and_cursors_do_not_expose_internal_authority() {
     assert_eq!(rows.len(), 1);
     let observation = rows.pop().expect("observation row");
     let commit_id: String =
-        sqlx::query_scalar("SELECT commit_id FROM run_commit_log WHERE run_id = $1 AND seq = 1")
+        sqlx::query_scalar("SELECT commit_id FROM commits WHERE run_id = $1 AND seq = 1")
             .bind(run.as_str())
             .fetch_one(&store.pool)
             .await
@@ -1929,7 +1908,7 @@ async fn observation_watch_wakes_on_notification_before_timeout() {
         .expect("load store metadata");
     let row = sqlx::query(
         "SELECT append_xid::text AS append_xid, commit_sort_key \
-         FROM run_commit_log WHERE run_id = $1 AND seq = 1",
+         FROM commits WHERE run_id = $1 AND seq = 1",
     )
     .bind(run.as_str())
     .fetch_one(&store.pool)

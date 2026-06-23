@@ -280,9 +280,9 @@ fn postgres_migrations_do_not_reintroduce_removed_storage_surfaces() {
     for required in [
         "CREATE TABLE run_events",
         "CONSTRAINT artifact_blobs_byte_len_max CHECK (byte_len <= 16777216)",
-        "CREATE TABLE run_commit_log",
-        "CONSTRAINT run_commit_log_sort_key_v1_length CHECK (octet_length(commit_sort_key) = 32)",
-        "CONSTRAINT run_commit_log_sort_key_v1_prefix CHECK (get_byte(commit_sort_key, 0) = 1)",
+        "commit_sort_key BYTEA NOT NULL",
+        "CONSTRAINT commits_sort_key_v1_length CHECK (octet_length(commit_sort_key) = 32)",
+        "CONSTRAINT commits_sort_key_v1_prefix CHECK (get_byte(commit_sort_key, 0) = 1)",
         "CREATE TABLE run_observation_cursors",
     ] {
         assert!(

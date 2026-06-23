@@ -69,7 +69,7 @@ them.
 Run this store in a dedicated MFM database tenancy and avoid sharing the
 Postgres transaction horizon with unrelated long-lived workloads. Observation
 pages seal a frontier from PostgreSQL snapshot `xmin` and order changes by
-`(run_commit_log.append_xid, commit_sort_key)`. PostgreSQL transaction IDs are a
+`(commits.append_xid, commit_sort_key)`. PostgreSQL transaction IDs are a
 cluster-level resource, so unrelated transactions can delay frontier advancement
 and make list/watch lag behind strict per-run status.
 

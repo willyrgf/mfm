@@ -122,11 +122,18 @@ impl PostgresRunStore {
         let commit_seq = u64_to_i64(batch.seq().as_u64(), "commits.seq")?;
         let event_count = i32::try_from(batch.events().len())
             .map_err(|_| PostgresStoreError::Corruption("event count overflow".into()))?;
+        let commit_sort_key = derive_commit_sort_key(
+            request.run_id(),
+            batch.seq(),
+            request.commit_key(),
+            &commit_id,
+            &final_authority.commit_batch_hash,
+        )?;
         sqlx::query(
             "INSERT INTO commits \
              (commit_id, run_id, seq, commit_key, commit_purpose, prepared_commit_plan_fingerprint, \
-              commit_batch_hash, event_count) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+              commit_batch_hash, commit_sort_key, event_count) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
         )
         .bind(&commit_id)
         .bind(request.run_id().as_str())
@@ -135,6 +142,7 @@ impl PostgresRunStore {
         .bind(plan.purpose_name())
         .bind(fingerprint.as_digest().as_str())
         .bind(&final_authority.commit_batch_hash)
+        .bind(commit_sort_key)
         .bind(event_count)
         .execute(&mut *tx)
         .await
@@ -180,15 +188,6 @@ impl PostgresRunStore {
         if let Some(admission) = &claim_admission {
             mark_waiter_claimed_tx(&mut tx, admission).await?;
         }
-        insert_run_commit_log_tx(
-            &mut tx,
-            request,
-            &commit_id,
-            &final_authority.commit_batch_hash,
-            batch.seq(),
-            event_count,
-        )
-        .await?;
         notify_observation_change_tx(&mut tx).await?;
 
         tx.commit()

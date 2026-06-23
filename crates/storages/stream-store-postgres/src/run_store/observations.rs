@@ -216,10 +216,9 @@ pub(super) async fn read_observation_list_rows(
                'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS started_at, \
              to_char(c.committed_at AT TIME ZONE 'UTC', \
                'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS updated_at, \
-             l.commit_id, l.append_xid::text AS append_xid, l.commit_sort_key \
+             c.commit_id, c.append_xid::text AS append_xid, c.commit_sort_key \
            FROM commits c \
-           INNER JOIN run_commit_log l ON l.commit_id = c.commit_id \
-           WHERE l.append_xid < $1::xid8 \
+           WHERE c.append_xid < $1::xid8 \
            ORDER BY c.run_id, c.seq DESC \
          ) \
          SELECT * FROM bounded ORDER BY updated_at DESC, run_id ASC LIMIT $2",
@@ -246,16 +245,15 @@ pub(super) async fn read_observation_watch_rows(
             'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS started_at, \
           to_char(c.committed_at AT TIME ZONE 'UTC', \
             'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS updated_at, \
-          l.commit_id, l.append_xid::text AS append_xid, l.commit_sort_key \
-         FROM run_commit_log l \
-         INNER JOIN commits c ON c.commit_id = l.commit_id \
-         WHERE l.append_xid < $1::xid8 \
+          c.commit_id, c.append_xid::text AS append_xid, c.commit_sort_key \
+         FROM commits c \
+         WHERE c.append_xid < $1::xid8 \
            AND ( \
-             ($4 AND l.append_xid >= $2::xid8) \
+             ($4 AND c.append_xid >= $2::xid8) \
              OR \
-             (NOT $4 AND (l.append_xid, l.commit_sort_key) > ($2::xid8, $3::bytea)) \
+             (NOT $4 AND (c.append_xid, c.commit_sort_key) > ($2::xid8, $3::bytea)) \
            ) \
-         ORDER BY l.append_xid ASC, l.commit_sort_key ASC \
+         ORDER BY c.append_xid ASC, c.commit_sort_key ASC \
          LIMIT $5",
     )
     .bind(frontier_xid)

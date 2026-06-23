@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn run_commit_sort_key(
+pub(super) fn derive_commit_sort_key(
     run_id: &RunId,
     seq: StreamSeq,
     commit_key: &CommitKey,
@@ -11,7 +11,7 @@ pub(super) fn run_commit_sort_key(
         "commit_batch_hash": commit_batch_hash,
         "commit_key": commit_key.as_str(),
         "commit_id": commit_id,
-        "domain": "mfm.run_commit_log.sort_key.v1",
+        "domain": "mfm.postgres.commit.sort_key.v1",
         "run_id": run_id.as_str(),
         "seq": seq.as_u64(),
     }))?

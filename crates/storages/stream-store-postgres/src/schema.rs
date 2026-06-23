@@ -369,7 +369,7 @@ async fn validate_append_xid_columns(pool: &PgPool) -> Result<()> {
          FROM information_schema.columns \
          WHERE table_schema = current_schema() \
            AND column_name = 'append_xid' \
-           AND table_name IN ('commits', 'run_commit_log')",
+           AND table_name = 'commits'",
     )
     .fetch_all(pool)
     .await
@@ -426,7 +426,6 @@ const REQUIRED_TABLES: &[&str] = &[
     "run_artifact_admissions",
     "resource_lane_waiter_counters",
     "resource_lane_waiters",
-    "run_commit_log",
     "run_observation_cursors",
 ];
 
@@ -441,7 +440,6 @@ const REQUIRED_FUNCTIONS: &[&str] = &["mfm_set_append_xid", "mfm_reject_authorit
 
 const REQUIRED_TRIGGERS: &[&str] = &[
     "commits_set_append_xid",
-    "run_commit_log_set_append_xid",
     "store_metadata_no_update",
     "commits_no_update",
     "run_events_no_update",
@@ -449,12 +447,14 @@ const REQUIRED_TRIGGERS: &[&str] = &[
     "artifact_admissions_no_update",
     "commit_artifact_evidence_no_update",
     "run_artifact_admissions_no_update",
-    "run_commit_log_no_update",
     "run_observation_cursors_no_update",
 ];
 
 const REQUIRED_CONSTRAINTS: &[&str] = &[
     "artifact_blobs_byte_len_max",
+    "commits_sort_key_v1_length",
+    "commits_sort_key_v1_prefix",
+    "commits_sort_key_not_sentinel",
     "resource_lane_waiter_counters_lane_id_len",
     "resource_lane_waiter_counters_next_ticket_positive",
     "resource_lane_waiters_lane_id_len",
@@ -474,7 +474,7 @@ const REQUIRED_CURSOR_COLUMNS: &[&str] = &[
     "issued_at",
 ];
 
-const APPEND_XID_TABLES: &[&str] = &["commits", "run_commit_log"];
+const APPEND_XID_TABLES: &[&str] = &["commits"];
 
 const IMMUTABLE_TABLES: &[&str] = &[
     "store_metadata",
@@ -484,7 +484,6 @@ const IMMUTABLE_TABLES: &[&str] = &[
     "artifact_admissions",
     "commit_artifact_evidence",
     "run_artifact_admissions",
-    "run_commit_log",
     "run_observation_cursors",
 ];
 
@@ -523,30 +522,17 @@ struct TriggerContract<'a> {
     truncate: bool,
 }
 
-const REQUIRED_TRIGGER_CONTRACTS: &[TriggerContract<'_>] = &[
-    TriggerContract {
-        name: "commits_set_append_xid",
-        table: "commits",
-        function: "mfm_set_append_xid",
-        row_level: true,
-        before: true,
-        insert: true,
-        update: false,
-        delete: false,
-        truncate: false,
-    },
-    TriggerContract {
-        name: "run_commit_log_set_append_xid",
-        table: "run_commit_log",
-        function: "mfm_set_append_xid",
-        row_level: true,
-        before: true,
-        insert: true,
-        update: false,
-        delete: false,
-        truncate: false,
-    },
-];
+const REQUIRED_TRIGGER_CONTRACTS: &[TriggerContract<'_>] = &[TriggerContract {
+    name: "commits_set_append_xid",
+    table: "commits",
+    function: "mfm_set_append_xid",
+    row_level: true,
+    before: true,
+    insert: true,
+    update: false,
+    delete: false,
+    truncate: false,
+}];
 
 const FORBIDDEN_TABLES: &[&str] = &[
     "typed_run_heads",

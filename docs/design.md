@@ -319,7 +319,7 @@ crates/storages/stream-store-postgres
 
 Postgres is the only production persistence backend. It stores append-only `commits`, canonical
 `run_events`, artifact blobs/evidence, resource-lane claim/release/transition rows,
-`run_commit_log` cursor authority, and mutable operational resource-lane waiter rows. Observation
+commit cursor authority, and mutable operational resource-lane waiter rows. Observation
 list/watch rows are derived from strict authority at read time. Artifact bytes live in Postgres;
 production app, CLI, and REST paths do not stage, read, or migrate workflow artifacts through
 filesystem artifact roots. The schema and migrations are owned by
@@ -332,9 +332,9 @@ side-effect legality, or completion. Observation rows and list/watch cursors are
 semantic authority for those decisions.
 
 Production deployments must give the Postgres run store a dedicated MFM database tenancy. List/watch
-cursors order `run_commit_log` rows by `(append_xid, commit_sort_key)` behind a snapshot `xmin`
+cursors order `commits` rows by `(append_xid, commit_sort_key)` behind a snapshot `xmin`
 frontier, and PostgreSQL transaction-id horizons are affected by cluster-level transaction activity;
-unrelated long-lived transactions can therefore delay observation frontier advancement. Cursor epochs,
+unrelated long-lived transactions can therefore delay observation frontier advancement. Cursor epochs
 and artifact cleanup have no public v1 maintenance entry points; any future maintenance role must
 first specify Postgres roles, ownership, credentials, and restore/clone runbooks.
 

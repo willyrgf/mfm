@@ -7,7 +7,7 @@ pub(super) async fn read_commit_by_key(
 ) -> Result<Option<CommitAuthorityRow>> {
     let row = sqlx::query(
         "SELECT commit_id, run_id, seq, commit_key, commit_purpose, \
-         prepared_commit_plan_fingerprint, commit_batch_hash, event_count \
+         prepared_commit_plan_fingerprint, commit_batch_hash, commit_sort_key, event_count \
          FROM commits WHERE run_id = $1 AND commit_key = $2",
     )
     .bind(run_id.as_str())
@@ -25,7 +25,7 @@ pub(super) async fn read_commit_by_seq(
 ) -> Result<CommitAuthorityRow> {
     let row = sqlx::query(
         "SELECT commit_id, run_id, seq, commit_key, commit_purpose, \
-         prepared_commit_plan_fingerprint, commit_batch_hash, event_count \
+         prepared_commit_plan_fingerprint, commit_batch_hash, commit_sort_key, event_count \
          FROM commits WHERE run_id = $1 AND seq = $2",
     )
     .bind(run_id.as_str())
@@ -49,7 +49,6 @@ pub(super) async fn load_committed_batch_tx(
         ));
     }
     validate_final_commit_authority_tx(tx, &commit, &events).await?;
-    validate_run_commit_log_row_tx(tx, &commit).await?;
     CommittedBatch::from_persisted_events(
         run_id.clone(),
         CommitKey::new(commit.commit_key)?,
@@ -66,7 +65,7 @@ pub(super) async fn load_commit_authority_rows_tx(
 ) -> Result<Vec<CommitAuthorityRow>> {
     let rows = sqlx::query(
         "SELECT commit_id, run_id, seq, commit_key, commit_purpose, \
-         prepared_commit_plan_fingerprint, commit_batch_hash, event_count \
+         prepared_commit_plan_fingerprint, commit_batch_hash, commit_sort_key, event_count \
          FROM commits WHERE run_id = $1 ORDER BY seq ASC",
     )
     .bind(run_id.as_str())
@@ -84,7 +83,6 @@ pub(super) async fn validate_persisted_run_authority_tx(
 ) -> Result<()> {
     let commits = load_commit_authority_rows_tx(tx, run_id).await?;
     for commit in &commits {
-        validate_run_commit_log_row_tx(tx, commit).await?;
         let events = load_run_commit_events_tx(tx, &commit.run_id, commit.seq).await?;
         if events.len() != commit.event_count {
             return Err(PostgresStoreError::Corruption(
@@ -222,79 +220,6 @@ pub(super) async fn load_commit_artifact_bindings_tx(
     Ok(bindings)
 }
 
-pub(super) async fn validate_run_commit_log_row_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    commit: &CommitAuthorityRow,
-) -> Result<()> {
-    let row = sqlx::query(
-        "SELECT commit_id, run_id, seq, commit_key, first_ordinal, last_ordinal, event_count, \
-         commit_sort_key FROM run_commit_log WHERE commit_id = $1",
-    )
-    .bind(&commit.commit_id)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(|error| database_error("failed to load run commit log row", error))?
-    .ok_or_else(|| {
-        PostgresStoreError::Corruption(format!(
-            "commit {} is missing run_commit_log row",
-            commit.commit_id
-        ))
-    })?;
-    let log_run_id = parse_identity::<RunId>(
-        &row.try_get::<String, _>("run_id")
-            .map_err(|error| database_error("failed to decode run commit log run id", error))?,
-    )?;
-    let log_seq = StreamSeq::new(i64_to_positive_u64(
-        row.try_get("seq")
-            .map_err(|error| database_error("failed to decode run commit log seq", error))?,
-        "run_commit_log.seq",
-    )?)?;
-    let log_commit_key: String = row
-        .try_get("commit_key")
-        .map_err(|error| database_error("failed to decode run commit log key", error))?;
-    let first_ordinal: i32 = row
-        .try_get("first_ordinal")
-        .map_err(|error| database_error("failed to decode run commit log first ordinal", error))?;
-    let last_ordinal: i32 = row
-        .try_get("last_ordinal")
-        .map_err(|error| database_error("failed to decode run commit log last ordinal", error))?;
-    let event_count: i32 = row
-        .try_get("event_count")
-        .map_err(|error| database_error("failed to decode run commit log event count", error))?;
-    let commit_sort_key: Vec<u8> = row
-        .try_get("commit_sort_key")
-        .map_err(|error| database_error("failed to decode run commit sort key", error))?;
-    if log_run_id != commit.run_id
-        || log_seq != commit.seq
-        || log_commit_key != commit.commit_key
-        || first_ordinal != 0
-        || usize::try_from(event_count).ok() != Some(commit.event_count)
-        || last_ordinal
-            != i32::try_from(commit.event_count.saturating_sub(1)).map_err(|_| {
-                PostgresStoreError::Corruption(
-                    "run_commit_log event count exceeded ordinal range".to_owned(),
-                )
-            })?
-    {
-        return Err(PostgresStoreError::Corruption(
-            "run_commit_log row does not match commit authority".to_owned(),
-        ));
-    }
-    let expected_sort_key = run_commit_sort_key(
-        &commit.run_id,
-        commit.seq,
-        &CommitKey::new(commit.commit_key.clone())?,
-        &commit.commit_id,
-        &commit.commit_batch_hash,
-    )?;
-    if commit_sort_key != expected_sort_key {
-        return Err(PostgresStoreError::Corruption(
-            "run_commit_log sort key does not match commit authority".to_owned(),
-        ));
-    }
-    Ok(())
-}
-
 pub(super) async fn load_run_commit_events_tx(
     tx: &mut Transaction<'_, Postgres>,
     run_id: &RunId,
@@ -345,6 +270,9 @@ pub(super) fn commit_authority_row_from_row(row: PgRow) -> Result<CommitAuthorit
     let commit_batch_hash: String = row
         .try_get("commit_batch_hash")
         .map_err(|error| database_error("failed to decode commit batch hash", error))?;
+    let commit_sort_key: Vec<u8> = row
+        .try_get("commit_sort_key")
+        .map_err(|error| database_error("failed to decode commit sort key", error))?;
     let seq: i64 = row
         .try_get("seq")
         .map_err(|error| database_error("failed to decode commit seq", error))?;
@@ -363,6 +291,18 @@ pub(super) fn commit_authority_row_from_row(row: PgRow) -> Result<CommitAuthorit
     if commit_id != expected_commit_id {
         return Err(PostgresStoreError::Corruption(
             "commit id does not match persisted fingerprint".to_owned(),
+        ));
+    }
+    let expected_sort_key = derive_commit_sort_key(
+        &run_id,
+        seq,
+        &commit_key_identity,
+        &commit_id,
+        &commit_batch_hash,
+    )?;
+    if commit_sort_key != expected_sort_key {
+        return Err(PostgresStoreError::Corruption(
+            "commit sort key does not match commit authority".to_owned(),
         ));
     }
     Ok(CommitAuthorityRow {

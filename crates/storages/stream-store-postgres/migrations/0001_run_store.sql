@@ -38,14 +38,19 @@ CREATE TABLE commits (
   commit_purpose TEXT NOT NULL,
   prepared_commit_plan_fingerprint TEXT NOT NULL,
   commit_batch_hash TEXT NOT NULL,
+  commit_sort_key BYTEA NOT NULL,
   event_count INTEGER NOT NULL,
   append_xid XID8 NOT NULL DEFAULT pg_current_xact_id(),
   committed_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp(),
   PRIMARY KEY (run_id, seq),
   UNIQUE (commit_id),
   UNIQUE (run_id, commit_key),
+  UNIQUE (append_xid, commit_sort_key),
   CONSTRAINT commits_seq_positive CHECK (seq >= 1),
-  CONSTRAINT commits_event_count_positive CHECK (event_count >= 1)
+  CONSTRAINT commits_event_count_positive CHECK (event_count >= 1),
+  CONSTRAINT commits_sort_key_v1_length CHECK (octet_length(commit_sort_key) = 32),
+  CONSTRAINT commits_sort_key_v1_prefix CHECK (get_byte(commit_sort_key, 0) = 1),
+  CONSTRAINT commits_sort_key_not_sentinel CHECK (commit_sort_key <> decode(repeat('00', 32), 'hex'))
 );
 
 CREATE TRIGGER commits_set_append_xid
@@ -180,31 +185,6 @@ CREATE INDEX resource_lane_waiters_expiry_idx
 ON resource_lane_waiters (status, lease_expires_at)
 WHERE status = 'waiting';
 
-CREATE TABLE run_commit_log (
-  commit_id TEXT PRIMARY KEY REFERENCES commits(commit_id) ON DELETE RESTRICT,
-  run_id TEXT NOT NULL,
-  seq BIGINT NOT NULL,
-  commit_key TEXT NOT NULL,
-  first_ordinal INTEGER NOT NULL DEFAULT 0 CHECK (first_ordinal = 0),
-  last_ordinal INTEGER NOT NULL,
-  event_count INTEGER NOT NULL,
-  commit_sort_key BYTEA NOT NULL,
-  append_xid XID8 NOT NULL DEFAULT pg_current_xact_id(),
-  committed_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp(),
-  CONSTRAINT run_commit_log_commit_fk FOREIGN KEY (run_id, seq) REFERENCES commits(run_id, seq) ON DELETE RESTRICT,
-  CONSTRAINT run_commit_log_seq_positive CHECK (seq >= 1),
-  CONSTRAINT run_commit_log_event_count_positive CHECK (event_count >= 1),
-  CONSTRAINT run_commit_log_last_ordinal_matches CHECK (last_ordinal = event_count - 1),
-  CONSTRAINT run_commit_log_sort_key_v1_length CHECK (octet_length(commit_sort_key) = 32),
-  CONSTRAINT run_commit_log_sort_key_v1_prefix CHECK (get_byte(commit_sort_key, 0) = 1),
-  CONSTRAINT run_commit_log_sort_key_not_sentinel CHECK (commit_sort_key <> decode(repeat('00', 32), 'hex')),
-  UNIQUE (append_xid, commit_sort_key)
-);
-
-CREATE TRIGGER run_commit_log_set_append_xid
-BEFORE INSERT ON run_commit_log
-FOR EACH ROW EXECUTE FUNCTION mfm_set_append_xid();
-
 CREATE TABLE run_observation_cursors (
   token_hash TEXT PRIMARY KEY,
   cursor_version TEXT NOT NULL,
@@ -243,10 +223,6 @@ FOR EACH STATEMENT EXECUTE FUNCTION mfm_reject_authority_mutation();
 
 CREATE TRIGGER run_artifact_admissions_no_update
 BEFORE UPDATE OR DELETE OR TRUNCATE ON run_artifact_admissions
-FOR EACH STATEMENT EXECUTE FUNCTION mfm_reject_authority_mutation();
-
-CREATE TRIGGER run_commit_log_no_update
-BEFORE UPDATE OR DELETE OR TRUNCATE ON run_commit_log
 FOR EACH STATEMENT EXECUTE FUNCTION mfm_reject_authority_mutation();
 
 CREATE TRIGGER run_observation_cursors_no_update
