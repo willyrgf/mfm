@@ -176,6 +176,21 @@ in
         "architecture_namespace_contract"
       ];
     };
+    postgres-sqlx-offline-check = cargoLeaf {
+      run = [
+        "cargo"
+        "check"
+        "-p"
+        "mfm-stream-store-postgres"
+        "--features"
+        "parity-tests"
+        "--all-targets"
+      ];
+      env = {
+        DATABASE_URL = "postgresql://offline/offline";
+        SQLX_OFFLINE = "true";
+      };
+    };
     nextest-run = cargoLeaf {
       run = [
         "cargo"
@@ -333,6 +348,7 @@ in
         "clippy"
         "cargo-metadata-contract"
         "architecture-namespace-contract"
+        "postgres-sqlx-offline-check"
       ];
     };
 

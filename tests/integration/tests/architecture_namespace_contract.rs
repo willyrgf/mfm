@@ -244,6 +244,53 @@ fn postgres_migrations_do_not_reintroduce_removed_storage_surfaces() {
 }
 
 #[test]
+fn postgres_migrations_do_not_claim_maintenance_role_boundaries() {
+    let root = repo_root();
+    let migration_dir = root.join("crates/storages/stream-store-postgres/migrations");
+    let mut migrations = fs::read_dir(&migration_dir)
+        .unwrap_or_else(|error| panic!("read migration dir {}: {error}", migration_dir.display()))
+        .map(|entry| {
+            entry
+                .unwrap_or_else(|error| panic!("read migration dir entry: {error}"))
+                .path()
+        })
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("sql"))
+        .collect::<Vec<_>>();
+    migrations.sort();
+
+    for path in migrations {
+        let source = fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read migration {}: {error}", path.display()));
+        for forbidden in [
+            "mfm_allow_orphan_artifact_blob_delete_only",
+            "artifact_blobs_orphan_delete_only",
+            "maintenance_artifact_blob_sweep",
+            "reseed_store_epoch",
+            "DISABLE TRIGGER",
+            "ENABLE TRIGGER",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "Postgres migrations must not claim underdesigned maintenance boundary `{forbidden}` in {}",
+                path.display()
+            );
+        }
+    }
+
+    let baseline =
+        fs::read_to_string(migration_dir.join("0001_run_store.sql")).expect("baseline migration");
+    for required in [
+        "CREATE TRIGGER artifact_blobs_no_update",
+        "BEFORE UPDATE OR DELETE OR TRUNCATE ON artifact_blobs",
+    ] {
+        assert!(
+            baseline.contains(required),
+            "baseline migration must keep append-owned artifact blob immutability guard `{required}`"
+        );
+    }
+}
+
+#[test]
 fn postgres_production_code_rejects_removed_storage_shortcuts() {
     let root = repo_root();
     let entries = repo_text_entries(&root);
@@ -272,6 +319,151 @@ fn postgres_production_code_rejects_removed_storage_shortcuts() {
                 && !path.ends_with("/src/schema.rs")
                 && !is_test_support_path(path)
         },
+    );
+}
+
+#[test]
+fn postgres_production_code_rejects_fake_maintenance_boundaries() {
+    let root = repo_root();
+    let entries = repo_text_entries(&root);
+    let forbidden = [
+        "PostgresMaintenance",
+        "ReadModelBuildMode",
+        "ReadModelBuildReport",
+        "ReadModelHighWatermark",
+        "ArtifactBlobSweepReport",
+        "build_projection_version",
+        "read_model_high_watermark",
+        "reseed_store_epoch",
+        "sweep_orphan",
+        "maintenance_artifact_blob_sweep",
+        "mfm_allow_orphan",
+        "artifact_blobs_orphan",
+        "precommit_large_artifact",
+        "LARGE_ARTIFACT_PRECOMMIT",
+    ];
+
+    assert_forbidden_terms_are_allowlisted(
+        "Postgres fake maintenance boundary",
+        &entries,
+        &forbidden,
+        &[],
+        |path, _source| {
+            path.starts_with("crates/storages/stream-store-postgres/")
+                && !TEST_HARNESS_PATHS.contains(&path)
+                && !SOURCE_OF_TRUTH_DOC_PATHS.contains(&path)
+                && !is_test_support_path(path)
+                && !path.contains("/.sqlx/")
+                && !path.ends_with(".md")
+        },
+    );
+
+    let mut trigger_offenders = Vec::new();
+    for entry in entries {
+        if !entry
+            .path
+            .starts_with("crates/storages/stream-store-postgres/src/")
+            || is_test_support_path(&entry.path)
+        {
+            continue;
+        }
+
+        for term in ["DISABLE TRIGGER", "ENABLE TRIGGER"] {
+            if entry.source.contains(term)
+                && !all_term_occurrences_after_cfg_test_module(&entry.source, term)
+            {
+                trigger_offenders.push(format!("{} [{term}]", entry.path));
+            }
+        }
+    }
+
+    assert!(
+        trigger_offenders.is_empty(),
+        "Postgres trigger bypasses must stay test-only corruption fixtures; offenders: {}",
+        trigger_offenders.join(", ")
+    );
+}
+
+#[test]
+fn postgres_sqlx_metadata_is_checked_in_and_wired_to_gates() {
+    let root = repo_root();
+    let sqlx_dir = root.join("crates/storages/stream-store-postgres/.sqlx");
+    let sqlx_files = fs::read_dir(&sqlx_dir)
+        .unwrap_or_else(|error| panic!("read sqlx metadata dir {}: {error}", sqlx_dir.display()))
+        .map(|entry| {
+            entry
+                .unwrap_or_else(|error| panic!("read sqlx metadata dir entry: {error}"))
+                .path()
+        })
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
+        .collect::<Vec<_>>();
+    assert!(
+        !sqlx_files.is_empty(),
+        "Postgres storage must keep checked-in .sqlx query metadata"
+    );
+
+    let nixfied = fs::read_to_string(root.join("nixfied.nix")).expect("nixfied model");
+    let check_start = nixfied
+        .find("    check = {")
+        .expect("check composite in nixfied model");
+    let test_start = nixfied[check_start..]
+        .find("\n    test = {")
+        .expect("test composite after check composite")
+        + check_start;
+    let check_block = &nixfied[check_start..test_start];
+    assert!(
+        check_block.contains("\"postgres-sqlx-offline-check\""),
+        ".#check must compile Postgres storage against checked-in SQLx metadata"
+    );
+
+    let offline_start = nixfied
+        .find("    postgres-sqlx-offline-check = cargoLeaf")
+        .expect("offline SQLx metadata task");
+    let live_start = nixfied
+        .find("    postgres-sqlx-check = cargoLeaf")
+        .expect("live SQLx prepare task");
+    let offline_block = &nixfied[offline_start..live_start];
+    for required in [
+        "SQLX_OFFLINE = \"true\";",
+        "DATABASE_URL = \"postgresql://offline/offline\";",
+        "\"mfm-stream-store-postgres\"",
+        "\"--features\"",
+        "\"parity-tests\"",
+        "\"--all-targets\"",
+    ] {
+        assert!(
+            offline_block.contains(required),
+            "offline SQLx metadata task must keep `{required}`"
+        );
+    }
+
+    let test_db_start = nixfied
+        .find("    test-db = {")
+        .expect("test-db composite in nixfied model");
+    let ci_start = nixfied[test_db_start..]
+        .find("\n    # The full gate")
+        .expect("ci comment after test-db composite")
+        + test_db_start;
+    let test_db_block = &nixfied[test_db_start..ci_start];
+    assert!(
+        test_db_block.contains("postgres-sqlx-check.task = \"postgres-sqlx-check\""),
+        ".#test-db must run the live SQLx prepare check before Postgres parity tests"
+    );
+
+    let live_block = &nixfied[live_start..test_db_start];
+    for required in [
+        "cargo sqlx prepare --check -- --all-targets --features parity-tests",
+        "env = postgresSqlxEnv;",
+        "requires = [ \"postgres\" ];",
+    ] {
+        assert!(
+            live_block.contains(required),
+            "live SQLx prepare task must keep `{required}`"
+        );
+    }
+    assert!(
+        nixfied.contains("SQLX_OFFLINE = \"false\";"),
+        "live SQLx prepare env must keep SQLX_OFFLINE=false"
     );
 }
 
@@ -557,7 +749,10 @@ fn is_test_support_path(path: &str) -> bool {
 fn all_term_occurrences_after_cfg_test_module(source: &str, term: &str) -> bool {
     let lines = source.lines().collect::<Vec<_>>();
     let cfg_test_module_line = lines.windows(2).position(|window| {
-        window[0].trim() == "#[cfg(test)]" && window[1].trim_start().starts_with("mod tests")
+        let attr = window[0].trim();
+        attr.starts_with("#[cfg(")
+            && attr.contains("test")
+            && window[1].trim_start().starts_with("mod tests")
     });
 
     let Some(cfg_test_module_line) = cfg_test_module_line else {
