@@ -1669,6 +1669,160 @@ async fn previous_resource_lane_transition_hash_tx(
     .map_err(|error| database_error("failed to load previous resource lane transition", error))
 }
 
+struct ResourceLaneTransitionAuthorityRow {
+    lane_id: Vec<u8>,
+    lane_transition_seq: u64,
+    transition_kind: String,
+    claim_id: String,
+    release_id: Option<String>,
+    claim_fencing_token: u64,
+    previous_transition_hash: Option<String>,
+    transition_hash: String,
+    source_seq: u64,
+    source_ordinal: u32,
+    source_event_id: String,
+    source_event_type: String,
+    source_event_payload_hash: String,
+}
+
+async fn validate_resource_lane_transition_hash_chains_tx(
+    tx: &mut Transaction<'_, Postgres>,
+) -> Result<()> {
+    let rows = sqlx::query(
+        "SELECT lane_id, lane_transition_seq, transition_kind, claim_id, release_id, \
+         claim_fencing_token, previous_transition_hash, transition_hash, source_seq, \
+         source_ordinal, source_event_id, source_event_type, source_event_payload_hash \
+         FROM resource_lane_transitions ORDER BY lane_id ASC, lane_transition_seq ASC",
+    )
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| database_error("failed to load resource lane transition rows", error))?;
+    let mut current_lane: Option<Vec<u8>> = None;
+    let mut expected_seq = 1_u64;
+    let mut expected_previous_hash: Option<String> = None;
+    for row in rows {
+        let row = resource_lane_transition_authority_row(row)?;
+        if current_lane.as_ref() != Some(&row.lane_id) {
+            current_lane = Some(row.lane_id.clone());
+            expected_seq = 1;
+            expected_previous_hash = None;
+        }
+        if row.lane_transition_seq != expected_seq {
+            return Err(PostgresStoreError::Corruption(
+                "resource lane transition sequence gap".to_owned(),
+            ));
+        }
+        if row.previous_transition_hash != expected_previous_hash {
+            return Err(PostgresStoreError::Corruption(
+                "resource lane transition previous hash mismatch".to_owned(),
+            ));
+        }
+        if !resource_lane_transition_kind_matches_source(&row) {
+            return Err(PostgresStoreError::Corruption(
+                "resource lane transition kind/source mismatch".to_owned(),
+            ));
+        }
+        let expected_hash = resource_lane_transition_hash_from_row(&row)?;
+        if row.transition_hash != expected_hash {
+            return Err(PostgresStoreError::Corruption(
+                "resource lane transition hash mismatch".to_owned(),
+            ));
+        }
+        expected_previous_hash = Some(row.transition_hash);
+        expected_seq = expected_seq.checked_add(1).ok_or_else(|| {
+            PostgresStoreError::Corruption("resource lane transition sequence overflow".to_owned())
+        })?;
+    }
+    Ok(())
+}
+
+fn resource_lane_transition_authority_row(
+    row: PgRow,
+) -> Result<ResourceLaneTransitionAuthorityRow> {
+    Ok(ResourceLaneTransitionAuthorityRow {
+        lane_id: row
+            .try_get("lane_id")
+            .map_err(|error| database_error("failed to decode transition lane id", error))?,
+        lane_transition_seq: i64_to_positive_u64(
+            row.try_get("lane_transition_seq")
+                .map_err(|error| database_error("failed to decode transition sequence", error))?,
+            "resource_lane_transitions.lane_transition_seq",
+        )?,
+        transition_kind: row
+            .try_get("transition_kind")
+            .map_err(|error| database_error("failed to decode transition kind", error))?,
+        claim_id: row
+            .try_get("claim_id")
+            .map_err(|error| database_error("failed to decode transition claim id", error))?,
+        release_id: row
+            .try_get("release_id")
+            .map_err(|error| database_error("failed to decode transition release id", error))?,
+        claim_fencing_token: i64_to_positive_u64(
+            row.try_get("claim_fencing_token").map_err(|error| {
+                database_error("failed to decode transition fencing token", error)
+            })?,
+            "resource_lane_transitions.claim_fencing_token",
+        )?,
+        previous_transition_hash: row
+            .try_get("previous_transition_hash")
+            .map_err(|error| database_error("failed to decode transition previous hash", error))?,
+        transition_hash: row
+            .try_get("transition_hash")
+            .map_err(|error| database_error("failed to decode transition hash", error))?,
+        source_seq: i64_to_positive_u64(
+            row.try_get("source_seq")
+                .map_err(|error| database_error("failed to decode transition source seq", error))?,
+            "resource_lane_transitions.source_seq",
+        )?,
+        source_ordinal: i32_to_u32(
+            row.try_get("source_ordinal").map_err(|error| {
+                database_error("failed to decode transition source ordinal", error)
+            })?,
+            "resource_lane_transitions.source_ordinal",
+        )?,
+        source_event_id: row
+            .try_get("source_event_id")
+            .map_err(|error| database_error("failed to decode transition event id", error))?,
+        source_event_type: row
+            .try_get("source_event_type")
+            .map_err(|error| database_error("failed to decode transition event type", error))?,
+        source_event_payload_hash: row
+            .try_get("source_event_payload_hash")
+            .map_err(|error| database_error("failed to decode transition payload hash", error))?,
+    })
+}
+
+fn resource_lane_transition_kind_matches_source(row: &ResourceLaneTransitionAuthorityRow) -> bool {
+    matches!(
+        (
+            row.transition_kind.as_str(),
+            row.release_id.is_some(),
+            row.source_event_type.as_str()
+        ),
+        ("claim", false, "ResourceLaneClaimed") | ("release", true, "ResourceLaneReleased")
+    )
+}
+
+fn resource_lane_transition_hash_from_row(
+    row: &ResourceLaneTransitionAuthorityRow,
+) -> Result<String> {
+    let digest = canonical_json(serde_json::json!({
+        "claim_fencing_token": row.claim_fencing_token,
+        "claim_id": row.claim_id.as_str(),
+        "lane_id": bytes_hex(&row.lane_id),
+        "lane_transition_seq": row.lane_transition_seq,
+        "previous_transition_hash": row.previous_transition_hash.as_deref(),
+        "release_id": row.release_id.as_deref(),
+        "source_event_id": row.source_event_id.as_str(),
+        "source_event_payload_hash": row.source_event_payload_hash.as_str(),
+        "source_ordinal": row.source_ordinal,
+        "source_seq": row.source_seq,
+        "transition_kind": row.transition_kind.as_str(),
+    }))?
+    .content_digest();
+    Ok(digest.as_str().to_owned())
+}
+
 fn resource_lane_transition_hash(
     transition: &ResourceLaneTransitionInsert<'_>,
     previous_transition_hash: Option<&str>,
@@ -1769,8 +1923,10 @@ async fn read_commit_by_key(
     commit_key: &str,
 ) -> Result<Option<CommitAuthorityRow>> {
     let row = sqlx::query(
-        "SELECT commit_id, commit_key, commit_idempotency_hash, prepared_authority_hash, \
-         commit_batch_hash, hash_domain_version, canonicalizer_identity, seq, event_count \
+        "SELECT commit_id, run_id, seq, commit_key, commit_purpose, commit_idempotency_hash, \
+         idempotency_canonical_json, prepared_authority_hash, prepared_authority_canonical_json, \
+         commit_batch_hash, commit_batch_canonical_json, hash_domain_version, \
+         canonicalizer_identity, event_count \
          FROM commits WHERE run_id = $1 AND commit_key = $2",
     )
     .bind(run_id.as_str())
@@ -1787,8 +1943,10 @@ async fn read_commit_by_seq(
     seq: StreamSeq,
 ) -> Result<CommitAuthorityRow> {
     let row = sqlx::query(
-        "SELECT commit_id, commit_key, commit_idempotency_hash, prepared_authority_hash, \
-         commit_batch_hash, hash_domain_version, canonicalizer_identity, seq, event_count \
+        "SELECT commit_id, run_id, seq, commit_key, commit_purpose, commit_idempotency_hash, \
+         idempotency_canonical_json, prepared_authority_hash, prepared_authority_canonical_json, \
+         commit_batch_hash, commit_batch_canonical_json, hash_domain_version, \
+         canonicalizer_identity, event_count \
          FROM commits WHERE run_id = $1 AND seq = $2",
     )
     .bind(run_id.as_str())
@@ -1811,6 +1969,8 @@ async fn load_committed_batch_tx(
             "commit event count does not match run_events rows".to_owned(),
         ));
     }
+    validate_run_commit_log_row_tx(tx, &commit).await?;
+    validate_resource_lane_transition_hash_chains_tx(tx).await?;
     CommittedBatch::from_persisted_events(
         run_id.clone(),
         CommitKey::new(commit.commit_key)?,
@@ -1821,6 +1981,133 @@ async fn load_committed_batch_tx(
         events,
     )
     .map_err(PostgresStoreError::from)
+}
+
+async fn load_commit_authority_rows_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    run_id: &RunId,
+) -> Result<Vec<CommitAuthorityRow>> {
+    let rows = sqlx::query(
+        "SELECT commit_id, run_id, seq, commit_key, commit_purpose, commit_idempotency_hash, \
+         idempotency_canonical_json, prepared_authority_hash, prepared_authority_canonical_json, \
+         commit_batch_hash, commit_batch_canonical_json, hash_domain_version, \
+         canonicalizer_identity, event_count \
+         FROM commits WHERE run_id = $1 ORDER BY seq ASC",
+    )
+    .bind(run_id.as_str())
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| database_error("failed to load commit authority rows", error))?;
+    rows.into_iter()
+        .map(commit_authority_row_from_row)
+        .collect()
+}
+
+async fn validate_persisted_run_authority_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    run_id: &RunId,
+) -> Result<()> {
+    let commits = load_commit_authority_rows_tx(tx, run_id).await?;
+    for commit in &commits {
+        validate_run_commit_log_row_tx(tx, commit).await?;
+        validate_run_commit_event_count_tx(tx, commit).await?;
+    }
+    validate_resource_lane_transition_hash_chains_tx(tx).await
+}
+
+async fn validate_run_commit_event_count_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    commit: &CommitAuthorityRow,
+) -> Result<()> {
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM run_events WHERE run_id = $1 AND seq = $2")
+            .bind(commit.run_id.as_str())
+            .bind(u64_to_i64(commit.seq.as_u64(), "run_events.seq")?)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(|error| database_error("failed to count commit events", error))?;
+    let count = usize::try_from(count).map_err(|_| {
+        PostgresStoreError::Corruption("commit event count was negative".to_owned())
+    })?;
+    if count != commit.event_count {
+        return Err(PostgresStoreError::Corruption(
+            "commit event count does not match run_events rows".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+async fn validate_run_commit_log_row_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    commit: &CommitAuthorityRow,
+) -> Result<()> {
+    let row = sqlx::query(
+        "SELECT commit_id, run_id, seq, commit_key, first_ordinal, last_ordinal, event_count, \
+         commit_sort_key FROM run_commit_log WHERE commit_id = $1",
+    )
+    .bind(&commit.commit_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| database_error("failed to load run commit log row", error))?
+    .ok_or_else(|| {
+        PostgresStoreError::Corruption(format!(
+            "commit {} is missing run_commit_log row",
+            commit.commit_id
+        ))
+    })?;
+    let log_run_id = parse_identity::<RunId>(
+        &row.try_get::<String, _>("run_id")
+            .map_err(|error| database_error("failed to decode run commit log run id", error))?,
+    )?;
+    let log_seq = StreamSeq::new(i64_to_positive_u64(
+        row.try_get("seq")
+            .map_err(|error| database_error("failed to decode run commit log seq", error))?,
+        "run_commit_log.seq",
+    )?)?;
+    let log_commit_key: String = row
+        .try_get("commit_key")
+        .map_err(|error| database_error("failed to decode run commit log key", error))?;
+    let first_ordinal: i32 = row
+        .try_get("first_ordinal")
+        .map_err(|error| database_error("failed to decode run commit log first ordinal", error))?;
+    let last_ordinal: i32 = row
+        .try_get("last_ordinal")
+        .map_err(|error| database_error("failed to decode run commit log last ordinal", error))?;
+    let event_count: i32 = row
+        .try_get("event_count")
+        .map_err(|error| database_error("failed to decode run commit log event count", error))?;
+    let commit_sort_key: Vec<u8> = row
+        .try_get("commit_sort_key")
+        .map_err(|error| database_error("failed to decode run commit sort key", error))?;
+    if log_run_id != commit.run_id
+        || log_seq != commit.seq
+        || log_commit_key != commit.commit_key
+        || first_ordinal != 0
+        || usize::try_from(event_count).ok() != Some(commit.event_count)
+        || last_ordinal
+            != i32::try_from(commit.event_count.saturating_sub(1)).map_err(|_| {
+                PostgresStoreError::Corruption(
+                    "run_commit_log event count exceeded ordinal range".to_owned(),
+                )
+            })?
+    {
+        return Err(PostgresStoreError::Corruption(
+            "run_commit_log row does not match commit authority".to_owned(),
+        ));
+    }
+    let expected_sort_key = run_commit_sort_key(
+        &commit.run_id,
+        commit.seq,
+        &CommitKey::new(commit.commit_key.clone())?,
+        &commit.commit_id,
+        &commit.commit_batch_hash,
+    )?;
+    if commit_sort_key != expected_sort_key {
+        return Err(PostgresStoreError::Corruption(
+            "run_commit_log sort key does not match commit authority".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 async fn load_run_commit_events_tx(
@@ -1842,13 +2129,47 @@ async fn load_run_commit_events_tx(
 }
 
 struct CommitAuthorityRow {
+    commit_id: String,
+    run_id: RunId,
     commit_key: String,
     commit_idempotency_hash: String,
+    commit_batch_hash: String,
     seq: StreamSeq,
     event_count: usize,
 }
 
 fn commit_authority_row_from_row(row: PgRow) -> Result<CommitAuthorityRow> {
+    let commit_id: String = row
+        .try_get("commit_id")
+        .map_err(|error| database_error("failed to decode commit id", error))?;
+    let run_id = parse_identity::<RunId>(
+        &row.try_get::<String, _>("run_id")
+            .map_err(|error| database_error("failed to decode commit run id", error))?,
+    )?;
+    let commit_key = row
+        .try_get::<String, _>("commit_key")
+        .map_err(|error| database_error("failed to decode commit key", error))?;
+    let commit_purpose: String = row
+        .try_get("commit_purpose")
+        .map_err(|error| database_error("failed to decode commit purpose", error))?;
+    let commit_idempotency_hash: String = row
+        .try_get("commit_idempotency_hash")
+        .map_err(|error| database_error("failed to decode commit idempotency hash", error))?;
+    let idempotency_canonical_json: Vec<u8> = row
+        .try_get("idempotency_canonical_json")
+        .map_err(|error| database_error("failed to decode commit idempotency bytes", error))?;
+    let prepared_authority_hash: String = row
+        .try_get("prepared_authority_hash")
+        .map_err(|error| database_error("failed to decode prepared authority hash", error))?;
+    let prepared_authority_canonical_json: Vec<u8> = row
+        .try_get("prepared_authority_canonical_json")
+        .map_err(|error| database_error("failed to decode prepared authority bytes", error))?;
+    let commit_batch_hash: String = row
+        .try_get("commit_batch_hash")
+        .map_err(|error| database_error("failed to decode commit batch hash", error))?;
+    let commit_batch_canonical_json: Vec<u8> = row
+        .try_get("commit_batch_canonical_json")
+        .map_err(|error| database_error("failed to decode commit batch bytes", error))?;
     let seq: i64 = row
         .try_get("seq")
         .map_err(|error| database_error("failed to decode commit seq", error))?;
@@ -1871,18 +2192,58 @@ fn commit_authority_row_from_row(row: PgRow) -> Result<CommitAuthorityRow> {
             "commit canonicalizer identity mismatch".to_owned(),
         ));
     }
+    verify_persisted_canonical_hash(
+        "commit idempotency",
+        &idempotency_canonical_json,
+        &commit_idempotency_hash,
+    )?;
+    verify_persisted_canonical_hash(
+        "prepared authority",
+        &prepared_authority_canonical_json,
+        &prepared_authority_hash,
+    )?;
+    verify_persisted_canonical_hash(
+        "commit batch",
+        &commit_batch_canonical_json,
+        &commit_batch_hash,
+    )?;
+    let seq = StreamSeq::new(i64_to_positive_u64(seq, "commits.seq")?)?;
+    let commit_key_identity = CommitKey::new(commit_key.clone())?;
+    let expected_commit_id = derive_commit_id(
+        &run_id,
+        seq,
+        &commit_key_identity,
+        &commit_purpose,
+        &prepared_authority_hash,
+    )?;
+    if commit_id != expected_commit_id {
+        return Err(PostgresStoreError::Corruption(
+            "commit id does not match persisted prepared authority".to_owned(),
+        ));
+    }
     Ok(CommitAuthorityRow {
-        commit_key: row
-            .try_get("commit_key")
-            .map_err(|error| database_error("failed to decode commit key", error))?,
-        commit_idempotency_hash: row
-            .try_get("commit_idempotency_hash")
-            .map_err(|error| database_error("failed to decode commit idempotency hash", error))?,
-        seq: StreamSeq::new(i64_to_positive_u64(seq, "commits.seq")?)?,
+        commit_id,
+        run_id,
+        commit_key,
+        commit_idempotency_hash,
+        commit_batch_hash,
+        seq,
         event_count: usize::try_from(event_count).map_err(|_| {
             PostgresStoreError::Corruption("commits.event_count was negative".to_owned())
         })?,
     })
+}
+
+fn verify_persisted_canonical_hash(context: &str, bytes: &[u8], expected: &str) -> Result<()> {
+    let canonical = PlainCanonicalJsonBytes::from_canonical_json_slice(bytes).map_err(|error| {
+        PostgresStoreError::Corruption(format!("{context} canonical bytes are invalid: {error}"))
+    })?;
+    if canonical.content_digest().as_str() != expected {
+        return Err(PostgresStoreError::Corruption(format!(
+            "{context} hash does not match persisted canonical bytes"
+        )));
+    }
+    Ok(())
 }
 
 async fn load_artifacts(
@@ -2484,20 +2845,14 @@ fn projection_snapshot_with_resource_lanes(
 }
 
 async fn load_run_stream_client(pool: &PgPool, run_id: &RunId) -> Result<Vec<KernelEventEnvelope>> {
-    let rows = sqlx::query(
-        "SELECT run_id, seq, ordinal, event_id, event_schema_id, spec_hash, commit_key, \
-         logical_key, payload_hash, payload_canonical_json \
-         FROM run_events WHERE run_id = $1 ORDER BY seq ASC, ordinal ASC",
-    )
-    .bind(run_id.as_str())
-    .fetch_all(pool)
-    .await
-    .map_err(|error| database_error("failed to load run stream", error))?;
-    let events = rows
-        .into_iter()
-        .map(event_envelope_from_row)
-        .collect::<Result<Vec<_>>>()?;
-    ProjectionSnapshot::validate_run_stream(&events)?;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| database_error("failed to start read transaction", error))?;
+    let events = load_run_stream_tx(&mut tx, run_id).await?;
+    tx.commit()
+        .await
+        .map_err(|error| database_error("failed to commit read transaction", error))?;
     Ok(events)
 }
 
@@ -2505,6 +2860,7 @@ async fn load_run_stream_tx(
     tx: &mut Transaction<'_, Postgres>,
     run_id: &RunId,
 ) -> Result<Vec<KernelEventEnvelope>> {
+    validate_persisted_run_authority_tx(tx, run_id).await?;
     let rows = sqlx::query(
         "SELECT run_id, seq, ordinal, event_id, event_schema_id, spec_hash, commit_key, \
          logical_key, payload_hash, payload_canonical_json \
@@ -3747,6 +4103,16 @@ mod tests {
         assert_eq!(block.holder.ledger_key, side_effect_ledger_key());
     }
 
+    fn assert_corruption(error: PostgresStoreError, expected: &str) {
+        let PostgresStoreError::Corruption(message) = error else {
+            panic!("expected corruption error, got {error:?}");
+        };
+        assert!(
+            message.contains(expected),
+            "expected corruption containing {expected:?}, got {message:?}"
+        );
+    }
+
     #[tokio::test]
     async fn prepared_commit_idempotency_fingerprint_includes_admitted_artifacts() {
         let (store, schema) = test_store().await;
@@ -3850,6 +4216,100 @@ mod tests {
                 assert_ne!(previous, commit_sort_key);
             }
         }
+
+        drop_schema(&store, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn strict_load_rejects_corrupt_commit_canonical_bytes() {
+        let (store, schema) = test_store().await;
+        let run = run_id(126);
+        append_run_start(&store, &run, "strict-canonical-run-start")
+            .await
+            .expect("run start");
+
+        sqlx::query("ALTER TABLE commits DISABLE TRIGGER commits_no_update")
+            .execute(&store.pool)
+            .await
+            .expect("disable commit mutation guard");
+        sqlx::query(
+            "UPDATE commits SET commit_batch_canonical_json = $1 WHERE run_id = $2 AND seq = 1",
+        )
+        .bind(b"{}".as_slice())
+        .bind(run.as_str())
+        .execute(&store.pool)
+        .await
+        .expect("corrupt commit batch canonical bytes");
+
+        let error = store
+            .load_run_stream(&run)
+            .await
+            .expect_err("strict load rejects corrupt commit batch bytes");
+        assert_corruption(error, "commit batch hash does not match");
+
+        drop_schema(&store, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn strict_load_rejects_corrupt_run_commit_log_sort_key() {
+        let (store, schema) = test_store().await;
+        let run = run_id(127);
+        append_run_start(&store, &run, "strict-log-run-start")
+            .await
+            .expect("run start");
+
+        sqlx::query("ALTER TABLE run_commit_log DISABLE TRIGGER run_commit_log_no_update")
+            .execute(&store.pool)
+            .await
+            .expect("disable commit log mutation guard");
+        sqlx::query("UPDATE run_commit_log SET commit_sort_key = $1 WHERE run_id = $2 AND seq = 1")
+            .bind(vec![1_u8; 32])
+            .bind(run.as_str())
+            .execute(&store.pool)
+            .await
+            .expect("corrupt commit sort key");
+
+        let error = store
+            .load_run_stream(&run)
+            .await
+            .expect_err("strict load rejects corrupt run_commit_log sort key");
+        assert_corruption(error, "run_commit_log sort key does not match");
+
+        drop_schema(&store, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn strict_load_rejects_corrupt_resource_lane_transition_hash() {
+        let (store, schema) = test_store().await;
+        let run = run_id(128);
+        append_run_start(&store, &run, "strict-lane-run-start")
+            .await
+            .expect("run start");
+        append_resource_lane_attempt_start(&store, &run, "strict-lane-attempt-start")
+            .await
+            .expect("attempt start");
+        append_resource_lane_prepare(&store, &run, "strict-lane-prepare", "wallet-strict", 129)
+            .await
+            .expect("resource lane prepare");
+
+        sqlx::query(
+            "ALTER TABLE resource_lane_transitions DISABLE TRIGGER \
+             resource_lane_transitions_no_update",
+        )
+        .execute(&store.pool)
+        .await
+        .expect("disable resource lane transition mutation guard");
+        sqlx::query("UPDATE resource_lane_transitions SET transition_hash = $1")
+            .bind("tampered-transition-hash")
+            .execute(&store.pool)
+            .await
+            .expect("corrupt resource lane transition hash");
+
+        let error = store
+            .load_run_stream(&run)
+            .await
+            .expect_err("strict load rejects corrupt lane transition hash");
+        assert_corruption(error, "resource lane transition hash mismatch");
 
         drop_schema(&store, &schema).await;
     }
