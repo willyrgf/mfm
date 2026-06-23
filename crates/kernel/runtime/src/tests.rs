@@ -213,6 +213,8 @@ impl TestTypedRunStore {
         &self,
         plan: store::PreparedCommitPlan,
     ) -> store::Result<store::CommitOutcome> {
+        self.inner
+            .seed_artifact_evidence_for_test(plan.admitted_artifacts())?;
         let bundle = test_bundle_from_plan(plan)?;
         block_on_ready(self.inner.append_prepared_commit_bundle(bundle))
     }
@@ -239,7 +241,11 @@ impl store::RunEventStore for TestTypedRunStore {
         &'a self,
         bundle: store::PreparedCommitBundle,
     ) -> store::AsyncStoreFuture<'a, store::CommitOutcome, Self::Error> {
-        self.inner.append_prepared_commit_bundle(bundle)
+        Box::pin(async move {
+            self.inner
+                .seed_artifact_evidence_for_test(bundle.admitted_artifacts())?;
+            self.inner.append_prepared_commit_bundle(bundle).await
+        })
     }
 
     fn load_run_stream<'a>(
@@ -347,6 +353,8 @@ impl store::RunEventStore for RecordingTypedRunStore {
         let payloads = bundle.request().payloads().to_vec();
         let admitted_artifacts = bundle.admitted_artifacts().to_vec();
         Box::pin(async move {
+            self.inner
+                .seed_artifact_evidence_for_test(bundle.admitted_artifacts())?;
             let outcome = self.inner.append_prepared_commit_bundle(bundle).await?;
             if let store::CommitOutcome::Appended(batch) = &outcome {
                 self.commits
@@ -421,12 +429,16 @@ impl store::RunEventStore for StaleOnceTypedRunStore {
             if should_inject {
                 let expected = bundle.request().expected_next_seq();
                 let run_id = bundle.request().run_id().clone();
+                self.inner
+                    .seed_artifact_evidence_for_test(bundle.admitted_artifacts())?;
                 self.inner.append_prepared_commit_bundle(bundle).await?;
                 return Err(store::StoreError::StaleExpectedNextSeq {
                     expected,
                     actual: self.inner.expected_next_seq(&run_id).await?,
                 });
             }
+            self.inner
+                .seed_artifact_evidence_for_test(bundle.admitted_artifacts())?;
             self.inner.append_prepared_commit_bundle(bundle).await
         })
     }
@@ -1819,6 +1831,68 @@ async fn side_effect_driver_preserves_concrete_exclusive_resource_key_across_run
                 events::KernelEventPayload::SideEffectInvocationPrepared(_)
             )),
         "peer run must not prepare while the cross-run resource lane is held"
+    );
+}
+
+#[tokio::test]
+async fn exclusive_side_effect_prepare_failure_after_claim_terminalizes_attempt() {
+    let fixture = fixture_with_first_exclusive_side_effect_state();
+    let scheduler = test_scheduler(registered_first_side_effect_runners_with(
+        &fixture,
+        FailingAfterPreclaimRunner::new(&fixture),
+    ));
+    let mut store = TestTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+
+    assert_eq!(
+        drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id,
+        )
+        .await
+        .expect("exclusive run terminalizes failed resource-lane claim"),
+        SchedulerStatus::Advanced
+    );
+    let node = node_by_output(&fixture, &fixture.cell_a);
+    let stream = store.load_run_stream(&fixture.run_id);
+    assert!(
+        stream.iter().any(|event| matches!(
+            event.payload(),
+            events::KernelEventPayload::ResourceLaneClaimed(_)
+        )),
+        "failed exclusive attempt records the resource lane claim"
+    );
+    assert!(
+        stream.iter().any(|event| matches!(
+            event.payload(),
+            events::KernelEventPayload::ResourceLaneReleased(_)
+        )),
+        "failed exclusive attempt releases the resource lane"
+    );
+    assert!(
+        stream.iter().any(|event| matches!(
+            event.payload(),
+            events::KernelEventPayload::SideEffectFailed(_)
+        )),
+        "failed exclusive attempt records terminal side-effect evidence"
+    );
+    assert_node_failed_with_code(&store, &node.node_id, "runner_output_invalid");
+    assert!(
+        store
+            .projection_snapshot()
+            .resource_lanes()
+            .next()
+            .is_none(),
+        "terminal attempt failure releases the exclusive resource lane"
     );
 }
 
@@ -7733,6 +7807,51 @@ impl ErasedNodeRunner for DriverSideEffectRunner {
 
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move { SideEffectDriver::drive(ctx, &self.callbacks).await })
+    }
+}
+
+#[derive(Clone)]
+struct FailingAfterPreclaimRunner {
+    callbacks: TestSideEffectDriverCallbacks,
+}
+
+impl FailingAfterPreclaimRunner {
+    fn new(fixture: &Fixture) -> Self {
+        Self {
+            callbacks: TestSideEffectDriverCallbacks::new(fixture),
+        }
+    }
+}
+
+impl ErasedNodeRunner for FailingAfterPreclaimRunner {
+    fn preclaim_resource_lane<'a>(
+        &'a self,
+        ctx: &'a PreInvocationRunCtx<'a>,
+    ) -> PreInvocationRunnerFuture<'a> {
+        Box::pin(async move {
+            let Some(resource_key) = test_driver_resource_key_for_node(ctx.node()) else {
+                return Ok(ErasedRunnerOutput::new(Vec::new()));
+            };
+            let plan = self.callbacks.intent_plan_for(
+                ctx.node().node_id.as_str().to_owned(),
+                ctx.attempt_id().as_str().to_owned(),
+            )?;
+            SideEffectLanePreclaimBuilder::new(ctx).claim_resource_lane(
+                &plan.intent,
+                &plan.idempotency,
+                plan.idempotency_key,
+                plan.capability_binding,
+                resource_key,
+            )
+        })
+    }
+
+    fn run_erased<'a>(&'a self, _ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+        Box::pin(async move {
+            Err(RuntimeError::InvalidRunnerOutput(
+                "prepare invocation failed after exclusive resource claim".to_owned(),
+            ))
+        })
     }
 }
 

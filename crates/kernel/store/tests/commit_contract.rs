@@ -74,6 +74,8 @@ impl StoreContractRunStore {
         &mut self,
         plan: PreparedCommitPlan,
     ) -> std::result::Result<CommitOutcome, StoreError> {
+        self.inner
+            .seed_artifact_evidence_for_test(plan.admitted_artifacts())?;
         let bundle = test_bundle_from_plan(plan)?;
         let outcome = poll_ready_store_future(self.inner.append_prepared_commit_bundle(bundle));
         if outcome.is_ok() {
@@ -2346,6 +2348,7 @@ fn append_async_prepared_commit(
     request: CommitRequest,
 ) -> mfm_store::v1::Result<CommitOutcome> {
     let plan = test_prepared_commit_plan(request.clone(), request.required_artifacts().to_vec())?;
+    store.seed_artifact_evidence_for_test(plan.admitted_artifacts())?;
     let bundle = test_bundle_from_plan(plan)?;
     poll_ready_store_future(store.append_prepared_commit_bundle(bundle))
 }
@@ -2772,6 +2775,19 @@ fn side_effect_evidence(
 }
 
 #[test]
+fn in_memory_store_rejects_unbacked_existing_artifact_admission() {
+    let store = AsyncInMemoryRunStore::new();
+    let request = run_start_request(run_id(39), "missing-existing-artifact-run-start");
+    let plan = test_prepared_commit_plan(request.clone(), request.required_artifacts().to_vec())
+        .expect("prepare run start");
+    let bundle = test_bundle_from_plan(plan).expect("existing artifact bundle");
+
+    let error = poll_ready_store_future(store.append_prepared_commit_bundle(bundle))
+        .expect_err("missing existing artifact admission is rejected");
+    assert!(matches!(error, StoreError::MissingArtifact { .. }));
+}
+
+#[test]
 fn commit_key_idempotency_precedes_stale_expected_next_seq() {
     let run_id = run_id(40);
     let mut store = StoreContractRunStore::new();
@@ -2806,6 +2822,9 @@ fn async_in_memory_store_exposes_commit_stream_and_status_contract() {
         resource_request.required_artifacts().to_vec(),
     )
     .expect("prepare resource run start");
+    store
+        .seed_artifact_evidence_for_test(resource_plan.admitted_artifacts())
+        .expect("seed resource artifact authority");
     let resource_bundle = test_bundle_from_plan(resource_plan).expect("bundle resource run start");
     let resource_outcome =
         poll_ready_store_future(store.append_prepared_commit_bundle(resource_bundle))
@@ -2827,6 +2846,9 @@ fn async_in_memory_store_exposes_commit_stream_and_status_contract() {
         status_request.required_artifacts().to_vec(),
     )
     .expect("prepare status run start");
+    store
+        .seed_artifact_evidence_for_test(status_plan.admitted_artifacts())
+        .expect("seed status artifact authority");
     let status_bundle = test_bundle_from_plan(status_plan).expect("bundle status run start");
     poll_ready_store_future(store.append_prepared_commit_bundle(status_bundle))
         .expect("append status run start");

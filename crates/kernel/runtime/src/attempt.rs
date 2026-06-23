@@ -519,11 +519,16 @@ fn can_terminalize_observed_failure(
     if !matches!(attempt.status, store::AttemptStatus::Started { .. }) {
         return Ok(false);
     }
-    if node.side_effect.is_some()
-        && SideEffectLifecycle::projection_for_attempt(&view.projections, node, attempt_id)?
-            .is_some()
-    {
-        return Ok(false);
+    if node.side_effect.is_some() {
+        let Some(side_effect) =
+            SideEffectLifecycle::projection_for_attempt(&view.projections, node, attempt_id)?
+        else {
+            return Ok(true);
+        };
+        return Ok(matches!(
+            side_effect.phase,
+            store::SideEffectPhase::Claimed { .. }
+        ));
     }
     Ok(true)
 }

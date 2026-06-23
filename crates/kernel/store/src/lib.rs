@@ -5833,6 +5833,7 @@ pub mod v1 {
             }
 
             let mut artifacts = self.artifacts.clone();
+            verify_existing_artifact_admissions(&artifacts, &bundle)?;
             admit_artifact_evidence(&mut artifacts, bundle.admitted_artifacts())?;
             let base = CommitBase {
                 artifacts,
@@ -5928,6 +5929,16 @@ pub mod v1 {
         pub fn projection_snapshot(&self) -> Result<ProjectionSnapshot> {
             self.lock_inner()
                 .map(|store| store.projection_snapshot().clone())
+        }
+
+        /// Seeds exact artifact evidence for tests that need pre-existing artifact authority.
+        pub fn seed_artifact_evidence_for_test(
+            &self,
+            admitted_artifacts: &[ArtifactEvidenceRef],
+        ) -> Result<()> {
+            self.lock_inner().and_then(|mut store| {
+                admit_artifact_evidence(&mut store.artifacts, admitted_artifacts)
+            })
         }
 
         fn lock_inner(&self) -> Result<MutexGuard<'_, RunMemoryCore>> {
@@ -6221,6 +6232,52 @@ pub mod v1 {
             artifacts.insert(key, evidence.clone());
         }
         Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn verify_existing_artifact_admissions(
+        artifacts: &ArtifactAuthorityMap,
+        bundle: &PreparedCommitBundle,
+    ) -> Result<()> {
+        for existing in bundle.existing_artifacts() {
+            let evidence = admitted_artifact_evidence(
+                bundle,
+                existing.artifact_id(),
+                existing.evidence_hash(),
+            )?;
+            let key = artifact_authority_key(evidence)?;
+            match artifacts.get(&key) {
+                Some(stored) if stored == evidence => {}
+                Some(_) => {
+                    return Err(StoreError::ArtifactEvidenceMismatch {
+                        artifact_id: existing.artifact_id().clone(),
+                        field: "artifact",
+                    });
+                }
+                None => {
+                    return Err(StoreError::MissingArtifact {
+                        artifact_id: existing.artifact_id().clone(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn admitted_artifact_evidence<'a>(
+        bundle: &'a PreparedCommitBundle,
+        artifact_id: &ArtifactId,
+        evidence_hash: &ContentDigest,
+    ) -> Result<&'a ArtifactEvidenceRef> {
+        for evidence in bundle.admitted_artifacts() {
+            if &evidence.artifact_id == artifact_id && evidence.evidence_hash()? == *evidence_hash {
+                return Ok(evidence);
+            }
+        }
+        Err(StoreError::MissingPreparedArtifactBytes {
+            artifact_id: artifact_id.clone(),
+        })
     }
 
     fn artifact_authority_key(evidence: &ArtifactEvidenceRef) -> Result<ArtifactAuthorityKey> {
@@ -7334,7 +7391,11 @@ pub mod v1 {
 
     fn is_side_effect_terminal_commit_payload(payload: &KernelEventPayload) -> bool {
         is_side_effect_payload(payload)
-            || matches!(payload, KernelEventPayload::StateAttemptFailed(_))
+            || matches!(
+                payload,
+                KernelEventPayload::StateAttemptFailed(_)
+                    | KernelEventPayload::ArtifactReferenced(_)
+            )
             || is_retention_ref_payload(payload)
     }
 

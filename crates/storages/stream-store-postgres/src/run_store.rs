@@ -3204,9 +3204,7 @@ async fn load_committed_batch_tx(
     CommittedBatch::from_persisted_events(
         run_id.clone(),
         CommitKey::new(commit.commit_key)?,
-        CommitFingerprint::from_digest(parse_identity::<ContentDigest>(
-            &commit.commit_idempotency_hash,
-        )?),
+        commit.prepared_commit_plan_fingerprint,
         seq,
         events,
     )
@@ -3475,6 +3473,7 @@ struct CommitAuthorityRow {
     run_id: RunId,
     commit_key: String,
     commit_idempotency_hash: String,
+    prepared_commit_plan_fingerprint: CommitFingerprint,
     commit_batch_hash: String,
     commit_batch_canonical_json: Vec<u8>,
     seq: StreamSeq,
@@ -3550,6 +3549,8 @@ fn commit_authority_row_from_row(row: PgRow) -> Result<CommitAuthorityRow> {
         &commit_batch_canonical_json,
         &commit_batch_hash,
     )?;
+    let prepared_commit_plan_fingerprint =
+        prepared_commit_plan_fingerprint_from_idempotency_json(&idempotency_canonical_json)?;
     let seq = StreamSeq::new(i64_to_positive_u64(seq, "commits.seq")?)?;
     let commit_key_identity = CommitKey::new(commit_key.clone())?;
     let expected_commit_id = derive_commit_id(
@@ -3569,6 +3570,7 @@ fn commit_authority_row_from_row(row: PgRow) -> Result<CommitAuthorityRow> {
         run_id,
         commit_key,
         commit_idempotency_hash,
+        prepared_commit_plan_fingerprint,
         commit_batch_hash,
         commit_batch_canonical_json,
         seq,
@@ -3576,6 +3578,33 @@ fn commit_authority_row_from_row(row: PgRow) -> Result<CommitAuthorityRow> {
             PostgresStoreError::Corruption("commits.event_count was negative".to_owned())
         })?,
     })
+}
+
+fn prepared_commit_plan_fingerprint_from_idempotency_json(
+    idempotency_canonical_json: &[u8],
+) -> Result<CommitFingerprint> {
+    let value: Value = serde_json::from_slice(idempotency_canonical_json).map_err(|error| {
+        PostgresStoreError::Corruption(format!(
+            "commit idempotency canonical JSON is invalid: {error}"
+        ))
+    })?;
+    if value.get("domain").and_then(Value::as_str) != Some("mfm.commit.idempotency.v1") {
+        return Err(PostgresStoreError::Corruption(
+            "commit idempotency authority domain mismatch".to_owned(),
+        ));
+    }
+    let fingerprint = value
+        .get("request")
+        .and_then(|request| request.get("prepared_plan_fingerprint"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            PostgresStoreError::Corruption(
+                "commit idempotency authority missing prepared plan fingerprint".to_owned(),
+            )
+        })?;
+    Ok(CommitFingerprint::from_digest(parse_identity::<
+        ContentDigest,
+    >(fingerprint)?))
 }
 
 fn verify_persisted_canonical_hash(context: &str, bytes: &[u8], expected: &str) -> Result<()> {
@@ -7071,7 +7100,10 @@ mod tests {
         )
         .await
         .expect("terminal commit");
-        assert!(matches!(appended, CommitOutcome::Appended(_)));
+        let CommitOutcome::Appended(appended_batch) = appended else {
+            panic!("terminal commit should append");
+        };
+        let appended_fingerprint = appended_batch.fingerprint().clone();
 
         let stale_retry =
             terminal_request.with_expected_next_seq(StreamSeq::new(1).expect("stale seq"));
@@ -7086,7 +7118,10 @@ mod tests {
         )
         .await
         .expect("idempotent retry before stale seq");
-        assert!(matches!(idempotent, CommitOutcome::Idempotent(_)));
+        let CommitOutcome::Idempotent(idempotent_batch) = idempotent else {
+            panic!("terminal retry should be idempotent");
+        };
+        assert_eq!(idempotent_batch.fingerprint(), &appended_fingerprint);
         assert_eq!(
             store.expected_next_seq(&run).await.expect("next seq"),
             StreamSeq::new(4).expect("seq")

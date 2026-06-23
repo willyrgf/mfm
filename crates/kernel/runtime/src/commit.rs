@@ -489,7 +489,7 @@ impl CommitPlanner {
             .diagnostic_artifact
             .map(|artifact| validate_attempt_failure_diagnostic_artifact(input.node, artifact))
             .transpose()?;
-        let mut error = input.error;
+        let mut error = input.error.clone();
         match &diagnostic_artifact {
             Some(artifact) => {
                 error.diagnostic_ref = Some(event_artifact_ref_from_store(&artifact.evidence)?);
@@ -502,6 +502,54 @@ impl CommitPlanner {
             }
             None => {}
         }
+        let terminal_side_effect_payloads = if input.node.side_effect.is_some() {
+            SideEffectLifecycle::projection_for_attempt(
+                &input.view.projections,
+                input.node,
+                input.attempt_id,
+            )?
+            .map(|projection| match &projection.phase {
+                store::SideEffectPhase::Claimed {
+                    invocation_epoch, ..
+                } => {
+                    let mut payloads = Vec::new();
+                    if let Some(release) = resource_lane_release_intent_for_failure(
+                        input.runtime_spec,
+                        input.run_id,
+                        input.node,
+                        input.attempt_id,
+                        &input.view.projections,
+                        projection,
+                        *invocation_epoch,
+                    )? {
+                        payloads.push(release);
+                    }
+                    payloads.push(events::KernelEventPayload::SideEffectFailed(
+                        events::side_effect::Failed {
+                            spec_hash: input.runtime_spec.spec_hash().clone(),
+                            node_id: input.node.node_id.clone(),
+                            attempt_id: input.attempt_id.clone(),
+                            ledger_key: projection.ledger_key.clone(),
+                            ledger_purpose: projection.ledger_purpose.clone(),
+                            invocation_epoch: *invocation_epoch,
+                            failure_phase:
+                                events::side_effect::FailurePhase::BeforeInvocationStarted,
+                            retryable: error.retryable,
+                            error: error.clone(),
+                        },
+                    ));
+                    Ok(payloads)
+                }
+                _ => Err(RuntimeError::InvalidRunnerOutput(format!(
+                    "side-effect node {} attempt {} has acquired side-effect authority for ledger {}",
+                    input.node.node_id, input.attempt_id, projection.ledger_key
+                ))),
+            })
+            .transpose()?
+            .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         let failure = events::StateAttemptFailed {
             spec_hash: input.runtime_spec.spec_hash().clone(),
             node_id: input.node.node_id.clone(),
@@ -511,6 +559,7 @@ impl CommitPlanner {
         };
         let commit_fragment = attempt_failure_commit_fragment(&failure)?;
         let mut payloads = Vec::new();
+        payloads.extend(terminal_side_effect_payloads);
         payloads.push(events::KernelEventPayload::StateAttemptFailed(failure));
         let (required_artifacts, admitted_artifacts, artifacts_to_stage) =
             if let Some(artifact) = diagnostic_artifact {
@@ -552,18 +601,6 @@ impl CommitPlanner {
             ))?],
             ..store::CommitPreconditions::default()
         };
-        if input.node.side_effect.is_some() {
-            if let Some(projection) = SideEffectLifecycle::projection_for_attempt(
-                &input.view.projections,
-                input.node,
-                input.attempt_id,
-            )? {
-                return Err(RuntimeError::InvalidRunnerOutput(format!(
-                    "side-effect node {} attempt {} has acquired side-effect authority for ledger {}",
-                    input.node.node_id, input.attempt_id, projection.ledger_key
-                )));
-            }
-        }
         preconditions
             .required_cell_states
             .extend(node_cell_preconditions(input.runtime_spec, input.node)?);
@@ -657,6 +694,46 @@ impl CommitPlanner {
         )?;
         prepare_runner_output_commit_plan(request, store::CommitArtifactEvidenceSet::empty(), None)
     }
+}
+
+fn resource_lane_release_intent_for_failure(
+    runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
+    node: &spec::NodeSpec,
+    attempt_id: &AttemptId,
+    projections: &store::ProjectionSnapshot,
+    projection: &store::SideEffectProjection,
+    invocation_epoch: u32,
+) -> Result<Option<events::KernelEventPayload>> {
+    let holder = store::SideEffectLedgerRef::new(run_id.clone(), projection.ledger_key.clone());
+    let Some((_, lane)) = projections
+        .resource_lanes()
+        .find(|(_, lane)| lane.holder == holder)
+    else {
+        return Ok(None);
+    };
+    if lane.node_id != node.node_id
+        || lane.attempt_id != *attempt_id
+        || lane.ledger_purpose != projection.ledger_purpose
+        || lane.invocation_epoch != invocation_epoch
+    {
+        return Err(RuntimeError::InvalidRunStream(format!(
+            "active resource lane for ledger {} does not match side-effect failure context",
+            projection.ledger_key
+        )));
+    }
+    Ok(Some(events::KernelEventPayload::ResourceLaneReleaseIntent(
+        events::ResourceLaneReleaseIntent {
+            spec_hash: runtime_spec.spec_hash().clone(),
+            node_id: node.node_id.clone(),
+            attempt_id: attempt_id.clone(),
+            ledger_key: projection.ledger_key.clone(),
+            ledger_purpose: projection.ledger_purpose.clone(),
+            invocation_epoch,
+            claim_id: lane.claim_id.clone(),
+            release_reason: events::ResourceLaneReleaseReason::new("side_effect.failed")?,
+        },
+    )))
 }
 
 fn prepare_runner_output_commit_plan(
