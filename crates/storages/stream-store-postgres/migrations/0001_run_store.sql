@@ -314,6 +314,63 @@ CREATE TABLE run_observation_change_summaries (
   CONSTRAINT run_observation_change_summaries_commit_fk FOREIGN KEY (run_id, head_seq) REFERENCES commits(run_id, seq) ON DELETE RESTRICT
 );
 
+CREATE TABLE observation_derivations (
+  projection_version TEXT NOT NULL,
+  model_name TEXT NOT NULL,
+  derived_key TEXT NOT NULL,
+  source_kind TEXT NOT NULL CHECK (source_kind IN ('event', 'run_prefix', 'platform_prefix', 'multi_event')),
+  source_run_id TEXT NULL,
+  source_from_seq BIGINT NULL,
+  source_to_seq BIGINT NULL,
+  source_last_ordinal INTEGER NULL,
+  source_seq BIGINT NULL,
+  source_ordinal INTEGER NULL,
+  source_commit_id TEXT NULL,
+  source_event_id TEXT NULL,
+  source_payload_hash TEXT NULL,
+  source_event_schema_id TEXT NULL,
+  source_high_append_xid XID8 NULL,
+  source_high_commit_id TEXT NULL REFERENCES run_commit_log(commit_id) ON DELETE RESTRICT,
+  source_high_commit_sort_key BYTEA NULL,
+  source_event_count BIGINT NOT NULL CHECK (source_event_count >= 1),
+  source_input_hash TEXT NOT NULL,
+  derived_row_canonical_json BYTEA NOT NULL,
+  derived_row_hash TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp(),
+  PRIMARY KEY (projection_version, model_name, derived_key),
+  CONSTRAINT observation_derivations_run_prefix_shape CHECK (
+    source_kind <> 'run_prefix'
+    OR (
+      source_run_id IS NOT NULL
+      AND source_from_seq IS NOT NULL
+      AND source_to_seq IS NOT NULL
+      AND source_last_ordinal IS NOT NULL
+      AND source_high_append_xid IS NOT NULL
+      AND source_high_commit_id IS NOT NULL
+      AND source_high_commit_sort_key IS NOT NULL
+      AND octet_length(source_high_commit_sort_key) = 32
+    )
+  ),
+  CONSTRAINT observation_derivations_source_prefix_fk FOREIGN KEY (source_run_id, source_to_seq) REFERENCES commits(run_id, seq) ON DELETE RESTRICT
+);
+
+CREATE TABLE observation_derivation_sources (
+  projection_version TEXT NOT NULL,
+  model_name TEXT NOT NULL,
+  derived_key TEXT NOT NULL,
+  source_run_id TEXT NOT NULL,
+  source_seq BIGINT NOT NULL,
+  source_ordinal INTEGER NOT NULL,
+  source_commit_id TEXT NOT NULL,
+  source_event_id TEXT NOT NULL,
+  source_payload_hash TEXT NOT NULL,
+  source_event_schema_id TEXT NOT NULL,
+  source_logical_key TEXT NOT NULL,
+  PRIMARY KEY (projection_version, model_name, derived_key, source_run_id, source_seq, source_ordinal),
+  CONSTRAINT observation_derivation_sources_derivation_fk FOREIGN KEY (projection_version, model_name, derived_key) REFERENCES observation_derivations(projection_version, model_name, derived_key) ON DELETE RESTRICT,
+  CONSTRAINT observation_derivation_sources_event_fk FOREIGN KEY (source_run_id, source_seq, source_ordinal) REFERENCES run_events(run_id, seq, ordinal) ON DELETE RESTRICT
+);
+
 CREATE VIEW current_run_observations AS
 SELECT DISTINCT ON (run_id)
   projection_version,
@@ -389,6 +446,14 @@ FOR EACH STATEMENT EXECUTE FUNCTION mfm_reject_authority_mutation();
 
 CREATE TRIGGER run_observation_change_summaries_no_update
 BEFORE UPDATE OR DELETE OR TRUNCATE ON run_observation_change_summaries
+FOR EACH STATEMENT EXECUTE FUNCTION mfm_reject_authority_mutation();
+
+CREATE TRIGGER observation_derivations_no_update
+BEFORE UPDATE OR DELETE OR TRUNCATE ON observation_derivations
+FOR EACH STATEMENT EXECUTE FUNCTION mfm_reject_authority_mutation();
+
+CREATE TRIGGER observation_derivation_sources_no_update
+BEFORE UPDATE OR DELETE OR TRUNCATE ON observation_derivation_sources
 FOR EACH STATEMENT EXECUTE FUNCTION mfm_reject_authority_mutation();
 
 CREATE TRIGGER run_observation_cursors_no_update

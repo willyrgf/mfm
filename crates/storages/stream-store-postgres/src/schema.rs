@@ -268,6 +268,8 @@ const REQUIRED_TABLES: &[&str] = &[
     "resource_lane_transitions",
     "run_commit_log",
     "run_observation_change_summaries",
+    "observation_derivations",
+    "observation_derivation_sources",
     "run_observation_cursors",
 ];
 
@@ -295,6 +297,8 @@ const REQUIRED_TRIGGERS: &[&str] = &[
     "resource_lane_transitions_no_update",
     "run_commit_log_no_update",
     "run_observation_change_summaries_no_update",
+    "observation_derivations_no_update",
+    "observation_derivation_sources_no_update",
     "run_observation_cursors_no_update",
 ];
 

@@ -88,6 +88,8 @@ const HASH_DOMAIN_VERSION: &str = "mfm.hash-domain.v1";
 const CANONICALIZER_IDENTITY: &str = "sha256-jcs-v1";
 const PROJECTION_VERSION: &str = "mfm.run_observation.v1";
 const RUN_OBSERVATION_SUMMARY_KIND: &str = "run";
+const RUN_OBSERVATION_DERIVATION_MODEL: &str = "run_observation_change_summary";
+const RUN_PREFIX_SOURCE_KIND: &str = "run_prefix";
 const CURSOR_VERSION: &str = "mfm.run_observation.cursor.v1";
 const RESOURCE_LANE_ID_DOMAIN: &[u8] = b"mfm.resource_lane.id.v1";
 const MAX_ARTIFACT_BLOB_BYTES: u64 = 16 * 1024 * 1024;
@@ -1545,34 +1547,11 @@ async fn insert_run_observation_summary_tx(
         source_event_count,
     )
     .await?;
-    sqlx::query(
-        "INSERT INTO run_observation_change_summaries \
-         (projection_version, commit_id, summary_kind, run_id, head_seq, observed_status, \
-          started_at, updated_at, completed_at, source_authority_hash, source_event_count, \
-          summary_row_hash, summary_row_canonical_json) \
-         SELECT $1, $2, $3, $4, $5, $6, \
-           (SELECT MIN(committed_at) FROM commits WHERE run_id = $4), \
-           c.committed_at, \
-           CASE WHEN $6 = 'completed' THEN c.committed_at ELSE NULL END, \
-           $7, $8, $9, $10 \
-         FROM commits c WHERE c.commit_id = $2",
-    )
-    .bind(summary.projection_version.as_str())
-    .bind(summary.commit_id.as_str())
-    .bind(summary.summary_kind)
-    .bind(summary.run_id.as_str())
-    .bind(u64_to_i64(
-        summary.head_seq.as_u64(),
-        "run_observation_change_summaries.head_seq",
-    )?)
-    .bind(summary.observed_status.as_str())
-    .bind(summary.source_authority_hash.as_str())
-    .bind(summary.source_event_count)
-    .bind(summary.summary_row_hash.as_str())
-    .bind(summary.summary_row_canonical_json.as_bytes())
-    .execute(&mut **tx)
-    .await
-    .map_err(|error| database_error("failed to insert run observation summary", error))?;
+    if !insert_materialized_run_observation_summary_tx(tx, &summary).await? {
+        return Err(PostgresStoreError::Corruption(
+            "append observation summary already existed".to_owned(),
+        ));
+    }
     Ok(())
 }
 
@@ -1590,6 +1569,25 @@ struct RunObservationSummaryMaterialization {
     source_event_count: i64,
     summary_row_hash: String,
     summary_row_canonical_json: PlainCanonicalJsonBytes,
+    derivation: ObservationDerivationMaterialization,
+}
+
+struct ObservationDerivationMaterialization {
+    projection_version: String,
+    model_name: &'static str,
+    derived_key: String,
+    source_kind: &'static str,
+    source_run_id: RunId,
+    source_from_seq: StreamSeq,
+    source_to_seq: StreamSeq,
+    source_last_ordinal: i32,
+    source_high_append_xid: String,
+    source_high_commit_id: String,
+    source_high_commit_sort_key: Vec<u8>,
+    source_event_count: i64,
+    source_input_hash: String,
+    derived_row_hash: String,
+    derived_row_canonical_json: PlainCanonicalJsonBytes,
 }
 
 async fn materialize_run_observation_summary_tx(
@@ -1614,8 +1612,13 @@ async fn materialize_run_observation_summary_tx(
              'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS updated_at, \
            CASE WHEN $2 = 'completed' THEN \
              to_char(c.committed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') \
-           ELSE NULL END AS completed_at \
-         FROM commits c WHERE c.commit_id = $3",
+           ELSE NULL END AS completed_at, \
+           l.append_xid::text AS source_high_append_xid, \
+           l.last_ordinal AS source_last_ordinal, \
+           l.commit_sort_key AS source_high_commit_sort_key \
+         FROM commits c \
+         INNER JOIN run_commit_log l ON l.commit_id = c.commit_id \
+         WHERE c.commit_id = $3",
     )
     .bind(run_id.as_str())
     .bind(observed_status.as_str())
@@ -1632,6 +1635,15 @@ async fn materialize_run_observation_summary_tx(
     let completed_at: Option<String> = row
         .try_get("completed_at")
         .map_err(|error| database_error("failed to decode observation completed_at", error))?;
+    let source_high_append_xid: String = row
+        .try_get("source_high_append_xid")
+        .map_err(|error| database_error("failed to decode observation source append xid", error))?;
+    let source_last_ordinal: i32 = row.try_get("source_last_ordinal").map_err(|error| {
+        database_error("failed to decode observation source last ordinal", error)
+    })?;
+    let source_high_commit_sort_key: Vec<u8> = row
+        .try_get("source_high_commit_sort_key")
+        .map_err(|error| database_error("failed to decode observation source sort key", error))?;
     let source_authority_hash = observation_source_authority_hash(
         run_id,
         commit_id,
@@ -1656,6 +1668,33 @@ async fn materialize_run_observation_summary_tx(
         .content_digest()
         .as_str()
         .to_owned();
+    let derived_key = observation_derivation_key(run_id, commit_id);
+    let source_input_hash = observation_source_input_hash(
+        run_id,
+        head_seq,
+        source_last_ordinal,
+        commit_id,
+        &source_high_append_xid,
+        &source_high_commit_sort_key,
+        source_event_count,
+    )?;
+    let derivation = ObservationDerivationMaterialization {
+        projection_version: projection_version.to_owned(),
+        model_name: RUN_OBSERVATION_DERIVATION_MODEL,
+        derived_key,
+        source_kind: RUN_PREFIX_SOURCE_KIND,
+        source_run_id: run_id.clone(),
+        source_from_seq: StreamSeq::FIRST,
+        source_to_seq: head_seq,
+        source_last_ordinal,
+        source_high_append_xid,
+        source_high_commit_id: commit_id.to_owned(),
+        source_high_commit_sort_key,
+        source_event_count,
+        source_input_hash,
+        derived_row_hash: summary_row_hash.clone(),
+        derived_row_canonical_json: summary_row_canonical_json.clone(),
+    };
     Ok(RunObservationSummaryMaterialization {
         projection_version: projection_version.to_owned(),
         commit_id: commit_id.to_owned(),
@@ -1670,6 +1709,7 @@ async fn materialize_run_observation_summary_tx(
         source_event_count,
         summary_row_hash,
         summary_row_canonical_json,
+        derivation,
     })
 }
 
@@ -1698,6 +1738,40 @@ fn observation_source_authority_hash(
         "observed_status": observed_status.as_str(),
         "run_id": run_id.as_str(),
         "source_event_count": source_event_count,
+    }))?
+    .content_digest()
+    .as_str()
+    .to_owned())
+}
+
+fn observation_derivation_key(run_id: &RunId, commit_id: &str) -> String {
+    format!(
+        "run:{}:commit:{}:summary:{}",
+        run_id.as_str(),
+        commit_id,
+        RUN_OBSERVATION_SUMMARY_KIND
+    )
+}
+
+fn observation_source_input_hash(
+    run_id: &RunId,
+    head_seq: StreamSeq,
+    source_last_ordinal: i32,
+    commit_id: &str,
+    source_high_append_xid: &str,
+    source_high_commit_sort_key: &[u8],
+    source_event_count: i64,
+) -> Result<String> {
+    Ok(canonical_json(serde_json::json!({
+        "commit_id": commit_id,
+        "domain": "mfm.run_observation.source_input.v1",
+        "source_event_count": source_event_count,
+        "source_high_append_xid": source_high_append_xid,
+        "source_high_commit_sort_key": bytes_hex(source_high_commit_sort_key),
+        "source_kind": RUN_PREFIX_SOURCE_KIND,
+        "source_last_ordinal": source_last_ordinal,
+        "source_run_id": run_id.as_str(),
+        "source_to_seq": head_seq.as_u64(),
     }))?
     .content_digest()
     .as_str()
@@ -2177,6 +2251,109 @@ async fn compare_existing_run_observation_summary_tx(
         && source_event_count == summary.source_event_count
         && summary_row_hash == summary.summary_row_hash
         && summary_row_canonical_json == summary.summary_row_canonical_json.as_bytes();
+    if !matches {
+        return Ok(SummaryComparison::Mismatch);
+    }
+    compare_existing_observation_derivation_tx(tx, &summary.derivation).await
+}
+
+async fn compare_existing_observation_derivation_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    derivation: &ObservationDerivationMaterialization,
+) -> Result<SummaryComparison> {
+    let row = sqlx::query(
+        "SELECT source_kind, source_run_id, source_from_seq, source_to_seq, source_last_ordinal, \
+          source_high_append_xid::text AS source_high_append_xid, source_high_commit_id, \
+          source_high_commit_sort_key, source_event_count, source_input_hash, \
+          derived_row_canonical_json, derived_row_hash \
+         FROM observation_derivations \
+         WHERE projection_version = $1 AND model_name = $2 AND derived_key = $3",
+    )
+    .bind(derivation.projection_version.as_str())
+    .bind(derivation.model_name)
+    .bind(derivation.derived_key.as_str())
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| database_error("failed to load observation derivation", error))?;
+    let Some(row) = row else {
+        return Ok(SummaryComparison::Missing);
+    };
+    let derived_row_hash: String = row
+        .try_get("derived_row_hash")
+        .map_err(|error| database_error("failed to decode derivation row hash", error))?;
+    let derived_row_canonical_json: Vec<u8> =
+        row.try_get("derived_row_canonical_json").map_err(|error| {
+            database_error("failed to decode derivation row canonical bytes", error)
+        })?;
+    let stored_canonical = PlainCanonicalJsonBytes::from_canonical_json_slice(
+        &derived_row_canonical_json,
+    )
+    .map_err(|error| {
+        PostgresStoreError::Corruption(format!(
+            "read-model derivation canonical bytes are invalid: {error}"
+        ))
+    })?;
+    if stored_canonical.content_digest().as_str() != derived_row_hash {
+        return Ok(SummaryComparison::Mismatch);
+    }
+    let source_run_id_text: String = row
+        .try_get("source_run_id")
+        .map_err(|error| database_error("failed to decode derivation source run id", error))?;
+    let source_run_id = parse_identity::<RunId>(&source_run_id_text)?;
+    let source_from_seq = StreamSeq::new(i64_to_positive_u64(
+        row.try_get("source_from_seq").map_err(|error| {
+            database_error("failed to decode derivation source from seq", error)
+        })?,
+        "observation_derivations.source_from_seq",
+    )?)?;
+    let source_to_seq = StreamSeq::new(i64_to_positive_u64(
+        row.try_get("source_to_seq")
+            .map_err(|error| database_error("failed to decode derivation source to seq", error))?,
+        "observation_derivations.source_to_seq",
+    )?)?;
+    let matches = row
+        .try_get::<String, _>("source_kind")
+        .map_err(|error| database_error("failed to decode derivation source kind", error))?
+        == derivation.source_kind
+        && source_run_id == derivation.source_run_id
+        && source_from_seq == derivation.source_from_seq
+        && source_to_seq == derivation.source_to_seq
+        && row
+            .try_get::<i32, _>("source_last_ordinal")
+            .map_err(|error| {
+                database_error("failed to decode derivation source last ordinal", error)
+            })?
+            == derivation.source_last_ordinal
+        && row
+            .try_get::<String, _>("source_high_append_xid")
+            .map_err(|error| database_error("failed to decode derivation source xid", error))?
+            == derivation.source_high_append_xid
+        && row
+            .try_get::<String, _>("source_high_commit_id")
+            .map_err(|error| {
+                database_error("failed to decode derivation source commit id", error)
+            })?
+            == derivation.source_high_commit_id
+        && row
+            .try_get::<Vec<u8>, _>("source_high_commit_sort_key")
+            .map_err(|error| {
+                database_error("failed to decode derivation source sort key", error)
+            })?
+            == derivation.source_high_commit_sort_key
+        && row
+            .try_get::<i64, _>("source_event_count")
+            .map_err(|error| {
+                database_error("failed to decode derivation source event count", error)
+            })?
+            == derivation.source_event_count
+        && row
+            .try_get::<String, _>("source_input_hash")
+            .map_err(|error| {
+                database_error("failed to decode derivation source input hash", error)
+            })?
+            == derivation.source_input_hash
+        && derived_row_hash == derivation.derived_row_hash
+        && derived_row_canonical_json == derivation.derived_row_canonical_json.as_bytes();
     Ok(if matches {
         SummaryComparison::Match
     } else {
@@ -2218,7 +2395,57 @@ async fn insert_materialized_run_observation_summary_tx(
     .await
     .map_err(|error| database_error("failed to insert rebuilt observation summary", error))?
     .rows_affected();
-    Ok(rows == 1)
+    let derivation_rows = insert_materialized_observation_derivation_tx(tx, &summary.derivation)
+        .await?
+        .rows_affected();
+    if !matches!(
+        compare_existing_observation_derivation_tx(tx, &summary.derivation).await?,
+        SummaryComparison::Match
+    ) {
+        return Err(PostgresStoreError::Corruption(
+            "observation derivation drift after rebuild".to_owned(),
+        ));
+    }
+    Ok(rows == 1 || derivation_rows == 1)
+}
+
+async fn insert_materialized_observation_derivation_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    derivation: &ObservationDerivationMaterialization,
+) -> Result<sqlx::postgres::PgQueryResult> {
+    sqlx::query(
+        "INSERT INTO observation_derivations \
+         (projection_version, model_name, derived_key, source_kind, source_run_id, \
+          source_from_seq, source_to_seq, source_last_ordinal, source_high_append_xid, \
+          source_high_commit_id, source_high_commit_sort_key, source_event_count, \
+          source_input_hash, derived_row_canonical_json, derived_row_hash) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::xid8,$10,$11,$12,$13,$14,$15) \
+         ON CONFLICT (projection_version, model_name, derived_key) DO NOTHING",
+    )
+    .bind(derivation.projection_version.as_str())
+    .bind(derivation.model_name)
+    .bind(derivation.derived_key.as_str())
+    .bind(derivation.source_kind)
+    .bind(derivation.source_run_id.as_str())
+    .bind(u64_to_i64(
+        derivation.source_from_seq.as_u64(),
+        "observation_derivations.source_from_seq",
+    )?)
+    .bind(u64_to_i64(
+        derivation.source_to_seq.as_u64(),
+        "observation_derivations.source_to_seq",
+    )?)
+    .bind(derivation.source_last_ordinal)
+    .bind(derivation.source_high_append_xid.as_str())
+    .bind(derivation.source_high_commit_id.as_str())
+    .bind(derivation.source_high_commit_sort_key.as_slice())
+    .bind(derivation.source_event_count)
+    .bind(derivation.source_input_hash.as_str())
+    .bind(derivation.derived_row_canonical_json.as_bytes())
+    .bind(derivation.derived_row_hash.as_str())
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| database_error("failed to insert observation derivation", error))
 }
 
 fn run_commit_sort_key(
@@ -5387,6 +5614,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn observation_derivations_record_run_prefix_provenance() {
+        let (store, schema) = test_store().await;
+        let run = run_id(138);
+        append_run_start(&store, &run, "derivation-run-start")
+            .await
+            .expect("run start");
+
+        let row = sqlx::query(
+            "SELECT d.source_kind, d.source_run_id, d.source_from_seq, d.source_to_seq, \
+              d.source_last_ordinal, d.source_high_append_xid::text AS source_high_append_xid, \
+              d.source_high_commit_id, d.source_high_commit_sort_key, d.source_event_count, \
+              d.derived_row_hash, d.derived_row_canonical_json, \
+              s.commit_id, s.summary_row_hash, s.summary_row_canonical_json, \
+              l.append_xid::text AS append_xid, l.commit_sort_key \
+             FROM observation_derivations d \
+             INNER JOIN run_observation_change_summaries s \
+               ON s.projection_version = d.projection_version \
+              AND s.commit_id = d.source_high_commit_id \
+              AND s.summary_kind = $2 \
+             INNER JOIN run_commit_log l ON l.commit_id = s.commit_id \
+             WHERE d.model_name = $3 AND s.run_id = $1",
+        )
+        .bind(run.as_str())
+        .bind(RUN_OBSERVATION_SUMMARY_KIND)
+        .bind(RUN_OBSERVATION_DERIVATION_MODEL)
+        .fetch_one(&store.pool)
+        .await
+        .expect("load derivation provenance");
+        assert_eq!(
+            row.try_get::<String, _>("source_kind")
+                .expect("source kind"),
+            RUN_PREFIX_SOURCE_KIND
+        );
+        assert_eq!(
+            row.try_get::<String, _>("source_run_id")
+                .expect("source run"),
+            run.as_str()
+        );
+        assert_eq!(row.try_get::<i64, _>("source_from_seq").expect("from"), 1);
+        assert_eq!(row.try_get::<i64, _>("source_to_seq").expect("to"), 1);
+        assert_eq!(
+            row.try_get::<i32, _>("source_last_ordinal")
+                .expect("last ordinal"),
+            0
+        );
+        assert_eq!(
+            row.try_get::<String, _>("source_high_append_xid")
+                .expect("source xid"),
+            row.try_get::<String, _>("append_xid").expect("log xid")
+        );
+        assert_eq!(
+            row.try_get::<String, _>("source_high_commit_id")
+                .expect("source commit"),
+            row.try_get::<String, _>("commit_id")
+                .expect("summary commit")
+        );
+        assert_eq!(
+            row.try_get::<Vec<u8>, _>("source_high_commit_sort_key")
+                .expect("source sort key"),
+            row.try_get::<Vec<u8>, _>("commit_sort_key")
+                .expect("log sort key")
+        );
+        assert_eq!(
+            row.try_get::<i64, _>("source_event_count")
+                .expect("source count"),
+            1
+        );
+        assert_eq!(
+            row.try_get::<String, _>("derived_row_hash")
+                .expect("derived hash"),
+            row.try_get::<String, _>("summary_row_hash")
+                .expect("summary hash")
+        );
+        assert_eq!(
+            row.try_get::<Vec<u8>, _>("derived_row_canonical_json")
+                .expect("derived row"),
+            row.try_get::<Vec<u8>, _>("summary_row_canonical_json")
+                .expect("summary row")
+        );
+
+        drop_schema(&store, &schema).await;
+    }
+
+    #[tokio::test]
     async fn read_model_missing_only_rebuild_repairs_missing_rows() {
         let (store, schema) = test_store().await;
         let run = run_id(131);
@@ -5447,6 +5758,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_model_missing_only_rebuild_repairs_missing_derivations() {
+        let (store, schema) = test_store().await;
+        let run = run_id(139);
+        append_run_start(&store, &run, "missing-derivation-run-start")
+            .await
+            .expect("run start");
+        let maintenance = PostgresMaintenance {
+            pool: store.pool.clone(),
+        };
+
+        sqlx::query(
+            "ALTER TABLE observation_derivations DISABLE TRIGGER \
+             observation_derivations_no_update",
+        )
+        .execute(&store.pool)
+        .await
+        .expect("disable derivation mutation guard");
+        sqlx::query("DELETE FROM observation_derivations WHERE source_run_id = $1")
+            .bind(run.as_str())
+            .execute(&store.pool)
+            .await
+            .expect("delete derivation row");
+        sqlx::query(
+            "ALTER TABLE observation_derivations ENABLE TRIGGER \
+             observation_derivations_no_update",
+        )
+        .execute(&store.pool)
+        .await
+        .expect("reenable derivation mutation guard");
+
+        let missing = maintenance
+            .validate_read_models(PROJECTION_VERSION)
+            .await
+            .expect("validate missing derivation");
+        assert_eq!(missing.missing_rows, 1);
+        assert_eq!(missing.drift_rows, 0);
+        let repaired = maintenance
+            .build_projection_version(PROJECTION_VERSION, ReadModelBuildMode::MissingOnly)
+            .await
+            .expect("repair missing derivation");
+        assert_eq!(repaired.inserted_rows, 1);
+        let valid = maintenance
+            .validate_read_models(PROJECTION_VERSION)
+            .await
+            .expect("validate repaired derivation");
+        assert_eq!(valid.missing_rows, 0);
+        assert_eq!(valid.drift_rows, 0);
+
+        drop_schema(&store, &schema).await;
+    }
+
+    #[tokio::test]
     async fn read_model_validation_detects_drift() {
         let (store, schema) = test_store().await;
         let run = run_id(132);
@@ -5491,6 +5854,48 @@ mod tests {
             .build_projection_version(PROJECTION_VERSION, ReadModelBuildMode::MissingOnly)
             .await
             .expect_err("rebuild fails closed on drift");
+        assert_corruption(error, "read-model drift");
+
+        drop_schema(&store, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn read_model_validation_detects_derivation_drift() {
+        let (store, schema) = test_store().await;
+        let run = run_id(140);
+        append_run_start(&store, &run, "drift-derivation-run-start")
+            .await
+            .expect("run start");
+        let maintenance = PostgresMaintenance {
+            pool: store.pool.clone(),
+        };
+
+        sqlx::query(
+            "ALTER TABLE observation_derivations DISABLE TRIGGER \
+             observation_derivations_no_update",
+        )
+        .execute(&store.pool)
+        .await
+        .expect("disable derivation mutation guard");
+        sqlx::query(
+            "UPDATE observation_derivations \
+             SET derived_row_hash = 'tampered-derivation-hash' \
+             WHERE source_run_id = $1",
+        )
+        .bind(run.as_str())
+        .execute(&store.pool)
+        .await
+        .expect("tamper derivation hash");
+
+        let validation = maintenance
+            .validate_read_models(PROJECTION_VERSION)
+            .await
+            .expect("validate drifted derivation");
+        assert_eq!(validation.drift_rows, 1);
+        let error = maintenance
+            .build_projection_version(PROJECTION_VERSION, ReadModelBuildMode::MissingOnly)
+            .await
+            .expect_err("rebuild fails closed on derivation drift");
         assert_corruption(error, "read-model drift");
 
         drop_schema(&store, &schema).await;
