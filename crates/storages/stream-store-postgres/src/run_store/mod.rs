@@ -145,13 +145,6 @@ impl PostgresRunStore {
         Ok(Self { pool })
     }
 
-    /// Connects using the `DATABASE_URL` environment variable.
-    pub async fn connect_env() -> Result<Self> {
-        let database_url = std::env::var("DATABASE_URL")
-            .map_err(|_| PostgresStoreError::Database("missing DATABASE_URL"))?;
-        Self::connect(&database_url).await
-    }
-
     /// Returns the next store-owned stream sequence for a run.
     pub async fn expected_next_seq(&self, run_id: &RunId) -> Result<StreamSeq> {
         let head = read_head(&self.pool, run_id).await?;
@@ -174,14 +167,6 @@ impl PostgresRunStore {
         requirement: &EventArtifactRequirement,
     ) -> mfm_store::v1::Result<VerifiedRunArtifactBytes> {
         read_retained_artifact_from_pool(&self.pool, requirement).await
-    }
-
-    /// Reads adapter-requested artifact bytes from Postgres-owned artifact authority.
-    pub async fn read_artifact(
-        &self,
-        request: &mfm_artifact_capabilities::ArtifactReadRequest,
-    ) -> mfm_artifact_capabilities::Result<mfm_artifact_capabilities::VerifiedArtifactBytes> {
-        read_artifact_from_pool(&self.pool, request).await
     }
 
     /// Reads one observation list/watch page from Postgres-owned read models.
@@ -231,15 +216,6 @@ impl RetainedArtifactReadProvider for PostgresRunStore {
         requirement: &'a EventArtifactRequirement,
     ) -> RetainedArtifactReadFuture<'a> {
         Box::pin(async move { PostgresRunStore::read_retained_artifact(self, requirement).await })
-    }
-}
-
-impl mfm_artifact_capabilities::ArtifactReadProvider for PostgresRunStore {
-    fn read_artifact<'a>(
-        &'a self,
-        request: &'a mfm_artifact_capabilities::ArtifactReadRequest,
-    ) -> mfm_artifact_capabilities::ArtifactReadFuture<'a> {
-        Box::pin(async move { PostgresRunStore::read_artifact(self, request).await })
     }
 }
 

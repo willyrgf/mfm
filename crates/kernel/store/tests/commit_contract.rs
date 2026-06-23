@@ -26,14 +26,13 @@ use mfm_store::v1::{
     CellTerminalProjection, CommitArtifactEvidenceSet, CommitKey, CommitOutcome,
     CommitPreconditions, CommitRequest, CommittedRunStream, EventArtifactReferenceSource,
     ExistingArtifactAdmission, ForwardLedgerClassification, KernelEventEnvelope, ManualBlockReason,
-    ManualResolution, ManualResolutionProjection, NonEmptyPayloadBatch, PreparedCommit,
-    PreparedCommitBundle, PreparedCommitPlan, ProjectionSnapshot, PublicOutputProjection,
-    RequiredRunState, ResourceLaneKey, Retention, RunAdmission, RunCompletionProjection,
-    RunEventStore, RunMode, RunState, SagaAdmitToken, SagaEngagementProjection,
-    SagaEngagementReason, SagaTerminal, SagaTerminalProof, SideEffectLedgerPhase,
-    SideEffectLedgerRef, SideEffectPhase, SideEffectProgress, SideEffectTerminal,
-    StateAttemptStarted, StoreError, StreamSeq, VerifiedRetentionProjection,
-    VerifiedRetentionProjectionSet,
+    ManualResolution, ManualResolutionProjection, PreparedCommit, PreparedCommitBundle,
+    PreparedCommitPlan, ProjectionSnapshot, PublicOutputProjection, RequiredRunState,
+    ResourceLaneKey, Retention, RunAdmission, RunCompletionProjection, RunEventStore, RunMode,
+    RunState, SagaAdmitToken, SagaEngagementProjection, SagaEngagementReason, SagaTerminal,
+    SagaTerminalProof, SideEffectLedgerPhase, SideEffectLedgerRef, SideEffectPhase,
+    SideEffectProgress, SideEffectTerminal, StateAttemptStarted, StoreError, StreamSeq,
+    VerifiedRetentionProjection, VerifiedRetentionProjectionSet,
 };
 
 const SPEC_MEDIA_TYPE: &str = "application/vnd.mfm.typed-execution-spec+json;version=1";
@@ -1912,14 +1911,18 @@ fn committed_run_stream_rejects_events_for_a_different_run() {
 }
 
 #[test]
-fn non_empty_payload_batch_rejects_empty_batches() {
+fn commit_request_rejects_empty_payloads() {
     assert!(matches!(
-        NonEmptyPayloadBatch::new(Vec::new()),
+        CommitRequest::from_payloads(
+            run_id(144),
+            StreamSeq::new(1).expect("seq"),
+            CommitKey::new("empty-request").expect("commit key"),
+            Vec::new(),
+            Vec::new(),
+            CommitPreconditions::default(),
+        ),
         Err(StoreError::EmptyCommit)
     ));
-    let batch = NonEmptyPayloadBatch::new(vec![run_admitted(run_id(144))]).expect("payload batch");
-    assert_eq!(batch.as_slice().len(), 1);
-    assert_eq!(batch.into_vec().len(), 1);
 }
 
 #[test]

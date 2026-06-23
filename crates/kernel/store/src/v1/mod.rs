@@ -1370,26 +1370,6 @@ pub struct CommitRequest {
 }
 
 impl CommitRequest {
-    /// Creates a typed commit request from a validated non-empty payload batch.
-    pub fn new(
-        run_id: RunId,
-        expected_next_seq: StreamSeq,
-        commit_key: CommitKey,
-        payloads: NonEmptyPayloadBatch,
-        required_artifacts: Vec<ArtifactEvidenceRef>,
-        preconditions: CommitPreconditions,
-    ) -> Result<Self> {
-        validate_payload_run_and_spec(&run_id, payloads.as_slice())?;
-        Ok(Self {
-            run_id,
-            expected_next_seq,
-            commit_key,
-            payloads: payloads.into_vec(),
-            required_artifacts,
-            preconditions,
-        })
-    }
-
     /// Creates a typed commit request after validating the raw payload collection.
     pub fn from_payloads(
         run_id: RunId,
@@ -1399,14 +1379,18 @@ impl CommitRequest {
         required_artifacts: Vec<ArtifactEvidenceRef>,
         preconditions: CommitPreconditions,
     ) -> Result<Self> {
-        Self::new(
+        if payloads.is_empty() {
+            return Err(StoreError::EmptyCommit);
+        }
+        validate_payload_run_and_spec(&run_id, &payloads)?;
+        Ok(Self {
             run_id,
             expected_next_seq,
             commit_key,
-            NonEmptyPayloadBatch::new(payloads)?,
+            payloads,
             required_artifacts,
             preconditions,
-        )
+        })
     }
 
     /// Returns the run id to append to.
@@ -1455,32 +1439,6 @@ impl CommitRequest {
     pub fn with_preconditions(mut self, preconditions: CommitPreconditions) -> Self {
         self.preconditions = preconditions;
         self
-    }
-}
-
-/// Non-empty ordered kernel payload batch.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NonEmptyPayloadBatch {
-    payloads: Vec<KernelEventPayload>,
-}
-
-impl NonEmptyPayloadBatch {
-    /// Creates a non-empty payload batch.
-    pub fn new(payloads: Vec<KernelEventPayload>) -> Result<Self> {
-        if payloads.is_empty() {
-            return Err(StoreError::EmptyCommit);
-        }
-        Ok(Self { payloads })
-    }
-
-    /// Returns the ordered payloads.
-    pub fn as_slice(&self) -> &[KernelEventPayload] {
-        &self.payloads
-    }
-
-    /// Consumes the batch into its ordered payloads.
-    pub fn into_vec(self) -> Vec<KernelEventPayload> {
-        self.payloads
     }
 }
 

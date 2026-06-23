@@ -17,22 +17,10 @@ impl PostgresSchema {
         Ok(())
     }
 
-    /// Applies migrations using the `DATABASE_URL` environment variable.
-    pub async fn migrate_env() -> Result<()> {
-        let database_url = database_url_env()?;
-        Self::migrate(&database_url).await
-    }
-
     /// Verifies that all expected migrations are applied and the schema contains required objects.
     pub async fn validate(database_url: &str) -> Result<()> {
         let pool = connect_pool(database_url).await?;
         validate_pool(&pool).await
-    }
-
-    /// Verifies schema compatibility using the `DATABASE_URL` environment variable.
-    pub async fn validate_env() -> Result<()> {
-        let database_url = database_url_env()?;
-        Self::validate(&database_url).await
     }
 }
 
@@ -54,10 +42,6 @@ pub(crate) async fn validate_pool(pool: &PgPool) -> Result<()> {
     validate_migrations(pool).await?;
     validate_catalog(pool).await?;
     validate_store_metadata(pool).await
-}
-
-fn database_url_env() -> Result<String> {
-    std::env::var("DATABASE_URL").map_err(|_| PostgresStoreError::Database("missing DATABASE_URL"))
 }
 
 async fn validate_migrations(pool: &PgPool) -> Result<()> {

@@ -232,60 +232,6 @@ pub(super) async fn read_retained_artifact_from_pool(
     }
 }
 
-pub(super) async fn read_artifact_from_pool(
-    pool: &PgPool,
-    request: &mfm_artifact_capabilities::ArtifactReadRequest,
-) -> mfm_artifact_capabilities::Result<mfm_artifact_capabilities::VerifiedArtifactBytes> {
-    let rows = sqlx::query(
-        "SELECT a.artifact_id, a.evidence_hash, a.digest, a.byte_len, a.media_type, a.schema_id, \
-         a.semantic_type_id, a.producer_node_id, a.producer_seed_id, a.artifact_role, b.bytes \
-         FROM artifact_admissions a \
-         INNER JOIN artifact_blobs b \
-           ON b.artifact_id = a.artifact_id AND b.digest = a.digest AND b.byte_len = a.byte_len \
-         WHERE a.artifact_id = $1 ORDER BY a.evidence_hash",
-    )
-    .bind(request.artifact_id().as_str())
-    .fetch_all(pool)
-    .await
-    .map_err(mfm_artifact_capabilities::ArtifactReadError::redacted_backend_failure)?;
-    if rows.is_empty() {
-        return Err(mfm_artifact_capabilities::ArtifactReadError::NotFound {
-            artifact_id: Box::new(request.artifact_id().clone()),
-        });
-    }
-
-    let mut saw_mismatch = false;
-    for row in rows {
-        let record = artifact_record_from_row(row)
-            .map_err(mfm_artifact_capabilities::ArtifactReadError::redacted_backend_failure)?;
-        let evidence = mfm_artifact_capabilities::ArtifactEvidenceRef::from(record.evidence);
-        match mfm_artifact_capabilities::VerifiedArtifactBytes::new(
-            record.artifact_bytes,
-            evidence,
-            request,
-        ) {
-            Ok(verified) => return Ok(verified),
-            Err(mfm_artifact_capabilities::ArtifactReadError::EvidenceMismatch { .. }) => {
-                saw_mismatch = true;
-            }
-            Err(error) => return Err(error),
-        }
-    }
-
-    if saw_mismatch {
-        Err(
-            mfm_artifact_capabilities::ArtifactReadError::EvidenceMismatch {
-                artifact_id: Box::new(request.artifact_id().clone()),
-                field: "artifact",
-            },
-        )
-    } else {
-        Err(mfm_artifact_capabilities::ArtifactReadError::NotFound {
-            artifact_id: Box::new(request.artifact_id().clone()),
-        })
-    }
-}
-
 pub(super) struct ArtifactEvidenceParts {
     pub(super) artifact_id: ArtifactId,
     pub(super) digest: String,
