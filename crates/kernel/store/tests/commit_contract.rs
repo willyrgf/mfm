@@ -32,7 +32,6 @@ use mfm_store::v1::{
     RunState, SagaAdmitToken, SagaEngagementProjection, SagaEngagementReason, SagaTerminal,
     SagaTerminalProof, SideEffectLedgerPhase, SideEffectLedgerRef, SideEffectPhase,
     SideEffectProgress, SideEffectTerminal, StateAttemptStarted, StoreError, StreamSeq,
-    VerifiedRetentionProjection, VerifiedRetentionProjectionSet,
 };
 
 const SPEC_MEDIA_TYPE: &str = "application/vnd.mfm.typed-execution-spec+json;version=1";
@@ -6809,13 +6808,19 @@ fn retention_refs_are_projected_from_authoritative_stream() {
         })
         .expect("append retention refs");
 
-    let stream = store.load_run_stream(&run_id);
-    let verified = VerifiedRetentionProjection::from_synthetic_run_stream(run_id.clone(), &stream)
-        .expect("verified retention");
-    assert!(verified.retains_artifact(&evidence));
+    let snapshot = ProjectionSnapshot::rebuild_from_run_stream(&store.load_run_stream(&run_id))
+        .expect("retention snapshot");
+    let retention = snapshot.retention(&run_id).expect("retention projection");
     assert_eq!(
-        verified
-            .projection()
+        retention
+            .refs
+            .get(&artifact_id)
+            .expect("retention ref")
+            .role,
+        ArtifactRole::StateOutput
+    );
+    assert_eq!(
+        retention
             .refs
             .get(&artifact_id)
             .expect("retention ref")
@@ -7048,16 +7053,10 @@ fn retention_manifest_projection_must_chain_append_only() {
             .previous_manifest_digest,
         Some(first_digest)
     );
-    let stream = store.load_run_stream(&run_id);
-    let verified = VerifiedRetentionProjectionSet::from_synthetic_run_streams(vec![(
-        run_id.clone(),
-        stream.as_slice(),
-    )])
-    .expect("verified retention set");
-    assert!(verified.retains_artifact(&retention_manifest_artifact_ref(
-        artifact_id(125),
-        second_digest,
-    )));
+    assert!(retention.manifests.values().any(|manifest| {
+        manifest.manifest_artifact_id == artifact_id(125)
+            && manifest.manifest_digest == second_digest
+    }));
 }
 
 #[test]
