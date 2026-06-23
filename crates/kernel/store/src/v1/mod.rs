@@ -933,7 +933,7 @@ pub struct SagaTerminalProof {
 
 #[derive(Debug, Clone)]
 enum SagaTerminalProofKind {
-    Completed(events::PublicOutputCompletionEvidence),
+    Completed(Box<events::PublicOutputCompletionEvidence>),
     Compensated,
     ManuallyResolved,
     FailedWithoutAcdcClaim,
@@ -988,7 +988,7 @@ impl SagaTerminalProof {
                         message: "completed proof requires completed run projection".to_owned(),
                     });
                 };
-                (SagaTerminalProofKind::Completed((**evidence).clone()), None)
+                (SagaTerminalProofKind::Completed(evidence.clone()), None)
             }
             RunMode::Forward | RunMode::Remediating | RunMode::ManualBlocked => {
                 return Err(StoreError::ProjectionConflict {
@@ -1028,7 +1028,7 @@ impl SagaTerminalProof {
     pub fn outcome(&self) -> events::RunCompletionOutcome {
         match &self.kind {
             SagaTerminalProofKind::Completed(evidence) => {
-                events::RunCompletionOutcome::Completed(Box::new(evidence.clone()))
+                events::RunCompletionOutcome::Completed(evidence.clone())
             }
             SagaTerminalProofKind::Compensated => events::RunCompletionOutcome::Compensated,
             SagaTerminalProofKind::ManuallyResolved => {
