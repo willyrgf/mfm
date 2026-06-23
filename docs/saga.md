@@ -166,9 +166,13 @@ transition sequence, and records the matching `resource_lane_claim_events` and
 
 Ordinary contention returns `ResourceLaneClaimBlocked`. That outcome parks the open attempt before
 live IO; it is not a run event, not lane-transition authority, not a persisted read-model fact, and
-never authorizes attempt, saga, or run terminal failure. Parked attempts retry with bounded backoff
-and may wake on lane-release notifications, but notifications are only wakeups; the durable signal is
-the append-only lane authority.
+never authorizes attempt, saga, or run terminal failure. For single-lane exclusive claims, Postgres
+may insert or refresh a mutable operational waiter row so retry admission is FIFO among live
+non-expired waiters. That waiter row is not lane ownership authority, cannot grant execution, and is
+skipped once claimed, cancelled, or expired. Parked attempts retry with bounded backoff and may wake
+on lane-release notifications, but notifications are only wakeups; the durable ownership signal is
+the append-only lane authority, and the FIFO signal is rechecked by store admission before any claim
+materializes.
 
 The no-deadlock invariant is structural: an attempt claims all required exclusive lanes in one
 all-or-nothing claim commit and never holds one lane while issuing a second blocking claim. Lanes
@@ -214,7 +218,9 @@ The following remain outside the current certified saga contract:
 - per-obligation manual targeting;
 - generic retry/replan/continuation policy;
 - cancellation semantics against remediation;
-- lane fairness, queueing, deadlock detection, or global scheduling policy.
+- multi-lane lane fairness, deadlock detection, or global scheduling policy.
 
-Lane fairness and queueing remain outside the current certified saga contract; callers must not
-assume starvation freedom under sustained single-lane contention.
+Generic lane fairness and queueing remain outside the current certified saga contract. The only v1
+fairness guarantee is the Postgres operational FIFO rule for live non-expired waiters on a single
+exclusive lane claim; callers must not assume starvation freedom for multi-lane claims or for waiters
+whose leases are not refreshed.

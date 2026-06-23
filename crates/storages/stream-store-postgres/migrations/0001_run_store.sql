@@ -250,6 +250,43 @@ CREATE TABLE resource_lane_transitions (
   UNIQUE (release_id)
 );
 
+CREATE TABLE resource_lane_waiter_counters (
+  lane_id BYTEA PRIMARY KEY,
+  next_ticket BIGINT NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp(),
+  CONSTRAINT resource_lane_waiter_counters_lane_id_len CHECK (octet_length(lane_id) = 32),
+  CONSTRAINT resource_lane_waiter_counters_next_ticket_positive CHECK (next_ticket >= 1)
+);
+
+CREATE TABLE resource_lane_waiters (
+  waiter_id TEXT PRIMARY KEY,
+  lane_id BYTEA NOT NULL,
+  lane_ticket BIGINT NOT NULL,
+  run_id TEXT NOT NULL,
+  node_id TEXT NOT NULL,
+  attempt_id TEXT NOT NULL,
+  ledger_key TEXT NOT NULL,
+  invocation_epoch INTEGER NOT NULL,
+  claim_fingerprint TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('waiting', 'claimed', 'cancelled', 'expired')),
+  enqueued_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp(),
+  lease_expires_at TIMESTAMPTZ NOT NULL,
+  CONSTRAINT resource_lane_waiters_lane_id_len CHECK (octet_length(lane_id) = 32),
+  CONSTRAINT resource_lane_waiters_lane_ticket_positive CHECK (lane_ticket >= 1),
+  CONSTRAINT resource_lane_waiters_invocation_epoch_nonnegative CHECK (invocation_epoch >= 0),
+  UNIQUE (lane_id, lane_ticket),
+  UNIQUE (lane_id, claim_fingerprint)
+);
+
+CREATE INDEX resource_lane_waiters_live_fifo_idx
+ON resource_lane_waiters (lane_id, status, lane_ticket)
+WHERE status = 'waiting';
+
+CREATE INDEX resource_lane_waiters_expiry_idx
+ON resource_lane_waiters (status, lease_expires_at)
+WHERE status = 'waiting';
+
 CREATE TABLE run_commit_log (
   commit_id TEXT PRIMARY KEY REFERENCES commits(commit_id) ON DELETE RESTRICT,
   run_id TEXT NOT NULL,

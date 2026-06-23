@@ -137,6 +137,27 @@ async fn validate_catalog(pool: &PgPool) -> Result<()> {
         }
     }
 
+    let index_rows = sqlx::query(
+        "SELECT indexname \
+         FROM pg_indexes \
+         WHERE schemaname = current_schema()",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| PostgresStoreError::Database("failed to inspect schema indexes"))?;
+    let indexes = index_rows
+        .into_iter()
+        .map(|row| row.try_get::<String, _>("indexname"))
+        .collect::<std::result::Result<BTreeSet<_>, _>>()
+        .map_err(|_| PostgresStoreError::Database("failed to decode schema indexes"))?;
+    for index in REQUIRED_INDEXES {
+        if !indexes.contains(*index) {
+            return Err(PostgresStoreError::Database(
+                "required schema index missing",
+            ));
+        }
+    }
+
     let trigger_rows = sqlx::query(
         "SELECT trigger_name \
          FROM information_schema.triggers \
@@ -451,6 +472,8 @@ const REQUIRED_TABLES: &[&str] = &[
     "resource_lane_claim_events",
     "resource_lane_release_events",
     "resource_lane_transitions",
+    "resource_lane_waiter_counters",
+    "resource_lane_waiters",
     "run_commit_log",
     "run_observation_change_summaries",
     "observation_derivations",
@@ -459,6 +482,11 @@ const REQUIRED_TABLES: &[&str] = &[
 ];
 
 const REQUIRED_VIEWS: &[&str] = &["current_run_observations"];
+
+const REQUIRED_INDEXES: &[&str] = &[
+    "resource_lane_waiters_live_fifo_idx",
+    "resource_lane_waiters_expiry_idx",
+];
 
 const REQUIRED_FUNCTIONS: &[&str] = &["mfm_set_append_xid", "mfm_reject_authority_mutation"];
 
@@ -484,6 +512,11 @@ const REQUIRED_TRIGGERS: &[&str] = &[
 
 const REQUIRED_CONSTRAINTS: &[&str] = &[
     "artifact_blobs_byte_len_max",
+    "resource_lane_waiter_counters_lane_id_len",
+    "resource_lane_waiter_counters_next_ticket_positive",
+    "resource_lane_waiters_lane_id_len",
+    "resource_lane_waiters_lane_ticket_positive",
+    "resource_lane_waiters_invocation_epoch_nonnegative",
     "run_observation_cursors_version_v1",
     "run_observation_cursors_sort_key_v1_length",
 ];

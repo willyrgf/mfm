@@ -11,6 +11,8 @@ Authority roles:
   mint execution, replay, retention, artifact, or lane authority.
 - `rebuildable cache`: data that is recomputable from strict authority rows and must be treated as
   stale or corrupt until reverified against those rows.
+- `operational coordination`: mutable store-owned rows used to coordinate admission or process
+  behavior. They are not replay, resume, side-effect, lane ownership, or public-output authority.
 - `operational telemetry`: runtime metadata used for paging, readiness, diagnostics, or process
   operation. It is not semantic run authority.
 - `public output`: data intentionally returned to users by CLI/REST. It must not contain secrets and
@@ -26,6 +28,7 @@ Authority roles:
 | Commit authority bytes | `commits.idempotency_canonical_json`, `prepared_authority_canonical_json`, `commit_batch_canonical_json` | No secrets allowed. | strict authority | Strict load revalidates canonicalizer identity, hash-domain version, commit id, idempotency hash, prepared authority hash, and final batch hash. |
 | Event canonical bytes | `run_events.payload_canonical_json`, `payload_hash`, event identity columns | No secrets allowed. | strict authority | Strict load reconstructs typed envelopes and cross-checks run id, seq, ordinal, commit key, event id, schema id, spec hash, logical key, payload hash, and canonical payload bytes. |
 | Resource lane authority rows | `resource_lane_claim_events`, `resource_lane_release_events`, `resource_lane_transitions` | No secrets allowed. Lane keys and ledger keys are non-secret coordination identities. | strict authority | Strict load validates lane id derivation, source event bindings, transition hash chains, fencing token monotonicity, active-holder fold, and release legality. |
+| Resource lane waiter rows | `resource_lane_waiter_counters`, `resource_lane_waiters` | No secrets allowed. Stores derived lane ids, run/node/attempt ids, ledger keys, deterministic waiter ids, tickets, status, and lease timestamps. | operational coordination | Mutable Postgres-only FIFO admission state for single-lane exclusive claims after prepared-commit semantic validation. These rows may be inserted/refreshed by `ResourceLaneClaimBlocked`, are skipped when claimed/cancelled/expired, and never grant lane ownership or replace `ResourceLaneClaimed`/`ResourceLaneReleased`/`resource_lane_transitions` authority. Expired/cancelled retries reuse the deterministic waiter id with a fresh lane-local ticket. |
 | Observation summaries | `run_observation_change_summaries` | No secrets allowed. | observation, rebuildable cache | Used by list/watch. Corruption cannot affect strict status/resume/replay/public-output reads. |
 | Observation provenance | `observation_derivations`, `observation_derivation_sources` | No secrets allowed. | observation, rebuildable cache | Records source event/prefix provenance for observation rows. |
 | Cursor metadata | `run_observation_cursors` | No secrets. Contains internal append XIDs, sort keys, store epochs, key ids, and cursor versions that must not be exposed. | operational telemetry | Server-issued opaque tokens are epoch-bound and no-TTL in v1. Unknown, missing, retired-key, or stale-format rows are invalid; epoch mismatch expires. |

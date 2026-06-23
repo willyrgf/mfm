@@ -780,26 +780,41 @@ cross-run concurrency claim for it beyond schema checks, exactly as today. `Manu
 Capabilities whose exclusive resource identity is not deterministically derivable before live IO
 cannot use the exclusive lane lifecycle (see the resolver purity rules below).
 
-**No-deadlock invariant.** `docs/saga.md` lists deadlock detection, fairness, and queueing as
-deferred. This design does not reintroduce them through the back door, so it must structurally exclude
-the deadlock class instead of detecting it. The invariant is: **an attempt acquires every exclusive
-lane it needs in a single `ResourceLaneClaimed` commit, all-or-nothing, under sorted per-lane
-admission locks; it never holds a committed lane while issuing a second, separately blocking claim.**
-Sorted locks make the single multi-lane claim free of lock-ordering deadlock, and all-or-nothing
-admission (return `ResourceLaneClaimBlocked` if any lane in the set conflicts, holding nothing) makes
-hold-and-wait impossible. Strict load and append admission must reject any history in which an open
-attempt holds an active lane and then commits a further `ResourceLaneClaimed`, because that shape can
-deadlock across runs. In v1 a side effect needs at most one lane, so the common path is a single-lane
-claim; the invariant is what keeps multi-lane requirements safe if they appear.
+**No-deadlock invariant.** Deadlock detection and global scheduling policy remain outside the saga
+contract. The design structurally excludes the deadlock class instead of detecting it: **an attempt
+acquires every exclusive lane it needs in a single `ResourceLaneClaimed` commit, all-or-nothing,
+under sorted per-lane admission locks; it never holds a committed lane while issuing a second,
+separately blocking claim.** Sorted locks make the single multi-lane claim free of lock-ordering
+deadlock, and all-or-nothing admission (return `ResourceLaneClaimBlocked` if any lane in the set
+conflicts, holding nothing) makes hold-and-wait impossible. Strict load and append admission must
+reject any history in which an open attempt holds an active lane and then commits a further
+`ResourceLaneClaimed`, because that shape can deadlock across runs. In v1 a side effect needs at most
+one lane, so the common path is a single-lane claim; the invariant is what keeps multi-lane
+requirements safe if they appear.
 
-**Liveness.** Contention resolution is park-and-retry (`ResourceLaneClaimBlocked`), which is not
-itself fair. v1 accepts best-effort liveness because exclusive lanes (e.g. EVM `{chain_id, account}`)
-are naturally low-contention, but it must bound the failure modes: claim retries use capped
-exponential backoff with jitter, a parked attempt is woken by `LISTEN/NOTIFY` on lane release and by
-a periodic floor poll (never trusting the notification as the sole signal), and a parked attempt is
-never converted into a failure by contention alone. Starvation under sustained contention on a single
-lane remains a known limitation; a fair queue is deferred to the same future work `docs/saga.md`
-already names, and must not be silently assumed by callers.
+**Single-lane FIFO liveness.** For the practical v1 case of one exclusive lane in a claim commit,
+Postgres admission maintains a lane-local FIFO waiter queue under the same per-lane advisory
+transaction lock used for authority admission. Waiter rows are mutable operational admission state;
+they are not semantic replay authority, do not grant ownership, and do not replace
+`ResourceLaneClaimed`, `ResourceLaneReleased`, or `resource_lane_transitions` as the only durable lane
+ownership/order authority. A single-lane exclusive claim may materialize only when no active
+authoritative holder exists and either no live waiter exists for the lane or this claim is the oldest
+live waiter. A later live waiter may bypass an earlier waiter only after the earlier waiter is marked
+`claimed`, `cancelled`, or `expired`. FIFO is therefore guaranteed only among live non-expired
+waiters for single-lane exclusive claims; multi-lane claims must not be described as fair until a
+separate atomic multi-lane FIFO design lands.
+
+`ResourceLaneClaimBlocked` may insert or refresh one non-authoritative waiter row so the claimant can
+retain its FIFO position on retry. It still persists no run event, commit, resource-lane claim,
+resource-lane release, lane-transition, or other MFM domain authority row. Claim retries use bounded
+backoff and refresh the waiter lease; expired waiters can be skipped. A retry for a deterministic
+claim fingerprint reuses the same operational waiter id; if its prior row was `expired` or
+`cancelled`, the row is reactivated with a fresh lane-local ticket rather than preserving stale
+priority. The store stages and validates the prepared commit before enqueueing any waiter, so
+malformed or otherwise semantically invalid claims cannot occupy the FIFO head. `LISTEN/NOTIFY` on
+release is a wake hint only, never a grant and never required for correctness, because waiters must
+re-read and pass store-side FIFO admission before ownership materializes. Ordinary contention never
+converts the parked attempt into a failure by itself.
 
 The capability contract should expose lane requirements as typed authority, for example:
 
@@ -875,19 +890,22 @@ admission must reject `ResourceLaneClaimed` unless it is preceded by a separate 
 `StateAttemptStarted` for the same `(run_id, node_id, attempt_id)`.
 
 Normal contention is not corruption and not an attempt failure. If the claim intent is valid but an
-active conflicting lane exists, the store returns `ResourceLaneClaimBlocked` without inserting a
-commit, run event, lane mirror row, or terminal attempt event. The attempt remains open and parked
-before invocation. Scheduler/recovery may retry claim admission when the conflicting lane releases,
-run independent work with a scoped independence witness, or keep the attempt parked. A blocked lane
-claim by itself must never authorize `StateAttemptFailed`, saga failure, run failure, or any terminal
-attempt disposition. Termination requires separate certified cancellation, interruption, timeout, or
-operator policy unrelated to ordinary lane contention, committed through the normal prepared
-authority path. Because no authority row is committed, this blocked outcome must not be persisted in
-MFM domain tables or Postgres read-model tables as if it were derived from committed history. It may
-be emitted as ephemeral logs/metrics or stored only in non-authoritative operational telemetry
-outside the MFM transition/read-model schema. Public list/watch may derive lane-blocked display from
-verified open-attempt history plus active lane transition authority at read time, or omit that
-display.
+active conflicting lane or earlier live waiter exists, the store returns `ResourceLaneClaimBlocked`
+without inserting a commit, run event, lane mirror row, lane-transition row, or terminal attempt
+event. For single-lane exclusive claims, Postgres may insert or refresh one mutable operational
+waiter row used only for FIFO admission; that row is not MFM domain authority and cannot authorize
+ownership, replay, status, or terminal outcome. The attempt remains open and parked before
+invocation. Scheduler/recovery may retry claim admission when the conflicting lane releases or its
+waiter lease is refreshed, run independent work with a scoped independence witness, or keep the
+attempt parked. A blocked lane claim by itself must never authorize `StateAttemptFailed`, saga
+failure, run failure, or any terminal attempt disposition. Termination requires separate certified
+cancellation, interruption, timeout, or operator policy unrelated to ordinary lane contention,
+committed through the normal prepared authority path. Because no authority row is committed, this
+blocked outcome must not be persisted in MFM domain tables or Postgres read-model tables as if it were
+derived from committed history. It may be emitted as ephemeral logs/metrics or stored only in
+non-authoritative operational coordination/telemetry outside the MFM transition/read-model authority
+schema. Public list/watch may derive lane-blocked display from verified open-attempt history plus
+active lane transition authority at read time, or omit that display.
 
 Crash behavior is stream-driven:
 
@@ -2146,9 +2164,11 @@ here; it is part of this merge gate, not optional follow-up.
 - how the three claim kinds map onto lanes: `Exclusive` takes a lane, `ExactTouchedSet` and
   `ManualOnly` take none
 - store-assigned lane-local fencing tokens and `resource_lane_transitions` as lane order authority
-- `ResourceLaneClaimBlocked` as a parked-attempt outcome that never authorizes terminal failure
-- the no-deadlock single-claim invariant and the v1 best-effort liveness/backoff story, with fairness
-  still deferred (its "Deferred" list should be reconciled to say what v1 now provides vs. defers)
+- `ResourceLaneClaimBlocked` as a parked-attempt outcome that never authorizes terminal failure and
+  may persist only non-authoritative operational waiter state
+- the no-deadlock single-claim invariant and the v1 liveness story: bounded retry/backoff, optional
+  wake hints, and Postgres FIFO only among live non-expired waiters for single-lane exclusive claims;
+  multi-lane fairness remains deferred
 
 CLI and REST docs must also be updated when the public list/watch routes and commands are added.
 
@@ -2300,9 +2320,12 @@ Required new tests:
 - idempotent commit-key retry still wins before stale sequence checks
 - cross-run resource-lane contention admits only one conflicting claimant
 - valid resource-lane contention returns `ResourceLaneClaimBlocked`, leaves the stream unchanged,
-  and parks the already-started attempt before invocation
-- `ResourceLaneClaimBlocked` does not insert MFM domain rows or persisted Postgres read-model facts
-  that claim derivation from committed history
+  and parks the already-started attempt before invocation; for single-lane exclusive claims it may
+  insert or refresh one mutable operational waiter row that carries no semantic authority
+- `ResourceLaneClaimBlocked` does not insert MFM domain rows, lane-transition rows, or persisted
+  Postgres read-model facts that claim derivation from committed history
+- single-lane exclusive claims are admitted by live-waiter FIFO under the lane advisory transaction
+  lock: a later live waiter cannot materialize while an earlier live waiter remains waiting
 - independent cross-run appends that do not share resource lanes can commit concurrently
 - same chain/account EVM mutation runs cannot both reach nonce read, signing, or submission
 - different chain/account EVM mutation runs can execute concurrently
@@ -2396,10 +2419,12 @@ Required new tests:
   Lane identity is a fixed-width derived `lane_id`, not a repeated descriptor tuple, keeping the large
   `key_canonical_json` out of every key/index/FK.
 - Resource-lane contention is represented as `ResourceLaneClaimBlocked`, which leaves the stream
-  unchanged and parks the already-started attempt before invocation. The no-deadlock invariant is
-  structural: an attempt claims all its lanes in one all-or-nothing commit and never holds a lane
-  while issuing a second blocking claim. v1 liveness is best-effort (capped backoff + release wakeups);
-  fairness/queueing remain deferred.
+  unchanged and parks the already-started attempt before invocation. For single-lane exclusive claims,
+  Postgres may persist/refresh a mutable operational waiter row for FIFO admission; the row is not
+  stream or lane ownership authority. The no-deadlock invariant is structural: an attempt claims all
+  its lanes in one all-or-nothing commit and never holds a lane while issuing a second blocking claim.
+  v1 liveness uses capped backoff, optional release wakeups, and store-enforced FIFO only among live
+  non-expired single-lane waiters; multi-lane fairness remains out of scope.
 - Resource-lane fencing tokens are store-assigned, lane-local, monotonic values filled during claim
   admission under the concrete lane lock.
 - Resource-lane claim/release order is durable lane-local authority in `resource_lane_transitions`,

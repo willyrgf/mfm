@@ -18,9 +18,10 @@ use mfm_store::v1::{
     EventArtifactRequirement, KernelEventEnvelope, LogicalEventKey, ObservedRunStatus,
     PersistedKernelEventRecord, PreparedArtifactBytes, PreparedCommitBundle, ProjectionSnapshot,
     ProjectionSnapshotParts, ResourceLaneAuthoritySet, ResourceLaneKey, ResourceLaneProjection,
-    RetainedArtifactReadFuture, RetainedArtifactReadProvider, RunEventStore, RunObservation,
-    RunObservationPage, RunObservationQuery, RunObservationStore, RunState, StagedCommitOutcome,
-    StoreError, StoreErrorInspection, StreamSeq, VerifiedRunArtifactBytes,
+    ResourceLaneWaiterBlock, RetainedArtifactReadFuture, RetainedArtifactReadProvider,
+    RunEventStore, RunObservation, RunObservationPage, RunObservationQuery, RunObservationStore,
+    RunState, StagedCommitOutcome, StoreError, StoreErrorInspection, StreamSeq,
+    VerifiedRunArtifactBytes,
 };
 use ring::hmac;
 use serde_json::Value;
@@ -96,7 +97,11 @@ const RUN_PREFIX_SOURCE_KIND: &str = "run_prefix";
 const CURSOR_VERSION: &str = "mfm.run_observation.cursor.v1";
 const OBSERVATION_NOTIFY_CHANNEL: &str = "mfm_run_observation";
 const OBSERVATION_NOTIFY_PAYLOAD: &str = "changed";
+const OBSERVATION_WAIT_POLL_INTERVAL_MS: u64 = 50;
 const RESOURCE_LANE_ID_DOMAIN: &[u8] = b"mfm.resource_lane.id.v1";
+const RESOURCE_LANE_WAITER_FINGERPRINT_DOMAIN: &[u8] = b"mfm.resource_lane.waiter.fingerprint.v1";
+const RESOURCE_LANE_WAITER_ID_DOMAIN: &[u8] = b"mfm.resource_lane.waiter.id.v1";
+const RESOURCE_LANE_WAITER_LEASE_SECS: i32 = 60;
 const MAX_ARTIFACT_BLOB_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_OBSERVATION_LIMIT: u32 = 100;
 
@@ -192,7 +197,10 @@ impl PostgresRunStore {
         verify_prepared_artifact_bundle_tx(&mut tx, &bundle).await?;
         let mut artifacts = load_artifacts(&mut tx, request.run_id()).await?;
         admit_artifact_evidence(&mut artifacts, bundle.admitted_artifacts())?;
-        lock_resource_lanes_for_request_tx(&mut tx, request).await?;
+        let locked_resource_lane_ids = lock_resource_lanes_for_request_tx(&mut tx, request).await?;
+        for lane_id in &locked_resource_lane_ids {
+            expire_stale_waiters_tx(&mut tx, lane_id).await?;
+        }
         let (run_projection, stream_head) =
             rebuild_projection_snapshot_with_head(&mut tx, request.run_id()).await?;
         if stream_head != head {
@@ -203,21 +211,40 @@ impl PostgresRunStore {
         let resource_lanes = load_active_resource_lanes_tx(&mut tx).await?;
         let resource_lane_authority = load_resource_lane_authority_tx(&mut tx).await?;
         let projections = projection_snapshot_with_resource_lanes(&run_projection, resource_lanes)?;
+        let claim_admission = single_lane_claim_admission(request)?;
         let base = CommitBase {
             artifacts,
             logical_keys: load_logical_keys(&mut tx, request.run_id()).await?,
             unique_logical_payloads: load_unique_logical_payloads(&mut tx, request.run_id())
                 .await?,
-            projections,
+            projections: projections.clone(),
             resource_lane_authority,
             actual_next_seq: next_seq_from_head(head)?,
         };
         let staged = match stage_prepared_commit_plan(&base, plan)? {
             StagedCommitOutcome::Staged(staged) => *staged,
             StagedCommitOutcome::ResourceLaneClaimBlocked(block) => {
+                if let Some(admission) = &claim_admission {
+                    let mut block = *block;
+                    block.waiter = Some(enqueue_or_refresh_waiter_tx(&mut tx, admission).await?);
+                    tx.commit().await.map_err(|_| {
+                        PostgresStoreError::Database("failed to commit transaction")
+                    })?;
+                    return Ok(CommitOutcome::ResourceLaneClaimBlocked(Box::new(block)));
+                }
                 return Ok(CommitOutcome::ResourceLaneClaimBlocked(block));
             }
         };
+        if let Some(admission) = &claim_admission {
+            if let Some(block) =
+                resource_lane_fifo_pre_gate_tx(&mut tx, &projections, admission).await?
+            {
+                tx.commit()
+                    .await
+                    .map_err(|_| PostgresStoreError::Database("failed to commit transaction"))?;
+                return Ok(CommitOutcome::ResourceLaneClaimBlocked(Box::new(block)));
+            }
+        }
         let batch = staged.batch().clone();
         let commit_id = derive_commit_id(
             request.run_id(),
@@ -296,6 +323,9 @@ impl PostgresRunStore {
         }
         let source_event_count = count_run_events_tx(&mut tx, request.run_id()).await?;
         insert_resource_lane_authority_rows_tx(&mut tx, &commit_id, batch.events()).await?;
+        if let Some(admission) = &claim_admission {
+            mark_waiter_claimed_tx(&mut tx, admission).await?;
+        }
         insert_run_commit_log_tx(
             &mut tx,
             request,
@@ -499,10 +529,11 @@ async fn read_run_observations_from_pool(
             else {
                 break;
             };
-            let notified = wait_for_observation_change(listener, remaining).await?;
+            let wait = remaining.min(Duration::from_millis(OBSERVATION_WAIT_POLL_INTERVAL_MS));
+            let notified = wait_for_observation_change(listener, wait).await?;
             page = read_run_observation_page_once(pool, &metadata, cursor.as_ref(), query.limit)
                 .await?;
-            if !notified {
+            if !notified && wait == remaining {
                 break;
             }
         }
@@ -2299,7 +2330,7 @@ fn advisory_object_id(bytes: &[u8]) -> i32 {
 async fn lock_resource_lanes_for_request_tx(
     tx: &mut Transaction<'_, Postgres>,
     request: &mfm_store::v1::CommitRequest,
-) -> Result<()> {
+) -> Result<BTreeSet<Vec<u8>>> {
     let mut lane_ids = BTreeSet::<Vec<u8>>::new();
     for payload in request.payloads() {
         match payload {
@@ -2312,10 +2343,10 @@ async fn lock_resource_lanes_for_request_tx(
             _ => {}
         }
     }
-    for lane_id in lane_ids {
-        lock_resource_lane_tx(tx, &lane_id).await?;
+    for lane_id in &lane_ids {
+        lock_resource_lane_tx(tx, lane_id).await?;
     }
-    Ok(())
+    Ok(lane_ids)
 }
 
 async fn lock_resource_lane_tx(tx: &mut Transaction<'_, Postgres>, lane_id: &[u8]) -> Result<()> {
@@ -2355,6 +2386,268 @@ fn resource_lane_id(evidence: &events::ResourceKeyEvidence) -> Result<[u8; 32]> 
     lane_id[0] = 1;
     lane_id[1..].copy_from_slice(&digest.as_bytes()[..31]);
     Ok(lane_id)
+}
+
+struct ResourceLaneClaimAdmission {
+    lane_id: Vec<u8>,
+    lane_key: ResourceLaneKey,
+    holder: mfm_store::v1::SideEffectLedgerRef,
+    run_id: RunId,
+    node_id: NodeId,
+    attempt_id: mfm_ids::AttemptId,
+    ledger_key: events::SideEffectLedgerKey,
+    invocation_epoch: u32,
+    claim_fingerprint: String,
+}
+
+struct ResourceLaneWaiterRow {
+    claim_fingerprint: String,
+}
+
+fn single_lane_claim_admission(
+    request: &mfm_store::v1::CommitRequest,
+) -> Result<Option<ResourceLaneClaimAdmission>> {
+    let mut claims = request.payloads().iter().filter_map(|payload| {
+        if let events::KernelEventPayload::ResourceLaneClaimIntent(intent) = payload {
+            Some(intent)
+        } else {
+            None
+        }
+    });
+    let Some(intent) = claims.next() else {
+        return Ok(None);
+    };
+    if claims.next().is_some() {
+        return Ok(None);
+    }
+    let lane_id = resource_lane_id(&intent.resource_key)?.to_vec();
+    let lane_key = ResourceLaneKey::from_evidence(&intent.resource_key);
+    let holder = mfm_store::v1::SideEffectLedgerRef::new(
+        request.run_id().clone(),
+        intent.ledger_key.clone(),
+    );
+    let claim_fingerprint = resource_lane_claim_fingerprint(request.run_id(), &lane_id, intent)?;
+    Ok(Some(ResourceLaneClaimAdmission {
+        lane_id,
+        lane_key,
+        holder,
+        run_id: request.run_id().clone(),
+        node_id: intent.node_id.clone(),
+        attempt_id: intent.attempt_id.clone(),
+        ledger_key: intent.ledger_key.clone(),
+        invocation_epoch: intent.invocation_epoch,
+        claim_fingerprint,
+    }))
+}
+
+fn resource_lane_claim_fingerprint(
+    run_id: &RunId,
+    lane_id: &[u8],
+    intent: &events::ResourceLaneClaimIntent,
+) -> Result<String> {
+    let canonical = canonical_json(serde_json::json!({
+        "attempt_id": intent.attempt_id.as_str(),
+        "domain": String::from_utf8_lossy(RESOURCE_LANE_WAITER_FINGERPRINT_DOMAIN),
+        "invocation_epoch": intent.invocation_epoch,
+        "lane_id": bytes_hex(lane_id),
+        "ledger_key": intent.ledger_key.as_str(),
+        "node_id": intent.node_id.as_str(),
+        "requirement_digest": intent.requirement_digest.as_str(),
+        "resolved_by_capability_impl": intent.resolved_by_capability_impl.as_str(),
+        "run_id": run_id.as_str(),
+    }))?;
+    let mut input = Vec::with_capacity(
+        RESOURCE_LANE_WAITER_FINGERPRINT_DOMAIN.len() + canonical.as_bytes().len(),
+    );
+    input.extend_from_slice(RESOURCE_LANE_WAITER_FINGERPRINT_DOMAIN);
+    input.extend_from_slice(canonical.as_bytes());
+    Ok(bytes_hex(sha256_digest_bytes(&input).as_bytes()))
+}
+
+fn resource_lane_waiter_id(claim_fingerprint: &str) -> String {
+    let mut input =
+        Vec::with_capacity(RESOURCE_LANE_WAITER_ID_DOMAIN.len() + claim_fingerprint.len());
+    input.extend_from_slice(RESOURCE_LANE_WAITER_ID_DOMAIN);
+    input.extend_from_slice(claim_fingerprint.as_bytes());
+    format!(
+        "resource_lane_waiter:{}",
+        bytes_hex(sha256_digest_bytes(&input).as_bytes())
+    )
+}
+
+async fn resource_lane_fifo_pre_gate_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    projections: &ProjectionSnapshot,
+    admission: &ResourceLaneClaimAdmission,
+) -> Result<Option<mfm_store::v1::ResourceLaneClaimBlock>> {
+    if let Some(active) = projections.resource_lane(&admission.lane_key) {
+        if active.holder != admission.holder {
+            let waiter = enqueue_or_refresh_waiter_tx(tx, admission).await?;
+            return Ok(Some(mfm_store::v1::ResourceLaneClaimBlock {
+                lane_key: admission.lane_key.clone(),
+                holder: Some(active.holder.clone()),
+                waiter: Some(waiter),
+            }));
+        }
+    }
+
+    if let Some(head) = oldest_live_waiter_tx(tx, &admission.lane_id).await? {
+        if head.claim_fingerprint != admission.claim_fingerprint {
+            let waiter = enqueue_or_refresh_waiter_tx(tx, admission).await?;
+            return Ok(Some(mfm_store::v1::ResourceLaneClaimBlock {
+                lane_key: admission.lane_key.clone(),
+                holder: None,
+                waiter: Some(waiter),
+            }));
+        }
+    }
+    Ok(None)
+}
+
+async fn expire_stale_waiters_tx(tx: &mut Transaction<'_, Postgres>, lane_id: &[u8]) -> Result<()> {
+    sqlx::query(
+        "UPDATE resource_lane_waiters \
+         SET status = 'expired', updated_at = statement_timestamp() \
+         WHERE lane_id = $1 AND status = 'waiting' AND lease_expires_at <= statement_timestamp()",
+    )
+    .bind(lane_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| database_error("failed to expire resource lane waiters", error))?;
+    Ok(())
+}
+
+async fn oldest_live_waiter_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    lane_id: &[u8],
+) -> Result<Option<ResourceLaneWaiterRow>> {
+    let row = sqlx::query(
+        "SELECT claim_fingerprint FROM resource_lane_waiters \
+         WHERE lane_id = $1 AND status = 'waiting' \
+         ORDER BY lane_ticket ASC LIMIT 1",
+    )
+    .bind(lane_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| database_error("failed to load oldest resource lane waiter", error))?;
+    row.map(|row| {
+        Ok(ResourceLaneWaiterRow {
+            claim_fingerprint: row.try_get("claim_fingerprint").map_err(|error| {
+                database_error("failed to decode resource lane waiter fingerprint", error)
+            })?,
+        })
+    })
+    .transpose()
+}
+
+async fn enqueue_or_refresh_waiter_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    admission: &ResourceLaneClaimAdmission,
+) -> Result<ResourceLaneWaiterBlock> {
+    if let Some(waiter) = refresh_waiting_waiter_tx(tx, admission).await? {
+        return Ok(waiter);
+    }
+    let lane_ticket = allocate_waiter_ticket_tx(tx, &admission.lane_id).await?;
+    let waiter_id = resource_lane_waiter_id(&admission.claim_fingerprint);
+    let row = sqlx::query(
+        "INSERT INTO resource_lane_waiters \
+         (waiter_id, lane_id, lane_ticket, run_id, node_id, attempt_id, ledger_key, \
+          invocation_epoch, claim_fingerprint, status, lease_expires_at) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'waiting', statement_timestamp() + make_interval(secs => $10)) \
+         ON CONFLICT (lane_id, claim_fingerprint) DO UPDATE \
+         SET lane_ticket = EXCLUDED.lane_ticket, status = 'waiting', updated_at = statement_timestamp(), \
+             lease_expires_at = statement_timestamp() + make_interval(secs => $10) \
+         RETURNING waiter_id, lane_ticket, (EXTRACT(EPOCH FROM lease_expires_at) * 1000)::BIGINT AS lease_expires_at_unix_ms",
+    )
+    .bind(&waiter_id)
+    .bind(&admission.lane_id)
+    .bind(u64_to_i64(lane_ticket, "resource_lane_waiters.lane_ticket")?)
+    .bind(admission.run_id.as_str())
+    .bind(admission.node_id.as_str())
+    .bind(admission.attempt_id.as_str())
+    .bind(admission.ledger_key.as_str())
+    .bind(i32::try_from(admission.invocation_epoch).map_err(|_| {
+        PostgresStoreError::Corruption("resource lane waiter invocation epoch overflow".to_owned())
+    })?)
+    .bind(&admission.claim_fingerprint)
+    .bind(RESOURCE_LANE_WAITER_LEASE_SECS)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|error| database_error("failed to enqueue resource lane waiter", error))?;
+    waiter_block_from_row(row)
+}
+
+async fn refresh_waiting_waiter_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    admission: &ResourceLaneClaimAdmission,
+) -> Result<Option<ResourceLaneWaiterBlock>> {
+    let row = sqlx::query(
+        "UPDATE resource_lane_waiters \
+         SET updated_at = statement_timestamp(), \
+             lease_expires_at = statement_timestamp() + make_interval(secs => $3) \
+         WHERE lane_id = $1 AND claim_fingerprint = $2 AND status = 'waiting' \
+         RETURNING waiter_id, lane_ticket, (EXTRACT(EPOCH FROM lease_expires_at) * 1000)::BIGINT AS lease_expires_at_unix_ms",
+    )
+    .bind(&admission.lane_id)
+    .bind(&admission.claim_fingerprint)
+    .bind(RESOURCE_LANE_WAITER_LEASE_SECS)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| database_error("failed to refresh resource lane waiter", error))?;
+    row.map(waiter_block_from_row).transpose()
+}
+
+async fn allocate_waiter_ticket_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    lane_id: &[u8],
+) -> Result<u64> {
+    let lane_ticket: i64 = sqlx::query_scalar(
+        "INSERT INTO resource_lane_waiter_counters (lane_id, next_ticket) \
+         VALUES ($1, 2) \
+         ON CONFLICT (lane_id) DO UPDATE \
+         SET next_ticket = resource_lane_waiter_counters.next_ticket + 1, \
+             updated_at = statement_timestamp() \
+         RETURNING next_ticket - 1",
+    )
+    .bind(lane_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|error| database_error("failed to allocate resource lane waiter ticket", error))?;
+    i64_to_positive_u64(lane_ticket, "resource_lane_waiters.lane_ticket")
+}
+
+fn waiter_block_from_row(row: PgRow) -> Result<ResourceLaneWaiterBlock> {
+    Ok(ResourceLaneWaiterBlock {
+        waiter_id: row
+            .try_get("waiter_id")
+            .map_err(|error| database_error("failed to decode resource lane waiter id", error))?,
+        lane_ticket: i64_to_positive_u64(
+            row.try_get("lane_ticket").map_err(|error| {
+                database_error("failed to decode resource lane waiter ticket", error)
+            })?,
+            "resource_lane_waiters.lane_ticket",
+        )?,
+        lease_expires_at_unix_ms: row.try_get("lease_expires_at_unix_ms").map_err(|error| {
+            database_error("failed to decode resource lane waiter lease", error)
+        })?,
+    })
+}
+
+async fn mark_waiter_claimed_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    admission: &ResourceLaneClaimAdmission,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE resource_lane_waiters \
+         SET status = 'claimed', updated_at = statement_timestamp() \
+         WHERE lane_id = $1 AND claim_fingerprint = $2 AND status = 'waiting'",
+    )
+    .bind(&admission.lane_id)
+    .bind(&admission.claim_fingerprint)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| database_error("failed to mark resource lane waiter claimed", error))?;
+    Ok(())
 }
 
 async fn load_claim_lane_id_tx(
@@ -4129,10 +4422,10 @@ mod tests {
     use mfm_store::v1::{
         ArtifactEvidenceRef, AttemptStatus, AttemptTerminal, CellTerminalProjection,
         CommitArtifactEvidenceSet, CommitKey, CommitOutcome, CommitPreconditions, ManualResolution,
-        PreparedCommit, PreparedCommitPlan, RequiredRunState, ResourceLaneKey, Retention,
-        RunAdmission, RunState, SagaEngagementReason, SagaTerminal, SagaTerminalProof,
-        SideEffectPhase, SideEffectProgress, SideEffectTerminal, StateAttemptStarted, StoreError,
-        StreamSeq,
+        PreparedCommit, PreparedCommitPlan, RequiredRunState, ResourceLaneKey,
+        ResourceLaneWaiterBlock, Retention, RunAdmission, RunState, SagaEngagementReason,
+        SagaTerminal, SagaTerminalProof, SideEffectPhase, SideEffectProgress, SideEffectTerminal,
+        StateAttemptStarted, StoreError, StreamSeq,
     };
     use sqlx::postgres::PgConnectOptions;
     use sqlx::AssertSqlSafe;
@@ -4929,6 +5222,27 @@ mod tests {
         })
     }
 
+    fn side_effect_failed() -> KernelEventPayload {
+        KernelEventPayload::SideEffectFailed(events::side_effect::Failed {
+            spec_hash: spec_hash(1),
+            node_id: node_id(70),
+            attempt_id: attempt_id(72),
+            ledger_key: side_effect_ledger_key(),
+            ledger_purpose: side_effect_ledger_purpose(),
+            invocation_epoch: 1,
+            failure_phase: events::side_effect::FailurePhase::BeforeInvocationStarted,
+            retryable: false,
+            error: events::MfmErrorInfo {
+                code: events::ErrorCode::new("sidefx_failed").expect("error code"),
+                category: events::ErrorCategory::SideEffect,
+                retryable: false,
+                safe_message: "side-effect failed".to_owned(),
+                public_details: None,
+                diagnostic_ref: None,
+            },
+        })
+    }
+
     fn store_artifact_ref(
         artifact_id: ArtifactId,
         digest: ContentDigest,
@@ -5260,6 +5574,56 @@ mod tests {
         .await
     }
 
+    async fn append_resource_lane_release(
+        store: &PostgresRunStore,
+        run_id: &RunId,
+        commit_key: &str,
+        lane_value: &str,
+    ) -> Result<CommitOutcome> {
+        let projection = store
+            .projection_snapshot(run_id)
+            .await
+            .expect("resource lane projection");
+        let lane_key = resource_lane_key(lane_value);
+        let lane = projection
+            .resource_lane(&lane_key)
+            .expect("active resource lane");
+        let next_seq = store
+            .expected_next_seq(run_id)
+            .await
+            .expect("release next seq")
+            .as_u64();
+        append_prepared(
+            store,
+            request(
+                run_id.clone(),
+                next_seq,
+                commit_key,
+                vec![
+                    KernelEventPayload::ResourceLaneReleaseIntent(
+                        events::ResourceLaneReleaseIntent {
+                            spec_hash: spec_hash(1),
+                            node_id: lane.node_id.clone(),
+                            attempt_id: lane.attempt_id.clone(),
+                            ledger_key: side_effect_ledger_key(),
+                            ledger_purpose: lane.ledger_purpose.clone(),
+                            invocation_epoch: lane.invocation_epoch,
+                            claim_id: lane.claim_id.clone(),
+                            release_reason: events::ResourceLaneReleaseReason::new(
+                                "mfm.test.release",
+                            )
+                            .expect("release reason"),
+                        },
+                    ),
+                    side_effect_failed(),
+                    side_effect_attempt_failed(),
+                ],
+            ),
+            Vec::new(),
+        )
+        .await
+    }
+
     fn assert_resource_lane_blocked(
         outcome: CommitOutcome,
         expected_lane_key: &ResourceLaneKey,
@@ -5269,8 +5633,31 @@ mod tests {
             panic!("expected typed resource lane block, got {outcome:?}");
         };
         assert_eq!(&block.lane_key, expected_lane_key);
-        assert_eq!(&block.holder.run_id, expected_holder_run);
-        assert_eq!(block.holder.ledger_key, side_effect_ledger_key());
+        let holder = block.holder.as_ref().expect("blocked holder");
+        assert_eq!(&holder.run_id, expected_holder_run);
+        assert_eq!(holder.ledger_key, side_effect_ledger_key());
+    }
+
+    fn assert_resource_lane_waiter_blocked(
+        outcome: CommitOutcome,
+        expected_lane_key: &ResourceLaneKey,
+        expected_holder_run: Option<&RunId>,
+    ) -> ResourceLaneWaiterBlock {
+        let CommitOutcome::ResourceLaneClaimBlocked(block) = outcome else {
+            panic!("expected typed resource lane block, got {outcome:?}");
+        };
+        assert_eq!(&block.lane_key, expected_lane_key);
+        match (block.holder.as_ref(), expected_holder_run) {
+            (Some(holder), Some(expected_holder_run)) => {
+                assert_eq!(&holder.run_id, expected_holder_run);
+                assert_eq!(holder.ledger_key, side_effect_ledger_key());
+            }
+            (None, None) => {}
+            (actual, expected) => {
+                panic!("unexpected block holder {actual:?}, expected {expected:?}")
+            }
+        }
+        block.waiter.expect("resource lane waiter block")
     }
 
     fn assert_corruption(error: PostgresStoreError, expected: &str) {
@@ -6188,13 +6575,13 @@ mod tests {
         let cursor = observation_row_cursor_for_commit(&store, &run, 1).await;
 
         let first = store
-            .read_run_observations(RunObservationQuery::new(Some(cursor), 1, 0))
+            .read_run_observations(RunObservationQuery::new(Some(cursor), 1, 5_000))
             .await
             .expect("first watch page");
         assert_eq!(first.runs.len(), 1);
         assert_eq!(first.runs[0].head_seq.as_u64(), 2);
         let second = store
-            .read_run_observations(RunObservationQuery::new(Some(first.next_cursor), 1, 0))
+            .read_run_observations(RunObservationQuery::new(Some(first.next_cursor), 1, 5_000))
             .await
             .expect("second watch page");
         assert_eq!(second.runs.len(), 1);
@@ -6254,6 +6641,65 @@ mod tests {
         assert_eq!(notification.channel(), OBSERVATION_NOTIFY_CHANNEL);
         assert_eq!(notification.payload(), OBSERVATION_NOTIFY_PAYLOAD);
         drop(listener);
+
+        drop_schema(&store, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn observation_watch_polls_until_frontier_advances_without_notify() {
+        let (store, schema) = test_store().await;
+        let database_url =
+            std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for parity tests");
+        let blocker_options = PgConnectOptions::from_str(&database_url)
+            .expect("postgres URL")
+            .options([("search_path", schema.as_str())]);
+        let blocker_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(blocker_options)
+            .await
+            .expect("connect blocker pool");
+
+        let run = run_id(154);
+        append_run_start(&store, &run, "cursor-frontier-lag-run-start")
+            .await
+            .expect("run start");
+        let cursor = observation_row_cursor_for_commit(&store, &run, 1).await;
+
+        let mut blocker = blocker_pool.begin().await.expect("begin blocker tx");
+        let _blocker_xid: String = sqlx::query_scalar("SELECT pg_current_xact_id()::text")
+            .fetch_one(&mut *blocker)
+            .await
+            .expect("assign blocker xid");
+        append_retention_commit(&store, &run, 2, "cursor-frontier-lag-retention", 155)
+            .await
+            .expect("append row behind blocked frontier");
+
+        let stale_frontier_page = store
+            .read_run_observations(RunObservationQuery::new(Some(cursor.clone()), 10, 0))
+            .await
+            .expect("frontier-lagged watch page");
+        assert!(stale_frontier_page.runs.is_empty());
+
+        let watcher_store = store.clone();
+        let watcher = tokio::spawn(async move {
+            let started = Instant::now();
+            let page = watcher_store
+                .read_run_observations(RunObservationQuery::new(Some(cursor), 10, 5_000))
+                .await
+                .expect("watch observes row after frontier advances");
+            (page, started.elapsed())
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        blocker.rollback().await.expect("release blocker tx");
+        blocker_pool.close().await;
+
+        let (page, elapsed) = watcher.await.expect("watch task joins");
+        assert_eq!(page.runs.len(), 1);
+        assert_eq!(page.runs[0].head_seq.as_u64(), 2);
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "watch should poll for frontier advancement without waiting for timeout; elapsed={elapsed:?}"
+        );
 
         drop_schema(&store, &schema).await;
     }
@@ -6939,6 +7385,95 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resource_lane_waiters_enforce_single_lane_fifo_after_release() {
+        let (store, schema) = test_store().await;
+        let holder_run = run_id(32);
+        let first_waiter = run_id(33);
+        let second_waiter = run_id(34);
+        let lane_value = "wallet-fifo-admission";
+        let lane_key = resource_lane_key(lane_value);
+
+        for (run, run_key, attempt_key) in [
+            (
+                &holder_run,
+                "fifo-holder-run-start",
+                "fifo-holder-attempt-start",
+            ),
+            (&first_waiter, "fifo-b-run-start", "fifo-b-attempt-start"),
+            (&second_waiter, "fifo-c-run-start", "fifo-c-attempt-start"),
+        ] {
+            append_run_start(&store, run, run_key)
+                .await
+                .expect("run start");
+            append_resource_lane_attempt_start(&store, run, attempt_key)
+                .await
+                .expect("attempt start");
+        }
+
+        append_resource_lane_prepare(&store, &holder_run, "fifo-holder-prepare", lane_value, 32)
+            .await
+            .expect("holder resource lane prepare");
+
+        let first_waiter_block = assert_resource_lane_waiter_blocked(
+            append_resource_lane_prepare(&store, &first_waiter, "fifo-b-prepare", lane_value, 33)
+                .await
+                .expect("first waiter blocked by holder"),
+            &lane_key,
+            Some(&holder_run),
+        );
+        let second_waiter_block = assert_resource_lane_waiter_blocked(
+            append_resource_lane_prepare(&store, &second_waiter, "fifo-c-prepare", lane_value, 34)
+                .await
+                .expect("second waiter blocked by holder"),
+            &lane_key,
+            Some(&holder_run),
+        );
+        assert!(first_waiter_block.lane_ticket < second_waiter_block.lane_ticket);
+
+        append_resource_lane_release(&store, &holder_run, "fifo-holder-release", lane_value)
+            .await
+            .expect("holder release");
+
+        let second_retry_block = assert_resource_lane_waiter_blocked(
+            append_resource_lane_prepare(&store, &second_waiter, "fifo-c-retry-1", lane_value, 34)
+                .await
+                .expect("second waiter cannot bypass first waiter"),
+            &lane_key,
+            None,
+        );
+        assert_eq!(second_retry_block.waiter_id, second_waiter_block.waiter_id);
+        assert_eq!(
+            second_retry_block.lane_ticket,
+            second_waiter_block.lane_ticket
+        );
+
+        append_resource_lane_prepare(&store, &first_waiter, "fifo-b-retry-1", lane_value, 33)
+            .await
+            .expect("first waiter claims after holder release");
+        assert_eq!(
+            store
+                .projection_snapshot(&first_waiter)
+                .await
+                .expect("first waiter projection")
+                .resource_lane(&lane_key)
+                .expect("first waiter lane")
+                .holder
+                .run_id,
+            first_waiter
+        );
+
+        assert_resource_lane_waiter_blocked(
+            append_resource_lane_prepare(&store, &second_waiter, "fifo-c-retry-2", lane_value, 34)
+                .await
+                .expect("second waiter blocked by first waiter holder"),
+            &lane_key,
+            Some(&first_waiter),
+        );
+
+        drop_schema(&store, &schema).await;
+    }
+
+    #[tokio::test]
     async fn saga_projection_rebuilds_from_events() {
         let (store, schema) = test_store().await;
         let run = run_id(41);
@@ -7448,6 +7983,7 @@ mod tests {
 #[cfg(test)]
 mod unit_tests {
     use super::*;
+    use mfm_ids::{DigestAlgorithm, DigestBytes};
 
     #[test]
     fn artifact_role_contract_postgres_tag_roundtrip_uses_events_contract() {
@@ -7463,5 +7999,62 @@ mod unit_tests {
             Err(PostgresStoreError::Store(StoreError::Identity(message)))
                 if message.contains("unknown artifact role unknown_artifact_role")
         ));
+    }
+
+    #[test]
+    fn resource_lane_waiter_fingerprint_is_stable_for_identical_claim_retries() {
+        let run_id = RunId::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            DigestBytes::from_array([1; 32]),
+        );
+        let evidence = events::ResourceKeyEvidence {
+            namespace: ResourceNamespace::new("mfm.test.account_nonce").expect("namespace"),
+            key_schema_id: SchemaId::new(
+                "mfm.test.resource_key",
+                "1",
+                DigestAlgorithm::Sha256JcsV1,
+                DigestBytes::from_array([2; 32]),
+            )
+            .expect("schema id"),
+            key: events::ResourceKey::new("wallet-1").expect("resource key"),
+        };
+        let lane_id = resource_lane_id(&evidence).expect("lane id");
+        let mut intent = events::ResourceLaneClaimIntent {
+            spec_hash: mfm_ids::SpecHash::from_digest(
+                DigestAlgorithm::Sha256JcsV1,
+                DigestBytes::from_array([3; 32]),
+            ),
+            node_id: NodeId::from_digest(
+                DigestAlgorithm::Sha256JcsV1,
+                DigestBytes::from_array([4; 32]),
+            ),
+            attempt_id: mfm_ids::AttemptId::from_digest(
+                DigestAlgorithm::Sha256JcsV1,
+                DigestBytes::from_array([5; 32]),
+            ),
+            ledger_key: events::SideEffectLedgerKey::new("ledger-1").expect("ledger key"),
+            ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+            invocation_epoch: 1,
+            resource_key: evidence,
+            requirement_digest: ContentDigest::from_digest(
+                DigestAlgorithm::Sha256JcsV1,
+                DigestBytes::from_array([6; 32]),
+            ),
+            resolved_by_capability_impl: events::RunnerFactoryId::new("mfm.test.runner")
+                .expect("runner id"),
+        };
+
+        let first = resource_lane_claim_fingerprint(&run_id, &lane_id, &intent).expect("first");
+        let retry = resource_lane_claim_fingerprint(&run_id, &lane_id, &intent).expect("retry");
+        intent.invocation_epoch = 2;
+        let different_epoch =
+            resource_lane_claim_fingerprint(&run_id, &lane_id, &intent).expect("different");
+
+        assert_eq!(first, retry);
+        assert_ne!(first, different_epoch);
+        assert_eq!(
+            resource_lane_waiter_id(&first),
+            resource_lane_waiter_id(&retry)
+        );
     }
 }

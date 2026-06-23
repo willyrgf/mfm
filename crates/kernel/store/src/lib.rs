@@ -2185,7 +2185,7 @@ pub mod v1 {
         Appended(CommittedBatch),
         /// The commit key had already appended the same canonical batch.
         Idempotent(CommittedBatch),
-        /// A resource-lane claim was blocked by an existing holder and no rows were persisted.
+        /// A resource-lane claim was blocked before domain authority was persisted.
         ResourceLaneClaimBlocked(Box<ResourceLaneClaimBlock>),
     }
 
@@ -2199,13 +2199,31 @@ pub mod v1 {
         }
     }
 
-    /// Non-persisted result of a resource-lane claim blocked by another run-scoped ledger.
+    /// Non-authoritative waiter metadata for a blocked resource-lane claim.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ResourceLaneWaiterBlock {
+        /// Deterministic waiter id for the stable claim fingerprint.
+        pub waiter_id: String,
+        /// Lane-local FIFO ticket assigned under the lane admission lock.
+        pub lane_ticket: u64,
+        /// Lease expiry as milliseconds since the Unix epoch.
+        pub lease_expires_at_unix_ms: i64,
+    }
+
+    /// Result of a resource-lane claim blocked before domain authority rows were persisted.
+    ///
+    /// A blocked claim persists no run event, commit, resource-lane claim, resource-lane release,
+    /// lane-transition, or other MFM domain authority row. Concrete stores may insert or refresh
+    /// non-authoritative operational waiter rows for FIFO admission; those rows are coordination
+    /// state only and never grant lane ownership.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct ResourceLaneClaimBlock {
         /// Blocked resource lane.
         pub lane_key: ResourceLaneKey,
-        /// Current holder of the lane.
-        pub holder: SideEffectLedgerRef,
+        /// Current authoritative holder of the lane, if one exists.
+        pub holder: Option<SideEffectLedgerRef>,
+        /// Operational waiter metadata for the blocked claim, if the store exposed it.
+        pub waiter: Option<ResourceLaneWaiterBlock>,
     }
 
     /// Cell terminal projection derived from committed run events.
@@ -5058,7 +5076,7 @@ pub mod v1 {
     pub enum StagedCommitOutcome {
         /// The commit staged successfully and is ready for durable insertion.
         Staged(Box<StagedCommit>),
-        /// The commit's resource-lane claim was blocked; no rows should be persisted.
+        /// The commit's resource-lane claim was blocked; no domain authority rows should be persisted.
         ResourceLaneClaimBlocked(Box<ResourceLaneClaimBlock>),
     }
 
@@ -5462,7 +5480,8 @@ pub mod v1 {
                             return Ok(ResourceLaneMaterialization::Blocked(Box::new(
                                 ResourceLaneClaimBlock {
                                     lane_key,
-                                    holder: existing.holder.clone(),
+                                    holder: Some(existing.holder.clone()),
+                                    waiter: None,
                                 },
                             )));
                         }

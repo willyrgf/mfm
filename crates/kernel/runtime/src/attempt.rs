@@ -46,6 +46,10 @@ pub(crate) struct ResourceLaneBlockWitness {
     pub(crate) node_id: NodeId,
     /// Resource lane that blocked the attempt.
     pub(crate) lane_key: store::ResourceLaneKey,
+    /// Non-authoritative waiter id, when the store exposed one.
+    pub(crate) waiter_id: Option<String>,
+    /// Lane-local waiter ticket, when the store exposed one.
+    pub(crate) lane_ticket: Option<u64>,
 }
 
 impl ResourceLaneBlockWitness {
@@ -221,13 +225,22 @@ impl<'a> AttemptLifecycle<'a> {
                     Ok(store::CommitOutcome::Appended(_) | store::CommitOutcome::Idempotent(_)) => {
                     }
                     Ok(store::CommitOutcome::ResourceLaneClaimBlocked(block)) => {
+                        let holder = block
+                            .holder
+                            .as_ref()
+                            .map(|holder| {
+                                format!(
+                                    " held by run {} ledger {}",
+                                    holder.run_id, holder.ledger_key
+                                )
+                            })
+                            .unwrap_or_else(|| " with no active holder".to_owned());
                         return Err(RuntimeError::InvalidRunStream(format!(
-                            "attempt start for node {} was blocked by resource lane {}:{} held by run {} ledger {}",
+                            "attempt start for node {} was blocked by resource lane {}:{}{}",
                             selected_attempt.phase.node.node_id,
                             block.lane_key.namespace,
                             block.lane_key.key,
-                            block.holder.run_id,
-                            block.holder.ledger_key
+                            holder
                         )));
                     }
                     Err(error) if async_error_is_stale_expected_next_seq(&error) => {
@@ -635,6 +648,8 @@ fn resource_lane_block_for_request(
             .map(|_| ResourceLaneBlockWitness {
                 node_id: payload.node_id.clone(),
                 lane_key,
+                waiter_id: None,
+                lane_ticket: None,
             })
     })
 }
@@ -655,6 +670,8 @@ fn resource_lane_block_witness_from_outcome(
     ResourceLaneBlockWitness {
         node_id: node_id.clone(),
         lane_key: block.lane_key,
+        waiter_id: block.waiter.as_ref().map(|waiter| waiter.waiter_id.clone()),
+        lane_ticket: block.waiter.as_ref().map(|waiter| waiter.lane_ticket),
     }
 }
 
@@ -771,7 +788,11 @@ mod tests {
 
         let witness = resource_lane_block_witness_from_outcome(
             &node_id,
-            store::ResourceLaneClaimBlock { lane_key, holder },
+            store::ResourceLaneClaimBlock {
+                lane_key,
+                holder: Some(holder),
+                waiter: None,
+            },
         );
         assert_eq!(witness.node_id, node_id);
         assert_eq!(

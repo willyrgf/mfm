@@ -319,11 +319,25 @@ crates/storages/stream-store-postgres
 
 Postgres is the only production persistence backend. It stores append-only `commits`, canonical
 `run_events`, artifact blobs/evidence, resource-lane claim/release/transition rows,
-`run_commit_log` cursor authority, and rebuildable observation summaries. Its schema and migrations
-are owned by `crates/storages/stream-store-postgres`; runtime callers validate schema compatibility
-and must not run startup auto-DDL. Logical-key admission folds authoritative `run_events`; there is
-no logical-key admission index. Observation rows and list/watch cursors are never semantic authority
-for resume, replay, public-output rendering, side-effect legality, or completion.
+`run_commit_log` cursor authority, mutable operational resource-lane waiter rows, and rebuildable
+observation summaries. Its schema and migrations are owned by
+`crates/storages/stream-store-postgres`; runtime callers validate schema compatibility and must not
+run startup auto-DDL. Logical-key admission folds authoritative `run_events`; there is no logical-key
+admission index. Resource-lane waiter rows are operational admission coordination for single-lane
+FIFO only: they can preserve retry order for live waiters, but cannot grant ownership and are never
+semantic authority for resume, replay, public-output rendering, side-effect legality, or completion.
+Observation rows and list/watch cursors are likewise never semantic authority for those decisions.
+
+For single-lane exclusive resource-lane claim commits, Postgres enforces FIFO under the lane advisory
+transaction lock before materializing `ResourceLaneClaimed`: a claim can commit only when there is no
+active authoritative holder and no earlier live waiter. A `ResourceLaneClaimBlocked` result persists
+no run event, commit, resource-lane claim, resource-lane release, lane-transition, or other MFM domain
+authority row, but it may insert or refresh one mutable operational waiter row. Waiter leases bound
+dead process impact; expired, cancelled, or claimed waiters no longer block later waiters. Retries
+for an expired or cancelled deterministic claim fingerprint reuse the same waiter id but receive a
+fresh lane-local ticket, so stale priority is not restored. The store validates prepared claim
+semantics before enqueueing a waiter, preventing malformed claims from occupying the FIFO head.
+Release notifications, if present, are wake hints only and do not grant ownership.
 
 ## Runtime
 
