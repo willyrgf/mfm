@@ -44,6 +44,16 @@ pub(super) struct ObservationRow {
     pub(super) commit_sort_key: Vec<u8>,
 }
 
+struct ObservationCandidate {
+    run_id: RunId,
+    head_seq: StreamSeq,
+    commit_id: String,
+    append_xid: String,
+    commit_sort_key: Vec<u8>,
+    started_at: String,
+    updated_at: String,
+}
+
 pub(super) async fn read_run_observations_from_pool(
     pool: &PgPool,
     query: RunObservationQuery,
@@ -181,6 +191,16 @@ pub(super) async fn sealed_frontier_xid(pool: &PgPool) -> Result<String> {
         .map_err(|error| database_error("failed to decode observation frontier", error))
 }
 
+pub(super) async fn notify_observation_change_tx(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
+    sqlx::query("SELECT pg_notify($1, $2)")
+        .bind(OBSERVATION_NOTIFY_CHANNEL)
+        .bind(OBSERVATION_NOTIFY_PAYLOAD)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| database_error("failed to notify observation change", error))?;
+    Ok(())
+}
+
 pub(super) async fn read_observation_list_rows(
     pool: &PgPool,
     metadata: &StoreMetadata,
@@ -189,33 +209,27 @@ pub(super) async fn read_observation_list_rows(
 ) -> Result<Vec<ObservationRow>> {
     let rows = sqlx::query(
         "WITH bounded AS ( \
-           SELECT DISTINCT ON (s.run_id) \
-             s.run_id, s.head_seq, s.observed_status, \
-             to_char(s.started_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS started_at, \
-             to_char(s.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS updated_at, \
-             CASE WHEN s.completed_at IS NULL THEN NULL \
-               ELSE to_char(s.completed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') \
-             END AS completed_at, \
+           SELECT DISTINCT ON (c.run_id) \
+             c.run_id, c.seq AS head_seq, \
+             to_char((SELECT MIN(started.committed_at) FROM commits started \
+               WHERE started.run_id = c.run_id) AT TIME ZONE 'UTC', \
+               'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS started_at, \
+             to_char(c.committed_at AT TIME ZONE 'UTC', \
+               'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS updated_at, \
              l.commit_id, l.append_xid::text AS append_xid, l.commit_sort_key \
-           FROM run_observation_change_summaries s \
-           INNER JOIN run_commit_log l ON l.commit_id = s.commit_id \
+           FROM commits c \
+           INNER JOIN run_commit_log l ON l.commit_id = c.commit_id \
            WHERE l.append_xid < $1::xid8 \
-             AND s.projection_version = $3 \
-             AND s.summary_kind = $4 \
-           ORDER BY s.run_id, s.head_seq DESC \
+           ORDER BY c.run_id, c.seq DESC \
          ) \
          SELECT * FROM bounded ORDER BY updated_at DESC, run_id ASC LIMIT $2",
     )
     .bind(frontier_xid)
     .bind(i64::from(limit))
-    .bind(PROJECTION_VERSION)
-    .bind(RUN_OBSERVATION_SUMMARY_KIND)
     .fetch_all(pool)
     .await
     .map_err(|error| database_error("failed to read run observation list", error))?;
-    rows.into_iter()
-        .map(|row| observation_row_from_row(row, metadata))
-        .collect()
+    materialize_observation_rows(pool, metadata, rows).await
 }
 
 pub(super) async fn read_observation_watch_rows(
@@ -226,18 +240,16 @@ pub(super) async fn read_observation_watch_rows(
     limit: u32,
 ) -> Result<Vec<ObservationRow>> {
     let rows = sqlx::query(
-        "SELECT s.run_id, s.head_seq, s.observed_status, \
-          to_char(s.started_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS started_at, \
-          to_char(s.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS updated_at, \
-          CASE WHEN s.completed_at IS NULL THEN NULL \
-            ELSE to_char(s.completed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') \
-          END AS completed_at, \
+        "SELECT c.run_id, c.seq AS head_seq, \
+          to_char((SELECT MIN(started.committed_at) FROM commits started \
+            WHERE started.run_id = c.run_id) AT TIME ZONE 'UTC', \
+            'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS started_at, \
+          to_char(c.committed_at AT TIME ZONE 'UTC', \
+            'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS updated_at, \
           l.commit_id, l.append_xid::text AS append_xid, l.commit_sort_key \
          FROM run_commit_log l \
-         INNER JOIN run_observation_change_summaries s ON s.commit_id = l.commit_id \
+         INNER JOIN commits c ON c.commit_id = l.commit_id \
          WHERE l.append_xid < $1::xid8 \
-           AND s.projection_version = $6 \
-           AND s.summary_kind = $7 \
            AND ( \
              ($4 AND l.append_xid >= $2::xid8) \
              OR \
@@ -251,58 +263,119 @@ pub(super) async fn read_observation_watch_rows(
     .bind(cursor.commit_sort_key.as_slice())
     .bind(cursor.kind == CursorKind::Frontier)
     .bind(i64::from(limit))
-    .bind(PROJECTION_VERSION)
-    .bind(RUN_OBSERVATION_SUMMARY_KIND)
     .fetch_all(pool)
     .await
     .map_err(|error| database_error("failed to read run observation changes", error))?;
-    rows.into_iter()
-        .map(|row| observation_row_from_row(row, metadata))
-        .collect()
+    materialize_observation_rows(pool, metadata, rows).await
 }
 
-pub(super) fn observation_row_from_row(
-    row: PgRow,
+async fn materialize_observation_rows(
+    pool: &PgPool,
     metadata: &StoreMetadata,
-) -> Result<ObservationRow> {
+    rows: Vec<PgRow>,
+) -> Result<Vec<ObservationRow>> {
+    let mut observations = Vec::with_capacity(rows.len());
+    for row in rows {
+        observations
+            .push(materialize_observation_row(pool, metadata, observation_candidate(row)?).await?);
+    }
+    Ok(observations)
+}
+
+fn observation_candidate(row: PgRow) -> Result<ObservationCandidate> {
     let run_id: String = row
         .try_get("run_id")
         .map_err(|error| database_error("failed to decode observation run id", error))?;
     let head_seq: i64 = row
         .try_get("head_seq")
         .map_err(|error| database_error("failed to decode observation head seq", error))?;
-    let observed_status: String = row
-        .try_get("observed_status")
-        .map_err(|error| database_error("failed to decode observation status", error))?;
     let commit_id: String = row
         .try_get("commit_id")
         .map_err(|error| database_error("failed to decode observation commit id", error))?;
+    let append_xid: String = row
+        .try_get("append_xid")
+        .map_err(|error| database_error("failed to decode observation append xid", error))?;
+    let commit_sort_key = row
+        .try_get("commit_sort_key")
+        .map_err(|error| database_error("failed to decode observation commit sort key", error))?;
+    let started_at = row
+        .try_get("started_at")
+        .map_err(|error| database_error("failed to decode observation started_at", error))?;
+    let updated_at = row
+        .try_get("updated_at")
+        .map_err(|error| database_error("failed to decode observation updated_at", error))?;
+    Ok(ObservationCandidate {
+        run_id: parse_identity(&run_id)?,
+        head_seq: StreamSeq::new(i64_to_positive_u64(head_seq, "commits.seq")?)?,
+        commit_id,
+        append_xid,
+        commit_sort_key,
+        started_at,
+        updated_at,
+    })
+}
+
+async fn materialize_observation_row(
+    pool: &PgPool,
+    metadata: &StoreMetadata,
+    candidate: ObservationCandidate,
+) -> Result<ObservationRow> {
+    let events = load_run_prefix(pool, &candidate.run_id, candidate.head_seq).await?;
+    let projections = ProjectionSnapshot::rebuild_from_run_stream(&events)?;
+    let observed_status = observed_status_from_run_state(projections.run_state(&candidate.run_id))?;
+    let completed_at =
+        (observed_status == ObservedRunStatus::Completed).then_some(candidate.updated_at.clone());
     Ok(ObservationRow {
         observation: RunObservation {
-            run_id: parse_identity(&run_id)?,
-            head_seq: StreamSeq::new(i64_to_positive_u64(
-                head_seq,
-                "run_observation_change_summaries.head_seq",
-            )?)?,
-            observed_status: ObservedRunStatus::parse(&observed_status)?,
-            started_at: row.try_get("started_at").map_err(|error| {
-                database_error("failed to decode observation started_at", error)
-            })?,
-            updated_at: row.try_get("updated_at").map_err(|error| {
-                database_error("failed to decode observation updated_at", error)
-            })?,
-            completed_at: row.try_get("completed_at").map_err(|error| {
-                database_error("failed to decode observation completed_at", error)
-            })?,
-            change_id: Some(observation_change_id(metadata, &commit_id)?),
+            run_id: candidate.run_id,
+            head_seq: candidate.head_seq,
+            observed_status,
+            started_at: candidate.started_at,
+            updated_at: candidate.updated_at,
+            completed_at,
+            change_id: Some(observation_change_id(metadata, &candidate.commit_id)?),
         },
-        append_xid: row
-            .try_get("append_xid")
-            .map_err(|error| database_error("failed to decode observation append xid", error))?,
-        commit_sort_key: row.try_get("commit_sort_key").map_err(|error| {
-            database_error("failed to decode observation commit sort key", error)
-        })?,
+        append_xid: candidate.append_xid,
+        commit_sort_key: candidate.commit_sort_key,
     })
+}
+
+async fn load_run_prefix(
+    pool: &PgPool,
+    run_id: &RunId,
+    head_seq: StreamSeq,
+) -> Result<Vec<KernelEventEnvelope>> {
+    let rows = sqlx::query(
+        "SELECT run_id, seq, ordinal, event_id, event_schema_id, spec_hash, commit_key, \
+         logical_key, payload_hash, payload_canonical_json \
+         FROM run_events WHERE run_id = $1 AND seq <= $2 ORDER BY seq ASC, ordinal ASC",
+    )
+    .bind(run_id.as_str())
+    .bind(u64_to_i64(head_seq.as_u64(), "commits.seq")?)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| database_error("failed to load run observation prefix", error))?;
+    let events = rows
+        .into_iter()
+        .map(event_envelope_from_row)
+        .collect::<Result<Vec<_>>>()?;
+    if events.last().map(KernelEventEnvelope::seq) != Some(head_seq) {
+        return Err(PostgresStoreError::Corruption(
+            "observation commit has no matching event prefix".to_owned(),
+        ));
+    }
+    Ok(events)
+}
+
+fn observed_status_from_run_state(run_state: RunState) -> Result<ObservedRunStatus> {
+    match run_state {
+        RunState::Started => Ok(ObservedRunStatus::Started),
+        RunState::Completed => Ok(ObservedRunStatus::Completed),
+        RunState::Absent => Err(StoreError::ObservationUnavailable {
+            message: "committed run observation had absent run state".to_owned(),
+        }
+        .into()),
+    }
 }
 
 pub(super) async fn encode_observation_cursor(

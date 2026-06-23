@@ -85,10 +85,6 @@ impl From<CodecError> for PostgresStoreError {
 
 pub(crate) type Result<T> = std::result::Result<T, PostgresStoreError>;
 
-const PROJECTION_VERSION: &str = "mfm.run_observation.v1";
-const RUN_OBSERVATION_SUMMARY_KIND: &str = "run";
-const RUN_OBSERVATION_DERIVATION_MODEL: &str = "run_observation_change_summary";
-const RUN_PREFIX_SOURCE_KIND: &str = "run_prefix";
 const CURSOR_VERSION: &str = "mfm.run_observation.cursor.v1";
 const OBSERVATION_NOTIFY_CHANNEL: &str = "mfm_run_observation";
 const OBSERVATION_NOTIFY_PAYLOAD: &str = "changed";
@@ -110,7 +106,6 @@ mod commits;
 mod event_rows;
 mod observations;
 mod projections;
-mod read_models;
 mod resource_lanes;
 mod stream;
 #[cfg(all(test, feature = "parity-tests"))]
@@ -121,8 +116,7 @@ mod util;
 
 use self::{
     artifact_admission::*, artifact_writes::*, artifacts::*, authority::*, commits::*,
-    event_rows::*, observations::*, projections::*, read_models::*, resource_lanes::*, stream::*,
-    util::*,
+    event_rows::*, observations::*, projections::*, resource_lanes::*, stream::*, util::*,
 };
 
 /// PostgreSQL-backed typed run event store.

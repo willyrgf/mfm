@@ -77,24 +77,22 @@ Authority and cursor tables are protected by no-update/no-delete/no-truncate
 triggers in the v1 schema. `resource_lane_waiter_counters` and
 `resource_lane_waiters` are the normal-operation mutable exception, and they are
 operational FIFO coordination only. V1 intentionally exposes no app, CLI, REST,
-or library maintenance endpoint for read-model rebuild or repair, store-epoch
-reseed, cursor pruning, or artifact sweeping. Those operations require a future
-design for Postgres roles, object ownership, credential separation, and
-restore/clone runbooks; do not implement them as helpers over ordinary runtime
-credentials.
+or library maintenance endpoint for store-epoch reseed, cursor pruning, or
+artifact sweeping. Those operations require a future design for Postgres roles,
+object ownership, credential separation, and restore/clone runbooks; do not
+implement them as helpers over ordinary runtime credentials.
 
 ## Observation Cursors
 
 Run observation cursors are server-issued opaque tokens backed by
 `run_observation_cursors`. The table stores only token authority metadata; public
-`next_cursor` values do not expose append XIDs, sort keys, store epochs, key ids,
-or cursor versions.
+`next_cursor` values do not expose append XIDs, sort keys, store epochs, or
+cursor versions.
 
-The v1 lifecycle is epoch-bound and has no wall-clock TTL, accepted old-key
-window, or cursor garbage collection. A cursor remains valid only while its row,
-`cursor_version`, `cursor_key_id`, and `store_epoch` match the live
-`store_metadata` row. Unknown or pruned token rows, stale cursor formats, and
-same-epoch retired-key rows are `InvalidCursor`. Store epoch mismatch is
+The v1 lifecycle is epoch-bound and has no wall-clock TTL or cursor garbage
+collection. A cursor remains valid only while its row, `cursor_version`, and
+`store_epoch` match the live `store_metadata` row. Unknown or pruned token rows
+and stale cursor formats are `InvalidCursor`. Store epoch mismatch is
 `CursorExpired`, including restore/clone/import/rollback situations; clients
 recover by listing again without a cursor.
 

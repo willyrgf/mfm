@@ -209,28 +209,6 @@ async fn validate_catalog(pool: &PgPool) -> Result<()> {
         }
     }
 
-    let column_rows = sqlx::query(
-        "SELECT column_name \
-         FROM information_schema.columns \
-         WHERE table_schema = current_schema() \
-           AND table_name = 'run_observation_change_summaries'",
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(|_| PostgresStoreError::Database("failed to inspect read-model columns"))?;
-    let columns = column_rows
-        .into_iter()
-        .map(|row| row.try_get::<String, _>("column_name"))
-        .collect::<std::result::Result<BTreeSet<_>, _>>()
-        .map_err(|_| PostgresStoreError::Database("failed to decode read-model columns"))?;
-    for column in REQUIRED_OBSERVATION_SUMMARY_COLUMNS {
-        if !columns.contains(*column) {
-            return Err(PostgresStoreError::Database(
-                "required read-model column missing",
-            ));
-        }
-    }
-
     let cursor_column_rows = sqlx::query(
         "SELECT column_name \
          FROM information_schema.columns \
@@ -449,13 +427,10 @@ const REQUIRED_TABLES: &[&str] = &[
     "resource_lane_waiter_counters",
     "resource_lane_waiters",
     "run_commit_log",
-    "run_observation_change_summaries",
-    "observation_derivations",
-    "observation_derivation_sources",
     "run_observation_cursors",
 ];
 
-const REQUIRED_VIEWS: &[&str] = &["current_run_observations"];
+const REQUIRED_VIEWS: &[&str] = &[];
 
 const REQUIRED_INDEXES: &[&str] = &[
     "resource_lane_waiters_live_fifo_idx",
@@ -475,9 +450,6 @@ const REQUIRED_TRIGGERS: &[&str] = &[
     "commit_artifact_evidence_no_update",
     "run_artifact_admissions_no_update",
     "run_commit_log_no_update",
-    "run_observation_change_summaries_no_update",
-    "observation_derivations_no_update",
-    "observation_derivation_sources_no_update",
     "run_observation_cursors_no_update",
 ];
 
@@ -490,19 +462,6 @@ const REQUIRED_CONSTRAINTS: &[&str] = &[
     "resource_lane_waiters_invocation_epoch_nonnegative",
     "run_observation_cursors_version_v1",
     "run_observation_cursors_sort_key_v1_length",
-];
-
-const REQUIRED_OBSERVATION_SUMMARY_COLUMNS: &[&str] = &[
-    "projection_version",
-    "commit_id",
-    "summary_kind",
-    "run_id",
-    "head_seq",
-    "observed_status",
-    "source_authority_hash",
-    "source_event_count",
-    "summary_row_hash",
-    "summary_row_canonical_json",
 ];
 
 const REQUIRED_CURSOR_COLUMNS: &[&str] = &[
@@ -526,9 +485,6 @@ const IMMUTABLE_TABLES: &[&str] = &[
     "commit_artifact_evidence",
     "run_artifact_admissions",
     "run_commit_log",
-    "run_observation_change_summaries",
-    "observation_derivations",
-    "observation_derivation_sources",
     "run_observation_cursors",
 ];
 

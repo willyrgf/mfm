@@ -29,10 +29,9 @@ Authority roles:
 | Event canonical bytes | `run_events.payload_canonical_json`, `payload_hash`, event identity columns | No secrets allowed. | strict authority | Strict load reconstructs typed envelopes and cross-checks run id, seq, ordinal, commit key, event id, schema id, spec hash, logical key, payload hash, and canonical payload bytes. |
 | Resource lane authority rows | `resource_lane_claim_events`, `resource_lane_release_events`, `resource_lane_transitions` | No secrets allowed. Lane keys and ledger keys are non-secret coordination identities. | strict authority | Strict load validates lane id derivation, source event bindings, transition hash chains, fencing token monotonicity, active-holder fold, and release legality. |
 | Resource lane waiter rows | `resource_lane_waiter_counters`, `resource_lane_waiters` | No secrets allowed. Stores derived lane ids, run/node/attempt ids, ledger keys, deterministic waiter ids, tickets, status, and lease timestamps. | operational coordination | Mutable Postgres-only FIFO admission state for single-lane exclusive claims after prepared-commit semantic validation. These rows may be inserted/refreshed by `ResourceLaneClaimBlocked`, are skipped when claimed/cancelled/expired, and never grant lane ownership or replace `ResourceLaneClaimed`/`ResourceLaneReleased`/`resource_lane_transitions` authority. Expired/cancelled retries reuse the deterministic waiter id with a fresh lane-local ticket. |
-| Observation summaries | `run_observation_change_summaries` | No secrets allowed. | observation, rebuildable cache | Used by list/watch. Corruption cannot affect strict status/resume/replay/public-output reads. |
-| Observation provenance | `observation_derivations`, `observation_derivation_sources` | No secrets allowed. | observation, rebuildable cache | Records source event/prefix provenance for observation rows. |
-| Cursor metadata | `run_observation_cursors` | No secrets. Contains internal append XIDs, sort keys, store epochs, key ids, and cursor versions that must not be exposed. | operational telemetry | Server-issued opaque tokens are epoch-bound and no-TTL in v1. Unknown, missing, retired-key, or stale-format rows are invalid; epoch mismatch expires. |
-| Store metadata | `store_metadata` | `cursor_secret` is secret storage metadata and must never be logged or returned. Other fields are internal non-secret metadata. | operational telemetry | Defines store epoch, schema contract version, and cursor key material. Runtime credentials must not mutate this table. |
+| Run observations | Derived from `commits`, `run_events`, and `run_commit_log` | No secrets allowed. | observation | List/watch materializes rows from strict authority at read time. Corruption cannot affect strict status/resume/replay/public-output reads. |
+| Cursor metadata | `run_observation_cursors` | No secrets. Contains internal append XIDs, sort keys, store epochs, and cursor versions that must not be exposed. | operational telemetry | Server-issued opaque tokens are epoch-bound and no-TTL in v1. Unknown, missing, or stale-format rows are invalid; epoch mismatch expires. |
+| Store metadata | `store_metadata` | No secrets. Fields are internal non-secret metadata. | operational telemetry | Defines store epoch and schema contract version. Runtime credentials must not mutate this table. |
 | SQLx metadata | `crates/storages/stream-store-postgres/.sqlx/*.json` | No secrets. | operational telemetry | Compile-time query metadata only; checked in and validated by Nix workflows. |
 
 ## CLI And REST
@@ -54,9 +53,8 @@ Authority roles:
   in the same change.
 - Secret-bearing values must stay out of typed configs, events, artifacts, facts, public outputs,
   diagnostics, fixtures, and snapshots.
-- Read models and list/watch output are observation surfaces. Strict resume, replay, status,
-  retention proof, artifact reads, public-output rendering, and side-effect recovery must load and
-  verify strict authority rows.
+- List/watch output is an observation surface. Strict resume, replay, status, retention proof,
+  artifact reads, public-output rendering, and side-effect recovery must load and verify strict
+  authority rows.
 - Cursor internals are storage-private. Public `change_id` and `next_cursor` values must remain
-  opaque and must not expose commit ids, append XIDs, sort keys, cursor versions, key ids, or store
-  epochs.
+  opaque and must not expose commit ids, append XIDs, sort keys, cursor versions, or store epochs.

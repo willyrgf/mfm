@@ -145,8 +145,7 @@ fn persisted_public_surface_inventory_covers_postgres_cutover_surfaces() {
         "Artifact evidence",
         "Event canonical bytes",
         "Resource lane authority rows",
-        "Observation summaries",
-        "Observation provenance",
+        "Run observations",
         "Cursor metadata",
         "Store metadata",
         "Run list/watch output",
@@ -176,9 +175,8 @@ fn persisted_public_surface_inventory_covers_postgres_cutover_surfaces() {
 
     for secret_boundary in [
         "No secrets allowed",
-        "`cursor_secret` is secret storage metadata",
-        "must never be logged or returned",
-        "must not expose commit ids, append XIDs, sort keys, cursor versions, key ids, or store",
+        "No secrets. Fields are internal non-secret metadata.",
+        "must not expose commit ids, append XIDs, sort keys, cursor versions, or store epochs",
     ] {
         assert!(
             inventory.contains(secret_boundary),
@@ -521,10 +519,10 @@ fn postgres_sqlx_metadata_is_checked_in_and_wired_to_gates() {
 #[test]
 fn in_memory_run_store_is_test_support_only() {
     let root = repo_root();
-    let store_path = "crates/kernel/store/src/lib.rs";
+    let store_path = "crates/kernel/store/src/v1/mod.rs";
     let store_source = fs::read_to_string(root.join(store_path)).expect("store source");
     assert!(
-        store_source.contains("#[cfg(any(test, feature = \"test-support\"))]\n    #[derive(Debug, Clone, Default)]\n    pub struct AsyncInMemoryRunStore"),
+        store_source.contains("#[cfg(any(test, feature = \"test-support\"))]\n#[derive(Debug, Clone, Default)]\npub struct AsyncInMemoryRunStore"),
         "AsyncInMemoryRunStore must remain cfg-gated to tests or the test-support feature"
     );
 
@@ -793,6 +791,7 @@ fn is_test_support_path(path: &str) -> bool {
     path.starts_with("tests/")
         || path.contains("/tests/")
         || path.ends_with("/src/tests.rs")
+        || path.ends_with("/src/run_store/tests.rs")
         || path.ends_with("/test_support.rs")
         || path.contains("/test_support/")
 }

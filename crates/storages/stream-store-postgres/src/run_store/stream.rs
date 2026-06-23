@@ -51,17 +51,6 @@ pub(super) async fn read_head_tx(
     i64_to_nonnegative_u64(head_seq, "commits.seq")
 }
 
-pub(super) async fn count_run_events_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    run_id: &RunId,
-) -> Result<i64> {
-    sqlx::query_scalar("SELECT COUNT(*) FROM run_events WHERE run_id = $1")
-        .bind(run_id.as_str())
-        .fetch_one(&mut **tx)
-        .await
-        .map_err(|error| database_error("failed to count run events", error))
-}
-
 pub(super) async fn lock_run_tx(tx: &mut Transaction<'_, Postgres>, run_id: &RunId) -> Result<()> {
     const RUN_LOCK_CLASS_ID: i32 = 0x4d46_5201;
     let object_id = advisory_object_id(run_id.as_str().as_bytes());

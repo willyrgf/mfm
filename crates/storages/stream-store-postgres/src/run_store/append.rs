@@ -177,7 +177,6 @@ impl PostgresRunStore {
             .await
             .map_err(|error| database_error("failed to insert run event", error))?;
         }
-        let source_event_count = count_run_events_tx(&mut tx, request.run_id()).await?;
         if let Some(admission) = &claim_admission {
             mark_waiter_claimed_tx(&mut tx, admission).await?;
         }
@@ -188,15 +187,6 @@ impl PostgresRunStore {
             &final_authority.commit_batch_hash,
             batch.seq(),
             event_count,
-        )
-        .await?;
-        insert_run_observation_summary_tx(
-            &mut tx,
-            staged.projections(),
-            request.run_id(),
-            &commit_id,
-            batch.seq(),
-            source_event_count,
         )
         .await?;
         notify_observation_change_tx(&mut tx).await?;

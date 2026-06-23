@@ -165,7 +165,7 @@ transition sequence, and records the matching `resource_lane_claim_events` and
 `(namespace, key_schema_id, key, exclusive)` lane across runs.
 
 Ordinary contention returns `ResourceLaneClaimBlocked`. That outcome parks the open attempt before
-live IO; it is not a run event, not lane-transition authority, not a persisted read-model fact, and
+live IO; it is not a run event, not lane-transition authority, not persisted semantic authority, and
 never authorizes attempt, saga, or run terminal failure. For single-lane exclusive claims, Postgres
 may insert or refresh a mutable operational waiter row so retry admission is FIFO among live
 non-expired waiters. That waiter row is not lane ownership authority, cannot grant execution, and is

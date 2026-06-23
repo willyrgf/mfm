@@ -1545,280 +1545,6 @@ async fn strict_load_rejects_corrupt_run_commit_log_sort_key() {
 }
 
 #[tokio::test]
-async fn read_model_private_validation_matches_append_rows() {
-    let (store, schema) = test_store().await;
-    let run = run_id(130);
-    append_run_start(&store, &run, "validation-run-start")
-        .await
-        .expect("run start");
-    append_resource_lane_attempt_start(&store, &run, "validation-attempt-start")
-        .await
-        .expect("attempt start");
-
-    let current = validate_read_models_from_pool(&store.pool, PROJECTION_VERSION)
-        .await
-        .expect("validate current projection");
-    assert_eq!(current.checked_commits, 2);
-    assert_eq!(current.missing_rows, 0);
-    assert_eq!(current.drift_rows, 0);
-    let drift = read_model_drift_report_from_pool(&store.pool)
-        .await
-        .expect("drift report");
-    assert!(drift.findings.is_empty());
-
-    drop_schema(&store, &schema).await;
-}
-
-#[tokio::test]
-async fn observation_derivations_record_run_prefix_provenance() {
-    let (store, schema) = test_store().await;
-    let run = run_id(138);
-    append_run_start(&store, &run, "derivation-run-start")
-        .await
-        .expect("run start");
-
-    let row = sqlx::query(
-        "SELECT d.source_kind, d.source_run_id, d.source_from_seq, d.source_to_seq, \
-          d.source_last_ordinal, d.source_high_append_xid::text AS source_high_append_xid, \
-          d.source_high_commit_id, d.source_high_commit_sort_key, d.source_event_count, \
-          d.derived_row_hash, d.derived_row_canonical_json, \
-          s.commit_id, s.summary_row_hash, s.summary_row_canonical_json, \
-          l.append_xid::text AS append_xid, l.commit_sort_key \
-         FROM observation_derivations d \
-         INNER JOIN run_observation_change_summaries s \
-           ON s.projection_version = d.projection_version \
-          AND s.commit_id = d.source_high_commit_id \
-          AND s.summary_kind = $2 \
-         INNER JOIN run_commit_log l ON l.commit_id = s.commit_id \
-         WHERE d.model_name = $3 AND s.run_id = $1",
-    )
-    .bind(run.as_str())
-    .bind(RUN_OBSERVATION_SUMMARY_KIND)
-    .bind(RUN_OBSERVATION_DERIVATION_MODEL)
-    .fetch_one(&store.pool)
-    .await
-    .expect("load derivation provenance");
-    assert_eq!(
-        row.try_get::<String, _>("source_kind")
-            .expect("source kind"),
-        RUN_PREFIX_SOURCE_KIND
-    );
-    assert_eq!(
-        row.try_get::<String, _>("source_run_id")
-            .expect("source run"),
-        run.as_str()
-    );
-    assert_eq!(row.try_get::<i64, _>("source_from_seq").expect("from"), 1);
-    assert_eq!(row.try_get::<i64, _>("source_to_seq").expect("to"), 1);
-    assert_eq!(
-        row.try_get::<i32, _>("source_last_ordinal")
-            .expect("last ordinal"),
-        0
-    );
-    assert_eq!(
-        row.try_get::<String, _>("source_high_append_xid")
-            .expect("source xid"),
-        row.try_get::<String, _>("append_xid").expect("log xid")
-    );
-    assert_eq!(
-        row.try_get::<String, _>("source_high_commit_id")
-            .expect("source commit"),
-        row.try_get::<String, _>("commit_id")
-            .expect("summary commit")
-    );
-    assert_eq!(
-        row.try_get::<Vec<u8>, _>("source_high_commit_sort_key")
-            .expect("source sort key"),
-        row.try_get::<Vec<u8>, _>("commit_sort_key")
-            .expect("log sort key")
-    );
-    assert_eq!(
-        row.try_get::<i64, _>("source_event_count")
-            .expect("source count"),
-        1
-    );
-    assert_eq!(
-        row.try_get::<String, _>("derived_row_hash")
-            .expect("derived hash"),
-        row.try_get::<String, _>("summary_row_hash")
-            .expect("summary hash")
-    );
-    assert_eq!(
-        row.try_get::<Vec<u8>, _>("derived_row_canonical_json")
-            .expect("derived row"),
-        row.try_get::<Vec<u8>, _>("summary_row_canonical_json")
-            .expect("summary row")
-    );
-
-    drop_schema(&store, &schema).await;
-}
-
-#[tokio::test]
-async fn read_model_validation_detects_missing_summary_rows() {
-    let (store, schema) = test_store().await;
-    let run = run_id(131);
-    append_run_start(&store, &run, "missing-read-model-run-start")
-        .await
-        .expect("run start");
-    append_resource_lane_attempt_start(&store, &run, "missing-read-model-attempt-start")
-        .await
-        .expect("attempt start");
-
-    sqlx::query(
-        "ALTER TABLE run_observation_change_summaries DISABLE TRIGGER \
-         run_observation_change_summaries_no_update",
-    )
-    .execute(&store.pool)
-    .await
-    .expect("disable read-model mutation guard");
-    sqlx::query(
-        "DELETE FROM run_observation_change_summaries \
-         WHERE projection_version = $1 AND summary_kind = $2 AND run_id = $3 AND head_seq = 2",
-    )
-    .bind(PROJECTION_VERSION)
-    .bind(RUN_OBSERVATION_SUMMARY_KIND)
-    .bind(run.as_str())
-    .execute(&store.pool)
-    .await
-    .expect("delete read-model row");
-    sqlx::query(
-        "ALTER TABLE run_observation_change_summaries ENABLE TRIGGER \
-         run_observation_change_summaries_no_update",
-    )
-    .execute(&store.pool)
-    .await
-    .expect("reenable read-model mutation guard");
-
-    let missing = validate_read_models_from_pool(&store.pool, PROJECTION_VERSION)
-        .await
-        .expect("validate missing row");
-    assert_eq!(missing.missing_rows, 1);
-    assert_eq!(missing.drift_rows, 0);
-    let drift = read_model_drift_report_from_pool(&store.pool)
-        .await
-        .expect("drift report");
-    assert_eq!(drift.findings.len(), 1);
-    assert_eq!(drift.findings[0].kind, ReadModelDriftKind::Missing);
-
-    drop_schema(&store, &schema).await;
-}
-
-#[tokio::test]
-async fn read_model_validation_detects_missing_derivations() {
-    let (store, schema) = test_store().await;
-    let run = run_id(139);
-    append_run_start(&store, &run, "missing-derivation-run-start")
-        .await
-        .expect("run start");
-
-    sqlx::query(
-        "ALTER TABLE observation_derivations DISABLE TRIGGER \
-         observation_derivations_no_update",
-    )
-    .execute(&store.pool)
-    .await
-    .expect("disable derivation mutation guard");
-    sqlx::query("DELETE FROM observation_derivations WHERE source_run_id = $1")
-        .bind(run.as_str())
-        .execute(&store.pool)
-        .await
-        .expect("delete derivation row");
-    sqlx::query(
-        "ALTER TABLE observation_derivations ENABLE TRIGGER \
-         observation_derivations_no_update",
-    )
-    .execute(&store.pool)
-    .await
-    .expect("reenable derivation mutation guard");
-
-    let missing = validate_read_models_from_pool(&store.pool, PROJECTION_VERSION)
-        .await
-        .expect("validate missing derivation");
-    assert_eq!(missing.missing_rows, 1);
-    assert_eq!(missing.drift_rows, 0);
-    let drift = read_model_drift_report_from_pool(&store.pool)
-        .await
-        .expect("drift report");
-    assert_eq!(drift.findings.len(), 1);
-    assert_eq!(drift.findings[0].kind, ReadModelDriftKind::Missing);
-
-    drop_schema(&store, &schema).await;
-}
-
-#[tokio::test]
-async fn read_model_validation_detects_drift() {
-    let (store, schema) = test_store().await;
-    let run = run_id(132);
-    append_run_start(&store, &run, "drift-read-model-run-start")
-        .await
-        .expect("run start");
-
-    sqlx::query(
-        "ALTER TABLE run_observation_change_summaries DISABLE TRIGGER \
-         run_observation_change_summaries_no_update",
-    )
-    .execute(&store.pool)
-    .await
-    .expect("disable read-model mutation guard");
-    sqlx::query(
-        "UPDATE run_observation_change_summaries \
-         SET summary_row_hash = 'tampered-summary-hash' \
-         WHERE projection_version = $1 AND summary_kind = $2 AND run_id = $3",
-    )
-    .bind(PROJECTION_VERSION)
-    .bind(RUN_OBSERVATION_SUMMARY_KIND)
-    .bind(run.as_str())
-    .execute(&store.pool)
-    .await
-    .expect("tamper read-model hash");
-
-    let validation = validate_read_models_from_pool(&store.pool, PROJECTION_VERSION)
-        .await
-        .expect("validate drifted projection");
-    assert_eq!(validation.drift_rows, 1);
-    let drift = read_model_drift_report_from_pool(&store.pool)
-        .await
-        .expect("drift report");
-    assert_eq!(drift.findings.len(), 1);
-    assert_eq!(drift.findings[0].kind, ReadModelDriftKind::Mismatched);
-
-    drop_schema(&store, &schema).await;
-}
-
-#[tokio::test]
-async fn read_model_validation_detects_derivation_drift() {
-    let (store, schema) = test_store().await;
-    let run = run_id(140);
-    append_run_start(&store, &run, "drift-derivation-run-start")
-        .await
-        .expect("run start");
-
-    sqlx::query(
-        "ALTER TABLE observation_derivations DISABLE TRIGGER \
-         observation_derivations_no_update",
-    )
-    .execute(&store.pool)
-    .await
-    .expect("disable derivation mutation guard");
-    sqlx::query(
-        "UPDATE observation_derivations \
-         SET derived_row_hash = 'tampered-derivation-hash' \
-         WHERE source_run_id = $1",
-    )
-    .bind(run.as_str())
-    .execute(&store.pool)
-    .await
-    .expect("tamper derivation hash");
-
-    let validation = validate_read_models_from_pool(&store.pool, PROJECTION_VERSION)
-        .await
-        .expect("validate drifted derivation");
-    assert_eq!(validation.drift_rows, 1);
-
-    drop_schema(&store, &schema).await;
-}
-
-#[tokio::test]
 async fn observation_change_ids_and_cursors_do_not_expose_internal_authority() {
     let (store, schema) = test_store().await;
     let run = run_id(134);
@@ -1829,34 +1555,29 @@ async fn observation_change_ids_and_cursors_do_not_expose_internal_authority() {
     let metadata = load_store_metadata(&store.pool)
         .await
         .expect("load store metadata");
-    let row = sqlx::query(
-        "SELECT s.run_id, s.head_seq, s.observed_status, \
-          to_char(s.started_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS started_at, \
-          to_char(s.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS updated_at, \
-          CASE WHEN s.completed_at IS NULL THEN NULL \
-            ELSE to_char(s.completed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') \
-          END AS completed_at, \
-          l.commit_id, l.append_xid::text AS append_xid, l.commit_sort_key \
-         FROM run_commit_log l \
-         INNER JOIN run_observation_change_summaries s ON s.commit_id = l.commit_id \
-         WHERE s.run_id = $1",
-    )
-    .bind(run.as_str())
-    .fetch_one(&store.pool)
-    .await
-    .expect("load observation row");
-    let commit_id: String = row.try_get("commit_id").expect("commit id");
-    let append_xid: String = row.try_get("append_xid").expect("append xid");
-    let commit_sort_key: Vec<u8> = row.try_get("commit_sort_key").expect("sort key");
-    let observation = observation_row_from_row(row, &metadata).expect("decode observation");
+    let frontier_xid = sealed_frontier_xid(&store.pool)
+        .await
+        .expect("read observation frontier");
+    let mut rows = read_observation_list_rows(&store.pool, &metadata, &frontier_xid, 1)
+        .await
+        .expect("load observation row");
+    assert_eq!(rows.len(), 1);
+    let observation = rows.pop().expect("observation row");
+    let commit_id: String =
+        sqlx::query_scalar("SELECT commit_id FROM run_commit_log WHERE run_id = $1 AND seq = 1")
+            .bind(run.as_str())
+            .fetch_one(&store.pool)
+            .await
+            .expect("load commit id");
     let public_change_id = observation
         .observation
         .change_id
         .as_deref()
         .expect("observation change id");
+    let commit_sort_key_hex = bytes_hex(&observation.commit_sort_key);
     let position = CursorPosition {
-        append_xid,
-        commit_sort_key: commit_sort_key.clone(),
+        append_xid: observation.append_xid.clone(),
+        commit_sort_key: observation.commit_sort_key.clone(),
         kind: CursorKind::Row,
     };
     let public_cursor = encode_observation_cursor(&store.pool, &metadata, &position)
@@ -1880,8 +1601,6 @@ async fn observation_change_ids_and_cursors_do_not_expose_internal_authority() {
             .len(),
         32
     );
-    let commit_sort_key_hex = bytes_hex(&commit_sort_key);
-
     for public_value in [public_cursor.as_str(), public_change_id] {
         assert!(!public_value.contains('|'));
         assert!(!public_value.contains(CURSOR_VERSION));
