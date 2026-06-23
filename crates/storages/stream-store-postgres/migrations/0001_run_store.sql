@@ -153,99 +153,6 @@ CREATE TABLE run_artifact_admissions (
   CONSTRAINT run_artifact_admissions_seq_positive CHECK (first_seq >= 1)
 );
 
-CREATE TABLE resource_lane_claim_events (
-  claim_id TEXT PRIMARY KEY,
-  lane_id BYTEA NOT NULL,
-  run_id TEXT NOT NULL,
-  node_id TEXT NOT NULL,
-  attempt_id TEXT NOT NULL,
-  ledger_key TEXT NOT NULL,
-  ledger_purpose JSONB NOT NULL,
-  invocation_epoch INTEGER NOT NULL,
-  namespace TEXT NOT NULL,
-  key_schema_id TEXT NOT NULL,
-  key_canonical_json BYTEA NOT NULL,
-  key_value TEXT NOT NULL,
-  mode TEXT NOT NULL CHECK (mode = 'exclusive'),
-  requirement_digest TEXT NOT NULL,
-  resolved_by_capability_impl TEXT NOT NULL,
-  fencing_token BIGINT NOT NULL,
-  commit_id TEXT NOT NULL REFERENCES commits(commit_id) ON DELETE RESTRICT,
-  source_seq BIGINT NOT NULL,
-  source_ordinal INTEGER NOT NULL,
-  source_event_id TEXT NOT NULL,
-  source_event_type TEXT NOT NULL CHECK (source_event_type = 'ResourceLaneClaimed'),
-  source_event_payload_hash TEXT NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp(),
-  CONSTRAINT resource_lane_claim_events_source_fk FOREIGN KEY (run_id, source_seq, source_ordinal) REFERENCES run_events(run_id, seq, ordinal) ON DELETE RESTRICT,
-  CONSTRAINT resource_lane_claim_events_lane_id_len CHECK (octet_length(lane_id) = 32),
-  CONSTRAINT resource_lane_claim_events_invocation_epoch_nonnegative CHECK (invocation_epoch >= 0),
-  CONSTRAINT resource_lane_claim_events_source_seq_positive CHECK (source_seq >= 1),
-  CONSTRAINT resource_lane_claim_events_source_ordinal_nonnegative CHECK (source_ordinal >= 0),
-  CONSTRAINT resource_lane_claim_events_fencing_token_positive CHECK (fencing_token >= 1),
-  UNIQUE (lane_id, fencing_token)
-);
-
-CREATE TABLE resource_lane_release_events (
-  release_id TEXT PRIMARY KEY,
-  claim_id TEXT NOT NULL REFERENCES resource_lane_claim_events(claim_id) ON DELETE RESTRICT,
-  lane_id BYTEA NOT NULL,
-  run_id TEXT NOT NULL,
-  node_id TEXT NOT NULL,
-  attempt_id TEXT NOT NULL,
-  ledger_key TEXT NOT NULL,
-  ledger_purpose JSONB NOT NULL,
-  invocation_epoch INTEGER NOT NULL,
-  claim_fencing_token BIGINT NOT NULL,
-  release_reason TEXT NOT NULL,
-  commit_id TEXT NOT NULL REFERENCES commits(commit_id) ON DELETE RESTRICT,
-  source_seq BIGINT NOT NULL,
-  source_ordinal INTEGER NOT NULL,
-  source_event_id TEXT NOT NULL,
-  source_event_type TEXT NOT NULL CHECK (source_event_type = 'ResourceLaneReleased'),
-  source_event_payload_hash TEXT NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp(),
-  CONSTRAINT resource_lane_release_events_source_fk FOREIGN KEY (run_id, source_seq, source_ordinal) REFERENCES run_events(run_id, seq, ordinal) ON DELETE RESTRICT,
-  CONSTRAINT resource_lane_release_events_lane_id_len CHECK (octet_length(lane_id) = 32),
-  CONSTRAINT resource_lane_release_events_invocation_epoch_nonnegative CHECK (invocation_epoch >= 0),
-  CONSTRAINT resource_lane_release_events_source_seq_positive CHECK (source_seq >= 1),
-  CONSTRAINT resource_lane_release_events_source_ordinal_nonnegative CHECK (source_ordinal >= 0),
-  CONSTRAINT resource_lane_release_events_fencing_token_positive CHECK (claim_fencing_token >= 1),
-  UNIQUE (claim_id)
-);
-
-CREATE TABLE resource_lane_transitions (
-  lane_id BYTEA NOT NULL,
-  lane_transition_seq BIGINT NOT NULL,
-  transition_kind TEXT NOT NULL CHECK (transition_kind IN ('claim', 'release')),
-  claim_id TEXT NOT NULL REFERENCES resource_lane_claim_events(claim_id) ON DELETE RESTRICT,
-  release_id TEXT NULL REFERENCES resource_lane_release_events(release_id) ON DELETE RESTRICT,
-  claim_fencing_token BIGINT NOT NULL,
-  previous_transition_hash TEXT NULL,
-  transition_hash TEXT NOT NULL,
-  run_id TEXT NOT NULL,
-  commit_id TEXT NOT NULL REFERENCES commits(commit_id) ON DELETE RESTRICT,
-  source_seq BIGINT NOT NULL,
-  source_ordinal INTEGER NOT NULL,
-  source_event_id TEXT NOT NULL,
-  source_event_type TEXT NOT NULL,
-  source_event_payload_hash TEXT NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp(),
-  PRIMARY KEY (lane_id, lane_transition_seq),
-  CONSTRAINT resource_lane_transitions_source_fk FOREIGN KEY (run_id, source_seq, source_ordinal) REFERENCES run_events(run_id, seq, ordinal) ON DELETE RESTRICT,
-  CONSTRAINT resource_lane_transitions_lane_id_len CHECK (octet_length(lane_id) = 32),
-  CONSTRAINT resource_lane_transitions_seq_positive CHECK (lane_transition_seq >= 1),
-  CONSTRAINT resource_lane_transitions_fencing_token_positive CHECK (claim_fencing_token >= 1),
-  CONSTRAINT resource_lane_transitions_kind_shape CHECK (
-    (transition_kind = 'claim' AND release_id IS NULL AND source_event_type = 'ResourceLaneClaimed')
-    OR
-    (transition_kind = 'release' AND release_id IS NOT NULL AND source_event_type = 'ResourceLaneReleased')
-  ),
-  UNIQUE (transition_hash),
-  UNIQUE (claim_id, transition_kind),
-  UNIQUE (release_id)
-);
-
 CREATE TABLE resource_lane_waiter_counters (
   lane_id BYTEA PRIMARY KEY,
   next_ticket BIGINT NOT NULL,
@@ -437,18 +344,6 @@ FOR EACH STATEMENT EXECUTE FUNCTION mfm_reject_authority_mutation();
 
 CREATE TRIGGER run_artifact_admissions_no_update
 BEFORE UPDATE OR DELETE OR TRUNCATE ON run_artifact_admissions
-FOR EACH STATEMENT EXECUTE FUNCTION mfm_reject_authority_mutation();
-
-CREATE TRIGGER resource_lane_claim_events_no_update
-BEFORE UPDATE OR DELETE OR TRUNCATE ON resource_lane_claim_events
-FOR EACH STATEMENT EXECUTE FUNCTION mfm_reject_authority_mutation();
-
-CREATE TRIGGER resource_lane_release_events_no_update
-BEFORE UPDATE OR DELETE OR TRUNCATE ON resource_lane_release_events
-FOR EACH STATEMENT EXECUTE FUNCTION mfm_reject_authority_mutation();
-
-CREATE TRIGGER resource_lane_transitions_no_update
-BEFORE UPDATE OR DELETE OR TRUNCATE ON resource_lane_transitions
 FOR EACH STATEMENT EXECUTE FUNCTION mfm_reject_authority_mutation();
 
 CREATE TRIGGER run_commit_log_no_update

@@ -70,12 +70,6 @@ pub(super) fn i64_to_positive_u64(value: i64, field: &'static str) -> Result<u64
     Ok(value)
 }
 
-pub(super) fn i32_to_u32(value: i32, field: &'static str) -> Result<u32> {
-    u32::try_from(value).map_err(|_| {
-        PostgresStoreError::Corruption(format!("{field} contained a negative integer"))
-    })
-}
-
 pub(super) fn parse_optional_identity<T>(value: Option<String>) -> Result<Option<T>>
 where
     T: FromStr<Err = IdentityError>,

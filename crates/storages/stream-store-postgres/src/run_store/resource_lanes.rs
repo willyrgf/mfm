@@ -3,6 +3,7 @@ use super::*;
 pub(super) async fn lock_resource_lanes_for_request_tx(
     tx: &mut Transaction<'_, Postgres>,
     request: &mfm_store::v1::CommitRequest,
+    projections: &ProjectionSnapshot,
 ) -> Result<BTreeSet<Vec<u8>>> {
     let mut lane_ids = BTreeSet::<Vec<u8>>::new();
     for payload in request.payloads() {
@@ -11,7 +12,11 @@ pub(super) async fn lock_resource_lanes_for_request_tx(
                 lane_ids.insert(resource_lane_id(&intent.resource_key)?.to_vec());
             }
             events::KernelEventPayload::ResourceLaneReleaseIntent(intent) => {
-                lane_ids.insert(load_claim_lane_id_tx(tx, &intent.claim_id).await?);
+                lane_ids.insert(resource_lane_id_for_release(
+                    request.run_id(),
+                    projections,
+                    intent,
+                )?);
             }
             _ => {}
         }
@@ -64,6 +69,45 @@ pub(super) fn resource_lane_id(evidence: &events::ResourceKeyEvidence) -> Result
     lane_id[0] = 1;
     lane_id[1..].copy_from_slice(&digest.as_bytes()[..31]);
     Ok(lane_id)
+}
+
+pub(super) fn resource_lane_id_for_key(key: &ResourceLaneKey) -> Result<[u8; 32]> {
+    resource_lane_id(&events::ResourceKeyEvidence {
+        namespace: key.namespace.clone(),
+        key_schema_id: key.key_schema_id.clone(),
+        key: key.key.clone(),
+    })
+}
+
+pub(super) fn resource_lane_id_for_release(
+    run_id: &RunId,
+    projections: &ProjectionSnapshot,
+    intent: &events::ResourceLaneReleaseIntent,
+) -> Result<Vec<u8>> {
+    let holder = mfm_store::v1::SideEffectLedgerRef::new(run_id.clone(), intent.ledger_key.clone());
+    let Some((lane_key, active)) = projections
+        .resource_lanes()
+        .find(|(_, projection)| projection.holder == holder)
+    else {
+        return Err(StoreError::ProjectionConflict {
+            key: format!("resource_lane:{}", intent.ledger_key),
+            message: "resource lane release references unknown active claim".to_owned(),
+        }
+        .into());
+    };
+    if active.claim_id != intent.claim_id
+        || active.node_id != intent.node_id
+        || active.attempt_id != intent.attempt_id
+        || active.ledger_purpose != intent.ledger_purpose
+        || active.invocation_epoch != intent.invocation_epoch
+    {
+        return Err(StoreError::ProjectionConflict {
+            key: format!("resource_lane:{}:{}", lane_key.namespace, lane_key.key),
+            message: "resource lane release intent does not match active claim".to_owned(),
+        }
+        .into());
+    }
+    Ok(resource_lane_id_for_key(lane_key)?.to_vec())
 }
 
 pub(super) struct ResourceLaneClaimAdmission {
@@ -331,431 +375,6 @@ pub(super) async fn mark_waiter_claimed_tx(
     Ok(())
 }
 
-pub(super) async fn load_claim_lane_id_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    claim_id: &events::ResourceLaneClaimId,
-) -> Result<Vec<u8>> {
-    let row = sqlx::query("SELECT lane_id FROM resource_lane_claim_events WHERE claim_id = $1")
-        .bind(claim_id.as_str())
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(|error| database_error("failed to load resource lane claim", error))?;
-    let Some(row) = row else {
-        return Err(StoreError::ProjectionConflict {
-            key: format!("resource_lane_claim:{}", claim_id),
-            message: "resource lane release references unknown claim".to_owned(),
-        }
-        .into());
-    };
-    row.try_get("lane_id")
-        .map_err(|error| database_error("failed to decode resource lane id", error))
-}
-
-pub(super) async fn insert_resource_lane_authority_rows_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    commit_id: &str,
-    events: &[KernelEventEnvelope],
-) -> Result<()> {
-    for event in events {
-        match event.payload() {
-            events::KernelEventPayload::ResourceLaneClaimed(payload) => {
-                insert_resource_lane_claim_tx(tx, commit_id, event, payload).await?;
-            }
-            events::KernelEventPayload::ResourceLaneReleased(payload) => {
-                insert_resource_lane_release_tx(tx, commit_id, event, payload).await?;
-            }
-            _ => {}
-        }
-    }
-    Ok(())
-}
-
-pub(super) async fn insert_resource_lane_claim_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    commit_id: &str,
-    event: &KernelEventEnvelope,
-    payload: &events::ResourceLaneClaimed,
-) -> Result<()> {
-    let lane_id = resource_lane_id(&payload.resource_key)?;
-    let key_canonical_json = resource_key_canonical_json(&payload.resource_key)?;
-    sqlx::query(
-        "INSERT INTO resource_lane_claim_events \
-         (claim_id, lane_id, run_id, node_id, attempt_id, ledger_key, ledger_purpose, \
-          invocation_epoch, namespace, key_schema_id, key_canonical_json, key_value, mode, \
-          requirement_digest, resolved_by_capability_impl, fencing_token, commit_id, source_seq, \
-          source_ordinal, source_event_id, source_event_type, source_event_payload_hash) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'exclusive',$13,$14,$15,$16,$17,$18,$19,'ResourceLaneClaimed',$20)",
-    )
-    .bind(payload.claim_id.as_str())
-    .bind(lane_id.as_slice())
-    .bind(event.run_id().as_str())
-    .bind(payload.node_id.as_str())
-    .bind(payload.attempt_id.as_str())
-    .bind(payload.ledger_key.as_str())
-    .bind(side_effect_ledger_purpose_json(&payload.ledger_purpose))
-    .bind(i32::try_from(payload.invocation_epoch).map_err(|_| {
-        PostgresStoreError::Corruption("resource lane invocation epoch overflow".to_owned())
-    })?)
-    .bind(payload.resource_key.namespace.as_str())
-    .bind(payload.resource_key.key_schema_id.as_str())
-    .bind(key_canonical_json)
-    .bind(payload.resource_key.key.as_str())
-    .bind(payload.requirement_digest.as_str())
-    .bind(payload.resolved_by_capability_impl.as_str())
-    .bind(u64_to_i64(payload.claim_fencing_token, "resource_lane_claim_events.fencing_token")?)
-    .bind(commit_id)
-    .bind(u64_to_i64(event.seq().as_u64(), "resource_lane_claim_events.source_seq")?)
-    .bind(i32::try_from(event.ordinal().as_u32()).map_err(|_| {
-        PostgresStoreError::Corruption("resource lane source ordinal overflow".to_owned())
-    })?)
-    .bind(event.event_id().as_str())
-    .bind(event.payload_hash().as_str())
-    .execute(&mut **tx)
-    .await
-    .map_err(|error| database_error("failed to insert resource lane claim", error))?;
-    insert_resource_lane_transition_tx(
-        tx,
-        ResourceLaneTransitionInsert {
-            lane_id: &lane_id,
-            lane_transition_seq: payload.lane_transition_seq,
-            transition_kind: "claim",
-            claim_id: &payload.claim_id,
-            release_id: None,
-            claim_fencing_token: payload.claim_fencing_token,
-            event,
-            commit_id,
-        },
-    )
-    .await
-}
-
-pub(super) async fn insert_resource_lane_release_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    commit_id: &str,
-    event: &KernelEventEnvelope,
-    payload: &events::ResourceLaneReleased,
-) -> Result<()> {
-    let claim = load_resource_lane_claim_row_tx(tx, &payload.claim_id).await?;
-    if claim.run_id != event.run_id().as_str()
-        || claim.claim_fencing_token != payload.claim_fencing_token
-    {
-        return Err(PostgresStoreError::Corruption(
-            "resource lane release claim binding mismatch".to_owned(),
-        ));
-    }
-    sqlx::query(
-        "INSERT INTO resource_lane_release_events \
-         (release_id, claim_id, lane_id, run_id, node_id, attempt_id, ledger_key, ledger_purpose, \
-          invocation_epoch, claim_fencing_token, release_reason, commit_id, source_seq, \
-          source_ordinal, source_event_id, source_event_type, source_event_payload_hash) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'ResourceLaneReleased',$16)",
-    )
-    .bind(payload.release_id.as_str())
-    .bind(payload.claim_id.as_str())
-    .bind(claim.lane_id.as_slice())
-    .bind(event.run_id().as_str())
-    .bind(payload.node_id.as_str())
-    .bind(payload.attempt_id.as_str())
-    .bind(payload.ledger_key.as_str())
-    .bind(side_effect_ledger_purpose_json(&payload.ledger_purpose))
-    .bind(i32::try_from(payload.invocation_epoch).map_err(|_| {
-        PostgresStoreError::Corruption("resource lane invocation epoch overflow".to_owned())
-    })?)
-    .bind(u64_to_i64(
-        payload.claim_fencing_token,
-        "resource_lane_release_events.claim_fencing_token",
-    )?)
-    .bind(payload.release_reason.as_str())
-    .bind(commit_id)
-    .bind(u64_to_i64(
-        event.seq().as_u64(),
-        "resource_lane_release_events.source_seq",
-    )?)
-    .bind(i32::try_from(event.ordinal().as_u32()).map_err(|_| {
-        PostgresStoreError::Corruption("resource lane source ordinal overflow".to_owned())
-    })?)
-    .bind(event.event_id().as_str())
-    .bind(event.payload_hash().as_str())
-    .execute(&mut **tx)
-    .await
-    .map_err(|error| database_error("failed to insert resource lane release", error))?;
-    insert_resource_lane_transition_tx(
-        tx,
-        ResourceLaneTransitionInsert {
-            lane_id: &claim.lane_id,
-            lane_transition_seq: payload.lane_transition_seq,
-            transition_kind: "release",
-            claim_id: &payload.claim_id,
-            release_id: Some(&payload.release_id),
-            claim_fencing_token: payload.claim_fencing_token,
-            event,
-            commit_id,
-        },
-    )
-    .await
-}
-
-pub(super) struct ResourceLaneTransitionInsert<'a> {
-    pub(super) lane_id: &'a [u8],
-    pub(super) lane_transition_seq: u64,
-    pub(super) transition_kind: &'a str,
-    pub(super) claim_id: &'a events::ResourceLaneClaimId,
-    pub(super) release_id: Option<&'a events::ResourceLaneReleaseId>,
-    pub(super) claim_fencing_token: u64,
-    pub(super) event: &'a KernelEventEnvelope,
-    pub(super) commit_id: &'a str,
-}
-
-pub(super) async fn insert_resource_lane_transition_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    transition: ResourceLaneTransitionInsert<'_>,
-) -> Result<()> {
-    let previous_transition_hash =
-        previous_resource_lane_transition_hash_tx(tx, transition.lane_id).await?;
-    let transition_hash =
-        resource_lane_transition_hash(&transition, previous_transition_hash.as_deref())?;
-    sqlx::query(
-        "INSERT INTO resource_lane_transitions \
-         (lane_id, lane_transition_seq, transition_kind, claim_id, release_id, claim_fencing_token, \
-          previous_transition_hash, transition_hash, run_id, commit_id, source_seq, source_ordinal, \
-         source_event_id, source_event_type, source_event_payload_hash) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)",
-    )
-    .bind(transition.lane_id)
-    .bind(u64_to_i64(
-        transition.lane_transition_seq,
-        "resource_lane_transitions.lane_transition_seq",
-    )?)
-    .bind(transition.transition_kind)
-    .bind(transition.claim_id.as_str())
-    .bind(
-        transition
-            .release_id
-            .map(events::ResourceLaneReleaseId::as_str),
-    )
-    .bind(u64_to_i64(
-        transition.claim_fencing_token,
-        "resource_lane_transitions.claim_fencing_token",
-    )?)
-    .bind(previous_transition_hash)
-    .bind(transition_hash)
-    .bind(transition.event.run_id().as_str())
-    .bind(transition.commit_id)
-    .bind(u64_to_i64(
-        transition.event.seq().as_u64(),
-        "resource_lane_transitions.source_seq",
-    )?)
-    .bind(i32::try_from(transition.event.ordinal().as_u32()).map_err(|_| {
-        PostgresStoreError::Corruption("resource lane source ordinal overflow".to_owned())
-    })?)
-    .bind(transition.event.event_id().as_str())
-    .bind(match transition.event.payload() {
-        events::KernelEventPayload::ResourceLaneClaimed(_) => "ResourceLaneClaimed",
-        events::KernelEventPayload::ResourceLaneReleased(_) => "ResourceLaneReleased",
-        _ => {
-            return Err(PostgresStoreError::Corruption(
-                "resource lane transition source event is not a lane event".to_owned(),
-            ))
-        }
-    })
-    .bind(transition.event.payload_hash().as_str())
-    .execute(&mut **tx)
-    .await
-    .map_err(|error| database_error("failed to insert resource lane transition", error))?;
-    Ok(())
-}
-
-pub(super) async fn previous_resource_lane_transition_hash_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    lane_id: &[u8],
-) -> Result<Option<String>> {
-    sqlx::query_scalar::<_, String>(
-        "SELECT transition_hash FROM resource_lane_transitions \
-         WHERE lane_id = $1 ORDER BY lane_transition_seq DESC LIMIT 1",
-    )
-    .bind(lane_id)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(|error| database_error("failed to load previous resource lane transition", error))
-}
-
-pub(super) struct ResourceLaneTransitionAuthorityRow {
-    pub(super) lane_id: Vec<u8>,
-    pub(super) lane_transition_seq: u64,
-    pub(super) transition_kind: String,
-    pub(super) claim_id: String,
-    pub(super) release_id: Option<String>,
-    pub(super) claim_fencing_token: u64,
-    pub(super) previous_transition_hash: Option<String>,
-    pub(super) transition_hash: String,
-    pub(super) source_seq: u64,
-    pub(super) source_ordinal: u32,
-    pub(super) source_event_id: String,
-    pub(super) source_event_type: String,
-    pub(super) source_event_payload_hash: String,
-}
-
-pub(super) async fn validate_resource_lane_transition_hash_chains_tx(
-    tx: &mut Transaction<'_, Postgres>,
-) -> Result<()> {
-    let rows = sqlx::query(
-        "SELECT lane_id, lane_transition_seq, transition_kind, claim_id, release_id, \
-         claim_fencing_token, previous_transition_hash, transition_hash, source_seq, \
-         source_ordinal, source_event_id, source_event_type, source_event_payload_hash \
-         FROM resource_lane_transitions ORDER BY lane_id ASC, lane_transition_seq ASC",
-    )
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(|error| database_error("failed to load resource lane transition rows", error))?;
-    let mut current_lane: Option<Vec<u8>> = None;
-    let mut expected_seq = 1_u64;
-    let mut expected_previous_hash: Option<String> = None;
-    for row in rows {
-        let row = resource_lane_transition_authority_row(row)?;
-        if current_lane.as_ref() != Some(&row.lane_id) {
-            current_lane = Some(row.lane_id.clone());
-            expected_seq = 1;
-            expected_previous_hash = None;
-        }
-        if row.lane_transition_seq != expected_seq {
-            return Err(PostgresStoreError::Corruption(
-                "resource lane transition sequence gap".to_owned(),
-            ));
-        }
-        if row.previous_transition_hash != expected_previous_hash {
-            return Err(PostgresStoreError::Corruption(
-                "resource lane transition previous hash mismatch".to_owned(),
-            ));
-        }
-        if !resource_lane_transition_kind_matches_source(&row) {
-            return Err(PostgresStoreError::Corruption(
-                "resource lane transition kind/source mismatch".to_owned(),
-            ));
-        }
-        let expected_hash = resource_lane_transition_hash_from_row(&row)?;
-        if row.transition_hash != expected_hash {
-            return Err(PostgresStoreError::Corruption(
-                "resource lane transition hash mismatch".to_owned(),
-            ));
-        }
-        expected_previous_hash = Some(row.transition_hash);
-        expected_seq = expected_seq.checked_add(1).ok_or_else(|| {
-            PostgresStoreError::Corruption("resource lane transition sequence overflow".to_owned())
-        })?;
-    }
-    Ok(())
-}
-
-pub(super) fn resource_lane_transition_authority_row(
-    row: PgRow,
-) -> Result<ResourceLaneTransitionAuthorityRow> {
-    Ok(ResourceLaneTransitionAuthorityRow {
-        lane_id: row
-            .try_get("lane_id")
-            .map_err(|error| database_error("failed to decode transition lane id", error))?,
-        lane_transition_seq: i64_to_positive_u64(
-            row.try_get("lane_transition_seq")
-                .map_err(|error| database_error("failed to decode transition sequence", error))?,
-            "resource_lane_transitions.lane_transition_seq",
-        )?,
-        transition_kind: row
-            .try_get("transition_kind")
-            .map_err(|error| database_error("failed to decode transition kind", error))?,
-        claim_id: row
-            .try_get("claim_id")
-            .map_err(|error| database_error("failed to decode transition claim id", error))?,
-        release_id: row
-            .try_get("release_id")
-            .map_err(|error| database_error("failed to decode transition release id", error))?,
-        claim_fencing_token: i64_to_positive_u64(
-            row.try_get("claim_fencing_token").map_err(|error| {
-                database_error("failed to decode transition fencing token", error)
-            })?,
-            "resource_lane_transitions.claim_fencing_token",
-        )?,
-        previous_transition_hash: row
-            .try_get("previous_transition_hash")
-            .map_err(|error| database_error("failed to decode transition previous hash", error))?,
-        transition_hash: row
-            .try_get("transition_hash")
-            .map_err(|error| database_error("failed to decode transition hash", error))?,
-        source_seq: i64_to_positive_u64(
-            row.try_get("source_seq")
-                .map_err(|error| database_error("failed to decode transition source seq", error))?,
-            "resource_lane_transitions.source_seq",
-        )?,
-        source_ordinal: i32_to_u32(
-            row.try_get("source_ordinal").map_err(|error| {
-                database_error("failed to decode transition source ordinal", error)
-            })?,
-            "resource_lane_transitions.source_ordinal",
-        )?,
-        source_event_id: row
-            .try_get("source_event_id")
-            .map_err(|error| database_error("failed to decode transition event id", error))?,
-        source_event_type: row
-            .try_get("source_event_type")
-            .map_err(|error| database_error("failed to decode transition event type", error))?,
-        source_event_payload_hash: row
-            .try_get("source_event_payload_hash")
-            .map_err(|error| database_error("failed to decode transition payload hash", error))?,
-    })
-}
-
-pub(super) fn resource_lane_transition_kind_matches_source(
-    row: &ResourceLaneTransitionAuthorityRow,
-) -> bool {
-    matches!(
-        (
-            row.transition_kind.as_str(),
-            row.release_id.is_some(),
-            row.source_event_type.as_str()
-        ),
-        ("claim", false, "ResourceLaneClaimed") | ("release", true, "ResourceLaneReleased")
-    )
-}
-
-pub(super) fn resource_lane_transition_hash_from_row(
-    row: &ResourceLaneTransitionAuthorityRow,
-) -> Result<String> {
-    let digest = canonical_json(serde_json::json!({
-        "claim_fencing_token": row.claim_fencing_token,
-        "claim_id": row.claim_id.as_str(),
-        "lane_id": bytes_hex(&row.lane_id),
-        "lane_transition_seq": row.lane_transition_seq,
-        "previous_transition_hash": row.previous_transition_hash.as_deref(),
-        "release_id": row.release_id.as_deref(),
-        "source_event_id": row.source_event_id.as_str(),
-        "source_event_payload_hash": row.source_event_payload_hash.as_str(),
-        "source_ordinal": row.source_ordinal,
-        "source_seq": row.source_seq,
-        "transition_kind": row.transition_kind.as_str(),
-    }))?
-    .content_digest();
-    Ok(digest.as_str().to_owned())
-}
-
-pub(super) fn resource_lane_transition_hash(
-    transition: &ResourceLaneTransitionInsert<'_>,
-    previous_transition_hash: Option<&str>,
-) -> Result<String> {
-    let digest = canonical_json(serde_json::json!({
-        "claim_fencing_token": transition.claim_fencing_token,
-        "claim_id": transition.claim_id.as_str(),
-        "lane_id": bytes_hex(transition.lane_id),
-        "lane_transition_seq": transition.lane_transition_seq,
-        "previous_transition_hash": previous_transition_hash,
-        "release_id": transition.release_id.map(events::ResourceLaneReleaseId::as_str),
-        "source_event_id": transition.event.event_id().as_str(),
-        "source_event_payload_hash": transition.event.payload_hash().as_str(),
-        "source_ordinal": transition.event.ordinal().as_u32(),
-        "source_seq": transition.event.seq().as_u64(),
-        "transition_kind": transition.transition_kind,
-    }))?
-    .content_digest();
-    Ok(digest.as_str().to_owned())
-}
-
 pub(super) fn bytes_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -792,39 +411,4 @@ pub(super) fn hex_nibble(byte: u8) -> Result<u8> {
         }
         .into()),
     }
-}
-
-pub(super) struct ResourceLaneClaimAuthorityRow {
-    pub(super) lane_id: Vec<u8>,
-    pub(super) run_id: String,
-    pub(super) claim_fencing_token: u64,
-}
-
-pub(super) async fn load_resource_lane_claim_row_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    claim_id: &events::ResourceLaneClaimId,
-) -> Result<ResourceLaneClaimAuthorityRow> {
-    let row = sqlx::query(
-        "SELECT lane_id, run_id, fencing_token \
-         FROM resource_lane_claim_events WHERE claim_id = $1",
-    )
-    .bind(claim_id.as_str())
-    .fetch_one(&mut **tx)
-    .await
-    .map_err(|error| database_error("failed to load resource lane claim", error))?;
-    let fencing_token: i64 = row
-        .try_get("fencing_token")
-        .map_err(|error| database_error("failed to decode resource lane claim token", error))?;
-    Ok(ResourceLaneClaimAuthorityRow {
-        lane_id: row
-            .try_get("lane_id")
-            .map_err(|error| database_error("failed to decode resource lane id", error))?,
-        run_id: row.try_get("run_id").map_err(|error| {
-            database_error("failed to decode resource lane claim run id", error)
-        })?,
-        claim_fencing_token: i64_to_positive_u64(
-            fencing_token,
-            "resource_lane_claim_events.fencing_token",
-        )?,
-    })
 }

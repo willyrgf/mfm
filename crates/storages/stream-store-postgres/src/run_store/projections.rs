@@ -75,163 +75,134 @@ pub(super) async fn load_stream_authoritative_projection_snapshot_tx(
 ) -> Result<ProjectionSnapshot> {
     let stream = load_run_stream_tx(tx, run_id).await?;
     let snapshot = ProjectionSnapshot::rebuild_from_run_stream(&stream)?;
-    let resource_lanes = load_active_resource_lanes_tx(tx).await?;
-    projection_snapshot_with_resource_lanes(&snapshot, resource_lanes)
+    let resource_lane_state = load_resource_lane_state_tx(tx).await?;
+    projection_snapshot_with_resource_lanes(&snapshot, resource_lane_state.active)
 }
 
-pub(super) async fn load_active_resource_lanes_tx(
+pub(super) struct ResourceLaneState {
+    pub(super) active: BTreeMap<ResourceLaneKey, ResourceLaneProjection>,
+    pub(super) authority: ResourceLaneAuthoritySet,
+}
+
+pub(super) async fn load_resource_lane_state_tx(
     tx: &mut Transaction<'_, Postgres>,
-) -> Result<BTreeMap<ResourceLaneKey, ResourceLaneProjection>> {
+) -> Result<ResourceLaneState> {
     let rows = sqlx::query(
-        "SELECT c.lane_id, c.run_id, c.node_id, c.attempt_id, c.ledger_key, c.ledger_purpose, \
-         c.invocation_epoch, c.namespace, c.key_schema_id, c.key_value, c.claim_id, \
-         c.fencing_token, c.source_event_id, t.lane_transition_seq \
-         FROM resource_lane_claim_events c \
-         INNER JOIN resource_lane_transitions t \
-           ON t.claim_id = c.claim_id AND t.transition_kind = 'claim' \
-         WHERE NOT EXISTS (\
-           SELECT 1 FROM resource_lane_release_events r WHERE r.claim_id = c.claim_id\
-         ) \
-         ORDER BY c.lane_id",
+        "SELECT run_id, seq, ordinal, event_id, event_schema_id, spec_hash, commit_key, \
+         logical_key, payload_hash, payload_canonical_json \
+         FROM run_events WHERE logical_key LIKE 'resource_lane:%' \
+         ORDER BY run_id ASC, seq ASC, ordinal ASC",
     )
     .fetch_all(&mut **tx)
     .await
-    .map_err(|error| database_error("failed to load active resource lanes", error))?;
-    let mut resource_lanes = BTreeMap::new();
-    for row in rows {
-        let evidence = resource_key_evidence_from_lane_row(&row)?;
-        verify_lane_id_row(&row, &evidence)?;
-        let lane_key = ResourceLaneKey::from_evidence(&evidence);
-        let projection = ResourceLaneProjection {
-            event_id: parse_identity(&row.try_get::<String, _>("source_event_id").map_err(
-                |error| database_error("failed to decode resource lane event id", error),
-            )?)?,
-            holder: mfm_store::v1::SideEffectLedgerRef::new(
-                parse_identity(&row.try_get::<String, _>("run_id").map_err(|error| {
-                    database_error("failed to decode resource lane run id", error)
-                })?)?,
-                events::SideEffectLedgerKey::new(row.try_get::<String, _>("ledger_key").map_err(
-                    |error| database_error("failed to decode resource lane ledger key", error),
-                )?)?,
-            ),
-            ledger_purpose: parse_side_effect_ledger_purpose(
-                &row.try_get::<Value, _>("ledger_purpose").map_err(|error| {
-                    database_error("failed to decode resource lane purpose", error)
-                })?,
-            )?,
-            node_id: parse_identity(&row.try_get::<String, _>("node_id").map_err(|error| {
-                database_error("failed to decode resource lane node id", error)
-            })?)?,
-            attempt_id: parse_identity(&row.try_get::<String, _>("attempt_id").map_err(
-                |error| database_error("failed to decode resource lane attempt id", error),
-            )?)?,
-            invocation_epoch: i32_to_u32(
-                row.try_get("invocation_epoch").map_err(|error| {
-                    database_error("failed to decode resource lane epoch", error)
-                })?,
-                "resource_lane_claim_events.invocation_epoch",
-            )?,
-            claim_id: events::ResourceLaneClaimId::new(
-                row.try_get::<String, _>("claim_id").map_err(|error| {
-                    database_error("failed to decode resource lane claim id", error)
-                })?,
-            )?,
-            claim_fencing_token: i64_to_positive_u64(
-                row.try_get("fencing_token").map_err(|error| {
-                    database_error("failed to decode resource lane fencing token", error)
-                })?,
-                "resource_lane_claim_events.fencing_token",
-            )?,
-            lane_transition_seq: i64_to_positive_u64(
-                row.try_get("lane_transition_seq").map_err(|error| {
-                    database_error("failed to decode resource lane transition seq", error)
-                })?,
-                "resource_lane_transitions.lane_transition_seq",
-            )?,
-        };
-        if resource_lanes.insert(lane_key, projection).is_some() {
-            return Err(PostgresStoreError::Corruption(
-                "resource lane tables contain duplicate active resource lane".to_owned(),
-            ));
+    .map_err(|error| database_error("failed to load resource lane events", error))?;
+    let events = rows
+        .into_iter()
+        .map(event_envelope_from_row)
+        .collect::<Result<Vec<_>>>()?;
+    fold_resource_lane_state(&events)
+}
+
+pub(super) fn fold_resource_lane_state(
+    events: &[KernelEventEnvelope],
+) -> Result<ResourceLaneState> {
+    let mut active: BTreeMap<ResourceLaneKey, ResourceLaneProjection> = BTreeMap::new();
+    let mut authority = ResourceLaneAuthoritySet::new();
+    let mut claim_lanes = BTreeMap::new();
+
+    for event in events {
+        if let events::KernelEventPayload::ResourceLaneClaimed(payload) = event.payload() {
+            claim_lanes.insert(
+                payload.claim_id.clone(),
+                ResourceLaneKey::from_evidence(&payload.resource_key),
+            );
         }
     }
-    Ok(resource_lanes)
-}
 
-pub(super) async fn load_resource_lane_authority_tx(
-    tx: &mut Transaction<'_, Postgres>,
-) -> Result<ResourceLaneAuthoritySet> {
-    let rows = sqlx::query(
-        "SELECT c.lane_id, c.namespace, c.key_schema_id, c.key_value, \
-         MAX(t.lane_transition_seq) AS last_transition_seq, \
-         MAX(t.claim_fencing_token) AS last_claim_fencing_token \
-         FROM resource_lane_transitions t \
-         INNER JOIN resource_lane_claim_events c ON c.claim_id = t.claim_id \
-         GROUP BY c.lane_id, c.namespace, c.key_schema_id, c.key_value",
-    )
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(|error| database_error("failed to load resource lane authority", error))?;
-    let mut authority = ResourceLaneAuthoritySet::new();
-    for row in rows {
-        let evidence = resource_key_evidence_from_lane_row(&row)?;
-        verify_lane_id_row(&row, &evidence)?;
-        authority.insert(
-            ResourceLaneKey::from_evidence(&evidence),
-            mfm_store::v1::ResourceLaneAuthority {
-                last_transition_seq: i64_to_positive_u64(
-                    row.try_get("last_transition_seq").map_err(|error| {
-                        database_error("failed to decode resource lane transition seq", error)
-                    })?,
-                    "resource_lane_transitions.lane_transition_seq",
-                )?,
-                last_claim_fencing_token: i64_to_positive_u64(
-                    row.try_get("last_claim_fencing_token").map_err(|error| {
-                        database_error("failed to decode resource lane fencing token", error)
-                    })?,
-                    "resource_lane_transitions.claim_fencing_token",
-                )?,
-            },
-        );
+    for event in events {
+        match event.payload() {
+            events::KernelEventPayload::ResourceLaneClaimed(payload) => {
+                let lane_key = ResourceLaneKey::from_evidence(&payload.resource_key);
+                let holder = mfm_store::v1::SideEffectLedgerRef::new(
+                    event.run_id().clone(),
+                    payload.ledger_key.clone(),
+                );
+                if let Some((existing_key, _)) = active
+                    .iter()
+                    .find(|(key, projection)| **key != lane_key && projection.holder == holder)
+                {
+                    return Err(PostgresStoreError::Corruption(format!(
+                        "resource lane holder already holds {}:{}",
+                        existing_key.namespace, existing_key.key
+                    )));
+                }
+                if let Some(existing) = active.get(&lane_key) {
+                    if existing.holder != holder {
+                        return Err(PostgresStoreError::Corruption(
+                            "run_events contain conflicting active resource lane claims".to_owned(),
+                        ));
+                    }
+                }
+                let authority = authority.entry(lane_key.clone()).or_default();
+                authority.last_transition_seq = authority
+                    .last_transition_seq
+                    .max(payload.lane_transition_seq);
+                authority.last_claim_fencing_token = authority
+                    .last_claim_fencing_token
+                    .max(payload.claim_fencing_token);
+                let projection = ResourceLaneProjection {
+                    event_id: event.event_id().clone(),
+                    holder,
+                    ledger_purpose: payload.ledger_purpose.clone(),
+                    node_id: payload.node_id.clone(),
+                    attempt_id: payload.attempt_id.clone(),
+                    invocation_epoch: payload.invocation_epoch,
+                    claim_id: payload.claim_id.clone(),
+                    claim_fencing_token: payload.claim_fencing_token,
+                    lane_transition_seq: payload.lane_transition_seq,
+                };
+                if active.insert(lane_key, projection).is_some() {
+                    return Err(PostgresStoreError::Corruption(
+                        "run_events contain duplicate active resource lane claims".to_owned(),
+                    ));
+                }
+            }
+            events::KernelEventPayload::ResourceLaneReleased(payload) => {
+                let lane_key = claim_lanes.get(&payload.claim_id).ok_or_else(|| {
+                    PostgresStoreError::Corruption(
+                        "resource lane release references unknown claim".to_owned(),
+                    )
+                })?;
+                let authority = authority.entry(lane_key.clone()).or_default();
+                authority.last_transition_seq = authority
+                    .last_transition_seq
+                    .max(payload.lane_transition_seq);
+                authority.last_claim_fencing_token = authority
+                    .last_claim_fencing_token
+                    .max(payload.claim_fencing_token);
+                let active_projection = active.get(lane_key).ok_or_else(|| {
+                    PostgresStoreError::Corruption(
+                        "resource lane release requires active claim".to_owned(),
+                    )
+                })?;
+                if active_projection.claim_id != payload.claim_id
+                    || active_projection.claim_fencing_token != payload.claim_fencing_token
+                    || active_projection.node_id != payload.node_id
+                    || active_projection.attempt_id != payload.attempt_id
+                    || active_projection.ledger_purpose != payload.ledger_purpose
+                    || active_projection.invocation_epoch != payload.invocation_epoch
+                {
+                    return Err(PostgresStoreError::Corruption(
+                        "resource lane release does not match active claim".to_owned(),
+                    ));
+                }
+                active.remove(lane_key);
+            }
+            _ => {}
+        }
     }
-    Ok(authority)
-}
 
-pub(super) fn resource_key_evidence_from_lane_row(
-    row: &PgRow,
-) -> Result<events::ResourceKeyEvidence> {
-    Ok(events::ResourceKeyEvidence {
-        namespace: ResourceNamespace::new(
-            row.try_get::<String, _>("namespace").map_err(|error| {
-                database_error("failed to decode resource lane namespace", error)
-            })?,
-        )
-        .map_err(|error| PostgresStoreError::Store(StoreError::Identity(error.to_string())))?,
-        key_schema_id: parse_identity(&row.try_get::<String, _>("key_schema_id").map_err(
-            |error| database_error("failed to decode resource lane key schema", error),
-        )?)?,
-        key: events::ResourceKey::new(
-            row.try_get::<String, _>("key_value").map_err(|error| {
-                database_error("failed to decode resource lane key value", error)
-            })?,
-        )?,
-    })
-}
-
-pub(super) fn verify_lane_id_row(
-    row: &PgRow,
-    evidence: &events::ResourceKeyEvidence,
-) -> Result<()> {
-    let stored: Vec<u8> = row
-        .try_get("lane_id")
-        .map_err(|error| database_error("failed to decode resource lane id", error))?;
-    let derived = resource_lane_id(evidence)?;
-    if stored != derived {
-        return Err(PostgresStoreError::Corruption(
-            "resource lane id does not match lane descriptor".to_owned(),
-        ));
-    }
-    Ok(())
+    Ok(ResourceLaneState { active, authority })
 }
 
 pub(super) fn projection_snapshot_with_resource_lanes(

@@ -57,10 +57,6 @@ impl PostgresRunStore {
         verify_prepared_artifact_bundle_tx(&mut tx, &bundle).await?;
         let mut artifacts = load_artifacts(&mut tx, request.run_id()).await?;
         admit_artifact_evidence(&mut artifacts, bundle.admitted_artifacts())?;
-        let locked_resource_lane_ids = lock_resource_lanes_for_request_tx(&mut tx, request).await?;
-        for lane_id in &locked_resource_lane_ids {
-            expire_stale_waiters_tx(&mut tx, lane_id).await?;
-        }
         let (run_projection, stream_head) =
             rebuild_projection_snapshot_with_head(&mut tx, request.run_id()).await?;
         if stream_head != head {
@@ -68,9 +64,14 @@ impl PostgresRunStore {
                 "run commit head does not match persisted event stream".to_owned(),
             ));
         }
-        let resource_lanes = load_active_resource_lanes_tx(&mut tx).await?;
-        let resource_lane_authority = load_resource_lane_authority_tx(&mut tx).await?;
-        let projections = projection_snapshot_with_resource_lanes(&run_projection, resource_lanes)?;
+        let locked_resource_lane_ids =
+            lock_resource_lanes_for_request_tx(&mut tx, request, &run_projection).await?;
+        for lane_id in &locked_resource_lane_ids {
+            expire_stale_waiters_tx(&mut tx, lane_id).await?;
+        }
+        let resource_lane_state = load_resource_lane_state_tx(&mut tx).await?;
+        let projections =
+            projection_snapshot_with_resource_lanes(&run_projection, resource_lane_state.active)?;
         let claim_admission = single_lane_claim_admission(request)?;
         let base = CommitBase {
             artifacts,
@@ -78,7 +79,7 @@ impl PostgresRunStore {
             unique_logical_payloads: load_unique_logical_payloads(&mut tx, request.run_id())
                 .await?,
             projections: projections.clone(),
-            resource_lane_authority,
+            resource_lane_authority: resource_lane_state.authority,
             actual_next_seq: next_seq_from_head(head)?,
         };
         let staged = match stage_prepared_commit_plan(&base, plan)? {
@@ -176,7 +177,6 @@ impl PostgresRunStore {
             .map_err(|error| database_error("failed to insert run event", error))?;
         }
         let source_event_count = count_run_events_tx(&mut tx, request.run_id()).await?;
-        insert_resource_lane_authority_rows_tx(&mut tx, &commit_id, batch.events()).await?;
         if let Some(admission) = &claim_admission {
             mark_waiter_claimed_tx(&mut tx, admission).await?;
         }

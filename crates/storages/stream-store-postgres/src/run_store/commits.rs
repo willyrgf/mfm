@@ -52,7 +52,6 @@ pub(super) async fn load_committed_batch_tx(
     }
     validate_final_commit_authority_tx(tx, &commit, &events).await?;
     validate_run_commit_log_row_tx(tx, &commit).await?;
-    validate_resource_lane_transition_hash_chains_tx(tx).await?;
     CommittedBatch::from_persisted_events(
         run_id.clone(),
         CommitKey::new(commit.commit_key)?,
@@ -97,7 +96,7 @@ pub(super) async fn validate_persisted_run_authority_tx(
         }
         validate_final_commit_authority_tx(tx, commit, &events).await?;
     }
-    validate_resource_lane_transition_hash_chains_tx(tx).await
+    Ok(())
 }
 
 pub(super) async fn validate_final_commit_authority_tx(
