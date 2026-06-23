@@ -30,7 +30,6 @@ mfm-portfolio-config = { path = "../../crates/portfolio-config" }
 mfm-state-portfolio = { path = "../../crates/states/portfolio" }
 mfm-spec = { path = "../../crates/kernel/spec" }
 mfm-store = { path = "../../crates/kernel/store" }
-mfm-stream-store-postgres = { path = "../../crates/storages/stream-store-postgres" }
 
 [features]
 parity-tests = []

@@ -1,8 +1,7 @@
 use crate::commands::result::CommandError;
 use clap::{Args, ValueEnum};
-use mfm_app::{DriveMode, RunServices};
+use mfm_app::{DriveMode, ProductionRunServices};
 use mfm_ids::{RunId, SchemaId};
-use mfm_stream_store_postgres::PostgresRunStore;
 
 /// Shared run-store selection arguments.
 #[derive(Args, Debug, Clone)]
@@ -23,38 +22,11 @@ pub(crate) enum DriveArg {
     UntilBlocked,
 }
 
-/// Connects to the certified PostgreSQL run store.
-pub(crate) async fn make_run_store(args: &RunStoresArgs) -> Result<PostgresRunStore, CommandError> {
-    let database_url = match args
-        .database_url
-        .clone()
-        .or_else(|| std::env::var("DATABASE_URL").ok())
-    {
-        Some(database_url) => database_url,
-        None => {
-            return Err(CommandError::new(
-                "MissingDatabaseUrl",
-                "Missing DATABASE_URL (or pass --database-url)",
-            ))
-        }
-    };
-
-    Ok(PostgresRunStore::connect(&database_url).await?)
-}
-
 /// Builds typed app services for CLI commands backed by the certified postgres run stores.
 pub(crate) async fn connect_run_services(
     args: &RunStoresArgs,
-) -> Result<RunServices<PostgresRunStore, PostgresRunStore>, CommandError> {
-    let store = make_run_store(args).await?;
-    let runners = mfm_app::production_runner_registry(std::sync::Arc::new(store.clone()))?;
-    let certification_registry = mfm_app::production_certification_registry()?;
-    Ok(mfm_app::make_run_services_with_certification_registry(
-        runners,
-        store.clone(),
-        store,
-        certification_registry,
-    ))
+) -> Result<ProductionRunServices, CommandError> {
+    Ok(mfm_app::connect_production_run_services(args.database_url.as_deref()).await?)
 }
 
 /// Converts a CLI drive enum into the typed app drive mode.

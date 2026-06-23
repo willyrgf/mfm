@@ -44,6 +44,8 @@ use serde_json::map::Entry;
 use serde_json::{Map, Value};
 
 pub use mfm_runtime::ErasedRunnerRegistry;
+pub use mfm_stream_store_postgres::PostgresRunStore as ProductionRunStore;
+pub use mfm_stream_store_postgres::PostgresSchema as ProductionPostgresSchema;
 
 mod entry_point;
 mod entry_points;
@@ -202,6 +204,28 @@ impl From<store::StoreError> for AppError {
     }
 }
 
+impl From<mfm_stream_store_postgres::PostgresStoreError> for AppError {
+    fn from(error: mfm_stream_store_postgres::PostgresStoreError) -> Self {
+        match error {
+            mfm_stream_store_postgres::PostgresStoreError::Store(_) => Self::backend(
+                ErrorClass::Conflict,
+                "RunStoreRejected",
+                "Run store rejected the requested operation",
+            ),
+            mfm_stream_store_postgres::PostgresStoreError::Database(_) => Self::backend(
+                ErrorClass::Internal,
+                "RunStoreUnavailable",
+                "Run store is unavailable",
+            ),
+            mfm_stream_store_postgres::PostgresStoreError::Corruption(_) => Self::backend(
+                ErrorClass::Internal,
+                "RunStoreCorruption",
+                "Run store returned invalid data",
+            ),
+        }
+    }
+}
+
 impl From<ReplayError> for AppError {
     fn from(error: ReplayError) -> Self {
         Self::backend(
@@ -288,6 +312,41 @@ where
         artifacts,
         certification_registry,
     )
+}
+
+/// Production typed run services backed by the Postgres run store.
+pub type ProductionRunServices = RunServices<ProductionRunStore, ProductionRunStore>;
+
+/// Connects the production Postgres run store.
+pub async fn connect_production_run_store(
+    database_url: Option<&str>,
+) -> Result<ProductionRunStore, AppError> {
+    let database_url = match database_url {
+        Some(database_url) => database_url.to_owned(),
+        None => std::env::var("DATABASE_URL").map_err(|_| {
+            AppError::new(
+                ErrorClass::BadRequest,
+                "MissingDatabaseUrl",
+                "Missing DATABASE_URL (or pass --database-url)",
+            )
+        })?,
+    };
+    Ok(ProductionRunStore::connect(&database_url).await?)
+}
+
+/// Builds production typed run services backed by the Postgres run store.
+pub async fn connect_production_run_services(
+    database_url: Option<&str>,
+) -> Result<ProductionRunServices, AppError> {
+    let store = connect_production_run_store(database_url).await?;
+    let runners = production_runner_registry(artifact_read_provider_from_retained(store.clone()))?;
+    let certification_registry = production_certification_registry()?;
+    Ok(make_run_services_with_certification_registry(
+        runners,
+        store.clone(),
+        store,
+        certification_registry,
+    ))
 }
 
 /// Builds the production typed runner registry for this process.

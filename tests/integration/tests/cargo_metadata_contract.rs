@@ -22,10 +22,8 @@ const EXPECTED_KERNEL_MANIFESTS: &[&str] = &[
 ];
 
 const APPROVED_CATEGORY_DEPENDENCY_OVERRIDES: &[(&str, &str)] = &[
-    ("mfm", "mfm-stream-store-postgres"),
     ("mfm", "mfm_core"),
     ("mfm-rest-api", "mfm-state-portfolio"),
-    ("mfm-rest-api", "mfm-stream-store-postgres"),
     ("mfm-transports-proof", "mfm-collectors-proof"),
 ];
 

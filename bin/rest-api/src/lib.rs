@@ -28,15 +28,14 @@ use axum::Router;
 use http::header::HeaderName;
 use mfm_app::{
     AppError, DriveMode, EntryPointRunLaunchInput, ErrorClass, ManualResolutionDecision,
-    ManualResolutionRecordRequest, PublicOpName, PublicOutputResponse, PublicSafeMessage,
-    RunModeStatus, RunResponse, RunServices, RunStreamResponse,
+    ManualResolutionRecordRequest, ProductionRunStore, PublicOpName, PublicOutputResponse,
+    PublicSafeMessage, RunModeStatus, RunResponse, RunServices, RunStreamResponse,
 };
 use mfm_authored_config::{AuthoredConfig, AuthoredConfigFormat};
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_ids::{RunId, SchemaId};
 use mfm_store::v1 as store;
 use mfm_store::v1::{RunEventStore, RunObservationStore};
-use mfm_stream_store_postgres::{PostgresRunStore, PostgresStoreError};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -169,11 +168,11 @@ impl axum::response::IntoResponse for ApiError {
 }
 
 /// Default production REST API state.
-pub type DefaultAppState = AppState<PostgresRunStore>;
+pub type DefaultAppState = AppState<ProductionRunStore>;
 
 /// Shared router state injected into request handlers.
 #[derive(Clone)]
-pub struct AppState<S = PostgresRunStore> {
+pub struct AppState<S = ProductionRunStore> {
     /// Certified typed run-event and artifact authority store.
     pub store: S,
 }
@@ -202,8 +201,8 @@ where
 }
 
 /// Connects to the default certified run store.
-pub async fn make_default_run_store() -> Result<PostgresRunStore, ApiError> {
-    Ok(PostgresRunStore::connect_env().await?)
+pub async fn make_default_run_store() -> Result<ProductionRunStore, ApiError> {
+    Ok(mfm_app::connect_production_run_store(None).await?)
 }
 
 /// Builds default production REST API state from environment-selected stores.
@@ -778,32 +777,6 @@ fn validate_sequence_range(from_seq: u64, to_seq: Option<u64>) -> Result<(), Api
         }
     }
     Ok(())
-}
-
-fn api_error_from_store_error(error: PostgresStoreError) -> ApiError {
-    match error {
-        PostgresStoreError::Store(_) => ApiError::backend(
-            StatusCode::CONFLICT,
-            "RunStoreRejected",
-            "Run store rejected the requested operation",
-        ),
-        PostgresStoreError::Database(_) => ApiError::backend(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "RunStoreUnavailable",
-            "Run store is unavailable",
-        ),
-        PostgresStoreError::Corruption(_) => ApiError::backend(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "RunStoreCorruption",
-            "Run store returned invalid data",
-        ),
-    }
-}
-
-impl From<PostgresStoreError> for ApiError {
-    fn from(error: PostgresStoreError) -> Self {
-        api_error_from_store_error(error)
-    }
 }
 
 #[cfg(test)]

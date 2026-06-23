@@ -15,7 +15,6 @@ thiserror = { workspace = true }
 mfm-app = { path = "../../crates/app" }
 mfm-authored-config = { path = "../../crates/authored-config" }
 mfm-canonical = { path = "../../crates/kernel/canonical" }
-mfm-stream-store-postgres = { path = "../../crates/storages/stream-store-postgres" }
 mfm-ids = { path = "../../crates/kernel/ids" }
 mfm-store = { path = "../../crates/kernel/store" }
 mfm-op-portfolio-tracker = { path = "../../crates/ops/portfolio-tracker-op" }
@@ -49,7 +48,6 @@ assert_cmd = "2.0"
 predicates = "3.0"
 rand = { workspace = true }
 k256 = { version = "0.13.0", features = ["ecdsa"] }
-sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-none", "postgres"] }
 
 [[bin]]
 name = "mfm_cli"
