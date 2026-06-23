@@ -88,6 +88,7 @@ const CANONICALIZER_IDENTITY: &str = "sha256-jcs-v1";
 const PROJECTION_VERSION: &str = "mfm.run_observation.v1";
 const RUN_OBSERVATION_SUMMARY_KIND: &str = "run";
 const CURSOR_VERSION: &str = "mfm.run_observation.cursor.v1";
+const RESOURCE_LANE_ID_DOMAIN: &[u8] = b"mfm.resource_lane.id.v1";
 const MAX_OBSERVATION_LIMIT: u32 = 100;
 
 fn database_error(context: &'static str, _error: sqlx::Error) -> PostgresStoreError {
@@ -2181,7 +2182,14 @@ fn resource_lane_id(evidence: &events::ResourceKeyEvidence) -> Result<[u8; 32]> 
         "mode": "exclusive",
         "namespace": evidence.namespace.as_str(),
     }))?;
-    Ok(*canonical.digest_bytes().as_bytes())
+    let mut input = Vec::with_capacity(RESOURCE_LANE_ID_DOMAIN.len() + canonical.as_bytes().len());
+    input.extend_from_slice(RESOURCE_LANE_ID_DOMAIN);
+    input.extend_from_slice(canonical.as_bytes());
+    let digest = sha256_digest_bytes(&input);
+    let mut lane_id = [0_u8; 32];
+    lane_id[0] = 1;
+    lane_id[1..].copy_from_slice(&digest.as_bytes()[..31]);
+    Ok(lane_id)
 }
 
 async fn load_claim_lane_id_tx(
@@ -4876,6 +4884,27 @@ mod tests {
         );
     }
 
+    fn expected_resource_lane_id_v1(evidence: &events::ResourceKeyEvidence) -> Result<[u8; 32]> {
+        let key_canonical_json = resource_key_canonical_json(evidence)?;
+        let canonical = canonical_json(serde_json::json!({
+            "key_canonical_json": String::from_utf8(key_canonical_json).map_err(|error| {
+                PostgresStoreError::Corruption(format!("resource key canonical JSON was not UTF-8: {error}"))
+            })?,
+            "key_schema_id": evidence.key_schema_id.as_str(),
+            "mode": "exclusive",
+            "namespace": evidence.namespace.as_str(),
+        }))?;
+        let mut input =
+            Vec::with_capacity(RESOURCE_LANE_ID_DOMAIN.len() + canonical.as_bytes().len());
+        input.extend_from_slice(RESOURCE_LANE_ID_DOMAIN);
+        input.extend_from_slice(canonical.as_bytes());
+        let digest = sha256_digest_bytes(&input);
+        let mut lane_id = [0_u8; 32];
+        lane_id[0] = 1;
+        lane_id[1..].copy_from_slice(&digest.as_bytes()[..31]);
+        Ok(lane_id)
+    }
+
     #[tokio::test]
     async fn prepared_commit_idempotency_fingerprint_includes_admitted_artifacts() {
         let (store, schema) = test_store().await;
@@ -5703,6 +5732,37 @@ mod tests {
                 .expect("holder stream-authoritative projection"),
             before
         );
+
+        drop_schema(&store, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn resource_lane_ids_use_versioned_rfc_derivation() {
+        let (store, schema) = test_store().await;
+        let run = run_id(31);
+        let lane_value = "wallet-lane-id-v1";
+        let evidence = resource_key(lane_value, 201);
+
+        append_run_start(&store, &run, "lane-id-run-start")
+            .await
+            .expect("run start");
+        append_resource_lane_attempt_start(&store, &run, "lane-id-attempt-start")
+            .await
+            .expect("attempt start");
+        append_resource_lane_prepare(&store, &run, "lane-id-prepare", lane_value, 32)
+            .await
+            .expect("resource lane prepare");
+
+        let stored_lane_id: Vec<u8> =
+            sqlx::query_scalar("SELECT lane_id FROM resource_lane_claim_events WHERE run_id = $1")
+                .bind(run.as_str())
+                .fetch_one(&store.pool)
+                .await
+                .expect("stored lane id");
+        let expected = expected_resource_lane_id_v1(&evidence).expect("expected lane id");
+        assert_eq!(stored_lane_id.len(), 32);
+        assert_eq!(stored_lane_id[0], 1);
+        assert_eq!(stored_lane_id, expected);
 
         drop_schema(&store, &schema).await;
     }
