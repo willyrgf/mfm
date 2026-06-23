@@ -3470,6 +3470,30 @@ pub struct TypedProgramLaunchPlan {
     pub seed_material: Vec<TypedProgramSeedMaterial>,
 }
 
+impl TypedProgramLaunchPlan {
+    /// Builds a launch plan from a draft that does not require launch seed material.
+    pub fn from_draft(draft: TypedProgramDraft) -> Result<Self> {
+        Self::from_draft_and_seed_material(draft, BTreeMap::new())
+    }
+
+    /// Builds a launch plan from a draft and canonical seed material keyed by seed id.
+    ///
+    /// Seed material is matched by [`SeedId`] and returned in draft seed order so callers do not
+    /// depend on positional seed input.
+    pub fn from_draft_and_seed_material(
+        draft: TypedProgramDraft,
+        seeds: BTreeMap<SeedId, PlainCanonicalJsonBytes>,
+    ) -> Result<Self> {
+        let config_material = config_material_for_draft(&draft)?;
+        let seed_material = seed_material_for_draft(&draft, seeds)?;
+        Ok(Self {
+            draft,
+            config_material,
+            seed_material,
+        })
+    }
+}
+
 /// Canonical non-secret config material required to launch a typed program draft.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypedProgramConfigMaterial {
@@ -3490,6 +3514,60 @@ pub struct TypedProgramSeedMaterial {
     pub bytes: PlainCanonicalJsonBytes,
     /// Media type for the canonical seed bytes.
     pub media_type: MediaType,
+}
+
+fn config_material_for_draft(draft: &TypedProgramDraft) -> Result<Vec<TypedProgramConfigMaterial>> {
+    let media_type = typed_program_launch_json_media_type()?;
+    Ok(draft
+        .state_nodes()
+        .iter()
+        .map(|node| &node.config)
+        .chain(draft.operation_lineage().iter().map(|frame| &frame.config))
+        .map(|config| TypedProgramConfigMaterial {
+            schema_id: config.schema_id.clone(),
+            bytes: config.canonical_json.clone(),
+            media_type: media_type.clone(),
+        })
+        .collect())
+}
+
+fn seed_material_for_draft(
+    draft: &TypedProgramDraft,
+    mut seeds: BTreeMap<SeedId, PlainCanonicalJsonBytes>,
+) -> Result<Vec<TypedProgramSeedMaterial>> {
+    let media_type = typed_program_launch_json_media_type()?;
+    let mut material = Vec::with_capacity(draft.seeds().len());
+    for seed in draft.seeds() {
+        let bytes = seeds.remove(&seed.seed_id).ok_or_else(|| {
+            PlanError::Key(format!(
+                "missing entry-point seed material for {}",
+                seed.seed_id
+            ))
+        })?;
+        let digest = bytes.content_digest();
+        let byte_len = bytes.as_bytes().len();
+        if digest != seed.content_digest || byte_len != seed.byte_len {
+            return Err(PlanError::Canonical(format!(
+                "entry-point seed material did not match draft seed {}",
+                seed.seed_id
+            )));
+        }
+        material.push(TypedProgramSeedMaterial {
+            seed_id: seed.seed_id.clone(),
+            bytes,
+            media_type: media_type.clone(),
+        });
+    }
+    if let Some(seed_id) = seeds.keys().next() {
+        return Err(PlanError::Key(format!(
+            "unknown entry-point seed material for {seed_id}"
+        )));
+    }
+    Ok(material)
+}
+
+fn typed_program_launch_json_media_type() -> Result<MediaType> {
+    MediaType::new("application/json").map_err(|error| PlanError::Key(error.to_string()))
 }
 
 /// Root-scope builder for a typed program.

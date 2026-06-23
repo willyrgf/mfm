@@ -18,21 +18,21 @@
 //! # }
 //! ```
 
+use std::collections::BTreeMap;
+
 use mfm_authored_config::{EntryPointDescriptor, TOML_JSON_AUTHORED_CONFIG_FORMATS};
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_evm_contract_config::{
     ConfigurePhaseConfig, DeployPhaseConfig, EvmNetworkIntent, ValidatePhaseConfig,
 };
 use mfm_evm_contract_model::{ConfiguredContract, DeployedContract, ValidationReport};
-use mfm_ids::{DigestAlgorithm, OperationKind, OperationVersion};
+use mfm_ids::{DigestAlgorithm, OperationKind, OperationVersion, SeedId};
 use mfm_program::{
     build_root_with_registries, CanonicalSeed, Handle, Operation, OperationExpansion, OperationKey,
     OperationRegistryBuilder, PublicOutputKey, RootBound, RootBuilder, ScopeKey, SeedKey,
-    SideEffectSagaPolicy, StateKey, StateRegistryBuilder, TypedProgramConfigMaterial,
-    TypedProgramLaunchPlan, TypedProgramSeedMaterial,
+    SideEffectSagaPolicy, StateKey, StateRegistryBuilder, TypedProgramLaunchPlan,
 };
 use mfm_program_derive::{MfmConfig, OperationOutput, PublicOutputs};
-use mfm_spec::v1::MediaType;
 use mfm_state_evm_contracts::{
     account_nonce_resource_claim, ConfigureContractInputHandles, ConfigureContractState,
     ContractLifecyclePublicOutputs, DeployContractState, ValidateContractInputHandles,
@@ -572,7 +572,9 @@ pub fn contract_lifecycle_program_draft(
 pub fn plan_contract_deploy_entry_point(
     config: DeployPhaseConfig,
 ) -> Result<TypedProgramLaunchPlan, ContractLifecyclePlanError> {
-    plan_draft(deploy_contract_program_draft(config)?, Vec::new())
+    Ok(TypedProgramLaunchPlan::from_draft(
+        deploy_contract_program_draft(config)?,
+    )?)
 }
 
 /// Plans a configure-only EVM contract entry-point program with its launch seed.
@@ -580,10 +582,11 @@ pub fn plan_contract_configure_entry_point(
     config: ContractConfigureEntryPointConfig,
 ) -> Result<TypedProgramLaunchPlan, ContractLifecyclePlanError> {
     let seed = CanonicalSeed::from_value(&config.deployed)?;
-    plan_draft(
-        configure_contract_program_draft(config.config, config.deployed)?,
-        vec![seed.canonical_json().clone()],
-    )
+    let draft = configure_contract_program_draft(config.config, config.deployed)?;
+    let seeds = seed_bytes_by_key(&draft, DEPLOY_SEED_KEY, seed.canonical_json().clone())?;
+    Ok(TypedProgramLaunchPlan::from_draft_and_seed_material(
+        draft, seeds,
+    )?)
 }
 
 /// Plans a validate-only EVM contract entry-point program with its launch seed.
@@ -591,17 +594,20 @@ pub fn plan_contract_validate_entry_point(
     config: ContractValidateEntryPointConfig,
 ) -> Result<TypedProgramLaunchPlan, ContractLifecyclePlanError> {
     let seed = CanonicalSeed::from_value(&config.configured)?;
-    plan_draft(
-        validate_contract_program_draft(config.config, config.configured)?,
-        vec![seed.canonical_json().clone()],
-    )
+    let draft = validate_contract_program_draft(config.config, config.configured)?;
+    let seeds = seed_bytes_by_key(&draft, CONFIGURED_SEED_KEY, seed.canonical_json().clone())?;
+    Ok(TypedProgramLaunchPlan::from_draft_and_seed_material(
+        draft, seeds,
+    )?)
 }
 
 /// Plans a full lifecycle EVM contract entry-point program.
 pub fn plan_contract_lifecycle_entry_point(
     config: ContractLifecycleConfig,
 ) -> Result<TypedProgramLaunchPlan, ContractLifecyclePlanError> {
-    plan_draft(contract_lifecycle_program_draft(config)?, Vec::new())
+    Ok(TypedProgramLaunchPlan::from_draft(
+        contract_lifecycle_program_draft(config)?,
+    )?)
 }
 
 /// Error returned while planning a contract lifecycle entry point.
@@ -612,70 +618,21 @@ pub enum ContractLifecyclePlanError {
     Plan(#[from] mfm_program::PlanError),
 }
 
-fn contract_lifecycle_draft_config_material(
+fn seed_bytes_by_key(
     draft: &mfm_program::TypedProgramDraft,
-) -> mfm_program::Result<Vec<TypedProgramConfigMaterial>> {
-    let media_type = MediaType::new("application/json")
-        .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
-    Ok(draft
-        .state_nodes()
-        .iter()
-        .map(|node| &node.config)
-        .chain(draft.operation_lineage().iter().map(|frame| &frame.config))
-        .map(|config| TypedProgramConfigMaterial {
-            schema_id: config.schema_id.clone(),
-            bytes: config.canonical_json.clone(),
-            media_type: media_type.clone(),
-        })
-        .collect())
-}
-
-fn plan_draft(
-    draft: mfm_program::TypedProgramDraft,
-    seed_bytes: Vec<PlainCanonicalJsonBytes>,
-) -> Result<TypedProgramLaunchPlan, ContractLifecyclePlanError> {
-    let config_material = contract_lifecycle_draft_config_material(&draft)?;
-    let seed_material = seed_material_for_draft(&draft, seed_bytes)?;
-    Ok(TypedProgramLaunchPlan {
-        draft,
-        config_material,
-        seed_material,
-    })
-}
-
-fn seed_material_for_draft(
-    draft: &mfm_program::TypedProgramDraft,
-    seed_bytes: Vec<PlainCanonicalJsonBytes>,
-) -> mfm_program::Result<Vec<TypedProgramSeedMaterial>> {
-    if draft.seeds().len() != seed_bytes.len() {
-        return Err(mfm_program::PlanError::Key(format!(
-            "entry-point seed material count mismatch: draft requires {}, supplied {}",
-            draft.seeds().len(),
-            seed_bytes.len()
-        )));
-    }
-    let media_type = MediaType::new("application/json")
-        .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
-    draft
+    seed_key: &'static str,
+    bytes: PlainCanonicalJsonBytes,
+) -> mfm_program::Result<BTreeMap<SeedId, PlainCanonicalJsonBytes>> {
+    let seed = draft
         .seeds()
         .iter()
-        .zip(seed_bytes)
-        .map(|(seed, bytes)| {
-            let digest = bytes.content_digest();
-            let byte_len = bytes.as_bytes().len() as u64;
-            if digest != seed.content_digest || byte_len != seed.byte_len as u64 {
-                return Err(mfm_program::PlanError::Canonical(format!(
-                    "entry-point seed material did not match draft seed {}",
-                    seed.seed_id
-                )));
-            }
-            Ok(TypedProgramSeedMaterial {
-                seed_id: seed.seed_id.clone(),
-                bytes,
-                media_type: media_type.clone(),
-            })
-        })
-        .collect()
+        .find(|seed| seed.key.as_str() == seed_key)
+        .ok_or_else(|| {
+            mfm_program::PlanError::Key(format!(
+                "entry-point seed key `{seed_key}` was not present in the draft"
+            ))
+        })?;
+    Ok(BTreeMap::from([(seed.seed_id.clone(), bytes)]))
 }
 
 fn build_program(

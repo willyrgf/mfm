@@ -35,9 +35,8 @@ use mfm_portfolio_model::wallet::WalletConfig;
 use mfm_program::{
     build_root_with_registries, DomainKeyedNonEmptyHandles, Operation, OperationExpansion,
     OperationKey, OperationRegistryBuilder, PublicOutputKey, RootBuilder, ScopeKey, StateKey,
-    StateRegistryBuilder, TypedProgramConfigMaterial, TypedProgramLaunchPlan,
+    StateRegistryBuilder, TypedProgramLaunchPlan,
 };
-use mfm_spec::v1::MediaType;
 pub use mfm_state_portfolio::{
     balance_reader_kind, observation_batch_id, portfolio_adapter_kind, portfolio_adapter_version,
     AssembleSnapshotConfig, AssembleSnapshotInput, AssembleSnapshotInputHandles,
@@ -318,12 +317,7 @@ pub fn plan_portfolio_snapshot_entry_point(
     let canonical = canonicalize_portfolio_snapshot_authored_config(authored)?;
     let workflow_config: PortfolioWorkflowConfig = canonical.into();
     let draft = portfolio_program_draft(workflow_config)?;
-    let config_material = portfolio_draft_config_material(&draft)?;
-    Ok(TypedProgramLaunchPlan {
-        draft,
-        config_material,
-        seed_material: Vec::new(),
-    })
+    Ok(TypedProgramLaunchPlan::from_draft(draft)?)
 }
 
 /// Error returned while planning a portfolio snapshot entry point.
@@ -347,24 +341,6 @@ impl From<mfm_program::PlanError> for PortfolioSnapshotPlanError {
     fn from(error: mfm_program::PlanError) -> Self {
         Self::Plan(error)
     }
-}
-
-fn portfolio_draft_config_material(
-    draft: &mfm_program::TypedProgramDraft,
-) -> mfm_program::Result<Vec<TypedProgramConfigMaterial>> {
-    let media_type = MediaType::new("application/json")
-        .map_err(|error| mfm_program::PlanError::Key(error.to_string()))?;
-    Ok(draft
-        .state_nodes()
-        .iter()
-        .map(|node| &node.config)
-        .chain(draft.operation_lineage().iter().map(|frame| &frame.config))
-        .map(|config| TypedProgramConfigMaterial {
-            schema_id: config.schema_id.clone(),
-            bytes: config.canonical_json.clone(),
-            media_type: media_type.clone(),
-        })
-        .collect())
 }
 
 fn networks_by_id(

@@ -52,9 +52,8 @@ mod entry_points;
 mod evm_contracts;
 
 pub use entry_point::{
-    CanonicalConfigMaterial, CanonicalSeedMaterial, EntryPointOpId, EntryPointOpPlan,
-    EntryPointOpRegistry, EntryPointOpResolveError, EntryPointPlannerAdapter, LaunchableOp,
-    OpLaunchError, OpVersion, PublicOpName,
+    EntryPointOpId, EntryPointOpPlan, EntryPointOpRegistry, EntryPointOpResolveError,
+    EntryPointPlannerAdapter, LaunchableOp, OpLaunchError, OpVersion, PublicOpName,
 };
 
 /// Shared observability configuration used by typed binaries.

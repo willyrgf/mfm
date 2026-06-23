@@ -2,9 +2,9 @@
 
 use k256::ecdsa::SigningKey;
 use mfm_app::{
-    CanonicalConfigMaterial, DriveMode, EntryPointOpId, EntryPointOpPlan, EntryPointOpRegistry,
-    EntryPointRunLaunchInput, LaunchableOp, ManualResolutionDecision,
-    ManualResolutionRecordRequest, OpLaunchError, OpVersion, PublicOpName, RunModeStatus,
+    DriveMode, EntryPointOpId, EntryPointOpPlan, EntryPointOpRegistry, EntryPointRunLaunchInput,
+    LaunchableOp, ManualResolutionDecision, ManualResolutionRecordRequest, OpLaunchError,
+    OpVersion, PublicOpName, RunModeStatus,
 };
 use mfm_authored_config::{AuthoredConfig, AuthoredConfigFormat};
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
@@ -191,49 +191,12 @@ impl LaunchableOp for ManualResolutionProofEntryPointOp {
         .map_err(|error| {
             OpLaunchError::new("ManualResolutionProofPlanFailed", error.to_string())
         })?;
-        Ok(EntryPointOpPlan {
-            config_material: config_material_for_draft(&draft)?,
-            draft,
-            seed_material: Vec::new(),
-        })
-    }
-}
-
-fn config_material_for_draft(
-    draft: &mfm_program::TypedProgramDraft,
-) -> Result<Vec<CanonicalConfigMaterial>, OpLaunchError> {
-    let media_type = spec::MediaType::new("application/json").map_err(|_| {
-        OpLaunchError::new(
-            "ManualResolutionProofConfigMaterialInvalid",
-            "JSON media type is invalid",
-        )
-    })?;
-    draft
-        .state_nodes()
-        .iter()
-        .map(|node| (&node.config.schema_id, &node.config.canonical_json))
-        .chain(
-            draft
-                .operation_lineage()
-                .iter()
-                .map(|frame| (&frame.config.schema_id, &frame.config.canonical_json)),
-        )
-        .map(|(schema_id, canonical_json)| {
-            let bytes =
-                PlainCanonicalJsonBytes::from_canonical_json_slice(canonical_json.as_bytes())
-                    .map_err(|_| {
-                        OpLaunchError::new(
-                            "ManualResolutionProofConfigMaterialInvalid",
-                            "test op produced invalid canonical config material",
-                        )
-                    })?;
-            Ok(CanonicalConfigMaterial {
-                schema_id: schema_id.clone(),
-                bytes,
-                media_type: media_type.clone(),
+        mfm_program::TypedProgramLaunchPlan::from_draft(draft)
+            .map(EntryPointOpPlan::from)
+            .map_err(|error| {
+                OpLaunchError::new("ManualResolutionProofPlanFailed", error.to_string())
             })
-        })
-        .collect()
+    }
 }
 
 async fn signed_manual_resolution_proof_bytes(
