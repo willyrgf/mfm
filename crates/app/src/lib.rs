@@ -7,16 +7,8 @@
 //! plans, certifies, stages launch material, and wires typed services for start, resume, replay,
 //! and public-output rendering.
 //!
-//! # Examples
-//!
-//! ```rust
-//! use mfm_app::{make_run_services, ErasedRunnerRegistry};
-//! use mfm_store::v1::AsyncInMemoryRunStore;
-//!
-//! let runners = ErasedRunnerRegistry::new();
-//! let store = AsyncInMemoryRunStore::default();
-//! let _services = make_run_services(runners, store.clone(), store);
-//! ```
+//! Production binaries should construct run services through the Postgres-backed factory exported by
+//! this crate, while tests can use explicit test-support stores.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;

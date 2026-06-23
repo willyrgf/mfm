@@ -14,6 +14,9 @@ category = "kernel"
 name = "mfm_store"
 path = "src/lib.rs"
 
+[features]
+test-support = []
+
 [dependencies]
 mfm-canonical = { path = "../canonical" }
 mfm-capabilities = { path = "../capabilities" }
@@ -29,3 +32,8 @@ mfm-certify = { path = "../certify" }
 mfm-events = { path = "../events" }
 mfm-ids = { path = "../ids" }
 mfm-spec = { path = "../spec" }
+
+[[test]]
+name = "commit_contract"
+path = "tests/commit_contract.rs"
+required-features = ["test-support"]

@@ -21,6 +21,7 @@ pub mod v1 {
     use std::future::Future;
     use std::marker::PhantomData;
     use std::pin::Pin;
+    #[cfg(any(test, feature = "test-support"))]
     use std::sync::{Arc, Mutex, MutexGuard};
 
     use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
@@ -4938,6 +4939,7 @@ pub mod v1 {
         ) -> AsyncStoreFuture<'a, ProjectionSnapshot, Self::Error>;
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct CommitKeyRecord {
         fingerprint: CommitFingerprint,
@@ -5070,29 +5072,13 @@ pub mod v1 {
         }
     }
 
-    /// Private in-memory implementation behind the async typed store test backend.
-    #[derive(Debug, Clone, Default)]
-    struct RunMemoryCore {
-        streams: BTreeMap<RunId, Vec<CommittedBatch>>,
-        commit_keys: BTreeMap<(RunId, CommitKey), CommitKeyRecord>,
-        artifacts: ArtifactAuthorityMap,
-        artifact_bytes: BTreeMap<(ArtifactId, ContentDigest), (Vec<u8>, ArtifactEvidenceRef)>,
-        logical_keys: BTreeSet<(RunId, LogicalEventKey)>,
-        unique_logical_payloads: BTreeMap<(RunId, LogicalEventKey), ContentDigest>,
-        projections: ProjectionSnapshot,
-        resource_lane_authority: ResourceLaneAuthoritySet,
+    struct CommitStagingVerifier<'a> {
+        artifacts: &'a ArtifactAuthorityMap,
+        logical_keys: &'a BTreeSet<(RunId, LogicalEventKey)>,
+        projections: &'a ProjectionSnapshot,
     }
 
-    impl RunMemoryCore {
-        fn stream_events(&self, run_id: &RunId) -> Vec<KernelEventEnvelope> {
-            self.streams
-                .get(run_id)
-                .into_iter()
-                .flat_map(|batches| batches.iter())
-                .flat_map(|batch| batch.events.iter().cloned())
-                .collect()
-        }
-
+    impl CommitStagingVerifier<'_> {
         fn validate_artifact_evidence(&self, evidence: &ArtifactEvidenceRef) -> Result<()> {
             let key = artifact_authority_key(evidence)?;
             let stored = self.artifacts.get(&key).or_else(|| {
@@ -5165,7 +5151,7 @@ pub mod v1 {
             requirement: &EventArtifactRequirement,
         ) -> Result<()> {
             let mut saw_artifact_id = false;
-            for ((artifact_id, _), evidence) in &self.artifacts {
+            for ((artifact_id, _), evidence) in self.artifacts {
                 if artifact_id != &requirement.artifact_id {
                     continue;
                 }
@@ -5262,6 +5248,32 @@ pub mod v1 {
         }
     }
 
+    /// Private state behind the async typed store test backend.
+    #[cfg(any(test, feature = "test-support"))]
+    #[derive(Debug, Clone, Default)]
+    struct RunMemoryCore {
+        streams: BTreeMap<RunId, Vec<CommittedBatch>>,
+        commit_keys: BTreeMap<(RunId, CommitKey), CommitKeyRecord>,
+        artifacts: ArtifactAuthorityMap,
+        artifact_bytes: BTreeMap<(ArtifactId, ContentDigest), (Vec<u8>, ArtifactEvidenceRef)>,
+        logical_keys: BTreeSet<(RunId, LogicalEventKey)>,
+        unique_logical_payloads: BTreeMap<(RunId, LogicalEventKey), ContentDigest>,
+        projections: ProjectionSnapshot,
+        resource_lane_authority: ResourceLaneAuthoritySet,
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    impl RunMemoryCore {
+        fn stream_events(&self, run_id: &RunId) -> Vec<KernelEventEnvelope> {
+            self.streams
+                .get(run_id)
+                .into_iter()
+                .flat_map(|batches| batches.iter())
+                .flat_map(|batch| batch.events.iter().cloned())
+                .collect()
+        }
+    }
+
     /// Validates and stages a purpose-specific prepared commit plan after commit-key idempotency handling.
     ///
     /// The returned batch fingerprint covers the full prepared mutation, including the artifact
@@ -5318,15 +5330,10 @@ pub mod v1 {
         validate_retention_manifest_pairs(&request.payloads)?;
         validate_payload_public_diagnostics(&request.payloads)?;
 
-        let verifier = RunMemoryCore {
-            streams: BTreeMap::new(),
-            commit_keys: BTreeMap::new(),
-            artifacts: base.artifacts.clone(),
-            artifact_bytes: BTreeMap::new(),
-            logical_keys: base.logical_keys.clone(),
-            unique_logical_payloads: base.unique_logical_payloads.clone(),
-            projections: base.projections.clone(),
-            resource_lane_authority: base.resource_lane_authority.clone(),
+        let verifier = CommitStagingVerifier {
+            artifacts: &base.artifacts,
+            logical_keys: &base.logical_keys,
+            projections: &base.projections,
         };
         verifier.validate_preconditions(request)?;
 
@@ -5780,6 +5787,7 @@ pub mod v1 {
         })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     impl RunMemoryCore {
         fn projection_snapshot(&self) -> &ProjectionSnapshot {
             &self.projections
@@ -5882,13 +5890,15 @@ pub mod v1 {
 
     /// Non-durable async wrapper around a private in-memory run store core.
     ///
-    /// This is intended for contract tests and single-process local tools that need the async typed
-    /// store API without a durable backend. It must not be used as a production persistence store.
+    /// This helper is compiled only for tests or the `test-support` feature. It must not be used as a
+    /// production persistence store.
+    #[cfg(any(test, feature = "test-support"))]
     #[derive(Debug, Clone, Default)]
     pub struct AsyncInMemoryRunStore {
         inner: Arc<Mutex<RunMemoryCore>>,
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     impl AsyncInMemoryRunStore {
         /// Creates an empty async in-memory typed run store.
         pub fn new() -> Self {
@@ -5908,6 +5918,7 @@ pub mod v1 {
         }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     impl RunEventStore for AsyncInMemoryRunStore {
         type Error = StoreError;
 
@@ -5962,6 +5973,7 @@ pub mod v1 {
         }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     impl RunObservationStore for AsyncInMemoryRunStore {
         type Error = StoreError;
 
@@ -6036,6 +6048,7 @@ pub mod v1 {
         }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn parse_memory_observation_cursor(cursor: &str) -> Result<usize> {
         let Some(value) = cursor.strip_prefix("memory:") else {
             return Err(StoreError::InvalidCursor {
@@ -6049,6 +6062,7 @@ pub mod v1 {
             })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn memory_observation_row(
         projections: &ProjectionSnapshot,
         run_id: &RunId,
@@ -6076,6 +6090,7 @@ pub mod v1 {
         })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     impl RetainedArtifactReadProvider for AsyncInMemoryRunStore {
         fn read_retained_artifact<'a>(
             &'a self,
@@ -6114,6 +6129,7 @@ pub mod v1 {
         }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn projection_with_resource_lanes(
         snapshot: &ProjectionSnapshot,
         resource_lanes: BTreeMap<ResourceLaneKey, ResourceLaneProjection>,
@@ -6167,6 +6183,7 @@ pub mod v1 {
         })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn admit_artifact_evidence(
         artifacts: &mut ArtifactAuthorityMap,
         admitted_artifacts: &[ArtifactEvidenceRef],

@@ -45,6 +45,7 @@ mfm-transports-proof = { path = "../transports/proof" }
 [dev-dependencies]
 k256 = { version = "0.13.0", features = ["ecdsa"] }
 mfm-manual-auth = { path = "../kernel/manual-auth" }
+mfm-store = { path = "../kernel/store", features = ["test-support"] }
 mfm_core = { path = "../core" }
 mfm-program-derive = { path = "../kernel/program-derive" }
 tempfile = "3.0"

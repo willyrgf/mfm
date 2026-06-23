@@ -24,7 +24,7 @@ mfm-spec = { path = "../../crates/kernel/spec" }
 mfm-certify = { path = "../../crates/kernel/certify" }
 mfm-program = { path = "../../crates/kernel/program" }
 mfm-manual-auth = { path = "../../crates/kernel/manual-auth" }
-mfm-store = { path = "../../crates/kernel/store" }
+mfm-store = { path = "../../crates/kernel/store", features = ["test-support"] }
 mfm-stream-store-postgres = { path = "../../crates/storages/stream-store-postgres" }
 mfm-op-proof = { path = "../../crates/ops/proof-op" }
 mfm-op-evm-contract-lifecycle = { path = "../../crates/ops/evm-contract-lifecycle-op" }
