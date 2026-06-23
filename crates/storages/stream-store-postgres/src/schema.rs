@@ -180,6 +180,27 @@ async fn validate_catalog(pool: &PgPool) -> Result<()> {
         }
     }
 
+    let constraint_rows = sqlx::query(
+        "SELECT constraint_name \
+         FROM information_schema.table_constraints \
+         WHERE table_schema = current_schema()",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| PostgresStoreError::Database("failed to inspect schema constraints"))?;
+    let constraints = constraint_rows
+        .into_iter()
+        .map(|row| row.try_get::<String, _>("constraint_name"))
+        .collect::<std::result::Result<BTreeSet<_>, _>>()
+        .map_err(|_| PostgresStoreError::Database("failed to decode schema constraints"))?;
+    for constraint in REQUIRED_CONSTRAINTS {
+        if !constraints.contains(*constraint) {
+            return Err(PostgresStoreError::Database(
+                "required schema constraint missing",
+            ));
+        }
+    }
+
     let column_rows = sqlx::query(
         "SELECT column_name \
          FROM information_schema.columns \
@@ -252,7 +273,11 @@ const REQUIRED_TABLES: &[&str] = &[
 
 const REQUIRED_VIEWS: &[&str] = &["current_run_observations"];
 
-const REQUIRED_FUNCTIONS: &[&str] = &["mfm_set_append_xid", "mfm_reject_authority_mutation"];
+const REQUIRED_FUNCTIONS: &[&str] = &[
+    "mfm_set_append_xid",
+    "mfm_reject_authority_mutation",
+    "mfm_allow_orphan_artifact_blob_delete_only",
+];
 
 const REQUIRED_TRIGGERS: &[&str] = &[
     "commits_set_append_xid",
@@ -260,7 +285,8 @@ const REQUIRED_TRIGGERS: &[&str] = &[
     "store_metadata_no_update",
     "commits_no_update",
     "run_events_no_update",
-    "artifact_blobs_no_update",
+    "artifact_blobs_no_update_or_truncate",
+    "artifact_blobs_orphan_delete_only",
     "artifact_admissions_no_update",
     "commit_artifact_evidence_no_update",
     "run_artifact_admissions_no_update",
@@ -271,6 +297,8 @@ const REQUIRED_TRIGGERS: &[&str] = &[
     "run_observation_change_summaries_no_update",
     "run_observation_cursors_no_update",
 ];
+
+const REQUIRED_CONSTRAINTS: &[&str] = &["artifact_blobs_byte_len_max"];
 
 const REQUIRED_OBSERVATION_SUMMARY_COLUMNS: &[&str] = &[
     "projection_version",

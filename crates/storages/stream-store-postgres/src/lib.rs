@@ -25,8 +25,8 @@ mod run_store;
 mod schema;
 
 pub use run_store::{
-    PostgresMaintenance, PostgresRunStore, PostgresStoreError, ReadModelBuildMode,
-    ReadModelBuildReport, ReadModelDrift, ReadModelDriftKind, ReadModelDriftReport,
-    ReadModelHighWatermark, ReadModelValidationReport,
+    ArtifactBlobSweepReport, PostgresMaintenance, PostgresRunStore, PostgresStoreError,
+    ReadModelBuildMode, ReadModelBuildReport, ReadModelDrift, ReadModelDriftKind,
+    ReadModelDriftReport, ReadModelHighWatermark, ReadModelValidationReport,
 };
 pub use schema::PostgresSchema;

@@ -17,6 +17,26 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION mfm_allow_orphan_artifact_blob_delete_only() RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF current_setting('mfm.maintenance_artifact_blob_sweep', true) IS DISTINCT FROM 'on' THEN
+    RAISE EXCEPTION 'artifact blob deletes require maintenance orphan sweep';
+  END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM artifact_admissions a
+    WHERE a.artifact_id = OLD.artifact_id
+      AND a.digest = OLD.digest
+      AND a.byte_len = OLD.byte_len
+  ) THEN
+    RAISE EXCEPTION 'referenced artifact blob cannot be deleted';
+  END IF;
+  RETURN OLD;
+END;
+$$;
+
 CREATE TABLE store_metadata (
   singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
   store_epoch TEXT NOT NULL,
@@ -90,6 +110,7 @@ CREATE TABLE artifact_blobs (
   bytes BYTEA NOT NULL,
   inserted_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp(),
   CONSTRAINT artifact_blobs_byte_len_nonnegative CHECK (byte_len >= 0),
+  CONSTRAINT artifact_blobs_byte_len_max CHECK (byte_len <= 16777216),
   CONSTRAINT artifact_blobs_byte_len_matches CHECK (octet_length(bytes) = byte_len),
   UNIQUE (digest),
   UNIQUE (artifact_id, digest),
@@ -330,9 +351,13 @@ CREATE TRIGGER run_events_no_update
 BEFORE UPDATE OR DELETE OR TRUNCATE ON run_events
 FOR EACH STATEMENT EXECUTE FUNCTION mfm_reject_authority_mutation();
 
-CREATE TRIGGER artifact_blobs_no_update
-BEFORE UPDATE OR DELETE OR TRUNCATE ON artifact_blobs
+CREATE TRIGGER artifact_blobs_no_update_or_truncate
+BEFORE UPDATE OR TRUNCATE ON artifact_blobs
 FOR EACH STATEMENT EXECUTE FUNCTION mfm_reject_authority_mutation();
+
+CREATE TRIGGER artifact_blobs_orphan_delete_only
+BEFORE DELETE ON artifact_blobs
+FOR EACH ROW EXECUTE FUNCTION mfm_allow_orphan_artifact_blob_delete_only();
 
 CREATE TRIGGER artifact_admissions_no_update
 BEFORE UPDATE OR DELETE OR TRUNCATE ON artifact_admissions

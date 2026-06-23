@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
+use std::time::Duration;
 
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_events::v1 as events;
@@ -89,6 +90,9 @@ const PROJECTION_VERSION: &str = "mfm.run_observation.v1";
 const RUN_OBSERVATION_SUMMARY_KIND: &str = "run";
 const CURSOR_VERSION: &str = "mfm.run_observation.cursor.v1";
 const RESOURCE_LANE_ID_DOMAIN: &[u8] = b"mfm.resource_lane.id.v1";
+const MAX_ARTIFACT_BLOB_BYTES: u64 = 16 * 1024 * 1024;
+const LARGE_ARTIFACT_PRECOMMIT_THRESHOLD_BYTES: u64 = 1024 * 1024;
+const MAX_ARTIFACT_BLOB_SWEEP_LIMIT: u32 = 1_000;
 const MAX_OBSERVATION_LIMIT: u32 = 100;
 
 fn database_error(context: &'static str, _error: sqlx::Error) -> PostgresStoreError {
@@ -174,6 +178,13 @@ pub struct ReadModelDriftReport {
     pub findings: Vec<ReadModelDrift>,
 }
 
+/// Report for a maintenance orphan artifact blob sweep.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactBlobSweepReport {
+    /// Number of unreferenced content-addressed blob rows deleted.
+    pub swept_blobs: u64,
+}
+
 /// PostgreSQL-backed typed run event store.
 ///
 /// This is the certified typed storage surface for run events, commit keys, artifact evidence, and
@@ -212,6 +223,8 @@ impl PostgresRunStore {
         let plan = bundle.plan();
         let request = plan.request();
         let fingerprint = prepared_commit_plan_fingerprint(plan)?;
+
+        precommit_large_artifact_blobs(&self.pool, &bundle).await?;
 
         let mut tx = self
             .pool
@@ -480,6 +493,15 @@ impl PostgresMaintenance {
     /// Rotates the store epoch and cursor MAC secret after restore, clone, import, or rollback.
     pub async fn reseed_store_epoch(&self) -> Result<String> {
         reseed_store_epoch_from_pool(&self.pool).await
+    }
+
+    /// Deletes unreferenced content-addressed artifact blob rows.
+    pub async fn sweep_orphan_artifact_blobs(
+        &self,
+        min_age: Duration,
+        limit: u32,
+    ) -> Result<ArtifactBlobSweepReport> {
+        sweep_orphan_artifact_blobs_from_pool(&self.pool, min_age, limit).await
     }
 }
 
@@ -1030,7 +1052,24 @@ fn verify_prepared_artifact_bytes(artifact: &PreparedArtifactBytes) -> Result<()
         }
         .into());
     }
+    validate_artifact_blob_size(artifact.evidence())?;
     Ok(())
+}
+
+fn validate_artifact_blob_size(evidence: &ArtifactEvidenceRef) -> Result<()> {
+    if evidence.byte_len <= MAX_ARTIFACT_BLOB_BYTES {
+        Ok(())
+    } else {
+        Err(StoreError::ArtifactEvidenceMismatch {
+            artifact_id: evidence.artifact_id.clone(),
+            field: "byte_len",
+        }
+        .into())
+    }
+}
+
+fn is_large_artifact_blob(evidence: &ArtifactEvidenceRef) -> bool {
+    evidence.byte_len > LARGE_ARTIFACT_PRECOMMIT_THRESHOLD_BYTES
 }
 
 struct PreparedCommitAuthority {
@@ -1267,18 +1306,11 @@ async fn insert_prepared_artifact_bytes_tx(
     let evidence_hash = artifact.evidence_hash();
     let evidence_canonical_json = artifact_evidence_canonical_json(evidence)?;
     let byte_len = u64_to_i64(evidence.byte_len, "artifact_blobs.byte_len")?;
-    sqlx::query(
-        "INSERT INTO artifact_blobs (artifact_id, digest, byte_len, bytes) \
-         VALUES ($1,$2,$3,$4) \
-         ON CONFLICT (artifact_id) DO NOTHING",
-    )
-    .bind(evidence.artifact_id.as_str())
-    .bind(evidence.digest.as_str())
-    .bind(byte_len)
-    .bind(artifact.bytes())
-    .execute(&mut **tx)
-    .await
-    .map_err(|error| database_error("failed to insert artifact blob", error))?;
+    if is_large_artifact_blob(evidence) {
+        verify_artifact_blob_tx(tx, artifact).await?;
+    } else {
+        insert_artifact_blob_tx(tx, artifact).await?;
+    }
     sqlx::query(
         "INSERT INTO artifact_admissions \
          (evidence_hash, artifact_id, digest, byte_len, evidence_schema_version, media_type, \
@@ -1309,6 +1341,87 @@ async fn insert_prepared_artifact_bytes_tx(
     .rows_affected();
     let record = load_artifact_record_tx(tx, &evidence.artifact_id, evidence_hash).await?;
     verify_artifact_record(&record, evidence, Some(artifact.bytes()))?;
+    Ok(())
+}
+
+async fn precommit_large_artifact_blobs(
+    pool: &PgPool,
+    bundle: &PreparedCommitBundle,
+) -> Result<()> {
+    for artifact in bundle.artifact_bytes() {
+        verify_prepared_artifact_bytes(artifact)?;
+        if !is_large_artifact_blob(artifact.evidence()) {
+            continue;
+        }
+        let mut tx = pool.begin().await.map_err(|error| {
+            database_error("failed to start artifact blob precommit transaction", error)
+        })?;
+        insert_artifact_blob_tx(&mut tx, artifact).await?;
+        tx.commit()
+            .await
+            .map_err(|error| database_error("failed to commit artifact blob precommit", error))?;
+    }
+    Ok(())
+}
+
+async fn insert_artifact_blob_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    artifact: &PreparedArtifactBytes,
+) -> Result<()> {
+    verify_prepared_artifact_bytes(artifact)?;
+    let evidence = artifact.evidence();
+    let byte_len = u64_to_i64(evidence.byte_len, "artifact_blobs.byte_len")?;
+    sqlx::query(
+        "INSERT INTO artifact_blobs (artifact_id, digest, byte_len, bytes) \
+         VALUES ($1,$2,$3,$4) \
+         ON CONFLICT (artifact_id) DO NOTHING",
+    )
+    .bind(evidence.artifact_id.as_str())
+    .bind(evidence.digest.as_str())
+    .bind(byte_len)
+    .bind(artifact.bytes())
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| database_error("failed to insert artifact blob", error))?;
+    verify_artifact_blob_tx(tx, artifact).await
+}
+
+async fn verify_artifact_blob_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    artifact: &PreparedArtifactBytes,
+) -> Result<()> {
+    let evidence = artifact.evidence();
+    let row =
+        sqlx::query("SELECT digest, byte_len, bytes FROM artifact_blobs WHERE artifact_id = $1")
+            .bind(evidence.artifact_id.as_str())
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(|error| database_error("failed to load artifact blob", error))?;
+    let Some(row) = row else {
+        return Err(StoreError::MissingArtifact {
+            artifact_id: evidence.artifact_id.clone(),
+        }
+        .into());
+    };
+    let digest: String = row
+        .try_get("digest")
+        .map_err(|error| database_error("failed to decode artifact blob", error))?;
+    let byte_len: i64 = row
+        .try_get("byte_len")
+        .map_err(|error| database_error("failed to decode artifact blob", error))?;
+    let bytes: Vec<u8> = row
+        .try_get("bytes")
+        .map_err(|error| database_error("failed to decode artifact blob", error))?;
+    if digest != evidence.digest.as_str()
+        || i64_to_nonnegative_u64(byte_len, "artifact_blobs.byte_len")? != evidence.byte_len
+        || bytes.as_slice() != artifact.bytes()
+    {
+        return Err(StoreError::ArtifactEvidenceMismatch {
+            artifact_id: evidence.artifact_id.clone(),
+            field: "artifact_blob",
+        }
+        .into());
+    }
     Ok(())
 }
 
@@ -1861,6 +1974,61 @@ async fn reseed_store_epoch_from_pool(pool: &PgPool) -> Result<String> {
         .await
         .map_err(|error| database_error("failed to commit store epoch reseed", error))?;
     Ok(store_epoch)
+}
+
+async fn sweep_orphan_artifact_blobs_from_pool(
+    pool: &PgPool,
+    min_age: Duration,
+    limit: u32,
+) -> Result<ArtifactBlobSweepReport> {
+    if limit == 0 || limit > MAX_ARTIFACT_BLOB_SWEEP_LIMIT {
+        return Err(StoreError::LimitOutOfRange {
+            limit,
+            max: MAX_ARTIFACT_BLOB_SWEEP_LIMIT,
+        }
+        .into());
+    }
+    let min_age_millis = i64::try_from(min_age.as_millis()).map_err(|_| {
+        PostgresStoreError::Corruption("artifact blob sweep age exceeded PostgreSQL range".into())
+    })?;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| database_error("failed to start artifact blob sweep", error))?;
+    sqlx::query("SET LOCAL mfm.maintenance_artifact_blob_sweep = 'on'")
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| {
+            database_error("failed to enter artifact blob sweep maintenance", error)
+        })?;
+    let deleted = sqlx::query(
+        "DELETE FROM artifact_blobs b \
+         WHERE b.ctid IN ( \
+           SELECT candidate.ctid \
+           FROM artifact_blobs candidate \
+           WHERE candidate.inserted_at < statement_timestamp() - ($1::bigint * INTERVAL '1 millisecond') \
+             AND NOT EXISTS ( \
+               SELECT 1 FROM artifact_admissions a \
+               WHERE a.artifact_id = candidate.artifact_id \
+                 AND a.digest = candidate.digest \
+                 AND a.byte_len = candidate.byte_len \
+             ) \
+           ORDER BY candidate.inserted_at ASC, candidate.artifact_id ASC \
+           LIMIT $2 \
+         )",
+    )
+    .bind(min_age_millis)
+    .bind(i64::from(limit))
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| database_error("failed to sweep orphan artifact blobs", error))?
+    .rows_affected();
+    tx.commit()
+        .await
+        .map_err(|error| database_error("failed to commit artifact blob sweep", error))?;
+    Ok(ArtifactBlobSweepReport {
+        swept_blobs: deleted,
+    })
 }
 
 fn validate_projection_version(projection_version: &str) -> Result<()> {
@@ -3189,7 +3357,10 @@ fn artifact_record_from_row(row: PgRow) -> Result<ArtifactRecord> {
     .into_evidence_ref()?;
     Ok(ArtifactRecord {
         evidence_hash: parse_identity::<ContentDigest>(&evidence_hash_text)?,
-        evidence,
+        evidence: {
+            validate_artifact_blob_size(&evidence)?;
+            evidence
+        },
         artifact_bytes: row
             .try_get("bytes")
             .map_err(|error| database_error("failed to decode artifact row", error))?,
@@ -3961,6 +4132,18 @@ mod tests {
         PreparedArtifactBytes::new(bytes, evidence.clone())
     }
 
+    fn prepared_artifact_bytes_from_bytes(
+        bytes: Vec<u8>,
+        role: ArtifactRole,
+    ) -> PreparedArtifactBytes {
+        let digest =
+            ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, sha256_digest_bytes(&bytes));
+        let artifact_id = ArtifactId::from_digest(digest.algorithm(), *digest.digest());
+        let mut evidence = store_artifact_ref(artifact_id, digest, role);
+        evidence.byte_len = bytes.len() as u64;
+        PreparedArtifactBytes::new(bytes, evidence).expect("prepared artifact bytes")
+    }
+
     fn node_id(byte: u8) -> NodeId {
         NodeId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
     }
@@ -4711,6 +4894,34 @@ mod tests {
         store
             .append_prepared_commit_bundle(test_prepared_commit_bundle(plan)?)
             .await
+    }
+
+    fn retention_artifact_bundle(
+        run_id: RunId,
+        seq: u64,
+        commit_key: &str,
+        artifact: PreparedArtifactBytes,
+        preconditions: CommitPreconditions,
+    ) -> mfm_store::v1::Result<PreparedCommitBundle> {
+        let evidence = artifact.evidence().clone();
+        let request = mfm_store::v1::CommitRequest::from_payloads(
+            run_id.clone(),
+            StreamSeq::new(seq).expect("seq"),
+            CommitKey::new(commit_key).expect("commit key"),
+            vec![retention_refs_appended(
+                run_id,
+                evidence.artifact_id.clone(),
+                evidence.digest.clone(),
+                evidence.artifact_role,
+            )],
+            vec![evidence.clone()],
+            preconditions,
+        )?;
+        let artifact_set =
+            CommitArtifactEvidenceSet::new(request.required_artifacts().to_vec(), vec![evidence])?;
+        let plan: PreparedCommitPlan =
+            PreparedCommit::<Retention>::new(request, artifact_set)?.into();
+        PreparedCommitBundle::new(plan, vec![artifact], Vec::new())
     }
 
     fn test_prepared_commit_bundle(
@@ -5473,6 +5684,185 @@ mod tests {
         append_prepared(&store, second_request, vec![second_evidence])
             .await
             .expect("append second evidence for same artifact id");
+
+        drop_schema(&store, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn large_blob_precommit_orphan_is_swept_by_maintenance_only() {
+        let (store, schema) = test_store().await;
+        let run = run_id(135);
+        append_run_start(&store, &run, "large-orphan-run-start")
+            .await
+            .expect("run start");
+        let artifact = prepared_artifact_bytes_from_bytes(
+            vec![0x5a; LARGE_ARTIFACT_PRECOMMIT_THRESHOLD_BYTES as usize + 1],
+            ArtifactRole::StateOutput,
+        );
+        let evidence = artifact.evidence().clone();
+        let bundle = retention_artifact_bundle(
+            run.clone(),
+            2,
+            "large-orphan-retention",
+            artifact,
+            CommitPreconditions {
+                required_run_state: RequiredRunState::Absent,
+                ..CommitPreconditions::default()
+            },
+        )
+        .expect("large retention bundle");
+
+        let error = store
+            .append_prepared_commit_bundle(bundle)
+            .await
+            .expect_err("precondition fails after large blob precommit");
+        assert!(matches!(
+            error,
+            PostgresStoreError::Store(StoreError::RunStatePreconditionFailed { .. })
+        ));
+        let blob_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM artifact_blobs WHERE artifact_id = $1")
+                .bind(evidence.artifact_id.as_str())
+                .fetch_one(&store.pool)
+                .await
+                .expect("count orphan blob");
+        assert_eq!(blob_count, 1);
+        let admission_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM artifact_admissions WHERE artifact_id = $1")
+                .bind(evidence.artifact_id.as_str())
+                .fetch_one(&store.pool)
+                .await
+                .expect("count orphan admissions");
+        assert_eq!(admission_count, 0);
+        sqlx::query("DELETE FROM artifact_blobs WHERE artifact_id = $1")
+            .bind(evidence.artifact_id.as_str())
+            .execute(&store.pool)
+            .await
+            .expect_err("direct artifact blob delete is blocked");
+
+        let maintenance = PostgresMaintenance {
+            pool: store.pool.clone(),
+        };
+        let swept = maintenance
+            .sweep_orphan_artifact_blobs(Duration::ZERO, 10)
+            .await
+            .expect("sweep orphan blob");
+        assert_eq!(swept.swept_blobs, 1);
+        let blob_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM artifact_blobs WHERE artifact_id = $1")
+                .bind(evidence.artifact_id.as_str())
+                .fetch_one(&store.pool)
+                .await
+                .expect("count swept blob");
+        assert_eq!(blob_count, 0);
+
+        drop_schema(&store, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn large_blob_success_is_admitted_and_not_swept() {
+        let (store, schema) = test_store().await;
+        let run = run_id(136);
+        append_run_start(&store, &run, "large-success-run-start")
+            .await
+            .expect("run start");
+        let artifact = prepared_artifact_bytes_from_bytes(
+            vec![0x6b; LARGE_ARTIFACT_PRECOMMIT_THRESHOLD_BYTES as usize + 1],
+            ArtifactRole::StateOutput,
+        );
+        let evidence = artifact.evidence().clone();
+        let bundle = retention_artifact_bundle(
+            run.clone(),
+            2,
+            "large-success-retention",
+            artifact,
+            CommitPreconditions {
+                required_run_state: RequiredRunState::Started,
+                ..CommitPreconditions::default()
+            },
+        )
+        .expect("large retention bundle");
+
+        let outcome = store
+            .append_prepared_commit_bundle(bundle)
+            .await
+            .expect("large blob append");
+        assert!(matches!(outcome, CommitOutcome::Appended(_)));
+        let admission_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM artifact_admissions WHERE artifact_id = $1")
+                .bind(evidence.artifact_id.as_str())
+                .fetch_one(&store.pool)
+                .await
+                .expect("count committed admissions");
+        assert_eq!(admission_count, 1);
+        let maintenance = PostgresMaintenance {
+            pool: store.pool.clone(),
+        };
+        let swept = maintenance
+            .sweep_orphan_artifact_blobs(Duration::ZERO, 10)
+            .await
+            .expect("sweep referenced blob");
+        assert_eq!(swept.swept_blobs, 0);
+        let blob_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM artifact_blobs WHERE artifact_id = $1")
+                .bind(evidence.artifact_id.as_str())
+                .fetch_one(&store.pool)
+                .await
+                .expect("count committed blob");
+        assert_eq!(blob_count, 1);
+
+        drop_schema(&store, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn oversized_artifact_blob_is_rejected_before_authority_rows() {
+        let (store, schema) = test_store().await;
+        let run = run_id(137);
+        append_run_start(&store, &run, "oversize-run-start")
+            .await
+            .expect("run start");
+        let artifact = prepared_artifact_bytes_from_bytes(
+            vec![0x7c; MAX_ARTIFACT_BLOB_BYTES as usize + 1],
+            ArtifactRole::StateOutput,
+        );
+        let evidence = artifact.evidence().clone();
+        let bundle = retention_artifact_bundle(
+            run.clone(),
+            2,
+            "oversize-retention",
+            artifact,
+            CommitPreconditions {
+                required_run_state: RequiredRunState::Started,
+                ..CommitPreconditions::default()
+            },
+        )
+        .expect("oversize retention bundle");
+
+        let error = store
+            .append_prepared_commit_bundle(bundle)
+            .await
+            .expect_err("oversized artifact rejected");
+        assert!(matches!(
+            error,
+            PostgresStoreError::Store(StoreError::ArtifactEvidenceMismatch {
+                field: "byte_len",
+                ..
+            })
+        ));
+        let blob_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM artifact_blobs WHERE artifact_id = $1")
+                .bind(evidence.artifact_id.as_str())
+                .fetch_one(&store.pool)
+                .await
+                .expect("count oversized blob rows");
+        assert_eq!(blob_count, 0);
+        let commit_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM commits WHERE run_id = $1")
+                .bind(run.as_str())
+                .fetch_one(&store.pool)
+                .await
+                .expect("count run commits");
+        assert_eq!(commit_count, 1);
 
         drop_schema(&store, &schema).await;
     }
