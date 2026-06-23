@@ -98,98 +98,10 @@ const OBSERVATION_NOTIFY_CHANNEL: &str = "mfm_run_observation";
 const OBSERVATION_NOTIFY_PAYLOAD: &str = "changed";
 const RESOURCE_LANE_ID_DOMAIN: &[u8] = b"mfm.resource_lane.id.v1";
 const MAX_ARTIFACT_BLOB_BYTES: u64 = 16 * 1024 * 1024;
-const LARGE_ARTIFACT_PRECOMMIT_THRESHOLD_BYTES: u64 = 1024 * 1024;
-const MAX_ARTIFACT_BLOB_SWEEP_LIMIT: u32 = 1_000;
 const MAX_OBSERVATION_LIMIT: u32 = 100;
 
 fn database_error(context: &'static str, _error: sqlx::Error) -> PostgresStoreError {
     PostgresStoreError::Database(context)
-}
-
-/// Maintenance build mode for projection-versioned Postgres read models.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReadModelBuildMode {
-    /// Insert only missing rows for the requested projection version and verify existing rows.
-    MissingOnly,
-    /// Build rows for a projection version without rewriting any existing version.
-    NewVersion,
-}
-
-/// Result of a read-model build operation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReadModelBuildReport {
-    /// Projection version that was built or verified.
-    pub projection_version: String,
-    /// Rows inserted by the build.
-    pub inserted_rows: u64,
-    /// Existing rows whose hashes matched the rebuilt authority row.
-    pub verified_rows: u64,
-}
-
-/// Result of validating a projection-versioned read model.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReadModelValidationReport {
-    /// Projection version that was checked.
-    pub projection_version: String,
-    /// Authority commits checked against the read model.
-    pub checked_commits: u64,
-    /// Missing read-model rows for the requested version.
-    pub missing_rows: u64,
-    /// Rows present but not equal to the rebuilt authority-derived row.
-    pub drift_rows: u64,
-}
-
-/// High watermark for immutable commit-log cursor authority and observation summaries.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReadModelHighWatermark {
-    /// Number of immutable commit-log rows.
-    pub commit_log_rows: u64,
-    /// Number of projection-versioned observation summary rows.
-    pub summary_rows: u64,
-    /// Highest sealed append transaction id currently present in the commit log.
-    pub high_append_xid: Option<String>,
-    /// Commit id at the high watermark.
-    pub high_commit_id: Option<String>,
-    /// RFC v1 bytewise commit sort key at the high watermark.
-    pub high_commit_sort_key: Option<Vec<u8>>,
-}
-
-/// One read-model drift finding.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReadModelDrift {
-    /// Projection version of the affected row.
-    pub projection_version: String,
-    /// Commit id of the affected summary.
-    pub commit_id: String,
-    /// Kind of summary row.
-    pub summary_kind: String,
-    /// Drift class.
-    pub kind: ReadModelDriftKind,
-}
-
-/// Read-model drift class.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReadModelDriftKind {
-    /// An authority commit has no corresponding summary row.
-    Missing,
-    /// A summary row's stored hash or canonical bytes do not match the rebuilt row.
-    Mismatched,
-    /// A summary row references no live commit authority row.
-    Orphaned,
-}
-
-/// Report of read-model drift across projection versions.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReadModelDriftReport {
-    /// Drift findings.
-    pub findings: Vec<ReadModelDrift>,
-}
-
-/// Report for a maintenance orphan artifact blob sweep.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ArtifactBlobSweepReport {
-    /// Number of unreferenced content-addressed blob rows deleted.
-    pub swept_blobs: u64,
 }
 
 /// PostgreSQL-backed typed run event store.
@@ -230,8 +142,6 @@ impl PostgresRunStore {
         let plan = bundle.plan();
         let request = plan.request();
         let fingerprint = prepared_commit_plan_fingerprint(plan)?;
-
-        precommit_large_artifact_blobs(&self.pool, &bundle).await?;
 
         let mut tx = self
             .pool
@@ -444,72 +354,6 @@ impl PostgresRunStore {
         query: RunObservationQuery,
     ) -> Result<RunObservationPage> {
         read_run_observations_from_pool(&self.pool, query).await
-    }
-}
-
-/// Explicit maintenance surface for Postgres read models and cursor epoch rotation.
-///
-/// Production deployments should construct this with maintenance database credentials, not with the
-/// normal app/CLI/REST runtime credentials.
-#[derive(Clone)]
-pub struct PostgresMaintenance {
-    pool: PgPool,
-}
-
-impl PostgresMaintenance {
-    /// Connects to PostgreSQL, validates the typed schema, and returns the maintenance surface.
-    pub async fn connect(database_url: &str) -> Result<Self> {
-        let pool = connect_pool(database_url).await?;
-        validate_pool(&pool).await?;
-        Ok(Self { pool })
-    }
-
-    /// Connects using the `DATABASE_URL` environment variable.
-    pub async fn connect_env() -> Result<Self> {
-        let database_url = std::env::var("DATABASE_URL")
-            .map_err(|_| PostgresStoreError::Database("missing DATABASE_URL"))?;
-        Self::connect(&database_url).await
-    }
-
-    /// Builds or verifies a projection-versioned read model from authority rows.
-    pub async fn build_projection_version(
-        &self,
-        projection_version: &str,
-        mode: ReadModelBuildMode,
-    ) -> Result<ReadModelBuildReport> {
-        build_projection_version_from_pool(&self.pool, projection_version, mode).await
-    }
-
-    /// Validates one projection-versioned read model without mutating it.
-    pub async fn validate_read_models(
-        &self,
-        projection_version: &str,
-    ) -> Result<ReadModelValidationReport> {
-        validate_read_models_from_pool(&self.pool, projection_version).await
-    }
-
-    /// Reads the commit-log and summary high watermark for operational maintenance.
-    pub async fn read_model_high_watermark(&self) -> Result<ReadModelHighWatermark> {
-        read_model_high_watermark_from_pool(&self.pool).await
-    }
-
-    /// Returns drift findings across projection-versioned read models.
-    pub async fn read_model_drift_report(&self) -> Result<ReadModelDriftReport> {
-        read_model_drift_report_from_pool(&self.pool).await
-    }
-
-    /// Rotates the store epoch and cursor MAC secret after restore, clone, import, or rollback.
-    pub async fn reseed_store_epoch(&self) -> Result<String> {
-        reseed_store_epoch_from_pool(&self.pool).await
-    }
-
-    /// Deletes unreferenced content-addressed artifact blob rows.
-    pub async fn sweep_orphan_artifact_blobs(
-        &self,
-        min_age: Duration,
-        limit: u32,
-    ) -> Result<ArtifactBlobSweepReport> {
-        sweep_orphan_artifact_blobs_from_pool(&self.pool, min_age, limit).await
     }
 }
 
@@ -1125,10 +969,6 @@ fn validate_artifact_blob_size(evidence: &ArtifactEvidenceRef) -> Result<()> {
     }
 }
 
-fn is_large_artifact_blob(evidence: &ArtifactEvidenceRef) -> bool {
-    evidence.byte_len > LARGE_ARTIFACT_PRECOMMIT_THRESHOLD_BYTES
-}
-
 struct PreparedCommitAuthority {
     commit_idempotency_hash: String,
     idempotency_canonical_json: Vec<u8>,
@@ -1363,11 +1203,7 @@ async fn insert_prepared_artifact_bytes_tx(
     let evidence_hash = artifact.evidence_hash();
     let evidence_canonical_json = artifact_evidence_canonical_json(evidence)?;
     let byte_len = u64_to_i64(evidence.byte_len, "artifact_blobs.byte_len")?;
-    if is_large_artifact_blob(evidence) {
-        verify_artifact_blob_tx(tx, artifact).await?;
-    } else {
-        insert_artifact_blob_tx(tx, artifact).await?;
-    }
+    insert_artifact_blob_tx(tx, artifact).await?;
     sqlx::query(
         "INSERT INTO artifact_admissions \
          (evidence_hash, artifact_id, digest, byte_len, evidence_schema_version, media_type, \
@@ -1398,26 +1234,6 @@ async fn insert_prepared_artifact_bytes_tx(
     .rows_affected();
     let record = load_artifact_record_tx(tx, &evidence.artifact_id, evidence_hash).await?;
     verify_artifact_record(&record, evidence, Some(artifact.bytes()))?;
-    Ok(())
-}
-
-async fn precommit_large_artifact_blobs(
-    pool: &PgPool,
-    bundle: &PreparedCommitBundle,
-) -> Result<()> {
-    for artifact in bundle.artifact_bytes() {
-        verify_prepared_artifact_bytes(artifact)?;
-        if !is_large_artifact_blob(artifact.evidence()) {
-            continue;
-        }
-        let mut tx = pool.begin().await.map_err(|error| {
-            database_error("failed to start artifact blob precommit transaction", error)
-        })?;
-        insert_artifact_blob_tx(&mut tx, artifact).await?;
-        tx.commit()
-            .await
-            .map_err(|error| database_error("failed to commit artifact blob precommit", error))?;
-    }
     Ok(())
 }
 
@@ -1627,8 +1443,11 @@ struct RunObservationSummaryMaterialization {
     run_id: RunId,
     head_seq: StreamSeq,
     observed_status: ObservedRunStatus,
+    #[cfg(all(test, feature = "parity-tests"))]
     started_at: String,
+    #[cfg(all(test, feature = "parity-tests"))]
     updated_at: String,
+    #[cfg(all(test, feature = "parity-tests"))]
     completed_at: Option<String>,
     source_authority_hash: String,
     source_event_count: i64,
@@ -1767,8 +1586,11 @@ async fn materialize_run_observation_summary_tx(
         run_id: run_id.clone(),
         head_seq,
         observed_status,
+        #[cfg(all(test, feature = "parity-tests"))]
         started_at,
+        #[cfg(all(test, feature = "parity-tests"))]
         updated_at,
+        #[cfg(all(test, feature = "parity-tests"))]
         completed_at,
         source_authority_hash,
         source_event_count,
@@ -1875,60 +1697,35 @@ fn run_observation_summary_canonical_json(
     }))
 }
 
-async fn build_projection_version_from_pool(
-    pool: &PgPool,
-    projection_version: &str,
-    mode: ReadModelBuildMode,
-) -> Result<ReadModelBuildReport> {
-    validate_projection_version(projection_version)?;
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|error| database_error("failed to start read-model build transaction", error))?;
-    let summaries =
-        materialize_all_run_observation_summaries_tx(&mut tx, projection_version).await?;
-    let mut report = ReadModelBuildReport {
-        projection_version: projection_version.to_owned(),
-        inserted_rows: 0,
-        verified_rows: 0,
-    };
-    for summary in summaries {
-        match compare_existing_run_observation_summary_tx(&mut tx, &summary).await? {
-            SummaryComparison::Match => {
-                report.verified_rows = report.verified_rows.checked_add(1).ok_or_else(|| {
-                    PostgresStoreError::Corruption(
-                        "read-model verified row count overflow".to_owned(),
-                    )
-                })?;
-            }
-            SummaryComparison::Missing => {
-                if matches!(
-                    mode,
-                    ReadModelBuildMode::MissingOnly | ReadModelBuildMode::NewVersion
-                ) && insert_materialized_run_observation_summary_tx(&mut tx, &summary).await?
-                {
-                    report.inserted_rows =
-                        report.inserted_rows.checked_add(1).ok_or_else(|| {
-                            PostgresStoreError::Corruption(
-                                "read-model inserted row count overflow".to_owned(),
-                            )
-                        })?;
-                }
-            }
-            SummaryComparison::Mismatch => {
-                return Err(PostgresStoreError::Corruption(format!(
-                    "read-model drift for projection {} commit {}",
-                    summary.projection_version, summary.commit_id
-                )));
-            }
-        }
-    }
-    tx.commit()
-        .await
-        .map_err(|error| database_error("failed to commit read-model build", error))?;
-    Ok(report)
+#[cfg(all(test, feature = "parity-tests"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReadModelValidationReport {
+    checked_commits: u64,
+    missing_rows: u64,
+    drift_rows: u64,
 }
 
+#[cfg(all(test, feature = "parity-tests"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReadModelDrift {
+    kind: ReadModelDriftKind,
+}
+
+#[cfg(all(test, feature = "parity-tests"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadModelDriftKind {
+    Missing,
+    Mismatched,
+    Orphaned,
+}
+
+#[cfg(all(test, feature = "parity-tests"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReadModelDriftReport {
+    findings: Vec<ReadModelDrift>,
+}
+
+#[cfg(all(test, feature = "parity-tests"))]
 async fn validate_read_models_from_pool(
     pool: &PgPool,
     projection_version: &str,
@@ -1940,7 +1737,6 @@ async fn validate_read_models_from_pool(
     let summaries =
         materialize_all_run_observation_summaries_tx(&mut tx, projection_version).await?;
     let mut report = ReadModelValidationReport {
-        projection_version: projection_version.to_owned(),
         checked_commits: 0,
         missing_rows: 0,
         drift_rows: 0,
@@ -1971,50 +1767,7 @@ async fn validate_read_models_from_pool(
     Ok(report)
 }
 
-async fn read_model_high_watermark_from_pool(pool: &PgPool) -> Result<ReadModelHighWatermark> {
-    let commit_log_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM run_commit_log")
-        .fetch_one(pool)
-        .await
-        .map_err(|error| database_error("failed to count commit-log rows", error))?;
-    let summary_rows: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM run_observation_change_summaries")
-            .fetch_one(pool)
-            .await
-            .map_err(|error| database_error("failed to count observation summary rows", error))?;
-    let high = sqlx::query(
-        "SELECT append_xid::text AS append_xid, commit_id, commit_sort_key \
-         FROM run_commit_log ORDER BY append_xid DESC, commit_sort_key DESC LIMIT 1",
-    )
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| database_error("failed to read read-model high watermark", error))?;
-    let (high_append_xid, high_commit_id, high_commit_sort_key) = if let Some(row) = high {
-        (
-            Some(row.try_get("append_xid").map_err(|error| {
-                database_error("failed to decode high-watermark append xid", error)
-            })?),
-            Some(row.try_get("commit_id").map_err(|error| {
-                database_error("failed to decode high-watermark commit id", error)
-            })?),
-            Some(row.try_get("commit_sort_key").map_err(|error| {
-                database_error("failed to decode high-watermark sort key", error)
-            })?),
-        )
-    } else {
-        (None, None, None)
-    };
-    Ok(ReadModelHighWatermark {
-        commit_log_rows: i64_to_nonnegative_u64(commit_log_rows, "run_commit_log.count")?,
-        summary_rows: i64_to_nonnegative_u64(
-            summary_rows,
-            "run_observation_change_summaries.count",
-        )?,
-        high_append_xid,
-        high_commit_id,
-        high_commit_sort_key,
-    })
-}
-
+#[cfg(all(test, feature = "parity-tests"))]
 async fn read_model_drift_report_from_pool(pool: &PgPool) -> Result<ReadModelDriftReport> {
     let mut tx = pool
         .begin()
@@ -2040,15 +1793,9 @@ async fn read_model_drift_report_from_pool(pool: &PgPool) -> Result<ReadModelDri
             match compare_existing_run_observation_summary_tx(&mut tx, &summary).await? {
                 SummaryComparison::Match => {}
                 SummaryComparison::Missing => findings.push(ReadModelDrift {
-                    projection_version: summary.projection_version,
-                    commit_id: summary.commit_id,
-                    summary_kind: summary.summary_kind.to_owned(),
                     kind: ReadModelDriftKind::Missing,
                 }),
                 SummaryComparison::Mismatch => findings.push(ReadModelDrift {
-                    projection_version: summary.projection_version,
-                    commit_id: summary.commit_id,
-                    summary_kind: summary.summary_kind.to_owned(),
                     kind: ReadModelDriftKind::Mismatched,
                 }),
             }
@@ -2064,16 +1811,16 @@ async fn read_model_drift_report_from_pool(pool: &PgPool) -> Result<ReadModelDri
     .await
     .map_err(|error| database_error("failed to load orphaned read-model rows", error))?;
     for row in orphan_rows {
+        let _: String = row
+            .try_get("projection_version")
+            .map_err(|error| database_error("failed to decode orphan projection version", error))?;
+        let _: String = row
+            .try_get("commit_id")
+            .map_err(|error| database_error("failed to decode orphan commit id", error))?;
+        let _: String = row
+            .try_get("summary_kind")
+            .map_err(|error| database_error("failed to decode orphan summary kind", error))?;
         findings.push(ReadModelDrift {
-            projection_version: row.try_get("projection_version").map_err(|error| {
-                database_error("failed to decode orphan projection version", error)
-            })?,
-            commit_id: row
-                .try_get("commit_id")
-                .map_err(|error| database_error("failed to decode orphan commit id", error))?,
-            summary_kind: row
-                .try_get("summary_kind")
-                .map_err(|error| database_error("failed to decode orphan summary kind", error))?,
             kind: ReadModelDriftKind::Orphaned,
         });
     }
@@ -2083,93 +1830,7 @@ async fn read_model_drift_report_from_pool(pool: &PgPool) -> Result<ReadModelDri
     Ok(ReadModelDriftReport { findings })
 }
 
-async fn reseed_store_epoch_from_pool(pool: &PgPool) -> Result<String> {
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|error| database_error("failed to start store epoch reseed", error))?;
-    sqlx::query("ALTER TABLE store_metadata DISABLE TRIGGER store_metadata_no_update")
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| database_error("failed to enter store epoch maintenance", error))?;
-    let row = sqlx::query(
-        "UPDATE store_metadata \
-         SET store_epoch = 'mfm.store.epoch.v1:' || encode(public.gen_random_bytes(16), 'hex'), \
-             cursor_secret = public.gen_random_bytes(32) \
-         WHERE singleton \
-         RETURNING store_epoch",
-    )
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(|error| database_error("failed to reseed store epoch", error))?;
-    sqlx::query("ALTER TABLE store_metadata ENABLE TRIGGER store_metadata_no_update")
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| database_error("failed to leave store epoch maintenance", error))?;
-    let store_epoch = row
-        .try_get("store_epoch")
-        .map_err(|error| database_error("failed to decode reseeded store epoch", error))?;
-    tx.commit()
-        .await
-        .map_err(|error| database_error("failed to commit store epoch reseed", error))?;
-    Ok(store_epoch)
-}
-
-async fn sweep_orphan_artifact_blobs_from_pool(
-    pool: &PgPool,
-    min_age: Duration,
-    limit: u32,
-) -> Result<ArtifactBlobSweepReport> {
-    if limit == 0 || limit > MAX_ARTIFACT_BLOB_SWEEP_LIMIT {
-        return Err(StoreError::LimitOutOfRange {
-            limit,
-            max: MAX_ARTIFACT_BLOB_SWEEP_LIMIT,
-        }
-        .into());
-    }
-    let min_age_millis = i64::try_from(min_age.as_millis()).map_err(|_| {
-        PostgresStoreError::Corruption("artifact blob sweep age exceeded PostgreSQL range".into())
-    })?;
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|error| database_error("failed to start artifact blob sweep", error))?;
-    sqlx::query("SET LOCAL mfm.maintenance_artifact_blob_sweep = 'on'")
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| {
-            database_error("failed to enter artifact blob sweep maintenance", error)
-        })?;
-    let deleted = sqlx::query(
-        "DELETE FROM artifact_blobs b \
-         WHERE b.ctid IN ( \
-           SELECT candidate.ctid \
-           FROM artifact_blobs candidate \
-           WHERE candidate.inserted_at < statement_timestamp() - ($1::bigint * INTERVAL '1 millisecond') \
-             AND NOT EXISTS ( \
-               SELECT 1 FROM artifact_admissions a \
-               WHERE a.artifact_id = candidate.artifact_id \
-                 AND a.digest = candidate.digest \
-                 AND a.byte_len = candidate.byte_len \
-             ) \
-           ORDER BY candidate.inserted_at ASC, candidate.artifact_id ASC \
-           LIMIT $2 \
-         )",
-    )
-    .bind(min_age_millis)
-    .bind(i64::from(limit))
-    .execute(&mut *tx)
-    .await
-    .map_err(|error| database_error("failed to sweep orphan artifact blobs", error))?
-    .rows_affected();
-    tx.commit()
-        .await
-        .map_err(|error| database_error("failed to commit artifact blob sweep", error))?;
-    Ok(ArtifactBlobSweepReport {
-        swept_blobs: deleted,
-    })
-}
-
+#[cfg(all(test, feature = "parity-tests"))]
 fn validate_projection_version(projection_version: &str) -> Result<()> {
     if projection_version.trim().is_empty() {
         return Err(StoreError::ObservationUnavailable {
@@ -2186,6 +1847,7 @@ enum SummaryComparison {
     Mismatch,
 }
 
+#[cfg(all(test, feature = "parity-tests"))]
 async fn materialize_all_run_observation_summaries_tx(
     tx: &mut Transaction<'_, Postgres>,
     projection_version: &str,
@@ -2238,6 +1900,7 @@ async fn materialize_all_run_observation_summaries_tx(
     Ok(summaries)
 }
 
+#[cfg(all(test, feature = "parity-tests"))]
 async fn compare_existing_run_observation_summary_tx(
     tx: &mut Transaction<'_, Postgres>,
     summary: &RunObservationSummaryMaterialization,
@@ -5610,67 +5273,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_model_maintenance_builds_validates_and_reports_watermark() {
+    async fn read_model_private_validation_matches_append_rows() {
         let (store, schema) = test_store().await;
         let run = run_id(130);
-        append_run_start(&store, &run, "maintenance-run-start")
+        append_run_start(&store, &run, "validation-run-start")
             .await
             .expect("run start");
-        append_resource_lane_attempt_start(&store, &run, "maintenance-attempt-start")
+        append_resource_lane_attempt_start(&store, &run, "validation-attempt-start")
             .await
             .expect("attempt start");
-        let maintenance = PostgresMaintenance {
-            pool: store.pool.clone(),
-        };
 
-        let current = maintenance
-            .validate_read_models(PROJECTION_VERSION)
+        let current = validate_read_models_from_pool(&store.pool, PROJECTION_VERSION)
             .await
             .expect("validate current projection");
         assert_eq!(current.checked_commits, 2);
         assert_eq!(current.missing_rows, 0);
         assert_eq!(current.drift_rows, 0);
-
-        let built = maintenance
-            .build_projection_version(
-                "mfm.run_observation.test.v2",
-                ReadModelBuildMode::NewVersion,
-            )
-            .await
-            .expect("build new projection version");
-        assert_eq!(built.inserted_rows, 2);
-        assert_eq!(built.verified_rows, 0);
-        let rebuilt = maintenance
-            .build_projection_version(
-                "mfm.run_observation.test.v2",
-                ReadModelBuildMode::MissingOnly,
-            )
-            .await
-            .expect("verify rebuilt projection version");
-        assert_eq!(rebuilt.inserted_rows, 0);
-        assert_eq!(rebuilt.verified_rows, 2);
-        let validated = maintenance
-            .validate_read_models("mfm.run_observation.test.v2")
-            .await
-            .expect("validate rebuilt projection");
-        assert_eq!(validated.checked_commits, 2);
-        assert_eq!(validated.missing_rows, 0);
-        assert_eq!(validated.drift_rows, 0);
-
-        let watermark = maintenance
-            .read_model_high_watermark()
-            .await
-            .expect("read watermark");
-        assert_eq!(watermark.commit_log_rows, 2);
-        assert_eq!(watermark.summary_rows, 4);
-        assert!(watermark.high_append_xid.is_some());
-        assert!(watermark.high_commit_id.is_some());
-        assert_eq!(
-            watermark.high_commit_sort_key.as_ref().map(Vec::len),
-            Some(32)
-        );
-        let drift = maintenance
-            .read_model_drift_report()
+        let drift = read_model_drift_report_from_pool(&store.pool)
             .await
             .expect("drift report");
         assert!(drift.findings.is_empty());
@@ -5763,7 +5382,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_model_missing_only_rebuild_repairs_missing_rows() {
+    async fn read_model_validation_detects_missing_summary_rows() {
         let (store, schema) = test_store().await;
         let run = run_id(131);
         append_run_start(&store, &run, "missing-read-model-run-start")
@@ -5772,9 +5391,6 @@ mod tests {
         append_resource_lane_attempt_start(&store, &run, "missing-read-model-attempt-start")
             .await
             .expect("attempt start");
-        let maintenance = PostgresMaintenance {
-            pool: store.pool.clone(),
-        };
 
         sqlx::query(
             "ALTER TABLE run_observation_change_summaries DISABLE TRIGGER \
@@ -5801,37 +5417,27 @@ mod tests {
         .await
         .expect("reenable read-model mutation guard");
 
-        let missing = maintenance
-            .validate_read_models(PROJECTION_VERSION)
+        let missing = validate_read_models_from_pool(&store.pool, PROJECTION_VERSION)
             .await
             .expect("validate missing row");
         assert_eq!(missing.missing_rows, 1);
         assert_eq!(missing.drift_rows, 0);
-        let repaired = maintenance
-            .build_projection_version(PROJECTION_VERSION, ReadModelBuildMode::MissingOnly)
+        let drift = read_model_drift_report_from_pool(&store.pool)
             .await
-            .expect("repair missing row");
-        assert_eq!(repaired.inserted_rows, 1);
-        let valid = maintenance
-            .validate_read_models(PROJECTION_VERSION)
-            .await
-            .expect("validate repaired projection");
-        assert_eq!(valid.missing_rows, 0);
-        assert_eq!(valid.drift_rows, 0);
+            .expect("drift report");
+        assert_eq!(drift.findings.len(), 1);
+        assert_eq!(drift.findings[0].kind, ReadModelDriftKind::Missing);
 
         drop_schema(&store, &schema).await;
     }
 
     #[tokio::test]
-    async fn read_model_missing_only_rebuild_repairs_missing_derivations() {
+    async fn read_model_validation_detects_missing_derivations() {
         let (store, schema) = test_store().await;
         let run = run_id(139);
         append_run_start(&store, &run, "missing-derivation-run-start")
             .await
             .expect("run start");
-        let maintenance = PostgresMaintenance {
-            pool: store.pool.clone(),
-        };
 
         sqlx::query(
             "ALTER TABLE observation_derivations DISABLE TRIGGER \
@@ -5853,23 +5459,16 @@ mod tests {
         .await
         .expect("reenable derivation mutation guard");
 
-        let missing = maintenance
-            .validate_read_models(PROJECTION_VERSION)
+        let missing = validate_read_models_from_pool(&store.pool, PROJECTION_VERSION)
             .await
             .expect("validate missing derivation");
         assert_eq!(missing.missing_rows, 1);
         assert_eq!(missing.drift_rows, 0);
-        let repaired = maintenance
-            .build_projection_version(PROJECTION_VERSION, ReadModelBuildMode::MissingOnly)
+        let drift = read_model_drift_report_from_pool(&store.pool)
             .await
-            .expect("repair missing derivation");
-        assert_eq!(repaired.inserted_rows, 1);
-        let valid = maintenance
-            .validate_read_models(PROJECTION_VERSION)
-            .await
-            .expect("validate repaired derivation");
-        assert_eq!(valid.missing_rows, 0);
-        assert_eq!(valid.drift_rows, 0);
+            .expect("drift report");
+        assert_eq!(drift.findings.len(), 1);
+        assert_eq!(drift.findings[0].kind, ReadModelDriftKind::Missing);
 
         drop_schema(&store, &schema).await;
     }
@@ -5881,9 +5480,6 @@ mod tests {
         append_run_start(&store, &run, "drift-read-model-run-start")
             .await
             .expect("run start");
-        let maintenance = PostgresMaintenance {
-            pool: store.pool.clone(),
-        };
 
         sqlx::query(
             "ALTER TABLE run_observation_change_summaries DISABLE TRIGGER \
@@ -5904,22 +5500,15 @@ mod tests {
         .await
         .expect("tamper read-model hash");
 
-        let validation = maintenance
-            .validate_read_models(PROJECTION_VERSION)
+        let validation = validate_read_models_from_pool(&store.pool, PROJECTION_VERSION)
             .await
             .expect("validate drifted projection");
         assert_eq!(validation.drift_rows, 1);
-        let drift = maintenance
-            .read_model_drift_report()
+        let drift = read_model_drift_report_from_pool(&store.pool)
             .await
             .expect("drift report");
         assert_eq!(drift.findings.len(), 1);
         assert_eq!(drift.findings[0].kind, ReadModelDriftKind::Mismatched);
-        let error = maintenance
-            .build_projection_version(PROJECTION_VERSION, ReadModelBuildMode::MissingOnly)
-            .await
-            .expect_err("rebuild fails closed on drift");
-        assert_corruption(error, "read-model drift");
 
         drop_schema(&store, &schema).await;
     }
@@ -5931,9 +5520,6 @@ mod tests {
         append_run_start(&store, &run, "drift-derivation-run-start")
             .await
             .expect("run start");
-        let maintenance = PostgresMaintenance {
-            pool: store.pool.clone(),
-        };
 
         sqlx::query(
             "ALTER TABLE observation_derivations DISABLE TRIGGER \
@@ -5952,16 +5538,10 @@ mod tests {
         .await
         .expect("tamper derivation hash");
 
-        let validation = maintenance
-            .validate_read_models(PROJECTION_VERSION)
+        let validation = validate_read_models_from_pool(&store.pool, PROJECTION_VERSION)
             .await
             .expect("validate drifted derivation");
         assert_eq!(validation.drift_rows, 1);
-        let error = maintenance
-            .build_projection_version(PROJECTION_VERSION, ReadModelBuildMode::MissingOnly)
-            .await
-            .expect_err("rebuild fails closed on derivation drift");
-        assert_corruption(error, "read-model drift");
 
         drop_schema(&store, &schema).await;
     }
@@ -6163,39 +5743,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reseed_store_epoch_expires_existing_observation_cursors() {
-        let (store, schema) = test_store().await;
-        let run = run_id(133);
-        append_run_start(&store, &run, "epoch-run-start")
-            .await
-            .expect("run start");
-        let page = store
-            .read_run_observations(RunObservationQuery::new(None, 10, 0))
-            .await
-            .expect("read observations before reseed");
-        let old_cursor = page.next_cursor;
-        let maintenance = PostgresMaintenance {
-            pool: store.pool.clone(),
-        };
-        let new_epoch = maintenance
-            .reseed_store_epoch()
-            .await
-            .expect("reseed store epoch");
-        assert!(new_epoch.starts_with("mfm.store.epoch.v1:"));
-
-        let error = store
-            .read_run_observations(RunObservationQuery::new(Some(old_cursor), 10, 0))
-            .await
-            .expect_err("old cursor expires after epoch reseed");
-        assert!(matches!(
-            error,
-            PostgresStoreError::Store(StoreError::CursorExpired)
-        ));
-
-        drop_schema(&store, &schema).await;
-    }
-
-    #[tokio::test]
     async fn artifact_authority_accepts_distinct_evidence_for_same_artifact_id() {
         let (store, schema) = test_store().await;
         let run = run_id(122);
@@ -6272,21 +5819,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn large_blob_precommit_orphan_is_swept_by_maintenance_only() {
+    async fn artifact_precondition_failure_rolls_back_blob_insert() {
         let (store, schema) = test_store().await;
         let run = run_id(135);
-        append_run_start(&store, &run, "large-orphan-run-start")
+        append_run_start(&store, &run, "blob-rollback-run-start")
             .await
             .expect("run start");
         let artifact = prepared_artifact_bytes_from_bytes(
-            vec![0x5a; LARGE_ARTIFACT_PRECOMMIT_THRESHOLD_BYTES as usize + 1],
+            vec![0x5a; 1024 * 1024 + 1],
             ArtifactRole::StateOutput,
         );
         let evidence = artifact.evidence().clone();
         let bundle = retention_artifact_bundle(
             run.clone(),
             2,
-            "large-orphan-retention",
+            "blob-rollback-retention",
             artifact,
             CommitPreconditions {
                 required_run_state: RequiredRunState::Absent,
@@ -6298,7 +5845,7 @@ mod tests {
         let error = store
             .append_prepared_commit_bundle(bundle)
             .await
-            .expect_err("precondition fails after large blob precommit");
+            .expect_err("precondition fails before blob commit");
         assert!(matches!(
             error,
             PostgresStoreError::Store(StoreError::RunStatePreconditionFailed { .. })
@@ -6308,56 +5855,35 @@ mod tests {
                 .bind(evidence.artifact_id.as_str())
                 .fetch_one(&store.pool)
                 .await
-                .expect("count orphan blob");
-        assert_eq!(blob_count, 1);
+                .expect("count rolled-back blob");
+        assert_eq!(blob_count, 0);
         let admission_count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM artifact_admissions WHERE artifact_id = $1")
                 .bind(evidence.artifact_id.as_str())
                 .fetch_one(&store.pool)
                 .await
-                .expect("count orphan admissions");
+                .expect("count rolled-back admissions");
         assert_eq!(admission_count, 0);
-        sqlx::query("DELETE FROM artifact_blobs WHERE artifact_id = $1")
-            .bind(evidence.artifact_id.as_str())
-            .execute(&store.pool)
-            .await
-            .expect_err("direct artifact blob delete is blocked");
-
-        let maintenance = PostgresMaintenance {
-            pool: store.pool.clone(),
-        };
-        let swept = maintenance
-            .sweep_orphan_artifact_blobs(Duration::ZERO, 10)
-            .await
-            .expect("sweep orphan blob");
-        assert_eq!(swept.swept_blobs, 1);
-        let blob_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM artifact_blobs WHERE artifact_id = $1")
-                .bind(evidence.artifact_id.as_str())
-                .fetch_one(&store.pool)
-                .await
-                .expect("count swept blob");
-        assert_eq!(blob_count, 0);
 
         drop_schema(&store, &schema).await;
     }
 
     #[tokio::test]
-    async fn large_blob_success_is_admitted_and_not_swept() {
+    async fn artifact_blob_success_is_admitted_in_append_transaction() {
         let (store, schema) = test_store().await;
         let run = run_id(136);
-        append_run_start(&store, &run, "large-success-run-start")
+        append_run_start(&store, &run, "blob-success-run-start")
             .await
             .expect("run start");
         let artifact = prepared_artifact_bytes_from_bytes(
-            vec![0x6b; LARGE_ARTIFACT_PRECOMMIT_THRESHOLD_BYTES as usize + 1],
+            vec![0x6b; 1024 * 1024 + 1],
             ArtifactRole::StateOutput,
         );
         let evidence = artifact.evidence().clone();
         let bundle = retention_artifact_bundle(
             run.clone(),
             2,
-            "large-success-retention",
+            "blob-success-retention",
             artifact,
             CommitPreconditions {
                 required_run_state: RequiredRunState::Started,
@@ -6371,21 +5897,6 @@ mod tests {
             .await
             .expect("large blob append");
         assert!(matches!(outcome, CommitOutcome::Appended(_)));
-        let admission_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM artifact_admissions WHERE artifact_id = $1")
-                .bind(evidence.artifact_id.as_str())
-                .fetch_one(&store.pool)
-                .await
-                .expect("count committed admissions");
-        assert_eq!(admission_count, 1);
-        let maintenance = PostgresMaintenance {
-            pool: store.pool.clone(),
-        };
-        let swept = maintenance
-            .sweep_orphan_artifact_blobs(Duration::ZERO, 10)
-            .await
-            .expect("sweep referenced blob");
-        assert_eq!(swept.swept_blobs, 0);
         let blob_count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM artifact_blobs WHERE artifact_id = $1")
                 .bind(evidence.artifact_id.as_str())
@@ -6393,6 +5904,18 @@ mod tests {
                 .await
                 .expect("count committed blob");
         assert_eq!(blob_count, 1);
+        let admission_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM artifact_admissions WHERE artifact_id = $1")
+                .bind(evidence.artifact_id.as_str())
+                .fetch_one(&store.pool)
+                .await
+                .expect("count committed admissions");
+        assert_eq!(admission_count, 1);
+        sqlx::query("DELETE FROM artifact_blobs WHERE artifact_id = $1")
+            .bind(evidence.artifact_id.as_str())
+            .execute(&store.pool)
+            .await
+            .expect_err("direct artifact blob delete is blocked");
 
         drop_schema(&store, &schema).await;
     }

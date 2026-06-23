@@ -275,11 +275,7 @@ const REQUIRED_TABLES: &[&str] = &[
 
 const REQUIRED_VIEWS: &[&str] = &["current_run_observations"];
 
-const REQUIRED_FUNCTIONS: &[&str] = &[
-    "mfm_set_append_xid",
-    "mfm_reject_authority_mutation",
-    "mfm_allow_orphan_artifact_blob_delete_only",
-];
+const REQUIRED_FUNCTIONS: &[&str] = &["mfm_set_append_xid", "mfm_reject_authority_mutation"];
 
 const REQUIRED_TRIGGERS: &[&str] = &[
     "commits_set_append_xid",
@@ -287,8 +283,7 @@ const REQUIRED_TRIGGERS: &[&str] = &[
     "store_metadata_no_update",
     "commits_no_update",
     "run_events_no_update",
-    "artifact_blobs_no_update_or_truncate",
-    "artifact_blobs_orphan_delete_only",
+    "artifact_blobs_no_update",
     "artifact_admissions_no_update",
     "commit_artifact_evidence_no_update",
     "run_artifact_admissions_no_update",
