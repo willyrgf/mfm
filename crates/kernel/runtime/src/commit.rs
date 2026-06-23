@@ -815,13 +815,14 @@ fn required_artifacts_for_payloads(
     required_artifacts: Vec<store::ArtifactEvidenceRef>,
     payloads: &[events::KernelEventPayload],
 ) -> Result<Vec<store::ArtifactEvidenceRef>> {
-    let mut by_artifact = required_artifacts
-        .into_iter()
-        .map(|artifact| (artifact.artifact_id.clone(), artifact))
-        .collect::<BTreeMap<_, _>>();
+    let mut required_artifacts = required_artifacts;
     for payload in payloads {
         for requirement in store::event_artifact_requirements(payload) {
-            if by_artifact.contains_key(&requirement.artifact_id) {
+            if required_artifacts.iter().any(|evidence| {
+                evidence.artifact_id == requirement.artifact_id
+                    && store::validate_artifact_requirement_against_evidence(&requirement, evidence)
+                        .is_ok()
+            }) {
                 continue;
             }
             let Some(evidence) = committed_artifact_for_requirement(view, &requirement) else {
@@ -833,10 +834,10 @@ fn required_artifacts_for_payloads(
                     requirement.artifact_id
                 )));
             };
-            by_artifact.insert(evidence.artifact_id.clone(), evidence);
+            required_artifacts.push(evidence);
         }
     }
-    Ok(by_artifact.into_values().collect())
+    Ok(required_artifacts)
 }
 
 fn committed_artifact_for_requirement(
@@ -844,7 +845,11 @@ fn committed_artifact_for_requirement(
     requirement: &store::EventArtifactRequirement,
 ) -> Option<store::ArtifactEvidenceRef> {
     view.artifact_refs
-        .get(&requirement.artifact_id)
+        .values()
+        .find(|reference| {
+            store::validate_artifact_requirement_against_evidence(requirement, &reference.evidence)
+                .is_ok()
+        })
         .map(|reference| reference.evidence.clone())
         .or_else(|| {
             view.config_artifacts
@@ -1084,7 +1089,7 @@ fn validate_staged_artifacts(
     attempt_id: &AttemptId,
     staged_artifacts: &[StagedArtifact],
 ) -> Result<Vec<ValidatedStagedArtifact>> {
-    let mut by_artifact = BTreeMap::<ArtifactId, ValidatedStagedArtifact>::new();
+    let mut by_artifact = BTreeMap::<(ArtifactId, ContentDigest), ValidatedStagedArtifact>::new();
     for staged in staged_artifacts {
         let handle = staged.handle();
         if handle.run_id() != run_id
@@ -1100,7 +1105,14 @@ fn validate_staged_artifacts(
         if let Some(bytes) = staged.bytes() {
             verify_artifact_bytes(bytes, handle.evidence())?;
         }
-        if let Some(existing) = by_artifact.get(&handle.evidence().artifact_id) {
+        let evidence_key = (
+            handle.evidence().artifact_id.clone(),
+            handle
+                .evidence()
+                .evidence_hash()
+                .map_err(RuntimeError::from)?,
+        );
+        if let Some(existing) = by_artifact.get(&evidence_key) {
             if existing.evidence != *handle.evidence() || existing.binding != *handle.binding() {
                 return Err(RuntimeError::InvalidRunnerOutput(format!(
                     "node {} staged conflicting evidence for artifact {}",
@@ -1111,7 +1123,7 @@ fn validate_staged_artifacts(
             continue;
         }
         by_artifact.insert(
-            handle.evidence().artifact_id.clone(),
+            evidence_key,
             ValidatedStagedArtifact {
                 evidence: handle.evidence().clone(),
                 binding: handle.binding().clone(),
@@ -1229,49 +1241,39 @@ fn validate_staged_artifact_payload_bindings(
     staged_artifacts: &[ValidatedStagedArtifact],
 ) -> Result<()> {
     let requirements = staged_payload_artifact_requirements(node, attempt_id, payloads)?;
-    let mut requirements_by_artifact: BTreeMap<ArtifactId, &StagedArtifactRequirement> =
-        BTreeMap::new();
-    for requirement in &requirements {
-        if let Some(existing) = requirements_by_artifact.get(&requirement.artifact_id) {
-            if !staged_artifact_requirements_are_compatible(existing, requirement) {
-                return Err(RuntimeError::InvalidRunnerOutput(format!(
-                    "node {} returned conflicting typed payload requirements for artifact {}",
-                    node.node_id, requirement.artifact_id
-                )));
-            }
-        }
-        requirements_by_artifact.insert(requirement.artifact_id.clone(), requirement);
-    }
-    let staged_by_artifact = staged_artifacts
-        .iter()
-        .map(|artifact| (artifact.evidence.artifact_id.clone(), artifact))
-        .collect::<BTreeMap<_, _>>();
-
     for staged in staged_artifacts {
-        let Some(requirement) = requirements_by_artifact.get(&staged.evidence.artifact_id) else {
+        if !requirements
+            .iter()
+            .any(|requirement| staged_artifact_matches_requirement(node, staged, requirement))
+        {
             return Err(RuntimeError::InvalidRunnerOutput(format!(
                 "node {} staged artifact {} without typed payload reference",
                 node.node_id, staged.evidence.artifact_id
             )));
-        };
-        validate_staged_artifact_requirement(node, &staged.evidence, &staged.binding, requirement)?;
+        }
     }
 
-    for requirement in requirements {
-        let Some(staged) = staged_by_artifact.get(&requirement.artifact_id) else {
+    for requirement in &requirements {
+        if !staged_artifacts
+            .iter()
+            .any(|staged| staged_artifact_matches_requirement(node, staged, requirement))
+        {
             return Err(RuntimeError::InvalidRunnerOutput(format!(
                 "node {} referenced artifact {} without staged artifact",
                 node.node_id, requirement.artifact_id
             )));
-        };
-        validate_staged_artifact_requirement(
-            node,
-            &staged.evidence,
-            &staged.binding,
-            &requirement,
-        )?;
+        }
     }
     Ok(())
+}
+
+fn staged_artifact_matches_requirement(
+    node: &spec::NodeSpec,
+    staged: &ValidatedStagedArtifact,
+    requirement: &StagedArtifactRequirement,
+) -> bool {
+    validate_staged_artifact_requirement(node, &staged.evidence, &staged.binding, requirement)
+        .is_ok()
 }
 
 fn validate_staged_artifact_requirement(
@@ -1310,30 +1312,6 @@ fn validate_staged_artifact_requirement(
         )));
     }
     Ok(())
-}
-
-fn staged_artifact_requirements_are_compatible(
-    left: &StagedArtifactRequirement,
-    right: &StagedArtifactRequirement,
-) -> bool {
-    left.artifact_id == right.artifact_id
-        && left.digest == right.digest
-        && optional_requirements_are_compatible(left.byte_len.as_ref(), right.byte_len.as_ref())
-        && optional_requirements_are_compatible(left.media_type.as_ref(), right.media_type.as_ref())
-        && optional_requirements_are_compatible(left.schema_id.as_ref(), right.schema_id.as_ref())
-        && optional_requirements_are_compatible(
-            left.semantic_type_id.as_ref(),
-            right.semantic_type_id.as_ref(),
-        )
-        && left.role == right.role
-        && left.binding == right.binding
-}
-
-fn optional_requirements_are_compatible<T: Eq>(left: Option<&T>, right: Option<&T>) -> bool {
-    match (left, right) {
-        (Some(left), Some(right)) => left == right,
-        _ => true,
-    }
 }
 
 fn staged_payload_artifact_requirements(
@@ -1612,14 +1590,10 @@ fn bind_staged_retention_refs(
     required_artifacts: &[store::ArtifactEvidenceRef],
     staged: Vec<StagedRetentionRefs>,
 ) -> Result<Vec<events::KernelEventPayload>> {
-    let artifact_evidence = required_artifacts
-        .iter()
-        .map(|artifact| (artifact.artifact_id.clone(), artifact))
-        .collect::<BTreeMap<_, _>>();
     let mut payloads = Vec::with_capacity(staged.len());
     for staged_refs in staged {
         let reason = staged_refs.reason;
-        validate_staged_retention_reason(runtime_spec, node, &artifact_evidence, &staged_refs)?;
+        validate_staged_retention_reason(runtime_spec, node, required_artifacts, &staged_refs)?;
         if staged_refs.refs.is_empty() {
             return Err(RuntimeError::InvalidRunnerOutput(format!(
                 "node {} staged empty retention refs",
@@ -1627,7 +1601,9 @@ fn bind_staged_retention_refs(
             )));
         }
         for retention_ref in &staged_refs.refs {
-            let Some(artifact) = artifact_evidence.get(&retention_ref.artifact_id) else {
+            let Some(artifact) =
+                artifact_evidence_for_retention_ref(required_artifacts, retention_ref)
+            else {
                 return Err(RuntimeError::InvalidRunnerOutput(format!(
                     "node {} staged retention for artifact {} without staged artifact evidence",
                     node.node_id, retention_ref.artifact_id
@@ -1657,7 +1633,7 @@ fn bind_staged_retention_refs(
 fn validate_staged_retention_reason(
     runtime_spec: &CertifiedRuntimeSpec,
     node: &spec::NodeSpec,
-    artifact_evidence: &BTreeMap<ArtifactId, &store::ArtifactEvidenceRef>,
+    artifact_evidence: &[store::ArtifactEvidenceRef],
     staged_refs: &StagedRetentionRefs,
 ) -> Result<()> {
     match staged_refs.reason {
@@ -1685,8 +1661,7 @@ fn validate_staged_retention_reason(
                 ))
             })?;
             for retention_ref in &staged_refs.refs {
-                let artifact = artifact_evidence
-                    .get(&retention_ref.artifact_id)
+                let artifact = artifact_evidence_for_retention_ref(artifact_evidence, retention_ref)
                     .ok_or_else(|| {
                         RuntimeError::InvalidRunnerOutput(format!(
                             "node {} staged public-output retention for artifact {} without staged artifact evidence",
@@ -1711,6 +1686,17 @@ fn validate_staged_retention_reason(
         events::RetentionReason::RuntimeEvidence => {}
     }
     Ok(())
+}
+
+fn artifact_evidence_for_retention_ref<'a>(
+    artifacts: &'a [store::ArtifactEvidenceRef],
+    retention_ref: &events::RetentionRef,
+) -> Option<&'a store::ArtifactEvidenceRef> {
+    artifacts.iter().find(|artifact| {
+        artifact.artifact_id == retention_ref.artifact_id
+            && artifact.digest == retention_ref.content_digest
+            && artifact.artifact_role == retention_ref.role
+    })
 }
 
 fn runner_output_preconditions(

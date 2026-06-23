@@ -191,8 +191,8 @@ pub mod v1 {
             let artifact_bytes = verified_view
                 .artifact_store()
                 .artifacts()
-                .map(|(artifact_id, artifact)| ReplayArtifactBytes {
-                    artifact_id: artifact_id.clone(),
+                .map(|(_, artifact)| ReplayArtifactBytes {
+                    artifact_id: artifact.evidence().artifact_id.clone(),
                     bytes: artifact.bytes().to_vec(),
                 })
                 .collect::<Vec<_>>();
@@ -512,6 +512,7 @@ pub mod v1 {
     }
 
     type FactKey = (NodeId, AttemptId, events::FactKey);
+    type ReplayArtifactAuthorityKey = (ArtifactId, ContentDigest);
     type SideEffectKey = (events::SideEffectLedgerKey, u32);
 
     /// Evidence-only broker for certified typed replay.
@@ -521,9 +522,9 @@ pub mod v1 {
         stream: Vec<KernelEventEnvelope>,
         run_id: events::RunAdmitted,
         projection: ProjectionSnapshot,
-        retained_artifacts: BTreeMap<ArtifactId, StoredArtifactEvidenceRef>,
+        retained_artifacts: BTreeMap<ReplayArtifactAuthorityKey, StoredArtifactEvidenceRef>,
         artifact_bytes: BTreeMap<ArtifactId, Vec<u8>>,
-        artifacts: BTreeMap<ArtifactId, StoredArtifactEvidenceRef>,
+        artifacts: BTreeMap<ReplayArtifactAuthorityKey, StoredArtifactEvidenceRef>,
         facts: BTreeMap<FactKey, events::FactRecorded>,
         intents: BTreeMap<events::SideEffectLedgerKey, side_effect::IntentPersisted>,
         submissions: BTreeMap<SideEffectKey, side_effect::SubmissionObserved>,
@@ -1636,9 +1637,21 @@ pub mod v1 {
             let block_reason = prefix_saga.manual_block_reason.ok_or_else(|| {
                 certified_evidence_mismatch("manual resolution prefix lacks block reason")
             })?;
-            let evidence_artifact = self
+            let _evidence_artifact = self
                 .retained_artifacts
-                .get(&payload.evidence_artifact_id)
+                .values()
+                .find(|evidence| {
+                    verify_artifact_fields(
+                        evidence,
+                        &payload.evidence_hash,
+                        Some(&payload.evidence_schema_id),
+                        None,
+                        ArtifactRole::ManualResolutionEvidence,
+                        None,
+                        None,
+                    )
+                    .is_ok()
+                })
                 .ok_or_else(|| {
                     ReplayError::new(
                         ReplayErrorKind::ArtifactMissing,
@@ -1648,18 +1661,21 @@ pub mod v1 {
                         ),
                     )
                 })?;
-            verify_artifact_fields(
-                evidence_artifact,
-                &payload.evidence_hash,
-                Some(&payload.evidence_schema_id),
-                None,
-                ArtifactRole::ManualResolutionEvidence,
-                None,
-                None,
-            )?;
-            let authorization_artifact = self
+            let _authorization_artifact = self
                 .retained_artifacts
-                .get(&payload.authorization_artifact_id)
+                .values()
+                .find(|evidence| {
+                    verify_artifact_fields(
+                        evidence,
+                        &payload.authorization_hash,
+                        Some(&payload.authorization_schema_id),
+                        None,
+                        ArtifactRole::ManualResolutionAuthorization,
+                        None,
+                        None,
+                    )
+                    .is_ok()
+                })
                 .ok_or_else(|| {
                     ReplayError::new(
                         ReplayErrorKind::ArtifactMissing,
@@ -1669,15 +1685,6 @@ pub mod v1 {
                         ),
                     )
                 })?;
-            verify_artifact_fields(
-                authorization_artifact,
-                &payload.authorization_hash,
-                Some(&payload.authorization_schema_id),
-                None,
-                ArtifactRole::ManualResolutionAuthorization,
-                None,
-                None,
-            )?;
             let proof_bytes = self
                 .artifact_bytes
                 .get(&payload.authorization_artifact_id)
@@ -1797,18 +1804,23 @@ pub mod v1 {
         }
 
         fn reject_unauthorized_artifact_evidence(&self) -> Result<()> {
-            for artifact_id in self.retained_artifacts.keys() {
-                if !self.artifacts.contains_key(artifact_id) {
+            for (key, evidence) in &self.retained_artifacts {
+                if !self.artifacts.contains_key(key) {
                     return Err(ReplayError::new(
                         ReplayErrorKind::ArtifactMismatch,
                         format!(
-                            "retained artifact evidence supplied without replay authorization for {artifact_id}"
+                            "retained artifact evidence supplied without replay authorization for {}",
+                            evidence.artifact_id
                         ),
                     ));
                 }
             }
             for artifact_id in self.artifact_bytes.keys() {
-                if !self.retained_artifacts.contains_key(artifact_id) {
+                if !self
+                    .retained_artifacts
+                    .values()
+                    .any(|evidence| &evidence.artifact_id == artifact_id)
+                {
                     return Err(ReplayError::new(
                         ReplayErrorKind::ArtifactMismatch,
                         format!(
@@ -2105,7 +2117,7 @@ pub mod v1 {
         fn validate_event_artifact_requirement(
             &mut self,
             requirement: &store::EventArtifactRequirement,
-            mismatch_context: &'static str,
+            _mismatch_context: &'static str,
         ) -> Result<StoredArtifactEvidenceRef> {
             if requirement.digest.is_none() {
                 return Err(ReplayError::new(
@@ -2118,7 +2130,11 @@ pub mod v1 {
             }
             let evidence = self
                 .retained_artifacts
-                .get(&requirement.artifact_id)
+                .values()
+                .find(|evidence| {
+                    store::validate_artifact_requirement_against_evidence(requirement, evidence)
+                        .is_ok()
+                })
                 .ok_or_else(|| {
                     ReplayError::new(
                         ReplayErrorKind::ArtifactMissing,
@@ -2128,8 +2144,6 @@ pub mod v1 {
                         ),
                     )
                 })?;
-            store::validate_artifact_requirement_against_evidence(requirement, evidence)
-                .map_err(|error| artifact_requirement_replay_error(error, mismatch_context))?;
             let evidence = evidence.clone();
             self.insert_authorized_artifact(evidence.clone())?;
             Ok(evidence)
@@ -2141,7 +2155,8 @@ pub mod v1 {
         ) -> Result<StoredArtifactEvidenceRef> {
             let evidence = self
                 .retained_artifacts
-                .get(expected.artifact_id)
+                .values()
+                .find(|evidence| verify_artifact_expectation(evidence, expected).is_ok())
                 .ok_or_else(|| {
                     ReplayError::new(
                         ReplayErrorKind::ArtifactMissing,
@@ -2151,15 +2166,6 @@ pub mod v1 {
                         ),
                     )
                 })?;
-            verify_artifact_fields(
-                evidence,
-                expected.digest,
-                expected.schema_id,
-                expected.semantic_type_id,
-                expected.role,
-                expected.producer_node_id,
-                expected.producer_seed_id,
-            )?;
             let evidence = evidence.clone();
             self.insert_authorized_artifact(evidence.clone())?;
             Ok(evidence)
@@ -2169,7 +2175,8 @@ pub mod v1 {
             &mut self,
             evidence: StoredArtifactEvidenceRef,
         ) -> Result<()> {
-            if let Some(existing) = self.artifacts.get(&evidence.artifact_id) {
+            let key = replay_artifact_authority_key(&evidence)?;
+            if let Some(existing) = self.artifacts.get(&key) {
                 if existing != &evidence {
                     return Err(ReplayError::new(
                         ReplayErrorKind::ArtifactMismatch,
@@ -2181,8 +2188,7 @@ pub mod v1 {
                 }
                 return Ok(());
             }
-            self.artifacts
-                .insert(evidence.artifact_id.clone(), evidence);
+            self.artifacts.insert(key, evidence);
             Ok(())
         }
 
@@ -2190,34 +2196,30 @@ pub mod v1 {
             &self,
             expected: ArtifactEvidenceExpectation<'_>,
         ) -> Result<StoredArtifactEvidenceRef> {
-            let evidence = self.artifacts.get(expected.artifact_id).ok_or_else(|| {
-                ReplayError::new(
-                    ReplayErrorKind::ArtifactMissing,
-                    format!(
-                        "missing replay-authorized artifact evidence for {}",
-                        expected.artifact_id
-                    ),
-                )
-            })?;
-            verify_artifact_fields(
-                evidence,
-                expected.digest,
-                expected.schema_id,
-                expected.semantic_type_id,
-                expected.role,
-                expected.producer_node_id,
-                expected.producer_seed_id,
-            )?;
+            let evidence = self
+                .artifacts
+                .values()
+                .find(|evidence| verify_artifact_expectation(evidence, expected).is_ok())
+                .ok_or_else(|| {
+                    ReplayError::new(
+                        ReplayErrorKind::ArtifactMissing,
+                        format!(
+                            "missing replay-authorized artifact evidence for {}",
+                            expected.artifact_id
+                        ),
+                    )
+                })?;
             Ok(evidence.clone())
         }
     }
 
     fn artifact_map(
         artifacts: Vec<StoredArtifactEvidenceRef>,
-    ) -> Result<BTreeMap<ArtifactId, StoredArtifactEvidenceRef>> {
+    ) -> Result<BTreeMap<ReplayArtifactAuthorityKey, StoredArtifactEvidenceRef>> {
         let mut map = BTreeMap::new();
         for artifact in artifacts {
-            if let Some(existing) = map.get(&artifact.artifact_id) {
+            let key = replay_artifact_authority_key(&artifact)?;
+            if let Some(existing) = map.get(&key) {
                 if existing != &artifact {
                     return Err(ReplayError::new(
                         ReplayErrorKind::ArtifactMismatch,
@@ -2228,7 +2230,7 @@ pub mod v1 {
                     ));
                 }
             } else {
-                map.insert(artifact.artifact_id.clone(), artifact);
+                map.insert(key, artifact);
             }
         }
         Ok(map)
@@ -2257,28 +2259,40 @@ pub mod v1 {
 
     fn verify_replay_artifact_authority(
         verified_view: &mfm_runtime::VerifiedRunHistoryView,
-        artifacts: &BTreeMap<ArtifactId, StoredArtifactEvidenceRef>,
+        artifacts: &BTreeMap<ReplayArtifactAuthorityKey, StoredArtifactEvidenceRef>,
     ) -> Result<()> {
         let verified_artifacts = verified_view.artifact_store();
-        for (artifact_id, artifact) in verified_artifacts.artifacts() {
-            let evidence = artifacts.get(artifact_id).ok_or_else(|| {
+        for (key, artifact) in verified_artifacts.artifacts() {
+            let evidence = artifacts.get(key).ok_or_else(|| {
                 ReplayError::new(
                     ReplayErrorKind::ArtifactMissing,
-                    format!("missing verified artifact evidence for {artifact_id}"),
+                    format!(
+                        "missing verified artifact evidence for {}",
+                        artifact.evidence().artifact_id
+                    ),
                 )
             })?;
             if evidence != artifact.evidence() {
                 return Err(ReplayError::new(
                     ReplayErrorKind::ArtifactMismatch,
-                    format!("verified artifact evidence mismatch for {artifact_id}"),
+                    format!(
+                        "verified artifact evidence mismatch for {}",
+                        artifact.evidence().artifact_id
+                    ),
                 ));
             }
         }
-        for artifact_id in artifacts.keys() {
-            if verified_artifacts.artifact(artifact_id).is_none() {
+        for (key, evidence) in artifacts {
+            if !verified_artifacts
+                .artifacts()
+                .any(|(verified_key, _)| verified_key == key)
+            {
                 return Err(ReplayError::new(
                     ReplayErrorKind::ArtifactMismatch,
-                    format!("unverified artifact evidence supplied for {artifact_id}"),
+                    format!(
+                        "unverified artifact evidence supplied for {}",
+                        evidence.artifact_id
+                    ),
                 ));
             }
         }
@@ -2404,6 +2418,30 @@ pub mod v1 {
             .map_err(|error| artifact_requirement_replay_error(error, "artifact evidence mismatch"))
     }
 
+    fn verify_artifact_expectation(
+        evidence: &StoredArtifactEvidenceRef,
+        expected: ArtifactEvidenceExpectation<'_>,
+    ) -> Result<()> {
+        verify_artifact_fields(
+            evidence,
+            expected.digest,
+            expected.schema_id,
+            expected.semantic_type_id,
+            expected.role,
+            expected.producer_node_id,
+            expected.producer_seed_id,
+        )
+    }
+
+    fn replay_artifact_authority_key(
+        evidence: &StoredArtifactEvidenceRef,
+    ) -> Result<ReplayArtifactAuthorityKey> {
+        Ok((
+            evidence.artifact_id.clone(),
+            evidence.evidence_hash().map_err(ReplayError::from)?,
+        ))
+    }
+
     fn artifact_requirement_replay_error(
         error: store::StoreError,
         context: &'static str,
@@ -2453,7 +2491,7 @@ pub mod v1 {
         certified_spec: &HashedSpecEnvelope,
         run_admitted: &events::RunAdmitted,
         authority: &ReplayReadAuthority,
-        artifacts: &BTreeMap<ArtifactId, StoredArtifactEvidenceRef>,
+        artifacts: &BTreeMap<ReplayArtifactAuthorityKey, StoredArtifactEvidenceRef>,
     ) -> Result<()> {
         if run_admitted.spec_version != certified_spec.spec.spec_version
             || run_admitted.lowering_version != certified_spec.spec.lowering_version
@@ -2531,11 +2569,20 @@ pub mod v1 {
     }
 
     fn verify_run_artifact(
-        artifacts: &BTreeMap<ArtifactId, StoredArtifactEvidenceRef>,
+        artifacts: &BTreeMap<ReplayArtifactAuthorityKey, StoredArtifactEvidenceRef>,
         expected: &events::RunArtifactEvidenceRef,
         role: ArtifactRole,
     ) -> Result<()> {
-        let Some(actual) = artifacts.get(&expected.artifact_id) else {
+        let Some(actual) = artifacts.values().find(|actual| {
+            actual.artifact_id == expected.artifact_id
+                && actual.digest == expected.content_digest
+                && actual.byte_len == expected.byte_len
+                && actual.media_type == expected.media_type
+                && actual.schema_id == expected.schema_id
+                && actual.semantic_type_id == expected.semantic_type_id
+                && actual.artifact_role == role
+                && expected.role == role
+        }) else {
             return Err(ReplayError::new(
                 ReplayErrorKind::ArtifactMissing,
                 format!(
@@ -2544,22 +2591,7 @@ pub mod v1 {
                 ),
             ));
         };
-        if actual.digest != expected.content_digest
-            || actual.byte_len != expected.byte_len
-            || actual.media_type != expected.media_type
-            || actual.schema_id != expected.schema_id
-            || actual.semantic_type_id != expected.semantic_type_id
-            || actual.artifact_role != role
-            || expected.role != role
-        {
-            return Err(ReplayError::new(
-                ReplayErrorKind::ArtifactMismatch,
-                format!(
-                    "run admission artifact evidence {} does not match retained artifact",
-                    expected.artifact_id
-                ),
-            ));
-        }
+        let _ = actual;
         Ok(())
     }
 

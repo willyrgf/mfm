@@ -263,6 +263,7 @@ impl ArtifactReadRequest {
         digest: ContentDigest,
         schema_id: SchemaId,
         semantic_type_id: SemanticTypeId,
+        producer_node_id: NodeId,
     ) -> Self {
         Self::from_expectation(ArtifactEvidenceExpectation {
             artifact_id,
@@ -271,7 +272,7 @@ impl ArtifactReadRequest {
             media_type: None,
             schema_id: OptionalEvidence::Present(schema_id),
             semantic_type_id: OptionalEvidence::Present(semantic_type_id),
-            producer_node_id: OptionalEvidence::Any,
+            producer_node_id: OptionalEvidence::Present(producer_node_id),
             producer_seed_id: OptionalEvidence::Absent,
             artifact_role: Some(ArtifactRole::StateOutput),
         })
@@ -693,6 +694,7 @@ mod tests {
             digest(&bytes),
             schema_id("mfm.test.output_schema"),
             semantic_id("output_value"),
+            node_id("producer"),
         );
         let evidence = ArtifactEvidenceRef {
             artifact_id: artifact_id(&bytes),

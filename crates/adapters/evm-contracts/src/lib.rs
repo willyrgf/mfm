@@ -2409,6 +2409,7 @@ where
             seed_id.clone(),
         ),
         MaterializedCellTerminal::Produced {
+            producer_node_id,
             artifact_id,
             content_digest,
         } => ArtifactReadRequest::from_materialized_produced_cell(
@@ -2416,6 +2417,7 @@ where
             content_digest.clone(),
             cell.schema_id.clone(),
             cell.semantic_type_id.clone(),
+            producer_node_id.clone(),
         ),
         MaterializedCellTerminal::Skipped { .. } => {
             return Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(

@@ -38,7 +38,7 @@ pub(crate) struct RuntimeRunView {
     pub(crate) run_admitted: events::RunAdmitted,
     pub(crate) seed_cells: BTreeMap<CellId, events::SeedCellRef>,
     pub(crate) config_artifacts: BTreeMap<String, store::ArtifactEvidenceRef>,
-    pub(crate) artifact_refs: BTreeMap<ArtifactId, CommittedArtifactReference>,
+    pub(crate) artifact_refs: BTreeMap<store::ArtifactAuthorityKey, CommittedArtifactReference>,
     pub(crate) next_seq: store::StreamSeq,
 }
 
@@ -647,6 +647,7 @@ fn materialize_cell(
                         )));
                     }
                     MaterializedCellTerminal::Produced {
+                        producer_node_id: node_id.clone(),
                         artifact_id: artifact_id.clone(),
                         content_digest: content_digest.clone(),
                     }
@@ -2845,7 +2846,7 @@ fn config_artifacts_from_run_admitted(
 
 fn artifact_refs_from_stream(
     stream: &[store::KernelEventEnvelope],
-) -> Result<BTreeMap<ArtifactId, CommittedArtifactReference>> {
+) -> Result<BTreeMap<store::ArtifactAuthorityKey, CommittedArtifactReference>> {
     let mut artifacts = BTreeMap::new();
     let mut index = 0;
     while index < stream.len() {
@@ -3014,10 +3015,17 @@ fn event_artifact_refs_match(
 }
 
 fn insert_committed_artifact(
-    artifacts: &mut BTreeMap<ArtifactId, CommittedArtifactReference>,
+    artifacts: &mut BTreeMap<store::ArtifactAuthorityKey, CommittedArtifactReference>,
     artifact: CommittedArtifactReference,
 ) -> Result<()> {
-    if let Some(existing) = artifacts.get(&artifact.evidence.artifact_id) {
+    let key = (
+        artifact.evidence.artifact_id.clone(),
+        artifact
+            .evidence
+            .evidence_hash()
+            .map_err(RuntimeError::from)?,
+    );
+    if let Some(existing) = artifacts.get(&key) {
         if existing != &artifact {
             return Err(RuntimeError::InvalidRunStream(format!(
                 "conflicting committed artifact evidence for {}",
@@ -3026,7 +3034,7 @@ fn insert_committed_artifact(
         }
         return Ok(());
     }
-    artifacts.insert(artifact.evidence.artifact_id.clone(), artifact);
+    artifacts.insert(key, artifact);
     Ok(())
 }
 
@@ -3064,11 +3072,15 @@ fn committed_input_artifact(
     cell_id: &CellId,
     artifact_id: &ArtifactId,
 ) -> Result<CommittedArtifactReference> {
-    view.artifact_refs.get(artifact_id).cloned().ok_or_else(|| {
-        RuntimeError::InputMaterialization(format!(
-            "input cell {cell_id} artifact {artifact_id} is not committed in the run stream",
-        ))
-    })
+    view.artifact_refs
+        .values()
+        .find(|reference| &reference.evidence.artifact_id == artifact_id)
+        .cloned()
+        .ok_or_else(|| {
+            RuntimeError::InputMaterialization(format!(
+                "input cell {cell_id} artifact {artifact_id} is not committed in the run stream",
+            ))
+        })
 }
 
 fn store_artifact_from_event_ref(

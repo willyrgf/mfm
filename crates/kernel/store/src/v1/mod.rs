@@ -1920,14 +1920,15 @@ impl PreparedCommitInner {
                 });
             }
         }
-        let mut deduped = BTreeMap::<ArtifactId, ArtifactEvidenceRef>::new();
+        let mut deduped = BTreeMap::<ArtifactAuthorityKey, ArtifactEvidenceRef>::new();
         for evidence in admitted_artifacts {
             if !referenced_artifacts.contains(&evidence.artifact_id) {
                 return Err(StoreError::UnreferencedArtifactEvidence {
                     artifact_id: evidence.artifact_id,
                 });
             }
-            if let Some(existing) = deduped.get(&evidence.artifact_id) {
+            let key = artifact_authority_key(&evidence)?;
+            if let Some(existing) = deduped.get(&key) {
                 if existing != &evidence {
                     return Err(StoreError::ArtifactEvidenceMismatch {
                         artifact_id: evidence.artifact_id,
@@ -1936,7 +1937,7 @@ impl PreparedCommitInner {
                 }
                 continue;
             }
-            deduped.insert(evidence.artifact_id.clone(), evidence);
+            deduped.insert(key, evidence);
         }
 
         Ok(Self {
@@ -4253,7 +4254,7 @@ impl VerifiedRunArtifactBytes {
 pub struct VerifiedRunArtifactStore {
     run_id: RunId,
     requirements: Vec<EventArtifactRequirement>,
-    artifacts: BTreeMap<ArtifactId, VerifiedRunArtifactBytes>,
+    artifacts: BTreeMap<ArtifactAuthorityKey, VerifiedRunArtifactBytes>,
 }
 
 impl VerifiedRunArtifactStore {
@@ -4288,13 +4289,20 @@ impl VerifiedRunArtifactStore {
         self.requirements.is_empty()
     }
 
-    /// Returns verified retained artifact bytes by artifact id.
-    pub fn artifact(&self, artifact_id: &ArtifactId) -> Option<&VerifiedRunArtifactBytes> {
-        self.artifacts.get(artifact_id)
+    /// Returns verified retained artifact bytes matching an event-derived requirement.
+    pub fn artifact_for_requirement(
+        &self,
+        requirement: &EventArtifactRequirement,
+    ) -> Option<&VerifiedRunArtifactBytes> {
+        self.artifacts.values().find(|artifact| {
+            validate_artifact_requirement_against_evidence(requirement, artifact.evidence()).is_ok()
+        })
     }
 
-    /// Iterates verified retained artifacts by artifact id.
-    pub fn artifacts(&self) -> impl Iterator<Item = (&ArtifactId, &VerifiedRunArtifactBytes)> {
+    /// Iterates verified retained artifacts by exact artifact authority key.
+    pub fn artifacts(
+        &self,
+    ) -> impl Iterator<Item = (&ArtifactAuthorityKey, &VerifiedRunArtifactBytes)> {
         self.artifacts.iter()
     }
 
@@ -4322,23 +4330,26 @@ impl VerifiedRunArtifactStore {
 
     fn validate_requirements(&self, requirements: &[EventArtifactRequirement]) -> Result<()> {
         for requirement in requirements {
-            let artifact = self
-                .artifacts
-                .get(&requirement.artifact_id)
-                .ok_or_else(|| StoreError::MissingArtifact {
+            if !self.artifacts.values().any(|artifact| {
+                validate_artifact_requirement_against_evidence(requirement, artifact.evidence())
+                    .is_ok()
+            }) {
+                return Err(StoreError::ArtifactEvidenceMismatch {
                     artifact_id: requirement.artifact_id.clone(),
-                })?;
-            validate_artifact_requirement_against_evidence(requirement, artifact.evidence())?;
+                    field: "artifact",
+                });
+            }
         }
         Ok(())
     }
 }
 
 fn insert_verified_run_artifact(
-    artifacts: &mut BTreeMap<ArtifactId, VerifiedRunArtifactBytes>,
+    artifacts: &mut BTreeMap<ArtifactAuthorityKey, VerifiedRunArtifactBytes>,
     artifact: VerifiedRunArtifactBytes,
 ) -> Result<()> {
-    if let Some(existing) = artifacts.get(&artifact.evidence().artifact_id) {
+    let key = artifact_authority_key(artifact.evidence())?;
+    if let Some(existing) = artifacts.get(&key) {
         if existing != &artifact {
             return Err(StoreError::ArtifactEvidenceMismatch {
                 artifact_id: artifact.evidence().artifact_id.clone(),
@@ -4347,7 +4358,7 @@ fn insert_verified_run_artifact(
         }
         return Ok(());
     }
-    artifacts.insert(artifact.evidence().artifact_id.clone(), artifact);
+    artifacts.insert(key, artifact);
     Ok(())
 }
 
@@ -5963,9 +5974,10 @@ fn validate_unique_artifact_evidence(
     field: &'static str,
     artifacts: &[ArtifactEvidenceRef],
 ) -> Result<()> {
-    let mut by_artifact = BTreeMap::<ArtifactId, &ArtifactEvidenceRef>::new();
+    let mut by_artifact = BTreeMap::<ArtifactAuthorityKey, &ArtifactEvidenceRef>::new();
     for artifact in artifacts {
-        if let Some(existing) = by_artifact.insert(artifact.artifact_id.clone(), artifact) {
+        let key = artifact_authority_key(artifact)?;
+        if let Some(existing) = by_artifact.insert(key, artifact) {
             if existing != artifact {
                 return Err(StoreError::ArtifactEvidenceMismatch {
                     artifact_id: artifact.artifact_id.clone(),
@@ -5981,22 +5993,19 @@ fn validate_required_artifacts_cover_payload_references(
     purpose: &'static str,
     request: &CommitRequest,
 ) -> Result<()> {
-    let required = request
-        .required_artifacts
-        .iter()
-        .map(|evidence| (evidence.artifact_id.clone(), evidence))
-        .collect::<BTreeMap<_, _>>();
     for payload in &request.payloads {
         for requirement in event_artifact_requirements(payload) {
-            let evidence = required.get(&requirement.artifact_id).ok_or_else(|| {
-                invalid_prepared_commit_purpose(
+            let Some(evidence) = request.required_artifacts.iter().find(|evidence| {
+                validate_artifact_requirement_against_evidence(&requirement, evidence).is_ok()
+            }) else {
+                return Err(invalid_prepared_commit_purpose(
                     purpose,
                     format!(
                         "missing required artifact evidence for {}",
                         requirement.artifact_id
                     ),
-                )
-            })?;
+                ));
+            };
             validate_required_artifact_requirement(purpose, &requirement, evidence)?;
         }
     }

@@ -618,6 +618,7 @@ async fn load_cell_bytes(
     };
     let request = match &cell.terminal {
         MaterializedCellTerminal::Produced {
+            producer_node_id,
             artifact_id,
             content_digest,
         } => ArtifactReadRequest::from_materialized_produced_cell(
@@ -625,6 +626,7 @@ async fn load_cell_bytes(
             content_digest.clone(),
             cell.schema_id.clone(),
             cell.semantic_type_id.clone(),
+            producer_node_id.clone(),
         ),
         MaterializedCellTerminal::Seed {
             seed_id,

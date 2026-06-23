@@ -543,6 +543,8 @@ pub enum MaterializedCellTerminal {
     },
     /// Produced node output.
     Produced {
+        /// Producer node id.
+        producer_node_id: NodeId,
         /// Artifact id.
         artifact_id: ArtifactId,
         /// Content digest.
