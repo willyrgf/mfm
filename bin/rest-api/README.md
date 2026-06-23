@@ -36,6 +36,11 @@ export DATABASE_URL="postgresql://postgres:postgres@localhost:5432/mfm_test"
 cargo sqlx migrate run --source crates/storages/stream-store-postgres/migrations
 ```
 
+Use a fresh or explicitly reset database for this typed Postgres baseline. There
+is no downgrade migration; rollback to an older branch requires resetting the
+database or schema to that branch's expected baseline. Old filesystem artifact
+roots are not read or migrated by the REST API.
+
 ## API
 
 All responses are JSON envelopes:

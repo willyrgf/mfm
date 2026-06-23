@@ -250,6 +250,10 @@ These commands use the certified PostgreSQL run store (requires `DATABASE_URL` o
 The CLI validates the PostgreSQL schema on connect and does not create or alter
 tables. Apply the `mfm-stream-store-postgres` migrations against a fresh or
 explicitly reset local database before running typed run commands.
+There is no downgrade migration for the current typed Postgres baseline; rolling
+back to an older branch requires resetting the database or schema to that
+branch's expected baseline. Old filesystem artifact roots are not read or
+migrated by typed run commands.
 
 Run ids use the typed identity format `run:<algorithm>:<digest>`. Old UUID dynamic run ids are not
 accepted by the typed CLI run surface.

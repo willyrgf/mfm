@@ -58,6 +58,31 @@ The old dynamic stream-store surface and old `typed_*` schema are removed from
 this crate. This is a destructive dev-branch baseline: use a fresh database or
 drop/recreate the existing local schema before applying migrations.
 
+There is no downgrade migration. Rollback means rolling code back to the target
+branch and resetting the database or schema to that branch's expected baseline.
+Old filesystem artifact roots are not read or migrated by this store; after a
+local reset, developers may delete those roots once no old branch still needs
+them.
+
+## Operational Constraints
+
+Run this store in a dedicated MFM database tenancy and avoid sharing the
+Postgres transaction horizon with unrelated long-lived workloads. Observation
+pages seal a frontier from PostgreSQL snapshot `xmin` and order changes by
+`(run_commit_log.append_xid, commit_sort_key)`. PostgreSQL transaction IDs are a
+cluster-level resource, so unrelated transactions can delay frontier advancement
+and make list/watch lag behind strict per-run status.
+
+Authority and cursor tables are protected by no-update/no-delete/no-truncate
+triggers in the v1 schema. `resource_lane_waiter_counters` and
+`resource_lane_waiters` are the normal-operation mutable exception, and they are
+operational FIFO coordination only. V1 intentionally exposes no app, CLI, REST,
+or library maintenance endpoint for read-model rebuild or repair, store-epoch
+reseed, cursor pruning, or artifact sweeping. Those operations require a future
+design for Postgres roles, object ownership, credential separation, and
+restore/clone runbooks; do not implement them as helpers over ordinary runtime
+credentials.
+
 ## Observation Cursors
 
 Run observation cursors are server-issued opaque tokens backed by

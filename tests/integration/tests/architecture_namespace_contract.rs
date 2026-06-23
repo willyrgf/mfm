@@ -4,11 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const TEST_HARNESS_PATHS: &[&str] = &["tests/integration/tests/architecture_namespace_contract.rs"];
-const SOURCE_OF_TRUTH_DOC_PATHS: &[&str] = &[
-    "PLAN_IMPL_RFC_PG_TRANS.md",
-    "RFC_REFAC_PG_TRANS.md",
-    "docs/persisted-public-surfaces.md",
-];
+const SOURCE_OF_TRUTH_DOC_PATHS: &[&str] = &["docs/design.md", "docs/persisted-public-surfaces.md"];
 const FORBIDDEN_SEMANTIC_SURFACE_FIELDS: &[&str] = &[
     "rpc_url",
     "authorization",
@@ -21,8 +17,6 @@ const FORBIDDEN_SEMANTIC_SURFACE_FIELDS: &[&str] = &[
 ];
 
 const SEMANTIC_SURFACE_FIELD_SCAN_SKIP_PATHS: &[&str] = &[
-    "PLAN_IMPL_RFC_PG_TRANS.md",
-    "RFC_REFAC_PG_TRANS.md",
     "crates/kernel/values/src/lib.rs",
     "crates/kernel/values/src/tests.rs",
 ];

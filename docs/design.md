@@ -320,13 +320,23 @@ crates/storages/stream-store-postgres
 Postgres is the only production persistence backend. It stores append-only `commits`, canonical
 `run_events`, artifact blobs/evidence, resource-lane claim/release/transition rows,
 `run_commit_log` cursor authority, mutable operational resource-lane waiter rows, and rebuildable
-observation summaries. Its schema and migrations are owned by
-`crates/storages/stream-store-postgres`; runtime callers validate schema compatibility and must not
-run startup auto-DDL. Logical-key admission folds authoritative `run_events`; there is no logical-key
-admission index. Resource-lane waiter rows are operational admission coordination for single-lane
-FIFO only: they can preserve retry order for live waiters, but cannot grant ownership and are never
-semantic authority for resume, replay, public-output rendering, side-effect legality, or completion.
-Observation rows and list/watch cursors are likewise never semantic authority for those decisions.
+observation summaries. Artifact bytes live in Postgres; production app, CLI, and REST paths do not
+stage, read, or migrate workflow artifacts through filesystem artifact roots. The schema and
+migrations are owned by `crates/storages/stream-store-postgres`; runtime callers validate schema
+compatibility and must not run startup auto-DDL. Logical-key admission folds authoritative
+`run_events`; there is no logical-key admission index. Resource-lane waiter rows are operational
+admission coordination for single-lane FIFO only: they can preserve retry order for live waiters, but
+cannot grant ownership and are never semantic authority for resume, replay, public-output rendering,
+side-effect legality, or completion. Observation rows and list/watch cursors are likewise never
+semantic authority for those decisions.
+
+Production deployments must give the Postgres run store a dedicated MFM database tenancy. List/watch
+cursors order `run_commit_log` rows by `(append_xid, commit_sort_key)` behind a snapshot `xmin`
+frontier, and PostgreSQL transaction-id horizons are affected by cluster-level transaction activity;
+unrelated long-lived transactions can therefore delay observation frontier advancement. Cursor epochs,
+read-model rebuild or repair, and artifact cleanup have no public v1 maintenance entry points; any
+future maintenance role must first specify Postgres roles, ownership, credentials, and restore/clone
+runbooks.
 
 For single-lane exclusive resource-lane claim commits, Postgres enforces FIFO under the lane advisory
 transaction lock before materializing `ResourceLaneClaimed`: a claim can commit only when there is no
