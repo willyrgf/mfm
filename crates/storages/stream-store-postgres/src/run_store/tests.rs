@@ -1534,29 +1534,23 @@ async fn observation_change_ids_and_cursors_do_not_expose_internal_authority() {
     let metadata = load_store_metadata(&store.pool)
         .await
         .expect("load store metadata");
-    let frontier_xid = sealed_frontier_xid(&store.pool)
-        .await
-        .expect("read observation frontier");
-    let mut rows = read_observation_list_rows(&store.pool, &metadata, &frontier_xid, 1)
-        .await
-        .expect("load observation row");
-    assert_eq!(rows.len(), 1);
-    let observation = rows.pop().expect("observation row");
-    let commit_id: String =
-        sqlx::query_scalar("SELECT commit_id FROM commits WHERE run_id = $1 AND seq = 1")
-            .bind(run.as_str())
-            .fetch_one(&store.pool)
-            .await
-            .expect("load commit id");
-    let public_change_id = observation
-        .observation
-        .change_id
-        .as_deref()
-        .expect("observation change id");
-    let commit_sort_key_hex = bytes_hex(&observation.commit_sort_key);
+    let row = sqlx::query(
+        "SELECT commit_id, append_xid::text AS append_xid, commit_sort_key \
+         FROM commits WHERE run_id = $1 AND seq = 1",
+    )
+    .bind(run.as_str())
+    .fetch_one(&store.pool)
+    .await
+    .expect("load commit cursor authority");
+    let commit_id: String = row.try_get("commit_id").expect("commit id");
+    let append_xid: String = row.try_get("append_xid").expect("append xid");
+    let commit_sort_key: Vec<u8> = row.try_get("commit_sort_key").expect("commit sort key");
+    let public_change_id =
+        observation_change_id(&metadata, &commit_id).expect("observation change id");
+    let commit_sort_key_hex = bytes_hex(&commit_sort_key);
     let position = CursorPosition {
-        append_xid: observation.append_xid.clone(),
-        commit_sort_key: observation.commit_sort_key.clone(),
+        append_xid,
+        commit_sort_key,
         kind: CursorKind::Row,
     };
     let public_cursor = encode_observation_cursor(&store.pool, &metadata, &position)
@@ -1575,19 +1569,19 @@ async fn observation_change_ids_and_cursors_do_not_expose_internal_authority() {
         32
     );
     assert_eq!(
-        bytes_from_hex(public_change_id)
+        bytes_from_hex(&public_change_id)
             .expect("opaque change id token is hex")
             .len(),
         32
     );
-    for public_value in [public_cursor.as_str(), public_change_id] {
+    for public_value in [public_cursor.as_str(), public_change_id.as_str()] {
         assert!(!public_value.contains('|'));
         assert!(!public_value.contains(CURSOR_VERSION));
         assert!(!public_value.contains(commit_id.as_str()));
         assert!(!public_value.contains(commit_sort_key_hex.as_str()));
         assert!(!public_value.contains(metadata.store_epoch.as_str()));
     }
-    assert_ne!(public_change_id, commit_id);
+    assert_ne!(public_change_id.as_str(), commit_id);
 
     let cursor_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM run_observation_cursors")
         .fetch_one(&store.pool)
