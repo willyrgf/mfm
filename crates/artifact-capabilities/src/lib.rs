@@ -304,9 +304,56 @@ impl ArtifactReadRequest {
         &self.expectation.artifact_id
     }
 
+    /// Returns the expected content digest, when the request constrains it.
+    pub fn digest(&self) -> Option<&ContentDigest> {
+        self.expectation.digest.as_ref()
+    }
+
+    /// Returns the expected byte length, when the request constrains it.
+    pub fn byte_len(&self) -> Option<u64> {
+        self.expectation.byte_len
+    }
+
+    /// Returns the expected media type, when the request constrains it.
+    pub fn media_type(&self) -> Option<&MediaType> {
+        self.expectation.media_type.as_ref()
+    }
+
+    /// Returns the expected schema id, when the request constrains it to a concrete value.
+    pub fn schema_id(&self) -> Option<&SchemaId> {
+        optional_present_ref(&self.expectation.schema_id)
+    }
+
+    /// Returns the expected semantic type id, when the request constrains it to a concrete value.
+    pub fn semantic_type_id(&self) -> Option<&SemanticTypeId> {
+        optional_present_ref(&self.expectation.semantic_type_id)
+    }
+
+    /// Returns the expected producer node id, when the request constrains it to a concrete value.
+    pub fn producer_node_id(&self) -> Option<&NodeId> {
+        optional_present_ref(&self.expectation.producer_node_id)
+    }
+
+    /// Returns the expected producer seed id, when the request constrains it to a concrete value.
+    pub fn producer_seed_id(&self) -> Option<&SeedId> {
+        optional_present_ref(&self.expectation.producer_seed_id)
+    }
+
+    /// Returns the expected artifact role, when the request constrains it.
+    pub fn artifact_role(&self) -> Option<ArtifactRole> {
+        self.expectation.artifact_role
+    }
+
     /// Verifies returned evidence against this request.
     pub fn verify_evidence(&self, evidence: &ArtifactEvidenceRef) -> Result<()> {
         self.expectation.verify(evidence)
+    }
+}
+
+fn optional_present_ref<T>(value: &OptionalEvidence<T>) -> Option<&T> {
+    match value {
+        OptionalEvidence::Present(value) => Some(value),
+        OptionalEvidence::Any | OptionalEvidence::Absent => None,
     }
 }
 
