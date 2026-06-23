@@ -2910,10 +2910,10 @@ fn store_owns_envelope_sequence_ordinal_and_event_id() {
     let first = store
         .append_prepared_commit(run_start_request(run_id.clone(), "run-start"))
         .expect("append run start");
-    let first_event = &first
-        .committed_batch()
-        .expect("run start committed batch")
-        .events()[0];
+    let CommitOutcome::Appended(first_batch) = first else {
+        panic!("run start should append");
+    };
+    let first_event = &first_batch.events()[0];
     assert_eq!(first_event.seq(), StreamSeq::FIRST);
     assert_eq!(first_event.ordinal().as_u32(), 0);
     assert_eq!(first_event.commit_key().as_str(), "run-start");
@@ -2932,10 +2932,10 @@ fn store_owns_envelope_sequence_ordinal_and_event_id() {
             },
         })
         .expect("append attempt start");
-    let second_event = &second
-        .committed_batch()
-        .expect("attempt start committed batch")
-        .events()[0];
+    let CommitOutcome::Appended(second_batch) = second else {
+        panic!("attempt start should append");
+    };
+    let second_event = &second_batch.events()[0];
     assert_eq!(second_event.seq(), StreamSeq::new(2).unwrap());
     assert_eq!(second_event.ordinal().as_u32(), 0);
     assert_ne!(first_event.event_id(), second_event.event_id());
@@ -6576,7 +6576,7 @@ fn side_effect_submission_unknown_recovery_uses_one_submission_result_key() {
         unknown_schema(),
         ArtifactRole::SubmissionUnknownEvidence,
     );
-    let unknown = store
+    let unknown_outcome = store
         .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
@@ -6588,10 +6588,10 @@ fn side_effect_submission_unknown_recovery_uses_one_submission_result_key() {
             required_artifacts: vec![unknown_evidence],
             preconditions: CommitPreconditions::default(),
         })
-        .expect("append submission unknown")
-        .committed_batch()
-        .expect("submission unknown committed batch")
-        .clone();
+        .expect("append submission unknown");
+    let CommitOutcome::Appended(unknown) = unknown_outcome else {
+        panic!("submission unknown should append");
+    };
     let submission_result_key = format!(
         "sidefx:forward:{}:invocation:1:submission_result",
         side_effect_ledger_key()
@@ -6609,7 +6609,7 @@ fn side_effect_submission_unknown_recovery_uses_one_submission_result_key() {
         unknown_schema(),
         ArtifactRole::SubmissionUnknownEvidence,
     );
-    let refreshed_unknown = store
+    let refreshed_unknown_outcome = store
         .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
@@ -6621,10 +6621,10 @@ fn side_effect_submission_unknown_recovery_uses_one_submission_result_key() {
             required_artifacts: vec![refreshed_unknown_evidence],
             preconditions: CommitPreconditions::default(),
         })
-        .expect("refresh submission unknown")
-        .committed_batch()
-        .expect("refreshed submission unknown committed batch")
-        .clone();
+        .expect("refresh submission unknown");
+    let CommitOutcome::Appended(refreshed_unknown) = refreshed_unknown_outcome else {
+        panic!("refreshed submission unknown should append");
+    };
     assert_eq!(
         refreshed_unknown.events()[0].logical_key().as_str(),
         submission_result_key
@@ -6648,7 +6648,7 @@ fn side_effect_submission_unknown_recovery_uses_one_submission_result_key() {
         submission_schema(),
         ArtifactRole::Submission,
     );
-    let observed = store
+    let observed_outcome = store
         .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(&run_id),
@@ -6661,10 +6661,10 @@ fn side_effect_submission_unknown_recovery_uses_one_submission_result_key() {
             required_artifacts: vec![submission_evidence],
             preconditions: CommitPreconditions::default(),
         })
-        .expect("recover observed submission")
-        .committed_batch()
-        .expect("observed submission committed batch")
-        .clone();
+        .expect("recover observed submission");
+    let CommitOutcome::Appended(observed) = observed_outcome else {
+        panic!("observed submission should append");
+    };
     assert_eq!(
         observed.events()[0].logical_key().as_str(),
         submission_result_key

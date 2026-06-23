@@ -4,11 +4,6 @@ const RESOURCE_LANE_ID_DOMAIN: &[u8] = b"mfm.resource_lane.id.v1";
 const RESOURCE_LANE_WAITER_FINGERPRINT_DOMAIN: &[u8] = b"mfm.resource_lane.waiter.fingerprint.v1";
 const RESOURCE_LANE_WAITER_ID_DOMAIN: &[u8] = b"mfm.resource_lane.waiter.id.v1";
 
-/// Returns the exact artifact authority key for an evidence reference.
-pub fn artifact_authority_key(evidence: &ArtifactEvidenceRef) -> Result<ArtifactAuthorityKey> {
-    super::artifact_authority_key(evidence)
-}
-
 /// Admits artifact evidence into an authority map, rejecting conflicting evidence.
 pub fn admit_artifact_evidence(
     artifacts: &mut ArtifactAuthorityMap,

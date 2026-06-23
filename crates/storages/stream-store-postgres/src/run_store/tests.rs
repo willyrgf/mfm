@@ -3383,7 +3383,7 @@ async fn side_effect_unknown_recovery_updates_submission_result_slot() {
 
     let unknown_artifact = artifact_id(16);
     let unknown_digest = content_digest(16);
-    let unknown = append_prepared(
+    let unknown_outcome = append_prepared(
         &store,
         request(
             run.clone(),
@@ -3402,10 +3402,10 @@ async fn side_effect_unknown_recovery_updates_submission_result_slot() {
         )],
     )
     .await
-    .expect("submission unknown")
-    .committed_batch()
-    .expect("submission unknown committed batch")
-    .clone();
+    .expect("submission unknown");
+    let CommitOutcome::Appended(unknown) = unknown_outcome else {
+        panic!("submission unknown should append");
+    };
     let submission_result_key = format!(
         "sidefx:forward:{}:invocation:1:submission_result",
         side_effect_ledger_key()
@@ -3417,7 +3417,7 @@ async fn side_effect_unknown_recovery_updates_submission_result_slot() {
 
     let submission_artifact = artifact_id(18);
     let submission_digest = content_digest(18);
-    let observed = append_prepared(
+    let observed_outcome = append_prepared(
         &store,
         request(
             run.clone(),
@@ -3436,10 +3436,10 @@ async fn side_effect_unknown_recovery_updates_submission_result_slot() {
         )],
     )
     .await
-    .expect("submission observed recovery")
-    .committed_batch()
-    .expect("submission observed committed batch")
-    .clone();
+    .expect("submission observed recovery");
+    let CommitOutcome::Appended(observed) = observed_outcome else {
+        panic!("submission observed should append");
+    };
     assert_eq!(
         observed.events()[0].logical_key().as_str(),
         submission_result_key

@@ -2051,16 +2051,6 @@ pub enum CommitOutcome {
     ResourceLaneClaimBlocked(Box<ResourceLaneClaimBlock>),
 }
 
-impl CommitOutcome {
-    /// Returns the committed batch when this outcome persisted or found one.
-    pub fn committed_batch(&self) -> Option<&CommittedBatch> {
-        match self {
-            Self::Appended(batch) | Self::Idempotent(batch) => Some(batch),
-            Self::ResourceLaneClaimBlocked(_) => None,
-        }
-    }
-}
-
 /// Non-authoritative waiter metadata for a blocked resource-lane claim.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResourceLaneWaiterBlock {
@@ -4288,28 +4278,6 @@ impl VerifiedRunArtifactStore {
         })
     }
 
-    /// Constructs a verified retained artifact store from pre-verified retained bytes.
-    pub fn from_verified_artifacts<I>(
-        run_id: RunId,
-        requirements: &[EventArtifactRequirement],
-        artifacts: I,
-    ) -> Result<Self>
-    where
-        I: IntoIterator<Item = VerifiedRunArtifactBytes>,
-    {
-        let mut by_artifact = BTreeMap::new();
-        for artifact in artifacts {
-            insert_verified_run_artifact(&mut by_artifact, artifact)?;
-        }
-        let store = Self {
-            run_id,
-            requirements: requirements.to_vec(),
-            artifacts: by_artifact,
-        };
-        store.validate_requirements(requirements)?;
-        Ok(store)
-    }
-
     /// Run id covered by this verified artifact store.
     pub fn run_id(&self) -> &RunId {
         &self.run_id
@@ -4318,11 +4286,6 @@ impl VerifiedRunArtifactStore {
     /// Returns true when the committed stream required no retained artifacts.
     pub fn is_empty(&self) -> bool {
         self.requirements.is_empty()
-    }
-
-    /// Returns the event-derived artifact requirements covered by this proof object.
-    pub fn requirements(&self) -> &[EventArtifactRequirement] {
-        &self.requirements
     }
 
     /// Returns verified retained artifact bytes by artifact id.
