@@ -56,10 +56,9 @@ complete.
 Cutover gates:
 
 - Append/artifact gate: plan-only durable append is gone; artifact bytes/evidence authority is in
-  Postgres; authority evidence/admission/event rows are append-transaction-bound; large precommitted
-  blobs are content-addressed, verified, and maintenance-sweepable; filesystem artifact production
-  paths are deleted; logical-key admission folds `run_events`; strict loads verify hashes from
-  canonical bytes.
+  Postgres; authority evidence/admission/event rows and artifact bytes are append-transaction-bound;
+  no production blob precommit or orphan-sweep path exists; filesystem artifact production paths are
+  deleted; logical-key admission folds `run_events`; strict loads verify hashes from canonical bytes.
 - Resource-lane gate: `docs/saga.md`, runtime lifecycle, capability resolvers, store admission,
   Postgres lane schema, strict load, and recovery all describe the same pre-invocation
   `ResourceLaneClaimed` lifecycle with no global lane locks and no terminal failure from ordinary
@@ -78,7 +77,6 @@ Postgres authority tables
   + SQLx-only storage crate access
   + append-only domain rows
   + transaction-bound artifact evidence/admissions/events
-  + optional short precommit for large immutable artifact blobs
   + Postgres-owned rebuildable read models
   + one app API exposed by CLI/REST
   + no production filesystem/in-memory stores
@@ -87,9 +85,8 @@ Postgres authority tables
 The implementation is complete only when:
 
 - production app/CLI/REST cannot select filesystem or in-memory storage
-- artifact evidence, run/commit admissions, and committed event rows are inserted in the same
-  Postgres transaction; small blob bytes may be inserted there too, while large precommitted blob
-  bytes are verified by digest/length before that transaction admits authority rows
+- artifact bytes, artifact evidence, run/commit admissions, and committed event rows are inserted in
+  the same Postgres transaction
 - plan-only append is gone from production
 - old `typed_*` schema surfaces are gone from the final storage baseline
 - old storage type names are not kept as compatibility aliases
@@ -102,8 +99,8 @@ Use three workstreams, but land commits in dependency order.
 
 - Kernel/runtime authority: `crates/kernel/store`, `crates/kernel/runtime`, `crates/kernel/replay`,
   capability contracts, and in-memory test helpers.
-- Postgres storage: Postgres schema, SQLx queries, artifact bytes/evidence, read models, rebuild
-  tools, maintenance role, and strict load verification.
+- Postgres storage: Postgres schema, SQLx queries, artifact bytes/evidence, append-owned read
+  models, private read-only proof helpers, and strict load verification.
 - App/API/binary boundaries: `crates/app`, `bin/cli`, `bin/rest-api`, docs, cargo metadata, and
   architecture tests.
 
@@ -148,7 +145,8 @@ Scope:
   lands in the resource-lane cutover merge unit (a planned-change callout already points to the RFC).
 - Document the dedicated-MFM-database requirement driven by cluster-wide `xmin` coupling.
 - Document the read-your-writes caveat (list/watch lag the sealed frontier; strict status is
-  immediate) and the operator `reseed_store_epoch` step after physical restore/clone.
+  immediate) and that restore/clone procedures are destructive with respect to issued cursors until a
+  real epoch-reseed design exists.
 - Document that list mode is capped by `limit` in v1 and is not separately paginated; any future list
   page cursor must be separate from the watch cursor.
 - Document the cursor key contract if sealed stateless cursors are used: key id, durable key source
@@ -192,7 +190,7 @@ Scope:
 - Add scans proving hash-bearing storage/read-model code uses canonical MFM bytes and never
   `jsonb::text` as hash input.
 - Add guardrails that `RunObservationStore` remains an internal one-page read boundary and has no
-  sink writes, projection maintenance methods, active-lane inspection, status-lite
+  sink writes, projection rebuild/repair methods, active-lane inspection, status-lite
   `get_run_observation`, or cursor internals.
 - Add dependency checks that keep signer providers below app/runtime wiring and out of states,
   operations, storage, CLI/REST semantic surfaces, and typed model crates.
@@ -329,8 +327,7 @@ Scope:
 - Remove broad production artifact APIs such as arbitrary `get_artifact_by_id`, `has_artifact`,
   or unscoped reads from app-facing surfaces.
 - Remove broad production byte insertion APIs such as `insert_artifact_bytes(Vec<u8>)`; bytes may
-  enter Postgres only through verified `PreparedCommitBundle` members or content-addressed large-blob
-  pre-commit paths verified by the append transaction.
+  enter Postgres only through verified `PreparedCommitBundle` members inside the append transaction.
 - Enforce artifact role/schema/semantic/producer contracts and same-commit admission/event bindings.
   Storage verifies content addressing and evidence; it must not rely on secret-content scanning of
   arbitrary `BYTEA`.
@@ -414,20 +411,14 @@ Scope:
   statements must not be able to override cursor transaction ids.
 - Add run-commit-log ordinal constraints (`first_ordinal = 0`,
   `last_ordinal = event_count - 1`) for the one-row-per-commit cursor log.
-- Add an explicit `reseed_store_epoch` maintenance entry point (maintenance role only) for use after
-  destructive reset, restore, clone, import, or rollback; it rotates `store_epoch` and invalidates
-  outstanding cursors. Startup does not auto-detect physical-domain changes.
 - Add no-update/no-delete/no-truncate guards for the app role.
 - Deny app/CLI/REST runtime credentials mutation of `store_metadata` and cursor codec/key metadata.
 - Avoid `ON DELETE CASCADE` on authority tables.
-- Add mutation guards for read fact tables except inside controlled rebuild procedures. Production
-  rebuild/validate/epoch-reseed/orphan-blob-sweep procedures are executable only through explicit
-  maintenance entry points, not normal app/CLI/REST runtime credentials.
-- Add maintenance-role-only rebuild/validation/reseed procedure boundaries.
+- Add mutation guards for read fact tables. Do not expose production rebuild/repair, epoch-reseed, or
+  orphan-blob-sweep entry points until a Postgres role/ownership/credential/runbook design exists.
 - Make schema validation reject stale old `typed_*` schemas or old migration checksums.
 - Validate required triggers/functions/views during schema validation, including no-update/delete
-  guards, database-owned `append_xid`, rebuild/validate/reseed entry points, and cursor key metadata
-  if stateless sealed cursors are used.
+  guards, database-owned `append_xid`, and cursor key metadata if stateless sealed cursors are used.
 
 Deletion requirement:
 
@@ -523,7 +514,7 @@ Verification:
 - commit hash tests proving `commit_id`, prepared authority, idempotency, final batch hash, hash
   domain version, and canonicalizer identity reverify from persisted canonical bytes
 - artifact mismatch/missing/extra-byte rejection tests
-- large-blob pre-commit + short append-transaction test; maintenance-role orphan-blob sweep test
+- artifact byte-size limit and append-transaction-bound blob insert tests
 - no-deadlock invariant test: a history holding a lane then committing a further `ResourceLaneClaimed`
   is rejected
 - lane and run advisory locks use distinct class ids
@@ -611,24 +602,19 @@ Scope:
 - Add `current_*` views over observation facts.
 - Keep materialized views/cache rows in clearly cache-like namespaces only; they must never be cursor
   authority and never strict semantic authority.
-- Add `validate_read_models(projection_version)`,
-  `build_projection_version(projection_version, mode)`, `read_model_high_watermark()`, and
-  `read_model_drift_report()` behind maintenance role boundaries. `mode` is `missing_only` or
-  `new_version`.
-- Rebuilding the same projection version may insert missing rows only when derived hashes match
-  existing rows. Mismatched hashes are drift/corruption, not update opportunities.
+- Keep read-model proof as private read-only validation: append-created rows must match rows
+  materialized from authority, and drift/corruption tests must detect mismatches without exposing a
+  production repair API.
 - Do not add a production-public observation sink trait in this RFC. Observation rows are written only
-  by the append/rebuild pipeline that owns the authority and provenance for the row.
+  by the append pipeline that owns the authority and provenance for the row.
 - Semantic-looking observations must record `producer_authority`, `projection_version`, source
   provenance, and row hash. Storage may persist such rows from the owning authority layer through the
   append/rebuild pipeline, but must not call runtime/app projection code internally.
 
 Verification:
 
-- observation facts rebuild exactly from authority rows
-- `validate_read_models`, `build_projection_version` (`missing_only` and `new_version`),
-  `read_model_high_watermark`, and `read_model_drift_report` tests
-- same projection rebuild inserts only missing matching rows and reports drift on mismatched hashes
+- observation facts materialize exactly from authority rows in private read-only validation
+- drift/corruption tests detect missing, extra, and mismatched read rows without public repair APIs
 - delta and aggregate provenance tests, including full watch frontier tuple recovery for
   platform-prefix high-watermarks
 - SQL-only derivations are mechanical
@@ -927,10 +913,9 @@ The refactor is done when all of the following are true:
 
 - A fresh Postgres database can migrate to the target schema.
 - A stale old `typed_*` database is rejected.
-- Production appends insert events, artifact evidence/admissions keyed by evidence hash, committed
-  resource-lane claim/release/transition rows, commit-log rows, and required observation facts
-  atomically. Large precommitted artifact blobs are immutable, content-addressed, verified by the
-  append transaction, and reclaimable only through a maintenance-role orphan sweep.
+- Production appends insert artifact bytes, events, artifact evidence/admissions keyed by evidence
+  hash, committed resource-lane claim/release/transition rows, commit-log rows, and required
+  observation facts atomically.
 - Commit idempotency, prepared authority, commit id, final batch hash, hash-domain versions, and
   canonicalizer identities reverify from persisted canonical bytes; `run_events` stores canonical
   payload bytes only.
@@ -940,9 +925,10 @@ The refactor is done when all of the following are true:
 - Ordinary resource-lane contention does not authorize attempt/saga/run failure.
 - Opaque epoch-tagged cursors plus database-owned `append_xid` assignment, bytewise
   `commit_sort_key`, snapshot-sealed frontiers, and cursor key rotation rules protect list/watch
-  cursors; `reseed_store_epoch` invalidates them after restore/clone/import/rollback.
-- Read models rebuild from authority rows, carry event/prefix/multi-source provenance, can be
-  drift-checked, and never hash PostgreSQL `jsonb::text`.
+  cursors. Restore/clone/import/rollback procedures are destructive with respect to issued cursors
+  until an authorized epoch-reseed design exists.
+- Read models materialize from authority rows, carry event/prefix/multi-source provenance, can be
+  drift-checked in private read-only validation, and never hash PostgreSQL `jsonb::text`.
 - Strict status, stream, replay, and public output do not trust read models.
 - CLI/REST expose one shared app run observation API with the stable minimal response shape
   (`next_cursor`, `runs[]`, optional opaque `change_id`; each run has `run_id`, `head_seq`,

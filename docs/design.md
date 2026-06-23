@@ -415,9 +415,8 @@ admitted only by the commit that first references them. Production callers submi
 `PreparedCommitBundle` values built from purpose-specific `PreparedCommit<Purpose>` authority;
 stores do not expose or accept a raw typed-batch or plan-only append escape hatch. Purpose
 constructors reject purpose mismatches, missing `SagaAdmitToken`, missing `SagaTerminalProof`, or
-artifact evidence that was not admitted in the same commit. Failed appends may leave immutable
-content-addressed orphan blobs for maintenance cleanup, but orphan run-store evidence is not
-authority.
+artifact evidence that was not admitted in the same commit. Artifact blobs are admitted inside the
+append transaction; failed appends leave no authoritative run-store evidence.
 
 Framework lifecycle work is represented by certified graph nodes, not ad hoc runtime side effects.
 Run admission is the sole pre-attempt root authority and is not represented by a certified graph

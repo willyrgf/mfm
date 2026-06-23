@@ -1388,7 +1388,7 @@ function, and it made every clone/restore fail closed until a privileged reseal 
 of machinery whose only deliverable is "watch cursors survive a physical restore," which v1 does not
 need.
 
-The cursor-domain rule is now an explicit operator responsibility with one enforcement point:
+The cursor-domain rule is intentionally narrow:
 
 - Fresh migration generates a new `store_epoch`. Cursors from any prior epoch are rejected with
   `CursorExpired`, and the client re-lists to obtain a fresh cursor.
@@ -1396,18 +1396,17 @@ The cursor-domain rule is now an explicit operator responsibility with one enfor
   epoch; the cursor domain is unchanged.
 - Any operation that changes the PostgreSQL XID ordering domain behind existing cursor rows —
   physical restore, `pg_basebackup` clone, logical dump/restore, point-in-time rollback, row discard —
-  **must reseed the epoch** before the store serves traffic, via an explicit maintenance command
-  (`reseed_store_epoch`) that runs outside normal app/CLI/REST credentials and rotates `store_epoch`.
-  Reseeding invalidates all outstanding cursors (clients re-list); it does not try to make old-domain
-  `append_xid` values comparable with the restored database's `pg_snapshot_xmin(...)`.
+  invalidates outstanding cursors by operator/runbook contract. MFM v1 does not expose a
+  `reseed_store_epoch` entry point until Postgres role ownership, credentials, and restore/clone
+  runbook semantics are designed.
 
 The store does not auto-detect physical-domain changes, because doing so reliably is exactly the
 machinery being removed. The contract is therefore explicit and documented in the runbook: **a
-physically restored or cloned database served without `reseed_store_epoch` can mis-order or skip watch
-cursors.** Reseed is mandatory after any such operation. This trades automatic detection for a
-one-command operator step and a much smaller, dependency-light implementation. If a deployment ever
-genuinely needs cursor survival across physical restore, a reviewed RFC can reintroduce a
-fingerprint/seal, justified against this simpler default.
+physically restored or cloned database served with old cursor state can mis-order or skip watch
+cursors.** Until a maintenance-role design lands, restore/clone procedures must be destructive with
+respect to issued cursors. If a deployment ever genuinely needs cursor survival across physical
+restore, a reviewed RFC can reintroduce either a fingerprint/seal or a properly authorized
+epoch-rotation procedure, justified against this simpler default.
 
 `run_commit_log` is the durable cursor source for run list/watch observation APIs. It is insert-only
 and atomic with the authority rows for the same commit. It is not projection-versioned and does not
@@ -1559,17 +1558,12 @@ must not block independent run appends. Two consequences need explicit handling:
 
 - **Large artifact bytes vs. short append transactions are in direct tension.** The `PreparedCommitBundle`
   inserts artifact `BYTEA` inside the append transaction, and a multi-megabyte insert is inherently a
-  long transaction holding a young XID — which is exactly what stalls the frontier. To bound append
-  duration, large artifact bytes may be pre-committed by content address in a separate short
-  transaction *before* the append transaction: the blob row `(artifact_id, digest, byte_len, bytes)`
-  is content-addressed and immutable, so writing it early is safe and idempotent (`UNIQUE (digest)`
-  deduplicates). The append transaction then verifies the blob exists with the expected digest/length
-  and inserts only the small evidence/admission/event rows, keeping it short. Blobs pre-committed for
-  an append that never lands are orphans with no run authority; a maintenance-role sweep reclaims
-  unreferenced blobs (this is the one sanctioned exception to "no production delete," scoped to
-  unreferenced content-addressed bytes and run only by the maintenance role, never the app role). This
-  replaces the earlier flat prohibition on pre-append staging, which was incompatible with both short
-  transactions and large artifacts.
+  long transaction holding a young XID — which is exactly what stalls the frontier. Until a real
+  Postgres maintenance-role design exists, MFM does not pre-commit large blobs in a separate
+  transaction and does not expose an orphan sweep. The v1 contract is therefore conservative:
+  artifact blobs enter Postgres only as part of the append transaction, under an MFM byte-size limit
+  enforced before insert and by the database. If larger blobs need a pre-commit path later, that path
+  needs a separate role/privilege/runbook RFC before it lands.
 
 There is also a **read-your-writes caveat** for list/watch: because the frontier only serves rows with
 `append_xid < safe_before_xid`, a run you just started does not appear in `read_run_observations`
@@ -1929,15 +1923,10 @@ surfaces. CLI and REST should depend on that factory rather than constructing co
 pieces directly.
 
 The current production *filesystem* artifact stager disappears from production wiring. Artifact bytes
-live only in Postgres `artifact_blobs`. Bytes may be content-addressed into `artifact_blobs` either
-inside the append transaction (small artifacts) or in a short preceding transaction (large artifacts,
-to keep the append transaction short — see the watch-frontier discussion). Either way the bytes never
-touch a filesystem store and the append transaction admits evidence/admission/event rows. A blob
-pre-committed for an append that never lands is an orphan with no run authority; orphan
-content-addressed blobs are acceptable and reclaimed by a maintenance-role sweep of unreferenced
-blobs. This matches the longstanding `docs/design.md` rule that failed commits may leave orphan
-artifact bytes while orphan run-store evidence is never authority. Runtime does not own a separate
-filesystem stager.
+live only in Postgres `artifact_blobs`. Bytes are inserted inside the append transaction, and the
+append transaction admits evidence/admission/event rows atomically. The bytes never touch a
+filesystem store. Runtime does not own a separate filesystem stager, and v1 does not expose a
+separate large-blob precommit or orphan-sweep path.
 
 ## Alternative Store Removal
 
@@ -1970,14 +1959,15 @@ exception.
 
 Read models are correct only if they can be rebuilt and compared.
 
-Required rebuild tools:
+Required proof surface:
 
-- `validate_read_models(projection_version)`
-- `build_projection_version(projection_version, mode)`
-- `read_model_high_watermark()`
-- `read_model_drift_report()`
+- append-owned read rows are derived from authority rows in the append path
+- tests can materialize the same read rows from authority and compare hashes
+- drift/corruption tests can prove mismatches are detected without exposing a production repair API
+- schema validation verifies required read-model tables, views, triggers, columns, and constraints
 
-`mode` is either `missing_only` or `new_version`.
+Production `validate_read_models`, `build_projection_version`, `read_model_high_watermark`, and
+`read_model_drift_report` entry points are deferred until a real maintenance-role model is designed.
 
 Required properties:
 
@@ -2041,11 +2031,10 @@ Database guardrails:
 - add database triggers that reject update/delete on authority tables (this single-row guard is the
   one trigger class that earns its keep; multi-row structural invariants are owned by the Rust append
   path, not by PL/pgSQL re-implementations)
-- add equivalent guards for read fact tables except inside controlled rebuild procedures
-- production rebuild/validate/epoch-reseed procedures are executable only by an explicit
-  maintenance role, not by normal app/CLI/REST runtime credentials
-- if local development uses a single physical database role, those procedures must still require an
-  explicit maintenance entry point and must not be exposed through production app services
+- add equivalent guards for read fact tables
+- production rebuild/repair/epoch-reseed/orphan-sweep procedures are not part of v1; do not expose
+  public maintenance entry points until Postgres roles, ownership, credentials, and runbooks are
+  designed
 - avoid `ON DELETE CASCADE` on authority tables
 - validate required functions/views during schema validation; do not mandate deferrable constraint
   triggers that duplicate Rust multi-row folds, and require a parity test for any SQL check that does
@@ -2131,7 +2120,8 @@ here; it is part of this merge gate, not optional follow-up.
 - the read-your-writes caveat: list/watch lag the sealed frontier while strict per-run status is
   immediate
 - append-only authority with a dedicated-database requirement driven by cluster-wide `xmin` coupling
-- maintenance-role requirements for read-model rebuild/validation and epoch-reseed procedures
+- no production maintenance entry points for read-model rebuild/validation or epoch reseed until
+  Postgres roles, ownership, credentials, and runbooks are designed
 - the breaking dev-branch cutover posture and lack of compatibility with old `typed_*` tables
 
 `docs/architecture.md` must be updated to describe:
@@ -2283,9 +2273,9 @@ Required new tests:
   append serialization is needed
 - watch cursor resumes after disconnect
 - watch cursors carrying a prior `store_epoch` are rejected with `CursorExpired` after fresh
-  migration, destructive reset, or an explicit `reseed_store_epoch`
-- `reseed_store_epoch` rotates `store_epoch`, runs only under the maintenance role, and invalidates
-  outstanding cursors (clients re-list)
+  migration or destructive reset
+- restore/clone procedures are destructive with respect to issued cursors until an authorized
+  epoch-reseed procedure is designed
 - forged, tampered, or future public watch cursors are rejected by the sealed/MACed cursor
   contract instead of silently skipping rows
 - cursor codec tests cover key id, durable key source across restarts, accepted old-key rotation
@@ -2343,9 +2333,8 @@ Required new tests:
 - same-commit terminal release batches contain only exact in-scope active-claim releases, reject
   unrelated releases, and cannot acquire new lanes
 - artifact evidence/admission/event rows are inserted atomically with the commit bundle
-- large artifact bytes may be content-addressed in a short preceding transaction, and the append
-  transaction verifies the blob digest/length before admitting evidence
-- a maintenance-role sweep reclaims unreferenced (orphan) `artifact_blobs`; the app role cannot delete
+- artifact bytes are inserted inside the append transaction under the MFM byte-size limit
+- `artifact_blobs` are append-only; there is no production orphan-sweep delete path in v1
 - missing, extra, or mismatched artifact bytes are rejected before authority rows commit
 - `run_events` stores only canonical payload bytes (no `payload_json` query copy)
 - run-level artifact admissions prove the exact first `binding_kind = 'admitted'`
@@ -2418,13 +2407,13 @@ Required new tests:
   runs.
 - Commit ids are deterministic pre-batch identities derived from prepared authority material, so
   event envelopes and `commit_batch_hash` have no post-hash storage-assignment cycle.
-- Read-model rebuild procedures should use an explicit maintenance role in production. Local
-  development can use a single physical database role only if rebuild functions are still hidden
-  behind an explicit maintenance entry point and are not exposed through app/CLI/REST runtime paths.
+- Read-model rebuild/repair procedures are not production entry points in v1. Read-model correctness
+  is proven by append-time derivation, strict authority loads, schema validation, and private
+  read-only tests until a maintenance-role model is designed.
 - Artifact bytes should be stored in Postgres `bytea` columns. PostgreSQL's current documented hard
   field-size limit is 1 GB, but MFM should enforce lower artifact-size limits before insert and with
-  database checks. Large blobs may be content-addressed in a short transaction before the append
-  transaction; orphan content-addressed blobs are acceptable and reclaimed by a maintenance sweep.
+  database checks. V1 inserts artifact blobs inside the append transaction and has no production
+  orphan-sweep path.
 - The MFM store runs on a database instance dedicated to MFM, because watch-frontier liveness is
   coupled to cluster-wide `xmin`. Data lifecycle (archival, partitioning, growth-bounding) is
   deferred to a future RFC; v1 is append-only with growth managed operationally.
@@ -2437,9 +2426,9 @@ Required new tests:
 - Public watch cursors should be based on snapshot-sealed `(run_commit_log.append_xid,
   commit_sort_key)`, not PostgreSQL identity allocation order, text collation, wall-clock
   timestamps, or globally serialized commit positions. Cursors are opaque, MACed, and epoch-tagged;
-  the cursor-domain seal/fingerprint subsystem is removed in favor of an operator `reseed_store_epoch`
-  after any physical restore/clone. Watch is a lagging observation surface (read-your-writes gap);
-  strict per-run status is immediate.
+  the cursor-domain seal/fingerprint subsystem is removed. Physical restore/clone procedures are
+  destructive with respect to issued cursors until an authorized epoch-reseed procedure is designed.
+  Watch is a lagging observation surface (read-your-writes gap); strict per-run status is immediate.
 - Cursor authority and projection summaries are split: `run_commit_log` is immutable observation
   cursor authority, while `run_observation_change_summaries` is projection-versioned and
   rebuildable.
@@ -2451,6 +2440,20 @@ Required new tests:
 - The work lands as three separable, individually coherent cutovers (append/artifact, resource-lane,
   observation/naming) in dependency order, not one big-bang merge. No compatibility shims within any
   cutover.
+
+## Appendix: Deferred Postgres Maintenance Roles
+
+Earlier drafts required production maintenance entry points for read-model rebuild/repair, store
+epoch reseed, and orphan artifact blob sweep. That requirement is removed from v1 because the RFC did
+not specify the required Postgres role model: role names, object ownership, GRANT/REVOKE posture,
+credential separation, SECURITY DEFINER policy, restore/clone runbook, or tests that prove app,
+CLI, and REST credentials cannot use those surfaces.
+
+V1 must not expose public Postgres maintenance entry points that merely document "use maintenance
+credentials" while accepting an ordinary `PgPool`. The implemented guarantees are append-time
+authority writes, append-owned read-model derivation, strict-load/read-only validation, schema
+validation, checked SQL where practical, and architecture guardrails that reject fake maintenance
+boundaries. Any future maintenance role work needs its own reviewed design before code lands.
 
 ## Decision
 
