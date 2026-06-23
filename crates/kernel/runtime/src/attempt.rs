@@ -246,13 +246,11 @@ impl<'a> AttemptLifecycle<'a> {
             .await
             .map_err(async_store_error)?;
         let mut latest_view = RuntimeRunView::from_stream(runtime_spec, run_id, &latest_stream)?;
-        if node_requires_pre_invocation_lane_claim(selected_attempt.phase.node)
-            && projected_started_attempt_active_lane_key(
-                &latest_view.projections,
-                selected_attempt.phase.node,
-            )
-            .is_none()
-        {
+        if node_needs_pre_invocation_lane_claim(
+            &latest_view.projections,
+            selected_attempt.phase.node,
+            &attempt_id,
+        )? {
             {
                 let pre_invocation = InvocationBuilder::new(InvocationBuilderInput {
                     runtime_spec,
@@ -683,6 +681,31 @@ fn node_requires_pre_invocation_lane_claim(node: &spec::NodeSpec) -> bool {
             .map(|side_effect| &side_effect.resource_claim),
         Some(spec::ResourceClaimSpec::Exclusive { .. })
     )
+}
+
+fn node_needs_pre_invocation_lane_claim(
+    projections: &store::ProjectionSnapshot,
+    node: &spec::NodeSpec,
+    attempt_id: &AttemptId,
+) -> Result<bool> {
+    if !node_requires_pre_invocation_lane_claim(node) {
+        return Ok(false);
+    }
+    let Some(projection) =
+        SideEffectLifecycle::projection_for_attempt(projections, node, attempt_id)?
+    else {
+        return Ok(true);
+    };
+    let state = projection
+        .ledger_state()
+        .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
+    Ok(matches!(
+        state.phase(),
+        store::SideEffectLedgerPhase::SubmissionKnown {
+            status: store::SideEffectSubmissionState::NotSubmitted,
+            ..
+        }
+    ))
 }
 
 fn projected_started_attempt_active_lane_key(
