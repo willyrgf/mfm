@@ -1036,32 +1036,42 @@ fn final_commit_authority(
     batch: &CommittedBatch,
     commit_id: &str,
 ) -> Result<FinalCommitAuthority> {
-    let events = batch
-        .events()
+    final_commit_authority_from_parts(
+        batch.run_id(),
+        batch.seq(),
+        batch.commit_key(),
+        commit_id,
+        batch.events(),
+        plan.request().required_artifacts(),
+        bundle.admitted_artifacts(),
+    )
+}
+
+fn final_commit_authority_from_parts(
+    run_id: &RunId,
+    seq: StreamSeq,
+    commit_key: &CommitKey,
+    commit_id: &str,
+    events: &[KernelEventEnvelope],
+    required_artifacts: &[ArtifactEvidenceRef],
+    admitted_artifacts: &[ArtifactEvidenceRef],
+) -> Result<FinalCommitAuthority> {
+    let events = events
         .iter()
         .map(event_authority_json)
         .collect::<Result<Vec<_>>>()?;
-    let required = plan
-        .request()
-        .required_artifacts()
-        .iter()
-        .map(|evidence| artifact_binding_authority_json("required", evidence))
-        .collect::<Result<Vec<_>>>()?;
-    let admitted = bundle
-        .admitted_artifacts()
-        .iter()
-        .map(|evidence| artifact_binding_authority_json("admitted", evidence))
-        .collect::<Result<Vec<_>>>()?;
+    let required = sorted_artifact_binding_authority_json("required", required_artifacts)?;
+    let admitted = sorted_artifact_binding_authority_json("admitted", admitted_artifacts)?;
     let canonical = canonical_json(serde_json::json!({
         "admitted_artifacts": admitted,
         "commit_id": commit_id,
-        "commit_key": batch.commit_key().as_str(),
+        "commit_key": commit_key.as_str(),
         "domain": "mfm.commit.batch.v1",
         "events": events,
         "hash_domain_version": HASH_DOMAIN_VERSION,
         "required_artifacts": required,
-        "run_id": batch.run_id().as_str(),
-        "seq": batch.seq().as_u64(),
+        "run_id": run_id.as_str(),
+        "seq": seq.as_u64(),
     }))?;
     Ok(FinalCommitAuthority {
         commit_batch_hash: canonical.content_digest().as_str().to_owned(),
@@ -1096,6 +1106,27 @@ fn artifact_binding_authority_json(
         );
     }
     Ok(value)
+}
+
+fn sorted_artifact_binding_authority_json(
+    binding_kind: &str,
+    evidence: &[ArtifactEvidenceRef],
+) -> Result<Vec<Value>> {
+    let mut bindings = evidence
+        .iter()
+        .map(|evidence| {
+            Ok((
+                evidence.artifact_id.as_str().to_owned(),
+                evidence.evidence_hash()?.as_str().to_owned(),
+                artifact_binding_authority_json(binding_kind, evidence)?,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    bindings.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    Ok(bindings
+        .into_iter()
+        .map(|(_artifact_id, _evidence_hash, value)| value)
+        .collect())
 }
 
 fn artifact_evidence_authority_json(evidence: &ArtifactEvidenceRef) -> Result<Value> {
@@ -2863,6 +2894,7 @@ async fn load_committed_batch_tx(
             "commit event count does not match run_events rows".to_owned(),
         ));
     }
+    validate_final_commit_authority_tx(tx, &commit, &events).await?;
     validate_run_commit_log_row_tx(tx, &commit).await?;
     validate_resource_lane_transition_hash_chains_tx(tx).await?;
     CommittedBatch::from_persisted_events(
@@ -2904,31 +2936,143 @@ async fn validate_persisted_run_authority_tx(
     let commits = load_commit_authority_rows_tx(tx, run_id).await?;
     for commit in &commits {
         validate_run_commit_log_row_tx(tx, commit).await?;
-        validate_run_commit_event_count_tx(tx, commit).await?;
+        let events = load_run_commit_events_tx(tx, &commit.run_id, commit.seq).await?;
+        if events.len() != commit.event_count {
+            return Err(PostgresStoreError::Corruption(
+                "commit event count does not match run_events rows".to_owned(),
+            ));
+        }
+        validate_final_commit_authority_tx(tx, commit, &events).await?;
     }
     validate_resource_lane_transition_hash_chains_tx(tx).await
 }
 
-async fn validate_run_commit_event_count_tx(
+async fn validate_final_commit_authority_tx(
     tx: &mut Transaction<'_, Postgres>,
     commit: &CommitAuthorityRow,
+    events: &[KernelEventEnvelope],
 ) -> Result<()> {
-    let count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM run_events WHERE run_id = $1 AND seq = $2")
-            .bind(commit.run_id.as_str())
-            .bind(u64_to_i64(commit.seq.as_u64(), "run_events.seq")?)
-            .fetch_one(&mut **tx)
-            .await
-            .map_err(|error| database_error("failed to count commit events", error))?;
-    let count = usize::try_from(count).map_err(|_| {
-        PostgresStoreError::Corruption("commit event count was negative".to_owned())
-    })?;
-    if count != commit.event_count {
+    let bindings = load_commit_artifact_bindings_tx(tx, commit).await?;
+    let expected = final_commit_authority_from_parts(
+        &commit.run_id,
+        commit.seq,
+        &CommitKey::new(commit.commit_key.clone())?,
+        &commit.commit_id,
+        events,
+        &bindings.required,
+        &bindings.admitted,
+    )?;
+    if expected.commit_batch_hash != commit.commit_batch_hash
+        || expected.commit_batch_canonical_json != commit.commit_batch_canonical_json
+    {
         return Err(PostgresStoreError::Corruption(
-            "commit event count does not match run_events rows".to_owned(),
+            "commit batch authority does not match persisted event and artifact bindings"
+                .to_owned(),
         ));
     }
     Ok(())
+}
+
+struct CommitArtifactBindings {
+    required: Vec<ArtifactEvidenceRef>,
+    admitted: Vec<ArtifactEvidenceRef>,
+}
+
+async fn load_commit_artifact_bindings_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    commit: &CommitAuthorityRow,
+) -> Result<CommitArtifactBindings> {
+    let rows = sqlx::query(
+        "SELECT cae.commit_key, cae.commit_id, cae.binding_kind, a.artifact_id, a.evidence_hash, \
+          a.digest, a.byte_len, a.media_type, a.schema_id, a.semantic_type_id, \
+          a.producer_node_id, a.producer_seed_id, a.artifact_role \
+         FROM commit_artifact_evidence cae \
+         INNER JOIN artifact_admissions a \
+           ON a.artifact_id = cae.artifact_id AND a.evidence_hash = cae.evidence_hash \
+         WHERE cae.run_id = $1 AND cae.seq = $2 \
+         ORDER BY cae.binding_kind, cae.artifact_id, cae.evidence_hash",
+    )
+    .bind(commit.run_id.as_str())
+    .bind(u64_to_i64(
+        commit.seq.as_u64(),
+        "commit_artifact_evidence.seq",
+    )?)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|error| database_error("failed to load commit artifact bindings", error))?;
+    let mut bindings = CommitArtifactBindings {
+        required: Vec::new(),
+        admitted: Vec::new(),
+    };
+    for row in rows {
+        let commit_key: String = row
+            .try_get("commit_key")
+            .map_err(|error| database_error("failed to decode artifact binding key", error))?;
+        let commit_id: String = row
+            .try_get("commit_id")
+            .map_err(|error| database_error("failed to decode artifact binding commit", error))?;
+        if commit_key != commit.commit_key || commit_id != commit.commit_id {
+            return Err(PostgresStoreError::Corruption(
+                "commit artifact binding does not match commit authority".to_owned(),
+            ));
+        }
+        let artifact_id: String = row
+            .try_get("artifact_id")
+            .map_err(|error| database_error("failed to decode artifact binding row", error))?;
+        let artifact_id = parse_identity::<ArtifactId>(&artifact_id)?;
+        let evidence_hash: String = row
+            .try_get("evidence_hash")
+            .map_err(|error| database_error("failed to decode artifact binding row", error))?;
+        let evidence_hash = parse_identity::<ContentDigest>(&evidence_hash)?;
+        let evidence = ArtifactEvidenceParts {
+            artifact_id: artifact_id.clone(),
+            digest: row
+                .try_get("digest")
+                .map_err(|error| database_error("failed to decode artifact binding row", error))?,
+            byte_len: row
+                .try_get("byte_len")
+                .map_err(|error| database_error("failed to decode artifact binding row", error))?,
+            media_type: row
+                .try_get("media_type")
+                .map_err(|error| database_error("failed to decode artifact binding row", error))?,
+            schema_id: row
+                .try_get("schema_id")
+                .map_err(|error| database_error("failed to decode artifact binding row", error))?,
+            semantic_type_id: row
+                .try_get("semantic_type_id")
+                .map_err(|error| database_error("failed to decode artifact binding row", error))?,
+            producer_node_id: row
+                .try_get("producer_node_id")
+                .map_err(|error| database_error("failed to decode artifact binding row", error))?,
+            producer_seed_id: row
+                .try_get("producer_seed_id")
+                .map_err(|error| database_error("failed to decode artifact binding row", error))?,
+            artifact_role: row
+                .try_get("artifact_role")
+                .map_err(|error| database_error("failed to decode artifact binding row", error))?,
+        }
+        .into_evidence_ref()?;
+        if evidence.evidence_hash()? != evidence_hash {
+            return Err(StoreError::ArtifactEvidenceMismatch {
+                artifact_id,
+                field: "evidence_hash",
+            }
+            .into());
+        }
+        let binding_kind: String = row
+            .try_get("binding_kind")
+            .map_err(|error| database_error("failed to decode artifact binding kind", error))?;
+        match binding_kind.as_str() {
+            "required" => bindings.required.push(evidence),
+            "admitted" => bindings.admitted.push(evidence),
+            _ => {
+                return Err(PostgresStoreError::Corruption(
+                    "unknown commit artifact binding kind".to_owned(),
+                ))
+            }
+        }
+    }
+    Ok(bindings)
 }
 
 async fn validate_run_commit_log_row_tx(
@@ -3028,6 +3172,7 @@ struct CommitAuthorityRow {
     commit_key: String,
     commit_idempotency_hash: String,
     commit_batch_hash: String,
+    commit_batch_canonical_json: Vec<u8>,
     seq: StreamSeq,
     event_count: usize,
 }
@@ -3121,6 +3266,7 @@ fn commit_authority_row_from_row(row: PgRow) -> Result<CommitAuthorityRow> {
         commit_key,
         commit_idempotency_hash,
         commit_batch_hash,
+        commit_batch_canonical_json,
         seq,
         event_count: usize::try_from(event_count).map_err(|_| {
             PostgresStoreError::Corruption("commits.event_count was negative".to_owned())
@@ -5280,6 +5426,73 @@ mod tests {
             .await
             .expect_err("strict load rejects corrupt commit batch bytes");
         assert_corruption(error, "commit batch hash does not match");
+
+        drop_schema(&store, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn strict_load_rejects_commit_batch_authority_rewritten_away_from_rows() {
+        let (store, schema) = test_store().await;
+        let run = run_id(144);
+        let commit_key = CommitKey::new("strict-batch-authority-run-start").expect("commit key");
+        append_run_start(&store, &run, commit_key.as_str())
+            .await
+            .expect("run start");
+
+        let commit_id: String =
+            sqlx::query_scalar("SELECT commit_id FROM commits WHERE run_id = $1 AND seq = 1")
+                .bind(run.as_str())
+                .fetch_one(&store.pool)
+                .await
+                .expect("load commit id");
+        let forged_batch = canonical_json(serde_json::json!({
+            "domain": "mfm.commit.batch.v1",
+            "tampered": true,
+        }))
+        .expect("canonical forged batch");
+        let forged_batch_hash = forged_batch.content_digest().as_str().to_owned();
+        let forged_sort_key = run_commit_sort_key(
+            &run,
+            StreamSeq::new(1).expect("seq"),
+            &commit_key,
+            &commit_id,
+            &forged_batch_hash,
+        )
+        .expect("forged sort key");
+
+        sqlx::query("ALTER TABLE commits DISABLE TRIGGER commits_no_update")
+            .execute(&store.pool)
+            .await
+            .expect("disable commit mutation guard");
+        sqlx::query("ALTER TABLE run_commit_log DISABLE TRIGGER run_commit_log_no_update")
+            .execute(&store.pool)
+            .await
+            .expect("disable commit log mutation guard");
+        sqlx::query(
+            "UPDATE commits SET commit_batch_hash = $1, commit_batch_canonical_json = $2 \
+             WHERE run_id = $3 AND seq = 1",
+        )
+        .bind(&forged_batch_hash)
+        .bind(forged_batch.as_bytes())
+        .bind(run.as_str())
+        .execute(&store.pool)
+        .await
+        .expect("forge commit batch authority");
+        sqlx::query("UPDATE run_commit_log SET commit_sort_key = $1 WHERE commit_id = $2")
+            .bind(forged_sort_key)
+            .bind(&commit_id)
+            .execute(&store.pool)
+            .await
+            .expect("forge matching commit log sort key");
+
+        let error = store
+            .load_run_stream(&run)
+            .await
+            .expect_err("strict load rejects batch authority that no longer matches rows");
+        assert_corruption(
+            error,
+            "commit batch authority does not match persisted event and artifact bindings",
+        );
 
         drop_schema(&store, &schema).await;
     }
