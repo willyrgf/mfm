@@ -4,7 +4,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const TEST_HARNESS_PATHS: &[&str] = &["tests/integration/tests/architecture_namespace_contract.rs"];
-const SOURCE_OF_TRUTH_DOC_PATHS: &[&str] = &["PLAN_IMPL_RFC_PG_TRANS.md", "RFC_REFAC_PG_TRANS.md"];
+const SOURCE_OF_TRUTH_DOC_PATHS: &[&str] = &[
+    "PLAN_IMPL_RFC_PG_TRANS.md",
+    "RFC_REFAC_PG_TRANS.md",
+    "docs/persisted-public-surfaces.md",
+];
 const FORBIDDEN_SEMANTIC_SURFACE_FIELDS: &[&str] = &[
     "rpc_url",
     "authorization",
@@ -134,6 +138,59 @@ fn design_docs_do_not_make_public_output_projected_a_transition_decision() {
         design.contains("already projected public output is a scheduler facade status"),
         "docs/design.md must scope already-projected public output to scheduler facade status"
     );
+}
+
+#[test]
+fn persisted_public_surface_inventory_covers_postgres_cutover_surfaces() {
+    let root = repo_root();
+    let inventory = fs::read_to_string(root.join("docs/persisted-public-surfaces.md"))
+        .expect("persisted/public surface inventory");
+
+    for required in [
+        "Artifact bytes",
+        "Artifact evidence",
+        "Event canonical bytes",
+        "Resource lane authority rows",
+        "Observation summaries",
+        "Observation provenance",
+        "Cursor metadata",
+        "Store metadata",
+        "Run list/watch output",
+        "Run status output",
+        "Run stream output",
+        "Public-output rendering",
+        "Keystore list output",
+    ] {
+        assert!(
+            inventory.contains(required),
+            "persisted/public surface inventory must cover `{required}`"
+        );
+    }
+
+    for classification in [
+        "strict authority",
+        "observation",
+        "rebuildable cache",
+        "operational telemetry",
+        "public output",
+    ] {
+        assert!(
+            inventory.contains(classification),
+            "persisted/public surface inventory must define/use `{classification}`"
+        );
+    }
+
+    for secret_boundary in [
+        "No secrets allowed",
+        "`cursor_secret` is secret storage metadata",
+        "must never be logged or returned",
+        "must not expose commit ids, append XIDs, sort keys, cursor versions, key ids, or store",
+    ] {
+        assert!(
+            inventory.contains(secret_boundary),
+            "persisted/public surface inventory must state secret/public boundary `{secret_boundary}`"
+        );
+    }
 }
 
 #[test]
