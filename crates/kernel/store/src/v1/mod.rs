@@ -836,138 +836,89 @@ pub struct SagaProjection {
     pub run_completion: Option<RunCompletionProjection>,
 }
 
-/// Non-empty proof that compensating obligations were closed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ClosedObligationsNonEmpty {
-    forward_ledger_keys: BTreeSet<events::SideEffectLedgerKey>,
-}
-
-impl ClosedObligationsNonEmpty {
-    fn new(policy: &SagaPolicySpec, saga: &SagaProjection) -> Result<Self> {
-        if !matches!(policy, SagaPolicySpec::CompensateCompleted { .. }) {
-            return Err(StoreError::ProjectionConflict {
-                key: format!("run:{}:saga_terminal", saga.run_id),
-                message: "compensated terminal requires compensating saga policy".to_owned(),
-            });
+fn require_closed_obligations_non_empty(
+    policy: &SagaPolicySpec,
+    saga: &SagaProjection,
+) -> Result<()> {
+    if !matches!(policy, SagaPolicySpec::CompensateCompleted { .. }) {
+        return Err(StoreError::ProjectionConflict {
+            key: format!("run:{}:saga_terminal", saga.run_id),
+            message: "compensated terminal requires compensating saga policy".to_owned(),
+        });
+    }
+    if saga.run_mode != RunMode::Compensated {
+        return Err(StoreError::ProjectionConflict {
+            key: format!("run:{}:saga_terminal", saga.run_id),
+            message: format!(
+                "compensated terminal requires compensated saga mode, found {}",
+                saga.run_mode.as_str()
+            ),
+        });
+    }
+    let mut closed_count = 0;
+    for obligation in saga.obligations.values() {
+        if obligation.classification != ForwardLedgerClassification::Owed {
+            continue;
         }
-        if saga.run_mode != RunMode::Compensated {
-            return Err(StoreError::ProjectionConflict {
-                key: format!("run:{}:saga_terminal", saga.run_id),
-                message: format!(
-                    "compensated terminal requires compensated saga mode, found {}",
-                    saga.run_mode.as_str()
-                ),
-            });
-        }
-        let mut closed = BTreeSet::new();
-        for obligation in saga.obligations.values() {
-            if obligation.classification != ForwardLedgerClassification::Owed {
-                continue;
+        match obligation.remediation.as_ref() {
+            Some(remediation) if remediation.closed && remediation.unresolved.is_none() => {
+                closed_count += 1;
             }
-            match obligation.remediation.as_ref() {
-                Some(remediation) if remediation.closed && remediation.unresolved.is_none() => {
-                    closed.insert(obligation.forward_ledger_key.clone());
-                }
-                _ => {
-                    return Err(StoreError::ProjectionConflict {
-                        key: format!(
-                            "run:{}:obligation:{}",
-                            saga.run_id, obligation.forward_ledger_key
-                        ),
-                        message: "compensated terminal requires every owed obligation to be closed"
-                            .to_owned(),
-                    });
-                }
+            _ => {
+                return Err(StoreError::ProjectionConflict {
+                    key: format!(
+                        "run:{}:obligation:{}",
+                        saga.run_id, obligation.forward_ledger_key
+                    ),
+                    message: "compensated terminal requires every owed obligation to be closed"
+                        .to_owned(),
+                });
             }
         }
-        if closed.is_empty() {
-            return Err(StoreError::ProjectionConflict {
-                key: format!("run:{}:saga_terminal", saga.run_id),
-                message: "compensated terminal requires a non-empty owed obligation set".to_owned(),
-            });
-        }
-        Ok(Self {
-            forward_ledger_keys: closed,
-        })
     }
-
-    /// Iterates the forward ledgers whose owed obligations were closed.
-    pub fn forward_ledger_keys(&self) -> impl Iterator<Item = &events::SideEffectLedgerKey> {
-        self.forward_ledger_keys.iter()
+    if closed_count == 0 {
+        return Err(StoreError::ProjectionConflict {
+            key: format!("run:{}:saga_terminal", saga.run_id),
+            message: "compensated terminal requires a non-empty owed obligation set".to_owned(),
+        });
     }
+    Ok(())
 }
 
-/// Proof that a failed terminal outcome makes no AC/DC-equivalence claim.
-#[derive(Debug, Clone)]
-pub struct FailedWithoutAcdcClaimProof {
-    source: FailedWithoutAcdcClaimSource,
-}
-
-#[derive(Debug, Clone)]
-enum FailedWithoutAcdcClaimSource {
-    Policy,
-    Manual(Box<VerifiedManualResolutionForPrefix>),
-}
-
-impl FailedWithoutAcdcClaimProof {
-    fn new(
-        policy: &SagaPolicySpec,
-        saga: &SagaProjection,
-        manual: Option<VerifiedManualResolutionForPrefix>,
-    ) -> Result<Self> {
-        if saga.run_mode != RunMode::FailedWithoutAcdcClaim {
-            return Err(StoreError::ProjectionConflict {
-                key: format!("run:{}:saga_terminal", saga.run_id),
-                message: format!(
-                    "failed-without-ACDC terminal requires failed_without_acdc_claim saga mode, found {}",
-                    saga.run_mode.as_str()
-                ),
-            });
-        }
-        if saga.manual_resolution.is_some() {
-            let verified = manual.ok_or_else(|| StoreError::ProjectionConflict {
-                key: format!("run:{}:saga_terminal", saga.run_id),
-                message: "manual failed terminal requires verified manual resolution proof"
-                    .to_owned(),
-            })?;
-            require_verified_manual_resolution_matches(
-                saga,
-                &verified,
-                events::ManualResolutionOutcome::FailWithoutAcdcClaim,
-            )?;
-            return Ok(Self {
-                source: FailedWithoutAcdcClaimSource::Manual(Box::new(verified)),
-            });
-        }
-        if !policy_allows_failed_without_acdc_claim(policy) {
-            return Err(StoreError::ProjectionConflict {
-                key: format!("run:{}:saga_terminal", saga.run_id),
-                message: "certified saga policy does not permit failed_without_acdc_claim terminal"
-                    .to_owned(),
-            });
-        }
-        Ok(Self {
-            source: FailedWithoutAcdcClaimSource::Policy,
-        })
+fn require_failed_without_acdc_claim(
+    policy: &SagaPolicySpec,
+    saga: &SagaProjection,
+    manual: Option<VerifiedManualResolutionForPrefix>,
+) -> Result<Option<SpecHash>> {
+    if saga.run_mode != RunMode::FailedWithoutAcdcClaim {
+        return Err(StoreError::ProjectionConflict {
+            key: format!("run:{}:saga_terminal", saga.run_id),
+            message: format!(
+                "failed-without-ACDC terminal requires failed_without_acdc_claim saga mode, found {}",
+                saga.run_mode.as_str()
+            ),
+        });
     }
-
-    /// Returns true when the proof is backed by a verified manual authorization.
-    pub const fn is_manual_authorized(&self) -> bool {
-        matches!(self.source, FailedWithoutAcdcClaimSource::Manual(_))
+    if saga.manual_resolution.is_some() {
+        let verified = manual.ok_or_else(|| StoreError::ProjectionConflict {
+            key: format!("run:{}:saga_terminal", saga.run_id),
+            message: "manual failed terminal requires verified manual resolution proof".to_owned(),
+        })?;
+        require_verified_manual_resolution_matches(
+            saga,
+            &verified,
+            events::ManualResolutionOutcome::FailWithoutAcdcClaim,
+        )?;
+        return Ok(Some(verified.prefix().spec_hash().clone()));
     }
-}
-
-/// Read-only terminal proof view.
-#[derive(Debug, Clone, Copy)]
-pub enum SagaTerminalProofView<'a> {
-    /// Forward public output completed the run.
-    Completed,
-    /// Certified remediation closed a non-empty obligation set.
-    Compensated(&'a ClosedObligationsNonEmpty),
-    /// Signed manual authorization resolved the run as remediated.
-    ManuallyResolved(&'a VerifiedManualResolutionForPrefix),
-    /// The run failed without making a compensation or AC/DC-equivalence claim.
-    FailedWithoutAcdcClaim(&'a FailedWithoutAcdcClaimProof),
+    if !policy_allows_failed_without_acdc_claim(policy) {
+        return Err(StoreError::ProjectionConflict {
+            key: format!("run:{}:saga_terminal", saga.run_id),
+            message: "certified saga policy does not permit failed_without_acdc_claim terminal"
+                .to_owned(),
+        });
+    }
+    Ok(None)
 }
 
 /// Opaque proof for one terminal saga outcome.
@@ -976,15 +927,16 @@ pub struct SagaTerminalProof {
     run_id: RunId,
     prefix_next_seq: StreamSeq,
     saga_policy_digest: ContentDigest,
+    manual_spec_hash: Option<SpecHash>,
     kind: SagaTerminalProofKind,
 }
 
 #[derive(Debug, Clone)]
 enum SagaTerminalProofKind {
     Completed(events::PublicOutputCompletionEvidence),
-    Compensated(ClosedObligationsNonEmpty),
-    ManuallyResolved(Box<VerifiedManualResolutionForPrefix>),
-    FailedWithoutAcdcClaim(FailedWithoutAcdcClaimProof),
+    Compensated,
+    ManuallyResolved,
+    FailedWithoutAcdcClaim,
 }
 
 impl SagaTerminalProof {
@@ -998,9 +950,10 @@ impl SagaTerminalProof {
         let saga_policy_digest = policy
             .saga_policy_digest()
             .map_err(|error| StoreError::Canonical(error.to_string()))?;
-        let kind = match saga.run_mode {
+        let (kind, manual_spec_hash) = match saga.run_mode {
             RunMode::Compensated => {
-                SagaTerminalProofKind::Compensated(ClosedObligationsNonEmpty::new(policy, saga)?)
+                require_closed_obligations_non_empty(policy, saga)?;
+                (SagaTerminalProofKind::Compensated, None)
             }
             RunMode::ManuallyResolved => {
                 let verified = manual.ok_or_else(|| StoreError::ProjectionConflict {
@@ -1012,11 +965,18 @@ impl SagaTerminalProof {
                     &verified,
                     events::ManualResolutionOutcome::ConfirmRemediated,
                 )?;
-                SagaTerminalProofKind::ManuallyResolved(Box::new(verified))
+                (
+                    SagaTerminalProofKind::ManuallyResolved,
+                    Some(verified.prefix().spec_hash().clone()),
+                )
             }
-            RunMode::FailedWithoutAcdcClaim => SagaTerminalProofKind::FailedWithoutAcdcClaim(
-                FailedWithoutAcdcClaimProof::new(policy, saga, manual)?,
-            ),
+            RunMode::FailedWithoutAcdcClaim => {
+                let manual_spec_hash = require_failed_without_acdc_claim(policy, saga, manual)?;
+                (
+                    SagaTerminalProofKind::FailedWithoutAcdcClaim,
+                    manual_spec_hash,
+                )
+            }
             RunMode::Completed => {
                 let Some(RunCompletionProjection {
                     outcome: events::RunCompletionOutcome::Completed(evidence),
@@ -1028,7 +988,7 @@ impl SagaTerminalProof {
                         message: "completed proof requires completed run projection".to_owned(),
                     });
                 };
-                SagaTerminalProofKind::Completed((**evidence).clone())
+                (SagaTerminalProofKind::Completed((**evidence).clone()), None)
             }
             RunMode::Forward | RunMode::Remediating | RunMode::ManualBlocked => {
                 return Err(StoreError::ProjectionConflict {
@@ -1044,6 +1004,7 @@ impl SagaTerminalProof {
             run_id: saga.run_id.clone(),
             prefix_next_seq,
             saga_policy_digest,
+            manual_spec_hash,
             kind,
         })
     }
@@ -1063,45 +1024,24 @@ impl SagaTerminalProof {
         &self.saga_policy_digest
     }
 
-    /// Returns a read-only view of this terminal proof.
-    pub fn view(&self) -> SagaTerminalProofView<'_> {
-        match &self.kind {
-            SagaTerminalProofKind::Completed(_) => SagaTerminalProofView::Completed,
-            SagaTerminalProofKind::Compensated(proof) => SagaTerminalProofView::Compensated(proof),
-            SagaTerminalProofKind::ManuallyResolved(proof) => {
-                SagaTerminalProofView::ManuallyResolved(proof.as_ref())
-            }
-            SagaTerminalProofKind::FailedWithoutAcdcClaim(proof) => {
-                SagaTerminalProofView::FailedWithoutAcdcClaim(proof)
-            }
-        }
-    }
-
     /// Returns the run completion outcome proven by this terminal proof.
     pub fn outcome(&self) -> events::RunCompletionOutcome {
         match &self.kind {
             SagaTerminalProofKind::Completed(evidence) => {
                 events::RunCompletionOutcome::Completed(Box::new(evidence.clone()))
             }
-            SagaTerminalProofKind::Compensated(_) => events::RunCompletionOutcome::Compensated,
-            SagaTerminalProofKind::ManuallyResolved(_) => {
+            SagaTerminalProofKind::Compensated => events::RunCompletionOutcome::Compensated,
+            SagaTerminalProofKind::ManuallyResolved => {
                 events::RunCompletionOutcome::ManuallyResolved
             }
-            SagaTerminalProofKind::FailedWithoutAcdcClaim(_) => {
+            SagaTerminalProofKind::FailedWithoutAcdcClaim => {
                 events::RunCompletionOutcome::FailedWithoutAcdcClaim
             }
         }
     }
 
-    fn verified_manual_resolution(&self) -> Option<&VerifiedManualResolutionForPrefix> {
-        match &self.kind {
-            SagaTerminalProofKind::ManuallyResolved(verified) => Some(verified.as_ref()),
-            SagaTerminalProofKind::FailedWithoutAcdcClaim(proof) => match &proof.source {
-                FailedWithoutAcdcClaimSource::Manual(verified) => Some(verified.as_ref()),
-                FailedWithoutAcdcClaimSource::Policy => None,
-            },
-            SagaTerminalProofKind::Completed(_) | SagaTerminalProofKind::Compensated(_) => None,
-        }
+    fn manual_spec_hash(&self) -> Option<&SpecHash> {
+        self.manual_spec_hash.as_ref()
     }
 }
 
@@ -4808,24 +4748,9 @@ impl StagedCommit {
         &self.batch
     }
 
-    /// Staged logical-key set after this commit.
-    pub fn logical_keys(&self) -> &LogicalKeySet {
-        &self.logical_keys
-    }
-
-    /// Staged unique logical-key payload map after this commit.
-    pub fn unique_logical_payloads(&self) -> &UniqueLogicalPayloads {
-        &self.unique_logical_payloads
-    }
-
     /// Staged projection snapshot after this commit.
     pub fn projections(&self) -> &ProjectionSnapshot {
         &self.projections
-    }
-
-    /// Staged resource-lane authority after this commit.
-    pub fn resource_lane_authority(&self) -> &ResourceLaneAuthoritySet {
-        &self.resource_lane_authority
     }
 
     /// Consumes this staged commit into owned parts.
@@ -4855,16 +4780,6 @@ pub enum StagedCommitOutcome {
     Staged(Box<StagedCommit>),
     /// The commit's resource-lane claim was blocked; no domain authority rows should be persisted.
     ResourceLaneClaimBlocked(Box<ResourceLaneClaimBlock>),
-}
-
-impl StagedCommitOutcome {
-    /// Consumes this outcome into a staged commit when one exists.
-    pub fn into_staged(self) -> Option<StagedCommit> {
-        match self {
-            Self::Staged(staged) => Some(*staged),
-            Self::ResourceLaneClaimBlocked(_) => None,
-        }
-    }
 }
 
 struct CommitStagingVerifier<'a> {
@@ -6932,8 +6847,8 @@ fn validate_saga_terminal_commit_with_proof(
             "completed public-output terminal must use CompleteRun authority",
         ));
     }
-    if let Some(verified) = proof.verified_manual_resolution() {
-        if verified.prefix().spec_hash() != &payload.spec_hash {
+    if let Some(spec_hash) = proof.manual_spec_hash() {
+        if spec_hash != &payload.spec_hash {
             return Err(invalid_prepared_commit_purpose(
                 SagaTerminal::NAME,
                 "manual proof spec hash does not match RunCompleted payload",
