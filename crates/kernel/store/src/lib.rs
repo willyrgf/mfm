@@ -2185,7 +2185,7 @@ pub mod v1 {
         /// The commit key had already appended the same canonical batch.
         Idempotent(CommittedBatch),
         /// A resource-lane claim was blocked by an existing holder and no rows were persisted.
-        ResourceLaneClaimBlocked(ResourceLaneClaimBlock),
+        ResourceLaneClaimBlocked(Box<ResourceLaneClaimBlock>),
     }
 
     impl CommitOutcome {
@@ -5055,16 +5055,16 @@ pub mod v1 {
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum StagedCommitOutcome {
         /// The commit staged successfully and is ready for durable insertion.
-        Staged(StagedCommit),
+        Staged(Box<StagedCommit>),
         /// The commit's resource-lane claim was blocked; no rows should be persisted.
-        ResourceLaneClaimBlocked(ResourceLaneClaimBlock),
+        ResourceLaneClaimBlocked(Box<ResourceLaneClaimBlock>),
     }
 
     impl StagedCommitOutcome {
         /// Consumes this outcome into a staged commit when one exists.
         pub fn into_staged(self) -> Option<StagedCommit> {
             match self {
-                Self::Staged(staged) => Some(staged),
+                Self::Staged(staged) => Some(*staged),
                 Self::ResourceLaneClaimBlocked(_) => None,
             }
         }
@@ -5281,7 +5281,7 @@ pub mod v1 {
                 fingerprint,
                 resource_lane_authority,
             )
-            .map(StagedCommitOutcome::Staged),
+            .map(|staged| StagedCommitOutcome::Staged(Box::new(staged))),
             ResourceLaneMaterialization::Blocked(block) => {
                 Ok(StagedCommitOutcome::ResourceLaneClaimBlocked(block))
             }
@@ -5290,10 +5290,10 @@ pub mod v1 {
 
     enum ResourceLaneMaterialization {
         Materialized {
-            request: CommitRequest,
+            request: Box<CommitRequest>,
             resource_lane_authority: ResourceLaneAuthoritySet,
         },
-        Blocked(ResourceLaneClaimBlock),
+        Blocked(Box<ResourceLaneClaimBlock>),
     }
 
     fn stage_run_commit_with_fingerprint(
@@ -5452,12 +5452,12 @@ pub mod v1 {
                     }
                     if let Some(existing) = active_lanes.get(&lane_key) {
                         if existing.holder != holder {
-                            return Ok(ResourceLaneMaterialization::Blocked(
+                            return Ok(ResourceLaneMaterialization::Blocked(Box::new(
                                 ResourceLaneClaimBlock {
                                     lane_key,
                                     holder: existing.holder.clone(),
                                 },
-                            ));
+                            )));
                         }
                     }
 
@@ -5593,7 +5593,7 @@ pub mod v1 {
             request.preconditions.clone(),
         )?;
         Ok(ResourceLaneMaterialization::Materialized {
-            request,
+            request: Box::new(request),
             resource_lane_authority,
         })
     }
@@ -5816,7 +5816,7 @@ pub mod v1 {
                 actual_next_seq: self.expected_next_seq(&request.run_id),
             };
             let staged = match stage_prepared_commit_plan(&base, plan)? {
-                StagedCommitOutcome::Staged(staged) => staged,
+                StagedCommitOutcome::Staged(staged) => *staged,
                 StagedCommitOutcome::ResourceLaneClaimBlocked(block) => {
                     return Ok(CommitOutcome::ResourceLaneClaimBlocked(block));
                 }

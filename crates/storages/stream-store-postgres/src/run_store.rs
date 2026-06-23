@@ -282,7 +282,7 @@ impl PostgresRunStore {
             actual_next_seq: next_seq_from_head(head)?,
         };
         let staged = match stage_prepared_commit_plan(&base, plan)? {
-            StagedCommitOutcome::Staged(staged) => staged,
+            StagedCommitOutcome::Staged(staged) => *staged,
             StagedCommitOutcome::ResourceLaneClaimBlocked(block) => {
                 return Ok(CommitOutcome::ResourceLaneClaimBlocked(block));
             }
@@ -1478,18 +1478,19 @@ async fn materialize_run_observation_summary_tx(
         observed_status,
         source_event_count,
     )?;
-    let summary_row_canonical_json = run_observation_summary_canonical_json(
-        projection_version,
-        run_id,
-        commit_id,
-        head_seq,
-        observed_status,
-        &started_at,
-        &updated_at,
-        completed_at.as_deref(),
-        &source_authority_hash,
-        source_event_count,
-    )?;
+    let summary_row_canonical_json =
+        run_observation_summary_canonical_json(&RunObservationSummaryCanonicalFields {
+            projection_version,
+            run_id,
+            commit_id,
+            head_seq,
+            observed_status,
+            started_at: &started_at,
+            updated_at: &updated_at,
+            completed_at: completed_at.as_deref(),
+            source_authority_hash: &source_authority_hash,
+            source_event_count,
+        })?;
     let summary_row_hash = summary_row_canonical_json
         .content_digest()
         .as_str()
@@ -1542,33 +1543,36 @@ fn observation_source_authority_hash(
     .to_owned())
 }
 
-fn run_observation_summary_canonical_json(
-    projection_version: &str,
-    run_id: &RunId,
-    commit_id: &str,
+struct RunObservationSummaryCanonicalFields<'a> {
+    projection_version: &'a str,
+    run_id: &'a RunId,
+    commit_id: &'a str,
     head_seq: StreamSeq,
     observed_status: ObservedRunStatus,
-    started_at: &str,
-    updated_at: &str,
-    completed_at: Option<&str>,
-    source_authority_hash: &str,
+    started_at: &'a str,
+    updated_at: &'a str,
+    completed_at: Option<&'a str>,
+    source_authority_hash: &'a str,
     source_event_count: i64,
+}
+
+fn run_observation_summary_canonical_json(
+    fields: &RunObservationSummaryCanonicalFields<'_>,
 ) -> Result<PlainCanonicalJsonBytes> {
     canonical_json(serde_json::json!({
-        "commit_id": commit_id,
-        "completed_at": completed_at,
+        "commit_id": fields.commit_id,
+        "completed_at": fields.completed_at,
         "domain": "mfm.run_observation.summary.row.v1",
-        "head_seq": head_seq.as_u64(),
-        "observed_status": observed_status.as_str(),
-        "projection_version": projection_version,
-        "run_id": run_id.as_str(),
-        "source_authority_hash": source_authority_hash,
-        "source_event_count": source_event_count,
-        "started_at": started_at,
+        "head_seq": fields.head_seq.as_u64(),
+        "observed_status": fields.observed_status.as_str(),
+        "projection_version": fields.projection_version,
+        "run_id": fields.run_id.as_str(),
+        "source_authority_hash": fields.source_authority_hash,
+        "source_event_count": fields.source_event_count,
+        "started_at": fields.started_at,
         "summary_kind": RUN_OBSERVATION_SUMMARY_KIND,
-        "updated_at": updated_at,
+        "updated_at": fields.updated_at,
     }))
-    .map_err(PostgresStoreError::from)
 }
 
 async fn build_projection_version_from_pool(
@@ -1601,15 +1605,14 @@ async fn build_projection_version_from_pool(
                 if matches!(
                     mode,
                     ReadModelBuildMode::MissingOnly | ReadModelBuildMode::NewVersion
-                ) {
-                    if insert_materialized_run_observation_summary_tx(&mut tx, &summary).await? {
-                        report.inserted_rows =
-                            report.inserted_rows.checked_add(1).ok_or_else(|| {
-                                PostgresStoreError::Corruption(
-                                    "read-model inserted row count overflow".to_owned(),
-                                )
-                            })?;
-                    }
+                ) && insert_materialized_run_observation_summary_tx(&mut tx, &summary).await?
+                {
+                    report.inserted_rows =
+                        report.inserted_rows.checked_add(1).ok_or_else(|| {
+                            PostgresStoreError::Corruption(
+                                "read-model inserted row count overflow".to_owned(),
+                            )
+                        })?;
                 }
             }
             SummaryComparison::Mismatch => {

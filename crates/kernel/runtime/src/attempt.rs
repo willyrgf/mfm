@@ -301,7 +301,7 @@ impl<'a> AttemptLifecycle<'a> {
                         return Ok(AttemptRunStatus::BlockedOnResourceLane {
                             witness: resource_lane_block_witness_from_outcome(
                                 &selected_attempt.phase.node.node_id,
-                                block,
+                                *block,
                             ),
                             advanced,
                         });
@@ -434,7 +434,7 @@ impl<'a> AttemptLifecycle<'a> {
                 if has_resource_lane_claim =>
             {
                 Ok(AttemptRunStatus::BlockedOnResourceLane {
-                    witness: resource_lane_block_witness_from_outcome(&node.node_id, block),
+                    witness: resource_lane_block_witness_from_outcome(&node.node_id, *block),
                     advanced,
                 })
             }
