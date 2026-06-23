@@ -125,8 +125,8 @@ impl PostgresRunStore {
         sqlx::query(
             "INSERT INTO commits \
              (commit_id, run_id, seq, commit_key, commit_purpose, prepared_commit_plan_fingerprint, \
-              commit_batch_hash, hash_domain_version, canonicalizer_identity, event_count) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+              commit_batch_hash, event_count) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
         )
         .bind(&commit_id)
         .bind(request.run_id().as_str())
@@ -135,8 +135,6 @@ impl PostgresRunStore {
         .bind(plan.purpose_name())
         .bind(fingerprint.as_digest().as_str())
         .bind(&final_authority.commit_batch_hash)
-        .bind(HASH_DOMAIN_VERSION)
-        .bind(CANONICALIZER_IDENTITY)
         .bind(event_count)
         .execute(&mut *tx)
         .await

@@ -42,7 +42,6 @@ pub(super) fn final_commit_authority_from_parts(
         "commit_key": commit_key.as_str(),
         "domain": "mfm.commit.batch.v1",
         "events": events,
-        "hash_domain_version": HASH_DOMAIN_VERSION,
         "required_artifacts": required,
         "run_id": run_id.as_str(),
         "seq": seq.as_u64(),

@@ -7,8 +7,7 @@ pub(super) async fn read_commit_by_key(
 ) -> Result<Option<CommitAuthorityRow>> {
     let row = sqlx::query(
         "SELECT commit_id, run_id, seq, commit_key, commit_purpose, \
-         prepared_commit_plan_fingerprint, commit_batch_hash, hash_domain_version, \
-         canonicalizer_identity, event_count \
+         prepared_commit_plan_fingerprint, commit_batch_hash, event_count \
          FROM commits WHERE run_id = $1 AND commit_key = $2",
     )
     .bind(run_id.as_str())
@@ -26,8 +25,7 @@ pub(super) async fn read_commit_by_seq(
 ) -> Result<CommitAuthorityRow> {
     let row = sqlx::query(
         "SELECT commit_id, run_id, seq, commit_key, commit_purpose, \
-         prepared_commit_plan_fingerprint, commit_batch_hash, hash_domain_version, \
-         canonicalizer_identity, event_count \
+         prepared_commit_plan_fingerprint, commit_batch_hash, event_count \
          FROM commits WHERE run_id = $1 AND seq = $2",
     )
     .bind(run_id.as_str())
@@ -68,8 +66,7 @@ pub(super) async fn load_commit_authority_rows_tx(
 ) -> Result<Vec<CommitAuthorityRow>> {
     let rows = sqlx::query(
         "SELECT commit_id, run_id, seq, commit_key, commit_purpose, \
-         prepared_commit_plan_fingerprint, commit_batch_hash, hash_domain_version, \
-         canonicalizer_identity, event_count \
+         prepared_commit_plan_fingerprint, commit_batch_hash, event_count \
          FROM commits WHERE run_id = $1 ORDER BY seq ASC",
     )
     .bind(run_id.as_str())
@@ -354,22 +351,6 @@ pub(super) fn commit_authority_row_from_row(row: PgRow) -> Result<CommitAuthorit
     let event_count: i32 = row
         .try_get("event_count")
         .map_err(|error| database_error("failed to decode commit event count", error))?;
-    let hash_domain_version: String = row
-        .try_get("hash_domain_version")
-        .map_err(|error| database_error("failed to decode commit hash domain", error))?;
-    if hash_domain_version != HASH_DOMAIN_VERSION {
-        return Err(PostgresStoreError::Corruption(
-            "commit hash domain version mismatch".to_owned(),
-        ));
-    }
-    let canonicalizer_identity: String = row
-        .try_get("canonicalizer_identity")
-        .map_err(|error| database_error("failed to decode commit canonicalizer", error))?;
-    if canonicalizer_identity != CANONICALIZER_IDENTITY {
-        return Err(PostgresStoreError::Corruption(
-            "commit canonicalizer identity mismatch".to_owned(),
-        ));
-    }
     let seq = StreamSeq::new(i64_to_positive_u64(seq, "commits.seq")?)?;
     let commit_key_identity = CommitKey::new(commit_key.clone())?;
     let expected_commit_id = mfm_store::v1::backend::derive_commit_id(

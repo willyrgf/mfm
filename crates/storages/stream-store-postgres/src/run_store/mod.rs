@@ -86,8 +86,6 @@ impl From<CodecError> for PostgresStoreError {
 
 pub(crate) type Result<T> = std::result::Result<T, PostgresStoreError>;
 
-const HASH_DOMAIN_VERSION: &str = "mfm.hash-domain.v1";
-const CANONICALIZER_IDENTITY: &str = "sha256-jcs-v1";
 const PROJECTION_VERSION: &str = "mfm.run_observation.v1";
 const RUN_OBSERVATION_SUMMARY_KIND: &str = "run";
 const RUN_OBSERVATION_DERIVATION_MODEL: &str = "run_observation_change_summary";

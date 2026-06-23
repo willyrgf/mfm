@@ -42,8 +42,6 @@ CREATE TABLE commits (
   commit_purpose TEXT NOT NULL,
   prepared_commit_plan_fingerprint TEXT NOT NULL,
   commit_batch_hash TEXT NOT NULL,
-  hash_domain_version TEXT NOT NULL,
-  canonicalizer_identity TEXT NOT NULL,
   event_count INTEGER NOT NULL,
   append_xid XID8 NOT NULL DEFAULT pg_current_xact_id(),
   committed_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp(),

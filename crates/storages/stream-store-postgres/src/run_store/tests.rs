@@ -100,11 +100,10 @@ async fn schema_validation_proves_append_xid_trigger_contracts() {
     let commit_xid: String = sqlx::query_scalar(
         "INSERT INTO commits \
          (commit_id, run_id, seq, commit_key, commit_purpose, prepared_commit_plan_fingerprint, \
-          commit_batch_hash, hash_domain_version, canonicalizer_identity, event_count, append_xid) \
+          commit_batch_hash, event_count, append_xid) \
          VALUES \
          ('schema-trigger-commit', 'schema-trigger-run', 1, 'schema-trigger-key', \
-          'schema-trigger-purpose', $1, $2, 'mfm.postgres.authority.v1', 'mfm.jcs.v1', \
-          1, '1'::xid8) \
+          'schema-trigger-purpose', $1, $2, 1, '1'::xid8) \
          RETURNING append_xid::text",
     )
     .bind(content_digest(252).as_str())
