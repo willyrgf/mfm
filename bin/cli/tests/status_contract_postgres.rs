@@ -7,6 +7,7 @@ use mfm_events::v1 as events;
 use mfm_ids::{AttemptId, DigestAlgorithm, DigestBytes, RunId, SpecHash};
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
+use mfm_store::v1::RunEventStore;
 use serde_json::Value;
 use sqlx::{AssertSqlSafe, PgPool};
 use std::process::Output;
