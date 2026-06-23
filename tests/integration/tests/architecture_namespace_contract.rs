@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const TEST_HARNESS_PATHS: &[&str] = &["tests/integration/tests/architecture_namespace_contract.rs"];
+const SOURCE_OF_TRUTH_DOC_PATHS: &[&str] = &["PLAN_IMPL_RFC_PG_TRANS.md", "RFC_REFAC_PG_TRANS.md"];
 const FORBIDDEN_SEMANTIC_SURFACE_FIELDS: &[&str] = &[
     "rpc_url",
     "authorization",
@@ -191,6 +192,206 @@ fn evm_contract_lifecycle_runners_live_in_adapter_not_app() {
 }
 
 #[test]
+fn postgres_migrations_do_not_reintroduce_removed_storage_surfaces() {
+    let root = repo_root();
+    let migration_dir = root.join("crates/storages/stream-store-postgres/migrations");
+    let mut migrations = fs::read_dir(&migration_dir)
+        .unwrap_or_else(|error| panic!("read migration dir {}: {error}", migration_dir.display()))
+        .map(|entry| {
+            entry
+                .unwrap_or_else(|error| panic!("read migration dir entry: {error}"))
+                .path()
+        })
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("sql"))
+        .collect::<Vec<_>>();
+    migrations.sort();
+
+    for path in migrations {
+        let source = fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read migration {}: {error}", path.display()));
+        for forbidden in [
+            "typed_",
+            "payload_json JSONB",
+            "jsonb::text",
+            "commit_pos",
+            "change_pos",
+            "CREATE SEQUENCE",
+            "LOCK TABLE",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "Postgres migrations must not reintroduce removed RFC storage surface `{forbidden}` in {}",
+                path.display()
+            );
+        }
+    }
+
+    let baseline =
+        fs::read_to_string(migration_dir.join("0001_run_store.sql")).expect("baseline migration");
+    for required in [
+        "CREATE TABLE run_events",
+        "CONSTRAINT artifact_blobs_byte_len_max CHECK (byte_len <= 16777216)",
+        "CREATE TABLE run_commit_log",
+        "CONSTRAINT run_commit_log_sort_key_v1_length CHECK (octet_length(commit_sort_key) = 32)",
+        "CONSTRAINT run_commit_log_sort_key_v1_prefix CHECK (get_byte(commit_sort_key, 0) = 1)",
+        "CREATE TABLE run_observation_cursors",
+    ] {
+        assert!(
+            baseline.contains(required),
+            "baseline migration must keep RFC target storage surface `{required}`"
+        );
+    }
+}
+
+#[test]
+fn postgres_production_code_rejects_removed_storage_shortcuts() {
+    let root = repo_root();
+    let entries = repo_text_entries(&root);
+    let forbidden = [
+        "CREATE TABLE typed_",
+        "INSERT INTO typed_",
+        "UPDATE typed_",
+        "DELETE FROM typed_",
+        "FROM typed_",
+        "JOIN typed_",
+        "payload_json JSONB",
+        "jsonb::text",
+        "commit_pos",
+        "change_pos",
+        "global_commit",
+        "global_change",
+    ];
+
+    assert_forbidden_terms_are_allowlisted(
+        "Postgres removed storage shortcut",
+        &entries,
+        &forbidden,
+        &[],
+        |path, _source| {
+            path.starts_with("crates/storages/stream-store-postgres/")
+                && !path.ends_with("/src/schema.rs")
+                && !is_test_support_path(path)
+        },
+    );
+}
+
+#[test]
+fn in_memory_run_store_is_test_support_only() {
+    let root = repo_root();
+    let store_path = "crates/kernel/store/src/lib.rs";
+    let store_source = fs::read_to_string(root.join(store_path)).expect("store source");
+    assert!(
+        store_source.contains("#[cfg(any(test, feature = \"test-support\"))]\n    #[derive(Debug, Clone, Default)]\n    pub struct AsyncInMemoryRunStore"),
+        "AsyncInMemoryRunStore must remain cfg-gated to tests or the test-support feature"
+    );
+
+    let lines = store_source.lines().collect::<Vec<_>>();
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        if !(trimmed.contains("pub struct AsyncInMemoryRunStore")
+            || (trimmed.starts_with("impl ") && trimmed.contains("AsyncInMemoryRunStore")))
+        {
+            continue;
+        }
+
+        let context = lines[index.saturating_sub(3)..index].join("\n");
+        assert!(
+            context.contains("#[cfg(any(test, feature = \"test-support\"))]"),
+            "{store_path}:{} exposes AsyncInMemoryRunStore without the required cfg",
+            index + 1
+        );
+    }
+
+    let entries = repo_text_entries(&root);
+    let mut offenders = Vec::new();
+    for entry in entries {
+        if TEST_HARNESS_PATHS.contains(&entry.path.as_str())
+            || entry.path == store_path
+            || is_test_support_path(&entry.path)
+            || !entry.source.contains("AsyncInMemoryRunStore")
+        {
+            continue;
+        }
+
+        if !all_term_occurrences_after_cfg_test_module(&entry.source, "AsyncInMemoryRunStore") {
+            offenders.push(entry.path);
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "AsyncInMemoryRunStore references must be limited to tests/test-support; offenders: {}",
+        offenders.join(", ")
+    );
+}
+
+#[test]
+fn public_observation_surfaces_do_not_expose_postgres_cursor_internals() {
+    let root = repo_root();
+    let entries = repo_text_entries(&root);
+    let forbidden = [
+        "cursor_key_id",
+        "store_epoch",
+        "append_xid",
+        "commit_sort_key",
+        "CURSOR_VERSION",
+        "run_observation_cursors",
+    ];
+
+    assert_forbidden_terms_are_allowlisted(
+        "public observation cursor internal",
+        &entries,
+        &forbidden,
+        &[],
+        |path, _source| {
+            !TEST_HARNESS_PATHS.contains(&path)
+                && !SOURCE_OF_TRUTH_DOC_PATHS.contains(&path)
+                && !is_test_support_path(path)
+                && !path.starts_with("crates/storages/stream-store-postgres/")
+                && (path.starts_with("bin/")
+                    || path.starts_with("crates/")
+                    || path.starts_with("docs/")
+                    || path == "README.md")
+        },
+    );
+}
+
+#[test]
+fn artifact_blob_table_access_stays_inside_postgres_storage() {
+    let root = repo_root();
+    let entries = repo_text_entries(&root);
+
+    assert_forbidden_terms_are_allowlisted(
+        "external artifact blob table",
+        &entries,
+        &["artifact_blobs"],
+        &[],
+        |path, _source| {
+            !TEST_HARNESS_PATHS.contains(&path)
+                && !SOURCE_OF_TRUTH_DOC_PATHS.contains(&path)
+                && !is_test_support_path(path)
+                && !path.starts_with("crates/storages/stream-store-postgres/")
+        },
+    );
+}
+
+#[test]
+fn jsonb_text_canonicalization_shortcuts_are_not_used() {
+    let root = repo_root();
+    let entries = repo_text_entries(&root);
+
+    assert_forbidden_terms_are_allowlisted(
+        "jsonb text canonicalization shortcut",
+        &entries,
+        &["jsonb::text", "payload_json JSONB"],
+        &[],
+        |path, _source| {
+            !TEST_HARNESS_PATHS.contains(&path) && !SOURCE_OF_TRUTH_DOC_PATHS.contains(&path)
+        },
+    );
+}
+
+#[test]
 fn semantic_surface_guard_rejects_synthetic_runtime_fields() {
     let entries = vec![TextEntry {
         path: "crates/new-config/src/lib.rs".to_owned(),
@@ -343,6 +544,31 @@ fn is_semantic_surface_candidate(source: &str) -> bool {
     ]
     .iter()
     .any(|marker| source.contains(marker))
+}
+
+fn is_test_support_path(path: &str) -> bool {
+    path.starts_with("tests/")
+        || path.contains("/tests/")
+        || path.ends_with("/src/tests.rs")
+        || path.ends_with("/test_support.rs")
+        || path.contains("/test_support/")
+}
+
+fn all_term_occurrences_after_cfg_test_module(source: &str, term: &str) -> bool {
+    let lines = source.lines().collect::<Vec<_>>();
+    let cfg_test_module_line = lines.windows(2).position(|window| {
+        window[0].trim() == "#[cfg(test)]" && window[1].trim_start().starts_with("mod tests")
+    });
+
+    let Some(cfg_test_module_line) = cfg_test_module_line else {
+        return false;
+    };
+
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(_index, line)| line.contains(term))
+        .all(|(index, _line)| index > cfg_test_module_line)
 }
 
 fn repo_text_entries(root: &Path) -> Vec<TextEntry> {
