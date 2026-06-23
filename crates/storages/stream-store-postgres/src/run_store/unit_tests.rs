@@ -34,7 +34,7 @@ fn resource_lane_waiter_fingerprint_is_stable_for_identical_claim_retries() {
         .expect("schema id"),
         key: events::ResourceKey::new("wallet-1").expect("resource key"),
     };
-    let lane_id = resource_lane_id(&evidence).expect("lane id");
+    let lane_id = mfm_store::v1::backend::resource_lane_id(&evidence).expect("lane id");
     let mut intent = events::ResourceLaneClaimIntent {
         spec_hash: mfm_ids::SpecHash::from_digest(
             DigestAlgorithm::Sha256JcsV1,
@@ -60,16 +60,19 @@ fn resource_lane_waiter_fingerprint_is_stable_for_identical_claim_retries() {
             .expect("runner id"),
     };
 
-    let first = resource_lane_claim_fingerprint(&run_id, &lane_id, &intent).expect("first");
-    let retry = resource_lane_claim_fingerprint(&run_id, &lane_id, &intent).expect("retry");
+    let first = mfm_store::v1::backend::resource_lane_claim_fingerprint(&run_id, &lane_id, &intent)
+        .expect("first");
+    let retry = mfm_store::v1::backend::resource_lane_claim_fingerprint(&run_id, &lane_id, &intent)
+        .expect("retry");
     intent.invocation_epoch = 2;
     let different_epoch =
-        resource_lane_claim_fingerprint(&run_id, &lane_id, &intent).expect("different");
+        mfm_store::v1::backend::resource_lane_claim_fingerprint(&run_id, &lane_id, &intent)
+            .expect("different");
 
     assert_eq!(first, retry);
     assert_ne!(first, different_epoch);
     assert_eq!(
-        resource_lane_waiter_id(&first),
-        resource_lane_waiter_id(&retry)
+        mfm_store::v1::backend::resource_lane_waiter_id(&first),
+        mfm_store::v1::backend::resource_lane_waiter_id(&retry)
     );
 }

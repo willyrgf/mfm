@@ -372,7 +372,7 @@ pub(super) fn commit_authority_row_from_row(row: PgRow) -> Result<CommitAuthorit
     }
     let seq = StreamSeq::new(i64_to_positive_u64(seq, "commits.seq")?)?;
     let commit_key_identity = CommitKey::new(commit_key.clone())?;
-    let expected_commit_id = derive_commit_id(
+    let expected_commit_id = mfm_store::v1::backend::derive_commit_id(
         &run_id,
         seq,
         &commit_key_identity,

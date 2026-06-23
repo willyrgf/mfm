@@ -1,26 +1,5 @@
 use super::*;
 
-pub(super) fn admit_artifact_evidence(
-    artifacts: &mut ArtifactAuthorityMap,
-    admitted_artifacts: &[ArtifactEvidenceRef],
-) -> Result<()> {
-    for evidence in admitted_artifacts {
-        let key = (evidence.artifact_id.clone(), evidence.evidence_hash()?);
-        if let Some(existing) = artifacts.get(&key) {
-            if existing != evidence {
-                return Err(StoreError::ArtifactEvidenceMismatch {
-                    artifact_id: evidence.artifact_id.clone(),
-                    field: "artifact",
-                }
-                .into());
-            }
-            continue;
-        }
-        artifacts.insert(key, evidence.clone());
-    }
-    Ok(())
-}
-
 pub(super) async fn verify_prepared_artifact_bundle_tx(
     tx: &mut Transaction<'_, Postgres>,
     bundle: &PreparedCommitBundle,
@@ -29,8 +8,11 @@ pub(super) async fn verify_prepared_artifact_bundle_tx(
         verify_prepared_artifact_bytes(artifact)?;
     }
     for existing in bundle.existing_artifacts() {
-        let evidence =
-            admitted_artifact_evidence(bundle, existing.artifact_id(), existing.evidence_hash())?;
+        let evidence = mfm_store::v1::backend::admitted_artifact_evidence(
+            bundle,
+            existing.artifact_id(),
+            existing.evidence_hash(),
+        )?;
         let record =
             load_artifact_record_tx(tx, existing.artifact_id(), existing.evidence_hash()).await?;
         verify_artifact_record(&record, evidence, None)?;
@@ -50,8 +32,11 @@ pub(super) async fn admit_artifact_bundle_tx(
         insert_prepared_artifact_bytes_tx(tx, artifact).await?;
     }
     for existing in bundle.existing_artifacts() {
-        let evidence =
-            admitted_artifact_evidence(bundle, existing.artifact_id(), existing.evidence_hash())?;
+        let evidence = mfm_store::v1::backend::admitted_artifact_evidence(
+            bundle,
+            existing.artifact_id(),
+            existing.evidence_hash(),
+        )?;
         let record =
             load_artifact_record_tx(tx, existing.artifact_id(), existing.evidence_hash()).await?;
         verify_artifact_record(&record, evidence, None)?;
@@ -66,22 +51,6 @@ pub(super) async fn admit_artifact_bundle_tx(
         link_run_artifact_tx(tx, run_id, commit_key, seq, commit_id, evidence).await?;
     }
     Ok(())
-}
-
-pub(super) fn admitted_artifact_evidence<'a>(
-    bundle: &'a PreparedCommitBundle,
-    artifact_id: &ArtifactId,
-    evidence_hash: &ContentDigest,
-) -> Result<&'a ArtifactEvidenceRef> {
-    for evidence in bundle.admitted_artifacts() {
-        if &evidence.artifact_id == artifact_id && evidence.evidence_hash()? == *evidence_hash {
-            return Ok(evidence);
-        }
-    }
-    Err(StoreError::MissingPreparedArtifactBytes {
-        artifact_id: artifact_id.clone(),
-    }
-    .into())
 }
 
 pub(super) fn verify_prepared_artifact_bytes(artifact: &PreparedArtifactBytes) -> Result<()> {

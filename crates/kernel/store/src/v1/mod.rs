@@ -291,6 +291,9 @@ pub enum CodecError {
     Identity(String),
 }
 
+/// Backend helper APIs for durable store implementations.
+pub mod backend;
+
 /// Shared canonical-JSON codec for kernel events, projections, and saga types.
 ///
 /// This module exists so the in-memory store and the Postgres adapter share one
@@ -6122,7 +6125,6 @@ fn projection_with_resource_lanes(
     })
 }
 
-#[cfg(any(test, feature = "test-support"))]
 fn admit_artifact_evidence(
     artifacts: &mut ArtifactAuthorityMap,
     admitted_artifacts: &[ArtifactEvidenceRef],
@@ -6170,7 +6172,6 @@ fn verify_existing_artifact_admissions(
     Ok(())
 }
 
-#[cfg(any(test, feature = "test-support"))]
 fn admitted_artifact_evidence<'a>(
     bundle: &'a PreparedCommitBundle,
     artifact_id: &ArtifactId,

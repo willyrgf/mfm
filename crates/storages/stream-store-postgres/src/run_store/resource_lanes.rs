@@ -9,7 +9,9 @@ pub(super) async fn lock_resource_lanes_for_request_tx(
     for payload in request.payloads() {
         match payload {
             events::KernelEventPayload::ResourceLaneClaimIntent(intent) => {
-                lane_ids.insert(resource_lane_id(&intent.resource_key)?.to_vec());
+                lane_ids.insert(
+                    mfm_store::v1::backend::resource_lane_id(&intent.resource_key)?.to_vec(),
+                );
             }
             events::KernelEventPayload::ResourceLaneReleaseIntent(intent) => {
                 lane_ids.insert(resource_lane_id_for_release(
@@ -42,43 +44,6 @@ pub(super) async fn lock_resource_lane_tx(
     Ok(())
 }
 
-pub(super) fn resource_key_canonical_json(
-    evidence: &events::ResourceKeyEvidence,
-) -> Result<Vec<u8>> {
-    Ok(canonical_json(serde_json::json!({
-        "key": evidence.key.as_str(),
-    }))?
-    .to_vec())
-}
-
-pub(super) fn resource_lane_id(evidence: &events::ResourceKeyEvidence) -> Result<[u8; 32]> {
-    let key_canonical_json = resource_key_canonical_json(evidence)?;
-    let canonical = canonical_json(serde_json::json!({
-        "key_canonical_json": String::from_utf8(key_canonical_json).map_err(|error| {
-            PostgresStoreError::Corruption(format!("resource key canonical JSON was not UTF-8: {error}"))
-        })?,
-        "key_schema_id": evidence.key_schema_id.as_str(),
-        "mode": "exclusive",
-        "namespace": evidence.namespace.as_str(),
-    }))?;
-    let mut input = Vec::with_capacity(RESOURCE_LANE_ID_DOMAIN.len() + canonical.as_bytes().len());
-    input.extend_from_slice(RESOURCE_LANE_ID_DOMAIN);
-    input.extend_from_slice(canonical.as_bytes());
-    let digest = sha256_digest_bytes(&input);
-    let mut lane_id = [0_u8; 32];
-    lane_id[0] = 1;
-    lane_id[1..].copy_from_slice(&digest.as_bytes()[..31]);
-    Ok(lane_id)
-}
-
-pub(super) fn resource_lane_id_for_key(key: &ResourceLaneKey) -> Result<[u8; 32]> {
-    resource_lane_id(&events::ResourceKeyEvidence {
-        namespace: key.namespace.clone(),
-        key_schema_id: key.key_schema_id.clone(),
-        key: key.key.clone(),
-    })
-}
-
 pub(super) fn resource_lane_id_for_release(
     run_id: &RunId,
     projections: &ProjectionSnapshot,
@@ -107,7 +72,7 @@ pub(super) fn resource_lane_id_for_release(
         }
         .into());
     }
-    Ok(resource_lane_id_for_key(lane_key)?.to_vec())
+    Ok(mfm_store::v1::backend::resource_lane_id_for_key(lane_key)?.to_vec())
 }
 
 pub(super) struct ResourceLaneClaimAdmission {
@@ -142,13 +107,17 @@ pub(super) fn single_lane_claim_admission(
     if claims.next().is_some() {
         return Ok(None);
     }
-    let lane_id = resource_lane_id(&intent.resource_key)?.to_vec();
+    let lane_id = mfm_store::v1::backend::resource_lane_id(&intent.resource_key)?.to_vec();
     let lane_key = ResourceLaneKey::from_evidence(&intent.resource_key);
     let holder = mfm_store::v1::SideEffectLedgerRef::new(
         request.run_id().clone(),
         intent.ledger_key.clone(),
     );
-    let claim_fingerprint = resource_lane_claim_fingerprint(request.run_id(), &lane_id, intent)?;
+    let claim_fingerprint = mfm_store::v1::backend::resource_lane_claim_fingerprint(
+        request.run_id(),
+        &lane_id,
+        intent,
+    )?;
     Ok(Some(ResourceLaneClaimAdmission {
         lane_id,
         lane_key,
@@ -160,41 +129,6 @@ pub(super) fn single_lane_claim_admission(
         invocation_epoch: intent.invocation_epoch,
         claim_fingerprint,
     }))
-}
-
-pub(super) fn resource_lane_claim_fingerprint(
-    run_id: &RunId,
-    lane_id: &[u8],
-    intent: &events::ResourceLaneClaimIntent,
-) -> Result<String> {
-    let canonical = canonical_json(serde_json::json!({
-        "attempt_id": intent.attempt_id.as_str(),
-        "domain": String::from_utf8_lossy(RESOURCE_LANE_WAITER_FINGERPRINT_DOMAIN),
-        "invocation_epoch": intent.invocation_epoch,
-        "lane_id": bytes_hex(lane_id),
-        "ledger_key": intent.ledger_key.as_str(),
-        "node_id": intent.node_id.as_str(),
-        "requirement_digest": intent.requirement_digest.as_str(),
-        "resolved_by_capability_impl": intent.resolved_by_capability_impl.as_str(),
-        "run_id": run_id.as_str(),
-    }))?;
-    let mut input = Vec::with_capacity(
-        RESOURCE_LANE_WAITER_FINGERPRINT_DOMAIN.len() + canonical.as_bytes().len(),
-    );
-    input.extend_from_slice(RESOURCE_LANE_WAITER_FINGERPRINT_DOMAIN);
-    input.extend_from_slice(canonical.as_bytes());
-    Ok(bytes_hex(sha256_digest_bytes(&input).as_bytes()))
-}
-
-pub(super) fn resource_lane_waiter_id(claim_fingerprint: &str) -> String {
-    let mut input =
-        Vec::with_capacity(RESOURCE_LANE_WAITER_ID_DOMAIN.len() + claim_fingerprint.len());
-    input.extend_from_slice(RESOURCE_LANE_WAITER_ID_DOMAIN);
-    input.extend_from_slice(claim_fingerprint.as_bytes());
-    format!(
-        "resource_lane_waiter:{}",
-        bytes_hex(sha256_digest_bytes(&input).as_bytes())
-    )
 }
 
 pub(super) async fn resource_lane_fifo_pre_gate_tx(
@@ -273,7 +207,7 @@ pub(super) async fn enqueue_or_refresh_waiter_tx(
         return Ok(waiter);
     }
     let lane_ticket = allocate_waiter_ticket_tx(tx, &admission.lane_id).await?;
-    let waiter_id = resource_lane_waiter_id(&admission.claim_fingerprint);
+    let waiter_id = mfm_store::v1::backend::resource_lane_waiter_id(&admission.claim_fingerprint);
     let row = sqlx::query(
         "INSERT INTO resource_lane_waiters \
          (waiter_id, lane_id, lane_ticket, run_id, node_id, attempt_id, ledger_key, \

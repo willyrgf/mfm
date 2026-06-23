@@ -56,7 +56,10 @@ impl PostgresRunStore {
 
         verify_prepared_artifact_bundle_tx(&mut tx, &bundle).await?;
         let mut artifacts = load_artifacts(&mut tx, request.run_id()).await?;
-        admit_artifact_evidence(&mut artifacts, bundle.admitted_artifacts())?;
+        mfm_store::v1::backend::admit_artifact_evidence(
+            &mut artifacts,
+            bundle.admitted_artifacts(),
+        )?;
         let (run_projection, stream_head) =
             rebuild_projection_snapshot_with_head(&mut tx, request.run_id()).await?;
         if stream_head != head {
@@ -107,7 +110,7 @@ impl PostgresRunStore {
             }
         }
         let batch = staged.batch().clone();
-        let commit_id = derive_commit_id(
+        let commit_id = mfm_store::v1::backend::derive_commit_id(
             request.run_id(),
             batch.seq(),
             request.commit_key(),

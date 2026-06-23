@@ -34,7 +34,7 @@ pub(super) async fn load_unique_logical_payloads(
             row.try_get::<String, _>("logical_key")
                 .map_err(|error| database_error("failed to decode logical key", error))?,
         )?;
-        if !is_unique_logical_key(&logical_key) {
+        if !mfm_store::v1::backend::is_unique_logical_key(&logical_key) {
             continue;
         }
         let payload_hash = parse_identity::<ContentDigest>(
