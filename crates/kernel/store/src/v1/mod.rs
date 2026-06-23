@@ -5995,9 +5995,32 @@ fn validate_required_artifacts_cover_payload_references(
 ) -> Result<()> {
     for payload in &request.payloads {
         for requirement in event_artifact_requirements(payload) {
-            let Some(evidence) = request.required_artifacts.iter().find(|evidence| {
-                validate_artifact_requirement_against_evidence(&requirement, evidence).is_ok()
-            }) else {
+            let mut same_artifact_evidence = None;
+            let mut same_digest_evidence = None;
+            let mut covering_evidence = None;
+            for evidence in &request.required_artifacts {
+                match validate_artifact_requirement_against_evidence(&requirement, evidence) {
+                    Ok(()) => {
+                        covering_evidence = Some(evidence);
+                        break;
+                    }
+                    Err(_) if evidence.artifact_id == requirement.artifact_id => {
+                        same_artifact_evidence.get_or_insert(evidence);
+                        let digest_matches = match &requirement.digest {
+                            Some(digest) => &evidence.digest == digest,
+                            None => true,
+                        };
+                        if digest_matches {
+                            same_digest_evidence.get_or_insert(evidence);
+                        }
+                    }
+                    Err(_) => {}
+                }
+            }
+            let Some(evidence) = covering_evidence else {
+                if let Some(evidence) = same_digest_evidence.or(same_artifact_evidence) {
+                    validate_required_artifact_requirement(purpose, &requirement, evidence)?;
+                }
                 return Err(invalid_prepared_commit_purpose(
                     purpose,
                     format!(
