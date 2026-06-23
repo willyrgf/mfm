@@ -1,64 +1,7 @@
 use super::*;
 
-pub(super) struct PreparedCommitAuthority {
-    pub(super) commit_idempotency_hash: String,
-    pub(super) idempotency_canonical_json: Vec<u8>,
-    pub(super) prepared_authority_hash: String,
-    pub(super) prepared_authority_canonical_json: Vec<u8>,
-}
-
 pub(super) struct FinalCommitAuthority {
     pub(super) commit_batch_hash: String,
-    pub(super) commit_batch_canonical_json: Vec<u8>,
-}
-
-pub(super) fn prepared_commit_authority(
-    plan: &mfm_store::v1::PreparedCommitPlan,
-    fingerprint: &CommitFingerprint,
-) -> Result<PreparedCommitAuthority> {
-    let request = plan.request();
-    let payloads = request
-        .payloads()
-        .iter()
-        .map(payload_json_value)
-        .collect::<Result<Vec<_>>>()?;
-    let required_artifacts = request
-        .required_artifacts()
-        .iter()
-        .map(artifact_evidence_authority_json)
-        .collect::<Result<Vec<_>>>()?;
-    let admitted_artifacts = plan
-        .admitted_artifacts()
-        .iter()
-        .map(artifact_evidence_authority_json)
-        .collect::<Result<Vec<_>>>()?;
-    let stable_request = serde_json::json!({
-        "admitted_artifacts": admitted_artifacts,
-        "commit_key": request.commit_key().as_str(),
-        "commit_purpose": plan.purpose_name(),
-        "hash_domain_version": HASH_DOMAIN_VERSION,
-        "payloads": payloads,
-        "preconditions": preconditions_authority_json(request.preconditions())?,
-        "prepared_plan_fingerprint": fingerprint.as_digest().as_str(),
-        "required_artifacts": required_artifacts,
-        "run_id": request.run_id().as_str(),
-    });
-    let idempotency = canonical_json(serde_json::json!({
-        "domain": "mfm.commit.idempotency.v1",
-        "request": stable_request,
-    }))?;
-    let prepared = canonical_json(serde_json::json!({
-        "domain": "mfm.commit.prepared_authority.v1",
-        "expected_next_seq": request.expected_next_seq().as_u64(),
-        "request": stable_request,
-        "store_fill_policy": "mfm.store_fill.resource_lanes.v1",
-    }))?;
-    Ok(PreparedCommitAuthority {
-        commit_idempotency_hash: idempotency.content_digest().as_str().to_owned(),
-        idempotency_canonical_json: idempotency.as_bytes().to_vec(),
-        prepared_authority_hash: prepared.content_digest().as_str().to_owned(),
-        prepared_authority_canonical_json: prepared.as_bytes().to_vec(),
-    })
 }
 
 pub(super) fn final_commit_authority(
@@ -106,7 +49,6 @@ pub(super) fn final_commit_authority_from_parts(
     }))?;
     Ok(FinalCommitAuthority {
         commit_batch_hash: canonical.content_digest().as_str().to_owned(),
-        commit_batch_canonical_json: canonical.as_bytes().to_vec(),
     })
 }
 
@@ -182,78 +124,4 @@ pub(super) fn artifact_evidence_canonical_json(evidence: &ArtifactEvidenceRef) -
     }))?
     .as_bytes()
     .to_vec())
-}
-
-pub(super) fn preconditions_authority_json(
-    preconditions: &mfm_store::v1::CommitPreconditions,
-) -> Result<Value> {
-    Ok(serde_json::json!({
-        "required_absent_logical_keys": preconditions.required_absent_logical_keys.iter().map(LogicalEventKey::as_str).collect::<Vec<_>>(),
-        "required_cell_states": preconditions.required_cell_states.iter().map(cell_precondition_json).collect::<Vec<_>>(),
-        "required_present_logical_keys": preconditions.required_present_logical_keys.iter().map(LogicalEventKey::as_str).collect::<Vec<_>>(),
-        "required_public_output_absent": preconditions.required_public_output_absent,
-        "required_run_state": required_run_state_tag(preconditions.required_run_state),
-        "required_side_effect_states": preconditions.required_side_effect_states.iter().map(side_effect_precondition_json).collect::<Vec<_>>(),
-        "saga_admit_token": preconditions.saga_admit_token.as_ref().map(saga_admit_token_json),
-    }))
-}
-
-pub(super) fn cell_precondition_json(precondition: &mfm_store::v1::CellStatePrecondition) -> Value {
-    serde_json::json!({
-        "cell_id": precondition.cell_id.as_str(),
-        "required": required_cell_state_tag(precondition.required),
-    })
-}
-
-pub(super) fn side_effect_precondition_json(
-    precondition: &mfm_store::v1::SideEffectStatePrecondition,
-) -> Value {
-    serde_json::json!({
-        "ledger_key": precondition.ledger_key.as_str(),
-        "required": required_side_effect_state_tag(precondition.required),
-    })
-}
-
-pub(super) fn saga_admit_token_json(token: &mfm_store::v1::SagaAdmitToken) -> Value {
-    serde_json::json!({
-        "run_id": token.run_id().as_str(),
-        "saga_policy_digest": token.saga_policy_digest().as_str(),
-        "spec_hash": token.spec_hash().as_str(),
-    })
-}
-
-pub(super) fn required_run_state_tag(value: mfm_store::v1::RequiredRunState) -> &'static str {
-    match value {
-        mfm_store::v1::RequiredRunState::Any => "any",
-        mfm_store::v1::RequiredRunState::Absent => "absent",
-        mfm_store::v1::RequiredRunState::Started => "started",
-        mfm_store::v1::RequiredRunState::NotCompleted => "not_completed",
-        mfm_store::v1::RequiredRunState::Completed => "completed",
-    }
-}
-
-pub(super) fn required_cell_state_tag(value: mfm_store::v1::RequiredCellState) -> &'static str {
-    match value {
-        mfm_store::v1::RequiredCellState::Absent => "absent",
-        mfm_store::v1::RequiredCellState::Produced => "produced",
-        mfm_store::v1::RequiredCellState::Skipped => "skipped",
-        mfm_store::v1::RequiredCellState::Terminal => "terminal",
-    }
-}
-
-pub(super) fn required_side_effect_state_tag(
-    value: mfm_store::v1::RequiredSideEffectState,
-) -> &'static str {
-    match value {
-        mfm_store::v1::RequiredSideEffectState::Absent => "absent",
-        mfm_store::v1::RequiredSideEffectState::IntentPersisted => "intent_persisted",
-        mfm_store::v1::RequiredSideEffectState::Claimed => "claimed",
-        mfm_store::v1::RequiredSideEffectState::InvocationPrepared => "invocation_prepared",
-        mfm_store::v1::RequiredSideEffectState::InvocationStarted => "invocation_started",
-        mfm_store::v1::RequiredSideEffectState::SubmissionResult => "submission_result",
-        mfm_store::v1::RequiredSideEffectState::ReceiptObserved => "receipt_observed",
-        mfm_store::v1::RequiredSideEffectState::ConfirmationObserved => "confirmation_observed",
-        mfm_store::v1::RequiredSideEffectState::Ambiguous => "ambiguous",
-        mfm_store::v1::RequiredSideEffectState::Failed => "failed",
-    }
 }

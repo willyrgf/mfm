@@ -6,9 +6,8 @@ pub(super) async fn read_commit_by_key(
     commit_key: &str,
 ) -> Result<Option<CommitAuthorityRow>> {
     let row = sqlx::query(
-        "SELECT commit_id, run_id, seq, commit_key, commit_purpose, commit_idempotency_hash, \
-         idempotency_canonical_json, prepared_authority_hash, prepared_authority_canonical_json, \
-         commit_batch_hash, commit_batch_canonical_json, hash_domain_version, \
+        "SELECT commit_id, run_id, seq, commit_key, commit_purpose, \
+         prepared_commit_plan_fingerprint, commit_batch_hash, hash_domain_version, \
          canonicalizer_identity, event_count \
          FROM commits WHERE run_id = $1 AND commit_key = $2",
     )
@@ -26,9 +25,8 @@ pub(super) async fn read_commit_by_seq(
     seq: StreamSeq,
 ) -> Result<CommitAuthorityRow> {
     let row = sqlx::query(
-        "SELECT commit_id, run_id, seq, commit_key, commit_purpose, commit_idempotency_hash, \
-         idempotency_canonical_json, prepared_authority_hash, prepared_authority_canonical_json, \
-         commit_batch_hash, commit_batch_canonical_json, hash_domain_version, \
+        "SELECT commit_id, run_id, seq, commit_key, commit_purpose, \
+         prepared_commit_plan_fingerprint, commit_batch_hash, hash_domain_version, \
          canonicalizer_identity, event_count \
          FROM commits WHERE run_id = $1 AND seq = $2",
     )
@@ -70,9 +68,8 @@ pub(super) async fn load_commit_authority_rows_tx(
     run_id: &RunId,
 ) -> Result<Vec<CommitAuthorityRow>> {
     let rows = sqlx::query(
-        "SELECT commit_id, run_id, seq, commit_key, commit_purpose, commit_idempotency_hash, \
-         idempotency_canonical_json, prepared_authority_hash, prepared_authority_canonical_json, \
-         commit_batch_hash, commit_batch_canonical_json, hash_domain_version, \
+        "SELECT commit_id, run_id, seq, commit_key, commit_purpose, \
+         prepared_commit_plan_fingerprint, commit_batch_hash, hash_domain_version, \
          canonicalizer_identity, event_count \
          FROM commits WHERE run_id = $1 ORDER BY seq ASC",
     )
@@ -118,9 +115,7 @@ pub(super) async fn validate_final_commit_authority_tx(
         &bindings.required,
         &bindings.admitted,
     )?;
-    if expected.commit_batch_hash != commit.commit_batch_hash
-        || expected.commit_batch_canonical_json != commit.commit_batch_canonical_json
-    {
+    if expected.commit_batch_hash != commit.commit_batch_hash {
         return Err(PostgresStoreError::Corruption(
             "commit batch authority does not match persisted event and artifact bindings"
                 .to_owned(),
@@ -326,10 +321,8 @@ pub(super) struct CommitAuthorityRow {
     pub(super) commit_id: String,
     pub(super) run_id: RunId,
     pub(super) commit_key: String,
-    pub(super) commit_idempotency_hash: String,
     pub(super) prepared_commit_plan_fingerprint: CommitFingerprint,
     pub(super) commit_batch_hash: String,
-    pub(super) commit_batch_canonical_json: Vec<u8>,
     pub(super) seq: StreamSeq,
     pub(super) event_count: usize,
 }
@@ -348,24 +341,14 @@ pub(super) fn commit_authority_row_from_row(row: PgRow) -> Result<CommitAuthorit
     let commit_purpose: String = row
         .try_get("commit_purpose")
         .map_err(|error| database_error("failed to decode commit purpose", error))?;
-    let commit_idempotency_hash: String = row
-        .try_get("commit_idempotency_hash")
-        .map_err(|error| database_error("failed to decode commit idempotency hash", error))?;
-    let idempotency_canonical_json: Vec<u8> = row
-        .try_get("idempotency_canonical_json")
-        .map_err(|error| database_error("failed to decode commit idempotency bytes", error))?;
-    let prepared_authority_hash: String = row
-        .try_get("prepared_authority_hash")
-        .map_err(|error| database_error("failed to decode prepared authority hash", error))?;
-    let prepared_authority_canonical_json: Vec<u8> = row
-        .try_get("prepared_authority_canonical_json")
-        .map_err(|error| database_error("failed to decode prepared authority bytes", error))?;
+    let prepared_commit_plan_fingerprint =
+        CommitFingerprint::from_digest(parse_identity::<ContentDigest>(
+            &row.try_get::<String, _>("prepared_commit_plan_fingerprint")
+                .map_err(|error| database_error("failed to decode commit fingerprint", error))?,
+        )?);
     let commit_batch_hash: String = row
         .try_get("commit_batch_hash")
         .map_err(|error| database_error("failed to decode commit batch hash", error))?;
-    let commit_batch_canonical_json: Vec<u8> = row
-        .try_get("commit_batch_canonical_json")
-        .map_err(|error| database_error("failed to decode commit batch bytes", error))?;
     let seq: i64 = row
         .try_get("seq")
         .map_err(|error| database_error("failed to decode commit seq", error))?;
@@ -388,23 +371,6 @@ pub(super) fn commit_authority_row_from_row(row: PgRow) -> Result<CommitAuthorit
             "commit canonicalizer identity mismatch".to_owned(),
         ));
     }
-    verify_persisted_canonical_hash(
-        "commit idempotency",
-        &idempotency_canonical_json,
-        &commit_idempotency_hash,
-    )?;
-    verify_persisted_canonical_hash(
-        "prepared authority",
-        &prepared_authority_canonical_json,
-        &prepared_authority_hash,
-    )?;
-    verify_persisted_canonical_hash(
-        "commit batch",
-        &commit_batch_canonical_json,
-        &commit_batch_hash,
-    )?;
-    let prepared_commit_plan_fingerprint =
-        prepared_commit_plan_fingerprint_from_idempotency_json(&idempotency_canonical_json)?;
     let seq = StreamSeq::new(i64_to_positive_u64(seq, "commits.seq")?)?;
     let commit_key_identity = CommitKey::new(commit_key.clone())?;
     let expected_commit_id = derive_commit_id(
@@ -412,67 +378,22 @@ pub(super) fn commit_authority_row_from_row(row: PgRow) -> Result<CommitAuthorit
         seq,
         &commit_key_identity,
         &commit_purpose,
-        &prepared_authority_hash,
+        &prepared_commit_plan_fingerprint,
     )?;
     if commit_id != expected_commit_id {
         return Err(PostgresStoreError::Corruption(
-            "commit id does not match persisted prepared authority".to_owned(),
+            "commit id does not match persisted fingerprint".to_owned(),
         ));
     }
     Ok(CommitAuthorityRow {
         commit_id,
         run_id,
         commit_key,
-        commit_idempotency_hash,
         prepared_commit_plan_fingerprint,
         commit_batch_hash,
-        commit_batch_canonical_json,
         seq,
         event_count: usize::try_from(event_count).map_err(|_| {
             PostgresStoreError::Corruption("commits.event_count was negative".to_owned())
         })?,
     })
-}
-
-pub(super) fn prepared_commit_plan_fingerprint_from_idempotency_json(
-    idempotency_canonical_json: &[u8],
-) -> Result<CommitFingerprint> {
-    let value: Value = serde_json::from_slice(idempotency_canonical_json).map_err(|error| {
-        PostgresStoreError::Corruption(format!(
-            "commit idempotency canonical JSON is invalid: {error}"
-        ))
-    })?;
-    if value.get("domain").and_then(Value::as_str) != Some("mfm.commit.idempotency.v1") {
-        return Err(PostgresStoreError::Corruption(
-            "commit idempotency authority domain mismatch".to_owned(),
-        ));
-    }
-    let fingerprint = value
-        .get("request")
-        .and_then(|request| request.get("prepared_plan_fingerprint"))
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            PostgresStoreError::Corruption(
-                "commit idempotency authority missing prepared plan fingerprint".to_owned(),
-            )
-        })?;
-    Ok(CommitFingerprint::from_digest(parse_identity::<
-        ContentDigest,
-    >(fingerprint)?))
-}
-
-pub(super) fn verify_persisted_canonical_hash(
-    context: &str,
-    bytes: &[u8],
-    expected: &str,
-) -> Result<()> {
-    let canonical = PlainCanonicalJsonBytes::from_canonical_json_slice(bytes).map_err(|error| {
-        PostgresStoreError::Corruption(format!("{context} canonical bytes are invalid: {error}"))
-    })?;
-    if canonical.content_digest().as_str() != expected {
-        return Err(PostgresStoreError::Corruption(format!(
-            "{context} hash does not match persisted canonical bytes"
-        )));
-    }
-    Ok(())
 }

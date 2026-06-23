@@ -16,12 +16,10 @@ impl PostgresRunStore {
             .await
             .map_err(|error| database_error("failed to start transaction", error))?;
 
-        let prepared_authority = prepared_commit_authority(plan, &fingerprint)?;
-
         if let Some(stored) =
             read_commit_by_key(&mut tx, request.run_id(), request.commit_key().as_str()).await?
         {
-            if stored.commit_idempotency_hash == prepared_authority.commit_idempotency_hash {
+            if stored.prepared_commit_plan_fingerprint == fingerprint {
                 let batch = load_committed_batch_tx(&mut tx, request.run_id(), stored.seq).await?;
                 tx.commit()
                     .await
@@ -43,7 +41,7 @@ impl PostgresRunStore {
         if let Some(stored) =
             read_commit_by_key(&mut tx, request.run_id(), request.commit_key().as_str()).await?
         {
-            if stored.commit_idempotency_hash == prepared_authority.commit_idempotency_hash {
+            if stored.prepared_commit_plan_fingerprint == fingerprint {
                 let batch = load_committed_batch_tx(&mut tx, request.run_id(), stored.seq).await?;
                 tx.commit()
                     .await
@@ -113,7 +111,7 @@ impl PostgresRunStore {
             batch.seq(),
             request.commit_key(),
             plan.purpose_name(),
-            &prepared_authority.prepared_authority_hash,
+            &fingerprint,
         )?;
         let final_authority = final_commit_authority(plan, &bundle, &batch, &commit_id)?;
 
@@ -122,23 +120,17 @@ impl PostgresRunStore {
             .map_err(|_| PostgresStoreError::Corruption("event count overflow".into()))?;
         sqlx::query(
             "INSERT INTO commits \
-             (commit_id, run_id, seq, commit_key, commit_purpose, commit_idempotency_hash, \
-              idempotency_canonical_json, prepared_authority_hash, prepared_authority_canonical_json, \
-              commit_batch_hash, commit_batch_canonical_json, hash_domain_version, \
-              canonicalizer_identity, event_count) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
+             (commit_id, run_id, seq, commit_key, commit_purpose, prepared_commit_plan_fingerprint, \
+              commit_batch_hash, hash_domain_version, canonicalizer_identity, event_count) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
         )
         .bind(&commit_id)
         .bind(request.run_id().as_str())
         .bind(commit_seq)
         .bind(request.commit_key().as_str())
         .bind(plan.purpose_name())
-        .bind(&prepared_authority.commit_idempotency_hash)
-        .bind(prepared_authority.idempotency_canonical_json.as_slice())
-        .bind(&prepared_authority.prepared_authority_hash)
-        .bind(prepared_authority.prepared_authority_canonical_json.as_slice())
+        .bind(fingerprint.as_digest().as_str())
         .bind(&final_authority.commit_batch_hash)
-        .bind(final_authority.commit_batch_canonical_json.as_slice())
         .bind(HASH_DOMAIN_VERSION)
         .bind(CANONICALIZER_IDENTITY)
         .bind(event_count)

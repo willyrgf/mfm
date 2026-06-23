@@ -26,13 +26,13 @@ pub(super) fn derive_commit_id(
     seq: StreamSeq,
     commit_key: &CommitKey,
     commit_purpose: &str,
-    prepared_authority_hash: &str,
+    fingerprint: &CommitFingerprint,
 ) -> Result<String> {
     let digest = canonical_json(serde_json::json!({
         "commit_key": commit_key.as_str(),
         "commit_purpose": commit_purpose,
         "domain": "mfm.commit.id.v1",
-        "prepared_authority_hash": prepared_authority_hash,
+        "prepared_commit_plan_fingerprint": fingerprint.as_digest().as_str(),
         "run_id": run_id.as_str(),
         "seq": seq.as_u64(),
     }))?

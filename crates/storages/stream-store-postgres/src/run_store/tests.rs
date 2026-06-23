@@ -99,17 +99,16 @@ async fn schema_validation_proves_append_xid_trigger_contracts() {
         .expect("current xact id");
     let commit_xid: String = sqlx::query_scalar(
         "INSERT INTO commits \
-         (commit_id, run_id, seq, commit_key, commit_purpose, commit_idempotency_hash, \
-          idempotency_canonical_json, prepared_authority_hash, \
-          prepared_authority_canonical_json, commit_batch_hash, commit_batch_canonical_json, \
-          hash_domain_version, canonicalizer_identity, event_count, append_xid) \
+         (commit_id, run_id, seq, commit_key, commit_purpose, prepared_commit_plan_fingerprint, \
+          commit_batch_hash, hash_domain_version, canonicalizer_identity, event_count, append_xid) \
          VALUES \
          ('schema-trigger-commit', 'schema-trigger-run', 1, 'schema-trigger-key', \
-          'schema-trigger-purpose', 'mfm.sha256-jcs-v1:idem', '{}'::bytea, \
-          'mfm.sha256-jcs-v1:prepared', '{}'::bytea, 'mfm.sha256-jcs-v1:batch', \
-          '{}'::bytea, 'mfm.postgres.authority.v1', 'mfm.jcs.v1', 1, '1'::xid8) \
+          'schema-trigger-purpose', $1, $2, 'mfm.postgres.authority.v1', 'mfm.jcs.v1', \
+          1, '1'::xid8) \
          RETURNING append_xid::text",
     )
+    .bind(content_digest(252).as_str())
+    .bind(content_digest(253).as_str())
     .fetch_one(&mut *tx)
     .await
     .expect("insert commit with explicit xid");
@@ -1446,7 +1445,7 @@ async fn run_commit_log_sort_keys_use_v1_rfc_tuple() {
 }
 
 #[tokio::test]
-async fn strict_load_rejects_corrupt_commit_canonical_bytes() {
+async fn strict_load_rejects_corrupt_commit_fingerprint() {
     let (store, schema) = test_store().await;
     let run = run_id(126);
     append_run_start(&store, &run, "strict-canonical-run-start")
@@ -1458,19 +1457,19 @@ async fn strict_load_rejects_corrupt_commit_canonical_bytes() {
         .await
         .expect("disable commit mutation guard");
     sqlx::query(
-        "UPDATE commits SET commit_batch_canonical_json = $1 WHERE run_id = $2 AND seq = 1",
+        "UPDATE commits SET prepared_commit_plan_fingerprint = $1 WHERE run_id = $2 AND seq = 1",
     )
-    .bind(b"{}".as_slice())
+    .bind(content_digest(251).as_str())
     .bind(run.as_str())
     .execute(&store.pool)
     .await
-    .expect("corrupt commit batch canonical bytes");
+    .expect("corrupt commit fingerprint");
 
     let error = store
         .load_run_stream(&run)
         .await
-        .expect_err("strict load rejects corrupt commit batch bytes");
-    assert_corruption(error, "commit batch hash does not match");
+        .expect_err("strict load rejects corrupt commit fingerprint");
+    assert_corruption(error, "commit id does not match persisted fingerprint");
 
     drop_schema(&store, &schema).await;
 }
@@ -1513,16 +1512,12 @@ async fn strict_load_rejects_commit_batch_authority_rewritten_away_from_rows() {
         .execute(&store.pool)
         .await
         .expect("disable commit log mutation guard");
-    sqlx::query(
-        "UPDATE commits SET commit_batch_hash = $1, commit_batch_canonical_json = $2 \
-         WHERE run_id = $3 AND seq = 1",
-    )
-    .bind(&forged_batch_hash)
-    .bind(forged_batch.as_bytes())
-    .bind(run.as_str())
-    .execute(&store.pool)
-    .await
-    .expect("forge commit batch authority");
+    sqlx::query("UPDATE commits SET commit_batch_hash = $1 WHERE run_id = $2 AND seq = 1")
+        .bind(&forged_batch_hash)
+        .bind(run.as_str())
+        .execute(&store.pool)
+        .await
+        .expect("forge commit batch authority");
     sqlx::query("UPDATE run_commit_log SET commit_sort_key = $1 WHERE commit_id = $2")
         .bind(forged_sort_key)
         .bind(&commit_id)
