@@ -157,6 +157,8 @@ async fn validate_catalog(pool: &PgPool) -> Result<()> {
             ));
         }
     }
+    validate_trigger_contracts(pool).await?;
+    validate_append_xid_columns(pool).await?;
 
     let function_rows = sqlx::query(
         "SELECT p.proname \
@@ -179,6 +181,7 @@ async fn validate_catalog(pool: &PgPool) -> Result<()> {
             ));
         }
     }
+    validate_function_contracts(pool).await?;
 
     let constraint_rows = sqlx::query(
         "SELECT constraint_name \
@@ -219,6 +222,166 @@ async fn validate_catalog(pool: &PgPool) -> Result<()> {
         if !columns.contains(*column) {
             return Err(PostgresStoreError::Database(
                 "required read-model column missing",
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+async fn validate_function_contracts(pool: &PgPool) -> Result<()> {
+    let rows = sqlx::query(
+        "SELECT p.proname, pg_get_function_result(p.oid) AS result_type, \
+          pg_get_function_arguments(p.oid) AS arguments, pg_get_functiondef(p.oid) AS definition \
+         FROM pg_proc p \
+         INNER JOIN pg_namespace n ON n.oid = p.pronamespace \
+         WHERE n.nspname = current_schema()",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| PostgresStoreError::Database("failed to inspect schema function contracts"))?;
+
+    for contract in REQUIRED_FUNCTION_CONTRACTS {
+        let row = rows
+            .iter()
+            .find(|row| row.try_get::<String, _>("proname").ok().as_deref() == Some(contract.name))
+            .ok_or(PostgresStoreError::Database(
+                "required schema function missing",
+            ))?;
+        let result_type: String = row
+            .try_get("result_type")
+            .map_err(|_| PostgresStoreError::Database("failed to decode schema function result"))?;
+        let arguments: String = row.try_get("arguments").map_err(|_| {
+            PostgresStoreError::Database("failed to decode schema function arguments")
+        })?;
+        let definition: String = row.try_get("definition").map_err(|_| {
+            PostgresStoreError::Database("failed to decode schema function definition")
+        })?;
+        if result_type != "trigger" || !arguments.is_empty() {
+            return Err(PostgresStoreError::Database(
+                "required schema function contract mismatch",
+            ));
+        }
+        for snippet in contract.required_definition_snippets {
+            if !definition.contains(snippet) {
+                return Err(PostgresStoreError::Database(
+                    "required schema function contract mismatch",
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn validate_trigger_contracts(pool: &PgPool) -> Result<()> {
+    let rows = sqlx::query(
+        "SELECT t.tgname, c.relname AS table_name, p.proname AS function_name, \
+          t.tgtype::int AS trigger_type, t.tgenabled::text AS trigger_enabled \
+         FROM pg_trigger t \
+         INNER JOIN pg_class c ON c.oid = t.tgrelid \
+         INNER JOIN pg_namespace n ON n.oid = c.relnamespace \
+         INNER JOIN pg_proc p ON p.oid = t.tgfoid \
+         WHERE n.nspname = current_schema() AND NOT t.tgisinternal",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| PostgresStoreError::Database("failed to inspect schema trigger contracts"))?;
+
+    for contract in REQUIRED_TRIGGER_CONTRACTS {
+        validate_trigger_contract_row(&rows, contract)?;
+    }
+
+    for table in IMMUTABLE_TABLES {
+        let trigger_name = format!("{table}_no_update");
+        validate_trigger_contract_row(
+            &rows,
+            &TriggerContract {
+                name: &trigger_name,
+                table,
+                function: "mfm_reject_authority_mutation",
+                row_level: false,
+                before: true,
+                insert: false,
+                update: true,
+                delete: true,
+                truncate: true,
+            },
+        )?;
+    }
+
+    Ok(())
+}
+
+fn validate_trigger_contract_row(
+    rows: &[sqlx::postgres::PgRow],
+    contract: &TriggerContract<'_>,
+) -> Result<()> {
+    let row = rows
+        .iter()
+        .find(|row| row.try_get::<String, _>("tgname").ok().as_deref() == Some(contract.name))
+        .ok_or(PostgresStoreError::Database(
+            "required schema trigger missing",
+        ))?;
+    let table_name: String = row
+        .try_get("table_name")
+        .map_err(|_| PostgresStoreError::Database("failed to decode schema trigger table"))?;
+    let function_name: String = row
+        .try_get("function_name")
+        .map_err(|_| PostgresStoreError::Database("failed to decode schema trigger function"))?;
+    let trigger_type: i32 = row
+        .try_get("trigger_type")
+        .map_err(|_| PostgresStoreError::Database("failed to decode schema trigger type"))?;
+    let trigger_enabled: String = row
+        .try_get("trigger_enabled")
+        .map_err(|_| PostgresStoreError::Database("failed to decode schema trigger enabled"))?;
+
+    if table_name != contract.table
+        || function_name != contract.function
+        || trigger_enabled != "O"
+        || trigger_type_has(trigger_type, TRIGGER_TYPE_ROW) != contract.row_level
+        || trigger_type_has(trigger_type, TRIGGER_TYPE_BEFORE) != contract.before
+        || trigger_type_has(trigger_type, TRIGGER_TYPE_INSERT) != contract.insert
+        || trigger_type_has(trigger_type, TRIGGER_TYPE_UPDATE) != contract.update
+        || trigger_type_has(trigger_type, TRIGGER_TYPE_DELETE) != contract.delete
+        || trigger_type_has(trigger_type, TRIGGER_TYPE_TRUNCATE) != contract.truncate
+    {
+        return Err(PostgresStoreError::Database(
+            "required schema trigger contract mismatch",
+        ));
+    }
+
+    Ok(())
+}
+
+fn trigger_type_has(trigger_type: i32, bit: i32) -> bool {
+    trigger_type & bit == bit
+}
+
+async fn validate_append_xid_columns(pool: &PgPool) -> Result<()> {
+    let rows = sqlx::query(
+        "SELECT table_name, column_default \
+         FROM information_schema.columns \
+         WHERE table_schema = current_schema() \
+           AND column_name = 'append_xid' \
+           AND table_name IN ('commits', 'run_commit_log')",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| PostgresStoreError::Database("failed to inspect append xid columns"))?;
+    for table in APPEND_XID_TABLES {
+        let row = rows
+            .iter()
+            .find(|row| row.try_get::<String, _>("table_name").ok().as_deref() == Some(*table))
+            .ok_or(PostgresStoreError::Database(
+                "required append_xid column missing",
+            ))?;
+        let default: Option<String> = row
+            .try_get("column_default")
+            .map_err(|_| PostgresStoreError::Database("failed to decode append xid default"))?;
+        if default.as_deref() != Some("pg_current_xact_id()") {
+            return Err(PostgresStoreError::Database(
+                "required append_xid default mismatch",
             ));
         }
     }
@@ -310,6 +473,86 @@ const REQUIRED_OBSERVATION_SUMMARY_COLUMNS: &[&str] = &[
     "source_event_count",
     "summary_row_hash",
     "summary_row_canonical_json",
+];
+
+const APPEND_XID_TABLES: &[&str] = &["commits", "run_commit_log"];
+
+const IMMUTABLE_TABLES: &[&str] = &[
+    "store_metadata",
+    "commits",
+    "run_events",
+    "artifact_blobs",
+    "artifact_admissions",
+    "commit_artifact_evidence",
+    "run_artifact_admissions",
+    "resource_lane_claim_events",
+    "resource_lane_release_events",
+    "resource_lane_transitions",
+    "run_commit_log",
+    "run_observation_change_summaries",
+    "observation_derivations",
+    "observation_derivation_sources",
+    "run_observation_cursors",
+];
+
+const TRIGGER_TYPE_ROW: i32 = 1;
+const TRIGGER_TYPE_BEFORE: i32 = 2;
+const TRIGGER_TYPE_INSERT: i32 = 4;
+const TRIGGER_TYPE_DELETE: i32 = 8;
+const TRIGGER_TYPE_UPDATE: i32 = 16;
+const TRIGGER_TYPE_TRUNCATE: i32 = 32;
+
+struct FunctionContract<'a> {
+    name: &'a str,
+    required_definition_snippets: &'a [&'a str],
+}
+
+const REQUIRED_FUNCTION_CONTRACTS: &[FunctionContract<'_>] = &[
+    FunctionContract {
+        name: "mfm_set_append_xid",
+        required_definition_snippets: &["NEW.append_xid", "pg_current_xact_id()"],
+    },
+    FunctionContract {
+        name: "mfm_reject_authority_mutation",
+        required_definition_snippets: &["RAISE EXCEPTION", "mfm authority tables are append-only"],
+    },
+];
+
+struct TriggerContract<'a> {
+    name: &'a str,
+    table: &'a str,
+    function: &'a str,
+    row_level: bool,
+    before: bool,
+    insert: bool,
+    update: bool,
+    delete: bool,
+    truncate: bool,
+}
+
+const REQUIRED_TRIGGER_CONTRACTS: &[TriggerContract<'_>] = &[
+    TriggerContract {
+        name: "commits_set_append_xid",
+        table: "commits",
+        function: "mfm_set_append_xid",
+        row_level: true,
+        before: true,
+        insert: true,
+        update: false,
+        delete: false,
+        truncate: false,
+    },
+    TriggerContract {
+        name: "run_commit_log_set_append_xid",
+        table: "run_commit_log",
+        function: "mfm_set_append_xid",
+        row_level: true,
+        before: true,
+        insert: true,
+        update: false,
+        delete: false,
+        truncate: false,
+    },
 ];
 
 const FORBIDDEN_TABLES: &[&str] = &[

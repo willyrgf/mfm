@@ -4040,6 +4040,82 @@ mod tests {
         .expect("drop schema");
     }
 
+    #[tokio::test]
+    async fn schema_validation_proves_append_xid_trigger_contracts() {
+        let (store, schema) = test_store().await;
+        let mut tx = store.pool.begin().await.expect("begin transaction");
+        let expected_xid: String = sqlx::query_scalar("SELECT pg_current_xact_id()::text")
+            .fetch_one(&mut *tx)
+            .await
+            .expect("current xact id");
+        let commit_xid: String = sqlx::query_scalar(
+            "INSERT INTO commits \
+             (commit_id, run_id, seq, commit_key, commit_purpose, commit_idempotency_hash, \
+              idempotency_canonical_json, prepared_authority_hash, \
+              prepared_authority_canonical_json, commit_batch_hash, commit_batch_canonical_json, \
+              hash_domain_version, canonicalizer_identity, event_count, append_xid) \
+             VALUES \
+             ('schema-trigger-commit', 'schema-trigger-run', 1, 'schema-trigger-key', \
+              'schema-trigger-purpose', 'mfm.sha256-jcs-v1:idem', '{}'::bytea, \
+              'mfm.sha256-jcs-v1:prepared', '{}'::bytea, 'mfm.sha256-jcs-v1:batch', \
+              '{}'::bytea, 'mfm.postgres.authority.v1', 'mfm.jcs.v1', 1, '1'::xid8) \
+             RETURNING append_xid::text",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .expect("insert commit with explicit xid");
+        let log_xid: String = sqlx::query_scalar(
+            "INSERT INTO run_commit_log \
+             (commit_id, run_id, seq, commit_key, first_ordinal, last_ordinal, event_count, \
+              commit_sort_key, append_xid) \
+             VALUES \
+             ('schema-trigger-commit', 'schema-trigger-run', 1, 'schema-trigger-key', 0, 0, 1, \
+              decode('01' || repeat('00', 31), 'hex'), '1'::xid8) \
+             RETURNING append_xid::text",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .expect("insert run commit log with explicit xid");
+        assert_eq!(commit_xid, expected_xid);
+        assert_eq!(log_xid, expected_xid);
+        tx.rollback().await.expect("rollback manual authority rows");
+        crate::schema::validate_pool(&store.pool)
+            .await
+            .expect("schema validation still passes");
+
+        drop_schema(&store, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn schema_validation_rejects_disabled_append_xid_trigger() {
+        let (store, schema) = test_store().await;
+
+        sqlx::query("ALTER TABLE commits DISABLE TRIGGER commits_set_append_xid")
+            .execute(&store.pool)
+            .await
+            .expect("disable append xid trigger");
+        crate::schema::validate_pool(&store.pool)
+            .await
+            .expect_err("disabled append xid trigger fails schema validation");
+
+        drop_schema(&store, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn schema_validation_rejects_missing_mutation_guard_trigger() {
+        let (store, schema) = test_store().await;
+
+        sqlx::query("DROP TRIGGER run_events_no_update ON run_events")
+            .execute(&store.pool)
+            .await
+            .expect("drop run events mutation guard");
+        crate::schema::validate_pool(&store.pool)
+            .await
+            .expect_err("missing mutation guard fails schema validation");
+
+        drop_schema(&store, &schema).await;
+    }
+
     fn digest_bytes(byte: u8) -> DigestBytes {
         DigestBytes::from_array([byte; 32])
     }
