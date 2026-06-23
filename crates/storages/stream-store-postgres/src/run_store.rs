@@ -24,7 +24,10 @@ use mfm_store::v1::{
 };
 use ring::hmac;
 use serde_json::Value;
-use sqlx::{postgres::PgRow, PgPool, Postgres, Row, Transaction};
+use sqlx::{
+    postgres::{PgListener, PgPoolOptions, PgRow},
+    PgPool, Postgres, Row, Transaction,
+};
 
 use crate::schema::{connect_pool, validate_pool};
 
@@ -91,6 +94,8 @@ const RUN_OBSERVATION_SUMMARY_KIND: &str = "run";
 const RUN_OBSERVATION_DERIVATION_MODEL: &str = "run_observation_change_summary";
 const RUN_PREFIX_SOURCE_KIND: &str = "run_prefix";
 const CURSOR_VERSION: &str = "mfm.run_observation.cursor.v1";
+const OBSERVATION_NOTIFY_CHANNEL: &str = "mfm_run_observation";
+const OBSERVATION_NOTIFY_PAYLOAD: &str = "changed";
 const RESOURCE_LANE_ID_DOMAIN: &[u8] = b"mfm.resource_lane.id.v1";
 const MAX_ARTIFACT_BLOB_BYTES: u64 = 16 * 1024 * 1024;
 const LARGE_ARTIFACT_PRECOMMIT_THRESHOLD_BYTES: u64 = 1024 * 1024;
@@ -399,6 +404,7 @@ impl PostgresRunStore {
             source_event_count,
         )
         .await?;
+        notify_observation_change_tx(&mut tx).await?;
 
         tx.commit()
             .await
@@ -630,14 +636,63 @@ async fn read_run_observations_from_pool(
         Some(cursor) => Some(decode_observation_cursor(pool, cursor, &metadata).await?),
         None => None,
     };
+    let mut listener = if cursor.is_some() && query.wait_ms > 0 {
+        Some(observation_change_listener(pool).await?)
+    } else {
+        None
+    };
     let mut page =
         read_run_observation_page_once(pool, &metadata, cursor.as_ref(), query.limit).await?;
     if page.runs.is_empty() && cursor.is_some() && query.wait_ms > 0 {
-        tokio::time::sleep(std::time::Duration::from_millis(query.wait_ms)).await;
-        page =
-            read_run_observation_page_once(pool, &metadata, cursor.as_ref(), query.limit).await?;
+        let listener = listener.as_mut().ok_or_else(|| {
+            PostgresStoreError::Corruption(
+                "observation watch listener was not initialized".to_owned(),
+            )
+        })?;
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(query.wait_ms);
+        while page.runs.is_empty() {
+            let Some(remaining) = deadline.checked_duration_since(tokio::time::Instant::now())
+            else {
+                break;
+            };
+            let notified = wait_for_observation_change(listener, remaining).await?;
+            page = read_run_observation_page_once(pool, &metadata, cursor.as_ref(), query.limit)
+                .await?;
+            if !notified {
+                break;
+            }
+        }
     }
     Ok(page)
+}
+
+async fn observation_change_listener(pool: &PgPool) -> Result<PgListener> {
+    let listener_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .max_lifetime(None)
+        .idle_timeout(None)
+        .connect_with((*pool.connect_options()).clone())
+        .await
+        .map_err(|error| database_error("failed to open observation listener pool", error))?;
+    let mut listener = PgListener::connect_with(&listener_pool)
+        .await
+        .map_err(|error| database_error("failed to open observation listener", error))?;
+    listener
+        .listen(OBSERVATION_NOTIFY_CHANNEL)
+        .await
+        .map_err(|error| database_error("failed to listen for observation changes", error))?;
+    Ok(listener)
+}
+
+async fn wait_for_observation_change(listener: &mut PgListener, wait: Duration) -> Result<bool> {
+    match tokio::time::timeout(wait, listener.recv()).await {
+        Ok(Ok(_notification)) => Ok(true),
+        Ok(Err(error)) => Err(database_error(
+            "failed to wait for observation change notification",
+            error,
+        )),
+        Err(_elapsed) => Ok(false),
+    }
 }
 
 async fn read_run_observation_page_once(
@@ -1525,6 +1580,16 @@ async fn insert_run_commit_log_tx(
     .execute(&mut **tx)
     .await
     .map_err(|error| database_error("failed to insert run commit log", error))?;
+    Ok(())
+}
+
+async fn notify_observation_change_tx(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
+    sqlx::query("SELECT pg_notify($1, $2)")
+        .bind(OBSERVATION_NOTIFY_CHANNEL)
+        .bind(OBSERVATION_NOTIFY_PAYLOAD)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| database_error("failed to notify observation change", error))?;
     Ok(())
 }
 
@@ -4222,7 +4287,7 @@ where
 #[cfg(all(test, feature = "parity-tests"))]
 mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use mfm_canonical::sha256_digest_bytes;
     use mfm_events::v1::{self as events, ArtifactRole, KernelEventPayload};
@@ -4249,7 +4314,7 @@ mod tests {
         SideEffectPhase, SideEffectProgress, SideEffectTerminal, StateAttemptStarted, StoreError,
         StreamSeq,
     };
-    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+    use sqlx::postgres::PgConnectOptions;
     use sqlx::AssertSqlSafe;
 
     use super::*;
@@ -5980,6 +6045,119 @@ mod tests {
             .await
             .expect("count cursor rows");
         assert_eq!(cursor_rows, 1);
+
+        drop_schema(&store, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn append_commit_emits_observation_notification() {
+        let (store, schema) = test_store().await;
+        let mut listener = observation_change_listener(&store.pool)
+            .await
+            .expect("listen for observation changes");
+        let run = run_id(141);
+
+        append_run_start(&store, &run, "notify-run-start")
+            .await
+            .expect("append run start");
+
+        let notification = tokio::time::timeout(Duration::from_secs(2), listener.recv())
+            .await
+            .expect("append should notify before timeout")
+            .expect("receive observation notification");
+        assert_eq!(notification.channel(), OBSERVATION_NOTIFY_CHANNEL);
+        assert_eq!(notification.payload(), OBSERVATION_NOTIFY_PAYLOAD);
+        drop(listener);
+
+        drop_schema(&store, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn observation_watch_wakes_on_notification_before_timeout() {
+        let (store, schema) = test_store().await;
+        let run = run_id(142);
+        append_run_start(&store, &run, "watch-notify-run-start")
+            .await
+            .expect("append run start");
+        let metadata = load_store_metadata(&store.pool)
+            .await
+            .expect("load store metadata");
+        let row = sqlx::query(
+            "SELECT append_xid::text AS append_xid, commit_sort_key \
+             FROM run_commit_log WHERE run_id = $1 AND seq = 1",
+        )
+        .bind(run.as_str())
+        .fetch_one(&store.pool)
+        .await
+        .expect("load initial commit cursor position");
+        let cursor = encode_observation_cursor(
+            &store.pool,
+            &metadata,
+            &CursorPosition {
+                append_xid: row.try_get("append_xid").expect("append xid"),
+                commit_sort_key: row.try_get("commit_sort_key").expect("sort key"),
+                kind: CursorKind::Row,
+            },
+        )
+        .await
+        .expect("encode row cursor");
+        let watcher_store = store.clone();
+        let watcher = tokio::spawn(async move {
+            let started = Instant::now();
+            let page = watcher_store
+                .read_run_observations(RunObservationQuery::new(Some(cursor), 10, 5_000))
+                .await
+                .expect("watch observations");
+            (page, started.elapsed())
+        });
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let artifact = artifact_id(143);
+        let digest = content_digest(143);
+        let evidence =
+            store_artifact_ref(artifact.clone(), digest.clone(), ArtifactRole::StateOutput);
+        let change_request = mfm_store::v1::CommitRequest::from_payloads(
+            run.clone(),
+            StreamSeq::new(2).expect("seq"),
+            CommitKey::new("watch-notify-retention").expect("commit key"),
+            vec![retention_refs_appended(
+                run.clone(),
+                artifact,
+                digest,
+                ArtifactRole::StateOutput,
+            )],
+            vec![evidence.clone()],
+            CommitPreconditions {
+                required_run_state: RequiredRunState::Started,
+                ..CommitPreconditions::default()
+            },
+        )
+        .expect("retention request");
+        append_prepared(&store, change_request, vec![evidence])
+            .await
+            .expect("append observed change");
+        let notify_pool = store.pool.clone();
+        let notifier = tokio::spawn(async move {
+            for _ in 0..20 {
+                let _ = sqlx::query("SELECT pg_notify($1, $2)")
+                    .bind(OBSERVATION_NOTIFY_CHANNEL)
+                    .bind(OBSERVATION_NOTIFY_PAYLOAD)
+                    .execute(&notify_pool)
+                    .await;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        });
+
+        let (page, elapsed) = watcher.await.expect("watch task joins");
+        notifier.abort();
+        let _ = notifier.await;
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "watch should wake from notification before long-poll timeout; elapsed={elapsed:?}"
+        );
+        assert_eq!(page.runs.len(), 1);
+        assert_eq!(page.runs[0].run_id, run);
+        assert_eq!(page.runs[0].head_seq.as_u64(), 2);
 
         drop_schema(&store, &schema).await;
     }
