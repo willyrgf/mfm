@@ -10,7 +10,8 @@ into a normative `docs/design.md` section and an execution-layer roadmap.
 Date opened: 2026-06-23.
 Revised: 2026-06-23 (**R2**, after a large Postgres refactor landed — see §0);
 2026-06-24 (**R3**, roadmap #1 decided — the unified admission-lane design, §6.1; decisions
-D1–D4 resolved, §6.2).
+D1–D4 resolved, §6.2); 2026-06-24 (**R4**, side-effect design specified — verification as a paired
+framework state, §9; refines/simplifies D2–D4).
 We have changed no code in this thread. The platform itself advanced: the monolithic
 `stream-store-postgres/src/typed.rs` was split into a `run_store/` module tree and the schema
 was rewritten (`0001_typed_run_event_store.sql` 83 lines → `0001_run_store.sql` 230 lines),
@@ -312,9 +313,11 @@ authority; the §5c residual); D11 size pools to worker count (pooler-safe). Seq
 
 **The reconciliation engine — D2+D4 are one machine:** holder-lease expiry (D4) is the *trigger*;
 the recovery verifier on the idempotency anchor (D2) is the *procedure*; the certified finality
-class (D3) decides *when terminal*; serial-exclusive lanes (D1) make the anchor deterministic. #2 is
-now *designed*, not just identified; the next build step is the recovery-verifier contract + the
-admission-lane refactor.
+class (D3) decides *when terminal*; serial-exclusive lanes (D1) make the anchor deterministic.
+**§9 specifies the full side-effect design and refines this:** verification becomes a paired
+framework *state*, which generalizes the verifier to every side effect and *removes* the bespoke
+recovery-verifier and the resource-lane holder-takeover (see §9.7–9.8). Read §9 as the authoritative
+side-effect spec; the D2–D4 records above are the decision history it builds on.
 
 ## 7. Verification items — resolved in R2
 
@@ -330,13 +333,157 @@ observation feed (§6.1), and granularity is decision D7.
 
 ## 8. Next step
 
-Roadmap #1 is decided (§6.1) and the #2 reconciliation engine is now designed (§6.2: D1–D4).
-Two tracks from here: (a) ratify the doctrine (§2) + land §6.1 + §6.2 as a normative
-`docs/design.md` "Process-Fungible Execution" section; (b) start the build design — the
-`SideEffectRecoveryVerifier` contract (mirroring `SideEffectReplayVerifier`) and the admission-lane
-refactor that generalizes today's `resource_lane_waiters`. Open items remaining: D5–D11 defaults to
-confirm, and the EVM `IdempotencyInput` shape that pins the signed-tx hash. Still no code until the
-direction is signed off.
+Roadmap #1 is decided (§6.1), the #2 reconciliation engine is designed (§6.2: D1–D4), and the
+side-effect design is now fully specified (§9 — verification as a paired framework state, which
+*simplifies* D2/D4). Two tracks from here: (a) ratify the doctrine (§2) + land §6.1 / §6.2 / §9 as a
+normative `docs/design.md` "Process-Fungible Execution" section; (b) start the build design — the
+`FrameworkNodeSpec::SideEffectVerify` node + the `SideEffectVerifier` contract + the admission-lane
+refactor of `resource_lane_waiters`. Open items to confirm: D5–D11 defaults and the EVM
+`IdempotencyInput` shape that pins the signed-tx hash (ledger-continuity §9.5 and
+deterministic-signing §9.7 are now settled). Still no code until the direction is signed off.
+
+## 9. Side-effect design — verification as a paired framework state
+
+Authoritative spec for how side effects verify and recover. It refines §6.2 (D2/D3/D4): the
+recovery-time reconciliation sketched there generalizes into a normal verification step, which in
+turn collapses most of the bespoke recovery machinery.
+
+### 9.1 The insight
+
+Verification — "did the mutation land (receipt), and is it final (confirmation)?" — is intrinsic to
+*every* side effect, not a recovery special case. The happy path and the recovery path run the
+*same* chain read against the *same* anchor; recovery is just "the same verification, picked up by
+another worker." So there is one verification mechanism, not a separate recovery verifier.
+
+The phases already exist. The side-effect ledger runs
+`IntentPersisted → Claimed → InvocationPrepared → InvocationStarted` (the uncertainty boundary)
+`→ {SubmissionObserved | SubmissionUnknown | NotSubmittedProven} → ReceiptObserved →
+ConfirmationObserved → (Failed)` (`events.rs:413-439`; `SideEffectPhase` in `store/v1`). **Receipt
+vs confirmation are already distinct phases.** What's missing is only *who drives the post-boundary
+phases* and *how the required level is configured*.
+
+### 9.2 The design — split the side-effect node in two
+
+Lower every side-effect node into a **pair**:
+
+- **Submit node** (the domain side-effect state): drives `Intent → Claim(lane) → Prepared →
+  InvocationStarted → Submission*`. Records the deterministic anchor (idempotency key pinning the
+  signed-tx hash) *before* the boundary, crosses the boundary once (the single external mutation),
+  ends at "submitted." It is the only node that mutates (effect class: apply-side-effect).
+- **Verify node** (a framework node, 9.3): drives `Submission* → ReceiptObserved →
+  ConfirmationObserved → terminal` to the configured level, then releases the lane and binds the
+  verified output. It only reads (effect class: read).
+
+The split point is the existing uncertainty boundary. The pair shares **one ledger, one anchor, one
+resource-lane hold** (9.5).
+
+### 9.3 The verify node is a framework node, inserted at lowering
+
+Add `FrameworkNodeSpec::SideEffectVerify` beside `Bridge / PublicOutputRender /
+ProjectRetentionManifest / CompleteRun / ResolveSagaTerminal` (`spec/src/lib.rs:1758`). Lowering
+inserts exactly one verify node immediately after each side-effect node — the same way retention /
+completion / resolve-saga nodes are framework-inserted and cardinality-checked in
+`certify/src/framework_lifecycle.rs` ("expected exactly one … framework node"). The pairing is
+therefore **automatic** (the author writes one side-effect state; lowering produces the pair),
+**certified & static** (topology stays hash-defining; no runtime topology change), and **zero
+per-operation LOC** (one framework node kind serves every side effect in every domain).
+
+### 9.4 Verification level is configured on the side-effect contract
+
+Add a hash-defining field to `SideEffectContractSpec` (beside `resource_claim`, `spec/src/lib.rs:1740`):
+
+    verification: Receipt | Finalized
+
+`Receipt` terminalizes at `ReceiptObserved` (accepts reorg risk); `Finalized` requires
+`ConfirmationObserved` past the chain's configured depth. The *class* is semantic/certified (the
+designer's choice, per downstream need and reorg tolerance); the *numeric depth* per chain stays
+runtime config but is recorded as evidence at determination time (D3). There is no "skip" level —
+the lane and run cannot terminalize without a determination.
+
+### 9.5 One ledger, one lane, across two nodes
+
+The Exclusive resource lane (the wallet/nonce lane) is **claimed by the submit node and released by
+the verify node** at terminal. Between them the lane is held by the *ledger* (non-terminal), not by
+any worker. This is the decided sequential-within-hold model (D1): the wallet stays held until the
+tx is confirmed to the required level, so no second nonce is issued against a still-pending tx.
+
+**Decided: one ledger across the pair.** The verify node continues the producing node's ledger —
+same ledger key, anchor, and lane, with phases flowing across the two driving nodes (not a linked
+second ledger + lane handoff). Consequence: the ledger key must be **stable across the pair and not
+tied to a node attempt** — lowering records the shared ledger identity in the verify node's spec
+(the certified link), so both nodes address the same ledger. This makes explicit the decoupling of
+**attempt lifecycle** (per-node execution bookkeeping) from **ledger lifecycle** (the side-effect's
+durable phase machine): the lane is claimed in the submit commit and released in the verify terminal
+commit, on one ledger.
+
+### 9.6 The verifier pair: live vs replay
+
+- **Live** — a new `SideEffectVerifier` contract (the only genuinely new contract), domain-
+  implemented, that reads external truth by the anchor (`getTransactionReceipt` + depth /
+  `getTransactionCount`) and emits the existing `ReceiptObserved / ConfirmationObserved /
+  NotSubmittedProven` evidence. It needs only a **read** capability, so any fungible worker can run
+  it. Mostly *relocated* receipt-poll code from today's EVM adapter, not new logic.
+- **Replay** — the existing `SideEffectReplayVerifier` (`replay/src/lib.rs:470`) checks recorded
+  evidence from recorded facts, no live IO; receipts/confirmations already carry a `replay_verifier_id`.
+
+Live verifier produces evidence; replay verifier checks it — the same live-vs-replay symmetry MFM
+uses everywhere.
+
+### 9.7 Recovery falls out for free — the payoff
+
+Because the verify node is an ordinary frontier node:
+
+- A worker that dies mid-verification leaves a **runnable verify node**; ordinary execution dispatch
+  (roadmap #1) + execution-lease expiry re-drives it. No bespoke recovery verifier.
+- A worker that dies mid-submission leaves an **open submit attempt**; ordinary attempt recovery
+  re-runs it. Safety floor: the tx is pinned to one nonce, so **at most one tx can land — never a
+  double-spend**. **Decided: require deterministic signing (RFC 6979)** — re-sign → same signed
+  payload → same hash → the broadcast is idempotent (the chain dedups). This is a **signer-contract
+  requirement, and it is enforced, not assumed:** the anchor (expected hash) is recorded before the
+  boundary, and recovery **asserts the re-signed hash equals the recorded anchor** — a
+  determinism-violating signer fails closed there instead of double-submitting. The set-of-hashes
+  fallback is dropped.
+- The wallet lane releases **only** when the verify node terminalizes — so a dead worker never
+  wedges the wallet; another worker just finishes the verify node.
+
+**Key invariant (replaces the holder-death sweeper):** a non-terminal side-effect ledger always has
+a corresponding runnable (or `due_at`-scheduled) frontier node. The scheduler guarantees it,
+dispatch drives it, the lane releases at terminal. No holder-lease on the wallet, no takeover machine.
+
+### 9.8 What this collapses in §6.2
+
+- **D2** — the "recovery verifier" becomes the general live `SideEffectVerifier` (9.6); anchor
+  unchanged (idempotency key pinning the tx hash).
+- **D3** — the finality decision becomes the `verification: Receipt | Finalized` contract field
+  (9.4); unchanged in substance.
+- **D4** — the bespoke active-holder takeover for resource lanes is **no longer needed**. The wallet
+  lane is ledger-lifetime, released by the verify node; recovery is ordinary dispatch (9.7). The
+  only worker lease that remains is **execution tenure** (roadmap #1, NowaitSkip), whose expiry just
+  means re-dispatch. "Lease expiry routes to recovery, never silent release" still holds — for
+  execution tenure; the resource lane simply isn't worker-leased.
+- **D6** — `due_at` is still needed: a verify node awaiting confirmations is a `blocked-until-due_at`
+  node. With D8 the worker releases execution tenure during the wait; at `due_at` a worker re-picks
+  the verify node, polls, and either terminalizes or re-blocks.
+
+### 9.9 New vs relocated (the LOC-honesty check)
+
+- **New:** one `FrameworkNodeSpec::SideEffectVerify` variant + its runner; one `SideEffectVerifier`
+  live contract (+ one EVM impl); one `verification` enum/field on the contract; the lowering
+  insertion + cardinality check; the scheduler "non-terminal ledger ⇒ runnable node" invariant.
+- **Relocated/reused:** the submission slot, the `ReceiptObserved`/`ConfirmationObserved` phases, the
+  replay verifier, the idempotency key, the resource lane, the framework-node-insertion pattern.
+- **Removed:** the bespoke recovery verifier and the resource-lane holder-takeover machine.
+
+Net: more capability (uniform, configurable verification for every side effect in every domain) with
+*less* bespoke machinery than the D2/D4 sketch.
+
+### 9.10 Bonus alignment
+
+- **Saga obligations:** the verify node's terminal *is* the obligation signal — `Confirmed` ⇒ the
+  forward effect definitely happened ⇒ a compensation obligation may be owed; `NotSubmittedProven` ⇒
+  no obligation. Verification feeds saga classification exactly (`docs/saga.md`).
+- **One-mutation-per-node:** improved — the submit node performs exactly one mutation, the verify
+  node none. The effect-class rule gets cleaner, not strained.
 
 ## Appendix — key code anchors (R2)
 
