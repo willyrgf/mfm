@@ -8,7 +8,9 @@ Postgres-owned coordination.** This document is the resume point for turning the
 into a normative `docs/design.md` section and an execution-layer roadmap.
 
 Date opened: 2026-06-23.
-Revised: 2026-06-23 (**R2**, after a large Postgres refactor landed — see §0).
+Revised: 2026-06-23 (**R2**, after a large Postgres refactor landed — see §0);
+2026-06-24 (**R3**, roadmap #1 decided — the unified admission-lane design, §6.1; remaining
+decisions in §6.2).
 We have changed no code in this thread. The platform itself advanced: the monolithic
 `stream-store-postgres/src/typed.rs` was split into a `run_store/` module tree and the schema
 was rewritten (`0001_typed_run_event_store.sql` 83 lines → `0001_run_store.sql` 230 lines),
@@ -29,9 +31,10 @@ The refactor implemented most of the §6 roadmap. Delta against the R1 findings:
 | Safety already complete (§5a) | **Still true, re-mechanized** | Per-run `pg_advisory_xact_lock` + `commits` PK/uniqueness + `expected_next_seq`; side-effect fencing intact. New hardening: authority tables are DB-enforced append-only via `mfm_reject_authority_mutation` triggers. |
 | Fencing has no trigger (Gap 2) | **Partial** | Waiter-queue liveness now exists (lease-expiry reaping). Active-holder takeover trigger and an execution-level lease still open. |
 
-Net: the doctrine (§2) is now ~95% realized in code. The remaining open work is smaller and
-sharper (§6): an **execution dispatch/claim layer**, **nonce reconciliation**, an **incremental
-lane-state projection**, and an **active-holder takeover trigger**.
+Net: the doctrine (§2) is now ~95% realized in code. **R3 decided roadmap #1** — execution
+discovery + effort-dedup unify with resource-lane admission into one **admission-lane** primitive
+(§6.1). The remaining decision agenda (§6.2): the external-effect reconciliation seam, liveness &
+recovery, execution-tenure policy, and performance/ops.
 
 ## 1. The question
 
@@ -207,31 +210,92 @@ remain a future efficiency/liveness optimization, never a correctness requiremen
    `submission-observed / unknown / not-submitted` slot models it; the reconciliation path is
    not implemented.
 
-## 6. Recommended direction + roadmap (R2)
+## 6. Roadmap (R3) — #1 decided, #2–#5 a decision agenda
 
-Ratify the doctrine (§2) as a new normative section in `docs/design.md`. Keep
-**leaseless-optimistic** as the execution-safety model (the store covers it). The remaining
-execution-layer workstreams, none touching the semantic core:
+Ratify the doctrine (§2). The execution-safety model stays **leaseless-optimistic** (the store
+already covers it; every lease below is liveness only). Roadmap #1 is now decided; the rest is a
+set of decisions to make before building.
 
-1. **Execution dispatch + claim/lease layer.** *(was #2; now the top item.)* A way for a
-   disposable worker to discover a run with a runnable frontier and take exclusive *execution*
-   tenure for the duration of driving it — distinct from the per-commit advisory lock and from
-   the now-built read/watch feed. Lease is liveness/efficiency only; safety still rests on
-   optimistic append. The watch feed can feed the dispatcher, but dispatch needs its own
-   runnable/blocked signal and a claim record.
-2. **Nonce reconciliation.** Chain-truth reconciliation that terminalizes an ambiguous held-lane
-   ledger on takeover. Decide also: keep safe-but-serial per-account `Exclusive` lanes, or move
-   to pipelined nonces (a monotonic allocator with gap recovery — richer, deferred).
-3. **Active-holder takeover trigger.** The thing that decides an in-flight lane holder is dead
-   and initiates the existing `ClaimTakenOver` (the waiter-queue already reaps dead *waiters*;
-   this extends liveness to dead *holders*). Liveness only, never safety.
-4. **Incremental lane-state projection.** Replace the full-history `resource_lane:%` fold
-   (`load_resource_lane_state_tx`) with a materialized, incrementally-updated active-lane table.
-   Pure performance; correctness already holds.
+### 6.1 DECIDED — #1: the unified admission lane + execution discovery
 
-Priority for the stated vision (multi-agent, multi-session): **#1** is what turns the now-built
-observation fabric into an execution fabric; **#2/#3** harden the external-effect seam; **#4** is
-a scale optimization once dispatch exists.
+**Discovery** reuses the existing observation feed (cold-start `list` of non-terminal runs, then
+NOTIFY-woken `watch`). **Effort-dedup** and **resource-lane fairness** unify into one generalized
+primitive — the **admission lane** — replacing both the bespoke `resource_lane_waiters` machinery
+and the separately-proposed execution-claim table.
+
+Governing principle: **the primitive owns admission *order* + an operational *lease*; the caller
+owns *authority*. They never share a row.** The shared table is liveness-only and structurally
+cannot be authority.
+
+One table-pair, one `admit(mode)` code path; a `class` discriminator *binds* the mode:
+
+- `admission_lane(class, lane_id) PK, next_ticket, holder_token, lease_expires_at` — holder-lease
+  columns used by `NowaitSkip` only.
+- `admission_waiter(class, lane_id, ticket) PK, token, status, lease_expires_at` — used by
+  `WaitFifo` only.
+- All functions take `&mut Transaction` → the same code runs inside a commit txn (resource lanes)
+  and standalone (execution dispatch). Shared *down* into a common component, never called
+  *across* layers.
+
+Two instantiations exercise disjoint subsets, so neither stores the other's authority:
+
+- **Resource lane (`WaitFifo`)** — uses only waiter rows. Admission gates the commit, so
+  "admitted" and the `ResourceLaneClaimed` authority event are atomic in one txn; there is never a
+  steady-state holder-lease to store. The caller supplies `holder_is_free` from the event fold.
+- **Execution (`NowaitSkip`)** — uses only the lane row's lease; writes no waiters; the lease *is*
+  the holder, harmless because safety = the store's per-run lock + `expected_next_seq`.
+
+Non-negotiable invariants (from a three-architect review):
+1. **Mode is bound to class** — `NowaitSkip` is unrepresentable on a FIFO lane and vice-versa.
+2. **The table is liveness-only** — no safety decision branches on it; a false reap or two
+   simultaneous "holders" cost duplicate work, never corruption.
+3. **The lane-state projection (#5) stays a SEPARATE event-derived view** — never this table;
+   merging them is the one move that manufactures dual authority.
+
+Cost: a **refactor** (generalize + relocate today's `resource_lane_waiters`), not a greenfield
+add. Dividend: one dispatch loop services both runnable runs *and* newly-head-of-line lane waiters
+(a lane release → NOTIFY → dispatcher drives the head-of-line run); any future coordination need is
+a new `class` + mode.
+
+### 6.2 Decision agenda — #2–#5
+
+**#2 — External-effect reconciliation (critical path; the doctrine's hard core).**
+- **D1 nonce concurrency:** keep **serial per-account** `Exclusive` lanes (recommend) vs pipelined
+  nonces with gap recovery (defer).
+- **D2 reconciliation algorithm + idempotency anchor:** how takeover decides landed-vs-never-sent
+  (deterministic signed-tx hash + receipt + `getTransactionCount`), what on-chain fact identifies
+  "our" tx, and the **exclusive-signer precondition** (does MFM assume it solely owns the account,
+  or handle a nonce occupied out-of-band?).
+- **D3 finality / reorg policy + recorded evidence:** confirmations-to-final (per-chain config) and
+  what typed evidence terminalizes each `submission observed/unknown/not-submitted` case so replay
+  can verify it.
+
+**#3 — Liveness & recovery.**
+- **D4 side-effect holder-death trigger:** the resource-lane holder is an *event* (authority), not
+  a lease, so waiter reaping does not free it. Decide the sweeper linking a dead execution lease to
+  side-effect `ClaimTakenOver`/recovery (recommend: dispatch surfaces open side-effect ledgers with
+  no live driver).
+- **D5 recovery model:** recovery is **ordinary fungible dispatch** of a run in a recovering state
+  (recommend) vs a dedicated recovery-worker class.
+- **D6 timed wakeups:** add a `due_at` signal to the dispatch layer for confirmation polling /
+  backoff — the one dispatch piece deferred in §5; reconciliation (D2) needs it.
+
+**#4 — Execution-tenure policy (closes out #1).**
+- **D7 lease granularity:** **per-run** now (recommend); per-attempt (intra-run parallelism) later.
+- **D8 long external waits:** a worker waiting minutes on a tx confirmation **releases execution
+  tenure** and lets recovery/re-dispatch own it (recommend) vs holding + heartbeating.
+- **D9 fairness / sharding:** defaults now (oldest-first over the feed, single feed); shard by
+  `hash(run_id)` later.
+
+**#5 — Performance / ops.**
+- **D10 materialize the lane-state projection** (rebuildable cache, not authority; the §5c residual);
+  sequence after #2/#3.
+- **D11 connection budget at N workers** — pool sizing + pooler choice. We are pooler-safe
+  (xact-scoped locks + lease tables; no session advisory locks), so transaction-mode poolers are OK.
+
+Critical path: **#2** is the biggest remaining correctness gap and exactly where the doctrine
+always said the hard problem lives. #3 makes the system self-healing; #4 is policy you can default
+and revisit; #5 is scale.
 
 ## 7. Verification items — resolved in R2
 
@@ -241,17 +305,18 @@ a scale optimization once dispatch exists.
 2. **EVM recovery chain reconciliation → resolved: not implemented.** Only read-at-prepare
    exists; folded into roadmap #2.
 
-No open verification items block ratifying the doctrine. The one thing worth confirming before
-designing #1 is the intended *execution* ownership granularity (per-run vs per-attempt lease)
-and whether dispatch should ride the existing observation feed or a dedicated runnable index.
+No open verification items block ratifying the doctrine. The execution-ownership-granularity and
+dispatch-source questions raised here are now decided/tracked in §6: dispatch rides the existing
+observation feed (§6.1), and granularity is decision D7.
 
 ## 8. Next step
 
-The R2 verification gate is clear. Either (a) ratify the doctrine (§2) as a normative
-`docs/design.md` "Process-Fungible Execution" section now and capture §6 as the execution-layer
-roadmap, or (b) go straight to designing roadmap #1 (the execution dispatch/claim layer), since
-it is now the load-bearing gap for the multi-agent execution vision. Still no code until the
-direction is signed off.
+Roadmap #1 is decided (§6.1). Two tracks from here: (a) ratify the doctrine (§2) as a normative
+`docs/design.md` "Process-Fungible Execution" section and land §6.1 + §6.2 as the execution-layer
+roadmap; (b) work the §6.2 decision agenda, starting with the critical path — **#2, the
+external-effect reconciliation seam** (the doctrine's hard core and the biggest remaining
+correctness gap). The first calls to make are D1 (nonce concurrency model) and D2 (reconciliation
+algorithm + exclusive-signer precondition). Still no code until the direction is signed off.
 
 ## Appendix — key code anchors (R2)
 
