@@ -80,6 +80,9 @@ append-only, certified design.
 - Pipelined nonces (multiple in-flight transactions per account). Deferred; serial-within-hold is
   sufficient and far simpler (DEC-1).
 - Cross-run priority/fairness beyond observation order, and feed sharding. Deferred (DEC-9).
+- Multi-lane admission (one claim spanning several lanes, with all-or-nothing acquisition, deadlock
+  ordering, and starvation policy). v1 is single-lane only — what the code and `docs/saga.md` already
+  provide.
 - Full AC/DC semantics for arbitrary external systems (unchanged from `docs/saga.md`).
 - Changing the semantic core (certified specs, typed values, replay) — none of this RFC touches it.
 
@@ -191,6 +194,12 @@ Non-negotiable invariants:
 App/runtime dispatch consumes the *contract*, never the Postgres-specific SQL — preserving the
 existing store-contract/implementation boundary (the same way `RunEventStore` is consumed today).
 
+**Scope (v1) — documents the existing single-lane scope, not a new constraint.** The primitive ships
+exactly two lane classes: single-lane `WaitFifo` (resource lanes; one `(namespace, key)` per claim —
+all the code and `docs/saga.md` already provide) and `NowaitSkip` (execution). Multi-lane admission
+stays deferred (§3 Non-goals). The point is only that the RFC's prose must not *imply* multi-lane
+atomicity the design never had.
+
 ### 6.3 Execution discovery & dispatch
 
 Discovery reuses the observation feed; the only genuinely new coordination is the execution claim
@@ -248,14 +257,17 @@ must not sign (`docs/architecture.md:143`). So split them:
   matches **this** against chain truth.
 Two deterministic anchors, two layers; neither crosses the boundary.
 
-**(b) Finality depth is certified-or-admission-bound, never process-local.** `verification:
-Receipt | Finalized` is a hash-defining field on `SideEffectContractSpec` — the semantic *class*.
-The numeric confirmation depth is outcome-affecting, so it must be identical for every worker driving
-the run: it is **pinned at run admission** (resolved from chain config once, recorded in
-`RunAdmitted` launch evidence, read from the run stream by every worker and by replay). A worker
-whose local config cannot satisfy the admitted depth fails as a deployment/ingress error, never as a
-divergent terminalization. (Refinement: model the depth behind a certified finality-policy descriptor
-resolved at admission, mirroring the capability descriptor→implementation binding.)
+**(b) Finality depth is certified, resolved at admission, never process-local.** `verification:
+Receipt | Finalized(policy)` is hash-defining on `SideEffectContractSpec` — the semantic *class*
+plus a **certified finality-policy descriptor**. Because the numeric depth is outcome-affecting it
+is not taken from worker-local config: the certified policy is **resolved against the registry at
+run admission** to a concrete depth, recorded in `RunAdmitted` launch evidence, and read from the
+run stream by every worker and by replay. (Pure admission-pinning from local config would only move
+the process dependence to *which worker admitted* — resolving from certified authority removes it.)
+A worker that lacks the capability to satisfy the admitted policy **declines the execution claim**
+(the run waits for a capable worker); it does **not** fail the run. A run no deployed worker can
+satisfy is a capacity/deployment stall surfaced operationally, never a semantic failure. *(Resolves
+the review's depth-model inconsistency: this is the single committed model.)*
 
 **(c) Terminal evidence by level — enables receipt-level output.** Today terminal output is built
 only from confirmation (`output_from_confirmation`, `program/src/lib.rs:1561`) and runtime requires
@@ -266,23 +278,39 @@ for `Finalized` (the `Receipt` and `Confirmation` associated types already exist
 `program/src/lib.rs:1534-1537`). Runtime validates terminal evidence against the *configured* level,
 not unconditionally `is_confirmed()`.
 
-**(d) One ledger across the pair — an explicit store/runtime authority redesign (DEC-14).** The
-verify node continues the submit node's ledger. Current authority is attempt-scoped and must change
-in four concrete places:
-1. **Ledger key** — today `{attempt_id, node_id, idempotency_key, ledger_purpose, run_id,
-   spec_hash}` (`side_effect_driver.rs:1096`). Re-derive from a **stable certified pair identity**
-   (run + the certified side-effect pair id), dropping `attempt_id`/`node_id`, so both nodes address
-   one ledger.
-2. **Projection lookup** — today by node+attempt (`side_effect_lifecycle.rs:278`). Look up by
-   **ledger key**.
-3. **Release authority** — today release must match the active claim's node/attempt/fence
-   (`resource_lanes.rs:75`). Bind release authority to the **certified pair** (submit claims, verify
-   releases), validated against the pairing + fence, not single-node-attempt.
-4. **Event payload validation** — accept ledger events from either node of the certified pair (keyed
-   on ledger identity + pair membership + fence), not one attempt.
-Attempt lifecycle (per-node execution bookkeeping) thereby decouples cleanly from ledger lifecycle
-(the durable phase machine). *Fallback if too invasive:* two linked ledgers with an explicit
-lane/anchor handoff (more moving parts, no attempt-scoping change) — see §10.
+**(d) One ledger across the pair — a first-class *pair authority* redesign (DEC-14, DEC-17).** The
+verify node continues the submit node's ledger. This is *not* a projection-lookup tweak: side-effect
+authority is node/attempt-shaped **down to the event schemas** — `IntentPersisted` and its siblings
+carry `node_id`/`scope_id`/`attempt_id` (`events.rs:2389`), as do store admission, lane release
+(`resource_lanes.rs:75`), and artifact producer evidence (`store/v1/mod.rs:6931`). One ledger across
+two nodes therefore requires a **first-class certified `SideEffectPair` authority** that the schema
+and validation understand:
+1. **Pair identity** — lowering mints a certified pair `(submit_node, verify_node)`; the ledger key
+   derives from `(run, pair_id)`, not `{attempt_id, node_id}` (`side_effect_driver.rs:1096`).
+2. **Event attribution** — side-effect event payloads are attributed to a `(pair, role ∈ {submit,
+   verify})`; store admission accepts an event iff its emitting node is the pair's certified node
+   for that phase (replacing single node/attempt checks, `events.rs:2389`).
+3. **Projection lookup** — by ledger/pair key, not node+attempt (`side_effect_lifecycle.rs:278`).
+4. **Release authority** — bound to the pair: the submit role claims the lane, the verify role
+   releases it, validated against the certified pair + fence (`resource_lanes.rs:75`).
+5. **Producer evidence** — submit-role intermediate artifacts and the verify-role output artifact
+   are both legal within the pair (`store/v1/mod.rs:6931`).
+**Decided: one-ledger** (rounds 1–2 showed the redesign reaches event schemas, store admission, lane
+release, and producer evidence — a wide blast radius, accepted on purpose). One ledger is the simpler,
+cleaner *end state* (one ledger, one anchor, one lane; attempt lifecycle decoupled from ledger
+lifecycle), and we optimize for end-state simplicity over one-time implementation effort
+(`docs/code-quality.md`: doing it right over doing it now). *Considered and rejected:* the
+two-linked-ledger handoff — smaller blast radius, but a permanently more complex end state (two
+ledgers + a handoff protocol).
+
+**(e) Output ownership & lineage — canonical lowering.** Splitting the node moves its
+downstream-visible output, so lowering must define ownership. Canonical rule: the original
+side-effect node's **output cell is produced by the verify node** (its producer is re-pointed to
+verify at lowering); the submit node produces only internal submission evidence and binds **no**
+downstream-visible cell. Cell lineage and artifact producer evidence name the **verify** node.
+Consequence: downstream nodes depend on the verify node's cell, so they can never observe
+"submitted" before "verified," and every cell has exactly one producer — e.g. a deployed contract
+address is unusable downstream until verification terminalizes.
 
 **Live vs replay verifier.** A new live `SideEffectVerifier` (read capability only; any fungible
 worker) reads chain truth by the submission anchor and emits the existing `ReceiptObserved /
@@ -317,7 +345,12 @@ and the "resource-lane holder-takeover machine" (now unnecessary — the lane is
   signatures (RFC 6979 for ECDSA secp256k1). Enforced, not assumed: the submission anchor (the
   prepared-invocation expected hash, §6.4a) is recorded before the boundary, and recovery **asserts
   the re-signed hash equals the recorded anchor** — a determinism-violating signer fails closed
-  instead of double-submitting.
+  instead of double-submitting. **Disposition on mismatch (review Med-6):** the re-sign check gates
+  *resubmission*, not reconciliation — the verify node still reconciles by the *recorded* anchor
+  against chain truth. On-chain → confirm + release the lane; provably not on-chain and
+  unresubmittable → a **defined terminal**: `NotSubmittedProven` → failure-with-lane-release (default
+  `FailWithoutAcdcClaim`), or a `ManualResolution`-policy manual block that holds the lane pending
+  operator action. Never a silent ledger/lane wedge.
 - **Capabilities split semantic vs operational** (unchanged): outcome-affecting authority (signer
   ref, expected chain id, expected address) is pinned to the run and verified at admission;
   transport routing (RPC URL, source id) is per-worker. Verification needs only **read**
@@ -332,7 +365,7 @@ and the "resource-lane holder-takeover machine" (now unnecessary — the lane is
 | DEC-0 | Doctrine: correctness = the Postgres transaction boundary; topology operational; leases = liveness, never safety | Enables fungible processes / multi-agent without process-level coordination |
 | DEC-1 | Nonce: serial per-account, sequential-within-hold; pipelining deferred | Deterministic nonce block, point-wise recovery; pipelining reopens range/gap recovery |
 | DEC-2 | Reconcile on the deterministic **submission anchor** (prepared-invocation signed-tx hash, adapter-computed — distinct from the state's semantic idempotency input), never the nonce; no exclusive-ownership assumption | Respects the state/signer boundary; foreign-occupied nonce = safe detectable terminal; exclusivity = availability, not safety |
-| DEC-3 | Finality: semantic class (`Receipt`/`Finalized`, hash-defining) + numeric depth **pinned at run admission** (recorded in `RunAdmitted`, identical for every worker) | Depth is outcome-affecting → must not be process-local; mismatched local config = ingress failure, not a divergent outcome |
+| DEC-3 | Finality: semantic class + **certified policy descriptor** resolved against the registry at admission to a depth recorded in `RunAdmitted` | Depth is outcome-affecting → from certified authority, not worker config; a worker lacking the capability **declines the claim**, never fails the run |
 | DEC-4 | Admission leases + heartbeat; expiry routes to recovery, never silent release | Superseded for resource-lane *holders* by §6.4–6.5 (ledger-lifetime); applies to execution tenure |
 | DEC-5 | Recovery = ordinary fungible dispatch of a run in a recovering state | Needs only a read capability; no dedicated recovery worker class |
 | DEC-6 | Add a `due_at` dispatch signal for confirmation polling / backoff | Verify nodes awaiting confirmations are `blocked-until-due_at` |
@@ -343,9 +376,13 @@ and the "resource-lane holder-takeover machine" (now unnecessary — the lane is
 | DEC-11 | Size pools to worker count; pooler-safe (xact-scoped locks + lease tables) | No session advisory locks → transaction-mode poolers OK |
 | DEC-12 | Unify resource lanes + execution claims into one admission-lane primitive | One table-pair, one `admit(mode)`; primitive owns order+lease, caller owns authority |
 | DEC-13 | Side-effect verification is a paired framework state (submit + verify) | Uniform/configurable verification; recovery-for-free; collapses DEC-2/DEC-4 machinery |
-| DEC-14 | One ledger across the verify pair — explicit authority redesign: re-key the ledger by certified pair identity (drop attempt/node), projection-by-ledger-key, pair-bound release authority, multi-node payload validation | Decouples attempt vs ledger lifecycle; two-linked-ledger handoff is the documented fallback (§10) |
+| DEC-14 | One ledger across the verify pair (**committed**) — re-key by certified pair identity, projection-by-ledger-key, pair-bound release, multi-node payload validation | Simplest end state; decouples attempt vs ledger lifecycle. Two-linked-ledger rejected (less effort, more complex end state) |
 | DEC-15 | Require deterministic signing, enforced via re-sign == recorded submission anchor | Idempotent re-broadcast; determinism violation fails closed |
 | DEC-16 | Side-effect terminal output via a typed terminal-evidence model (`output_from_receipt` / `output_from_confirmation`), validated against the configured level | Enables `Receipt`-level terminalization; output is confirmation-only today |
+| DEC-17 | One-ledger's first-class certified `SideEffectPair` authority (pair identity, event attribution, store admission, pair-bound release, producer evidence) is accepted as the chosen path | Node/attempt shaping reaches the event schemas (`events.rs:2389`); blast radius accepted, not a reason to switch |
+| DEC-19 | Lowering re-points the original output cell's producer to the verify node; submit binds no downstream cell | Downstream never observes "submitted" before "verified"; one producer per cell |
+| DEC-20 | Re-sign mismatch gates resubmission only; reconcile by the recorded anchor to a defined terminal (failure-with-lane-release or policy manual-block) | Never a silent ledger/lane wedge |
+| DEC-21 | WS-B dispatch gated to side-effect-free / already-terminal runs until WS-C/WS-D land | Multi-worker dispatch of side-effecting runs is unsafe before reconciliation |
 
 ## 8. Changes required (implementation plan)
 
@@ -375,6 +412,9 @@ with docs+tests in the same change. Five workstreams.
 - **Runnable granularity:** extend the frontier read so the claim winner gets Runnable/Blocked/
   Terminal (today the feed reports only Started/Completed).
 - **`due_at` signal** (DEC-6) and **lane-release wakeup** in the dispatcher.
+- **Dispatch-eligibility gate (until WS-C/WS-D land, review High-1):** claim a run only if it has
+  **no non-terminal side-effect ledger**; side-effecting runs stay single-driver until reconciliation
+  exists. The gate lifts at Phase 3.
 - **Worker entrypoint** in `bin` + a dispatch service in `crates/app`.
 - **Targets:** `crates/app`, `bin/*`, `kernel/runtime` (frontier granularity), `storages` (`due_at`,
   wakeup).
@@ -426,10 +466,17 @@ with docs+tests in the same change. Five workstreams.
 
 ```
 Phase 1: WS-A  (admission lane)            ── foundation, behavior-preserving for resource lanes
-Phase 2: WS-B  (execution dispatch)        ── turns the observation feed into an execution fabric
-Phase 3: WS-C + WS-D (verification + determinism) ── productizes side effects; delivers recovery
+Phase 2: WS-B  (execution dispatch, GATED) ── dispatches only side-effect-free / already-terminal
+                                              runs; in-flight-side-effect runs stay single-driver
+Phase 3: WS-C + WS-D (verification + determinism) ── productize side effects AND lift the WS-B gate
 Phase 4: WS-E  (perf / ops)                ── scale optimizations
 ```
+
+**Safety gate (review High-1).** General multi-worker dispatch of a *side-effecting* run is unsafe
+until reconciliation exists (WS-C/WS-D), per the doctrine that external-effect safety requires
+reconciliation (§4). WS-B's claim eligibility therefore **excludes any run with a non-terminal
+side-effect ledger** until Phase 3; pure/read runs get the execution fabric immediately, and the
+gate lifts when verification + determinism land.
 
 ## 9. Migration & compatibility
 
@@ -447,8 +494,10 @@ Phase 4: WS-E  (perf / ops)                ── scale optimizations
 | Risk | Mitigation |
 |---|---|
 | Admission table mistaken for authority | Structural: mode∝class, liveness-only, no safety read branches on it (§6.2 inv. 2); lane-state projection kept separate |
-| One-ledger authority redesign (ledger key, projection lookup, release authority, payload validation) is invasive | Specified explicitly in §6.4d; gated by replay + kill-mid-flight integration tests; two-linked-ledger handoff is the documented fallback |
-| Fungible workers terminalize finality at different depths | Depth pinned at run admission (§6.4b), identical for all workers and replay; mismatched local config fails as ingress, not a divergent outcome |
+| One-ledger redesign reaches event schemas / store admission / producer evidence (wide blast radius) | Accepted as the chosen end state (DEC-14/17); pair-authority schema design in §6.4d + replay/kill-mid-flight tests; two-linked-ledger considered and rejected |
+| Fungible workers terminalize finality at different depths | Depth resolved from a certified policy at admission (§6.4b), identical for all workers and replay; a worker lacking the capability declines the claim |
+| Signer cannot reproduce a recorded anchor → wedged lane | Defined terminal disposition (DEC-20): reconcile by the recorded anchor; failure-with-lane-release or policy manual-block, never a silent wedge |
+| Multi-worker dispatch of side-effecting runs before reconciliation exists | WS-B gated to side-effect-free / terminal runs until WS-C/WS-D (DEC-21); gate lifts at Phase 3 |
 | Non-deterministic signer slips in | Enforced by the re-sign == anchor assertion (DEC-15): fails closed, never double-submits |
 | Thundering herd at high worker count | `NowaitSkip` losers pay one `UPDATE` and skip; no waiter writes on the Busy path; shard the feed later (DEC-9) |
 | Postgres as the coordination/scaling ceiling | Per-run and per-lane locks parallelize disjoint work; materialized lane projection (WS-E) removes the O(history) fold |
@@ -472,10 +521,7 @@ Phase 4: WS-E  (perf / ops)                ── scale optimizations
 ## 12. Deferred / open
 
 - Pipelined nonces (DEC-1); per-attempt execution leases (DEC-7); feed sharding and cross-run
-  priority (DEC-9).
-- Whether the finality depth is admission-bound (default, §6.4b) or modeled behind a certified
-  finality-policy descriptor (refinement).
-- Whether the one-ledger authority redesign (§6.4d) or the two-linked-ledger fallback (§10) is taken.
+  priority (DEC-9); multi-lane admission (§3 Non-goals).
 - D5–D11 defaults to be rubber-stamped at ratification.
 - Concrete shapes: the prepared-invocation submission anchor (adapter) and the state's semantic
   `IdempotencyInput` (now distinct).
