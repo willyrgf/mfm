@@ -24,8 +24,11 @@ resource lanes, a durable observation/watch feed). The remaining work is three c
 1. **A unified admission-lane primitive** — one durable mechanism for fair, fenced, lease-reaped
    exclusive admission that serves both *resource lanes* (wallet/nonce contention) and *execution
    claims* (which worker drives a run), plus any future coordination need.
-2. **Execution discovery & dispatch** — turn the existing read-only observation feed into an
-   execution fabric: workers discover, claim, and drive runnable runs.
+2. **Execution claim (dedup + recovery-ownership substrate)** — the invoker drives its own run; an
+   execution claim coordinates concurrent invocations (no duplicate driver of the same run) and, via
+   its lease, leaves a dead driver's run *reclaimable*. **Automatic resume is out of scope here** — it
+   belongs to the larger AC/DC + saga recovery effort (§6.5, §12). The observation feed stays
+   status/watch only.
 3. **Side-effect verification as a paired framework state** — every side-effect node lowers into a
    `submit` node plus an auto-inserted `verify` framework node. This productizes receipt/finality
    verification uniformly *and* makes external-effect recovery fall out of ordinary dispatch,
@@ -54,8 +57,11 @@ append-only, certified design.
 
 ### 2.3 What is missing today
 
-- **No execution dispatch.** Execution is per-run and caller-driven; a worker must already hold a
-  `run_id`. The observation feed is strictly read/observe — there is no "lease me a runnable run."
+- **No execution claim, and no safe takeover/resume.** Execution is invoker-driven (the process that
+  starts a run drives it) — fine — but there is no durable execution claim to dedup concurrent
+  invocations of the same run (this RFC adds it), and no way for another process to safely take over
+  and resume a dead driver's run (deferred to the AC/DC + saga recovery effort). The observation feed
+  is read/observe only.
 - **No external-effect reconciliation.** A worker that submits a transaction and dies leaves an
   ambiguous nonce; nothing reads chain truth to resolve landed-vs-never-sent.
 - **Verification is not productized.** Receipt/finality checking is embedded ad hoc inside the
@@ -109,10 +115,11 @@ Three layers follow:
 The safety substrate is already complete; the gaps are in liveness/scale/discovery.
 
 - **Per-run serialization + optimistic seq.** Every append takes a transaction-scoped
-  `pg_advisory_xact_lock` on the run id (`run_store/stream.rs:54`), backed by `commits` PK
-  `(run_id, seq)` and `expected_next_seq` (`run_store/mod.rs:157`). Two workers driving one run:
-  one commits each step; the other no-ops (commit-key idempotent) or retries. **Leaseless is
-  already safe.**
+  `pg_advisory_xact_lock` on the run id (`run_store/stream.rs:54`), backed by the `commits` PK
+  `(run_id, seq)` and a **caller-supplied `expected_next_seq` CAS** validated at staging — a
+  precondition, not a stored column (`run_store/mod.rs:157`; `StaleExpectedNextSeq` in `store/v1`).
+  Two workers driving one run: one commits each step; the other no-ops (commit-key idempotent) or
+  retries. **Leaseless is already safe.**
 - **DB-enforced append-only authority.** `mfm_reject_authority_mutation` triggers reject
   UPDATE/DELETE/TRUNCATE on every authority table (`migrations/0001_run_store.sql`).
 - **Sharded resource-lane admission.** Per-lane `pg_advisory_xact_lock` on only the touched lanes
@@ -177,9 +184,15 @@ Two instantiations exercise disjoint subsets, so neither stores the other's auth
 - **Resource lane (`WaitFifo`)** — uses only waiter rows. Admission gates the commit, so "admitted"
   and the `ResourceLaneClaimed` authority event are atomic in one txn; the steady-state holder is
   never stored here. The caller supplies `holder_is_free` from the event fold.
-- **Execution claim (`NowaitSkip`, lane_id = run_id)** — uses only the lane row's lease; writes no
+- **Execution claim (`NowaitSkip`, lane_id = run id)** — uses only the lane row's lease; writes no
   waiters; the lease *is* the holder, harmless because safety = the store's per-run lock +
-  `expected_next_seq`. A worker that can't claim run X skips to run Y; it never queues.
+  `expected_next_seq`. Try-acquire is the **dedup** gate: a second invoker of the same run finds it
+  held and attaches instead of starting a duplicate (§6.3). Crucially, the execution lease confers
+  **no** authority to cross a side-effect boundary — that gate is solely the per-side-effect
+  nonce-lane claim + `claim_fencing_token`. So even two processes that both believe they hold the
+  execution lease (after a false reap) cannot double-submit: only the claim-holder may submit, and
+  nonce serialization + the claim-generation fence make at most one mutation land. Execution lease =
+  dispatch liveness; side-effect claim = mutation safety.
 
 Non-negotiable invariants:
 
@@ -193,6 +206,9 @@ Non-negotiable invariants:
 `admit(mode)`, lease, fence, head-of-line) with a **Postgres implementation in `storages`**.
 App/runtime dispatch consumes the *contract*, never the Postgres-specific SQL — preserving the
 existing store-contract/implementation boundary (the same way `RunEventStore` is consumed today).
+Note (LOW): today's advisory-lock key is a 32-bit truncation of SHA-256 (`run_store/stream.rs:66-74`),
+so distinct lanes can falsely contend at scale; the new primitive should key its lock on a 64-bit
+value or the full lane id (safety is unaffected — it holds via PK + CAS).
 
 **Scope (v1) — documents the existing single-lane scope, not a new constraint.** The primitive ships
 exactly two lane classes: single-lane `WaitFifo` (resource lanes; one `(namespace, key)` per claim —
@@ -200,30 +216,48 @@ all the code and `docs/saga.md` already provide) and `NowaitSkip` (execution). M
 stays deferred (§3 Non-goals). The point is only that the RFC's prose must not *imply* multi-lane
 atomicity the design never had.
 
-### 6.3 Execution discovery & dispatch
+### 6.3 Execution: invoker-drives, claim, and automatic resume
 
-Discovery reuses the observation feed; the only genuinely new coordination is the execution claim
-(§6.2). The dispatch loop is library code colocated in *every* worker — **no central dispatcher**
-(that would re-introduce process-level coordination):
+MFM is **invoker-driven**, not pool-dispatched: `mfm run --op xyz` starts the state-machine runner
+*in that process* and drives the run to completion or to a block. There is no pool of idle workers
+polling a feed for work; the observation feed (§5) is **status/watch only** and never a dispatch
+surface.
+
+The execution claim is a `NowaitSkip` admission lane keyed on the content-addressed run id, doing
+two jobs — neither of which is discovery:
+
+- **Dedup.** A second `mfm run --op xyz` (same op+config → same run id) finds the claim held by a
+  live driver and does not start a duplicate; it attaches to / reports the existing run.
+- **Recovery ownership.** The driver heartbeats the claim while running (renewing `lease_expires_at`
+  forward). If it dies, the lease expires and the run becomes resumable by another process — without
+  ever transferring *semantic* ownership (safety is still the store, §5).
+
+The driver holds the run through blocks rather than handing it off:
 
 ```
-cursor = observe_list(status = non-terminal)        // cold start: seed candidates
-loop:
-  for run in candidates:                             // feed changes ∪ due_at-elapsed ∪ new head-of-line waiters
-    if acquire_execution_claim(run) is None: continue
-    while frontier(fold(run)) is Runnable(t):
-      renew_claim(); commit(t)                       // release tenure on long external waits (DEC-8)
-    release_claim(run)                               // blocked / terminal
-  (cursor, candidates) = observe_watch(cursor, wait_ms)   // NOTIFY-woken
+acquire_execution_claim(run) or attach-to-existing       // dedup
+while frontier(fold(run)) is Runnable(t):
+  renew_claim(); commit(t)                                // heartbeat + advance
+  // a short Receipt-level side-effect wait (~1 block) is polled in-line while heartbeating
+release_claim(run)                                        // terminal
 ```
 
-- **Safety is independent of the claim** — the store's per-run lock + `expected_next_seq` is the
-  sole guard. A dead worker's claim expires and is takeable; a double-claim only wastes work.
-- **Runnability is derived lazily** by the claim winner folding the run; no new index in v1.
-- **`due_at` (DEC-6)** — a durable "blocked until T" the dispatcher polls (for confirmation polling
-  / backoff), woken by NOTIFY in between.
-- **Lane-release wakeup** — on wake the dispatcher re-checks `head_of_line` for lanes whose holder
-  released, surfacing the new head-of-line run as a candidate.
+**Dead-driver recovery is deferred (to the AC/DC + saga effort).** The execution claim's lease +
+expiry is the *substrate* for recovery — a dead driver's lease lapses, so its run is no longer locked
+and becomes reclaimable — but the mechanism that *automatically* finds and resumes such runs (and,
+for side-effecting runs, reconciles an ambiguous in-flight submission) is part of the larger,
+separate AC/DC + saga recovery effort, not this RFC. v1 delivers the claim (dedup + the reclaimable
+lease); automatic resume is future work (§12). No manual `--resume` is added here either. When it is
+built, it should read the **claim table** for expired claims (a fresh indexed read), not the
+snapshot-frontier-gated feed.
+
+**Why no feed-driven discovery, and no `due_at` in v1 (review HIGH-2).** The observation feed is
+gated behind `pg_snapshot_xmin` (`observations.rs:185-192`), so a pool that discovered work through
+it would inherit a cluster-wide liveness lag. That lag is real for the *watch* feed but irrelevant
+here: MFM does not dispatch through it — the invoker drives, and resume reads the claim table.
+Confirmation waits are short at the default `Receipt` level, so the driver simply holds +
+heartbeats through them; `due_at` (re-waking a parked, undriven run) and tenure-release-on-wait are
+**deferred** (DEC-6/DEC-8) to a long-`Finalized`-at-scale optimization, not a v1 mechanism.
 
 ### 6.4 Side-effect verification as a paired framework state
 
@@ -239,8 +273,13 @@ Verification — "did the mutation land (receipt), and is it final (confirmation
 
 It is **auto-inserted at lowering** — add `FrameworkNodeSpec::SideEffectVerify` beside `Bridge /
 PublicOutputRender / ProjectRetentionManifest / CompleteRun / ResolveSagaTerminal`; lowering inserts
-exactly one verify node after each side-effect node, cardinality-checked like the other framework
-nodes (`certify/src/framework_lifecycle.rs`). Automatic, certified, static, zero per-operation LOC.
+exactly one verify node after each side-effect node. Unlike the existing framework nodes — validated
+as **singletons** (`certify/src/framework_lifecycle.rs`) — `SideEffectVerify` is **its own validation
+family**: an N-cardinality **pairing invariant** (exactly one verify per submit; no orphan verify, no
+submit without verify), **evidence-flow binding** (verify consumes the submit's epoch/anchor), and a
+**post-rewrite single-producer check** (every downstream consumer of the re-pointed output cell
+resolves to verify — §6.4e). Zero per-operation LOC for *authors*, but a real new certifier +
+lowering path (WS-C).
 
 This split hides four authority changes the review correctly surfaced; they are specified explicitly
 below, not behind "paired framework state."
@@ -251,10 +290,17 @@ deterministic and computed in the state *before* `submit` (`program/src/lib.rs:1
 must not sign (`docs/architecture.md:143`). So split them:
 - *Semantic idempotency* (state, pre-submit) — the existing `idempotency_input → IdempotencyKey`;
   identifies the intended mutation; drives store dedup / ledger identity.
-- *Submission anchor* (adapter, prepared-invocation) — the deterministic signed-tx hash, computed at
-  prepare time where signing is allowed and retained in the prepared-invocation artifact (which
-  `docs/design.md` already permits to hold "expected hashes") *before* broadcast. Reconciliation
-  matches **this** against chain truth.
+- *Submission anchor* (adapter, prepared-invocation) — the deterministic signed-tx hash, retained in
+  the prepared-invocation artifact (which `docs/design.md` already permits to hold "expected hashes")
+  *before* broadcast. The anchor is only defined once `InvocationPrepared` is **committed**, because
+  it freezes the nonce, fees, and gas — all **live RPC reads** at prepare time
+  (`adapters/evm-contracts/src/lib.rs:665-683`). Recovery therefore **reconstructs the anchor from
+  the committed prepared-invocation artifact** (`reconstruct_*`, `:1145+`) and must never re-run the
+  live `prepare_*` path; a death *before* `InvocationPrepared` committed broadcast nothing (the
+  boundary is `InvocationStarted`), so a fresh prepare on a new invocation epoch is safe. RFC 6979
+  deterministic signing is necessary for the signing step, but the load-bearing determinism is
+  **artifact reconstruction**, not the signature. Reconciliation matches this anchor against chain
+  truth.
 Two deterministic anchors, two layers; neither crosses the boundary.
 
 **(b) Finality depth is certified, resolved at admission, never process-local.** `verification:
@@ -295,6 +341,14 @@ and validation understand:
    releases it, validated against the certified pair + fence (`resource_lanes.rs:75`).
 5. **Producer evidence** — submit-role intermediate artifacts and the verify-role output artifact
    are both legal within the pair (`store/v1/mod.rs:6931`).
+6. **Remediation linkage** — remediation today targets a forward *node*
+   (`runtime/src/side_effects.rs:213`) and the saga keys it on `forward_ledger_key` (`docs/saga.md`).
+   With a pair, remediation targets the **pair** (canonically the submit role), over the pair-keyed
+   ledger.
+7. **Forward fence** — saga engagement forbids new forward boundary crossings, derived from per-node
+   ledger phase (`docs/saga.md`). The fence must treat the pair **atomically** (over pair-terminal
+   phase), so a verify-side transition after engagement is not wrongly admitted.
+
 **Decided: one-ledger** (rounds 1–2 showed the redesign reaches event schemas, store admission, lane
 release, and producer evidence — a wide blast radius, accepted on purpose). One ledger is the simpler,
 cleaner *end state* (one ledger, one anchor, one lane; attempt lifecycle decoupled from ledger
@@ -319,7 +373,11 @@ ConfirmationObserved / NotSubmittedProven` evidence; the existing `SideEffectRep
 
 ### 6.5 Reconciliation & recovery (emergent — no bespoke machinery)
 
-Because the verify node is an ordinary frontier node, recovery falls out of dispatch:
+The verify-pair is designed so recovery *falls out of ordinary driving* rather than needing bespoke
+machinery. **The automatic resumption that triggers cross-process recovery is deferred to the AC/DC +
+saga effort (§6.3, §12);** this section specifies how recovery *behaves* once a run is resumed (by
+that future effort) or re-driven within a live driver — it is not a v1 sweep. Because the verify node
+is an ordinary frontier node:
 
 - A worker that dies mid-verification leaves a **runnable verify node**; ordinary dispatch +
   execution-lease expiry re-drives it.
@@ -339,13 +397,31 @@ dispatch drives it, the lane releases at terminal.
 This subsumes what the earlier design called the "recovery verifier" (now the general live verifier)
 and the "resource-lane holder-takeover machine" (now unnecessary — the lane is ledger-lifetime).
 
+**Lane release tracks the ledger's terminal state, not the run's block.** The wallet lane is held
+only while the side-effect is *genuinely ambiguous*. The moment the ledger reaches a **proven
+terminal** — `Confirmed` (nonce consumed) or `NotSubmittedProven` (nonce provably free) — the lane
+releases, *even if the run then manual-blocks downstream*: only the run is parked, the wallet is free
+for other runs. A lane is held past terminal only when the **ambiguity itself** needs an operator
+(`ManualResolution`), and the operator's signed resolution is what terminalizes and releases it. The
+lane is **never** timeout-released (it is ledger-lifetime, not lease-reaped) — releasing a
+still-ambiguous nonce would risk a cross-run nonce conflict. A held nonce lane blocks only
+*same-signer* side-effects; unrelated runs proceed (DEC-25).
+
+**Per-signer write throughput ceiling (honest scalability bound).** Because the lane is held
+submit→terminal, a signer account executes at most **one side-effect per terminal window**: ≈one per
+block at the default `Receipt` level, and ≈one per finality window only for explicitly-`Finalized`
+effects. On-chain *reads* are unconstrained. Horizontal scale of side-effecting work comes from
+**more signer accounts**, not more workers, until pipelined nonces (DEC-1) are lifted. (A
+`Receipt`-level reorg can briefly gap the next nonce on that signer; it self-heals via
+reconciliation.) (DEC-26)
+
 ### 6.6 Determinism, capabilities, replay
 
 - **Deterministic signing required (DEC-15).** The signer contract must produce deterministic
   signatures (RFC 6979 for ECDSA secp256k1). Enforced, not assumed: the submission anchor (the
-  prepared-invocation expected hash, §6.4a) is recorded before the boundary, and recovery **asserts
-  the re-signed hash equals the recorded anchor** — a determinism-violating signer fails closed
-  instead of double-submitting. **Disposition on mismatch (review Med-6):** the re-sign check gates
+  prepared-invocation expected hash, §6.4a) is recorded before the boundary; recovery
+  **reconstructs it from the committed prepared invocation and asserts the re-signed hash equals
+  it** — a determinism-violating signer fails closed instead of double-submitting. **Disposition on mismatch (review Med-6):** the re-sign check gates
   *resubmission*, not reconciliation — the verify node still reconciles by the *recorded* anchor
   against chain truth. On-chain → confirm + release the lane; provably not on-chain and
   unresubmittable → a **defined terminal**: `NotSubmittedProven` → failure-with-lane-release (default
@@ -368,21 +444,27 @@ and the "resource-lane holder-takeover machine" (now unnecessary — the lane is
 | DEC-3 | Finality: semantic class + **certified policy descriptor** resolved against the registry at admission to a depth recorded in `RunAdmitted` | Depth is outcome-affecting → from certified authority, not worker config; a worker lacking the capability **declines the claim**, never fails the run |
 | DEC-4 | Admission leases + heartbeat; expiry routes to recovery, never silent release | Superseded for resource-lane *holders* by §6.4–6.5 (ledger-lifetime); applies to execution tenure |
 | DEC-5 | Recovery = ordinary fungible dispatch of a run in a recovering state | Needs only a read capability; no dedicated recovery worker class |
-| DEC-6 | Add a `due_at` dispatch signal for confirmation polling / backoff | Verify nodes awaiting confirmations are `blocked-until-due_at` |
+| DEC-6 | `due_at` re-wake for undriven parked runs — **DEFERRED** (v1 holds+heartbeats through short Receipt waits) | Only needed for long `Finalized` waits at scale |
 | DEC-7 | Per-run execution lease (not per-attempt) | Simplest; runs are the parallelism unit; per-attempt deferred |
-| DEC-8 | Release execution tenure on long external waits | A confirmation wait must not pin a worker |
+| DEC-8 | Release execution tenure on long external waits — **DEFERRED** (v1 holds+heartbeats) | Pairs with `due_at`; only for long `Finalized` waits |
 | DEC-9 | Single feed / oldest-first now; shard by `hash(run_id)` later | Defer scale complexity until needed |
 | DEC-10 | Materialize the lane-state projection (rebuildable cache, not authority) | Removes the O(history) `resource_lane:%` fold |
 | DEC-11 | Size pools to worker count; pooler-safe (xact-scoped locks + lease tables) | No session advisory locks → transaction-mode poolers OK |
 | DEC-12 | Unify resource lanes + execution claims into one admission-lane primitive | One table-pair, one `admit(mode)`; primitive owns order+lease, caller owns authority |
 | DEC-13 | Side-effect verification is a paired framework state (submit + verify) | Uniform/configurable verification; recovery-for-free; collapses DEC-2/DEC-4 machinery |
 | DEC-14 | One ledger across the verify pair (**committed**) — re-key by certified pair identity, projection-by-ledger-key, pair-bound release, multi-node payload validation | Simplest end state; decouples attempt vs ledger lifecycle. Two-linked-ledger rejected (less effort, more complex end state) |
-| DEC-15 | Require deterministic signing, enforced via re-sign == recorded submission anchor | Idempotent re-broadcast; determinism violation fails closed |
+| DEC-15 | Deterministic signing (RFC 6979) **and** recovery reconstructs the anchor from the committed prepared invocation, asserting re-sign == it | The load-bearing determinism is artifact reconstruction (nonce/fee/gas are live reads), not the signature; fails closed |
 | DEC-16 | Side-effect terminal output via a typed terminal-evidence model (`output_from_receipt` / `output_from_confirmation`), validated against the configured level | Enables `Receipt`-level terminalization; output is confirmation-only today |
 | DEC-17 | One-ledger's first-class certified `SideEffectPair` authority (pair identity, event attribution, store admission, pair-bound release, producer evidence) is accepted as the chosen path | Node/attempt shaping reaches the event schemas (`events.rs:2389`); blast radius accepted, not a reason to switch |
 | DEC-19 | Lowering re-points the original output cell's producer to the verify node; submit binds no downstream cell | Downstream never observes "submitted" before "verified"; one producer per cell |
 | DEC-20 | Re-sign mismatch gates resubmission only; reconcile by the recorded anchor to a defined terminal (failure-with-lane-release or policy manual-block) | Never a silent ledger/lane wedge |
-| DEC-21 | WS-B dispatch gated to side-effect-free / already-terminal runs until WS-C/WS-D land | Multi-worker dispatch of side-effecting runs is unsafe before reconciliation |
+| DEC-21 | Resume of a side-effecting run requires reconciliation → deferred to the AC/DC + saga recovery effort | In v1 each run has a single driver (its invoker); side effects handled by the verify-pair |
+| DEC-22 | **Invoker-driven** execution (not pool-dispatched): the starting process drives its run; the execution claim = dedup + recovery ownership; the observation feed is status/watch only | Corrects a worker-pool misframing; no feed-driven dispatch → no snapshot-frontier liveness coupling |
+| DEC-23 | Dead-driver **automatic resume** (background sweep over expired claims) — **DEFERRED** to the AC/DC + saga recovery effort | v1 delivers the claim's reclaimable lease as the substrate; no manual `--resume` added either |
+| DEC-24 | The execution lease grants **no** authority to cross a side-effect boundary; the per-side-effect nonce-lane claim + `claim_fencing_token` is the sole submission gate | A false-reaped double-drive still cannot double-submit |
+| DEC-25 | Wallet lane releases at the side-effect ledger's **proven terminal** (Confirmed / NotSubmittedProven), not at the run's manual-block; held past terminal only when the ambiguity itself needs an operator; never timeout-released | A manual-blocked-but-proven side-effect frees the wallet; a still-ambiguous one holds it safely |
+| DEC-26 | Per-signer write throughput is bounded by the terminal window (≈1/block at Receipt, ≈1/finality at Finalized); reads unbounded; scale via more signers | Honest scalability bound of serial-within-hold (DEC-1) |
+| DEC-27 | `SideEffectVerify` is its **own validation family** (N-cardinality pairing invariant, evidence binding, post-rewrite single-producer check), not a singleton like other framework nodes | Zero-LOC for authors, real new certifier/lowering work |
 
 ## 8. Changes required (implementation plan)
 
@@ -404,34 +486,39 @@ with docs+tests in the same change. Five workstreams.
   `crates/storages/stream-store-postgres` (migration + impl).
 - **Depends on:** nothing (behavior-preserving refactor for resource lanes).
 
-### WS-B — Execution discovery & dispatch
+### WS-B — Execution claim + invoker drive loop
 
-- **Execution lane class** (`NowaitSkip`, `lane_id = run_id`) on the WS-A primitive.
-- **Dispatch loop** (library, colocated per worker): cold-start list → NOTIFY-woken watch →
-  try-acquire → fold → drive-until-blocked (renew; release on long waits) → release.
-- **Runnable granularity:** extend the frontier read so the claim winner gets Runnable/Blocked/
-  Terminal (today the feed reports only Started/Completed).
-- **`due_at` signal** (DEC-6) and **lane-release wakeup** in the dispatcher.
-- **Dispatch-eligibility gate (until WS-C/WS-D land, review High-1):** claim a run only if it has
-  **no non-terminal side-effect ledger**; side-effecting runs stay single-driver until reconciliation
-  exists. The gate lifts at Phase 3.
-- **Worker entrypoint** in `bin` + a dispatch service in `crates/app`.
-- **Targets:** `crates/app`, `bin/*`, `kernel/runtime` (frontier granularity), `storages` (`due_at`,
-  wakeup).
+- **Execution lane class** (`NowaitSkip`, `lane_id` = content-addressed run id) on the WS-A
+  primitive: try-acquire dedup + heartbeat + lease expiry.
+- **Invoker drive loop** (library, in the `mfm run` path): acquire-or-attach the claim → fold →
+  drive-until-blocked while heartbeating → hold + poll through short Receipt waits → release at
+  terminal.
+- **Runnable granularity:** extend the frontier read so the driver gets Runnable/Blocked/Terminal
+  (today the feed reports only Started/Completed).
+- **Not in v1 (deferred to the AC/DC + saga recovery effort):** automatic resume of dead-driver runs
+  + reconciliation-on-takeover (DEC-21/23); `due_at` + tenure-release-on-wait (DEC-6/DEC-8). v1
+  delivers the execution claim (dedup) + the reclaimable lease that effort will build on; the
+  observation feed stays status/watch only.
+- **Targets:** `crates/app` (drive loop), `bin/*` (the `mfm run` runner exists), `kernel/runtime`
+  (frontier granularity), `kernel/store` + `storages` (claim lane + expiry query).
 - **Depends on:** WS-A.
 
 ### WS-C — Side-effect verification as a paired framework state
 
-- **`FrameworkNodeSpec::SideEffectVerify`** spec types + parse/json (`kernel/spec`) + cardinality
-  validation (`kernel/certify/framework_lifecycle.rs`); lowering inserts it after each side-effect
-  node and records the **certified pair identity** (`kernel/program`).
+- **`FrameworkNodeSpec::SideEffectVerify`** spec types + parse/json (`kernel/spec`); lowering inserts
+  it after each side-effect node and records the **certified pair identity** (`kernel/program`). Its
+  **own validation family** (`kernel/certify/framework_lifecycle.rs`): N-cardinality pairing
+  invariant, evidence binding, post-rewrite single-producer check — not the singleton check the other
+  framework nodes use (DEC-27).
 - **`verification: Receipt | Finalized`** on `SideEffectContractSpec` (hash-defining); finality
   **depth pinned at run admission** as `RunAdmitted` evidence and verified per worker
   (`kernel/spec`, `kernel/certify`, run admission in `kernel/runtime` / `crates/app`). [§6.4b]
 - **Ledger authority redesign [§6.4d]:** re-key the ledger from a certified pair identity (drop
   `attempt_id`/`node_id`, `side_effect_driver.rs:1096`), projection lookup by ledger key
-  (`side_effect_lifecycle.rs:278`), pair-bound release authority (`resource_lanes.rs:75`), and
-  multi-node payload validation (`kernel/store`, `kernel/runtime`).
+  (`side_effect_lifecycle.rs:278`), pair-bound release authority (`resource_lanes.rs:75`),
+  multi-node payload validation, **plus remediation-link retargeting to the pair and an atomic pair
+  forward-fence** (`runtime/src/side_effects.rs:213`, `docs/saga.md`) (`kernel/store`,
+  `kernel/runtime`).
 - **Terminal-evidence model [§6.4c]:** add `output_from_receipt`; runtime validates terminal
   evidence against the *configured* level instead of unconditional `is_confirmed()`
   (`kernel/program:1561`, `side_effect_lifecycle.rs:298`).
@@ -466,17 +553,16 @@ with docs+tests in the same change. Five workstreams.
 
 ```
 Phase 1: WS-A  (admission lane)            ── foundation, behavior-preserving for resource lanes
-Phase 2: WS-B  (execution dispatch, GATED) ── dispatches only side-effect-free / already-terminal
-                                              runs; in-flight-side-effect runs stay single-driver
-Phase 3: WS-C + WS-D (verification + determinism) ── productize side effects AND lift the WS-B gate
+Phase 2: WS-B  (execution claim + drive)   ── dedup + invoker drive loop (no resume; that's deferred)
+Phase 3: WS-C + WS-D (verification + determinism) ── productize side effects (live-driver path)
 Phase 4: WS-E  (perf / ops)                ── scale optimizations
 ```
 
-**Safety gate (review High-1).** General multi-worker dispatch of a *side-effecting* run is unsafe
-until reconciliation exists (WS-C/WS-D), per the doctrine that external-effect safety requires
-reconciliation (§4). WS-B's claim eligibility therefore **excludes any run with a non-terminal
-side-effect ledger** until Phase 3; pure/read runs get the execution fabric immediately, and the
-gate lifts when verification + determinism land.
+**Recovery is deferred (review HIGH-1 + the AC/DC + saga effort).** The only multi-process touch of a
+*running* side-effecting run is resume of a dead driver, which is unsafe without reconciliation and is
+therefore scoped into the larger AC/DC + saga recovery effort, not this RFC. In v1 each run is driven
+by its invoker (single driver), including its side effects via the verify-pair; a dead driver's run is
+left reclaimable for that future effort.
 
 ## 9. Migration & compatibility
 
@@ -486,8 +572,9 @@ gate lifts when verification + determinism land.
 - **Side-effect contract gains `verification`.** This changes the spec hash; existing certified
   specs are re-lowered/re-certified (no in-place migration of historical runs, per `docs/design.md`
   CLI/REST rules).
-- **Public surfaces.** A `mfm worker` (or equivalent) dispatch entrypoint is additive; existing
-  `run start/resume/replay/list --watch` are unchanged.
+- **Public surfaces.** The `mfm run` path gains an execution claim (dedup); existing
+  `run start / replay / list --watch` are unchanged. Automatic resume is deferred (§12) and no new
+  manual `run --resume` is added; there is no separate worker-pool entrypoint.
 
 ## 10. Risks & mitigations
 
@@ -497,11 +584,13 @@ gate lifts when verification + determinism land.
 | One-ledger redesign reaches event schemas / store admission / producer evidence (wide blast radius) | Accepted as the chosen end state (DEC-14/17); pair-authority schema design in §6.4d + replay/kill-mid-flight tests; two-linked-ledger considered and rejected |
 | Fungible workers terminalize finality at different depths | Depth resolved from a certified policy at admission (§6.4b), identical for all workers and replay; a worker lacking the capability declines the claim |
 | Signer cannot reproduce a recorded anchor → wedged lane | Defined terminal disposition (DEC-20): reconcile by the recorded anchor; failure-with-lane-release or policy manual-block, never a silent wedge |
-| Multi-worker dispatch of side-effecting runs before reconciliation exists | WS-B gated to side-effect-free / terminal runs until WS-C/WS-D (DEC-21); gate lifts at Phase 3 |
+| Resuming a side-effecting run without reconciliation | Resume is deferred to the AC/DC + saga effort (DEC-21/23); in v1 each run has a single driver, so the case does not arise |
 | Non-deterministic signer slips in | Enforced by the re-sign == anchor assertion (DEC-15): fails closed, never double-submits |
-| Thundering herd at high worker count | `NowaitSkip` losers pay one `UPDATE` and skip; no waiter writes on the Busy path; shard the feed later (DEC-9) |
+| Herd on the claim table (resume sweep / concurrent invokers) | `NowaitSkip` try-acquire: losers pay one `UPDATE`; a duplicate invoker attaches rather than starts; no feed scanning (DEC-22) |
 | Postgres as the coordination/scaling ceiling | Per-run and per-lane locks parallelize disjoint work; materialized lane projection (WS-E) removes the O(history) fold |
-| Wallet wedged by a stuck/slow verify | Scheduler invariant (§6.5) keeps a runnable/`due_at` node; `due_at` backoff bounds polling |
+| Wallet wedged by a stuck/slow verify (live driver) | Scheduler invariant (§6.5) keeps a runnable node the live driver re-drives; the lane releases at the ledger's proven terminal (DEC-25), never on a timeout. Dead-driver resume is the deferred saga effort |
+| Observation-feed frontier lag (`pg_snapshot_xmin`) | Affects status/watch freshness only; dispatch is invoker-driven and resume reads the claim table directly — no dispatch coupling (DEC-22/23) |
+| `ManualResolution` holds a wallet lane | Only when the ambiguity itself needs an operator (rare; most ambiguity auto-reconciles); blocks only same-signer effects; mitigate operationally (per-class signers, fast alerting) (DEC-25) |
 
 ## 11. Testing strategy
 
@@ -520,8 +609,11 @@ gate lifts when verification + determinism land.
 
 ## 12. Deferred / open
 
+- **Automatic resume + dead-driver takeover + reconciliation-on-takeover (DEC-21/23)** — part of the
+  larger AC/DC + saga recovery effort, not this RFC.
 - Pipelined nonces (DEC-1); per-attempt execution leases (DEC-7); feed sharding and cross-run
-  priority (DEC-9); multi-lane admission (§3 Non-goals).
+  priority (DEC-9); multi-lane admission (§3 Non-goals); `due_at` re-wake + tenure-release-on-wait
+  (DEC-6/DEC-8, for long `Finalized` waits at scale).
 - D5–D11 defaults to be rubber-stamped at ratification.
 - Concrete shapes: the prepared-invocation submission anchor (adapter) and the state's semantic
   `IdempotencyInput` (now distinct).
@@ -543,3 +635,8 @@ gate lifts when verification + determinism land.
 | `FrameworkNodeSpec` + framework-node validation | `kernel/spec/src/lib.rs:1758`; `kernel/certify/src/framework_lifecycle.rs` |
 | `SideEffectReplayVerifier` | `kernel/replay/src/lib.rs:470` |
 | EVM exclusive nonce lane; nonce read | `states/evm-contracts/src/lib.rs:107`; `transports/evm/src/lib.rs:469` |
+| EVM prepare (live nonce/fee/gas) + reconstruct | `adapters/evm-contracts/src/lib.rs:665-683,1145+` |
+| Observation snapshot-frontier gate | `run_store/observations.rs:185-192` |
+| Advisory-lock 32-bit truncation | `run_store/stream.rs:66-74` |
+| Remediation link / forward fence | `runtime/src/side_effects.rs:213`; `docs/saga.md` |
+| Side-effect terminal output (confirmation-only today) | `program/src/lib.rs:1561`; `side_effect_lifecycle.rs:298` |
