@@ -9,8 +9,8 @@ into a normative `docs/design.md` section and an execution-layer roadmap.
 
 Date opened: 2026-06-23.
 Revised: 2026-06-23 (**R2**, after a large Postgres refactor landed — see §0);
-2026-06-24 (**R3**, roadmap #1 decided — the unified admission-lane design, §6.1; remaining
-decisions in §6.2).
+2026-06-24 (**R3**, roadmap #1 decided — the unified admission-lane design, §6.1; decisions
+D1–D4 resolved, §6.2).
 We have changed no code in this thread. The platform itself advanced: the monolithic
 `stream-store-postgres/src/typed.rs` was split into a `run_store/` module tree and the schema
 was rewritten (`0001_typed_run_event_store.sql` 83 lines → `0001_run_store.sql` 230 lines),
@@ -259,43 +259,62 @@ a new `class` + mode.
 
 ### 6.2 Decision agenda — #2–#5
 
+**D1–D4 decided** (2026-06-24 discussion); D5–D11 keep their recommended defaults.
+
 **#2 — External-effect reconciliation (critical path; the doctrine's hard core).**
-- **D1 nonce concurrency:** keep **serial per-account** `Exclusive` lanes (recommend) vs pipelined
-  nonces with gap recovery (defer).
-- **D2 reconciliation algorithm + idempotency anchor:** how takeover decides landed-vs-never-sent
-  (deterministic signed-tx hash + receipt + `getTransactionCount`), what on-chain fact identifies
-  "our" tx, and the **exclusive-signer precondition** (does MFM assume it solely owns the account,
-  or handle a nonce occupied out-of-band?).
-- **D3 finality / reorg policy + recorded evidence:** confirmations-to-final (per-chain config) and
-  what typed evidence terminalizes each `submission observed/unknown/not-submitted` case so replay
-  can verify it.
+- **D1 nonce concurrency — DECIDED: serial per-account, sequential-within-hold.** Exclusive lanes
+  give deterministic nonce assignment; a holder may pre-assign a contiguous block and submit
+  *sequentially* (one in-flight → point-wise recovery). Pipelined batches (multiple in-flight) are
+  deferred — they reopen range/gap recovery. A batch is N side-effect nodes sharing one lane hold,
+  preserving the one-mutation-per-side-effect effect-class rule.
+- **D2 reconciliation anchor — DECIDED: anchor on the deterministic idempotency identity, never the
+  nonce; no exclusive-ownership assumption.** Exclusivity is an *availability* expectation, not a
+  *safety* assumption; a foreign-occupied nonce is a detectable terminal ("superseded"), never a
+  double-spend. **Representation (reuses existing machinery — no new authority/event types):**
+  - the anchor is the existing typed `IdempotencyKey`/`idempotency_input`
+    (`program/src/lib.rs:1506,1531`, recorded at intent in `store/v1/mod.rs:3476-3480`); the EVM
+    side-effect's `IdempotencyInput` must deterministically pin the signed-tx hash. The operation's
+    "submission responsibility" = supplying that typed input.
+  - the output is the existing submission slot `SubmissionUnknown → SubmissionObserved |
+    NotSubmittedProven` (`events.rs:427-431`, `store/v1/saga.rs:216-264`).
+  - the procedure is one new contract — a `SideEffectRecoveryVerifier` shaped like
+    `SideEffectReplayVerifier` (`replay/src/lib.rs:470`), identified and domain-implemented, but
+    answering from a live **read** capability instead of recorded evidence (so any fungible worker
+    can run it). Reconciliation is to recovery what the replay verifier is to replay; every future
+    side-effecting domain implements the same verifier against its own idempotency key + read.
+- **D3 finality — DECIDED: two layers.** The *requirement class* (receipt-confirmed vs finalized)
+  is **semantic**, the designer's choice, hash-defining in `SideEffectContractSpec`
+  (`spec/src/lib.rs:1740`, beside `resource_claim`). The *numeric depth* per chain is **runtime**
+  config but **recorded as evidence** at determination time, so replay verifies "final under depth
+  D" without a live chain. Reorg-risk acceptance is encoded in the chosen class.
 
 **#3 — Liveness & recovery.**
-- **D4 side-effect holder-death trigger:** the resource-lane holder is an *event* (authority), not
-  a lease, so waiter reaping does not free it. Decide the sweeper linking a dead execution lease to
-  side-effect `ClaimTakenOver`/recovery (recommend: dispatch surfaces open side-effect ledgers with
-  no live driver).
+- **D4 holder lease + death trigger — DECIDED: every admission/holder/waiter row carries
+  `lease_expires_at` + heartbeat renewal; expiry routes to recovery, never a silent release.** Today
+  only the *waiter* has a lease; the unified admission lane adds a holder lease. Consequence by
+  phase: waiter expiry → drop from queue; pre-boundary holder expiry → interrupt; **post-boundary
+  holder expiry → takeover (bump fencing token / `ClaimTakenOver`) → reconciliation (D2)**, and the
+  lane stays held until the side-effect terminalizes. False reap of a slow-but-alive holder is safe
+  — fencing rejects its late writes and the D2 anchor prevents double-submit, so it costs wasted
+  reconciliation work, never corruption.
 - **D5 recovery model:** recovery is **ordinary fungible dispatch** of a run in a recovering state
-  (recommend) vs a dedicated recovery-worker class.
+  (default); it needs only a read capability, which any worker has.
 - **D6 timed wakeups:** add a `due_at` signal to the dispatch layer for confirmation polling /
-  backoff — the one dispatch piece deferred in §5; reconciliation (D2) needs it.
+  backoff — the one dispatch piece deferred in §5; D2 reconciliation needs it.
 
-**#4 — Execution-tenure policy (closes out #1).**
-- **D7 lease granularity:** **per-run** now (recommend); per-attempt (intra-run parallelism) later.
-- **D8 long external waits:** a worker waiting minutes on a tx confirmation **releases execution
-  tenure** and lets recovery/re-dispatch own it (recommend) vs holding + heartbeating.
-- **D9 fairness / sharding:** defaults now (oldest-first over the feed, single feed); shard by
-  `hash(run_id)` later.
+**#4 — Execution-tenure policy.** D7 **per-run** lease; D8 **release tenure on long external waits**
+(a confirmation wait hands the run back to recovery/re-dispatch rather than pinning a worker); D9
+single feed / oldest-first now, shard by `hash(run_id)` later. (Recommended defaults; revisit under
+load.)
 
-**#5 — Performance / ops.**
-- **D10 materialize the lane-state projection** (rebuildable cache, not authority; the §5c residual);
-  sequence after #2/#3.
-- **D11 connection budget at N workers** — pool sizing + pooler choice. We are pooler-safe
-  (xact-scoped locks + lease tables; no session advisory locks), so transaction-mode poolers are OK.
+**#5 — Performance / ops.** D10 materialize the lane-state projection (rebuildable cache, not
+authority; the §5c residual); D11 size pools to worker count (pooler-safe). Sequence after #2/#3.
 
-Critical path: **#2** is the biggest remaining correctness gap and exactly where the doctrine
-always said the hard problem lives. #3 makes the system self-healing; #4 is policy you can default
-and revisit; #5 is scale.
+**The reconciliation engine — D2+D4 are one machine:** holder-lease expiry (D4) is the *trigger*;
+the recovery verifier on the idempotency anchor (D2) is the *procedure*; the certified finality
+class (D3) decides *when terminal*; serial-exclusive lanes (D1) make the anchor deterministic. #2 is
+now *designed*, not just identified; the next build step is the recovery-verifier contract + the
+admission-lane refactor.
 
 ## 7. Verification items — resolved in R2
 
@@ -311,12 +330,13 @@ observation feed (§6.1), and granularity is decision D7.
 
 ## 8. Next step
 
-Roadmap #1 is decided (§6.1). Two tracks from here: (a) ratify the doctrine (§2) as a normative
-`docs/design.md` "Process-Fungible Execution" section and land §6.1 + §6.2 as the execution-layer
-roadmap; (b) work the §6.2 decision agenda, starting with the critical path — **#2, the
-external-effect reconciliation seam** (the doctrine's hard core and the biggest remaining
-correctness gap). The first calls to make are D1 (nonce concurrency model) and D2 (reconciliation
-algorithm + exclusive-signer precondition). Still no code until the direction is signed off.
+Roadmap #1 is decided (§6.1) and the #2 reconciliation engine is now designed (§6.2: D1–D4).
+Two tracks from here: (a) ratify the doctrine (§2) + land §6.1 + §6.2 as a normative
+`docs/design.md` "Process-Fungible Execution" section; (b) start the build design — the
+`SideEffectRecoveryVerifier` contract (mirroring `SideEffectReplayVerifier`) and the admission-lane
+refactor that generalizes today's `resource_lane_waiters`. Open items remaining: D5–D11 defaults to
+confirm, and the EVM `IdempotencyInput` shape that pins the signed-tx hash. Still no code until the
+direction is signed off.
 
 ## Appendix — key code anchors (R2)
 
