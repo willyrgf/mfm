@@ -78,7 +78,7 @@ pub use side_effect_driver::{
     SideEffectDriver, SideEffectDriverCallbacks, SideEffectDriverFuture, SideEffectIntentPlan,
     SideEffectLanePreclaimBuilder, SideEffectObservedEvidence, SideEffectPreparedInvocationPlan,
     SideEffectProtocolAction, SideEffectReplayEvidence, SideEffectSubmissionDecision,
-    SideEffectSubmissionDecisionFuture,
+    SideEffectSubmissionDecisionFuture, SideEffectVerifyCallbacks, SideEffectVerifyDriver,
 };
 pub use side_effect_lifecycle::SideEffectAttemptView;
 pub use spec_authority::CertifiedRuntimeSpec;

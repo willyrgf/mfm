@@ -492,13 +492,44 @@ pub mod v1 {
         field_path: &str,
         cell: &CellSpec,
     ) -> Result<InputBindingSpec> {
+        framework_lifecycle_cell_input_binding(
+            kind,
+            field_path,
+            cell,
+            RequiredTerminal::ProducedOnly,
+            "receipt_cell",
+        )
+    }
+
+    /// Returns the deterministic maybe-skipped cell input binding for a lifecycle framework node.
+    pub fn framework_lifecycle_maybe_skipped_cell_input_binding(
+        kind: &str,
+        field_path: &str,
+        cell: &CellSpec,
+    ) -> Result<InputBindingSpec> {
+        framework_lifecycle_cell_input_binding(
+            kind,
+            field_path,
+            cell,
+            RequiredTerminal::MaybeSkipped,
+            "maybe_skipped_cell",
+        )
+    }
+
+    fn framework_lifecycle_cell_input_binding(
+        kind: &str,
+        field_path: &str,
+        cell: &CellSpec,
+        required_terminal: RequiredTerminal,
+        input_kind: &str,
+    ) -> Result<InputBindingSpec> {
         let field_path = PublicFieldPath::new(field_path)?;
         let root = InputBindingNodeSpec::Cell(Box::new(InputBindingCellSpec {
             field_path: field_path.clone(),
             cell_id: cell.cell_id.clone(),
             semantic_type_id: cell.semantic_type_id.clone(),
             schema_id: cell.schema_id.clone(),
-            required_terminal: RequiredTerminal::ProducedOnly,
+            required_terminal,
             value_lineage: cell.value_lineage.clone(),
         }));
         Ok(InputBindingSpec {
@@ -508,7 +539,7 @@ pub mod v1 {
                 serde_json::json!({
                     "cell_id": cell.cell_id.as_str(),
                     "field_path": field_path.as_str(),
-                    "input": "receipt_cell",
+                    "input": input_kind,
                     "schema_id": cell.schema_id.as_str(),
                     "semantic_type_id": cell.semantic_type_id.as_str(),
                 }),

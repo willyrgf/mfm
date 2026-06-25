@@ -73,19 +73,15 @@ pub(crate) fn validate_historical_side_effect_payload(
     let node = runtime_spec.node(node_id).ok_or_else(|| {
         RuntimeError::InvalidRunStream(format!("side-effect event for uncertified node {node_id}"))
     })?;
-    if node.side_effect.is_none() {
-        return Err(RuntimeError::InvalidRunStream(format!(
-            "non-side-effect node {} emitted side-effect ledger event",
-            node.node_id
-        )));
-    }
+    let contract_node = side_effect_contract_node_for_payload(runtime_spec, node, payload)
+        .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
     if !active_attempts.contains(&(node_id.clone(), attempt_id.clone())) {
         return Err(RuntimeError::InvalidRunStream(format!(
             "side-effect ledger {} for node {} attempt {} was recorded outside an active started attempt",
             ledger_key, node_id, attempt_id
         )));
     }
-    let contract = certified_side_effect_contract(runtime_spec, node)
+    let contract = certified_side_effect_contract(runtime_spec, contract_node)
         .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
     validate_side_effect_ledger_purpose(&contract, projections, run_id, payload)
         .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
@@ -139,7 +135,13 @@ pub(crate) fn validate_historical_side_effect_payload(
                     ledger_key
                 ))
             })?;
-            if ledger.node_id != *node_id || ledger.attempt_id != *attempt_id {
+            let payload_pair_role = side_effect_payload_pair_role(payload);
+            let verify_pair_event = payload_pair_role == Some(events::SideEffectPairRole::Verify)
+                && pair_id.is_some()
+                && ledger.pair_id.as_ref() == pair_id;
+            if !verify_pair_event
+                && (ledger.node_id != *node_id || ledger.attempt_id != *attempt_id)
+            {
                 return Err(RuntimeError::InvalidRunStream(format!(
                     "side-effect ledger {} changed node or attempt authority",
                     ledger_key
@@ -198,11 +200,54 @@ fn side_effect_payload_ledger_purpose(
         .map(|side_effect| side_effect.ledger_purpose)
 }
 
+fn side_effect_payload_pair_role(
+    payload: &events::KernelEventPayload,
+) -> Option<events::SideEffectPairRole> {
+    payload
+        .side_effect_ref()
+        .and_then(|side_effect| side_effect.pair_role)
+}
+
 fn certified_side_effect_contract(
     runtime_spec: &CertifiedRuntimeSpec,
     node: &spec::NodeSpec,
 ) -> mfm_certify::Result<CertifiedSideEffectContract> {
     CertifiedSideEffectContract::for_node(runtime_spec.spec(), &node.node_id)
+}
+
+fn side_effect_contract_node_for_payload<'a>(
+    runtime_spec: &'a CertifiedRuntimeSpec,
+    node: &'a spec::NodeSpec,
+    payload: &events::KernelEventPayload,
+) -> Result<&'a spec::NodeSpec> {
+    if node.side_effect.is_some() {
+        return Ok(node);
+    }
+    let Some(spec::FrameworkNodeSpec::SideEffectVerify(verify)) = &node.framework else {
+        return Err(RuntimeError::InvalidRunnerOutput(format!(
+            "non-side-effect node {} returned side-effect payload",
+            node.node_id
+        )));
+    };
+    let Some(side_effect) = payload.side_effect_ref() else {
+        return Err(RuntimeError::InvalidRunnerOutput(
+            "expected side-effect payload".to_owned(),
+        ));
+    };
+    if side_effect.pair_id != Some(&verify.pair_id)
+        || side_effect.pair_role != Some(events::SideEffectPairRole::Verify)
+    {
+        return Err(RuntimeError::InvalidRunnerOutput(format!(
+            "side-effect verify node {} emitted payload outside certified pair {}",
+            node.node_id, verify.pair_id
+        )));
+    }
+    runtime_spec.node(&verify.submit_node_id).ok_or_else(|| {
+        RuntimeError::InvalidSpec(format!(
+            "side-effect verify node {} references missing submit node {}",
+            node.node_id, verify.submit_node_id
+        ))
+    })
 }
 
 fn validate_side_effect_ledger_purpose(
@@ -254,28 +299,82 @@ fn validate_side_effect_ledger_purpose(
         .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))
 }
 
-pub(crate) fn validate_historical_side_effect_confirmation(
+pub(crate) fn validate_historical_side_effect_terminal(
+    runtime_spec: &CertifiedRuntimeSpec,
     ledgers: &BTreeMap<events::SideEffectLedgerKey, HistoricalSideEffectLedger>,
-    node_id: &NodeId,
+    node: &spec::NodeSpec,
     attempt_id: &AttemptId,
+    terminal_skipped: bool,
 ) -> Result<()> {
-    let ledger = historical_side_effect_ledger_for_attempt(ledgers, node_id, attempt_id)?;
-    if ledger.phase == HistoricalSideEffectPhase::ConfirmationObserved {
+    if node.side_effect.is_some() {
+        let ledger = historical_side_effect_ledger_for_attempt(ledgers, &node.node_id, attempt_id)?;
+        if terminal_skipped {
+            if historical_phase_has_submission_result(ledger.phase) {
+                return Ok(());
+            }
+            return Err(RuntimeError::InvalidRunStream(format!(
+                "side-effect node {} attempt {} skipped output before a submission result",
+                node.node_id, attempt_id
+            )));
+        }
+        if ledger.phase == HistoricalSideEffectPhase::ConfirmationObserved {
+            return Ok(());
+        }
+        return Err(RuntimeError::InvalidRunStream(format!(
+            "side-effect node {} attempt {} produced output before confirmation",
+            node.node_id, attempt_id
+        )));
+    }
+    let Some(spec::FrameworkNodeSpec::SideEffectVerify(verify)) = &node.framework else {
+        return Ok(());
+    };
+    let ledger = historical_side_effect_ledger_for_pair(ledgers, &verify.pair_id)?;
+    let submit = runtime_spec.node(&verify.submit_node_id).ok_or_else(|| {
+        RuntimeError::InvalidRunStream(format!(
+            "side-effect verify node {} references missing submit node {}",
+            node.node_id, verify.submit_node_id
+        ))
+    })?;
+    let Some(contract) = &submit.side_effect else {
+        return Err(RuntimeError::InvalidRunStream(format!(
+            "side-effect verify node {} references non-side-effect submit node {}",
+            node.node_id, submit.node_id
+        )));
+    };
+    let ok = match &contract.verification {
+        spec::SideEffectVerificationSpec::Receipt => matches!(
+            ledger.phase,
+            HistoricalSideEffectPhase::ReceiptObserved
+                | HistoricalSideEffectPhase::ConfirmationObserved
+        ),
+        spec::SideEffectVerificationSpec::Finalized { .. } => {
+            ledger.phase == HistoricalSideEffectPhase::ConfirmationObserved
+        }
+    };
+    if ok {
         Ok(())
     } else {
         Err(RuntimeError::InvalidRunStream(format!(
-            "side-effect node {} attempt {} produced output before confirmation",
-            node_id, attempt_id
+            "side-effect verify node {} attempt {} produced output before certified terminal evidence",
+            node.node_id, attempt_id
         )))
     }
 }
 
 pub(crate) fn validate_historical_side_effect_failure(
+    runtime_spec: &CertifiedRuntimeSpec,
     ledgers: &BTreeMap<events::SideEffectLedgerKey, HistoricalSideEffectLedger>,
-    node_id: &NodeId,
+    node: &spec::NodeSpec,
     attempt_id: &AttemptId,
 ) -> Result<()> {
-    let ledger = historical_side_effect_ledger_for_attempt(ledgers, node_id, attempt_id)?;
+    let ledger = if node.side_effect.is_some() {
+        historical_side_effect_ledger_for_attempt(ledgers, &node.node_id, attempt_id)?
+    } else if let Some(spec::FrameworkNodeSpec::SideEffectVerify(verify)) = &node.framework {
+        let _ = runtime_spec;
+        historical_side_effect_ledger_for_pair(ledgers, &verify.pair_id)?
+    } else {
+        return Ok(());
+    };
     if matches!(
         ledger.phase,
         HistoricalSideEffectPhase::Failed | HistoricalSideEffectPhase::Ambiguous
@@ -284,7 +383,7 @@ pub(crate) fn validate_historical_side_effect_failure(
     } else {
         Err(RuntimeError::InvalidRunStream(format!(
             "side-effect node {} attempt {} failed without terminal side-effect evidence",
-            node_id, attempt_id
+            node.node_id, attempt_id
         )))
     }
 }
@@ -312,6 +411,48 @@ fn historical_side_effect_ledger_for_attempt<'a>(
             node_id, attempt_id
         ))
     })
+}
+
+fn historical_side_effect_ledger_for_pair<'a>(
+    ledgers: &'a BTreeMap<events::SideEffectLedgerKey, HistoricalSideEffectLedger>,
+    pair_id: &SideEffectPairId,
+) -> Result<&'a HistoricalSideEffectLedger> {
+    let mut found = None;
+    for ledger in ledgers.values() {
+        if ledger.pair_id.as_ref() == Some(pair_id) && found.replace(ledger).is_some() {
+            return Err(RuntimeError::InvalidRunStream(format!(
+                "side-effect pair {} has multiple ledgers in history",
+                pair_id
+            )));
+        }
+    }
+    found.ok_or_else(|| {
+        RuntimeError::InvalidRunStream(format!(
+            "side-effect pair {} lacks ledger evidence",
+            pair_id
+        ))
+    })
+}
+
+fn historical_phase_has_submission_result(phase: HistoricalSideEffectPhase) -> bool {
+    matches!(
+        phase,
+        HistoricalSideEffectPhase::NotSubmittedProven
+            | HistoricalSideEffectPhase::SubmissionObserved
+            | HistoricalSideEffectPhase::SubmissionUnknown
+            | HistoricalSideEffectPhase::ReceiptObserved
+            | HistoricalSideEffectPhase::ConfirmationObserved
+            | HistoricalSideEffectPhase::Ambiguous
+            | HistoricalSideEffectPhase::Failed
+    )
+}
+
+pub(crate) fn node_uses_side_effect_terminal_validation(node: &spec::NodeSpec) -> bool {
+    node.side_effect.is_some()
+        || matches!(
+            &node.framework,
+            Some(spec::FrameworkNodeSpec::SideEffectVerify(_))
+        )
 }
 
 pub(crate) fn validate_atomic_side_effect_failure_pairs(
@@ -357,7 +498,7 @@ pub(crate) fn validate_atomic_side_effect_failure_pairs(
                     payload.node_id
                 ))
             })?;
-            if node.side_effect.is_some() {
+            if node_uses_side_effect_terminal_validation(node) {
                 attempt_failures.insert(
                     (
                         event.seq(),
@@ -468,18 +609,13 @@ pub(crate) fn validate_runner_side_effect_payload(
     projections: &store::ProjectionSnapshot,
     payload: &events::KernelEventPayload,
 ) -> Result<()> {
-    if node.side_effect.is_none() {
-        return Err(RuntimeError::InvalidRunnerOutput(format!(
-            "non-side-effect node {} returned side-effect payload",
-            node.node_id
-        )));
-    }
+    let contract_node = side_effect_contract_node_for_payload(runtime_spec, node, payload)?;
     let (payload_node_id, payload_attempt_id, _, _, _) = side_effect_payload_ref(payload)
         .ok_or_else(|| {
             RuntimeError::InvalidRunnerOutput("expected side-effect payload".to_owned())
         })?;
     require_attempt(node, attempt_id, payload_node_id, payload_attempt_id)?;
-    let contract = certified_side_effect_contract(runtime_spec, node)
+    let contract = certified_side_effect_contract(runtime_spec, contract_node)
         .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))?;
     validate_side_effect_ledger_purpose(&contract, projections, run_id, payload)?;
     validate_side_effect_resource_claim(&contract, payload)?;

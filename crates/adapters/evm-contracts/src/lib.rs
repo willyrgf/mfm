@@ -58,19 +58,22 @@ use mfm_evm_core::hex::bytes_to_hex_prefixed;
 use mfm_evm_core::rlp::{rlp_encode_list, u64_to_min_be};
 use mfm_evm_core::tx::{parse_address, parse_u128_quantity, Eip1559TxToSign, LegacyTxToSign};
 use mfm_evm_signing::EvmSigningRequest;
-use mfm_ids::{CapabilityKind, CapabilityVersion, ContentDigest, DigestAlgorithm, SchemaId};
+use mfm_ids::{
+    CapabilityKind, CapabilityVersion, ContentDigest, DigestAlgorithm, NodeId, SchemaId,
+};
 use mfm_program::{SideEffectState, StateSpec, ValidatedConfig};
 use mfm_program_derive::MfmValue;
 use mfm_replay::v1 as replay;
 use mfm_runtime::{
     CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture,
     ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCell, MaterializedCellTerminal,
-    MaterializedInputNode, PreInvocationRunCtx, PreInvocationRunnerFuture, RunnerArtifactBuilder,
-    RunnerCapabilityBinding, RunnerOutputBuilder, RunnerPayloadBuilder, RunnerRegistrationBuilder,
-    SideEffectDriver, SideEffectDriverCallbacks, SideEffectDriverFuture, SideEffectIntentPlan,
-    SideEffectLanePreclaimBuilder, SideEffectObservedEvidence, SideEffectPreparedInvocationPlan,
-    SideEffectProtocolAction, SideEffectReplayEvidence, SideEffectSubmissionDecision,
-    SideEffectSubmissionDecisionFuture,
+    MaterializedInputNode, MaterializedInputs, PreInvocationRunCtx, PreInvocationRunnerFuture,
+    RunnerArtifactBuilder, RunnerCapabilityBinding, RunnerOutputBuilder, RunnerPayloadBuilder,
+    RunnerRegistrationBuilder, SideEffectDriver, SideEffectDriverCallbacks, SideEffectDriverFuture,
+    SideEffectIntentPlan, SideEffectLanePreclaimBuilder, SideEffectObservedEvidence,
+    SideEffectPreparedInvocationPlan, SideEffectProtocolAction, SideEffectReplayEvidence,
+    SideEffectSubmissionDecision, SideEffectSubmissionDecisionFuture, SideEffectVerifyCallbacks,
+    SideEffectVerifyDriver,
 };
 use mfm_signing::{PublicKeyBytes, SignerRef, SigningProvider};
 use mfm_spec::v1 as spec;
@@ -1490,8 +1493,15 @@ pub fn register_contract_lifecycle_runners_with_factory(
         validate.descriptor_id().clone(),
         validate.capabilities(),
         read_factory.clone(),
+        executable(read_factory.clone())?,
+        Arc::new(ContractValidateRunner {
+            factory: factory.clone(),
+        }),
+    )?;
+    registrations.register_side_effect_verify_runner(
+        read_factory.clone(),
         executable(read_factory)?,
-        Arc::new(ContractValidateRunner { factory }),
+        Arc::new(ContractVerifyRunner { factory }),
     )?;
     Ok(())
 }
@@ -1522,6 +1532,16 @@ struct ContractValidateRunner {
 impl ErasedNodeRunner for ContractValidateRunner {
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move { run_validate(ctx, self.factory.as_ref()).await })
+    }
+}
+
+struct ContractVerifyRunner {
+    factory: Arc<dyn EvmContractRuntimeFactory>,
+}
+
+impl ErasedNodeRunner for ContractVerifyRunner {
+    fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+        Box::pin(async move { run_verify(ctx, self.factory.as_ref()).await })
     }
 }
 
@@ -1560,6 +1580,63 @@ async fn run_mutation(
         ContractMutationRunnerPhase::Deploy => run_deploy_mutation(ctx, factory).await,
         ContractMutationRunnerPhase::Configure => run_configure_mutation(ctx, factory).await,
     }
+}
+
+async fn run_verify(
+    ctx: ErasedRunCtx<'_>,
+    factory: &dyn EvmContractRuntimeFactory,
+) -> mfm_runtime::Result<ErasedRunnerOutput> {
+    let phase = {
+        let submit_node = side_effect_verify_submit_node(&ctx)?;
+        mutation_phase_for_submit_node(submit_node)?
+    };
+    match phase {
+        ContractMutationRunnerPhase::Deploy => {
+            let callbacks = DeploySideEffectVerifyCallbacks { factory };
+            SideEffectVerifyDriver::drive(ctx, &callbacks).await
+        }
+        ContractMutationRunnerPhase::Configure => {
+            let callbacks = ConfigureSideEffectVerifyCallbacks { factory };
+            SideEffectVerifyDriver::drive(ctx, &callbacks).await
+        }
+    }
+}
+
+fn side_effect_verify_submit_node<'a>(
+    ctx: &'a ErasedRunCtx<'a>,
+) -> mfm_runtime::Result<&'a spec::NodeSpec> {
+    let Some(spec::FrameworkNodeSpec::SideEffectVerify(verify)) = &ctx.node().framework else {
+        return Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(format!(
+            "node {} is not a side-effect verify node",
+            ctx.node().node_id
+        )));
+    };
+    ctx.certified_node(&verify.submit_node_id).ok_or_else(|| {
+        mfm_runtime::RuntimeError::InvalidRunnerOutput(format!(
+            "side-effect verify node {} references missing submit node {}",
+            ctx.node().node_id,
+            verify.submit_node_id
+        ))
+    })
+}
+
+fn mutation_phase_for_submit_node(
+    node: &spec::NodeSpec,
+) -> mfm_runtime::Result<ContractMutationRunnerPhase> {
+    let deploy = mfm_program::registered_state_descriptor::<DeployContractState>()
+        .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
+    if &node.descriptor_id == deploy.descriptor_id() {
+        return Ok(ContractMutationRunnerPhase::Deploy);
+    }
+    let configure = mfm_program::registered_state_descriptor::<ConfigureContractState>()
+        .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
+    if &node.descriptor_id == configure.descriptor_id() {
+        return Ok(ContractMutationRunnerPhase::Configure);
+    }
+    Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(format!(
+        "side-effect verify submit node {} is not an EVM contract mutation",
+        node.node_id
+    )))
 }
 
 async fn preclaim_mutation_lane(
@@ -1695,10 +1772,7 @@ impl SideEffectDriverCallbacks for DeploySideEffectCallbacks<'_> {
     type Submission = ContractTransactionSubmissions;
     type SubmissionUnknownEvidence = ContractTransactionSubmissions;
     type NotSubmittedProof = ContractTransactionSubmissions;
-    type Receipt = ContractDeployReceipt;
-    type Confirmation = ContractDeployConfirmation;
     type AmbiguityEvidence = ContractTransactionSubmissions;
-    type Output = DeployedContract;
 
     fn intent_and_idempotency<'a, 'ctx>(
         &'a self,
@@ -1780,90 +1854,6 @@ impl SideEffectDriverCallbacks for DeploySideEffectCallbacks<'_> {
             Ok(SideEffectSubmissionDecision::Observed(submissions))
         })
     }
-
-    fn read_receipt<'a, 'ctx>(
-        &'a self,
-        ctx: &'a ErasedRunCtx<'ctx>,
-        submission: &'a store::SideEffectArtifactProjection,
-    ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Receipt>> {
-        Box::pin(async {
-            let prepared_projection = projected_prepared_artifact(ctx)?;
-            let prepared = load_prepared_invocation(
-                &prepared_projection,
-                events::ArtifactRole::PreparedInvocation,
-                ctx,
-                self.factory.artifacts(),
-            )
-            .await?;
-            let submissions = load_side_effect_value::<ContractTransactionSubmissions>(
-                submission,
-                events::ArtifactRole::Submission,
-                ctx,
-                self.factory.artifacts(),
-            )
-            .await?;
-            let runtime = self
-                .factory
-                .runtime_for(self.plan.config.as_ref().network().network_id())?;
-            let receipts = ContractTransactionReceipts {
-                receipts_version: 1,
-                transactions: read_receipts_with_poll(&runtime, &prepared, &submissions).await?,
-            };
-            Ok(SideEffectObservedEvidence {
-                evidence: ContractDeployReceipt {
-                    receipt_version: 1,
-                    contract_address: deploy_contract_address_from_prepared(&prepared)?,
-                    receipt: single_receipt(receipts)?,
-                },
-                replay: contract_side_effect_replay_evidence()?,
-            })
-        })
-    }
-
-    fn build_confirmation<'a, 'ctx>(
-        &'a self,
-        ctx: &'a ErasedRunCtx<'ctx>,
-        receipt: &'a store::SideEffectArtifactProjection,
-    ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Confirmation>> {
-        Box::pin(async {
-            let (receipt, receipt_evidence) = load_side_effect_artifact::<ContractDeployReceipt>(
-                receipt,
-                events::ArtifactRole::Receipt,
-                ctx,
-                self.factory.artifacts(),
-            )
-            .await?;
-            let receipt = deploy_receipt_with_evidence(receipt, &receipt_evidence);
-            Ok(SideEffectObservedEvidence {
-                evidence: ContractDeployConfirmation {
-                    confirmation_version: 1,
-                    contract_address: receipt.contract_address,
-                    receipt: receipt.receipt,
-                },
-                replay: contract_side_effect_replay_evidence()?,
-            })
-        })
-    }
-
-    fn map_confirmation_to_output<'a, 'ctx>(
-        &'a self,
-        ctx: &'a ErasedRunCtx<'ctx>,
-        confirmation: &'a store::SideEffectArtifactProjection,
-    ) -> SideEffectDriverFuture<'a, Self::Output> {
-        Box::pin(async {
-            let confirmation = load_side_effect_value::<ContractDeployConfirmation>(
-                confirmation,
-                events::ArtifactRole::Confirmation,
-                ctx,
-                self.factory.artifacts(),
-            )
-            .await?;
-            self.plan
-                .state
-                .output_from_confirmation(&(), &self.plan.intent, &confirmation)
-                .map_err(runtime_state_error)
-        })
-    }
 }
 
 async fn run_configure_mutation(
@@ -1887,10 +1877,7 @@ impl SideEffectDriverCallbacks for ConfigureSideEffectCallbacks<'_> {
     type Submission = ContractTransactionSubmissions;
     type SubmissionUnknownEvidence = ContractTransactionSubmissions;
     type NotSubmittedProof = ContractTransactionSubmissions;
-    type Receipt = ContractConfigureReceipt;
-    type Confirmation = ContractConfigureConfirmation;
     type AmbiguityEvidence = ContractTransactionSubmissions;
-    type Output = ConfiguredContract;
 
     fn intent_and_idempotency<'a, 'ctx>(
         &'a self,
@@ -1977,31 +1964,176 @@ impl SideEffectDriverCallbacks for ConfigureSideEffectCallbacks<'_> {
             Ok(SideEffectSubmissionDecision::Observed(submissions))
         })
     }
+}
+
+struct DeploySideEffectVerifyCallbacks<'a> {
+    factory: &'a dyn EvmContractRuntimeFactory,
+}
+
+impl SideEffectVerifyCallbacks for DeploySideEffectVerifyCallbacks<'_> {
+    type Receipt = ContractDeployReceipt;
+    type Confirmation = ContractDeployConfirmation;
+    type Output = DeployedContract;
 
     fn read_receipt<'a, 'ctx>(
         &'a self,
         ctx: &'a ErasedRunCtx<'ctx>,
+        submit_node: &'a spec::NodeSpec,
+        _submit_inputs: &'a MaterializedInputs,
         submission: &'a store::SideEffectArtifactProjection,
     ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Receipt>> {
         Box::pin(async {
-            let prepared_projection = projected_prepared_artifact(ctx)?;
-            let prepared = load_prepared_invocation(
+            let plan = deploy_mutation_plan_for_node(submit_node, self.factory.artifacts()).await?;
+            let prepared_projection = projected_prepared_artifact_for_submit(ctx, submit_node)?;
+            let prepared = load_prepared_invocation_for_node(
                 &prepared_projection,
                 events::ArtifactRole::PreparedInvocation,
                 ctx,
                 self.factory.artifacts(),
+                &submit_node.node_id,
             )
             .await?;
-            let submissions = load_side_effect_value::<ContractTransactionSubmissions>(
+            let submissions = load_side_effect_value_for_node::<ContractTransactionSubmissions>(
                 submission,
                 events::ArtifactRole::Submission,
                 ctx,
                 self.factory.artifacts(),
+                &submit_node.node_id,
             )
             .await?;
             let runtime = self
                 .factory
-                .runtime_for(self.plan.config.as_ref().network().network_id())?;
+                .runtime_for(plan.config.as_ref().network().network_id())?;
+            let receipts = ContractTransactionReceipts {
+                receipts_version: 1,
+                transactions: read_receipts_with_poll(&runtime, &prepared, &submissions).await?,
+            };
+            Ok(SideEffectObservedEvidence {
+                evidence: ContractDeployReceipt {
+                    receipt_version: 1,
+                    contract_address: deploy_contract_address_from_prepared(&prepared)?,
+                    receipt: single_receipt(receipts)?,
+                },
+                replay: contract_side_effect_replay_evidence()?,
+            })
+        })
+    }
+
+    fn build_confirmation<'a, 'ctx>(
+        &'a self,
+        ctx: &'a ErasedRunCtx<'ctx>,
+        _submit_node: &'a spec::NodeSpec,
+        _submit_inputs: &'a MaterializedInputs,
+        receipt: &'a store::SideEffectArtifactProjection,
+    ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Confirmation>> {
+        Box::pin(async {
+            let (receipt, receipt_evidence) = load_side_effect_artifact::<ContractDeployReceipt>(
+                receipt,
+                events::ArtifactRole::Receipt,
+                ctx,
+                self.factory.artifacts(),
+            )
+            .await?;
+            let receipt = deploy_receipt_with_evidence(receipt, &receipt_evidence);
+            Ok(SideEffectObservedEvidence {
+                evidence: ContractDeployConfirmation {
+                    confirmation_version: 1,
+                    contract_address: receipt.contract_address,
+                    receipt: receipt.receipt,
+                },
+                replay: contract_side_effect_replay_evidence()?,
+            })
+        })
+    }
+
+    fn map_receipt_to_output<'a, 'ctx>(
+        &'a self,
+        ctx: &'a ErasedRunCtx<'ctx>,
+        submit_node: &'a spec::NodeSpec,
+        _submit_inputs: &'a MaterializedInputs,
+        receipt: &'a store::SideEffectArtifactProjection,
+    ) -> SideEffectDriverFuture<'a, Self::Output> {
+        Box::pin(async {
+            let plan = deploy_mutation_plan_for_node(submit_node, self.factory.artifacts()).await?;
+            let receipt = load_side_effect_value::<ContractDeployReceipt>(
+                receipt,
+                events::ArtifactRole::Receipt,
+                ctx,
+                self.factory.artifacts(),
+            )
+            .await?;
+            plan.state
+                .output_from_receipt(&(), &plan.intent, &receipt)
+                .map_err(runtime_state_error)
+        })
+    }
+
+    fn map_confirmation_to_output<'a, 'ctx>(
+        &'a self,
+        ctx: &'a ErasedRunCtx<'ctx>,
+        submit_node: &'a spec::NodeSpec,
+        _submit_inputs: &'a MaterializedInputs,
+        confirmation: &'a store::SideEffectArtifactProjection,
+    ) -> SideEffectDriverFuture<'a, Self::Output> {
+        Box::pin(async {
+            let plan = deploy_mutation_plan_for_node(submit_node, self.factory.artifacts()).await?;
+            let confirmation = load_side_effect_value::<ContractDeployConfirmation>(
+                confirmation,
+                events::ArtifactRole::Confirmation,
+                ctx,
+                self.factory.artifacts(),
+            )
+            .await?;
+            plan.state
+                .output_from_confirmation(&(), &plan.intent, &confirmation)
+                .map_err(runtime_state_error)
+        })
+    }
+}
+
+struct ConfigureSideEffectVerifyCallbacks<'a> {
+    factory: &'a dyn EvmContractRuntimeFactory,
+}
+
+impl SideEffectVerifyCallbacks for ConfigureSideEffectVerifyCallbacks<'_> {
+    type Receipt = ContractConfigureReceipt;
+    type Confirmation = ContractConfigureConfirmation;
+    type Output = ConfiguredContract;
+
+    fn read_receipt<'a, 'ctx>(
+        &'a self,
+        ctx: &'a ErasedRunCtx<'ctx>,
+        submit_node: &'a spec::NodeSpec,
+        submit_inputs: &'a MaterializedInputs,
+        submission: &'a store::SideEffectArtifactProjection,
+    ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Receipt>> {
+        Box::pin(async {
+            let plan = configure_mutation_plan_for_inputs(
+                submit_node,
+                submit_inputs,
+                self.factory.artifacts(),
+            )
+            .await?;
+            let prepared_projection = projected_prepared_artifact_for_submit(ctx, submit_node)?;
+            let prepared = load_prepared_invocation_for_node(
+                &prepared_projection,
+                events::ArtifactRole::PreparedInvocation,
+                ctx,
+                self.factory.artifacts(),
+                &submit_node.node_id,
+            )
+            .await?;
+            let submissions = load_side_effect_value_for_node::<ContractTransactionSubmissions>(
+                submission,
+                events::ArtifactRole::Submission,
+                ctx,
+                self.factory.artifacts(),
+                &submit_node.node_id,
+            )
+            .await?;
+            let runtime = self
+                .factory
+                .runtime_for(plan.config.as_ref().network().network_id())?;
             let receipts = read_receipts_with_poll(&runtime, &prepared, &submissions).await?;
             Ok(SideEffectObservedEvidence {
                 evidence: ContractConfigureReceipt {
@@ -2020,6 +2152,8 @@ impl SideEffectDriverCallbacks for ConfigureSideEffectCallbacks<'_> {
     fn build_confirmation<'a, 'ctx>(
         &'a self,
         ctx: &'a ErasedRunCtx<'ctx>,
+        _submit_node: &'a spec::NodeSpec,
+        _submit_inputs: &'a MaterializedInputs,
         receipt: &'a store::SideEffectArtifactProjection,
     ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Confirmation>> {
         Box::pin(async {
@@ -2043,12 +2177,47 @@ impl SideEffectDriverCallbacks for ConfigureSideEffectCallbacks<'_> {
         })
     }
 
+    fn map_receipt_to_output<'a, 'ctx>(
+        &'a self,
+        ctx: &'a ErasedRunCtx<'ctx>,
+        submit_node: &'a spec::NodeSpec,
+        submit_inputs: &'a MaterializedInputs,
+        receipt: &'a store::SideEffectArtifactProjection,
+    ) -> SideEffectDriverFuture<'a, Self::Output> {
+        Box::pin(async {
+            let plan = configure_mutation_plan_for_inputs(
+                submit_node,
+                submit_inputs,
+                self.factory.artifacts(),
+            )
+            .await?;
+            let receipt = load_side_effect_value::<ContractConfigureReceipt>(
+                receipt,
+                events::ArtifactRole::Receipt,
+                ctx,
+                self.factory.artifacts(),
+            )
+            .await?;
+            plan.state
+                .output_from_receipt(&plan.input, &plan.intent, &receipt)
+                .map_err(runtime_state_error)
+        })
+    }
+
     fn map_confirmation_to_output<'a, 'ctx>(
         &'a self,
         ctx: &'a ErasedRunCtx<'ctx>,
+        submit_node: &'a spec::NodeSpec,
+        submit_inputs: &'a MaterializedInputs,
         confirmation: &'a store::SideEffectArtifactProjection,
     ) -> SideEffectDriverFuture<'a, Self::Output> {
         Box::pin(async {
+            let plan = configure_mutation_plan_for_inputs(
+                submit_node,
+                submit_inputs,
+                self.factory.artifacts(),
+            )
+            .await?;
             let confirmation = load_side_effect_value::<ContractConfigureConfirmation>(
                 confirmation,
                 events::ArtifactRole::Confirmation,
@@ -2056,9 +2225,8 @@ impl SideEffectDriverCallbacks for ConfigureSideEffectCallbacks<'_> {
                 self.factory.artifacts(),
             )
             .await?;
-            self.plan
-                .state
-                .output_from_confirmation(&self.plan.input, &self.plan.intent, &confirmation)
+            plan.state
+                .output_from_confirmation(&plan.input, &plan.intent, &confirmation)
                 .map_err(runtime_state_error)
         })
     }
@@ -2293,9 +2461,24 @@ async fn load_prepared_invocation(
     ctx: &ErasedRunCtx<'_>,
     artifacts: &dyn ArtifactReadProvider,
 ) -> mfm_runtime::Result<PreparedContractInvocation> {
-    let prepared =
-        load_side_effect_value::<PreparedContractInvocation>(artifact, role, ctx, artifacts)
-            .await?;
+    load_prepared_invocation_for_node(artifact, role, ctx, artifacts, &ctx.node().node_id).await
+}
+
+async fn load_prepared_invocation_for_node(
+    artifact: &store::SideEffectArtifactProjection,
+    role: events::ArtifactRole,
+    ctx: &ErasedRunCtx<'_>,
+    artifacts: &dyn ArtifactReadProvider,
+    producer_node_id: &NodeId,
+) -> mfm_runtime::Result<PreparedContractInvocation> {
+    let prepared = load_side_effect_value_for_node::<PreparedContractInvocation>(
+        artifact,
+        role,
+        ctx,
+        artifacts,
+        producer_node_id,
+    )
+    .await?;
     ensure_prepared_invocation_public(&prepared)?;
     Ok(prepared)
 }
@@ -2309,7 +2492,25 @@ async fn load_side_effect_value<T>(
 where
     T: MfmValue + DeserializeOwned,
 {
-    let (value, _) = load_side_effect_artifact(artifact, role, ctx, artifacts).await?;
+    let (value, _) =
+        load_side_effect_artifact_for_node(artifact, role, ctx, artifacts, &ctx.node().node_id)
+            .await?;
+    Ok(value)
+}
+
+async fn load_side_effect_value_for_node<T>(
+    artifact: &store::SideEffectArtifactProjection,
+    role: events::ArtifactRole,
+    ctx: &ErasedRunCtx<'_>,
+    artifacts: &dyn ArtifactReadProvider,
+    producer_node_id: &NodeId,
+) -> mfm_runtime::Result<T>
+where
+    T: MfmValue + DeserializeOwned,
+{
+    let (value, _) =
+        load_side_effect_artifact_for_node(artifact, role, ctx, artifacts, producer_node_id)
+            .await?;
     Ok(value)
 }
 
@@ -2322,11 +2523,21 @@ async fn load_side_effect_artifact<T>(
 where
     T: MfmValue + DeserializeOwned,
 {
-    let request = ArtifactReadRequest::from_side_effect_projection(
-        artifact,
-        role,
-        ctx.node().node_id.clone(),
-    );
+    load_side_effect_artifact_for_node(artifact, role, ctx, artifacts, &ctx.node().node_id).await
+}
+
+async fn load_side_effect_artifact_for_node<T>(
+    artifact: &store::SideEffectArtifactProjection,
+    role: events::ArtifactRole,
+    _ctx: &ErasedRunCtx<'_>,
+    artifacts: &dyn ArtifactReadProvider,
+    producer_node_id: &NodeId,
+) -> mfm_runtime::Result<(T, mfm_artifact_capabilities::ArtifactEvidenceRef)>
+where
+    T: MfmValue + DeserializeOwned,
+{
+    let request =
+        ArtifactReadRequest::from_side_effect_projection(artifact, role, producer_node_id.clone());
     let verified = artifacts
         .read_artifact(&request)
         .await
@@ -2454,29 +2665,37 @@ fn evm_capability_binding(
     })
 }
 
-fn projected_side_effect<'a>(
+fn projected_side_effect_for_submit<'a>(
     ctx: &'a ErasedRunCtx<'_>,
+    submit_node: &spec::NodeSpec,
 ) -> mfm_runtime::Result<&'a store::SideEffectProjection> {
-    ctx.projections()
-        .side_effects()
-        .find_map(|(_, projection)| {
-            (projection.intent.node_id == ctx.node().node_id
-                && projection.intent.attempt_id == *ctx.attempt_id())
-            .then_some(projection)
-        })
-        .ok_or_else(|| {
-            mfm_runtime::RuntimeError::InvalidRunnerOutput(format!(
-                "contract lifecycle side-effect projection missing for node {} attempt {}",
-                ctx.node().node_id,
-                ctx.attempt_id()
-            ))
-        })
+    let mut found = None;
+    for (_, projection) in ctx.projections().side_effects() {
+        if projection.run_id == *ctx.run_id()
+            && projection.intent.node_id == submit_node.node_id
+            && projection.pair_id.is_some()
+        {
+            if found.replace(projection).is_some() {
+                return Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(format!(
+                    "contract lifecycle side-effect projection for submit node {} is ambiguous",
+                    submit_node.node_id
+                )));
+            }
+        }
+    }
+    found.ok_or_else(|| {
+        mfm_runtime::RuntimeError::InvalidRunnerOutput(format!(
+            "contract lifecycle side-effect projection missing for submit node {}",
+            submit_node.node_id
+        ))
+    })
 }
 
-fn projected_prepared_artifact(
+fn projected_prepared_artifact_for_submit(
     ctx: &ErasedRunCtx<'_>,
+    submit_node: &spec::NodeSpec,
 ) -> mfm_runtime::Result<store::SideEffectArtifactProjection> {
-    projected_side_effect(ctx)?
+    projected_side_effect_for_submit(ctx, submit_node)?
         .prepared_invocation
         .clone()
         .ok_or_else(|| missing_side_effect_artifact("prepared invocation"))

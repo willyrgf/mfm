@@ -343,6 +343,11 @@ impl<'a> ErasedRunCtx<'a> {
         self.invocation.node()
     }
 
+    /// Returns another certified node from the same runtime spec.
+    pub fn certified_node(&self, node_id: &NodeId) -> Option<&'a spec::NodeSpec> {
+        self.invocation.runtime_spec().node(node_id)
+    }
+
     /// Certified state descriptor identity for the node.
     pub fn descriptor(&self) -> &'a spec::StateDescriptorIdentity {
         self.invocation.descriptor()
@@ -386,6 +391,16 @@ impl<'a> ErasedRunCtx<'a> {
     /// Store-owned projection snapshot observed before the runner invocation.
     pub fn projections(&self) -> &store::ProjectionSnapshot {
         self.invocation.projections()
+    }
+
+    /// Materializes certified inputs for another node against the same verified run stream.
+    pub fn materialize_node_inputs(&self, node: &spec::NodeSpec) -> Result<MaterializedInputs> {
+        let view = RuntimeRunView::from_stream(
+            self.invocation.runtime_spec(),
+            self.invocation.run_id(),
+            self.invocation.run_stream(),
+        )?;
+        materialize_inputs(self.invocation.runtime_spec(), node, &view)
     }
 
     pub(crate) fn runtime_spec(&self) -> &'a CertifiedRuntimeSpec {

@@ -2936,15 +2936,15 @@ impl OwnedSideEffectLedgerState {
     ) -> Result<Self> {
         self.require_purpose(&payload.ledger_key, &payload.ledger_purpose)?;
         let claim = self.require_observed_submission_claim()?.clone();
-        require_claim_context_for_payload(
+        require_claim_or_verify_context_for_observation(
             &self.core.ledger_key,
+            self.core.pair_id.as_ref(),
+            payload.pair_id.as_ref(),
+            payload.pair_role,
             &claim,
             &payload.node_id,
             &payload.attempt_id,
             payload.invocation_epoch,
-            claim.claim_generation,
-            &claim.claim_fencing_token,
-            Some(&claim.claim_owner),
         )?;
         self.core.event_id = event_id;
         self.retained.receipt = Some(SideEffectArtifactProjection {
@@ -2966,15 +2966,15 @@ impl OwnedSideEffectLedgerState {
     ) -> Result<Self> {
         self.require_purpose(&payload.ledger_key, &payload.ledger_purpose)?;
         let claim = self.require_phase_claim("receipt")?.clone();
-        require_claim_context_for_payload(
+        require_claim_or_verify_context_for_observation(
             &self.core.ledger_key,
+            self.core.pair_id.as_ref(),
+            payload.pair_id.as_ref(),
+            payload.pair_role,
             &claim,
             &payload.node_id,
             &payload.attempt_id,
             payload.invocation_epoch,
-            claim.claim_generation,
-            &claim.claim_fencing_token,
-            Some(&claim.claim_owner),
         )?;
         self.core.event_id = event_id;
         self.retained.confirmation = Some(SideEffectArtifactProjection {
@@ -3327,6 +3327,40 @@ fn require_claim_context_for_payload(
         ));
     }
     Ok(())
+}
+
+fn require_claim_or_verify_context_for_observation(
+    ledger_key: &events::SideEffectLedgerKey,
+    ledger_pair_id: Option<&SideEffectPairId>,
+    payload_pair_id: Option<&SideEffectPairId>,
+    payload_pair_role: Option<events::SideEffectPairRole>,
+    claim: &SideEffectClaimProjection,
+    node_id: &NodeId,
+    attempt_id: &AttemptId,
+    invocation_epoch: u32,
+) -> Result<()> {
+    if payload_pair_role == Some(events::SideEffectPairRole::Verify)
+        && ledger_pair_id.is_some()
+        && ledger_pair_id == payload_pair_id
+    {
+        if claim.invocation_epoch != invocation_epoch {
+            return Err(side_effect_key_conflict(
+                ledger_key,
+                "invocation epoch does not match active claim",
+            ));
+        }
+        return Ok(());
+    }
+    require_claim_context_for_payload(
+        ledger_key,
+        claim,
+        node_id,
+        attempt_id,
+        invocation_epoch,
+        claim.claim_generation,
+        &claim.claim_fencing_token,
+        Some(&claim.claim_owner),
+    )
 }
 
 fn require_claim_identity(
@@ -5474,8 +5508,12 @@ fn materialize_resource_lane_intents(
                         });
                     }
                 }
-                if active.node_id != intent.node_id
-                    || active.attempt_id != intent.attempt_id
+                let holder_matches = if intent.pair_id.is_some() {
+                    active.pair_id == intent.pair_id
+                } else {
+                    active.node_id == intent.node_id && active.attempt_id == intent.attempt_id
+                };
+                if !holder_matches
                     || active.ledger_purpose != intent.ledger_purpose
                     || active.pair_id != intent.pair_id
                     || active.invocation_epoch != intent.invocation_epoch

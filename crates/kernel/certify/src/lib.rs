@@ -2254,6 +2254,11 @@ impl<'a> DraftLowerer<'a> {
             transform_policy: spec::LineageTransformPolicy::StateOutput,
         };
         self.insert_value_lineage(output_lineage)?;
+        let terminal_policy = if node.side_effect_verify.is_some() {
+            spec::CellTerminalPolicy::MaybeSkipped
+        } else {
+            spec::CellTerminalPolicy::ProducedOnly
+        };
         self.insert_cell(spec::CellSpec {
             cell_id: node.output_cell_id.clone(),
             producer: spec::CellProducer::Node(node.node_id.clone()),
@@ -2261,7 +2266,7 @@ impl<'a> DraftLowerer<'a> {
             semantic_type_id: node.output_semantic_type_id.clone(),
             schema_id: node.output_schema_id.clone(),
             value_lineage: lineage_ref(node.output_value_lineage.digest()),
-            terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
+            terminal_policy,
             storage_policy: spec::StoragePolicy::ContentAddressed,
             redaction_policy: spec::RedactionPolicy::Public,
         })?;
@@ -2377,7 +2382,7 @@ impl<'a> DraftLowerer<'a> {
                     format!("submit node {} output cell is missing", submit.node_id),
                 )
             })?;
-        let input_binding = spec::framework_lifecycle_receipt_input_binding(
+        let input_binding = spec::framework_lifecycle_maybe_skipped_cell_input_binding(
             "side_effect_verify",
             "submit_output",
             &submit_output_cell,

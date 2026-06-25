@@ -160,10 +160,10 @@ pub(super) fn require_side_effect_pair_event(
             }
         }
         events::SideEffectLedgerPurpose::Remediation { .. } => {
-            if pair_id.is_some() {
+            if pair_id.is_some() && pair_role != Some(expected_role) {
                 return Err(side_effect_projection_error(
                     ledger_key,
-                    "remediation side-effect ledger must not carry its own pair authority",
+                    "side-effect pair role does not match event phase",
                 ));
             }
         }

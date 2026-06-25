@@ -164,6 +164,16 @@ impl SideEffectLifecycle {
         validate_side_effect_terminal_evidence(projections, node, attempt_id)
     }
 
+    /// Validates legal terminal evidence for a same-batch side-effect runner output.
+    pub(crate) fn validate_terminal_batch_evidence(
+        projections: &store::ProjectionSnapshot,
+        node: &spec::NodeSpec,
+        attempt_id: &AttemptId,
+        terminal_skipped: bool,
+    ) -> Result<()> {
+        validate_side_effect_terminal_phase(projections, node, attempt_id, terminal_skipped)
+    }
+
     /// Validates legal runner evidence when resuming an open side-effect ledger.
     pub(crate) fn validate_resume_output(
         projections: &store::ProjectionSnapshot,
@@ -300,6 +310,23 @@ pub(crate) fn validate_side_effect_terminal_evidence(
     node: &spec::NodeSpec,
     attempt_id: &AttemptId,
 ) -> Result<()> {
+    let terminal_skipped = match projections.cell_terminal(&node.output_cell) {
+        Some(store::CellTerminalProjection::Skipped {
+            node_id,
+            attempt_id: cell_attempt_id,
+            ..
+        }) if node_id == &node.node_id && cell_attempt_id == attempt_id => true,
+        _ => false,
+    };
+    validate_side_effect_terminal_phase(projections, node, attempt_id, terminal_skipped)
+}
+
+fn validate_side_effect_terminal_phase(
+    projections: &store::ProjectionSnapshot,
+    node: &spec::NodeSpec,
+    attempt_id: &AttemptId,
+    terminal_skipped: bool,
+) -> Result<()> {
     let Some(projection) = side_effect_projection_for_attempt(projections, node, attempt_id)?
     else {
         return Err(RuntimeError::InvalidRunStream(format!(
@@ -310,6 +337,15 @@ pub(crate) fn validate_side_effect_terminal_evidence(
     let state = projection
         .ledger_state()
         .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
+    if terminal_skipped {
+        if side_effect_phase_has_submission_result(state.phase()) {
+            return Ok(());
+        }
+        return Err(RuntimeError::InvalidRunStream(format!(
+            "side-effect node {} attempt {} skipped output before a submission result",
+            node.node_id, attempt_id
+        )));
+    }
     if state.is_confirmed() {
         Ok(())
     } else {
@@ -318,6 +354,17 @@ pub(crate) fn validate_side_effect_terminal_evidence(
             node.node_id, attempt_id
         )))
     }
+}
+
+fn side_effect_phase_has_submission_result(phase: store::SideEffectLedgerPhase<'_>) -> bool {
+    matches!(
+        phase,
+        store::SideEffectLedgerPhase::SubmissionKnown { .. }
+            | store::SideEffectLedgerPhase::ReceiptObserved { .. }
+            | store::SideEffectLedgerPhase::Confirmed { .. }
+            | store::SideEffectLedgerPhase::Ambiguous { .. }
+            | store::SideEffectLedgerPhase::Failed { .. }
+    )
 }
 
 pub(crate) fn validate_side_effect_resume_output(
@@ -360,6 +407,9 @@ pub(crate) fn validate_side_effect_resume_output(
                 | events::KernelEventPayload::SideEffectAmbiguous(_)
         )
     });
+    let closes_submission_boundary = payloads
+        .iter()
+        .any(|payload| matches!(payload, events::KernelEventPayload::CellSkipped(_)));
     let terminal_failure = payloads.iter().find_map(|payload| match payload {
         events::KernelEventPayload::SideEffectFailed(payload) => Some(payload),
         _ => None,
@@ -391,18 +441,25 @@ pub(crate) fn validate_side_effect_resume_output(
             status: store::SideEffectSubmissionState::NotSubmitted,
             ..
         } => {
-            if !closes_projection && !has_claim {
+            if !closes_projection && !closes_submission_boundary && !has_claim {
                 return Err(RuntimeError::InvalidRunnerOutput(format!(
                     "side-effect node {} resumed not-submitted ledger {} without next-epoch claim",
                     node.node_id, projection.ledger_key
                 )));
             }
         }
-        store::SideEffectLedgerPhase::Started { .. }
-        | store::SideEffectLedgerPhase::SubmissionKnown {
+        store::SideEffectLedgerPhase::SubmissionKnown {
             status: store::SideEffectSubmissionState::Unknown,
             ..
         } => {
+            if !closes_submission_boundary && !has_submission_recovery {
+                return Err(RuntimeError::InvalidRunnerOutput(format!(
+                    "side-effect node {} resumed uncertain submission ledger {} without submission recovery evidence",
+                    node.node_id, projection.ledger_key
+                )));
+            }
+        }
+        store::SideEffectLedgerPhase::Started { .. } => {
             if !has_submission_recovery {
                 return Err(RuntimeError::InvalidRunnerOutput(format!(
                     "side-effect node {} resumed uncertain submission ledger {} without submission recovery evidence",

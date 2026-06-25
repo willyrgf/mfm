@@ -134,8 +134,12 @@ pub(super) fn release_resource_lane(
         .resource_lanes
         .get(&key)
         .expect("resource lane key was found from projection");
-    if active.node_id != payload.node_id
-        || active.attempt_id != payload.attempt_id
+    let holder_matches = if payload.pair_id.is_some() {
+        active.pair_id == payload.pair_id
+    } else {
+        active.node_id == payload.node_id && active.attempt_id == payload.attempt_id
+    };
+    if !holder_matches
         || active.ledger_purpose != payload.ledger_purpose
         || active.pair_id != payload.pair_id
         || active.invocation_epoch != payload.invocation_epoch

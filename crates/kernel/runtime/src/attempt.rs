@@ -528,6 +528,12 @@ fn can_terminalize_observed_failure(
             store::SideEffectPhase::Claimed { .. }
         ));
     }
+    if matches!(
+        node.framework,
+        Some(spec::FrameworkNodeSpec::SideEffectVerify(_))
+    ) {
+        return Ok(false);
+    }
     Ok(true)
 }
 

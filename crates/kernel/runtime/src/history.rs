@@ -20,9 +20,10 @@ use crate::framework::{
 };
 use crate::recovery::AttemptRecoveryLifecycle;
 use crate::side_effects::{
-    side_effect_payload_ref, validate_atomic_side_effect_failure_pairs,
-    validate_historical_side_effect_confirmation, validate_historical_side_effect_failure,
-    validate_historical_side_effect_payload, HistoricalSideEffectLedger,
+    node_uses_side_effect_terminal_validation, side_effect_payload_ref,
+    validate_atomic_side_effect_failure_pairs, validate_historical_side_effect_failure,
+    validate_historical_side_effect_payload, validate_historical_side_effect_terminal,
+    HistoricalSideEffectLedger,
 };
 use crate::{
     config_ref_key, require_adapter, require_capability, validate_public_output,
@@ -861,11 +862,13 @@ fn validate_historical_run_stream(
                         payload.attempt_id, payload.node_id, payload.output_cell_id
                     )));
                 }
-                if node.side_effect.is_some() {
-                    validate_historical_side_effect_confirmation(
+                if node_uses_side_effect_terminal_validation(node) {
+                    validate_historical_side_effect_terminal(
+                        runtime_spec,
                         &side_effect_ledgers,
-                        &payload.node_id,
+                        node,
                         &payload.attempt_id,
+                        stream_output_cell_is_skipped(stream, node, &payload.attempt_id),
                     )?;
                 }
                 if !active_attempts.remove(&(payload.node_id.clone(), payload.attempt_id.clone())) {
@@ -890,21 +893,17 @@ fn validate_historical_run_stream(
                 }
             }
             events::KernelEventPayload::StateAttemptFailed(payload) => {
-                runtime_spec.node(&payload.node_id).ok_or_else(|| {
+                let node = runtime_spec.node(&payload.node_id).ok_or_else(|| {
                     RuntimeError::InvalidRunStream(format!(
                         "attempt failed for uncertified node {}",
                         payload.node_id
                     ))
                 })?;
-                if runtime_spec
-                    .node(&payload.node_id)
-                    .expect("checked above")
-                    .side_effect
-                    .is_some()
-                {
+                if node_uses_side_effect_terminal_validation(node) {
                     validate_historical_side_effect_failure(
+                        runtime_spec,
                         &side_effect_ledgers,
-                        &payload.node_id,
+                        node,
                         &payload.attempt_id,
                     )?;
                 }
@@ -920,11 +919,13 @@ fn validate_historical_run_stream(
                 let node = runtime_spec
                     .node(&payload.node_id)
                     .expect("validated cell node");
-                if node.side_effect.is_some() {
-                    validate_historical_side_effect_confirmation(
+                if node_uses_side_effect_terminal_validation(node) {
+                    validate_historical_side_effect_terminal(
+                        runtime_spec,
                         &side_effect_ledgers,
-                        &payload.node_id,
+                        node,
                         &payload.attempt_id,
+                        false,
                     )?;
                 }
                 available_cells.insert(payload.cell_id.clone());
@@ -934,11 +935,13 @@ fn validate_historical_run_stream(
                 let node = runtime_spec
                     .node(&payload.node_id)
                     .expect("validated cell node");
-                if node.side_effect.is_some() {
-                    validate_historical_side_effect_confirmation(
+                if node_uses_side_effect_terminal_validation(node) {
+                    validate_historical_side_effect_terminal(
+                        runtime_spec,
                         &side_effect_ledgers,
-                        &payload.node_id,
+                        node,
                         &payload.attempt_id,
+                        true,
                     )?;
                 }
                 available_cells.insert(payload.cell_id.clone());
@@ -1165,6 +1168,22 @@ fn validate_attempt_start_boundary(
         }
     }
     Ok(())
+}
+
+fn stream_output_cell_is_skipped(
+    stream: &[store::KernelEventEnvelope],
+    node: &spec::NodeSpec,
+    attempt_id: &AttemptId,
+) -> bool {
+    stream.iter().any(|event| {
+        matches!(
+            event.payload(),
+            events::KernelEventPayload::CellSkipped(payload)
+                if payload.node_id == node.node_id
+                    && payload.attempt_id == *attempt_id
+                    && payload.cell_id == node.output_cell
+        )
+    })
 }
 
 fn validate_atomic_terminal_pairs(
