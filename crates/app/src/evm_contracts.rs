@@ -132,8 +132,8 @@ mod tests {
         SigningProvider, SigningRequest, SigningResult,
     };
     use mfm_store::v1::{
-        self as store, ExecutionClaimStatus, ExecutionClaimStore, RetainedArtifactReadProvider,
-        RunEventStore,
+        self as store, AdmissionToken, ExecutionClaimStatus, ExecutionClaimStore,
+        NowaitSkipAdmissionResult, RetainedArtifactReadProvider, RunEventStore,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -343,6 +343,79 @@ mod tests {
             .await
             .expect("launch with one drive step");
 
+        assert!(matches!(
+            store
+                .execution_claim_status(&run_id)
+                .await
+                .expect("execution claim status"),
+            ExecutionClaimStatus::Unclaimed
+        ));
+    }
+
+    #[tokio::test]
+    async fn app_runner_reaps_stale_execution_claim_and_resumes() {
+        let store = store::AsyncInMemoryRunStore::default();
+        let artifacts = crate::artifact_read_provider_from_retained(store.clone());
+        let config = validate_config();
+        let configured = configured_contract();
+        let mut certification = CertificationRegistry::new();
+        mfm_op_evm_contract_lifecycle::register_contract_lifecycle_certification_descriptors(
+            &mut certification,
+        )
+        .expect("contract certification descriptors");
+        let mut runners = ErasedRunnerRegistry::new();
+        mfm_adapters_evm_contracts::register_contract_lifecycle_runners_with_factory(
+            &mut runners,
+            Arc::new(TestRuntimeFactory::new(artifacts)),
+        )
+        .expect("contract runners");
+        let services = make_run_services_with_certification_registry(
+            runners,
+            store.clone(),
+            store.clone(),
+            certification,
+        );
+        let request = prepare_evm_entry_point_request(
+            &services,
+            "evm_contract_validate",
+            json!({
+                "config": config,
+                "configured": configured,
+            }),
+        )
+        .await;
+        let run_id = request.run_id.clone();
+        let (_, started) = services
+            .launch_run(request)
+            .await
+            .expect("append start")
+            .into_response_parts()
+            .expect("run response");
+        let stale_token = AdmissionToken::new("mfm.test.app.execution_claim.stale").expect("token");
+        assert!(matches!(
+            store
+                .acquire_execution_claim(&run_id, stale_token)
+                .await
+                .expect("claim execution"),
+            NowaitSkipAdmissionResult::Admitted(_)
+        ));
+        assert!(
+            store
+                .expire_execution_claim_for_test(&run_id)
+                .expect("expire execution claim"),
+            "test must mark the active execution claim stale"
+        );
+
+        let resumed = services
+            .resume_stored_run(&run_id, DriveMode::Once)
+            .await
+            .expect("resume after stale claim");
+
+        assert_ne!(resumed.scheduler_status, "execution_claim_busy");
+        assert!(
+            resumed.head_seq > started.head_seq,
+            "resume should drive the run after reaping the stale claim"
+        );
         assert!(matches!(
             store
                 .execution_claim_status(&run_id)

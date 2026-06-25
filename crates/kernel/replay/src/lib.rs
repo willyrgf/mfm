@@ -2884,6 +2884,50 @@ pub mod v1 {
         }
 
         #[test]
+        fn side_effect_frame_receipt_request_uses_recorded_verify_evidence() {
+            let pair_id = pair_id(0x61);
+            let ledger_key =
+                events::SideEffectLedgerKey::new("receipt-ledger").expect("receipt ledger key");
+            let intent = intent_persisted(pair_id.clone(), ledger_key.clone());
+            let receipt_hash = content_digest(0x62);
+            let replay_verifier_id =
+                events::ReplayVerifierId::new("mfm.replay.test.receipt.verifier")
+                    .expect("replay verifier id");
+            let receipt = side_effect::ReceiptObserved {
+                spec_hash: intent.spec_hash.clone(),
+                node_id: intent.node_id.clone(),
+                attempt_id: intent.attempt_id.clone(),
+                ledger_key: ledger_key.clone(),
+                ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                pair_id: pair_id.clone(),
+                pair_role: events::SideEffectPairRole::Verify,
+                invocation_epoch: 1,
+                receipt_schema_id: schema_id("mfm.replay.test.receipt", 0x63),
+                receipt_hash: receipt_hash.clone(),
+                receipt_artifact_id: artifact_id(0x64),
+                replay_verifier_id: replay_verifier_id.clone(),
+                resource_touched_set: None,
+            };
+            let frame = SideEffectReplayFrame {
+                intent: &intent,
+                submission: None,
+                not_submitted: None,
+                receipt: Some(&receipt),
+                confirmation: None,
+                ambiguity: None,
+            };
+
+            let request = frame.receipt_request().expect("receipt request");
+
+            assert_eq!(request.pair_id, pair_id);
+            assert_eq!(request.ledger_key, ledger_key);
+            assert_eq!(request.invocation_epoch, 1);
+            assert_eq!(request.evidence_schema_id, receipt.receipt_schema_id);
+            assert_eq!(request.evidence_hash, receipt_hash);
+            assert_eq!(request.replay_verifier_id, Some(replay_verifier_id));
+        }
+
+        #[test]
         fn replay_source_does_not_import_live_authorities() {
             let source = include_str!("lib.rs");
             for forbidden in [

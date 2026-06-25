@@ -2134,6 +2134,92 @@ async fn side_effect_driver_persists_submission_recovery_decisions() {
 }
 
 #[tokio::test]
+async fn side_effect_submission_unknown_keeps_exclusive_resource_lane_held() {
+    let fixture = fixture_with_first_exclusive_side_effect_state();
+    let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
+    let mut store = TestTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    let node = node_by_output(&fixture, &fixture.cell_a);
+    let pair_id = fixture_side_effect_pair_id(&fixture, node);
+    let (attempt_id, ledger_key) = append_synthetic_exclusive_prepare(
+        &mut store,
+        &fixture,
+        &fixture.run_id,
+        node,
+        "wallet-driver-unknown-lane",
+        "sidefx-driver-unknown-lane",
+    );
+    append_synthetic_invocation_started(
+        &mut store,
+        &fixture,
+        &fixture.run_id,
+        node,
+        &attempt_id,
+        &ledger_key,
+        "sidefx-driver-unknown-lane-started",
+    );
+    let before_unknown = store.projection_snapshot();
+    let (lane_key, held_lane) =
+        active_resource_lane_for_pair(&before_unknown, &fixture.run_id, &pair_id)
+            .expect("exclusive lane must be held before submission recovery");
+    let callbacks = TestSideEffectDriverCallbacks::new(&fixture)
+        .with_submission_decision(TestSubmissionDecision::Unknown);
+
+    let output =
+        drive_side_effect_driver_from_store(&fixture, &store, node, &attempt_id, &callbacks)
+            .await
+            .expect("driver output");
+    assert!(output
+        .payloads
+        .iter()
+        .any(|payload| matches!(payload, RunnerEventPayload::SideEffectSubmissionUnknown(_))));
+    assert!(output
+        .payloads
+        .iter()
+        .all(|payload| !matches!(payload, RunnerEventPayload::ResourceLaneReleaseIntent(_))));
+    append_erased_runner_output(
+        &mut store,
+        &fixture.run_id,
+        "sidefx-driver-unknown-lane-output",
+        output,
+        store::CommitPreconditions {
+            required_run_state: store::RequiredRunState::NotCompleted,
+            required_present_logical_keys: vec![store::LogicalEventKey::new(format!(
+                "attempt:{}:{}",
+                node.node_id, attempt_id
+            ))
+            .expect("attempt logical key")],
+            required_side_effect_states: vec![store::SideEffectStatePrecondition {
+                pair_id: pair_id.clone(),
+                required: store::RequiredSideEffectState::InvocationStarted,
+            }],
+            ..store::CommitPreconditions::default()
+        },
+    );
+
+    let after_unknown = store.projection_snapshot();
+    let projection = after_unknown
+        .side_effect_for_pair(&fixture.run_id, &pair_id)
+        .expect("side-effect projection");
+    assert!(matches!(
+        projection.phase,
+        store::SideEffectPhase::SubmissionUnknown { .. }
+    ));
+    let lane_after_unknown = after_unknown
+        .resource_lane(&lane_key)
+        .expect("submission-unknown phase must keep the resource lane held");
+    assert_eq!(lane_after_unknown.holder, held_lane.holder);
+    assert_eq!(lane_after_unknown.claim_id, held_lane.claim_id);
+}
+
+#[tokio::test]
 async fn side_effect_verify_driver_maps_receipt_to_state_output() {
     let fixture = fixture_with_first_exclusive_side_effect_state();
     let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
@@ -2210,6 +2296,72 @@ async fn side_effect_verify_driver_maps_receipt_to_state_output() {
         output.payloads[1],
         RunnerEventPayload::CellProduced(_)
     ));
+}
+
+#[tokio::test]
+async fn side_effect_receipt_verification_releases_exclusive_resource_lane() {
+    let fixture = fixture_with_first_exclusive_side_effect_state();
+    let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
+    let mut store = TestTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    let submit_node = node_by_output(&fixture, &fixture.cell_a).clone();
+    let verify_node = side_effect_verify_node_for_submit(&fixture, &submit_node).clone();
+    let pair_id = fixture_side_effect_pair_id(&fixture, &submit_node);
+    let mut saw_lane_claimed = false;
+    let mut saw_receipt_with_lane_held = false;
+    let mut released_after_receipt = false;
+
+    for _ in 0..10 {
+        assert_ne!(
+            drive_once(
+                &scheduler,
+                &mut store,
+                &fixture.runtime_spec,
+                &fixture.run_id
+            )
+            .await
+            .expect("advance receipt verification"),
+            SchedulerStatus::Blocked
+        );
+        let snapshot = store.projection_snapshot();
+        let active_lane = active_resource_lane_for_pair(&snapshot, &fixture.run_id, &pair_id);
+        saw_lane_claimed |= active_lane.is_some();
+        let side_effect = snapshot
+            .side_effect_for_pair(&fixture.run_id, &pair_id)
+            .expect("side-effect projection");
+        if matches!(
+            side_effect.phase,
+            store::SideEffectPhase::ReceiptObserved { .. }
+        ) && active_lane.is_some()
+            && snapshot.cell_terminal(&verify_node.output_cell).is_none()
+        {
+            saw_receipt_with_lane_held = true;
+        }
+        if saw_receipt_with_lane_held
+            && active_lane.is_none()
+            && snapshot.cell_terminal(&verify_node.output_cell).is_some()
+        {
+            released_after_receipt = true;
+            break;
+        }
+    }
+
+    assert!(saw_lane_claimed, "exclusive side effect must claim a lane");
+    assert!(
+        saw_receipt_with_lane_held,
+        "receipt evidence alone should not release the lane before terminal output"
+    );
+    assert!(
+        released_after_receipt,
+        "receipt-level terminal output should release the exclusive lane"
+    );
 }
 
 #[tokio::test]
@@ -10126,6 +10278,47 @@ fn synthetic_resource_lane_release(
             release_reason: events::ResourceLaneReleaseReason::new(reason).expect("release reason"),
         },
     ))
+}
+
+fn active_resource_lane_for_pair(
+    snapshot: &store::ProjectionSnapshot,
+    run_id: &RunId,
+    pair_id: &SideEffectPairId,
+) -> Option<(store::ResourceLaneKey, store::ResourceLaneProjection)> {
+    let holder = store::SideEffectPairLedgerRef::new(run_id.clone(), pair_id.clone());
+    snapshot
+        .resource_lanes()
+        .find(|(_, projection)| projection.holder == holder)
+        .map(|(key, projection)| (key.clone(), projection.clone()))
+}
+
+fn append_erased_runner_output(
+    store: &mut TestTypedRunStore,
+    run_id: &RunId,
+    commit_key: &str,
+    output: ErasedRunnerOutput,
+    preconditions: store::CommitPreconditions,
+) {
+    let required_artifacts = output
+        .staged_artifacts
+        .iter()
+        .map(|artifact| artifact.evidence().clone())
+        .collect::<Vec<_>>();
+    let payloads = output
+        .payloads
+        .into_iter()
+        .map(events::KernelEventPayload::from)
+        .collect::<Vec<_>>();
+    store
+        .append_prepared_commit(store_typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(run_id),
+            commit_key: store::CommitKey::new(commit_key).expect("commit key"),
+            payloads: payloads,
+            required_artifacts: required_artifacts,
+            preconditions: preconditions,
+        })
+        .expect("append runner output");
 }
 
 fn side_effect_evidence(

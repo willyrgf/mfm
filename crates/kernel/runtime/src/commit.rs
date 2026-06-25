@@ -774,6 +774,21 @@ fn prepare_runner_output_commit_plan(
             store::PreparedCommit::<store::AttemptTerminal>::new(request, artifacts)?.into(),
         );
     }
+    if payloads
+        .iter()
+        .any(is_retention_manifest_projection_payload)
+    {
+        return Ok(store::PreparedCommit::<store::Retention>::new(request, artifacts)?.into());
+    }
+    if payloads.iter().any(is_attempt_terminal_payload)
+        && !payloads
+            .iter()
+            .any(is_side_effect_terminal_disposition_payload)
+    {
+        return Ok(
+            store::PreparedCommit::<store::AttemptTerminal>::new(request, artifacts)?.into(),
+        );
+    }
     if payloads.iter().any(is_side_effect_terminal_payload) {
         return Ok(
             store::PreparedCommit::<store::SideEffectTerminal>::new(request, artifacts)?.into(),
@@ -798,11 +813,34 @@ fn is_run_completed_payload(payload: &events::KernelEventPayload) -> bool {
     matches!(payload, events::KernelEventPayload::RunCompleted(_))
 }
 
+fn is_attempt_terminal_payload(payload: &events::KernelEventPayload) -> bool {
+    matches!(
+        payload,
+        events::KernelEventPayload::StateAttemptCompleted(_)
+            | events::KernelEventPayload::StateAttemptInterrupted(_)
+            | events::KernelEventPayload::StateAttemptFailed(_)
+            | events::KernelEventPayload::CellProduced(_)
+            | events::KernelEventPayload::CellSkipped(_)
+            | events::KernelEventPayload::FactRecorded(_)
+            | events::KernelEventPayload::ArtifactReferenced(_)
+            | events::KernelEventPayload::PublicOutputProduced(_)
+            | events::KernelEventPayload::PublicOutputRenderFailed(_)
+            | events::KernelEventPayload::RunCompleted(_)
+    )
+}
+
 fn is_retention_payload(payload: &events::KernelEventPayload) -> bool {
     matches!(
         payload,
         events::KernelEventPayload::RetentionRefsAppended(_)
             | events::KernelEventPayload::RetentionManifestProjected(_)
+    )
+}
+
+fn is_retention_manifest_projection_payload(payload: &events::KernelEventPayload) -> bool {
+    matches!(
+        payload,
+        events::KernelEventPayload::RetentionManifestProjected(_)
     )
 }
 
@@ -819,6 +857,15 @@ fn is_side_effect_terminal_payload(payload: &events::KernelEventPayload) -> bool
             | events::KernelEventPayload::ResourceLaneReleased(_)
             | events::KernelEventPayload::ResourceLaneReleaseIntent(_)
     )
+}
+
+fn is_side_effect_terminal_disposition_payload(payload: &events::KernelEventPayload) -> bool {
+    is_side_effect_terminal_payload(payload)
+        && !matches!(
+            payload,
+            events::KernelEventPayload::ResourceLaneReleased(_)
+                | events::KernelEventPayload::ResourceLaneReleaseIntent(_)
+        )
 }
 
 fn is_side_effect_payload(payload: &events::KernelEventPayload) -> bool {
