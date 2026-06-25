@@ -726,16 +726,12 @@ mod tests {
                 "attempt-output:mfm.evm.contract/deploy:side_effect.intent_persisted+side_effect.claimed+resource_lane.claimed+retention_refs_appended[roles=side_effect_intent]",
                 "attempt-output:mfm.evm.contract/deploy:side_effect.invocation_prepared+side_effect.invocation_started+retention_refs_appended[roles=prepared_invocation]",
                 "attempt-output:mfm.evm.contract/deploy:side_effect.submission_observed+retention_refs_appended[roles=submission]",
-                "attempt-output:mfm.evm.contract/deploy:side_effect.receipt_observed+retention_refs_appended[roles=receipt]",
-                "attempt-output:mfm.evm.contract/deploy:resource_lane.released+side_effect.confirmation_observed+retention_refs_appended[roles=confirmation]",
-                "attempt-output:mfm.evm.contract/deploy:cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+retention_refs_appended[roles=state_output]",
+                "attempt-output:mfm.evm.contract/deploy:cell_skipped+state_attempt_completed",
                 "attempt-output:mfm.evm.contract/configure:side_effect.intent_persisted+side_effect.claimed+resource_lane.claimed+retention_refs_appended[roles=side_effect_intent]",
                 "attempt-output:mfm.evm.contract/configure:side_effect.invocation_prepared+side_effect.invocation_started+retention_refs_appended[roles=prepared_invocation]",
                 "attempt-output:mfm.evm.contract/configure:side_effect.submission_observed+retention_refs_appended[roles=submission]",
-                "attempt-output:mfm.evm.contract/configure:side_effect.receipt_observed+retention_refs_appended[roles=receipt]",
-                "attempt-output:mfm.evm.contract/configure:resource_lane.released+side_effect.confirmation_observed+retention_refs_appended[roles=confirmation]",
-                "attempt-output:mfm.evm.contract/configure:cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+retention_refs_appended[roles=state_output]",
-                "attempt-output:mfm.evm.contract/validate:fact_recorded+cell_produced+state_attempt_completed+artifact_referenced[role=state_output]+artifact_referenced[role=fact_response]+retention_refs_appended[roles=fact_response]+retention_refs_appended[roles=state_output]",
+                "attempt-output:mfm.evm.contract/configure:cell_skipped+state_attempt_completed",
+                "attempt-output:mfm.evm.contract/validate:fact_recorded+cell_produced+state_attempt_completed+artifact_referenced[role=fact_response]+artifact_referenced[role=state_output]+retention_refs_appended[roles=fact_response]+retention_refs_appended[roles=state_output]",
             ]
         );
         let mut prepared_artifact_requirements = Vec::new();

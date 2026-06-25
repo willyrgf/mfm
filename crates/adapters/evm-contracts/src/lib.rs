@@ -1151,13 +1151,12 @@ fn verify_contract_lifecycle_replay_frame(
     let Some(receipt_request) = frame.receipt_request() else {
         return Err(contract_lifecycle_side_effect_missing("receipt"));
     };
-    let Some(confirmation_request) = frame.confirmation_request() else {
-        return Err(contract_lifecycle_side_effect_missing("confirmation"));
-    };
 
     broker.verify_side_effect_submission(&submission_request, verifier)?;
     broker.verify_side_effect_receipt(&receipt_request, verifier)?;
-    broker.verify_side_effect_confirmation(&confirmation_request, verifier)?;
+    if let Some(confirmation_request) = frame.confirmation_request() {
+        broker.verify_side_effect_confirmation(&confirmation_request, verifier)?;
+    }
     Ok(())
 }
 
