@@ -2669,26 +2669,28 @@ fn projected_side_effect_for_submit<'a>(
     ctx: &'a ErasedRunCtx<'_>,
     submit_node: &spec::NodeSpec,
 ) -> mfm_runtime::Result<&'a store::SideEffectProjection> {
-    let mut found = None;
-    for (_, projection) in ctx.projections().side_effects() {
-        if projection.run_id == *ctx.run_id()
-            && projection.intent.node_id == submit_node.node_id
-            && projection.pair_id.is_some()
-        {
-            if found.replace(projection).is_some() {
-                return Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(format!(
-                    "contract lifecycle side-effect projection for submit node {} is ambiguous",
-                    submit_node.node_id
-                )));
-            }
-        }
-    }
-    found.ok_or_else(|| {
-        mfm_runtime::RuntimeError::InvalidRunnerOutput(format!(
-            "contract lifecycle side-effect projection missing for submit node {}",
+    let contract = submit_node.side_effect.as_ref().ok_or_else(|| {
+        mfm_runtime::RuntimeError::InvalidSpec(format!(
+            "contract lifecycle submit node {} lacks side-effect contract",
             submit_node.node_id
         ))
-    })
+    })?;
+    let pair_id =
+        spec::side_effect_pair_id(&submit_node.node_id, &submit_node.output_cell, contract)
+            .map_err(|error| {
+                mfm_runtime::RuntimeError::InvalidSpec(format!(
+                    "contract lifecycle submit node {} pair id is invalid: {error}",
+                    submit_node.node_id
+                ))
+            })?;
+    ctx.projections()
+        .side_effect_for_pair(ctx.run_id(), &pair_id)
+        .ok_or_else(|| {
+            mfm_runtime::RuntimeError::InvalidRunnerOutput(format!(
+                "contract lifecycle side-effect projection missing for submit node {}",
+                submit_node.node_id
+            ))
+        })
 }
 
 fn projected_prepared_artifact_for_submit(

@@ -261,18 +261,15 @@ pub struct RunnerSideEffectBinding {
     pub ledger_key: events::SideEffectLedgerKey,
     /// Side-effect ledger purpose.
     pub ledger_purpose: events::SideEffectLedgerPurpose,
-    /// Certified side-effect pair id, when this is a forward paired ledger.
-    pub pair_id: Option<mfm_ids::SideEffectPairId>,
+    /// Certified side-effect pair id.
+    pub pair_id: mfm_ids::SideEffectPairId,
     /// Invocation epoch.
     pub invocation_epoch: u32,
 }
 
 impl RunnerSideEffectBinding {
-    pub(crate) fn pair_role(
-        &self,
-        role: events::SideEffectPairRole,
-    ) -> Option<events::SideEffectPairRole> {
-        self.pair_id.as_ref().map(|_| role)
+    pub(crate) fn pair_role(&self, role: events::SideEffectPairRole) -> events::SideEffectPairRole {
+        role
     }
 }
 

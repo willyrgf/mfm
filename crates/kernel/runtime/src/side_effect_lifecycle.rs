@@ -1,11 +1,11 @@
 use mfm_events::v1 as events;
-use mfm_ids::AttemptId;
+use mfm_ids::{AttemptId, RunId, SideEffectPairId};
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 
 use crate::history::VerifiedRunContext;
 use crate::invocation::{ErasedRunCtx, PreInvocationRunCtx};
-use crate::{Result, RuntimeError};
+use crate::{CertifiedRuntimeSpec, Result, RuntimeError};
 
 /// Store-verified side-effect ledger view for one certified node attempt.
 ///
@@ -21,33 +21,59 @@ impl<'a> SideEffectAttemptView<'a> {
     /// Builds a side-effect attempt view from a prepared runner context.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn from_erased_context(ctx: &'a ErasedRunCtx<'_>) -> Result<Self> {
-        Self::from_verified_parts(ctx.projections(), ctx.node(), ctx.attempt_id())
+        Self::from_verified_parts(
+            ctx.runtime_spec(),
+            ctx.run_id(),
+            ctx.projections(),
+            ctx.node(),
+            ctx.attempt_id(),
+        )
     }
 
     /// Builds a side-effect attempt view from a pre-invocation resource-lane context.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn from_pre_invocation_context(ctx: &'a PreInvocationRunCtx<'_>) -> Result<Self> {
-        Self::from_verified_parts(ctx.projections(), ctx.node(), ctx.attempt_id())
+        Self::from_verified_parts(
+            ctx.runtime_spec(),
+            ctx.run_id(),
+            ctx.projections(),
+            ctx.node(),
+            ctx.attempt_id(),
+        )
     }
 
     /// Builds a side-effect attempt view from a scheduler-owned verified run context.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn from_verified_context(
+        runtime_spec: &CertifiedRuntimeSpec,
         ctx: &'a VerifiedRunContext,
         node: &spec::NodeSpec,
         attempt_id: &AttemptId,
     ) -> Result<Self> {
-        Self::from_verified_parts(&ctx.view().projections, node, attempt_id)
+        Self::from_verified_parts(
+            runtime_spec,
+            ctx.run_id(),
+            &ctx.view().projections,
+            node,
+            attempt_id,
+        )
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
     fn from_verified_parts(
+        runtime_spec: &CertifiedRuntimeSpec,
+        run_id: &RunId,
         projections: &'a store::ProjectionSnapshot,
         node: &spec::NodeSpec,
         attempt_id: &AttemptId,
     ) -> Result<Self> {
-        let projection =
-            SideEffectLifecycle::projection_for_attempt(projections, node, attempt_id)?;
+        let projection = SideEffectLifecycle::projection_for_attempt(
+            runtime_spec,
+            run_id,
+            projections,
+            node,
+            attempt_id,
+        )?;
         let ledger_state = projection
             .map(|projection| {
                 projection
@@ -148,49 +174,79 @@ pub(crate) enum SideEffectOperationalBlockReason {
 impl SideEffectLifecycle {
     /// Returns the single durable side-effect projection for a certified node attempt.
     pub(crate) fn projection_for_attempt<'a>(
+        runtime_spec: &CertifiedRuntimeSpec,
+        run_id: &RunId,
         projections: &'a store::ProjectionSnapshot,
         node: &spec::NodeSpec,
         attempt_id: &AttemptId,
     ) -> Result<Option<&'a store::SideEffectProjection>> {
-        side_effect_projection_for_attempt(projections, node, attempt_id)
+        side_effect_projection_for_attempt(runtime_spec, run_id, projections, node, attempt_id)
     }
 
     /// Validates that a side-effect attempt has confirmed terminal evidence before producing output.
     pub(crate) fn validate_terminal_evidence(
+        runtime_spec: &CertifiedRuntimeSpec,
+        run_id: &RunId,
         projections: &store::ProjectionSnapshot,
         node: &spec::NodeSpec,
         attempt_id: &AttemptId,
     ) -> Result<()> {
-        validate_side_effect_terminal_evidence(projections, node, attempt_id)
+        validate_side_effect_terminal_evidence(runtime_spec, run_id, projections, node, attempt_id)
     }
 
     /// Validates legal terminal evidence for a same-batch side-effect runner output.
     pub(crate) fn validate_terminal_batch_evidence(
+        runtime_spec: &CertifiedRuntimeSpec,
+        run_id: &RunId,
         projections: &store::ProjectionSnapshot,
         node: &spec::NodeSpec,
         attempt_id: &AttemptId,
         terminal_skipped: bool,
     ) -> Result<()> {
-        validate_side_effect_terminal_phase(projections, node, attempt_id, terminal_skipped)
+        validate_side_effect_terminal_phase(
+            runtime_spec,
+            run_id,
+            projections,
+            node,
+            attempt_id,
+            terminal_skipped,
+        )
     }
 
     /// Validates legal runner evidence when resuming an open side-effect ledger.
     pub(crate) fn validate_resume_output(
+        runtime_spec: &CertifiedRuntimeSpec,
+        run_id: &RunId,
         projections: &store::ProjectionSnapshot,
         node: &spec::NodeSpec,
         attempt_id: &AttemptId,
         payloads: &[events::KernelEventPayload],
     ) -> Result<()> {
-        validate_side_effect_resume_output(projections, node, attempt_id, payloads)
+        validate_side_effect_resume_output(
+            runtime_spec,
+            run_id,
+            projections,
+            node,
+            attempt_id,
+            payloads,
+        )
     }
 
     /// Returns whether standalone interruption can close this attempt without ledger recovery.
     pub(crate) fn standalone_interruption_allowed(
+        runtime_spec: &CertifiedRuntimeSpec,
+        run_id: &RunId,
         projections: &store::ProjectionSnapshot,
         node: &spec::NodeSpec,
         attempt_id: &AttemptId,
     ) -> Result<bool> {
-        let Some(projection) = side_effect_projection_for_attempt(projections, node, attempt_id)?
+        let Some(projection) = side_effect_projection_for_attempt(
+            runtime_spec,
+            run_id,
+            projections,
+            node,
+            attempt_id,
+        )?
         else {
             return Ok(true);
         };
@@ -204,11 +260,19 @@ impl SideEffectLifecycle {
 
     /// Classifies an open side-effect attempt from store-owned ledger typestate.
     pub(crate) fn open_attempt_disposition(
+        runtime_spec: &CertifiedRuntimeSpec,
+        run_id: &RunId,
         projections: &store::ProjectionSnapshot,
         node: &spec::NodeSpec,
         attempt_id: &AttemptId,
     ) -> Result<SideEffectOpenAttemptDisposition> {
-        let Some(projection) = side_effect_projection_for_attempt(projections, node, attempt_id)?
+        let Some(projection) = side_effect_projection_for_attempt(
+            runtime_spec,
+            run_id,
+            projections,
+            node,
+            attempt_id,
+        )?
         else {
             return Ok(SideEffectOpenAttemptDisposition::ContinueBeforeLedger);
         };
@@ -286,26 +350,81 @@ fn side_effect_phase_is_before_invocation_prepared(
 }
 
 pub(crate) fn side_effect_projection_for_attempt<'a>(
+    runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
     projections: &'a store::ProjectionSnapshot,
     node: &spec::NodeSpec,
     attempt_id: &AttemptId,
 ) -> Result<Option<&'a store::SideEffectProjection>> {
-    let mut found = None;
-    for (_, projection) in projections.side_effects() {
-        if projection.intent.node_id == node.node_id
-            && projection.intent.attempt_id == *attempt_id
-            && found.replace(projection).is_some()
-        {
-            return Err(RuntimeError::InvalidRunStream(format!(
-                "side-effect node {} attempt {} has multiple ledger projections",
-                node.node_id, attempt_id
-            )));
-        }
+    let Some(pair_id) = certified_side_effect_pair_id(runtime_spec, node)? else {
+        return Ok(None);
+    };
+    let Some(projection) = projections.side_effect_for_pair(run_id, pair_id) else {
+        return Ok(None);
+    };
+    validate_side_effect_projection_matches_node(node, attempt_id, pair_id, projection)?;
+    Ok(Some(projection))
+}
+
+fn certified_side_effect_pair_id<'a>(
+    runtime_spec: &'a CertifiedRuntimeSpec,
+    node: &'a spec::NodeSpec,
+) -> Result<Option<&'a SideEffectPairId>> {
+    match &node.framework {
+        Some(spec::FrameworkNodeSpec::SideEffectVerify(verify)) => Ok(Some(&verify.pair_id)),
+        _ if node.side_effect.is_some() => runtime_spec
+            .side_effect_pair_for_submit_node(&node.node_id)
+            .map(Some)
+            .ok_or_else(|| {
+                RuntimeError::InvalidSpec(format!(
+                    "side-effect node {} is missing certified verify pair",
+                    node.node_id
+                ))
+            }),
+        _ => Ok(None),
     }
-    Ok(found)
+}
+
+fn validate_side_effect_projection_matches_node(
+    node: &spec::NodeSpec,
+    attempt_id: &AttemptId,
+    pair_id: &SideEffectPairId,
+    projection: &store::SideEffectProjection,
+) -> Result<()> {
+    if projection.pair_id != *pair_id {
+        return Err(RuntimeError::InvalidRunStream(format!(
+            "side-effect pair {} projected as pair {}",
+            pair_id, projection.pair_id
+        )));
+    }
+    match &node.framework {
+        Some(spec::FrameworkNodeSpec::SideEffectVerify(verify))
+            if projection.intent.node_id != verify.submit_node_id =>
+        {
+            Err(RuntimeError::InvalidRunStream(format!(
+                "side-effect verify node {} pair {} points at submit node {} but projection belongs to node {}",
+                node.node_id, pair_id, verify.submit_node_id, projection.intent.node_id
+            )))
+        }
+        _ if node.side_effect.is_some() && projection.intent.node_id != node.node_id => {
+            Err(RuntimeError::InvalidRunStream(format!(
+                "side-effect node {} pair {} projection belongs to node {}",
+                node.node_id, pair_id, projection.intent.node_id
+            )))
+        }
+        _ if node.side_effect.is_some() && projection.intent.attempt_id != *attempt_id => {
+            Err(RuntimeError::InvalidRunStream(format!(
+                "side-effect node {} pair {} projection belongs to attempt {} instead of {}",
+                node.node_id, pair_id, projection.intent.attempt_id, attempt_id
+            )))
+        }
+        _ => Ok(()),
+    }
 }
 
 pub(crate) fn validate_side_effect_terminal_evidence(
+    runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
     projections: &store::ProjectionSnapshot,
     node: &spec::NodeSpec,
     attempt_id: &AttemptId,
@@ -318,16 +437,26 @@ pub(crate) fn validate_side_effect_terminal_evidence(
         }) if node_id == &node.node_id && cell_attempt_id == attempt_id => true,
         _ => false,
     };
-    validate_side_effect_terminal_phase(projections, node, attempt_id, terminal_skipped)
+    validate_side_effect_terminal_phase(
+        runtime_spec,
+        run_id,
+        projections,
+        node,
+        attempt_id,
+        terminal_skipped,
+    )
 }
 
 fn validate_side_effect_terminal_phase(
+    runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
     projections: &store::ProjectionSnapshot,
     node: &spec::NodeSpec,
     attempt_id: &AttemptId,
     terminal_skipped: bool,
 ) -> Result<()> {
-    let Some(projection) = side_effect_projection_for_attempt(projections, node, attempt_id)?
+    let Some(projection) =
+        side_effect_projection_for_attempt(runtime_spec, run_id, projections, node, attempt_id)?
     else {
         return Err(RuntimeError::InvalidRunStream(format!(
             "side-effect node {} attempt {} produced output without ledger evidence",
@@ -368,12 +497,15 @@ fn side_effect_phase_has_submission_result(phase: store::SideEffectLedgerPhase<'
 }
 
 pub(crate) fn validate_side_effect_resume_output(
+    runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
     projections: &store::ProjectionSnapshot,
     node: &spec::NodeSpec,
     attempt_id: &AttemptId,
     payloads: &[events::KernelEventPayload],
 ) -> Result<()> {
-    let Some(projection) = side_effect_projection_for_attempt(projections, node, attempt_id)?
+    let Some(projection) =
+        side_effect_projection_for_attempt(runtime_spec, run_id, projections, node, attempt_id)?
     else {
         return Ok(());
     };

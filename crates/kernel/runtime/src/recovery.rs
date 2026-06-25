@@ -199,6 +199,7 @@ impl AttemptRecoveryLifecycle {
     /// Validates that projected attempts and terminal cells form a recoverable frontier.
     pub(crate) fn validate_frontier(
         runtime_spec: &CertifiedRuntimeSpec,
+        run_id: &RunId,
         projections: &store::ProjectionSnapshot,
     ) -> Result<()> {
         for node in recoverable_nodes(runtime_spec) {
@@ -211,6 +212,8 @@ impl AttemptRecoveryLifecycle {
                 )?;
                 if node.side_effect.is_some() {
                     SideEffectLifecycle::validate_terminal_evidence(
+                        runtime_spec,
+                        run_id,
                         projections,
                         node,
                         &attempt_id,
@@ -276,6 +279,8 @@ impl AttemptRecoveryLifecycle {
         }
         if node.side_effect.is_some() {
             match SideEffectLifecycle::open_attempt_disposition(
+                runtime_spec,
+                &view.run_admitted.run_id,
                 &view.projections,
                 node,
                 &attempt_id,

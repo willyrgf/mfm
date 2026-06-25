@@ -511,6 +511,8 @@ impl CommitPlanner {
         }
         let terminal_side_effect_payloads = if input.node.side_effect.is_some() {
             SideEffectLifecycle::projection_for_attempt(
+                input.runtime_spec,
+                input.run_id,
                 &input.view.projections,
                 input.node,
                 input.attempt_id,
@@ -539,10 +541,7 @@ impl CommitPlanner {
                             ledger_key: projection.ledger_key.clone(),
                             ledger_purpose: projection.ledger_purpose.clone(),
                             pair_id: projection.pair_id.clone(),
-                            pair_role: projection
-                                .pair_id
-                                .as_ref()
-                                .map(|_| events::SideEffectPairRole::Verify),
+                            pair_role: events::SideEffectPairRole::Verify,
                             invocation_epoch: *invocation_epoch,
                             failure_phase:
                                 events::side_effect::FailurePhase::BeforeInvocationStarted,
@@ -661,6 +660,8 @@ impl CommitPlanner {
         }
         if input.node.side_effect.is_some()
             && !SideEffectLifecycle::standalone_interruption_allowed(
+                input.runtime_spec,
+                input.run_id,
                 &input.view.projections,
                 input.node,
                 input.attempt_id,
@@ -717,7 +718,7 @@ fn resource_lane_release_intent_for_failure(
     projection: &store::SideEffectProjection,
     invocation_epoch: u32,
 ) -> Result<Option<events::KernelEventPayload>> {
-    let holder = store::SideEffectLedgerRef::new(run_id.clone(), projection.ledger_key.clone());
+    let holder = store::SideEffectPairLedgerRef::new(run_id.clone(), projection.pair_id.clone());
     let Some((_, lane)) = projections
         .resource_lanes()
         .find(|(_, lane)| lane.holder == holder)
@@ -742,10 +743,7 @@ fn resource_lane_release_intent_for_failure(
             ledger_key: projection.ledger_key.clone(),
             ledger_purpose: projection.ledger_purpose.clone(),
             pair_id: projection.pair_id.clone(),
-            pair_role: projection
-                .pair_id
-                .as_ref()
-                .map(|_| events::SideEffectPairRole::Verify),
+            pair_role: events::SideEffectPairRole::Verify,
             invocation_epoch,
             claim_id: lane.claim_id.clone(),
             release_reason: events::ResourceLaneReleaseReason::new("side_effect.failed")?,
@@ -977,66 +975,66 @@ fn runner_output_commit_fragment(payload: &events::KernelEventPayload) -> String
             format!("public-output-failed:{}", payload.public_schema_id)
         }
         events::KernelEventPayload::SideEffectIntentPersisted(payload) => {
-            format!("sidefx-intent:{}", payload.ledger_key)
+            format!("sidefx-intent:{}", payload.pair_id)
         }
         events::KernelEventPayload::SideEffectClaimed(payload) => format!(
             "sidefx-claim:{}:{}:{}",
-            payload.ledger_key, payload.invocation_epoch, payload.claim_generation
+            payload.pair_id, payload.invocation_epoch, payload.claim_generation
         ),
         events::KernelEventPayload::SideEffectClaimTakenOver(payload) => format!(
             "sidefx-claim-takeover:{}:{}:{}",
-            payload.ledger_key, payload.invocation_epoch, payload.claim_generation
+            payload.pair_id, payload.invocation_epoch, payload.claim_generation
         ),
         events::KernelEventPayload::ResourceLaneClaimed(payload) => format!(
             "resource-lane-claimed:{}:{}:{}",
-            payload.ledger_key, payload.invocation_epoch, payload.claim_id
+            payload.pair_id, payload.invocation_epoch, payload.claim_id
         ),
         events::KernelEventPayload::ResourceLaneClaimIntent(payload) => format!(
             "resource-lane-claim-intent:{}:{}",
-            payload.ledger_key, payload.invocation_epoch
+            payload.pair_id, payload.invocation_epoch
         ),
         events::KernelEventPayload::SideEffectInvocationPrepared(payload) => format!(
             "sidefx-prepared:{}:{}",
-            payload.ledger_key, payload.invocation_epoch
+            payload.pair_id, payload.invocation_epoch
         ),
         events::KernelEventPayload::SideEffectInvocationStarted(payload) => format!(
             "sidefx-started:{}:{}",
-            payload.ledger_key, payload.invocation_epoch
+            payload.pair_id, payload.invocation_epoch
         ),
         events::KernelEventPayload::SideEffectNotSubmittedProven(payload) => format!(
             "sidefx-not-submitted:{}:{}",
-            payload.ledger_key, payload.invocation_epoch
+            payload.pair_id, payload.invocation_epoch
         ),
         events::KernelEventPayload::SideEffectSubmissionObserved(payload) => format!(
             "sidefx-submission:{}:{}",
-            payload.ledger_key, payload.invocation_epoch
+            payload.pair_id, payload.invocation_epoch
         ),
         events::KernelEventPayload::SideEffectSubmissionUnknown(payload) => format!(
             "sidefx-submission-unknown:{}:{}",
-            payload.ledger_key, payload.invocation_epoch
+            payload.pair_id, payload.invocation_epoch
         ),
         events::KernelEventPayload::SideEffectReceiptObserved(payload) => format!(
             "sidefx-receipt:{}:{}",
-            payload.ledger_key, payload.invocation_epoch
+            payload.pair_id, payload.invocation_epoch
         ),
         events::KernelEventPayload::SideEffectConfirmationObserved(payload) => format!(
             "sidefx-confirmation:{}:{}",
-            payload.ledger_key, payload.invocation_epoch
+            payload.pair_id, payload.invocation_epoch
         ),
         events::KernelEventPayload::SideEffectAmbiguous(payload) => {
-            format!("sidefx-ambiguous:{}", payload.ledger_key)
+            format!("sidefx-ambiguous:{}", payload.pair_id)
         }
         events::KernelEventPayload::SideEffectFailed(payload) => format!(
             "sidefx-failed:{}:{}",
-            payload.ledger_key, payload.invocation_epoch
+            payload.pair_id, payload.invocation_epoch
         ),
         events::KernelEventPayload::ResourceLaneReleased(payload) => format!(
             "resource-lane-released:{}:{}:{}",
-            payload.ledger_key, payload.invocation_epoch, payload.release_id
+            payload.pair_id, payload.invocation_epoch, payload.release_id
         ),
         events::KernelEventPayload::ResourceLaneReleaseIntent(payload) => format!(
             "resource-lane-release-intent:{}:{}:{}",
-            payload.ledger_key, payload.invocation_epoch, payload.claim_id
+            payload.pair_id, payload.invocation_epoch, payload.claim_id
         ),
         events::KernelEventPayload::RetentionManifestProjected(payload) => {
             format!(
@@ -1809,7 +1807,7 @@ fn runner_output_preconditions(
         .iter()
         .filter_map(|payload| match payload {
             events::KernelEventPayload::SideEffectInvocationPrepared(payload) => {
-                Some(payload.ledger_key.clone())
+                Some(payload.pair_id.clone())
             }
             _ => None,
         })
@@ -1819,16 +1817,16 @@ fn runner_output_preconditions(
             events::KernelEventPayload::SideEffectIntentPersisted(payload) => {
                 preconditions.required_side_effect_states.push(
                     store::SideEffectStatePrecondition {
-                        ledger_key: payload.ledger_key.clone(),
+                        pair_id: payload.pair_id.clone(),
                         required: store::RequiredSideEffectState::Absent,
                     },
                 );
             }
             events::KernelEventPayload::SideEffectInvocationStarted(payload) => {
-                if !prepared_in_batch.contains(&payload.ledger_key) {
+                if !prepared_in_batch.contains(&payload.pair_id) {
                     preconditions.required_side_effect_states.push(
                         store::SideEffectStatePrecondition {
-                            ledger_key: payload.ledger_key.clone(),
+                            pair_id: payload.pair_id.clone(),
                             required: store::RequiredSideEffectState::InvocationPrepared,
                         },
                     );
@@ -1837,7 +1835,7 @@ fn runner_output_preconditions(
             events::KernelEventPayload::SideEffectReceiptObserved(payload) => {
                 preconditions.required_side_effect_states.push(
                     store::SideEffectStatePrecondition {
-                        ledger_key: payload.ledger_key.clone(),
+                        pair_id: payload.pair_id.clone(),
                         required: store::RequiredSideEffectState::SubmissionResult,
                     },
                 );
@@ -1845,7 +1843,7 @@ fn runner_output_preconditions(
             events::KernelEventPayload::SideEffectConfirmationObserved(payload) => {
                 preconditions.required_side_effect_states.push(
                     store::SideEffectStatePrecondition {
-                        ledger_key: payload.ledger_key.clone(),
+                        pair_id: payload.pair_id.clone(),
                         required: store::RequiredSideEffectState::ReceiptObserved,
                     },
                 );
@@ -1855,18 +1853,23 @@ fn runner_output_preconditions(
     }
 
     if let Some(required) = terminal_side_effect_required_state {
-        let projection =
-            SideEffectLifecycle::projection_for_attempt(projections, node, attempt_id)?
-                .ok_or_else(|| {
-                    RuntimeError::InvalidRunnerOutput(format!(
-                        "side-effect node {} attempted output without ledger evidence",
-                        node.node_id
-                    ))
-                })?;
+        let projection = SideEffectLifecycle::projection_for_attempt(
+            runtime_spec,
+            run_id,
+            projections,
+            node,
+            attempt_id,
+        )?
+        .ok_or_else(|| {
+            RuntimeError::InvalidRunnerOutput(format!(
+                "side-effect node {} attempted output without ledger evidence",
+                node.node_id
+            ))
+        })?;
         preconditions
             .required_side_effect_states
             .push(store::SideEffectStatePrecondition {
-                ledger_key: projection.ledger_key.clone(),
+                pair_id: projection.pair_id.clone(),
                 required,
             });
     }
@@ -1885,7 +1888,6 @@ fn add_side_effect_verify_preconditions(
 ) -> Result<()> {
     let projection = projections
         .side_effect_for_pair(run_id, &verify.pair_id)
-        .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))?
         .ok_or_else(|| {
             RuntimeError::InvalidRunnerOutput(format!(
                 "side-effect verify node {} has no ledger projection for pair {}",
@@ -1909,7 +1911,7 @@ fn add_side_effect_verify_preconditions(
             _ => None,
         };
         if let Some(required) = required {
-            push_side_effect_precondition(preconditions, projection.ledger_key.clone(), required);
+            push_side_effect_precondition(preconditions, projection.pair_id.clone(), required);
         }
     }
     Ok(())
@@ -1943,22 +1945,19 @@ fn side_effect_verify_terminal_required_state(
 
 fn push_side_effect_precondition(
     preconditions: &mut store::CommitPreconditions,
-    ledger_key: events::SideEffectLedgerKey,
+    pair_id: mfm_ids::SideEffectPairId,
     required: store::RequiredSideEffectState,
 ) {
     if preconditions
         .required_side_effect_states
         .iter()
-        .any(|existing| existing.ledger_key == ledger_key && existing.required == required)
+        .any(|existing| existing.pair_id == pair_id && existing.required == required)
     {
         return;
     }
     preconditions
         .required_side_effect_states
-        .push(store::SideEffectStatePrecondition {
-            ledger_key,
-            required,
-        });
+        .push(store::SideEffectStatePrecondition { pair_id, required });
 }
 
 fn side_effect_verify_spec(node: &spec::NodeSpec) -> Option<&spec::SideEffectVerifyNodeSpec> {
@@ -2304,7 +2303,14 @@ fn validate_runner_output(input: RunnerOutputValidation<'_>) -> Result<()> {
     }
 
     if node.side_effect.is_some() {
-        SideEffectLifecycle::validate_resume_output(projections, node, attempt_id, payloads)?;
+        SideEffectLifecycle::validate_resume_output(
+            runtime_spec,
+            run_id,
+            projections,
+            node,
+            attempt_id,
+            payloads,
+        )?;
         if failed {
             if !side_effect_terminal_failure {
                 return Err(RuntimeError::InvalidRunnerOutput(format!(
@@ -2351,6 +2357,8 @@ fn validate_runner_output(input: RunnerOutputValidation<'_>) -> Result<()> {
             .iter()
             .any(|payload| matches!(payload, events::KernelEventPayload::CellSkipped(_)));
         SideEffectLifecycle::validate_terminal_batch_evidence(
+            runtime_spec,
+            run_id,
             projections,
             node,
             attempt_id,
@@ -2509,7 +2517,6 @@ fn validate_side_effect_verify_terminal_evidence(
     };
     let projection = projections
         .side_effect_for_pair(run_id, &verify.pair_id)
-        .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))?
         .ok_or_else(|| {
             RuntimeError::InvalidRunnerOutput(format!(
                 "side-effect verify node {} has no ledger projection for pair {}",

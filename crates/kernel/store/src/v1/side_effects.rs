@@ -16,24 +16,23 @@ pub(super) fn require_forward_fence_open(
     run_id: &RunId,
     ledger_key: &events::SideEffectLedgerKey,
     purpose: &events::SideEffectLedgerPurpose,
-    pair_id: Option<&SideEffectPairId>,
-    pair_role: Option<events::SideEffectPairRole>,
+    pair_id: &SideEffectPairId,
+    pair_role: events::SideEffectPairRole,
 ) -> Result<()> {
     if matches!(purpose, events::SideEffectLedgerPurpose::Forward)
         && projections.saga_engagement(run_id).is_some()
     {
-        if pair_role == Some(events::SideEffectPairRole::Verify)
-            && pair_id.is_some_and(|pair_id| {
-                projections
-                    .side_effect_for_run(run_id, ledger_key)
-                    .is_some_and(|projection| {
-                        projection.pair_id.as_ref() == Some(pair_id)
-                            && matches!(
-                                projection.ledger_purpose,
-                                events::SideEffectLedgerPurpose::Forward
-                            )
-                    })
-            })
+        if pair_role == events::SideEffectPairRole::Verify
+            && projections
+                .side_effect_for_pair(run_id, pair_id)
+                .is_some_and(|projection| {
+                    projection.pair_id == *pair_id
+                        && projection.ledger_key == *ledger_key
+                        && matches!(
+                            projection.ledger_purpose,
+                            events::SideEffectLedgerPurpose::Forward
+                        )
+                })
         {
             return Ok(());
         }
@@ -65,11 +64,7 @@ pub(super) fn require_remediation_intent_admissible(
     remediation_ledger_key: &events::SideEffectLedgerKey,
     purpose: &events::SideEffectLedgerPurpose,
 ) -> Result<()> {
-    let events::SideEffectLedgerPurpose::Remediation {
-        forward_ledger_key,
-        forward_pair_id,
-    } = purpose
-    else {
+    let events::SideEffectLedgerPurpose::Remediation { forward_pair_id } = purpose else {
         return Ok(());
     };
     if projections.saga_engagement(run_id).is_none() {
@@ -78,26 +73,12 @@ pub(super) fn require_remediation_intent_admissible(
             message: "remediation ledger requires prior saga engagement".to_owned(),
         });
     }
-    let Some(forward) = projections.side_effect_for_run(run_id, forward_ledger_key) else {
+    let Some(forward) = projections.side_effect_for_pair(run_id, forward_pair_id) else {
         return Err(StoreError::ProjectionConflict {
             key: format!("sidefx:{remediation_ledger_key}"),
-            message: "remediation ledger references missing forward ledger".to_owned(),
+            message: "remediation ledger references missing forward pair".to_owned(),
         });
     };
-    if let Some(forward_pair_id) = forward_pair_id {
-        let Some(pair_forward) = projections.side_effect_for_pair(run_id, forward_pair_id)? else {
-            return Err(StoreError::ProjectionConflict {
-                key: format!("sidefx:{remediation_ledger_key}"),
-                message: "remediation ledger references missing forward pair".to_owned(),
-            });
-        };
-        if pair_forward.ledger_key != *forward_ledger_key {
-            return Err(StoreError::ProjectionConflict {
-                key: format!("sidefx:{remediation_ledger_key}"),
-                message: "remediation forward pair does not match forward ledger key".to_owned(),
-            });
-        }
-    }
     if !matches!(
         forward.ledger_purpose,
         events::SideEffectLedgerPurpose::Forward
@@ -118,14 +99,14 @@ pub(super) fn require_remediation_intent_admissible(
             && matches!(
                 &projection.ledger_purpose,
                 events::SideEffectLedgerPurpose::Remediation {
-                    forward_ledger_key: linked,
+                    forward_pair_id: linked,
                     ..
-                } if linked == forward_ledger_key
+                } if linked == forward_pair_id
             )
     }) {
         return Err(StoreError::ProjectionConflict {
             key: format!("sidefx:{remediation_ledger_key}"),
-            message: "remediation ledger already exists for forward ledger".to_owned(),
+            message: "remediation ledger already exists for forward pair".to_owned(),
         });
     }
     Ok(())
@@ -134,33 +115,14 @@ pub(super) fn require_remediation_intent_admissible(
 pub(super) fn require_side_effect_pair_event(
     ledger_key: &events::SideEffectLedgerKey,
     purpose: &events::SideEffectLedgerPurpose,
-    pair_id: Option<&SideEffectPairId>,
-    pair_role: Option<events::SideEffectPairRole>,
+    _pair_id: &SideEffectPairId,
+    pair_role: events::SideEffectPairRole,
     expected_role: events::SideEffectPairRole,
 ) -> Result<()> {
-    if pair_id.is_some() != pair_role.is_some() {
-        return Err(side_effect_projection_error(
-            ledger_key,
-            "side-effect pair id and role must be recorded together",
-        ));
-    }
     match purpose {
-        events::SideEffectLedgerPurpose::Forward => {
-            if pair_id.is_none() {
-                return Err(side_effect_projection_error(
-                    ledger_key,
-                    "forward side-effect event requires certified pair id",
-                ));
-            }
-            if pair_role != Some(expected_role) {
-                return Err(side_effect_projection_error(
-                    ledger_key,
-                    "side-effect pair role does not match event phase",
-                ));
-            }
-        }
-        events::SideEffectLedgerPurpose::Remediation { .. } => {
-            if pair_id.is_some() && pair_role != Some(expected_role) {
+        events::SideEffectLedgerPurpose::Forward
+        | events::SideEffectLedgerPurpose::Remediation { .. } => {
+            if pair_role != expected_role {
                 return Err(side_effect_projection_error(
                     ledger_key,
                     "side-effect pair role does not match event phase",
@@ -174,9 +136,9 @@ pub(super) fn require_side_effect_pair_event(
 pub(super) fn require_side_effect_pair_consistent(
     projection: &SideEffectProjection,
     ledger_key: &events::SideEffectLedgerKey,
-    pair_id: Option<&SideEffectPairId>,
+    pair_id: &SideEffectPairId,
 ) -> Result<()> {
-    if projection.pair_id.as_ref() == pair_id {
+    if projection.pair_id == *pair_id {
         Ok(())
     } else {
         Err(side_effect_projection_error(
@@ -200,15 +162,22 @@ pub(super) fn require_side_effect_phase<'a>(
     projections: &'a ProjectionSnapshot,
     run_id: &RunId,
     ledger_key: &events::SideEffectLedgerKey,
+    pair_id: &SideEffectPairId,
     expected: &'static str,
     predicate: impl FnOnce(&SideEffectLedgerState<'_>) -> bool,
 ) -> Result<&'a SideEffectProjection> {
-    let Some(projection) = projections.side_effect_for_run(run_id, ledger_key) else {
+    let Some(projection) = projections.side_effect_for_pair(run_id, pair_id) else {
         return Err(side_effect_projection_error(
             ledger_key,
             format!("missing side-effect projection; expected {expected}"),
         ));
     };
+    if projection.ledger_key != *ledger_key {
+        return Err(side_effect_projection_error(
+            ledger_key,
+            "side-effect ledger key changed",
+        ));
+    }
     let state = projection.ledger_state()?;
     if predicate(&state) {
         Ok(projection)
@@ -318,8 +287,8 @@ pub(super) struct EpochOnlyTransition<'a> {
     pub(super) run_id: &'a RunId,
     pub(super) ledger_key: &'a events::SideEffectLedgerKey,
     pub(super) ledger_purpose: &'a events::SideEffectLedgerPurpose,
-    pub(super) pair_id: Option<&'a SideEffectPairId>,
-    pub(super) pair_role: Option<events::SideEffectPairRole>,
+    pub(super) pair_id: &'a SideEffectPairId,
+    pub(super) pair_role: events::SideEffectPairRole,
     pub(super) expected_pair_role: events::SideEffectPairRole,
     pub(super) required_previous: &'static str,
 }
@@ -348,6 +317,7 @@ pub(super) fn transition_side_effect_epoch_only(
         projections,
         transition.run_id,
         transition.ledger_key,
+        transition.pair_id,
         transition.required_previous,
         |state| phase_matches_expected(&state.phase(), transition.required_previous),
     )?;
@@ -358,7 +328,7 @@ pub(super) fn transition_side_effect_epoch_only(
     )?)?
     .into_projection();
     projections.side_effects.insert(
-        SideEffectLedgerRef::new((*transition.run_id).clone(), transition.ledger_key.clone()),
+        SideEffectPairLedgerRef::new((*transition.run_id).clone(), transition.pair_id.clone()),
         projection,
     );
     Ok(())
@@ -373,7 +343,7 @@ pub(super) fn transition_side_effect_failure(
     require_side_effect_pair_event(
         &payload.ledger_key,
         &payload.ledger_purpose,
-        payload.pair_id.as_ref(),
+        &payload.pair_id,
         payload.pair_role,
         events::SideEffectPairRole::Verify,
     )?;
@@ -382,22 +352,28 @@ pub(super) fn transition_side_effect_failure(
         run_id,
         &payload.ledger_key,
         &payload.ledger_purpose,
-        payload.pair_id.as_ref(),
+        &payload.pair_id,
         payload.pair_role,
     )?;
-    let Some(previous) = projections.side_effect_for_run(run_id, &payload.ledger_key) else {
+    let Some(previous) = projections.side_effect_for_pair(run_id, &payload.pair_id) else {
         return Err(side_effect_projection_error(
             &payload.ledger_key,
             "missing side-effect projection",
         ));
     };
+    if previous.ledger_key != payload.ledger_key {
+        return Err(side_effect_projection_error(
+            &payload.ledger_key,
+            "side-effect ledger key changed",
+        ));
+    }
     require_side_effect_purpose(previous, &payload.ledger_key, &payload.ledger_purpose)?;
-    require_side_effect_pair_consistent(previous, &payload.ledger_key, payload.pair_id.as_ref())?;
+    require_side_effect_pair_consistent(previous, &payload.ledger_key, &payload.pair_id)?;
     let projection = OwnedSideEffectLedgerState::from_projection(previous.clone())?
         .fail(event_id, payload)?
         .into_projection();
     projections.side_effects.insert(
-        SideEffectLedgerRef::new(run_id.clone(), payload.ledger_key.clone()),
+        SideEffectPairLedgerRef::new(run_id.clone(), payload.pair_id.clone()),
         projection,
     );
     Ok(())

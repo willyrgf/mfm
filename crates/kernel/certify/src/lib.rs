@@ -7742,9 +7742,10 @@ mod tests {
             .expect("remediation contract");
         let run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_byte(0xc4));
         let purpose = events::SideEffectLedgerPurpose::Remediation {
-            forward_ledger_key: events::SideEffectLedgerKey::new("forward-ledger")
-                .expect("forward ledger"),
-            forward_pair_id: None,
+            forward_pair_id: mfm_ids::SideEffectPairId::from_digest(
+                DigestAlgorithm::Sha256JcsV1,
+                digest_byte(0xc5),
+            ),
         };
         let forward_purpose = events::SideEffectLedgerPurpose::Forward;
 

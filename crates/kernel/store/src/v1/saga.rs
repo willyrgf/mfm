@@ -59,7 +59,7 @@ pub(super) fn derive_saga_projection(
 fn derive_saga_obligations(
     projections: &ProjectionSnapshot,
     run_id: &RunId,
-) -> BTreeMap<events::SideEffectLedgerKey, SagaObligationProjection> {
+) -> BTreeMap<SideEffectPairId, SagaObligationProjection> {
     projections
         .side_effects
         .values()
@@ -71,11 +71,12 @@ fn derive_saga_obligations(
                 )
         })
         .map(|forward| {
-            let remediation = remediation_for_forward(projections, run_id, &forward.ledger_key);
+            let remediation = remediation_for_forward(projections, run_id, &forward.pair_id);
             (
-                forward.ledger_key.clone(),
+                forward.pair_id.clone(),
                 SagaObligationProjection {
                     forward_ledger_key: forward.ledger_key.clone(),
+                    forward_pair_id: forward.pair_id.clone(),
                     forward_phase: forward.phase.clone(),
                     classification: forward_ledger_classification(&forward.phase),
                     remediation,
@@ -88,7 +89,7 @@ fn derive_saga_obligations(
 fn remediation_for_forward(
     projections: &ProjectionSnapshot,
     run_id: &RunId,
-    forward_ledger_key: &events::SideEffectLedgerKey,
+    forward_pair_id: &SideEffectPairId,
 ) -> Option<RemediationLedgerProjection> {
     projections
         .side_effects
@@ -98,15 +99,16 @@ fn remediation_for_forward(
                 && matches!(
                     &projection.ledger_purpose,
                     events::SideEffectLedgerPurpose::Remediation {
-                        forward_ledger_key: linked,
+                        forward_pair_id: linked,
                         ..
-                    } if linked == forward_ledger_key
+                    } if linked == forward_pair_id
                 )
         })
         .map(|projection| {
             let unresolved = remediation_unresolved_reason(projections, projection);
             RemediationLedgerProjection {
                 ledger_key: projection.ledger_key.clone(),
+                pair_id: projection.pair_id.clone(),
                 phase: projection.phase.clone(),
                 closed: matches!(
                     projection.phase,

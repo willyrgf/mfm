@@ -33,7 +33,8 @@ pub(super) fn resource_lane_for_release(
     projections: &ProjectionSnapshot,
     intent: &events::ResourceLaneReleaseIntent,
 ) -> Result<mfm_store::v1::ResourceAdmissionLane> {
-    let holder = mfm_store::v1::SideEffectLedgerRef::new(run_id.clone(), intent.ledger_key.clone());
+    let holder =
+        mfm_store::v1::SideEffectPairLedgerRef::new(run_id.clone(), intent.pair_id.clone());
     let Some((lane_key, active)) = projections
         .resource_lanes()
         .find(|(_, projection)| projection.holder == holder)
@@ -44,23 +45,21 @@ pub(super) fn resource_lane_for_release(
         }
         .into());
     };
-    if let Some(pair_id) = &intent.pair_id {
-        let Some((pair_lane_key, _)) = projections.resource_lanes().find(|(_, projection)| {
-            projection.holder.run_id == *run_id && projection.pair_id.as_ref() == Some(pair_id)
-        }) else {
-            return Err(StoreError::ProjectionConflict {
-                key: format!("resource_lane:{}", intent.ledger_key),
-                message: "resource lane release pair references unknown active claim".to_owned(),
-            }
-            .into());
-        };
-        if pair_lane_key != lane_key {
-            return Err(StoreError::ProjectionConflict {
-                key: format!("resource_lane:{}", intent.ledger_key),
-                message: "resource lane release pair does not match active holder".to_owned(),
-            }
-            .into());
+    let Some((pair_lane_key, _)) = projections.resource_lanes().find(|(_, projection)| {
+        projection.holder.run_id == *run_id && projection.pair_id == intent.pair_id
+    }) else {
+        return Err(StoreError::ProjectionConflict {
+            key: format!("resource_lane:{}", intent.ledger_key),
+            message: "resource lane release pair references unknown active claim".to_owned(),
         }
+        .into());
+    };
+    if pair_lane_key != lane_key {
+        return Err(StoreError::ProjectionConflict {
+            key: format!("resource_lane:{}", intent.ledger_key),
+            message: "resource lane release pair does not match active holder".to_owned(),
+        }
+        .into());
     }
     if active.claim_id != intent.claim_id
         || active.node_id != intent.node_id
@@ -81,7 +80,7 @@ pub(super) fn resource_lane_for_release(
 pub(super) struct ResourceLaneClaimAdmission {
     pub(super) lane: mfm_store::v1::ResourceAdmissionLane,
     pub(super) lane_key: ResourceLaneKey,
-    pub(super) holder: mfm_store::v1::SideEffectLedgerRef,
+    pub(super) holder: mfm_store::v1::SideEffectPairLedgerRef,
     pub(super) admission_token: mfm_store::v1::AdmissionToken,
 }
 
@@ -104,9 +103,9 @@ pub(super) fn single_lane_claim_admission(
     let lane =
         mfm_store::v1::ResourceAdmissionLane::from_resource_key_evidence(&intent.resource_key)?;
     let lane_key = ResourceLaneKey::from_evidence(&intent.resource_key);
-    let holder = mfm_store::v1::SideEffectLedgerRef::new(
+    let holder = mfm_store::v1::SideEffectPairLedgerRef::new(
         request.run_id().clone(),
-        intent.ledger_key.clone(),
+        intent.pair_id.clone(),
     );
     let admission_token =
         mfm_store::v1::resource_wait_fifo_admission_token(request.run_id(), &lane, intent)?;

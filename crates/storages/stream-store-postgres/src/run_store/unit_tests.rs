@@ -52,6 +52,11 @@ fn resource_wait_fifo_admission_token_is_stable_for_identical_claim_retries() {
         ),
         ledger_key: events::SideEffectLedgerKey::new("ledger-1").expect("ledger key"),
         ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+        pair_id: mfm_ids::SideEffectPairId::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            DigestBytes::from_array([7; 32]),
+        ),
+        pair_role: events::SideEffectPairRole::Submit,
         invocation_epoch: 1,
         resource_key: evidence,
         requirement_digest: ContentDigest::from_digest(

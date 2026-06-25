@@ -123,9 +123,9 @@ pub(super) fn fold_resource_lane_state(
         match event.payload() {
             events::KernelEventPayload::ResourceLaneClaimed(payload) => {
                 let lane_key = ResourceLaneKey::from_evidence(&payload.resource_key);
-                let holder = mfm_store::v1::SideEffectLedgerRef::new(
+                let holder = mfm_store::v1::SideEffectPairLedgerRef::new(
                     event.run_id().clone(),
-                    payload.ledger_key.clone(),
+                    payload.pair_id.clone(),
                 );
                 if let Some((existing_key, _)) = active
                     .iter()
@@ -158,6 +158,7 @@ pub(super) fn fold_resource_lane_state(
                 let projection = ResourceLaneProjection {
                     event_id: event.event_id().clone(),
                     holder,
+                    ledger_key: payload.ledger_key.clone(),
                     ledger_purpose: payload.ledger_purpose.clone(),
                     pair_id: payload.pair_id.clone(),
                     node_id: payload.node_id.clone(),

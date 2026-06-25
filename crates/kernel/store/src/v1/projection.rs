@@ -308,7 +308,7 @@ fn apply_side_effect_intent_persisted(
     require_side_effect_pair_event(
         &payload.ledger_key,
         &payload.ledger_purpose,
-        payload.pair_id.as_ref(),
+        &payload.pair_id,
         payload.pair_role,
         events::SideEffectPairRole::Submit,
     )?;
@@ -317,7 +317,7 @@ fn apply_side_effect_intent_persisted(
         envelope.run_id(),
         &payload.ledger_key,
         &payload.ledger_purpose,
-        payload.pair_id.as_ref(),
+        &payload.pair_id,
         payload.pair_role,
     )?;
     require_remediation_intent_admissible(
@@ -333,27 +333,12 @@ fn apply_side_effect_intent_persisted(
         &payload.ledger_key,
     )?;
     let ledger_ref =
-        SideEffectLedgerRef::new(envelope.run_id().clone(), payload.ledger_key.clone());
+        SideEffectPairLedgerRef::new(envelope.run_id().clone(), payload.pair_id.clone());
     if projections.side_effects.contains_key(&ledger_ref) {
         return Err(side_effect_projection_error(
             &payload.ledger_key,
             "intent already persisted",
         ));
-    }
-    if matches!(
-        payload.ledger_purpose,
-        events::SideEffectLedgerPurpose::Forward
-    ) {
-        let pair_id = payload.pair_id.as_ref().expect("forward pair id required");
-        if projections
-            .side_effect_for_pair(envelope.run_id(), pair_id)?
-            .is_some()
-        {
-            return Err(side_effect_projection_error(
-                &payload.ledger_key,
-                "forward side-effect pair already has a ledger",
-            ));
-        }
     }
     let intent = SideEffectIntentProjection {
         node_id: payload.node_id.clone(),
@@ -395,7 +380,7 @@ fn apply_side_effect_claimed(
     require_side_effect_pair_event(
         &payload.ledger_key,
         &payload.ledger_purpose,
-        payload.pair_id.as_ref(),
+        &payload.pair_id,
         payload.pair_role,
         events::SideEffectPairRole::Submit,
     )?;
@@ -404,7 +389,7 @@ fn apply_side_effect_claimed(
         envelope.run_id(),
         &payload.ledger_key,
         &payload.ledger_purpose,
-        payload.pair_id.as_ref(),
+        &payload.pair_id,
         payload.pair_role,
     )?;
     require_active_attempt_for_side_effect(
@@ -417,6 +402,7 @@ fn apply_side_effect_claimed(
         projections,
         envelope.run_id(),
         &payload.ledger_key,
+        &payload.pair_id,
         "intent or not-submitted",
         |state| {
             matches!(
@@ -430,12 +416,12 @@ fn apply_side_effect_claimed(
         },
     )?;
     require_side_effect_purpose(previous, &payload.ledger_key, &payload.ledger_purpose)?;
-    require_side_effect_pair_consistent(previous, &payload.ledger_key, payload.pair_id.as_ref())?;
+    require_side_effect_pair_consistent(previous, &payload.ledger_key, &payload.pair_id)?;
     let projection = OwnedSideEffectLedgerState::from_projection(previous.clone())?
         .claim(envelope.event_id.clone(), payload)?
         .into_projection();
     projections.side_effects.insert(
-        SideEffectLedgerRef::new(envelope.run_id().clone(), payload.ledger_key.clone()),
+        SideEffectPairLedgerRef::new(envelope.run_id().clone(), payload.pair_id.clone()),
         projection,
     );
     Ok(())
@@ -449,7 +435,7 @@ fn apply_side_effect_claim_taken_over(
     require_side_effect_pair_event(
         &payload.ledger_key,
         &payload.ledger_purpose,
-        payload.pair_id.as_ref(),
+        &payload.pair_id,
         payload.pair_role,
         events::SideEffectPairRole::Submit,
     )?;
@@ -458,7 +444,7 @@ fn apply_side_effect_claim_taken_over(
         envelope.run_id(),
         &payload.ledger_key,
         &payload.ledger_purpose,
-        payload.pair_id.as_ref(),
+        &payload.pair_id,
         payload.pair_role,
     )?;
     require_active_attempt_for_side_effect(
@@ -471,6 +457,7 @@ fn apply_side_effect_claim_taken_over(
         projections,
         envelope.run_id(),
         &payload.ledger_key,
+        &payload.pair_id,
         "claim or prepared",
         |state| {
             matches!(
@@ -480,12 +467,12 @@ fn apply_side_effect_claim_taken_over(
         },
     )?;
     require_side_effect_purpose(previous, &payload.ledger_key, &payload.ledger_purpose)?;
-    require_side_effect_pair_consistent(previous, &payload.ledger_key, payload.pair_id.as_ref())?;
+    require_side_effect_pair_consistent(previous, &payload.ledger_key, &payload.pair_id)?;
     let projection = OwnedSideEffectLedgerState::from_projection(previous.clone())?
         .take_over(envelope.event_id.clone(), payload)?
         .into_projection();
     projections.side_effects.insert(
-        SideEffectLedgerRef::new(envelope.run_id().clone(), payload.ledger_key.clone()),
+        SideEffectPairLedgerRef::new(envelope.run_id().clone(), payload.pair_id.clone()),
         projection,
     );
     Ok(())
@@ -499,7 +486,7 @@ fn apply_side_effect_invocation_prepared(
     require_side_effect_pair_event(
         &payload.ledger_key,
         &payload.ledger_purpose,
-        payload.pair_id.as_ref(),
+        &payload.pair_id,
         payload.pair_role,
         events::SideEffectPairRole::Submit,
     )?;
@@ -508,7 +495,7 @@ fn apply_side_effect_invocation_prepared(
         envelope.run_id(),
         &payload.ledger_key,
         &payload.ledger_purpose,
-        payload.pair_id.as_ref(),
+        &payload.pair_id,
         payload.pair_role,
     )?;
     require_active_attempt_for_side_effect(
@@ -521,11 +508,12 @@ fn apply_side_effect_invocation_prepared(
         projections,
         envelope.run_id(),
         &payload.ledger_key,
+        &payload.pair_id,
         "claim",
         |state| matches!(state.phase(), SideEffectLedgerPhase::Claimed { .. }),
     )?;
     require_side_effect_purpose(previous, &payload.ledger_key, &payload.ledger_purpose)?;
-    require_side_effect_pair_consistent(previous, &payload.ledger_key, payload.pair_id.as_ref())?;
+    require_side_effect_pair_consistent(previous, &payload.ledger_key, &payload.pair_id)?;
     let prepared_invocation = prepared_invocation_projection(
         &payload.prepared_artifact_id,
         &payload.prepared_hash,
@@ -558,7 +546,7 @@ fn apply_side_effect_invocation_prepared(
     if let Some(resource_key) = &resource_key {
         let lane_key = ResourceLaneKey::from_evidence(resource_key);
         let holder =
-            SideEffectLedgerRef::new(envelope.run_id().clone(), payload.ledger_key.clone());
+            SideEffectPairLedgerRef::new(envelope.run_id().clone(), payload.pair_id.clone());
         if projections
             .resource_lane(&lane_key)
             .is_none_or(|projection| projection.holder != holder)
@@ -578,7 +566,7 @@ fn apply_side_effect_invocation_prepared(
         )?
         .into_projection();
     projections.side_effects.insert(
-        SideEffectLedgerRef::new(envelope.run_id().clone(), payload.ledger_key.clone()),
+        SideEffectPairLedgerRef::new(envelope.run_id().clone(), payload.pair_id.clone()),
         projection,
     );
     Ok(())
@@ -592,7 +580,7 @@ fn apply_resource_lane_claimed(
     require_side_effect_pair_event(
         &payload.ledger_key,
         &payload.ledger_purpose,
-        payload.pair_id.as_ref(),
+        &payload.pair_id,
         payload.pair_role,
         events::SideEffectPairRole::Submit,
     )?;
@@ -606,11 +594,12 @@ fn apply_resource_lane_claimed(
         projections,
         envelope.run_id(),
         &payload.ledger_key,
+        &payload.pair_id,
         "claim",
         |state| matches!(state.phase(), SideEffectLedgerPhase::Claimed { .. }),
     )?;
     require_side_effect_purpose(previous, &payload.ledger_key, &payload.ledger_purpose)?;
-    require_side_effect_pair_consistent(previous, &payload.ledger_key, payload.pair_id.as_ref())?;
+    require_side_effect_pair_consistent(previous, &payload.ledger_key, &payload.pair_id)?;
     let mut projection = previous.clone();
     if let Some(existing) = &projection.resource_key {
         if existing != &payload.resource_key {
@@ -624,7 +613,7 @@ fn apply_resource_lane_claimed(
     projection.event_id = envelope.event_id.clone();
     projection.resource_key = Some(payload.resource_key.clone());
     projections.side_effects.insert(
-        SideEffectLedgerRef::new(envelope.run_id().clone(), payload.ledger_key.clone()),
+        SideEffectPairLedgerRef::new(envelope.run_id().clone(), payload.pair_id.clone()),
         projection,
     );
     Ok(())
@@ -646,7 +635,7 @@ fn apply_side_effect_invocation_started(
     require_side_effect_pair_event(
         &payload.ledger_key,
         &payload.ledger_purpose,
-        payload.pair_id.as_ref(),
+        &payload.pair_id,
         payload.pair_role,
         events::SideEffectPairRole::Submit,
     )?;
@@ -655,7 +644,7 @@ fn apply_side_effect_invocation_started(
         envelope.run_id(),
         &payload.ledger_key,
         &payload.ledger_purpose,
-        payload.pair_id.as_ref(),
+        &payload.pair_id,
         payload.pair_role,
     )?;
     require_active_attempt_for_side_effect(
@@ -668,16 +657,17 @@ fn apply_side_effect_invocation_started(
         projections,
         envelope.run_id(),
         &payload.ledger_key,
+        &payload.pair_id,
         "prepared",
         |state| matches!(state.phase(), SideEffectLedgerPhase::Prepared { .. }),
     )?;
     require_side_effect_purpose(previous, &payload.ledger_key, &payload.ledger_purpose)?;
-    require_side_effect_pair_consistent(previous, &payload.ledger_key, payload.pair_id.as_ref())?;
+    require_side_effect_pair_consistent(previous, &payload.ledger_key, &payload.pair_id)?;
     let projection = OwnedSideEffectLedgerState::from_projection(previous.clone())?
         .start(envelope.event_id.clone(), payload)?
         .into_projection();
     projections.side_effects.insert(
-        SideEffectLedgerRef::new(envelope.run_id().clone(), payload.ledger_key.clone()),
+        SideEffectPairLedgerRef::new(envelope.run_id().clone(), payload.pair_id.clone()),
         projection,
     );
     Ok(())
@@ -700,7 +690,7 @@ fn apply_side_effect_not_submitted_proven(
             run_id: envelope.run_id(),
             ledger_key: &payload.ledger_key,
             ledger_purpose: &payload.ledger_purpose,
-            pair_id: payload.pair_id.as_ref(),
+            pair_id: &payload.pair_id,
             pair_role: payload.pair_role,
             expected_pair_role: events::SideEffectPairRole::Submit,
             required_previous: "submission_recovery",
@@ -709,7 +699,7 @@ fn apply_side_effect_not_submitted_proven(
     )?;
     require_no_resource_lane_for_holder(
         projections,
-        &SideEffectLedgerRef::new(envelope.run_id().clone(), payload.ledger_key.clone()),
+        &SideEffectPairLedgerRef::new(envelope.run_id().clone(), payload.pair_id.clone()),
         "not-submitted proof",
     )?;
     Ok(())
@@ -732,7 +722,7 @@ fn apply_side_effect_submission_observed(
             run_id: envelope.run_id(),
             ledger_key: &payload.ledger_key,
             ledger_purpose: &payload.ledger_purpose,
-            pair_id: payload.pair_id.as_ref(),
+            pair_id: &payload.pair_id,
             pair_role: payload.pair_role,
             expected_pair_role: events::SideEffectPairRole::Submit,
             required_previous: "submission_recovery",
@@ -759,7 +749,7 @@ fn apply_side_effect_submission_unknown(
             run_id: envelope.run_id(),
             ledger_key: &payload.ledger_key,
             ledger_purpose: &payload.ledger_purpose,
-            pair_id: payload.pair_id.as_ref(),
+            pair_id: &payload.pair_id,
             pair_role: payload.pair_role,
             expected_pair_role: events::SideEffectPairRole::Submit,
             required_previous: "submission_recovery",
@@ -786,7 +776,7 @@ fn apply_side_effect_receipt_observed(
             run_id: envelope.run_id(),
             ledger_key: &payload.ledger_key,
             ledger_purpose: &payload.ledger_purpose,
-            pair_id: payload.pair_id.as_ref(),
+            pair_id: &payload.pair_id,
             pair_role: payload.pair_role,
             expected_pair_role: events::SideEffectPairRole::Verify,
             required_previous: "submission_observed",
@@ -813,7 +803,7 @@ fn apply_side_effect_confirmation_observed(
             run_id: envelope.run_id(),
             ledger_key: &payload.ledger_key,
             ledger_purpose: &payload.ledger_purpose,
-            pair_id: payload.pair_id.as_ref(),
+            pair_id: &payload.pair_id,
             pair_role: payload.pair_role,
             expected_pair_role: events::SideEffectPairRole::Verify,
             required_previous: "receipt",
@@ -822,7 +812,7 @@ fn apply_side_effect_confirmation_observed(
     )?;
     require_no_resource_lane_for_holder(
         projections,
-        &SideEffectLedgerRef::new(envelope.run_id().clone(), payload.ledger_key.clone()),
+        &SideEffectPairLedgerRef::new(envelope.run_id().clone(), payload.pair_id.clone()),
         "confirmation",
     )?;
     Ok(())
@@ -845,7 +835,7 @@ fn apply_side_effect_ambiguous(
             run_id: envelope.run_id(),
             ledger_key: &payload.ledger_key,
             ledger_purpose: &payload.ledger_purpose,
-            pair_id: payload.pair_id.as_ref(),
+            pair_id: &payload.pair_id,
             pair_role: payload.pair_role,
             expected_pair_role: events::SideEffectPairRole::Verify,
             required_previous: "ambiguity_source",
@@ -854,7 +844,7 @@ fn apply_side_effect_ambiguous(
     )?;
     require_no_resource_lane_for_holder(
         projections,
-        &SideEffectLedgerRef::new(envelope.run_id().clone(), payload.ledger_key.clone()),
+        &SideEffectPairLedgerRef::new(envelope.run_id().clone(), payload.pair_id.clone()),
         "ambiguity",
     )?;
     if matches!(
@@ -867,7 +857,7 @@ fn apply_side_effect_ambiguous(
             SagaEngagementProjection {
                 event_id: envelope.event_id.clone(),
                 reason: SagaEngagementReason::ForwardAmbiguous {
-                    ledger_key: payload.ledger_key.clone(),
+                    pair_id: payload.pair_id.clone(),
                 },
             },
         );
@@ -894,7 +884,7 @@ fn apply_side_effect_failed(
     )?;
     require_no_resource_lane_for_holder(
         projections,
-        &SideEffectLedgerRef::new(envelope.run_id().clone(), payload.ledger_key.clone()),
+        &SideEffectPairLedgerRef::new(envelope.run_id().clone(), payload.pair_id.clone()),
         "side-effect failure",
     )?;
     if !payload.retryable {

@@ -108,10 +108,10 @@ pub enum StoreError {
         required: RequiredCellState,
     },
     /// A side-effect-state precondition failed.
-    #[error("side-effect state precondition failed for {ledger_key}: required {required:?}")]
+    #[error("side-effect state precondition failed for pair {pair_id}: required {required:?}")]
     SideEffectStatePreconditionFailed {
-        /// Ledger key that failed the precondition.
-        ledger_key: events::SideEffectLedgerKey,
+        /// Certified pair id that failed the precondition.
+        pair_id: SideEffectPairId,
         /// Required side-effect state.
         required: RequiredSideEffectState,
     },
@@ -753,10 +753,10 @@ pub enum SagaEngagementReason {
         /// Attempt id that failed.
         attempt_id: AttemptId,
     },
-    /// A forward side-effect ledger became ambiguous.
+    /// A forward side-effect pair became ambiguous.
     ForwardAmbiguous {
-        /// Forward ledger key.
-        ledger_key: events::SideEffectLedgerKey,
+        /// Forward pair id.
+        pair_id: SideEffectPairId,
     },
 }
 
@@ -810,6 +810,8 @@ pub enum ForwardLedgerClassification {
 pub struct RemediationLedgerProjection {
     /// Remediation ledger key.
     pub ledger_key: events::SideEffectLedgerKey,
+    /// Remediation side-effect pair id.
+    pub pair_id: SideEffectPairId,
     /// Current remediation side-effect phase.
     pub phase: SideEffectPhase,
     /// Whether remediation confirmation closed the obligation.
@@ -823,6 +825,8 @@ pub struct RemediationLedgerProjection {
 pub struct SagaObligationProjection {
     /// Forward ledger key.
     pub forward_ledger_key: events::SideEffectLedgerKey,
+    /// Forward side-effect pair id.
+    pub forward_pair_id: SideEffectPairId,
     /// Current forward side-effect phase.
     pub forward_phase: SideEffectPhase,
     /// Forward ledger classification at this stream prefix.
@@ -844,8 +848,8 @@ pub struct SagaProjection {
     pub forward_quiescent: bool,
     /// Derived manual block reason, when manually blocked.
     pub manual_block_reason: Option<ManualBlockReason>,
-    /// Derived forward-ledger obligation state.
-    pub obligations: BTreeMap<events::SideEffectLedgerKey, SagaObligationProjection>,
+    /// Derived forward-pair obligation state.
+    pub obligations: BTreeMap<SideEffectPairId, SagaObligationProjection>,
     /// Manual resolution evidence recorded for the run, if any.
     pub manual_resolution: Option<ManualResolutionProjection>,
     /// Run completion recorded for the run, if any.
@@ -1239,8 +1243,8 @@ pub enum RequiredSideEffectState {
 /// Typed side-effect precondition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SideEffectStatePrecondition {
-    /// Side-effect ledger key checked by this precondition.
-    pub ledger_key: events::SideEffectLedgerKey,
+    /// Certified side-effect pair id checked by this precondition.
+    pub pair_id: SideEffectPairId,
     /// Required side-effect phase.
     pub required: RequiredSideEffectState,
 }
@@ -2114,8 +2118,8 @@ pub struct SideEffectProjection {
     pub ledger_key: events::SideEffectLedgerKey,
     /// Ledger purpose.
     pub ledger_purpose: events::SideEffectLedgerPurpose,
-    /// Certified side-effect pair id, when the projection is bound to a paired forward ledger.
-    pub pair_id: Option<SideEffectPairId>,
+    /// Certified side-effect pair id.
+    pub pair_id: SideEffectPairId,
     /// Last event id that updated this projection.
     pub event_id: EventId,
     /// Intent evidence that opened this ledger key.
@@ -2525,7 +2529,7 @@ fn side_effect_projection_conflict(
     message: impl Into<String>,
 ) -> StoreError {
     StoreError::ProjectionConflict {
-        key: format!("sidefx:{}", projection.ledger_key),
+        key: format!("sidefx_pair:{}", projection.pair_id),
         message: message.into(),
     }
 }
@@ -2551,7 +2555,7 @@ struct SideEffectLedgerCore {
     run_id: RunId,
     ledger_key: events::SideEffectLedgerKey,
     ledger_purpose: events::SideEffectLedgerPurpose,
-    pair_id: Option<SideEffectPairId>,
+    pair_id: SideEffectPairId,
     event_id: EventId,
     intent: SideEffectIntentProjection,
 }
@@ -2611,7 +2615,7 @@ impl OwnedSideEffectLedgerState {
         run_id: RunId,
         ledger_key: events::SideEffectLedgerKey,
         ledger_purpose: events::SideEffectLedgerPurpose,
-        pair_id: Option<SideEffectPairId>,
+        pair_id: SideEffectPairId,
         event_id: EventId,
         intent: SideEffectIntentProjection,
         invocation_epoch: u32,
@@ -2938,8 +2942,8 @@ impl OwnedSideEffectLedgerState {
         let claim = self.require_observed_submission_claim()?.clone();
         require_claim_or_verify_context_for_observation(
             &self.core.ledger_key,
-            self.core.pair_id.as_ref(),
-            payload.pair_id.as_ref(),
+            &self.core.pair_id,
+            &payload.pair_id,
             payload.pair_role,
             &claim,
             &payload.node_id,
@@ -2968,8 +2972,8 @@ impl OwnedSideEffectLedgerState {
         let claim = self.require_phase_claim("receipt")?.clone();
         require_claim_or_verify_context_for_observation(
             &self.core.ledger_key,
-            self.core.pair_id.as_ref(),
-            payload.pair_id.as_ref(),
+            &self.core.pair_id,
+            &payload.pair_id,
             payload.pair_role,
             &claim,
             &payload.node_id,
@@ -3182,7 +3186,7 @@ impl OwnedSideEffectLedgerState {
 
     fn error(&self, message: impl Into<String>) -> StoreError {
         StoreError::ProjectionConflict {
-            key: format!("sidefx:{}", self.core.ledger_key),
+            key: format!("sidefx_pair:{}", self.core.pair_id),
             message: message.into(),
         }
     }
@@ -3331,17 +3335,15 @@ fn require_claim_context_for_payload(
 
 fn require_claim_or_verify_context_for_observation(
     ledger_key: &events::SideEffectLedgerKey,
-    ledger_pair_id: Option<&SideEffectPairId>,
-    payload_pair_id: Option<&SideEffectPairId>,
-    payload_pair_role: Option<events::SideEffectPairRole>,
+    ledger_pair_id: &SideEffectPairId,
+    payload_pair_id: &SideEffectPairId,
+    payload_pair_role: events::SideEffectPairRole,
     claim: &SideEffectClaimProjection,
     node_id: &NodeId,
     attempt_id: &AttemptId,
     invocation_epoch: u32,
 ) -> Result<()> {
-    if payload_pair_role == Some(events::SideEffectPairRole::Verify)
-        && ledger_pair_id.is_some()
-        && ledger_pair_id == payload_pair_id
+    if payload_pair_role == events::SideEffectPairRole::Verify && ledger_pair_id == payload_pair_id
     {
         if claim.invocation_epoch != invocation_epoch {
             return Err(side_effect_key_conflict(
@@ -3401,22 +3403,6 @@ fn side_effect_key_conflict(
     }
 }
 
-/// Durable identity for one side-effect ledger within a run.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SideEffectLedgerRef {
-    /// Run id that owns the ledger.
-    pub run_id: RunId,
-    /// Run-local side-effect ledger key.
-    pub ledger_key: events::SideEffectLedgerKey,
-}
-
-impl SideEffectLedgerRef {
-    /// Creates a side-effect ledger reference.
-    pub fn new(run_id: RunId, ledger_key: events::SideEffectLedgerKey) -> Self {
-        Self { run_id, ledger_key }
-    }
-}
-
 /// Durable identity for one certified side-effect pair within a run.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SideEffectPairLedgerRef {
@@ -3460,12 +3446,14 @@ impl ResourceLaneKey {
 pub struct ResourceLaneProjection {
     /// Store event id that acquired or refreshed the lane.
     pub event_id: EventId,
-    /// Run-scoped side-effect ledger holding the lane.
-    pub holder: SideEffectLedgerRef,
+    /// Run-scoped side-effect pair holding the lane.
+    pub holder: SideEffectPairLedgerRef,
+    /// Diagnostic side-effect ledger key that claimed the lane.
+    pub ledger_key: events::SideEffectLedgerKey,
     /// Ledger purpose.
     pub ledger_purpose: events::SideEffectLedgerPurpose,
-    /// Certified side-effect pair id, when the active lane is bound to a paired forward ledger.
-    pub pair_id: Option<SideEffectPairId>,
+    /// Certified side-effect pair id that owns the active lane.
+    pub pair_id: SideEffectPairId,
     /// Node id that prepared the invocation.
     pub node_id: NodeId,
     /// Attempt id that prepared the invocation.
@@ -3780,7 +3768,7 @@ pub struct ProjectionSnapshot {
     attempts: BTreeMap<(NodeId, AttemptId), AttemptProjection>,
     cells: BTreeMap<CellId, CellTerminalProjection>,
     facts: BTreeMap<(NodeId, AttemptId, events::FactKey), FactProjection>,
-    side_effects: BTreeMap<SideEffectLedgerRef, SideEffectProjection>,
+    side_effects: BTreeMap<SideEffectPairLedgerRef, SideEffectProjection>,
     resource_lanes: BTreeMap<ResourceLaneKey, ResourceLaneProjection>,
     public_outputs: BTreeMap<SchemaId, PublicOutputProjection>,
     retentions: BTreeMap<RunId, RetentionProjection>,
@@ -3808,8 +3796,8 @@ pub struct ProjectionSnapshotParts {
     pub cells: BTreeMap<CellId, CellTerminalProjection>,
     /// Recorded fact projections.
     pub facts: BTreeMap<(NodeId, AttemptId, events::FactKey), FactProjection>,
-    /// Side-effect ledger projections.
-    pub side_effects: BTreeMap<SideEffectLedgerRef, SideEffectProjection>,
+    /// Side-effect pair projections.
+    pub side_effects: BTreeMap<SideEffectPairLedgerRef, SideEffectProjection>,
     /// Cross-run resource lane projections.
     pub resource_lanes: BTreeMap<ResourceLaneKey, ResourceLaneProjection>,
     /// Public output projections.
@@ -3847,13 +3835,10 @@ impl ProjectionSnapshot {
             }
         }
         for (ledger_ref, projection) in &side_effects {
-            if ledger_ref.run_id != projection.run_id
-                || ledger_ref.ledger_key != projection.ledger_key
-            {
+            if ledger_ref.run_id != projection.run_id || ledger_ref.pair_id != projection.pair_id {
                 return Err(StoreError::ProjectionConflict {
-                    key: format!("sidefx:{}", ledger_ref.ledger_key),
-                    message: "side-effect projection key does not match ledger reference"
-                        .to_owned(),
+                    key: format!("sidefx_pair:{}", ledger_ref.pair_id),
+                    message: "side-effect projection key does not match pair reference".to_owned(),
                 });
             }
             projection.ledger_state()?;
@@ -3971,57 +3956,16 @@ impl ProjectionSnapshot {
         Ok(())
     }
 
-    /// Returns a side-effect projection.
-    pub fn side_effect(
-        &self,
-        ledger_key: &events::SideEffectLedgerKey,
-    ) -> Option<&SideEffectProjection> {
-        self.side_effects
-            .values()
-            .find(|projection| projection.ledger_key == *ledger_key)
-    }
-
-    /// Returns a side-effect projection for a run-scoped ledger.
-    pub fn side_effect_for_run(
-        &self,
-        run_id: &RunId,
-        ledger_key: &events::SideEffectLedgerKey,
-    ) -> Option<&SideEffectProjection> {
-        self.side_effects.get(&SideEffectLedgerRef::new(
-            run_id.clone(),
-            ledger_key.clone(),
-        ))
-    }
-
     /// Returns a side-effect projection for a run-scoped certified pair id.
     pub fn side_effect_for_pair(
         &self,
         run_id: &RunId,
         pair_id: &SideEffectPairId,
-    ) -> Result<Option<&SideEffectProjection>> {
-        let mut found = None;
-        for projection in self.side_effects.values() {
-            if projection.run_id == *run_id && projection.pair_id.as_ref() == Some(pair_id) {
-                if found.replace(projection).is_some() {
-                    return Err(StoreError::ProjectionConflict {
-                        key: format!("sidefx_pair:{pair_id}"),
-                        message: "multiple side-effect ledgers project the same pair id".to_owned(),
-                    });
-                }
-            }
-        }
-        Ok(found)
-    }
-
-    /// Returns a validated side-effect ledger state for a run-scoped ledger.
-    pub fn side_effect_state_for_run(
-        &self,
-        run_id: &RunId,
-        ledger_key: &events::SideEffectLedgerKey,
-    ) -> Result<Option<SideEffectLedgerState<'_>>> {
-        self.side_effect_for_run(run_id, ledger_key)
-            .map(SideEffectProjection::ledger_state)
-            .transpose()
+    ) -> Option<&SideEffectProjection> {
+        self.side_effects.get(&SideEffectPairLedgerRef::new(
+            run_id.clone(),
+            pair_id.clone(),
+        ))
     }
 
     /// Returns a validated side-effect ledger state for a run-scoped certified pair id.
@@ -4030,7 +3974,7 @@ impl ProjectionSnapshot {
         run_id: &RunId,
         pair_id: &SideEffectPairId,
     ) -> Result<Option<SideEffectLedgerState<'_>>> {
-        self.side_effect_for_pair(run_id, pair_id)?
+        self.side_effect_for_pair(run_id, pair_id)
             .map(SideEffectProjection::ledger_state)
             .transpose()
     }
@@ -4157,7 +4101,7 @@ impl ProjectionSnapshot {
     /// Iterates side-effect projections.
     pub fn side_effects(
         &self,
-    ) -> impl Iterator<Item = (&SideEffectLedgerRef, &SideEffectProjection)> {
+    ) -> impl Iterator<Item = (&SideEffectPairLedgerRef, &SideEffectProjection)> {
         self.side_effects.iter()
     }
 
@@ -4788,9 +4732,9 @@ pub struct CommitBase {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MaterializedActiveLane {
-    holder: SideEffectLedgerRef,
+    holder: SideEffectPairLedgerRef,
     ledger_purpose: events::SideEffectLedgerPurpose,
-    pair_id: Option<SideEffectPairId>,
+    pair_id: SideEffectPairId,
     node_id: NodeId,
     attempt_id: AttemptId,
     invocation_epoch: u32,
@@ -5005,10 +4949,10 @@ impl CommitStagingVerifier<'_> {
         for precondition in &request.preconditions.required_side_effect_states {
             let actual = self
                 .projections
-                .side_effect_for_run(&request.run_id, &precondition.ledger_key);
+                .side_effect_for_pair(&request.run_id, &precondition.pair_id);
             if !side_effect_precondition_matches(actual, precondition.required)? {
                 return Err(StoreError::SideEffectStatePreconditionFailed {
-                    ledger_key: precondition.ledger_key.clone(),
+                    pair_id: precondition.pair_id.clone(),
                     required: precondition.required,
                 });
             }
@@ -5373,27 +5317,24 @@ fn materialize_resource_lane_intents(
                 require_side_effect_pair_event(
                     &intent.ledger_key,
                     &intent.ledger_purpose,
-                    intent.pair_id.as_ref(),
+                    &intent.pair_id,
                     intent.pair_role,
                     events::SideEffectPairRole::Submit,
                 )?;
                 let lane_key = ResourceLaneKey::from_evidence(&intent.resource_key);
                 let holder =
-                    SideEffectLedgerRef::new(request.run_id.clone(), intent.ledger_key.clone());
-                if let Some(pair_id) = &intent.pair_id {
-                    if let Some(existing_key) =
-                        materialized_lane_key_for_pair(&active_lanes, &request.run_id, pair_id)
-                    {
-                        let existing = active_lanes
-                            .get(&existing_key)
-                            .expect("resource lane key was found from pair materialization");
-                        if existing.holder != holder {
-                            return Err(StoreError::ProjectionConflict {
-                                key: format!("resource_lane:{}", intent.ledger_key),
-                                message: "side-effect pair already has active resource lane"
-                                    .to_owned(),
-                            });
-                        }
+                    SideEffectPairLedgerRef::new(request.run_id.clone(), intent.pair_id.clone());
+                if let Some(existing_key) =
+                    materialized_lane_key_for_pair(&active_lanes, &request.run_id, &intent.pair_id)
+                {
+                    let existing = active_lanes
+                        .get(&existing_key)
+                        .expect("resource lane key was found from pair materialization");
+                    if existing.holder != holder {
+                        return Err(StoreError::ProjectionConflict {
+                            key: format!("resource_lane_pair:{}", intent.pair_id),
+                            message: "side-effect pair already has active resource lane".to_owned(),
+                        });
                     }
                 }
                 if let Some((existing_key, _)) = active_lanes
@@ -5401,7 +5342,7 @@ fn materialize_resource_lane_intents(
                     .find(|(_, active)| active.holder == holder)
                 {
                     return Err(StoreError::ProjectionConflict {
-                        key: format!("resource_lane:{}", intent.ledger_key),
+                        key: format!("resource_lane_pair:{}", intent.pair_id),
                         message: format!(
                             "side-effect holder already has active resource lane {}:{}",
                             existing_key.namespace, existing_key.key
@@ -5474,48 +5415,39 @@ fn materialize_resource_lane_intents(
                 require_side_effect_pair_event(
                     &intent.ledger_key,
                     &intent.ledger_purpose,
-                    intent.pair_id.as_ref(),
+                    &intent.pair_id,
                     intent.pair_role,
                     events::SideEffectPairRole::Verify,
                 )?;
                 let holder =
-                    SideEffectLedgerRef::new(request.run_id.clone(), intent.ledger_key.clone());
+                    SideEffectPairLedgerRef::new(request.run_id.clone(), intent.pair_id.clone());
                 let Some((lane_key, active)) = active_lanes
                     .iter()
                     .find(|(_, active)| active.holder == holder)
                     .map(|(lane_key, active)| (lane_key.clone(), active.clone()))
                 else {
                     return Err(StoreError::ProjectionConflict {
-                        key: format!("resource_lane:{}", intent.ledger_key),
+                        key: format!("resource_lane_pair:{}", intent.pair_id),
                         message: "resource lane release requires an active claim".to_owned(),
                     });
                 };
-                if let Some(pair_id) = &intent.pair_id {
-                    let Some(pair_key) =
-                        materialized_lane_key_for_pair(&active_lanes, &request.run_id, pair_id)
-                    else {
-                        return Err(StoreError::ProjectionConflict {
-                            key: format!("resource_lane:{}", intent.ledger_key),
-                            message: "resource lane release pair references no active claim"
-                                .to_owned(),
-                        });
-                    };
-                    if pair_key != lane_key {
-                        return Err(StoreError::ProjectionConflict {
-                            key: format!("resource_lane:{}", intent.ledger_key),
-                            message: "resource lane release pair does not match active holder"
-                                .to_owned(),
-                        });
-                    }
-                }
-                let holder_matches = if intent.pair_id.is_some() {
-                    active.pair_id == intent.pair_id
-                } else {
-                    active.node_id == intent.node_id && active.attempt_id == intent.attempt_id
+                let Some(pair_key) =
+                    materialized_lane_key_for_pair(&active_lanes, &request.run_id, &intent.pair_id)
+                else {
+                    return Err(StoreError::ProjectionConflict {
+                        key: format!("resource_lane_pair:{}", intent.pair_id),
+                        message: "resource lane release pair references no active claim".to_owned(),
+                    });
                 };
-                if !holder_matches
+                if pair_key != lane_key {
+                    return Err(StoreError::ProjectionConflict {
+                        key: format!("resource_lane_pair:{}", intent.pair_id),
+                        message: "resource lane release pair does not match active holder"
+                            .to_owned(),
+                    });
+                }
+                if active.pair_id != intent.pair_id
                     || active.ledger_purpose != intent.ledger_purpose
-                    || active.pair_id != intent.pair_id
                     || active.invocation_epoch != intent.invocation_epoch
                     || active.claim_id != intent.claim_id
                 {
@@ -5612,7 +5544,7 @@ impl MaterializedActiveLane {
 
     fn from_claimed(run_id: &RunId, payload: &events::ResourceLaneClaimed) -> Self {
         Self {
-            holder: SideEffectLedgerRef::new(run_id.clone(), payload.ledger_key.clone()),
+            holder: SideEffectPairLedgerRef::new(run_id.clone(), payload.pair_id.clone()),
             ledger_purpose: payload.ledger_purpose.clone(),
             pair_id: payload.pair_id.clone(),
             node_id: payload.node_id.clone(),
@@ -5645,8 +5577,7 @@ fn materialized_lane_key_for_pair(
     pair_id: &SideEffectPairId,
 ) -> Option<ResourceLaneKey> {
     active_lanes.iter().find_map(|(key, active)| {
-        (active.holder.run_id == *run_id && active.pair_id.as_ref() == Some(pair_id))
-            .then(|| key.clone())
+        (active.holder.run_id == *run_id && active.pair_id == *pair_id).then(|| key.clone())
     })
 }
 
@@ -5678,8 +5609,8 @@ fn derive_resource_lane_claim_id(
         "ledger_key": intent.ledger_key.as_str(),
         "ledger_purpose": side_effect_ledger_purpose_json(&intent.ledger_purpose),
         "node_id": intent.node_id.as_str(),
-        "pair_id": intent.pair_id.as_ref().map(SideEffectPairId::as_str),
-        "pair_role": intent.pair_role.map(events::SideEffectPairRole::as_str),
+        "pair_id": intent.pair_id.as_str(),
+        "pair_role": intent.pair_role.as_str(),
         "run_id": run_id.as_str(),
     }))?
     .content_digest();
@@ -5711,8 +5642,8 @@ fn derive_resource_lane_release_id(
         "ledger_key": intent.ledger_key.as_str(),
         "ledger_purpose": side_effect_ledger_purpose_json(&intent.ledger_purpose),
         "node_id": intent.node_id.as_str(),
-        "pair_id": intent.pair_id.as_ref().map(SideEffectPairId::as_str),
-        "pair_role": intent.pair_role.map(events::SideEffectPairRole::as_str),
+        "pair_id": intent.pair_id.as_str(),
+        "pair_role": intent.pair_role.as_str(),
         "release_reason": intent.release_reason.as_str(),
         "run_id": run_id.as_str(),
     }))?
@@ -8042,27 +7973,27 @@ fn derive_logical_key(
             format!(
                 "sidefx:{}:{}:intent",
                 side_effect_ledger_purpose_key(&payload.ledger_purpose),
-                payload.ledger_key
+                payload.pair_id
             )
         }
         KernelEventPayload::SideEffectClaimed(payload) => format!(
             "sidefx:{}:{}:claim:{}:{}",
             side_effect_ledger_purpose_key(&payload.ledger_purpose),
-            payload.ledger_key,
+            payload.pair_id,
             payload.invocation_epoch,
             payload.claim_generation
         ),
         KernelEventPayload::SideEffectClaimTakenOver(payload) => format!(
             "sidefx:{}:{}:claim:{}:{}:taken_over",
             side_effect_ledger_purpose_key(&payload.ledger_purpose),
-            payload.ledger_key,
+            payload.pair_id,
             payload.invocation_epoch,
             payload.claim_generation
         ),
         KernelEventPayload::ResourceLaneClaimed(payload) => format!(
             "resource_lane:{}:{}:claim:{}",
             side_effect_ledger_purpose_key(&payload.ledger_purpose),
-            payload.ledger_key,
+            payload.pair_id,
             payload.claim_id
         ),
         KernelEventPayload::ResourceLaneClaimIntent(_)
@@ -8074,63 +8005,63 @@ fn derive_logical_key(
         KernelEventPayload::SideEffectInvocationPrepared(payload) => format!(
             "sidefx:{}:{}:invocation:{}:prepared:{}",
             side_effect_ledger_purpose_key(&payload.ledger_purpose),
-            payload.ledger_key,
+            payload.pair_id,
             payload.invocation_epoch,
             payload.claim_generation
         ),
         KernelEventPayload::SideEffectInvocationStarted(payload) => format!(
             "sidefx:{}:{}:invocation:{}:started",
             side_effect_ledger_purpose_key(&payload.ledger_purpose),
-            payload.ledger_key,
+            payload.pair_id,
             payload.invocation_epoch
         ),
         KernelEventPayload::SideEffectNotSubmittedProven(payload) => format!(
             "sidefx:{}:{}:invocation:{}:submission_result",
             side_effect_ledger_purpose_key(&payload.ledger_purpose),
-            payload.ledger_key,
+            payload.pair_id,
             payload.invocation_epoch
         ),
         KernelEventPayload::SideEffectSubmissionObserved(payload) => format!(
             "sidefx:{}:{}:invocation:{}:submission_result",
             side_effect_ledger_purpose_key(&payload.ledger_purpose),
-            payload.ledger_key,
+            payload.pair_id,
             payload.invocation_epoch
         ),
         KernelEventPayload::SideEffectSubmissionUnknown(payload) => format!(
             "sidefx:{}:{}:invocation:{}:submission_result",
             side_effect_ledger_purpose_key(&payload.ledger_purpose),
-            payload.ledger_key,
+            payload.pair_id,
             payload.invocation_epoch
         ),
         KernelEventPayload::SideEffectReceiptObserved(payload) => format!(
             "sidefx:{}:{}:invocation:{}:receipt",
             side_effect_ledger_purpose_key(&payload.ledger_purpose),
-            payload.ledger_key,
+            payload.pair_id,
             payload.invocation_epoch
         ),
         KernelEventPayload::SideEffectConfirmationObserved(payload) => format!(
             "sidefx:{}:{}:invocation:{}:confirmation",
             side_effect_ledger_purpose_key(&payload.ledger_purpose),
-            payload.ledger_key,
+            payload.pair_id,
             payload.invocation_epoch
         ),
         KernelEventPayload::SideEffectAmbiguous(payload) => {
             format!(
                 "sidefx:{}:{}:ambiguous",
                 side_effect_ledger_purpose_key(&payload.ledger_purpose),
-                payload.ledger_key
+                payload.pair_id
             )
         }
         KernelEventPayload::SideEffectFailed(payload) => format!(
             "sidefx:{}:{}:invocation:{}:failure",
             side_effect_ledger_purpose_key(&payload.ledger_purpose),
-            payload.ledger_key,
+            payload.pair_id,
             payload.invocation_epoch
         ),
         KernelEventPayload::ResourceLaneReleased(payload) => format!(
             "resource_lane:{}:{}:release:{}",
             side_effect_ledger_purpose_key(&payload.ledger_purpose),
-            payload.ledger_key,
+            payload.pair_id,
             payload.release_id
         ),
         KernelEventPayload::PublicOutputProduced(payload) => {
@@ -8173,12 +8104,11 @@ fn unique_logical_key_rewrite_allowed(
     {
         return Ok(false);
     }
-    let Some((ledger_key, invocation_epoch)) = recoverable_submission_result_payload(payload)
-    else {
+    let Some((pair_id, invocation_epoch)) = recoverable_submission_result_payload(payload) else {
         return Ok(false);
     };
     Ok(matches!(
-        projections.side_effect_state_for_run(run_id, ledger_key)?,
+        projections.side_effect_state_for_pair(run_id, pair_id)?,
         Some(state)
             if matches!(
                 state.phase(),
@@ -8192,16 +8122,16 @@ fn unique_logical_key_rewrite_allowed(
 
 fn recoverable_submission_result_payload(
     payload: &KernelEventPayload,
-) -> Option<(&events::SideEffectLedgerKey, u32)> {
+) -> Option<(&SideEffectPairId, u32)> {
     match payload {
         KernelEventPayload::SideEffectNotSubmittedProven(payload) => {
-            Some((&payload.ledger_key, payload.invocation_epoch))
+            Some((&payload.pair_id, payload.invocation_epoch))
         }
         KernelEventPayload::SideEffectSubmissionObserved(payload) => {
-            Some((&payload.ledger_key, payload.invocation_epoch))
+            Some((&payload.pair_id, payload.invocation_epoch))
         }
         KernelEventPayload::SideEffectSubmissionUnknown(payload) => {
-            Some((&payload.ledger_key, payload.invocation_epoch))
+            Some((&payload.pair_id, payload.invocation_epoch))
         }
         _ => None,
     }
@@ -8211,9 +8141,9 @@ fn side_effect_ledger_purpose_key(purpose: &events::SideEffectLedgerPurpose) -> 
     match purpose {
         events::SideEffectLedgerPurpose::Forward => "forward".to_owned(),
         events::SideEffectLedgerPurpose::Remediation {
-            forward_ledger_key, ..
+            forward_pair_id, ..
         } => {
-            format!("remediation:{forward_ledger_key}")
+            format!("remediation:{forward_pair_id}")
         }
     }
 }
@@ -8340,8 +8270,8 @@ fn payload_json(payload: &KernelEventPayload) -> serde_json::Value {
             "ledger_key": payload.ledger_key.as_str(),
             "ledger_purpose": side_effect_ledger_purpose_json(&payload.ledger_purpose),
             "node_id": payload.node_id.as_str(),
-            "pair_id": payload.pair_id.as_ref().map(SideEffectPairId::as_str),
-            "pair_role": payload.pair_role.map(events::SideEffectPairRole::as_str),
+            "pair_id": payload.pair_id.as_str(),
+            "pair_role": payload.pair_role.as_str(),
             "scope_id": payload.scope_id.as_str(),
             "spec_hash": payload.spec_hash.as_str(),
             "variant": "SideEffectIntentPersisted",
@@ -8355,8 +8285,8 @@ fn payload_json(payload: &KernelEventPayload) -> serde_json::Value {
             "ledger_key": payload.ledger_key.as_str(),
             "ledger_purpose": side_effect_ledger_purpose_json(&payload.ledger_purpose),
             "node_id": payload.node_id.as_str(),
-            "pair_id": payload.pair_id.as_ref().map(SideEffectPairId::as_str),
-            "pair_role": payload.pair_role.map(events::SideEffectPairRole::as_str),
+            "pair_id": payload.pair_id.as_str(),
+            "pair_role": payload.pair_role.as_str(),
             "spec_hash": payload.spec_hash.as_str(),
             "variant": "SideEffectClaimed",
         }),
@@ -8369,8 +8299,8 @@ fn payload_json(payload: &KernelEventPayload) -> serde_json::Value {
             "ledger_purpose": side_effect_ledger_purpose_json(&payload.ledger_purpose),
             "new_claim_owner": payload.new_claim_owner.as_str(),
             "node_id": payload.node_id.as_str(),
-            "pair_id": payload.pair_id.as_ref().map(SideEffectPairId::as_str),
-            "pair_role": payload.pair_role.map(events::SideEffectPairRole::as_str),
+            "pair_id": payload.pair_id.as_str(),
+            "pair_role": payload.pair_role.as_str(),
             "previous_claim_generation": payload.previous_claim_generation,
             "previous_claim_owner": payload.previous_claim_owner.as_str(),
             "spec_hash": payload.spec_hash.as_str(),
@@ -8385,8 +8315,8 @@ fn payload_json(payload: &KernelEventPayload) -> serde_json::Value {
             "ledger_key": payload.ledger_key.as_str(),
             "ledger_purpose": side_effect_ledger_purpose_json(&payload.ledger_purpose),
             "node_id": payload.node_id.as_str(),
-            "pair_id": payload.pair_id.as_ref().map(SideEffectPairId::as_str),
-            "pair_role": payload.pair_role.map(events::SideEffectPairRole::as_str),
+            "pair_id": payload.pair_id.as_str(),
+            "pair_role": payload.pair_role.as_str(),
             "requirement_digest": payload.requirement_digest.as_str(),
             "resolved_by_capability_impl": payload.resolved_by_capability_impl.as_str(),
             "resource_key": resource_key_evidence_json(&payload.resource_key),
@@ -8399,8 +8329,8 @@ fn payload_json(payload: &KernelEventPayload) -> serde_json::Value {
             "ledger_key": payload.ledger_key.as_str(),
             "ledger_purpose": side_effect_ledger_purpose_json(&payload.ledger_purpose),
             "node_id": payload.node_id.as_str(),
-            "pair_id": payload.pair_id.as_ref().map(SideEffectPairId::as_str),
-            "pair_role": payload.pair_role.map(events::SideEffectPairRole::as_str),
+            "pair_id": payload.pair_id.as_str(),
+            "pair_role": payload.pair_role.as_str(),
             "requirement_digest": payload.requirement_digest.as_str(),
             "resolved_by_capability_impl": payload.resolved_by_capability_impl.as_str(),
             "resource_key": resource_key_evidence_json(&payload.resource_key),
@@ -8415,8 +8345,8 @@ fn payload_json(payload: &KernelEventPayload) -> serde_json::Value {
             "ledger_key": payload.ledger_key.as_str(),
             "ledger_purpose": side_effect_ledger_purpose_json(&payload.ledger_purpose),
             "node_id": payload.node_id.as_str(),
-            "pair_id": payload.pair_id.as_ref().map(SideEffectPairId::as_str),
-            "pair_role": payload.pair_role.map(events::SideEffectPairRole::as_str),
+            "pair_id": payload.pair_id.as_str(),
+            "pair_role": payload.pair_role.as_str(),
             "resource_key": payload.resource_key.as_ref().map(resource_key_evidence_json),
             "prepared_artifact_id": payload.prepared_artifact_id.as_ref().map(ArtifactId::as_str),
             "prepared_hash": payload.prepared_hash.as_ref().map(ContentDigest::as_str),
@@ -8432,8 +8362,8 @@ fn payload_json(payload: &KernelEventPayload) -> serde_json::Value {
             "ledger_key": payload.ledger_key.as_str(),
             "ledger_purpose": side_effect_ledger_purpose_json(&payload.ledger_purpose),
             "node_id": payload.node_id.as_str(),
-            "pair_id": payload.pair_id.as_ref().map(SideEffectPairId::as_str),
-            "pair_role": payload.pair_role.map(events::SideEffectPairRole::as_str),
+            "pair_id": payload.pair_id.as_str(),
+            "pair_role": payload.pair_role.as_str(),
             "spec_hash": payload.spec_hash.as_str(),
             "variant": "SideEffectInvocationStarted",
         }),
@@ -8443,8 +8373,8 @@ fn payload_json(payload: &KernelEventPayload) -> serde_json::Value {
             "ledger_key": payload.ledger_key.as_str(),
             "ledger_purpose": side_effect_ledger_purpose_json(&payload.ledger_purpose),
             "node_id": payload.node_id.as_str(),
-            "pair_id": payload.pair_id.as_ref().map(SideEffectPairId::as_str),
-            "pair_role": payload.pair_role.map(events::SideEffectPairRole::as_str),
+            "pair_id": payload.pair_id.as_str(),
+            "pair_role": payload.pair_role.as_str(),
             "proof_artifact_id": payload.proof_artifact_id.as_str(),
             "proof_hash": payload.proof_hash.as_str(),
             "proof_schema_id": payload.proof_schema_id.as_str(),
@@ -8457,8 +8387,8 @@ fn payload_json(payload: &KernelEventPayload) -> serde_json::Value {
             "ledger_key": payload.ledger_key.as_str(),
             "ledger_purpose": side_effect_ledger_purpose_json(&payload.ledger_purpose),
             "node_id": payload.node_id.as_str(),
-            "pair_id": payload.pair_id.as_ref().map(SideEffectPairId::as_str),
-            "pair_role": payload.pair_role.map(events::SideEffectPairRole::as_str),
+            "pair_id": payload.pair_id.as_str(),
+            "pair_role": payload.pair_role.as_str(),
             "spec_hash": payload.spec_hash.as_str(),
             "submission_artifact_id": payload.submission_artifact_id.as_str(),
             "submission_hash": payload.submission_hash.as_str(),
@@ -8474,8 +8404,8 @@ fn payload_json(payload: &KernelEventPayload) -> serde_json::Value {
             "ledger_key": payload.ledger_key.as_str(),
             "ledger_purpose": side_effect_ledger_purpose_json(&payload.ledger_purpose),
             "node_id": payload.node_id.as_str(),
-            "pair_id": payload.pair_id.as_ref().map(SideEffectPairId::as_str),
-            "pair_role": payload.pair_role.map(events::SideEffectPairRole::as_str),
+            "pair_id": payload.pair_id.as_str(),
+            "pair_role": payload.pair_role.as_str(),
             "spec_hash": payload.spec_hash.as_str(),
             "variant": "SideEffectSubmissionUnknown",
         }),
@@ -8485,8 +8415,8 @@ fn payload_json(payload: &KernelEventPayload) -> serde_json::Value {
             "ledger_key": payload.ledger_key.as_str(),
             "ledger_purpose": side_effect_ledger_purpose_json(&payload.ledger_purpose),
             "node_id": payload.node_id.as_str(),
-            "pair_id": payload.pair_id.as_ref().map(SideEffectPairId::as_str),
-            "pair_role": payload.pair_role.map(events::SideEffectPairRole::as_str),
+            "pair_id": payload.pair_id.as_str(),
+            "pair_role": payload.pair_role.as_str(),
             "receipt_artifact_id": payload.receipt_artifact_id.as_str(),
             "receipt_hash": payload.receipt_hash.as_str(),
             "receipt_schema_id": payload.receipt_schema_id.as_str(),
@@ -8504,8 +8434,8 @@ fn payload_json(payload: &KernelEventPayload) -> serde_json::Value {
             "ledger_key": payload.ledger_key.as_str(),
             "ledger_purpose": side_effect_ledger_purpose_json(&payload.ledger_purpose),
             "node_id": payload.node_id.as_str(),
-            "pair_id": payload.pair_id.as_ref().map(SideEffectPairId::as_str),
-            "pair_role": payload.pair_role.map(events::SideEffectPairRole::as_str),
+            "pair_id": payload.pair_id.as_str(),
+            "pair_role": payload.pair_role.as_str(),
             "replay_verifier_id": payload.replay_verifier_id.as_str(),
             "resource_touched_set": payload.resource_touched_set.as_ref().map(resource_touched_set_evidence_json),
             "spec_hash": payload.spec_hash.as_str(),
@@ -8521,8 +8451,8 @@ fn payload_json(payload: &KernelEventPayload) -> serde_json::Value {
             "ledger_key": payload.ledger_key.as_str(),
             "ledger_purpose": side_effect_ledger_purpose_json(&payload.ledger_purpose),
             "node_id": payload.node_id.as_str(),
-            "pair_id": payload.pair_id.as_ref().map(SideEffectPairId::as_str),
-            "pair_role": payload.pair_role.map(events::SideEffectPairRole::as_str),
+            "pair_id": payload.pair_id.as_str(),
+            "pair_role": payload.pair_role.as_str(),
             "spec_hash": payload.spec_hash.as_str(),
             "variant": "SideEffectAmbiguous",
         }),
@@ -8534,8 +8464,8 @@ fn payload_json(payload: &KernelEventPayload) -> serde_json::Value {
             "ledger_key": payload.ledger_key.as_str(),
             "ledger_purpose": side_effect_ledger_purpose_json(&payload.ledger_purpose),
             "node_id": payload.node_id.as_str(),
-            "pair_id": payload.pair_id.as_ref().map(SideEffectPairId::as_str),
-            "pair_role": payload.pair_role.map(events::SideEffectPairRole::as_str),
+            "pair_id": payload.pair_id.as_str(),
+            "pair_role": payload.pair_role.as_str(),
             "retryable": payload.retryable,
             "spec_hash": payload.spec_hash.as_str(),
             "variant": "SideEffectFailed",
@@ -8549,8 +8479,8 @@ fn payload_json(payload: &KernelEventPayload) -> serde_json::Value {
             "ledger_key": payload.ledger_key.as_str(),
             "ledger_purpose": side_effect_ledger_purpose_json(&payload.ledger_purpose),
             "node_id": payload.node_id.as_str(),
-            "pair_id": payload.pair_id.as_ref().map(SideEffectPairId::as_str),
-            "pair_role": payload.pair_role.map(events::SideEffectPairRole::as_str),
+            "pair_id": payload.pair_id.as_str(),
+            "pair_role": payload.pair_role.as_str(),
             "release_id": payload.release_id.as_str(),
             "release_reason": payload.release_reason.as_str(),
             "spec_hash": payload.spec_hash.as_str(),
@@ -8563,8 +8493,8 @@ fn payload_json(payload: &KernelEventPayload) -> serde_json::Value {
             "ledger_key": payload.ledger_key.as_str(),
             "ledger_purpose": side_effect_ledger_purpose_json(&payload.ledger_purpose),
             "node_id": payload.node_id.as_str(),
-            "pair_id": payload.pair_id.as_ref().map(SideEffectPairId::as_str),
-            "pair_role": payload.pair_role.map(events::SideEffectPairRole::as_str),
+            "pair_id": payload.pair_id.as_str(),
+            "pair_role": payload.pair_role.as_str(),
             "release_reason": payload.release_reason.as_str(),
             "spec_hash": payload.spec_hash.as_str(),
             "variant": "ResourceLaneReleaseIntent",
@@ -8769,9 +8699,7 @@ pub fn payload_from_json_value(json: &serde_json::Value) -> Result<KernelEventPa
                     json,
                     "ledger_purpose",
                 )?)?,
-                pair_id: optional_str(json, "pair_id")?
-                    .map(parse_identity)
-                    .transpose()?,
+                pair_id: parse_identity(required_str(json, "pair_id")?)?,
                 pair_role: parse_side_effect_pair_role(json, "pair_role")?,
                 invocation_epoch: required_u32(json, "invocation_epoch")?,
                 intent_schema_id: parse_identity(required_str(json, "intent_schema_id")?)?,
@@ -8805,9 +8733,7 @@ pub fn payload_from_json_value(json: &serde_json::Value) -> Result<KernelEventPa
                     json,
                     "ledger_purpose",
                 )?)?,
-                pair_id: optional_str(json, "pair_id")?
-                    .map(parse_identity)
-                    .transpose()?,
+                pair_id: parse_identity(required_str(json, "pair_id")?)?,
                 pair_role: parse_side_effect_pair_role(json, "pair_role")?,
                 claim_owner: events::RunnerInvocationId::new(required_str(json, "claim_owner")?)?,
                 invocation_epoch: required_u32(json, "invocation_epoch")?,
@@ -8828,9 +8754,7 @@ pub fn payload_from_json_value(json: &serde_json::Value) -> Result<KernelEventPa
                     json,
                     "ledger_purpose",
                 )?)?,
-                pair_id: optional_str(json, "pair_id")?
-                    .map(parse_identity)
-                    .transpose()?,
+                pair_id: parse_identity(required_str(json, "pair_id")?)?,
                 pair_role: parse_side_effect_pair_role(json, "pair_role")?,
                 previous_claim_owner: events::RunnerInvocationId::new(required_str(
                     json,
@@ -8859,9 +8783,7 @@ pub fn payload_from_json_value(json: &serde_json::Value) -> Result<KernelEventPa
                     json,
                     "ledger_purpose",
                 )?)?,
-                pair_id: optional_str(json, "pair_id")?
-                    .map(parse_identity)
-                    .transpose()?,
+                pair_id: parse_identity(required_str(json, "pair_id")?)?,
                 pair_role: parse_side_effect_pair_role(json, "pair_role")?,
                 invocation_epoch: required_u32(json, "invocation_epoch")?,
                 resource_key: parse_resource_key_evidence(required_obj(json, "resource_key")?)?,
@@ -8885,9 +8807,7 @@ pub fn payload_from_json_value(json: &serde_json::Value) -> Result<KernelEventPa
                     json,
                     "ledger_purpose",
                 )?)?,
-                pair_id: optional_str(json, "pair_id")?
-                    .map(parse_identity)
-                    .transpose()?,
+                pair_id: parse_identity(required_str(json, "pair_id")?)?,
                 pair_role: parse_side_effect_pair_role(json, "pair_role")?,
                 invocation_epoch: required_u32(json, "invocation_epoch")?,
                 claim_generation: required_u32(json, "claim_generation")?,
@@ -8916,9 +8836,7 @@ pub fn payload_from_json_value(json: &serde_json::Value) -> Result<KernelEventPa
                     json,
                     "ledger_purpose",
                 )?)?,
-                pair_id: optional_str(json, "pair_id")?
-                    .map(parse_identity)
-                    .transpose()?,
+                pair_id: parse_identity(required_str(json, "pair_id")?)?,
                 pair_role: parse_side_effect_pair_role(json, "pair_role")?,
                 invocation_epoch: required_u32(json, "invocation_epoch")?,
                 claim_owner: events::RunnerInvocationId::new(required_str(json, "claim_owner")?)?,
@@ -8939,9 +8857,7 @@ pub fn payload_from_json_value(json: &serde_json::Value) -> Result<KernelEventPa
                     json,
                     "ledger_purpose",
                 )?)?,
-                pair_id: optional_str(json, "pair_id")?
-                    .map(parse_identity)
-                    .transpose()?,
+                pair_id: parse_identity(required_str(json, "pair_id")?)?,
                 pair_role: parse_side_effect_pair_role(json, "pair_role")?,
                 invocation_epoch: required_u32(json, "invocation_epoch")?,
                 proof_schema_id: parse_identity(required_str(json, "proof_schema_id")?)?,
@@ -8959,9 +8875,7 @@ pub fn payload_from_json_value(json: &serde_json::Value) -> Result<KernelEventPa
                     json,
                     "ledger_purpose",
                 )?)?,
-                pair_id: optional_str(json, "pair_id")?
-                    .map(parse_identity)
-                    .transpose()?,
+                pair_id: parse_identity(required_str(json, "pair_id")?)?,
                 pair_role: parse_side_effect_pair_role(json, "pair_role")?,
                 invocation_epoch: required_u32(json, "invocation_epoch")?,
                 submission_schema_id: parse_identity(required_str(json, "submission_schema_id")?)?,
@@ -8982,9 +8896,7 @@ pub fn payload_from_json_value(json: &serde_json::Value) -> Result<KernelEventPa
                     json,
                     "ledger_purpose",
                 )?)?,
-                pair_id: optional_str(json, "pair_id")?
-                    .map(parse_identity)
-                    .transpose()?,
+                pair_id: parse_identity(required_str(json, "pair_id")?)?,
                 pair_role: parse_side_effect_pair_role(json, "pair_role")?,
                 invocation_epoch: required_u32(json, "invocation_epoch")?,
                 evidence_schema_id: parse_identity(required_str(json, "evidence_schema_id")?)?,
@@ -9002,9 +8914,7 @@ pub fn payload_from_json_value(json: &serde_json::Value) -> Result<KernelEventPa
                     json,
                     "ledger_purpose",
                 )?)?,
-                pair_id: optional_str(json, "pair_id")?
-                    .map(parse_identity)
-                    .transpose()?,
+                pair_id: parse_identity(required_str(json, "pair_id")?)?,
                 pair_role: parse_side_effect_pair_role(json, "pair_role")?,
                 invocation_epoch: required_u32(json, "invocation_epoch")?,
                 receipt_schema_id: parse_identity(required_str(json, "receipt_schema_id")?)?,
@@ -9029,9 +8939,7 @@ pub fn payload_from_json_value(json: &serde_json::Value) -> Result<KernelEventPa
                     json,
                     "ledger_purpose",
                 )?)?,
-                pair_id: optional_str(json, "pair_id")?
-                    .map(parse_identity)
-                    .transpose()?,
+                pair_id: parse_identity(required_str(json, "pair_id")?)?,
                 pair_role: parse_side_effect_pair_role(json, "pair_role")?,
                 invocation_epoch: required_u32(json, "invocation_epoch")?,
                 confirmation_schema_id: parse_identity(required_str(
@@ -9062,9 +8970,7 @@ pub fn payload_from_json_value(json: &serde_json::Value) -> Result<KernelEventPa
                     json,
                     "ledger_purpose",
                 )?)?,
-                pair_id: optional_str(json, "pair_id")?
-                    .map(parse_identity)
-                    .transpose()?,
+                pair_id: parse_identity(required_str(json, "pair_id")?)?,
                 pair_role: parse_side_effect_pair_role(json, "pair_role")?,
                 invocation_epoch: required_u32(json, "invocation_epoch")?,
                 ambiguity_code: events::AmbiguityCode::new(required_str(json, "ambiguity_code")?)?,
@@ -9082,9 +8988,7 @@ pub fn payload_from_json_value(json: &serde_json::Value) -> Result<KernelEventPa
                 json,
                 "ledger_purpose",
             )?)?,
-            pair_id: optional_str(json, "pair_id")?
-                .map(parse_identity)
-                .transpose()?,
+            pair_id: parse_identity(required_str(json, "pair_id")?)?,
             pair_role: parse_side_effect_pair_role(json, "pair_role")?,
             invocation_epoch: required_u32(json, "invocation_epoch")?,
             failure_phase: parse_failure_phase(required_str(json, "failure_phase")?)?,
@@ -9101,9 +9005,7 @@ pub fn payload_from_json_value(json: &serde_json::Value) -> Result<KernelEventPa
                     json,
                     "ledger_purpose",
                 )?)?,
-                pair_id: optional_str(json, "pair_id")?
-                    .map(parse_identity)
-                    .transpose()?,
+                pair_id: parse_identity(required_str(json, "pair_id")?)?,
                 pair_role: parse_side_effect_pair_role(json, "pair_role")?,
                 invocation_epoch: required_u32(json, "invocation_epoch")?,
                 claim_id: events::ResourceLaneClaimId::new(required_str(json, "claim_id")?)?,
@@ -9432,13 +9334,7 @@ pub fn parse_side_effect_ledger_purpose(
     match required_str(json, "kind")? {
         "forward" => Ok(events::SideEffectLedgerPurpose::Forward),
         "remediation" => Ok(events::SideEffectLedgerPurpose::Remediation {
-            forward_ledger_key: events::SideEffectLedgerKey::new(required_str(
-                json,
-                "forward_ledger_key",
-            )?)?,
-            forward_pair_id: optional_str(json, "forward_pair_id")?
-                .map(parse_identity)
-                .transpose()?,
+            forward_pair_id: parse_identity(required_str(json, "forward_pair_id")?)?,
         }),
         other => Err(CodecError::Identity(format!(
             "unknown side-effect ledger purpose {other}"
@@ -9449,14 +9345,10 @@ pub fn parse_side_effect_ledger_purpose(
 fn parse_side_effect_pair_role(
     json: &serde_json::Value,
     field: &'static str,
-) -> CodecResult<Option<events::SideEffectPairRole>> {
-    optional_str(json, field)?
-        .map(|value| {
-            events::SideEffectPairRole::from_str(value).ok_or_else(|| {
-                CodecError::Identity(format!("unknown side-effect pair role {value}"))
-            })
-        })
-        .transpose()
+) -> CodecResult<events::SideEffectPairRole> {
+    let value = required_str(json, field)?;
+    events::SideEffectPairRole::from_str(value)
+        .ok_or_else(|| CodecError::Identity(format!("unknown side-effect pair role {value}")))
 }
 
 /// Parses exclusive resource-key evidence from canonical JSON.
@@ -9673,7 +9565,7 @@ fn preconditions_json(preconditions: &CommitPreconditions) -> serde_json::Value 
         .iter()
         .map(|precondition| {
             serde_json::json!({
-                "ledger_key": precondition.ledger_key.as_str(),
+                "pair_id": precondition.pair_id.as_str(),
                 "required": required_side_effect_state_str(precondition.required),
             })
         })
@@ -9888,13 +9780,9 @@ pub fn side_effect_ledger_purpose_json(
         events::SideEffectLedgerPurpose::Forward => serde_json::json!({
             "kind": "forward",
         }),
-        events::SideEffectLedgerPurpose::Remediation {
-            forward_ledger_key,
-            forward_pair_id,
-        } => {
+        events::SideEffectLedgerPurpose::Remediation { forward_pair_id } => {
             serde_json::json!({
-                "forward_ledger_key": forward_ledger_key.as_str(),
-                "forward_pair_id": forward_pair_id.as_ref().map(SideEffectPairId::as_str),
+                "forward_pair_id": forward_pair_id.as_str(),
                 "kind": "remediation",
             })
         }
@@ -10047,9 +9935,9 @@ fn saga_engagement_reason_json(reason: &SagaEngagementReason) -> serde_json::Val
             "kind": "non_retryable_failure",
             "node_id": node_id.as_str(),
         }),
-        SagaEngagementReason::ForwardAmbiguous { ledger_key } => serde_json::json!({
+        SagaEngagementReason::ForwardAmbiguous { pair_id } => serde_json::json!({
             "kind": "forward_ambiguous",
-            "ledger_key": ledger_key.as_str(),
+            "pair_id": pair_id.as_str(),
         }),
     }
 }
@@ -10061,7 +9949,7 @@ fn parse_saga_engagement_reason(json: &serde_json::Value) -> CodecResult<SagaEng
             attempt_id: parse_identity(required_str(json, "attempt_id")?)?,
         }),
         "forward_ambiguous" => Ok(SagaEngagementReason::ForwardAmbiguous {
-            ledger_key: events::SideEffectLedgerKey::new(required_str(json, "ledger_key")?)?,
+            pair_id: parse_identity(required_str(json, "pair_id")?)?,
         }),
         other => Err(CodecError::Identity(format!(
             "unknown saga engagement reason {other}"
@@ -10309,7 +10197,7 @@ pub fn side_effect_projection_json(projection: &SideEffectProjection) -> serde_j
         "intent": side_effect_intent_json(&projection.intent),
         "ledger_key": projection.ledger_key.as_str(),
         "ledger_purpose": side_effect_ledger_purpose_json(&projection.ledger_purpose),
-        "pair_id": projection.pair_id.as_ref().map(SideEffectPairId::as_str),
+        "pair_id": projection.pair_id.as_str(),
         "phase": side_effect_phase_json(&projection.phase),
         "prepared_invocation": projection.prepared_invocation.as_ref().map(side_effect_artifact_json),
         "receipt": projection.receipt.as_ref().map(side_effect_artifact_json),
@@ -10326,9 +10214,7 @@ pub fn parse_side_effect_projection(json: &serde_json::Value) -> CodecResult<Sid
         run_id: parse_identity(required_str(json, "run_id")?)?,
         ledger_key: events::SideEffectLedgerKey::new(required_str(json, "ledger_key")?)?,
         ledger_purpose: parse_side_effect_ledger_purpose(required_obj(json, "ledger_purpose")?)?,
-        pair_id: optional_str(json, "pair_id")?
-            .map(parse_identity)
-            .transpose()?,
+        pair_id: parse_identity(required_str(json, "pair_id")?)?,
         event_id: parse_identity(required_str(json, "event_id")?)?,
         intent: parse_side_effect_intent(required_obj(json, "intent")?)?,
         prepared_invocation: optional_obj(json, "prepared_invocation")?
@@ -10390,11 +10276,11 @@ pub fn resource_lane_projection_json(
         "key": lane_key.key.as_str(),
         "key_schema_id": lane_key.key_schema_id.as_str(),
         "lane_transition_seq": projection.lane_transition_seq,
-        "ledger_key": projection.holder.ledger_key.as_str(),
+        "ledger_key": projection.ledger_key.as_str(),
         "ledger_purpose": side_effect_ledger_purpose_json(&projection.ledger_purpose),
         "namespace": lane_key.namespace.as_str(),
         "node_id": projection.node_id.as_str(),
-        "pair_id": projection.pair_id.as_ref().map(SideEffectPairId::as_str),
+        "pair_id": projection.pair_id.as_str(),
         "run_id": projection.holder.run_id.as_str(),
     })
 }
@@ -10411,14 +10297,13 @@ pub fn parse_resource_lane_projection(
     };
     let projection = ResourceLaneProjection {
         event_id: parse_identity(required_str(json, "event_id")?)?,
-        holder: SideEffectLedgerRef::new(
+        holder: SideEffectPairLedgerRef::new(
             parse_identity(required_str(json, "run_id")?)?,
-            events::SideEffectLedgerKey::new(required_str(json, "ledger_key")?)?,
+            parse_identity(required_str(json, "pair_id")?)?,
         ),
+        ledger_key: events::SideEffectLedgerKey::new(required_str(json, "ledger_key")?)?,
         ledger_purpose: parse_side_effect_ledger_purpose(required_obj(json, "ledger_purpose")?)?,
-        pair_id: optional_str(json, "pair_id")?
-            .map(parse_identity)
-            .transpose()?,
+        pair_id: parse_identity(required_str(json, "pair_id")?)?,
         node_id: parse_identity(required_str(json, "node_id")?)?,
         attempt_id: parse_identity(required_str(json, "attempt_id")?)?,
         invocation_epoch: required_u32(json, "invocation_epoch")?,

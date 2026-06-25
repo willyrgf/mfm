@@ -256,9 +256,9 @@ pub mod v1 {
         /// Side-effect ledger purpose.
         pub ledger_purpose: SideEffectLedgerPurpose,
         /// Certified side-effect pair id, when this lane is bound to a paired forward ledger.
-        pub pair_id: Option<SideEffectPairId>,
+        pub pair_id: SideEffectPairId,
         /// Pair phase authority, when this lane is bound to a paired forward ledger.
-        pub pair_role: Option<SideEffectPairRole>,
+        pub pair_role: SideEffectPairRole,
         /// Invocation epoch protected by the lane.
         pub invocation_epoch: u32,
         /// Exact resource key evidence resolved before invocation.
@@ -289,9 +289,9 @@ pub mod v1 {
         /// Side-effect ledger purpose.
         pub ledger_purpose: SideEffectLedgerPurpose,
         /// Certified side-effect pair id, when this lane is bound to a paired forward ledger.
-        pub pair_id: Option<SideEffectPairId>,
+        pub pair_id: SideEffectPairId,
         /// Pair phase authority, when this lane is bound to a paired forward ledger.
-        pub pair_role: Option<SideEffectPairRole>,
+        pub pair_role: SideEffectPairRole,
         /// Invocation epoch protected by the lane.
         pub invocation_epoch: u32,
         /// Exact resource key evidence resolved before invocation.
@@ -316,9 +316,9 @@ pub mod v1 {
         /// Side-effect ledger purpose.
         pub ledger_purpose: SideEffectLedgerPurpose,
         /// Certified side-effect pair id, when this lane is bound to a paired forward ledger.
-        pub pair_id: Option<SideEffectPairId>,
+        pub pair_id: SideEffectPairId,
         /// Pair phase authority, when this lane is bound to a paired forward ledger.
-        pub pair_role: Option<SideEffectPairRole>,
+        pub pair_role: SideEffectPairRole,
         /// Invocation epoch protected by the lane.
         pub invocation_epoch: u32,
         /// Claim being released.
@@ -347,9 +347,9 @@ pub mod v1 {
         /// Side-effect ledger purpose.
         pub ledger_purpose: SideEffectLedgerPurpose,
         /// Certified side-effect pair id, when this lane is bound to a paired forward ledger.
-        pub pair_id: Option<SideEffectPairId>,
+        pub pair_id: SideEffectPairId,
         /// Pair phase authority, when this lane is bound to a paired forward ledger.
-        pub pair_role: Option<SideEffectPairRole>,
+        pub pair_role: SideEffectPairRole,
         /// Invocation epoch protected by the lane.
         pub invocation_epoch: u32,
         /// Claim being released.
@@ -382,10 +382,8 @@ pub mod v1 {
         Forward,
         /// Remediation ledger for the linked forward side-effect ledger.
         Remediation {
-            /// Forward ledger key whose obligation this remediation addresses.
-            forward_ledger_key: SideEffectLedgerKey,
-            /// Certified forward side-effect pair id validated beside the legacy ledger key.
-            forward_pair_id: Option<SideEffectPairId>,
+            /// Certified forward side-effect pair id whose obligation this remediation addresses.
+            forward_pair_id: SideEffectPairId,
         },
     }
 
@@ -617,7 +615,7 @@ pub mod v1 {
                         attempt_id: &$payload.attempt_id,
                         ledger_key: &$payload.ledger_key,
                         ledger_purpose: &$payload.ledger_purpose,
-                        pair_id: $payload.pair_id.as_ref(),
+                        pair_id: &$payload.pair_id,
                         pair_role: $payload.pair_role,
                         invocation_epoch: Some($payload.invocation_epoch),
                         claim_generation: $claim_generation,
@@ -725,10 +723,10 @@ pub mod v1 {
         pub ledger_key: &'a SideEffectLedgerKey,
         /// Side-effect ledger purpose.
         pub ledger_purpose: &'a SideEffectLedgerPurpose,
-        /// Certified side-effect pair id, when the event is paired.
-        pub pair_id: Option<&'a SideEffectPairId>,
-        /// Pair phase authority, when the event is paired.
-        pub pair_role: Option<SideEffectPairRole>,
+        /// Certified side-effect pair id.
+        pub pair_id: &'a SideEffectPairId,
+        /// Pair phase authority.
+        pub pair_role: SideEffectPairRole,
         /// Invocation epoch when the payload carries one.
         pub invocation_epoch: Option<u32>,
         /// Claim generation when the payload carries one.
@@ -2548,9 +2546,9 @@ pub mod v1 {
             /// Side-effect ledger purpose.
             pub ledger_purpose: SideEffectLedgerPurpose,
             /// Certified side-effect pair id, when this ledger is bound to a paired forward node.
-            pub pair_id: Option<SideEffectPairId>,
+            pub pair_id: SideEffectPairId,
             /// Pair phase authority, when this ledger is bound to a paired forward node.
-            pub pair_role: Option<SideEffectPairRole>,
+            pub pair_role: SideEffectPairRole,
             /// Invocation epoch.
             pub invocation_epoch: u32,
             /// Intent schema id.
@@ -2589,9 +2587,9 @@ pub mod v1 {
             /// Side-effect ledger purpose.
             pub ledger_purpose: SideEffectLedgerPurpose,
             /// Certified side-effect pair id, when this ledger is bound to a paired forward node.
-            pub pair_id: Option<SideEffectPairId>,
+            pub pair_id: SideEffectPairId,
             /// Pair phase authority, when this ledger is bound to a paired forward node.
-            pub pair_role: Option<SideEffectPairRole>,
+            pub pair_role: SideEffectPairRole,
             /// Claim owner.
             pub claim_owner: RunnerInvocationId,
             /// Invocation epoch.
@@ -2616,9 +2614,9 @@ pub mod v1 {
             /// Side-effect ledger purpose.
             pub ledger_purpose: SideEffectLedgerPurpose,
             /// Certified side-effect pair id, when this ledger is bound to a paired forward node.
-            pub pair_id: Option<SideEffectPairId>,
+            pub pair_id: SideEffectPairId,
             /// Pair phase authority, when this ledger is bound to a paired forward node.
-            pub pair_role: Option<SideEffectPairRole>,
+            pub pair_role: SideEffectPairRole,
             /// Previous claim owner.
             pub previous_claim_owner: RunnerInvocationId,
             /// New claim owner.
@@ -2647,9 +2645,9 @@ pub mod v1 {
             /// Side-effect ledger purpose.
             pub ledger_purpose: SideEffectLedgerPurpose,
             /// Certified side-effect pair id, when this ledger is bound to a paired forward node.
-            pub pair_id: Option<SideEffectPairId>,
+            pub pair_id: SideEffectPairId,
             /// Pair phase authority, when this ledger is bound to a paired forward node.
-            pub pair_role: Option<SideEffectPairRole>,
+            pub pair_role: SideEffectPairRole,
             /// Invocation epoch.
             pub invocation_epoch: u32,
             /// Claim generation.
@@ -2678,9 +2676,9 @@ pub mod v1 {
             /// Side-effect ledger purpose.
             pub ledger_purpose: SideEffectLedgerPurpose,
             /// Certified side-effect pair id, when this ledger is bound to a paired forward node.
-            pub pair_id: Option<SideEffectPairId>,
+            pub pair_id: SideEffectPairId,
             /// Pair phase authority, when this ledger is bound to a paired forward node.
-            pub pair_role: Option<SideEffectPairRole>,
+            pub pair_role: SideEffectPairRole,
             /// Invocation epoch.
             pub invocation_epoch: u32,
             /// Claim owner.
@@ -2705,9 +2703,9 @@ pub mod v1 {
             /// Side-effect ledger purpose.
             pub ledger_purpose: SideEffectLedgerPurpose,
             /// Certified side-effect pair id, when this ledger is bound to a paired forward node.
-            pub pair_id: Option<SideEffectPairId>,
+            pub pair_id: SideEffectPairId,
             /// Pair phase authority, when this ledger is bound to a paired forward node.
-            pub pair_role: Option<SideEffectPairRole>,
+            pub pair_role: SideEffectPairRole,
             /// Invocation epoch.
             pub invocation_epoch: u32,
             /// Proof schema id.
@@ -2732,9 +2730,9 @@ pub mod v1 {
             /// Side-effect ledger purpose.
             pub ledger_purpose: SideEffectLedgerPurpose,
             /// Certified side-effect pair id, when this ledger is bound to a paired forward node.
-            pub pair_id: Option<SideEffectPairId>,
+            pub pair_id: SideEffectPairId,
             /// Pair phase authority, when this ledger is bound to a paired forward node.
-            pub pair_role: Option<SideEffectPairRole>,
+            pub pair_role: SideEffectPairRole,
             /// Invocation epoch.
             pub invocation_epoch: u32,
             /// Submission schema id.
@@ -2759,9 +2757,9 @@ pub mod v1 {
             /// Side-effect ledger purpose.
             pub ledger_purpose: SideEffectLedgerPurpose,
             /// Certified side-effect pair id, when this ledger is bound to a paired forward node.
-            pub pair_id: Option<SideEffectPairId>,
+            pub pair_id: SideEffectPairId,
             /// Pair phase authority, when this ledger is bound to a paired forward node.
-            pub pair_role: Option<SideEffectPairRole>,
+            pub pair_role: SideEffectPairRole,
             /// Invocation epoch.
             pub invocation_epoch: u32,
             /// Evidence schema id.
@@ -2786,9 +2784,9 @@ pub mod v1 {
             /// Side-effect ledger purpose.
             pub ledger_purpose: SideEffectLedgerPurpose,
             /// Certified side-effect pair id, when this ledger is bound to a paired forward node.
-            pub pair_id: Option<SideEffectPairId>,
+            pub pair_id: SideEffectPairId,
             /// Pair phase authority, when this ledger is bound to a paired forward node.
-            pub pair_role: Option<SideEffectPairRole>,
+            pub pair_role: SideEffectPairRole,
             /// Invocation epoch.
             pub invocation_epoch: u32,
             /// Receipt schema id.
@@ -2817,9 +2815,9 @@ pub mod v1 {
             /// Side-effect ledger purpose.
             pub ledger_purpose: SideEffectLedgerPurpose,
             /// Certified side-effect pair id, when this ledger is bound to a paired forward node.
-            pub pair_id: Option<SideEffectPairId>,
+            pub pair_id: SideEffectPairId,
             /// Pair phase authority, when this ledger is bound to a paired forward node.
-            pub pair_role: Option<SideEffectPairRole>,
+            pub pair_role: SideEffectPairRole,
             /// Invocation epoch.
             pub invocation_epoch: u32,
             /// Confirmation schema id.
@@ -2848,9 +2846,9 @@ pub mod v1 {
             /// Side-effect ledger purpose.
             pub ledger_purpose: SideEffectLedgerPurpose,
             /// Certified side-effect pair id, when this ledger is bound to a paired forward node.
-            pub pair_id: Option<SideEffectPairId>,
+            pub pair_id: SideEffectPairId,
             /// Pair phase authority, when this ledger is bound to a paired forward node.
-            pub pair_role: Option<SideEffectPairRole>,
+            pub pair_role: SideEffectPairRole,
             /// Invocation epoch.
             pub invocation_epoch: u32,
             /// Ambiguity code.
@@ -2877,9 +2875,9 @@ pub mod v1 {
             /// Side-effect ledger purpose.
             pub ledger_purpose: SideEffectLedgerPurpose,
             /// Certified side-effect pair id, when this ledger is bound to a paired forward node.
-            pub pair_id: Option<SideEffectPairId>,
+            pub pair_id: SideEffectPairId,
             /// Pair phase authority, when this ledger is bound to a paired forward node.
-            pub pair_role: Option<SideEffectPairRole>,
+            pub pair_role: SideEffectPairRole,
             /// Invocation epoch.
             pub invocation_epoch: u32,
             /// Failure phase.
@@ -3557,8 +3555,8 @@ pub mod v1 {
                     enum_variant(
                         "remediation",
                         vec![schema_field(
-                            "forward_ledger_key",
-                            "SideEffectLedgerKey",
+                            "forward_pair_id",
+                            "SideEffectPairId",
                             EventFieldCardinality::Required,
                         )],
                     ),
@@ -3840,8 +3838,8 @@ pub mod v1 {
             EventFieldDescriptor::required("attempt_id", "AttemptId"),
             EventFieldDescriptor::required("ledger_key", "SideEffectLedgerKey"),
             EventFieldDescriptor::required("ledger_purpose", "SideEffectLedgerPurpose"),
-            EventFieldDescriptor::optional("pair_id", "SideEffectPairId"),
-            EventFieldDescriptor::optional("pair_role", "SideEffectPairRole"),
+            EventFieldDescriptor::required("pair_id", "SideEffectPairId"),
+            EventFieldDescriptor::required("pair_role", "SideEffectPairRole"),
             EventFieldDescriptor::required("invocation_epoch", "u32"),
             EventFieldDescriptor::required("intent_schema_id", "SchemaId"),
             EventFieldDescriptor::required("intent_hash", "ContentDigest"),
@@ -3866,8 +3864,8 @@ pub mod v1 {
             EventFieldDescriptor::required("attempt_id", "AttemptId"),
             EventFieldDescriptor::required("ledger_key", "SideEffectLedgerKey"),
             EventFieldDescriptor::required("ledger_purpose", "SideEffectLedgerPurpose"),
-            EventFieldDescriptor::optional("pair_id", "SideEffectPairId"),
-            EventFieldDescriptor::optional("pair_role", "SideEffectPairRole"),
+            EventFieldDescriptor::required("pair_id", "SideEffectPairId"),
+            EventFieldDescriptor::required("pair_role", "SideEffectPairRole"),
             EventFieldDescriptor::required("claim_owner", "RunnerInvocationId"),
             EventFieldDescriptor::required("invocation_epoch", "u32"),
             EventFieldDescriptor::required("claim_generation", "u32"),
@@ -3885,8 +3883,8 @@ pub mod v1 {
             EventFieldDescriptor::required("attempt_id", "AttemptId"),
             EventFieldDescriptor::required("ledger_key", "SideEffectLedgerKey"),
             EventFieldDescriptor::required("ledger_purpose", "SideEffectLedgerPurpose"),
-            EventFieldDescriptor::optional("pair_id", "SideEffectPairId"),
-            EventFieldDescriptor::optional("pair_role", "SideEffectPairRole"),
+            EventFieldDescriptor::required("pair_id", "SideEffectPairId"),
+            EventFieldDescriptor::required("pair_role", "SideEffectPairRole"),
             EventFieldDescriptor::required("previous_claim_owner", "RunnerInvocationId"),
             EventFieldDescriptor::required("new_claim_owner", "RunnerInvocationId"),
             EventFieldDescriptor::required("invocation_epoch", "u32"),
@@ -3906,8 +3904,8 @@ pub mod v1 {
             EventFieldDescriptor::required("attempt_id", "AttemptId"),
             EventFieldDescriptor::required("ledger_key", "SideEffectLedgerKey"),
             EventFieldDescriptor::required("ledger_purpose", "SideEffectLedgerPurpose"),
-            EventFieldDescriptor::optional("pair_id", "SideEffectPairId"),
-            EventFieldDescriptor::optional("pair_role", "SideEffectPairRole"),
+            EventFieldDescriptor::required("pair_id", "SideEffectPairId"),
+            EventFieldDescriptor::required("pair_role", "SideEffectPairRole"),
             EventFieldDescriptor::required("invocation_epoch", "u32"),
             EventFieldDescriptor::required("resource_key", "ResourceKeyEvidence"),
             EventFieldDescriptor::required("requirement_digest", "ContentDigest"),
@@ -3928,8 +3926,8 @@ pub mod v1 {
             EventFieldDescriptor::required("attempt_id", "AttemptId"),
             EventFieldDescriptor::required("ledger_key", "SideEffectLedgerKey"),
             EventFieldDescriptor::required("ledger_purpose", "SideEffectLedgerPurpose"),
-            EventFieldDescriptor::optional("pair_id", "SideEffectPairId"),
-            EventFieldDescriptor::optional("pair_role", "SideEffectPairRole"),
+            EventFieldDescriptor::required("pair_id", "SideEffectPairId"),
+            EventFieldDescriptor::required("pair_role", "SideEffectPairRole"),
             EventFieldDescriptor::required("invocation_epoch", "u32"),
             EventFieldDescriptor::required("resource_key", "ResourceKeyEvidence"),
             EventFieldDescriptor::required("requirement_digest", "ContentDigest"),
@@ -3947,8 +3945,8 @@ pub mod v1 {
             EventFieldDescriptor::required("attempt_id", "AttemptId"),
             EventFieldDescriptor::required("ledger_key", "SideEffectLedgerKey"),
             EventFieldDescriptor::required("ledger_purpose", "SideEffectLedgerPurpose"),
-            EventFieldDescriptor::optional("pair_id", "SideEffectPairId"),
-            EventFieldDescriptor::optional("pair_role", "SideEffectPairRole"),
+            EventFieldDescriptor::required("pair_id", "SideEffectPairId"),
+            EventFieldDescriptor::required("pair_role", "SideEffectPairRole"),
             EventFieldDescriptor::required("invocation_epoch", "u32"),
             EventFieldDescriptor::required("claim_generation", "u32"),
             EventFieldDescriptor::required("claim_fencing_token", "ClaimFencingToken"),
@@ -3968,8 +3966,8 @@ pub mod v1 {
             EventFieldDescriptor::required("attempt_id", "AttemptId"),
             EventFieldDescriptor::required("ledger_key", "SideEffectLedgerKey"),
             EventFieldDescriptor::required("ledger_purpose", "SideEffectLedgerPurpose"),
-            EventFieldDescriptor::optional("pair_id", "SideEffectPairId"),
-            EventFieldDescriptor::optional("pair_role", "SideEffectPairRole"),
+            EventFieldDescriptor::required("pair_id", "SideEffectPairId"),
+            EventFieldDescriptor::required("pair_role", "SideEffectPairRole"),
             EventFieldDescriptor::required("invocation_epoch", "u32"),
             EventFieldDescriptor::required("claim_owner", "RunnerInvocationId"),
             EventFieldDescriptor::required("claim_generation", "u32"),
@@ -3987,8 +3985,8 @@ pub mod v1 {
             EventFieldDescriptor::required("attempt_id", "AttemptId"),
             EventFieldDescriptor::required("ledger_key", "SideEffectLedgerKey"),
             EventFieldDescriptor::required("ledger_purpose", "SideEffectLedgerPurpose"),
-            EventFieldDescriptor::optional("pair_id", "SideEffectPairId"),
-            EventFieldDescriptor::optional("pair_role", "SideEffectPairRole"),
+            EventFieldDescriptor::required("pair_id", "SideEffectPairId"),
+            EventFieldDescriptor::required("pair_role", "SideEffectPairRole"),
             EventFieldDescriptor::required("invocation_epoch", "u32"),
             EventFieldDescriptor::required("proof_schema_id", "SchemaId"),
             EventFieldDescriptor::required("proof_hash", "ContentDigest"),
@@ -4006,8 +4004,8 @@ pub mod v1 {
             EventFieldDescriptor::required("attempt_id", "AttemptId"),
             EventFieldDescriptor::required("ledger_key", "SideEffectLedgerKey"),
             EventFieldDescriptor::required("ledger_purpose", "SideEffectLedgerPurpose"),
-            EventFieldDescriptor::optional("pair_id", "SideEffectPairId"),
-            EventFieldDescriptor::optional("pair_role", "SideEffectPairRole"),
+            EventFieldDescriptor::required("pair_id", "SideEffectPairId"),
+            EventFieldDescriptor::required("pair_role", "SideEffectPairRole"),
             EventFieldDescriptor::required("invocation_epoch", "u32"),
             EventFieldDescriptor::required("submission_schema_id", "SchemaId"),
             EventFieldDescriptor::required("submission_hash", "ContentDigest"),
@@ -4025,8 +4023,8 @@ pub mod v1 {
             EventFieldDescriptor::required("attempt_id", "AttemptId"),
             EventFieldDescriptor::required("ledger_key", "SideEffectLedgerKey"),
             EventFieldDescriptor::required("ledger_purpose", "SideEffectLedgerPurpose"),
-            EventFieldDescriptor::optional("pair_id", "SideEffectPairId"),
-            EventFieldDescriptor::optional("pair_role", "SideEffectPairRole"),
+            EventFieldDescriptor::required("pair_id", "SideEffectPairId"),
+            EventFieldDescriptor::required("pair_role", "SideEffectPairRole"),
             EventFieldDescriptor::required("invocation_epoch", "u32"),
             EventFieldDescriptor::required("evidence_schema_id", "SchemaId"),
             EventFieldDescriptor::required("evidence_hash", "ContentDigest"),
@@ -4044,8 +4042,8 @@ pub mod v1 {
             EventFieldDescriptor::required("attempt_id", "AttemptId"),
             EventFieldDescriptor::required("ledger_key", "SideEffectLedgerKey"),
             EventFieldDescriptor::required("ledger_purpose", "SideEffectLedgerPurpose"),
-            EventFieldDescriptor::optional("pair_id", "SideEffectPairId"),
-            EventFieldDescriptor::optional("pair_role", "SideEffectPairRole"),
+            EventFieldDescriptor::required("pair_id", "SideEffectPairId"),
+            EventFieldDescriptor::required("pair_role", "SideEffectPairRole"),
             EventFieldDescriptor::required("invocation_epoch", "u32"),
             EventFieldDescriptor::required("receipt_schema_id", "SchemaId"),
             EventFieldDescriptor::required("receipt_hash", "ContentDigest"),
@@ -4065,8 +4063,8 @@ pub mod v1 {
             EventFieldDescriptor::required("attempt_id", "AttemptId"),
             EventFieldDescriptor::required("ledger_key", "SideEffectLedgerKey"),
             EventFieldDescriptor::required("ledger_purpose", "SideEffectLedgerPurpose"),
-            EventFieldDescriptor::optional("pair_id", "SideEffectPairId"),
-            EventFieldDescriptor::optional("pair_role", "SideEffectPairRole"),
+            EventFieldDescriptor::required("pair_id", "SideEffectPairId"),
+            EventFieldDescriptor::required("pair_role", "SideEffectPairRole"),
             EventFieldDescriptor::required("invocation_epoch", "u32"),
             EventFieldDescriptor::required("confirmation_schema_id", "SchemaId"),
             EventFieldDescriptor::required("confirmation_hash", "ContentDigest"),
@@ -4086,8 +4084,8 @@ pub mod v1 {
             EventFieldDescriptor::required("attempt_id", "AttemptId"),
             EventFieldDescriptor::required("ledger_key", "SideEffectLedgerKey"),
             EventFieldDescriptor::required("ledger_purpose", "SideEffectLedgerPurpose"),
-            EventFieldDescriptor::optional("pair_id", "SideEffectPairId"),
-            EventFieldDescriptor::optional("pair_role", "SideEffectPairRole"),
+            EventFieldDescriptor::required("pair_id", "SideEffectPairId"),
+            EventFieldDescriptor::required("pair_role", "SideEffectPairRole"),
             EventFieldDescriptor::required("invocation_epoch", "u32"),
             EventFieldDescriptor::required("ambiguity_code", "AmbiguityCode"),
             EventFieldDescriptor::required("evidence_schema_id", "SchemaId"),
@@ -4106,8 +4104,8 @@ pub mod v1 {
             EventFieldDescriptor::required("attempt_id", "AttemptId"),
             EventFieldDescriptor::required("ledger_key", "SideEffectLedgerKey"),
             EventFieldDescriptor::required("ledger_purpose", "SideEffectLedgerPurpose"),
-            EventFieldDescriptor::optional("pair_id", "SideEffectPairId"),
-            EventFieldDescriptor::optional("pair_role", "SideEffectPairRole"),
+            EventFieldDescriptor::required("pair_id", "SideEffectPairId"),
+            EventFieldDescriptor::required("pair_role", "SideEffectPairRole"),
             EventFieldDescriptor::required("invocation_epoch", "u32"),
             EventFieldDescriptor::required("failure_phase", "FailurePhase"),
             EventFieldDescriptor::required("retryable", "bool"),
@@ -4125,8 +4123,8 @@ pub mod v1 {
             EventFieldDescriptor::required("attempt_id", "AttemptId"),
             EventFieldDescriptor::required("ledger_key", "SideEffectLedgerKey"),
             EventFieldDescriptor::required("ledger_purpose", "SideEffectLedgerPurpose"),
-            EventFieldDescriptor::optional("pair_id", "SideEffectPairId"),
-            EventFieldDescriptor::optional("pair_role", "SideEffectPairRole"),
+            EventFieldDescriptor::required("pair_id", "SideEffectPairId"),
+            EventFieldDescriptor::required("pair_role", "SideEffectPairRole"),
             EventFieldDescriptor::required("invocation_epoch", "u32"),
             EventFieldDescriptor::required("claim_id", "ResourceLaneClaimId"),
             EventFieldDescriptor::required("release_id", "ResourceLaneReleaseId"),
@@ -4146,8 +4144,8 @@ pub mod v1 {
             EventFieldDescriptor::required("attempt_id", "AttemptId"),
             EventFieldDescriptor::required("ledger_key", "SideEffectLedgerKey"),
             EventFieldDescriptor::required("ledger_purpose", "SideEffectLedgerPurpose"),
-            EventFieldDescriptor::optional("pair_id", "SideEffectPairId"),
-            EventFieldDescriptor::optional("pair_role", "SideEffectPairRole"),
+            EventFieldDescriptor::required("pair_id", "SideEffectPairId"),
+            EventFieldDescriptor::required("pair_role", "SideEffectPairRole"),
             EventFieldDescriptor::required("invocation_epoch", "u32"),
             EventFieldDescriptor::required("claim_id", "ResourceLaneClaimId"),
             EventFieldDescriptor::required("release_reason", "ResourceLaneReleaseReason"),
@@ -4980,22 +4978,22 @@ mfm.events.v1.fact_recorded schema:mfm.events.v1.fact_recorded:1:sha256-jcs-v1:e
 mfm.events.v1.artifact_referenced schema:mfm.events.v1.artifact_referenced:1:sha256-jcs-v1:c5965f6401628c580d907568a57b29e06638d4cf1740b1ea781eae88df4d592c [ArtifactReferenced]\n\
 mfm.events.v1.cell_produced schema:mfm.events.v1.cell_produced:1:sha256-jcs-v1:9a2b250e7a5270bb302ae76a06091873dc50644855bace41bab97dcce311f07a [StateOutput]\n\
 mfm.events.v1.cell_skipped schema:mfm.events.v1.cell_skipped:1:sha256-jcs-v1:e82d7230e3ca668b68f1403d3db7c07d36a3373f8e3744e9a41351a7aa5392f4 []\n\
-	mfm.events.v1.side_effect.intent_persisted schema:mfm.events.v1.side_effect.intent_persisted:1:sha256-jcs-v1:676c765d2a03a6b96644927f50b2b88c66ee3696448bd81a1dcb1a7508ffa3ff [SideEffectIntent]\n\
-	mfm.events.v1.side_effect.claimed schema:mfm.events.v1.side_effect.claimed:1:sha256-jcs-v1:702eea4d0b4792750161297be5dae22a9aada34100e36ad6f6e77d7c7eaa5ff6 []\n\
-	mfm.events.v1.side_effect.claim_taken_over schema:mfm.events.v1.side_effect.claim_taken_over:1:sha256-jcs-v1:ebec36a75dbcbbbee0fb24d53fb9491b0ac60c923ad140c397255f54ef9dfba2 []\n\
-	mfm.events.v1.resource_lane.claimed schema:mfm.events.v1.resource_lane.claimed:1:sha256-jcs-v1:b99deaaee22778841362ae4a10c47f90106023ed4ff14c4911f4b2fa56501297 []\n\
-	mfm.events.v1.resource_lane.claim_intent schema:mfm.events.v1.resource_lane.claim_intent:1:sha256-jcs-v1:103279e48dce626d5629f74c75761dd8e0bb24ebab8ecff749ff21ea2ad6dc64 []\n\
-	mfm.events.v1.side_effect.invocation_prepared schema:mfm.events.v1.side_effect.invocation_prepared:1:sha256-jcs-v1:497a227ea21afb3afc7f6695de07c4fdde01f3963465cbade9e1af9bc876d4a5 [PreparedInvocation]\n\
-	mfm.events.v1.side_effect.invocation_started schema:mfm.events.v1.side_effect.invocation_started:1:sha256-jcs-v1:4d296ddbe385a6daaad5839a6b361df4ee16707648cf019ec07e89c6cc2be50e []\n\
-	mfm.events.v1.side_effect.not_submitted_proven schema:mfm.events.v1.side_effect.not_submitted_proven:1:sha256-jcs-v1:18912df4467a377130061404317680653357dc9800c670a65b30cb59702920af [NotSubmittedProof]\n\
-	mfm.events.v1.side_effect.submission_observed schema:mfm.events.v1.side_effect.submission_observed:1:sha256-jcs-v1:794f28ba463f66cfc8fa5beba180827fdd076d06769b3a4b525dd73cc40ec2ca [Submission]\n\
-	mfm.events.v1.side_effect.submission_unknown schema:mfm.events.v1.side_effect.submission_unknown:1:sha256-jcs-v1:27cc68f03429e3c373462bace5bc5bdacba916d0905c6273f79560f64584d95f [SubmissionUnknownEvidence]\n\
-	mfm.events.v1.side_effect.receipt_observed schema:mfm.events.v1.side_effect.receipt_observed:1:sha256-jcs-v1:86e83e26da2041c4d1e5483c9c667aa855259ee52d6014024dd2f786833b6ab2 [Receipt,ResourceTouchedSet]\n\
-	mfm.events.v1.side_effect.confirmation_observed schema:mfm.events.v1.side_effect.confirmation_observed:1:sha256-jcs-v1:f7f42ad784fbc7ddcc405466ab84acd7fd9e409c5e9f39e8da00a9391a997a76 [Confirmation,ResourceTouchedSet]\n\
-	mfm.events.v1.side_effect.ambiguous schema:mfm.events.v1.side_effect.ambiguous:1:sha256-jcs-v1:b883869ab2ba3cbccc608ec09b13a78215cb9d980ae8bb1e37d0942fbb24dbad [AmbiguityEvidence]\n\
-	mfm.events.v1.side_effect.failed schema:mfm.events.v1.side_effect.failed:1:sha256-jcs-v1:0c5436ac5757895723b67810a94f1a770dd3a16b92a54e0ee6d3f8060593ea64 [SideEffectFailureDiagnostic]\n\
-	mfm.events.v1.resource_lane.released schema:mfm.events.v1.resource_lane.released:1:sha256-jcs-v1:88db748bb0b4e2e129e6ac868690a6a48d1cbdf017cd3c372280735d20bf772d []\n\
-	mfm.events.v1.resource_lane.release_intent schema:mfm.events.v1.resource_lane.release_intent:1:sha256-jcs-v1:1223b57a614db61aedbca4f54b953731381f8dc11710d93326233a8c5a545003 []\n\
+	mfm.events.v1.side_effect.intent_persisted schema:mfm.events.v1.side_effect.intent_persisted:1:sha256-jcs-v1:184f616378bb665931366be4d4a7f755107c6ba6ee6ba2599cab83c40da81800 [SideEffectIntent]\n\
+	mfm.events.v1.side_effect.claimed schema:mfm.events.v1.side_effect.claimed:1:sha256-jcs-v1:378b5f76e9154f11e72ce3a6802f545e5020474e9c5881ebc0baf0134d23cfd5 []\n\
+	mfm.events.v1.side_effect.claim_taken_over schema:mfm.events.v1.side_effect.claim_taken_over:1:sha256-jcs-v1:6f1fd2384eebda41570a6327b6aada60fe83884c1acaa98e0c931fac0e899069 []\n\
+	mfm.events.v1.resource_lane.claimed schema:mfm.events.v1.resource_lane.claimed:1:sha256-jcs-v1:2368a7092555e02af2c43cae46f0636aecfd1d9ded8925b1fb498684244ae25c []\n\
+	mfm.events.v1.resource_lane.claim_intent schema:mfm.events.v1.resource_lane.claim_intent:1:sha256-jcs-v1:d1823bb3a964102b138400037575ded9b459865a9beadd917f155e97f1ad4aec []\n\
+	mfm.events.v1.side_effect.invocation_prepared schema:mfm.events.v1.side_effect.invocation_prepared:1:sha256-jcs-v1:a10e7836de421e8f09a69e4c2ba85fa14ca2826bd547a9979e5b80a37940b9c1 [PreparedInvocation]\n\
+	mfm.events.v1.side_effect.invocation_started schema:mfm.events.v1.side_effect.invocation_started:1:sha256-jcs-v1:2bd48fa57a50b70f5e068c08c10423c77b2ad14612769ff6eb0d4198bb6ed324 []\n\
+	mfm.events.v1.side_effect.not_submitted_proven schema:mfm.events.v1.side_effect.not_submitted_proven:1:sha256-jcs-v1:6a3479ad34d3f47656592844ee91d9a3cbb4495dfd57f93d78177d1d80fbded5 [NotSubmittedProof]\n\
+	mfm.events.v1.side_effect.submission_observed schema:mfm.events.v1.side_effect.submission_observed:1:sha256-jcs-v1:c2703fda5a31242cc07d50a7aca7472a9bd82beb33abea53d3773c3bba2f344d [Submission]\n\
+	mfm.events.v1.side_effect.submission_unknown schema:mfm.events.v1.side_effect.submission_unknown:1:sha256-jcs-v1:7ee85b734557f3add57f9ca25ac1f115080a9e63c6f24f97cb7429d459b1a0a0 [SubmissionUnknownEvidence]\n\
+	mfm.events.v1.side_effect.receipt_observed schema:mfm.events.v1.side_effect.receipt_observed:1:sha256-jcs-v1:822c8ac0f82c5a33dddc0f0636435580782ffdfb36c0f0f7a165339a427c1161 [Receipt,ResourceTouchedSet]\n\
+	mfm.events.v1.side_effect.confirmation_observed schema:mfm.events.v1.side_effect.confirmation_observed:1:sha256-jcs-v1:02250af51d07defdc363643ef0331ca787418be443659d3b20c7746eebdbd044 [Confirmation,ResourceTouchedSet]\n\
+	mfm.events.v1.side_effect.ambiguous schema:mfm.events.v1.side_effect.ambiguous:1:sha256-jcs-v1:664144513b8998b20b47a6662db2bfea3983532abe9612c8c49610d587681a35 [AmbiguityEvidence]\n\
+	mfm.events.v1.side_effect.failed schema:mfm.events.v1.side_effect.failed:1:sha256-jcs-v1:12849d61d18dc23a31a92afcafa05dfff5241e3180aa21defe20fc2501d1c577 [SideEffectFailureDiagnostic]\n\
+	mfm.events.v1.resource_lane.released schema:mfm.events.v1.resource_lane.released:1:sha256-jcs-v1:de6fed7cdb279cb2a5fcf32926538f85b0a171ea63b131aafeb3420084f610d5 []\n\
+	mfm.events.v1.resource_lane.release_intent schema:mfm.events.v1.resource_lane.release_intent:1:sha256-jcs-v1:cbf0e0d68c70dd683b729e3d3778ac966aee87db40bfe631e2c23fa2ee3a88a0 []\n\
 mfm.events.v1.public_output_produced schema:mfm.events.v1.public_output_produced:1:sha256-jcs-v1:00d2531467818398553aa59e62c034fa0cd054e7856b89f425aeb4510f9c6776 [PublicOutputCell,PublicOutputRendered]\n\
 mfm.events.v1.public_output_render_failed schema:mfm.events.v1.public_output_render_failed:1:sha256-jcs-v1:38c7cf4189e8525be1c51f1d0601c024b69769e961b6cf5fd43193211e143d9d [PublicOutputRenderFailureDiagnostic]\n\
 mfm.events.v1.state_attempt_completed schema:mfm.events.v1.state_attempt_completed:1:sha256-jcs-v1:36800f9d3ae748d407bc2ea24339049471c8ffe40aa86c53b35b6c7c6cd6ee80 []\n\
@@ -5057,22 +5055,22 @@ mfm_events::v1::FactRecorded schema:mfm.events.v1.fact_recorded:1:sha256-jcs-v1:
 mfm_events::v1::ArtifactReferenced schema:mfm.events.v1.artifact_referenced:1:sha256-jcs-v1:c5965f6401628c580d907568a57b29e06638d4cf1740b1ea781eae88df4d592c\n\
 mfm_events::v1::CellProduced schema:mfm.events.v1.cell_produced:1:sha256-jcs-v1:9a2b250e7a5270bb302ae76a06091873dc50644855bace41bab97dcce311f07a\n\
 mfm_events::v1::CellSkipped schema:mfm.events.v1.cell_skipped:1:sha256-jcs-v1:e82d7230e3ca668b68f1403d3db7c07d36a3373f8e3744e9a41351a7aa5392f4\n\
-	mfm_events::v1::side_effect::IntentPersisted schema:mfm.events.v1.side_effect.intent_persisted:1:sha256-jcs-v1:676c765d2a03a6b96644927f50b2b88c66ee3696448bd81a1dcb1a7508ffa3ff\n\
-	mfm_events::v1::side_effect::Claimed schema:mfm.events.v1.side_effect.claimed:1:sha256-jcs-v1:702eea4d0b4792750161297be5dae22a9aada34100e36ad6f6e77d7c7eaa5ff6\n\
-	mfm_events::v1::side_effect::ClaimTakenOver schema:mfm.events.v1.side_effect.claim_taken_over:1:sha256-jcs-v1:ebec36a75dbcbbbee0fb24d53fb9491b0ac60c923ad140c397255f54ef9dfba2\n\
-	mfm_events::v1::ResourceLaneClaimed schema:mfm.events.v1.resource_lane.claimed:1:sha256-jcs-v1:b99deaaee22778841362ae4a10c47f90106023ed4ff14c4911f4b2fa56501297\n\
-	mfm_events::v1::ResourceLaneClaimIntent schema:mfm.events.v1.resource_lane.claim_intent:1:sha256-jcs-v1:103279e48dce626d5629f74c75761dd8e0bb24ebab8ecff749ff21ea2ad6dc64\n\
-	mfm_events::v1::side_effect::InvocationPrepared schema:mfm.events.v1.side_effect.invocation_prepared:1:sha256-jcs-v1:497a227ea21afb3afc7f6695de07c4fdde01f3963465cbade9e1af9bc876d4a5\n\
-	mfm_events::v1::side_effect::InvocationStarted schema:mfm.events.v1.side_effect.invocation_started:1:sha256-jcs-v1:4d296ddbe385a6daaad5839a6b361df4ee16707648cf019ec07e89c6cc2be50e\n\
-	mfm_events::v1::side_effect::NotSubmittedProven schema:mfm.events.v1.side_effect.not_submitted_proven:1:sha256-jcs-v1:18912df4467a377130061404317680653357dc9800c670a65b30cb59702920af\n\
-	mfm_events::v1::side_effect::SubmissionObserved schema:mfm.events.v1.side_effect.submission_observed:1:sha256-jcs-v1:794f28ba463f66cfc8fa5beba180827fdd076d06769b3a4b525dd73cc40ec2ca\n\
-	mfm_events::v1::side_effect::SubmissionUnknown schema:mfm.events.v1.side_effect.submission_unknown:1:sha256-jcs-v1:27cc68f03429e3c373462bace5bc5bdacba916d0905c6273f79560f64584d95f\n\
-	mfm_events::v1::side_effect::ReceiptObserved schema:mfm.events.v1.side_effect.receipt_observed:1:sha256-jcs-v1:86e83e26da2041c4d1e5483c9c667aa855259ee52d6014024dd2f786833b6ab2\n\
-	mfm_events::v1::side_effect::ConfirmationObserved schema:mfm.events.v1.side_effect.confirmation_observed:1:sha256-jcs-v1:f7f42ad784fbc7ddcc405466ab84acd7fd9e409c5e9f39e8da00a9391a997a76\n\
-	mfm_events::v1::side_effect::Ambiguous schema:mfm.events.v1.side_effect.ambiguous:1:sha256-jcs-v1:b883869ab2ba3cbccc608ec09b13a78215cb9d980ae8bb1e37d0942fbb24dbad\n\
-	mfm_events::v1::side_effect::Failed schema:mfm.events.v1.side_effect.failed:1:sha256-jcs-v1:0c5436ac5757895723b67810a94f1a770dd3a16b92a54e0ee6d3f8060593ea64\n\
-	mfm_events::v1::ResourceLaneReleased schema:mfm.events.v1.resource_lane.released:1:sha256-jcs-v1:88db748bb0b4e2e129e6ac868690a6a48d1cbdf017cd3c372280735d20bf772d\n\
-	mfm_events::v1::ResourceLaneReleaseIntent schema:mfm.events.v1.resource_lane.release_intent:1:sha256-jcs-v1:1223b57a614db61aedbca4f54b953731381f8dc11710d93326233a8c5a545003\n\
+	mfm_events::v1::side_effect::IntentPersisted schema:mfm.events.v1.side_effect.intent_persisted:1:sha256-jcs-v1:184f616378bb665931366be4d4a7f755107c6ba6ee6ba2599cab83c40da81800\n\
+	mfm_events::v1::side_effect::Claimed schema:mfm.events.v1.side_effect.claimed:1:sha256-jcs-v1:378b5f76e9154f11e72ce3a6802f545e5020474e9c5881ebc0baf0134d23cfd5\n\
+	mfm_events::v1::side_effect::ClaimTakenOver schema:mfm.events.v1.side_effect.claim_taken_over:1:sha256-jcs-v1:6f1fd2384eebda41570a6327b6aada60fe83884c1acaa98e0c931fac0e899069\n\
+	mfm_events::v1::ResourceLaneClaimed schema:mfm.events.v1.resource_lane.claimed:1:sha256-jcs-v1:2368a7092555e02af2c43cae46f0636aecfd1d9ded8925b1fb498684244ae25c\n\
+	mfm_events::v1::ResourceLaneClaimIntent schema:mfm.events.v1.resource_lane.claim_intent:1:sha256-jcs-v1:d1823bb3a964102b138400037575ded9b459865a9beadd917f155e97f1ad4aec\n\
+	mfm_events::v1::side_effect::InvocationPrepared schema:mfm.events.v1.side_effect.invocation_prepared:1:sha256-jcs-v1:a10e7836de421e8f09a69e4c2ba85fa14ca2826bd547a9979e5b80a37940b9c1\n\
+	mfm_events::v1::side_effect::InvocationStarted schema:mfm.events.v1.side_effect.invocation_started:1:sha256-jcs-v1:2bd48fa57a50b70f5e068c08c10423c77b2ad14612769ff6eb0d4198bb6ed324\n\
+	mfm_events::v1::side_effect::NotSubmittedProven schema:mfm.events.v1.side_effect.not_submitted_proven:1:sha256-jcs-v1:6a3479ad34d3f47656592844ee91d9a3cbb4495dfd57f93d78177d1d80fbded5\n\
+	mfm_events::v1::side_effect::SubmissionObserved schema:mfm.events.v1.side_effect.submission_observed:1:sha256-jcs-v1:c2703fda5a31242cc07d50a7aca7472a9bd82beb33abea53d3773c3bba2f344d\n\
+	mfm_events::v1::side_effect::SubmissionUnknown schema:mfm.events.v1.side_effect.submission_unknown:1:sha256-jcs-v1:7ee85b734557f3add57f9ca25ac1f115080a9e63c6f24f97cb7429d459b1a0a0\n\
+	mfm_events::v1::side_effect::ReceiptObserved schema:mfm.events.v1.side_effect.receipt_observed:1:sha256-jcs-v1:822c8ac0f82c5a33dddc0f0636435580782ffdfb36c0f0f7a165339a427c1161\n\
+	mfm_events::v1::side_effect::ConfirmationObserved schema:mfm.events.v1.side_effect.confirmation_observed:1:sha256-jcs-v1:02250af51d07defdc363643ef0331ca787418be443659d3b20c7746eebdbd044\n\
+	mfm_events::v1::side_effect::Ambiguous schema:mfm.events.v1.side_effect.ambiguous:1:sha256-jcs-v1:664144513b8998b20b47a6662db2bfea3983532abe9612c8c49610d587681a35\n\
+	mfm_events::v1::side_effect::Failed schema:mfm.events.v1.side_effect.failed:1:sha256-jcs-v1:12849d61d18dc23a31a92afcafa05dfff5241e3180aa21defe20fc2501d1c577\n\
+	mfm_events::v1::ResourceLaneReleased schema:mfm.events.v1.resource_lane.released:1:sha256-jcs-v1:de6fed7cdb279cb2a5fcf32926538f85b0a171ea63b131aafeb3420084f610d5\n\
+	mfm_events::v1::ResourceLaneReleaseIntent schema:mfm.events.v1.resource_lane.release_intent:1:sha256-jcs-v1:cbf0e0d68c70dd683b729e3d3778ac966aee87db40bfe631e2c23fa2ee3a88a0\n\
 mfm_events::v1::PublicOutputProduced schema:mfm.events.v1.public_output_produced:1:sha256-jcs-v1:00d2531467818398553aa59e62c034fa0cd054e7856b89f425aeb4510f9c6776\n\
 mfm_events::v1::PublicOutputRenderFailed schema:mfm.events.v1.public_output_render_failed:1:sha256-jcs-v1:38c7cf4189e8525be1c51f1d0601c024b69769e961b6cf5fd43193211e143d9d\n\
 mfm_events::v1::StateAttemptCompleted schema:mfm.events.v1.state_attempt_completed:1:sha256-jcs-v1:36800f9d3ae748d407bc2ea24339049471c8ffe40aa86c53b35b6c7c6cd6ee80\n\
@@ -5160,8 +5158,7 @@ mfm_events::v1::RetentionManifestProjected schema:mfm.events.v1.retention_manife
             assert_eq!(SideEffectLedgerPurpose::Forward.kind(), "forward");
             assert_eq!(
                 SideEffectLedgerPurpose::Remediation {
-                    forward_ledger_key: SideEffectLedgerKey::new("forward-ledger").unwrap(),
-                    forward_pair_id: None,
+                    forward_pair_id: side_effect_pair_id(37),
                 }
                 .kind(),
                 "remediation"
@@ -5214,8 +5211,8 @@ mfm_events::v1::RetentionManifestProjected schema:mfm.events.v1.retention_manife
                     attempt_id: attempt_id(32),
                     ledger_key: SideEffectLedgerKey::new("ledger-1").expect("ledger"),
                     ledger_purpose: SideEffectLedgerPurpose::Forward,
-                    pair_id: Some(side_effect_pair_id(36)),
-                    pair_role: Some(SideEffectPairRole::Submit),
+                    pair_id: side_effect_pair_id(36),
+                    pair_role: SideEffectPairRole::Submit,
                     invocation_epoch: 3,
                     submission_schema_id: schema_id("mfm.test.submission", 33),
                     submission_hash: content_digest(34),
@@ -5226,8 +5223,8 @@ mfm_events::v1::RetentionManifestProjected schema:mfm.events.v1.retention_manife
             assert_eq!(side_effect.spec_hash(), &spec_hash(30));
             assert_eq!(side_effect_ref.node_id, &node_id(31));
             assert_eq!(side_effect_ref.attempt_id, &attempt_id(32));
-            assert_eq!(side_effect_ref.pair_id, Some(&side_effect_pair_id(36)));
-            assert_eq!(side_effect_ref.pair_role, Some(SideEffectPairRole::Submit));
+            assert_eq!(side_effect_ref.pair_id, &side_effect_pair_id(36));
+            assert_eq!(side_effect_ref.pair_role, SideEffectPairRole::Submit);
             assert_eq!(
                 side_effect_ref.kind,
                 SideEffectEventKind::SubmissionObserved
@@ -5399,8 +5396,8 @@ mfm_events::v1::RetentionManifestProjected schema:mfm.events.v1.retention_manife
                         attempt_id: attempt_id(108),
                         ledger_key: SideEffectLedgerKey::new("ledger-intent").expect("ledger"),
                         ledger_purpose: SideEffectLedgerPurpose::Forward,
-                        pair_id: Some(side_effect_pair_id(201)),
-                        pair_role: Some(SideEffectPairRole::Submit),
+                        pair_id: side_effect_pair_id(201),
+                        pair_role: SideEffectPairRole::Submit,
                         invocation_epoch: 1,
                         intent_schema_id: schema_id("mfm.test.intent", 109),
                         intent_hash: content_digest(110),
@@ -5438,8 +5435,8 @@ mfm_events::v1::RetentionManifestProjected schema:mfm.events.v1.retention_manife
                             ledger_key: SideEffectLedgerKey::new("ledger-prepared")
                                 .expect("ledger"),
                             ledger_purpose: SideEffectLedgerPurpose::Forward,
-                            pair_id: Some(side_effect_pair_id(201)),
-                            pair_role: Some(SideEffectPairRole::Submit),
+                            pair_id: side_effect_pair_id(201),
+                            pair_role: SideEffectPairRole::Submit,
                             invocation_epoch: 1,
                             claim_generation: 1,
                             claim_fencing_token: side_effect::ClaimFencingToken::new("token-1")
@@ -5460,8 +5457,8 @@ mfm_events::v1::RetentionManifestProjected schema:mfm.events.v1.retention_manife
                             ledger_key: SideEffectLedgerKey::new("ledger-not-submitted")
                                 .expect("ledger"),
                             ledger_purpose: SideEffectLedgerPurpose::Forward,
-                            pair_id: Some(side_effect_pair_id(201)),
-                            pair_role: Some(SideEffectPairRole::Submit),
+                            pair_id: side_effect_pair_id(201),
+                            pair_role: SideEffectPairRole::Submit,
                             invocation_epoch: 1,
                             proof_schema_id: schema_id("mfm.test.not_submitted", 124),
                             proof_hash: content_digest(125),
@@ -5479,8 +5476,8 @@ mfm_events::v1::RetentionManifestProjected schema:mfm.events.v1.retention_manife
                             ledger_key: SideEffectLedgerKey::new("ledger-submission")
                                 .expect("ledger"),
                             ledger_purpose: SideEffectLedgerPurpose::Forward,
-                            pair_id: Some(side_effect_pair_id(201)),
-                            pair_role: Some(SideEffectPairRole::Submit),
+                            pair_id: side_effect_pair_id(201),
+                            pair_role: SideEffectPairRole::Submit,
                             invocation_epoch: 1,
                             submission_schema_id: schema_id("mfm.test.submission", 130),
                             submission_hash: content_digest(131),
@@ -5498,8 +5495,8 @@ mfm_events::v1::RetentionManifestProjected schema:mfm.events.v1.retention_manife
                             ledger_key: SideEffectLedgerKey::new("ledger-submission-unknown")
                                 .expect("ledger"),
                             ledger_purpose: SideEffectLedgerPurpose::Forward,
-                            pair_id: Some(side_effect_pair_id(201)),
-                            pair_role: Some(SideEffectPairRole::Submit),
+                            pair_id: side_effect_pair_id(201),
+                            pair_role: SideEffectPairRole::Submit,
                             invocation_epoch: 1,
                             evidence_schema_id: schema_id("mfm.test.submission_unknown", 136),
                             evidence_hash: content_digest(137),
@@ -5515,8 +5512,8 @@ mfm_events::v1::RetentionManifestProjected schema:mfm.events.v1.retention_manife
                         attempt_id: attempt_id(141),
                         ledger_key: SideEffectLedgerKey::new("ledger-receipt").expect("ledger"),
                         ledger_purpose: SideEffectLedgerPurpose::Forward,
-                        pair_id: Some(side_effect_pair_id(201)),
-                        pair_role: Some(SideEffectPairRole::Verify),
+                        pair_id: side_effect_pair_id(201),
+                        pair_role: SideEffectPairRole::Verify,
                         invocation_epoch: 1,
                         receipt_schema_id: schema_id("mfm.test.receipt", 142),
                         receipt_hash: content_digest(143),
@@ -5538,8 +5535,8 @@ mfm_events::v1::RetentionManifestProjected schema:mfm.events.v1.retention_manife
                             ledger_key: SideEffectLedgerKey::new("ledger-confirmation")
                                 .expect("ledger"),
                             ledger_purpose: SideEffectLedgerPurpose::Forward,
-                            pair_id: Some(side_effect_pair_id(201)),
-                            pair_role: Some(SideEffectPairRole::Verify),
+                            pair_id: side_effect_pair_id(201),
+                            pair_role: SideEffectPairRole::Verify,
                             invocation_epoch: 1,
                             confirmation_schema_id: schema_id("mfm.test.confirmation", 151),
                             confirmation_hash: content_digest(152),
@@ -5561,8 +5558,8 @@ mfm_events::v1::RetentionManifestProjected schema:mfm.events.v1.retention_manife
                         attempt_id: attempt_id(159),
                         ledger_key: SideEffectLedgerKey::new("ledger-ambiguous").expect("ledger"),
                         ledger_purpose: SideEffectLedgerPurpose::Forward,
-                        pair_id: Some(side_effect_pair_id(201)),
-                        pair_role: Some(SideEffectPairRole::Verify),
+                        pair_id: side_effect_pair_id(201),
+                        pair_role: SideEffectPairRole::Verify,
                         invocation_epoch: 1,
                         ambiguity_code: AmbiguityCode::new("ambiguous").expect("ambiguity"),
                         evidence_schema_id: schema_id("mfm.test.ambiguity", 160),
@@ -5578,8 +5575,8 @@ mfm_events::v1::RetentionManifestProjected schema:mfm.events.v1.retention_manife
                         attempt_id: attempt_id(165),
                         ledger_key: SideEffectLedgerKey::new("ledger-failed").expect("ledger"),
                         ledger_purpose: SideEffectLedgerPurpose::Forward,
-                        pair_id: Some(side_effect_pair_id(201)),
-                        pair_role: Some(SideEffectPairRole::Verify),
+                        pair_id: side_effect_pair_id(201),
+                        pair_role: SideEffectPairRole::Verify,
                         invocation_epoch: 1,
                         failure_phase: side_effect::FailurePhase::BeforeInvocationStarted,
                         retryable: false,
