@@ -263,6 +263,8 @@ pub struct PreparedContractTransactionEvidence {
     pub data_len: u64,
     /// Signing digest requested from the signer provider.
     pub signing_digest: String,
+    /// Expected signed transaction hash reconstructed from deterministic signing.
+    pub expected_transaction_hash: String,
 }
 
 /// Prepared mutation containing public evidence plus transient signing requests.
@@ -277,8 +279,12 @@ impl PreparedContractMutation {
         evidence: PreparedContractInvocation,
         signing_requests: Vec<EvmSigningRequest>,
     ) -> Result<Self> {
+        ensure_prepared_invocation_public(&evidence)?;
         if evidence.transactions.len() != signing_requests.len() {
             return Err(EvmContractAdapterError::InvalidPreparedInvocation);
+        }
+        for transaction in &evidence.transactions {
+            parse_prepared_transaction_hash(&transaction.expected_transaction_hash)?;
         }
         Ok(Self {
             evidence,
@@ -480,7 +486,12 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         prepared: &PreparedContractMutation,
     ) -> Result<Vec<ContractTransactionSubmission>> {
         let mut submissions = Vec::with_capacity(prepared.signing_requests.len());
-        for signing_request in prepared.signing_requests() {
+        for (transaction, signing_request) in prepared
+            .evidence()
+            .transactions
+            .iter()
+            .zip(prepared.signing_requests())
+        {
             let result = self
                 .mutation
                 .signer
@@ -491,6 +502,11 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
                 .transaction_hash()
                 .parse::<B256>()
                 .map_err(|_| EvmContractAdapterError::TransactionHashMismatch)?;
+            let prepared_hash =
+                parse_prepared_transaction_hash(&transaction.expected_transaction_hash)?;
+            if expected_hash != prepared_hash {
+                return Err(EvmContractAdapterError::TransactionHashMismatch);
+            }
             let payload =
                 SignedEvmPayload::from_verified_bytes(raw.bytes().to_vec(), expected_hash)?;
             let response = self
@@ -764,6 +780,9 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
                     }
                 }
             };
+            let expected_transaction_hash = self
+                .expected_transaction_hash_for_request(&prepared.request)
+                .await?;
             evidence.push(PreparedContractTransactionEvidence {
                 index: index as u64,
                 style: prepared.style,
@@ -780,6 +799,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
                 data_digest: digest_bytes(&input.data).to_string(),
                 data_len: input.data.len() as u64,
                 signing_digest: format!("{:?}", prepared.request.signing_hash()),
+                expected_transaction_hash: format!("{expected_transaction_hash:?}"),
             });
             signing_requests.push(prepared.request);
         }
@@ -799,6 +819,21 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
             },
             signing_requests,
         )
+    }
+
+    async fn expected_transaction_hash_for_request(
+        &self,
+        signing_request: &EvmSigningRequest,
+    ) -> Result<B256> {
+        let result = self
+            .mutation
+            .signer
+            .sign(signing_request.signing_request())
+            .await?;
+        let raw = signing_request.materialize_signed_payload(&result)?;
+        raw.transaction_hash()
+            .parse::<B256>()
+            .map_err(|_| EvmContractAdapterError::TransactionHashMismatch)
     }
 
     async fn evaluate_assertions(
@@ -1249,6 +1284,7 @@ fn reconstruct_prepared_mutation(
         if transaction.signing_digest != format!("{:?}", signing_request.signing_hash()) {
             return Err(EvmContractAdapterError::InvalidPreparedInvocation);
         }
+        parse_prepared_transaction_hash(&transaction.expected_transaction_hash)?;
         signing_requests.push(signing_request);
     }
 
@@ -1269,6 +1305,12 @@ struct PreparedMutationReconstruction<'a> {
 fn required_prepared_quantity(value: Option<&str>, field: &'static str) -> Result<u128> {
     optional_policy_quantity(value, field)?
         .ok_or(EvmContractAdapterError::InvalidPreparedInvocation)
+}
+
+fn parse_prepared_transaction_hash(value: &str) -> Result<B256> {
+    value
+        .parse::<B256>()
+        .map_err(|_| EvmContractAdapterError::InvalidPreparedInvocation)
 }
 
 fn parse_optional_wei(value: Option<&str>) -> Result<u128> {
@@ -2890,8 +2932,14 @@ mod tests {
         EvmGasEstimateResponse, EvmLogsReadResponse, EvmNonceReadResponse, EvmReceiptReadResponse,
         RedactedEvmSourceEvidence,
     };
-    use mfm_evm_signing::EvmTransactionStyle as SigningTransactionStyle;
+    use mfm_evm_signing::{
+        primitive_signature_from_bytes, recover_signing_address,
+        EvmTransactionStyle as SigningTransactionStyle,
+    };
     use mfm_replay::v1::SideEffectReplayVerifier;
+    use mfm_signing::{
+        PublicSigningIdentity, SignatureBytes, SigningError, SigningRequest, SigningResult,
+    };
     use serde_json::json;
     use std::sync::Mutex;
 
@@ -2941,6 +2989,7 @@ mod tests {
     }
 
     fn deploy_config(style: &str) -> DeployPhaseConfig {
+        let expected_signer_address = expected_test_signer_address(style);
         serde_json::from_value(json!({
             "artifact": artifact_json(),
             "network": {
@@ -2949,7 +2998,7 @@ mod tests {
             },
             "signer": {
                 "signer_ref": "deployer",
-                "expected_signer_address": "0x0f65fe9276bc9a24ae7083ae28e2660ef72df99e"
+                "expected_signer_address": expected_signer_address
             },
             "transaction": match style {
                 "legacy" => json!({"style": "legacy", "gas_price": "7"}),
@@ -3071,10 +3120,77 @@ mod tests {
     impl SigningProvider for TestEvmProviders {
         fn sign<'a>(
             &'a self,
-            _request: &'a mfm_signing::SigningRequest,
+            request: &'a mfm_signing::SigningRequest,
         ) -> mfm_signing::SigningFuture<'a> {
-            Box::pin(async { panic!("not used in preparation tests") })
+            let result = test_signing_result(request);
+            Box::pin(async move { result })
         }
+    }
+
+    fn test_signature_bytes() -> SignatureBytes {
+        SignatureBytes::new(
+            hex_to_bytes(
+                "0x48b55bfa915ac795c431978d8a6a992b628d557da5ff759b307d495a36649353\
+                 efffd310ac743f371de3b9f7f9cb56c0b28ad43601b4ab949f53faa07bd2c8041b",
+            )
+            .expect("signature hex"),
+        )
+        .expect("signature bytes")
+    }
+
+    fn test_signing_result(request: &SigningRequest) -> mfm_signing::Result<SigningResult> {
+        let signature = test_signature_bytes();
+        let primitive = primitive_signature_from_bytes(&signature)
+            .map_err(|_| SigningError::redacted_provider_failure("test signer"))?;
+        let recovered =
+            recover_signing_address(B256::from(*request.digest().as_bytes()), primitive)
+                .map_err(|_| SigningError::redacted_provider_failure("test signer"))?;
+        let identity = PublicSigningIdentity::new(
+            request.algorithm().clone(),
+            None,
+            Some(format!("{recovered:?}")),
+        )?;
+        SigningResult::for_request(request, identity, signature)
+    }
+
+    fn expected_test_signer_address(style: &str) -> String {
+        let signer_ref = SignerRef::new("deployer").expect("signer ref");
+        let expected_from = Address::from([0_u8; 20]);
+        let data = vec![0x60, 0x00];
+        let request = match style {
+            "legacy" => EvmSigningRequest::legacy(
+                signer_ref,
+                LegacyTxToSign {
+                    to: None,
+                    value_wei: 0,
+                    chain_id: 1,
+                    nonce: 7,
+                    gas_price_wei: 7,
+                    gas_limit: 21_000,
+                    data,
+                },
+                expected_from,
+            ),
+            _ => EvmSigningRequest::eip1559(
+                signer_ref,
+                Eip1559TxToSign {
+                    to: None,
+                    value_wei: 0,
+                    chain_id: 1,
+                    nonce: 7,
+                    max_fee_per_gas: 11,
+                    max_priority_fee_per_gas: 3,
+                    gas_limit: 21_000,
+                    data,
+                },
+                expected_from,
+            ),
+        }
+        .expect("signing request");
+        let primitive = primitive_signature_from_bytes(&test_signature_bytes()).expect("signature");
+        let recovered =
+            recover_signing_address(request.signing_hash(), primitive).expect("recovered address");
+        format!("{recovered:?}")
     }
 
     fn adapter<'a>(
@@ -3191,7 +3307,7 @@ mod tests {
         assert_eq!(evidence.signer_ref, "deployer");
         assert_eq!(
             evidence.expected_signer_address,
-            "0x0f65fe9276bc9a24ae7083ae28e2660ef72df99e"
+            expected_test_signer_address("eip1559")
         );
         let transaction = evidence.transactions.first().expect("transaction");
         let rendered_transaction = rendered_value["transactions"][0].clone();
@@ -3201,6 +3317,7 @@ mod tests {
                 "chain_id",
                 "data_digest",
                 "data_len",
+                "expected_transaction_hash",
                 "gas_limit",
                 "gas_price",
                 "index",
@@ -3223,6 +3340,8 @@ mod tests {
         assert_eq!(transaction.data_len, 2);
         assert!(transaction.signing_digest.starts_with("0x"));
         assert_eq!(transaction.signing_digest.len(), 66);
+        assert!(transaction.expected_transaction_hash.starts_with("0x"));
+        assert_eq!(transaction.expected_transaction_hash.len(), 66);
 
         let rendered = serde_json::to_string(prepared.evidence()).expect("json");
         let rendered = rendered.to_ascii_lowercase();
@@ -3232,6 +3351,54 @@ mod tests {
                 "prepared invocation evidence contains forbidden runtime surface"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn prepared_invocation_reconstruction_preserves_submission_anchor() {
+        let route = route();
+        let providers = TestEvmProviders;
+        let adapter = adapter(&route, &providers);
+        let config = validated_deploy_config("eip1559");
+        let intent = deploy_intent(&config);
+
+        let prepared = adapter
+            .prepare_deploy_invocation(&config, &intent)
+            .await
+            .expect("prepared");
+        let reconstructed = adapter
+            .reconstruct_deploy_invocation(&config, &intent, prepared.evidence())
+            .expect("reconstructed");
+
+        assert_eq!(reconstructed.evidence(), prepared.evidence());
+        assert_eq!(
+            reconstructed.evidence().transactions[0].expected_transaction_hash,
+            prepared.evidence().transactions[0].expected_transaction_hash
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_rejects_resigned_hash_mismatch_before_broadcast() {
+        let route = route();
+        let providers = TestEvmProviders;
+        let adapter = adapter(&route, &providers);
+        let config = validated_deploy_config("eip1559");
+        let intent = deploy_intent(&config);
+
+        let prepared = adapter
+            .prepare_deploy_invocation(&config, &intent)
+            .await
+            .expect("prepared");
+        let mut evidence = prepared.evidence().clone();
+        evidence.transactions[0].expected_transaction_hash =
+            "0x1111111111111111111111111111111111111111111111111111111111111111".to_owned();
+        let reconstructed = adapter
+            .reconstruct_deploy_invocation(&config, &intent, &evidence)
+            .expect("reconstructed");
+
+        assert!(matches!(
+            adapter.submit_prepared(&reconstructed).await,
+            Err(EvmContractAdapterError::TransactionHashMismatch)
+        ));
     }
 
     #[test]
@@ -3275,6 +3442,9 @@ mod tests {
                 data_len: 2,
                 signing_digest:
                     "0x0000000000000000000000000000000000000000000000000000000000000000"
+                        .to_owned(),
+                expected_transaction_hash:
+                    "0x1111111111111111111111111111111111111111111111111111111111111111"
                         .to_owned(),
             }],
             poll_interval_ms: 1_000,
@@ -3335,6 +3505,7 @@ mod tests {
                 data_digest: "content:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000".to_owned(),
                 data_len: 0,
                 signing_digest: transaction_hash.to_owned(),
+                expected_transaction_hash: transaction_hash.to_owned(),
             }],
             poll_interval_ms: 25,
             max_receipt_polls: 3,
