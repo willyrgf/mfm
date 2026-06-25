@@ -66,7 +66,7 @@ worker-local default, or launch-time `RunAdmitted` echo is independent verificat
 
 Remediation linkage is structural. Remediation nodes live outside the forward graph and are linked
 to the forward side-effect node they compensate. Remediation reuses the side-effect protocol with
-`SideEffectLedgerPurpose::Remediation { forward_ledger_key }`; forward ledgers use
+`SideEffectLedgerPurpose::Remediation { forward_pair_id }`; forward ledgers use
 `SideEffectLedgerPurpose::Forward`.
 
 ## Engagement And Quiescence
