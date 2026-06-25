@@ -1062,6 +1062,7 @@ pub mod v1 {
                             &payload.pair_id,
                             &payload.ledger_key,
                             payload.invocation_epoch,
+                            payload.pair_role,
                             &payload.node_id,
                             &payload.attempt_id,
                         )?;
@@ -1071,6 +1072,7 @@ pub mod v1 {
                             &payload.pair_id,
                             &payload.ledger_key,
                             payload.invocation_epoch,
+                            payload.pair_role,
                             &payload.node_id,
                             &payload.attempt_id,
                         )?;
@@ -1083,6 +1085,7 @@ pub mod v1 {
                             &payload.pair_id,
                             &payload.ledger_key,
                             payload.invocation_epoch,
+                            payload.pair_role,
                             &payload.node_id,
                             &payload.attempt_id,
                         )?;
@@ -1099,6 +1102,7 @@ pub mod v1 {
                             &payload.pair_id,
                             &payload.ledger_key,
                             payload.invocation_epoch,
+                            payload.pair_role,
                             &payload.node_id,
                             &payload.attempt_id,
                         )?;
@@ -1108,6 +1112,7 @@ pub mod v1 {
                             &payload.pair_id,
                             &payload.ledger_key,
                             payload.invocation_epoch,
+                            payload.pair_role,
                             &payload.node_id,
                             &payload.attempt_id,
                         )?;
@@ -1125,10 +1130,13 @@ pub mod v1 {
                             &payload.pair_id,
                             &payload.ledger_key,
                             payload.invocation_epoch,
+                            payload.pair_role,
                             &payload.node_id,
                             &payload.attempt_id,
                         )?;
                         self.verify_resource_touched_set(
+                            &payload.pair_id,
+                            payload.pair_role,
                             &payload.node_id,
                             payload.resource_touched_set.as_ref(),
                         )?;
@@ -1146,10 +1154,13 @@ pub mod v1 {
                             &payload.pair_id,
                             &payload.ledger_key,
                             payload.invocation_epoch,
+                            payload.pair_role,
                             &payload.node_id,
                             &payload.attempt_id,
                         )?;
                         self.verify_resource_touched_set(
+                            &payload.pair_id,
+                            payload.pair_role,
                             &payload.node_id,
                             payload.resource_touched_set.as_ref(),
                         )?;
@@ -1167,6 +1178,7 @@ pub mod v1 {
                             &payload.pair_id,
                             &payload.ledger_key,
                             payload.invocation_epoch,
+                            payload.pair_role,
                             &payload.node_id,
                             &payload.attempt_id,
                         )?;
@@ -1178,6 +1190,7 @@ pub mod v1 {
                             &payload.pair_id,
                             &payload.ledger_key,
                             payload.invocation_epoch,
+                            payload.pair_role,
                             &payload.node_id,
                             &payload.attempt_id,
                         )?;
@@ -1195,6 +1208,7 @@ pub mod v1 {
                             &payload.pair_id,
                             &payload.ledger_key,
                             payload.invocation_epoch,
+                            payload.pair_role,
                             &payload.node_id,
                             &payload.attempt_id,
                         )?;
@@ -1205,6 +1219,7 @@ pub mod v1 {
                             &payload.pair_id,
                             &payload.ledger_key,
                             payload.invocation_epoch,
+                            payload.pair_role,
                             &payload.node_id,
                             &payload.attempt_id,
                         )?;
@@ -1273,6 +1288,7 @@ pub mod v1 {
                             &payload.pair_id,
                             &payload.ledger_key,
                             payload.invocation_epoch,
+                            payload.pair_role,
                             &payload.node_id,
                             &payload.attempt_id,
                         )?;
@@ -1642,6 +1658,7 @@ pub mod v1 {
                 &payload.pair_id,
                 &payload.ledger_key,
                 payload.invocation_epoch,
+                payload.pair_role,
                 &payload.node_id,
                 &payload.attempt_id,
             )?;
@@ -1660,11 +1677,14 @@ pub mod v1 {
 
         fn verify_resource_touched_set(
             &self,
+            pair_id: &SideEffectPairId,
+            pair_role: events::SideEffectPairRole,
             node_id: &NodeId,
             touched_set: Option<&events::ResourceTouchedSetEvidence>,
         ) -> Result<()> {
-            self.node(node_id)?;
-            CertifiedSideEffectContract::for_node(&self.certified_spec.spec, node_id)
+            let contract_node_id =
+                self.side_effect_contract_node_for_pair_event(pair_id, pair_role, node_id)?;
+            CertifiedSideEffectContract::for_node(&self.certified_spec.spec, contract_node_id)
                 .and_then(|contract| contract.validate_touched_set(touched_set))
                 .map_err(certified_contract_mismatch)
         }
@@ -1931,6 +1951,7 @@ pub mod v1 {
             pair_id: &SideEffectPairId,
             ledger_key: &events::SideEffectLedgerKey,
             invocation_epoch: u32,
+            pair_role: events::SideEffectPairRole,
             node_id: &NodeId,
             attempt_id: &AttemptId,
         ) -> Result<()> {
@@ -1943,14 +1964,87 @@ pub mod v1 {
             if intent.ledger_key != *ledger_key
                 || intent.pair_id != *pair_id
                 || intent.invocation_epoch != invocation_epoch
-                || intent.node_id != *node_id
-                || intent.attempt_id != *attempt_id
             {
                 return Err(side_effect_mismatch(
                     "side-effect event does not match persisted intent",
                 ));
             }
+            match pair_role {
+                events::SideEffectPairRole::Submit => {
+                    if intent.node_id != *node_id || intent.attempt_id != *attempt_id {
+                        return Err(side_effect_mismatch(
+                            "side-effect event does not match persisted intent",
+                        ));
+                    }
+                }
+                events::SideEffectPairRole::Verify => {
+                    let (verify_node, verify) = self.side_effect_verify_node_for_pair(pair_id)?;
+                    if verify.submit_node_id != intent.node_id || verify_node.node_id != *node_id {
+                        return Err(side_effect_mismatch(
+                            "side-effect verify event does not match certified pair",
+                        ));
+                    }
+                    self.node(node_id)?;
+                }
+            }
             Ok(())
+        }
+
+        fn side_effect_contract_node_for_pair_event(
+            &self,
+            pair_id: &SideEffectPairId,
+            pair_role: events::SideEffectPairRole,
+            node_id: &NodeId,
+        ) -> Result<&NodeId> {
+            let intent = self.intents.get(pair_id).ok_or_else(|| {
+                ReplayError::new(
+                    ReplayErrorKind::SideEffectMissing,
+                    format!("missing side-effect intent {pair_id}"),
+                )
+            })?;
+            match pair_role {
+                events::SideEffectPairRole::Submit => {
+                    if intent.node_id != *node_id {
+                        return Err(side_effect_mismatch(
+                            "side-effect event does not match persisted intent",
+                        ));
+                    }
+                    Ok(&intent.node_id)
+                }
+                events::SideEffectPairRole::Verify => {
+                    let (verify_node, verify) = self.side_effect_verify_node_for_pair(pair_id)?;
+                    if verify.submit_node_id != intent.node_id || verify_node.node_id != *node_id {
+                        return Err(side_effect_mismatch(
+                            "side-effect verify event does not match certified pair",
+                        ));
+                    }
+                    Ok(&intent.node_id)
+                }
+            }
+        }
+
+        fn side_effect_verify_node_for_pair(
+            &self,
+            pair_id: &SideEffectPairId,
+        ) -> Result<(&spec::NodeSpec, &spec::SideEffectVerifyNodeSpec)> {
+            self.certified_spec
+                .spec
+                .nodes
+                .iter()
+                .find_map(|node| match &node.framework {
+                    Some(spec::FrameworkNodeSpec::SideEffectVerify(verify))
+                        if verify.pair_id == *pair_id =>
+                    {
+                        Some((node, verify))
+                    }
+                    _ => None,
+                })
+                .ok_or_else(|| {
+                    ReplayError::new(
+                        ReplayErrorKind::CertifiedEvidenceMismatch,
+                        format!("side-effect pair {pair_id} has no certified verify node"),
+                    )
+                })
         }
 
         fn verify_cell_produced_against_spec(&self, payload: &events::CellProduced) -> Result<()> {
