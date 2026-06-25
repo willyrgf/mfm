@@ -325,6 +325,15 @@ macro_rules! impl_side_effect_state_spec {
                 std::future::ready(Ok(intent.clone()))
             }
 
+            fn output_from_receipt(
+                &self,
+                _input: &Self::Input,
+                _intent: &Self::Intent,
+                receipt: &Self::Receipt,
+            ) -> StateResult<Self::Output> {
+                Ok(receipt.clone())
+            }
+
             fn output_from_confirmation(
                 &self,
                 _input: &Self::Input,
@@ -828,11 +837,13 @@ fn linked_compensation_authoring_keeps_remediation_out_of_forward_nodes() {
                         config: LaunchConfig { multiplier: 5 },
                         input,
                         resource_claim: forward_claim.clone(),
+                        verification: SideEffectVerificationSpec::Receipt,
                     },
                     RemediationNodeParams {
                         key: StateKey::new("compensate-forward")?,
                         config: LaunchConfig { multiplier: 7 },
                         resource_claim: remediation_claim.clone(),
+                        verification: SideEffectVerificationSpec::Receipt,
                     },
                     |forward| Ok(forward.clone()),
                 )?;
@@ -860,6 +871,10 @@ fn linked_compensation_authoring_keeps_remediation_out_of_forward_nodes() {
         forward.side_effect_resource_claim.as_ref(),
         Some(expected_forward_claim.as_spec())
     );
+    assert_eq!(
+        forward.side_effect_verification.as_ref(),
+        Some(&SideEffectVerificationSpec::Receipt)
+    );
     let remediation = draft
         .remediation_nodes()
         .get(&forward.node_id)
@@ -871,6 +886,10 @@ fn linked_compensation_authoring_keeps_remediation_out_of_forward_nodes() {
     assert_eq!(
         remediation.side_effect_resource_claim.as_ref(),
         Some(expected_remediation_claim.as_spec())
+    );
+    assert_eq!(
+        remediation.side_effect_verification.as_ref(),
+        Some(&SideEffectVerificationSpec::Receipt)
     );
     assert!(
         draft
@@ -917,11 +936,13 @@ fn linked_compensation_rejects_same_forward_and_remediation_key() {
                         config: LaunchConfig { multiplier: 5 },
                         input,
                         resource_claim: manual_resource_claim(),
+                        verification: SideEffectVerificationSpec::Receipt,
                     },
                     RemediationNodeParams {
                         key: StateKey::new("forward")?,
                         config: LaunchConfig { multiplier: 7 },
                         resource_claim: manual_resource_claim(),
+                        verification: SideEffectVerificationSpec::Receipt,
                     },
                     |forward| Ok(forward.clone()),
                 )?;
@@ -957,6 +978,7 @@ fn compensating_policy_requires_every_forward_side_effect_linked() {
                 LaunchConfig { multiplier: 5 },
                 input,
                 manual_resource_claim(),
+                SideEffectVerificationSpec::Receipt,
             )?;
             root.bind_public_outputs(
                 PublicOutputKey::new("terminal")?,
@@ -1017,11 +1039,13 @@ fn out_of_scope_remediation_binding_fails_finalize() {
                         config: LaunchConfig { multiplier: 5 },
                         input,
                         resource_claim: manual_resource_claim(),
+                        verification: SideEffectVerificationSpec::Receipt,
                     },
                     RemediationNodeParams {
                         key: StateKey::new("compensate-forward")?,
                         config: LaunchConfig { multiplier: 7 },
                         resource_claim: manual_resource_claim(),
+                        verification: SideEffectVerificationSpec::Receipt,
                     },
                     |_forward| Ok(sibling),
                 )?;

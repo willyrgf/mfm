@@ -31,11 +31,13 @@ fn main() -> mfm_program::Result<()> {
                         config: TryConfig { multiplier: 2 },
                         input: seed,
                         resource_claim: mfm_program::ResourceClaim::manual_only(),
+                        verification: mfm_program::SideEffectVerificationSpec::Receipt,
                     },
                     mfm_program::RemediationNodeParams {
                         key: mfm_program::StateKey::new("compensate-forward")?,
                         config: TryConfig { multiplier: 3 },
                         resource_claim: mfm_program::ResourceClaim::manual_only(),
+                        verification: mfm_program::SideEffectVerificationSpec::Receipt,
                     },
                     |forward| Ok(forward),
                 )?;

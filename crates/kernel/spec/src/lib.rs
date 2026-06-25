@@ -1735,6 +1735,34 @@ pub mod v1 {
         }
     }
 
+    /// Certified side-effect terminal verification policy.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum SideEffectVerificationSpec {
+        /// Receipt evidence is terminal. This is final-at-risk if the external chain can reorg.
+        Receipt,
+        /// Confirmation/finality evidence at a certified positive depth is terminal.
+        Finalized {
+            /// Required confirmation/finality depth.
+            depth: u64,
+        },
+    }
+
+    impl SideEffectVerificationSpec {
+        fn json(&self) -> serde_json::Value {
+            match self {
+                Self::Receipt => serde_json::json!({
+                    "kind": "receipt",
+                }),
+                Self::Finalized { depth } => serde_json::json!({
+                    "finalized": {
+                        "depth": depth,
+                    },
+                    "kind": "finalized",
+                }),
+            }
+        }
+    }
+
     /// Side-effect contract persisted in node specs.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct SideEffectContractSpec {
@@ -1742,6 +1770,8 @@ pub mod v1 {
         pub contract_digest: ContentDigest,
         /// Mandatory cross-run resource claim declaration.
         pub resource_claim: ResourceClaimSpec,
+        /// Certified terminal verification policy.
+        pub verification: SideEffectVerificationSpec,
     }
 
     impl SideEffectContractSpec {
@@ -1749,6 +1779,7 @@ pub mod v1 {
             serde_json::json!({
                 "contract_digest": self.contract_digest.as_str(),
                 "resource_claim": self.resource_claim.json(),
+                "verification": self.verification.json(),
             })
         }
     }
@@ -3005,7 +3036,33 @@ pub mod v1 {
         Ok(SideEffectContractSpec {
             contract_digest: identity(required_str(object, "contract_digest")?)?,
             resource_claim: parse_resource_claim(required(object, "resource_claim")?)?,
+            verification: parse_side_effect_verification(required(object, "verification")?)?,
         })
+    }
+
+    fn parse_side_effect_verification(
+        value: &serde_json::Value,
+    ) -> Result<SideEffectVerificationSpec> {
+        let verification = object(value, "side-effect verification")?;
+        match required_str(verification, "kind")? {
+            "receipt" => Ok(SideEffectVerificationSpec::Receipt),
+            "finalized" => {
+                let finalized = object(
+                    required(verification, "finalized")?,
+                    "finalized side-effect verification",
+                )?;
+                let depth = required_u64(finalized, "depth")?;
+                if depth == 0 {
+                    return Err(json_error(
+                        "finalized side-effect verification depth must be positive",
+                    ));
+                }
+                Ok(SideEffectVerificationSpec::Finalized { depth })
+            }
+            kind => Err(json_error(format!(
+                "unsupported side-effect verification kind {kind:?}"
+            ))),
+        }
     }
 
     fn parse_resource_claim(value: &serde_json::Value) -> Result<ResourceClaimSpec> {
@@ -4261,6 +4318,7 @@ pub mod v1 {
             manual.nodes[0].side_effect = Some(SideEffectContractSpec {
                 contract_digest: content(0x91),
                 resource_claim: ResourceClaimSpec::ManualOnly,
+                verification: SideEffectVerificationSpec::Receipt,
             });
             let manual_hash = manual.spec_hash().expect("manual claim hash");
 
@@ -4296,6 +4354,40 @@ pub mod v1 {
                 .expect_err("missing resource claim rejects");
             assert!(matches!(err, SpecError::Json(message) if message.contains("resource_claim")));
 
+            let mut missing: serde_json::Value =
+                serde_json::from_str(canonical.as_str()).expect("json value");
+            missing["nodes"][0]["side_effect"]
+                .as_object_mut()
+                .expect("side-effect object")
+                .remove("verification");
+            let missing = serde_json::to_string(&missing).expect("json");
+            let err = TypedExecutionSpec::from_json_str(&missing)
+                .expect_err("missing verification rejects");
+            assert!(matches!(err, SpecError::Json(message) if message.contains("verification")));
+
+            let mut finalized_1 = exclusive.clone();
+            finalized_1.nodes[0]
+                .side_effect
+                .as_mut()
+                .expect("side-effect")
+                .verification = SideEffectVerificationSpec::Finalized { depth: 1 };
+            let mut finalized_12 = exclusive.clone();
+            finalized_12.nodes[0]
+                .side_effect
+                .as_mut()
+                .expect("side-effect")
+                .verification = SideEffectVerificationSpec::Finalized { depth: 12 };
+            assert_ne!(
+                finalized_1.spec_hash().expect("finalized one hash"),
+                exclusive.spec_hash().expect("receipt hash"),
+                "side-effect verification policy must be hash-defining"
+            );
+            assert_ne!(
+                finalized_12.spec_hash().expect("finalized twelve hash"),
+                finalized_1.spec_hash().expect("finalized one hash"),
+                "side-effect verification depth must be hash-defining"
+            );
+
             let mut unknown: serde_json::Value =
                 serde_json::from_str(canonical.as_str()).expect("json value");
             unknown["nodes"][0]["side_effect"]["resource_claim"]["kind"] =
@@ -4306,6 +4398,34 @@ pub mod v1 {
             assert!(matches!(
                 err,
                 SpecError::Json(message) if message.contains("unsupported resource claim kind")
+            ));
+
+            let mut unknown: serde_json::Value =
+                serde_json::from_str(canonical.as_str()).expect("json value");
+            unknown["nodes"][0]["side_effect"]["verification"]["kind"] =
+                serde_json::json!("mutable_registry");
+            let unknown = serde_json::to_string(&unknown).expect("json");
+            let err = TypedExecutionSpec::from_json_str(&unknown)
+                .expect_err("unknown verification rejects");
+            assert!(matches!(
+                err,
+                SpecError::Json(message) if message.contains("unsupported side-effect verification kind")
+            ));
+
+            let mut zero_depth: serde_json::Value =
+                serde_json::from_str(canonical.as_str()).expect("json value");
+            zero_depth["nodes"][0]["side_effect"]["verification"] = serde_json::json!({
+                "finalized": {
+                    "depth": 0,
+                },
+                "kind": "finalized",
+            });
+            let zero_depth = serde_json::to_string(&zero_depth).expect("json");
+            let err = TypedExecutionSpec::from_json_str(&zero_depth)
+                .expect_err("zero finalized depth rejects");
+            assert!(matches!(
+                err,
+                SpecError::Json(message) if message.contains("depth must be positive")
             ));
         }
 

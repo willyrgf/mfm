@@ -593,6 +593,19 @@ impl SideEffectState for ProofApplySideEffectState {
         }))
     }
 
+    fn output_from_receipt(
+        &self,
+        _input: &Self::Input,
+        _intent: &Self::Intent,
+        receipt: &Self::Receipt,
+    ) -> StateResult<Self::Output> {
+        Ok(ProofSideEffectResult {
+            tx_hash: receipt.tx_hash.clone(),
+            confirmations: 0,
+            status: "receipt_observed".to_owned(),
+        })
+    }
+
     fn output_from_confirmation(
         &self,
         _input: &Self::Input,
@@ -721,5 +734,42 @@ mod tests {
 
         assert_ne!(config_bytes.as_bytes(), intent_bytes.as_bytes());
         assert_ne!(config_bytes.content_digest(), intent_bytes.content_digest());
+    }
+
+    #[test]
+    fn proof_side_effect_outputs_reflect_terminal_evidence_level() {
+        let state = ProofApplySideEffectState::new(
+            mfm_program::ValidatedConfig::new(ProofApplyConfig::new("accept").expect("config"))
+                .expect("validated config"),
+        )
+        .expect("state");
+        let input = ProofFact { n: 7 };
+        let intent = state.prepare_intent(&input).expect("intent");
+
+        let receipt = state
+            .output_from_receipt(
+                &input,
+                &intent,
+                &ProofReceipt {
+                    tx_hash: "0xreceipt".to_owned(),
+                    submission_id: "proof-submission-accept-7".to_owned(),
+                },
+            )
+            .expect("receipt output");
+        let confirmation = state
+            .output_from_confirmation(
+                &input,
+                &intent,
+                &ProofConfirmation {
+                    tx_hash: "0xconfirmed".to_owned(),
+                    confirmations: 3,
+                },
+            )
+            .expect("confirmation output");
+
+        assert_eq!(receipt.status, "receipt_observed");
+        assert_eq!(receipt.confirmations, 0);
+        assert_eq!(confirmation.status, "confirmed");
+        assert_eq!(confirmation.confirmations, 3);
     }
 }

@@ -30,7 +30,8 @@ use mfm_ids::{DigestAlgorithm, OperationKind, OperationVersion, SeedId};
 use mfm_program::{
     build_root_with_registries, CanonicalSeed, Handle, Operation, OperationExpansion, OperationKey,
     OperationRegistryBuilder, PublicOutputKey, RootBound, RootBuilder, ScopeKey, SeedKey,
-    SideEffectSagaPolicy, StateKey, StateRegistryBuilder, TypedProgramLaunchPlan,
+    SideEffectSagaPolicy, SideEffectVerificationSpec, StateKey, StateRegistryBuilder,
+    TypedProgramLaunchPlan,
 };
 use mfm_program_derive::{MfmConfig, OperationOutput, PublicOutputs};
 use mfm_state_evm_contracts::{
@@ -261,6 +262,7 @@ impl Operation for DeployContractOperation {
                 config,
                 (),
                 account_nonce_resource_claim()?,
+                SideEffectVerificationSpec::Receipt,
             )?
             .into_handle();
         Ok(ContractDeployOperationOutputs { deployed })
@@ -301,6 +303,7 @@ impl Operation for ConfigureContractOperation {
                 config,
                 ConfigureContractInputHandles { deployed },
                 account_nonce_resource_claim()?,
+                SideEffectVerificationSpec::Receipt,
             )?
             .into_handle();
         Ok(ContractConfigureOperationOutputs { configured })
@@ -378,6 +381,7 @@ impl Operation for ContractLifecycleOperation {
                 config.deploy,
                 (),
                 account_nonce_resource_claim()?,
+                SideEffectVerificationSpec::Receipt,
             )?
             .into_handle();
         let configured = builder
@@ -388,6 +392,7 @@ impl Operation for ContractLifecycleOperation {
                     deployed: deployed.clone(),
                 },
                 account_nonce_resource_claim()?,
+                SideEffectVerificationSpec::Receipt,
             )?
             .into_handle();
         let validation_report = builder.state::<ValidateContractState, _>(

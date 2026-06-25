@@ -897,6 +897,7 @@ mod tests {
                     namespace: ResourceNamespace::new("mfm.test.account_nonce").expect("namespace"),
                     key_schema: schema,
                 },
+                verification: spec::SideEffectVerificationSpec::Receipt,
             }),
             framework: None,
             planning_lineage: spec::PlanningLineage {
