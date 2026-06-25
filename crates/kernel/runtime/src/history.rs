@@ -390,20 +390,7 @@ impl RuntimeRunView {
         for event in stream {
             match event.payload() {
                 events::KernelEventPayload::RunAdmitted(payload) => {
-                    if &payload.run_id != committed.run_id() {
-                        return Err(RuntimeError::InvalidRunStream(format!(
-                            "run stream contains RunAdmitted for {} while executing {}",
-                            payload.run_id,
-                            committed.run_id()
-                        )));
-                    }
-                    if &payload.spec_hash != runtime_spec.spec_hash() {
-                        return Err(RuntimeError::InvalidRunStream(format!(
-                            "RunAdmitted spec hash {} does not match certified {}",
-                            payload.spec_hash,
-                            runtime_spec.spec_hash()
-                        )));
-                    }
+                    validate_run_identity_material(runtime_spec, committed.run_id(), payload)?;
                     if run_admitted.replace(payload.clone()).is_some() {
                         return Err(RuntimeError::InvalidRunStream(
                             "run stream contains multiple RunAdmitted events".to_owned(),
@@ -1369,6 +1356,7 @@ fn validate_run_admitted_matches_certified_spec(
     run_id: &RunId,
     run_admitted: &events::RunAdmitted,
 ) -> Result<()> {
+    validate_run_identity_material(runtime_spec, run_id, run_admitted)?;
     if run_admitted.run_id != *run_id
         || run_admitted.spec_hash != *runtime_spec.spec_hash()
         || run_admitted.spec_version != runtime_spec.spec().spec_version
@@ -1405,6 +1393,38 @@ fn validate_run_admitted_matches_certified_spec(
             .collect(),
     )?;
     validate_seed_cells(runtime_spec, &run_admitted.seed_cells)?;
+    Ok(())
+}
+
+fn validate_run_identity_material(
+    runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
+    run_admitted: &events::RunAdmitted,
+) -> Result<()> {
+    if &run_admitted.run_id != run_id {
+        return Err(RuntimeError::InvalidRunStream(format!(
+            "run stream contains RunAdmitted for {} while executing {}",
+            run_admitted.run_id, run_id
+        )));
+    }
+    if &run_admitted.spec_hash != runtime_spec.spec_hash() {
+        return Err(RuntimeError::InvalidRunStream(format!(
+            "RunAdmitted spec hash {} does not match certified {}",
+            run_admitted.spec_hash,
+            runtime_spec.spec_hash()
+        )));
+    }
+    if run_admitted.identity_material.certified_spec_hash != run_admitted.spec_hash {
+        return Err(RuntimeError::InvalidRunStream(
+            "RunAdmitted identity material spec hash does not match event spec hash".to_owned(),
+        ));
+    }
+    let derived_run_id = run_admitted.identity_material.derive_run_id()?;
+    if derived_run_id != run_admitted.run_id {
+        return Err(RuntimeError::InvalidRunStream(
+            "RunAdmitted run id does not match identity material".to_owned(),
+        ));
+    }
     Ok(())
 }
 

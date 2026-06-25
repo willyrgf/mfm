@@ -296,6 +296,8 @@ pub enum CodecError {
 /// Backend helper APIs for durable store implementations.
 pub mod backend;
 
+pub use mfm_ids::TrustScopeId;
+
 mod admission_lanes;
 pub use admission_lanes::{
     admission_advisory_lock_key, admission_waiter_id, resource_key_canonical_json,
@@ -334,41 +336,6 @@ fn checked_ascii_key(field: &'static str, value: impl AsRef<str>) -> Result<Stri
         )));
     }
     Ok(value.to_owned())
-}
-
-/// Store-owned deployment trust-scope identifier.
-///
-/// This non-secret value identifies the deployment trust domain used by run identity derivation.
-/// Callers read it from the store; normal launch APIs must not accept caller-supplied trust scopes.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct TrustScopeId(String);
-
-impl TrustScopeId {
-    /// Stable v1 trust-scope prefix.
-    pub const PREFIX: &'static str = "mfm.trust_scope.v1:";
-
-    /// Creates a trust-scope id from the stable persisted string shape.
-    pub fn new(value: impl Into<String>) -> Result<Self> {
-        let value = value.into();
-        let suffix = value
-            .strip_prefix(Self::PREFIX)
-            .ok_or_else(|| StoreError::Identity("trust scope id prefix mismatch".to_owned()))?;
-        if suffix.len() != 32
-            || !suffix
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-        {
-            return Err(StoreError::Identity(
-                "trust scope id must use 32 lowercase hex characters".to_owned(),
-            ));
-        }
-        Ok(Self(value))
-    }
-
-    /// Returns the persisted trust-scope id string.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
 }
 
 /// Contiguous store-owned sequence for an atomic run commit.
@@ -8072,6 +8039,7 @@ fn payload_json(payload: &KernelEventPayload) -> serde_json::Value {
             "descriptor_identities": payload.descriptor_identities.iter().map(descriptor_identity_json).collect::<Vec<_>>(),
             "adapter_executables": payload.adapter_executables.iter().map(executable_identity_json).collect::<Vec<_>>(),
             "entry_point": entry_point_launch_evidence_json(&payload.entry_point),
+            "identity_material": run_identity_material_json(&payload.identity_material),
             "lowering_version": payload.lowering_version.as_str(),
             "public_output_schema_id": payload.public_output_schema_id.as_str(),
             "run_id": payload.run_id.as_str(),
@@ -8442,6 +8410,10 @@ pub fn payload_from_json_value(json: &serde_json::Value) -> Result<KernelEventPa
         "RunAdmitted" => Ok(KernelEventPayload::RunAdmitted(Box::new(
             events::RunAdmitted {
                 run_id: parse_identity(required_str(json, "run_id")?)?,
+                identity_material: parse_run_identity_material(required_obj(
+                    json,
+                    "identity_material",
+                )?)?,
                 entry_point: parse_entry_point_launch_evidence(required_obj(json, "entry_point")?)?,
                 spec_hash: parse_identity(required_str(json, "spec_hash")?)?,
                 spec_artifact: parse_run_artifact(required_obj(json, "spec_artifact")?)?,
@@ -9133,6 +9105,16 @@ fn parse_entry_point_launch_evidence(
     })
 }
 
+fn parse_run_identity_material(json: &serde_json::Value) -> Result<events::RunIdentityMaterialV1> {
+    Ok(events::RunIdentityMaterialV1 {
+        certified_spec_hash: parse_identity(required_str(json, "certified_spec_hash")?)?,
+        trust_scope_id: TrustScopeId::new(required_str(json, "trust_scope_id")?)?,
+        distinct_run_key_digest: optional_str(json, "distinct_run_key_digest")?
+            .map(parse_identity)
+            .transpose()?,
+    })
+}
+
 /// Parses a cell skip reason from canonical JSON.
 pub fn parse_skip_reason(json: &serde_json::Value) -> CodecResult<events::SkipReason> {
     Ok(events::SkipReason {
@@ -9455,6 +9437,14 @@ fn entry_point_launch_evidence_json(
     serde_json::json!({
         "entry_point_registry_digest": evidence.entry_point_registry_digest.as_str(),
         "resolved_op_id": evidence.resolved_op_id.as_str(),
+    })
+}
+
+fn run_identity_material_json(material: &events::RunIdentityMaterialV1) -> serde_json::Value {
+    serde_json::json!({
+        "certified_spec_hash": material.certified_spec_hash.as_str(),
+        "distinct_run_key_digest": material.distinct_run_key_digest.as_ref().map(ContentDigest::as_str),
+        "trust_scope_id": material.trust_scope_id.as_str(),
     })
 }
 

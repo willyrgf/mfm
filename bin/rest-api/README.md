@@ -112,7 +112,6 @@ Request shape:
   "config": {
     "...": "entry-point config"
   },
-  "run_id": "run:sha256-jcs-v1:<optional-digest>",
   "drive": "until_blocked"
 }
 ```
@@ -124,7 +123,10 @@ Request notes:
 - `config_format` is `toml` or `json`; it defaults to `toml`.
 - `config` is required. With `config_format: "toml"`, it must be a string. With
   `config_format: "json"`, it may be a JSON object/array/value accepted by the selected op.
-- `run_id` is optional; the server generates a typed digest run id when omitted.
+- Normal start derives the typed run id from certified run identity material: certified spec hash,
+  store trust scope, and optional distinct-run material when that surface is introduced.
+- A `run_id` field is rejected with `RunIdUnsupported`; raw caller-supplied run ids are not accepted
+  for normal start.
 - `drive` is `until_blocked`, `append_only`, or `once`; it defaults to `until_blocked`.
 
 The response is `{"run": ..., "public_output": ...}` inside the standard success envelope.

@@ -11,7 +11,7 @@ use mfm_capabilities::{
 };
 use mfm_ids::{
     ArtifactId, DigestBytes, EffectKind, EffectVersion, EventId, SchemaId, ScopeId, SeedId,
-    SemanticTypeId, StateKind, StateVersion,
+    SemanticTypeId, StateKind, StateVersion, TrustScopeId,
 };
 use mfm_manual_auth::{
     ManualAuthorizationSignatureBytes, ManualResolutionAuthorizationProof,
@@ -43,6 +43,49 @@ fn fixture_value_semantic_id() -> SemanticTypeId {
 
 fn fixture_value_schema_id() -> SchemaId {
     SchemaId::new("mfm.test.value", "1", DigestAlgorithm::Sha256JcsV1, DA).expect("schema")
+}
+
+fn fixture_trust_scope_id() -> TrustScopeId {
+    TrustScopeId::new("mfm.trust_scope.v1:10101010101010101010101010101010")
+        .expect("test trust scope")
+}
+
+fn run_identity_material(runtime_spec: &CertifiedRuntimeSpec) -> events::RunIdentityMaterialV1 {
+    run_identity_material_with_distinct(runtime_spec, None)
+}
+
+fn run_identity_material_with_distinct(
+    runtime_spec: &CertifiedRuntimeSpec,
+    distinct_run_key_digest: Option<ContentDigest>,
+) -> events::RunIdentityMaterialV1 {
+    events::RunIdentityMaterialV1 {
+        certified_spec_hash: runtime_spec.spec_hash().clone(),
+        trust_scope_id: fixture_trust_scope_id(),
+        distinct_run_key_digest,
+    }
+}
+
+fn fixture_run_identity_material(fixture: &Fixture) -> events::RunIdentityMaterialV1 {
+    run_identity_material_with_distinct(
+        &fixture.runtime_spec,
+        fixture.distinct_run_key_digest.clone(),
+    )
+}
+
+fn refresh_fixture_run_id(fixture: &mut Fixture) {
+    let distinct_run_key_digest = fixture.distinct_run_key_digest.clone();
+    refresh_fixture_run_id_with_distinct(fixture, distinct_run_key_digest);
+}
+
+fn refresh_fixture_run_id_with_distinct(
+    fixture: &mut Fixture,
+    distinct_run_key_digest: Option<ContentDigest>,
+) {
+    fixture.distinct_run_key_digest = distinct_run_key_digest.clone();
+    fixture.run_id =
+        run_identity_material_with_distinct(&fixture.runtime_spec, distinct_run_key_digest)
+            .derive_run_id()
+            .expect("fixture run id");
 }
 
 macro_rules! store_typed_commit_request {
@@ -756,6 +799,7 @@ const TEST_SEED_BYTES: &[u8] = br#"{"seed":true}"#;
 struct Fixture {
     runtime_spec: CertifiedRuntimeSpec,
     run_id: RunId,
+    distinct_run_key_digest: Option<ContentDigest>,
     seed_ref: events::SeedCellRef,
     descriptor_a: DescriptorId,
     descriptor_b: DescriptorId,
@@ -1743,10 +1787,7 @@ async fn side_effect_driver_prepares_and_starts_one_step() {
 async fn side_effect_driver_preserves_concrete_exclusive_resource_key_across_runs() {
     let fixture = fixture_with_first_exclusive_side_effect_state();
     let mut peer = fixture.clone();
-    peer.run_id = RunId::from_digest(
-        DigestAlgorithm::Sha256JcsV1,
-        DigestBytes::from_array([0xf6; 32]),
-    );
+    refresh_fixture_run_id_with_distinct(&mut peer, Some(content(0xf6)));
     let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
     let mut store = TestTypedRunStore::new();
 
@@ -3985,7 +4026,7 @@ fn run_start_rejects_missing_config_artifact_evidence() {
     assert!(matches!(
         scheduler.prepare_run_launch(
             &fixture.runtime_spec,
-            fixture.run_id.clone(),
+            fixture_run_identity_material(&fixture),
             evidence,
             store.expected_next_seq(&fixture.run_id),
         ),
@@ -4005,7 +4046,7 @@ fn run_start_rejects_mismatched_staged_launch_bytes() {
     assert!(matches!(
         scheduler.prepare_run_launch(
             &fixture.runtime_spec,
-            fixture.run_id.clone(),
+            fixture_run_identity_material(&fixture),
             bad_spec,
             store.expected_next_seq(&fixture.run_id),
         ),
@@ -4017,7 +4058,7 @@ fn run_start_rejects_mismatched_staged_launch_bytes() {
     assert!(matches!(
         scheduler.prepare_run_launch(
             &fixture.runtime_spec,
-            fixture.run_id.clone(),
+            fixture_run_identity_material(&fixture),
             bad_certificate,
             store.expected_next_seq(&fixture.run_id),
         ),
@@ -4034,7 +4075,7 @@ fn run_start_rejects_mismatched_staged_launch_bytes() {
     assert!(matches!(
         scheduler.prepare_run_launch(
             &fixture.runtime_spec,
-            fixture.run_id.clone(),
+            fixture_run_identity_material(&fixture),
             bad_config,
             store.expected_next_seq(&fixture.run_id),
         ),
@@ -4051,7 +4092,7 @@ fn run_start_rejects_mismatched_staged_launch_bytes() {
     assert!(matches!(
         scheduler.prepare_run_launch(
             &fixture.runtime_spec,
-            fixture.run_id.clone(),
+            fixture_run_identity_material(&fixture),
             bad_seed,
             store.expected_next_seq(&fixture.run_id),
         ),
@@ -8654,7 +8695,7 @@ fn prepare_fixture_launch(
 ) -> Result<PreparedRunLaunch> {
     scheduler.prepare_run_launch(
         &fixture.runtime_spec,
-        fixture.run_id.clone(),
+        fixture_run_identity_material(fixture),
         run_start_evidence(fixture, seed_cells),
         store.expected_next_seq(&fixture.run_id),
     )
@@ -8682,7 +8723,7 @@ async fn start_fixture_run_async_store<S: store::RunEventStore + ?Sized>(
         .map_err(crate::error::async_store_error)?;
     let launch = scheduler.prepare_run_launch(
         &fixture.runtime_spec,
-        fixture.run_id.clone(),
+        fixture_run_identity_material(fixture),
         run_start_evidence(fixture, seed_cells),
         expected_next_seq,
     )?;
@@ -11019,9 +11060,12 @@ fn fixture() -> Fixture {
         .expect("envelope");
     let runtime_spec =
         CertifiedRuntimeSpec::from_verified_envelope(envelope).expect("runtime spec");
+    let identity_material = run_identity_material(&runtime_spec);
+    let run_id = identity_material.derive_run_id().expect("run id");
     Fixture {
         runtime_spec,
-        run_id: RunId::from_digest(DigestAlgorithm::Sha256JcsV1, D5),
+        run_id,
+        distinct_run_key_digest: None,
         seed_ref,
         descriptor_a,
         descriptor_b,
@@ -11109,6 +11153,7 @@ fn fixture_with_first_managed_write_state() -> Fixture {
     let envelope = spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
     fixture.runtime_spec =
         CertifiedRuntimeSpec::from_verified_envelope(envelope).expect("runtime spec");
+    refresh_fixture_run_id(&mut fixture);
     fixture
 }
 
@@ -11157,6 +11202,7 @@ fn fixture_with_first_side_effect_state() -> Fixture {
     let envelope = spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
     fixture.runtime_spec =
         CertifiedRuntimeSpec::from_verified_envelope(envelope).expect("runtime spec");
+    refresh_fixture_run_id(&mut fixture);
     fixture
 }
 
@@ -11183,6 +11229,7 @@ fn fixture_with_manual_resolution_side_effect_state() -> Fixture {
     let envelope = spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
     fixture.runtime_spec =
         CertifiedRuntimeSpec::from_verified_envelope(envelope).expect("runtime spec");
+    refresh_fixture_run_id(&mut fixture);
     fixture
 }
 
@@ -11322,6 +11369,7 @@ fn fixture_with_independent_second_node_and_first_side_effect_state() -> Fixture
     let envelope = spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
     fixture.runtime_spec =
         CertifiedRuntimeSpec::from_verified_envelope(envelope).expect("runtime spec");
+    refresh_fixture_run_id(&mut fixture);
     fixture
 }
 
@@ -11596,6 +11644,7 @@ fn fixture_with_two_side_effects_and_failing_tail() -> Fixture {
     let envelope = spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
     fixture.runtime_spec =
         CertifiedRuntimeSpec::from_verified_envelope(envelope).expect("runtime spec");
+    refresh_fixture_run_id(&mut fixture);
     fixture.descriptor_c = Some(descriptor_c);
     fixture.cell_c = Some(cell_c);
     fixture
@@ -11660,6 +11709,7 @@ fn with_exclusive_resource_claims(mut fixture: Fixture, descriptors: &[Descripto
     let envelope = spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
     fixture.runtime_spec =
         CertifiedRuntimeSpec::from_verified_envelope(envelope).expect("runtime spec");
+    refresh_fixture_run_id(&mut fixture);
     fixture
 }
 
@@ -11692,6 +11742,7 @@ fn with_exact_touched_set_resource_claims(
     let envelope = spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
     fixture.runtime_spec =
         CertifiedRuntimeSpec::from_verified_envelope(envelope).expect("runtime spec");
+    refresh_fixture_run_id(&mut fixture);
     fixture
 }
 

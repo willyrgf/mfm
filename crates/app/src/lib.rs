@@ -21,7 +21,7 @@ use mfm_certify::{CertificationRegistry, CertifiedTypedSpec};
 use mfm_events::v1 as events;
 use mfm_ids::{
     ArtifactId, ContentDigest, DigestAlgorithm, EventId, RunId, SchemaId, SeedId, SemanticTypeId,
-    SpecHash,
+    SpecHash, TrustScopeId,
 };
 use mfm_replay::v1::{ReplayBroker, ReplayError, ReplayReadAuthority};
 use mfm_runtime::{
@@ -274,7 +274,7 @@ pub fn make_run_services<S, A>(
     artifacts: A,
 ) -> RunServices<S, A>
 where
-    S: store::RunEventStore + Send + Sync,
+    S: store::RunEventStore + store::TrustScopeStore + Send + Sync,
     A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
 {
     make_run_services_with_certification_registry(
@@ -293,7 +293,7 @@ pub fn make_run_services_with_certification_registry<S, A>(
     certification_registry: CertificationRegistry,
 ) -> RunServices<S, A>
 where
-    S: store::RunEventStore + Send + Sync,
+    S: store::RunEventStore + store::TrustScopeStore + Send + Sync,
     A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
 {
     let runtime_artifacts = Arc::new(artifacts.clone());
@@ -500,8 +500,10 @@ impl fmt::Display for ManualResolutionDecision {
 pub struct RunLaunchRequest {
     /// Certifier-backed typed spec authority.
     pub certified_spec: CertifiedTypedSpec,
-    /// Store-owned run id to bind.
+    /// Derived run id to bind.
     pub run_id: RunId,
+    /// Store-owned and certified identity material used to derive `run_id`.
+    pub identity_material: events::RunIdentityMaterialV1,
     /// Launch material that runtime middleware stages and admits with the admission commit.
     pub evidence: RunLaunchEvidence,
     /// Scheduler drive policy after start.
@@ -520,8 +522,8 @@ pub struct EntryPointRunLaunchInput<'a> {
     pub authored_config: AuthoredConfig,
     /// Trusted certification registry used to certify the planned typed spec.
     pub certification_registry: &'a CertificationRegistry,
-    /// Store-owned run id to bind.
-    pub run_id: RunId,
+    /// Store-owned deployment trust scope.
+    pub trust_scope_id: TrustScopeId,
     /// Scheduler drive policy after start.
     pub drive: DriveMode,
 }
@@ -1019,7 +1021,7 @@ pub struct RunServices<S, A> {
 
 impl<S, A> RunServices<S, A>
 where
-    S: store::RunEventStore + Send + Sync,
+    S: store::RunEventStore + store::TrustScopeStore + Send + Sync,
     A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
 {
     /// Creates typed async app services with an explicit trusted certification registry.
@@ -1052,25 +1054,48 @@ where
         &self.certification_registry
     }
 
+    /// Loads the store-owned deployment trust scope used to derive run identities.
+    pub async fn load_trust_scope_id(&self) -> Result<TrustScopeId, AppError> {
+        self.store
+            .load_trust_scope_id()
+            .await
+            .map_err(async_app_store_error)
+    }
+
     /// Starts a certified typed run against a durable async typed store.
     pub async fn launch_run(&self, req: RunLaunchRequest) -> Result<RunResponse, AppError> {
+        self.validate_identity_material_trust_scope(&req.identity_material)
+            .await?;
+        if req.identity_material.certified_spec_hash != *req.certified_spec.spec_hash() {
+            return Err(run_identity_material_mismatch());
+        }
+        let run_id = req.identity_material.derive_run_id().map_err(|_| {
+            AppError::backend(
+                ErrorClass::Internal,
+                "RunIdentityMaterialInvalid",
+                "Run identity material is invalid",
+            )
+        })?;
+        if run_id != req.run_id {
+            return Err(run_identity_material_mismatch());
+        }
         let runtime_spec = CertifiedRuntimeSpec::new(req.certified_spec)?;
         let expected_next_seq = self
             .store
-            .expected_next_seq(&req.run_id)
+            .expected_next_seq(&run_id)
             .await
             .map_err(async_app_store_error)?;
         let launch = self.scheduler.prepare_run_launch(
             &runtime_spec,
-            req.run_id.clone(),
+            req.identity_material,
             req.evidence,
             expected_next_seq,
         )?;
         self.scheduler.start_run(&self.store, launch).await?;
         let status = self
-            .drive_with_mode(&runtime_spec, &req.run_id, req.drive)
+            .drive_with_mode(&runtime_spec, &run_id, req.drive)
             .await?;
-        self.run_response_from_verified_status(&req.run_id, status)
+        self.run_response_from_verified_status(&run_id, status)
             .await
     }
 
@@ -1112,13 +1137,7 @@ where
 
     /// Returns typed run status by rebuilding projection from the authoritative run stream.
     pub async fn run_status(&self, run_id: &RunId) -> Result<RunResponse, AppError> {
-        let context = load_async_verified_status_read_context(
-            &self.store,
-            &self.artifacts,
-            &self.certification_registry,
-            run_id,
-        )
-        .await?;
+        let context = self.load_verified_status_read_context(run_id).await?;
         run_status_from_projection(
             run_id,
             context.runtime_spec(),
@@ -1132,13 +1151,7 @@ where
         run_id: &RunId,
         status: SchedulerStatus,
     ) -> Result<RunResponse, AppError> {
-        let context = load_async_verified_status_read_context(
-            &self.store,
-            &self.artifacts,
-            &self.certification_registry,
-            run_id,
-        )
-        .await?;
+        let context = self.load_verified_status_read_context(run_id).await?;
         run_response_from_projection(
             run_id,
             context.runtime_spec(),
@@ -1216,13 +1229,47 @@ where
         &self,
         run_id: &RunId,
     ) -> Result<VerifiedRunReadContext, AppError> {
-        load_async_verified_run_read_context(
+        let context = load_async_verified_run_read_context(
             &self.store,
             &self.artifacts,
             &self.certification_registry,
             run_id,
         )
-        .await
+        .await?;
+        self.validate_identity_material_trust_scope(
+            &context.view().run_admitted().identity_material,
+        )
+        .await?;
+        Ok(context)
+    }
+
+    async fn load_verified_status_read_context(
+        &self,
+        run_id: &RunId,
+    ) -> Result<VerifiedStatusReadContext, AppError> {
+        let context = load_async_verified_status_read_context(
+            &self.store,
+            &self.artifacts,
+            &self.certification_registry,
+            run_id,
+        )
+        .await?;
+        self.validate_identity_material_trust_scope(
+            &context.read.view().run_admitted().identity_material,
+        )
+        .await?;
+        Ok(context)
+    }
+
+    async fn validate_identity_material_trust_scope(
+        &self,
+        identity_material: &events::RunIdentityMaterialV1,
+    ) -> Result<(), AppError> {
+        let trust_scope_id = self.load_trust_scope_id().await?;
+        if trust_scope_id != identity_material.trust_scope_id {
+            return Err(run_identity_material_mismatch());
+        }
+        Ok(())
     }
 
     async fn drive_with_mode(
@@ -1923,7 +1970,7 @@ pub fn prepare_entry_point_run_launch(
         CertifiedRunLaunchInput {
             certified_spec,
             registry: &scoped_registry,
-            run_id: input.run_id,
+            trust_scope_id: input.trust_scope_id,
             entry_point_evidence: runtime_entry_point_evidence,
             drive: input.drive,
         },
@@ -1951,8 +1998,8 @@ pub(crate) struct CertifiedRunLaunchInput<'a> {
     pub(crate) certified_spec: CertifiedTypedSpec,
     /// Trusted registry used to validate launch config artifacts.
     pub(crate) registry: &'a CertificationRegistry,
-    /// Run id to record in the started run stream.
-    pub(crate) run_id: RunId,
+    /// Store-owned deployment trust scope.
+    pub(crate) trust_scope_id: TrustScopeId,
     /// Public entry-point operation evidence selected by app assembly.
     pub(crate) entry_point_evidence: events::EntryPointLaunchEvidence,
     /// Drive mode used for the initial scheduler invocation.
@@ -1971,9 +2018,22 @@ fn prepare_certified_run_launch(
     let config_artifacts =
         config_launch_artifacts_for_spec(&runtime_spec, input.registry, config_inputs)?;
     let seed_cells = seed_launch_cells_for_spec(&runtime_spec, seed_inputs)?;
+    let identity_material = events::RunIdentityMaterialV1 {
+        certified_spec_hash: runtime_spec.spec_hash().clone(),
+        trust_scope_id: input.trust_scope_id,
+        distinct_run_key_digest: None,
+    };
+    let run_id = identity_material.derive_run_id().map_err(|_| {
+        AppError::backend(
+            ErrorClass::Internal,
+            "RunIdentityMaterialInvalid",
+            "Run identity material is invalid",
+        )
+    })?;
     Ok(RunLaunchRequest {
         certified_spec: input.certified_spec,
-        run_id: input.run_id,
+        run_id,
+        identity_material,
         evidence: RunLaunchEvidence {
             entry_point: input.entry_point_evidence,
             spec_artifact,
@@ -1984,6 +2044,14 @@ fn prepare_certified_run_launch(
         },
         drive: input.drive,
     })
+}
+
+fn run_identity_material_mismatch() -> AppError {
+    AppError::backend(
+        ErrorClass::Internal,
+        "RunIdentityMaterialMismatch",
+        "Run identity material does not match the store or certified spec",
+    )
 }
 
 fn async_app_store_error(_error: impl fmt::Display) -> AppError {

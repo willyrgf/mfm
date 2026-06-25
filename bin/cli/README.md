@@ -256,7 +256,9 @@ branch's expected baseline. Old filesystem artifact roots are not read or
 migrated by typed run commands.
 
 Run ids use the typed identity format `run:<algorithm>:<digest>`. Old UUID dynamic run ids are not
-accepted by the typed CLI run surface.
+accepted by the typed CLI run surface. Normal `run start` derives the typed run id from certified
+run identity material: certified spec hash, store trust scope, and optional distinct-run material
+when that surface is introduced.
 
 Old dynamic op launch, pipeline launch, context snapshots, and generic artifact reads have been
 removed from the `run` subcommand. The CLI starts only through registered entry-point ops that app
@@ -285,7 +287,8 @@ mfm_cli run start --op <NAME> --config <PATH> [OPTIONS]
 - `--config <PATH>`: Authored op config file.
 - `--op-version <VERSION>`: Optional public op version. If omitted, the latest registered version is selected.
 - `--config-format <toml|json>`: Authored config format. Defaults to `toml`.
-- `--run-id <RUN_ID>`: Optional typed run id. If omitted, a new typed digest id is generated.
+- `--run-id <RUN_ID>`: Deprecated transitional option. Supplying it is rejected with
+  `RunIdUnsupported`; raw caller-supplied run ids are not accepted for normal start.
 - `--framework-version <VALUE>`: Framework version evidence recorded in `RunAdmitted`.
 - `--source-revision <VALUE>`: Source revision evidence recorded in `RunAdmitted` (or `MFM_SOURCE_REVISION`).
 - `--drive <append-only|once|until-blocked>`: Scheduler drive policy after `RunAdmitted`.

@@ -44,20 +44,24 @@ async fn public_manual_resolution_scenario_records_resolution_and_hides_proof_by
     entry_points
         .register(ManualResolutionProofEntryPointOp)
         .expect("register manual proof entry point");
-    let run_id = mfm_app::new_run_id();
     let authored_config =
         AuthoredConfig::new(AuthoredConfigFormat::Json, b"{}".to_vec()).expect("authored config");
+    let trust_scope_id = services
+        .load_trust_scope_id()
+        .await
+        .expect("trust scope id");
     let launch = mfm_app::prepare_entry_point_run_launch(EntryPointRunLaunchInput {
         entry_point_registry: &entry_points,
         public_op_name: PublicOpName::new("manual_resolution_proof").expect("public op name"),
         op_version: Some(OpVersion::new(1).expect("op version")),
         authored_config,
         certification_registry: &registry,
-        run_id: run_id.clone(),
+        trust_scope_id,
         drive: DriveMode::UntilBlocked,
     })
     .expect("launch request");
 
+    let run_id = launch.request.run_id.clone();
     let certified = launch.request.certified_spec.clone();
     let blocked = services.launch_run(launch.request).await.expect("launch");
     assert_eq!(blocked.run_mode, RunModeStatus::ManualBlocked);

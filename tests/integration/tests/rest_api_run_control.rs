@@ -213,12 +213,38 @@ async fn start_accepts_entry_point_json_object_config_shape() {
 }
 
 #[tokio::test]
+async fn start_rejects_explicit_run_id() {
+    let app = test_app();
+
+    let resp = app
+        .oneshot(json_post(
+            "/v1/runs/start",
+            serde_json::json!({
+                "op": "portfolio_snapshot",
+                "config_format": "json",
+                "config": {
+                    "portfolio_id": "main",
+                    "wallets": []
+                },
+                "run_id": VALID_RUN_ID,
+                "drive": "append_only"
+            }),
+        ))
+        .await
+        .expect("response");
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let v = response_json(resp).await;
+    assert_eq!(v["status"], "error");
+    assert_eq!(v["error"]["code"], "RunIdUnsupported");
+}
+
+#[tokio::test]
 async fn evm_contract_start_accepts_all_entry_point_ops_append_only() {
     let state = in_memory_state();
     let app = mfm_rest_api::make_app(state.clone());
 
     for (op, config) in evm_entry_point_configs() {
-        let run_id = mfm_app::new_run_id();
         let resp = app
             .clone()
             .oneshot(json_post(
@@ -228,7 +254,6 @@ async fn evm_contract_start_accepts_all_entry_point_ops_append_only() {
                     "op_version": 1,
                     "config_format": "json",
                     "config": config,
-                    "run_id": run_id.as_str(),
                     "drive": "append_only"
                 }),
             ))
@@ -239,7 +264,12 @@ async fn evm_contract_start_accepts_all_entry_point_ops_append_only() {
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["status"], "success");
         assert_eq!(body["data"]["run"]["run_mode"], "forward", "{body}");
-        assert_eq!(body["data"]["run"]["run_id"], run_id.as_str());
+        let run_id = RunId::parse(
+            body["data"]["run"]["run_id"]
+                .as_str()
+                .expect("response run id"),
+        )
+        .expect("typed run id");
 
         let stream = state
             .store
@@ -258,7 +288,6 @@ async fn portfolio_status_route_reports_interrupted_attempt_and_framework_attemp
     let state = in_memory_state();
     let config = portfolio_snapshot_config();
     let certified = portfolio_status_spec_for_config(&config);
-    let run_id = mfm_app::new_run_id();
     let app = mfm_rest_api::make_app(state.clone());
 
     let start = app
@@ -269,7 +298,6 @@ async fn portfolio_status_route_reports_interrupted_attempt_and_framework_attemp
                 "op": "portfolio_snapshot",
                 "config_format": "json",
                 "config": config,
-                "run_id": run_id.as_str(),
                 "drive": "append_only"
             }),
         ))
@@ -279,6 +307,12 @@ async fn portfolio_status_route_reports_interrupted_attempt_and_framework_attemp
     let start_body = response_json(start).await;
     assert_eq!(start_body["status"], "success");
     assert_eq!(start_body["data"]["run"]["run_mode"], "forward");
+    let run_id = RunId::parse(
+        start_body["data"]["run"]["run_id"]
+            .as_str()
+            .expect("response run id"),
+    )
+    .expect("typed run id");
 
     let interrupted_node = certified
         .envelope()

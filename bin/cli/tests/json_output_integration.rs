@@ -348,38 +348,7 @@ fn test_run_start_requires_entry_point_op_and_config_path() {
 }
 
 #[test]
-fn test_run_start_rejects_unknown_entry_point_op_before_store_access() {
-    let temp_dir = TempDir::new().unwrap();
-    let config_path = temp_dir.path().join("portfolio.toml");
-    std::fs::write(&config_path, "portfolio_id = \"main\"\n").expect("config fixture");
-
-    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
-    let output = cmd
-        .env_remove("DATABASE_URL")
-        .args([
-            "--output-format",
-            "json",
-            "run",
-            "start",
-            "--op",
-            "unknown_entry_point",
-            "--config",
-            config_path.to_str().unwrap(),
-            "--run-id",
-            "run:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000001",
-        ])
-        .output()
-        .expect("Failed to execute command");
-
-    assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    let parsed = verify_error_response(&stderr);
-    assert_eq!(parsed.error.code, "EntryPointOpNotFound");
-}
-
-#[test]
-fn test_run_start_accepts_portfolio_snapshot_toml_before_store_access() {
+fn test_run_start_rejects_explicit_run_id_before_store_access() {
     let temp_dir = TempDir::new().unwrap();
     let config_path = temp_dir.path().join("portfolio.toml");
     std::fs::write(&config_path, sample_portfolio_config_toml()).expect("config fixture");
@@ -398,6 +367,35 @@ fn test_run_start_accepts_portfolio_snapshot_toml_before_store_access() {
             config_path.to_str().unwrap(),
             "--run-id",
             "run:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000001",
+        ])
+        .output()
+        .expect("Failed to execute command");
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let parsed = verify_error_response(&stderr);
+    assert_eq!(parsed.error.code, "RunIdUnsupported");
+}
+
+#[test]
+fn test_run_start_requires_store_trust_scope_before_config_decode() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("portfolio.toml");
+    std::fs::write(&config_path, sample_portfolio_config_toml()).expect("config fixture");
+
+    let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
+    let output = cmd
+        .env_remove("DATABASE_URL")
+        .args([
+            "--output-format",
+            "json",
+            "run",
+            "start",
+            "--op",
+            "portfolio_snapshot",
+            "--config",
+            config_path.to_str().unwrap(),
             "--drive",
             "append-only",
         ])
