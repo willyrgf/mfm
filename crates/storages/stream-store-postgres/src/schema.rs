@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 
+use mfm_store::v1::TrustScopeId;
 use sqlx::{PgPool, Row};
 
 use crate::run_store::{PostgresStoreError, Result};
@@ -397,6 +398,7 @@ async fn validate_append_xid_columns(pool: &PgPool) -> Result<()> {
 async fn validate_store_metadata(pool: &PgPool) -> Result<()> {
     let row = sqlx::query(
         "SELECT COUNT(*)::bigint AS row_count, \
+          MIN(trust_scope_id) AS trust_scope_id, \
           MIN(schema_contract_version) AS schema_contract_version \
          FROM store_metadata WHERE singleton",
     )
@@ -409,7 +411,19 @@ async fn validate_store_metadata(pool: &PgPool) -> Result<()> {
     let schema_contract_version: Option<String> = row
         .try_get("schema_contract_version")
         .map_err(|_| PostgresStoreError::Database("failed to decode store metadata"))?;
-    if row_count != 1 || schema_contract_version.as_deref() != Some("mfm.postgres.run_store.v1") {
+    let trust_scope_id: Option<String> = row
+        .try_get("trust_scope_id")
+        .map_err(|_| PostgresStoreError::Database("failed to decode store metadata"))?;
+    let trust_scope_id = trust_scope_id
+        .as_deref()
+        .map(TrustScopeId::new)
+        .transpose()
+        .ok()
+        .flatten();
+    if row_count != 1
+        || schema_contract_version.as_deref() != Some("mfm.postgres.run_store.v1")
+        || trust_scope_id.is_none()
+    {
         return Err(PostgresStoreError::Database("invalid store metadata"));
     }
     Ok(())
@@ -456,6 +470,7 @@ const REQUIRED_CONSTRAINTS: &[&str] = &[
     "commits_sort_key_v1_length",
     "commits_sort_key_v1_prefix",
     "commits_sort_key_not_sentinel",
+    "store_metadata_trust_scope_id_v1",
     "admission_lane_id_len",
     "admission_lane_class_v1",
     "admission_lane_mode_v1",

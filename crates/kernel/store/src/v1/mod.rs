@@ -336,6 +336,41 @@ fn checked_ascii_key(field: &'static str, value: impl AsRef<str>) -> Result<Stri
     Ok(value.to_owned())
 }
 
+/// Store-owned deployment trust-scope identifier.
+///
+/// This non-secret value identifies the deployment trust domain used by run identity derivation.
+/// Callers read it from the store; normal launch APIs must not accept caller-supplied trust scopes.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TrustScopeId(String);
+
+impl TrustScopeId {
+    /// Stable v1 trust-scope prefix.
+    pub const PREFIX: &'static str = "mfm.trust_scope.v1:";
+
+    /// Creates a trust-scope id from the stable persisted string shape.
+    pub fn new(value: impl Into<String>) -> Result<Self> {
+        let value = value.into();
+        let suffix = value
+            .strip_prefix(Self::PREFIX)
+            .ok_or_else(|| StoreError::Identity("trust scope id prefix mismatch".to_owned()))?;
+        if suffix.len() != 32
+            || !suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        {
+            return Err(StoreError::Identity(
+                "trust scope id must use 32 lowercase hex characters".to_owned(),
+            ));
+        }
+        Ok(Self(value))
+    }
+
+    /// Returns the persisted trust-scope id string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Contiguous store-owned sequence for an atomic run commit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct StreamSeq(u64);
@@ -4537,6 +4572,15 @@ pub struct RunObservationPage {
     pub runs: Vec<RunObservation>,
 }
 
+/// Read-only store-owned deployment trust scope.
+pub trait TrustScopeStore {
+    /// Store-specific error type.
+    type Error: StoreErrorInspection + fmt::Display + Send + Sync + 'static;
+
+    /// Loads the store-owned deployment trust-scope id.
+    fn load_trust_scope_id<'a>(&'a self) -> AsyncStoreFuture<'a, TrustScopeId, Self::Error>;
+}
+
 /// Internal storage boundary for observation list/watch pages.
 pub trait RunObservationStore {
     /// Backend-specific error.
@@ -4916,8 +4960,9 @@ impl CommitStagingVerifier<'_> {
 
 /// Private state behind the async typed store test backend.
 #[cfg(any(test, feature = "test-support"))]
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 struct RunMemoryCore {
+    trust_scope_id: TrustScopeId,
     streams: BTreeMap<RunId, Vec<CommittedBatch>>,
     commit_keys: BTreeMap<(RunId, CommitKey), CommitKeyRecord>,
     artifacts: ArtifactAuthorityMap,
@@ -4927,6 +4972,27 @@ struct RunMemoryCore {
     projections: ProjectionSnapshot,
     resource_lane_authority: ResourceLaneAuthoritySet,
     execution_claims: BTreeMap<RunId, MemoryExecutionClaim>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Default for RunMemoryCore {
+    fn default() -> Self {
+        Self {
+            trust_scope_id: TrustScopeId::new(
+                "mfm.trust_scope.v1:00000000000000000000000000000000",
+            )
+            .expect("test trust scope"),
+            streams: BTreeMap::new(),
+            commit_keys: BTreeMap::new(),
+            artifacts: BTreeMap::new(),
+            artifact_bytes: BTreeMap::new(),
+            logical_keys: BTreeSet::new(),
+            unique_logical_payloads: BTreeMap::new(),
+            projections: ProjectionSnapshot::default(),
+            resource_lane_authority: ResourceLaneAuthoritySet::default(),
+            execution_claims: BTreeMap::new(),
+        }
+    }
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -5761,6 +5827,16 @@ impl RunEventStore for AsyncInMemoryRunStore {
                 )
             })
             .and_then(|result| result);
+        Box::pin(std::future::ready(result))
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl TrustScopeStore for AsyncInMemoryRunStore {
+    type Error = StoreError;
+
+    fn load_trust_scope_id<'a>(&'a self) -> AsyncStoreFuture<'a, TrustScopeId, Self::Error> {
+        let result = self.lock_inner().map(|store| store.trust_scope_id.clone());
         Box::pin(std::future::ready(result))
     }
 }

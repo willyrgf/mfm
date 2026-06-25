@@ -3,6 +3,7 @@ use super::*;
 #[derive(Clone)]
 pub(super) struct StoreMetadata {
     pub(super) store_epoch: String,
+    pub(super) trust_scope_id: TrustScopeId,
 }
 
 #[derive(Debug, Clone)]
@@ -171,7 +172,7 @@ pub(super) async fn read_run_observation_page_once(
 }
 
 pub(super) async fn load_store_metadata(pool: &PgPool) -> Result<StoreMetadata> {
-    let row = sqlx::query("SELECT store_epoch FROM store_metadata WHERE singleton")
+    let row = sqlx::query("SELECT store_epoch, trust_scope_id FROM store_metadata WHERE singleton")
         .fetch_one(pool)
         .await
         .map_err(|error| database_error("failed to load store metadata", error))?;
@@ -179,7 +180,17 @@ pub(super) async fn load_store_metadata(pool: &PgPool) -> Result<StoreMetadata> 
         store_epoch: row
             .try_get("store_epoch")
             .map_err(|error| database_error("failed to decode store epoch", error))?,
+        trust_scope_id: TrustScopeId::new(
+            row.try_get::<String, _>("trust_scope_id")
+                .map_err(|error| database_error("failed to decode trust scope id", error))?,
+        )?,
     })
+}
+
+pub(super) async fn load_trust_scope_id_client(pool: &PgPool) -> Result<TrustScopeId> {
+    load_store_metadata(pool)
+        .await
+        .map(|metadata| metadata.trust_scope_id)
 }
 
 pub(super) async fn sealed_frontier_xid(pool: &PgPool) -> Result<String> {

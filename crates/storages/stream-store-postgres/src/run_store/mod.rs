@@ -19,8 +19,8 @@ use mfm_store::v1::{
     ProjectionSnapshot, ProjectionSnapshotParts, ResourceLaneAuthoritySet, ResourceLaneKey,
     ResourceLaneProjection, RetainedArtifactReadFuture, RetainedArtifactReadProvider,
     RunEventStore, RunObservation, RunObservationPage, RunObservationQuery, RunObservationStore,
-    RunState, StagedCommitOutcome, StoreError, StoreErrorInspection, StreamSeq,
-    VerifiedRunArtifactBytes,
+    RunState, StagedCommitOutcome, StoreError, StoreErrorInspection, StreamSeq, TrustScopeId,
+    TrustScopeStore, VerifiedRunArtifactBytes,
 };
 use serde_json::Value;
 use sqlx::{
@@ -217,6 +217,14 @@ impl ExecutionClaimStore for PostgresRunStore {
         Box::pin(
             async move { reap_expired_execution_claim_client(&self.pool, run_id, token).await },
         )
+    }
+}
+
+impl TrustScopeStore for PostgresRunStore {
+    type Error = PostgresStoreError;
+
+    fn load_trust_scope_id<'a>(&'a self) -> AsyncStoreFuture<'a, TrustScopeId, Self::Error> {
+        Box::pin(async move { load_trust_scope_id_client(&self.pool).await })
     }
 }
 
