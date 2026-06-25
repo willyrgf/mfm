@@ -56,6 +56,8 @@ pub enum BoundFrameworkHandlerKind {
     CompleteRun,
     /// Saga terminal resolution handler.
     ResolveSagaTerminal,
+    /// Side-effect verification handler.
+    SideEffectVerify,
 }
 
 /// Bound framework handler authority for a certified lifecycle node.
@@ -193,9 +195,6 @@ impl BoundRuntimeContext {
     }
 
     fn require_node_authority(&self, node: &spec::NodeSpec) -> Result<()> {
-        if is_parked_side_effect_verify(node) {
-            return Ok(());
-        }
         self.runner_binding_for(node)?;
         let Some(capabilities) = self.capability_authority_for(&node.node_id) else {
             return Err(RuntimeError::RunnerBinding(format!(
@@ -289,9 +288,6 @@ fn bind_node(
     node: &spec::NodeSpec,
     accumulator: &mut BindingAccumulator,
 ) -> Result<()> {
-    if is_parked_side_effect_verify(node) {
-        return Ok(());
-    }
     let descriptor = runtime_spec.state_descriptor_for_node(node)?;
     let binding = runners.resolve(node, descriptor)?;
     let capability_implementations = runners.resolve_capability_implementations(node)?;
@@ -364,15 +360,9 @@ fn framework_handler_kind(node: &spec::NodeSpec) -> Option<BoundFrameworkHandler
         Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_)) => {
             Some(BoundFrameworkHandlerKind::ResolveSagaTerminal)
         }
-        Some(spec::FrameworkNodeSpec::Bridge(_))
-        | Some(spec::FrameworkNodeSpec::SideEffectVerify(_))
-        | None => None,
+        Some(spec::FrameworkNodeSpec::SideEffectVerify(_)) => {
+            Some(BoundFrameworkHandlerKind::SideEffectVerify)
+        }
+        Some(spec::FrameworkNodeSpec::Bridge(_)) | None => None,
     }
-}
-
-fn is_parked_side_effect_verify(node: &spec::NodeSpec) -> bool {
-    matches!(
-        &node.framework,
-        Some(spec::FrameworkNodeSpec::SideEffectVerify(_))
-    )
 }

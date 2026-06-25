@@ -64,14 +64,14 @@ fn side_effect_pair_fields_for_purpose(
     role: events::SideEffectPairRole,
 ) -> (Option<SideEffectPairId>, Option<events::SideEffectPairRole>) {
     match ledger_purpose {
-        events::SideEffectLedgerPurpose::Forward => {
+        events::SideEffectLedgerPurpose::Forward
+        | events::SideEffectLedgerPurpose::Remediation { .. } => {
             let pair_id = runtime_spec
                 .side_effect_pair_for_submit_node(node_id)
                 .cloned();
             let pair_role = pair_id.as_ref().map(|_| role);
             (pair_id, pair_role)
         }
-        events::SideEffectLedgerPurpose::Remediation { .. } => (None, None),
     }
 }
 
@@ -663,6 +663,7 @@ fn register_fixture_capabilities(
     fixture: &Fixture,
 ) -> ErasedRunnerRegistry {
     register_spec_capabilities(&mut registry, &fixture.runtime_spec);
+    register_side_effect_verify_fixture_runner(&mut registry, fixture);
     registry
 }
 
@@ -1606,10 +1607,7 @@ impl SideEffectDriverCallbacks for TestSideEffectDriverCallbacks {
     type Submission = FixtureSideEffectEvidence;
     type SubmissionUnknownEvidence = FixtureSideEffectEvidence;
     type NotSubmittedProof = FixtureSideEffectEvidence;
-    type Receipt = FixtureSideEffectEvidence;
-    type Confirmation = FixtureSideEffectEvidence;
     type AmbiguityEvidence = FixtureSideEffectEvidence;
-    type Output = FixtureOutputValue;
 
     fn intent_and_idempotency<'a, 'ctx>(
         &'a self,
@@ -1702,10 +1700,18 @@ impl SideEffectDriverCallbacks for TestSideEffectDriverCallbacks {
             })
         })
     }
+}
+
+impl SideEffectVerifyCallbacks for TestSideEffectDriverCallbacks {
+    type Receipt = FixtureSideEffectEvidence;
+    type Confirmation = FixtureSideEffectEvidence;
+    type Output = FixtureOutputValue;
 
     fn read_receipt<'a, 'ctx>(
         &'a self,
         ctx: &'a ErasedRunCtx<'ctx>,
+        _submit_node: &'a spec::NodeSpec,
+        _submit_inputs: &'a MaterializedInputs,
         _submission: &'a store::SideEffectArtifactProjection,
     ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Receipt>> {
         let node_id = ctx.node().node_id.as_str().to_owned();
@@ -1725,6 +1731,8 @@ impl SideEffectDriverCallbacks for TestSideEffectDriverCallbacks {
     fn build_confirmation<'a, 'ctx>(
         &'a self,
         ctx: &'a ErasedRunCtx<'ctx>,
+        _submit_node: &'a spec::NodeSpec,
+        _submit_inputs: &'a MaterializedInputs,
         _receipt: &'a store::SideEffectArtifactProjection,
     ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Confirmation>> {
         let node_id = ctx.node().node_id.as_str().to_owned();
@@ -1741,9 +1749,29 @@ impl SideEffectDriverCallbacks for TestSideEffectDriverCallbacks {
         })
     }
 
+    fn map_receipt_to_output<'a, 'ctx>(
+        &'a self,
+        ctx: &'a ErasedRunCtx<'ctx>,
+        _submit_node: &'a spec::NodeSpec,
+        _submit_inputs: &'a MaterializedInputs,
+        _receipt: &'a store::SideEffectArtifactProjection,
+    ) -> SideEffectDriverFuture<'a, Self::Output> {
+        let node_id = ctx.node().node_id.as_str().to_owned();
+        let attempt_id = ctx.attempt_id().as_str().to_owned();
+        Box::pin(async move {
+            Ok(FixtureOutputValue {
+                amount: 233,
+                node_id,
+                attempt_id,
+            })
+        })
+    }
+
     fn map_confirmation_to_output<'a, 'ctx>(
         &'a self,
         ctx: &'a ErasedRunCtx<'ctx>,
+        _submit_node: &'a spec::NodeSpec,
+        _submit_inputs: &'a MaterializedInputs,
         _confirmation: &'a store::SideEffectArtifactProjection,
     ) -> SideEffectDriverFuture<'a, Self::Output> {
         let node_id = ctx.node().node_id.as_str().to_owned();
@@ -2095,7 +2123,7 @@ async fn side_effect_driver_persists_submission_recovery_decisions() {
 }
 
 #[tokio::test]
-async fn side_effect_driver_maps_confirmation_to_state_output() {
+async fn side_effect_verify_driver_maps_receipt_to_state_output() {
     let fixture = fixture_with_first_exclusive_side_effect_state();
     let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
     let mut store = TestTypedRunStore::new();
@@ -2108,7 +2136,7 @@ async fn side_effect_driver_maps_confirmation_to_state_output() {
     .await
     .expect("start run");
     let node = node_by_output(&fixture, &fixture.cell_a);
-    let (attempt_id, ledger_key) = append_synthetic_exclusive_prepare(
+    let (submit_attempt_id, ledger_key) = append_synthetic_exclusive_prepare(
         &mut store,
         &fixture,
         &fixture.run_id,
@@ -2121,7 +2149,7 @@ async fn side_effect_driver_maps_confirmation_to_state_output() {
         &fixture,
         &fixture.run_id,
         node,
-        &attempt_id,
+        &submit_attempt_id,
         &ledger_key,
         "sidefx-driver-output-started",
     );
@@ -2129,7 +2157,7 @@ async fn side_effect_driver_maps_confirmation_to_state_output() {
         &mut store,
         &fixture,
         node,
-        &attempt_id,
+        &submit_attempt_id,
         &ledger_key,
         "sidefx-driver-output-submission",
     );
@@ -2137,35 +2165,44 @@ async fn side_effect_driver_maps_confirmation_to_state_output() {
         &mut store,
         &fixture,
         node,
-        &attempt_id,
+        &submit_attempt_id,
         &ledger_key,
         "sidefx-driver-output-receipt",
     );
-    append_synthetic_confirmation_observed(
-        &mut store,
-        &fixture,
-        node,
-        &attempt_id,
-        &ledger_key,
-        "sidefx-driver-output-confirmation",
-    );
     let callbacks = TestSideEffectDriverCallbacks::new(&fixture);
+    let verify_node = side_effect_verify_node_for_submit(&fixture, node);
+    let verify_attempt_id = attempt_id(
+        &fixture.run_id,
+        fixture.runtime_spec.spec_hash(),
+        &verify_node.node_id,
+        1,
+    )
+    .expect("verify attempt id");
 
-    let output =
-        drive_side_effect_driver_from_store(&fixture, &store, node, &attempt_id, &callbacks)
-            .await
-            .expect("driver output");
+    let output = drive_side_effect_verify_driver_from_store(
+        &fixture,
+        &store,
+        verify_node,
+        &verify_attempt_id,
+        &callbacks,
+    )
+    .await
+    .expect("driver output");
 
     assert_eq!(output.staged_artifacts.len(), 1);
-    assert_eq!(output.payloads.len(), 1);
+    assert_eq!(output.payloads.len(), 2);
     assert!(matches!(
         output.payloads[0],
+        RunnerEventPayload::ResourceLaneReleaseIntent(_)
+    ));
+    assert!(matches!(
+        output.payloads[1],
         RunnerEventPayload::CellProduced(_)
     ));
 }
 
 #[tokio::test]
-async fn side_effect_driver_idles_on_ambiguous_projection() {
+async fn side_effect_driver_rejects_ambiguous_projection() {
     let fixture = fixture_with_first_exclusive_side_effect_state();
     let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
     let mut store = TestTypedRunStore::new();
@@ -2206,13 +2243,11 @@ async fn side_effect_driver_idles_on_ambiguous_projection() {
     );
     let callbacks = TestSideEffectDriverCallbacks::new(&fixture);
 
-    let output =
-        drive_side_effect_driver_from_store(&fixture, &store, node, &attempt_id, &callbacks)
-            .await
-            .expect("driver output");
-
-    assert!(output.payloads.is_empty());
-    assert!(output.staged_artifacts.is_empty());
+    assert!(matches!(
+        drive_side_effect_driver_from_store(&fixture, &store, node, &attempt_id, &callbacks).await,
+        Err(RuntimeError::InvalidRunnerOutput(message))
+            if message.contains("unsupported side-effect driver phase: ambiguous")
+    ));
 }
 
 #[tokio::test]
@@ -2448,6 +2483,52 @@ where
         run_stream: &run_stream,
     };
     SideEffectDriver::drive(ErasedRunCtx::from_prepared(&invocation), callbacks).await
+}
+
+async fn drive_side_effect_verify_driver_from_store<C>(
+    fixture: &Fixture,
+    store: &TestTypedRunStore,
+    node: &spec::NodeSpec,
+    attempt_id: &AttemptId,
+    callbacks: &C,
+) -> Result<ErasedRunnerOutput>
+where
+    C: SideEffectVerifyCallbacks + ?Sized,
+{
+    let descriptor = fixture
+        .runtime_spec
+        .state_descriptor_for_node(node)
+        .expect("state descriptor");
+    let output_cell = fixture
+        .runtime_spec
+        .cell(&node.output_cell)
+        .expect("output cell");
+    let config_artifact = config_artifact(&fixture.runtime_spec, &node.config_ref).evidence;
+    let projections = store.projection_snapshot().clone();
+    let run_stream = store.load_run_stream(&fixture.run_id);
+    let invocation = PreparedRunnerInvocation {
+        runtime_spec: &fixture.runtime_spec,
+        run_id: &fixture.run_id,
+        spec_hash: fixture.runtime_spec.spec_hash(),
+        node,
+        descriptor,
+        output_cell,
+        attempt_id,
+        attempt_no: 1,
+        config_artifact,
+        inputs: MaterializedInputs {
+            input_schema_id: node.input_bindings.input_schema_id.clone(),
+            root: MaterializedInputNode::Unit,
+        },
+        caps: CertifiedRuntimeCapabilities::new(
+            node.node_id.clone(),
+            node.capability_bindings.clone(),
+        ),
+        recorded_facts: RecordedFacts::default(),
+        projections: &projections,
+        run_stream: &run_stream,
+    };
+    SideEffectVerifyDriver::drive(ErasedRunCtx::from_prepared(&invocation), callbacks).await
 }
 
 fn single_side_effect_payload(output: &ErasedRunnerOutput) -> &RunnerEventPayload {
@@ -5421,6 +5502,10 @@ async fn side_effect_attempt_view_from_verified_context_exposes_ledger_state() {
 #[tokio::test]
 async fn recovery_sweep_includes_open_remediation_attempts() {
     let fixture = fixture_with_two_side_effects_and_failing_tail();
+    let forward_a = node_by_output(&fixture, &fixture.cell_a).clone();
+    let forward_b = node_by_output(&fixture, &fixture.cell_b).clone();
+    let forward_a_output = effective_output_cell_for_node(&fixture, &forward_a);
+    let forward_b_output = effective_output_cell_for_node(&fixture, &forward_b);
     let scheduler = compensated_saga_scheduler(&fixture);
     let mut store = TestTypedRunStore::new();
     start_fixture_run(
@@ -5436,17 +5521,17 @@ async fn recovery_sweep_includes_open_remediation_attempts() {
         &scheduler,
         &mut store,
         &fixture,
-        &[fixture.cell_a.clone(), fixture.cell_b.clone()],
+        &[forward_a_output.clone(), forward_b_output.clone()],
         "drive forward side-effect phase",
     )
     .await;
     assert!(store
         .projection_snapshot()
-        .cell_terminal(&fixture.cell_a)
+        .cell_terminal(&forward_a_output)
         .is_some());
     assert!(store
         .projection_snapshot()
-        .cell_terminal(&fixture.cell_b)
+        .cell_terminal(&forward_b_output)
         .is_some());
 
     let failure_node = node_by_output(
@@ -5454,9 +5539,8 @@ async fn recovery_sweep_includes_open_remediation_attempts() {
         fixture.cell_c.as_ref().expect("failing output cell"),
     )
     .clone();
-    let failure_attempt = append_attempt_start(&mut store, &fixture, &failure_node, 1);
+    let failure_attempt = append_or_get_started_attempt(&mut store, &fixture, &failure_node, 1);
     append_attempt_failure(&mut store, &fixture, &failure_node, &failure_attempt, false);
-    let forward_b = node_by_output(&fixture, &fixture.cell_b).clone();
     let remediation = fixture
         .runtime_spec
         .remediation_for_forward_node(&forward_b.node_id)
@@ -5996,6 +6080,7 @@ async fn side_effect_scheduler_commits_durable_ledger_phases_before_output() {
     .expect("start run");
 
     let node = node_by_output(&fixture, &fixture.cell_a);
+    let verify_node = side_effect_verify_node_for_submit(&fixture, node);
     let attempt_id = attempt_id(
         &fixture.run_id,
         fixture.runtime_spec.spec_hash(),
@@ -6003,7 +6088,7 @@ async fn side_effect_scheduler_commits_durable_ledger_phases_before_output() {
         1,
     )
     .expect("attempt id");
-    let mut confirmed_before_output = false;
+    let mut receipt_before_output = false;
     for _ in 0..8 {
         assert_eq!(
             drive_once(
@@ -6023,17 +6108,23 @@ async fn side_effect_scheduler_commits_durable_ledger_phases_before_output() {
                 .expect("side-effect projection");
         if matches!(
             projection.phase,
-            store::SideEffectPhase::ConfirmationObserved { .. }
-        ) && projection_snapshot.cell_terminal(&fixture.cell_a).is_none()
+            store::SideEffectPhase::ReceiptObserved { .. }
+        ) && projection_snapshot
+            .cell_terminal(&verify_node.output_cell)
+            .is_none()
         {
-            confirmed_before_output = true;
+            receipt_before_output = true;
             break;
         }
     }
-    assert!(confirmed_before_output);
+    assert!(receipt_before_output);
+    assert!(matches!(
+        store.projection_snapshot().cell_terminal(&fixture.cell_a),
+        Some(store::CellTerminalProjection::Skipped { .. })
+    ));
     assert!(store
         .projection_snapshot()
-        .cell_terminal(&fixture.cell_a)
+        .cell_terminal(&verify_node.output_cell)
         .is_none());
 
     assert_eq!(
@@ -6050,7 +6141,7 @@ async fn side_effect_scheduler_commits_durable_ledger_phases_before_output() {
 
     assert!(store
         .projection_snapshot()
-        .cell_terminal(&fixture.cell_a)
+        .cell_terminal(&verify_node.output_cell)
         .is_some());
     let projection_snapshot = store.projection_snapshot();
     let projection = side_effect_projection_for_attempt(&projection_snapshot, node, &attempt_id)
@@ -6058,7 +6149,7 @@ async fn side_effect_scheduler_commits_durable_ledger_phases_before_output() {
         .expect("side-effect projection");
     assert!(matches!(
         projection.phase,
-        store::SideEffectPhase::ConfirmationObserved { .. }
+        store::SideEffectPhase::ReceiptObserved { .. }
     ));
     assert!(store
         .load_run_stream(&fixture.run_id)
@@ -6069,6 +6160,10 @@ async fn side_effect_scheduler_commits_durable_ledger_phases_before_output() {
         )));
     assert_eq!(
         attempt_started_count(&store, &fixture.run_id, &node.node_id),
+        1
+    );
+    assert_eq!(
+        attempt_started_count(&store, &fixture.run_id, &verify_node.node_id),
         1
     );
 }
@@ -6087,7 +6182,7 @@ async fn runtime_rejects_exact_touched_set_receipt_without_evidence() {
     .await
     .expect("start run");
 
-    for _ in 0..2 {
+    for _ in 0..3 {
         assert_eq!(
             drive_once(
                 &scheduler,
@@ -6110,10 +6205,11 @@ async fn runtime_rejects_exact_touched_set_receipt_without_evidence() {
 
 #[tokio::test]
 async fn runtime_rejects_exact_touched_set_confirmation_without_evidence() {
-    let fixture = fixture_with_first_exact_touched_set_side_effect_state();
-    let scheduler = test_scheduler(registered_first_side_effect_runners_with(
+    let fixture = fixture_with_first_exact_touched_set_finalized_side_effect_state();
+    let scheduler = test_scheduler(registered_first_side_effect_and_verify_runners_with(
         &fixture,
-        TouchedSetSideEffectRunner::with_receipt(&fixture),
+        DriverSideEffectRunner::new(&fixture),
+        TouchedSetSideEffectVerifyRunner::with_receipt(&fixture),
     ));
     let mut store = TestTypedRunStore::new();
     start_fixture_run(
@@ -6125,7 +6221,7 @@ async fn runtime_rejects_exact_touched_set_confirmation_without_evidence() {
     .await
     .expect("start run");
 
-    for _ in 0..3 {
+    for _ in 0..4 {
         assert_eq!(
             drive_once(
                 &scheduler,
@@ -6148,10 +6244,11 @@ async fn runtime_rejects_exact_touched_set_confirmation_without_evidence() {
 
 #[tokio::test]
 async fn runtime_rejects_touched_set_confirmation_without_exact_claim() {
-    let fixture = fixture_with_first_side_effect_state();
-    let scheduler = test_scheduler(registered_first_side_effect_runners_with(
+    let fixture = fixture_with_first_finalized_side_effect_state();
+    let scheduler = test_scheduler(registered_first_side_effect_and_verify_runners_with(
         &fixture,
-        TouchedSetSideEffectRunner::with_confirmation(&fixture),
+        DriverSideEffectRunner::new(&fixture),
+        TouchedSetSideEffectVerifyRunner::with_confirmation(&fixture),
     ));
     let mut store = TestTypedRunStore::new();
     start_fixture_run(
@@ -6163,7 +6260,7 @@ async fn runtime_rejects_touched_set_confirmation_without_exact_claim() {
     .await
     .expect("start run");
 
-    for _ in 0..3 {
+    for _ in 0..4 {
         assert_eq!(
             drive_once(
                 &scheduler,
@@ -6230,7 +6327,7 @@ async fn runtime_fails_pre_boundary_forward_attempt_before_saga_terminal() {
         store::SideEffectPhase::InvocationPrepared { .. }
     ));
 
-    let failing_attempt = append_attempt_start(&mut store, &fixture, &failing_node, 1);
+    let failing_attempt = append_or_get_started_attempt(&mut store, &fixture, &failing_node, 1);
     append_attempt_failure(&mut store, &fixture, &failing_node, &failing_attempt, false);
     assert_eq!(
         store
@@ -6345,7 +6442,7 @@ async fn runtime_fails_not_submitted_forward_attempt_before_saga_terminal() {
         store::SideEffectPhase::NotSubmittedProven { .. }
     ));
 
-    let failing_attempt = append_attempt_start(&mut store, &fixture, &failing_node, 1);
+    let failing_attempt = append_or_get_started_attempt(&mut store, &fixture, &failing_node, 1);
     append_attempt_failure(&mut store, &fixture, &failing_node, &failing_attempt, false);
 
     assert_eq!(
@@ -6401,6 +6498,8 @@ async fn runtime_remediates_confirmed_forward_ledgers_in_reverse_confirmation_or
     let fixture = fixture_with_two_side_effects_and_failing_tail();
     let forward_a = node_by_output(&fixture, &fixture.cell_a).clone();
     let forward_b = node_by_output(&fixture, &fixture.cell_b).clone();
+    let forward_a_output = effective_output_cell_for_node(&fixture, &forward_a);
+    let forward_b_output = effective_output_cell_for_node(&fixture, &forward_b);
     let failure_node = node_by_output(
         &fixture,
         fixture.cell_c.as_ref().expect("failing output cell"),
@@ -6446,24 +6545,24 @@ async fn runtime_remediates_confirmed_forward_ledgers_in_reverse_confirmation_or
         &scheduler,
         &mut store,
         &fixture,
-        &[fixture.cell_a.clone(), fixture.cell_b.clone()],
+        &[forward_a_output.clone(), forward_b_output.clone()],
         "drive forward side-effect phase",
     )
     .await;
     assert!(store
         .projection_snapshot()
-        .cell_terminal(&fixture.cell_a)
+        .cell_terminal(&forward_a_output)
         .is_some());
     assert!(store
         .projection_snapshot()
-        .cell_terminal(&fixture.cell_b)
+        .cell_terminal(&forward_b_output)
         .is_some());
     let forward_a_ledger =
         forward_ledger_for_node(&store.projection_snapshot(), &forward_a.node_id);
     let forward_b_ledger =
         forward_ledger_for_node(&store.projection_snapshot(), &forward_b.node_id);
 
-    let failure_attempt = append_attempt_start(&mut store, &fixture, &failure_node, 1);
+    let failure_attempt = append_or_get_started_attempt(&mut store, &fixture, &failure_node, 1);
     append_attempt_failure(&mut store, &fixture, &failure_node, &failure_attempt, false);
     let saga = store
         .projection_snapshot()
@@ -6480,10 +6579,13 @@ async fn runtime_remediates_confirmed_forward_ledgers_in_reverse_confirmation_or
         )
         .await
         .expect("drive remediation phase");
-        assert!(matches!(
-            status,
-            SchedulerStatus::Advanced | SchedulerStatus::PublicOutputProjected
-        ));
+        assert!(
+            matches!(
+                status,
+                SchedulerStatus::Advanced | SchedulerStatus::PublicOutputProjected
+            ),
+            "unexpected remediation status: {status:?}"
+        );
         if store
             .projection_snapshot()
             .derive_saga_projection(&fixture.run_id, &fixture.runtime_spec.spec().saga)
@@ -6566,6 +6668,8 @@ async fn runtime_compensated_saga_resume_boundaries_do_not_duplicate_mutations()
     let fixture = fixture_with_two_side_effects_and_failing_tail();
     let forward_a = node_by_output(&fixture, &fixture.cell_a).clone();
     let forward_b = node_by_output(&fixture, &fixture.cell_b).clone();
+    let forward_a_output = effective_output_cell_for_node(&fixture, &forward_a);
+    let forward_b_output = effective_output_cell_for_node(&fixture, &forward_b);
     let remediation_a = fixture
         .runtime_spec
         .spec()
@@ -6580,6 +6684,8 @@ async fn runtime_compensated_saga_resume_boundaries_do_not_duplicate_mutations()
         .get(&forward_b.node_id)
         .expect("remediation b")
         .clone();
+    let remediation_a_output = effective_output_cell_for_node(&fixture, &remediation_a);
+    let remediation_b_output = effective_output_cell_for_node(&fixture, &remediation_b);
     let failure_node = node_by_output(
         &fixture,
         fixture.cell_c.as_ref().expect("failing output cell"),
@@ -6601,7 +6707,7 @@ async fn runtime_compensated_saga_resume_boundaries_do_not_duplicate_mutations()
         &mut store,
         &fixture,
         &forward_a,
-        &fixture.cell_a,
+        &forward_a_output,
         "forward a confirmation before output",
     )
     .await;
@@ -6612,7 +6718,7 @@ async fn runtime_compensated_saga_resume_boundaries_do_not_duplicate_mutations()
         &scheduler,
         &mut store,
         &fixture,
-        &[fixture.cell_a.clone(), fixture.cell_b.clone()],
+        &[forward_a_output.clone(), forward_b_output.clone()],
         "forward outputs",
     )
     .await;
@@ -6622,7 +6728,7 @@ async fn runtime_compensated_saga_resume_boundaries_do_not_duplicate_mutations()
     let forward_b_ledger =
         forward_ledger_for_node(&store.projection_snapshot(), &forward_b.node_id);
 
-    let failure_attempt = append_attempt_start(&mut store, &fixture, &failure_node, 1);
+    let failure_attempt = append_or_get_started_attempt(&mut store, &fixture, &failure_node, 1);
     append_attempt_failure(&mut store, &fixture, &failure_node, &failure_attempt, false);
     let saga = store
         .projection_snapshot()
@@ -6655,7 +6761,7 @@ async fn runtime_compensated_saga_resume_boundaries_do_not_duplicate_mutations()
     .await;
     assert!(store
         .projection_snapshot()
-        .cell_terminal(&remediation_b.output_cell)
+        .cell_terminal(&remediation_b_output)
         .is_none());
     assert_no_duplicate_side_effect_submissions(&store, &fixture.run_id);
 
@@ -6664,7 +6770,7 @@ async fn runtime_compensated_saga_resume_boundaries_do_not_duplicate_mutations()
         &scheduler,
         &mut store,
         &fixture,
-        std::slice::from_ref(&remediation_b.output_cell),
+        std::slice::from_ref(&remediation_b_output),
         "first remedial output",
     )
     .await;
@@ -6679,7 +6785,7 @@ async fn runtime_compensated_saga_resume_boundaries_do_not_duplicate_mutations()
     ));
     assert!(store
         .projection_snapshot()
-        .cell_terminal(&remediation_a.output_cell)
+        .cell_terminal(&remediation_a_output)
         .is_none());
     assert_no_duplicate_side_effect_submissions(&store, &fixture.run_id);
 
@@ -6688,13 +6794,13 @@ async fn runtime_compensated_saga_resume_boundaries_do_not_duplicate_mutations()
         &scheduler,
         &mut store,
         &fixture,
-        std::slice::from_ref(&remediation_a.output_cell),
+        std::slice::from_ref(&remediation_a_output),
         "second remedial output",
     )
     .await;
     assert!(store
         .projection_snapshot()
-        .cell_terminal(&remediation_a.output_cell)
+        .cell_terminal(&remediation_a_output)
         .is_some());
     assert_no_duplicate_side_effect_submissions(&store, &fixture.run_id);
     assert_eq!(
@@ -6780,7 +6886,7 @@ async fn runtime_resolves_clean_failure_without_acdc_claim() {
     .await
     .expect("start run");
 
-    let failure_attempt = append_attempt_start(&mut store, &fixture, &failure_node, 1);
+    let failure_attempt = append_or_get_started_attempt(&mut store, &fixture, &failure_node, 1);
     append_attempt_failure(&mut store, &fixture, &failure_node, &failure_attempt, false);
     let saga = store
         .projection_snapshot()
@@ -6812,7 +6918,13 @@ async fn runtime_resolves_clean_failure_without_acdc_claim() {
 #[tokio::test]
 async fn runtime_materializes_confirmed_forward_output_before_failed_without_claim_terminal() {
     let fixture = fixture_with_independent_second_node_and_first_side_effect_state();
+    let descriptor_a = fixture.descriptor_a.clone();
+    let fixture = with_first_side_effect_verification(
+        with_exclusive_resource_claims(fixture, std::slice::from_ref(&descriptor_a)),
+        spec::SideEffectVerificationSpec::Finalized { depth: 1 },
+    );
     let forward_node = node_by_output(&fixture, &fixture.cell_a).clone();
+    let forward_output = effective_output_cell_for_node(&fixture, &forward_node);
     let failure_node = node_by_output(&fixture, &fixture.cell_b).clone();
     let mut registry = ErasedRunnerRegistry::new();
     registry
@@ -6844,47 +6956,62 @@ async fn runtime_materializes_confirmed_forward_output_before_failed_without_cla
     .await
     .expect("start run");
 
-    let forward_attempt = attempt_id(
+    let (forward_attempt, ledger) = append_synthetic_exclusive_prepare(
+        &mut store,
+        &fixture,
         &fixture.run_id,
-        fixture.runtime_spec.spec_hash(),
-        &forward_node.node_id,
-        1,
-    )
-    .expect("attempt id");
-    for _ in 0..8 {
-        assert_eq!(
-            drive_once(
-                &scheduler,
-                &mut store,
-                &fixture.runtime_spec,
-                &fixture.run_id
-            )
-            .await
-            .expect("drive forward side-effect to confirmation"),
-            SchedulerStatus::Advanced
-        );
-        let projection_snapshot = store.projection_snapshot();
-        let projection = side_effect_projection_for_attempt(
-            &projection_snapshot,
-            &forward_node,
-            &forward_attempt,
-        )
-        .expect("side-effect projection lookup")
-        .expect("side-effect projection");
-        assert!(store
-            .projection_snapshot()
-            .cell_terminal(&fixture.cell_a)
-            .is_none());
-        if matches!(
-            projection.phase,
-            store::SideEffectPhase::ConfirmationObserved { .. }
-        ) {
-            break;
-        }
-    }
+        &forward_node,
+        "wallet-confirmed-forward-output-before-failure",
+        "sidefx-confirmed-forward-output-before-failure",
+    );
+    append_synthetic_invocation_started(
+        &mut store,
+        &fixture,
+        &fixture.run_id,
+        &forward_node,
+        &forward_attempt,
+        &ledger,
+        "sidefx-confirmed-forward-output-before-failure-started",
+    );
+    append_synthetic_submission_observed(
+        &mut store,
+        &fixture,
+        &forward_node,
+        &forward_attempt,
+        &ledger,
+        "sidefx-confirmed-forward-output-before-failure-submission",
+    );
+    append_synthetic_submit_boundary_skipped(
+        &mut store,
+        &fixture,
+        &forward_node,
+        &forward_attempt,
+        &ledger,
+        "sidefx-confirmed-forward-output-before-failure-submit-boundary",
+    );
+    let verify_node = side_effect_verify_node_for_submit(&fixture, &forward_node).clone();
+    let verify_attempt = append_attempt_start(&mut store, &fixture, &verify_node, 1);
+    append_synthetic_verify_receipt_observed(
+        &mut store,
+        &fixture,
+        &forward_node,
+        &verify_node,
+        &verify_attempt,
+        &ledger,
+        "sidefx-confirmed-forward-output-before-failure-receipt",
+    );
+    append_synthetic_verify_confirmation_observed(
+        &mut store,
+        &fixture,
+        &forward_node,
+        &verify_node,
+        &verify_attempt,
+        &ledger,
+        "sidefx-confirmed-forward-output-before-failure-confirmation",
+    );
     assert!(store
         .projection_snapshot()
-        .cell_terminal(&fixture.cell_a)
+        .cell_terminal(&forward_output)
         .is_none());
     let projection_snapshot = store.projection_snapshot();
     let projection =
@@ -6896,7 +7023,7 @@ async fn runtime_materializes_confirmed_forward_output_before_failed_without_cla
         store::SideEffectPhase::ConfirmationObserved { .. }
     ));
 
-    let failure_attempt = append_attempt_start(&mut store, &fixture, &failure_node, 1);
+    let failure_attempt = append_or_get_started_attempt(&mut store, &fixture, &failure_node, 1);
     append_attempt_failure(&mut store, &fixture, &failure_node, &failure_attempt, false);
     let saga = store
         .projection_snapshot()
@@ -6916,7 +7043,7 @@ async fn runtime_materializes_confirmed_forward_output_before_failed_without_cla
     );
     assert!(store
         .projection_snapshot()
-        .cell_terminal(&fixture.cell_a)
+        .cell_terminal(&forward_output)
         .is_some());
     assert!(store
         .projection_snapshot()
@@ -7341,6 +7468,10 @@ async fn runtime_rejects_forward_node_emitting_remediation_ledger_purpose() {
 #[tokio::test]
 async fn runtime_rejects_remediation_node_emitting_forward_ledger_purpose() {
     let fixture = fixture_with_two_side_effects_and_failing_tail();
+    let forward_a = node_by_output(&fixture, &fixture.cell_a).clone();
+    let forward_b = node_by_output(&fixture, &fixture.cell_b).clone();
+    let forward_a_output = effective_output_cell_for_node(&fixture, &forward_a);
+    let forward_b_output = effective_output_cell_for_node(&fixture, &forward_b);
     let failure_node = node_by_output(
         &fixture,
         fixture.cell_c.as_ref().expect("failing output cell"),
@@ -7386,11 +7517,11 @@ async fn runtime_rejects_remediation_node_emitting_forward_ledger_purpose() {
         &scheduler,
         &mut store,
         &fixture,
-        &[fixture.cell_a.clone(), fixture.cell_b.clone()],
+        &[forward_a_output, forward_b_output],
         "drive forward side-effect phase",
     )
     .await;
-    let failure_attempt = append_attempt_start(&mut store, &fixture, &failure_node, 1);
+    let failure_attempt = append_or_get_started_attempt(&mut store, &fixture, &failure_node, 1);
     append_attempt_failure(&mut store, &fixture, &failure_node, &failure_attempt, false);
 
     assert_eq!(
@@ -7408,7 +7539,7 @@ async fn runtime_rejects_remediation_node_emitting_forward_ledger_purpose() {
 }
 
 #[tokio::test]
-async fn side_effect_not_submitted_resume_claims_next_epoch() {
+async fn side_effect_not_submitted_resume_completes_submit_boundary() {
     let fixture = fixture_with_first_side_effect_state();
     let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
     let mut store = TestTypedRunStore::new();
@@ -7453,12 +7584,16 @@ async fn side_effect_not_submitted_resume_claims_next_epoch() {
         .expect("side-effect projection");
     assert!(matches!(
         projection.phase,
-        store::SideEffectPhase::InvocationStarted {
-            invocation_epoch: 2,
-            claim_generation: 2,
-            ..
-        }
+        store::SideEffectPhase::NotSubmittedProven { .. }
     ));
+    assert!(matches!(
+        projection_snapshot.cell_terminal(&fixture.cell_a),
+        Some(store::CellTerminalProjection::Skipped { .. })
+    ));
+    assert_eq!(
+        attempt_started_count(&store, &fixture.run_id, &node.node_id),
+        1
+    );
 }
 
 #[tokio::test]
@@ -7939,6 +8074,25 @@ impl ErasedNodeRunner for DriverSideEffectRunner {
 }
 
 #[derive(Clone)]
+struct DriverSideEffectVerifyRunner {
+    callbacks: TestSideEffectDriverCallbacks,
+}
+
+impl DriverSideEffectVerifyRunner {
+    fn new(fixture: &Fixture) -> Self {
+        Self {
+            callbacks: TestSideEffectDriverCallbacks::new(fixture),
+        }
+    }
+}
+
+impl ErasedNodeRunner for DriverSideEffectVerifyRunner {
+    fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
+        Box::pin(async move { SideEffectVerifyDriver::drive(ctx, &self.callbacks).await })
+    }
+}
+
+#[derive(Clone)]
 struct FailingAfterPreclaimRunner {
     callbacks: TestSideEffectDriverCallbacks,
 }
@@ -8065,8 +8219,9 @@ impl ErasedNodeRunner for PrePreparedSideEffectRunner {
     }
 }
 
-struct TouchedSetSideEffectRunner {
-    inner: DriverSideEffectRunner,
+#[derive(Clone)]
+struct TouchedSetSideEffectVerifyRunner {
+    callbacks: TestSideEffectDriverCallbacks,
     receipt: TouchedSetEmission,
     confirmation: TouchedSetEmission,
 }
@@ -8077,10 +8232,10 @@ enum TouchedSetEmission {
     MatchPayloadSchema,
 }
 
-impl TouchedSetSideEffectRunner {
+impl TouchedSetSideEffectVerifyRunner {
     fn with_receipt(fixture: &Fixture) -> Self {
         Self {
-            inner: DriverSideEffectRunner::new(fixture),
+            callbacks: TestSideEffectDriverCallbacks::new(fixture),
             receipt: TouchedSetEmission::MatchPayloadSchema,
             confirmation: TouchedSetEmission::None,
         }
@@ -8088,24 +8243,17 @@ impl TouchedSetSideEffectRunner {
 
     fn with_confirmation(fixture: &Fixture) -> Self {
         Self {
-            inner: DriverSideEffectRunner::new(fixture),
+            callbacks: TestSideEffectDriverCallbacks::new(fixture),
             receipt: TouchedSetEmission::None,
             confirmation: TouchedSetEmission::MatchPayloadSchema,
         }
     }
 }
 
-impl ErasedNodeRunner for TouchedSetSideEffectRunner {
-    fn preclaim_resource_lane<'a>(
-        &'a self,
-        ctx: &'a PreInvocationRunCtx<'a>,
-    ) -> PreInvocationRunnerFuture<'a> {
-        self.inner.preclaim_resource_lane(ctx)
-    }
-
+impl ErasedNodeRunner for TouchedSetSideEffectVerifyRunner {
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
-            let mut output = self.inner.run_erased(ctx).await?;
+            let mut output = SideEffectVerifyDriver::drive(ctx, &self.callbacks).await?;
             for payload in &mut output.payloads {
                 match payload {
                     RunnerEventPayload::SideEffectReceiptObserved(payload) => {
@@ -9183,6 +9331,35 @@ fn node_by_output<'a>(fixture: &'a Fixture, cell_id: &CellId) -> &'a spec::NodeS
         .expect("node by output")
 }
 
+fn side_effect_verify_node_for_submit<'a>(
+    fixture: &'a Fixture,
+    submit: &spec::NodeSpec,
+) -> &'a spec::NodeSpec {
+    fixture
+        .runtime_spec
+        .topological_order()
+        .iter()
+        .filter_map(|node_id| fixture.runtime_spec.node(node_id))
+        .find(|node| {
+            matches!(
+                &node.framework,
+                Some(spec::FrameworkNodeSpec::SideEffectVerify(verify))
+                    if verify.submit_node_id == submit.node_id
+            )
+        })
+        .expect("side-effect verify node")
+}
+
+fn effective_output_cell_for_node(fixture: &Fixture, node: &spec::NodeSpec) -> CellId {
+    if node.side_effect.is_some() {
+        side_effect_verify_node_for_submit(fixture, node)
+            .output_cell
+            .clone()
+    } else {
+        node.output_cell.clone()
+    }
+}
+
 fn append_attempt_start(
     store: &mut TestTypedRunStore,
     fixture: &Fixture,
@@ -9223,6 +9400,34 @@ fn append_attempt_start(
         })
         .expect("append attempt start");
     attempt_id
+}
+
+fn append_or_get_started_attempt(
+    store: &mut TestTypedRunStore,
+    fixture: &Fixture,
+    node: &spec::NodeSpec,
+    attempt_no: u32,
+) -> AttemptId {
+    let attempt_id = attempt_id(
+        &fixture.run_id,
+        fixture.runtime_spec.spec_hash(),
+        &node.node_id,
+        attempt_no,
+    )
+    .expect("attempt id");
+    if let Some(attempt) = store
+        .projection_snapshot()
+        .attempt(&node.node_id, &attempt_id)
+        .cloned()
+    {
+        assert!(
+            matches!(attempt.status, store::AttemptStatus::Started { .. }),
+            "attempt {attempt_id} for node {} is not active",
+            node.node_id
+        );
+        return attempt_id;
+    }
+    append_attempt_start(store, fixture, node, attempt_no)
 }
 
 fn append_attempt_failure(
@@ -9605,6 +9810,210 @@ fn append_synthetic_receipt_observed(
         .expect("append synthetic receipt observed");
 }
 
+fn append_synthetic_submit_boundary_skipped(
+    store: &mut TestTypedRunStore,
+    fixture: &Fixture,
+    node: &spec::NodeSpec,
+    attempt_id: &AttemptId,
+    ledger: &events::SideEffectLedgerKey,
+    commit_key: &str,
+) {
+    let output_cell = fixture
+        .runtime_spec
+        .cell(&node.output_cell)
+        .expect("submit output cell");
+    store
+        .append_prepared_commit(store_typed_commit_request! {
+            run_id: fixture.run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&fixture.run_id),
+            commit_key: store::CommitKey::new(commit_key).expect("commit key"),
+            payloads: vec![
+                events::KernelEventPayload::CellSkipped(events::CellSkipped {
+                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                    node_id: node.node_id.clone(),
+                    cell_id: node.output_cell.clone(),
+                    scope_id: node.scope_id.clone(),
+                    attempt_id: attempt_id.clone(),
+                    semantic_type_id: output_cell.semantic_type_id.clone(),
+                    schema_id: output_cell.schema_id.clone(),
+                    value_lineage: output_cell.value_lineage.clone(),
+                    skip_reason: events::SkipReason {
+                        code: events::ErrorCode::new("side_effect_submission_boundary")
+                            .expect("skip code"),
+                        safe_message: "side-effect submit boundary recorded; verification is delegated to the paired verify node".to_owned(),
+                    },
+                }),
+                events::KernelEventPayload::StateAttemptCompleted(
+                    events::StateAttemptCompleted {
+                        spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                        node_id: node.node_id.clone(),
+                        attempt_id: attempt_id.clone(),
+                        output_cell_id: node.output_cell.clone(),
+                    },
+                ),
+            ],
+            required_artifacts: Vec::new(),
+            preconditions: store::CommitPreconditions {
+                required_run_state: store::RequiredRunState::NotCompleted,
+                required_present_logical_keys: vec![store::LogicalEventKey::new(format!(
+                    "attempt:{}:{}",
+                    node.node_id, attempt_id
+                ))
+                .expect("attempt logical key")],
+                required_cell_states: vec![store::CellStatePrecondition {
+                    cell_id: node.output_cell.clone(),
+                    required: store::RequiredCellState::Absent,
+                }],
+                required_side_effect_states: vec![store::SideEffectStatePrecondition {
+                    ledger_key: ledger.clone(),
+                    required: store::RequiredSideEffectState::SubmissionResult,
+                }],
+                ..store::CommitPreconditions::default()
+            },
+        })
+        .expect("append synthetic submit boundary skipped");
+}
+
+fn append_synthetic_verify_receipt_observed(
+    store: &mut TestTypedRunStore,
+    fixture: &Fixture,
+    submit_node: &spec::NodeSpec,
+    verify_node: &spec::NodeSpec,
+    verify_attempt_id: &AttemptId,
+    ledger: &events::SideEffectLedgerKey,
+    commit_key: &str,
+) {
+    let artifact_id = artifact(0xd9);
+    let digest = content(0xda);
+    let evidence = side_effect_evidence(
+        verify_node,
+        artifact_id.clone(),
+        digest.clone(),
+        events::ArtifactRole::Receipt,
+    );
+    let pair_id = fixture
+        .runtime_spec
+        .side_effect_pair_for_submit_node(&submit_node.node_id)
+        .cloned();
+    let pair_role = pair_id.as_ref().map(|_| events::SideEffectPairRole::Verify);
+    store
+        .append_prepared_commit(store_typed_commit_request! {
+            run_id: fixture.run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&fixture.run_id),
+            commit_key: store::CommitKey::new(commit_key).expect("commit key"),
+            payloads: vec![events::KernelEventPayload::SideEffectReceiptObserved(
+                events::side_effect::ReceiptObserved {
+                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                    node_id: verify_node.node_id.clone(),
+                    attempt_id: verify_attempt_id.clone(),
+                    ledger_key: ledger.clone(),
+                    ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                    pair_id,
+                    pair_role,
+                    invocation_epoch: 1,
+                    receipt_schema_id: verify_node.config_ref.schema_id.clone(),
+                    receipt_hash: digest,
+                    receipt_artifact_id: artifact_id,
+                    replay_verifier_id: events::ReplayVerifierId::new("mfm.test.driver.replay")
+                        .expect("replay verifier"),
+                    resource_touched_set: None,
+                },
+            )],
+            required_artifacts: vec![evidence],
+            preconditions: store::CommitPreconditions {
+                required_run_state: store::RequiredRunState::NotCompleted,
+                required_present_logical_keys: vec![store::LogicalEventKey::new(format!(
+                    "attempt:{}:{}",
+                    verify_node.node_id, verify_attempt_id
+                ))
+                .expect("attempt logical key")],
+                required_side_effect_states: vec![store::SideEffectStatePrecondition {
+                    ledger_key: ledger.clone(),
+                    required: store::RequiredSideEffectState::SubmissionResult,
+                }],
+                ..store::CommitPreconditions::default()
+            },
+        })
+        .expect("append synthetic verify receipt observed");
+}
+
+fn append_synthetic_verify_confirmation_observed(
+    store: &mut TestTypedRunStore,
+    fixture: &Fixture,
+    submit_node: &spec::NodeSpec,
+    verify_node: &spec::NodeSpec,
+    verify_attempt_id: &AttemptId,
+    ledger: &events::SideEffectLedgerKey,
+    commit_key: &str,
+) {
+    let artifact_id = artifact(0xdb);
+    let digest = content(0xdc);
+    let evidence = side_effect_evidence(
+        verify_node,
+        artifact_id.clone(),
+        digest.clone(),
+        events::ArtifactRole::Confirmation,
+    );
+    let pair_id = fixture
+        .runtime_spec
+        .side_effect_pair_for_submit_node(&submit_node.node_id)
+        .cloned();
+    let pair_role = pair_id.as_ref().map(|_| events::SideEffectPairRole::Verify);
+    let release = synthetic_resource_lane_release(
+        store,
+        fixture,
+        &fixture.run_id,
+        verify_node,
+        verify_attempt_id,
+        ledger,
+        "side_effect.confirmed",
+    );
+    let mut payloads = Vec::new();
+    if let Some(release) = release {
+        payloads.push(release);
+    }
+    payloads.push(events::KernelEventPayload::SideEffectConfirmationObserved(
+        events::side_effect::ConfirmationObserved {
+            spec_hash: fixture.runtime_spec.spec_hash().clone(),
+            node_id: verify_node.node_id.clone(),
+            attempt_id: verify_attempt_id.clone(),
+            ledger_key: ledger.clone(),
+            ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+            pair_id,
+            pair_role,
+            invocation_epoch: 1,
+            confirmation_schema_id: verify_node.config_ref.schema_id.clone(),
+            confirmation_hash: digest,
+            confirmation_artifact_id: artifact_id,
+            replay_verifier_id: events::ReplayVerifierId::new("mfm.test.driver.replay")
+                .expect("replay verifier"),
+            resource_touched_set: None,
+        },
+    ));
+    store
+        .append_prepared_commit(store_typed_commit_request! {
+            run_id: fixture.run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&fixture.run_id),
+            commit_key: store::CommitKey::new(commit_key).expect("commit key"),
+            payloads: payloads,
+            required_artifacts: vec![evidence],
+            preconditions: store::CommitPreconditions {
+                required_run_state: store::RequiredRunState::NotCompleted,
+                required_present_logical_keys: vec![store::LogicalEventKey::new(format!(
+                    "attempt:{}:{}",
+                    verify_node.node_id, verify_attempt_id
+                ))
+                .expect("attempt logical key")],
+                required_side_effect_states: vec![store::SideEffectStatePrecondition {
+                    ledger_key: ledger.clone(),
+                    required: store::RequiredSideEffectState::ReceiptObserved,
+                }],
+                ..store::CommitPreconditions::default()
+            },
+        })
+        .expect("append synthetic confirmation observed");
+}
+
 fn synthetic_resource_lane_release(
     store: &TestTypedRunStore,
     fixture: &Fixture,
@@ -9636,79 +10045,6 @@ fn synthetic_resource_lane_release(
             release_reason: events::ResourceLaneReleaseReason::new(reason).expect("release reason"),
         },
     ))
-}
-
-fn append_synthetic_confirmation_observed(
-    store: &mut TestTypedRunStore,
-    fixture: &Fixture,
-    node: &spec::NodeSpec,
-    attempt_id: &AttemptId,
-    ledger: &events::SideEffectLedgerKey,
-    commit_key: &str,
-) {
-    let artifact_id = artifact(0xdb);
-    let digest = content(0xdc);
-    let evidence = side_effect_evidence(
-        node,
-        artifact_id.clone(),
-        digest.clone(),
-        events::ArtifactRole::Confirmation,
-    );
-    let ledger_purpose = events::SideEffectLedgerPurpose::Forward;
-    let (pair_id, pair_role) = side_effect_pair_fields_for_purpose(
-        &fixture.runtime_spec,
-        &node.node_id,
-        &ledger_purpose,
-        events::SideEffectPairRole::Verify,
-    );
-    let release = synthetic_resource_lane_release(
-        store,
-        fixture,
-        &fixture.run_id,
-        node,
-        attempt_id,
-        ledger,
-        "side_effect.confirmed",
-    );
-    let mut payloads = Vec::new();
-    if let Some(release) = release {
-        payloads.push(release);
-    }
-    payloads.push(events::KernelEventPayload::SideEffectConfirmationObserved(
-        events::side_effect::ConfirmationObserved {
-            spec_hash: fixture.runtime_spec.spec_hash().clone(),
-            node_id: node.node_id.clone(),
-            attempt_id: attempt_id.clone(),
-            ledger_key: ledger.clone(),
-            ledger_purpose,
-            pair_id,
-            pair_role,
-            invocation_epoch: 1,
-            confirmation_schema_id: node.config_ref.schema_id.clone(),
-            confirmation_hash: digest,
-            confirmation_artifact_id: artifact_id,
-            replay_verifier_id: events::ReplayVerifierId::new("mfm.test.driver.replay")
-                .expect("replay verifier"),
-            resource_touched_set: None,
-        },
-    ));
-    store
-        .append_prepared_commit(store_typed_commit_request! {
-            run_id: fixture.run_id.clone(),
-            expected_next_seq: store.expected_next_seq(&fixture.run_id),
-            commit_key: store::CommitKey::new(commit_key).expect("commit key"),
-            payloads: payloads,
-            required_artifacts: vec![evidence],
-            preconditions: store::CommitPreconditions {
-                required_run_state: store::RequiredRunState::NotCompleted,
-                required_side_effect_states: vec![store::SideEffectStatePrecondition {
-                    ledger_key: ledger.clone(),
-                    required: store::RequiredSideEffectState::ReceiptObserved,
-                }],
-                ..store::CommitPreconditions::default()
-            },
-        })
-        .expect("append synthetic confirmation observed");
 }
 
 fn side_effect_evidence(
@@ -10389,6 +10725,7 @@ fn registered_fixture_runners(fixture: &Fixture) -> ErasedRunnerRegistry {
 fn registered_side_effect_fixture_runners(fixture: &Fixture) -> ErasedRunnerRegistry {
     let mut registry = ErasedRunnerRegistry::new();
     register_spec_capabilities(&mut registry, &fixture.runtime_spec);
+    register_side_effect_verify_fixture_runner(&mut registry, fixture);
     registry
         .register(binding(
             fixture.descriptor_a.clone(),
@@ -10416,6 +10753,35 @@ fn registered_first_side_effect_runners_with<R: ErasedNodeRunner + 'static>(
 ) -> ErasedRunnerRegistry {
     let mut registry = ErasedRunnerRegistry::new();
     register_spec_capabilities(&mut registry, &fixture.runtime_spec);
+    register_side_effect_verify_fixture_runner(&mut registry, fixture);
+    registry
+        .register(binding(fixture.descriptor_a.clone(), "sidefx", runner))
+        .expect("binding a");
+    registry
+        .register(binding(
+            fixture.descriptor_b.clone(),
+            "read",
+            RecordingRunner {
+                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                output_artifact: artifact(0xb1),
+                output_digest: content(0xb2),
+            },
+        ))
+        .expect("binding b");
+    registry
+}
+
+fn registered_first_side_effect_and_verify_runners_with<
+    R: ErasedNodeRunner + 'static,
+    V: ErasedNodeRunner + 'static,
+>(
+    fixture: &Fixture,
+    runner: R,
+    verify_runner: V,
+) -> ErasedRunnerRegistry {
+    let mut registry = ErasedRunnerRegistry::new();
+    register_spec_capabilities(&mut registry, &fixture.runtime_spec);
+    register_side_effect_verify_runner_with(&mut registry, verify_runner);
     registry
         .register(binding(fixture.descriptor_a.clone(), "sidefx", runner))
         .expect("binding a");
@@ -10436,6 +10802,7 @@ fn registered_first_side_effect_runners_with<R: ErasedNodeRunner + 'static>(
 fn compensated_saga_scheduler(fixture: &Fixture) -> SerialTypedScheduler {
     let mut registry = ErasedRunnerRegistry::new();
     register_spec_capabilities(&mut registry, &fixture.runtime_spec);
+    register_side_effect_verify_fixture_runner(&mut registry, fixture);
     registry
         .register(binding(
             fixture.descriptor_a.clone(),
@@ -10461,6 +10828,33 @@ fn compensated_saga_scheduler(fixture: &Fixture) -> SerialTypedScheduler {
         ))
         .expect("binding failure node");
     test_scheduler(registry)
+}
+
+fn register_side_effect_verify_fixture_runner(
+    registry: &mut ErasedRunnerRegistry,
+    fixture: &Fixture,
+) {
+    register_side_effect_verify_runner_with(registry, DriverSideEffectVerifyRunner::new(fixture));
+}
+
+fn register_side_effect_verify_runner_with<R: ErasedNodeRunner + 'static>(
+    registry: &mut ErasedRunnerRegistry,
+    runner: R,
+) {
+    let factory_id = events::RunnerFactoryId::new("read_external").expect("factory");
+    registry
+        .register_side_effect_verify_runner(
+            factory_id.clone(),
+            events::ExecutableIdentity {
+                factory_id,
+                cargo_package_digest: content(0xe1),
+                binary_digest: content(0xe2),
+                nix_derivation_hash: None,
+                nix_output_hash: None,
+            },
+            Arc::new(runner),
+        )
+        .expect("side-effect verify binding");
 }
 
 fn binding<R: ErasedNodeRunner + 'static>(
@@ -11332,6 +11726,17 @@ fn fixture_with_first_managed_write_state() -> Fixture {
 }
 
 fn refresh_side_effect_verify_nodes(typed: &mut spec::TypedExecutionSpec) {
+    let old_verify_links = typed
+        .nodes
+        .iter()
+        .filter_map(|node| match &node.framework {
+            Some(spec::FrameworkNodeSpec::SideEffectVerify(verify)) => Some((
+                verify.submit_node_id.clone(),
+                (node.node_id.clone(), node.output_cell.clone()),
+            )),
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
     let verify_node_ids = typed
         .nodes
         .iter()
@@ -11386,18 +11791,44 @@ fn refresh_side_effect_verify_nodes(typed: &mut spec::TypedExecutionSpec) {
             _ => true,
         });
 
-    let submit_nodes = typed
+    let mut submit_nodes = typed
         .nodes
         .iter()
         .filter(|node| node.side_effect.is_some() && node.framework.is_none())
         .cloned()
+        .map(|node| (node, true))
         .collect::<Vec<_>>();
-    for submit in submit_nodes {
-        append_side_effect_verify_node(typed, &submit);
+    submit_nodes.extend(
+        typed
+            .remediations
+            .values()
+            .filter(|node| node.side_effect.is_some() && node.framework.is_none())
+            .cloned()
+            .map(|node| (node, false)),
+    );
+    for (submit, include_predecessor) in submit_nodes {
+        if let Some(cell) = typed
+            .cells
+            .iter_mut()
+            .find(|cell| cell.cell_id == submit.output_cell)
+        {
+            cell.terminal_policy = spec::CellTerminalPolicy::MaybeSkipped;
+        }
+        let verify = append_side_effect_verify_node(typed, &submit, include_predecessor);
+        rewrite_side_effect_verify_consumers(
+            typed,
+            &submit,
+            old_verify_links.get(&submit.node_id),
+            &verify,
+        );
     }
 }
 
-fn append_side_effect_verify_node(typed: &mut spec::TypedExecutionSpec, submit: &spec::NodeSpec) {
+fn append_side_effect_verify_node(
+    typed: &mut spec::TypedExecutionSpec,
+    submit: &spec::NodeSpec,
+    include_predecessor: bool,
+) -> spec::NodeSpec {
     let contract = submit
         .side_effect
         .as_ref()
@@ -11448,7 +11879,7 @@ fn append_side_effect_verify_node(typed: &mut spec::TypedExecutionSpec, submit: 
         .find(|cell| cell.cell_id == submit.output_cell)
         .cloned()
         .expect("submit output cell");
-    let input_bindings = spec::framework_lifecycle_receipt_input_binding(
+    let input_bindings = spec::framework_lifecycle_maybe_skipped_cell_input_binding(
         "side_effect_verify",
         "submit_output",
         &submit_output_cell,
@@ -11520,7 +11951,7 @@ fn append_side_effect_verify_node(typed: &mut spec::TypedExecutionSpec, submit: 
         storage_policy: spec::StoragePolicy::ContentAddressed,
         redaction_policy: spec::RedactionPolicy::Public,
     });
-    typed.nodes.push(spec::NodeSpec {
+    let verify_node = spec::NodeSpec {
         node_id,
         stable_key: spec::side_effect_verify_stable_key(&submit.stable_key)
             .expect("verify stable key"),
@@ -11544,8 +11975,159 @@ fn append_side_effect_verify_node(typed: &mut spec::TypedExecutionSpec, submit: 
             },
         )),
         planning_lineage: submit.planning_lineage.clone(),
-        deterministic_predecessors: vec![submit.node_id.clone()],
-    });
+        deterministic_predecessors: if include_predecessor {
+            vec![submit.node_id.clone()]
+        } else {
+            Vec::new()
+        },
+    };
+    typed.nodes.push(verify_node.clone());
+    verify_node
+}
+
+fn rewrite_side_effect_verify_consumers(
+    typed: &mut spec::TypedExecutionSpec,
+    submit: &spec::NodeSpec,
+    old_verify: Option<&(NodeId, CellId)>,
+    verify: &spec::NodeSpec,
+) {
+    let verify_cell = typed
+        .cells
+        .iter()
+        .find(|cell| cell.cell_id == verify.output_cell)
+        .cloned()
+        .expect("verify output cell");
+    for node in &mut typed.nodes {
+        if node.node_id == verify.node_id {
+            continue;
+        }
+        replace_input_cell_binding(
+            &mut node.input_bindings.root,
+            &submit.output_cell,
+            &verify_cell,
+        );
+        if let Some((_, old_verify_cell)) = old_verify {
+            replace_input_cell_binding(
+                &mut node.input_bindings.root,
+                old_verify_cell,
+                &verify_cell,
+            );
+        }
+        node.input_bindings.digest =
+            content_digest_json(input_node_json(&node.input_bindings.root)).expect("input digest");
+        for predecessor in &mut node.deterministic_predecessors {
+            if *predecessor == submit.node_id
+                || old_verify
+                    .as_ref()
+                    .is_some_and(|(old_verify_node, _)| predecessor == old_verify_node)
+            {
+                *predecessor = verify.node_id.clone();
+            }
+        }
+        node.deterministic_predecessors.sort();
+        node.deterministic_predecessors.dedup();
+        if let Some(spec::FrameworkNodeSpec::PublicOutputRender(render)) = &mut node.framework {
+            for public_output in &mut render.required_cells {
+                replace_public_output_cell(public_output, &submit.output_cell, &verify_cell);
+                if let Some((_, old_verify_cell)) = old_verify {
+                    replace_public_output_cell(public_output, old_verify_cell, &verify_cell);
+                }
+            }
+        }
+    }
+    for remediation in typed.remediations.values_mut() {
+        replace_input_cell_binding(
+            &mut remediation.input_bindings.root,
+            &submit.output_cell,
+            &verify_cell,
+        );
+        if let Some((_, old_verify_cell)) = old_verify {
+            replace_input_cell_binding(
+                &mut remediation.input_bindings.root,
+                old_verify_cell,
+                &verify_cell,
+            );
+        }
+        remediation.input_bindings.digest =
+            content_digest_json(input_node_json(&remediation.input_bindings.root))
+                .expect("remediation input digest");
+        for predecessor in &mut remediation.deterministic_predecessors {
+            if *predecessor == submit.node_id
+                || old_verify
+                    .as_ref()
+                    .is_some_and(|(old_verify_node, _)| predecessor == old_verify_node)
+            {
+                *predecessor = verify.node_id.clone();
+            }
+        }
+        remediation.deterministic_predecessors.sort();
+        remediation.deterministic_predecessors.dedup();
+    }
+    for lineage in &mut typed.value_lineages {
+        for input_cell in &mut lineage.input_cells {
+            if *input_cell == submit.output_cell
+                || old_verify
+                    .as_ref()
+                    .is_some_and(|(_, old_verify_cell)| input_cell == old_verify_cell)
+            {
+                *input_cell = verify.output_cell.clone();
+            }
+        }
+    }
+    for public_output in &mut typed.public_outputs.outputs {
+        replace_public_output_cell(public_output, &submit.output_cell, &verify_cell);
+        if let Some((_, old_verify_cell)) = old_verify {
+            replace_public_output_cell(public_output, old_verify_cell, &verify_cell);
+        }
+    }
+}
+
+fn replace_public_output_cell(
+    public_output: &mut spec::PublicOutputCell,
+    from: &CellId,
+    to: &spec::CellSpec,
+) {
+    if public_output.cell_id != *from {
+        return;
+    }
+    public_output.cell_id = to.cell_id.clone();
+    public_output.producer = to.producer.clone();
+    public_output.scope_id = to.scope_id.clone();
+    public_output.semantic_type_id = to.semantic_type_id.clone();
+    public_output.schema_id = to.schema_id.clone();
+    public_output.value_lineage = to.value_lineage.clone();
+    public_output.required_terminal = spec::RequiredTerminal::ProducedOnly;
+}
+
+fn replace_input_cell_binding(
+    input: &mut spec::InputBindingNodeSpec,
+    from: &CellId,
+    to: &spec::CellSpec,
+) {
+    match input {
+        spec::InputBindingNodeSpec::Unit => {}
+        spec::InputBindingNodeSpec::Cell(cell) => {
+            if cell.cell_id == *from {
+                cell.cell_id = to.cell_id.clone();
+                cell.semantic_type_id = to.semantic_type_id.clone();
+                cell.schema_id = to.schema_id.clone();
+                cell.value_lineage = to.value_lineage.clone();
+                cell.required_terminal = spec::RequiredTerminal::ProducedOnly;
+            }
+        }
+        spec::InputBindingNodeSpec::Tuple(elements)
+        | spec::InputBindingNodeSpec::Vec { elements, .. }
+        | spec::InputBindingNodeSpec::NonEmptyVec { elements, .. } => {
+            for element in elements {
+                replace_input_cell_binding(element, from, to);
+            }
+        }
+        spec::InputBindingNodeSpec::Struct(fields) => {
+            for field in fields {
+                replace_input_cell_binding(&mut field.node, from, to);
+            }
+        }
+    }
 }
 
 fn fixture_with_first_side_effect_state() -> Fixture {
@@ -11605,10 +12187,45 @@ fn fixture_with_first_exclusive_side_effect_state() -> Fixture {
     with_exclusive_resource_claims(fixture, &descriptors)
 }
 
+fn fixture_with_first_finalized_side_effect_state() -> Fixture {
+    let fixture = fixture_with_first_side_effect_state();
+    with_first_side_effect_verification(
+        fixture,
+        spec::SideEffectVerificationSpec::Finalized { depth: 1 },
+    )
+}
+
 fn fixture_with_first_exact_touched_set_side_effect_state() -> Fixture {
     let fixture = fixture_with_first_side_effect_state();
     let descriptors = vec![fixture.descriptor_a.clone()];
     with_exact_touched_set_resource_claims(fixture, &descriptors)
+}
+
+fn fixture_with_first_exact_touched_set_finalized_side_effect_state() -> Fixture {
+    let fixture = fixture_with_first_finalized_side_effect_state();
+    let descriptors = vec![fixture.descriptor_a.clone()];
+    with_exact_touched_set_resource_claims(fixture, &descriptors)
+}
+
+fn with_first_side_effect_verification(
+    mut fixture: Fixture,
+    verification: spec::SideEffectVerificationSpec,
+) -> Fixture {
+    let mut envelope = fixture.runtime_spec.envelope().clone();
+    for node in &mut envelope.spec.nodes {
+        if node.descriptor_id == fixture.descriptor_a {
+            node.side_effect
+                .as_mut()
+                .expect("first descriptor is side effect")
+                .verification = verification.clone();
+        }
+    }
+    refresh_side_effect_verify_nodes(&mut envelope.spec);
+    let envelope = spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
+    fixture.runtime_spec =
+        CertifiedRuntimeSpec::from_verified_envelope(envelope).expect("runtime spec");
+    refresh_fixture_run_id(&mut fixture);
+    fixture
 }
 
 fn fixture_with_manual_resolution_side_effect_state() -> Fixture {
@@ -11794,7 +12411,7 @@ fn fixture_with_two_side_effects_and_failing_tail() -> Fixture {
             node.side_effect = Some(spec::SideEffectContractSpec {
                 contract_digest: contract_digest.clone(),
                 resource_claim: spec::ResourceClaimSpec::ManualOnly,
-                verification: spec::SideEffectVerificationSpec::Receipt,
+                verification: spec::SideEffectVerificationSpec::Finalized { depth: 1 },
             });
         }
     }

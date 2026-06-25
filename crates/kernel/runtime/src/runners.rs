@@ -272,7 +272,15 @@ impl CapabilityImplementationBinding {
 #[derive(Clone, Default)]
 pub struct ErasedRunnerRegistry {
     bindings: BTreeMap<DescriptorId, ErasedRunnerBinding>,
+    side_effect_verify: Option<ErasedFrameworkRunnerBinding>,
     capability_implementations: BTreeMap<(String, String), CapabilityImplementationBinding>,
+}
+
+#[derive(Clone)]
+struct ErasedFrameworkRunnerBinding {
+    factory_id: events::RunnerFactoryId,
+    executable: events::ExecutableIdentity,
+    runner: Arc<dyn ErasedNodeRunner>,
 }
 
 impl ErasedRunnerRegistry {
@@ -292,6 +300,32 @@ impl ErasedRunnerRegistry {
                 "duplicate runner binding".to_owned(),
             ));
         }
+        Ok(())
+    }
+
+    /// Registers the adapter-owned runner used by certified side-effect verify framework nodes.
+    pub fn register_side_effect_verify_runner(
+        &mut self,
+        factory_id: events::RunnerFactoryId,
+        executable: events::ExecutableIdentity,
+        runner: Arc<dyn ErasedNodeRunner>,
+    ) -> Result<()> {
+        if executable.factory_id != factory_id {
+            return Err(RuntimeError::RunnerBinding(format!(
+                "side-effect verify executable factory {} does not match binding factory {}",
+                executable.factory_id, factory_id
+            )));
+        }
+        if self.side_effect_verify.is_some() {
+            return Err(RuntimeError::RunnerBinding(
+                "duplicate side-effect verify runner binding".to_owned(),
+            ));
+        }
+        self.side_effect_verify = Some(ErasedFrameworkRunnerBinding {
+            factory_id,
+            executable,
+            runner,
+        });
         Ok(())
     }
 
@@ -356,6 +390,29 @@ impl ErasedRunnerRegistry {
             Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_))
         ) {
             return framework_resolve_saga_terminal_binding(node, descriptor);
+        }
+        if matches!(
+            &node.framework,
+            Some(spec::FrameworkNodeSpec::SideEffectVerify(_))
+        ) {
+            let binding = self.side_effect_verify.as_ref().ok_or_else(|| {
+                RuntimeError::RunnerBinding(format!(
+                    "missing side-effect verify runner binding for node {} descriptor {}",
+                    node.node_id, node.descriptor_id
+                ))
+            })?;
+            if binding.factory_id.as_str() != descriptor.runner {
+                return Err(RuntimeError::RunnerBinding(format!(
+                    "side-effect verify runner factory {} does not match descriptor runner {} for node {}",
+                    binding.factory_id, descriptor.runner, node.node_id
+                )));
+            }
+            return ErasedRunnerBinding::new(
+                node.descriptor_id.clone(),
+                binding.factory_id.clone(),
+                binding.executable.clone(),
+                binding.runner.clone(),
+            );
         }
         let binding = self.bindings.get(&node.descriptor_id).ok_or_else(|| {
             RuntimeError::RunnerBinding(format!(

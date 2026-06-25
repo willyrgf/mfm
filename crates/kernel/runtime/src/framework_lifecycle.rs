@@ -41,6 +41,7 @@ impl<'a> FrameworkAttemptLifecycle<'a> {
                     | spec::FrameworkNodeSpec::PublicOutputRender(_)
                     | spec::FrameworkNodeSpec::CompleteRun(_)
                     | spec::FrameworkNodeSpec::ResolveSagaTerminal(_)
+                    | spec::FrameworkNodeSpec::SideEffectVerify(_)
             )
         )
     }

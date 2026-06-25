@@ -25,9 +25,8 @@ use mfm_runtime::{
     ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCellTerminal, MaterializedInputNode,
     RunnerArtifactBuilder, RunnerCapabilityBinding, RunnerOutputBuilder, RunnerPayloadBuilder,
     RunnerRegistrationBuilder, SideEffectDriver, SideEffectDriverCallbacks, SideEffectDriverFuture,
-    SideEffectIntentPlan, SideEffectObservedEvidence, SideEffectPreparedInvocationPlan,
-    SideEffectProtocolAction, SideEffectReplayEvidence, SideEffectSubmissionDecision,
-    SideEffectSubmissionDecisionFuture,
+    SideEffectIntentPlan, SideEffectPreparedInvocationPlan, SideEffectProtocolAction,
+    SideEffectSubmissionDecision, SideEffectSubmissionDecisionFuture,
 };
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
@@ -188,10 +187,7 @@ impl SideEffectDriverCallbacks for ProofSideEffectCallbacks {
     type Submission = ProofSubmission;
     type SubmissionUnknownEvidence = ProofSideEffectResult;
     type NotSubmittedProof = ProofSideEffectResult;
-    type Receipt = ProofReceipt;
-    type Confirmation = ProofConfirmation;
     type AmbiguityEvidence = ProofSideEffectResult;
-    type Output = ProofSideEffectResult;
 
     fn intent_and_idempotency<'a, 'ctx>(
         &'a self,
@@ -261,47 +257,6 @@ impl SideEffectDriverCallbacks for ProofSideEffectCallbacks {
             }
         })
     }
-
-    fn read_receipt<'a, 'ctx>(
-        &'a self,
-        _ctx: &'a ErasedRunCtx<'ctx>,
-        _submission: &'a store::SideEffectArtifactProjection,
-    ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Receipt>> {
-        Box::pin(async {
-            Ok(SideEffectObservedEvidence {
-                evidence: proof_receipt()?,
-                replay: proof_replay_evidence()?,
-            })
-        })
-    }
-
-    fn build_confirmation<'a, 'ctx>(
-        &'a self,
-        _ctx: &'a ErasedRunCtx<'ctx>,
-        _receipt: &'a store::SideEffectArtifactProjection,
-    ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Confirmation>> {
-        Box::pin(async {
-            Ok(SideEffectObservedEvidence {
-                evidence: proof_confirmation()?,
-                replay: proof_replay_evidence()?,
-            })
-        })
-    }
-
-    fn map_confirmation_to_output<'a, 'ctx>(
-        &'a self,
-        _ctx: &'a ErasedRunCtx<'ctx>,
-        _confirmation: &'a store::SideEffectArtifactProjection,
-    ) -> SideEffectDriverFuture<'a, Self::Output> {
-        Box::pin(async { proof_side_effect_result() })
-    }
-}
-
-fn proof_replay_evidence() -> mfm_runtime::Result<SideEffectReplayEvidence> {
-    Ok(SideEffectReplayEvidence {
-        replay_verifier_id: replay_verifier_id()?,
-        resource_touched_set: None,
-    })
 }
 
 async fn run_assemble(ctx: ErasedRunCtx<'_>) -> mfm_runtime::Result<ErasedRunnerOutput> {

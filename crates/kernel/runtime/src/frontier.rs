@@ -128,16 +128,34 @@ fn next_forward_completion_node<'a>(
             continue;
         }
         let node = runtime_spec.node(node_id).expect("topological node exists");
-        if node.side_effect.is_none() {
-            continue;
+        if node.side_effect.is_some() {
+            let Some(runnable) =
+                continuing_side_effect_node_if(runtime_spec, node, view, |state| {
+                    state.is_forward_completion_candidate()
+                })?
+            else {
+                continue;
+            };
+            return Ok(Some(runnable));
         }
-        let Some(runnable) = continuing_side_effect_node_if(runtime_spec, node, view, |state| {
-            state.is_forward_completion_candidate()
-        })?
-        else {
-            continue;
-        };
-        return Ok(Some(runnable));
+        if let Some(spec::FrameworkNodeSpec::SideEffectVerify(verify)) = &node.framework {
+            let Some(state) = view
+                .projections
+                .side_effect_state_for_pair(&view.run_admitted.run_id, &verify.pair_id)
+                .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?
+            else {
+                continue;
+            };
+            if !state.is_forward_completion_candidate() {
+                continue;
+            }
+            let Some(attempt) = attempt_plan(runtime_spec, node, view)? else {
+                continue;
+            };
+            if node_inputs_ready(runtime_spec, node, view)? {
+                return Ok(Some(RunnableNode { node, attempt }));
+            }
+        }
     }
     Ok(None)
 }
@@ -166,6 +184,14 @@ fn next_remediation_node<'a>(
                     forward.intent.node_id
                 ))
             })?;
+        let verify_node = if remediation_node.side_effect.is_some() {
+            Some(certified_side_effect_verify_node(
+                runtime_spec,
+                &remediation_node.node_id,
+            )?)
+        } else {
+            None
+        };
         if blocked_nodes.contains(&remediation_node.node_id) {
             continue;
         }
@@ -173,13 +199,50 @@ fn next_remediation_node<'a>(
             if remediation.unresolved.is_some() {
                 return Ok(None);
             }
+            let output_node = verify_node.unwrap_or(remediation_node);
             if remediation.closed
                 && view
                     .projections
-                    .cell_terminal(&remediation_node.output_cell)
+                    .cell_terminal(&output_node.output_cell)
                     .is_some()
             {
                 continue;
+            }
+            if let Some(verify_node) = verify_node {
+                if let Some(attempt) = attempt_plan(runtime_spec, remediation_node, view)? {
+                    if node_inputs_ready(runtime_spec, remediation_node, view)? {
+                        return Ok(Some(RunnableNode {
+                            node: remediation_node,
+                            attempt,
+                        }));
+                    }
+                    return Ok(None);
+                }
+                if blocked_nodes.contains(&verify_node.node_id) {
+                    return Ok(None);
+                }
+                let state = view
+                    .projections
+                    .side_effect_state_for_run(&view.run_admitted.run_id, &remediation.ledger_key)
+                    .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?
+                    .ok_or_else(|| {
+                        RuntimeError::InvalidRunStream(format!(
+                            "remediation ledger {} has no side-effect projection",
+                            remediation.ledger_key
+                        ))
+                    })?;
+                if remediation_verify_completion_candidate(&state) {
+                    let Some(attempt) = attempt_plan(runtime_spec, verify_node, view)? else {
+                        return Ok(None);
+                    };
+                    if node_inputs_ready(runtime_spec, verify_node, view)? {
+                        return Ok(Some(RunnableNode {
+                            node: verify_node,
+                            attempt,
+                        }));
+                    }
+                }
+                return Ok(None);
             }
         }
         let Some(attempt) = attempt_plan(runtime_spec, remediation_node, view)? else {
@@ -194,6 +257,43 @@ fn next_remediation_node<'a>(
         return Ok(None);
     }
     Ok(None)
+}
+
+fn certified_side_effect_verify_node<'a>(
+    runtime_spec: &'a CertifiedRuntimeSpec,
+    submit_node_id: &NodeId,
+) -> Result<&'a spec::NodeSpec> {
+    let mut found = None;
+    for node_id in runtime_spec.topological_order() {
+        let node = runtime_spec.node(node_id).expect("topological node exists");
+        if matches!(
+            &node.framework,
+            Some(spec::FrameworkNodeSpec::SideEffectVerify(verify))
+                if verify.submit_node_id == *submit_node_id
+        ) && found.replace(node).is_some()
+        {
+            return Err(RuntimeError::InvalidSpec(format!(
+                "submit node {submit_node_id} has multiple certified side-effect verify nodes"
+            )));
+        }
+    }
+    found.ok_or_else(|| {
+        RuntimeError::InvalidSpec(format!(
+            "submit node {submit_node_id} is missing certified side-effect verify node"
+        ))
+    })
+}
+
+fn remediation_verify_completion_candidate(state: &store::SideEffectLedgerState<'_>) -> bool {
+    matches!(
+        state.ledger_purpose(),
+        events::SideEffectLedgerPurpose::Remediation { .. }
+    ) && matches!(
+        state.phase(),
+        store::SideEffectLedgerPhase::SubmissionKnown { .. }
+            | store::SideEffectLedgerPhase::ReceiptObserved { .. }
+            | store::SideEffectLedgerPhase::Confirmed { .. }
+    )
 }
 
 fn next_saga_terminal_node<'a>(
@@ -358,10 +458,7 @@ fn attempt_plan(
 ) -> Result<Option<AttemptPlan>> {
     if matches!(
         &node.framework,
-        Some(
-            spec::FrameworkNodeSpec::ResolveSagaTerminal(_)
-                | spec::FrameworkNodeSpec::SideEffectVerify(_)
-        )
+        Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_))
     ) {
         return Ok(None);
     }
@@ -513,28 +610,67 @@ pub(crate) fn node_inputs_ready(
     node: &spec::NodeSpec,
     view: &RuntimeRunView,
 ) -> Result<bool> {
-    let input_cells = runtime_spec.validate_input_binding(&node.input_bindings.root)?;
-    for cell_id in input_cells {
-        let cell = runtime_spec.cell(&cell_id).ok_or_else(|| {
-            RuntimeError::InvalidSpec(format!(
-                "node {} input cell {} is missing",
-                node.node_id, cell_id
-            ))
-        })?;
-        match &cell.producer {
-            spec::CellProducer::Seed(_) => {
-                if !view.seed_cells.contains_key(&cell_id) {
-                    return Ok(false);
-                }
-            }
-            spec::CellProducer::Node(_) => {
-                if view.projections.cell_terminal(&cell_id).is_none() {
-                    return Ok(false);
-                }
-            }
+    runtime_spec.validate_input_binding(&node.input_bindings.root)?;
+    input_binding_ready(runtime_spec, node, &node.input_bindings.root, view)
+}
+
+fn input_binding_ready(
+    runtime_spec: &CertifiedRuntimeSpec,
+    node: &spec::NodeSpec,
+    input: &spec::InputBindingNodeSpec,
+    view: &RuntimeRunView,
+) -> Result<bool> {
+    match input {
+        spec::InputBindingNodeSpec::Unit => Ok(true),
+        spec::InputBindingNodeSpec::Cell(cell) => input_cell_ready(runtime_spec, node, cell, view),
+        spec::InputBindingNodeSpec::Tuple(elements) => {
+            input_bindings_ready(runtime_spec, node, elements, view)
+        }
+        spec::InputBindingNodeSpec::Struct(fields) => {
+            fields.iter().try_fold(true, |ready, field| {
+                Ok(ready && input_binding_ready(runtime_spec, node, &field.node, view)?)
+            })
+        }
+        spec::InputBindingNodeSpec::Vec { elements, .. }
+        | spec::InputBindingNodeSpec::NonEmptyVec { elements, .. } => {
+            input_bindings_ready(runtime_spec, node, elements, view)
         }
     }
-    Ok(true)
+}
+
+fn input_bindings_ready(
+    runtime_spec: &CertifiedRuntimeSpec,
+    node: &spec::NodeSpec,
+    elements: &[spec::InputBindingNodeSpec],
+    view: &RuntimeRunView,
+) -> Result<bool> {
+    elements.iter().try_fold(true, |ready, element| {
+        Ok(ready && input_binding_ready(runtime_spec, node, element, view)?)
+    })
+}
+
+fn input_cell_ready(
+    runtime_spec: &CertifiedRuntimeSpec,
+    node: &spec::NodeSpec,
+    input: &spec::InputBindingCellSpec,
+    view: &RuntimeRunView,
+) -> Result<bool> {
+    let cell = runtime_spec.cell(&input.cell_id).ok_or_else(|| {
+        RuntimeError::InvalidSpec(format!(
+            "node {} input cell {} is missing",
+            node.node_id, input.cell_id
+        ))
+    })?;
+    match &cell.producer {
+        spec::CellProducer::Seed(_) => Ok(view.seed_cells.contains_key(&input.cell_id)),
+        spec::CellProducer::Node(_) => match view.projections.cell_terminal(&input.cell_id) {
+            Some(store::CellTerminalProjection::Produced { .. }) => Ok(true),
+            Some(store::CellTerminalProjection::Skipped { .. }) => {
+                Ok(input.required_terminal == spec::RequiredTerminal::MaybeSkipped)
+            }
+            None => Ok(false),
+        },
+    }
 }
 
 fn next_attempt_no(projections: &store::ProjectionSnapshot, node_id: &NodeId) -> Result<u32> {

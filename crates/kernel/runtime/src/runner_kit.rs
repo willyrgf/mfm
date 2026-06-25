@@ -343,6 +343,21 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
         }))
     }
 
+    /// Builds a `CellSkipped` runner payload for a certified maybe-skipped output cell.
+    pub fn cell_skipped(&self, skip_reason: events::SkipReason) -> RunnerEventPayload {
+        RunnerEventPayload::CellSkipped(events::CellSkipped {
+            spec_hash: self.ctx.spec_hash().clone(),
+            node_id: self.ctx.node().node_id.clone(),
+            cell_id: self.ctx.node().output_cell.clone(),
+            scope_id: self.ctx.output_cell().scope_id.clone(),
+            attempt_id: self.ctx.attempt_id().clone(),
+            semantic_type_id: self.ctx.output_cell().semantic_type_id.clone(),
+            schema_id: self.ctx.output_cell().schema_id.clone(),
+            value_lineage: self.ctx.output_cell().value_lineage.clone(),
+            skip_reason,
+        })
+    }
+
     /// Builds a `FactRecorded` runner payload from a typed request and fact-response artifact.
     pub fn fact_recorded<Request>(
         &self,
@@ -846,6 +861,18 @@ impl<'a> RunnerRegistrationBuilder<'a> {
     ) -> Result<&mut Self> {
         self.register_capability_set(capabilities)?;
         self.register_runner(descriptor_id, factory_id, executable, runner)
+    }
+
+    /// Registers the adapter-owned runner used by side-effect verify framework nodes.
+    pub fn register_side_effect_verify_runner(
+        &mut self,
+        factory_id: events::RunnerFactoryId,
+        executable: events::ExecutableIdentity,
+        runner: Arc<dyn ErasedNodeRunner>,
+    ) -> Result<&mut Self> {
+        self.registry
+            .register_side_effect_verify_runner(factory_id, executable, runner)?;
+        Ok(self)
     }
 }
 

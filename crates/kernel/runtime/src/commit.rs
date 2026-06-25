@@ -1779,11 +1779,32 @@ fn runner_output_preconditions(
         )?);
     }
 
+    if let Some(verify) = side_effect_verify_spec(node) {
+        add_side_effect_verify_preconditions(
+            runtime_spec,
+            run_id,
+            projections,
+            node,
+            verify,
+            payloads,
+            &mut preconditions,
+        )?;
+        return Ok(preconditions);
+    }
+
     if node.side_effect.is_none() {
         return Ok(preconditions);
     }
 
-    let mut requires_terminal_confirmation = false;
+    let terminal_side_effect_required_state = payloads.iter().find_map(|payload| match payload {
+        events::KernelEventPayload::CellSkipped(_) => {
+            Some(store::RequiredSideEffectState::SubmissionResult)
+        }
+        events::KernelEventPayload::CellProduced(_) => {
+            Some(store::RequiredSideEffectState::ConfirmationObserved)
+        }
+        _ => None,
+    });
     let prepared_in_batch = payloads
         .iter()
         .filter_map(|payload| match payload {
@@ -1829,16 +1850,11 @@ fn runner_output_preconditions(
                     },
                 );
             }
-            events::KernelEventPayload::CellProduced(_)
-            | events::KernelEventPayload::CellSkipped(_)
-            | events::KernelEventPayload::StateAttemptCompleted(_) => {
-                requires_terminal_confirmation = true;
-            }
             _ => {}
         }
     }
 
-    if requires_terminal_confirmation {
+    if let Some(required) = terminal_side_effect_required_state {
         let projection =
             SideEffectLifecycle::projection_for_attempt(projections, node, attempt_id)?
                 .ok_or_else(|| {
@@ -1851,11 +1867,105 @@ fn runner_output_preconditions(
             .required_side_effect_states
             .push(store::SideEffectStatePrecondition {
                 ledger_key: projection.ledger_key.clone(),
-                required: store::RequiredSideEffectState::ConfirmationObserved,
+                required,
             });
     }
 
     Ok(preconditions)
+}
+
+fn add_side_effect_verify_preconditions(
+    runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
+    projections: &store::ProjectionSnapshot,
+    node: &spec::NodeSpec,
+    verify: &spec::SideEffectVerifyNodeSpec,
+    payloads: &[events::KernelEventPayload],
+    preconditions: &mut store::CommitPreconditions,
+) -> Result<()> {
+    let projection = projections
+        .side_effect_for_pair(run_id, &verify.pair_id)
+        .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))?
+        .ok_or_else(|| {
+            RuntimeError::InvalidRunnerOutput(format!(
+                "side-effect verify node {} has no ledger projection for pair {}",
+                node.node_id, verify.pair_id
+            ))
+        })?;
+    let terminal_required = side_effect_verify_terminal_required_state(runtime_spec, verify)?;
+    for payload in payloads {
+        let required = match payload {
+            events::KernelEventPayload::SideEffectReceiptObserved(_) => {
+                Some(store::RequiredSideEffectState::SubmissionResult)
+            }
+            events::KernelEventPayload::SideEffectConfirmationObserved(_) => {
+                Some(store::RequiredSideEffectState::ReceiptObserved)
+            }
+            events::KernelEventPayload::SideEffectFailed(_) => {
+                Some(store::RequiredSideEffectState::SubmissionResult)
+            }
+            events::KernelEventPayload::CellProduced(_)
+            | events::KernelEventPayload::StateAttemptCompleted(_) => Some(terminal_required),
+            _ => None,
+        };
+        if let Some(required) = required {
+            push_side_effect_precondition(preconditions, projection.ledger_key.clone(), required);
+        }
+    }
+    Ok(())
+}
+
+fn side_effect_verify_terminal_required_state(
+    runtime_spec: &CertifiedRuntimeSpec,
+    verify: &spec::SideEffectVerifyNodeSpec,
+) -> Result<store::RequiredSideEffectState> {
+    let submit = runtime_spec.node(&verify.submit_node_id).ok_or_else(|| {
+        RuntimeError::InvalidSpec(format!(
+            "side-effect verify node references missing submit node {}",
+            verify.submit_node_id
+        ))
+    })?;
+    let contract = submit.side_effect.as_ref().ok_or_else(|| {
+        RuntimeError::InvalidSpec(format!(
+            "side-effect verify node references non-side-effect submit node {}",
+            verify.submit_node_id
+        ))
+    })?;
+    match &contract.verification {
+        spec::SideEffectVerificationSpec::Receipt => {
+            Ok(store::RequiredSideEffectState::ReceiptObserved)
+        }
+        spec::SideEffectVerificationSpec::Finalized { .. } => {
+            Ok(store::RequiredSideEffectState::ConfirmationObserved)
+        }
+    }
+}
+
+fn push_side_effect_precondition(
+    preconditions: &mut store::CommitPreconditions,
+    ledger_key: events::SideEffectLedgerKey,
+    required: store::RequiredSideEffectState,
+) {
+    if preconditions
+        .required_side_effect_states
+        .iter()
+        .any(|existing| existing.ledger_key == ledger_key && existing.required == required)
+    {
+        return;
+    }
+    preconditions
+        .required_side_effect_states
+        .push(store::SideEffectStatePrecondition {
+            ledger_key,
+            required,
+        });
+}
+
+fn side_effect_verify_spec(node: &spec::NodeSpec) -> Option<&spec::SideEffectVerifyNodeSpec> {
+    match &node.framework {
+        Some(spec::FrameworkNodeSpec::SideEffectVerify(verify)) => Some(verify),
+        _ => None,
+    }
 }
 
 fn node_cell_preconditions(
@@ -2174,6 +2284,25 @@ fn validate_runner_output(input: RunnerOutputValidation<'_>) -> Result<()> {
             }
         }
     }
+    if side_effect_verify_spec(node).is_some() {
+        return validate_side_effect_verify_runner_output(SideEffectVerifyRunnerOutputValidation {
+            runtime_spec,
+            run_id,
+            node,
+            projections,
+            completed,
+            failed,
+            terminal_cell,
+            public_output_produced,
+            public_output_failed,
+            side_effect_payload,
+            side_effect_terminal_failure,
+            attempt_failure_retryable,
+            side_effect_terminal_failure_retryable,
+            payloads,
+        });
+    }
+
     if node.side_effect.is_some() {
         SideEffectLifecycle::validate_resume_output(projections, node, attempt_id, payloads)?;
         if failed {
@@ -2218,8 +2347,16 @@ fn validate_runner_output(input: RunnerOutputValidation<'_>) -> Result<()> {
                 node.node_id
             )));
         }
-        SideEffectLifecycle::validate_terminal_evidence(projections, node, attempt_id)
-            .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))?;
+        let terminal_skipped = payloads
+            .iter()
+            .any(|payload| matches!(payload, events::KernelEventPayload::CellSkipped(_)));
+        SideEffectLifecycle::validate_terminal_batch_evidence(
+            projections,
+            node,
+            attempt_id,
+            terminal_skipped,
+        )
+        .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))?;
         if public_output_produced && !completed {
             return Err(RuntimeError::InvalidRunnerOutput(format!(
                 "node {} projected public output without completing its certified output cell",
@@ -2253,4 +2390,156 @@ fn validate_runner_output(input: RunnerOutputValidation<'_>) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+struct SideEffectVerifyRunnerOutputValidation<'a> {
+    runtime_spec: &'a CertifiedRuntimeSpec,
+    run_id: &'a RunId,
+    node: &'a spec::NodeSpec,
+    projections: &'a store::ProjectionSnapshot,
+    completed: bool,
+    failed: bool,
+    terminal_cell: bool,
+    public_output_produced: bool,
+    public_output_failed: bool,
+    side_effect_payload: bool,
+    side_effect_terminal_failure: bool,
+    attempt_failure_retryable: Option<bool>,
+    side_effect_terminal_failure_retryable: Option<bool>,
+    payloads: &'a [events::KernelEventPayload],
+}
+
+fn validate_side_effect_verify_runner_output(
+    input: SideEffectVerifyRunnerOutputValidation<'_>,
+) -> Result<()> {
+    let SideEffectVerifyRunnerOutputValidation {
+        runtime_spec,
+        run_id,
+        node,
+        projections,
+        completed,
+        failed,
+        terminal_cell,
+        public_output_produced,
+        public_output_failed,
+        side_effect_payload,
+        side_effect_terminal_failure,
+        attempt_failure_retryable,
+        side_effect_terminal_failure_retryable,
+        payloads,
+    } = input;
+    if failed {
+        if !side_effect_terminal_failure {
+            return Err(RuntimeError::InvalidRunnerOutput(format!(
+                "side-effect verify node {} returned StateAttemptFailed without terminal side-effect evidence",
+                node.node_id
+            )));
+        }
+        if side_effect_terminal_failure_retryable != attempt_failure_retryable {
+            return Err(RuntimeError::InvalidRunnerOutput(format!(
+                "side-effect verify node {} returned inconsistent failure retryability",
+                node.node_id
+            )));
+        }
+        if completed || terminal_cell || public_output_produced {
+            return Err(RuntimeError::InvalidRunnerOutput(format!(
+                "runner for node {} mixed side-effect failure with successful terminal evidence",
+                node.node_id
+            )));
+        }
+        return Ok(());
+    }
+    if side_effect_terminal_failure {
+        return Err(RuntimeError::InvalidRunnerOutput(format!(
+            "side-effect verify node {} returned terminal side-effect evidence without StateAttemptFailed",
+            node.node_id
+        )));
+    }
+    if side_effect_payload && !terminal_cell && !completed {
+        if payloads.iter().any(|payload| {
+            matches!(
+                payload,
+                events::KernelEventPayload::ResourceLaneReleaseIntent(_)
+            )
+        }) {
+            return Err(RuntimeError::InvalidRunnerOutput(format!(
+                "side-effect verify node {} returned a resource-lane release without terminal evidence",
+                node.node_id
+            )));
+        }
+        return Ok(());
+    }
+    if !completed || !terminal_cell {
+        return Err(RuntimeError::InvalidRunnerOutput(format!(
+            "side-effect verify node {} successful terminal commit must pair StateAttemptCompleted with terminal cell evidence",
+            node.node_id
+        )));
+    }
+    if public_output_failed {
+        return Err(RuntimeError::InvalidRunnerOutput(format!(
+            "side-effect verify node {} returned public-output failure",
+            node.node_id
+        )));
+    }
+    if side_effect_payload
+        && payloads.iter().any(|payload| {
+            payload.side_effect_ref().is_some()
+                && !matches!(
+                    payload,
+                    events::KernelEventPayload::ResourceLaneReleaseIntent(_)
+                )
+        })
+    {
+        return Err(RuntimeError::InvalidRunnerOutput(format!(
+            "side-effect verify node {} mixed ledger phase events with terminal output evidence",
+            node.node_id
+        )));
+    }
+    validate_side_effect_verify_terminal_evidence(runtime_spec, run_id, node, projections)
+}
+
+fn validate_side_effect_verify_terminal_evidence(
+    runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
+    node: &spec::NodeSpec,
+    projections: &store::ProjectionSnapshot,
+) -> Result<()> {
+    let Some(verify) = side_effect_verify_spec(node) else {
+        return Ok(());
+    };
+    let projection = projections
+        .side_effect_for_pair(run_id, &verify.pair_id)
+        .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))?
+        .ok_or_else(|| {
+            RuntimeError::InvalidRunnerOutput(format!(
+                "side-effect verify node {} has no ledger projection for pair {}",
+                node.node_id, verify.pair_id
+            ))
+        })?;
+    let state = projection
+        .ledger_state()
+        .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))?;
+    let required = side_effect_verify_terminal_required_state(runtime_spec, verify)?;
+    let satisfied = match required {
+        store::RequiredSideEffectState::ReceiptObserved => matches!(
+            state.phase(),
+            store::SideEffectLedgerPhase::ReceiptObserved { .. }
+                | store::SideEffectLedgerPhase::Confirmed { .. }
+        ),
+        store::RequiredSideEffectState::ConfirmationObserved => {
+            matches!(
+                state.phase(),
+                store::SideEffectLedgerPhase::Confirmed { .. }
+            )
+        }
+        _ => false,
+    };
+    if satisfied {
+        Ok(())
+    } else {
+        Err(RuntimeError::InvalidRunnerOutput(format!(
+            "side-effect verify node {} produced output before certified terminal evidence",
+            node.node_id
+        )))
+    }
 }
