@@ -13,6 +13,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 
 use mfm_artifact_capabilities::ArtifactReadProvider;
 use mfm_authored_config::AuthoredConfig;
@@ -461,6 +462,31 @@ pub enum DriveMode {
     UntilBlocked,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DriveStatus {
+    Scheduler(SchedulerStatus),
+    ExecutionClaimBusy,
+    ExecutionClaimLost,
+    IncompatibleExecutable,
+}
+
+impl DriveStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Scheduler(status) => scheduler_status_str(status),
+            Self::ExecutionClaimBusy => "execution_claim_busy",
+            Self::ExecutionClaimLost => "execution_claim_lost",
+            Self::IncompatibleExecutable => "incompatible_executable",
+        }
+    }
+}
+
+impl From<SchedulerStatus> for DriveStatus {
+    fn from(status: SchedulerStatus) -> Self {
+        Self::Scheduler(status)
+    }
+}
+
 /// Operator-selected manual resolution decision accepted by app ingress.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -878,8 +904,8 @@ pub struct RunResponse {
     pub attempt_dispositions: Vec<AttemptDispositionStatus>,
     /// Last scheduler status observed by the app dispatch loop.
     ///
-    /// Read-only status reports `observed`; start/resume dispatch reports `advanced`, `blocked`, or
-    /// `public_output_projected`.
+    /// Read-only status reports `observed`; start/resume dispatch reports scheduler progress,
+    /// execution-claim coordination, or incompatible executable binding status.
     pub scheduler_status: String,
     /// Current typed run-stream head sequence.
     pub head_seq: u64,
@@ -1151,6 +1177,7 @@ pub struct RunServices<S, A> {
     store: S,
     artifacts: A,
     certification_registry: CertificationRegistry,
+    execution_claim_heartbeat_interval: Duration,
 }
 
 impl<S, A> RunServices<S, A>
@@ -1170,7 +1197,14 @@ where
             store,
             artifacts,
             certification_registry,
+            execution_claim_heartbeat_interval: default_execution_claim_heartbeat_interval(),
         }
+    }
+
+    #[cfg(test)]
+    fn with_execution_claim_heartbeat_interval_for_test(mut self, interval: Duration) -> Self {
+        self.execution_claim_heartbeat_interval = interval;
+        self
     }
 
     /// Returns the typed artifact store.
@@ -1196,42 +1230,6 @@ where
             .map_err(async_app_store_error)
     }
 
-    /// Resumes a certified typed run from its stored spec artifact.
-    pub async fn resume_stored_run(
-        &self,
-        run_id: &RunId,
-        drive: DriveMode,
-    ) -> Result<RunResponse, AppError> {
-        let runtime_spec = self
-            .load_verified_run_read_context(run_id)
-            .await?
-            .runtime_spec()
-            .clone();
-        let status = self.drive_with_mode(&runtime_spec, run_id, drive).await?;
-        self.run_response_from_verified_status(run_id, status).await
-    }
-
-    /// Records a signed manual resolution and optionally resumes typed scheduler execution.
-    pub async fn record_manual_resolution(
-        &self,
-        req: ManualResolutionRecordRequest,
-    ) -> Result<RunResponse, AppError> {
-        let run_id = req.run_id.clone();
-        let drive = req.drive;
-        let runtime_spec = self
-            .load_verified_run_read_context(&run_id)
-            .await?
-            .runtime_spec()
-            .clone();
-        let manual_request = manual_resolution_runtime_request(req)?;
-        self.scheduler
-            .record_manual_resolution(&self.store, &runtime_spec, &run_id, manual_request)
-            .await?;
-        let status = self.drive_with_mode(&runtime_spec, &run_id, drive).await?;
-        self.run_response_from_verified_status(&run_id, status)
-            .await
-    }
-
     /// Returns typed run status by rebuilding projection from the authoritative run stream.
     pub async fn run_status(&self, run_id: &RunId) -> Result<RunResponse, AppError> {
         let context = self.load_verified_status_read_context(run_id).await?;
@@ -1246,7 +1244,7 @@ where
     async fn run_response_from_verified_status(
         &self,
         run_id: &RunId,
-        status: SchedulerStatus,
+        status: DriveStatus,
     ) -> Result<RunResponse, AppError> {
         let context = self.load_verified_status_read_context(run_id).await?;
         run_response_from_projection(
@@ -1368,25 +1366,6 @@ where
         }
         Ok(())
     }
-
-    async fn drive_with_mode(
-        &self,
-        runtime_spec: &CertifiedRuntimeSpec,
-        run_id: &RunId,
-        drive: DriveMode,
-    ) -> Result<SchedulerStatus, AppError> {
-        match drive {
-            DriveMode::AppendOnly => Ok(SchedulerStatus::Blocked),
-            DriveMode::Once => Ok(self
-                .scheduler
-                .drive_once(&self.store, runtime_spec, run_id)
-                .await?),
-            DriveMode::UntilBlocked => Ok(self
-                .scheduler
-                .drive_until_blocked(&self.store, runtime_spec, run_id)
-                .await?),
-        }
-    }
 }
 
 impl<S, A> RunServices<S, A>
@@ -1394,6 +1373,42 @@ where
     S: store::RunEventStore + store::TrustScopeStore + store::ExecutionClaimStore + Send + Sync,
     A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
 {
+    /// Resumes a certified typed run from its stored spec artifact.
+    pub async fn resume_stored_run(
+        &self,
+        run_id: &RunId,
+        drive: DriveMode,
+    ) -> Result<RunResponse, AppError> {
+        let runtime_spec = self
+            .load_verified_run_read_context(run_id)
+            .await?
+            .runtime_spec()
+            .clone();
+        let status = self.drive_with_mode(&runtime_spec, run_id, drive).await?;
+        self.run_response_from_verified_status(run_id, status).await
+    }
+
+    /// Records a signed manual resolution and optionally resumes typed scheduler execution.
+    pub async fn record_manual_resolution(
+        &self,
+        req: ManualResolutionRecordRequest,
+    ) -> Result<RunResponse, AppError> {
+        let run_id = req.run_id.clone();
+        let drive = req.drive;
+        let runtime_spec = self
+            .load_verified_run_read_context(&run_id)
+            .await?
+            .runtime_spec()
+            .clone();
+        let manual_request = manual_resolution_runtime_request(req)?;
+        self.scheduler
+            .record_manual_resolution(&self.store, &runtime_spec, &run_id, manual_request)
+            .await?;
+        let status = self.drive_with_mode(&runtime_spec, &run_id, drive).await?;
+        self.run_response_from_verified_status(&run_id, status)
+            .await
+    }
+
     /// Starts a certified typed run against a durable async typed store.
     pub async fn launch_run(&self, req: RunLaunchRequest) -> Result<RunLaunchOutcome, AppError> {
         self.validate_identity_material_trust_scope(&req.identity_material)
@@ -1498,6 +1513,204 @@ where
             }
         }
     }
+
+    async fn drive_with_mode(
+        &self,
+        runtime_spec: &CertifiedRuntimeSpec,
+        run_id: &RunId,
+        drive: DriveMode,
+    ) -> Result<DriveStatus, AppError> {
+        if drive == DriveMode::AppendOnly {
+            return Ok(SchedulerStatus::Blocked.into());
+        }
+        if let Some(status) = self
+            .drive_binding_decline_status(runtime_spec, run_id)
+            .await?
+        {
+            return Ok(status);
+        }
+        let mut lease = match self.acquire_execution_claim_for_drive(run_id).await? {
+            ExecutionClaimAcquire::Acquired(lease) => lease,
+            ExecutionClaimAcquire::Busy => return Ok(DriveStatus::ExecutionClaimBusy),
+        };
+        match drive {
+            DriveMode::AppendOnly => unreachable!("append-only returned before claiming"),
+            DriveMode::Once => {
+                let step = self
+                    .drive_once_with_execution_claim(runtime_spec, run_id, &mut lease)
+                    .await?;
+                if step.claim_lost {
+                    return Ok(DriveStatus::ExecutionClaimLost);
+                }
+                self.release_execution_claim_if_holder(run_id, &lease)
+                    .await?;
+                Ok(step.status.into())
+            }
+            DriveMode::UntilBlocked => loop {
+                if !self
+                    .renew_execution_claim_or_lost(run_id, &mut lease)
+                    .await?
+                {
+                    return Ok(DriveStatus::ExecutionClaimLost);
+                }
+                let step = self
+                    .drive_once_with_execution_claim(runtime_spec, run_id, &mut lease)
+                    .await?;
+                if step.claim_lost {
+                    return Ok(DriveStatus::ExecutionClaimLost);
+                }
+                let terminal = self.run_is_terminal(run_id).await?;
+                if terminal || step.status == SchedulerStatus::PublicOutputProjected {
+                    self.release_execution_claim_if_holder(run_id, &lease)
+                        .await?;
+                    return Ok(step.status.into());
+                }
+                match step.status {
+                    SchedulerStatus::Advanced => {}
+                    SchedulerStatus::Blocked => return Ok(SchedulerStatus::Blocked.into()),
+                    SchedulerStatus::PublicOutputProjected => unreachable!("handled above"),
+                }
+            },
+        }
+    }
+
+    async fn drive_binding_decline_status(
+        &self,
+        runtime_spec: &CertifiedRuntimeSpec,
+        run_id: &RunId,
+    ) -> Result<Option<DriveStatus>, AppError> {
+        let context = self.load_verified_status_read_context(run_id).await?;
+        let compatibility = self
+            .scheduler
+            .run_admitted_binding_compatibility(runtime_spec, context.read.view().run_admitted())?;
+        match compatibility {
+            RunAdmittedBindingCompatibility::Compatible => Ok(None),
+            RunAdmittedBindingCompatibility::IncompatibleExecutable => {
+                Ok(Some(DriveStatus::IncompatibleExecutable))
+            }
+        }
+    }
+
+    async fn acquire_execution_claim_for_drive(
+        &self,
+        run_id: &RunId,
+    ) -> Result<ExecutionClaimAcquire, AppError> {
+        loop {
+            match self
+                .store
+                .execution_claim_status(run_id)
+                .await
+                .map_err(async_app_store_error)?
+            {
+                store::ExecutionClaimStatus::Live(_) => return Ok(ExecutionClaimAcquire::Busy),
+                store::ExecutionClaimStatus::Expired(lease) => {
+                    self.store
+                        .reap_expired_execution_claim(run_id, &lease.token)
+                        .await
+                        .map_err(async_app_store_error)?;
+                }
+                store::ExecutionClaimStatus::Unclaimed => {
+                    let token = new_execution_claim_token()?;
+                    match self
+                        .store
+                        .acquire_execution_claim(run_id, token)
+                        .await
+                        .map_err(async_app_store_error)?
+                    {
+                        store::NowaitSkipAdmissionResult::Admitted(lease) => {
+                            return Ok(ExecutionClaimAcquire::Acquired(lease));
+                        }
+                        store::NowaitSkipAdmissionResult::Busy(_) => {}
+                    }
+                }
+            }
+        }
+    }
+
+    async fn drive_once_with_execution_claim(
+        &self,
+        runtime_spec: &CertifiedRuntimeSpec,
+        run_id: &RunId,
+        lease: &mut store::AdmissionLease,
+    ) -> Result<ClaimedDriveStep, AppError> {
+        let scheduler = self.scheduler.clone();
+        let step = scheduler.drive_once(&self.store, runtime_spec, run_id);
+        tokio::pin!(step);
+        loop {
+            tokio::select! {
+                status = &mut step => {
+                    return Ok(ClaimedDriveStep {
+                        status: status?,
+                        claim_lost: false,
+                    });
+                }
+                _ = tokio::time::sleep(self.execution_claim_heartbeat_interval) => {
+                    if !self.renew_execution_claim_or_lost(run_id, lease).await? {
+                        let status = (&mut step).await?;
+                        return Ok(ClaimedDriveStep {
+                            status,
+                            claim_lost: true,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    async fn renew_execution_claim_or_lost(
+        &self,
+        run_id: &RunId,
+        lease: &mut store::AdmissionLease,
+    ) -> Result<bool, AppError> {
+        match self
+            .store
+            .renew_execution_claim(run_id, &lease.token)
+            .await
+            .map_err(async_app_store_error)?
+        {
+            Some(renewed) => {
+                *lease = renewed;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    async fn release_execution_claim_if_holder(
+        &self,
+        run_id: &RunId,
+        lease: &store::AdmissionLease,
+    ) -> Result<(), AppError> {
+        self.store
+            .release_execution_claim(run_id, &lease.token)
+            .await
+            .map_err(async_app_store_error)?;
+        Ok(())
+    }
+
+    async fn run_is_terminal(&self, run_id: &RunId) -> Result<bool, AppError> {
+        let context = self.load_verified_status_read_context(run_id).await?;
+        let saga = context
+            .projection()
+            .derive_saga_projection(run_id, &context.runtime_spec().spec().saga);
+        Ok(matches!(
+            saga.run_mode,
+            store::RunMode::Completed
+                | store::RunMode::Compensated
+                | store::RunMode::ManuallyResolved
+                | store::RunMode::FailedWithoutAcdcClaim
+        ))
+    }
+}
+
+enum ExecutionClaimAcquire {
+    Acquired(store::AdmissionLease),
+    Busy,
+}
+
+struct ClaimedDriveStep {
+    status: SchedulerStatus,
+    claim_lost: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -2270,6 +2483,15 @@ fn run_identity_material_mismatch() -> AppError {
     )
 }
 
+fn new_execution_claim_token() -> Result<store::AdmissionToken, AppError> {
+    store::AdmissionToken::new(format!("mfm.execution_claim.v1:{}", uuid::Uuid::new_v4()))
+        .map_err(AppError::from)
+}
+
+fn default_execution_claim_heartbeat_interval() -> Duration {
+    Duration::from_secs(store::EXECUTION_CLAIM_HEARTBEAT_INTERVAL_SECS)
+}
+
 fn async_app_store_error(_error: impl fmt::Display) -> AppError {
     AppError::backend(
         ErrorClass::Conflict,
@@ -2819,7 +3041,7 @@ fn run_response_from_projection(
     runtime_spec: &CertifiedRuntimeSpec,
     stream: &[store::KernelEventEnvelope],
     projection: &store::ProjectionSnapshot,
-    status: SchedulerStatus,
+    status: DriveStatus,
 ) -> Result<RunResponse, AppError> {
     let saga = projection.derive_saga_projection(run_id, &runtime_spec.spec().saga);
     Ok(RunResponse {
@@ -2828,7 +3050,7 @@ fn run_response_from_projection(
         run_mode: run_mode_status(saga.run_mode),
         saga: saga_status_with_resources(runtime_spec.spec(), projection, &saga),
         attempt_dispositions: attempt_dispositions(projection),
-        scheduler_status: scheduler_status_str(status).to_owned(),
+        scheduler_status: status.as_str().to_owned(),
         head_seq: stream_head(stream),
     })
 }

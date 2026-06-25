@@ -20,7 +20,7 @@ use mfm_runtime::{
     unresolved_manual_obligations_digest,
 };
 use mfm_spec::v1 as spec;
-use mfm_store::v1::{self as store, RunEventStore};
+use mfm_store::v1::{self as store, ExecutionClaimStatus, ExecutionClaimStore, RunEventStore};
 use serde_json::Value;
 
 const PROOF_SECRET_SENTINEL: &str = "manual-secret-proof-sentinel";
@@ -36,7 +36,7 @@ async fn public_manual_resolution_scenario_records_resolution_and_hides_proof_by
     let services = mfm_app::make_run_services_with_certification_registry(
         runners,
         store.clone(),
-        store,
+        store.clone(),
         registry.clone(),
     );
 
@@ -80,6 +80,13 @@ async fn public_manual_resolution_scenario_records_resolution_and_hides_proof_by
         blocked.saga.manual_block_reason.as_deref(),
         Some("policy_manual_resolution")
     );
+    assert!(matches!(
+        store
+            .execution_claim_status(&run_id)
+            .await
+            .expect("execution claim status"),
+        ExecutionClaimStatus::Live(_)
+    ));
     let required = blocked
         .saga
         .required_manual_authorization
@@ -105,6 +112,12 @@ async fn public_manual_resolution_scenario_records_resolution_and_hides_proof_by
         &evidence_bytes,
     )
     .await;
+    assert!(
+        store
+            .expire_execution_claim_for_test(&run_id)
+            .expect("expire execution claim for stale resume"),
+        "manual-blocked run should have a live execution claim to expire"
+    );
 
     let resolved = services
         .record_manual_resolution(ManualResolutionRecordRequest {
@@ -120,6 +133,13 @@ async fn public_manual_resolution_scenario_records_resolution_and_hides_proof_by
         .expect("manual resolution");
 
     assert_eq!(resolved.run_mode, RunModeStatus::ManuallyResolved);
+    assert!(matches!(
+        store
+            .execution_claim_status(&run_id)
+            .await
+            .expect("execution claim status"),
+        ExecutionClaimStatus::Unclaimed
+    ));
     assert_eq!(resolved.saga.manual_block_reason, None);
     assert_eq!(resolved.saga.required_manual_authorization, None);
     let terminal = resolved
