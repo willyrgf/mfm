@@ -273,6 +273,22 @@ pub struct ContractTransactionReceipts {
     pub transactions: Vec<ContractTransactionReceipt>,
 }
 
+/// Deployment receipt-level terminal evidence consumed by [`DeployContractState::output_from_receipt`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "deploy-receipt",
+    schema = "mfm.evm.contract.value.deploy_receipt"
+)]
+pub struct ContractDeployReceipt {
+    /// Receipt-level contract version.
+    pub receipt_version: u64,
+    /// Deployed contract address derived from prepared invocation evidence.
+    pub contract_address: String,
+    /// Observed transaction receipt.
+    pub receipt: ContractTransactionReceipt,
+}
+
 /// Deployment confirmation consumed by [`DeployContractState::output_from_confirmation`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
 #[mfm(
@@ -287,6 +303,22 @@ pub struct ContractDeployConfirmation {
     pub contract_address: String,
     /// Confirmed transaction receipt.
     pub receipt: ContractTransactionReceipt,
+}
+
+/// Configuration receipt-level terminal evidence consumed by [`ConfigureContractState::output_from_receipt`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "configure-receipt",
+    schema = "mfm.evm.contract.value.configure_receipt"
+)]
+pub struct ContractConfigureReceipt {
+    /// Receipt-level contract version.
+    pub receipt_version: u64,
+    /// Observed transaction receipts.
+    pub receipts: Vec<ContractTransactionReceipt>,
+    /// Highest observed configuration block, when known.
+    pub configured_block_number: Option<u64>,
 }
 
 /// Configuration confirmation consumed by [`ConfigureContractState::output_from_confirmation`].
@@ -419,7 +451,7 @@ impl SideEffectState for DeployContractState {
     type Intent = ContractDeployIntent;
     type IdempotencyInput = ContractTransactionIdempotency;
     type Submission = ContractTransactionSubmissions;
-    type Receipt = ContractTransactionReceipts;
+    type Receipt = ContractDeployReceipt;
     type Confirmation = ContractDeployConfirmation;
     type SubmitFuture<'a> = future::Ready<StateResult<Self::Submission>>;
 
@@ -447,6 +479,23 @@ impl SideEffectState for DeployContractState {
         _caps: &'a Self::Caps,
     ) -> Self::SubmitFuture<'a> {
         future::ready(Err(adapter_required_error(Self::name())))
+    }
+
+    fn output_from_receipt(
+        &self,
+        _input: &Self::Input,
+        _intent: &Self::Intent,
+        receipt: &Self::Receipt,
+    ) -> StateResult<Self::Output> {
+        Ok(DeployedContract {
+            lifecycle_version: 1,
+            network_id: self.config.network().network_id().to_owned(),
+            expected_chain_id: self.config.network().expected_chain_id(),
+            contract_address: receipt.contract_address.clone(),
+            deploy_tx_hash: receipt.receipt.transaction_hash.clone(),
+            deploy_receipt_evidence: receipt.receipt.receipt_evidence.clone(),
+            deployed_block_number: Some(receipt.receipt.block_number),
+        })
     }
 
     fn output_from_confirmation(
@@ -513,7 +562,7 @@ impl SideEffectState for ConfigureContractState {
     type Intent = ContractConfigureIntent;
     type IdempotencyInput = ContractTransactionIdempotency;
     type Submission = ContractTransactionSubmissions;
-    type Receipt = ContractTransactionReceipts;
+    type Receipt = ContractConfigureReceipt;
     type Confirmation = ContractConfigureConfirmation;
     type SubmitFuture<'a> = future::Ready<StateResult<Self::Submission>>;
 
@@ -548,6 +597,39 @@ impl SideEffectState for ConfigureContractState {
         _caps: &'a Self::Caps,
     ) -> Self::SubmitFuture<'a> {
         future::ready(Err(adapter_required_error(Self::name())))
+    }
+
+    fn output_from_receipt(
+        &self,
+        input: &Self::Input,
+        _intent: &Self::Intent,
+        receipt: &Self::Receipt,
+    ) -> StateResult<Self::Output> {
+        ensure_network_matches_deployed(self.config.network(), &input.deployed)?;
+        Ok(ConfiguredContract {
+            lifecycle_version: 1,
+            deployed: input.deployed.clone(),
+            configure_calls: self.config.calls().to_vec(),
+            confirmation_read_assertions: self.config.confirmation_read_assertions().to_vec(),
+            confirmation_event_assertions: self.config.confirmation_event_assertions().to_vec(),
+            configure_tx_hashes: receipt
+                .receipts
+                .iter()
+                .map(|receipt| receipt.transaction_hash.clone())
+                .collect(),
+            configure_receipt_evidence: receipt
+                .receipts
+                .iter()
+                .filter_map(|receipt| receipt.receipt_evidence.clone())
+                .collect(),
+            configured_block_number: receipt.configured_block_number.or_else(|| {
+                receipt
+                    .receipts
+                    .iter()
+                    .map(|receipt| receipt.block_number)
+                    .max()
+            }),
+        })
     }
 
     fn output_from_confirmation(
@@ -904,6 +986,12 @@ mod tests {
             ContractConfigureIntent::schema_id()
                 .expect("schema")
                 .to_string(),
+            ContractDeployReceipt::schema_id()
+                .expect("schema")
+                .to_string(),
+            ContractConfigureReceipt::schema_id()
+                .expect("schema")
+                .to_string(),
             ContractValidationReadRequest::schema_id()
                 .expect("schema")
                 .to_string(),
@@ -979,6 +1067,67 @@ mod tests {
         ] {
             assert!(!json.contains(&forbidden), "{json} contains {forbidden}");
         }
+    }
+
+    #[test]
+    fn deploy_receipt_projects_deployed_typestate() {
+        let state = DeployContractState::new(validated_config(deploy_config())).expect("state");
+        let intent = state.prepare_intent(&()).expect("intent");
+        let output = state
+            .output_from_receipt(
+                &(),
+                &intent,
+                &ContractDeployReceipt {
+                    receipt_version: 1,
+                    contract_address: "0x000000000000000000000000000000000000beef".to_owned(),
+                    receipt: ContractTransactionReceipt {
+                        receipt_version: 1,
+                        transaction_hash: "0x01".to_owned(),
+                        block_number: 3,
+                        status: true,
+                        receipt_evidence: None,
+                    },
+                },
+            )
+            .expect("deployed");
+
+        assert_eq!(
+            output.contract_address,
+            "0x000000000000000000000000000000000000beef"
+        );
+        assert_eq!(output.deploy_tx_hash, "0x01");
+        assert_eq!(output.deployed_block_number, Some(3));
+    }
+
+    #[test]
+    fn configure_receipt_projects_configured_typestate() {
+        let state =
+            ConfigureContractState::new(validated_config(configure_config())).expect("state");
+        let input = ConfigureContractInput {
+            deployed: deployed_contract(),
+        };
+        let intent = state.prepare_intent(&input).expect("intent");
+        let output = state
+            .output_from_receipt(
+                &input,
+                &intent,
+                &ContractConfigureReceipt {
+                    receipt_version: 1,
+                    receipts: vec![ContractTransactionReceipt {
+                        receipt_version: 1,
+                        transaction_hash: "0x02".to_owned(),
+                        block_number: 3,
+                        status: true,
+                        receipt_evidence: None,
+                    }],
+                    configured_block_number: None,
+                },
+            )
+            .expect("configured");
+
+        assert_eq!(output.configure_tx_hashes, vec!["0x02"]);
+        assert_eq!(output.configured_block_number, Some(3));
+        assert_eq!(intent.transactions.len(), 1);
     }
 
     #[test]

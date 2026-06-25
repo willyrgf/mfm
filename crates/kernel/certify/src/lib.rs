@@ -559,6 +559,11 @@ impl CertifiedSideEffectContract {
         &self.side_effect.resource_claim
     }
 
+    /// Returns the certified terminal verification policy.
+    pub fn verification(&self) -> &spec::SideEffectVerificationSpec {
+        &self.side_effect.verification
+    }
+
     /// Validates whether a ledger purpose is admissible for this node.
     pub fn validate_ledger_purpose(&self, purpose: &events::SideEffectLedgerPurpose) -> Result<()> {
         match (&self.remediation_forward_node_id, purpose) {
@@ -2241,26 +2246,30 @@ impl<'a> DraftLowerer<'a> {
         let side_effect = match (
             node.side_effect_contract_digest.as_ref(),
             node.side_effect_resource_claim.as_ref(),
+            node.side_effect_verification.as_ref(),
         ) {
-            (Some(digest), Some(resource_claim)) => Some(spec::SideEffectContractSpec {
-                contract_digest: digest.clone(),
-                resource_claim: resource_claim.clone(),
-            }),
-            (None, None) => None,
-            (Some(_), None) => {
+            (Some(digest), Some(resource_claim), Some(verification)) => {
+                Some(spec::SideEffectContractSpec {
+                    contract_digest: digest.clone(),
+                    resource_claim: resource_claim.clone(),
+                    verification: verification.clone(),
+                })
+            }
+            (None, None, None) => None,
+            (Some(_), None, _) | (Some(_), _, None) => {
                 return Err(problem(
                     ProblemClass::InvalidSemanticTransition,
                     format!(
-                        "side-effect node {} is missing resource claim",
+                        "side-effect node {} is missing resource claim or verification policy",
                         node.node_id
                     ),
                 ));
             }
-            (None, Some(_)) => {
+            (None, Some(_), _) | (None, _, Some(_)) => {
                 return Err(problem(
                     ProblemClass::InvalidSemanticTransition,
                     format!(
-                        "non-side-effect node {} carries resource claim",
+                        "non-side-effect node {} carries side-effect policy",
                         node.node_id
                     ),
                 ));
@@ -6225,6 +6234,15 @@ mod tests {
             std::future::ready(Ok(intent.clone()))
         }
 
+        fn output_from_receipt(
+            &self,
+            _input: &Self::Input,
+            _intent: &Self::Intent,
+            receipt: &Self::Receipt,
+        ) -> StateResult<Self::Output> {
+            Ok(receipt.clone())
+        }
+
         fn output_from_confirmation(
             &self,
             _input: &Self::Input,
@@ -6315,6 +6333,12 @@ mod tests {
     }
 
     fn side_effect_draft() -> program::TypedProgramDraft {
+        side_effect_draft_with_verification(program::SideEffectVerificationSpec::Receipt)
+    }
+
+    fn side_effect_draft_with_verification(
+        verification: program::SideEffectVerificationSpec,
+    ) -> program::TypedProgramDraft {
         let mut states = StateRegistryBuilder::new();
         states
             .register::<MutatingState>()
@@ -6334,6 +6358,7 @@ mod tests {
                     TestConfig { multiplier: 3 },
                     seed,
                     ResourceClaim::manual_only(),
+                    verification,
                 )?;
                 root.bind_public_outputs(
                     PublicOutputKey::new("terminal")?,
@@ -6371,11 +6396,13 @@ mod tests {
                             config: TestConfig { multiplier: 3 },
                             input: seed,
                             resource_claim: ResourceClaim::manual_only(),
+                            verification: program::SideEffectVerificationSpec::Receipt,
                         },
                         program::RemediationNodeParams {
                             key: StateKey::new("compensating-state")?,
                             config: TestConfig { multiplier: 1 },
                             resource_claim: ResourceClaim::manual_only(),
+                            verification: program::SideEffectVerificationSpec::Receipt,
                         },
                         Ok,
                     )?;
@@ -7267,9 +7294,57 @@ mod tests {
                         digest_byte(0x63),
                     ),
                     resource_claim: spec::ResourceClaimSpec::ManualOnly,
+                    verification: spec::SideEffectVerificationSpec::Receipt,
                 });
             },
         );
+    }
+
+    #[test]
+    fn side_effect_verification_policy_is_spec_authority_not_registry_authority() {
+        let receipt =
+            side_effect_draft_with_verification(program::SideEffectVerificationSpec::Receipt);
+        let finalized_1 =
+            side_effect_draft_with_verification(program::SideEffectVerificationSpec::Finalized {
+                depth: 1,
+            });
+        let finalized_12 =
+            side_effect_draft_with_verification(program::SideEffectVerificationSpec::Finalized {
+                depth: 12,
+            });
+
+        let receipt_registry =
+            CertificationRegistry::from_program_draft(&receipt).expect("receipt registry");
+        let finalized_registry =
+            CertificationRegistry::from_program_draft(&finalized_12).expect("finalized registry");
+        assert_eq!(
+            receipt_registry.digest().expect("receipt registry digest"),
+            finalized_registry
+                .digest()
+                .expect("finalized registry digest"),
+            "verification policy must not be resolved from registry authority"
+        );
+
+        let receipt_spec = certify_program_draft(&receipt)
+            .expect("receipt certified")
+            .validated_spec()
+            .spec()
+            .spec_hash()
+            .expect("receipt hash");
+        let finalized_1_spec = certify_program_draft(&finalized_1)
+            .expect("finalized one certified")
+            .validated_spec()
+            .spec()
+            .spec_hash()
+            .expect("finalized one hash");
+        let finalized_12_spec = certify_program_draft(&finalized_12)
+            .expect("finalized twelve certified")
+            .validated_spec()
+            .spec()
+            .spec_hash()
+            .expect("finalized twelve hash");
+        assert_ne!(receipt_spec, finalized_1_spec);
+        assert_ne!(finalized_1_spec, finalized_12_spec);
     }
 
     #[test]

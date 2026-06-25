@@ -31,6 +31,7 @@ use mfm_spec::v1::{
 pub use mfm_spec::v1::{
     ManualAuthorizationVerifierId, ManualSigningSchemeSpec, OperatorAuthorityId,
     OperatorAuthorityMemberSpec, OperatorId, OperatorPublicIdentity, ResourceNamespace,
+    SideEffectVerificationSpec,
 };
 use mfm_values::{
     MfmConfig, MfmValue, PublicOutputDescriptor, SchemaDescriptor, SchemaShape, StateInput,
@@ -1558,6 +1559,14 @@ pub trait SideEffectState: StateSpec<Effect = ApplySideEffect> {
         caps: &'a Self::Caps,
     ) -> Self::SubmitFuture<'a>;
 
+    /// Constructs terminal output from receipt-level side-effect evidence.
+    fn output_from_receipt(
+        &self,
+        input: &Self::Input,
+        intent: &Self::Intent,
+        receipt: &Self::Receipt,
+    ) -> StateResult<Self::Output>;
+
     /// Constructs terminal output from confirmed side-effect evidence.
     fn output_from_confirmation(
         &self,
@@ -1970,6 +1979,8 @@ pub struct SideEffectNodeParams<S: SideEffectState, I> {
     pub input: I,
     /// Resource claim for the forward side-effect ledger.
     pub resource_claim: ResourceClaim,
+    /// Terminal verification policy for the forward side-effect ledger.
+    pub verification: SideEffectVerificationSpec,
 }
 
 /// Parameters for a remediation node in a linked compensation pair.
@@ -1980,6 +1991,8 @@ pub struct RemediationNodeParams<R: SideEffectState> {
     pub config: R::Config,
     /// Resource claim for the remediation side-effect ledger.
     pub resource_claim: ResourceClaim,
+    /// Terminal verification policy for the remediation side-effect ledger.
+    pub verification: SideEffectVerificationSpec,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2137,6 +2150,8 @@ pub struct StateNodeSpec {
     pub side_effect_contract_digest: Option<ContentDigest>,
     /// Cross-run resource claim when this node mutates an external system.
     pub side_effect_resource_claim: Option<ResourceClaimSpec>,
+    /// Terminal verification policy when this node mutates an external system.
+    pub side_effect_verification: Option<SideEffectVerificationSpec>,
     /// Canonical config binding.
     pub config: ConfigBindingSpec,
     /// Typed input binding.
@@ -3887,11 +3902,13 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
             config: forward_config,
             input: forward_input,
             resource_claim: forward_resource_claim,
+            verification: forward_verification,
         } = forward_params;
         let RemediationNodeParams {
             key: remediation_key,
             config: remediation_config,
             resource_claim: remediation_resource_claim,
+            verification: remediation_verification,
         } = remediation_params;
         let checkpoint = self.checkpoint();
         let forward_key_string = forward_key.as_str().to_owned();
@@ -3916,7 +3933,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
             forward_config,
             forward_input,
             Vec::new(),
-            Some(forward_resource_claim),
+            Some((forward_resource_claim, forward_verification)),
         )?;
         let forward = ForwardSideEffectHandle::new(forward_node.node_id.clone(), forward_handle);
         let remediation_input = match build_remediation_input(forward.clone()) {
@@ -3940,7 +3957,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
             remediation_config,
             remediation_input,
             Vec::new(),
-            Some(remediation_resource_claim),
+            Some((remediation_resource_claim, remediation_verification)),
         ) {
             Ok(planned) => planned,
             Err(error) => {
@@ -4005,6 +4022,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
         config: S::Config,
         input: I,
         resource_claim: ResourceClaim,
+        verification: SideEffectVerificationSpec,
     ) -> Result<ForwardSideEffectHandle<'program, 'scope, S::Output>>
     where
         S: SideEffectState,
@@ -4022,7 +4040,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
             config,
             input,
             Vec::new(),
-            Some(resource_claim),
+            Some((resource_claim, verification)),
         )?;
         self.state_keys.insert(key_string);
         self.state_nodes.push(node.clone());
@@ -4036,7 +4054,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
         config: S::Config,
         input: I,
         output_domain_keys: Vec<StableDomainKeyRef>,
-        resource_claim: Option<ResourceClaim>,
+        side_effect_contract: Option<(ResourceClaim, SideEffectVerificationSpec)>,
     ) -> Result<(StateNodeSpec, Handle<'program, 'scope, S::Output>)>
     where
         S: StateSpec,
@@ -4054,8 +4072,9 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
 
         let descriptor = registered.descriptor();
         let side_effect_contract_digest = descriptor.side_effect_contract_digest().cloned();
-        let resource_claim = resource_claim.map(ResourceClaim::into_spec);
-        match (&side_effect_contract_digest, &resource_claim) {
+        let side_effect_contract =
+            side_effect_contract.map(|(claim, verification)| (claim.into_spec(), verification));
+        match (&side_effect_contract_digest, &side_effect_contract) {
             (Some(_), Some(_)) | (None, None) => {}
             (Some(_), None) => {
                 return Err(PlanError::SideEffectClaimRequired(format!(
@@ -4119,7 +4138,11 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
                 capability_bindings: descriptor.capabilities().clone(),
                 adapter_bindings,
                 side_effect_contract_digest,
-                side_effect_resource_claim: resource_claim,
+                side_effect_resource_claim: side_effect_contract
+                    .as_ref()
+                    .map(|(claim, _)| claim.clone()),
+                side_effect_verification: side_effect_contract
+                    .map(|(_, verification)| verification),
                 config: config_binding,
                 input: input.spec(),
                 output_cell_id,
@@ -4460,6 +4483,7 @@ impl<'program, 'scope> OperationExpansion<'program, 'scope> {
         config: S::Config,
         input: I,
         resource_claim: ResourceClaim,
+        verification: SideEffectVerificationSpec,
     ) -> Result<ForwardSideEffectHandle<'program, 'scope, S::Output>>
     where
         S: SideEffectState,
@@ -4467,7 +4491,7 @@ impl<'program, 'scope> OperationExpansion<'program, 'scope> {
         I: IntoStateInput<'program, 'scope, S::Input>,
     {
         self.scope_mut()
-            .side_effect::<S, I>(key, config, input, resource_claim)
+            .side_effect::<S, I>(key, config, input, resource_claim, verification)
     }
 
     /// Plans a linked forward/remediation side-effect pair.

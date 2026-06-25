@@ -31,7 +31,8 @@ use mfm_program::{
     OperationExpansion, OperationKey, OperationRegistryBuilder, OperatorAuthorityId,
     OperatorAuthorityMemberSpec, OperatorAuthoritySnapshotDraft, OperatorId,
     OperatorPublicIdentity, PublicOutputKey, ResourceClaim, RootBuilder, ScopeKey,
-    SideEffectSagaPolicy, StateKey, StateRegistryBuilder, ThresholdQuorum,
+    SideEffectSagaPolicy, SideEffectVerificationSpec, StateKey, StateRegistryBuilder,
+    ThresholdQuorum,
 };
 
 const PROOF_OPERATION_KIND_NAME: &str = "workflow";
@@ -87,6 +88,7 @@ impl Operation for ProofWorkflowOperation {
             config.apply,
             fact.clone(),
             ResourceClaim::manual_only(),
+            SideEffectVerificationSpec::Receipt,
         )?;
         let output = builder.state::<ProofAssembleOutputState, _>(
             StateKey::new("assemble_output")?,

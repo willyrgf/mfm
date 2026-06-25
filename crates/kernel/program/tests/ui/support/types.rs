@@ -174,6 +174,15 @@ macro_rules! impl_try_side_effect_state {
                 std::future::ready(Ok(intent.clone()))
             }
 
+            fn output_from_receipt(
+                &self,
+                _input: &Self::Input,
+                _intent: &Self::Intent,
+                receipt: &Self::Receipt,
+            ) -> mfm_program::StateResult<Self::Output> {
+                Ok(receipt.clone())
+            }
+
             fn output_from_confirmation(
                 &self,
                 _input: &Self::Input,

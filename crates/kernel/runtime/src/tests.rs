@@ -11204,6 +11204,7 @@ fn fixture_with_first_side_effect_state() -> Fixture {
             node.side_effect = Some(spec::SideEffectContractSpec {
                 contract_digest: contract_digest.clone(),
                 resource_claim: spec::ResourceClaimSpec::ManualOnly,
+                verification: spec::SideEffectVerificationSpec::Receipt,
             });
         }
     }
@@ -11421,6 +11422,7 @@ fn fixture_with_two_side_effects_and_failing_tail() -> Fixture {
             node.side_effect = Some(spec::SideEffectContractSpec {
                 contract_digest: contract_digest.clone(),
                 resource_claim: spec::ResourceClaimSpec::ManualOnly,
+                verification: spec::SideEffectVerificationSpec::Receipt,
             });
         }
     }
@@ -11708,6 +11710,7 @@ fn with_exclusive_resource_claims(mut fixture: Fixture, descriptors: &[Descripto
             node.side_effect = Some(spec::SideEffectContractSpec {
                 contract_digest: contract_digest.clone(),
                 resource_claim: resource_claim.clone(),
+                verification: spec::SideEffectVerificationSpec::Receipt,
             });
         }
     }

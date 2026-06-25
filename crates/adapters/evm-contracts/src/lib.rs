@@ -77,10 +77,11 @@ use mfm_spec::v1 as spec;
 use mfm_state_evm_contracts::{
     account_nonce_resource_key_schema_id, account_nonce_resource_namespace, ConfigureContractInput,
     ConfigureContractState, ContractConfigureConfirmation, ContractConfigureIntent,
-    ContractDeployConfirmation, ContractDeployIntent, ContractTransactionIdempotency,
-    ContractTransactionReceipt, ContractTransactionReceipts, ContractTransactionSubmission,
-    ContractTransactionSubmissions, ContractValidationReadRequest, ContractValidationReadResponse,
-    DeployContractState, ValidateContractInput, ValidateContractState,
+    ContractConfigureReceipt, ContractDeployConfirmation, ContractDeployIntent,
+    ContractDeployReceipt, ContractTransactionIdempotency, ContractTransactionReceipt,
+    ContractTransactionReceipts, ContractTransactionSubmission, ContractTransactionSubmissions,
+    ContractValidationReadRequest, ContractValidationReadResponse, DeployContractState,
+    ValidateContractInput, ValidateContractState,
 };
 use mfm_store::v1 as store;
 use mfm_values::{MfmConfig, MfmValue};
@@ -958,11 +959,17 @@ impl replay::SideEffectReplayVerifier for EvmContractLifecycleReplayVerifier {
 
     fn verify_receipt(&self, input: &replay::SideEffectReceiptReplayInput) -> replay::Result<()> {
         self.verify_adapter_binding(&input.intent)?;
-        ensure_schema(
-            &input.receipt.receipt.receipt_schema_id,
-            &ContractTransactionReceipts::schema_id().map_err(replay_value_error)?,
-            "receipt",
-        )
+        let schema = &input.receipt.receipt.receipt_schema_id;
+        let deploy = ContractDeployReceipt::schema_id().map_err(replay_value_error)?;
+        let configure = ContractConfigureReceipt::schema_id().map_err(replay_value_error)?;
+        if schema == &deploy || schema == &configure {
+            Ok(())
+        } else {
+            Err(replay::ReplayError::new(
+                replay::ReplayErrorKind::SideEffectMismatch,
+                "receipt schema did not match contract lifecycle schemas",
+            ))
+        }
     }
 
     fn verify_confirmation(
@@ -1688,7 +1695,7 @@ impl SideEffectDriverCallbacks for DeploySideEffectCallbacks<'_> {
     type Submission = ContractTransactionSubmissions;
     type SubmissionUnknownEvidence = ContractTransactionSubmissions;
     type NotSubmittedProof = ContractTransactionSubmissions;
-    type Receipt = ContractTransactionReceipts;
+    type Receipt = ContractDeployReceipt;
     type Confirmation = ContractDeployConfirmation;
     type AmbiguityEvidence = ContractTransactionSubmissions;
     type Output = DeployedContract;
@@ -1798,11 +1805,15 @@ impl SideEffectDriverCallbacks for DeploySideEffectCallbacks<'_> {
             let runtime = self
                 .factory
                 .runtime_for(self.plan.config.as_ref().network().network_id())?;
+            let receipts = ContractTransactionReceipts {
+                receipts_version: 1,
+                transactions: read_receipts_with_poll(&runtime, &prepared, &submissions).await?,
+            };
             Ok(SideEffectObservedEvidence {
-                evidence: ContractTransactionReceipts {
-                    receipts_version: 1,
-                    transactions: read_receipts_with_poll(&runtime, &prepared, &submissions)
-                        .await?,
+                evidence: ContractDeployReceipt {
+                    receipt_version: 1,
+                    contract_address: deploy_contract_address_from_prepared(&prepared)?,
+                    receipt: single_receipt(receipts)?,
                 },
                 replay: contract_side_effect_replay_evidence()?,
             })
@@ -1815,29 +1826,19 @@ impl SideEffectDriverCallbacks for DeploySideEffectCallbacks<'_> {
         receipt: &'a store::SideEffectArtifactProjection,
     ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Confirmation>> {
         Box::pin(async {
-            let prepared_projection = projected_prepared_artifact(ctx)?;
-            let prepared = load_prepared_invocation(
-                &prepared_projection,
-                events::ArtifactRole::PreparedInvocation,
+            let (receipt, receipt_evidence) = load_side_effect_artifact::<ContractDeployReceipt>(
+                receipt,
+                events::ArtifactRole::Receipt,
                 ctx,
                 self.factory.artifacts(),
             )
             .await?;
-            let (receipts, receipt_evidence) =
-                load_side_effect_artifact::<ContractTransactionReceipts>(
-                    receipt,
-                    events::ArtifactRole::Receipt,
-                    ctx,
-                    self.factory.artifacts(),
-                )
-                .await?;
-            let receipts = receipts_with_evidence(receipts, &receipt_evidence);
-            let receipt = single_receipt(receipts)?;
+            let receipt = deploy_receipt_with_evidence(receipt, &receipt_evidence);
             Ok(SideEffectObservedEvidence {
                 evidence: ContractDeployConfirmation {
                     confirmation_version: 1,
-                    contract_address: deploy_contract_address_from_prepared(&prepared)?,
-                    receipt,
+                    contract_address: receipt.contract_address,
+                    receipt: receipt.receipt,
                 },
                 replay: contract_side_effect_replay_evidence()?,
             })
@@ -1886,7 +1887,7 @@ impl SideEffectDriverCallbacks for ConfigureSideEffectCallbacks<'_> {
     type Submission = ContractTransactionSubmissions;
     type SubmissionUnknownEvidence = ContractTransactionSubmissions;
     type NotSubmittedProof = ContractTransactionSubmissions;
-    type Receipt = ContractTransactionReceipts;
+    type Receipt = ContractConfigureReceipt;
     type Confirmation = ContractConfigureConfirmation;
     type AmbiguityEvidence = ContractTransactionSubmissions;
     type Output = ConfiguredContract;
@@ -2001,11 +2002,15 @@ impl SideEffectDriverCallbacks for ConfigureSideEffectCallbacks<'_> {
             let runtime = self
                 .factory
                 .runtime_for(self.plan.config.as_ref().network().network_id())?;
+            let receipts = read_receipts_with_poll(&runtime, &prepared, &submissions).await?;
             Ok(SideEffectObservedEvidence {
-                evidence: ContractTransactionReceipts {
-                    receipts_version: 1,
-                    transactions: read_receipts_with_poll(&runtime, &prepared, &submissions)
-                        .await?,
+                evidence: ContractConfigureReceipt {
+                    receipt_version: 1,
+                    configured_block_number: receipts
+                        .iter()
+                        .map(|receipt| receipt.block_number)
+                        .max(),
+                    receipts,
                 },
                 replay: contract_side_effect_replay_evidence()?,
             })
@@ -2018,24 +2023,20 @@ impl SideEffectDriverCallbacks for ConfigureSideEffectCallbacks<'_> {
         receipt: &'a store::SideEffectArtifactProjection,
     ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Confirmation>> {
         Box::pin(async {
-            let (receipts, receipt_evidence) =
-                load_side_effect_artifact::<ContractTransactionReceipts>(
+            let (receipt, receipt_evidence) =
+                load_side_effect_artifact::<ContractConfigureReceipt>(
                     receipt,
                     events::ArtifactRole::Receipt,
                     ctx,
                     self.factory.artifacts(),
                 )
                 .await?;
-            let receipts = receipts_with_evidence(receipts, &receipt_evidence);
+            let receipt = configure_receipt_with_evidence(receipt, &receipt_evidence);
             Ok(SideEffectObservedEvidence {
                 evidence: ContractConfigureConfirmation {
                     confirmation_version: 1,
-                    configured_block_number: receipts
-                        .transactions
-                        .iter()
-                        .map(|receipt| receipt.block_number)
-                        .max(),
-                    receipts: receipts.transactions,
+                    configured_block_number: receipt.configured_block_number,
+                    receipts: receipt.receipts,
                 },
                 replay: contract_side_effect_replay_evidence()?,
             })
@@ -2499,15 +2500,24 @@ fn single_receipt(
     Ok(transactions.remove(0))
 }
 
-fn receipts_with_evidence(
-    mut receipts: ContractTransactionReceipts,
+fn deploy_receipt_with_evidence(
+    mut receipt: ContractDeployReceipt,
     evidence: &mfm_artifact_capabilities::ArtifactEvidenceRef,
-) -> ContractTransactionReceipts {
+) -> ContractDeployReceipt {
     let evidence = lifecycle_evidence_ref(evidence);
-    for receipt in &mut receipts.transactions {
-        receipt.receipt_evidence = Some(evidence.clone());
+    receipt.receipt.receipt_evidence = Some(evidence);
+    receipt
+}
+
+fn configure_receipt_with_evidence(
+    mut receipt: ContractConfigureReceipt,
+    evidence: &mfm_artifact_capabilities::ArtifactEvidenceRef,
+) -> ContractConfigureReceipt {
+    let evidence = lifecycle_evidence_ref(evidence);
+    for transaction_receipt in &mut receipt.receipts {
+        transaction_receipt.receipt_evidence = Some(evidence.clone());
     }
-    receipts
+    receipt
 }
 
 fn idempotency_key_ref(
