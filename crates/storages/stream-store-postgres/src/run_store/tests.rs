@@ -19,12 +19,11 @@ use mfm_spec::v1::{
     ResourceNamespace, SagaPolicySpec, ValueLineageRef,
 };
 use mfm_store::v1::{
-    ArtifactEvidenceRef, AttemptStatus, AttemptTerminal, CellTerminalProjection,
+    AdmissionWaiter, ArtifactEvidenceRef, AttemptStatus, AttemptTerminal, CellTerminalProjection,
     CommitArtifactEvidenceSet, CommitKey, CommitOutcome, CommitPreconditions, ManualResolution,
-    PreparedCommit, PreparedCommitPlan, RequiredRunState, ResourceLaneKey, ResourceLaneWaiterBlock,
-    Retention, RunAdmission, RunState, SagaEngagementReason, SagaTerminal, SagaTerminalProof,
-    SideEffectPhase, SideEffectProgress, SideEffectTerminal, StateAttemptStarted, StoreError,
-    StreamSeq,
+    PreparedCommit, PreparedCommitPlan, RequiredRunState, ResourceLaneKey, Retention, RunAdmission,
+    RunState, SagaEngagementReason, SagaTerminal, SagaTerminalProof, SideEffectPhase,
+    SideEffectProgress, SideEffectTerminal, StateAttemptStarted, StoreError, StreamSeq,
 };
 use sqlx::postgres::PgConnectOptions;
 use sqlx::AssertSqlSafe;
@@ -1187,10 +1186,10 @@ fn assert_resource_lane_blocked(
     expected_lane_key: &ResourceLaneKey,
     expected_holder_run: &RunId,
 ) {
-    let CommitOutcome::ResourceLaneClaimBlocked(block) = outcome else {
+    let CommitOutcome::AdmissionBlocked(block) = outcome else {
         panic!("expected typed resource lane block, got {outcome:?}");
     };
-    assert_eq!(&block.lane_key, expected_lane_key);
+    assert_eq!(&block.resource_lane_key, expected_lane_key);
     let holder = block.holder.as_ref().expect("blocked holder");
     assert_eq!(&holder.run_id, expected_holder_run);
     assert_eq!(holder.ledger_key, side_effect_ledger_key());
@@ -1200,11 +1199,11 @@ fn assert_resource_lane_waiter_blocked(
     outcome: CommitOutcome,
     expected_lane_key: &ResourceLaneKey,
     expected_holder_run: Option<&RunId>,
-) -> ResourceLaneWaiterBlock {
-    let CommitOutcome::ResourceLaneClaimBlocked(block) = outcome else {
+) -> AdmissionWaiter {
+    let CommitOutcome::AdmissionBlocked(block) = outcome else {
         panic!("expected typed resource lane block, got {outcome:?}");
     };
-    assert_eq!(&block.lane_key, expected_lane_key);
+    assert_eq!(&block.resource_lane_key, expected_lane_key);
     match (block.holder.as_ref(), expected_holder_run) {
         (Some(holder), Some(expected_holder_run)) => {
             assert_eq!(&holder.run_id, expected_holder_run);

@@ -21,17 +21,20 @@ use mfm_spec::v1::{
     PublicFieldPath, RemediationUnresolvedSpec, ResourceNamespace, SagaPolicySpec, ValueLineageRef,
 };
 use mfm_store::v1::{
-    event_artifact_requirements, payload_canonical_json, payload_from_json_value,
-    ArtifactEvidenceRef, AsyncInMemoryRunStore, AsyncStoreFuture, AttemptStatus, AttemptTerminal,
-    CellTerminalProjection, CommitArtifactEvidenceSet, CommitKey, CommitOutcome,
-    CommitPreconditions, CommitRequest, CommittedRunStream, EventArtifactReferenceSource,
+    admission_advisory_lock_key, admission_waiter_id, event_artifact_requirements,
+    payload_canonical_json, payload_from_json_value, resource_wait_fifo_admission_token,
+    AdmissionLaneClass, AdmissionLaneMode, ArtifactEvidenceRef, AsyncInMemoryRunStore,
+    AsyncStoreFuture, AttemptStatus, AttemptTerminal, CellTerminalProjection,
+    CommitArtifactEvidenceSet, CommitKey, CommitOutcome, CommitPreconditions, CommitRequest,
+    CommittedRunStream, EventArtifactReferenceSource, ExecutionClaimAdmissionLane,
     ExistingArtifactAdmission, ForwardLedgerClassification, KernelEventEnvelope, ManualBlockReason,
     ManualResolution, ManualResolutionProjection, PreparedCommit, PreparedCommitBundle,
     PreparedCommitPlan, ProjectionSnapshot, PublicOutputProjection, RequiredRunState,
-    ResourceLaneKey, Retention, RunAdmission, RunCompletionProjection, RunEventStore, RunMode,
-    RunState, SagaAdmitToken, SagaEngagementProjection, SagaEngagementReason, SagaTerminal,
-    SagaTerminalProof, SideEffectLedgerPhase, SideEffectLedgerRef, SideEffectPhase,
-    SideEffectProgress, SideEffectTerminal, StateAttemptStarted, StoreError, StreamSeq,
+    ResourceAdmissionLane, ResourceLaneKey, Retention, RunAdmission, RunCompletionProjection,
+    RunEventStore, RunMode, RunState, SagaAdmitToken, SagaEngagementProjection,
+    SagaEngagementReason, SagaTerminal, SagaTerminalProof, SideEffectLedgerPhase,
+    SideEffectLedgerRef, SideEffectPhase, SideEffectProgress, SideEffectTerminal,
+    StateAttemptStarted, StoreError, StreamSeq,
 };
 
 const SPEC_MEDIA_TYPE: &str = "application/vnd.mfm.typed-execution-spec+json;version=1";
@@ -485,6 +488,79 @@ fn resource_lane_key_with_schema(value: &str, schema_byte: u8) -> ResourceLaneKe
     ResourceLaneKey::from_evidence(&resource_key(value, schema_byte))
 }
 
+#[test]
+fn admission_lane_constructors_bind_class_to_mode() {
+    let resource_lane =
+        ResourceAdmissionLane::from_resource_key_evidence(&resource_key("admission-wallet", 240))
+            .expect("resource admission lane");
+    assert_eq!(resource_lane.class(), AdmissionLaneClass::ResourceLane);
+    assert_eq!(resource_lane.mode(), AdmissionLaneMode::WaitFifo);
+
+    let execution_lane =
+        ExecutionClaimAdmissionLane::from_run_id(&run_id(240)).expect("execution admission lane");
+    assert_eq!(execution_lane.class(), AdmissionLaneClass::ExecutionClaim);
+    assert_eq!(execution_lane.mode(), AdmissionLaneMode::NowaitSkip);
+    assert_ne!(
+        resource_lane.id().as_bytes(),
+        execution_lane.id().as_bytes()
+    );
+}
+
+#[test]
+fn admission_lane_helpers_are_stable_and_domain_separated() {
+    let run_id = run_id(241);
+    let resource_key = resource_key("admission-wallet-token", 241);
+    let lane =
+        ResourceAdmissionLane::from_resource_key_evidence(&resource_key).expect("resource lane");
+    let mut intent = events::ResourceLaneClaimIntent {
+        spec_hash: spec_hash(241),
+        node_id: node_id(241),
+        attempt_id: attempt_id(241),
+        ledger_key: side_effect_ledger_key_with_suffix(241),
+        ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+        invocation_epoch: 1,
+        resource_key,
+        requirement_digest: content_digest(241),
+        resolved_by_capability_impl: events::RunnerFactoryId::new("mfm.test.runner")
+            .expect("runner id"),
+    };
+
+    let first = resource_wait_fifo_admission_token(&run_id, &lane, &intent).expect("first token");
+    let retry = resource_wait_fifo_admission_token(&run_id, &lane, &intent).expect("retry token");
+    intent.invocation_epoch = 2;
+    let different_epoch =
+        resource_wait_fifo_admission_token(&run_id, &lane, &intent).expect("different token");
+
+    assert_eq!(first, retry);
+    assert_ne!(first, different_epoch);
+    assert_eq!(
+        admission_waiter_id(&first)
+            .expect("first waiter id")
+            .as_str(),
+        admission_waiter_id(&retry)
+            .expect("retry waiter id")
+            .as_str()
+    );
+    assert!(admission_waiter_id(&first)
+        .expect("waiter id")
+        .as_str()
+        .starts_with("admission_waiter:"));
+
+    let resource_lock =
+        admission_advisory_lock_key(&lane.erased_key()).expect("resource advisory lock");
+    let resource_retry_lock =
+        admission_advisory_lock_key(&lane.erased_key()).expect("resource advisory lock retry");
+    let execution_lock = admission_advisory_lock_key(
+        &ExecutionClaimAdmissionLane::from_run_id(&run_id)
+            .expect("execution lane")
+            .erased_key(),
+    )
+    .expect("execution advisory lock");
+
+    assert_eq!(resource_lock, resource_retry_lock);
+    assert_ne!(resource_lock, execution_lock);
+}
+
 fn resource_touched_set(byte: u8) -> events::ResourceTouchedSetEvidence {
     events::ResourceTouchedSetEvidence {
         namespace: resource_namespace(),
@@ -550,10 +626,10 @@ fn assert_event_error_contains(error: StoreError, expected: &str) {
 }
 
 fn assert_resource_lane_blocked(outcome: CommitOutcome, expected_lane_key: &ResourceLaneKey) {
-    let CommitOutcome::ResourceLaneClaimBlocked(block) = outcome else {
+    let CommitOutcome::AdmissionBlocked(block) = outcome else {
         panic!("unexpected outcome: {outcome:?}");
     };
-    assert_eq!(&block.lane_key, expected_lane_key);
+    assert_eq!(&block.resource_lane_key, expected_lane_key);
 }
 
 fn side_effect_attempt_started() -> KernelEventPayload {

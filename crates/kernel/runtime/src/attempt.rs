@@ -224,7 +224,7 @@ impl<'a> AttemptLifecycle<'a> {
                 match store.append_prepared_commit_bundle(bundle).await {
                     Ok(store::CommitOutcome::Appended(_) | store::CommitOutcome::Idempotent(_)) => {
                     }
-                    Ok(store::CommitOutcome::ResourceLaneClaimBlocked(block)) => {
+                    Ok(store::CommitOutcome::AdmissionBlocked(block)) => {
                         let holder = block
                             .holder
                             .as_ref()
@@ -238,8 +238,8 @@ impl<'a> AttemptLifecycle<'a> {
                         return Err(RuntimeError::InvalidRunStream(format!(
                             "attempt start for node {} was blocked by resource lane {}:{}{}",
                             selected_attempt.phase.node.node_id,
-                            block.lane_key.namespace,
-                            block.lane_key.key,
+                            block.resource_lane_key.namespace,
+                            block.resource_lane_key.key,
                             holder
                         )));
                     }
@@ -308,7 +308,7 @@ impl<'a> AttemptLifecycle<'a> {
                     Ok(store::CommitOutcome::Appended(_) | store::CommitOutcome::Idempotent(_)) => {
                         advanced = true;
                     }
-                    Ok(store::CommitOutcome::ResourceLaneClaimBlocked(block)) => {
+                    Ok(store::CommitOutcome::AdmissionBlocked(block)) => {
                         return Ok(AttemptRunStatus::BlockedOnResourceLane {
                             witness: resource_lane_block_witness_from_outcome(
                                 &selected_attempt.phase.node.node_id,
@@ -441,18 +441,16 @@ impl<'a> AttemptLifecycle<'a> {
                 };
                 Ok(AttemptRunStatus::Advanced)
             }
-            Ok(store::CommitOutcome::ResourceLaneClaimBlocked(block))
-                if has_resource_lane_claim =>
-            {
+            Ok(store::CommitOutcome::AdmissionBlocked(block)) if has_resource_lane_claim => {
                 Ok(AttemptRunStatus::BlockedOnResourceLane {
                     witness: resource_lane_block_witness_from_outcome(&node.node_id, *block),
                     advanced,
                 })
             }
-            Ok(store::CommitOutcome::ResourceLaneClaimBlocked(block)) => {
+            Ok(store::CommitOutcome::AdmissionBlocked(block)) => {
                 Err(RuntimeError::InvalidRunStream(format!(
                     "commit without resource-lane claim was blocked by lane {}:{}",
-                    block.lane_key.namespace, block.lane_key.key
+                    block.resource_lane_key.namespace, block.resource_lane_key.key
                 )))
             }
             Err(error) if async_error_is_stale_expected_next_seq(&error) => {
@@ -670,12 +668,15 @@ fn request_has_resource_lane_claim(request: &store::CommitRequest) -> bool {
 
 fn resource_lane_block_witness_from_outcome(
     node_id: &NodeId,
-    block: store::ResourceLaneClaimBlock,
+    block: store::WaitFifoAdmissionBlock,
 ) -> ResourceLaneBlockWitness {
     ResourceLaneBlockWitness {
         node_id: node_id.clone(),
-        lane_key: block.lane_key,
-        waiter_id: block.waiter.as_ref().map(|waiter| waiter.waiter_id.clone()),
+        lane_key: block.resource_lane_key,
+        waiter_id: block
+            .waiter
+            .as_ref()
+            .map(|waiter| waiter.waiter_id.as_str().to_owned()),
         lane_ticket: block.waiter.as_ref().map(|waiter| waiter.lane_ticket),
     }
 }
@@ -797,8 +798,10 @@ mod tests {
 
         let witness = resource_lane_block_witness_from_outcome(
             &node_id,
-            store::ResourceLaneClaimBlock {
-                lane_key,
+            store::WaitFifoAdmissionBlock {
+                lane: store::ResourceAdmissionLane::from_resource_lane_key(&lane_key)
+                    .expect("resource admission lane"),
+                resource_lane_key: lane_key,
                 holder: Some(holder),
                 waiter: None,
             },

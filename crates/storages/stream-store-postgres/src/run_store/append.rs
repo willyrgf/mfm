@@ -87,16 +87,16 @@ impl PostgresRunStore {
         };
         let staged = match stage_prepared_commit_plan(&base, plan)? {
             StagedCommitOutcome::Staged(staged) => *staged,
-            StagedCommitOutcome::ResourceLaneClaimBlocked(block) => {
+            StagedCommitOutcome::AdmissionBlocked(block) => {
                 if let Some(admission) = &claim_admission {
                     let mut block = *block;
                     block.waiter = Some(enqueue_or_refresh_waiter_tx(&mut tx, admission).await?);
                     tx.commit().await.map_err(|_| {
                         PostgresStoreError::Database("failed to commit transaction")
                     })?;
-                    return Ok(CommitOutcome::ResourceLaneClaimBlocked(Box::new(block)));
+                    return Ok(CommitOutcome::AdmissionBlocked(Box::new(block)));
                 }
-                return Ok(CommitOutcome::ResourceLaneClaimBlocked(block));
+                return Ok(CommitOutcome::AdmissionBlocked(block));
             }
         };
         if let Some(admission) = &claim_admission {
@@ -106,7 +106,7 @@ impl PostgresRunStore {
                 tx.commit()
                     .await
                     .map_err(|_| PostgresStoreError::Database("failed to commit transaction"))?;
-                return Ok(CommitOutcome::ResourceLaneClaimBlocked(Box::new(block)));
+                return Ok(CommitOutcome::AdmissionBlocked(Box::new(block)));
             }
         }
         let batch = staged.batch().clone();

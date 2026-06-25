@@ -13,6 +13,17 @@
 //! // stream sequence numbers, ordinals, logical keys, or projection writes.
 //! let _forged = KernelEventEnvelope {};
 //! ```
+//!
+//! ```compile_fail
+//! use mfm_store::v1::{AdmissionLane, AdmissionLaneClass, WaitFifo};
+//!
+//! // Admission lane class/mode pairs are not caller-assembled. Resource admission
+//! // lanes are built only through the resource FIFO constructor, and execution
+//! // claim lanes are built only through the nowait constructor.
+//! let _forged = AdmissionLane::<WaitFifo> {
+//!     class: AdmissionLaneClass::ExecutionClaim,
+//! };
+//! ```
 
 /// Versioned v1 typed store contract.
 pub mod v1;
