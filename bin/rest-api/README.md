@@ -246,6 +246,12 @@ curl -s -X POST "http://127.0.0.1:3001/v1/runs/$RUN_ID/resume" \
   -d '{"drive":"once"}'
 ```
 
+Manual resume is the v1 recovery trigger for a run left with an open execution claim,
+side-effect uncertainty, or a resumable frontier. Automatic dead-driver takeover and background
+worker-pool dispatch are deferred. Receipt-level side-effect terminalization is final-at-risk: a
+later reorg can invalidate the published receipt-derived output, so operations that need reorg
+safety must use certified `Finalized(depth)` verification.
+
 Record a signed manual resolution:
 
 ```bash

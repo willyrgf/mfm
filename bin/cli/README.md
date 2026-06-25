@@ -337,6 +337,12 @@ mfm_cli run resume <RUN_ID> [OPTIONS]
 It rejects non-typed run ids before storage access. `--drive append-only` validates and reports the
 stored run without executing states.
 
+Manual `run resume <RUN_ID>` is the v1 recovery trigger for a run left with an open execution claim,
+side-effect uncertainty, or a resumable frontier. Automatic dead-driver takeover and background
+worker-pool dispatch are deferred. Receipt-level side-effect terminalization is final-at-risk: a
+later reorg can invalidate the published receipt-derived output, so operations that need reorg
+safety must use certified `Finalized(depth)` verification.
+
 ### `run manual-resolution`
 
 Records a signed manual resolution for a certified typed run whose current stream prefix derives

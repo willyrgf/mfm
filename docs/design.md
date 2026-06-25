@@ -251,7 +251,7 @@ Saga handling engages at the first non-retryable failure or forward side-effect 
 engagement, no new forward side-effect boundary crossings may be admitted. Runtime drives
 past-boundary forward ledgers to quiescence before resolving obligations or terminal outcomes.
 Remediation ledgers use the same side-effect protocol as forward ledgers and carry
-`SideEffectLedgerPurpose::Remediation { forward_ledger_key }`.
+`SideEffectLedgerPurpose::Remediation { forward_pair_id }`.
 
 Public status reports semantic `RunMode`: `forward`, `remediating`, `manual_blocked`,
 `completed`, `compensated`, `manually_resolved`, or `failed_without_acdc_claim`.
