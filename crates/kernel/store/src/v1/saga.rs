@@ -265,6 +265,7 @@ fn forward_ledger_phase_is_quiescent(phase: &SideEffectPhase) -> bool {
     matches!(
         phase,
         SideEffectPhase::NotSubmittedProven { .. }
+            | SideEffectPhase::ReceiptObserved { .. }
             | SideEffectPhase::ConfirmationObserved { .. }
             | SideEffectPhase::Ambiguous { .. }
             | SideEffectPhase::Failed { .. }

@@ -795,7 +795,7 @@ pub struct RunCompletionProjection {
 /// Forward ledger classification at the current stream prefix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ForwardLedgerClassification {
-    /// The ledger has not reached a quiescent classification yet.
+    /// The ledger is not owed, remediated, or unresolvable for compensation decisions yet.
     Pending,
     /// The ledger owes no compensation.
     NothingOwed,
