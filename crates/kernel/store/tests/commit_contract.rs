@@ -34,7 +34,7 @@ use mfm_store::v1::{
     ResourceAdmissionLane, ResourceLaneKey, Retention, RunAdmission, RunCompletionProjection,
     RunEventStore, RunMode, RunState, SagaAdmitToken, SagaEngagementProjection,
     SagaEngagementReason, SagaTerminal, SagaTerminalProof, SideEffectLedgerPhase,
-    SideEffectLedgerRef, SideEffectPhase, SideEffectProgress, SideEffectTerminal,
+    SideEffectPairLedgerRef, SideEffectPhase, SideEffectProgress, SideEffectTerminal,
     StateAttemptStarted, StoreError, StreamSeq, TrustScopeId, TrustScopeStore,
     EXECUTION_CLAIM_HEARTBEAT_INTERVAL_SECS, EXECUTION_CLAIM_LEASE_TTL_SECS,
 };
@@ -178,8 +178,8 @@ fn side_effect_pair_id() -> SideEffectPairId {
 
 fn side_effect_pair_role(
     role: events::SideEffectPairRole,
-) -> (Option<SideEffectPairId>, Option<events::SideEffectPairRole>) {
-    (Some(side_effect_pair_id()), Some(role))
+) -> (SideEffectPairId, events::SideEffectPairRole) {
+    (side_effect_pair_id(), role)
 }
 
 fn event_id(byte: u8) -> EventId {
@@ -494,8 +494,7 @@ fn side_effect_ledger_purpose() -> events::SideEffectLedgerPurpose {
 
 fn remediation_ledger_purpose() -> events::SideEffectLedgerPurpose {
     events::SideEffectLedgerPurpose::Remediation {
-        forward_ledger_key: side_effect_ledger_key(),
-        forward_pair_id: None,
+        forward_pair_id: side_effect_pair_id(),
     }
 }
 
@@ -550,8 +549,8 @@ fn admission_lane_helpers_are_stable_and_domain_separated() {
         attempt_id: attempt_id(241),
         ledger_key: ledger_key.clone(),
         ledger_purpose: events::SideEffectLedgerPurpose::Forward,
-        pair_id: Some(side_effect_pair_id_for_ledger(&ledger_key)),
-        pair_role: Some(events::SideEffectPairRole::Submit),
+        pair_id: side_effect_pair_id_for_ledger(&ledger_key),
+        pair_role: events::SideEffectPairRole::Submit,
         invocation_epoch: 1,
         resource_key,
         requirement_digest: content_digest(241),
@@ -937,7 +936,8 @@ fn resource_lane_release_intent_from_projection(
     ledger_key: &events::SideEffectLedgerKey,
     reason: &str,
 ) -> KernelEventPayload {
-    let holder = SideEffectLedgerRef::new(run_id.clone(), ledger_key.clone());
+    let holder =
+        SideEffectPairLedgerRef::new(run_id.clone(), side_effect_pair_id_for_ledger(ledger_key));
     let (_, lane) = store
         .projection_snapshot()
         .resource_lanes()
@@ -950,10 +950,7 @@ fn resource_lane_release_intent_from_projection(
         ledger_key: ledger_key.clone(),
         ledger_purpose: lane.ledger_purpose.clone(),
         pair_id: lane.pair_id.clone(),
-        pair_role: lane
-            .pair_id
-            .as_ref()
-            .map(|_| events::SideEffectPairRole::Verify),
+        pair_role: events::SideEffectPairRole::Verify,
         invocation_epoch: lane.invocation_epoch,
         claim_id: lane.claim_id.clone(),
         release_reason: events::ResourceLaneReleaseReason::new(reason).expect("release reason"),
@@ -1601,18 +1598,7 @@ fn set_side_effect_ledger(
     with_side_effect_payload_mut!(payload, inner, {
         inner.ledger_key = ledger_key.clone();
         inner.ledger_purpose = purpose.clone();
-        match &purpose {
-            events::SideEffectLedgerPurpose::Forward => {
-                inner.pair_id = Some(side_effect_pair_id_for_ledger(&ledger_key));
-                inner
-                    .pair_role
-                    .get_or_insert(events::SideEffectPairRole::Submit);
-            }
-            events::SideEffectLedgerPurpose::Remediation { .. } => {
-                inner.pair_id = None;
-                inner.pair_role = None;
-            }
-        }
+        inner.pair_id = side_effect_pair_id_for_ledger(&ledger_key);
     });
 }
 
@@ -1793,8 +1779,8 @@ fn projection_snapshot_summary(
 
     rows.extend(snapshot.side_effects().map(|(ledger_ref, side_effect)| {
         format!(
-            "side_effect ledger={} phase={} prepared={} resource_key={} touched_set={}",
-            ledger_ref.ledger_key.as_str(),
+            "side_effect pair={} phase={} prepared={} resource_key={} touched_set={}",
+            ledger_ref.pair_id.as_str(),
             side_effect.phase.as_str(),
             side_effect.prepared_invocation.is_some(),
             side_effect.resource_key.is_some(),
@@ -1807,7 +1793,7 @@ fn projection_snapshot_summary(
             "resource_lane {}:{} holder={} phase_epoch={}",
             lane_key.namespace.as_str(),
             lane_key.key.as_str(),
-            lane.holder.ledger_key.as_str(),
+            lane.holder.pair_id.as_str(),
             lane.invocation_epoch
         )
     }));
@@ -2118,7 +2104,7 @@ fn committed_run_stream_exposes_store_owned_authority() {
     assert_eq!(
         committed
             .projection()
-            .side_effect_for_run(&run_id, &side_effect_ledger_key())
+            .side_effect_for_pair(&run_id, &side_effect_pair_id())
             .expect("side-effect projection")
             .phase,
         SideEffectPhase::InvocationPrepared {
@@ -3125,9 +3111,10 @@ fn async_in_memory_store_exposes_commit_stream_and_status_contract() {
         .expect("cross-run resource lane");
     assert_eq!(lane.holder.run_id, resource_run);
     assert_eq!(
-        lane.holder.ledger_key,
-        side_effect_ledger_key_with_suffix(30)
+        lane.holder.pair_id,
+        side_effect_pair_id_for_ledger(&side_effect_ledger_key_with_suffix(30))
     );
+    assert_eq!(lane.ledger_key, side_effect_ledger_key_with_suffix(30));
 }
 
 #[test]
@@ -3760,7 +3747,7 @@ fn state_attempt_interrupted_allows_side_effect_intent_before_invocation_prepare
     assert!(matches!(attempt.status, AttemptStatus::Interrupted));
     assert!(matches!(
         projection
-            .side_effect(&side_effect_ledger_key())
+            .side_effect_for_pair(&run_id, &side_effect_pair_id())
             .expect("side-effect projection")
             .ledger_state()
             .expect("ledger state")
@@ -3826,7 +3813,7 @@ fn state_attempt_interrupted_allows_side_effect_claim_before_invocation_prepared
     assert!(matches!(attempt.status, AttemptStatus::Interrupted));
     assert!(matches!(
         projection
-            .side_effect(&side_effect_ledger_key())
+            .side_effect_for_pair(&run_id, &side_effect_pair_id())
             .expect("side-effect projection")
             .ledger_state()
             .expect("ledger state")
@@ -4406,15 +4393,23 @@ fn resource_lane_holder_identity_includes_run_for_same_ledger_key_across_runs() 
     let projection = store.projection_snapshot();
     let lane_a = projection.resource_lane(&lane_a).expect("run a lane");
     assert_eq!(lane_a.holder.run_id, run_a);
-    assert_eq!(lane_a.holder.ledger_key, shared_ledger);
+    assert_eq!(
+        lane_a.holder.pair_id,
+        side_effect_pair_id_for_ledger(&shared_ledger)
+    );
+    assert_eq!(lane_a.ledger_key, shared_ledger);
     let lane_b = projection.resource_lane(&lane_b).expect("run b lane");
     assert_eq!(lane_b.holder.run_id, run_b);
-    assert_eq!(lane_b.holder.ledger_key, shared_ledger);
+    assert_eq!(
+        lane_b.holder.pair_id,
+        side_effect_pair_id_for_ledger(&shared_ledger)
+    );
+    assert_eq!(lane_b.ledger_key, shared_ledger);
     assert!(projection
-        .side_effect_for_run(&run_a, &shared_ledger)
+        .side_effect_for_pair(&run_a, &side_effect_pair_id_for_ledger(&shared_ledger))
         .is_some());
     assert!(projection
-        .side_effect_for_run(&run_b, &shared_ledger)
+        .side_effect_for_pair(&run_b, &side_effect_pair_id_for_ledger(&shared_ledger))
         .is_some());
 }
 
@@ -4523,10 +4518,7 @@ fn resource_lane_releases_on_ledger_terminals_and_run_terminal() {
         .projection_snapshot()
         .resource_lane(&lane_key)
         .expect("active lane");
-    assert_eq!(
-        active_lane.pair_id.as_ref(),
-        Some(&side_effect_pair_id_for_ledger(&ledger))
-    );
+    assert_eq!(active_lane.pair_id, side_effect_pair_id_for_ledger(&ledger));
     let mut started = side_effect_started("owner-1", 1, "token-1");
     set_side_effect_ledger(
         &mut started,
@@ -4969,9 +4961,10 @@ fn resource_lane_projection_rebuilds_from_non_terminal_run_stream() {
         .expect("rebuilt non-terminal lane");
     assert_eq!(lane.holder.run_id, run);
     assert_eq!(
-        lane.holder.ledger_key,
-        side_effect_ledger_key_with_suffix(10)
+        lane.holder.pair_id,
+        side_effect_pair_id_for_ledger(&side_effect_ledger_key_with_suffix(10))
     );
+    assert_eq!(lane.ledger_key, side_effect_ledger_key_with_suffix(10));
 }
 
 #[test]
@@ -5080,7 +5073,7 @@ fn resource_touched_set_evidence_is_schema_checked_at_admission() {
         .expect("valid touched-set evidence admits");
     let projection = store
         .projection_snapshot()
-        .side_effect(&side_effect_ledger_key())
+        .side_effect_for_pair(&run, &side_effect_pair_id())
         .expect("side-effect projection");
     assert_eq!(projection.resource_touched_set, Some(touched));
 }
@@ -5152,11 +5145,8 @@ fn side_effect_ledger_purpose_cannot_change_after_intent() {
         unreachable!("helper returns claimed payload");
     };
     payload.ledger_purpose = events::SideEffectLedgerPurpose::Remediation {
-        forward_ledger_key: side_effect_ledger_key(),
-        forward_pair_id: None,
+        forward_pair_id: side_effect_pair_id(),
     };
-    payload.pair_id = None;
-    payload.pair_role = None;
     let error = store
         .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
@@ -5439,10 +5429,7 @@ fn remediation_intent_requires_engaged_confirmed_forward_and_unique_link() {
         unreachable!("helper returns side-effect intent");
     };
     payload.ledger_purpose = events::SideEffectLedgerPurpose::Remediation {
-        forward_ledger_key: side_effect_ledger_key(),
-        forward_pair_id: Some(side_effect_pair_id_for_ledger(
-            &side_effect_ledger_key_with_suffix(99),
-        )),
+        forward_pair_id: side_effect_pair_id_for_ledger(&side_effect_ledger_key_with_suffix(99)),
     };
     let error = store
         .append_prepared_commit(typed_commit_request! {
@@ -5462,8 +5449,7 @@ fn remediation_intent_requires_engaged_confirmed_forward_and_unique_link() {
         unreachable!("helper returns side-effect intent");
     };
     payload.ledger_purpose = events::SideEffectLedgerPurpose::Remediation {
-        forward_ledger_key: side_effect_ledger_key(),
-        forward_pair_id: Some(side_effect_pair_id()),
+        forward_pair_id: side_effect_pair_id(),
     };
     store
         .append_prepared_commit(typed_commit_request! {
@@ -5488,7 +5474,7 @@ fn remediation_intent_requires_engaged_confirmed_forward_and_unique_link() {
             preconditions: CommitPreconditions::default(),
         })
         .expect_err("duplicate remediation rejects");
-    assert_projection_conflict_contains(error, "already exists for forward ledger");
+    assert_projection_conflict_contains(error, "already exists for forward pair");
 
     let unconfirmed_run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(121));
     let mut unconfirmed = StoreContractRunStore::new();
@@ -5856,7 +5842,11 @@ fn manual_resolution_rejects_open_side_effect_lane_without_releasing_it() {
         .projection_snapshot()
         .resource_lane(&lane_key)
         .expect("open lane remains held after rejected manual resolution");
-    assert_eq!(lane.holder.ledger_key, open_ledger);
+    assert_eq!(
+        lane.holder.pair_id,
+        side_effect_pair_id_for_ledger(&open_ledger)
+    );
+    assert_eq!(lane.ledger_key, open_ledger);
 }
 
 #[test]
@@ -6288,7 +6278,7 @@ fn saga_projection_derives_obligations_and_run_mode_from_policy_and_stream() {
     assert!(projection.forward_quiescent);
     let obligation = projection
         .obligations
-        .get(&side_effect_ledger_key())
+        .get(&side_effect_pair_id())
         .expect("forward obligation");
     assert_eq!(obligation.classification, ForwardLedgerClassification::Owed);
     assert!(obligation.remediation.is_none());
@@ -6316,7 +6306,7 @@ fn saga_projection_derives_obligations_and_run_mode_from_policy_and_stream() {
     assert_eq!(projection.run_mode, RunMode::Compensated);
     let obligation = projection
         .obligations
-        .get(&side_effect_ledger_key())
+        .get(&side_effect_pair_id())
         .expect("forward obligation");
     let remediation = obligation.remediation.as_ref().expect("remediation");
     assert_eq!(remediation.ledger_key, remediation_key);
@@ -6332,13 +6322,12 @@ fn side_effect_ledger_state_exposes_valid_prepared_view() {
 
     let projection = store
         .projection_snapshot()
-        .side_effect_for_run(&run_id, &side_effect_ledger_key())
+        .side_effect_for_pair(&run_id, &side_effect_pair_id())
         .expect("side-effect projection");
     let pair_id = side_effect_pair_id_for_ledger(&side_effect_ledger_key());
     let pair_projection = store
         .projection_snapshot()
         .side_effect_for_pair(&run_id, &pair_id)
-        .expect("pair projection lookup")
         .expect("pair projection");
     assert_eq!(pair_projection.ledger_key, projection.ledger_key);
     let state = projection.ledger_state().expect("typed ledger state");
@@ -6373,7 +6362,7 @@ fn side_effect_ledger_state_rejects_claim_phase_without_active_claim() {
     append_side_effect_prepare(&mut store, &run_id);
     let mut projection = store
         .projection_snapshot()
-        .side_effect_for_run(&run_id, &side_effect_ledger_key())
+        .side_effect_for_pair(&run_id, &side_effect_pair_id())
         .expect("side-effect projection")
         .clone();
     projection.claim = None;
@@ -6391,7 +6380,7 @@ fn side_effect_ledger_state_rejects_confirmed_phase_without_confirmation_evidenc
     append_forward_confirmation(&mut store, &run_id);
     let mut projection = store
         .projection_snapshot()
-        .side_effect_for_run(&run_id, &side_effect_ledger_key())
+        .side_effect_for_pair(&run_id, &side_effect_pair_id())
         .expect("side-effect projection")
         .clone();
     projection.confirmation = None;
@@ -6431,7 +6420,7 @@ fn side_effect_ledger_state_classifies_ambiguity_as_terminal_not_frontier() {
 
     let projection = store
         .projection_snapshot()
-        .side_effect_for_run(&run_id, &side_effect_ledger_key())
+        .side_effect_for_pair(&run_id, &side_effect_pair_id())
         .expect("side-effect projection");
     let state = projection.ledger_state().expect("typed ledger state");
     assert!(!state.is_forward_completion_candidate());
@@ -6532,8 +6521,8 @@ fn side_effect_phase_order_and_fencing_are_enforced() {
                     attempt_id: attempt_id(72),
                     ledger_key: side_effect_ledger_key(),
                     ledger_purpose: side_effect_ledger_purpose(),
-                    pair_id: Some(side_effect_pair_id()),
-                    pair_role: Some(events::SideEffectPairRole::Submit),
+                    pair_id: side_effect_pair_id(),
+                    pair_role: events::SideEffectPairRole::Submit,
                     previous_claim_owner: events::RunnerInvocationId::new("owner-2")
                         .expect("previous owner"),
                     new_claim_owner: events::RunnerInvocationId::new("owner-3").expect("new owner"),
@@ -6905,7 +6894,7 @@ fn side_effect_submission_unknown_recovery_uses_one_submission_result_key() {
     };
     let submission_result_key = format!(
         "sidefx:forward:{}:invocation:1:submission_result",
-        side_effect_ledger_key()
+        side_effect_pair_id()
     );
     assert_eq!(
         unknown.events()[0].logical_key().as_str(),
@@ -6942,7 +6931,7 @@ fn side_effect_submission_unknown_recovery_uses_one_submission_result_key() {
     );
     let projection = store
         .projection_snapshot()
-        .side_effect(&side_effect_ledger_key())
+        .side_effect_for_pair(&run_id, &side_effect_pair_id())
         .expect("side-effect projection");
     assert!(matches!(
         projection.phase,
@@ -6982,7 +6971,7 @@ fn side_effect_submission_unknown_recovery_uses_one_submission_result_key() {
     );
     let projection = store
         .projection_snapshot()
-        .side_effect(&side_effect_ledger_key())
+        .side_effect_for_pair(&run_id, &side_effect_pair_id())
         .expect("side-effect projection");
     assert!(matches!(
         projection.phase,
@@ -7495,7 +7484,7 @@ fn assert_projection_codecs_round_trip(snapshot: &ProjectionSnapshot) {
     let saga_engagement = SagaEngagementProjection {
         event_id: event_id(213),
         reason: SagaEngagementReason::ForwardAmbiguous {
-            ledger_key: side_effect_ledger_key_with_suffix(214),
+            pair_id: side_effect_pair_id_for_ledger(&side_effect_ledger_key_with_suffix(214)),
         },
     };
     let json = codec::saga_engagement_projection_json(&synthetic_run_id, &saga_engagement);
@@ -7638,8 +7627,8 @@ fn projections_rebuild_from_authoritative_run_stream() {
         summary,
         "committed run_state=Started commits=8 events=14 next_seq=9\n\
 fact key=fact-key-1 schema=schema:mfm.test.fact_response:1:sha256-jcs-v1:6060606060606060606060606060606060606060606060606060606060606060 artifact=artifact:sha256-jcs-v1:3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f\n\
-side_effect ledger=ledger-key-67 phase=invocation_prepared prepared=false resource_key=true touched_set=false\n\
-resource_lane mfm.test.account_nonce:account-1 holder=ledger-key-67 phase_epoch=1\n\
+side_effect pair=side_effect_pair:sha256-jcs-v1:6ed76ba36b356a4752764173078d945137b8d63ecc1976d94e011659cb064cb6 phase=invocation_prepared prepared=false resource_key=true touched_set=false\n\
+resource_lane mfm.test.account_nonce:account-1 holder=side_effect_pair:sha256-jcs-v1:6ed76ba36b356a4752764173078d945137b8d63ecc1976d94e011659cb064cb6 phase_epoch=1\n\
 public_output schema=schema:mfm.test.public_output:1:sha256-jcs-v1:0303030303030303030303030303030303030303030303030303030303030303 rendered_artifact=true\n\
 retention run=run:sha256-jcs-v1:7878787878787878787878787878787878787878787878787878787878787878 refs=3 manifests=1 latest_seq=1"
     );

@@ -327,7 +327,7 @@ pub struct WaitFifoAdmissionBlock {
     /// Normalized resource lane key for status and diagnostics.
     pub resource_lane_key: ResourceLaneKey,
     /// Current authoritative holder of the lane, if one exists.
-    pub holder: Option<SideEffectLedgerRef>,
+    pub holder: Option<SideEffectPairLedgerRef>,
     /// Operational waiter metadata for the blocked claim, if the store exposed it.
     pub waiter: Option<AdmissionWaiter>,
 }
@@ -404,8 +404,8 @@ pub fn resource_wait_fifo_admission_token(
         "lane_id": bytes_hex(lane.id().as_bytes()),
         "ledger_key": intent.ledger_key.as_str(),
         "node_id": intent.node_id.as_str(),
-        "pair_id": intent.pair_id.as_ref().map(mfm_ids::SideEffectPairId::as_str),
-        "pair_role": intent.pair_role.map(events::SideEffectPairRole::as_str),
+        "pair_id": intent.pair_id.as_str(),
+        "pair_role": intent.pair_role.as_str(),
         "requirement_digest": intent.requirement_digest.as_str(),
         "resolved_by_capability_impl": intent.resolved_by_capability_impl.as_str(),
         "run_id": run_id.as_str(),

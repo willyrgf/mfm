@@ -9,24 +9,22 @@ pub(super) fn acquire_resource_lane(
     require_side_effect_pair_event(
         &payload.ledger_key,
         &payload.ledger_purpose,
-        payload.pair_id.as_ref(),
+        &payload.pair_id,
         payload.pair_role,
         events::SideEffectPairRole::Submit,
     )?;
-    let holder = SideEffectLedgerRef::new(run_id.clone(), payload.ledger_key.clone());
+    let holder = SideEffectPairLedgerRef::new(run_id.clone(), payload.pair_id.clone());
     let lane_key = ResourceLaneKey::from_evidence(&payload.resource_key);
-    if let Some(pair_id) = &payload.pair_id {
-        if let Some(existing_key) = resource_lane_key_for_pair(projections, run_id, pair_id) {
-            let existing = projections
-                .resource_lanes
-                .get(&existing_key)
-                .expect("resource lane key was found from pair projection");
-            if existing.holder != holder {
-                return Err(StoreError::ProjectionConflict {
-                    key: format!("resource_lane:{}", payload.ledger_key),
-                    message: "side-effect pair already has active resource lane".to_owned(),
-                });
-            }
+    if let Some(existing_key) = resource_lane_key_for_pair(projections, run_id, &payload.pair_id) {
+        let existing = projections
+            .resource_lanes
+            .get(&existing_key)
+            .expect("resource lane key was found from pair projection");
+        if existing.holder != holder {
+            return Err(StoreError::ProjectionConflict {
+                key: format!("resource_lane:{}", payload.ledger_key),
+                message: "side-effect pair already has active resource lane".to_owned(),
+            });
         }
     }
     if let Some(existing_key) = resource_lane_key_for_holder(projections, &holder) {
@@ -43,8 +41,8 @@ pub(super) fn acquire_resource_lane(
             return Err(StoreError::ProjectionConflict {
                 key: format!("resource_lane:{}:{}", lane_key.namespace, lane_key.key),
                 message: format!(
-                    "resource lane already held by run {} ledger {}",
-                    existing.holder.run_id, existing.holder.ledger_key
+                    "resource lane already held by run {} pair {}",
+                    existing.holder.run_id, existing.holder.pair_id
                 ),
             });
         } else if existing.pair_id != payload.pair_id {
@@ -60,6 +58,7 @@ pub(super) fn acquire_resource_lane(
         ResourceLaneProjection {
             event_id: event_id.clone(),
             holder,
+            ledger_key: payload.ledger_key.clone(),
             ledger_purpose: payload.ledger_purpose.clone(),
             pair_id: payload.pair_id.clone(),
             node_id: payload.node_id.clone(),
@@ -75,7 +74,7 @@ pub(super) fn acquire_resource_lane(
 
 fn resource_lane_key_for_holder(
     projections: &ProjectionSnapshot,
-    holder: &SideEffectLedgerRef,
+    holder: &SideEffectPairLedgerRef,
 ) -> Option<ResourceLaneKey> {
     projections
         .resource_lanes
@@ -92,7 +91,7 @@ fn resource_lane_key_for_pair(
         .resource_lanes
         .iter()
         .find_map(|(key, projection)| {
-            (projection.holder.run_id == *run_id && projection.pair_id.as_ref() == Some(pair_id))
+            (projection.holder.run_id == *run_id && projection.pair_id == *pair_id)
                 .then(|| key.clone())
         })
 }
@@ -105,43 +104,35 @@ pub(super) fn release_resource_lane(
     require_side_effect_pair_event(
         &payload.ledger_key,
         &payload.ledger_purpose,
-        payload.pair_id.as_ref(),
+        &payload.pair_id,
         payload.pair_role,
         events::SideEffectPairRole::Verify,
     )?;
-    let holder = SideEffectLedgerRef::new(run_id.clone(), payload.ledger_key.clone());
+    let holder = SideEffectPairLedgerRef::new(run_id.clone(), payload.pair_id.clone());
     let Some(key) = resource_lane_key_for_holder(projections, &holder) else {
         return Err(StoreError::ProjectionConflict {
             key: format!("resource_lane:{}", payload.ledger_key),
             message: "resource lane release requires an active claim".to_owned(),
         });
     };
-    if let Some(pair_id) = &payload.pair_id {
-        let Some(pair_key) = resource_lane_key_for_pair(projections, run_id, pair_id) else {
-            return Err(StoreError::ProjectionConflict {
-                key: format!("resource_lane:{}", payload.ledger_key),
-                message: "resource lane release pair references no active claim".to_owned(),
-            });
-        };
-        if pair_key != key {
-            return Err(StoreError::ProjectionConflict {
-                key: format!("resource_lane:{}", payload.ledger_key),
-                message: "resource lane release pair does not match active holder".to_owned(),
-            });
-        }
+    let Some(pair_key) = resource_lane_key_for_pair(projections, run_id, &payload.pair_id) else {
+        return Err(StoreError::ProjectionConflict {
+            key: format!("resource_lane:{}", payload.ledger_key),
+            message: "resource lane release pair references no active claim".to_owned(),
+        });
+    };
+    if pair_key != key {
+        return Err(StoreError::ProjectionConflict {
+            key: format!("resource_lane:{}", payload.ledger_key),
+            message: "resource lane release pair does not match active holder".to_owned(),
+        });
     }
     let active = projections
         .resource_lanes
         .get(&key)
         .expect("resource lane key was found from projection");
-    let holder_matches = if payload.pair_id.is_some() {
-        active.pair_id == payload.pair_id
-    } else {
-        active.node_id == payload.node_id && active.attempt_id == payload.attempt_id
-    };
-    if !holder_matches
+    if active.pair_id != payload.pair_id
         || active.ledger_purpose != payload.ledger_purpose
-        || active.pair_id != payload.pair_id
         || active.invocation_epoch != payload.invocation_epoch
         || active.claim_id != payload.claim_id
         || active.claim_fencing_token != payload.claim_fencing_token
@@ -157,7 +148,7 @@ pub(super) fn release_resource_lane(
 
 pub(super) fn require_no_resource_lane_for_holder(
     projections: &ProjectionSnapshot,
-    holder: &SideEffectLedgerRef,
+    holder: &SideEffectPairLedgerRef,
     context: &str,
 ) -> Result<()> {
     if let Some(key) = resource_lane_key_for_holder(projections, holder) {

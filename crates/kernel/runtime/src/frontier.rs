@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use mfm_events::v1 as events;
-use mfm_ids::{AttemptId, NodeId, RunId};
+use mfm_ids::{AttemptId, NodeId, RunId, SideEffectPairId};
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 
@@ -169,11 +169,11 @@ fn next_remediation_node<'a>(
     for obligation in owed_obligations_reverse_confirmation_order(view, saga)? {
         let forward = view
             .projections
-            .side_effect(&obligation.forward_ledger_key)
+            .side_effect_for_pair(&view.run_admitted.run_id, &obligation.forward_pair_id)
             .ok_or_else(|| {
                 RuntimeError::InvalidRunStream(format!(
-                    "owed obligation {} has no forward ledger projection",
-                    obligation.forward_ledger_key
+                    "owed obligation {} has no forward pair projection",
+                    obligation.forward_pair_id
                 ))
             })?;
         let remediation_node = runtime_spec
@@ -223,12 +223,12 @@ fn next_remediation_node<'a>(
                 }
                 let state = view
                     .projections
-                    .side_effect_state_for_run(&view.run_admitted.run_id, &remediation.ledger_key)
+                    .side_effect_state_for_pair(&view.run_admitted.run_id, &remediation.pair_id)
                     .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?
                     .ok_or_else(|| {
                         RuntimeError::InvalidRunStream(format!(
-                            "remediation ledger {} has no side-effect projection",
-                            remediation.ledger_key
+                            "remediation pair {} has no side-effect projection",
+                            remediation.pair_id
                         ))
                     })?;
                 if remediation_verify_completion_candidate(&state) {
@@ -367,8 +367,13 @@ fn continuing_side_effect_node_if<'a>(
         if !matches!(attempt.status, store::AttemptStatus::Started { .. }) {
             continue;
         }
-        let Some(projection) =
-            SideEffectLifecycle::projection_for_attempt(&view.projections, node, attempt_id)?
+        let Some(projection) = SideEffectLifecycle::projection_for_attempt(
+            runtime_spec,
+            &view.run_admitted.run_id,
+            &view.projections,
+            node,
+            attempt_id,
+        )?
         else {
             continue;
         };
@@ -413,7 +418,7 @@ fn owed_obligations_reverse_confirmation_order<'a>(
         if obligation.classification != store::ForwardLedgerClassification::Owed {
             continue;
         }
-        let position = forward_confirmation_position(view, &obligation.forward_ledger_key)?;
+        let position = forward_confirmation_position(view, &obligation.forward_pair_id)?;
         positioned.push((position, obligation));
     }
     positioned.sort_by_key(|(position, _)| *position);
@@ -426,7 +431,7 @@ fn owed_obligations_reverse_confirmation_order<'a>(
 
 fn forward_confirmation_position(
     view: &RuntimeRunView,
-    ledger_key: &events::SideEffectLedgerKey,
+    pair_id: &SideEffectPairId,
 ) -> Result<(u64, u32)> {
     let mut found = None;
     for event in &view.stream {
@@ -434,19 +439,19 @@ fn forward_confirmation_position(
         else {
             continue;
         };
-        if &payload.ledger_key != ledger_key {
+        if &payload.pair_id != pair_id {
             continue;
         }
         let position = (event.seq().as_u64(), event.ordinal().as_u32());
         if found.replace(position).is_some() {
             return Err(RuntimeError::InvalidRunStream(format!(
-                "forward ledger {ledger_key} has multiple confirmation events"
+                "forward pair {pair_id} has multiple confirmation events"
             )));
         }
     }
     found.ok_or_else(|| {
         RuntimeError::InvalidRunStream(format!(
-            "owed forward ledger {ledger_key} has no confirmation event"
+            "owed forward pair {pair_id} has no confirmation event"
         ))
     })
 }
@@ -547,7 +552,13 @@ fn side_effect_attempt_plan(
             node,
             cell_terminal,
         )?;
-        SideEffectLifecycle::validate_terminal_evidence(&view.projections, node, &attempt_id)?;
+        SideEffectLifecycle::validate_terminal_evidence(
+            runtime_spec,
+            &view.run_admitted.run_id,
+            &view.projections,
+            node,
+            &attempt_id,
+        )?;
         return Ok(None);
     }
 
@@ -568,7 +579,13 @@ fn side_effect_attempt_plan(
                         attempt_id, node.node_id
                     )));
                 }
-                SideEffectLifecycle::open_attempt_disposition(&view.projections, node, attempt_id)?;
+                SideEffectLifecycle::open_attempt_disposition(
+                    runtime_spec,
+                    &view.run_admitted.run_id,
+                    &view.projections,
+                    node,
+                    attempt_id,
+                )?;
                 if started.replace((attempt_id.clone(), *attempt_no)).is_some() {
                     return Err(RuntimeError::InvalidRunStream(format!(
                         "node {} has multiple non-terminal side-effect attempts",

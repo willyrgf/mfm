@@ -1489,24 +1489,10 @@ pub mod v1 {
                 CertifiedSideEffectContract::for_node(&self.certified_spec.spec, &payload.node_id)
                     .map_err(certified_contract_mismatch)?;
             let forward = match &payload.ledger_purpose {
-                events::SideEffectLedgerPurpose::Remediation {
-                    forward_ledger_key,
-                    forward_pair_id,
-                } => {
-                    let forward = self.projection.side_effect(forward_ledger_key);
-                    if let Some(forward_pair_id) = forward_pair_id {
-                        let pair_forward = self
-                            .projection
-                            .side_effect_for_pair(&self.run_id.run_id, forward_pair_id)
-                            .map_err(ReplayError::from)?;
-                        if pair_forward.map(|projection| &projection.ledger_key)
-                            != forward.map(|projection| &projection.ledger_key)
-                        {
-                            return Err(certified_evidence_mismatch(
-                                "remediation forward pair does not match forward ledger key",
-                            ));
-                        }
-                    }
+                events::SideEffectLedgerPurpose::Remediation { forward_pair_id } => {
+                    let forward = self
+                        .projection
+                        .side_effect_for_pair(&self.run_id.run_id, forward_pair_id);
                     forward
                 }
                 events::SideEffectLedgerPurpose::Forward => None,
@@ -2359,23 +2345,9 @@ pub mod v1 {
             )
             .map_err(certified_contract_mismatch)?;
             let forward = match &side_effect.ledger_purpose {
-                events::SideEffectLedgerPurpose::Remediation {
-                    forward_ledger_key,
-                    forward_pair_id,
-                } => {
-                    let forward = projection.side_effect(forward_ledger_key);
-                    if let Some(forward_pair_id) = forward_pair_id {
-                        let pair_forward = projection
-                            .side_effect_for_pair(&side_effect.run_id, forward_pair_id)
-                            .map_err(ReplayError::from)?;
-                        if pair_forward.map(|projection| &projection.ledger_key)
-                            != forward.map(|projection| &projection.ledger_key)
-                        {
-                            return Err(certified_evidence_mismatch(
-                                "remediation forward pair does not match forward ledger key",
-                            ));
-                        }
-                    }
+                events::SideEffectLedgerPurpose::Remediation { forward_pair_id } => {
+                    let forward =
+                        projection.side_effect_for_pair(&side_effect.run_id, forward_pair_id);
                     forward
                 }
                 events::SideEffectLedgerPurpose::Forward => None,

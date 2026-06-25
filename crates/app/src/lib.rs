@@ -3295,9 +3295,7 @@ fn obligation_status(
     projection: Option<&store::ProjectionSnapshot>,
 ) -> SagaObligationStatus {
     let forward_resource = projection
-        .and_then(|projection| {
-            projection.side_effect_for_run(run_id, &obligation.forward_ledger_key)
-        })
+        .and_then(|projection| projection.side_effect_for_pair(run_id, &obligation.forward_pair_id))
         .and_then(|side_effect| resource_ledger_status(certified_spec?, projection?, side_effect));
     SagaObligationStatus {
         forward_ledger_key: obligation.forward_ledger_key.as_str().to_owned(),
@@ -3307,7 +3305,7 @@ fn obligation_status(
         remediation: obligation.remediation.as_ref().map(|remediation| {
             let remediation_resource = projection
                 .and_then(|projection| {
-                    projection.side_effect_for_run(run_id, &remediation.ledger_key)
+                    projection.side_effect_for_pair(run_id, &remediation.pair_id)
                 })
                 .and_then(|side_effect| {
                     resource_ledger_status(certified_spec?, projection?, side_effect)
@@ -3348,10 +3346,10 @@ fn resource_ledger_status(
                         .map(|lane| (lane_key, lane))
                 })
                 .map(|(lane_key, lane)| {
-                    let holder = resource_lane_holder_status(&lane_key, lane);
-                    let side_effect_ref = store::SideEffectLedgerRef::new(
+                    let holder = resource_lane_holder_status(projection, &lane_key, lane);
+                    let side_effect_ref = store::SideEffectPairLedgerRef::new(
                         side_effect.run_id.clone(),
-                        side_effect.ledger_key.clone(),
+                        side_effect.pair_id.clone(),
                     );
                     if lane.holder == side_effect_ref {
                         (Some(holder), None)
@@ -3363,7 +3361,9 @@ fn resource_ledger_status(
         } else {
             (None, None)
         };
-    let (ledger_purpose, forward_ledger_key) = ledger_purpose_status(&side_effect.ledger_purpose);
+    let ledger_purpose = ledger_purpose_status(&side_effect.ledger_purpose);
+    let forward_ledger_key =
+        forward_ledger_key_status(projection, &side_effect.run_id, &side_effect.ledger_purpose);
 
     Some(ResourceLedgerStatus {
         ledger_key: side_effect.ledger_key.as_str().to_owned(),
@@ -3418,7 +3418,7 @@ fn resource_lanes_for_run(
     projection
         .resource_lanes()
         .filter(|(lane_key, _lane)| referenced_lane_keys.contains(*lane_key))
-        .map(|(lane_key, lane)| resource_lane_holder_status(lane_key, lane))
+        .map(|(lane_key, lane)| resource_lane_holder_status(projection, lane_key, lane))
         .collect()
 }
 
@@ -3482,17 +3482,19 @@ fn resource_touched_set_status(
 }
 
 fn resource_lane_holder_status(
+    projection: &store::ProjectionSnapshot,
     lane_key: &store::ResourceLaneKey,
     lane: &store::ResourceLaneProjection,
 ) -> ResourceLaneHolderStatus {
-    let (holding_ledger_purpose, holding_forward_ledger_key) =
-        ledger_purpose_status(&lane.ledger_purpose);
+    let holding_ledger_purpose = ledger_purpose_status(&lane.ledger_purpose);
+    let holding_forward_ledger_key =
+        forward_ledger_key_status(projection, &lane.holder.run_id, &lane.ledger_purpose);
     ResourceLaneHolderStatus {
         namespace: lane_key.namespace.as_str().to_owned(),
         key_schema_id: lane_key.key_schema_id.as_str().to_owned(),
         key_digest: resource_lane_key_digest(lane_key),
         holding_run_id: lane.holder.run_id.as_str().to_owned(),
-        holding_ledger_key: lane.holder.ledger_key.as_str().to_owned(),
+        holding_ledger_key: lane.ledger_key.as_str().to_owned(),
         holding_ledger_purpose,
         holding_forward_ledger_key,
         holding_node_id: lane.node_id.as_str().to_owned(),
@@ -3535,15 +3537,23 @@ fn resource_key_digest_material(material: ResourceKeyDigestMaterial<'_>) -> Stri
     .to_string()
 }
 
-fn ledger_purpose_status(purpose: &events::SideEffectLedgerPurpose) -> (String, Option<String>) {
+fn ledger_purpose_status(purpose: &events::SideEffectLedgerPurpose) -> String {
     match purpose {
-        events::SideEffectLedgerPurpose::Forward => ("forward".to_owned(), None),
-        events::SideEffectLedgerPurpose::Remediation {
-            forward_ledger_key, ..
-        } => (
-            "remediation".to_owned(),
-            Some(forward_ledger_key.as_str().to_owned()),
-        ),
+        events::SideEffectLedgerPurpose::Forward => "forward".to_owned(),
+        events::SideEffectLedgerPurpose::Remediation { .. } => "remediation".to_owned(),
+    }
+}
+
+fn forward_ledger_key_status(
+    projection: &store::ProjectionSnapshot,
+    run_id: &RunId,
+    purpose: &events::SideEffectLedgerPurpose,
+) -> Option<String> {
+    match purpose {
+        events::SideEffectLedgerPurpose::Forward => None,
+        events::SideEffectLedgerPurpose::Remediation { forward_pair_id } => projection
+            .side_effect_for_pair(run_id, forward_pair_id)
+            .map(|side_effect| side_effect.ledger_key.as_str().to_owned()),
     }
 }
 

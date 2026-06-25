@@ -57,20 +57,31 @@ fn synthetic_side_effect_pair_id(byte: u8) -> SideEffectPairId {
     )
 }
 
+fn fixture_side_effect_pair_id(fixture: &Fixture, node: &spec::NodeSpec) -> SideEffectPairId {
+    match &node.framework {
+        Some(spec::FrameworkNodeSpec::SideEffectVerify(verify)) => verify.pair_id.clone(),
+        _ => fixture
+            .runtime_spec
+            .side_effect_pair_for_submit_node(&node.node_id)
+            .cloned()
+            .expect("certified side-effect pair"),
+    }
+}
+
 fn side_effect_pair_fields_for_purpose(
     runtime_spec: &CertifiedRuntimeSpec,
     node_id: &NodeId,
     ledger_purpose: &events::SideEffectLedgerPurpose,
     role: events::SideEffectPairRole,
-) -> (Option<SideEffectPairId>, Option<events::SideEffectPairRole>) {
+) -> (SideEffectPairId, events::SideEffectPairRole) {
     match ledger_purpose {
         events::SideEffectLedgerPurpose::Forward
         | events::SideEffectLedgerPurpose::Remediation { .. } => {
             let pair_id = runtime_spec
                 .side_effect_pair_for_submit_node(node_id)
-                .cloned();
-            let pair_role = pair_id.as_ref().map(|_| role);
-            (pair_id, pair_role)
+                .cloned()
+                .expect("certified side-effect pair");
+            (pair_id, role)
         }
     }
 }
@@ -79,7 +90,7 @@ fn side_effect_pair_fields_for_ctx(
     ctx: &ErasedRunCtx<'_>,
     ledger_purpose: &events::SideEffectLedgerPurpose,
     role: events::SideEffectPairRole,
-) -> (Option<SideEffectPairId>, Option<events::SideEffectPairRole>) {
+) -> (SideEffectPairId, events::SideEffectPairRole) {
     side_effect_pair_fields_for_purpose(
         ctx.runtime_spec(),
         &ctx.node().node_id,
@@ -1048,7 +1059,7 @@ fn runner_kit_builders_create_context_bound_artifacts_payloads_and_output() {
     let side_effect = RunnerSideEffectBinding {
         ledger_key: ledger_key.clone(),
         ledger_purpose: events::SideEffectLedgerPurpose::Forward,
-        pair_id: Some(synthetic_side_effect_pair_id(0x31)),
+        pair_id: synthetic_side_effect_pair_id(0x31),
         invocation_epoch: 1,
     };
     let idempotency_key =
@@ -1362,7 +1373,7 @@ fn side_effect_evidence_builder_prepares_and_stages_claimed_invocation() {
                 side_effect: RunnerSideEffectBinding {
                     ledger_key: ledger_key.clone(),
                     ledger_purpose: events::SideEffectLedgerPurpose::Forward,
-                    pair_id: Some(synthetic_side_effect_pair_id(0x32)),
+                    pair_id: synthetic_side_effect_pair_id(0x32),
                     invocation_epoch: 3,
                 },
                 claim: RuntimeSideEffectClaimAuthority {
@@ -1444,7 +1455,7 @@ fn side_effect_evidence_builder_builds_progress_evidence_with_replay_and_resourc
         let side_effect = RunnerSideEffectBinding {
             ledger_key: ledger_key.clone(),
             ledger_purpose: events::SideEffectLedgerPurpose::Forward,
-            pair_id: Some(synthetic_side_effect_pair_id(0x33)),
+            pair_id: synthetic_side_effect_pair_id(0x33),
             invocation_epoch: 4,
         };
 
@@ -2272,6 +2283,7 @@ async fn side_effect_driver_starts_and_submits_from_prepared_projection() {
         "wallet-driver-unsupported",
         "sidefx-driver-unsupported",
     );
+    let pair_id = fixture_side_effect_pair_id(&fixture, node);
     let callbacks = TestSideEffectDriverCallbacks::new(&fixture);
 
     let output =
@@ -2317,7 +2329,7 @@ async fn side_effect_driver_starts_and_submits_from_prepared_projection() {
             preconditions: store::CommitPreconditions {
                 required_run_state: store::RequiredRunState::NotCompleted,
                 required_side_effect_states: vec![store::SideEffectStatePrecondition {
-                    ledger_key: ledger_key.clone(),
+                    pair_id: pair_id.clone(),
                     required: store::RequiredSideEffectState::InvocationPrepared,
                 }],
                 ..store::CommitPreconditions::default()
@@ -2327,7 +2339,7 @@ async fn side_effect_driver_starts_and_submits_from_prepared_projection() {
 
     let projection_snapshot = store.projection_snapshot();
     let projection = projection_snapshot
-        .side_effect_state_for_run(&fixture.run_id, &ledger_key)
+        .side_effect_state_for_pair(&fixture.run_id, &pair_id)
         .expect("side-effect state")
         .expect("side-effect projection");
     assert!(matches!(
@@ -5473,8 +5485,13 @@ async fn side_effect_attempt_view_from_verified_context_exposes_ledger_state() {
         .await
         .expect("verified context");
 
-    let view = SideEffectAttemptView::from_verified_context(&context, node, &attempt_id)
-        .expect("side-effect view");
+    let view = SideEffectAttemptView::from_verified_context(
+        &fixture.runtime_spec,
+        &context,
+        node,
+        &attempt_id,
+    )
+    .expect("side-effect view");
     assert!(!view.is_empty());
     assert_eq!(view.ledger_key(), Some(&ledger_key));
     assert_eq!(
@@ -6102,10 +6119,15 @@ async fn side_effect_scheduler_commits_durable_ledger_phases_before_output() {
             SchedulerStatus::Advanced
         );
         let projection_snapshot = store.projection_snapshot();
-        let projection =
-            side_effect_projection_for_attempt(&projection_snapshot, node, &attempt_id)
-                .expect("projection lookup")
-                .expect("side-effect projection");
+        let projection = side_effect_projection_for_attempt(
+            &fixture.runtime_spec,
+            &fixture.run_id,
+            &projection_snapshot,
+            node,
+            &attempt_id,
+        )
+        .expect("projection lookup")
+        .expect("side-effect projection");
         if matches!(
             projection.phase,
             store::SideEffectPhase::ReceiptObserved { .. }
@@ -6144,9 +6166,15 @@ async fn side_effect_scheduler_commits_durable_ledger_phases_before_output() {
         .cell_terminal(&verify_node.output_cell)
         .is_some());
     let projection_snapshot = store.projection_snapshot();
-    let projection = side_effect_projection_for_attempt(&projection_snapshot, node, &attempt_id)
-        .expect("projection lookup")
-        .expect("side-effect projection");
+    let projection = side_effect_projection_for_attempt(
+        &fixture.runtime_spec,
+        &fixture.run_id,
+        &projection_snapshot,
+        node,
+        &attempt_id,
+    )
+    .expect("projection lookup")
+    .expect("side-effect projection");
     assert!(matches!(
         projection.phase,
         store::SideEffectPhase::ReceiptObserved { .. }
@@ -6320,10 +6348,16 @@ async fn runtime_fails_pre_boundary_forward_attempt_before_saga_terminal() {
     );
     let projection_snapshot = store.projection_snapshot();
     assert!(matches!(
-        side_effect_projection_for_attempt(&projection_snapshot, &forward_node, &forward_attempt)
-            .expect("side-effect lookup")
-            .expect("side-effect projection")
-            .phase,
+        side_effect_projection_for_attempt(
+            &fixture.runtime_spec,
+            &fixture.run_id,
+            &projection_snapshot,
+            &forward_node,
+            &forward_attempt
+        )
+        .expect("side-effect lookup")
+        .expect("side-effect projection")
+        .phase,
         store::SideEffectPhase::InvocationPrepared { .. }
     ));
 
@@ -6350,10 +6384,16 @@ async fn runtime_fails_pre_boundary_forward_attempt_before_saga_terminal() {
     );
     let projection_snapshot = store.projection_snapshot();
     assert!(matches!(
-        side_effect_projection_for_attempt(&projection_snapshot, &forward_node, &forward_attempt)
-            .expect("side-effect lookup")
-            .expect("side-effect projection")
-            .phase,
+        side_effect_projection_for_attempt(
+            &fixture.runtime_spec,
+            &fixture.run_id,
+            &projection_snapshot,
+            &forward_node,
+            &forward_attempt
+        )
+        .expect("side-effect lookup")
+        .expect("side-effect projection")
+        .phase,
         store::SideEffectPhase::Failed {
             failure_phase: events::side_effect::FailurePhase::BeforeInvocationStarted,
             ..
@@ -6435,10 +6475,16 @@ async fn runtime_fails_not_submitted_forward_attempt_before_saga_terminal() {
     }
     let projection_snapshot = store.projection_snapshot();
     assert!(matches!(
-        side_effect_projection_for_attempt(&projection_snapshot, &forward_node, &forward_attempt)
-            .expect("side-effect lookup")
-            .expect("side-effect projection")
-            .phase,
+        side_effect_projection_for_attempt(
+            &fixture.runtime_spec,
+            &fixture.run_id,
+            &projection_snapshot,
+            &forward_node,
+            &forward_attempt
+        )
+        .expect("side-effect lookup")
+        .expect("side-effect projection")
+        .phase,
         store::SideEffectPhase::NotSubmittedProven { .. }
     ));
 
@@ -6458,10 +6504,16 @@ async fn runtime_fails_not_submitted_forward_attempt_before_saga_terminal() {
     );
     let projection_snapshot = store.projection_snapshot();
     assert!(matches!(
-        side_effect_projection_for_attempt(&projection_snapshot, &forward_node, &forward_attempt)
-            .expect("side-effect lookup")
-            .expect("side-effect projection")
-            .phase,
+        side_effect_projection_for_attempt(
+            &fixture.runtime_spec,
+            &fixture.run_id,
+            &projection_snapshot,
+            &forward_node,
+            &forward_attempt
+        )
+        .expect("side-effect lookup")
+        .expect("side-effect projection")
+        .phase,
         store::SideEffectPhase::Failed {
             failure_phase: events::side_effect::FailurePhase::AfterNotSubmittedProven,
             ..
@@ -6561,6 +6613,8 @@ async fn runtime_remediates_confirmed_forward_ledgers_in_reverse_confirmation_or
         forward_ledger_for_node(&store.projection_snapshot(), &forward_a.node_id);
     let forward_b_ledger =
         forward_ledger_for_node(&store.projection_snapshot(), &forward_b.node_id);
+    let forward_a_pair = forward_pair_for_ledger(&store.projection_snapshot(), &forward_a_ledger);
+    let forward_b_pair = forward_pair_for_ledger(&store.projection_snapshot(), &forward_b_ledger);
 
     let failure_attempt = append_or_get_started_attempt(&mut store, &fixture, &failure_node, 1);
     append_attempt_failure(&mut store, &fixture, &failure_node, &failure_attempt, false);
@@ -6598,16 +6652,17 @@ async fn runtime_remediates_confirmed_forward_ledgers_in_reverse_confirmation_or
     let remediation_order = remediation_intent_forward_links(&store, &fixture.run_id);
     assert_eq!(
         remediation_order,
-        vec![forward_b_ledger.clone(), forward_a_ledger.clone()]
+        vec![forward_b_pair.clone(), forward_a_pair.clone()]
     );
     let saga = store
         .projection_snapshot()
         .derive_saga_projection(&fixture.run_id, &fixture.runtime_spec.spec().saga);
     assert_eq!(saga.run_mode, store::RunMode::Compensated);
     for forward_ledger in [forward_a_ledger, forward_b_ledger] {
+        let forward_pair = forward_pair_for_ledger(&store.projection_snapshot(), &forward_ledger);
         let obligation = saga
             .obligations
-            .get(&forward_ledger)
+            .get(&forward_pair)
             .expect("forward obligation");
         assert_eq!(
             obligation.classification,
@@ -6727,6 +6782,8 @@ async fn runtime_compensated_saga_resume_boundaries_do_not_duplicate_mutations()
         forward_ledger_for_node(&store.projection_snapshot(), &forward_a.node_id);
     let forward_b_ledger =
         forward_ledger_for_node(&store.projection_snapshot(), &forward_b.node_id);
+    let forward_a_pair = forward_pair_for_ledger(&store.projection_snapshot(), &forward_a_ledger);
+    let forward_b_pair = forward_pair_for_ledger(&store.projection_snapshot(), &forward_b_ledger);
 
     let failure_attempt = append_or_get_started_attempt(&mut store, &fixture, &failure_node, 1);
     append_attempt_failure(&mut store, &fixture, &failure_node, &failure_attempt, false);
@@ -6742,7 +6799,7 @@ async fn runtime_compensated_saga_resume_boundaries_do_not_duplicate_mutations()
         &scheduler,
         &mut store,
         &fixture,
-        &forward_b_ledger,
+        &forward_b_pair,
         RemediationPhaseCheckpoint::SubmissionObserved,
         "first remedial submission",
     )
@@ -6754,7 +6811,7 @@ async fn runtime_compensated_saga_resume_boundaries_do_not_duplicate_mutations()
         &scheduler,
         &mut store,
         &fixture,
-        &forward_b_ledger,
+        &forward_b_pair,
         RemediationPhaseCheckpoint::ConfirmationObserved,
         "first remedial confirmation",
     )
@@ -6778,7 +6835,7 @@ async fn runtime_compensated_saga_resume_boundaries_do_not_duplicate_mutations()
 
     drive_until_compensated_before_terminal(&scheduler, &mut store, &fixture).await;
     assert!(matches!(
-        remediation_projection_for_forward_ledger(store.projection_snapshot(), &forward_a_ledger)
+        remediation_projection_for_forward_pair(store.projection_snapshot(), &forward_a_pair)
             .expect("second remediation projection")
             .phase,
         store::SideEffectPhase::ConfirmationObserved { .. }
@@ -6853,7 +6910,7 @@ async fn runtime_compensated_saga_resume_boundaries_do_not_duplicate_mutations()
 
     assert_eq!(
         remediation_intent_forward_links(&store, &fixture.run_id),
-        vec![forward_b_ledger.clone(), forward_a_ledger.clone()]
+        vec![forward_b_pair.clone(), forward_a_pair.clone()]
     );
     for forward_ledger in [&forward_a_ledger, &forward_b_ledger] {
         assert_eq!(
@@ -6861,10 +6918,10 @@ async fn runtime_compensated_saga_resume_boundaries_do_not_duplicate_mutations()
             1
         );
         assert_eq!(
-            remediation_submission_count_for_forward_ledger(
+            remediation_submission_count_for_forward_pair(
                 &store,
                 &fixture.run_id,
-                forward_ledger
+                &forward_pair_for_ledger(&store.projection_snapshot(), forward_ledger)
             ),
             1
         );
@@ -7014,10 +7071,15 @@ async fn runtime_materializes_confirmed_forward_output_before_failed_without_cla
         .cell_terminal(&forward_output)
         .is_none());
     let projection_snapshot = store.projection_snapshot();
-    let projection =
-        side_effect_projection_for_attempt(&projection_snapshot, &forward_node, &forward_attempt)
-            .expect("side-effect projection lookup")
-            .expect("side-effect projection");
+    let projection = side_effect_projection_for_attempt(
+        &fixture.runtime_spec,
+        &fixture.run_id,
+        &projection_snapshot,
+        &forward_node,
+        &forward_attempt,
+    )
+    .expect("side-effect projection lookup")
+    .expect("side-effect projection");
     assert!(matches!(
         projection.phase,
         store::SideEffectPhase::ConfirmationObserved { .. }
@@ -7579,9 +7641,15 @@ async fn side_effect_not_submitted_resume_completes_submit_boundary() {
     .await
     .expect("resume not-submitted");
     let projection_snapshot = store.projection_snapshot();
-    let projection = side_effect_projection_for_attempt(&projection_snapshot, node, &attempt_id)
-        .expect("projection lookup")
-        .expect("side-effect projection");
+    let projection = side_effect_projection_for_attempt(
+        &fixture.runtime_spec,
+        &fixture.run_id,
+        &projection_snapshot,
+        node,
+        &attempt_id,
+    )
+    .expect("projection lookup")
+    .expect("side-effect projection");
     assert!(matches!(
         projection.phase,
         store::SideEffectPhase::NotSubmittedProven { .. }
@@ -8144,8 +8212,14 @@ struct PrePreparedSideEffectRunner {
 impl ErasedNodeRunner for PrePreparedSideEffectRunner {
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
-            if side_effect_projection_for_attempt(ctx.projections(), ctx.node(), ctx.attempt_id())?
-                .is_some()
+            if side_effect_projection_for_attempt(
+                ctx.runtime_spec(),
+                ctx.run_id(),
+                ctx.projections(),
+                ctx.node(),
+                ctx.attempt_id(),
+            )?
+            .is_some()
             {
                 return Err(RuntimeError::Blocked(
                     "pre-prepared side-effect runner should not resume".to_owned(),
@@ -8320,6 +8394,8 @@ impl ErasedNodeRunner for FailActiveSideEffectAfterSagaRunner {
                 .projections()
                 .derive_saga_projection(ctx.run_id(), &ctx.runtime_spec().spec().saga);
             let projected = side_effect_projection_for_attempt(
+                ctx.runtime_spec(),
+                ctx.run_id(),
                 ctx.projections(),
                 ctx.node(),
                 ctx.attempt_id(),
@@ -8452,13 +8528,10 @@ struct ForwardEmitsRemediationPurposeRunner;
 impl ErasedNodeRunner for ForwardEmitsRemediationPurposeRunner {
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
-            let forward_ledger_key =
-                events::SideEffectLedgerKey::new("foreign-forward").expect("forward ledger key");
             side_effect_intent_with_purpose(
                 ctx,
                 events::SideEffectLedgerPurpose::Remediation {
-                    forward_ledger_key,
-                    forward_pair_id: None,
+                    forward_pair_id: synthetic_side_effect_pair_id(0x84),
                 },
             )
         })
@@ -9543,8 +9616,9 @@ fn append_synthetic_exclusive_prepare(
     let pair_id = fixture
         .runtime_spec
         .side_effect_pair_for_submit_node(&node.node_id)
-        .cloned();
-    let pair_role = pair_id.as_ref().map(|_| events::SideEffectPairRole::Submit);
+        .cloned()
+        .expect("side-effect pair");
+    let pair_role = events::SideEffectPairRole::Submit;
     store
         .append_prepared_commit(store_typed_commit_request! {
             run_id: run_id.clone(),
@@ -9635,7 +9709,7 @@ fn append_synthetic_exclusive_prepare(
                 ))
                 .expect("attempt logical key")],
                 required_side_effect_states: vec![store::SideEffectStatePrecondition {
-                    ledger_key: ledger.clone(),
+                    pair_id: fixture_side_effect_pair_id(fixture, node),
                     required: store::RequiredSideEffectState::Absent,
                 }],
                 ..store::CommitPreconditions::default()
@@ -9686,7 +9760,7 @@ fn append_synthetic_invocation_started(
             preconditions: store::CommitPreconditions {
                 required_run_state: store::RequiredRunState::NotCompleted,
                 required_side_effect_states: vec![store::SideEffectStatePrecondition {
-                    ledger_key: ledger.clone(),
+                    pair_id: fixture_side_effect_pair_id(fixture, node),
                     required: store::RequiredSideEffectState::InvocationPrepared,
                 }],
                 ..store::CommitPreconditions::default()
@@ -9742,7 +9816,7 @@ fn append_synthetic_submission_observed(
             preconditions: store::CommitPreconditions {
                 required_run_state: store::RequiredRunState::NotCompleted,
                 required_side_effect_states: vec![store::SideEffectStatePrecondition {
-                    ledger_key: ledger.clone(),
+                    pair_id: fixture_side_effect_pair_id(fixture, node),
                     required: store::RequiredSideEffectState::InvocationStarted,
                 }],
                 ..store::CommitPreconditions::default()
@@ -9801,7 +9875,7 @@ fn append_synthetic_receipt_observed(
             preconditions: store::CommitPreconditions {
                 required_run_state: store::RequiredRunState::NotCompleted,
                 required_side_effect_states: vec![store::SideEffectStatePrecondition {
-                    ledger_key: ledger.clone(),
+                    pair_id: fixture_side_effect_pair_id(fixture, node),
                     required: store::RequiredSideEffectState::SubmissionResult,
                 }],
                 ..store::CommitPreconditions::default()
@@ -9815,7 +9889,7 @@ fn append_synthetic_submit_boundary_skipped(
     fixture: &Fixture,
     node: &spec::NodeSpec,
     attempt_id: &AttemptId,
-    ledger: &events::SideEffectLedgerKey,
+    _ledger: &events::SideEffectLedgerKey,
     commit_key: &str,
 ) {
     let output_cell = fixture
@@ -9865,7 +9939,7 @@ fn append_synthetic_submit_boundary_skipped(
                     required: store::RequiredCellState::Absent,
                 }],
                 required_side_effect_states: vec![store::SideEffectStatePrecondition {
-                    ledger_key: ledger.clone(),
+                    pair_id: fixture_side_effect_pair_id(fixture, node),
                     required: store::RequiredSideEffectState::SubmissionResult,
                 }],
                 ..store::CommitPreconditions::default()
@@ -9894,8 +9968,9 @@ fn append_synthetic_verify_receipt_observed(
     let pair_id = fixture
         .runtime_spec
         .side_effect_pair_for_submit_node(&submit_node.node_id)
-        .cloned();
-    let pair_role = pair_id.as_ref().map(|_| events::SideEffectPairRole::Verify);
+        .cloned()
+        .expect("side-effect pair");
+    let pair_role = events::SideEffectPairRole::Verify;
     store
         .append_prepared_commit(store_typed_commit_request! {
             run_id: fixture.run_id.clone(),
@@ -9928,7 +10003,7 @@ fn append_synthetic_verify_receipt_observed(
                 ))
                 .expect("attempt logical key")],
                 required_side_effect_states: vec![store::SideEffectStatePrecondition {
-                    ledger_key: ledger.clone(),
+                    pair_id: fixture_side_effect_pair_id(fixture, verify_node),
                     required: store::RequiredSideEffectState::SubmissionResult,
                 }],
                 ..store::CommitPreconditions::default()
@@ -9957,8 +10032,9 @@ fn append_synthetic_verify_confirmation_observed(
     let pair_id = fixture
         .runtime_spec
         .side_effect_pair_for_submit_node(&submit_node.node_id)
-        .cloned();
-    let pair_role = pair_id.as_ref().map(|_| events::SideEffectPairRole::Verify);
+        .cloned()
+        .expect("side-effect pair");
+    let pair_role = events::SideEffectPairRole::Verify;
     let release = synthetic_resource_lane_release(
         store,
         fixture,
@@ -10005,7 +10081,7 @@ fn append_synthetic_verify_confirmation_observed(
                 ))
                 .expect("attempt logical key")],
                 required_side_effect_states: vec![store::SideEffectStatePrecondition {
-                    ledger_key: ledger.clone(),
+                    pair_id: fixture_side_effect_pair_id(fixture, verify_node),
                     required: store::RequiredSideEffectState::ReceiptObserved,
                 }],
                 ..store::CommitPreconditions::default()
@@ -10023,7 +10099,15 @@ fn synthetic_resource_lane_release(
     ledger: &events::SideEffectLedgerKey,
     reason: &str,
 ) -> Option<events::KernelEventPayload> {
-    let holder = store::SideEffectLedgerRef::new(run_id.clone(), ledger.clone());
+    let pair_id = match &node.framework {
+        Some(spec::FrameworkNodeSpec::SideEffectVerify(verify)) => verify.pair_id.clone(),
+        _ => fixture
+            .runtime_spec
+            .side_effect_pair_for_submit_node(&node.node_id)
+            .cloned()
+            .expect("side-effect pair"),
+    };
+    let holder = store::SideEffectPairLedgerRef::new(run_id.clone(), pair_id);
     let snapshot = store.projection_snapshot();
     let (_, lane) = snapshot
         .resource_lanes()
@@ -10036,10 +10120,7 @@ fn synthetic_resource_lane_release(
             ledger_key: ledger.clone(),
             ledger_purpose: events::SideEffectLedgerPurpose::Forward,
             pair_id: lane.pair_id.clone(),
-            pair_role: lane
-                .pair_id
-                .as_ref()
-                .map(|_| events::SideEffectPairRole::Verify),
+            pair_role: events::SideEffectPairRole::Verify,
             invocation_epoch: lane.invocation_epoch,
             claim_id: lane.claim_id.clone(),
             release_reason: events::ResourceLaneReleaseReason::new(reason).expect("release reason"),
@@ -10143,7 +10224,7 @@ fn append_synthetic_ambiguous(
             preconditions: store::CommitPreconditions {
                 required_run_state: store::RequiredRunState::NotCompleted,
                 required_side_effect_states: vec![store::SideEffectStatePrecondition {
-                    ledger_key: ledger.clone(),
+                    pair_id: fixture_side_effect_pair_id(fixture, node),
                     required: store::RequiredSideEffectState::InvocationStarted,
                 }],
                 ..store::CommitPreconditions::default()
@@ -10435,13 +10516,19 @@ fn append_not_submitted_proven(
     invocation_epoch: u32,
 ) {
     let projection_snapshot = store.projection_snapshot();
-    let projection = side_effect_projection_for_attempt(&projection_snapshot, node, attempt_id)
-        .expect("side-effect projection lookup")
-        .expect("side-effect projection");
+    let projection = side_effect_projection_for_attempt(
+        &fixture.runtime_spec,
+        &fixture.run_id,
+        &projection_snapshot,
+        node,
+        attempt_id,
+    )
+    .expect("side-effect projection lookup")
+    .expect("side-effect projection");
     let ledger_key = projection.ledger_key.clone();
     let ledger_purpose = projection.ledger_purpose.clone();
     let pair_id = projection.pair_id.clone();
-    let pair_role = pair_id.as_ref().map(|_| events::SideEffectPairRole::Submit);
+    let pair_role = events::SideEffectPairRole::Submit;
     let proof_artifact = artifact(0xd5);
     let proof_hash = content(0xd6);
     let evidence = store::ArtifactEvidenceRef {
@@ -13148,7 +13235,7 @@ async fn drive_until_remediation_phase(
     scheduler: &SerialTypedScheduler,
     store: &mut TestTypedRunStore,
     fixture: &Fixture,
-    forward_ledger_key: &events::SideEffectLedgerKey,
+    forward_pair_id: &SideEffectPairId,
     checkpoint: RemediationPhaseCheckpoint,
     context: &str,
 ) {
@@ -13160,7 +13247,7 @@ async fn drive_until_remediation_phase(
             SchedulerStatus::Advanced
         );
         let projection_snapshot = store.projection_snapshot();
-        if remediation_projection_for_forward_ledger(&projection_snapshot, forward_ledger_key)
+        if remediation_projection_for_forward_pair(&projection_snapshot, forward_pair_id)
             .is_some_and(|projection| match checkpoint {
                 RemediationPhaseCheckpoint::SubmissionObserved => {
                     matches!(
@@ -13209,16 +13296,16 @@ async fn drive_until_compensated_before_terminal(
 fn remediation_intent_forward_links(
     store: &TestTypedRunStore,
     run_id: &RunId,
-) -> Vec<events::SideEffectLedgerKey> {
+) -> Vec<SideEffectPairId> {
     store
         .load_run_stream(run_id)
         .iter()
         .filter_map(|event| match event.payload() {
             events::KernelEventPayload::SideEffectIntentPersisted(payload) => {
                 match &payload.ledger_purpose {
-                    events::SideEffectLedgerPurpose::Remediation {
-                        forward_ledger_key, ..
-                    } => Some(forward_ledger_key.clone()),
+                    events::SideEffectLedgerPurpose::Remediation { forward_pair_id } => {
+                        Some(forward_pair_id.clone())
+                    }
                     events::SideEffectLedgerPurpose::Forward => None,
                 }
             }
@@ -13227,18 +13314,17 @@ fn remediation_intent_forward_links(
         .collect()
 }
 
-fn remediation_projection_for_forward_ledger<P: std::borrow::Borrow<store::ProjectionSnapshot>>(
+fn remediation_projection_for_forward_pair<P: std::borrow::Borrow<store::ProjectionSnapshot>>(
     projections: P,
-    forward_ledger_key: &events::SideEffectLedgerKey,
+    forward_pair_id: &SideEffectPairId,
 ) -> Option<store::SideEffectProjection> {
     let projections = projections.borrow();
     projections.side_effects().find_map(|(_, projection)| {
         matches!(
             &projection.ledger_purpose,
             events::SideEffectLedgerPurpose::Remediation {
-                forward_ledger_key: linked,
-                ..
-            } if linked == forward_ledger_key
+                forward_pair_id: linked,
+            } if linked == forward_pair_id
         )
         .then(|| projection.clone())
     })
@@ -13247,7 +13333,7 @@ fn remediation_projection_for_forward_ledger<P: std::borrow::Borrow<store::Proje
 fn assert_no_duplicate_side_effect_submissions(store: &TestTypedRunStore, run_id: &RunId) {
     let mut by_ledger = BTreeMap::<events::SideEffectLedgerKey, usize>::new();
     let mut forward_by_node = BTreeMap::<NodeId, usize>::new();
-    let mut remediation_by_forward = BTreeMap::<events::SideEffectLedgerKey, usize>::new();
+    let mut remediation_by_forward = BTreeMap::<SideEffectPairId, usize>::new();
     for event in store.load_run_stream(run_id) {
         if let events::KernelEventPayload::SideEffectSubmissionObserved(payload) = event.payload() {
             *by_ledger.entry(payload.ledger_key.clone()).or_default() += 1;
@@ -13255,11 +13341,9 @@ fn assert_no_duplicate_side_effect_submissions(store: &TestTypedRunStore, run_id
                 events::SideEffectLedgerPurpose::Forward => {
                     *forward_by_node.entry(payload.node_id.clone()).or_default() += 1;
                 }
-                events::SideEffectLedgerPurpose::Remediation {
-                    forward_ledger_key, ..
-                } => {
+                events::SideEffectLedgerPurpose::Remediation { forward_pair_id } => {
                     *remediation_by_forward
-                        .entry(forward_ledger_key.clone())
+                        .entry(forward_pair_id.clone())
                         .or_default() += 1;
                 }
             }
@@ -13271,10 +13355,10 @@ fn assert_no_duplicate_side_effect_submissions(store: &TestTypedRunStore, run_id
     for (node, count) in forward_by_node {
         assert_eq!(count, 1, "duplicate forward submission for node {node}");
     }
-    for (forward_ledger, count) in remediation_by_forward {
+    for (forward_pair, count) in remediation_by_forward {
         assert_eq!(
             count, 1,
-            "duplicate remediation submission for forward ledger {forward_ledger}"
+            "duplicate remediation submission for forward pair {forward_pair}"
         );
     }
 }
@@ -13297,10 +13381,10 @@ fn side_effect_submission_count_for_ledger(
         .count()
 }
 
-fn remediation_submission_count_for_forward_ledger(
+fn remediation_submission_count_for_forward_pair(
     store: &TestTypedRunStore,
     run_id: &RunId,
-    forward_ledger_key: &events::SideEffectLedgerKey,
+    forward_pair_id: &SideEffectPairId,
 ) -> usize {
     store
         .load_run_stream(run_id)
@@ -13312,9 +13396,8 @@ fn remediation_submission_count_for_forward_ledger(
                     if matches!(
                         &payload.ledger_purpose,
                         events::SideEffectLedgerPurpose::Remediation {
-                            forward_ledger_key: linked,
-                            ..
-                        } if linked == forward_ledger_key
+                            forward_pair_id: linked,
+                        } if linked == forward_pair_id
                     )
             )
         })
@@ -13342,10 +13425,10 @@ fn side_effect_fixture_artifact_pair(
 }
 
 fn side_effect_ledger_key_for_ctx(ctx: &ErasedRunCtx<'_>) -> events::SideEffectLedgerKey {
-    if let Some(forward_ledger_key) = linked_forward_ledger_for_remediation(ctx) {
+    if let Some(forward_pair_id) = linked_forward_pair_for_remediation(ctx) {
         events::SideEffectLedgerKey::new(format!(
             "remediation-{}-{}",
-            forward_ledger_key,
+            forward_pair_id,
             ctx.attempt_no()
         ))
         .expect("remediation ledger key")
@@ -13361,39 +13444,37 @@ fn side_effect_ledger_key_for_ctx(ctx: &ErasedRunCtx<'_>) -> events::SideEffectL
 }
 
 fn side_effect_ledger_purpose_for_ctx(ctx: &ErasedRunCtx<'_>) -> events::SideEffectLedgerPurpose {
-    linked_forward_ledger_for_remediation(ctx)
-        .map(
-            |forward_ledger_key| events::SideEffectLedgerPurpose::Remediation {
-                forward_pair_id: forward_pair_id_for_ledger(ctx, &forward_ledger_key),
-                forward_ledger_key,
-            },
-        )
+    linked_forward_pair_for_remediation(ctx)
+        .map(|forward_pair_id| events::SideEffectLedgerPurpose::Remediation { forward_pair_id })
         .unwrap_or(events::SideEffectLedgerPurpose::Forward)
 }
 
-fn forward_pair_id_for_ledger(
-    ctx: &ErasedRunCtx<'_>,
+fn forward_pair_for_ledger(
+    projections: &store::ProjectionSnapshot,
     forward_ledger_key: &events::SideEffectLedgerKey,
-) -> Option<SideEffectPairId> {
-    ctx.projections()
+) -> SideEffectPairId {
+    projections
         .side_effects()
         .find_map(|(_, projection)| {
             (projection.ledger_key == *forward_ledger_key).then(|| projection.pair_id.clone())
-        })?
+        })
+        .expect("forward pair projection")
 }
 
-fn linked_forward_ledger_for_remediation(
-    ctx: &ErasedRunCtx<'_>,
-) -> Option<events::SideEffectLedgerKey> {
-    if let Some(projection) =
-        side_effect_projection_for_attempt(ctx.projections(), ctx.node(), ctx.attempt_id())
-            .expect("remediation projection lookup")
+fn linked_forward_pair_for_remediation(ctx: &ErasedRunCtx<'_>) -> Option<SideEffectPairId> {
+    if let Some(projection) = side_effect_projection_for_attempt(
+        ctx.runtime_spec(),
+        ctx.run_id(),
+        ctx.projections(),
+        ctx.node(),
+        ctx.attempt_id(),
+    )
+    .expect("remediation projection lookup")
     {
-        if let events::SideEffectLedgerPurpose::Remediation {
-            forward_ledger_key, ..
-        } = &projection.ledger_purpose
+        if let events::SideEffectLedgerPurpose::Remediation { forward_pair_id } =
+            &projection.ledger_purpose
         {
-            return Some(forward_ledger_key.clone());
+            return Some(forward_pair_id.clone());
         }
     }
     let forward_node_id = ctx
@@ -13411,7 +13492,7 @@ fn linked_forward_ledger_for_remediation(
                     projection.phase,
                     store::SideEffectPhase::ConfirmationObserved { .. }
                 ))
-            .then(|| projection.ledger_key.clone())
+            .then(|| projection.pair_id.clone())
         })
 }
 

@@ -229,10 +229,7 @@ impl<'a> AttemptLifecycle<'a> {
                             .holder
                             .as_ref()
                             .map(|holder| {
-                                format!(
-                                    " held by run {} ledger {}",
-                                    holder.run_id, holder.ledger_key
-                                )
+                                format!(" held by run {} pair {}", holder.run_id, holder.pair_id)
                             })
                             .unwrap_or_else(|| " with no active holder".to_owned());
                         return Err(RuntimeError::InvalidRunStream(format!(
@@ -260,6 +257,8 @@ impl<'a> AttemptLifecycle<'a> {
             .map_err(async_store_error)?;
         let mut latest_view = RuntimeRunView::from_stream(runtime_spec, run_id, &latest_stream)?;
         if node_needs_pre_invocation_lane_claim(
+            runtime_spec,
+            run_id,
             &latest_view.projections,
             selected_attempt.phase.node,
             &attempt_id,
@@ -477,7 +476,7 @@ pub(crate) async fn terminalize_observed_failure<S: store::RunEventStore + ?Size
     let Some(error_info) = observed_attempt_failure_info(&error, retryability)? else {
         return Err(error);
     };
-    if !can_terminalize_observed_failure(node, attempt_id, view)? {
+    if !can_terminalize_observed_failure(runtime_spec, run_id, node, attempt_id, view)? {
         return Err(error);
     }
     let diagnostic_artifact = redacted_attempt_failure_diagnostic_artifact(
@@ -507,6 +506,8 @@ pub(crate) async fn terminalize_observed_failure<S: store::RunEventStore + ?Size
 }
 
 fn can_terminalize_observed_failure(
+    runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
     node: &spec::NodeSpec,
     attempt_id: &AttemptId,
     view: &RuntimeRunView,
@@ -518,8 +519,13 @@ fn can_terminalize_observed_failure(
         return Ok(false);
     }
     if node.side_effect.is_some() {
-        let Some(side_effect) =
-            SideEffectLifecycle::projection_for_attempt(&view.projections, node, attempt_id)?
+        let Some(side_effect) = SideEffectLifecycle::projection_for_attempt(
+            runtime_spec,
+            run_id,
+            &view.projections,
+            node,
+            attempt_id,
+        )?
         else {
             return Ok(true);
         };
@@ -650,7 +656,7 @@ fn resource_lane_block_for_request(
         };
         let lane_key = store::ResourceLaneKey::from_evidence(&payload.resource_key);
         let holder =
-            store::SideEffectLedgerRef::new(request.run_id().clone(), payload.ledger_key.clone());
+            store::SideEffectPairLedgerRef::new(request.run_id().clone(), payload.pair_id.clone());
         projections
             .resource_lane(&lane_key)
             .filter(|projection| projection.holder != holder)
@@ -713,6 +719,8 @@ fn node_requires_pre_invocation_lane_claim(node: &spec::NodeSpec) -> bool {
 }
 
 fn node_needs_pre_invocation_lane_claim(
+    runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
     projections: &store::ProjectionSnapshot,
     node: &spec::NodeSpec,
     attempt_id: &AttemptId,
@@ -720,8 +728,13 @@ fn node_needs_pre_invocation_lane_claim(
     if !node_requires_pre_invocation_lane_claim(node) {
         return Ok(false);
     }
-    let Some(projection) =
-        SideEffectLifecycle::projection_for_attempt(projections, node, attempt_id)?
+    let Some(projection) = SideEffectLifecycle::projection_for_attempt(
+        runtime_spec,
+        run_id,
+        projections,
+        node,
+        attempt_id,
+    )?
     else {
         return Ok(true);
     };
@@ -790,12 +803,15 @@ mod tests {
             .expect("schema id"),
             key: events::ResourceKey::new("wallet-1").expect("resource key"),
         };
-        let holder = store::SideEffectLedgerRef::new(
+        let holder = store::SideEffectPairLedgerRef::new(
             RunId::from_digest(
                 DigestAlgorithm::Sha256JcsV1,
                 DigestBytes::from_array([0x7a; 32]),
             ),
-            events::SideEffectLedgerKey::new("ledger-key-1").expect("ledger key"),
+            mfm_ids::SideEffectPairId::from_digest(
+                DigestAlgorithm::Sha256JcsV1,
+                DigestBytes::from_array([0x7c; 32]),
+            ),
         );
         let node_id = NodeId::from_digest(
             DigestAlgorithm::Sha256JcsV1,

@@ -6,7 +6,7 @@ use mfm_events::v1::{self as events, ArtifactRole, KernelEventPayload};
 use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind, CapabilityVersion, CellId,
     ContentDigest, DigestAlgorithm, DigestBytes, LoweringVersion, NodeId, RunId, SchemaId, ScopeId,
-    SemanticTypeId, SpecHash, SpecVersion, StateKind, StateVersion,
+    SemanticTypeId, SideEffectPairId, SpecHash, SpecVersion, StateKind, StateVersion,
 };
 use mfm_manual_auth::{
     manual_authorization_proof_schema_id, ManualAuthorizationSignatureBytes,
@@ -836,6 +836,13 @@ fn side_effect_ledger_key() -> events::SideEffectLedgerKey {
     events::SideEffectLedgerKey::new("ledger-key-1").expect("ledger key")
 }
 
+fn side_effect_pair_id() -> SideEffectPairId {
+    SideEffectPairId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        sha256_digest_bytes(side_effect_ledger_key().as_str().as_bytes()),
+    )
+}
+
 fn side_effect_ledger_purpose() -> events::SideEffectLedgerPurpose {
     events::SideEffectLedgerPurpose::Forward
 }
@@ -859,6 +866,8 @@ fn side_effect_intent(artifact_id: ArtifactId, digest: ContentDigest) -> KernelE
         attempt_id: attempt_id(72),
         ledger_key: side_effect_ledger_key(),
         ledger_purpose: side_effect_ledger_purpose(),
+        pair_id: side_effect_pair_id(),
+        pair_role: events::SideEffectPairRole::Submit,
         invocation_epoch: 1,
         intent_schema_id: schema_id("mfm.test.side_effect_intent", 70),
         intent_hash: digest,
@@ -893,6 +902,8 @@ fn side_effect_claim() -> KernelEventPayload {
         attempt_id: attempt_id(72),
         ledger_key: side_effect_ledger_key(),
         ledger_purpose: side_effect_ledger_purpose(),
+        pair_id: side_effect_pair_id(),
+        pair_role: events::SideEffectPairRole::Submit,
         claim_owner: events::RunnerInvocationId::new("owner-1").expect("claim owner"),
         invocation_epoch: 1,
         claim_generation: 1,
@@ -907,6 +918,8 @@ fn side_effect_prepared() -> KernelEventPayload {
         attempt_id: attempt_id(72),
         ledger_key: side_effect_ledger_key(),
         ledger_purpose: side_effect_ledger_purpose(),
+        pair_id: side_effect_pair_id(),
+        pair_role: events::SideEffectPairRole::Submit,
         invocation_epoch: 1,
         claim_generation: 1,
         claim_fencing_token: events::side_effect::ClaimFencingToken::new("token-1").expect("token"),
@@ -939,6 +952,8 @@ fn resource_lane_claim_intent(resource_key: events::ResourceKeyEvidence) -> Kern
         attempt_id: attempt_id(72),
         ledger_key: side_effect_ledger_key(),
         ledger_purpose: side_effect_ledger_purpose(),
+        pair_id: side_effect_pair_id(),
+        pair_role: events::SideEffectPairRole::Submit,
         invocation_epoch: 1,
         resource_key,
         requirement_digest: content_digest(210),
@@ -954,6 +969,8 @@ fn side_effect_started() -> KernelEventPayload {
         attempt_id: attempt_id(72),
         ledger_key: side_effect_ledger_key(),
         ledger_purpose: side_effect_ledger_purpose(),
+        pair_id: side_effect_pair_id(),
+        pair_role: events::SideEffectPairRole::Submit,
         invocation_epoch: 1,
         claim_owner: events::RunnerInvocationId::new("owner-1").expect("claim owner"),
         claim_generation: 1,
@@ -979,6 +996,8 @@ fn side_effect_submission_unknown(
         attempt_id: attempt_id(72),
         ledger_key: side_effect_ledger_key(),
         ledger_purpose: side_effect_ledger_purpose(),
+        pair_id: side_effect_pair_id(),
+        pair_role: events::SideEffectPairRole::Submit,
         invocation_epoch: 1,
         evidence_schema_id: unknown_schema(),
         evidence_hash: digest,
@@ -996,6 +1015,8 @@ fn side_effect_submission_observed(
         attempt_id: attempt_id(72),
         ledger_key: side_effect_ledger_key(),
         ledger_purpose: side_effect_ledger_purpose(),
+        pair_id: side_effect_pair_id(),
+        pair_role: events::SideEffectPairRole::Submit,
         invocation_epoch: 1,
         submission_schema_id: submission_schema(),
         submission_hash: digest,
@@ -1010,6 +1031,8 @@ fn side_effect_ambiguous(artifact_id: ArtifactId, digest: ContentDigest) -> Kern
         attempt_id: attempt_id(72),
         ledger_key: side_effect_ledger_key(),
         ledger_purpose: side_effect_ledger_purpose(),
+        pair_id: side_effect_pair_id(),
+        pair_role: events::SideEffectPairRole::Verify,
         invocation_epoch: 1,
         ambiguity_code: events::AmbiguityCode::new("ambiguous").expect("ambiguity code"),
         evidence_schema_id: schema_id("mfm.test.ambiguity", 84),
@@ -1042,6 +1065,8 @@ fn side_effect_failed() -> KernelEventPayload {
         attempt_id: attempt_id(72),
         ledger_key: side_effect_ledger_key(),
         ledger_purpose: side_effect_ledger_purpose(),
+        pair_id: side_effect_pair_id(),
+        pair_role: events::SideEffectPairRole::Verify,
         invocation_epoch: 1,
         failure_phase: events::side_effect::FailurePhase::BeforeInvocationStarted,
         retryable: false,
@@ -1443,7 +1468,7 @@ fn assert_resource_lane_blocked(
     assert_eq!(&block.resource_lane_key, expected_lane_key);
     let holder = block.holder.as_ref().expect("blocked holder");
     assert_eq!(&holder.run_id, expected_holder_run);
-    assert_eq!(holder.ledger_key, side_effect_ledger_key());
+    assert_eq!(holder.pair_id, side_effect_pair_id());
 }
 
 fn assert_wait_fifo_admission_blocked(
@@ -1458,7 +1483,7 @@ fn assert_wait_fifo_admission_blocked(
     match (block.holder.as_ref(), expected_holder_run) {
         (Some(holder), Some(expected_holder_run)) => {
             assert_eq!(&holder.run_id, expected_holder_run);
-            assert_eq!(holder.ledger_key, side_effect_ledger_key());
+            assert_eq!(holder.pair_id, side_effect_pair_id());
         }
         (None, None) => {}
         (actual, expected) => {
@@ -2677,7 +2702,8 @@ async fn resource_lane_projection_rebuilds_from_events() {
         .expect("projection");
     let lane = before.resource_lane(&lane_key).expect("resource lane");
     assert_eq!(lane.holder.run_id, run);
-    assert_eq!(lane.holder.ledger_key, side_effect_ledger_key());
+    assert_eq!(lane.holder.pair_id, side_effect_pair_id());
+    assert_eq!(lane.ledger_key, side_effect_ledger_key());
 
     let stream = store.load_run_stream(&run).await.expect("typed run stream");
     assert_eq!(
@@ -2716,7 +2742,8 @@ async fn resource_lane_projection_rebuilds_from_events() {
         .resource_lane(&lane_key)
         .expect("peer snapshot includes cross-run lane from stream");
     assert_eq!(&peer_lane.holder.run_id, &run);
-    assert_eq!(&peer_lane.holder.ledger_key, &side_effect_ledger_key());
+    assert_eq!(&peer_lane.holder.pair_id, &side_effect_pair_id());
+    assert_eq!(&peer_lane.ledger_key, &side_effect_ledger_key());
     assert_eq!(peer_after_reload.run_state(&peer_run), RunState::Started);
     assert_eq!(
         store
@@ -3376,7 +3403,7 @@ async fn side_effect_unknown_recovery_updates_submission_result_slot() {
         .await
         .expect("projection");
     let side_effect = projection
-        .side_effect(&side_effect_ledger_key())
+        .side_effect_for_pair(&run, &side_effect_pair_id())
         .expect("side-effect projection");
     assert!(matches!(
         side_effect.phase,

@@ -2,7 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 
 use mfm_events::v1 as events;
-use mfm_ids::{ArtifactId, AttemptId, CellId, ContentDigest, NodeId, RunId, SpecHash};
+use mfm_ids::{
+    ArtifactId, AttemptId, CellId, ContentDigest, NodeId, RunId, SideEffectPairId, SpecHash,
+};
 use mfm_manual_auth::manual_authorization_proof_schema_id;
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
@@ -764,8 +766,7 @@ fn validate_historical_run_stream(
 ) -> Result<()> {
     let mut available_cells = BTreeSet::<CellId>::new();
     let mut active_attempts = BTreeSet::<(NodeId, AttemptId)>::new();
-    let mut side_effect_ledgers =
-        BTreeMap::<events::SideEffectLedgerKey, HistoricalSideEffectLedger>::new();
+    let mut side_effect_ledgers = BTreeMap::<SideEffectPairId, HistoricalSideEffectLedger>::new();
     let mut seen_run_admitted = false;
     let mut produced_public_output = None::<events::PublicOutputCompletionEvidence>;
     let mut retention_manifest_projected_seq = None::<store::StreamSeq>;
@@ -1083,7 +1084,7 @@ fn validate_historical_run_stream(
     validate_historical_retention_manifest_batches(runtime_spec, stream, history)?;
     validate_historical_terminal_tail(runtime_spec, run_id, stream)?;
     validate_atomic_side_effect_failure_pairs(runtime_spec, stream)?;
-    AttemptRecoveryLifecycle::validate_frontier(runtime_spec, projections)?;
+    AttemptRecoveryLifecycle::validate_frontier(runtime_spec, run_id, projections)?;
     Ok(())
 }
 
