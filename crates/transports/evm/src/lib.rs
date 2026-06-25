@@ -813,6 +813,7 @@ fn capability_error_from_transport(error: EvmTransportError) -> EvmCapabilityErr
 fn block_selector_tag(selector: &EvmBlockSelector) -> String {
     match selector {
         EvmBlockSelector::Latest => "latest".to_owned(),
+        EvmBlockSelector::Pending => "pending".to_owned(),
         EvmBlockSelector::Number(number) => format!("0x{number:x}"),
         EvmBlockSelector::Hash(hash) => format!("{hash:?}"),
     }
@@ -1074,6 +1075,11 @@ mod tests {
             .expect("receipt");
         assert_eq!(receipt.block_number, 42);
         assert!(receipt.status);
+    }
+
+    #[test]
+    fn block_selector_tag_supports_pending_nonce_reads() {
+        assert_eq!(block_selector_tag(&EvmBlockSelector::Pending), "pending");
     }
 
     #[tokio::test]
