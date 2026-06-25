@@ -21,7 +21,7 @@ use crate::manual_resolution::{
 use crate::recovery::AttemptRecoveryLifecycle;
 use crate::runners::ErasedRunnerRegistry;
 use crate::transition::{TransitionAttempt, TransitionDecision, TransitionLifecycle};
-use crate::{CertifiedRuntimeSpec, Result};
+use crate::{CertifiedRuntimeSpec, Result, RuntimeError};
 
 /// Result of one serial scheduler drive call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +32,15 @@ pub enum SchedulerStatus {
     Blocked,
     /// Public output has already been projected.
     PublicOutputProjected,
+}
+
+/// Compatibility between this scheduler's executable bindings and an admitted run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunAdmittedBindingCompatibility {
+    /// The scheduler can attach to and drive the admitted run with matching executable evidence.
+    Compatible,
+    /// The scheduler's executable bindings do not match the admitted run evidence.
+    IncompatibleExecutable,
 }
 
 /// Manual resolution input verified against the certified saga policy and current stream prefix.
@@ -96,6 +105,28 @@ impl SerialTypedScheduler {
             expected_next_seq,
             &bound_context,
         )
+    }
+
+    /// Checks whether this scheduler's executable bindings match stored admission evidence.
+    pub fn run_admitted_binding_compatibility(
+        &self,
+        runtime_spec: &CertifiedRuntimeSpec,
+        run_admitted: &events::RunAdmitted,
+    ) -> Result<RunAdmittedBindingCompatibility> {
+        let bound_context = match self.run_contexts.load_bound_context(runtime_spec) {
+            Ok(bound_context) => bound_context,
+            Err(RuntimeError::RunnerBinding(_)) => {
+                return Ok(RunAdmittedBindingCompatibility::IncompatibleExecutable);
+            }
+            Err(error) => return Err(error),
+        };
+        match bound_context.validate_run_admitted_binding(run_admitted) {
+            Ok(()) => Ok(RunAdmittedBindingCompatibility::Compatible),
+            Err(RuntimeError::RunnerBinding(_)) => {
+                Ok(RunAdmittedBindingCompatibility::IncompatibleExecutable)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Appends the prepared typed admission commit through an async typed store.

@@ -61,7 +61,11 @@ mod tests {
     use super::*;
     use crate::{OpVersion, PublicOpName};
     use mfm_authored_config::{AuthoredConfig, AuthoredConfigFormat};
-    use mfm_store::v1::{RunEventStore, TrustScopeStore};
+    use mfm_store::v1::{
+        AdmissionToken, ExecutionClaimStore, NowaitSkipAdmissionResult, RunEventStore,
+        TrustScopeStore,
+    };
+    use std::sync::Arc;
 
     #[test]
     fn production_registry_resolves_portfolio_snapshot_latest() {
@@ -229,6 +233,152 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn app_launch_duplicate_same_spec_attaches_without_second_admission() {
+        let entry_point_registry = production_entry_point_op_registry().expect("registry");
+        let certification_registry = crate::production_certification_registry().expect("cert");
+        let store = mfm_store::v1::AsyncInMemoryRunStore::default();
+        let trust_scope_id = store.load_trust_scope_id().await.expect("trust scope");
+        let first = prepare_portfolio_launch(
+            &entry_point_registry,
+            &certification_registry,
+            trust_scope_id.clone(),
+            sample_portfolio_config_json(),
+            None,
+        );
+        let second = prepare_portfolio_launch(
+            &entry_point_registry,
+            &certification_registry,
+            trust_scope_id,
+            sample_portfolio_config_json(),
+            None,
+        );
+        let run_id = first.request.run_id.clone();
+        let services = test_services(store.clone(), certification_registry);
+
+        let first_outcome = services
+            .launch_run(first.request)
+            .await
+            .expect("first launch");
+        let second_outcome = services
+            .launch_run(second.request)
+            .await
+            .expect("duplicate launch");
+
+        assert_eq!(
+            first_outcome.status(),
+            crate::RunLaunchOutcomeStatus::Admitted
+        );
+        assert_eq!(
+            second_outcome.status(),
+            crate::RunLaunchOutcomeStatus::Attached
+        );
+        assert_eq!(
+            second_outcome.run().expect("attached run").scheduler_status,
+            "observed"
+        );
+        assert_eq!(run_admitted_count(&store, &run_id).await, 1);
+    }
+
+    #[tokio::test]
+    async fn app_launch_concurrent_duplicates_admit_once_and_attach_rest() {
+        const LAUNCHERS: usize = 8;
+
+        let entry_point_registry = production_entry_point_op_registry().expect("registry");
+        let certification_registry = crate::production_certification_registry().expect("cert");
+        let store = mfm_store::v1::AsyncInMemoryRunStore::default();
+        let trust_scope_id = store.load_trust_scope_id().await.expect("trust scope");
+        let prepared = prepare_portfolio_launch(
+            &entry_point_registry,
+            &certification_registry,
+            trust_scope_id,
+            sample_portfolio_config_json(),
+            None,
+        );
+        let run_id = prepared.request.run_id.clone();
+        let services = test_services(store.clone(), certification_registry);
+        let barrier = Arc::new(tokio::sync::Barrier::new(LAUNCHERS));
+        let mut handles = Vec::new();
+
+        for _ in 0..LAUNCHERS {
+            let services = services.clone();
+            let request = prepared.request.clone();
+            let barrier = barrier.clone();
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                services.launch_run(request).await.expect("launch").status()
+            }));
+        }
+
+        let mut statuses = Vec::new();
+        for handle in handles {
+            statuses.push(handle.await.expect("launcher task"));
+        }
+
+        assert_eq!(
+            statuses
+                .iter()
+                .filter(|status| **status == crate::RunLaunchOutcomeStatus::Admitted)
+                .count(),
+            1
+        );
+        assert_eq!(
+            statuses
+                .iter()
+                .filter(|status| **status == crate::RunLaunchOutcomeStatus::Attached)
+                .count(),
+            LAUNCHERS - 1
+        );
+        assert_eq!(run_admitted_count(&store, &run_id).await, 1);
+    }
+
+    #[tokio::test]
+    async fn app_launch_duplicate_reports_already_driving_for_live_claim() {
+        let entry_point_registry = production_entry_point_op_registry().expect("registry");
+        let certification_registry = crate::production_certification_registry().expect("cert");
+        let store = mfm_store::v1::AsyncInMemoryRunStore::default();
+        let trust_scope_id = store.load_trust_scope_id().await.expect("trust scope");
+        let first = prepare_portfolio_launch(
+            &entry_point_registry,
+            &certification_registry,
+            trust_scope_id.clone(),
+            sample_portfolio_config_json(),
+            None,
+        );
+        let second = prepare_portfolio_launch(
+            &entry_point_registry,
+            &certification_registry,
+            trust_scope_id,
+            sample_portfolio_config_json(),
+            None,
+        );
+        let run_id = first.request.run_id.clone();
+        let services = test_services(store.clone(), certification_registry);
+        services
+            .launch_run(first.request)
+            .await
+            .expect("first launch");
+        let token = AdmissionToken::new("mfm.test.app.execution_claim").expect("token");
+        assert!(matches!(
+            store
+                .acquire_execution_claim(&run_id, token)
+                .await
+                .expect("claim execution"),
+            NowaitSkipAdmissionResult::Admitted(_)
+        ));
+
+        let outcome = services
+            .launch_run(second.request)
+            .await
+            .expect("duplicate launch");
+
+        assert_eq!(
+            outcome.status(),
+            crate::RunLaunchOutcomeStatus::AlreadyDriving
+        );
+        assert_eq!(run_admitted_count(&store, &run_id).await, 1);
+    }
+
+    #[tokio::test]
     async fn app_launch_fails_before_run_admitted_when_runner_binding_is_unavailable() {
         let entry_point_registry = production_entry_point_op_registry().expect("registry");
         let certification_registry = crate::production_certification_registry().expect("cert");
@@ -364,6 +514,43 @@ mod tests {
             drive: crate::DriveMode::AppendOnly,
         })
         .expect("prepared entry-point launch")
+    }
+
+    fn test_services(
+        store: mfm_store::v1::AsyncInMemoryRunStore,
+        certification_registry: mfm_certify::CertificationRegistry,
+    ) -> crate::RunServices<
+        mfm_store::v1::AsyncInMemoryRunStore,
+        mfm_store::v1::AsyncInMemoryRunStore,
+    > {
+        let runners = crate::production_runner_registry(
+            crate::artifact_read_provider_from_retained(store.clone()),
+        )
+        .expect("runners");
+        crate::make_run_services_with_certification_registry(
+            runners,
+            store.clone(),
+            store,
+            certification_registry,
+        )
+    }
+
+    async fn run_admitted_count(
+        store: &mfm_store::v1::AsyncInMemoryRunStore,
+        run_id: &mfm_ids::RunId,
+    ) -> usize {
+        store
+            .load_run_stream(run_id)
+            .await
+            .expect("run stream")
+            .into_iter()
+            .filter(|event| {
+                matches!(
+                    event.payload(),
+                    mfm_events::v1::KernelEventPayload::RunAdmitted(_)
+                )
+            })
+            .count()
     }
 
     fn sample_portfolio_config_json() -> String {

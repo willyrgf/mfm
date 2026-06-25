@@ -21,11 +21,11 @@ use mfm_spec::v1::{
 use mfm_store::v1::{
     AdmissionToken, AdmissionWaiter, ArtifactEvidenceRef, AttemptStatus, AttemptTerminal,
     CellTerminalProjection, CommitArtifactEvidenceSet, CommitKey, CommitOutcome,
-    CommitPreconditions, ExecutionClaimStore, ManualResolution, NowaitSkipAdmissionResult,
-    PreparedCommit, PreparedCommitPlan, RequiredRunState, ResourceLaneKey, Retention, RunAdmission,
-    RunState, SagaEngagementReason, SagaTerminal, SagaTerminalProof, SideEffectPhase,
-    SideEffectProgress, SideEffectTerminal, StateAttemptStarted, StoreError, StreamSeq,
-    TrustScopeId, TrustScopeStore,
+    CommitPreconditions, ExecutionClaimStatus, ExecutionClaimStore, ManualResolution,
+    NowaitSkipAdmissionResult, PreparedCommit, PreparedCommitPlan, RequiredRunState,
+    ResourceLaneKey, Retention, RunAdmission, RunState, SagaEngagementReason, SagaTerminal,
+    SagaTerminalProof, SideEffectPhase, SideEffectProgress, SideEffectTerminal,
+    StateAttemptStarted, StoreError, StreamSeq, TrustScopeId, TrustScopeStore,
 };
 use sqlx::postgres::PgConnectOptions;
 use sqlx::AssertSqlSafe;
@@ -198,6 +198,13 @@ async fn execution_claim_acquire_busy_and_release_are_token_matched() {
         panic!("first execution claim should be admitted");
     };
     assert_eq!(lease.token, holder);
+    assert!(matches!(
+        store
+            .execution_claim_status(&run)
+            .await
+            .expect("execution claim status"),
+        ExecutionClaimStatus::Live(status) if status.token == lease.token
+    ));
 
     let busy = store
         .acquire_execution_claim(&run, other.clone())
@@ -232,6 +239,13 @@ async fn execution_claim_acquire_busy_and_release_are_token_matched() {
         .expect("matching-token release"));
     assert!(matches!(
         store
+            .execution_claim_status(&run)
+            .await
+            .expect("released execution claim status"),
+        ExecutionClaimStatus::Unclaimed
+    ));
+    assert!(matches!(
+        store
             .acquire_execution_claim(&run, other)
             .await
             .expect("acquire after release"),
@@ -256,6 +270,13 @@ async fn execution_claim_expiry_requires_explicit_reap() {
         panic!("first execution claim should be admitted");
     };
     expire_execution_claim_row(&store, &run).await;
+    assert!(matches!(
+        store
+            .execution_claim_status(&run)
+            .await
+            .expect("expired execution claim status"),
+        ExecutionClaimStatus::Expired(status) if status.token == lease.token
+    ));
 
     let busy = store
         .acquire_execution_claim(&run, other.clone())

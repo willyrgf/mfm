@@ -13,14 +13,14 @@ use mfm_store::v1::{
     payload_from_json_value, prepared_commit_plan_fingerprint, stage_prepared_commit_plan,
     AdmissionLease, AdmissionToken, AdmissionWaiter, ArtifactAuthorityMap, ArtifactEvidenceRef,
     AsyncStoreFuture, CodecError, CommitBase, CommitFingerprint, CommitKey, CommitOrdinal,
-    CommitOutcome, CommittedBatch, EventArtifactRequirement, ExecutionClaimStore,
-    ExpiredExecutionClaim, KernelEventEnvelope, LogicalEventKey, NowaitSkipAdmissionResult,
-    ObservedRunStatus, PersistedKernelEventRecord, PreparedArtifactBytes, PreparedCommitBundle,
-    ProjectionSnapshot, ProjectionSnapshotParts, ResourceLaneAuthoritySet, ResourceLaneKey,
-    ResourceLaneProjection, RetainedArtifactReadFuture, RetainedArtifactReadProvider,
-    RunEventStore, RunObservation, RunObservationPage, RunObservationQuery, RunObservationStore,
-    RunState, StagedCommitOutcome, StoreError, StoreErrorInspection, StreamSeq, TrustScopeId,
-    TrustScopeStore, VerifiedRunArtifactBytes,
+    CommitOutcome, CommittedBatch, EventArtifactRequirement, ExecutionClaimStatus,
+    ExecutionClaimStore, ExpiredExecutionClaim, KernelEventEnvelope, LogicalEventKey,
+    NowaitSkipAdmissionResult, ObservedRunStatus, PersistedKernelEventRecord,
+    PreparedArtifactBytes, PreparedCommitBundle, ProjectionSnapshot, ProjectionSnapshotParts,
+    ResourceLaneAuthoritySet, ResourceLaneKey, ResourceLaneProjection, RetainedArtifactReadFuture,
+    RetainedArtifactReadProvider, RunEventStore, RunObservation, RunObservationPage,
+    RunObservationQuery, RunObservationStore, RunState, StagedCommitOutcome, StoreError,
+    StoreErrorInspection, StreamSeq, TrustScopeId, TrustScopeStore, VerifiedRunArtifactBytes,
 };
 use serde_json::Value;
 use sqlx::{
@@ -185,6 +185,13 @@ impl ExecutionClaimStore for PostgresRunStore {
         token: AdmissionToken,
     ) -> AsyncStoreFuture<'a, NowaitSkipAdmissionResult, Self::Error> {
         Box::pin(async move { acquire_execution_claim_client(&self.pool, run_id, token).await })
+    }
+
+    fn execution_claim_status<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> AsyncStoreFuture<'a, ExecutionClaimStatus, Self::Error> {
+        Box::pin(async move { execution_claim_status_client(&self.pool, run_id).await })
     }
 
     fn renew_execution_claim<'a>(

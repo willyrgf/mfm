@@ -132,8 +132,11 @@ Request notes:
 - `run_id` is not a normal start field.
 - `drive` is `until_blocked`, `append_only`, or `once`; it defaults to `until_blocked`.
 
-The response is `{"outcome": "admitted", "run": ..., "public_output": ...}` inside the standard
-success envelope.
+The response is `{"outcome": "...", "run": ..., "public_output": ...}` inside the standard success
+envelope. Fresh admissions report `admitted`. Duplicate starts for the same certified run identity
+report `attached` without driving; if another process holds a live execution claim they report
+`already_driving`; if this process cannot match admitted runner executable evidence they report
+`incompatible_executable`.
 `public_output` is present when the run completes during the selected drive mode and the op exposes
 a public output schema id.
 

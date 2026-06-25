@@ -308,6 +308,11 @@ runner resolution. Specs that reference unported domain state descriptors fail w
 contains the framework public-output renderer plus the portfolio and EVM contract domain runners
 used by registered entry-point ops.
 
+JSON and text output include `launch_outcome`. Fresh admissions report `admitted`. A duplicate start
+for the same certified run identity reports `attached` without driving; if another process holds a
+live execution claim it reports `already_driving`; if this process cannot match the admitted runner
+executable evidence it reports `incompatible_executable`.
+
 Stable launch errors include:
 
 - `EntryPointOpNotFound`: no registered op matches `--op`.

@@ -187,6 +187,7 @@ impl<S> RouterState<S>
 where
     S: RunEventStore
         + store::TrustScopeStore
+        + store::ExecutionClaimStore
         + store::RetainedArtifactReadProvider
         + Clone
         + Send
@@ -224,6 +225,7 @@ pub fn make_app<S>(state: AppState<S>) -> Router
 where
     S: RunEventStore
         + store::TrustScopeStore
+        + store::ExecutionClaimStore
         + RunObservationStore<Error = <S as RunEventStore>::Error>
         + store::RetainedArtifactReadProvider
         + Clone
@@ -302,6 +304,7 @@ async fn ready<S>(State(state): State<RouterState<S>>) -> Result<Json<serde_json
 where
     S: RunEventStore
         + store::TrustScopeStore
+        + store::ExecutionClaimStore
         + store::RetainedArtifactReadProvider
         + Clone
         + Send
@@ -494,6 +497,7 @@ async fn runs_list<S>(
 where
     S: RunEventStore
         + store::TrustScopeStore
+        + store::ExecutionClaimStore
         + RunObservationStore<Error = <S as RunEventStore>::Error>
         + store::RetainedArtifactReadProvider
         + Clone
@@ -527,6 +531,7 @@ async fn runs_start<S>(
 where
     S: RunEventStore
         + store::TrustScopeStore
+        + store::ExecutionClaimStore
         + store::RetainedArtifactReadProvider
         + Clone
         + Send
@@ -597,6 +602,7 @@ async fn runs_resume<S>(
 where
     S: RunEventStore
         + store::TrustScopeStore
+        + store::ExecutionClaimStore
         + store::RetainedArtifactReadProvider
         + Clone
         + Send
@@ -622,6 +628,7 @@ async fn runs_manual_resolution<S>(
 where
     S: RunEventStore
         + store::TrustScopeStore
+        + store::ExecutionClaimStore
         + store::RetainedArtifactReadProvider
         + Clone
         + Send
@@ -661,6 +668,7 @@ async fn runs_status<S>(
 where
     S: RunEventStore
         + store::TrustScopeStore
+        + store::ExecutionClaimStore
         + store::RetainedArtifactReadProvider
         + Clone
         + Send
@@ -686,6 +694,7 @@ async fn runs_stream<S>(
 where
     S: RunEventStore
         + store::TrustScopeStore
+        + store::ExecutionClaimStore
         + store::RetainedArtifactReadProvider
         + Clone
         + Send
@@ -730,6 +739,7 @@ async fn runs_replay<S>(
 where
     S: RunEventStore
         + store::TrustScopeStore
+        + store::ExecutionClaimStore
         + store::RetainedArtifactReadProvider
         + Clone
         + Send
@@ -754,6 +764,7 @@ async fn runs_public_output<S>(
 where
     S: RunEventStore
         + store::TrustScopeStore
+        + store::ExecutionClaimStore
         + store::RetainedArtifactReadProvider
         + Clone
         + Send

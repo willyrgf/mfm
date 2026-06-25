@@ -26,8 +26,8 @@ use mfm_ids::{
 use mfm_replay::v1::{ReplayBroker, ReplayError, ReplayReadAuthority};
 use mfm_runtime::{
     CertifiedRuntimeSpec, ManualResolutionEvidenceArtifact, ManualResolutionRequest,
-    RunLaunchArtifact, RunLaunchEvidence, RunLaunchSeedCell, SchedulerStatus, SerialTypedScheduler,
-    VerifiedRunHistoryView,
+    RunAdmittedBindingCompatibility, RunLaunchArtifact, RunLaunchEvidence, RunLaunchSeedCell,
+    SchedulerStatus, SerialTypedScheduler, VerifiedRunHistoryView,
 };
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
@@ -1196,45 +1196,6 @@ where
             .map_err(async_app_store_error)
     }
 
-    /// Starts a certified typed run against a durable async typed store.
-    pub async fn launch_run(&self, req: RunLaunchRequest) -> Result<RunLaunchOutcome, AppError> {
-        self.validate_identity_material_trust_scope(&req.identity_material)
-            .await?;
-        if req.identity_material.certified_spec_hash != *req.certified_spec.spec_hash() {
-            return Err(run_identity_material_mismatch());
-        }
-        let run_id = req.identity_material.derive_run_id().map_err(|_| {
-            AppError::backend(
-                ErrorClass::Internal,
-                "RunIdentityMaterialInvalid",
-                "Run identity material is invalid",
-            )
-        })?;
-        if run_id != req.run_id {
-            return Err(run_identity_material_mismatch());
-        }
-        let runtime_spec = CertifiedRuntimeSpec::new(req.certified_spec)?;
-        let expected_next_seq = self
-            .store
-            .expected_next_seq(&run_id)
-            .await
-            .map_err(async_app_store_error)?;
-        let launch = self.scheduler.prepare_run_launch(
-            &runtime_spec,
-            req.identity_material,
-            req.evidence,
-            expected_next_seq,
-        )?;
-        self.scheduler.start_run(&self.store, launch).await?;
-        let status = self
-            .drive_with_mode(&runtime_spec, &run_id, req.drive)
-            .await?;
-        let run = self
-            .run_response_from_verified_status(&run_id, status)
-            .await?;
-        Ok(RunLaunchOutcome::Admitted { run })
-    }
-
     /// Resumes a certified typed run from its stored spec artifact.
     pub async fn resume_stored_run(
         &self,
@@ -1424,6 +1385,117 @@ where
                 .scheduler
                 .drive_until_blocked(&self.store, runtime_spec, run_id)
                 .await?),
+        }
+    }
+}
+
+impl<S, A> RunServices<S, A>
+where
+    S: store::RunEventStore + store::TrustScopeStore + store::ExecutionClaimStore + Send + Sync,
+    A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
+{
+    /// Starts a certified typed run against a durable async typed store.
+    pub async fn launch_run(&self, req: RunLaunchRequest) -> Result<RunLaunchOutcome, AppError> {
+        self.validate_identity_material_trust_scope(&req.identity_material)
+            .await?;
+        if req.identity_material.certified_spec_hash != *req.certified_spec.spec_hash() {
+            return Err(run_identity_material_mismatch());
+        }
+        let run_id = req.identity_material.derive_run_id().map_err(|_| {
+            AppError::backend(
+                ErrorClass::Internal,
+                "RunIdentityMaterialInvalid",
+                "Run identity material is invalid",
+            )
+        })?;
+        if run_id != req.run_id {
+            return Err(run_identity_material_mismatch());
+        }
+        let identity_material = req.identity_material;
+        let runtime_spec = CertifiedRuntimeSpec::new(req.certified_spec)?;
+        let stream = self
+            .store
+            .load_run_stream(&run_id)
+            .await
+            .map_err(async_app_store_error)?;
+        if !stream.is_empty() {
+            return self
+                .attach_to_existing_run(&run_id, &identity_material)
+                .await;
+        }
+        let expected_next_seq = self
+            .store
+            .expected_next_seq(&run_id)
+            .await
+            .map_err(async_app_store_error)?;
+        if expected_next_seq != store::StreamSeq::FIRST {
+            return self
+                .attach_to_existing_run(&run_id, &identity_material)
+                .await;
+        }
+        let launch = self.scheduler.prepare_run_launch(
+            &runtime_spec,
+            identity_material.clone(),
+            req.evidence,
+            expected_next_seq,
+        )?;
+        if let Err(error) = self.scheduler.start_run(&self.store, launch).await {
+            let stream = self
+                .store
+                .load_run_stream(&run_id)
+                .await
+                .map_err(async_app_store_error)?;
+            if !stream.is_empty() {
+                return self
+                    .attach_to_existing_run(&run_id, &identity_material)
+                    .await;
+            }
+            return Err(error.into());
+        }
+        let status = self
+            .drive_with_mode(&runtime_spec, &run_id, req.drive)
+            .await?;
+        let run = self
+            .run_response_from_verified_status(&run_id, status)
+            .await?;
+        Ok(RunLaunchOutcome::Admitted { run })
+    }
+
+    async fn attach_to_existing_run(
+        &self,
+        run_id: &RunId,
+        identity_material: &events::RunIdentityMaterialV1,
+    ) -> Result<RunLaunchOutcome, AppError> {
+        let context = self.load_verified_status_read_context(run_id).await?;
+        let run_admitted = context.read.view().run_admitted();
+        if &run_admitted.identity_material != identity_material {
+            return Err(run_identity_material_mismatch());
+        }
+        let run = run_status_from_projection(
+            run_id,
+            context.runtime_spec(),
+            context.events(),
+            context.projection(),
+        )?;
+        match self
+            .scheduler
+            .run_admitted_binding_compatibility(context.runtime_spec(), run_admitted)?
+        {
+            RunAdmittedBindingCompatibility::Compatible => {}
+            RunAdmittedBindingCompatibility::IncompatibleExecutable => {
+                return Ok(RunLaunchOutcome::IncompatibleExecutable { run });
+            }
+        }
+        match self
+            .store
+            .execution_claim_status(run_id)
+            .await
+            .map_err(async_app_store_error)?
+        {
+            store::ExecutionClaimStatus::Live(_) => Ok(RunLaunchOutcome::AlreadyDriving { run }),
+            store::ExecutionClaimStatus::Unclaimed | store::ExecutionClaimStatus::Expired(_) => {
+                Ok(RunLaunchOutcome::Attached { run })
+            }
         }
     }
 }

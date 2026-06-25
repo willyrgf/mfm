@@ -71,7 +71,9 @@ pub use runners::{
     ErasedRunnerBinding, ErasedRunnerFuture, ErasedRunnerOutput, ErasedRunnerRegistry,
     PreInvocationRunnerFuture, RunnerEventPayload,
 };
-pub use scheduler::{ManualResolutionRequest, SchedulerStatus, SerialTypedScheduler};
+pub use scheduler::{
+    ManualResolutionRequest, RunAdmittedBindingCompatibility, SchedulerStatus, SerialTypedScheduler,
+};
 pub use side_effect_driver::{
     SideEffectDriver, SideEffectDriverCallbacks, SideEffectDriverFuture, SideEffectIntentPlan,
     SideEffectLanePreclaimBuilder, SideEffectObservedEvidence, SideEffectPreparedInvocationPlan,
