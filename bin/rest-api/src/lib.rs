@@ -27,9 +27,10 @@ use axum::Json;
 use axum::Router;
 use http::header::HeaderName;
 use mfm_app::{
-    AppError, DriveMode, EntryPointRunLaunchInput, ErrorClass, ManualResolutionDecision,
-    ManualResolutionRecordRequest, ProductionRunStore, PublicOpName, PublicOutputResponse,
-    PublicSafeMessage, RunModeStatus, RunResponse, RunServices, RunStreamResponse,
+    AppError, DistinctRunKey, DriveMode, EntryPointRunLaunchInput, ErrorClass,
+    ManualResolutionDecision, ManualResolutionRecordRequest, ProductionRunStore, PublicOpName,
+    PublicOutputResponse, PublicSafeMessage, RunLaunchOutcomeStatus, RunModeStatus, RunResponse,
+    RunServices, RunStreamResponse,
 };
 use mfm_authored_config::{AuthoredConfig, AuthoredConfigFormat};
 use mfm_canonical::PlainCanonicalJsonBytes;
@@ -352,7 +353,7 @@ impl RestDriveMode {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RunStartBody {
     op: String,
@@ -362,13 +363,14 @@ struct RunStartBody {
     config_format: Option<RestConfigFormat>,
     config: serde_json::Value,
     #[serde(default)]
-    run_id: Option<String>,
+    distinct_run_key: Option<String>,
     #[serde(default)]
     drive: RestDriveMode,
 }
 
 #[derive(Debug, Serialize)]
 struct RunStartResponse {
+    outcome: RunLaunchOutcomeStatus,
     run: RunResponse,
     public_output: Option<PublicOutputResponse>,
 }
@@ -532,12 +534,12 @@ where
         + 'static,
 {
     let Json(req) = body?;
-    reject_explicit_run_id(req.run_id)?;
     let services = state.services()?;
     let trust_scope_id = services.load_trust_scope_id().await?;
     let entry_point_registry = mfm_app::production_entry_point_op_registry()?;
     let public_op_name = PublicOpName::new(&req.op)?;
     let op_version = req.op_version.map(mfm_app::OpVersion::new).transpose()?;
+    let distinct_run_key = req.distinct_run_key.map(DistinctRunKey::new).transpose()?;
     let authored_config = AuthoredConfig::from_json_transport_value(
         req.config_format.map(AuthoredConfigFormat::from),
         &req.config,
@@ -549,6 +551,7 @@ where
         authored_config,
         certification_registry: services.certification_registry(),
         trust_scope_id,
+        distinct_run_key,
         drive: req.drive.into_app(),
     })?;
     let run_id = prepared.request.run_id.clone();
@@ -560,7 +563,14 @@ where
         .public_outputs
         .public_schema_id
         .clone();
-    let run = services.launch_run(prepared.request).await?;
+    let launch = services.launch_run(prepared.request).await?;
+    let (outcome, run) = launch.into_response_parts().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "RunLaunchOutcomeInvalid",
+            "Run launch did not return a run response",
+        )
+    })?;
     let public_output = if run.run_mode == RunModeStatus::Completed {
         Some(
             services
@@ -571,7 +581,11 @@ where
         None
     };
 
-    json_ok(RunStartResponse { run, public_output })
+    json_ok(RunStartResponse {
+        outcome,
+        run,
+        public_output,
+    })
 }
 
 #[instrument(level = "info", skip(state, body), fields(run_id = run_id.as_str()))]
@@ -761,17 +775,6 @@ fn parse_run_id(value: &str) -> Result<RunId, ApiError> {
             "Run id must use the typed run identity format `run:<algorithm>:<digest>`",
         )
     })
-}
-
-fn reject_explicit_run_id(value: Option<String>) -> Result<(), ApiError> {
-    if value.is_some() {
-        return Err(ApiError::new(
-            StatusCode::BAD_REQUEST,
-            "RunIdUnsupported",
-            "Explicit run ids are not accepted; run ids are derived from certified identity material",
-        ));
-    }
-    Ok(())
 }
 
 fn parse_schema_id(value: &str) -> Result<SchemaId, ApiError> {

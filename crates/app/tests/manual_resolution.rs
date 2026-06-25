@@ -57,13 +57,19 @@ async fn public_manual_resolution_scenario_records_resolution_and_hides_proof_by
         authored_config,
         certification_registry: &registry,
         trust_scope_id,
+        distinct_run_key: None,
         drive: DriveMode::UntilBlocked,
     })
     .expect("launch request");
 
     let run_id = launch.request.run_id.clone();
     let certified = launch.request.certified_spec.clone();
-    let blocked = services.launch_run(launch.request).await.expect("launch");
+    let (_, blocked) = services
+        .launch_run(launch.request)
+        .await
+        .expect("launch")
+        .into_response_parts()
+        .expect("run response");
     assert_eq!(blocked.run_mode, RunModeStatus::ManualBlocked);
     let blocked_replay = services
         .verify_replay_for_run(&run_id)

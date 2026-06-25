@@ -112,6 +112,7 @@ Request shape:
   "config": {
     "...": "entry-point config"
   },
+  "distinct_run_key": "optional-key",
   "drive": "until_blocked"
 }
 ```
@@ -124,12 +125,15 @@ Request notes:
 - `config` is required. With `config_format: "toml"`, it must be a string. With
   `config_format: "json"`, it may be a JSON object/array/value accepted by the selected op.
 - Normal start derives the typed run id from certified run identity material: certified spec hash,
-  store trust scope, and optional distinct-run material when that surface is introduced.
-- A `run_id` field is rejected with `RunIdUnsupported`; raw caller-supplied run ids are not accepted
-  for normal start.
+  store trust scope, and an optional distinct-run key digest.
+- `distinct_run_key` is optional. Supplying it forces a distinct run for otherwise identical
+  certified work. The raw key is not persisted; only a domain-separated digest enters run identity
+  material.
+- `run_id` is not a normal start field.
 - `drive` is `until_blocked`, `append_only`, or `once`; it defaults to `until_blocked`.
 
-The response is `{"run": ..., "public_output": ...}` inside the standard success envelope.
+The response is `{"outcome": "admitted", "run": ..., "public_output": ...}` inside the standard
+success envelope.
 `public_output` is present when the run completes during the selected drive mode and the op exposes
 a public output schema id.
 

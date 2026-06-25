@@ -450,15 +450,6 @@ pub fn production_entry_point_op_registry() -> Result<EntryPointOpRegistry, AppE
     entry_points::production_entry_point_op_registry()
 }
 
-/// Generates a digest-only typed run id from a random UUID.
-pub fn new_run_id() -> RunId {
-    let uuid = uuid::Uuid::new_v4();
-    RunId::from_digest(
-        DigestAlgorithm::Sha256JcsV1,
-        sha256_digest_bytes(uuid.as_bytes()),
-    )
-}
-
 /// Whether typed start/resume should run scheduler steps after appending `RunAdmitted`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DriveMode {
@@ -495,6 +486,45 @@ impl fmt::Display for ManualResolutionDecision {
     }
 }
 
+/// Raw caller material used only to force a distinct run for otherwise identical certified work.
+///
+/// The raw key is intentionally not exposed after construction. Only its digest may be recorded in
+/// run identity material.
+#[derive(Clone, PartialEq, Eq)]
+pub struct DistinctRunKey(String);
+
+impl DistinctRunKey {
+    /// Creates a checked distinct-run key from the exact caller-supplied UTF-8 string.
+    pub fn new(value: impl Into<String>) -> Result<Self, AppError> {
+        let value = value.into();
+        events::DistinctRunKeyMaterialV1::new(&value).map_err(distinct_run_key_error)?;
+        Ok(Self(value))
+    }
+
+    /// Returns the domain-separated digest used by `RunIdentityMaterialV1`.
+    pub fn digest(&self) -> Result<ContentDigest, AppError> {
+        events::DistinctRunKeyMaterialV1::new(&self.0)
+            .and_then(|material| material.digest())
+            .map_err(distinct_run_key_error)
+    }
+}
+
+impl fmt::Debug for DistinctRunKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("DistinctRunKey")
+            .field(&"<redacted>")
+            .finish()
+    }
+}
+
+fn distinct_run_key_error(_error: mfm_events::EventError) -> AppError {
+    AppError::new(
+        ErrorClass::BadRequest,
+        "DistinctRunKeyInvalid",
+        "Distinct run key must be non-empty and at most 1024 bytes",
+    )
+}
+
 /// Request to start a certified typed run.
 #[derive(Debug, Clone)]
 pub struct RunLaunchRequest {
@@ -524,6 +554,8 @@ pub struct EntryPointRunLaunchInput<'a> {
     pub certification_registry: &'a CertificationRegistry,
     /// Store-owned deployment trust scope.
     pub trust_scope_id: TrustScopeId,
+    /// Optional caller material used only to force a distinct run id.
+    pub distinct_run_key: Option<DistinctRunKey>,
     /// Scheduler drive policy after start.
     pub drive: DriveMode,
 }
@@ -863,6 +895,108 @@ impl fmt::Display for RunResponse {
     }
 }
 
+/// Public launch outcome kind for start responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunLaunchOutcomeStatus {
+    /// A new run was admitted by this launch request.
+    Admitted,
+    /// The launch request attached to an already admitted compatible run.
+    Attached,
+    /// The launch request found an already admitted run with an active compatible driver.
+    AlreadyDriving,
+    /// The launch request found the same run identity with incompatible executable bindings.
+    IncompatibleExecutable,
+    /// The stored run identity material did not match the derived identity.
+    IdentityMismatch,
+}
+
+impl RunLaunchOutcomeStatus {
+    /// Returns the stable public status string.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Admitted => "admitted",
+            Self::Attached => "attached",
+            Self::AlreadyDriving => "already_driving",
+            Self::IncompatibleExecutable => "incompatible_executable",
+            Self::IdentityMismatch => "identity_mismatch",
+        }
+    }
+}
+
+impl fmt::Display for RunLaunchOutcomeStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// App-level result of a normal run launch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunLaunchOutcome {
+    /// This launch admitted a new run.
+    Admitted {
+        /// Current run status after the selected drive mode.
+        run: RunResponse,
+    },
+    /// This launch attached to an already admitted compatible run.
+    Attached {
+        /// Current run status for the existing run.
+        run: RunResponse,
+    },
+    /// This launch found an active compatible driver.
+    AlreadyDriving {
+        /// Current run status for the existing run.
+        run: RunResponse,
+    },
+    /// This launch found the same run identity with incompatible executable bindings.
+    IncompatibleExecutable {
+        /// Current run status for the existing run.
+        run: RunResponse,
+    },
+    /// This launch found stored identity material that did not match the derived run id.
+    IdentityMismatch {
+        /// Run id whose stored identity material did not validate.
+        run_id: String,
+    },
+}
+
+impl RunLaunchOutcome {
+    /// Returns the stable public outcome kind.
+    pub fn status(&self) -> RunLaunchOutcomeStatus {
+        match self {
+            Self::Admitted { .. } => RunLaunchOutcomeStatus::Admitted,
+            Self::Attached { .. } => RunLaunchOutcomeStatus::Attached,
+            Self::AlreadyDriving { .. } => RunLaunchOutcomeStatus::AlreadyDriving,
+            Self::IncompatibleExecutable { .. } => RunLaunchOutcomeStatus::IncompatibleExecutable,
+            Self::IdentityMismatch { .. } => RunLaunchOutcomeStatus::IdentityMismatch,
+        }
+    }
+
+    /// Returns the run response when this outcome carries one.
+    pub fn run(&self) -> Option<&RunResponse> {
+        match self {
+            Self::Admitted { run }
+            | Self::Attached { run }
+            | Self::AlreadyDriving { run }
+            | Self::IncompatibleExecutable { run } => Some(run),
+            Self::IdentityMismatch { .. } => None,
+        }
+    }
+
+    /// Splits this outcome into the public kind and run response when one is available.
+    pub fn into_response_parts(self) -> Option<(RunLaunchOutcomeStatus, RunResponse)> {
+        match self {
+            Self::Admitted { run } => Some((RunLaunchOutcomeStatus::Admitted, run)),
+            Self::Attached { run } => Some((RunLaunchOutcomeStatus::Attached, run)),
+            Self::AlreadyDriving { run } => Some((RunLaunchOutcomeStatus::AlreadyDriving, run)),
+            Self::IncompatibleExecutable { run } => {
+                Some((RunLaunchOutcomeStatus::IncompatibleExecutable, run))
+            }
+            Self::IdentityMismatch { .. } => None,
+        }
+    }
+}
+
 /// Typed public-output rendering response.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PublicOutputResponse {
@@ -1063,7 +1197,7 @@ where
     }
 
     /// Starts a certified typed run against a durable async typed store.
-    pub async fn launch_run(&self, req: RunLaunchRequest) -> Result<RunResponse, AppError> {
+    pub async fn launch_run(&self, req: RunLaunchRequest) -> Result<RunLaunchOutcome, AppError> {
         self.validate_identity_material_trust_scope(&req.identity_material)
             .await?;
         if req.identity_material.certified_spec_hash != *req.certified_spec.spec_hash() {
@@ -1095,8 +1229,10 @@ where
         let status = self
             .drive_with_mode(&runtime_spec, &run_id, req.drive)
             .await?;
-        self.run_response_from_verified_status(&run_id, status)
-            .await
+        let run = self
+            .run_response_from_verified_status(&run_id, status)
+            .await?;
+        Ok(RunLaunchOutcome::Admitted { run })
     }
 
     /// Resumes a certified typed run from its stored spec artifact.
@@ -1955,6 +2091,11 @@ pub fn prepare_entry_point_run_launch(
         resolved_op_id,
         entry_point_registry_digest: registry_digest,
     };
+    let distinct_run_key_digest = input
+        .distinct_run_key
+        .as_ref()
+        .map(DistinctRunKey::digest)
+        .transpose()?;
     let runtime_entry_point_evidence = events::EntryPointLaunchEvidence {
         resolved_op_id: events::EntryPointOpId::new(evidence.resolved_op_id.to_string()).map_err(
             |_| {
@@ -1971,6 +2112,7 @@ pub fn prepare_entry_point_run_launch(
             certified_spec,
             registry: &scoped_registry,
             trust_scope_id: input.trust_scope_id,
+            distinct_run_key_digest,
             entry_point_evidence: runtime_entry_point_evidence,
             drive: input.drive,
         },
@@ -2000,6 +2142,8 @@ pub(crate) struct CertifiedRunLaunchInput<'a> {
     pub(crate) registry: &'a CertificationRegistry,
     /// Store-owned deployment trust scope.
     pub(crate) trust_scope_id: TrustScopeId,
+    /// Optional distinct-run key digest.
+    pub(crate) distinct_run_key_digest: Option<ContentDigest>,
     /// Public entry-point operation evidence selected by app assembly.
     pub(crate) entry_point_evidence: events::EntryPointLaunchEvidence,
     /// Drive mode used for the initial scheduler invocation.
@@ -2021,7 +2165,7 @@ fn prepare_certified_run_launch(
     let identity_material = events::RunIdentityMaterialV1 {
         certified_spec_hash: runtime_spec.spec_hash().clone(),
         trust_scope_id: input.trust_scope_id,
-        distinct_run_key_digest: None,
+        distinct_run_key_digest: input.distinct_run_key_digest,
     };
     let run_id = identity_material.derive_run_id().map_err(|_| {
         AppError::backend(

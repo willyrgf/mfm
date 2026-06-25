@@ -38,6 +38,12 @@ pub enum EventError {
         /// Stable rejection reason.
         reason: &'static str,
     },
+    /// A distinct-run key failed validation.
+    #[error("invalid distinct run key: {reason}")]
+    InvalidDistinctRunKey {
+        /// Stable rejection reason.
+        reason: &'static str,
+    },
     /// Identity construction failed.
     #[error("identity error: {0}")]
     Identity(String),
@@ -677,6 +683,58 @@ pub mod v1 {
         pub claim_generation: Option<u32>,
         /// Side-effect payload kind.
         pub kind: SideEffectEventKind,
+    }
+
+    /// Transient hash-defining material for a caller-requested distinct run.
+    ///
+    /// The raw key is never persisted. Only the digest returned by [`Self::digest`] may enter
+    /// [`RunIdentityMaterialV1`].
+    pub struct DistinctRunKeyMaterialV1<'a> {
+        raw_key: &'a str,
+    }
+
+    impl<'a> DistinctRunKeyMaterialV1<'a> {
+        /// Stable canonical domain.
+        pub const DOMAIN: &'static str = "mfm.distinct_run_key.v1";
+        /// Maximum accepted raw key size in bytes.
+        pub const MAX_RAW_KEY_BYTES: usize = 1024;
+
+        /// Creates transient distinct-run material from the exact caller-supplied UTF-8 key.
+        pub fn new(raw_key: &'a str) -> Result<Self> {
+            if raw_key.is_empty() {
+                return Err(EventError::InvalidDistinctRunKey { reason: "empty" });
+            }
+            if raw_key.len() > Self::MAX_RAW_KEY_BYTES {
+                return Err(EventError::InvalidDistinctRunKey {
+                    reason: "too_large",
+                });
+            }
+            Ok(Self { raw_key })
+        }
+
+        /// Returns canonical JSON bytes for the distinct-run key digest material.
+        pub fn canonical_json(&self) -> Result<PlainCanonicalJsonBytes> {
+            canonical_json(serde_json::json!({
+                "domain": Self::DOMAIN,
+                "raw_key": self.raw_key,
+            }))
+        }
+
+        /// Returns the digest that may be recorded in run identity material.
+        pub fn digest(&self) -> Result<ContentDigest> {
+            Ok(ContentDigest::from_digest(
+                DigestAlgorithm::Sha256JcsV1,
+                self.canonical_json()?.digest_bytes(),
+            ))
+        }
+    }
+
+    impl std::fmt::Debug for DistinctRunKeyMaterialV1<'_> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("DistinctRunKeyMaterialV1")
+                .field("raw_key", &"<redacted>")
+                .finish()
+        }
     }
 
     /// Hash-defining material for content-addressed run identity.
@@ -4299,6 +4357,32 @@ pub mod v1 {
                 trust_scope_id: trust_scope_id(),
                 distinct_run_key_digest: None,
             }
+        }
+
+        #[test]
+        fn distinct_run_key_material_v1_digest_is_canonical_and_redacted() {
+            let material = DistinctRunKeyMaterialV1::new("alpha").expect("distinct key");
+
+            assert_eq!(
+                material.canonical_json().expect("canonical").as_str(),
+                r#"{"domain":"mfm.distinct_run_key.v1","raw_key":"alpha"}"#
+            );
+            assert_eq!(
+                material.digest().expect("digest").as_str(),
+                "content:sha256-jcs-v1:4b27bd2f750880d8bd52200ddc0af0ad78fe23dfa519cad83595ec905a103c1d"
+            );
+            assert!(!format!("{material:?}").contains("alpha"));
+        }
+
+        #[test]
+        fn distinct_run_key_material_v1_rejects_empty_and_oversized_keys_without_echo() {
+            let empty = DistinctRunKeyMaterialV1::new("").expect_err("empty key rejects");
+            assert_eq!(empty.to_string(), "invalid distinct run key: empty");
+
+            let too_large = "x".repeat(DistinctRunKeyMaterialV1::MAX_RAW_KEY_BYTES + 1);
+            let err = DistinctRunKeyMaterialV1::new(&too_large).expect_err("oversized key rejects");
+            assert_eq!(err.to_string(), "invalid distinct run key: too_large");
+            assert!(!err.to_string().contains(&too_large));
         }
 
         fn run_admitted_payload() -> KernelEventPayload {

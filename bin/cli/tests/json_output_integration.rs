@@ -348,7 +348,7 @@ fn test_run_start_requires_entry_point_op_and_config_path() {
 }
 
 #[test]
-fn test_run_start_rejects_explicit_run_id_before_store_access() {
+fn test_run_start_run_id_flag_is_not_a_start_option() {
     let temp_dir = TempDir::new().unwrap();
     let config_path = temp_dir.path().join("portfolio.toml");
     std::fs::write(&config_path, sample_portfolio_config_toml()).expect("config fixture");
@@ -375,7 +375,8 @@ fn test_run_start_rejects_explicit_run_id_before_store_access() {
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8(output.stderr).unwrap();
     let parsed = verify_error_response(&stderr);
-    assert_eq!(parsed.error.code, "RunIdUnsupported");
+    assert_eq!(parsed.error.code, "CliParseError");
+    assert!(parsed.error.message.contains("--run-id"));
 }
 
 #[test]

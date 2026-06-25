@@ -52,6 +52,7 @@ async fn run_status_reports_interrupted_attempt_and_framework_attempts_from_hist
         .expect("authored config"),
         certification_registry: &certification_registry,
         trust_scope_id,
+        distinct_run_key: None,
         drive: mfm_app::DriveMode::AppendOnly,
     })
     .expect("prepared entry-point launch");
@@ -77,6 +78,7 @@ async fn run_status_reports_interrupted_attempt_and_framework_attempts_from_hist
     let start = run_cli(&start_args);
     assert_success(&start);
     let start_json = parse_success_json(&start.stdout);
+    assert_eq!(start_json["outcome"], "admitted");
     assert_eq!(start_json["run"]["run_mode"], "forward");
     assert_eq!(start_json["run"]["run_id"], run_id.as_str());
 
