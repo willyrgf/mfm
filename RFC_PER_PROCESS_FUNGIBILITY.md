@@ -24,15 +24,19 @@ resource lanes, a durable observation/watch feed). The remaining work is three c
 1. **A unified admission-lane primitive** — one durable mechanism for fair, fenced, lease-reaped
    exclusive admission that serves both *resource lanes* (wallet/nonce contention) and *execution
    claims* (which worker drives a run), plus any future coordination need.
-2. **Execution claim (dedup + recovery-ownership substrate)** — the invoker drives its own run; an
-   execution claim coordinates concurrent invocations (no duplicate driver of the same run) and, via
-   its lease, leaves a dead driver's run *reclaimable*. **Automatic resume is out of scope here** — it
-   belongs to the larger AC/DC + saga recovery effort (§6.5, §12). The observation feed stays
-   status/watch only.
+2. **Content-addressed run identity + execution claim** — the invoker expands and certifies the
+   runtime state graph, binds the runner/adapter executables, and derives the run id from that
+   canonical work product **including those executable identities** (so fungibility is
+   executable-identity-scoped: same work + same build dedups and is interchangeable; a different build
+   is a distinct run). Dedup identity comes from the content-addressed run id; the execution claim
+   coordinates active drivers of that run and, via its lease, leaves a dead driver's run visible for
+   recovery. **Automatic resume is out of scope here** — it belongs to the larger AC/DC + saga
+   recovery effort (§6.5, §12). v1 recovery is manual `run resume`.
 3. **Side-effect verification as a paired framework state** — every side-effect node lowers into a
    `submit` node plus an auto-inserted `verify` framework node. This productizes receipt/finality
-   verification uniformly *and* makes external-effect recovery fall out of ordinary dispatch,
-   collapsing the bespoke reconciliation machinery the earlier design implied.
+   verification uniformly *and* makes external-effect reconciliation follow the ordinary frontier
+   once a run is live-driven or manually resumed, collapsing the bespoke reconciliation machinery
+   the earlier design implied.
 
 The net is more capability with less bespoke code, and a system that scales to many processes and
 many agents/sessions without any process-level coordination.
@@ -57,11 +61,13 @@ append-only, certified design.
 
 ### 2.3 What is missing today
 
-- **No execution claim, and no safe takeover/resume.** Execution is invoker-driven (the process that
-  starts a run drives it) — fine — but there is no durable execution claim to dedup concurrent
-  invocations of the same run (this RFC adds it), and no way for another process to safely take over
-  and resume a dead driver's run (deferred to the AC/DC + saga recovery effort). The observation feed
-  is read/observe only.
+- **Random run identity, no execution claim, and no automatic takeover.** Execution is invoker-driven
+  (the process that starts a run drives it) — fine — but default run ids are random today
+  (`mfm_app::new_run_id()` hashes a UUIDv4, and CLI/REST use it when no run id is supplied). That
+  means two identical launches create two independent runs. There is also no durable execution claim
+  to coordinate active drivers of the same run, and no automatic way for another process to take over
+  a dead driver's run (deferred to the AC/DC + saga recovery effort). The observation feed is
+  read/observe only.
 - **No external-effect reconciliation.** A worker that submits a transaction and dies leaves an
   ambiguous nonce; nothing reads chain truth to resolve landed-vs-never-sent.
 - **Verification is not productized.** Receipt/finality checking is embedded ad hoc inside the
@@ -79,7 +85,8 @@ append-only, certified design.
   (see `docs/saga.md`).
 - One reusable coordination primitive for all exclusive-admission needs.
 - Uniform, configurable side-effect verification (receipt vs finality) across all domains.
-- External-effect recovery that requires no bespoke machinery beyond ordinary dispatch.
+- External-effect recovery behavior, once a run is live-driven or manually resumed, that requires no
+  bespoke machinery beyond ordinary frontier driving.
 
 ### Non-goals
 
@@ -143,8 +150,11 @@ The safety substrate is already complete; the gaps are in liveness/scale/discove
 
 ### 6.1 Process-fungible execution model
 
-A run is persisted authority (certified spec) plus a current frontier. Any worker with the registry,
-capabilities, and store authority may drive it. Safety is the store (§5). A **worker lease is
+A run is persisted authority (certified spec) plus a current frontier. Any worker that shares the
+run's **bound executable identities** — and has the registry, capabilities, and store authority —
+may drive it. Fungibility is **executable-identity-scoped**, not unbounded: the drive/resume path
+rejects a worker whose runner/adapter executables differ from those in `RunAdmitted` (DEC-29;
+`binding.rs:113`, `history.rs:212`). Safety is the store (§5). A **worker lease is
 operational authority only**: "this process currently has fenced permission to *attempt* an action
 under durable preconditions," never "this process owns the run." The semantic result exists only
 after a valid store-admitted append.
@@ -186,13 +196,14 @@ Two instantiations exercise disjoint subsets, so neither stores the other's auth
   never stored here. The caller supplies `holder_is_free` from the event fold.
 - **Execution claim (`NowaitSkip`, lane_id = run id)** — uses only the lane row's lease; writes no
   waiters; the lease *is* the holder, harmless because safety = the store's per-run lock +
-  `expected_next_seq`. Try-acquire is the **dedup** gate: a second invoker of the same run finds it
-  held and attaches instead of starting a duplicate (§6.3). Crucially, the execution lease confers
-  **no** authority to cross a side-effect boundary — that gate is solely the per-side-effect
+  `expected_next_seq`. The content-addressed run id is the **dedup identity**; try-acquire is the
+  **active-driver coordination** gate: a second invoker of the same run finds an existing holder and
+  attaches/reports instead of doing duplicate driver work (§6.3). Crucially, the execution lease
+  confers **no** authority to cross a side-effect boundary — that gate is solely the per-side-effect
   nonce-lane claim + `claim_fencing_token`. So even two processes that both believe they hold the
-  execution lease (after a false reap) cannot double-submit: only the claim-holder may submit, and
-  nonce serialization + the claim-generation fence make at most one mutation land. Execution lease =
-  dispatch liveness; side-effect claim = mutation safety.
+  execution lease (after a false reap) cannot double-submit: only a valid side-effect claim-holder
+  may submit, and nonce serialization + the claim-generation fence make at most one mutation land.
+  Execution lease = dispatch liveness; side-effect claim = mutation safety.
 
 Non-negotiable invariants:
 
@@ -207,8 +218,9 @@ Non-negotiable invariants:
 App/runtime dispatch consumes the *contract*, never the Postgres-specific SQL — preserving the
 existing store-contract/implementation boundary (the same way `RunEventStore` is consumed today).
 Note (LOW): today's advisory-lock key is a 32-bit truncation of SHA-256 (`run_store/stream.rs:66-74`),
-so distinct lanes can falsely contend at scale; the new primitive should key its lock on a 64-bit
-value or the full lane id (safety is unaffected — it holds via PK + CAS).
+so distinct lanes can falsely contend at scale; the new primitive should use the 64-bit
+`pg_advisory_xact_lock(int8)` form derived from the lane fingerprint (or an equivalent full-lane
+lock). Safety is unaffected — it holds via PK + CAS.
 
 **Scope (v1) — documents the existing single-lane scope, not a new constraint.** The primitive ships
 exactly two lane classes: single-lane `WaitFifo` (resource lanes; one `(namespace, key)` per claim —
@@ -216,45 +228,106 @@ all the code and `docs/saga.md` already provide) and `NowaitSkip` (execution). M
 stays deferred (§3 Non-goals). The point is only that the RFC's prose must not *imply* multi-lane
 atomicity the design never had.
 
-### 6.3 Execution: invoker-drives, claim, and automatic resume
+### 6.3 Execution: content-addressed run id, invoker-drives, and manual resume
 
 MFM is **invoker-driven**, not pool-dispatched: `mfm run --op xyz` starts the state-machine runner
 *in that process* and drives the run to completion or to a block. There is no pool of idle workers
 polling a feed for work; the observation feed (§5) is **status/watch only** and never a dispatch
-surface.
+surface. One process may drive many runs concurrently; the correctness boundary is the run stream,
+not the OS process.
 
-The execution claim is a `NowaitSkip` admission lane keyed on the content-addressed run id, doing
-two jobs — neither of which is discovery:
+Before admission, the launcher expands and certifies the requested work into the runtime state graph
+the scheduler will actually execute, and binds the concrete runner/adapter **executable identities**.
+The default run id is content-addressed over that canonical runtime work product **including the bound
+executable identities**:
 
-- **Dedup.** A second `mfm run --op xyz` (same op+config → same run id) finds the claim held by a
-  live driver and does not start a duplicate; it attaches to / reports the existing run.
-- **Recovery ownership.** The driver heartbeats the claim while running (renewing `lease_expires_at`
-  forward). If it dies, the lease expires and the run becomes resumable by another process — without
-  ever transferring *semantic* ownership (safety is still the store, §5).
+```
+run_id = hash(
+  lowered node/cell/binding graph
+  + hash-defining admission policy
+  + bound runner/adapter executable identities   // the same ones RunAdmitted records and the
+)                                                 // drive/resume path enforces (commit.rs:235-237,
+                                                  // binding.rs:113, history.rs:212)
+```
+
+The projection **excludes** the run id itself, non-semantic launch spelling (raw entry-point name,
+config-file bytes, local path, unresolved "latest"), and the certified spec's audit/provenance fields
+(`TypedExecutionSpecAudit` / `non_semantic_provenance`) — so it is **not** simply the full spec hash,
+which folds provenance in. Remediation-linked specs carry a `forward_run_id` whose handling the
+projection must define (WS-B, addresses MED-3).
+
+**Including the executable identities is deliberate (DEC-29).** The drive/resume path already enforces
+exact executable identity (`validate_run_admitted_binding`, `history.rs:212`; full-vector `!=` in
+`binding.rs:113`), so fungibility is **executable-identity-scoped**: workers sharing the run's bound
+executables are interchangeable, a worker on a *different* build is not. Folding executables into the
+run id makes the two mechanisms consistent — *same work + same build* → the **same** run id → the
+**same** `RunAdmitted` fingerprint → an idempotent **admit-or-attach** (not a `CommitConflict`);
+*same work + different build* → a **different** run id → a distinct run. Consequence (rolling upgrade):
+a new binary starts new runs; an in-flight run is driven/resumed only by its own build until the
+deferred AC/DC + saga recovery effort adds cross-build takeover. Today's implementation has none of
+this: `mfm_app::new_run_id()` hashes a random UUID and CLI/REST use it by default; WS-B replaces that
+default with this derived run id.
+
+**Idempotent by default, distinct-run on request (DEC-28).** Because the run id is the certified-graph
+content address, two launches of *identical* certified work converge on **one** run — re-invoking
+attaches to / reports the existing run rather than duplicating it. This is the multi-agent safety
+default: if two agents or sessions independently request the same work, they coordinate onto one run
+and cannot double-execute. To force a **distinct** run of identical work, the caller supplies a
+distinguishing input — an explicit `run_id`, or a nonce/timestamp that flows into the certified graph
+(e.g. a snapshot-as-of-block input). Most repeatable ops already carry a varying input (a resolved
+block height or timestamp) that differentiates them, so dedup collapses only genuinely-identical
+launches — which is exactly when convergence is desired.
+
+**Trust assumption (DEC-31).** Convergence is a safety win only within a **shared trust domain**:
+`RunAdmitted` carries no launching-principal identity, so two launchers that converge drive the side
+effect under whichever worker's pinned-`signer_ref` resolution wins. This is correct when all
+converging launchers are co-authorized for that signer. Cross-tenant isolation would require the
+launching principal to enter the dedup identity — which would stop identical work by different
+principals from converging, a deliberate tension with the idempotent default that this RFC does not
+take on.
+
+The execution claim is a `NowaitSkip` admission lane keyed on the derived run id. It does two jobs —
+neither of which is discovery and neither of which creates run identity:
+
+- **Active-driver coordination.** A second launch that derives the same run id sees the same stream.
+  If a live driver holds the claim, it attaches to / reports that run instead of doing duplicate
+  driver work. If two drivers race, the store's per-run lock, commit-key idempotency, and
+  `expected_next_seq` remain the safety floor.
+- **Recovery substrate.** The driver heartbeats the claim while running (renewing
+  `lease_expires_at` forward). If it dies, the lease expiry makes the run visibly stale for future
+  recovery machinery — without ever transferring *semantic* ownership (safety is still the store,
+  §5).
 
 The driver holds the run through blocks rather than handing it off:
 
 ```
-acquire_execution_claim(run) or attach-to-existing       // dedup
+expand + certify runtime graph; derive run_id
+admit-or-attach RunAdmitted for run_id                  // content-addressed dedup identity
+acquire_execution_claim(run) or attach-to-existing       // active-driver coordination
 while frontier(fold(run)) is Runnable(t):
   renew_claim(); commit(t)                                // heartbeat + advance
   // a short Receipt-level side-effect wait (~1 block) is polled in-line while heartbeating
 release_claim(run)                                        // terminal
 ```
 
-**Dead-driver recovery is deferred (to the AC/DC + saga effort).** The execution claim's lease +
-expiry is the *substrate* for recovery — a dead driver's lease lapses, so its run is no longer locked
-and becomes reclaimable — but the mechanism that *automatically* finds and resumes such runs (and,
-for side-effecting runs, reconciles an ambiguous in-flight submission) is part of the larger,
-separate AC/DC + saga recovery effort, not this RFC. v1 delivers the claim (dedup + the reclaimable
-lease); automatic resume is future work (§12). No manual `--resume` is added here either. When it is
-built, it should read the **claim table** for expired claims (a fresh indexed read), not the
-snapshot-frontier-gated feed.
+**Dead-driver automatic recovery is deferred (to the AC/DC + saga effort).** The execution claim's
+lease + expiry is only the *substrate* for recovery. The mechanism that automatically finds stale
+runs, takes over expired claims, and reconciles ambiguous in-flight submissions is part of the
+larger, separate AC/DC + saga recovery effort, not this RFC. v1 recovery is the existing explicit
+operator path: `mfm run resume <run_id>` / REST resume. Consequence: if a driver dies after a wallet
+lane is claimed but before the side-effect ledger reaches a proven terminal, that signer lane remains
+held until the run is manually resumed and driven to the verify/reconciliation terminal. This is an
+availability wedge, not a safety escape hatch; the lane is never timeout-released while the nonce is
+ambiguous.
+
+When automatic recovery is built, it should read the **claim table** for expired claims (a fresh
+indexed read), not the snapshot-frontier-gated feed.
 
 **Why no feed-driven discovery, and no `due_at` in v1 (review HIGH-2).** The observation feed is
 gated behind `pg_snapshot_xmin` (`observations.rs:185-192`), so a pool that discovered work through
 it would inherit a cluster-wide liveness lag. That lag is real for the *watch* feed but irrelevant
-here: MFM does not dispatch through it — the invoker drives, and resume reads the claim table.
+here: MFM does not dispatch through it — the invoker drives, manual resume is keyed by run id, and
+future automatic resume reads the claim table.
 Confirmation waits are short at the default `Receipt` level, so the driver simply holds +
 heartbeats through them; `due_at` (re-waking a parked, undriven run) and tenure-release-on-wait are
 **deferred** (DEC-6/DEC-8) to a long-`Finalized`-at-scale optimization, not a v1 mechanism.
@@ -371,31 +444,42 @@ worker) reads chain truth by the submission anchor and emits the existing `Recei
 ConfirmationObserved / NotSubmittedProven` evidence; the existing `SideEffectReplayVerifier`
 (`replay/src/lib.rs:470`) checks it from recorded facts, no live IO.
 
-### 6.5 Reconciliation & recovery (emergent — no bespoke machinery)
+### 6.5 Reconciliation & recovery (ordinary driving once resumed)
 
-The verify-pair is designed so recovery *falls out of ordinary driving* rather than needing bespoke
-machinery. **The automatic resumption that triggers cross-process recovery is deferred to the AC/DC +
-saga effort (§6.3, §12);** this section specifies how recovery *behaves* once a run is resumed (by
-that future effort) or re-driven within a live driver — it is not a v1 sweep. Because the verify node
-is an ordinary frontier node:
+The verify-pair is designed so recovery *once a run is driven again* follows the ordinary frontier
+rather than a bespoke side-effect recovery machine. **The automatic resumption that triggers
+cross-process recovery is deferred to the AC/DC + saga effort (§6.3, §12);** this section specifies
+how recovery *behaves* once a run is manually resumed in v1, automatically resumed by that future
+effort, or re-driven within a live driver. It is not a v1 sweep. Because the verify node is an
+ordinary frontier node:
 
-- A worker that dies mid-verification leaves a **runnable verify node**; ordinary dispatch +
-  execution-lease expiry re-drives it.
-- A worker that dies mid-submission leaves an **open submit attempt**; ordinary attempt recovery
-  re-runs it. Safety floor: the tx is pinned to one nonce, so **at most one tx can land — never a
-  double-spend**. Deterministic signing (DEC-15) makes the re-broadcast idempotent.
-- The wallet lane releases **only** when the verify node terminalizes, so a dead worker never wedges
-  the wallet.
+- A worker that dies mid-verification leaves a **runnable verify node**; manual `run resume` in v1
+  (or future automatic recovery) re-drives it.
+- A worker that dies mid-submission leaves an **open submit attempt**; manual `run resume` in v1
+  (or future automatic recovery) re-runs the attempt path. **The safe reconciliation — chain-truth
+  read → `Confirmed` / `NotSubmittedProven`, plus the re-sign == recorded-anchor assertion — is
+  net-new EVM-verifier work (WS-D), not emergent from frontier driving**: today's recovery callback
+  blindly re-broadcasts and returns `Observed` (`adapters/evm-contracts/src/lib.rs:1758-1774`).
+  Safety floor *given WS-D*: the tx is pinned to one nonce, so **at most one tx can land — never a
+  double-spend**, and recorded-anchor reconstruction makes re-broadcast idempotent. *Without WS-D*,
+  bare re-broadcast mishandles a tx dropped from the mempool whose nonce has since advanced (reorg /
+  foreign use) — recording `Observed` for a tx that can never land — so WS-D's reconcile-before-resubmit
+  is a **hard gate**, not optional.
+- The wallet lane releases **only** when the verify node terminalizes, so a dead worker can wedge the
+  wallet until manual resume. That is an explicit v1 availability tradeoff; it is safer than
+  timeout-releasing an ambiguous nonce.
 - **Foreign-occupied nonce** (a tx MFM never sent occupies the nonce) → the anchor never appears →
   `NotSubmittedProven` terminal ("superseded"), an honest failure/compensation, never a
   double-spend. Exclusivity is an **availability** expectation, not a safety assumption (DEC-2).
 
-**Key invariant (replaces any holder-death sweeper):** a non-terminal side-effect ledger always has
-a corresponding runnable (or `due_at`-scheduled) frontier node. The scheduler guarantees it,
-dispatch drives it, the lane releases at terminal.
+**Key invariant (replaces any holder-death sweeper):** once the run is being driven, a non-terminal
+side-effect ledger has a corresponding runnable frontier node (and, in the future, a
+`due_at`-scheduled node for parked long waits). The scheduler decision exposes it, the driver/resume
+loop drives it, and the lane releases at terminal.
 
 This subsumes what the earlier design called the "recovery verifier" (now the general live verifier)
-and the "resource-lane holder-takeover machine" (now unnecessary — the lane is ledger-lifetime).
+and the "resource-lane holder-takeover machine" (now unnecessary for safety — the lane is
+ledger-lifetime and is not lease-reaped).
 
 **Lane release tracks the ledger's terminal state, not the run's block.** The wallet lane is held
 only while the side-effect is *genuinely ambiguous*. The moment the ledger reaches a **proven
@@ -417,20 +501,23 @@ reconciliation.) (DEC-26)
 
 ### 6.6 Determinism, capabilities, replay
 
-- **Deterministic signing required (DEC-15).** The signer contract must produce deterministic
-  signatures (RFC 6979 for ECDSA secp256k1). Enforced, not assumed: the submission anchor (the
+- **Recorded-anchor reconstruction is load-bearing (DEC-15).** The production ECDSA signer path
+  already uses deterministic RFC 6979-style signing, so this RFC is not adding a new nonce-signing
+  mechanism as its primary safety move. The primary invariant is that the submission anchor (the
   prepared-invocation expected hash, §6.4a) is recorded before the boundary; recovery
   **reconstructs it from the committed prepared invocation and asserts the re-signed hash equals
-  it** — a determinism-violating signer fails closed instead of double-submitting. **Disposition on mismatch (review Med-6):** the re-sign check gates
+  it** before any re-broadcast. A determinism-violating signer fails closed instead of
+  double-submitting. **Disposition on mismatch (review Med-6):** the re-sign check gates
   *resubmission*, not reconciliation — the verify node still reconciles by the *recorded* anchor
   against chain truth. On-chain → confirm + release the lane; provably not on-chain and
-  unresubmittable → a **defined terminal**: `NotSubmittedProven` → failure-with-lane-release (default
-  `FailWithoutAcdcClaim`), or a `ManualResolution`-policy manual block that holds the lane pending
-  operator action. Never a silent ledger/lane wedge.
+  unresubmittable → a **defined terminal**: `NotSubmittedProven` → failure-with-lane-release
+  (default `FailWithoutAcdcClaim`), or a `ManualResolution`-policy manual block that holds the lane
+  pending operator action. Never a silent ledger/lane wedge.
 - **Capabilities split semantic vs operational** (unchanged): outcome-affecting authority (signer
   ref, expected chain id, expected address) is pinned to the run and verified at admission;
   transport routing (RPC URL, source id) is per-worker. Verification needs only **read**
-  capabilities, so any fungible worker can run it.
+  capabilities, so any worker with the run's bound executable identities (DEC-29) and those read
+  capabilities can run it.
 - **Replay unchanged in shape.** The verify node records receipt/confirmation evidence; replay
   re-verifies from recorded evidence via `SideEffectReplayVerifier`, no live IO.
 
@@ -443,7 +530,7 @@ reconciliation.) (DEC-26)
 | DEC-2 | Reconcile on the deterministic **submission anchor** (prepared-invocation signed-tx hash, adapter-computed — distinct from the state's semantic idempotency input), never the nonce; no exclusive-ownership assumption | Respects the state/signer boundary; foreign-occupied nonce = safe detectable terminal; exclusivity = availability, not safety |
 | DEC-3 | Finality: semantic class + **certified policy descriptor** resolved against the registry at admission to a depth recorded in `RunAdmitted` | Depth is outcome-affecting → from certified authority, not worker config; a worker lacking the capability **declines the claim**, never fails the run |
 | DEC-4 | Admission leases + heartbeat; expiry routes to recovery, never silent release | Superseded for resource-lane *holders* by §6.4–6.5 (ledger-lifetime); applies to execution tenure |
-| DEC-5 | Recovery = ordinary fungible dispatch of a run in a recovering state | Needs only a read capability; no dedicated recovery worker class |
+| DEC-5 | Recovery behavior = ordinary driving once a run is resumed; automatic recovery dispatch is deferred | Needs only a read capability; v1 trigger is manual `run resume`, future trigger is expired-claim sweep |
 | DEC-6 | `due_at` re-wake for undriven parked runs — **DEFERRED** (v1 holds+heartbeats through short Receipt waits) | Only needed for long `Finalized` waits at scale |
 | DEC-7 | Per-run execution lease (not per-attempt) | Simplest; runs are the parallelism unit; per-attempt deferred |
 | DEC-8 | Release execution tenure on long external waits — **DEFERRED** (v1 holds+heartbeats) | Pairs with `due_at`; only for long `Finalized` waits |
@@ -451,20 +538,25 @@ reconciliation.) (DEC-26)
 | DEC-10 | Materialize the lane-state projection (rebuildable cache, not authority) | Removes the O(history) `resource_lane:%` fold |
 | DEC-11 | Size pools to worker count; pooler-safe (xact-scoped locks + lease tables) | No session advisory locks → transaction-mode poolers OK |
 | DEC-12 | Unify resource lanes + execution claims into one admission-lane primitive | One table-pair, one `admit(mode)`; primitive owns order+lease, caller owns authority |
-| DEC-13 | Side-effect verification is a paired framework state (submit + verify) | Uniform/configurable verification; recovery-for-free; collapses DEC-2/DEC-4 machinery |
+| DEC-13 | Side-effect verification is a paired framework state (submit + verify) | Uniform/configurable verification; once resumed, reconciliation follows the ordinary frontier instead of bespoke machinery |
 | DEC-14 | One ledger across the verify pair (**committed**) — re-key by certified pair identity, projection-by-ledger-key, pair-bound release, multi-node payload validation | Simplest end state; decouples attempt vs ledger lifecycle. Two-linked-ledger rejected (less effort, more complex end state) |
-| DEC-15 | Deterministic signing (RFC 6979) **and** recovery reconstructs the anchor from the committed prepared invocation, asserting re-sign == it | The load-bearing determinism is artifact reconstruction (nonce/fee/gas are live reads), not the signature; fails closed |
+| DEC-15 | Recovery reconstructs the anchor from the committed prepared invocation and asserts re-sign == it before re-broadcast | The production signer path is already deterministic; artifact reconstruction is the load-bearing invariant because nonce/fee/gas are live reads |
 | DEC-16 | Side-effect terminal output via a typed terminal-evidence model (`output_from_receipt` / `output_from_confirmation`), validated against the configured level | Enables `Receipt`-level terminalization; output is confirmation-only today |
 | DEC-17 | One-ledger's first-class certified `SideEffectPair` authority (pair identity, event attribution, store admission, pair-bound release, producer evidence) is accepted as the chosen path | Node/attempt shaping reaches the event schemas (`events.rs:2389`); blast radius accepted, not a reason to switch |
+| DEC-18 | Default run id is derived from the canonical certified runtime graph **+ bound executable identities + admission policy**, excluding audit/provenance, the run id itself, and launch spelling | Dedup identity tracks the actual work + build the runtime executes; `NowaitSkip` coordinates active drivers of that identity |
 | DEC-19 | Lowering re-points the original output cell's producer to the verify node; submit binds no downstream cell | Downstream never observes "submitted" before "verified"; one producer per cell |
 | DEC-20 | Re-sign mismatch gates resubmission only; reconcile by the recorded anchor to a defined terminal (failure-with-lane-release or policy manual-block) | Never a silent ledger/lane wedge |
-| DEC-21 | Resume of a side-effecting run requires reconciliation → deferred to the AC/DC + saga recovery effort | In v1 each run has a single driver (its invoker); side effects handled by the verify-pair |
-| DEC-22 | **Invoker-driven** execution (not pool-dispatched): the starting process drives its run; the execution claim = dedup + recovery ownership; the observation feed is status/watch only | Corrects a worker-pool misframing; no feed-driven dispatch → no snapshot-frontier liveness coupling |
-| DEC-23 | Dead-driver **automatic resume** (background sweep over expired claims) — **DEFERRED** to the AC/DC + saga recovery effort | v1 delivers the claim's reclaimable lease as the substrate; no manual `--resume` added either |
+| DEC-21 | Automatic takeover of a side-effecting run requires reconciliation → deferred to the AC/DC + saga recovery effort | v1 uses explicit manual resume; safety does not depend on single-driver uniqueness |
+| DEC-22 | **Invoker-driven** execution (not pool-dispatched): the starting process drives its run; the execution claim = active-driver coordination + future recovery substrate; the observation feed is status/watch only | Corrects a worker-pool misframing; no feed-driven dispatch → no snapshot-frontier liveness coupling |
+| DEC-23 | Dead-driver **automatic resume** (background sweep over expired claims) — **DEFERRED** to the AC/DC + saga recovery effort | v1 recovery is manual `run resume`; a dead driver can hold a signer lane until resumed |
 | DEC-24 | The execution lease grants **no** authority to cross a side-effect boundary; the per-side-effect nonce-lane claim + `claim_fencing_token` is the sole submission gate | A false-reaped double-drive still cannot double-submit |
 | DEC-25 | Wallet lane releases at the side-effect ledger's **proven terminal** (Confirmed / NotSubmittedProven), not at the run's manual-block; held past terminal only when the ambiguity itself needs an operator; never timeout-released | A manual-blocked-but-proven side-effect frees the wallet; a still-ambiguous one holds it safely |
 | DEC-26 | Per-signer write throughput is bounded by the terminal window (≈1/block at Receipt, ≈1/finality at Finalized); reads unbounded; scale via more signers | Honest scalability bound of serial-within-hold (DEC-1) |
-| DEC-27 | `SideEffectVerify` is its **own validation family** (N-cardinality pairing invariant, evidence binding, post-rewrite single-producer check), not a singleton like other framework nodes | Zero-LOC for authors, real new certifier/lowering work |
+| DEC-27 | `SideEffectVerify` is its **own validation family** (N-cardinality pairing invariant, evidence binding, post-rewrite single-producer check), not a singleton like other framework nodes | Zero per-author LOC, but real new certifier/lowering work |
+| DEC-28 | Runs are **idempotent by default** (same certified graph → one run); a caller forces a distinct run of identical work via an explicit `run_id` or a distinguishing input that flows into the graph | The safe multi-agent default — independent identical requests converge on one run, never double-execute |
+| DEC-29 | Run id **includes bound executable identities** → exact-binary fungibility (interchangeable iff same executables; `binding.rs:113` enforces it on drive/resume). Aligns run id with the binding check: same build → admit-or-attach; different build → distinct run | Resolves the run-id-vs-fingerprint collision (HIGH-1) and the overstated "any worker drives" doctrine (HIGH-2); rolling upgrade = new runs, cross-build takeover deferred |
+| DEC-30 | v1 mid-submission reconciliation is **net-new EVM-verifier work (WS-D)** — chain-truth read + re-sign==anchor — not emergent from frontier driving; bare re-broadcast (today's `submit_or_recover_submission`) is insufficient and gated out | "At most one tx lands" holds *given* WS-D; without it, dropped-mempool + advanced-nonce is mishandled |
+| DEC-31 | Dedup convergence is safe **within a shared trust domain** for the pinned `signer_ref`; cross-tenant isolation would require the launching principal in the dedup identity | `RunAdmitted` carries no principal; co-authorized launchers converge safely, distrusting tenants would not |
 
 ## 8. Changes required (implementation plan)
 
@@ -486,25 +578,42 @@ with docs+tests in the same change. Five workstreams.
   `crates/storages/stream-store-postgres` (migration + impl).
 - **Depends on:** nothing (behavior-preserving refactor for resource lanes).
 
-### WS-B — Execution claim + invoker drive loop
+### WS-B — Content-addressed run identity + execution claim + invoker drive loop
 
-- **Execution lane class** (`NowaitSkip`, `lane_id` = content-addressed run id) on the WS-A
-  primitive: try-acquire dedup + heartbeat + lease expiry.
+- **Default run-id derivation:** replace random `mfm_app::new_run_id()` defaults on CLI/REST launch
+  with a derived run id over the canonical lowered graph + admission policy **+ bound executable
+  identities**, excluding the run id, audit/provenance (`TypedExecutionSpecAudit`), and launch
+  spelling; define remediation-linked (`forward_run_id`) handling (DEC-18/29, MED-3). `RunAdmitted`
+  becomes idempotent **admit-or-attach** for that content address — and because executables are folded
+  into the run id, two same-build launchers produce matching `RunAdmitted` fingerprints (attach, not
+  `CommitConflict`).
+- **Execution lane class** (`NowaitSkip`, `lane_id` = derived run id) on the WS-A primitive:
+  try-acquire active-driver coordination + heartbeat + lease expiry. Dedup identity is the run id;
+  the claim avoids duplicate driver work and gives future recovery a stale-claim substrate.
 - **Invoker drive loop** (library, in the `mfm run` path): acquire-or-attach the claim → fold →
   drive-until-blocked while heartbeating → hold + poll through short Receipt waits → release at
   terminal.
-- **Runnable granularity:** extend the frontier read so the driver gets Runnable/Blocked/Terminal
-  (today the feed reports only Started/Completed).
+- **Runnable granularity:** surface the existing scheduler decision (`Run` / `Blocked` / `Completed`,
+  `crates/kernel/runtime/src/frontier.rs`) to the drive loop; the observation feed may remain
+  Started/Completed for watch/status.
 - **Not in v1 (deferred to the AC/DC + saga recovery effort):** automatic resume of dead-driver runs
   + reconciliation-on-takeover (DEC-21/23); `due_at` + tenure-release-on-wait (DEC-6/DEC-8). v1
-  delivers the execution claim (dedup) + the reclaimable lease that effort will build on; the
-  observation feed stays status/watch only.
-- **Targets:** `crates/app` (drive loop), `bin/*` (the `mfm run` runner exists), `kernel/runtime`
-  (frontier granularity), `kernel/store` + `storages` (claim lane + expiry query).
+  delivers content-addressed dedup identity, manual `run resume`, and the execution-claim substrate
+  that effort will build on; the observation feed stays status/watch only.
+- **Targets:** `crates/app` (run-id derivation + drive loop), `bin/*` / `bin/rest-api` (derived
+  default launch id; resume path unchanged), `kernel/runtime` (surface scheduler decision),
+  `kernel/store` + `storages` (claim lane + expiry query).
 - **Depends on:** WS-A.
 
-### WS-C — Side-effect verification as a paired framework state
+### WS-C — Side-effect pair authority + verification framework state
 
+- **Phase gate: ledger authority redesign [§6.4d].** Re-key the ledger from a certified pair
+  identity (drop `attempt_id`/`node_id`, `side_effect_driver.rs:1096`), projection lookup by ledger
+  key (`side_effect_lifecycle.rs:278`), pair-bound release authority (`resource_lanes.rs:75`),
+  multi-node payload validation, **plus remediation-link retargeting to the pair and an atomic pair
+  forward-fence** (`runtime/src/side_effects.rs:213`, `docs/saga.md`) (`kernel/store`,
+  `kernel/runtime`). This is foundational: without pair-keyed authority, the verify node cannot
+  continue the submit node's ledger or release the wallet lane.
 - **`FrameworkNodeSpec::SideEffectVerify`** spec types + parse/json (`kernel/spec`); lowering inserts
   it after each side-effect node and records the **certified pair identity** (`kernel/program`). Its
   **own validation family** (`kernel/certify/framework_lifecycle.rs`): N-cardinality pairing
@@ -513,32 +622,33 @@ with docs+tests in the same change. Five workstreams.
 - **`verification: Receipt | Finalized`** on `SideEffectContractSpec` (hash-defining); finality
   **depth pinned at run admission** as `RunAdmitted` evidence and verified per worker
   (`kernel/spec`, `kernel/certify`, run admission in `kernel/runtime` / `crates/app`). [§6.4b]
-- **Ledger authority redesign [§6.4d]:** re-key the ledger from a certified pair identity (drop
-  `attempt_id`/`node_id`, `side_effect_driver.rs:1096`), projection lookup by ledger key
-  (`side_effect_lifecycle.rs:278`), pair-bound release authority (`resource_lanes.rs:75`),
-  multi-node payload validation, **plus remediation-link retargeting to the pair and an atomic pair
-  forward-fence** (`runtime/src/side_effects.rs:213`, `docs/saga.md`) (`kernel/store`,
-  `kernel/runtime`).
 - **Terminal-evidence model [§6.4c]:** add `output_from_receipt`; runtime validates terminal
   evidence against the *configured* level instead of unconditional `is_confirmed()`
   (`kernel/program:1561`, `side_effect_lifecycle.rs:298`).
 - **Verify-node runner** (`kernel/runtime`): drive `Submission* → Receipt → Confirmation → terminal`
-  to the level; bind the verified output cell. Scheduler invariant: non-terminal side-effect ledger
-  ⇒ runnable / `due_at` frontier node.
+  to the level; bind the verified output cell. Scheduler invariant once a run is driven:
+  non-terminal side-effect ledger ⇒ runnable frontier node (future `due_at` for long waits).
 - **Live `SideEffectVerifier`** contract (`crates/adapter-contracts`) + EVM impl
   (`crates/adapters/evm-contracts` + `crates/transports/evm`, relocating receipt/confirmation poll),
   behind a read capability.
 - **Submission anchor [§6.4a]:** the deterministic signed-tx hash is recorded in the
   prepared-invocation artifact at the **adapter** layer (`crates/adapters/evm-contracts`), *not* in
   the state; `crates/states/evm-contracts` keeps only its semantic `IdempotencyInput` (no signing).
-- **Depends on:** WS-B (recovery-for-free relies on dispatch + `due_at`).
+- **Depends on:** pair-authority phase gate above; WS-B for the v1 invoker drive loop.
 
-### WS-D — Determinism & reconciliation (mostly emergent)
+### WS-D — Anchor reconstruction & reconciliation (hard gate, not emergent)
 
-- **Deterministic-signing requirement** on the signer contract (`crates/signing`); RFC 6979 in
-  `crates/evm-signing`.
+- **Replace bare re-broadcast with reconcile-before-resubmit (DEC-30).** Today's EVM recovery callback
+  `submit_or_recover_submission` unconditionally re-broadcasts and returns `Observed`
+  (`adapters/evm-contracts/src/lib.rs:1758-1774`). WS-D makes the live `SideEffectVerifier` read chain
+  truth first and emit `Confirmed` / `NotSubmittedProven` / still-`Unknown`, driving the generic
+  `SideEffectSubmissionDecision` (`side_effect_driver.rs:848-878`) instead of always-`Observed`. This
+  is a **hard gate** of the verify-pair, not optional.
 - **Re-sign == recorded-anchor assertion** in the submit-node recovery path (`kernel/runtime`);
-  fail closed on mismatch.
+  fail closed on mismatch before any re-broadcast.
+- **Signer determinism remains a contract invariant** (`crates/signing`); the production ECDSA path
+  already uses RFC 6979-style deterministic signing, so the load-bearing invariant is anchor
+  reconstruction, not the signature (DEC-15).
 - **Foreign-occupied-nonce → `NotSubmittedProven`** terminal in the EVM verifier.
 - **Depends on:** WS-C.
 
@@ -553,16 +663,16 @@ with docs+tests in the same change. Five workstreams.
 
 ```
 Phase 1: WS-A  (admission lane)            ── foundation, behavior-preserving for resource lanes
-Phase 2: WS-B  (execution claim + drive)   ── dedup + invoker drive loop (no resume; that's deferred)
-Phase 3: WS-C + WS-D (verification + determinism) ── productize side effects (live-driver path)
+Phase 2: WS-B  (run identity + claim + drive) ── dedup identity + active-driver coordination
+Phase 3: WS-C + WS-D (pair authority + verification) ── productize side effects (manual-resume path)
 Phase 4: WS-E  (perf / ops)                ── scale optimizations
 ```
 
-**Recovery is deferred (review HIGH-1 + the AC/DC + saga effort).** The only multi-process touch of a
-*running* side-effecting run is resume of a dead driver, which is unsafe without reconciliation and is
-therefore scoped into the larger AC/DC + saga recovery effort, not this RFC. In v1 each run is driven
-by its invoker (single driver), including its side effects via the verify-pair; a dead driver's run is
-left reclaimable for that future effort.
+**Automatic recovery is deferred (review HIGH-2 + the AC/DC + saga effort).** v1 has an explicit
+manual resume path, not a background expired-claim sweep. A run has one intended active driver at a
+time, but correctness does not depend on that uniqueness: false reaps/races cost duplicate driver
+work, while per-run append CAS and side-effect fencing preserve safety. If a dead driver leaves a
+side-effect ledger non-terminal, the signer lane can remain held until manual resume drives the run.
 
 ## 9. Migration & compatibility
 
@@ -572,35 +682,52 @@ left reclaimable for that future effort.
 - **Side-effect contract gains `verification`.** This changes the spec hash; existing certified
   specs are re-lowered/re-certified (no in-place migration of historical runs, per `docs/design.md`
   CLI/REST rules).
-- **Public surfaces.** The `mfm run` path gains an execution claim (dedup); existing
-  `run start / replay / list --watch` are unchanged. Automatic resume is deferred (§12) and no new
-  manual `run --resume` is added; there is no separate worker-pool entrypoint.
+- **Public surfaces.** The `mfm run start` / REST launch default run id changes from random UUID to
+  content-addressed certified runtime graph identity; callers may still pass an explicit run id when
+  they need a distinct run identity. The run path gains an execution claim for active-driver
+  coordination. Existing `run resume`, `run replay`, and `run list --watch` surfaces remain; manual
+  resume is the v1 recovery trigger. Automatic resume is deferred (§12); there is no separate
+  worker-pool entrypoint.
 
 ## 10. Risks & mitigations
 
 | Risk | Mitigation |
 |---|---|
 | Admission table mistaken for authority | Structural: mode∝class, liveness-only, no safety read branches on it (§6.2 inv. 2); lane-state projection kept separate |
-| One-ledger redesign reaches event schemas / store admission / producer evidence (wide blast radius) | Accepted as the chosen end state (DEC-14/17); pair-authority schema design in §6.4d + replay/kill-mid-flight tests; two-linked-ledger considered and rejected |
+| Run-id derivation accidentally includes volatile launch spelling | Hash only the canonical certified runtime graph / lowered state graph and hash-defining admission policy; exclude run id, raw file path/bytes, and unresolved "latest" spelling (DEC-18) |
+| One-ledger redesign reaches event schemas / store admission / lane release / producer evidence (wide blast radius) | Accepted as the chosen end state and a WS-C phase gate (DEC-14/17); pair-authority schema design in §6.4d + replay/kill-mid-flight tests; two-linked-ledger considered and rejected |
 | Fungible workers terminalize finality at different depths | Depth resolved from a certified policy at admission (§6.4b), identical for all workers and replay; a worker lacking the capability declines the claim |
 | Signer cannot reproduce a recorded anchor → wedged lane | Defined terminal disposition (DEC-20): reconcile by the recorded anchor; failure-with-lane-release or policy manual-block, never a silent wedge |
-| Resuming a side-effecting run without reconciliation | Resume is deferred to the AC/DC + saga effort (DEC-21/23); in v1 each run has a single driver, so the case does not arise |
-| Non-deterministic signer slips in | Enforced by the re-sign == anchor assertion (DEC-15): fails closed, never double-submits |
-| Herd on the claim table (resume sweep / concurrent invokers) | `NowaitSkip` try-acquire: losers pay one `UPDATE`; a duplicate invoker attaches rather than starts; no feed scanning (DEC-22) |
+| Automatic takeover of a side-effecting run without reconciliation | Automatic resume is deferred to the AC/DC + saga effort (DEC-21/23); v1 uses explicit manual resume, and ambiguous ledgers keep the signer lane held until driven |
+| Signer determinism regresses | Production signer is already deterministic; re-sign == recorded-anchor assertion catches mismatch before re-broadcast (DEC-15/20) |
+| Herd on the claim table (future resume sweep / concurrent invokers) | Content-addressed run id gives one lane per runtime graph; `NowaitSkip` try-acquire losers pay one `UPDATE`; duplicate invokers attach/report rather than do driver work (DEC-18/22) |
 | Postgres as the coordination/scaling ceiling | Per-run and per-lane locks parallelize disjoint work; materialized lane projection (WS-E) removes the O(history) fold |
-| Wallet wedged by a stuck/slow verify (live driver) | Scheduler invariant (§6.5) keeps a runnable node the live driver re-drives; the lane releases at the ledger's proven terminal (DEC-25), never on a timeout. Dead-driver resume is the deferred saga effort |
-| Observation-feed frontier lag (`pg_snapshot_xmin`) | Affects status/watch freshness only; dispatch is invoker-driven and resume reads the claim table directly — no dispatch coupling (DEC-22/23) |
+| Wallet wedged by a dead driver before verify terminal | Accepted v1 availability tradeoff: manual `run resume` is the recovery trigger; the lane releases at the ledger's proven terminal (DEC-25), never on a timeout. Automatic recovery is deferred |
+| Observation-feed frontier lag (`pg_snapshot_xmin`) | Affects status/watch freshness only; dispatch is invoker-driven, manual resume is keyed by run id, and future automatic resume reads the claim table directly — no dispatch coupling (DEC-22/23) |
 | `ManualResolution` holds a wallet lane | Only when the ambiguity itself needs an operator (rare; most ambiguity auto-reconciles); blocks only same-signer effects; mitigate operationally (per-class signers, fast alerting) (DEC-25) |
+| Run id excludes executables but the drive path enforces them → admit-or-attach becomes `CommitConflict` across builds (HIGH-1) | Fold bound executable identities into the run id (DEC-29): same build → matching fingerprint → attach; different build → distinct run |
+| "Any worker drives any run" overstated — drive/resume is binary-identity-scoped (HIGH-2) | Doctrine corrected to executable-identity-scoped fungibility (§6.1, DEC-29); rolling upgrade starts new runs; cross-build takeover is deferred recovery work |
+| Manual resume of an ambiguous submission left unreconciled (bare re-broadcast) | WS-D reconcile-before-resubmit (chain truth → Confirmed/NotSubmittedProven, re-sign==anchor) is a hard gate (DEC-30), replacing today's always-`Observed` callback |
+| Dedup convergence under mutual distrust drives a side effect under another launcher's signer | Safe within a shared trust domain for the pinned `signer_ref` (DEC-31); cross-tenant isolation would put the principal in the dedup identity |
 
 ## 11. Testing strategy
 
 - **Concurrency:** property/integration tests with N concurrent drivers per run asserting
   single-commit-wins and idempotent re-presentation.
+- **Run identity:** same canonical certified runtime graph ⇒ same run id; different lowered graph ⇒
+  different run id; run-id derivation excludes run id, audit/provenance, and volatile launch spelling;
+  **same graph + different bound executables ⇒ different run id** (DEC-29); two same-build launchers
+  admit-or-attach with matching fingerprints (not `CommitConflict`); a duplicate launch
+  attaches/reports instead of creating a random second run; an explicit run id or a distinguishing
+  graph input yields a distinct run (opt-out, DEC-28).
 - **Admission:** FIFO fairness, lease-expiry reaping, `NowaitSkip` no-queue, mode∝class compile-fail
   fixtures.
-- **Side-effect recovery:** kill-mid-submit and kill-mid-verify integration tests against a local
-  chain (reth) asserting at-most-once landing, idempotent re-broadcast, and correct
-  `Receipt/Confirmation/NotSubmittedProven` terminalization.
+- **Side-effect manual recovery:** kill-mid-submit and kill-mid-verify integration tests against a
+  local chain (reth) asserting the signer lane remains held until manual resume, at-most-once
+  landing, idempotent re-broadcast, and correct `Receipt/Confirmation/NotSubmittedProven`
+  terminalization after resume. Resume must **reconcile via a chain-truth read**, not bare
+  re-broadcast: a tx dropped from the mempool with an advanced nonce terminalizes `NotSubmittedProven`,
+  not `Observed` (DEC-30).
 - **Determinism:** assert re-sign reproduces the recorded anchor; a deliberately non-deterministic
   signer fixture must fail closed.
 - **Replay:** verify-node evidence replays from recorded facts with no live IO.
@@ -610,7 +737,9 @@ left reclaimable for that future effort.
 ## 12. Deferred / open
 
 - **Automatic resume + dead-driver takeover + reconciliation-on-takeover (DEC-21/23)** — part of the
-  larger AC/DC + saga recovery effort, not this RFC.
+  larger AC/DC + saga recovery effort, not this RFC. Includes **cross-build takeover** (resuming a run
+  admitted under a different executable identity, DEC-29), which exact-binary fungibility otherwise
+  forbids.
 - Pipelined nonces (DEC-1); per-attempt execution leases (DEC-7); feed sharding and cross-run
   priority (DEC-9); multi-lane admission (§3 Non-goals); `due_at` re-wake + tenure-release-on-wait
   (DEC-6/DEC-8, for long `Finalized` waits at scale).
@@ -627,7 +756,9 @@ left reclaimable for that future effort.
 | Append-only authority triggers | `migrations/0001_run_store.sql:12-18,200-230` |
 | Per-lane advisory lock + FIFO waiters | `run_store/resource_lanes.rs:32-45,134-310` |
 | Observation/watch feed + NOTIFY | `run_store/observations.rs:104-268,379-461`; channel `mod.rs:89` |
-| Observation surface (app/REST/CLI) | `app/src/lib.rs:1157`; `bin/rest-api/src/lib.rs:502`; `bin/cli/src/commands/run/list.rs` |
+| Observation surface (app/REST/CLI) | `crates/app/src/lib.rs`; `bin/rest-api/src/lib.rs`; `bin/cli/src/commands/run/list.rs` |
+| Current random run-id default | `crates/app/src/lib.rs:454`; `bin/cli/src/commands/run/start.rs:99`; `bin/rest-api/src/lib.rs:716` |
+| Scheduler decision (`Run` / `Blocked` / `Completed`) | `crates/kernel/runtime/src/frontier.rs:31` |
 | Side-effect fencing | `kernel/store/src/v1/{projection.rs:36,412 , resource_lanes.rs:42,80 , mod.rs:2179-2220}` |
 | Side-effect phases/events | `kernel/events/src/lib.rs:413-439`; `SideEffectPhase` in `store/v1` |
 | `IdempotencyKey` / `idempotency_input` | `kernel/program/src/lib.rs:1506,1531` |
@@ -639,4 +770,8 @@ left reclaimable for that future effort.
 | Observation snapshot-frontier gate | `run_store/observations.rs:185-192` |
 | Advisory-lock 32-bit truncation | `run_store/stream.rs:66-74` |
 | Remediation link / forward fence | `runtime/src/side_effects.rs:213`; `docs/saga.md` |
-| Side-effect terminal output (confirmation-only today) | `program/src/lib.rs:1561`; `side_effect_lifecycle.rs:298` |
+| Side-effect terminal output (confirmation-only today) | `program/src/lib.rs:1561`; `side_effect_lifecycle.rs:313` |
+| RunAdmitted records driver executables; drive-path binding check | `kernel/runtime/src/commit.rs:235-237`; `binding.rs:113`; `history.rs:212` |
+| EVM recovery: bare re-broadcast (always `Observed`); generic submission decisions | `adapters/evm-contracts/src/lib.rs:1758-1774`; `runtime/src/side_effect_driver.rs:848-878` |
+| Ledger key derivation (attempt-scoped today) | `kernel/runtime/src/side_effect_driver.rs:1091-1127` |
+| Spec audit/provenance (excluded from run-id projection) | `kernel/spec/src/lib.rs` `TypedExecutionSpecAudit`; `certify` `forward_run_id` |
