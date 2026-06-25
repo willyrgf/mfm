@@ -14,9 +14,10 @@ On ratification, §4 / §6 land in `docs/design.md` and the side-effect contract
 
 MFM was built without an explicit decision on how it is executed: one service driving many runs,
 or many processes each driving runs. This RFC resolves that: **MFM is a Postgres-coordinated
-durable execution fabric in which processes are fungible.** Any worker can drive any run; no
-process owns anything; correctness lives in the database transaction boundary, never in process
-topology.
+durable execution fabric in which processes are fungible.** No process owns a run, and any worker
+that **matches a run's bound executables** can drive it — correctness lives in the database
+transaction boundary, never in process topology. (v1 is invoker-driven and manual-resumable; full
+automatic disposable-worker recovery is deferred — §6.5, §12.)
 
 Most of the substrate already exists (per-run serialization, append-only authority, sharded
 resource lanes, a durable observation/watch feed). The remaining work is three coherent pieces:
@@ -25,13 +26,14 @@ resource lanes, a durable observation/watch feed). The remaining work is three c
    exclusive admission that serves both *resource lanes* (wallet/nonce contention) and *execution
    claims* (which worker drives a run), plus any future coordination need.
 2. **Content-addressed run identity + execution claim** — the invoker expands and certifies the
-   runtime state graph, binds the runner/adapter executables, and derives the run id from that
-   canonical work product **including those executable identities** (so fungibility is
-   executable-identity-scoped: same work + same build dedups and is interchangeable; a different build
-   is a distinct run). Dedup identity comes from the content-addressed run id; the execution claim
-   coordinates active drivers of that run and, via its lease, leaves a dead driver's run visible for
-   recovery. **Automatic resume is out of scope here** — it belongs to the larger AC/DC + saga
-   recovery effort (§6.5, §12). v1 recovery is manual `run resume`.
+   runtime state graph and derives a **semantic** run id from it (certified graph + resolved semantic
+   inputs/config + admission policy + trust scope; **executables are not in the identity**). Identical
+   work converges on one run (idempotent by default); a distinguishing input forces a distinct run.
+   The execution claim coordinates active drivers; a worker may only **drive** a run whose bound
+   executables it matches (a determinism guard, not run identity) — so a different build
+   *attaches/reports*, never duplicates and never double-executes. **v1 is invoker-driven and
+   manual-resumable**: automatic disposable-worker recovery (expired-claim takeover, `due_at`) is the
+   deferred AC/DC + saga effort (§6.5, §12).
 3. **Side-effect verification as a paired framework state** — every side-effect node lowers into a
    `submit` node plus an auto-inserted `verify` framework node. This productizes receipt/finality
    verification uniformly *and* makes external-effect reconciliation follow the ordinary frontier
@@ -94,8 +96,10 @@ append-only, certified design.
   sufficient and far simpler (DEC-1).
 - Cross-run priority/fairness beyond observation order, and feed sharding. Deferred (DEC-9).
 - Multi-lane admission (one claim spanning several lanes, with all-or-nothing acquisition, deadlock
-  ordering, and starvation policy). v1 is single-lane only — what the code and `docs/saga.md` already
-  provide.
+  ordering, and starvation policy). v1 is single-lane only — what the **code** provides
+  (`single_lane_claim_admission`); `docs/saga.md` currently overstates it as a multi-lane contract
+  (`saga.md:161`, "every requested lane acquired together") and must be **narrowed to single-lane at
+  ratification** (DEC-33, review #6).
 - Full AC/DC semantics for arbitrary external systems (unchanged from `docs/saga.md`).
 - Changing the semantic core (certified specs, typed values, replay) — none of this RFC touches it.
 
@@ -150,11 +154,12 @@ The safety substrate is already complete; the gaps are in liveness/scale/discove
 
 ### 6.1 Process-fungible execution model
 
-A run is persisted authority (certified spec) plus a current frontier. Any worker that shares the
-run's **bound executable identities** — and has the registry, capabilities, and store authority —
-may drive it. Fungibility is **executable-identity-scoped**, not unbounded: the drive/resume path
-rejects a worker whose runner/adapter executables differ from those in `RunAdmitted` (DEC-29;
-`binding.rs:113`, `history.rs:212`). Safety is the store (§5). A **worker lease is
+A run is persisted authority (certified spec) plus a current frontier. Any worker that **matches the
+run's bound executables** — and has the registry, capabilities, and store authority — may drive it.
+Fungibility of *driving* is **executable-scoped**, not unbounded: the drive/resume path rejects a
+worker whose runner/adapter executables differ from those in `RunAdmitted` (a **drive-time
+determinism guard, not part of run identity** — DEC-29; `binding.rs:113`, `history.rs:212`). v1 is
+also **manual-resumable**, not auto-recovering (§6.5). Safety is the store (§5). A **worker lease is
 operational authority only**: "this process currently has fenced permission to *attempt* an action
 under durable preconditions," never "this process owns the run." The semantic result exists only
 after a valid store-admitted append.
@@ -224,9 +229,10 @@ lock). Safety is unaffected — it holds via PK + CAS.
 
 **Scope (v1) — documents the existing single-lane scope, not a new constraint.** The primitive ships
 exactly two lane classes: single-lane `WaitFifo` (resource lanes; one `(namespace, key)` per claim —
-all the code and `docs/saga.md` already provide) and `NowaitSkip` (execution). Multi-lane admission
-stays deferred (§3 Non-goals). The point is only that the RFC's prose must not *imply* multi-lane
-atomicity the design never had.
+the code provides this via `single_lane_claim_admission`; `docs/saga.md` overstates it as multi-lane
+and is reconciled to single-lane at ratification, DEC-33) and `NowaitSkip` (execution). Multi-lane
+admission stays deferred (§3 Non-goals). The point is only that the RFC's prose must not *imply*
+multi-lane atomicity the design never had.
 
 ### 6.3 Execution: content-addressed run id, invoker-drives, and manual resume
 
@@ -237,36 +243,40 @@ surface. One process may drive many runs concurrently; the correctness boundary 
 not the OS process.
 
 Before admission, the launcher expands and certifies the requested work into the runtime state graph
-the scheduler will actually execute, and binds the concrete runner/adapter **executable identities**.
-The default run id is content-addressed over that canonical runtime work product **including the bound
-executable identities**:
+the scheduler will actually execute. The default run id is a **semantic** content address over that
+canonical work product:
 
 ```
 run_id = hash(
-  lowered node/cell/binding graph
+  canonical certified graph (lowered node/cell/binding graph)
+  + resolved semantic inputs / config
   + hash-defining admission policy
-  + bound runner/adapter executable identities   // the same ones RunAdmitted records and the
-)                                                 // drive/resume path enforces (commit.rs:235-237,
-                                                  // binding.rs:113, history.rs:212)
+  + trust scope (DEC-31)
+)
 ```
 
 The projection **excludes** the run id itself, non-semantic launch spelling (raw entry-point name,
-config-file bytes, local path, unresolved "latest"), and the certified spec's audit/provenance fields
-(`TypedExecutionSpecAudit` / `non_semantic_provenance`) — so it is **not** simply the full spec hash,
-which folds provenance in. Remediation-linked specs carry a `forward_run_id` whose handling the
-projection must define (WS-B, addresses MED-3).
+config-file bytes, local path, unresolved "latest"), the certified spec's audit/provenance fields
+(`TypedExecutionSpecAudit` / `non_semantic_provenance`), **and the bound executable identities** — so
+it is build-independent and **not** simply the full spec hash. Resolved *semantic* inputs/config **are**
+in the preimage (different config/inputs ⇒ different run); only non-semantic spelling is excluded.
+Remediation-linked specs carry a `forward_run_id` whose handling the projection must define (WS-B,
+addresses MED-3).
 
-**Including the executable identities is deliberate (DEC-29).** The drive/resume path already enforces
-exact executable identity (`validate_run_admitted_binding`, `history.rs:212`; full-vector `!=` in
-`binding.rs:113`), so fungibility is **executable-identity-scoped**: workers sharing the run's bound
-executables are interchangeable, a worker on a *different* build is not. Folding executables into the
-run id makes the two mechanisms consistent — *same work + same build* → the **same** run id → the
-**same** `RunAdmitted` fingerprint → an idempotent **admit-or-attach** (not a `CommitConflict`);
-*same work + different build* → a **different** run id → a distinct run. Consequence (rolling upgrade):
-a new binary starts new runs; an in-flight run is driven/resumed only by its own build until the
-deferred AC/DC + saga recovery effort adds cross-build takeover. Today's implementation has none of
-this: `mfm_app::new_run_id()` hashes a random UUID and CLI/REST use it by default; WS-B replaces that
-default with this derived run id.
+**Run identity is semantic; the executable binding is a drive guard (DEC-29).** Executable identity is
+deliberately **out of run identity** — folding it in would make the same semantic work on a different
+build a *distinct* run, which **double-executes** the side effect across a rolling upgrade (the nonce
+lane serializes the two txs but executes both). Instead, executables stay where the code already
+enforces them: a **drive-time determinism guard** — `validate_run_admitted_binding` rejects a worker
+whose runner/adapter executables differ from the run's admitted ones (`history.rs:212`,
+`binding.rs:113`). So *identical work* always addresses **one** run (no double-execution), and a
+**different-build** launcher **attaches/reports** ("this run exists, admitted under build X — needs a
+compatible-build driver, or pass an explicit run id for a new run"); it never creates a duplicate and
+never hard-errors as a conflict. The first admitter's executables become the run's bound build.
+Consequence (rolling upgrade): an in-flight run is driven/resumed only by a matching build until the
+deferred AC/DC + saga effort adds cross-build takeover; a *completed* run is recognized, not re-run.
+Today's implementation lacks all of this: `mfm_app::new_run_id()` hashes a random UUID and CLI/REST use
+it by default; WS-B replaces that default with this derived run id.
 
 **Idempotent by default, distinct-run on request (DEC-28).** Because the run id is the certified-graph
 content address, two launches of *identical* certified work converge on **one** run — re-invoking
@@ -278,13 +288,14 @@ distinguishing input — an explicit `run_id`, or a nonce/timestamp that flows i
 block height or timestamp) that differentiates them, so dedup collapses only genuinely-identical
 launches — which is exactly when convergence is desired.
 
-**Trust assumption (DEC-31).** Convergence is a safety win only within a **shared trust domain**:
-`RunAdmitted` carries no launching-principal identity, so two launchers that converge drive the side
-effect under whichever worker's pinned-`signer_ref` resolution wins. This is correct when all
-converging launchers are co-authorized for that signer. Cross-tenant isolation would require the
-launching principal to enter the dedup identity — which would stop identical work by different
-principals from converging, a deliberate tension with the idempotent default that this RFC does not
-take on.
+**Trust scope is normative (DEC-31).** v1 scopes **one Postgres deployment to one trust domain**: all
+launchers are co-authorized for the deployment's signers/capabilities, and the **trust scope is a
+factor of the run-id preimage** (above). Convergence is therefore a safety win — co-authorized
+launchers of identical work converge onto one run. `RunAdmitted` carries no per-launch principal, so
+**cross-tenant isolation is a non-goal**: supporting mutually-distrusting tenants in one deployment
+would require the launching *principal* (not just the trust scope) to enter the run-id preimage, the
+claim lane, and admitted evidence — which would stop identical work by different principals from
+converging. Out of scope here.
 
 The execution claim is a `NowaitSkip` admission lane keyed on the derived run id. It does two jobs —
 neither of which is discovery and neither of which creates run identity:
@@ -301,8 +312,10 @@ neither of which is discovery and neither of which creates run identity:
 The driver holds the run through blocks rather than handing it off:
 
 ```
-expand + certify runtime graph; derive run_id
-admit-or-attach RunAdmitted for run_id                  // content-addressed dedup identity
+expand + certify graph; derive semantic run_id
+try-admit RunAdmitted(run_id, my_executables)            // on CommitConflict → run exists → attach
+if run exists and my_executables != admitted:            // different build
+    report "exists; needs a compatible-build driver"; stop
 acquire_execution_claim(run) or attach-to-existing       // active-driver coordination
 while frontier(fold(run)) is Runnable(t):
   renew_claim(); commit(t)                                // heartbeat + advance
@@ -383,10 +396,12 @@ is not taken from worker-local config: the certified policy is **resolved agains
 run admission** to a concrete depth, recorded in `RunAdmitted` launch evidence, and read from the
 run stream by every worker and by replay. (Pure admission-pinning from local config would only move
 the process dependence to *which worker admitted* — resolving from certified authority removes it.)
-A worker that lacks the capability to satisfy the admitted policy **declines the execution claim**
-(the run waits for a capable worker); it does **not** fail the run. A run no deployed worker can
-satisfy is a capacity/deployment stall surfaced operationally, never a semantic failure. *(Resolves
-the review's depth-model inconsistency: this is the single committed model.)*
+At **initial launch** the invoker must hold the capability to satisfy the policy or the launch
+**fails before `RunAdmitted`** (an ingress failure, per `docs/design.md:216`) — an invoker-driven
+system has no pool to hand an admitted-but-undrivable run to, so it must not admit one. At
+**resume/attach** a worker lacking the capability **declines cleanly** and the run waits for a capable
+resumer (a capacity/deployment stall surfaced operationally, never a semantic failure). *(Resolves the
+review's depth-model inconsistency and the strand-an-admitted-run concern, review #5.)*
 
 **(c) Terminal evidence by level — enables receipt-level output.** Today terminal output is built
 only from confirmation (`output_from_confirmation`, `program/src/lib.rs:1561`) and runtime requires
@@ -496,8 +511,15 @@ submit→terminal, a signer account executes at most **one side-effect per termi
 block at the default `Receipt` level, and ≈one per finality window only for explicitly-`Finalized`
 effects. On-chain *reads* are unconstrained. Horizontal scale of side-effecting work comes from
 **more signer accounts**, not more workers, until pipelined nonces (DEC-1) are lifted. (A
-`Receipt`-level reorg can briefly gap the next nonce on that signer; it self-heals via
-reconciliation.) (DEC-26)
+`Receipt`-level reorg can gap the next nonce on that signer; nonce *continuity* self-heals via
+reconciliation, but an already-published output does not — see below.) (DEC-26)
+
+**Receipt is final-at-risk (DEC-32).** `Receipt`-level terminalization binds output and releases the
+lane at `ReceiptObserved` — *before* finality. The nonce self-heal above is the only thing that heals:
+once an effect has terminalized and downstream has consumed its output, a later reorg of that receipt
+has **no frontier left to reconcile** the original mutation, so the published output is not
+automatically repaired. `Receipt` is therefore explicitly **final-at-risk** — the designer accepts
+post-receipt reorg risk on the output. Outputs that must survive reorgs **must** use `Finalized`.
 
 ### 6.6 Determinism, capabilities, replay
 
@@ -528,7 +550,7 @@ reconciliation.) (DEC-26)
 | DEC-0 | Doctrine: correctness = the Postgres transaction boundary; topology operational; leases = liveness, never safety | Enables fungible processes / multi-agent without process-level coordination |
 | DEC-1 | Nonce: serial per-account, sequential-within-hold; pipelining deferred | Deterministic nonce block, point-wise recovery; pipelining reopens range/gap recovery |
 | DEC-2 | Reconcile on the deterministic **submission anchor** (prepared-invocation signed-tx hash, adapter-computed — distinct from the state's semantic idempotency input), never the nonce; no exclusive-ownership assumption | Respects the state/signer boundary; foreign-occupied nonce = safe detectable terminal; exclusivity = availability, not safety |
-| DEC-3 | Finality: semantic class + **certified policy descriptor** resolved against the registry at admission to a depth recorded in `RunAdmitted` | Depth is outcome-affecting → from certified authority, not worker config; a worker lacking the capability **declines the claim**, never fails the run |
+| DEC-3 | Finality: semantic class + **certified policy descriptor** resolved against the registry at admission to a depth recorded in `RunAdmitted` | Depth is outcome-affecting → from certified authority, not worker config; **initial launch without the capability fails before `RunAdmitted` (ingress); only resume/attach declines** (review #5) |
 | DEC-4 | Admission leases + heartbeat; expiry routes to recovery, never silent release | Superseded for resource-lane *holders* by §6.4–6.5 (ledger-lifetime); applies to execution tenure |
 | DEC-5 | Recovery behavior = ordinary driving once a run is resumed; automatic recovery dispatch is deferred | Needs only a read capability; v1 trigger is manual `run resume`, future trigger is expired-claim sweep |
 | DEC-6 | `due_at` re-wake for undriven parked runs — **DEFERRED** (v1 holds+heartbeats through short Receipt waits) | Only needed for long `Finalized` waits at scale |
@@ -543,7 +565,7 @@ reconciliation.) (DEC-26)
 | DEC-15 | Recovery reconstructs the anchor from the committed prepared invocation and asserts re-sign == it before re-broadcast | The production signer path is already deterministic; artifact reconstruction is the load-bearing invariant because nonce/fee/gas are live reads |
 | DEC-16 | Side-effect terminal output via a typed terminal-evidence model (`output_from_receipt` / `output_from_confirmation`), validated against the configured level | Enables `Receipt`-level terminalization; output is confirmation-only today |
 | DEC-17 | One-ledger's first-class certified `SideEffectPair` authority (pair identity, event attribution, store admission, pair-bound release, producer evidence) is accepted as the chosen path | Node/attempt shaping reaches the event schemas (`events.rs:2389`); blast radius accepted, not a reason to switch |
-| DEC-18 | Default run id is derived from the canonical certified runtime graph **+ bound executable identities + admission policy**, excluding audit/provenance, the run id itself, and launch spelling | Dedup identity tracks the actual work + build the runtime executes; `NowaitSkip` coordinates active drivers of that identity |
+| DEC-18 | Default run id = **semantic** content address: `hash(certified graph + resolved semantic inputs/config + admission policy + trust scope)`, **excluding executables**, audit/provenance, the run id, and launch spelling | Identical work converges (no double-execute); build-independent identity; `NowaitSkip` coordinates active drivers of that identity |
 | DEC-19 | Lowering re-points the original output cell's producer to the verify node; submit binds no downstream cell | Downstream never observes "submitted" before "verified"; one producer per cell |
 | DEC-20 | Re-sign mismatch gates resubmission only; reconcile by the recorded anchor to a defined terminal (failure-with-lane-release or policy manual-block) | Never a silent ledger/lane wedge |
 | DEC-21 | Automatic takeover of a side-effecting run requires reconciliation → deferred to the AC/DC + saga recovery effort | v1 uses explicit manual resume; safety does not depend on single-driver uniqueness |
@@ -554,9 +576,11 @@ reconciliation.) (DEC-26)
 | DEC-26 | Per-signer write throughput is bounded by the terminal window (≈1/block at Receipt, ≈1/finality at Finalized); reads unbounded; scale via more signers | Honest scalability bound of serial-within-hold (DEC-1) |
 | DEC-27 | `SideEffectVerify` is its **own validation family** (N-cardinality pairing invariant, evidence binding, post-rewrite single-producer check), not a singleton like other framework nodes | Zero per-author LOC, but real new certifier/lowering work |
 | DEC-28 | Runs are **idempotent by default** (same certified graph → one run); a caller forces a distinct run of identical work via an explicit `run_id` or a distinguishing input that flows into the graph | The safe multi-agent default — independent identical requests converge on one run, never double-execute |
-| DEC-29 | Run id **includes bound executable identities** → exact-binary fungibility (interchangeable iff same executables; `binding.rs:113` enforces it on drive/resume). Aligns run id with the binding check: same build → admit-or-attach; different build → distinct run | Resolves the run-id-vs-fingerprint collision (HIGH-1) and the overstated "any worker drives" doctrine (HIGH-2); rolling upgrade = new runs, cross-build takeover deferred |
+| DEC-29 | Executable identity is a **drive-time determinism guard, NOT part of run identity** (`binding.rs:113`/`history.rs:212` enforce it on drive/resume). Same work → one run regardless of build; a different-build launcher **attaches/reports** ("needs compatible build"), never duplicates | Reverses build-scoped identity: avoids cross-build **double-execution** (review #1) while keeping the determinism guard; rolling upgrade drains on matching build, cross-build takeover deferred |
 | DEC-30 | v1 mid-submission reconciliation is **net-new EVM-verifier work (WS-D)** — chain-truth read + re-sign==anchor — not emergent from frontier driving; bare re-broadcast (today's `submit_or_recover_submission`) is insufficient and gated out | "At most one tx lands" holds *given* WS-D; without it, dropped-mempool + advanced-nonce is mishandled |
-| DEC-31 | Dedup convergence is safe **within a shared trust domain** for the pinned `signer_ref`; cross-tenant isolation would require the launching principal in the dedup identity | `RunAdmitted` carries no principal; co-authorized launchers converge safely, distrusting tenants would not |
+| DEC-31 | **Normative:** one Postgres deployment = one trust domain (all launchers co-authorized for its signers); **trust scope is a factor of the run-id preimage**. Cross-tenant isolation is a non-goal (would need the launching principal in the preimage + claim + evidence) | A trust *boundary*, not a note (review #2); co-authorized convergence is safe, distrusting tenants out of scope |
+| DEC-32 | `Receipt`-level terminalization is **final-at-risk**: binds output / releases the lane pre-finality; a post-receipt reorg invalidates the published output with no automatic repair (only nonce continuity self-heals). Reorg-safe outputs use `Finalized` | review #4 — a terminalized effect has no frontier left to reconcile |
+| DEC-33 | Ratification reconciles `docs/saga.md` ("every requested lane acquired together", `saga.md:161`) **down to single-lane** to match the code (`single_lane_claim_admission`, `resource_lanes.rs:94`); multi-lane stays deferred | review #6 — the saga contract overstated the single-lane implementation |
 
 ## 8. Changes required (implementation plan)
 
@@ -580,13 +604,14 @@ with docs+tests in the same change. Five workstreams.
 
 ### WS-B — Content-addressed run identity + execution claim + invoker drive loop
 
-- **Default run-id derivation:** replace random `mfm_app::new_run_id()` defaults on CLI/REST launch
-  with a derived run id over the canonical lowered graph + admission policy **+ bound executable
-  identities**, excluding the run id, audit/provenance (`TypedExecutionSpecAudit`), and launch
-  spelling; define remediation-linked (`forward_run_id`) handling (DEC-18/29, MED-3). `RunAdmitted`
-  becomes idempotent **admit-or-attach** for that content address — and because executables are folded
-  into the run id, two same-build launchers produce matching `RunAdmitted` fingerprints (attach, not
-  `CommitConflict`).
+- **Default run-id derivation (semantic):** replace random `mfm_app::new_run_id()` defaults on
+  CLI/REST launch with a derived run id over the canonical lowered graph + **resolved semantic
+  inputs/config** + admission policy + trust scope, **excluding executables**, audit/provenance
+  (`TypedExecutionSpecAudit`), the run id, and launch spelling; define remediation-linked
+  (`forward_run_id`) handling (DEC-18/31, MED-3). Launch is **try-admit → attach-on-`CommitConflict`**;
+  a launcher whose executables don't match the admitted run **attaches/reports** ("needs a
+  compatible-build driver"), never duplicates and never hard-errors. **Initial launch verifies
+  capability before `RunAdmitted`** (ingress failure, DEC-3); only resume/attach declines (review #5).
 - **Execution lane class** (`NowaitSkip`, `lane_id` = derived run id) on the WS-A primitive:
   try-acquire active-driver coordination + heartbeat + lease expiry. Dedup identity is the run id;
   the claim avoids duplicate driver work and gives future recovery a stale-claim substrate.
@@ -682,19 +707,20 @@ side-effect ledger non-terminal, the signer lane can remain held until manual re
 - **Side-effect contract gains `verification`.** This changes the spec hash; existing certified
   specs are re-lowered/re-certified (no in-place migration of historical runs, per `docs/design.md`
   CLI/REST rules).
-- **Public surfaces.** The `mfm run start` / REST launch default run id changes from random UUID to
-  content-addressed certified runtime graph identity; callers may still pass an explicit run id when
-  they need a distinct run identity. The run path gains an execution claim for active-driver
-  coordination. Existing `run resume`, `run replay`, and `run list --watch` surfaces remain; manual
-  resume is the v1 recovery trigger. Automatic resume is deferred (§12); there is no separate
-  worker-pool entrypoint.
+- **Public surfaces.** The `mfm run start` / REST launch default run id changes from random UUID to a
+  **semantic** content address (certified graph + resolved config/inputs + admission policy + trust
+  scope, **excluding executables**); callers may pass an explicit run id for a distinct run. Initial
+  launch now fails before `RunAdmitted` if the invoker lacks the policy capability (DEC-3). The run
+  path gains an execution claim for active-driver coordination. Existing `run resume`, `run replay`,
+  and `run list --watch` remain; manual resume is the v1 recovery trigger. Automatic resume is
+  deferred (§12); there is no separate worker-pool entrypoint.
 
 ## 10. Risks & mitigations
 
 | Risk | Mitigation |
 |---|---|
 | Admission table mistaken for authority | Structural: mode∝class, liveness-only, no safety read branches on it (§6.2 inv. 2); lane-state projection kept separate |
-| Run-id derivation accidentally includes volatile launch spelling | Hash only the canonical certified runtime graph / lowered state graph and hash-defining admission policy; exclude run id, raw file path/bytes, and unresolved "latest" spelling (DEC-18) |
+| Run-id derivation accidentally includes volatile launch spelling or executables | Hash only the canonical graph + resolved semantic inputs/config + admission policy + trust scope; exclude run id, **executables**, audit/provenance, raw file path/bytes, and unresolved "latest" spelling (DEC-18/29) |
 | One-ledger redesign reaches event schemas / store admission / lane release / producer evidence (wide blast radius) | Accepted as the chosen end state and a WS-C phase gate (DEC-14/17); pair-authority schema design in §6.4d + replay/kill-mid-flight tests; two-linked-ledger considered and rejected |
 | Fungible workers terminalize finality at different depths | Depth resolved from a certified policy at admission (§6.4b), identical for all workers and replay; a worker lacking the capability declines the claim |
 | Signer cannot reproduce a recorded anchor → wedged lane | Defined terminal disposition (DEC-20): reconcile by the recorded anchor; failure-with-lane-release or policy manual-block, never a silent wedge |
@@ -705,21 +731,25 @@ side-effect ledger non-terminal, the signer lane can remain held until manual re
 | Wallet wedged by a dead driver before verify terminal | Accepted v1 availability tradeoff: manual `run resume` is the recovery trigger; the lane releases at the ledger's proven terminal (DEC-25), never on a timeout. Automatic recovery is deferred |
 | Observation-feed frontier lag (`pg_snapshot_xmin`) | Affects status/watch freshness only; dispatch is invoker-driven, manual resume is keyed by run id, and future automatic resume reads the claim table directly — no dispatch coupling (DEC-22/23) |
 | `ManualResolution` holds a wallet lane | Only when the ambiguity itself needs an operator (rare; most ambiguity auto-reconciles); blocks only same-signer effects; mitigate operationally (per-class signers, fast alerting) (DEC-25) |
-| Run id excludes executables but the drive path enforces them → admit-or-attach becomes `CommitConflict` across builds (HIGH-1) | Fold bound executable identities into the run id (DEC-29): same build → matching fingerprint → attach; different build → distinct run |
-| "Any worker drives any run" overstated — drive/resume is binary-identity-scoped (HIGH-2) | Doctrine corrected to executable-identity-scoped fungibility (§6.1, DEC-29); rolling upgrade starts new runs; cross-build takeover is deferred recovery work |
+| Same work on a different build double-executes if executables are in run identity (review #1) | Executables are a **drive guard, not identity** (DEC-29); semantic run id → identical work is one run; a different-build launcher attaches/reports via try-admit→attach, never duplicates |
+| "Any worker drives any run" overstated — drive is executable-scoped and v1 is manual-resumable (review #3) | Doctrine scoped in §1/§6.1: driving requires matching executables; v1 invoker-driven + manual resume; full auto-recovery deferred |
 | Manual resume of an ambiguous submission left unreconciled (bare re-broadcast) | WS-D reconcile-before-resubmit (chain truth → Confirmed/NotSubmittedProven, re-sign==anchor) is a hard gate (DEC-30), replacing today's always-`Observed` callback |
-| Dedup convergence under mutual distrust drives a side effect under another launcher's signer | Safe within a shared trust domain for the pinned `signer_ref` (DEC-31); cross-tenant isolation would put the principal in the dedup identity |
+| Dedup convergence under mutual distrust drives a side effect under another launcher's signer | One deployment = one trust domain, trust scope in the run-id preimage (DEC-31, normative); cross-tenant isolation is a non-goal |
+| Capability-lacking invoker strands an admitted run (review #5) | Initial launch verifies capability **before** `RunAdmitted` (ingress failure, DEC-3); only resume/attach declines cleanly |
+| Receipt-level output invalidated by a post-receipt reorg (review #4) | `Receipt` is explicitly **final-at-risk** (DEC-32); outputs needing reorg-safety use `Finalized` |
+| `docs/saga.md` multi-lane contract diverges from single-lane code (review #6) | Reconcile saga.md down to single-lane at ratification (DEC-33); multi-lane deferred |
 
 ## 11. Testing strategy
 
 - **Concurrency:** property/integration tests with N concurrent drivers per run asserting
   single-commit-wins and idempotent re-presentation.
-- **Run identity:** same canonical certified runtime graph ⇒ same run id; different lowered graph ⇒
-  different run id; run-id derivation excludes run id, audit/provenance, and volatile launch spelling;
-  **same graph + different bound executables ⇒ different run id** (DEC-29); two same-build launchers
-  admit-or-attach with matching fingerprints (not `CommitConflict`); a duplicate launch
-  attaches/reports instead of creating a random second run; an explicit run id or a distinguishing
-  graph input yields a distinct run (opt-out, DEC-28).
+- **Run identity:** same canonical graph + same resolved semantic inputs/config ⇒ same run id;
+  different config/inputs or graph ⇒ different run id; run-id derivation excludes run id, executables,
+  audit/provenance, and volatile launch spelling; **same work + different bound executables ⇒ the SAME
+  run id** (executables not in identity, DEC-29) — a different-build launcher **attaches/reports**
+  ("needs compatible build"), never a second run and never a hard `CommitConflict`; a same-build
+  duplicate launch attaches via commit-key idempotency; an explicit run id or distinguishing input
+  yields a distinct run (opt-out, DEC-28).
 - **Admission:** FIFO fairness, lease-expiry reaping, `NowaitSkip` no-queue, mode∝class compile-fail
   fixtures.
 - **Side-effect manual recovery:** kill-mid-submit and kill-mid-verify integration tests against a
@@ -738,8 +768,7 @@ side-effect ledger non-terminal, the signer lane can remain held until manual re
 
 - **Automatic resume + dead-driver takeover + reconciliation-on-takeover (DEC-21/23)** — part of the
   larger AC/DC + saga recovery effort, not this RFC. Includes **cross-build takeover** (resuming a run
-  admitted under a different executable identity, DEC-29), which exact-binary fungibility otherwise
-  forbids.
+  admitted under different executables, DEC-29), which the executable drive-guard otherwise forbids.
 - Pipelined nonces (DEC-1); per-attempt execution leases (DEC-7); feed sharding and cross-run
   priority (DEC-9); multi-lane admission (§3 Non-goals); `due_at` re-wake + tenure-release-on-wait
   (DEC-6/DEC-8, for long `Finalized` waits at scale).
@@ -775,3 +804,5 @@ side-effect ledger non-terminal, the signer lane can remain held until manual re
 | EVM recovery: bare re-broadcast (always `Observed`); generic submission decisions | `adapters/evm-contracts/src/lib.rs:1758-1774`; `runtime/src/side_effect_driver.rs:848-878` |
 | Ledger key derivation (attempt-scoped today) | `kernel/runtime/src/side_effect_driver.rs:1091-1127` |
 | Spec audit/provenance (excluded from run-id projection) | `kernel/spec/src/lib.rs` `TypedExecutionSpecAudit`; `certify` `forward_run_id` |
+| saga.md multi-lane contract vs single-lane code | `docs/saga.md:159-169`; `run_store/resource_lanes.rs:94` |
+| Capability bindings verified at admission (ingress) | `docs/design.md:216` |
