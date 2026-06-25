@@ -88,7 +88,7 @@ const CURSOR_VERSION: &str = "mfm.run_observation.cursor.v1";
 const OBSERVATION_NOTIFY_CHANNEL: &str = "mfm_run_observation";
 const OBSERVATION_NOTIFY_PAYLOAD: &str = "changed";
 const OBSERVATION_WAIT_POLL_INTERVAL_MS: u64 = 50;
-const RESOURCE_LANE_WAITER_LEASE_SECS: i32 = 60;
+const WAIT_FIFO_ADMISSION_WAITER_LEASE_SECS: i32 = 60;
 const MAX_ARTIFACT_BLOB_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_OBSERVATION_LIMIT: u32 = 100;
 
@@ -96,6 +96,7 @@ fn database_error(context: &'static str, _error: sqlx::Error) -> PostgresStoreEr
     PostgresStoreError::Database(context)
 }
 
+mod admission_lanes;
 mod append;
 mod artifact_admission;
 mod artifact_writes;
@@ -114,8 +115,9 @@ mod unit_tests;
 mod util;
 
 use self::{
-    artifact_admission::*, artifact_writes::*, artifacts::*, authority::*, commits::*,
-    event_rows::*, observations::*, projections::*, resource_lanes::*, stream::*, util::*,
+    admission_lanes::*, artifact_admission::*, artifact_writes::*, artifacts::*, authority::*,
+    commits::*, event_rows::*, observations::*, projections::*, resource_lanes::*, stream::*,
+    util::*,
 };
 
 /// PostgreSQL-backed typed run event store.

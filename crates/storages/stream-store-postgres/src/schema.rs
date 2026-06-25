@@ -424,16 +424,16 @@ const REQUIRED_TABLES: &[&str] = &[
     "artifact_admissions",
     "commit_artifact_evidence",
     "run_artifact_admissions",
-    "resource_lane_waiter_counters",
-    "resource_lane_waiters",
+    "admission_lane",
+    "admission_waiter",
     "run_observation_cursors",
 ];
 
 const REQUIRED_VIEWS: &[&str] = &[];
 
 const REQUIRED_INDEXES: &[&str] = &[
-    "resource_lane_waiters_live_fifo_idx",
-    "resource_lane_waiters_expiry_idx",
+    "admission_waiter_live_fifo_idx",
+    "admission_waiter_waiting_expiry_idx",
 ];
 
 const REQUIRED_FUNCTIONS: &[&str] = &["mfm_set_append_xid", "mfm_reject_authority_mutation"];
@@ -455,11 +455,19 @@ const REQUIRED_CONSTRAINTS: &[&str] = &[
     "commits_sort_key_v1_length",
     "commits_sort_key_v1_prefix",
     "commits_sort_key_not_sentinel",
-    "resource_lane_waiter_counters_lane_id_len",
-    "resource_lane_waiter_counters_next_ticket_positive",
-    "resource_lane_waiters_lane_id_len",
-    "resource_lane_waiters_lane_ticket_positive",
-    "resource_lane_waiters_invocation_epoch_nonnegative",
+    "admission_lane_id_len",
+    "admission_lane_class_v1",
+    "admission_lane_mode_v1",
+    "admission_lane_class_mode_v1",
+    "admission_lane_wait_fifo_shape",
+    "admission_lane_nowait_skip_shape",
+    "admission_waiter_lane_fk",
+    "admission_waiter_resource_wait_fifo_v1",
+    "admission_waiter_lane_id_len",
+    "admission_waiter_lane_ticket_positive",
+    "admission_waiter_id_nonempty",
+    "admission_waiter_token_nonempty",
+    "admission_waiter_status_v1",
     "run_observation_cursors_version_v1",
     "run_observation_cursors_sort_key_v1_length",
 ];
@@ -555,4 +563,6 @@ const FORBIDDEN_TABLES: &[&str] = &[
     "typed_side_effect_projection",
     "typed_resource_lane_projection",
     "public_output_projection",
+    "resource_lane_waiter_counters",
+    "resource_lane_waiters",
 ];

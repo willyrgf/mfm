@@ -74,13 +74,15 @@ cluster-level resource, so unrelated transactions can delay frontier advancement
 and make list/watch lag behind strict per-run status.
 
 Authority and cursor tables are protected by no-update/no-delete/no-truncate
-triggers in the v1 schema. `resource_lane_waiter_counters` and
-`resource_lane_waiters` are the normal-operation mutable exception, and they are
-operational FIFO coordination only. V1 intentionally exposes no app, CLI, REST,
-or library maintenance endpoint for store-epoch reseed, cursor pruning, or
-artifact sweeping. Those operations require a future design for Postgres roles,
-object ownership, credential separation, and restore/clone runbooks; do not
-implement them as helpers over ordinary runtime credentials.
+triggers in the v1 schema. `admission_lane` and `admission_waiter` are the
+normal-operation mutable exception, and they are operational admission
+coordination only. Resource-lane ownership remains event-derived from
+`ResourceLaneClaimed`/`ResourceLaneReleased`; admission rows never grant lane
+ownership. V1 intentionally exposes no app, CLI, REST, or library maintenance
+endpoint for store-epoch reseed, cursor pruning, or artifact sweeping. Those
+operations require a future design for Postgres roles, object ownership,
+credential separation, and restore/clone runbooks; do not implement them as
+helpers over ordinary runtime credentials.
 
 ## Observation Cursors
 
