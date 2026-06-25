@@ -124,6 +124,17 @@ Three layers follow:
 - **Execution layer** (disposable workers): dispatch loops, local concurrency, capability pools,
   transport clients, signer adapters. *May optimize execution; cannot define correctness.*
 
+**No mutable registry or external oracle is consulted while a run executes.** Every outcome-affecting
+input — config, definitions, policy (finality, authority) — is content-addressed and resolved **once,
+at authoring/certification**, then frozen into the certified spec (and the certificate's pinned
+digests). Admission, drive, verify, and replay read **only** the certified spec and the committed
+stream. This is not new restraint bolted on: replay already forbids live registry/signer calls
+(`docs/saga.md:126`) and the registry-validated spec already "does not cross into runtime as a mutable
+execution surface" (`docs/design.md:52`) — the doctrine simply extends that fence across the entire
+admission + execution path. The payoff is that a run's state changes stay **visible, precise, and
+reproducible** from its stream alone: nothing resolves behind your back between two reads, two workers,
+or a run and its replay (DEC-39).
+
 ## 5. Current state (code-grounded baseline)
 
 The safety substrate is already complete; the gaps are in liveness/scale/discovery.
@@ -152,6 +163,13 @@ The safety substrate is already complete; the gaps are in liveness/scale/discove
 - **Typed idempotency + verifier pattern.** `IdempotencyKey`/`idempotency_input`
   (`program/src/lib.rs:1506,1531`); `SideEffectReplayVerifier` (`replay/src/lib.rs:470`); framework
   nodes inserted/validated at lowering (`certify/src/framework_lifecycle.rs`).
+- **Registry is already certification-only.** The certification registry is an in-memory descriptor
+  catalog assembled from the draft (`certify` `CertificationRegistry::from_program_draft`), and the
+  entry-point op registry is a compiled-in table (`app/src/entry_points.rs`) — neither is a live
+  mutable service. Registry-validated authority "does not cross into runtime as a mutable execution
+  surface" (`design.md:52`) and replay forbids live registry calls (`saga.md:126`). So no mutable
+  registry is read during drive today; the only admission-time registry *lookup* the design ever
+  contemplated was this RFC's own (now-removed) finality-resolved-at-admission step (DEC-3/36/39).
 
 ## 6. Design — the end state
 
@@ -269,14 +287,18 @@ free-form semantic equivalence:
 - different effective config that changes the certified spec ⇒ different run id
 - different TOML/JSON spelling converges only if normalization and planning produce the same
   certified spec hash
-- registry, "latest", admission-policy, finality-policy, or lineage changes produce a different run
-  only when they change hash-defining certified spec material
+- a finality / policy / "latest" / lineage change matters **only** when it changes hash-defining
+  certified spec material — and because all such policy is config lowered into the spec (§6.4b, §4
+  doctrine), a change to it *is* a change to the certified work, by construction
 
-All launch-time material that can affect outcome must be inside the certified spec hash before run-id
-derivation. If outcome-affecting data is not hash-defining certified spec material, that is a
-certification/assembly bug to fix, not a reason to add a second run-identity projection. This is the
-deliberately conservative simplification: exact certified work converges; merely equivalent-looking
-work is not promised to converge.
+All outcome-affecting material is content-addressed config or definitions lowered into the certified
+spec **before** run-id derivation; nothing outcome-affecting is resolved from a mutable registry at
+admission (§4 doctrine, DEC-39). That is what makes the spec hash a *complete* identity rather than a
+partial one. The consequence is deliberately simple: two **identical requests** converge on one run; a
+**different request** (different config — including a different finality value) is different certified
+work and gets its own run. That is correct, not a divergence: the launcher asked for something
+different, rather than something changing behind their back. Exact certified work converges; merely
+equivalent-looking work is not promised to converge.
 
 `RunIdentityMaterialV1` is part of `RunAdmitted` evidence, and the store/runtime validate
 `run_id == sha256-jcs-v1(identity_material)`. Attach loads the existing `RunAdmitted` and compares
@@ -410,16 +432,16 @@ must not sign (`docs/architecture.md:143`). So split them:
   truth.
 Two deterministic anchors, two layers; neither crosses the boundary.
 
-**(b) Finality depth is certified, resolved at admission, never process-local.** `verification:
-Receipt | Finalized(policy)` is hash-defining on `SideEffectContractSpec` — the semantic *class*
-plus a **certified finality-policy descriptor**. Because the numeric depth is outcome-affecting it
-is not taken from worker-local config: the certified policy is **resolved against the registry at
-run admission** to a concrete depth, recorded in `RunAdmitted` launch evidence **with the
-registry-snapshot digest + resolver identity**. Any outcome-affecting resolved policy material must
-also be hash-defining certified spec material, so it influences run identity through
-`certified_spec_hash` (DEC-36), and is read from the run stream by every worker and by replay. (Pure
-admission-pinning from local config would only move the process dependence to *which worker admitted*
-— resolving from certified authority removes it.)
+**(b) Finality is certified config, lowered into the spec — never registry-resolved or
+process-local.** `verification: Receipt | Finalized(depth)` is hash-defining on
+`SideEffectContractSpec` — the semantic *class* plus, for `Finalized`, a concrete **depth that is a
+config value** (a default, overridable by network/deployment config). Because the depth is
+outcome-affecting it is neither worker-local config nor a mutable registry lookup: it is **config
+lowered into the certified spec at authoring/certification**, so it is captured by
+`certified_spec_hash` and read identically from the certified spec by every worker and by replay.
+There is **no resolve-against-the-registry-at-admission step** — that earlier design is removed (§4
+doctrine, DEC-3/36/39). A finality change is therefore a config change: a different certified spec and
+a deliberately distinct run, never a silent re-resolution under a running identity.
 At **initial launch** the invoker must hold the capability to satisfy the policy or the launch
 **fails before `RunAdmitted`** (an ingress failure, per `docs/design.md:216`) — an invoker-driven
 system has no pool to hand an admitted-but-undrivable run to, so it must not admit one. At
@@ -595,7 +617,7 @@ finality" — finality is one input among several.
 | DEC-0 | Doctrine: correctness = the Postgres transaction boundary; topology operational; leases = liveness, never safety | Enables fungible processes / multi-agent without process-level coordination |
 | DEC-1 | Nonce: serial per-account, sequential-within-hold; pipelining deferred | Deterministic nonce block, point-wise recovery; pipelining reopens range/gap recovery |
 | DEC-2 | Reconcile on the deterministic **submission anchor** (prepared-invocation signed-tx hash, adapter-computed — distinct from the state's semantic idempotency input), never the nonce; no exclusive-ownership assumption | Respects the state/signer boundary; foreign-occupied nonce = safe detectable terminal; exclusivity = availability, not safety |
-| DEC-3 | Finality: semantic class + **certified policy descriptor** resolved against the registry at admission to a depth recorded in `RunAdmitted` | Depth is outcome-affecting → from certified authority, not worker config; **initial launch without the capability fails before `RunAdmitted` (ingress); only resume/attach declines** (review #5) |
+| DEC-3 | Finality is **certified config lowered into the spec** (`verification` = `Receipt` or `Finalized(depth)`, hash-defining on `SideEffectContractSpec`), captured by `certified_spec_hash` and read identically by every worker and replay — **not** resolved from a registry at admission. **Initial launch without the capability to satisfy the policy fails before `RunAdmitted` (ingress); only resume/attach declines** (review #5) | Depth is outcome-affecting → content-addressed config, not worker config and not a mutable registry lookup; no admission-time policy oracle (§4 doctrine, DEC-39) |
 | DEC-4 | Admission leases + heartbeat; expiry routes to recovery, never silent release | Superseded for resource-lane *holders* by §6.4–6.5 (ledger-lifetime); applies to execution tenure |
 | DEC-5 | Recovery behavior = ordinary driving once a run is resumed; automatic recovery dispatch is deferred | Needs only a read capability; v1 trigger is manual `run resume`, future trigger is expired-claim sweep |
 | DEC-6 | `due_at` re-wake for undriven parked runs — **DEFERRED** (v1 holds+heartbeats through short Receipt waits) | Only needed for long `Finalized` waits at scale |
@@ -628,9 +650,10 @@ finality" — finality is one input among several.
 | DEC-33 | Ratification reconciles `docs/saga.md` ("every requested lane acquired together", `saga.md:161`) **down to single-lane** to match the code (`single_lane_claim_admission`, `resource_lanes.rs:94`); multi-lane stays deferred | review #6 — the saga contract overstated the single-lane implementation |
 | DEC-34 | `RunAdmitted` records first-class `RunIdentityMaterialV1`; store/runtime validate `run_id == sha256-jcs-v1(identity_material)`, and attach compares the stored material before drive/report | MFM's no-bare-hash hygiene (R7 #3); identity material is required authority, not optional hardening |
 | DEC-35 | `NotSubmittedProven` is the terminal *outcome of recovery investigation* (receipt-recovery / stuck-tx cancel-or-bump / foreign-superseded / resubmit), not a single read; WS-D resolves clear cases, richer diagnosis is deferred | R7 #2 — "nonce advanced + receipt absent" is ambiguity; a transient RPC read triggers investigation, never terminalization; not always about finality |
-| DEC-36 | The **resolved** admission policy — finality depth + registry-snapshot digest + resolver identity — is recorded in `RunAdmitted` and must be hash-defining certified spec material when it can affect outcome | R7 #4 — registry-resolved terminality is outcome-affecting; a registry change must change the certified spec hash or launch fails before admission |
+| DEC-36 | **Superseded (R8): there is no registry-resolved admission policy.** Finality and every other outcome-affecting policy are content-addressed config/definitions lowered into the certified spec; identity needs **no** registry-snapshot digest. Reverses R7 #4 | Putting a registry-snapshot digest in identity made same-spec launches across a registry change *fork* and **double-execute** (the Round-5 pathology, DEC-29); the convergence-vs-fork dilemma only exists when policy is hidden mutable state, and explicit config dissolves it |
 | DEC-37 | The framework `SideEffectVerify` node **invokes** the domain `SideEffectState::output_from_*` contract for the output value; it never constructs domain output in `kernel/runtime` | R7 #5 — keeps `kernel/runtime` domain-free (`architecture.md:80`); framework owns lifecycle, domain owns output |
 | DEC-38 | v1 claim is **processes are safe to lose** (a crash never corrupts), NOT automatic at-least-once progress — progress after a driver loss needs manual `run resume`; automatic at-least-once is the deferred recovery effort | R7 #6 — "at-least-once execution" overstated automatic progress for v1 |
+| DEC-39 | **No mutable registry/oracle is consulted during admission, drive, verify, or replay.** All outcome-affecting policy is resolved once at authoring/certification and frozen into the certified spec (+ certificate pinned digests); execution reads only the certified spec and the committed stream | R8 — extends the existing replay fence (`saga.md:126`) and runtime fence ("does not cross into runtime", `design.md:52`) across the whole admission+execution path; state changes stay visible/precise/reproducible from the stream alone |
 
 ## 8. Changes required (implementation plan)
 
@@ -657,9 +680,10 @@ with docs+tests in the same change. Five workstreams.
 - **Default run-id derivation (certified-spec identity):** replace random `mfm_app::new_run_id()`
   defaults on CLI/REST launch with `RunIdentityMaterialV1 { certified_spec_hash, trust_scope_id,
   distinct_run_key_digest }` and `run_id = sha256-jcs-v1(identity_material)`. `certified_spec_hash`
-  is the exact identity authority; all outcome-affecting launch config, policy resolution, registry
-  resolution, remediation linkage (`forward_run_id`), and lineage that should distinguish runs must
-  be hash-defining certified spec material. `RunAdmitted` records the identity material, and
+  is the exact identity authority; all outcome-affecting launch config, policy (finality, authority),
+  remediation linkage (`forward_run_id`), and lineage that should distinguish runs must be
+  content-addressed config/definitions lowered into the certified spec — **never** resolved from a
+  mutable registry at admission (§4 doctrine, DEC-39). `RunAdmitted` records the identity material, and
   store/runtime validation fails closed if the material does not hash to the stream `run_id`.
   Launch is **try-admit → attach-on-existing** with typed outcomes (`Admitted`, `Attached`,
   `AlreadyDriving`, `IncompatibleExecutable`, `IdentityMismatch`). A launcher whose executables don't
@@ -763,9 +787,10 @@ side-effect ledger non-terminal, the signer lane can remain held until manual re
 - **`resource_lane_waiters` → `admission_lane`/`admission_waiter`.** A fresh schema is acceptable;
   resource-lane *holders* are event-derived (rebuilt from the stream), so only the operational
   waiter queue is replaced. No semantic data migration is required for holders.
-- **Side-effect contract gains `verification`.** This changes the spec hash; existing certified
-  specs are re-lowered/re-certified (no in-place migration of historical runs, per `docs/design.md`
-  CLI/REST rules).
+- **Side-effect contract gains `verification`.** The finality class + depth are **config in the
+  contract spec** (no registry-resolved-at-admission step; §4 doctrine, DEC-3/39). This changes the
+  spec hash; existing certified specs are re-lowered/re-certified (no in-place migration of historical
+  runs, per `docs/design.md` CLI/REST rules).
 - **Public surfaces.** The `mfm run start` / REST launch default run id changes from random UUID to
   the certified-spec identity material content address (`certified_spec_hash` + deployment
   `trust_scope_id` + optional `distinct_run_key_digest`). Normal start no longer accepts arbitrary
@@ -782,9 +807,9 @@ side-effect ledger non-terminal, the signer lane can remain held until manual re
 |---|---|
 | Admission table mistaken for authority | Structural: mode∝class, liveness-only, no safety read branches on it (§6.2 inv. 2); lane-state projection kept separate |
 | Certified spec hash includes accidental volatile launch spelling | Conservative identity promises exact certified-spec convergence only; keep raw paths, raw config bytes, unresolved "latest" spelling, and other non-semantic noise out of hash-defining spec material when convergence is desired (DEC-18) |
-| Outcome-affecting launch material is missing from `certified_spec_hash` | Treat it as a certification/assembly bug: make the material hash-defining in the certified spec before deriving `RunIdentityMaterialV1`, or fail before `RunAdmitted` (DEC-18/36) |
+| Outcome-affecting launch material is missing from `certified_spec_hash` | Treat it as a certification/assembly bug: make the material content-addressed config/definitions in the certified spec before deriving `RunIdentityMaterialV1`, or fail before `RunAdmitted` (DEC-18/39) |
 | One-ledger redesign reaches event schemas / store admission / lane release / producer evidence (wide blast radius) | Accepted as the chosen end state and a WS-C phase gate (DEC-14/17); pair-authority schema design in §6.4d + replay/kill-mid-flight tests; two-linked-ledger considered and rejected |
-| Fungible workers terminalize finality at different depths | Depth resolved from a certified policy at admission (§6.4b), identical for all workers and replay; a worker lacking the capability declines the claim |
+| Fungible workers terminalize finality at different depths | Depth is certified **config in the spec** (§6.4b), captured by `certified_spec_hash` and read identically by all workers and replay — no registry or worker-local resolution; a worker lacking the capability declines the claim |
 | Signer cannot reproduce a recorded anchor → wedged lane | Defined terminal disposition (DEC-20): reconcile by the recorded anchor; failure-with-lane-release or policy manual-block, never a silent wedge |
 | Automatic takeover of a side-effecting run without reconciliation | Automatic resume is deferred to the AC/DC + saga effort (DEC-21/23); v1 uses explicit manual resume, and ambiguous ledgers keep the signer lane held until driven |
 | Signer determinism regresses | Production signer is already deterministic; re-sign == recorded-anchor assertion catches mismatch before re-broadcast (DEC-15/20) |
@@ -802,9 +827,10 @@ side-effect ledger non-terminal, the signer lane can remain held until manual re
 | `docs/saga.md` multi-lane contract diverges from single-lane code (review #6) | Reconcile saga.md down to single-lane at ratification (DEC-33); multi-lane deferred |
 | Receipt-reorg nonce wedge / invalid output (R7 #1) | Accepted, designer-chosen risk of `Receipt` (`Finalized` is the safe option); both recoverable via the deferred stuck-tx / nonce-reclaim workflow, not a safety hole (DEC-32) |
 | `NotSubmittedProven` released on a transient/lagging RPC read (R7 #2) | It is an investigation *outcome*, not a single read (DEC-35); a transient read triggers investigation, never terminalization |
-| Registry policy change silently diverges terminality (R7 #4) | Resolved admission policy + registry-snapshot digest are recorded in `RunAdmitted` and must be hash-defining certified spec material when outcome-affecting (DEC-36); otherwise launch fails before admission |
+| Registry policy change silently diverges terminality (R7 #4) | **Dissolved (R8):** there is no registry-resolved policy (DEC-36 superseded). Finality is config in the spec; a change is different certified work → a deliberate distinct run, never a silent re-resolution under a running identity (DEC-3/39) |
 | Attach trusts a bare `run_id` digest (R7 #3) | Required `RunIdentityMaterialV1` is recorded in `RunAdmitted`; attach re-hashes and compares it before drive/report (DEC-34) |
 | Verify node leaks domain output into the kernel (R7 #5) | Framework node **invokes** the domain `output_from_*` contract, never constructs output (DEC-37); `kernel/runtime` stays domain-free |
+| A run reads mutable external state mid-execution → unreproducible from the stream | Forbidden by doctrine (DEC-39): admission/drive/verify/replay read only the certified spec + committed stream; the registry is certification-only (`design.md:52`, `saga.md:126`) |
 
 ## 11. Testing strategy
 
@@ -829,7 +855,8 @@ side-effect ledger non-terminal, the signer lane can remain held until manual re
   signer fixture must fail closed.
 - **Replay:** verify-node evidence replays from recorded facts with no live IO.
 - **Boundary:** cargo-metadata + compile-fail fixtures keeping the admission primitive
-  domain-agnostic and the verifier read-only.
+  domain-agnostic and the verifier read-only; an execution-path test asserting drive/verify take **no
+  registry/oracle dependency** (only certified spec + committed stream), enforcing DEC-39.
 
 ## 12. Deferred / open
 
@@ -874,4 +901,5 @@ side-effect ledger non-terminal, the signer lane can remain held until manual re
 | Ledger key derivation (attempt-scoped today) | `kernel/runtime/src/side_effect_driver.rs:1091-1127` |
 | Certified spec hash vs audit envelope; remediation link material | `kernel/spec/src/lib.rs` `TypedExecutionSpec`; `TypedExecutionSpecAudit`; `certify` `forward_run_id` |
 | saga.md multi-lane contract vs single-lane code | `docs/saga.md:159-169`; `run_store/resource_lanes.rs:94` |
+| Registry fenced from runtime; replay forbids live registry (DEC-39) | `docs/design.md:52`; `docs/saga.md:126`; `certify` `CertificationRegistry`; `app/src/entry_points.rs` |
 | Capability bindings verified at admission (ingress) | `docs/design.md:216` |
