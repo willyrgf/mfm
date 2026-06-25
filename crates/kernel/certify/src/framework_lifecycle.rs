@@ -147,7 +147,7 @@ pub(super) fn validate_framework_nodes(
                     })?;
                 validate_framework_input_binding(
                     node,
-                    &spec::framework_lifecycle_receipt_input_binding(
+                    &spec::framework_lifecycle_maybe_skipped_cell_input_binding(
                         "side_effect_verify",
                         "submit_output",
                         submit_output_cell,
