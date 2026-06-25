@@ -78,11 +78,13 @@ triggers in the v1 schema. `admission_lane` and `admission_waiter` are the
 normal-operation mutable exception, and they are operational admission
 coordination only. Resource-lane ownership remains event-derived from
 `ResourceLaneClaimed`/`ResourceLaneReleased`; admission rows never grant lane
-ownership. V1 intentionally exposes no app, CLI, REST, or library maintenance
-endpoint for store-epoch reseed, cursor pruning, or artifact sweeping. Those
-operations require a future design for Postgres roles, object ownership,
-credential separation, and restore/clone runbooks; do not implement them as
-helpers over ordinary runtime credentials.
+ownership. Execution-claim rows are nowait holder leases keyed by derived run id;
+they coordinate active drivers and require explicit token-matched reaping after
+expiry before another holder can acquire. V1 intentionally exposes no app, CLI,
+REST, or library maintenance endpoint for store-epoch reseed, cursor pruning, or
+artifact sweeping. Those operations require a future design for Postgres roles,
+object ownership, credential separation, and restore/clone runbooks; do not
+implement them as helpers over ordinary runtime credentials.
 
 ## Observation Cursors
 

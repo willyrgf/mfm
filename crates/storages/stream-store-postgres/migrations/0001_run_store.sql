@@ -155,6 +155,7 @@ CREATE TABLE admission_lane (
   next_ticket BIGINT NULL,
   holder_token TEXT NULL,
   lease_expires_at TIMESTAMPTZ NULL,
+  execution_run_id TEXT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp(),
   PRIMARY KEY (class, lane_id),
@@ -181,6 +182,13 @@ CREATE TABLE admission_lane (
       AND ((holder_token IS NULL AND lease_expires_at IS NULL)
         OR (holder_token IS NOT NULL AND lease_expires_at IS NOT NULL))
     )
+  ),
+  CONSTRAINT admission_lane_execution_run_id_shape CHECK (
+    (class = 'execution_claim' AND execution_run_id IS NOT NULL)
+    OR (class <> 'execution_claim' AND execution_run_id IS NULL)
+  ),
+  CONSTRAINT admission_lane_execution_run_id_nonempty CHECK (
+    execution_run_id IS NULL OR execution_run_id <> ''
   )
 );
 
@@ -213,6 +221,10 @@ WHERE status = 'waiting';
 CREATE INDEX admission_waiter_waiting_expiry_idx
 ON admission_waiter (class, lane_id, lease_expires_at)
 WHERE status = 'waiting';
+
+CREATE INDEX admission_lane_expired_execution_claim_idx
+ON admission_lane (lease_expires_at, execution_run_id)
+WHERE class = 'execution_claim' AND holder_token IS NOT NULL;
 
 CREATE TABLE run_observation_cursors (
   token_hash TEXT PRIMARY KEY,

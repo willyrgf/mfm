@@ -170,15 +170,14 @@ and records the matching `resource_lane_claim_events` and `resource_lane_transit
 lane blocks other ledgers for the same `(namespace, key_schema_id, key, exclusive)` lane across
 runs.
 
-Ordinary contention returns `ResourceLaneClaimBlocked`. That outcome parks the open attempt before
-live IO; it is not a run event, not lane-transition authority, not persisted semantic authority, and
-never authorizes attempt, saga, or run terminal failure. For single-lane exclusive claims, Postgres
-may insert or refresh a mutable operational waiter row so retry admission is FIFO among live
-non-expired waiters. That waiter row is not lane ownership authority, cannot grant execution, and is
-skipped once claimed, cancelled, or expired. Parked attempts retry with bounded backoff and may wake
-on lane-release notifications, but notifications are only wakeups; the durable ownership signal is
-the append-only lane authority, and the FIFO signal is rechecked by store admission before any claim
-materializes.
+Ordinary contention returns `AdmissionBlocked`. That outcome parks the open attempt before live IO;
+it is not a run event, not lane-transition authority, not persisted semantic authority, and never
+authorizes attempt, saga, or run terminal failure. For single-lane exclusive claims, Postgres may
+insert or refresh a mutable operational waiter row so retry admission is FIFO among live non-expired
+waiters. That waiter row is not lane ownership authority, cannot grant execution, and is skipped once
+admitted or expired. Parked attempts retry with bounded backoff and may wake on lane-release
+notifications, but notifications are only wakeups; the durable ownership signal is the append-only
+lane authority, and the FIFO signal is rechecked by store admission before any claim materializes.
 
 The no-deadlock invariant is structural: a v1 attempt can hold at most one exclusive lane, and it
 never holds one lane while issuing a second blocking claim. Multi-lane admission, all-or-nothing

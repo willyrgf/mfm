@@ -147,9 +147,9 @@ The safety substrate is already complete; the gaps are in liveness/scale/discove
   retries. **Leaseless is already safe.**
 - **DB-enforced append-only authority.** `mfm_reject_authority_mutation` triggers reject
   UPDATE/DELETE/TRUNCATE on every authority table (`migrations/0001_run_store.sql`).
-- **Sharded resource-lane admission.** Per-lane `pg_advisory_xact_lock` on only the touched lanes
-  plus a `resource_lane_waiters` FIFO queue with ticketing and 60s waiter-lease reaping
-  (`run_store/resource_lanes.rs`).
+- **Sharded admission lanes.** Per-lane `pg_advisory_xact_lock` on only the touched lanes, with
+  `admission_lane`/`admission_waiter` carrying resource FIFO waiters and execution-claim holder
+  leases (`run_store/admission_lanes.rs`, `run_store/resource_lanes.rs`).
 - **Durable observation/watch feed.** Cursored, globally ordered by `(append_xid, commit_sort_key)`
   past a sealed `frontier_xid`, woken by `LISTEN/NOTIFY mfm_run_observation`
   (`run_store/observations.rs`); exposed via app/REST/CLI. **Read-only.**
@@ -198,7 +198,8 @@ One table-pair, one `admit(mode)` code path; a `class` discriminator **binds** t
 
 ```
 admission_lane   (class, lane_id) PK, next_ticket,            -- FIFO ticket source
-                  holder_token, lease_expires_at              -- NowaitSkip holder lease ONLY
+                  holder_token, lease_expires_at,             -- NowaitSkip holder lease ONLY
+                  execution_run_id                            -- execution-claim read key ONLY
 admission_waiter (class, lane_id, ticket) PK, token,          -- WaitFifo queue ONLY
                   status, lease_expires_at
 ```

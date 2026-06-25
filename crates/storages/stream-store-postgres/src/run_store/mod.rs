@@ -11,14 +11,16 @@ use mfm_spec::v1::MediaType;
 use mfm_store::v1::codec::parse_identity;
 use mfm_store::v1::{
     payload_from_json_value, prepared_commit_plan_fingerprint, stage_prepared_commit_plan,
-    AdmissionWaiter, ArtifactAuthorityMap, ArtifactEvidenceRef, AsyncStoreFuture, CodecError,
-    CommitBase, CommitFingerprint, CommitKey, CommitOrdinal, CommitOutcome, CommittedBatch,
-    EventArtifactRequirement, KernelEventEnvelope, LogicalEventKey, ObservedRunStatus,
-    PersistedKernelEventRecord, PreparedArtifactBytes, PreparedCommitBundle, ProjectionSnapshot,
-    ProjectionSnapshotParts, ResourceLaneAuthoritySet, ResourceLaneKey, ResourceLaneProjection,
-    RetainedArtifactReadFuture, RetainedArtifactReadProvider, RunEventStore, RunObservation,
-    RunObservationPage, RunObservationQuery, RunObservationStore, RunState, StagedCommitOutcome,
-    StoreError, StoreErrorInspection, StreamSeq, VerifiedRunArtifactBytes,
+    AdmissionLease, AdmissionToken, AdmissionWaiter, ArtifactAuthorityMap, ArtifactEvidenceRef,
+    AsyncStoreFuture, CodecError, CommitBase, CommitFingerprint, CommitKey, CommitOrdinal,
+    CommitOutcome, CommittedBatch, EventArtifactRequirement, ExecutionClaimStore,
+    ExpiredExecutionClaim, KernelEventEnvelope, LogicalEventKey, NowaitSkipAdmissionResult,
+    ObservedRunStatus, PersistedKernelEventRecord, PreparedArtifactBytes, PreparedCommitBundle,
+    ProjectionSnapshot, ProjectionSnapshotParts, ResourceLaneAuthoritySet, ResourceLaneKey,
+    ResourceLaneProjection, RetainedArtifactReadFuture, RetainedArtifactReadProvider,
+    RunEventStore, RunObservation, RunObservationPage, RunObservationQuery, RunObservationStore,
+    RunState, StagedCommitOutcome, StoreError, StoreErrorInspection, StreamSeq,
+    VerifiedRunArtifactBytes,
 };
 use serde_json::Value;
 use sqlx::{
@@ -89,6 +91,7 @@ const OBSERVATION_NOTIFY_CHANNEL: &str = "mfm_run_observation";
 const OBSERVATION_NOTIFY_PAYLOAD: &str = "changed";
 const OBSERVATION_WAIT_POLL_INTERVAL_MS: u64 = 50;
 const WAIT_FIFO_ADMISSION_WAITER_LEASE_SECS: i32 = 60;
+const EXECUTION_CLAIM_LEASE_SECS: i32 = mfm_store::v1::EXECUTION_CLAIM_LEASE_TTL_SECS as i32;
 const MAX_ARTIFACT_BLOB_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_OBSERVATION_LIMIT: u32 = 100;
 
@@ -170,6 +173,50 @@ impl RunEventStore for PostgresRunStore {
         run_id: &'a RunId,
     ) -> AsyncStoreFuture<'a, ProjectionSnapshot, Self::Error> {
         Box::pin(async move { load_projection_snapshot_client(&self.pool, run_id).await })
+    }
+}
+
+impl ExecutionClaimStore for PostgresRunStore {
+    type Error = PostgresStoreError;
+
+    fn acquire_execution_claim<'a>(
+        &'a self,
+        run_id: &'a RunId,
+        token: AdmissionToken,
+    ) -> AsyncStoreFuture<'a, NowaitSkipAdmissionResult, Self::Error> {
+        Box::pin(async move { acquire_execution_claim_client(&self.pool, run_id, token).await })
+    }
+
+    fn renew_execution_claim<'a>(
+        &'a self,
+        run_id: &'a RunId,
+        token: &'a AdmissionToken,
+    ) -> AsyncStoreFuture<'a, Option<AdmissionLease>, Self::Error> {
+        Box::pin(async move { renew_execution_claim_client(&self.pool, run_id, token).await })
+    }
+
+    fn release_execution_claim<'a>(
+        &'a self,
+        run_id: &'a RunId,
+        token: &'a AdmissionToken,
+    ) -> AsyncStoreFuture<'a, bool, Self::Error> {
+        Box::pin(async move { release_execution_claim_client(&self.pool, run_id, token).await })
+    }
+
+    fn expired_execution_claims<'a>(
+        &'a self,
+    ) -> AsyncStoreFuture<'a, Vec<ExpiredExecutionClaim>, Self::Error> {
+        Box::pin(async move { expired_execution_claims_client(&self.pool).await })
+    }
+
+    fn reap_expired_execution_claim<'a>(
+        &'a self,
+        run_id: &'a RunId,
+        token: &'a AdmissionToken,
+    ) -> AsyncStoreFuture<'a, bool, Self::Error> {
+        Box::pin(
+            async move { reap_expired_execution_claim_client(&self.pool, run_id, token).await },
+        )
     }
 }
 

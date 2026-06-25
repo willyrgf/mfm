@@ -23,18 +23,20 @@ use mfm_spec::v1::{
 use mfm_store::v1::{
     admission_advisory_lock_key, admission_waiter_id, event_artifact_requirements,
     payload_canonical_json, payload_from_json_value, resource_wait_fifo_admission_token,
-    AdmissionLaneClass, AdmissionLaneMode, ArtifactEvidenceRef, AsyncInMemoryRunStore,
-    AsyncStoreFuture, AttemptStatus, AttemptTerminal, CellTerminalProjection,
-    CommitArtifactEvidenceSet, CommitKey, CommitOutcome, CommitPreconditions, CommitRequest,
-    CommittedRunStream, EventArtifactReferenceSource, ExecutionClaimAdmissionLane,
-    ExistingArtifactAdmission, ForwardLedgerClassification, KernelEventEnvelope, ManualBlockReason,
-    ManualResolution, ManualResolutionProjection, PreparedCommit, PreparedCommitBundle,
+    AdmissionLaneClass, AdmissionLaneMode, AdmissionToken, ArtifactEvidenceRef,
+    AsyncInMemoryRunStore, AsyncStoreFuture, AttemptStatus, AttemptTerminal,
+    CellTerminalProjection, CommitArtifactEvidenceSet, CommitKey, CommitOutcome,
+    CommitPreconditions, CommitRequest, CommittedRunStream, EventArtifactReferenceSource,
+    ExecutionClaimAdmissionLane, ExecutionClaimStore, ExistingArtifactAdmission,
+    ForwardLedgerClassification, KernelEventEnvelope, ManualBlockReason, ManualResolution,
+    ManualResolutionProjection, NowaitSkipAdmissionResult, PreparedCommit, PreparedCommitBundle,
     PreparedCommitPlan, ProjectionSnapshot, PublicOutputProjection, RequiredRunState,
     ResourceAdmissionLane, ResourceLaneKey, Retention, RunAdmission, RunCompletionProjection,
     RunEventStore, RunMode, RunState, SagaAdmitToken, SagaEngagementProjection,
     SagaEngagementReason, SagaTerminal, SagaTerminalProof, SideEffectLedgerPhase,
     SideEffectLedgerRef, SideEffectPhase, SideEffectProgress, SideEffectTerminal,
-    StateAttemptStarted, StoreError, StreamSeq,
+    StateAttemptStarted, StoreError, StreamSeq, EXECUTION_CLAIM_HEARTBEAT_INTERVAL_SECS,
+    EXECUTION_CLAIM_LEASE_TTL_SECS,
 };
 
 const SPEC_MEDIA_TYPE: &str = "application/vnd.mfm.typed-execution-spec+json;version=1";
@@ -559,6 +561,61 @@ fn admission_lane_helpers_are_stable_and_domain_separated() {
 
     assert_eq!(resource_lock, resource_retry_lock);
     assert_ne!(resource_lock, execution_lock);
+}
+
+#[test]
+fn execution_claim_contract_defaults_are_explicit() {
+    assert_eq!(EXECUTION_CLAIM_LEASE_TTL_SECS, 60);
+    assert_eq!(EXECUTION_CLAIM_HEARTBEAT_INTERVAL_SECS, 20);
+    assert!(AdmissionToken::new("").is_err());
+}
+
+#[test]
+fn in_memory_execution_claims_are_token_matched() {
+    let store = AsyncInMemoryRunStore::default();
+    let run_id = run_id(242);
+    let holder = AdmissionToken::new("mfm.test.execution_claim.holder").expect("holder token");
+    let other = AdmissionToken::new("mfm.test.execution_claim.other").expect("other token");
+
+    let admitted = poll_ready_store_future(store.acquire_execution_claim(&run_id, holder.clone()))
+        .expect("acquire execution claim");
+    let NowaitSkipAdmissionResult::Admitted(first_lease) = admitted else {
+        panic!("first execution claim should be admitted");
+    };
+    assert_eq!(first_lease.token, holder);
+
+    let busy = poll_ready_store_future(store.acquire_execution_claim(&run_id, other.clone()))
+        .expect("busy execution claim");
+    let NowaitSkipAdmissionResult::Busy(busy) = busy else {
+        panic!("second execution claim should be busy");
+    };
+    assert_eq!(
+        busy.holder.expect("busy holder lease").token,
+        first_lease.token
+    );
+
+    assert!(
+        poll_ready_store_future(store.renew_execution_claim(&run_id, &other))
+            .expect("wrong-token renew does not fail")
+            .is_none()
+    );
+    assert!(
+        !poll_ready_store_future(store.release_execution_claim(&run_id, &other))
+            .expect("wrong-token release does not fail")
+    );
+
+    let renewed = poll_ready_store_future(store.renew_execution_claim(&run_id, &first_lease.token))
+        .expect("matching-token renew")
+        .expect("matching token returns lease");
+    assert_eq!(renewed.token, first_lease.token);
+
+    assert!(
+        poll_ready_store_future(store.release_execution_claim(&run_id, &renewed.token))
+            .expect("matching-token release")
+    );
+    let reacquired = poll_ready_store_future(store.acquire_execution_claim(&run_id, other.clone()))
+        .expect("reacquire execution claim");
+    assert!(matches!(reacquired, NowaitSkipAdmissionResult::Admitted(_)));
 }
 
 fn resource_touched_set(byte: u8) -> events::ResourceTouchedSetEvidence {
