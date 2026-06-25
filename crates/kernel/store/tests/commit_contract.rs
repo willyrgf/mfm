@@ -2928,6 +2928,44 @@ fn append_forward_confirmation(store: &mut StoreContractRunStore, run_id: &RunId
         .expect("append forward confirmation");
 }
 
+fn append_forward_receipt(store: &mut StoreContractRunStore, run_id: &RunId) {
+    append_side_effect_prepare(store, run_id);
+    append_side_effect_started(store, run_id);
+    let submission_artifact_id = artifact_id(84);
+    let submission_digest = content_digest(85);
+    let receipt_artifact_id = artifact_id(86);
+    let receipt_digest = content_digest(87);
+    store
+        .append_prepared_commit(typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(run_id),
+            commit_key: CommitKey::new("forward-receipt").expect("commit key"),
+            payloads: vec![
+                side_effect_submission_observed(
+                    submission_artifact_id.clone(),
+                    submission_digest.clone(),
+                ),
+                side_effect_receipt(receipt_artifact_id.clone(), receipt_digest.clone()),
+            ],
+            required_artifacts: vec![
+                side_effect_evidence(
+                    submission_artifact_id,
+                    submission_digest,
+                    submission_schema(),
+                    ArtifactRole::Submission,
+                ),
+                side_effect_evidence(
+                    receipt_artifact_id,
+                    receipt_digest,
+                    receipt_schema(),
+                    ArtifactRole::Receipt,
+                ),
+            ],
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("append forward receipt");
+}
+
 fn append_remediation_confirmation(
     store: &mut StoreContractRunStore,
     run_id: &RunId,
@@ -6252,6 +6290,43 @@ fn saga_terminal_prepared_commit_rejects_stale_prefix_proof() {
         PreparedCommit::<SagaTerminal>::new(request, CommitArtifactEvidenceSet::empty(), &proof)
             .expect_err("stale proof rejects");
     assert_invalid_prepared_commit_contains(error, "prefix");
+}
+
+#[test]
+fn receipt_observed_forward_ledger_is_quiescent_but_not_owed() {
+    let run_id = run_id(127);
+    let mut store = StoreContractRunStore::new();
+    store
+        .append_prepared_commit(run_start_request(
+            run_id.clone(),
+            "receipt-quiescence-run-start",
+        ))
+        .expect("append run start");
+    append_forward_receipt(&mut store, &run_id);
+
+    let projection = store
+        .projection_snapshot()
+        .derive_saga_projection(&run_id, &compensate_saga_policy());
+    assert!(projection.forward_quiescent);
+    let obligation = projection
+        .obligations
+        .get(&side_effect_pair_id())
+        .expect("receipt-observed forward obligation");
+    assert_eq!(
+        obligation.classification,
+        ForwardLedgerClassification::Pending
+    );
+
+    store
+        .append_prepared_commit(typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("receipt-quiescence-complete").expect("commit key"),
+            payloads: vec![run_completed_for_run(run_id.clone(), completed_outcome(127))],
+            required_artifacts: Vec::new(),
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect("receipt-observed forward ledger permits normal completion");
 }
 
 #[test]
