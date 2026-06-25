@@ -15,7 +15,8 @@ pub mod v1 {
     use mfm_events::v1::{self as events, side_effect, ArtifactRole, KernelEventPayload};
     use mfm_ids::{
         AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind, CapabilityVersion,
-        ContentDigest, DigestAlgorithm, NodeId, RunId, SchemaId, SeedId, SemanticTypeId, SpecHash,
+        ContentDigest, DigestAlgorithm, NodeId, RunId, SchemaId, SeedId, SemanticTypeId,
+        SideEffectPairId, SpecHash,
     };
     use mfm_manual_auth::{
         manual_authorization_proof_schema_id, ManualResolutionEvidenceRef,
@@ -265,6 +266,8 @@ pub mod v1 {
     pub struct SideEffectEvidenceReplayRequest {
         /// Side-effect ledger key.
         pub ledger_key: events::SideEffectLedgerKey,
+        /// Stable side-effect pair id.
+        pub pair_id: SideEffectPairId,
         /// Node id that owns the side effect.
         pub node_id: NodeId,
         /// Attempt id that owns the side effect.
@@ -305,6 +308,8 @@ pub mod v1 {
         pub intent: &'a side_effect::IntentPersisted,
         /// Submission observed event payload, when present.
         pub submission: Option<&'a side_effect::SubmissionObserved>,
+        /// Not-submitted proof payload, when present.
+        pub not_submitted: Option<&'a side_effect::NotSubmittedProven>,
         /// Receipt observed event payload, when present.
         pub receipt: Option<&'a side_effect::ReceiptObserved>,
         /// Confirmation observed event payload, when present.
@@ -333,6 +338,17 @@ pub mod v1 {
                 receipt.receipt_schema_id.clone(),
                 receipt.receipt_hash.clone(),
                 Some(receipt.replay_verifier_id.clone()),
+            ))
+        }
+
+        /// Builds the replay request for this frame's not-submitted proof, when present.
+        pub fn not_submitted_request(&self) -> Option<SideEffectEvidenceReplayRequest> {
+            let proof = self.not_submitted?;
+            Some(side_effect_evidence_replay_request(
+                self.intent,
+                proof.proof_schema_id.clone(),
+                proof.proof_hash.clone(),
+                None,
             ))
         }
 
@@ -367,6 +383,7 @@ pub mod v1 {
     ) -> SideEffectEvidenceReplayRequest {
         SideEffectEvidenceReplayRequest {
             ledger_key: intent.ledger_key.clone(),
+            pair_id: intent.pair_id.clone(),
             node_id: intent.node_id.clone(),
             attempt_id: intent.attempt_id.clone(),
             invocation_epoch: intent.invocation_epoch,
@@ -390,6 +407,15 @@ pub mod v1 {
         /// Submission observed event payload.
         pub submission: side_effect::SubmissionObserved,
         /// Retained submission artifact evidence.
+        pub artifact: StoredArtifactEvidenceRef,
+    }
+
+    /// Replay evidence returned for a side effect proven not submitted.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct NotSubmittedReplayEvidence {
+        /// Not-submitted proof event payload.
+        pub proof: side_effect::NotSubmittedProven,
+        /// Retained not-submitted proof artifact evidence.
         pub artifact: StoredArtifactEvidenceRef,
     }
 
@@ -513,7 +539,7 @@ pub mod v1 {
 
     type FactKey = (NodeId, AttemptId, events::FactKey);
     type ReplayArtifactAuthorityKey = (ArtifactId, ContentDigest);
-    type SideEffectKey = (events::SideEffectLedgerKey, u32);
+    type SideEffectKey = (SideEffectPairId, u32);
 
     /// Evidence-only broker for certified typed replay.
     #[derive(Debug, Clone)]
@@ -526,8 +552,9 @@ pub mod v1 {
         artifact_bytes: BTreeMap<ArtifactId, Vec<u8>>,
         artifacts: BTreeMap<ReplayArtifactAuthorityKey, StoredArtifactEvidenceRef>,
         facts: BTreeMap<FactKey, events::FactRecorded>,
-        intents: BTreeMap<events::SideEffectLedgerKey, side_effect::IntentPersisted>,
+        intents: BTreeMap<SideEffectPairId, side_effect::IntentPersisted>,
         submissions: BTreeMap<SideEffectKey, side_effect::SubmissionObserved>,
+        not_submitted: BTreeMap<SideEffectKey, side_effect::NotSubmittedProven>,
         receipts: BTreeMap<SideEffectKey, side_effect::ReceiptObserved>,
         confirmations: BTreeMap<SideEffectKey, side_effect::ConfirmationObserved>,
         ambiguities: BTreeMap<SideEffectKey, side_effect::Ambiguous>,
@@ -583,6 +610,7 @@ pub mod v1 {
                 facts: BTreeMap::new(),
                 intents: BTreeMap::new(),
                 submissions: BTreeMap::new(),
+                not_submitted: BTreeMap::new(),
                 receipts: BTreeMap::new(),
                 confirmations: BTreeMap::new(),
                 ambiguities: BTreeMap::new(),
@@ -703,10 +731,11 @@ pub mod v1 {
                 if !matches_intent(intent)? {
                     continue;
                 }
-                let key = (intent.ledger_key.clone(), intent.invocation_epoch);
+                let key = (intent.pair_id.clone(), intent.invocation_epoch);
                 frames.push(SideEffectReplayFrame {
                     intent,
                     submission: self.submissions.get(&key),
+                    not_submitted: self.not_submitted.get(&key),
                     receipt: self.receipts.get(&key),
                     confirmation: self.confirmations.get(&key),
                     ambiguity: self.ambiguities.get(&key),
@@ -723,11 +752,11 @@ pub mod v1 {
             self.verify_side_effect_intent(request)?;
             let submission = self
                 .submissions
-                .get(&(request.ledger_key.clone(), request.invocation_epoch))
+                .get(&(request.pair_id.clone(), request.invocation_epoch))
                 .ok_or_else(|| {
                     ReplayError::new(
                         ReplayErrorKind::SideEffectMissing,
-                        format!("missing side-effect submission {}", request.ledger_key),
+                        format!("missing side-effect submission {}", request.pair_id),
                     )
                 })?;
             if submission.submission_schema_id != request.evidence_schema_id
@@ -744,6 +773,45 @@ pub mod v1 {
                     semantic_type_id: None,
                     role: ArtifactRole::Submission,
                     producer_node_id: Some(&submission.node_id),
+                    producer_seed_id: None,
+                })?,
+            })
+        }
+
+        /// Returns side-effect not-submitted proof evidence from replay records only.
+        pub fn side_effect_not_submitted(
+            &self,
+            request: &SideEffectEvidenceReplayRequest,
+        ) -> Result<NotSubmittedReplayEvidence> {
+            self.verify_side_effect_intent(request)?;
+            let proof = self
+                .not_submitted
+                .get(&(request.pair_id.clone(), request.invocation_epoch))
+                .ok_or_else(|| {
+                    ReplayError::new(
+                        ReplayErrorKind::SideEffectMissing,
+                        format!(
+                            "missing side-effect not-submitted proof {}",
+                            request.pair_id
+                        ),
+                    )
+                })?;
+            if proof.proof_schema_id != request.evidence_schema_id
+                || proof.proof_hash != request.evidence_hash
+            {
+                return Err(side_effect_mismatch(
+                    "not-submitted proof evidence mismatch",
+                ));
+            }
+            Ok(NotSubmittedReplayEvidence {
+                proof: proof.clone(),
+                artifact: self.verify_artifact(ArtifactEvidenceExpectation {
+                    artifact_id: &proof.proof_artifact_id,
+                    digest: &proof.proof_hash,
+                    schema_id: Some(&proof.proof_schema_id),
+                    semantic_type_id: None,
+                    role: ArtifactRole::NotSubmittedProof,
+                    producer_node_id: Some(&proof.node_id),
                     producer_seed_id: None,
                 })?,
             })
@@ -775,11 +843,11 @@ pub mod v1 {
             self.verify_side_effect_intent(request)?;
             let receipt = self
                 .receipts
-                .get(&(request.ledger_key.clone(), request.invocation_epoch))
+                .get(&(request.pair_id.clone(), request.invocation_epoch))
                 .ok_or_else(|| {
                     ReplayError::new(
                         ReplayErrorKind::SideEffectMissing,
-                        format!("missing side-effect receipt {}", request.ledger_key),
+                        format!("missing side-effect receipt {}", request.pair_id),
                     )
                 })?;
             verify_replay_verifier(
@@ -813,11 +881,11 @@ pub mod v1 {
             self.verify_side_effect_intent(request)?;
             let confirmation = self
                 .confirmations
-                .get(&(request.ledger_key.clone(), request.invocation_epoch))
+                .get(&(request.pair_id.clone(), request.invocation_epoch))
                 .ok_or_else(|| {
                     ReplayError::new(
                         ReplayErrorKind::SideEffectMissing,
-                        format!("missing side-effect confirmation {}", request.ledger_key),
+                        format!("missing side-effect confirmation {}", request.pair_id),
                     )
                 })?;
             verify_replay_verifier(
@@ -851,11 +919,11 @@ pub mod v1 {
             self.verify_side_effect_intent(request)?;
             let ambiguity = self
                 .ambiguities
-                .get(&(request.ledger_key.clone(), request.invocation_epoch))
+                .get(&(request.pair_id.clone(), request.invocation_epoch))
                 .ok_or_else(|| {
                     ReplayError::new(
                         ReplayErrorKind::SideEffectMissing,
-                        format!("missing side-effect ambiguity {}", request.ledger_key),
+                        format!("missing side-effect ambiguity {}", request.pair_id),
                     )
                 })?;
             if ambiguity.evidence_schema_id != request.evidence_schema_id
@@ -983,7 +1051,7 @@ pub mod v1 {
                         self.authorize_event_artifacts(envelope.payload())?;
                         insert_unique(
                             &mut self.intents,
-                            payload.ledger_key.clone(),
+                            payload.pair_id.clone(),
                             payload.clone(),
                             ReplayErrorKind::InvalidRunStream,
                             "duplicate side-effect intent replay event",
@@ -991,6 +1059,7 @@ pub mod v1 {
                     }
                     KernelEventPayload::SideEffectClaimed(payload) => {
                         self.verify_side_effect_event_against_intent(
+                            &payload.pair_id,
                             &payload.ledger_key,
                             payload.invocation_epoch,
                             &payload.node_id,
@@ -999,6 +1068,7 @@ pub mod v1 {
                     }
                     KernelEventPayload::SideEffectClaimTakenOver(payload) => {
                         self.verify_side_effect_event_against_intent(
+                            &payload.pair_id,
                             &payload.ledger_key,
                             payload.invocation_epoch,
                             &payload.node_id,
@@ -1010,6 +1080,7 @@ pub mod v1 {
                     }
                     KernelEventPayload::ResourceLaneReleased(payload) => {
                         self.verify_side_effect_event_against_intent(
+                            &payload.pair_id,
                             &payload.ledger_key,
                             payload.invocation_epoch,
                             &payload.node_id,
@@ -1025,6 +1096,7 @@ pub mod v1 {
                     }
                     KernelEventPayload::SideEffectInvocationStarted(payload) => {
                         self.verify_side_effect_event_against_intent(
+                            &payload.pair_id,
                             &payload.ledger_key,
                             payload.invocation_epoch,
                             &payload.node_id,
@@ -1033,6 +1105,7 @@ pub mod v1 {
                     }
                     KernelEventPayload::SideEffectSubmissionObserved(payload) => {
                         self.verify_side_effect_event_against_intent(
+                            &payload.pair_id,
                             &payload.ledger_key,
                             payload.invocation_epoch,
                             &payload.node_id,
@@ -1041,7 +1114,7 @@ pub mod v1 {
                         self.authorize_event_artifacts(envelope.payload())?;
                         insert_unique(
                             &mut self.submissions,
-                            (payload.ledger_key.clone(), payload.invocation_epoch),
+                            (payload.pair_id.clone(), payload.invocation_epoch),
                             payload.clone(),
                             ReplayErrorKind::InvalidRunStream,
                             "duplicate side-effect submission replay event",
@@ -1049,6 +1122,7 @@ pub mod v1 {
                     }
                     KernelEventPayload::SideEffectReceiptObserved(payload) => {
                         self.verify_side_effect_event_against_intent(
+                            &payload.pair_id,
                             &payload.ledger_key,
                             payload.invocation_epoch,
                             &payload.node_id,
@@ -1061,7 +1135,7 @@ pub mod v1 {
                         self.authorize_event_artifacts(envelope.payload())?;
                         insert_unique(
                             &mut self.receipts,
-                            (payload.ledger_key.clone(), payload.invocation_epoch),
+                            (payload.pair_id.clone(), payload.invocation_epoch),
                             payload.clone(),
                             ReplayErrorKind::InvalidRunStream,
                             "duplicate side-effect receipt replay event",
@@ -1069,6 +1143,7 @@ pub mod v1 {
                     }
                     KernelEventPayload::SideEffectConfirmationObserved(payload) => {
                         self.verify_side_effect_event_against_intent(
+                            &payload.pair_id,
                             &payload.ledger_key,
                             payload.invocation_epoch,
                             &payload.node_id,
@@ -1081,7 +1156,7 @@ pub mod v1 {
                         self.authorize_event_artifacts(envelope.payload())?;
                         insert_unique(
                             &mut self.confirmations,
-                            (payload.ledger_key.clone(), payload.invocation_epoch),
+                            (payload.pair_id.clone(), payload.invocation_epoch),
                             payload.clone(),
                             ReplayErrorKind::InvalidRunStream,
                             "duplicate side-effect confirmation replay event",
@@ -1089,6 +1164,7 @@ pub mod v1 {
                     }
                     KernelEventPayload::SideEffectInvocationPrepared(payload) => {
                         self.verify_side_effect_event_against_intent(
+                            &payload.pair_id,
                             &payload.ledger_key,
                             payload.invocation_epoch,
                             &payload.node_id,
@@ -1099,15 +1175,24 @@ pub mod v1 {
                     }
                     KernelEventPayload::SideEffectNotSubmittedProven(payload) => {
                         self.verify_side_effect_event_against_intent(
+                            &payload.pair_id,
                             &payload.ledger_key,
                             payload.invocation_epoch,
                             &payload.node_id,
                             &payload.attempt_id,
                         )?;
                         self.authorize_event_artifacts(envelope.payload())?;
+                        insert_unique(
+                            &mut self.not_submitted,
+                            (payload.pair_id.clone(), payload.invocation_epoch),
+                            payload.clone(),
+                            ReplayErrorKind::InvalidRunStream,
+                            "duplicate side-effect not-submitted replay event",
+                        )?;
                     }
                     KernelEventPayload::SideEffectSubmissionUnknown(payload) => {
                         self.verify_side_effect_event_against_intent(
+                            &payload.pair_id,
                             &payload.ledger_key,
                             payload.invocation_epoch,
                             &payload.node_id,
@@ -1117,6 +1202,7 @@ pub mod v1 {
                     }
                     KernelEventPayload::SideEffectAmbiguous(payload) => {
                         self.verify_side_effect_event_against_intent(
+                            &payload.pair_id,
                             &payload.ledger_key,
                             payload.invocation_epoch,
                             &payload.node_id,
@@ -1125,7 +1211,7 @@ pub mod v1 {
                         self.authorize_event_artifacts(envelope.payload())?;
                         insert_unique(
                             &mut self.ambiguities,
-                            (payload.ledger_key.clone(), payload.invocation_epoch),
+                            (payload.pair_id.clone(), payload.invocation_epoch),
                             payload.clone(),
                             ReplayErrorKind::InvalidRunStream,
                             "duplicate side-effect ambiguity replay event",
@@ -1184,6 +1270,7 @@ pub mod v1 {
                     }
                     KernelEventPayload::SideEffectFailed(payload) => {
                         self.verify_side_effect_event_against_intent(
+                            &payload.pair_id,
                             &payload.ledger_key,
                             payload.invocation_epoch,
                             &payload.node_id,
@@ -1200,10 +1287,10 @@ pub mod v1 {
             request: &SideEffectEvidenceReplayRequest,
         ) -> Result<SideEffectIntentReplayEvidence> {
             self.verify_side_effect_intent(request)?;
-            let intent = self.intents.get(&request.ledger_key).ok_or_else(|| {
+            let intent = self.intents.get(&request.pair_id).ok_or_else(|| {
                 ReplayError::new(
                     ReplayErrorKind::SideEffectMissing,
-                    format!("missing side-effect intent {}", request.ledger_key),
+                    format!("missing side-effect intent {}", request.pair_id),
                 )
             })?;
             Ok(SideEffectIntentReplayEvidence {
@@ -1226,7 +1313,7 @@ pub mod v1 {
         ) -> Result<Option<SubmissionReplayEvidence>> {
             let Some(submission) = self
                 .submissions
-                .get(&(request.ledger_key.clone(), request.invocation_epoch))
+                .get(&(request.pair_id.clone(), request.invocation_epoch))
             else {
                 return Ok(None);
             };
@@ -1250,7 +1337,7 @@ pub mod v1 {
         ) -> Result<Option<ReceiptReplayEvidence>> {
             let Some(receipt) = self
                 .receipts
-                .get(&(request.ledger_key.clone(), request.invocation_epoch))
+                .get(&(request.pair_id.clone(), request.invocation_epoch))
             else {
                 return Ok(None);
             };
@@ -1282,14 +1369,17 @@ pub mod v1 {
                 &request.adapter_kind,
                 &request.adapter_version,
             )?;
-            let intent = self.intents.get(&request.ledger_key).ok_or_else(|| {
+            let intent = self.intents.get(&request.pair_id).ok_or_else(|| {
                 ReplayError::new(
                     ReplayErrorKind::SideEffectMissing,
-                    format!("missing side-effect intent {}", request.ledger_key),
+                    format!("missing side-effect intent {}", request.pair_id),
                 )
             })?;
-            if intent.node_id != request.node_id
+            if intent.ledger_key != request.ledger_key
+                || intent.pair_id != request.pair_id
+                || intent.node_id != request.node_id
                 || intent.attempt_id != request.attempt_id
+                || intent.invocation_epoch != request.invocation_epoch
                 || intent.intent_schema_id != request.intent_schema_id
                 || intent.intent_hash != request.intent_hash
                 || intent.idempotency_input_schema_id != request.idempotency_input_schema_id
@@ -1528,7 +1618,7 @@ pub mod v1 {
         fn verify_invocation_prepared_resource_key(
             &self,
             payload: &side_effect::InvocationPrepared,
-            resource_keys: &BTreeMap<events::SideEffectLedgerKey, events::ResourceKeyEvidence>,
+            resource_keys: &BTreeMap<SideEffectPairId, events::ResourceKeyEvidence>,
         ) -> Result<()> {
             self.node(&payload.node_id)?;
             let contract =
@@ -1536,7 +1626,7 @@ pub mod v1 {
                     .map_err(certified_contract_mismatch)?;
             contract
                 .validate_epoch_resource_consistency(
-                    resource_keys.get(&payload.ledger_key),
+                    resource_keys.get(&payload.pair_id),
                     payload.resource_key.as_ref(),
                 )
                 .map_err(certified_contract_mismatch)?;
@@ -1546,9 +1636,10 @@ pub mod v1 {
         fn verify_resource_lane_claim(
             &self,
             payload: &events::ResourceLaneClaimed,
-            resource_keys: &mut BTreeMap<events::SideEffectLedgerKey, events::ResourceKeyEvidence>,
+            resource_keys: &mut BTreeMap<SideEffectPairId, events::ResourceKeyEvidence>,
         ) -> Result<()> {
             self.verify_side_effect_event_against_intent(
+                &payload.pair_id,
                 &payload.ledger_key,
                 payload.invocation_epoch,
                 &payload.node_id,
@@ -1559,11 +1650,11 @@ pub mod v1 {
                     .map_err(certified_contract_mismatch)?;
             contract
                 .validate_epoch_resource_consistency(
-                    resource_keys.get(&payload.ledger_key),
+                    resource_keys.get(&payload.pair_id),
                     Some(&payload.resource_key),
                 )
                 .map_err(certified_contract_mismatch)?;
-            resource_keys.insert(payload.ledger_key.clone(), payload.resource_key.clone());
+            resource_keys.insert(payload.pair_id.clone(), payload.resource_key.clone());
             Ok(())
         }
 
@@ -1837,18 +1928,24 @@ pub mod v1 {
 
         fn verify_side_effect_event_against_intent(
             &self,
+            pair_id: &SideEffectPairId,
             ledger_key: &events::SideEffectLedgerKey,
-            _invocation_epoch: u32,
+            invocation_epoch: u32,
             node_id: &NodeId,
             attempt_id: &AttemptId,
         ) -> Result<()> {
-            let intent = self.intents.get(ledger_key).ok_or_else(|| {
+            let intent = self.intents.get(pair_id).ok_or_else(|| {
                 ReplayError::new(
                     ReplayErrorKind::SideEffectMissing,
-                    format!("missing side-effect intent {ledger_key}"),
+                    format!("missing side-effect intent {pair_id}"),
                 )
             })?;
-            if intent.node_id != *node_id || intent.attempt_id != *attempt_id {
+            if intent.ledger_key != *ledger_key
+                || intent.pair_id != *pair_id
+                || intent.invocation_epoch != invocation_epoch
+                || intent.node_id != *node_id
+                || intent.attempt_id != *attempt_id
+            {
                 return Err(side_effect_mismatch(
                     "side-effect event does not match persisted intent",
                 ));
@@ -2705,5 +2802,176 @@ pub mod v1 {
 
     fn spec_digest(spec_hash: &SpecHash) -> ContentDigest {
         ContentDigest::from_digest(spec_hash.algorithm(), *spec_hash.digest())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn side_effect_frame_requests_are_pair_keyed() {
+            let pair_id = pair_id(0x31);
+            let ledger_key = events::SideEffectLedgerKey::new("ledger-key").expect("ledger key");
+            let intent = intent_persisted(pair_id.clone(), ledger_key.clone());
+            let submission_hash = content_digest(0x41);
+            let submission = side_effect::SubmissionObserved {
+                spec_hash: intent.spec_hash.clone(),
+                node_id: intent.node_id.clone(),
+                attempt_id: intent.attempt_id.clone(),
+                ledger_key: ledger_key.clone(),
+                ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                pair_id: pair_id.clone(),
+                pair_role: events::SideEffectPairRole::Submit,
+                invocation_epoch: 1,
+                submission_schema_id: schema_id("mfm.replay.test.submission", 0x42),
+                submission_hash: submission_hash.clone(),
+                submission_artifact_id: artifact_id(0x43),
+            };
+            let frame = SideEffectReplayFrame {
+                intent: &intent,
+                submission: Some(&submission),
+                not_submitted: None,
+                receipt: None,
+                confirmation: None,
+                ambiguity: None,
+            };
+
+            let request = frame.submission_request().expect("submission request");
+
+            assert_eq!(request.pair_id, pair_id);
+            assert_eq!(request.ledger_key, ledger_key);
+            assert_eq!(request.invocation_epoch, 1);
+            assert_eq!(request.evidence_schema_id, submission.submission_schema_id);
+            assert_eq!(request.evidence_hash, submission_hash);
+        }
+
+        #[test]
+        fn side_effect_frame_not_submitted_requests_are_pair_keyed() {
+            let pair_id = pair_id(0x51);
+            let ledger_key =
+                events::SideEffectLedgerKey::new("not-submitted-ledger").expect("ledger key");
+            let intent = intent_persisted(pair_id.clone(), ledger_key.clone());
+            let proof_hash = content_digest(0x52);
+            let proof = side_effect::NotSubmittedProven {
+                spec_hash: intent.spec_hash.clone(),
+                node_id: intent.node_id.clone(),
+                attempt_id: intent.attempt_id.clone(),
+                ledger_key: ledger_key.clone(),
+                ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                pair_id: pair_id.clone(),
+                pair_role: events::SideEffectPairRole::Submit,
+                invocation_epoch: 1,
+                proof_schema_id: schema_id("mfm.replay.test.not_submitted", 0x53),
+                proof_hash: proof_hash.clone(),
+                proof_artifact_id: artifact_id(0x54),
+            };
+            let frame = SideEffectReplayFrame {
+                intent: &intent,
+                submission: None,
+                not_submitted: Some(&proof),
+                receipt: None,
+                confirmation: None,
+                ambiguity: None,
+            };
+
+            let request = frame.not_submitted_request().expect("proof request");
+
+            assert_eq!(request.pair_id, pair_id);
+            assert_eq!(request.ledger_key, ledger_key);
+            assert_eq!(request.invocation_epoch, 1);
+            assert_eq!(request.evidence_schema_id, proof.proof_schema_id);
+            assert_eq!(request.evidence_hash, proof_hash);
+        }
+
+        #[test]
+        fn replay_source_does_not_import_live_authorities() {
+            let source = include_str!("lib.rs");
+            for forbidden in [
+                concat!("std", "::", "env"),
+                concat!("mfm", "_", "transports"),
+                concat!("mfm", "_", "signing", "::", "SigningProvider"),
+                concat!("mfm", "_", "core", "::", "keystore"),
+                concat!("Evm", "Json", "Rpc", "Client"),
+            ] {
+                assert!(
+                    !source.contains(forbidden),
+                    "replay source must not import live authority surface {forbidden}"
+                );
+            }
+        }
+
+        fn intent_persisted(
+            pair_id: SideEffectPairId,
+            ledger_key: events::SideEffectLedgerKey,
+        ) -> side_effect::IntentPersisted {
+            side_effect::IntentPersisted {
+                spec_hash: SpecHash::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(0x01)),
+                node_id: node_id(0x02),
+                scope_id: mfm_ids::ScopeId::from_digest(
+                    DigestAlgorithm::Sha256JcsV1,
+                    digest_bytes(0x03),
+                ),
+                attempt_id: attempt_id(0x04),
+                ledger_key,
+                ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                pair_id,
+                pair_role: events::SideEffectPairRole::Submit,
+                invocation_epoch: 1,
+                intent_schema_id: schema_id("mfm.replay.test.intent", 0x05),
+                intent_hash: content_digest(0x06),
+                intent_artifact_id: artifact_id(0x07),
+                idempotency_input_schema_id: schema_id("mfm.replay.test.idempotency", 0x08),
+                idempotency_input_hash: content_digest(0x09),
+                idempotency_key: events::IdempotencyKeyRef::new("idem-key")
+                    .expect("idempotency key"),
+                capability_kind: CapabilityKind::new(
+                    "mfm.replay.test",
+                    "mutation",
+                    DigestAlgorithm::Sha256JcsV1,
+                    digest_bytes(0x0a),
+                )
+                .expect("capability kind"),
+                capability_version: CapabilityVersion::new("mfm.replay.test.capability.v1")
+                    .expect("capability version"),
+                adapter_kind: AdapterKind::new(
+                    "mfm.replay.test",
+                    "adapter",
+                    DigestAlgorithm::Sha256JcsV1,
+                    digest_bytes(0x0b),
+                )
+                .expect("adapter kind"),
+                adapter_version: AdapterVersion::new("mfm.replay.test.adapter.v1")
+                    .expect("adapter version"),
+            }
+        }
+
+        fn pair_id(byte: u8) -> SideEffectPairId {
+            SideEffectPairId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
+        }
+
+        fn node_id(byte: u8) -> NodeId {
+            NodeId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
+        }
+
+        fn attempt_id(byte: u8) -> AttemptId {
+            AttemptId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
+        }
+
+        fn artifact_id(byte: u8) -> ArtifactId {
+            ArtifactId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
+        }
+
+        fn content_digest(byte: u8) -> ContentDigest {
+            ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
+        }
+
+        fn schema_id(name: &str, byte: u8) -> SchemaId {
+            SchemaId::new(name, "1", DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
+                .expect("schema id")
+        }
+
+        fn digest_bytes(byte: u8) -> mfm_ids::DigestBytes {
+            mfm_ids::DigestBytes::from_array([byte; 32])
+        }
     }
 }
