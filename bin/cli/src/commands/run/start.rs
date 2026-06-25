@@ -6,7 +6,8 @@ use crate::presentation::output::handle_command_result;
 use crate::support::run_store::{connect_run_services, drive_mode, DriveArg, RunStoresArgs};
 use clap::{Args, ValueEnum};
 use mfm_app::{
-    EntryPointRunLaunchInput, PublicOpName, PublicOutputResponse, RunModeStatus, RunResponse,
+    DistinctRunKey, EntryPointRunLaunchInput, PublicOpName, PublicOutputResponse,
+    RunLaunchOutcomeStatus, RunModeStatus, RunResponse,
 };
 use mfm_authored_config::{AuthoredConfig, AuthoredConfigFormat};
 use serde::Serialize;
@@ -30,9 +31,9 @@ pub(crate) struct StartArgs {
     #[arg(long, value_enum, default_value_t = ConfigFormatArg::Toml)]
     pub config_format: ConfigFormatArg,
 
-    /// Deprecated explicit run id. Supplying this option is rejected.
-    #[arg(long)]
-    pub run_id: Option<String>,
+    /// Caller-supplied key that forces a distinct run of otherwise identical certified work.
+    #[arg(long, value_name = "KEY")]
+    pub distinct_run_key: Option<String>,
 
     /// Scheduler drive policy after the typed RunAdmitted event is committed.
     #[arg(long, value_enum, default_value_t = DriveArg::UntilBlocked)]
@@ -72,6 +73,7 @@ impl std::fmt::Display for ConfigFormatArg {
 
 #[derive(Debug, Clone, Serialize)]
 struct StartOutput {
+    outcome: RunLaunchOutcomeStatus,
     run: RunResponse,
     public_output: Option<PublicOutputResponse>,
 }
@@ -79,8 +81,8 @@ struct StartOutput {
 impl std::fmt::Display for StartOutput {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.public_output {
-            Some(public_output) => write!(f, "{public_output}"),
-            None => write!(f, "{}", self.run),
+            Some(public_output) => write!(f, "launch_outcome={} {public_output}", self.outcome),
+            None => write!(f, "launch_outcome={} {}", self.outcome, self.run),
         }
     }
 }
@@ -92,14 +94,13 @@ pub(crate) async fn execute(ctx: &CommandContext, args: &StartArgs) -> ! {
 }
 
 async fn execute_internal(args: &StartArgs) -> CommandResult<StartOutput> {
-    if args.run_id.is_some() {
-        return Err(CommandError::new(
-            "RunIdUnsupported",
-            "Explicit run ids are not accepted; run ids are derived from certified identity material",
-        ));
-    }
     let public_op_name = PublicOpName::new(&args.op)?;
     let op_version = args.op_version.map(mfm_app::OpVersion::new).transpose()?;
+    let distinct_run_key = args
+        .distinct_run_key
+        .as_deref()
+        .map(DistinctRunKey::new)
+        .transpose()?;
     let config_bytes = tokio::fs::read(&args.config)
         .await
         .map_err(|_| CommandError::backend("AuthoredConfigReadFailed", "Failed to read config"))?;
@@ -115,6 +116,7 @@ async fn execute_internal(args: &StartArgs) -> CommandResult<StartOutput> {
         authored_config,
         certification_registry: &certification_registry,
         trust_scope_id,
+        distinct_run_key,
         drive: drive_mode(args.drive),
     })?;
     let run_id = prepared.request.run_id.clone();
@@ -126,7 +128,13 @@ async fn execute_internal(args: &StartArgs) -> CommandResult<StartOutput> {
         .public_outputs
         .public_schema_id
         .clone();
-    let run = services.launch_run(prepared.request).await?;
+    let launch = services.launch_run(prepared.request).await?;
+    let (outcome, run) = launch.into_response_parts().ok_or_else(|| {
+        CommandError::backend(
+            "RunLaunchOutcomeInvalid",
+            "Run launch did not return a run response",
+        )
+    })?;
     let public_output = if run.run_mode == RunModeStatus::Completed {
         Some(
             services
@@ -136,7 +144,11 @@ async fn execute_internal(args: &StartArgs) -> CommandResult<StartOutput> {
     } else {
         None
     };
-    Ok(CommandOutput::new(StartOutput { run, public_output }))
+    Ok(CommandOutput::new(StartOutput {
+        outcome,
+        run,
+        public_output,
+    }))
 }
 
 #[cfg(test)]
@@ -144,22 +156,19 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn start_rejects_explicit_run_id_before_store_connection() {
+    async fn start_rejects_empty_distinct_run_key_before_store_connection() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let config = tmp.path().join("portfolio.json");
         std::fs::write(&config, "{}").expect("write config");
 
         let mut args = start_args(config, RunStoresArgs { database_url: None });
-        args.run_id = Some(
-            "run:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000001"
-                .to_owned(),
-        );
+        args.distinct_run_key = Some(String::new());
 
         let err = execute_internal(&args)
             .await
-            .expect_err("explicit run id rejects before store construction");
+            .expect_err("empty distinct run key rejects before store construction");
 
-        assert_eq!(err.code, "RunIdUnsupported");
+        assert_eq!(err.code, "DistinctRunKeyInvalid");
     }
 
     #[tokio::test]
@@ -246,7 +255,7 @@ mod tests {
             config,
             op_version: None,
             config_format: ConfigFormatArg::Json,
-            run_id: None,
+            distinct_run_key: None,
             drive: DriveArg::AppendOnly,
             stores,
         }

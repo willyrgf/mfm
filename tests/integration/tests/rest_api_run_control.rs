@@ -213,7 +213,7 @@ async fn start_accepts_entry_point_json_object_config_shape() {
 }
 
 #[tokio::test]
-async fn start_rejects_explicit_run_id() {
+async fn start_rejects_raw_run_id_field_as_unknown_json() {
     let app = test_app();
 
     let resp = app
@@ -236,7 +236,77 @@ async fn start_rejects_explicit_run_id() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let v = response_json(resp).await;
     assert_eq!(v["status"], "error");
-    assert_eq!(v["error"]["code"], "RunIdUnsupported");
+    assert_eq!(v["error"]["code"], "InvalidJson");
+}
+
+#[tokio::test]
+async fn start_distinct_run_key_derives_separate_run_without_persisting_raw_key() {
+    let state = in_memory_state();
+    let app = mfm_rest_api::make_app(state.clone());
+    let raw_key = "distinct-alpha";
+
+    let first = app
+        .clone()
+        .oneshot(json_post(
+            "/v1/runs/start",
+            serde_json::json!({
+                "op": "portfolio_snapshot",
+                "config_format": "json",
+                "config": portfolio_snapshot_config(),
+                "drive": "append_only"
+            }),
+        ))
+        .await
+        .expect("first start response");
+    assert_eq!(first.status(), StatusCode::OK);
+    let first_body = response_json(first).await;
+    assert_eq!(first_body["data"]["outcome"], "admitted");
+    let first_run_id = RunId::parse(
+        first_body["data"]["run"]["run_id"]
+            .as_str()
+            .expect("first run id"),
+    )
+    .expect("typed first run id");
+
+    let distinct = app
+        .oneshot(json_post(
+            "/v1/runs/start",
+            serde_json::json!({
+                "op": "portfolio_snapshot",
+                "config_format": "json",
+                "config": portfolio_snapshot_config(),
+                "distinct_run_key": raw_key,
+                "drive": "append_only"
+            }),
+        ))
+        .await
+        .expect("distinct start response");
+    assert_eq!(distinct.status(), StatusCode::OK);
+    let distinct_body = response_json(distinct).await;
+    assert_eq!(distinct_body["data"]["outcome"], "admitted");
+    assert!(!distinct_body.to_string().contains(raw_key));
+    let distinct_run_id = RunId::parse(
+        distinct_body["data"]["run"]["run_id"]
+            .as_str()
+            .expect("distinct run id"),
+    )
+    .expect("typed distinct run id");
+    assert_ne!(first_run_id, distinct_run_id);
+
+    let stream = state
+        .store
+        .load_run_stream(&distinct_run_id)
+        .await
+        .expect("distinct stream");
+    let admitted = stream
+        .iter()
+        .find_map(|event| match event.payload() {
+            events::KernelEventPayload::RunAdmitted(payload) => Some(payload),
+            _ => None,
+        })
+        .expect("RunAdmitted");
+    assert!(admitted.identity_material.distinct_run_key_digest.is_some());
+    assert!(!format!("{admitted:?}").contains(raw_key));
 }
 
 #[tokio::test]

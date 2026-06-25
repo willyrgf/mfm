@@ -212,6 +212,7 @@ mod tests {
             authored_config,
             certification_registry: services.certification_registry(),
             trust_scope_id: services.load_trust_scope_id().await.expect("trust scope"),
+            distinct_run_key: None,
             drive: DriveMode::AppendOnly,
         })
         .expect("entry-point launch request")
@@ -259,7 +260,12 @@ mod tests {
             .public_schema_id
             .clone();
 
-        let started = services.launch_run(request).await.expect("append start");
+        let (_, started) = services
+            .launch_run(request)
+            .await
+            .expect("append start")
+            .into_response_parts()
+            .expect("run response");
         assert_eq!(started.run_mode, RunModeStatus::Forward);
         let resumed = services
             .resume_stored_run(&run_id, DriveMode::UntilBlocked)
@@ -319,7 +325,12 @@ mod tests {
         .await;
         let run_id = request.run_id.clone();
 
-        let started = services.launch_run(request).await.expect("append start");
+        let (_, started) = services
+            .launch_run(request)
+            .await
+            .expect("append start")
+            .into_response_parts()
+            .expect("run response");
         assert_eq!(started.run_mode, RunModeStatus::Forward);
         let resumed = services
             .resume_stored_run(&run_id, DriveMode::UntilBlocked)
@@ -394,7 +405,12 @@ mod tests {
             .public_schema_id
             .clone();
 
-        let started = services.launch_run(request).await.expect("append start");
+        let (_, started) = services
+            .launch_run(request)
+            .await
+            .expect("append start")
+            .into_response_parts()
+            .expect("run response");
         assert_eq!(started.run_mode, RunModeStatus::Forward);
         let resumed = services
             .resume_stored_run(&run_id, DriveMode::UntilBlocked)
@@ -471,7 +487,12 @@ mod tests {
             .public_schema_id
             .clone();
 
-        let started = services.launch_run(request).await.expect("append start");
+        let (_, started) = services
+            .launch_run(request)
+            .await
+            .expect("append start")
+            .into_response_parts()
+            .expect("run response");
         assert_eq!(started.run_mode, RunModeStatus::Forward);
         let resumed = services
             .resume_stored_run(&run_id, DriveMode::UntilBlocked)

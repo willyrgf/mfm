@@ -61,6 +61,7 @@ mod tests {
     use super::*;
     use crate::{OpVersion, PublicOpName};
     use mfm_authored_config::{AuthoredConfig, AuthoredConfigFormat};
+    use mfm_store::v1::{RunEventStore, TrustScopeStore};
 
     #[test]
     fn production_registry_resolves_portfolio_snapshot_latest() {
@@ -135,6 +136,7 @@ mod tests {
             authored_config: authored,
             certification_registry: &certification_registry,
             trust_scope_id,
+            distinct_run_key: None,
             drive: crate::DriveMode::AppendOnly,
         })
         .expect("prepared entry-point launch");
@@ -156,6 +158,116 @@ mod tests {
                 .expect("run id")
         );
         assert!(!prepared.request.evidence.config_artifacts.is_empty());
+    }
+
+    #[test]
+    fn app_prepare_entry_point_run_launch_derives_stable_and_distinct_run_ids() {
+        let entry_point_registry = production_entry_point_op_registry().expect("registry");
+        let certification_registry = crate::production_certification_registry().expect("cert");
+        let trust_scope_id =
+            mfm_ids::TrustScopeId::new("mfm.trust_scope.v1:51515151515151515151515151515151")
+                .expect("trust scope");
+
+        let first = prepare_portfolio_launch(
+            &entry_point_registry,
+            &certification_registry,
+            trust_scope_id.clone(),
+            sample_portfolio_config_json(),
+            None,
+        );
+        let second = prepare_portfolio_launch(
+            &entry_point_registry,
+            &certification_registry,
+            trust_scope_id.clone(),
+            sample_portfolio_config_json(),
+            None,
+        );
+        let distinct = prepare_portfolio_launch(
+            &entry_point_registry,
+            &certification_registry,
+            trust_scope_id.clone(),
+            sample_portfolio_config_json(),
+            Some(crate::DistinctRunKey::new("alpha").expect("distinct key")),
+        );
+        let mut changed_config: serde_json::Value =
+            serde_json::from_str(&sample_portfolio_config_json()).expect("portfolio json");
+        changed_config["portfolio"]["portfolio_id"] = serde_json::json!("portfolio_other");
+        let changed = prepare_portfolio_launch(
+            &entry_point_registry,
+            &certification_registry,
+            trust_scope_id,
+            changed_config.to_string(),
+            None,
+        );
+
+        assert_eq!(first.request.run_id, second.request.run_id);
+        assert_eq!(
+            first.request.certified_spec.spec_hash(),
+            second.request.certified_spec.spec_hash()
+        );
+        assert_eq!(
+            first.request.certified_spec.spec_hash(),
+            distinct.request.certified_spec.spec_hash()
+        );
+        assert_ne!(first.request.run_id, distinct.request.run_id);
+        assert_eq!(
+            distinct
+                .request
+                .identity_material
+                .distinct_run_key_digest
+                .as_ref()
+                .expect("distinct key digest")
+                .as_str(),
+            "content:sha256-jcs-v1:4b27bd2f750880d8bd52200ddc0af0ad78fe23dfa519cad83595ec905a103c1d"
+        );
+        assert!(!format!("{:?}", distinct.request).contains("alpha"));
+        assert_ne!(
+            first.request.certified_spec.spec_hash(),
+            changed.request.certified_spec.spec_hash()
+        );
+        assert_ne!(first.request.run_id, changed.request.run_id);
+    }
+
+    #[tokio::test]
+    async fn app_launch_fails_before_run_admitted_when_runner_binding_is_unavailable() {
+        let entry_point_registry = production_entry_point_op_registry().expect("registry");
+        let certification_registry = crate::production_certification_registry().expect("cert");
+        let store = mfm_store::v1::AsyncInMemoryRunStore::default();
+        let trust_scope_id = store.load_trust_scope_id().await.expect("trust scope");
+        let prepared = prepare_portfolio_launch(
+            &entry_point_registry,
+            &certification_registry,
+            trust_scope_id,
+            sample_portfolio_config_json(),
+            None,
+        );
+        let run_id = prepared.request.run_id.clone();
+        let services = crate::make_run_services_with_certification_registry(
+            crate::ErasedRunnerRegistry::new(),
+            store.clone(),
+            store.clone(),
+            certification_registry,
+        );
+
+        let err = services
+            .launch_run(prepared.request)
+            .await
+            .expect_err("missing runner binding rejects at ingress");
+
+        assert_eq!(err.code, "LaunchRunnerUnavailable");
+        assert_eq!(
+            store
+                .expected_next_seq(&run_id)
+                .await
+                .expect("expected next seq")
+                .as_u64(),
+            1
+        );
+        assert!(store
+            .load_run_stream(&run_id)
+            .await
+            .expect("run stream")
+            .is_empty());
     }
 
     #[test]
@@ -228,6 +340,30 @@ mod tests {
             assert_eq!(plan.seed_material[0].seed_id, plan.draft.seeds()[0].seed_id);
             assert!(!plan.config_material.is_empty());
         }
+    }
+
+    fn prepare_portfolio_launch(
+        entry_point_registry: &EntryPointOpRegistry,
+        certification_registry: &mfm_certify::CertificationRegistry,
+        trust_scope_id: mfm_ids::TrustScopeId,
+        config: String,
+        distinct_run_key: Option<crate::DistinctRunKey>,
+    ) -> crate::PreparedEntryPointRunLaunch {
+        crate::prepare_entry_point_run_launch(crate::EntryPointRunLaunchInput {
+            entry_point_registry,
+            public_op_name: PublicOpName::new(
+                mfm_op_portfolio_tracker::PORTFOLIO_SNAPSHOT_ENTRY_POINT.public_name,
+            )
+            .expect("name"),
+            op_version: None,
+            authored_config: AuthoredConfig::new(AuthoredConfigFormat::Json, config)
+                .expect("authored config"),
+            certification_registry,
+            trust_scope_id,
+            distinct_run_key,
+            drive: crate::DriveMode::AppendOnly,
+        })
+        .expect("prepared entry-point launch")
     }
 
     fn sample_portfolio_config_json() -> String {
