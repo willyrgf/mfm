@@ -298,7 +298,10 @@ partial one. The consequence is deliberately simple: two **identical requests** 
 **different request** (different config — including a different finality value) is different certified
 work and gets its own run. That is correct, not a divergence: the launcher asked for something
 different, rather than something changing behind their back. Exact certified work converges; merely
-equivalent-looking work is not promised to converge.
+equivalent-looking work is not promised to converge. (When `--op-version` is omitted and the launcher
+resolves "latest", the **resolved** op id/version is recorded in hash-defining `planning_lineage`, so
+"latest" is deterministic per build and two builds that resolve it differently cannot collide on one
+`run_id` — R9 #4.)
 
 `RunIdentityMaterialV1` is part of `RunAdmitted` evidence, and the store/runtime validate
 `run_id == sha256-jcs-v1(identity_material)`. Attach loads the existing `RunAdmitted` and compares
@@ -326,7 +329,10 @@ content address inside a trust scope, two launches of the same certified spec co
 key is never persisted; only a domain-separated `distinct_run_key_digest` enters
 `RunIdentityMaterialV1`. A nonce/timestamp/resolved block that flows into the certified spec also
 creates a distinct run by changing `certified_spec_hash`. A raw caller-supplied `--run-id` is not a
-normal launch API; keep it admin/import/test-only.
+normal launch API; keep it admin/import/test-only. Convergence promises identical *certified work*,
+**not** identical on-chain economics: unpinned fee/gas takes the first driver's live market read
+(§6.4a). Pin fee/gas in config, or use `--distinct-run-key`, when independent economics are required
+(R9 #3).
 
 **Trust scope is normative (DEC-31).** v1 scopes **one Postgres deployment to one trust domain**: all
 launchers are co-authorized for the deployment's signers/capabilities. The `trust_scope_id` is
@@ -451,7 +457,7 @@ review's depth-model inconsistency and the strand-an-admitted-run concern, revie
 
 **(c) Terminal evidence by level — enables receipt-level output.** Today terminal output is built
 only from confirmation (`output_from_confirmation`, `program/src/lib.rs:1561`) and runtime requires
-`is_confirmed()` before output (`side_effect_lifecycle.rs:298`). Generalize to a typed
+`is_confirmed()` before output (`side_effect_lifecycle.rs:313`). Generalize to a typed
 **terminal-evidence** model: the `SideEffectState` builds output from the terminal evidence at its
 level — `output_from_receipt(.. Receipt)` for `Receipt`, `output_from_confirmation(.. Confirmation)`
 for `Finalized` (the `Receipt` and `Confirmation` associated types already exist,
@@ -720,17 +726,26 @@ with docs+tests in the same change. Five workstreams.
   forward-fence** (`runtime/src/side_effects.rs:213`, `docs/saga.md`) (`kernel/store`,
   `kernel/runtime`). This is foundational: without pair-keyed authority, the verify node cannot
   continue the submit node's ledger or release the wallet lane.
+- **Land the phase gate incrementally, not big-bang (R9 #2).** Because the re-key touches
+  store-admission acceptance and wallet-lane release — the one place safety lives — introduce pair
+  identity *additively*, **dual-validate** old (`attempt_id`/`node_id`) and new (pair) keys under test,
+  then cut over; the §11 kill-mid-submit / kill-mid-verify tests **gate** the cutover rather than
+  follow it. No intermediate step may leave store admission or lane release able to mis-admit or
+  mis-release a lane. The one-ledger *end state* is unchanged (DEC-14/17); this constrains only how it
+  lands.
 - **`FrameworkNodeSpec::SideEffectVerify`** spec types + parse/json (`kernel/spec`); lowering inserts
   it after each side-effect node and records the **certified pair identity** (`kernel/program`). Its
   **own validation family** (`kernel/certify/framework_lifecycle.rs`): N-cardinality pairing
   invariant, evidence binding, post-rewrite single-producer check — not the singleton check the other
   framework nodes use (DEC-27).
-- **`verification: Receipt | Finalized`** on `SideEffectContractSpec` (hash-defining); finality
-  **depth pinned at run admission** as `RunAdmitted` evidence and verified per worker
-  (`kernel/spec`, `kernel/certify`, run admission in `kernel/runtime` / `crates/app`). [§6.4b]
+- **`verification: Receipt | Finalized(depth)`** on `SideEffectContractSpec` is **config,
+  hash-defining** → captured by `certified_spec_hash`, read identically by every worker and replay;
+  **no admission-time depth resolution** (§6.4b, DEC-3/39). `RunAdmitted` may echo the depth for
+  diagnostics only, never as an independent resolution or verification authority (`kernel/spec`,
+  `kernel/certify`, `kernel/runtime`). [§6.4b]
 - **Terminal-evidence model [§6.4c]:** add `output_from_receipt`; runtime validates terminal
   evidence against the *configured* level instead of unconditional `is_confirmed()`
-  (`kernel/program:1561`, `side_effect_lifecycle.rs:298`).
+  (`kernel/program:1561`, `side_effect_lifecycle.rs:313`).
 - **Verify-node runner** (`kernel/runtime`): drive `Submission* → Receipt → Confirmation → terminal`
   to the level; bind the verified output cell — **invoking** the domain `SideEffectState::output_from_*`
   contract for the output value (DEC-37), never constructing domain output in the kernel. Scheduler
