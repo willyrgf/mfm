@@ -294,6 +294,17 @@ pub enum CodecError {
 /// Backend helper APIs for durable store implementations.
 pub mod backend;
 
+mod admission_lanes;
+pub use admission_lanes::{
+    admission_advisory_lock_key, admission_waiter_id, resource_key_canonical_json,
+    resource_wait_fifo_admission_token, AdmissionAdvisoryLockKey, AdmissionLane,
+    AdmissionLaneClass, AdmissionLaneId, AdmissionLaneKey, AdmissionLaneMode, AdmissionLease,
+    AdmissionModeSpec, AdmissionToken, AdmissionWaiter, AdmissionWaiterId,
+    ExecutionClaimAdmissionLane, NowaitSkip, NowaitSkipAdmissionBusy, NowaitSkipAdmissionResult,
+    ResourceAdmissionLane, WaitFifo, WaitFifoAdmissionBlock, WaitFifoAdmissionGrant,
+    WaitFifoAdmissionResult,
+};
+
 /// Shared canonical-JSON codec for kernel events, projections, and saga types.
 ///
 /// This module exists so the in-memory store and the Postgres adapter share one
@@ -2048,35 +2059,8 @@ pub enum CommitOutcome {
     Appended(CommittedBatch),
     /// The commit key had already appended the same canonical batch.
     Idempotent(CommittedBatch),
-    /// A resource-lane claim was blocked before domain authority was persisted.
-    ResourceLaneClaimBlocked(Box<ResourceLaneClaimBlock>),
-}
-
-/// Non-authoritative waiter metadata for a blocked resource-lane claim.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResourceLaneWaiterBlock {
-    /// Deterministic waiter id for the stable claim fingerprint.
-    pub waiter_id: String,
-    /// Lane-local FIFO ticket assigned under the lane admission lock.
-    pub lane_ticket: u64,
-    /// Lease expiry as milliseconds since the Unix epoch.
-    pub lease_expires_at_unix_ms: i64,
-}
-
-/// Result of a resource-lane claim blocked before domain authority rows were persisted.
-///
-/// A blocked claim persists no run event, commit, resource-lane claim, resource-lane release,
-/// lane-transition, or other MFM domain authority row. Concrete stores may insert or refresh
-/// non-authoritative operational waiter rows for FIFO admission; those rows are coordination
-/// state only and never grant lane ownership.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResourceLaneClaimBlock {
-    /// Blocked resource lane.
-    pub lane_key: ResourceLaneKey,
-    /// Current authoritative holder of the lane, if one exists.
-    pub holder: Option<SideEffectLedgerRef>,
-    /// Operational waiter metadata for the blocked claim, if the store exposed it.
-    pub waiter: Option<ResourceLaneWaiterBlock>,
+    /// A FIFO admission was blocked before domain authority was persisted.
+    AdmissionBlocked(Box<WaitFifoAdmissionBlock>),
 }
 
 /// Cell terminal projection derived from committed run events.
@@ -4704,8 +4688,8 @@ impl StagedCommit {
 pub enum StagedCommitOutcome {
     /// The commit staged successfully and is ready for durable insertion.
     Staged(Box<StagedCommit>),
-    /// The commit's resource-lane claim was blocked; no domain authority rows should be persisted.
-    ResourceLaneClaimBlocked(Box<ResourceLaneClaimBlock>),
+    /// FIFO admission was blocked; no domain authority rows should be persisted.
+    AdmissionBlocked(Box<WaitFifoAdmissionBlock>),
 }
 
 struct CommitStagingVerifier<'a> {
@@ -4925,7 +4909,7 @@ pub fn stage_prepared_commit_plan(
                 .map(|staged| StagedCommitOutcome::Staged(Box::new(staged)))
         }
         ResourceLaneMaterialization::Blocked(block) => {
-            Ok(StagedCommitOutcome::ResourceLaneClaimBlocked(block))
+            Ok(StagedCommitOutcome::AdmissionBlocked(block))
         }
     }
 }
@@ -4935,7 +4919,7 @@ enum ResourceLaneMaterialization {
         request: Box<CommitRequest>,
         resource_lane_authority: ResourceLaneAuthoritySet,
     },
-    Blocked(Box<ResourceLaneClaimBlock>),
+    Blocked(Box<WaitFifoAdmissionBlock>),
 }
 
 fn stage_run_commit_with_fingerprint(
@@ -5089,9 +5073,11 @@ fn materialize_resource_lane_intents(
                 }
                 if let Some(existing) = active_lanes.get(&lane_key) {
                     if existing.holder != holder {
+                        let lane = ResourceAdmissionLane::from_resource_lane_key(&lane_key)?;
                         return Ok(ResourceLaneMaterialization::Blocked(Box::new(
-                            ResourceLaneClaimBlock {
-                                lane_key,
+                            WaitFifoAdmissionBlock {
+                                lane,
+                                resource_lane_key: lane_key,
                                 holder: Some(existing.holder.clone()),
                                 waiter: None,
                             },
@@ -5452,8 +5438,8 @@ impl RunMemoryCore {
         };
         let staged = match stage_prepared_commit_plan(&base, plan)? {
             StagedCommitOutcome::Staged(staged) => *staged,
-            StagedCommitOutcome::ResourceLaneClaimBlocked(block) => {
-                return Ok(CommitOutcome::ResourceLaneClaimBlocked(block));
+            StagedCommitOutcome::AdmissionBlocked(block) => {
+                return Ok(CommitOutcome::AdmissionBlocked(block));
             }
         };
         let (

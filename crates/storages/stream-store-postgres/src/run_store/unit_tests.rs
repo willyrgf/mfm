@@ -19,7 +19,7 @@ fn artifact_role_contract_postgres_tag_roundtrip_uses_events_contract() {
 }
 
 #[test]
-fn resource_lane_waiter_fingerprint_is_stable_for_identical_claim_retries() {
+fn resource_wait_fifo_admission_token_is_stable_for_identical_claim_retries() {
     let run_id = RunId::from_digest(
         DigestAlgorithm::Sha256JcsV1,
         DigestBytes::from_array([1; 32]),
@@ -35,7 +35,8 @@ fn resource_lane_waiter_fingerprint_is_stable_for_identical_claim_retries() {
         .expect("schema id"),
         key: events::ResourceKey::new("wallet-1").expect("resource key"),
     };
-    let lane_id = mfm_store::v1::backend::resource_lane_id(&evidence).expect("lane id");
+    let lane = mfm_store::v1::ResourceAdmissionLane::from_resource_key_evidence(&evidence)
+        .expect("lane id");
     let mut intent = events::ResourceLaneClaimIntent {
         spec_hash: mfm_ids::SpecHash::from_digest(
             DigestAlgorithm::Sha256JcsV1,
@@ -61,19 +62,19 @@ fn resource_lane_waiter_fingerprint_is_stable_for_identical_claim_retries() {
             .expect("runner id"),
     };
 
-    let first = mfm_store::v1::backend::resource_lane_claim_fingerprint(&run_id, &lane_id, &intent)
-        .expect("first");
-    let retry = mfm_store::v1::backend::resource_lane_claim_fingerprint(&run_id, &lane_id, &intent)
-        .expect("retry");
+    let first =
+        mfm_store::v1::resource_wait_fifo_admission_token(&run_id, &lane, &intent).expect("first");
+    let retry =
+        mfm_store::v1::resource_wait_fifo_admission_token(&run_id, &lane, &intent).expect("retry");
     intent.invocation_epoch = 2;
     let different_epoch =
-        mfm_store::v1::backend::resource_lane_claim_fingerprint(&run_id, &lane_id, &intent)
+        mfm_store::v1::resource_wait_fifo_admission_token(&run_id, &lane, &intent)
             .expect("different");
 
     assert_eq!(first, retry);
     assert_ne!(first, different_epoch);
     assert_eq!(
-        mfm_store::v1::backend::resource_lane_waiter_id(&first),
-        mfm_store::v1::backend::resource_lane_waiter_id(&retry)
+        mfm_store::v1::admission_waiter_id(&first).expect("first waiter id"),
+        mfm_store::v1::admission_waiter_id(&retry).expect("retry waiter id")
     );
 }

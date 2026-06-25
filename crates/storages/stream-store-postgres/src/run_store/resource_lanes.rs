@@ -10,7 +10,11 @@ pub(super) async fn lock_resource_lanes_for_request_tx(
         match payload {
             events::KernelEventPayload::ResourceLaneClaimIntent(intent) => {
                 lane_ids.insert(
-                    mfm_store::v1::backend::resource_lane_id(&intent.resource_key)?.to_vec(),
+                    mfm_store::v1::ResourceAdmissionLane::from_resource_key_evidence(
+                        &intent.resource_key,
+                    )?
+                    .id()
+                    .to_vec(),
                 );
             }
             events::KernelEventPayload::ResourceLaneReleaseIntent(intent) => {
@@ -72,10 +76,15 @@ pub(super) fn resource_lane_id_for_release(
         }
         .into());
     }
-    Ok(mfm_store::v1::backend::resource_lane_id_for_key(lane_key)?.to_vec())
+    Ok(
+        mfm_store::v1::ResourceAdmissionLane::from_resource_lane_key(lane_key)?
+            .id()
+            .to_vec(),
+    )
 }
 
 pub(super) struct ResourceLaneClaimAdmission {
+    pub(super) lane: mfm_store::v1::ResourceAdmissionLane,
     pub(super) lane_id: Vec<u8>,
     pub(super) lane_key: ResourceLaneKey,
     pub(super) holder: mfm_store::v1::SideEffectLedgerRef,
@@ -84,11 +93,11 @@ pub(super) struct ResourceLaneClaimAdmission {
     pub(super) attempt_id: mfm_ids::AttemptId,
     pub(super) ledger_key: events::SideEffectLedgerKey,
     pub(super) invocation_epoch: u32,
-    pub(super) claim_fingerprint: String,
+    pub(super) admission_token: mfm_store::v1::AdmissionToken,
 }
 
 pub(super) struct ResourceLaneWaiterRow {
-    pub(super) claim_fingerprint: String,
+    pub(super) admission_token: mfm_store::v1::AdmissionToken,
 }
 
 pub(super) fn single_lane_claim_admission(
@@ -107,18 +116,18 @@ pub(super) fn single_lane_claim_admission(
     if claims.next().is_some() {
         return Ok(None);
     }
-    let lane_id = mfm_store::v1::backend::resource_lane_id(&intent.resource_key)?.to_vec();
+    let lane =
+        mfm_store::v1::ResourceAdmissionLane::from_resource_key_evidence(&intent.resource_key)?;
+    let lane_id = lane.id().to_vec();
     let lane_key = ResourceLaneKey::from_evidence(&intent.resource_key);
     let holder = mfm_store::v1::SideEffectLedgerRef::new(
         request.run_id().clone(),
         intent.ledger_key.clone(),
     );
-    let claim_fingerprint = mfm_store::v1::backend::resource_lane_claim_fingerprint(
-        request.run_id(),
-        &lane_id,
-        intent,
-    )?;
+    let admission_token =
+        mfm_store::v1::resource_wait_fifo_admission_token(request.run_id(), &lane, intent)?;
     Ok(Some(ResourceLaneClaimAdmission {
+        lane,
         lane_id,
         lane_key,
         holder,
@@ -127,7 +136,7 @@ pub(super) fn single_lane_claim_admission(
         attempt_id: intent.attempt_id.clone(),
         ledger_key: intent.ledger_key.clone(),
         invocation_epoch: intent.invocation_epoch,
-        claim_fingerprint,
+        admission_token,
     }))
 }
 
@@ -135,12 +144,13 @@ pub(super) async fn resource_lane_fifo_pre_gate_tx(
     tx: &mut Transaction<'_, Postgres>,
     projections: &ProjectionSnapshot,
     admission: &ResourceLaneClaimAdmission,
-) -> Result<Option<mfm_store::v1::ResourceLaneClaimBlock>> {
+) -> Result<Option<mfm_store::v1::WaitFifoAdmissionBlock>> {
     if let Some(active) = projections.resource_lane(&admission.lane_key) {
         if active.holder != admission.holder {
             let waiter = enqueue_or_refresh_waiter_tx(tx, admission).await?;
-            return Ok(Some(mfm_store::v1::ResourceLaneClaimBlock {
-                lane_key: admission.lane_key.clone(),
+            return Ok(Some(mfm_store::v1::WaitFifoAdmissionBlock {
+                lane: admission.lane.clone(),
+                resource_lane_key: admission.lane_key.clone(),
                 holder: Some(active.holder.clone()),
                 waiter: Some(waiter),
             }));
@@ -148,10 +158,11 @@ pub(super) async fn resource_lane_fifo_pre_gate_tx(
     }
 
     if let Some(head) = oldest_live_waiter_tx(tx, &admission.lane_id).await? {
-        if head.claim_fingerprint != admission.claim_fingerprint {
+        if head.admission_token != admission.admission_token {
             let waiter = enqueue_or_refresh_waiter_tx(tx, admission).await?;
-            return Ok(Some(mfm_store::v1::ResourceLaneClaimBlock {
-                lane_key: admission.lane_key.clone(),
+            return Ok(Some(mfm_store::v1::WaitFifoAdmissionBlock {
+                lane: admission.lane.clone(),
+                resource_lane_key: admission.lane_key.clone(),
                 holder: None,
                 waiter: Some(waiter),
             }));
@@ -191,9 +202,12 @@ pub(super) async fn oldest_live_waiter_tx(
     .map_err(|error| database_error("failed to load oldest resource lane waiter", error))?;
     row.map(|row| {
         Ok(ResourceLaneWaiterRow {
-            claim_fingerprint: row.try_get("claim_fingerprint").map_err(|error| {
-                database_error("failed to decode resource lane waiter fingerprint", error)
-            })?,
+            admission_token: mfm_store::v1::AdmissionToken::new(
+                row.try_get::<String, _>("claim_fingerprint")
+                    .map_err(|error| {
+                        database_error("failed to decode resource lane waiter fingerprint", error)
+                    })?,
+            )?,
         })
     })
     .transpose()
@@ -202,12 +216,12 @@ pub(super) async fn oldest_live_waiter_tx(
 pub(super) async fn enqueue_or_refresh_waiter_tx(
     tx: &mut Transaction<'_, Postgres>,
     admission: &ResourceLaneClaimAdmission,
-) -> Result<ResourceLaneWaiterBlock> {
+) -> Result<AdmissionWaiter> {
     if let Some(waiter) = refresh_waiting_waiter_tx(tx, admission).await? {
         return Ok(waiter);
     }
     let lane_ticket = allocate_waiter_ticket_tx(tx, &admission.lane_id).await?;
-    let waiter_id = mfm_store::v1::backend::resource_lane_waiter_id(&admission.claim_fingerprint);
+    let waiter_id = mfm_store::v1::admission_waiter_id(&admission.admission_token)?;
     let row = sqlx::query(
         "INSERT INTO resource_lane_waiters \
          (waiter_id, lane_id, lane_ticket, run_id, node_id, attempt_id, ledger_key, \
@@ -218,7 +232,7 @@ pub(super) async fn enqueue_or_refresh_waiter_tx(
              lease_expires_at = statement_timestamp() + make_interval(secs => $10) \
          RETURNING waiter_id, lane_ticket, (EXTRACT(EPOCH FROM lease_expires_at) * 1000)::BIGINT AS lease_expires_at_unix_ms",
     )
-    .bind(&waiter_id)
+    .bind(waiter_id.as_str())
     .bind(&admission.lane_id)
     .bind(u64_to_i64(lane_ticket, "resource_lane_waiters.lane_ticket")?)
     .bind(admission.run_id.as_str())
@@ -228,7 +242,7 @@ pub(super) async fn enqueue_or_refresh_waiter_tx(
     .bind(i32::try_from(admission.invocation_epoch).map_err(|_| {
         PostgresStoreError::Corruption("resource lane waiter invocation epoch overflow".to_owned())
     })?)
-    .bind(&admission.claim_fingerprint)
+    .bind(admission.admission_token.as_str())
     .bind(RESOURCE_LANE_WAITER_LEASE_SECS)
     .fetch_one(&mut **tx)
     .await
@@ -239,7 +253,7 @@ pub(super) async fn enqueue_or_refresh_waiter_tx(
 pub(super) async fn refresh_waiting_waiter_tx(
     tx: &mut Transaction<'_, Postgres>,
     admission: &ResourceLaneClaimAdmission,
-) -> Result<Option<ResourceLaneWaiterBlock>> {
+) -> Result<Option<AdmissionWaiter>> {
     let row = sqlx::query(
         "UPDATE resource_lane_waiters \
          SET updated_at = statement_timestamp(), \
@@ -248,7 +262,7 @@ pub(super) async fn refresh_waiting_waiter_tx(
          RETURNING waiter_id, lane_ticket, (EXTRACT(EPOCH FROM lease_expires_at) * 1000)::BIGINT AS lease_expires_at_unix_ms",
     )
     .bind(&admission.lane_id)
-    .bind(&admission.claim_fingerprint)
+    .bind(admission.admission_token.as_str())
     .bind(RESOURCE_LANE_WAITER_LEASE_SECS)
     .fetch_optional(&mut **tx)
     .await
@@ -275,11 +289,13 @@ pub(super) async fn allocate_waiter_ticket_tx(
     i64_to_positive_u64(lane_ticket, "resource_lane_waiters.lane_ticket")
 }
 
-pub(super) fn waiter_block_from_row(row: PgRow) -> Result<ResourceLaneWaiterBlock> {
-    Ok(ResourceLaneWaiterBlock {
-        waiter_id: row
-            .try_get("waiter_id")
-            .map_err(|error| database_error("failed to decode resource lane waiter id", error))?,
+pub(super) fn waiter_block_from_row(row: PgRow) -> Result<AdmissionWaiter> {
+    Ok(AdmissionWaiter {
+        waiter_id: mfm_store::v1::AdmissionWaiterId::new(
+            row.try_get::<String, _>("waiter_id").map_err(|error| {
+                database_error("failed to decode resource lane waiter id", error)
+            })?,
+        )?,
         lane_ticket: i64_to_positive_u64(
             row.try_get("lane_ticket").map_err(|error| {
                 database_error("failed to decode resource lane waiter ticket", error)
@@ -302,7 +318,7 @@ pub(super) async fn mark_waiter_claimed_tx(
          WHERE lane_id = $1 AND claim_fingerprint = $2 AND status = 'waiting'",
     )
     .bind(&admission.lane_id)
-    .bind(&admission.claim_fingerprint)
+    .bind(admission.admission_token.as_str())
     .execute(&mut **tx)
     .await
     .map_err(|error| database_error("failed to mark resource lane waiter claimed", error))?;
