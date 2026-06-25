@@ -19,8 +19,9 @@ use mfm_spec::v1::{
     ResourceNamespace, SagaPolicySpec, ValueLineageRef,
 };
 use mfm_store::v1::{
-    AdmissionWaiter, ArtifactEvidenceRef, AttemptStatus, AttemptTerminal, CellTerminalProjection,
-    CommitArtifactEvidenceSet, CommitKey, CommitOutcome, CommitPreconditions, ManualResolution,
+    AdmissionToken, AdmissionWaiter, ArtifactEvidenceRef, AttemptStatus, AttemptTerminal,
+    CellTerminalProjection, CommitArtifactEvidenceSet, CommitKey, CommitOutcome,
+    CommitPreconditions, ExecutionClaimStore, ManualResolution, NowaitSkipAdmissionResult,
     PreparedCommit, PreparedCommitPlan, RequiredRunState, ResourceLaneKey, Retention, RunAdmission,
     RunState, SagaEngagementReason, SagaTerminal, SagaTerminalProof, SideEffectPhase,
     SideEffectProgress, SideEffectTerminal, StateAttemptStarted, StoreError, StreamSeq,
@@ -150,6 +151,175 @@ async fn schema_validation_rejects_missing_mutation_guard_trigger() {
     drop_schema(&store, &schema).await;
 }
 
+#[tokio::test]
+async fn execution_claim_acquire_busy_and_release_are_token_matched() {
+    let (store, schema) = test_store().await;
+    let run = run_id(6);
+    let holder = admission_token("mfm.test.execution_claim.holder");
+    let other = admission_token("mfm.test.execution_claim.other");
+
+    let admitted = store
+        .acquire_execution_claim(&run, holder.clone())
+        .await
+        .expect("acquire execution claim");
+    let NowaitSkipAdmissionResult::Admitted(lease) = admitted else {
+        panic!("first execution claim should be admitted");
+    };
+    assert_eq!(lease.token, holder);
+
+    let busy = store
+        .acquire_execution_claim(&run, other.clone())
+        .await
+        .expect("busy execution claim");
+    let NowaitSkipAdmissionResult::Busy(busy) = busy else {
+        panic!("second execution claim should be busy");
+    };
+    assert_eq!(busy.holder.expect("busy holder").token, lease.token);
+
+    assert!(store
+        .renew_execution_claim(&run, &other)
+        .await
+        .expect("wrong-token renew")
+        .is_none());
+    assert!(!store
+        .release_execution_claim(&run, &other)
+        .await
+        .expect("wrong-token release"));
+
+    let renewed = store
+        .renew_execution_claim(&run, &lease.token)
+        .await
+        .expect("matching-token renew")
+        .expect("matching-token renew returns lease");
+    assert_eq!(renewed.token, lease.token);
+    assert!(renewed.lease_expires_at_unix_ms >= lease.lease_expires_at_unix_ms);
+
+    assert!(store
+        .release_execution_claim(&run, &renewed.token)
+        .await
+        .expect("matching-token release"));
+    assert!(matches!(
+        store
+            .acquire_execution_claim(&run, other)
+            .await
+            .expect("acquire after release"),
+        NowaitSkipAdmissionResult::Admitted(_)
+    ));
+
+    drop_schema(&store, &schema).await;
+}
+
+#[tokio::test]
+async fn execution_claim_expiry_requires_explicit_reap() {
+    let (store, schema) = test_store().await;
+    let run = run_id(7);
+    let holder = admission_token("mfm.test.execution_claim.expired_holder");
+    let other = admission_token("mfm.test.execution_claim.expired_other");
+
+    let admitted = store
+        .acquire_execution_claim(&run, holder.clone())
+        .await
+        .expect("acquire execution claim");
+    let NowaitSkipAdmissionResult::Admitted(lease) = admitted else {
+        panic!("first execution claim should be admitted");
+    };
+    expire_execution_claim_row(&store, &run).await;
+
+    let busy = store
+        .acquire_execution_claim(&run, other.clone())
+        .await
+        .expect("expired holder still blocks acquire");
+    let NowaitSkipAdmissionResult::Busy(busy) = busy else {
+        panic!("expired holder should remain busy before explicit reap");
+    };
+    assert_eq!(busy.holder.expect("expired holder").token, lease.token);
+
+    let expired = store
+        .expired_execution_claims()
+        .await
+        .expect("expired execution claims");
+    assert_eq!(expired.len(), 1);
+    assert_eq!(expired[0].run_id, run);
+    assert_eq!(expired[0].lease.token, holder);
+
+    assert!(!store
+        .reap_expired_execution_claim(&run, &other)
+        .await
+        .expect("wrong-token reap"));
+    assert!(matches!(
+        store
+            .acquire_execution_claim(&run, other.clone())
+            .await
+            .expect("busy after wrong-token reap"),
+        NowaitSkipAdmissionResult::Busy(_)
+    ));
+
+    assert!(store
+        .reap_expired_execution_claim(&run, &holder)
+        .await
+        .expect("matching-token reap"));
+    assert!(matches!(
+        store
+            .acquire_execution_claim(&run, other)
+            .await
+            .expect("acquire after explicit reap"),
+        NowaitSkipAdmissionResult::Admitted(_)
+    ));
+
+    drop_schema(&store, &schema).await;
+}
+
+#[tokio::test]
+async fn execution_claim_stale_token_cannot_reap_newer_holder() {
+    let (store, schema) = test_store().await;
+    let run = run_id(8);
+    let first = admission_token("mfm.test.execution_claim.first");
+    let second = admission_token("mfm.test.execution_claim.second");
+    let third = admission_token("mfm.test.execution_claim.third");
+
+    assert!(matches!(
+        store
+            .acquire_execution_claim(&run, first.clone())
+            .await
+            .expect("first acquire"),
+        NowaitSkipAdmissionResult::Admitted(_)
+    ));
+    expire_execution_claim_row(&store, &run).await;
+    assert!(store
+        .reap_expired_execution_claim(&run, &first)
+        .await
+        .expect("first reap"));
+
+    let admitted = store
+        .acquire_execution_claim(&run, second.clone())
+        .await
+        .expect("second acquire");
+    let NowaitSkipAdmissionResult::Admitted(second_lease) = admitted else {
+        panic!("second execution claim should be admitted");
+    };
+    expire_execution_claim_row(&store, &run).await;
+
+    assert!(!store
+        .reap_expired_execution_claim(&run, &first)
+        .await
+        .expect("stale-token reap"));
+    let busy = store
+        .acquire_execution_claim(&run, third)
+        .await
+        .expect("newer holder still blocks after stale reap");
+    let NowaitSkipAdmissionResult::Busy(busy) = busy else {
+        panic!("newer holder should remain busy");
+    };
+    assert_eq!(busy.holder.expect("newer holder").token, second_lease.token);
+
+    assert!(store
+        .reap_expired_execution_claim(&run, &second)
+        .await
+        .expect("newer holder reap"));
+
+    drop_schema(&store, &schema).await;
+}
+
 fn digest_bytes(byte: u8) -> DigestBytes {
     DigestBytes::from_array([byte; 32])
 }
@@ -249,6 +419,23 @@ fn state_kind(byte: u8) -> StateKind {
 
 fn media_type(value: &str) -> MediaType {
     MediaType::new(value).expect("media type")
+}
+
+fn admission_token(value: &str) -> AdmissionToken {
+    AdmissionToken::new(value).expect("admission token")
+}
+
+async fn expire_execution_claim_row(store: &PostgresRunStore, run_id: &RunId) {
+    sqlx::query(
+        "UPDATE admission_lane \
+         SET lease_expires_at = statement_timestamp() - make_interval(secs => 1), \
+             updated_at = statement_timestamp() \
+         WHERE class = 'execution_claim' AND execution_run_id = $1",
+    )
+    .bind(run_id.as_str())
+    .execute(&store.pool)
+    .await
+    .expect("expire execution claim row");
 }
 
 fn run_admitted(run_id: RunId) -> KernelEventPayload {

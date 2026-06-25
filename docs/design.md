@@ -349,14 +349,16 @@ first specify Postgres roles, ownership, credentials, and restore/clone runbooks
 For single-lane exclusive resource-lane claim commits, Postgres enforces FIFO under the lane advisory
 transaction lock before materializing `ResourceLaneClaimed`: a claim can commit only when the one
 requested lane has no active authoritative holder and no earlier live waiter. A
-`ResourceLaneClaimBlocked` result persists no run event, commit, resource-lane claim,
+`AdmissionBlocked` result persists no run event, commit, resource-lane claim,
 resource-lane release, lane-transition, or other MFM domain authority row, but it may insert or
 refresh one mutable operational waiter row. Waiter leases bound dead process impact; expired,
-cancelled, or claimed waiters no longer block later waiters. Retries for an expired or cancelled
-deterministic claim fingerprint reuse the same waiter id but receive a fresh lane-local ticket, so
-stale priority is not restored. The store validates prepared claim semantics before enqueueing a
-waiter, preventing malformed claims from occupying the FIFO head. Release notifications, if present,
-are wake hints only and do not grant ownership.
+or admitted waiters no longer block later waiters. Retries for an expired deterministic admission
+token reuse the same waiter id but receive a fresh lane-local ticket, so stale priority is not
+restored. Execution claims use the same admission-lane table as `nowait_skip` holder leases keyed by
+derived run id; acquire does not auto-reap expired holders, and renew/release/reap only mutate when
+the caller's token still matches the current holder. The store validates prepared claim semantics
+before enqueueing a waiter, preventing malformed claims from occupying the FIFO head. Release
+notifications, if present, are wake hints only and do not grant ownership.
 
 ## Runtime
 

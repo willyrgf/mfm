@@ -432,6 +432,7 @@ const REQUIRED_TABLES: &[&str] = &[
 const REQUIRED_VIEWS: &[&str] = &[];
 
 const REQUIRED_INDEXES: &[&str] = &[
+    "admission_lane_expired_execution_claim_idx",
     "admission_waiter_live_fifo_idx",
     "admission_waiter_waiting_expiry_idx",
 ];
@@ -461,6 +462,8 @@ const REQUIRED_CONSTRAINTS: &[&str] = &[
     "admission_lane_class_mode_v1",
     "admission_lane_wait_fifo_shape",
     "admission_lane_nowait_skip_shape",
+    "admission_lane_execution_run_id_shape",
+    "admission_lane_execution_run_id_nonempty",
     "admission_waiter_lane_fk",
     "admission_waiter_resource_wait_fifo_v1",
     "admission_waiter_lane_id_len",

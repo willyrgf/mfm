@@ -7,6 +7,12 @@ const RESOURCE_WAIT_FIFO_TOKEN_DOMAIN: &[u8] = b"mfm.admission_lane.resource.wai
 const ADMISSION_WAITER_ID_DOMAIN: &[u8] = b"mfm.admission_lane.waiter.id.v1";
 const ADMISSION_ADVISORY_LOCK_DOMAIN: &[u8] = b"mfm.admission_lane.advisory_lock.v1";
 
+/// V1 execution-claim lease time-to-live in seconds.
+pub const EXECUTION_CLAIM_LEASE_TTL_SECS: u64 = 60;
+
+/// V1 execution-claim heartbeat interval in seconds.
+pub const EXECUTION_CLAIM_HEARTBEAT_INTERVAL_SECS: u64 = 20;
+
 /// Class of an operational admission lane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AdmissionLaneClass {
@@ -342,6 +348,17 @@ pub struct NowaitSkipAdmissionBusy {
     pub lane: ExecutionClaimAdmissionLane,
     /// Current holder lease if the store can expose it.
     pub holder: Option<AdmissionLease>,
+}
+
+/// Expired execution claim exposed for explicit manual reaping.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpiredExecutionClaim {
+    /// Run whose execution claim has expired.
+    pub run_id: RunId,
+    /// Expired execution-claim lane.
+    pub lane: ExecutionClaimAdmissionLane,
+    /// Expired holder lease.
+    pub lease: AdmissionLease,
 }
 
 /// PostgreSQL `pg_advisory_xact_lock(int8)` key for an admission lane.
