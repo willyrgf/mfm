@@ -11,7 +11,7 @@ use mfm_capabilities::{
 };
 use mfm_ids::{
     ArtifactId, DigestBytes, EffectKind, EffectVersion, EventId, SchemaId, ScopeId, SeedId,
-    SemanticTypeId, StateKind, StateVersion, TrustScopeId,
+    SemanticTypeId, SideEffectPairId, StateKind, StateVersion, TrustScopeId,
 };
 use mfm_manual_auth::{
     ManualAuthorizationSignatureBytes, ManualResolutionAuthorizationProof,
@@ -48,6 +48,44 @@ fn fixture_value_schema_id() -> SchemaId {
 fn fixture_trust_scope_id() -> TrustScopeId {
     TrustScopeId::new("mfm.trust_scope.v1:10101010101010101010101010101010")
         .expect("test trust scope")
+}
+
+fn synthetic_side_effect_pair_id(byte: u8) -> SideEffectPairId {
+    SideEffectPairId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        DigestBytes::from_array([byte; 32]),
+    )
+}
+
+fn side_effect_pair_fields_for_purpose(
+    runtime_spec: &CertifiedRuntimeSpec,
+    node_id: &NodeId,
+    ledger_purpose: &events::SideEffectLedgerPurpose,
+    role: events::SideEffectPairRole,
+) -> (Option<SideEffectPairId>, Option<events::SideEffectPairRole>) {
+    match ledger_purpose {
+        events::SideEffectLedgerPurpose::Forward => {
+            let pair_id = runtime_spec
+                .side_effect_pair_for_submit_node(node_id)
+                .cloned();
+            let pair_role = pair_id.as_ref().map(|_| role);
+            (pair_id, pair_role)
+        }
+        events::SideEffectLedgerPurpose::Remediation { .. } => (None, None),
+    }
+}
+
+fn side_effect_pair_fields_for_ctx(
+    ctx: &ErasedRunCtx<'_>,
+    ledger_purpose: &events::SideEffectLedgerPurpose,
+    role: events::SideEffectPairRole,
+) -> (Option<SideEffectPairId>, Option<events::SideEffectPairRole>) {
+    side_effect_pair_fields_for_purpose(
+        ctx.runtime_spec(),
+        &ctx.node().node_id,
+        ledger_purpose,
+        role,
+    )
 }
 
 fn run_identity_material(runtime_spec: &CertifiedRuntimeSpec) -> events::RunIdentityMaterialV1 {
@@ -1009,6 +1047,7 @@ fn runner_kit_builders_create_context_bound_artifacts_payloads_and_output() {
     let side_effect = RunnerSideEffectBinding {
         ledger_key: ledger_key.clone(),
         ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+        pair_id: Some(synthetic_side_effect_pair_id(0x31)),
         invocation_epoch: 1,
     };
     let idempotency_key =
@@ -1322,6 +1361,7 @@ fn side_effect_evidence_builder_prepares_and_stages_claimed_invocation() {
                 side_effect: RunnerSideEffectBinding {
                     ledger_key: ledger_key.clone(),
                     ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                    pair_id: Some(synthetic_side_effect_pair_id(0x32)),
                     invocation_epoch: 3,
                 },
                 claim: RuntimeSideEffectClaimAuthority {
@@ -1403,6 +1443,7 @@ fn side_effect_evidence_builder_builds_progress_evidence_with_replay_and_resourc
         let side_effect = RunnerSideEffectBinding {
             ledger_key: ledger_key.clone(),
             ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+            pair_id: Some(synthetic_side_effect_pair_id(0x33)),
             invocation_epoch: 4,
         };
 
@@ -7433,6 +7474,12 @@ async fn side_effect_staged_artifact_must_match_payload_ledger_binding() {
         fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
             Box::pin(async move {
                 let ledger = side_effect_ledger_key_for_ctx(&ctx);
+                let ledger_purpose = side_effect_ledger_purpose_for_ctx(&ctx);
+                let (pair_id, pair_role) = side_effect_pair_fields_for_ctx(
+                    &ctx,
+                    &ledger_purpose,
+                    events::SideEffectPairRole::Submit,
+                );
                 let staged_ledger =
                     events::SideEffectLedgerKey::new("wrong-ledger").expect("ledger key");
                 let intent_bytes = br#"{"intent":"wrong-ledger"}"#.to_vec();
@@ -7468,7 +7515,9 @@ async fn side_effect_staged_artifact_must_match_payload_ledger_binding() {
                                 scope_id: ctx.node().scope_id.clone(),
                                 attempt_id: ctx.attempt_id().clone(),
                                 ledger_key: ledger.clone(),
-                                ledger_purpose: side_effect_ledger_purpose_for_ctx(&ctx),
+                                ledger_purpose,
+                                pair_id,
+                                pair_role,
                                 invocation_epoch: 1,
                                 intent_schema_id: ctx.node().config_ref.schema_id.clone(),
                                 intent_hash,
@@ -7749,6 +7798,13 @@ fn side_effect_failure_derives_attempt_failure_payload() {
         1,
     )
     .expect("attempt id");
+    let ledger_purpose = side_effect_ledger_purpose();
+    let (pair_id, pair_role) = side_effect_pair_fields_for_purpose(
+        &fixture.runtime_spec,
+        &node.node_id,
+        &ledger_purpose,
+        events::SideEffectPairRole::Verify,
+    );
     let payloads = runner_payloads_with_derived_lifecycle(
         &fixture.runtime_spec,
         node,
@@ -7759,7 +7815,9 @@ fn side_effect_failure_derives_attempt_failure_payload() {
                 node_id: node.node_id.clone(),
                 attempt_id: attempt_id.clone(),
                 ledger_key: side_effect_ledger_key(1),
-                ledger_purpose: side_effect_ledger_purpose(),
+                ledger_purpose,
+                pair_id,
+                pair_role,
                 invocation_epoch: 1,
                 failure_phase: events::side_effect::FailurePhase::BeforeInvocationStarted,
                 retryable: false,
@@ -7793,6 +7851,13 @@ fn side_effect_ambiguity_derives_attempt_failure_payload() {
         1,
     )
     .expect("attempt id");
+    let ledger_purpose = side_effect_ledger_purpose();
+    let (pair_id, pair_role) = side_effect_pair_fields_for_purpose(
+        &fixture.runtime_spec,
+        &node.node_id,
+        &ledger_purpose,
+        events::SideEffectPairRole::Verify,
+    );
     let payloads = runner_payloads_with_derived_lifecycle(
         &fixture.runtime_spec,
         node,
@@ -7803,7 +7868,9 @@ fn side_effect_ambiguity_derives_attempt_failure_payload() {
                 node_id: node.node_id.clone(),
                 attempt_id: attempt_id.clone(),
                 ledger_key: side_effect_ledger_key(1),
-                ledger_purpose: side_effect_ledger_purpose(),
+                ledger_purpose,
+                pair_id,
+                pair_role,
                 invocation_epoch: 1,
                 ambiguity_code: events::AmbiguityCode::new("unknown_submission")
                     .expect("ambiguity code"),
@@ -7931,6 +7998,12 @@ impl ErasedNodeRunner for PrePreparedSideEffectRunner {
                 ));
             }
             let ledger = side_effect_ledger_key_for_ctx(&ctx);
+            let ledger_purpose = side_effect_ledger_purpose_for_ctx(&ctx);
+            let (pair_id, pair_role) = side_effect_pair_fields_for_ctx(
+                &ctx,
+                &ledger_purpose,
+                events::SideEffectPairRole::Submit,
+            );
             let (intent_artifact_id, intent_hash) =
                 side_effect_fixture_artifact_pair(&ctx, "intent");
             let staged_artifact = staged_side_effect_artifact(
@@ -7951,7 +8024,9 @@ impl ErasedNodeRunner for PrePreparedSideEffectRunner {
                     scope_id: ctx.node().scope_id.clone(),
                     attempt_id: ctx.attempt_id().clone(),
                     ledger_key: ledger.clone(),
-                    ledger_purpose: side_effect_ledger_purpose_for_ctx(&ctx),
+                    ledger_purpose,
+                    pair_id,
+                    pair_role,
                     invocation_epoch: 1,
                     intent_schema_id: ctx.node().config_ref.schema_id.clone(),
                     intent_hash,
@@ -8127,6 +8202,9 @@ impl ErasedNodeRunner for FailActiveSideEffectAfterSagaRunner {
 
 fn prepared_boundary_side_effect_output(ctx: ErasedRunCtx<'_>) -> Result<ErasedRunnerOutput> {
     let ledger = side_effect_ledger_key_for_ctx(&ctx);
+    let ledger_purpose = side_effect_ledger_purpose_for_ctx(&ctx);
+    let (pair_id, pair_role) =
+        side_effect_pair_fields_for_ctx(&ctx, &ledger_purpose, events::SideEffectPairRole::Submit);
     let (intent_artifact_id, intent_hash) = side_effect_fixture_artifact_pair(&ctx, "intent");
     let staged_artifact = staged_side_effect_artifact(
         &ctx,
@@ -8149,7 +8227,9 @@ fn prepared_boundary_side_effect_output(ctx: ErasedRunCtx<'_>) -> Result<ErasedR
                 scope_id: ctx.node().scope_id.clone(),
                 attempt_id: ctx.attempt_id().clone(),
                 ledger_key: ledger.clone(),
-                ledger_purpose: side_effect_ledger_purpose_for_ctx(&ctx),
+                ledger_purpose,
+                pair_id,
+                pair_role,
                 invocation_epoch: 1,
                 intent_schema_id: ctx.node().config_ref.schema_id.clone(),
                 intent_hash,
@@ -8228,7 +8308,10 @@ impl ErasedNodeRunner for ForwardEmitsRemediationPurposeRunner {
                 events::SideEffectLedgerKey::new("foreign-forward").expect("forward ledger key");
             side_effect_intent_with_purpose(
                 ctx,
-                events::SideEffectLedgerPurpose::Remediation { forward_ledger_key },
+                events::SideEffectLedgerPurpose::Remediation {
+                    forward_ledger_key,
+                    forward_pair_id: None,
+                },
             )
         })
     }
@@ -8274,6 +8357,8 @@ fn side_effect_intent_with_purpose(
     ledger_purpose: events::SideEffectLedgerPurpose,
 ) -> Result<ErasedRunnerOutput> {
     let ledger = side_effect_ledger_key_for_ctx(&ctx);
+    let (pair_id, pair_role) =
+        side_effect_pair_fields_for_ctx(&ctx, &ledger_purpose, events::SideEffectPairRole::Submit);
     let (intent_artifact_id, intent_hash) = side_effect_fixture_artifact_pair(&ctx, "intent");
     let staged_artifact = staged_side_effect_artifact(
         &ctx,
@@ -8297,6 +8382,8 @@ fn side_effect_intent_with_purpose(
                 attempt_id: ctx.attempt_id().clone(),
                 ledger_key: ledger,
                 ledger_purpose,
+                pair_id,
+                pair_role,
                 invocation_epoch: 1,
                 intent_schema_id: ctx.node().config_ref.schema_id.clone(),
                 intent_hash,
@@ -9248,6 +9335,11 @@ fn append_synthetic_exclusive_prepare(
         producer_seed_id: None,
         artifact_role: events::ArtifactRole::SideEffectIntent,
     };
+    let pair_id = fixture
+        .runtime_spec
+        .side_effect_pair_for_submit_node(&node.node_id)
+        .cloned();
+    let pair_role = pair_id.as_ref().map(|_| events::SideEffectPairRole::Submit);
     store
         .append_prepared_commit(store_typed_commit_request! {
             run_id: run_id.clone(),
@@ -9262,6 +9354,8 @@ fn append_synthetic_exclusive_prepare(
                         attempt_id: attempt_id.clone(),
                         ledger_key: ledger.clone(),
                         ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                        pair_id: pair_id.clone(),
+                        pair_role,
                         invocation_epoch: 1,
                         intent_schema_id: node.config_ref.schema_id.clone(),
                         intent_hash: intent_hash.clone(),
@@ -9284,6 +9378,8 @@ fn append_synthetic_exclusive_prepare(
                     attempt_id: attempt_id.clone(),
                     ledger_key: ledger.clone(),
                     ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                    pair_id: pair_id.clone(),
+                    pair_role,
                     claim_owner: events::RunnerInvocationId::new("owner-1").expect("claim owner"),
                     invocation_epoch: 1,
                     claim_generation: 1,
@@ -9296,6 +9392,8 @@ fn append_synthetic_exclusive_prepare(
                     attempt_id: attempt_id.clone(),
                     ledger_key: ledger.clone(),
                     ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                    pair_id: pair_id.clone(),
+                    pair_role,
                     invocation_epoch: 1,
                     resource_key: resource_key.clone(),
                     requirement_digest: resource_lane_requirement_digest,
@@ -9311,6 +9409,8 @@ fn append_synthetic_exclusive_prepare(
                         attempt_id: attempt_id.clone(),
                         ledger_key: ledger.clone(),
                         ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                        pair_id: pair_id.clone(),
+                        pair_role,
                         invocation_epoch: 1,
                         claim_generation: 1,
                         claim_fencing_token: events::side_effect::ClaimFencingToken::new("token-1")
@@ -9349,6 +9449,13 @@ fn append_synthetic_invocation_started(
     ledger: &events::SideEffectLedgerKey,
     commit_key: &str,
 ) {
+    let ledger_purpose = events::SideEffectLedgerPurpose::Forward;
+    let (pair_id, pair_role) = side_effect_pair_fields_for_purpose(
+        &fixture.runtime_spec,
+        &node.node_id,
+        &ledger_purpose,
+        events::SideEffectPairRole::Submit,
+    );
     store
         .append_prepared_commit(store_typed_commit_request! {
             run_id: run_id.clone(),
@@ -9360,7 +9467,9 @@ fn append_synthetic_invocation_started(
                     node_id: node.node_id.clone(),
                     attempt_id: attempt_id.clone(),
                     ledger_key: ledger.clone(),
-                    ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                    ledger_purpose,
+                    pair_id,
+                    pair_role,
                     invocation_epoch: 1,
                     claim_owner: events::RunnerInvocationId::new("owner-1").expect("claim owner"),
                     claim_generation: 1,
@@ -9397,6 +9506,13 @@ fn append_synthetic_submission_observed(
         digest.clone(),
         events::ArtifactRole::Submission,
     );
+    let ledger_purpose = events::SideEffectLedgerPurpose::Forward;
+    let (pair_id, pair_role) = side_effect_pair_fields_for_purpose(
+        &fixture.runtime_spec,
+        &node.node_id,
+        &ledger_purpose,
+        events::SideEffectPairRole::Submit,
+    );
     store
         .append_prepared_commit(store_typed_commit_request! {
             run_id: fixture.run_id.clone(),
@@ -9408,7 +9524,9 @@ fn append_synthetic_submission_observed(
                     node_id: node.node_id.clone(),
                     attempt_id: attempt_id.clone(),
                     ledger_key: ledger.clone(),
-                    ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                    ledger_purpose,
+                    pair_id,
+                    pair_role,
                     invocation_epoch: 1,
                     submission_schema_id: node.config_ref.schema_id.clone(),
                     submission_hash: digest,
@@ -9444,6 +9562,13 @@ fn append_synthetic_receipt_observed(
         digest.clone(),
         events::ArtifactRole::Receipt,
     );
+    let ledger_purpose = events::SideEffectLedgerPurpose::Forward;
+    let (pair_id, pair_role) = side_effect_pair_fields_for_purpose(
+        &fixture.runtime_spec,
+        &node.node_id,
+        &ledger_purpose,
+        events::SideEffectPairRole::Verify,
+    );
     store
         .append_prepared_commit(store_typed_commit_request! {
             run_id: fixture.run_id.clone(),
@@ -9455,7 +9580,9 @@ fn append_synthetic_receipt_observed(
                     node_id: node.node_id.clone(),
                     attempt_id: attempt_id.clone(),
                     ledger_key: ledger.clone(),
-                    ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                    ledger_purpose,
+                    pair_id,
+                    pair_role,
                     invocation_epoch: 1,
                     receipt_schema_id: node.config_ref.schema_id.clone(),
                     receipt_hash: digest,
@@ -9499,6 +9626,11 @@ fn synthetic_resource_lane_release(
             attempt_id: attempt_id.clone(),
             ledger_key: ledger.clone(),
             ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+            pair_id: lane.pair_id.clone(),
+            pair_role: lane
+                .pair_id
+                .as_ref()
+                .map(|_| events::SideEffectPairRole::Verify),
             invocation_epoch: lane.invocation_epoch,
             claim_id: lane.claim_id.clone(),
             release_reason: events::ResourceLaneReleaseReason::new(reason).expect("release reason"),
@@ -9522,6 +9654,13 @@ fn append_synthetic_confirmation_observed(
         digest.clone(),
         events::ArtifactRole::Confirmation,
     );
+    let ledger_purpose = events::SideEffectLedgerPurpose::Forward;
+    let (pair_id, pair_role) = side_effect_pair_fields_for_purpose(
+        &fixture.runtime_spec,
+        &node.node_id,
+        &ledger_purpose,
+        events::SideEffectPairRole::Verify,
+    );
     let release = synthetic_resource_lane_release(
         store,
         fixture,
@@ -9541,7 +9680,9 @@ fn append_synthetic_confirmation_observed(
             node_id: node.node_id.clone(),
             attempt_id: attempt_id.clone(),
             ledger_key: ledger.clone(),
-            ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+            ledger_purpose,
+            pair_id,
+            pair_role,
             invocation_epoch: 1,
             confirmation_schema_id: node.config_ref.schema_id.clone(),
             confirmation_hash: digest,
@@ -9611,6 +9752,13 @@ fn append_synthetic_ambiguous(
         producer_seed_id: None,
         artifact_role: events::ArtifactRole::AmbiguityEvidence,
     };
+    let ledger_purpose = events::SideEffectLedgerPurpose::Forward;
+    let (pair_id, pair_role) = side_effect_pair_fields_for_purpose(
+        &fixture.runtime_spec,
+        &node.node_id,
+        &ledger_purpose,
+        events::SideEffectPairRole::Verify,
+    );
     let release = synthetic_resource_lane_release(
         store,
         fixture,
@@ -9630,7 +9778,9 @@ fn append_synthetic_ambiguous(
             node_id: node.node_id.clone(),
             attempt_id: attempt_id.clone(),
             ledger_key: ledger.clone(),
-            ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+            ledger_purpose,
+            pair_id,
+            pair_role,
             invocation_epoch: 1,
             ambiguity_code: events::AmbiguityCode::new("unknown").expect("ambiguity"),
             evidence_schema_id: node.config_ref.schema_id.clone(),
@@ -9954,6 +10104,8 @@ fn append_not_submitted_proven(
         .expect("side-effect projection");
     let ledger_key = projection.ledger_key.clone();
     let ledger_purpose = projection.ledger_purpose.clone();
+    let pair_id = projection.pair_id.clone();
+    let pair_role = pair_id.as_ref().map(|_| events::SideEffectPairRole::Submit);
     let proof_artifact = artifact(0xd5);
     let proof_hash = content(0xd6);
     let evidence = store::ArtifactEvidenceRef {
@@ -9983,6 +10135,8 @@ fn append_not_submitted_proven(
                     attempt_id: attempt_id.clone(),
                     ledger_key,
                     ledger_purpose,
+                    pair_id,
+                    pair_role,
                     invocation_epoch,
                     proof_schema_id: node.config_ref.schema_id.clone(),
                     proof_hash,
@@ -11177,6 +11331,223 @@ fn fixture_with_first_managed_write_state() -> Fixture {
     fixture
 }
 
+fn refresh_side_effect_verify_nodes(typed: &mut spec::TypedExecutionSpec) {
+    let verify_node_ids = typed
+        .nodes
+        .iter()
+        .filter(|node| {
+            matches!(
+                &node.framework,
+                Some(spec::FrameworkNodeSpec::SideEffectVerify(_))
+            )
+        })
+        .map(|node| node.node_id.clone())
+        .collect::<BTreeSet<_>>();
+    let verify_cell_ids = typed
+        .nodes
+        .iter()
+        .filter(|node| verify_node_ids.contains(&node.node_id))
+        .map(|node| node.output_cell.clone())
+        .collect::<BTreeSet<_>>();
+    let verify_descriptor_ids = typed
+        .nodes
+        .iter()
+        .filter(|node| verify_node_ids.contains(&node.node_id))
+        .map(|node| node.descriptor_id.clone())
+        .collect::<BTreeSet<_>>();
+    let verify_config_artifacts = typed
+        .nodes
+        .iter()
+        .filter(|node| verify_node_ids.contains(&node.node_id))
+        .map(|node| node.config_ref.artifact_id.clone())
+        .collect::<BTreeSet<_>>();
+
+    typed
+        .nodes
+        .retain(|node| !verify_node_ids.contains(&node.node_id));
+    typed
+        .cells
+        .retain(|cell| !verify_cell_ids.contains(&cell.cell_id));
+    typed
+        .value_lineages
+        .retain(|lineage| match &lineage.producer {
+            spec::CellProducer::Node(node_id) => !verify_node_ids.contains(node_id),
+            spec::CellProducer::Seed(_) => true,
+        });
+    typed
+        .config_refs
+        .retain(|config| !verify_config_artifacts.contains(&config.artifact_id));
+    typed
+        .descriptor_identities
+        .retain(|descriptor| match descriptor {
+            spec::DescriptorIdentity::State(identity) => {
+                !verify_descriptor_ids.contains(&identity.descriptor_id)
+            }
+            _ => true,
+        });
+
+    let submit_nodes = typed
+        .nodes
+        .iter()
+        .filter(|node| node.side_effect.is_some() && node.framework.is_none())
+        .cloned()
+        .collect::<Vec<_>>();
+    for submit in submit_nodes {
+        append_side_effect_verify_node(typed, &submit);
+    }
+}
+
+fn append_side_effect_verify_node(typed: &mut spec::TypedExecutionSpec, submit: &spec::NodeSpec) {
+    let contract = submit
+        .side_effect
+        .as_ref()
+        .expect("submit side-effect contract");
+    let pair_id = spec::side_effect_pair_id(&submit.node_id, &submit.output_cell, contract)
+        .expect("side-effect pair id");
+    let node_id =
+        spec::side_effect_verify_node_id(&submit.node_id, &pair_id).expect("verify node id");
+    let output_cell = CellId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        *content_digest_json(serde_json::json!({
+            "framework": "side_effect_verify",
+            "kind": "output_cell",
+            "pair_id": pair_id.as_str(),
+            "submit_node_id": submit.node_id.as_str(),
+        }))
+        .expect("verify output cell digest")
+        .digest(),
+    );
+    let descriptor_id = DescriptorId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        *content_digest_json(serde_json::json!({
+            "framework": "side_effect_verify",
+            "kind": "descriptor",
+            "pair_id": pair_id.as_str(),
+            "submit_node_id": submit.node_id.as_str(),
+        }))
+        .expect("verify descriptor digest")
+        .digest(),
+    );
+    let state_kind = StateKind::new(
+        "mfm.framework.state",
+        "side_effect_verify",
+        DigestAlgorithm::Sha256JcsV1,
+        *content_digest_json(serde_json::json!({
+            "framework": "side_effect_verify",
+            "kind": "state",
+        }))
+        .expect("verify state kind digest")
+        .digest(),
+    )
+    .expect("verify state kind");
+    let config_ref =
+        spec::framework_config_ref("side_effect_verify", &node_id).expect("verify config ref");
+    let submit_output_cell = typed
+        .cells
+        .iter()
+        .find(|cell| cell.cell_id == submit.output_cell)
+        .cloned()
+        .expect("submit output cell");
+    let input_bindings = spec::framework_lifecycle_receipt_input_binding(
+        "side_effect_verify",
+        "submit_output",
+        &submit_output_cell,
+    )
+    .expect("verify input binding");
+    let submit_descriptor = typed
+        .descriptor_identities
+        .iter()
+        .find_map(|descriptor| match descriptor {
+            spec::DescriptorIdentity::State(identity)
+                if identity.descriptor_id == submit.descriptor_id =>
+            {
+                Some(identity.as_ref().clone())
+            }
+            _ => None,
+        })
+        .expect("submit descriptor");
+    let read_external = mfm_effects::ReadExternal::descriptor().expect("read external effect");
+    typed.config_refs.push(config_ref.clone());
+    typed
+        .descriptor_identities
+        .push(spec::DescriptorIdentity::State(Box::new(
+            spec::StateDescriptorIdentity {
+                descriptor_id: descriptor_id.clone(),
+                name: "mfm.framework.side_effect_verify".to_owned(),
+                state_kind: state_kind.clone(),
+                state_version: StateVersion::new("mfm.framework.state.side_effect_verify.v1")
+                    .expect("verify state version"),
+                config_schema_id: config_ref.schema_id.clone(),
+                input_schema_id: input_bindings.input_schema_id.clone(),
+                output_schema_id: submit_descriptor.output_schema_id.clone(),
+                output_semantic_type_id: submit_descriptor.output_semantic_type_id.clone(),
+                effect_kind: read_external.kind.clone(),
+                effect_class: read_external.class.as_str().to_owned(),
+                effect_name: read_external.name.to_owned(),
+                effect_version: read_external.version,
+                capabilities: CapabilitySetDescriptor::new(Vec::new()).expect("no caps"),
+                runner: "read_external".to_owned(),
+                side_effect_contract_digest: None,
+            },
+        )));
+    let value_lineage = spec::ValueLineageRef {
+        lineage_digest: content_digest_json(serde_json::json!({
+            "framework": "side_effect_verify",
+            "kind": "lineage",
+            "pair_id": pair_id.as_str(),
+            "submit_node_id": submit.node_id.as_str(),
+        }))
+        .expect("verify value lineage"),
+    };
+    typed.value_lineages.push(spec::ValueLineage {
+        lineage_ref: value_lineage.clone(),
+        scope_id: submit.scope_id.clone(),
+        producer: spec::CellProducer::Node(node_id.clone()),
+        input_cells: vec![submit.output_cell.clone()],
+        config_ref_digest: Some(config_ref.digest.clone()),
+        planning_lineage: submit.planning_lineage.clone(),
+        domain_keys: Vec::new(),
+        transform_policy: spec::LineageTransformPolicy::StateOutput,
+    });
+    typed.cells.push(spec::CellSpec {
+        cell_id: output_cell.clone(),
+        producer: spec::CellProducer::Node(node_id.clone()),
+        scope_id: submit.scope_id.clone(),
+        semantic_type_id: submit_descriptor.output_semantic_type_id,
+        schema_id: submit_descriptor.output_schema_id,
+        value_lineage,
+        terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
+        storage_policy: spec::StoragePolicy::ContentAddressed,
+        redaction_policy: spec::RedactionPolicy::Public,
+    });
+    typed.nodes.push(spec::NodeSpec {
+        node_id,
+        stable_key: spec::side_effect_verify_stable_key(&submit.stable_key)
+            .expect("verify stable key"),
+        scope_id: submit.scope_id.clone(),
+        state_kind,
+        state_version: StateVersion::new("mfm.framework.state.side_effect_verify.v1")
+            .expect("verify state version"),
+        descriptor_id,
+        config_ref,
+        input_bindings,
+        output_cell,
+        effect_kind: read_external.kind,
+        capability_bindings: CapabilitySetDescriptor::new(Vec::new()).expect("no caps"),
+        adapter_bindings: Vec::new(),
+        side_effect: None,
+        framework: Some(spec::FrameworkNodeSpec::SideEffectVerify(
+            spec::SideEffectVerifyNodeSpec {
+                pair_id,
+                submit_node_id: submit.node_id.clone(),
+                submit_output_cell_id: submit.output_cell.clone(),
+            },
+        )),
+        planning_lineage: submit.planning_lineage.clone(),
+        deterministic_predecessors: vec![submit.node_id.clone()],
+    });
+}
+
 fn fixture_with_first_side_effect_state() -> Fixture {
     let mut fixture = fixture();
     let mut envelope = fixture.runtime_spec.envelope().clone();
@@ -11220,6 +11591,7 @@ fn fixture_with_first_side_effect_state() -> Fixture {
             }
         }
     }
+    refresh_side_effect_verify_nodes(&mut envelope.spec);
     let envelope = spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
     fixture.runtime_spec =
         CertifiedRuntimeSpec::from_verified_envelope(envelope).expect("runtime spec");
@@ -11663,6 +12035,7 @@ fn fixture_with_two_side_effects_and_failing_tail() -> Fixture {
         on_remediation_unresolved: spec::RemediationUnresolvedSpec::FailWithoutAcdcClaim,
     };
 
+    refresh_side_effect_verify_nodes(&mut envelope.spec);
     let envelope = spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
     fixture.runtime_spec =
         CertifiedRuntimeSpec::from_verified_envelope(envelope).expect("runtime spec");
@@ -11729,6 +12102,7 @@ fn with_exclusive_resource_claims(mut fixture: Fixture, descriptors: &[Descripto
             }
         }
     }
+    refresh_side_effect_verify_nodes(&mut envelope.spec);
     let envelope = spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
     fixture.runtime_spec =
         CertifiedRuntimeSpec::from_verified_envelope(envelope).expect("runtime spec");
@@ -11762,6 +12136,7 @@ fn with_exact_touched_set_resource_claims(
             };
         }
     }
+    refresh_side_effect_verify_nodes(&mut envelope.spec);
     let envelope = spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
     fixture.runtime_spec =
         CertifiedRuntimeSpec::from_verified_envelope(envelope).expect("runtime spec");
@@ -12224,9 +12599,9 @@ fn remediation_intent_forward_links(
         .filter_map(|event| match event.payload() {
             events::KernelEventPayload::SideEffectIntentPersisted(payload) => {
                 match &payload.ledger_purpose {
-                    events::SideEffectLedgerPurpose::Remediation { forward_ledger_key } => {
-                        Some(forward_ledger_key.clone())
-                    }
+                    events::SideEffectLedgerPurpose::Remediation {
+                        forward_ledger_key, ..
+                    } => Some(forward_ledger_key.clone()),
                     events::SideEffectLedgerPurpose::Forward => None,
                 }
             }
@@ -12244,7 +12619,8 @@ fn remediation_projection_for_forward_ledger<P: std::borrow::Borrow<store::Proje
         matches!(
             &projection.ledger_purpose,
             events::SideEffectLedgerPurpose::Remediation {
-                forward_ledger_key: linked
+                forward_ledger_key: linked,
+                ..
             } if linked == forward_ledger_key
         )
         .then(|| projection.clone())
@@ -12262,7 +12638,9 @@ fn assert_no_duplicate_side_effect_submissions(store: &TestTypedRunStore, run_id
                 events::SideEffectLedgerPurpose::Forward => {
                     *forward_by_node.entry(payload.node_id.clone()).or_default() += 1;
                 }
-                events::SideEffectLedgerPurpose::Remediation { forward_ledger_key } => {
+                events::SideEffectLedgerPurpose::Remediation {
+                    forward_ledger_key, ..
+                } => {
                     *remediation_by_forward
                         .entry(forward_ledger_key.clone())
                         .or_default() += 1;
@@ -12317,7 +12695,8 @@ fn remediation_submission_count_for_forward_ledger(
                     if matches!(
                         &payload.ledger_purpose,
                         events::SideEffectLedgerPurpose::Remediation {
-                            forward_ledger_key: linked
+                            forward_ledger_key: linked,
+                            ..
                         } if linked == forward_ledger_key
                     )
             )
@@ -12368,10 +12747,22 @@ fn side_effect_ledger_purpose_for_ctx(ctx: &ErasedRunCtx<'_>) -> events::SideEff
     linked_forward_ledger_for_remediation(ctx)
         .map(
             |forward_ledger_key| events::SideEffectLedgerPurpose::Remediation {
+                forward_pair_id: forward_pair_id_for_ledger(ctx, &forward_ledger_key),
                 forward_ledger_key,
             },
         )
         .unwrap_or(events::SideEffectLedgerPurpose::Forward)
+}
+
+fn forward_pair_id_for_ledger(
+    ctx: &ErasedRunCtx<'_>,
+    forward_ledger_key: &events::SideEffectLedgerKey,
+) -> Option<SideEffectPairId> {
+    ctx.projections()
+        .side_effects()
+        .find_map(|(_, projection)| {
+            (projection.ledger_key == *forward_ledger_key).then(|| projection.pair_id.clone())
+        })?
 }
 
 fn linked_forward_ledger_for_remediation(
@@ -12381,8 +12772,9 @@ fn linked_forward_ledger_for_remediation(
         side_effect_projection_for_attempt(ctx.projections(), ctx.node(), ctx.attempt_id())
             .expect("remediation projection lookup")
     {
-        if let events::SideEffectLedgerPurpose::Remediation { forward_ledger_key } =
-            &projection.ledger_purpose
+        if let events::SideEffectLedgerPurpose::Remediation {
+            forward_ledger_key, ..
+        } = &projection.ledger_purpose
         {
             return Some(forward_ledger_key.clone());
         }
@@ -12444,12 +12836,17 @@ fn side_effect_claimed(
     invocation_epoch: u32,
     claim_generation: u32,
 ) -> RunnerEventPayload {
+    let ledger_purpose = side_effect_ledger_purpose_for_ctx(ctx);
+    let (pair_id, pair_role) =
+        side_effect_pair_fields_for_ctx(ctx, &ledger_purpose, events::SideEffectPairRole::Submit);
     RunnerEventPayload::SideEffectClaimed(events::side_effect::Claimed {
         spec_hash: ctx.spec_hash().clone(),
         node_id: ctx.node().node_id.clone(),
         attempt_id: ctx.attempt_id().clone(),
         ledger_key: ledger,
-        ledger_purpose: side_effect_ledger_purpose_for_ctx(ctx),
+        ledger_purpose,
+        pair_id,
+        pair_role,
         claim_owner: side_effect_claim_owner(ctx.attempt_no(), claim_generation),
         invocation_epoch,
         claim_generation,
@@ -12473,12 +12870,17 @@ fn side_effect_prepared_with_resource_key(
     claim_generation: u32,
     resource_key: Option<events::ResourceKeyEvidence>,
 ) -> RunnerEventPayload {
+    let ledger_purpose = side_effect_ledger_purpose_for_ctx(ctx);
+    let (pair_id, pair_role) =
+        side_effect_pair_fields_for_ctx(ctx, &ledger_purpose, events::SideEffectPairRole::Submit);
     RunnerEventPayload::SideEffectInvocationPrepared(events::side_effect::InvocationPrepared {
         spec_hash: ctx.spec_hash().clone(),
         node_id: ctx.node().node_id.clone(),
         attempt_id: ctx.attempt_id().clone(),
         ledger_key: ledger,
-        ledger_purpose: side_effect_ledger_purpose_for_ctx(ctx),
+        ledger_purpose,
+        pair_id,
+        pair_role,
         invocation_epoch,
         claim_generation,
         claim_fencing_token: side_effect_fencing_token(ctx.attempt_no(), claim_generation),
@@ -12495,12 +12897,17 @@ fn side_effect_failed(
     failure_phase: events::side_effect::FailurePhase,
     retryable: bool,
 ) -> RunnerEventPayload {
+    let ledger_purpose = side_effect_ledger_purpose_for_ctx(ctx);
+    let (pair_id, pair_role) =
+        side_effect_pair_fields_for_ctx(ctx, &ledger_purpose, events::SideEffectPairRole::Verify);
     RunnerEventPayload::SideEffectFailed(events::side_effect::Failed {
         spec_hash: ctx.spec_hash().clone(),
         node_id: ctx.node().node_id.clone(),
         attempt_id: ctx.attempt_id().clone(),
         ledger_key: ledger,
-        ledger_purpose: side_effect_ledger_purpose_for_ctx(ctx),
+        ledger_purpose,
+        pair_id,
+        pair_role,
         invocation_epoch,
         failure_phase,
         retryable,

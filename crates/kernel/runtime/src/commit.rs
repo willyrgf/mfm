@@ -538,6 +538,11 @@ impl CommitPlanner {
                             attempt_id: input.attempt_id.clone(),
                             ledger_key: projection.ledger_key.clone(),
                             ledger_purpose: projection.ledger_purpose.clone(),
+                            pair_id: projection.pair_id.clone(),
+                            pair_role: projection
+                                .pair_id
+                                .as_ref()
+                                .map(|_| events::SideEffectPairRole::Verify),
                             invocation_epoch: *invocation_epoch,
                             failure_phase:
                                 events::side_effect::FailurePhase::BeforeInvocationStarted,
@@ -736,6 +741,11 @@ fn resource_lane_release_intent_for_failure(
             attempt_id: attempt_id.clone(),
             ledger_key: projection.ledger_key.clone(),
             ledger_purpose: projection.ledger_purpose.clone(),
+            pair_id: projection.pair_id.clone(),
+            pair_role: projection
+                .pair_id
+                .as_ref()
+                .map(|_| events::SideEffectPairRole::Verify),
             invocation_epoch,
             claim_id: lane.claim_id.clone(),
             release_reason: events::ResourceLaneReleaseReason::new("side_effect.failed")?,

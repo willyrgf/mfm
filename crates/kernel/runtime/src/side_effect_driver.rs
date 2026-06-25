@@ -12,8 +12,8 @@ use crate::runner_kit::{
     RunnerClaimBinding, RunnerPreparedInvocationBinding, RunnerSideEffectBinding,
 };
 use crate::{
-    canonical_json, ErasedRunCtx, ErasedRunnerOutput, PreInvocationRunCtx, Result,
-    RunnerArtifactBuilder, RunnerCapabilityBinding, RunnerEventPayload, RunnerJsonArtifact,
+    canonical_json, CertifiedRuntimeSpec, ErasedRunCtx, ErasedRunnerOutput, PreInvocationRunCtx,
+    Result, RunnerArtifactBuilder, RunnerCapabilityBinding, RunnerEventPayload, RunnerJsonArtifact,
     RunnerOutputBuilder, RunnerPayloadBuilder, RuntimeError, SideEffectAttemptView, StagedArtifact,
     StagedRetentionRefs,
 };
@@ -196,8 +196,10 @@ where
             node_id: ctx.node().node_id.clone(),
             scope_id: ctx.node().scope_id.clone(),
             attempt_id: ctx.attempt_id().clone(),
-            ledger_key: side_effect.ledger_key,
-            ledger_purpose: side_effect.ledger_purpose,
+            ledger_key: side_effect.ledger_key.clone(),
+            ledger_purpose: side_effect.ledger_purpose.clone(),
+            pair_id: side_effect.pair_id.clone(),
+            pair_role: side_effect.pair_role(events::SideEffectPairRole::Submit),
             invocation_epoch: side_effect.invocation_epoch,
             intent_schema_id: pre_invocation_artifact_schema_id(intent)?,
             intent_hash: intent.evidence.digest.clone(),
@@ -223,8 +225,10 @@ fn pre_invocation_side_effect_claimed(
         spec_hash: ctx.spec_hash().clone(),
         node_id: ctx.node().node_id.clone(),
         attempt_id: ctx.attempt_id().clone(),
-        ledger_key: side_effect.ledger_key,
-        ledger_purpose: side_effect.ledger_purpose,
+        ledger_key: side_effect.ledger_key.clone(),
+        ledger_purpose: side_effect.ledger_purpose.clone(),
+        pair_id: side_effect.pair_id.clone(),
+        pair_role: side_effect.pair_role(events::SideEffectPairRole::Submit),
         claim_owner: claim.claim_owner,
         invocation_epoch: side_effect.invocation_epoch,
         claim_generation: claim.claim_generation,
@@ -244,8 +248,10 @@ fn pre_invocation_resource_lane_claim_intent(
             spec_hash: ctx.spec_hash().clone(),
             node_id: ctx.node().node_id.clone(),
             attempt_id: ctx.attempt_id().clone(),
-            ledger_key: side_effect.ledger_key,
-            ledger_purpose: side_effect.ledger_purpose,
+            ledger_key: side_effect.ledger_key.clone(),
+            ledger_purpose: side_effect.ledger_purpose.clone(),
+            pair_id: side_effect.pair_id.clone(),
+            pair_role: side_effect.pair_role(events::SideEffectPairRole::Submit),
             invocation_epoch: side_effect.invocation_epoch,
             resource_key,
             requirement_digest: pre_invocation_resource_lane_requirement_digest(ctx)?,
@@ -911,15 +917,13 @@ fn side_effect_binding(
     view: &SideEffectAttemptView<'_>,
     invocation_epoch: u32,
 ) -> Result<RunnerSideEffectBinding> {
+    let projection = view
+        .projection()
+        .ok_or_else(|| missing_driver_projection("side-effect projection"))?;
     Ok(RunnerSideEffectBinding {
-        ledger_key: view
-            .ledger_key()
-            .cloned()
-            .ok_or_else(|| missing_driver_projection("ledger key"))?,
-        ledger_purpose: view
-            .ledger_purpose()
-            .cloned()
-            .ok_or_else(|| missing_driver_projection("ledger purpose"))?,
+        ledger_key: projection.ledger_key.clone(),
+        ledger_purpose: projection.ledger_purpose.clone(),
+        pair_id: projection.pair_id.clone(),
         invocation_epoch,
     })
 }
@@ -930,9 +934,11 @@ fn runtime_side_effect_binding(
 ) -> Result<RunnerSideEffectBinding> {
     let ledger_purpose = runtime_ledger_purpose(ctx)?;
     let ledger_key = runtime_ledger_key(ctx, &ledger_purpose, idempotency_key)?;
+    let pair_id = runtime_side_effect_pair_id(ctx, &ledger_purpose)?;
     Ok(RunnerSideEffectBinding {
         ledger_key,
         ledger_purpose,
+        pair_id,
         invocation_epoch: 1,
     })
 }
@@ -943,9 +949,11 @@ fn pre_invocation_side_effect_binding(
 ) -> Result<RunnerSideEffectBinding> {
     let ledger_purpose = pre_invocation_ledger_purpose(ctx)?;
     let ledger_key = pre_invocation_ledger_key(ctx, &ledger_purpose, idempotency_key)?;
+    let pair_id = pre_invocation_side_effect_pair_id(ctx, &ledger_purpose)?;
     Ok(RunnerSideEffectBinding {
         ledger_key,
         ledger_purpose,
+        pair_id,
         invocation_epoch: 1,
     })
 }
@@ -993,6 +1001,7 @@ fn pre_invocation_lane_claim_plan(
             let side_effect = RunnerSideEffectBinding {
                 ledger_key: projected.ledger_key.clone(),
                 ledger_purpose: projected.ledger_purpose.clone(),
+                pair_id: projected.pair_id.clone(),
                 invocation_epoch,
             };
             let claim =
@@ -1009,11 +1018,10 @@ fn pre_invocation_lane_claim_plan(
 
 fn runtime_ledger_purpose(ctx: &ErasedRunCtx<'_>) -> Result<events::SideEffectLedgerPurpose> {
     Ok(linked_forward_ledger_for_remediation(ctx)?
-        .map(
-            |forward_ledger_key| events::SideEffectLedgerPurpose::Remediation {
-                forward_ledger_key,
-            },
-        )
+        .map(|forward| events::SideEffectLedgerPurpose::Remediation {
+            forward_ledger_key: forward.ledger_key,
+            forward_pair_id: forward.pair_id,
+        })
         .unwrap_or(events::SideEffectLedgerPurpose::Forward))
 }
 
@@ -1021,22 +1029,31 @@ fn pre_invocation_ledger_purpose(
     ctx: &PreInvocationRunCtx<'_>,
 ) -> Result<events::SideEffectLedgerPurpose> {
     Ok(pre_invocation_linked_forward_ledger_for_remediation(ctx)?
-        .map(
-            |forward_ledger_key| events::SideEffectLedgerPurpose::Remediation {
-                forward_ledger_key,
-            },
-        )
+        .map(|forward| events::SideEffectLedgerPurpose::Remediation {
+            forward_ledger_key: forward.ledger_key,
+            forward_pair_id: forward.pair_id,
+        })
         .unwrap_or(events::SideEffectLedgerPurpose::Forward))
+}
+
+struct ForwardLedgerLink {
+    ledger_key: events::SideEffectLedgerKey,
+    pair_id: Option<mfm_ids::SideEffectPairId>,
 }
 
 fn linked_forward_ledger_for_remediation(
     ctx: &ErasedRunCtx<'_>,
-) -> Result<Option<events::SideEffectLedgerKey>> {
+) -> Result<Option<ForwardLedgerLink>> {
     if let Some(projection) = SideEffectAttemptView::from_erased_context(ctx)?.projection() {
-        if let events::SideEffectLedgerPurpose::Remediation { forward_ledger_key } =
-            &projection.ledger_purpose
+        if let events::SideEffectLedgerPurpose::Remediation {
+            forward_ledger_key,
+            forward_pair_id,
+        } = &projection.ledger_purpose
         {
-            return Ok(Some(forward_ledger_key.clone()));
+            return Ok(Some(ForwardLedgerLink {
+                ledger_key: forward_ledger_key.clone(),
+                pair_id: forward_pair_id.clone(),
+            }));
         }
     }
     let Some(forward_node_id) = ctx
@@ -1058,13 +1075,16 @@ fn linked_forward_ledger_for_remediation(
                     projection.phase,
                     store::SideEffectPhase::ConfirmationObserved { .. }
                 ))
-            .then(|| projection.ledger_key.clone())
+            .then(|| ForwardLedgerLink {
+                ledger_key: projection.ledger_key.clone(),
+                pair_id: projection.pair_id.clone(),
+            })
         }))
 }
 
 fn pre_invocation_linked_forward_ledger_for_remediation(
     ctx: &PreInvocationRunCtx<'_>,
-) -> Result<Option<events::SideEffectLedgerKey>> {
+) -> Result<Option<ForwardLedgerLink>> {
     let Some(forward_node_id) = ctx
         .runtime_spec()
         .forward_node_for_remediation(&ctx.node().node_id)
@@ -1084,8 +1104,44 @@ fn pre_invocation_linked_forward_ledger_for_remediation(
                     projection.phase,
                     store::SideEffectPhase::ConfirmationObserved { .. }
                 ))
-            .then(|| projection.ledger_key.clone())
+            .then(|| ForwardLedgerLink {
+                ledger_key: projection.ledger_key.clone(),
+                pair_id: projection.pair_id.clone(),
+            })
         }))
+}
+
+fn runtime_side_effect_pair_id(
+    ctx: &ErasedRunCtx<'_>,
+    ledger_purpose: &events::SideEffectLedgerPurpose,
+) -> Result<Option<mfm_ids::SideEffectPairId>> {
+    forward_side_effect_pair_id(ctx.runtime_spec(), &ctx.node().node_id, ledger_purpose)
+}
+
+fn pre_invocation_side_effect_pair_id(
+    ctx: &PreInvocationRunCtx<'_>,
+    ledger_purpose: &events::SideEffectLedgerPurpose,
+) -> Result<Option<mfm_ids::SideEffectPairId>> {
+    forward_side_effect_pair_id(ctx.runtime_spec(), &ctx.node().node_id, ledger_purpose)
+}
+
+fn forward_side_effect_pair_id(
+    runtime_spec: &CertifiedRuntimeSpec,
+    node_id: &mfm_ids::NodeId,
+    ledger_purpose: &events::SideEffectLedgerPurpose,
+) -> Result<Option<mfm_ids::SideEffectPairId>> {
+    if !matches!(ledger_purpose, events::SideEffectLedgerPurpose::Forward) {
+        return Ok(None);
+    }
+    runtime_spec
+        .side_effect_pair_for_submit_node(node_id)
+        .cloned()
+        .map(Some)
+        .ok_or_else(|| {
+            RuntimeError::InvalidSpec(format!(
+                "forward side-effect node {node_id} is missing certified verify pair"
+            ))
+        })
 }
 
 fn runtime_ledger_key(
@@ -1271,8 +1327,12 @@ fn ledger_purpose_key(ledger_purpose: &events::SideEffectLedgerPurpose) -> serde
         events::SideEffectLedgerPurpose::Forward => serde_json::json!({
             "kind": "forward",
         }),
-        events::SideEffectLedgerPurpose::Remediation { forward_ledger_key } => serde_json::json!({
+        events::SideEffectLedgerPurpose::Remediation {
+            forward_ledger_key,
+            forward_pair_id,
+        } => serde_json::json!({
             "forward_ledger_key": forward_ledger_key.as_str(),
+            "forward_pair_id": forward_pair_id.as_ref().map(mfm_ids::SideEffectPairId::as_str),
             "kind": "remediation",
         }),
     }

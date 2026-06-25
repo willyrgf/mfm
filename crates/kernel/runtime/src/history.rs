@@ -2107,7 +2107,7 @@ fn payload_targets_node(payload: &events::KernelEventPayload, node_id: &NodeId) 
             payload.node_id == *node_id
         }
         payload => side_effect_payload_ref(payload)
-            .map(|(payload_node_id, _, _, _)| payload_node_id == node_id)
+            .map(|(payload_node_id, _, _, _, _)| payload_node_id == node_id)
             .unwrap_or(false),
     }
 }

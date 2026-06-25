@@ -141,6 +141,11 @@ pub(super) fn fold_resource_lane_state(
                         return Err(PostgresStoreError::Corruption(
                             "run_events contain conflicting active resource lane claims".to_owned(),
                         ));
+                    } else if existing.pair_id != payload.pair_id {
+                        return Err(PostgresStoreError::Corruption(
+                            "run_events contain conflicting active resource lane pair authority"
+                                .to_owned(),
+                        ));
                     }
                 }
                 let authority = authority.entry(lane_key.clone()).or_default();
@@ -154,6 +159,7 @@ pub(super) fn fold_resource_lane_state(
                     event_id: event.event_id().clone(),
                     holder,
                     ledger_purpose: payload.ledger_purpose.clone(),
+                    pair_id: payload.pair_id.clone(),
                     node_id: payload.node_id.clone(),
                     attempt_id: payload.attempt_id.clone(),
                     invocation_epoch: payload.invocation_epoch,

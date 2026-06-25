@@ -404,6 +404,8 @@ pub fn resource_wait_fifo_admission_token(
         "lane_id": bytes_hex(lane.id().as_bytes()),
         "ledger_key": intent.ledger_key.as_str(),
         "node_id": intent.node_id.as_str(),
+        "pair_id": intent.pair_id.as_ref().map(mfm_ids::SideEffectPairId::as_str),
+        "pair_role": intent.pair_role.map(events::SideEffectPairRole::as_str),
         "requirement_digest": intent.requirement_digest.as_str(),
         "resolved_by_capability_impl": intent.resolved_by_capability_impl.as_str(),
         "run_id": run_id.as_str(),

@@ -7739,6 +7739,7 @@ mod tests {
         let purpose = events::SideEffectLedgerPurpose::Remediation {
             forward_ledger_key: events::SideEffectLedgerKey::new("forward-ledger")
                 .expect("forward ledger"),
+            forward_pair_id: None,
         };
         let forward_purpose = events::SideEffectLedgerPurpose::Forward;
 
