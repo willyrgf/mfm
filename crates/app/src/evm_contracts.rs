@@ -100,8 +100,8 @@ fn runtime_signing_error(error: mfm_signing::SigningError) -> mfm_runtime::Runti
 mod tests {
     use super::*;
     use crate::{
-        make_run_services_with_certification_registry, new_run_id, prepare_entry_point_run_launch,
-        DriveMode, EntryPointRunLaunchInput, RunLaunchRequest, RunModeStatus, RunServices,
+        make_run_services_with_certification_registry, prepare_entry_point_run_launch, DriveMode,
+        EntryPointRunLaunchInput, RunLaunchRequest, RunModeStatus, RunServices,
     };
     use mfm_adapters_evm_contracts::{
         ensure_prepared_invocation_public, EvmContractRuntime, EvmContractRuntimeFactory,
@@ -125,7 +125,6 @@ mod tests {
     };
     use mfm_evm_contract_config::{ConfigurePhaseConfig, DeployPhaseConfig, ValidatePhaseConfig};
     use mfm_evm_contract_model::{ConfiguredContract, DeployedContract};
-    use mfm_ids::RunId;
     use mfm_op_evm_contract_lifecycle::ContractLifecycleConfig;
     use mfm_runtime::ErasedRunnerRegistry;
     use mfm_signing::{
@@ -190,14 +189,13 @@ mod tests {
         }
     }
 
-    fn prepare_evm_entry_point_request<S, A>(
+    async fn prepare_evm_entry_point_request<S, A>(
         services: &RunServices<S, A>,
         op: &'static str,
         config: serde_json::Value,
-        run_id: RunId,
     ) -> RunLaunchRequest
     where
-        S: store::RunEventStore + Send + Sync,
+        S: store::RunEventStore + store::TrustScopeStore + Send + Sync,
         A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
     {
         let entry_point_registry =
@@ -213,7 +211,7 @@ mod tests {
             op_version: None,
             authored_config,
             certification_registry: services.certification_registry(),
-            run_id,
+            trust_scope_id: services.load_trust_scope_id().await.expect("trust scope"),
             drive: DriveMode::AppendOnly,
         })
         .expect("entry-point launch request")
@@ -243,7 +241,6 @@ mod tests {
             store,
             certification,
         );
-        let run_id = new_run_id();
         let request = prepare_evm_entry_point_request(
             &services,
             "evm_contract_validate",
@@ -251,8 +248,9 @@ mod tests {
                 "config": config,
                 "configured": configured,
             }),
-            run_id.clone(),
-        );
+        )
+        .await;
+        let run_id = request.run_id.clone();
         let public_schema_id = request
             .certified_spec
             .envelope()
@@ -310,7 +308,6 @@ mod tests {
             store,
             certification,
         );
-        let run_id = new_run_id();
         let request = prepare_evm_entry_point_request(
             &services,
             "evm_contract_validate",
@@ -318,8 +315,9 @@ mod tests {
                 "config": validate_config_with_assertions(),
                 "configured": configured,
             }),
-            run_id.clone(),
-        );
+        )
+        .await;
+        let run_id = request.run_id.clone();
 
         let started = services.launch_run(request).await.expect("append start");
         assert_eq!(started.run_mode, RunModeStatus::Forward);
@@ -381,13 +379,13 @@ mod tests {
             store,
             certification,
         );
-        let run_id = new_run_id();
         let request = prepare_evm_entry_point_request(
             &services,
             "evm_contract_deploy",
             serde_json::to_value(config).expect("deploy config json"),
-            run_id.clone(),
-        );
+        )
+        .await;
+        let run_id = request.run_id.clone();
         let public_schema_id = request
             .certified_spec
             .envelope()
@@ -458,13 +456,13 @@ mod tests {
             store,
             certification,
         );
-        let run_id = new_run_id();
         let request = prepare_evm_entry_point_request(
             &services,
             "evm_contract_lifecycle",
             serde_json::to_value(config).expect("lifecycle config json"),
-            run_id.clone(),
-        );
+        )
+        .await;
+        let run_id = request.run_id.clone();
         let public_schema_id = request
             .certified_spec
             .envelope()

@@ -84,14 +84,14 @@ impl SerialTypedScheduler {
     pub fn prepare_run_launch(
         &self,
         runtime_spec: &CertifiedRuntimeSpec,
-        run_id: RunId,
+        identity_material: events::RunIdentityMaterialV1,
         evidence: RunLaunchEvidence,
         expected_next_seq: store::StreamSeq,
     ) -> Result<PreparedRunLaunch> {
         let bound_context = self.run_contexts.load_bound_context(runtime_spec)?;
         RunAdmissionLifecycle::prepare_run_launch(
             runtime_spec,
-            run_id,
+            identity_material,
             evidence,
             expected_next_seq,
             &bound_context,

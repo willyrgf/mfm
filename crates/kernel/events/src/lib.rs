@@ -9,7 +9,7 @@ use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind, CapabilityVersion, CellId,
     ContentDigest, DescriptorId, DigestAlgorithm, EventId, IdentityError, LoweringVersion, NodeId,
     RunId, SchemaId, ScopeId, SeedId, SemanticTypeId, SpecHash, SpecVersion, StateKind,
-    StateVersion,
+    StateVersion, TrustScopeId,
 };
 use mfm_spec::v1::{
     CanonicalizerIdentity, CellProducer, DescriptorIdentity, MediaType, PublicFieldPath,
@@ -679,11 +679,47 @@ pub mod v1 {
         pub kind: SideEffectEventKind,
     }
 
+    /// Hash-defining material for content-addressed run identity.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct RunIdentityMaterialV1 {
+        /// Certified typed spec hash.
+        pub certified_spec_hash: SpecHash,
+        /// Store-owned deployment trust scope.
+        pub trust_scope_id: TrustScopeId,
+        /// Optional digest of caller-supplied distinct-run material.
+        pub distinct_run_key_digest: Option<ContentDigest>,
+    }
+
+    impl RunIdentityMaterialV1 {
+        /// Stable canonical domain.
+        pub const DOMAIN: &'static str = "mfm.run_identity.v1";
+
+        /// Returns canonical JSON bytes for the hash-defining run identity material.
+        pub fn canonical_json(&self) -> Result<PlainCanonicalJsonBytes> {
+            canonical_json(serde_json::json!({
+                "certified_spec_hash": self.certified_spec_hash.as_str(),
+                "distinct_run_key_digest": self.distinct_run_key_digest.as_ref().map(ContentDigest::as_str),
+                "domain": Self::DOMAIN,
+                "trust_scope_id": self.trust_scope_id.as_str(),
+            }))
+        }
+
+        /// Derives the typed run id from this identity material.
+        pub fn derive_run_id(&self) -> Result<RunId> {
+            Ok(RunId::from_digest(
+                DigestAlgorithm::Sha256JcsV1,
+                self.canonical_json()?.digest_bytes(),
+            ))
+        }
+    }
+
     /// Run admission event payload.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct RunAdmitted {
         /// Run id bound to this event stream.
         pub run_id: RunId,
+        /// Hash-defining identity material used to derive `run_id`.
+        pub identity_material: RunIdentityMaterialV1,
         /// Public entry-point operation evidence selected by app assembly.
         pub entry_point: EntryPointLaunchEvidence,
         /// Certified typed spec hash.
@@ -2856,7 +2892,7 @@ pub mod v1 {
             "AdapterKind" | "ArtifactId" | "AttemptId" | "CapabilityKind" | "CellId"
             | "ContentDigest" | "DescriptorId" | "EffectKind" | "EventId" | "NodeId"
             | "OperationKind" | "RunId" | "SchemaId" | "ScopeId" | "SeedId" | "SemanticTypeId"
-            | "SpecHash" | "StateKind" => mfm_identity_type(type_name),
+            | "SpecHash" | "StateKind" | "TrustScopeId" => mfm_identity_type(type_name),
             "AdapterVersion" | "CapabilityVersion" | "LoweringVersion" | "OperationVersion"
             | "SpecVersion" | "StateVersion" => mfm_version_type(type_name),
             "DigestAlgorithm" => unit_enum_type("DigestAlgorithm", &["sha256-jcs-v1"]),
@@ -2894,6 +2930,26 @@ pub mod v1 {
                         "entry_point_registry_digest",
                         "ContentDigest",
                         EventFieldCardinality::Required,
+                    ),
+                ],
+            ),
+            "RunIdentityMaterialV1" => struct_type(
+                "RunIdentityMaterialV1",
+                vec![
+                    schema_field(
+                        "certified_spec_hash",
+                        "SpecHash",
+                        EventFieldCardinality::Required,
+                    ),
+                    schema_field(
+                        "trust_scope_id",
+                        "TrustScopeId",
+                        EventFieldCardinality::Required,
+                    ),
+                    schema_field(
+                        "distinct_run_key_digest",
+                        "ContentDigest",
+                        EventFieldCardinality::Optional,
                     ),
                 ],
             ),
@@ -3510,6 +3566,7 @@ pub mod v1 {
         schema_version: EVENT_SCHEMA_VERSION,
         fields: fields![
             EventFieldDescriptor::required("run_id", "RunId"),
+            EventFieldDescriptor::required("identity_material", "RunIdentityMaterialV1"),
             EventFieldDescriptor::required("entry_point", "EntryPointLaunchEvidence"),
             EventFieldDescriptor::required("spec_hash", "SpecHash"),
             EventFieldDescriptor::required("spec_artifact", "RunArtifactEvidenceRef"),
@@ -4231,9 +4288,25 @@ pub mod v1 {
             }
         }
 
+        fn trust_scope_id() -> TrustScopeId {
+            TrustScopeId::new("mfm.trust_scope.v1:20202020202020202020202020202020")
+                .expect("trust scope")
+        }
+
+        fn run_identity_material(spec_hash: SpecHash) -> RunIdentityMaterialV1 {
+            RunIdentityMaterialV1 {
+                certified_spec_hash: spec_hash,
+                trust_scope_id: trust_scope_id(),
+                distinct_run_key_digest: None,
+            }
+        }
+
         fn run_admitted_payload() -> KernelEventPayload {
+            let identity_material = run_identity_material(spec_hash(2));
+            let run_id = identity_material.derive_run_id().expect("run id");
             KernelEventPayload::RunAdmitted(Box::new(RunAdmitted {
-                run_id: run_id(1),
+                run_id,
+                identity_material,
                 entry_point: EntryPointLaunchEvidence {
                     resolved_op_id: EntryPointOpId::new("mfm.portfolio/snapshot@1").expect("op id"),
                     entry_point_registry_digest: content_digest(18),
@@ -4678,7 +4751,7 @@ retention_manifest schema=absent semantic=absent producer=middleware_no_seed sta
 
             assert_eq!(
                 rows,
-                "mfm.events.v1.run_admitted schema:mfm.events.v1.run_admitted:1:sha256-jcs-v1:54a09a13587e3048ddd955d8bc3c9b4ba9bf2c2dd2914cb214dda96d859b4aac [RunSpec,RunCertificate,RunConfig,SeedCell]\n\
+                "mfm.events.v1.run_admitted schema:mfm.events.v1.run_admitted:1:sha256-jcs-v1:4534f87423dac47f886e61d43a0313118afa7e3ff089f86ced9a2834e8a3ad5a [RunSpec,RunCertificate,RunConfig,SeedCell]\n\
 mfm.events.v1.state_attempt_started schema:mfm.events.v1.state_attempt_started:1:sha256-jcs-v1:986f35aa39938713b9862192cab7d2b9b3a37219f5872bd242f8a06e7957ff1b []\n\
 mfm.events.v1.fact_recorded schema:mfm.events.v1.fact_recorded:1:sha256-jcs-v1:e708d591505935c8d5b12e833e34e6883c3e62fc548758a53ed5199e94218f70 [FactResponse]\n\
 mfm.events.v1.artifact_referenced schema:mfm.events.v1.artifact_referenced:1:sha256-jcs-v1:c5965f6401628c580d907568a57b29e06638d4cf1740b1ea781eae88df4d592c [ArtifactReferenced]\n\
@@ -4755,7 +4828,7 @@ retention_manifest"
             assert_eq!(all_event_schema_descriptors().len(), 31);
             assert_eq!(
                 rows,
-                "mfm_events::v1::RunAdmitted schema:mfm.events.v1.run_admitted:1:sha256-jcs-v1:54a09a13587e3048ddd955d8bc3c9b4ba9bf2c2dd2914cb214dda96d859b4aac\n\
+                "mfm_events::v1::RunAdmitted schema:mfm.events.v1.run_admitted:1:sha256-jcs-v1:4534f87423dac47f886e61d43a0313118afa7e3ff089f86ced9a2834e8a3ad5a\n\
 mfm_events::v1::StateAttemptStarted schema:mfm.events.v1.state_attempt_started:1:sha256-jcs-v1:986f35aa39938713b9862192cab7d2b9b3a37219f5872bd242f8a06e7957ff1b\n\
 mfm_events::v1::FactRecorded schema:mfm.events.v1.fact_recorded:1:sha256-jcs-v1:e708d591505935c8d5b12e833e34e6883c3e62fc548758a53ed5199e94218f70\n\
 mfm_events::v1::ArtifactReferenced schema:mfm.events.v1.artifact_referenced:1:sha256-jcs-v1:c5965f6401628c580d907568a57b29e06638d4cf1740b1ea781eae88df4d592c\n\
@@ -4904,7 +4977,10 @@ mfm_events::v1::RetentionManifestProjected schema:mfm.events.v1.retention_manife
         #[test]
         fn payload_accessors_expose_authority_fields_without_serialization_changes() {
             let run_admitted = run_admitted_payload();
-            assert_eq!(run_admitted.run_id(), Some(&run_id(1)));
+            let expected_run_id = run_identity_material(spec_hash(2))
+                .derive_run_id()
+                .expect("run id");
+            assert_eq!(run_admitted.run_id(), Some(&expected_run_id));
             assert_eq!(run_admitted.spec_hash(), &spec_hash(2));
 
             let side_effect =

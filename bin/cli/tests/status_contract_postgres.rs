@@ -7,7 +7,7 @@ use mfm_events::v1 as events;
 use mfm_ids::{AttemptId, DigestAlgorithm, DigestBytes, RunId, SpecHash};
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
-use mfm_store::v1::RunEventStore;
+use mfm_store::v1::{RunEventStore, TrustScopeStore};
 use serde_json::Value;
 use sqlx::{AssertSqlSafe, PgPool};
 use std::process::Output;
@@ -38,7 +38,7 @@ async fn run_status_reports_interrupted_attempt_and_framework_attempts_from_hist
     let config_path = temp.path().join("portfolio.json");
     let config = sample_portfolio_config_json();
     std::fs::write(&config_path, &config).expect("write portfolio config");
-    let run_id = mfm_app::new_run_id();
+    let trust_scope_id = store.load_trust_scope_id().await.expect("load trust scope");
     let entry_point_registry = mfm_app::production_entry_point_op_registry().expect("entrypoints");
     let certification_registry = mfm_app::production_certification_registry().expect("cert");
     let prepared = mfm_app::prepare_entry_point_run_launch(mfm_app::EntryPointRunLaunchInput {
@@ -51,10 +51,11 @@ async fn run_status_reports_interrupted_attempt_and_framework_attempts_from_hist
         )
         .expect("authored config"),
         certification_registry: &certification_registry,
-        run_id: run_id.clone(),
+        trust_scope_id,
         drive: mfm_app::DriveMode::AppendOnly,
     })
     .expect("prepared entry-point launch");
+    let run_id = prepared.request.run_id.clone();
     let certified = prepared.request.certified_spec.clone();
 
     let start_args = vec![
@@ -68,8 +69,6 @@ async fn run_status_reports_interrupted_attempt_and_framework_attempts_from_hist
         config_path.display().to_string(),
         "--config-format".to_owned(),
         "json".to_owned(),
-        "--run-id".to_owned(),
-        run_id.as_str().to_owned(),
         "--drive".to_owned(),
         "append-only".to_owned(),
         "--database-url".to_owned(),
@@ -79,6 +78,7 @@ async fn run_status_reports_interrupted_attempt_and_framework_attempts_from_hist
     assert_success(&start);
     let start_json = parse_success_json(&start.stdout);
     assert_eq!(start_json["run"]["run_mode"], "forward");
+    assert_eq!(start_json["run"]["run_id"], run_id.as_str());
 
     let interrupted_node = certified
         .envelope()

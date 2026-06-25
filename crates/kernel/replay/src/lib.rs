@@ -2503,6 +2503,7 @@ pub mod v1 {
                 "run-start spec contract fields do not match certified spec",
             ));
         }
+        verify_run_identity_material(certified_spec, run_admitted)?;
         if run_admitted.descriptor_identities != certified_spec.spec.descriptor_identities {
             return Err(ReplayError::new(
                 ReplayErrorKind::DescriptorIdentityMismatch,
@@ -2564,6 +2565,36 @@ pub mod v1 {
         )?;
         for artifact in &run_admitted.config_artifacts {
             verify_run_artifact(artifacts, artifact, ArtifactRole::TypedConfig)?;
+        }
+        Ok(())
+    }
+
+    fn verify_run_identity_material(
+        certified_spec: &HashedSpecEnvelope,
+        run_admitted: &events::RunAdmitted,
+    ) -> Result<()> {
+        if run_admitted.identity_material.certified_spec_hash != run_admitted.spec_hash
+            || run_admitted.identity_material.certified_spec_hash != certified_spec.spec_hash
+        {
+            return Err(ReplayError::new(
+                ReplayErrorKind::SpecHashMismatch,
+                "run identity material spec hash does not match certified run start",
+            ));
+        }
+        let derived_run_id = run_admitted
+            .identity_material
+            .derive_run_id()
+            .map_err(|_| {
+                ReplayError::new(
+                    ReplayErrorKind::InvalidRunStream,
+                    "run identity material is invalid",
+                )
+            })?;
+        if derived_run_id != run_admitted.run_id {
+            return Err(ReplayError::new(
+                ReplayErrorKind::InvalidRunStream,
+                "RunAdmitted run id does not match identity material",
+            ));
         }
         Ok(())
     }

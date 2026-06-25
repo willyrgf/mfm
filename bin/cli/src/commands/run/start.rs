@@ -3,9 +3,7 @@ use std::path::PathBuf;
 use crate::commands::result::{CommandError, CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
-use crate::support::run_store::{
-    connect_run_services, drive_mode, parse_run_id, DriveArg, RunStoresArgs,
-};
+use crate::support::run_store::{connect_run_services, drive_mode, DriveArg, RunStoresArgs};
 use clap::{Args, ValueEnum};
 use mfm_app::{
     EntryPointRunLaunchInput, PublicOpName, PublicOutputResponse, RunModeStatus, RunResponse,
@@ -32,7 +30,7 @@ pub(crate) struct StartArgs {
     #[arg(long, value_enum, default_value_t = ConfigFormatArg::Toml)]
     pub config_format: ConfigFormatArg,
 
-    /// Optional typed run id (`run:<algorithm>:<digest>`). Defaults to a generated typed id.
+    /// Deprecated explicit run id. Supplying this option is rejected.
     #[arg(long)]
     pub run_id: Option<String>,
 
@@ -94,10 +92,12 @@ pub(crate) async fn execute(ctx: &CommandContext, args: &StartArgs) -> ! {
 }
 
 async fn execute_internal(args: &StartArgs) -> CommandResult<StartOutput> {
-    let run_id = match &args.run_id {
-        Some(run_id) => parse_run_id(run_id)?,
-        None => mfm_app::new_run_id(),
-    };
+    if args.run_id.is_some() {
+        return Err(CommandError::new(
+            "RunIdUnsupported",
+            "Explicit run ids are not accepted; run ids are derived from certified identity material",
+        ));
+    }
     let public_op_name = PublicOpName::new(&args.op)?;
     let op_version = args.op_version.map(mfm_app::OpVersion::new).transpose()?;
     let config_bytes = tokio::fs::read(&args.config)
@@ -106,15 +106,18 @@ async fn execute_internal(args: &StartArgs) -> CommandResult<StartOutput> {
     let authored_config = AuthoredConfig::new(args.config_format.into(), config_bytes)?;
     let entry_point_registry = mfm_app::production_entry_point_op_registry()?;
     let certification_registry = mfm_app::production_certification_registry()?;
+    let services = connect_run_services(&args.stores).await?;
+    let trust_scope_id = services.load_trust_scope_id().await?;
     let prepared = mfm_app::prepare_entry_point_run_launch(EntryPointRunLaunchInput {
         entry_point_registry: &entry_point_registry,
         public_op_name,
         op_version,
         authored_config,
         certification_registry: &certification_registry,
-        run_id: run_id.clone(),
+        trust_scope_id,
         drive: drive_mode(args.drive),
     })?;
+    let run_id = prepared.request.run_id.clone();
     let public_output_schema_id = prepared
         .request
         .certified_spec
@@ -123,7 +126,6 @@ async fn execute_internal(args: &StartArgs) -> CommandResult<StartOutput> {
         .public_outputs
         .public_schema_id
         .clone();
-    let services = connect_run_services(&args.stores).await?;
     let run = services.launch_run(prepared.request).await?;
     let public_output = if run.run_mode == RunModeStatus::Completed {
         Some(
@@ -142,7 +144,26 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn start_rejects_unknown_op_before_store_connection() {
+    async fn start_rejects_explicit_run_id_before_store_connection() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config = tmp.path().join("portfolio.json");
+        std::fs::write(&config, "{}").expect("write config");
+
+        let mut args = start_args(config, RunStoresArgs { database_url: None });
+        args.run_id = Some(
+            "run:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000001"
+                .to_owned(),
+        );
+
+        let err = execute_internal(&args)
+            .await
+            .expect_err("explicit run id rejects before store construction");
+
+        assert_eq!(err.code, "RunIdUnsupported");
+    }
+
+    #[tokio::test]
+    async fn start_requires_store_trust_scope_before_entry_point_resolution() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let config = tmp.path().join("portfolio.json");
         std::fs::write(&config, "{}").expect("write config");
@@ -152,22 +173,22 @@ mod tests {
 
         let err = execute_internal(&args)
             .await
-            .expect_err("unknown op rejects before store construction");
+            .expect_err("start requires store trust scope");
 
-        assert_eq!(err.code, "EntryPointOpNotFound");
+        assert_eq!(err.code, "MissingDatabaseUrl");
     }
 
     #[tokio::test]
-    async fn start_rejects_invalid_config_before_store_connection() {
+    async fn start_requires_store_trust_scope_before_op_config_decode() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let config = tmp.path().join("portfolio.json");
         std::fs::write(&config, r#"{"portfolio":{"portfolio_id":1}}"#).expect("write config");
 
         let err = execute_internal(&start_args(config, RunStoresArgs { database_url: None }))
             .await
-            .expect_err("invalid config rejects before store construction");
+            .expect_err("start requires store trust scope");
 
-        assert_eq!(err.code, "AuthoredConfigDecodeFailed");
+        assert_eq!(err.code, "MissingDatabaseUrl");
     }
 
     #[tokio::test]

@@ -124,7 +124,9 @@ mod tests {
             AuthoredConfig::new(AuthoredConfigFormat::Json, sample_portfolio_config_json())
                 .expect("authored config");
         let registry_digest = entry_point_registry.registry_digest().expect("digest");
-        let run_id = crate::new_run_id();
+        let trust_scope_id =
+            mfm_ids::TrustScopeId::new("mfm.trust_scope.v1:50505050505050505050505050505050")
+                .expect("trust scope");
 
         let prepared = crate::prepare_entry_point_run_launch(crate::EntryPointRunLaunchInput {
             entry_point_registry: &entry_point_registry,
@@ -132,7 +134,7 @@ mod tests {
             op_version: None,
             authored_config: authored,
             certification_registry: &certification_registry,
-            run_id: run_id.clone(),
+            trust_scope_id,
             drive: crate::DriveMode::AppendOnly,
         })
         .expect("prepared entry-point launch");
@@ -145,7 +147,14 @@ mod tests {
             prepared.evidence.entry_point_registry_digest,
             registry_digest
         );
-        assert_eq!(prepared.request.run_id, run_id);
+        assert_eq!(
+            prepared.request.run_id,
+            prepared
+                .request
+                .identity_material
+                .derive_run_id()
+                .expect("run id")
+        );
         assert!(!prepared.request.evidence.config_artifacts.is_empty());
     }
 

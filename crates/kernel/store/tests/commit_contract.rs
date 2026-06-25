@@ -144,6 +144,15 @@ fn run_id(byte: u8) -> RunId {
     RunId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
 }
 
+fn test_run_identity_material() -> events::RunIdentityMaterialV1 {
+    events::RunIdentityMaterialV1 {
+        certified_spec_hash: spec_hash(1),
+        trust_scope_id: TrustScopeId::new("mfm.trust_scope.v1:30303030303030303030303030303030")
+            .expect("test trust scope"),
+        distinct_run_key_digest: None,
+    }
+}
+
 fn artifact_id(byte: u8) -> ArtifactId {
     ArtifactId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
 }
@@ -231,8 +240,10 @@ fn run_admitted_with_saga_policy(
 ) -> KernelEventPayload {
     let spec_artifact = spec_artifact_ref();
     let certificate_artifact = certificate_artifact_ref();
+    let identity_material = test_run_identity_material();
     KernelEventPayload::RunAdmitted(Box::new(events::RunAdmitted {
         run_id,
+        identity_material,
         entry_point: entry_point_launch_evidence(),
         spec_hash: spec_hash(1),
         spec_artifact: run_artifact_ref(&spec_artifact),

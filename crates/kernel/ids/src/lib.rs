@@ -561,6 +561,54 @@ pub type ArtifactId = Identity<ArtifactIdKind>;
 /// Generic digest of canonical bytes or artifact bytes.
 pub type ContentDigest = Identity<ContentDigestKind>;
 
+/// Store-owned deployment trust-scope identifier.
+///
+/// This non-secret value identifies a deployment trust domain for run identity derivation.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TrustScopeId(String);
+
+impl TrustScopeId {
+    /// Stable v1 trust-scope prefix.
+    pub const PREFIX: &'static str = "mfm.trust_scope.v1:";
+
+    /// Creates a trust-scope id from the stable persisted string shape.
+    pub fn new(value: impl Into<String>) -> Result<Self> {
+        let value = value.into();
+        let suffix = value
+            .strip_prefix(Self::PREFIX)
+            .ok_or_else(|| IdentityError::new("trust scope id prefix mismatch"))?;
+        if suffix.len() != 32
+            || !suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        {
+            return Err(IdentityError::new(
+                "trust scope id must use 32 lowercase hex characters",
+            ));
+        }
+        Ok(Self(value))
+    }
+
+    /// Returns the persisted trust-scope id string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for TrustScopeId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for TrustScopeId {
+    type Err = IdentityError;
+
+    fn from_str(value: &str) -> Result<Self> {
+        Self::new(value)
+    }
+}
+
 /// Semantic type version string.
 pub type SemanticTypeVersion = Version<SemanticTypeVersionKind>;
 
@@ -987,6 +1035,24 @@ mod tests {
             DescriptorId::from_digest(DigestAlgorithm::Sha256JcsV1, digest()).as_str(),
             format!("descriptor:sha256-jcs-v1:{DIGEST_HEX}")
         );
+    }
+
+    #[test]
+    fn trust_scope_id_accepts_only_stable_lowercase_hex_shape() {
+        let trust_scope = TrustScopeId::new("mfm.trust_scope.v1:0123456789abcdef0123456789abcdef")
+            .expect("trust scope");
+
+        assert_eq!(
+            trust_scope.as_str(),
+            "mfm.trust_scope.v1:0123456789abcdef0123456789abcdef"
+        );
+        assert_eq!(
+            trust_scope.to_string(),
+            "mfm.trust_scope.v1:0123456789abcdef0123456789abcdef"
+        );
+        assert!(TrustScopeId::new("mfm.trust_scope.v2:0123456789abcdef0123456789abcdef").is_err());
+        assert!(TrustScopeId::new("mfm.trust_scope.v1:0123456789ABCDEF0123456789abcdef").is_err());
+        assert!(TrustScopeId::new("mfm.trust_scope.v1:0123456789abcdef").is_err());
     }
 
     #[test]

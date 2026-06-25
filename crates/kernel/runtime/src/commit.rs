@@ -176,11 +176,17 @@ pub(crate) struct CommitPlanner;
 impl CommitPlanner {
     pub(crate) fn prepare_run_launch(
         runtime_spec: &CertifiedRuntimeSpec,
-        run_id: RunId,
+        identity_material: events::RunIdentityMaterialV1,
         evidence: RunLaunchEvidence,
         expected_next_seq: store::StreamSeq,
         bound_context: &BoundRuntimeContext,
     ) -> Result<PreparedRunLaunch> {
+        if identity_material.certified_spec_hash != *runtime_spec.spec_hash() {
+            return Err(RuntimeError::InvalidRunnerOutput(
+                "run identity material spec hash does not match certified spec".to_owned(),
+            ));
+        }
+        let run_id = identity_material.derive_run_id()?;
         let spec_input = evidence.spec_artifact;
         verify_artifact_bytes(&spec_input.bytes, &spec_input.evidence)?;
         let spec_artifact = validate_spec_artifact(runtime_spec, spec_input.evidence.clone())?;
@@ -219,6 +225,7 @@ impl CommitPlanner {
             bound_context.admitted_binding_digest(&adapter_executables)?;
         let run_admitted = events::RunAdmitted {
             run_id: run_id.clone(),
+            identity_material,
             entry_point: evidence.entry_point,
             spec_hash: runtime_spec.spec_hash().clone(),
             spec_artifact: run_artifact_ref_from_store(&spec_artifact),
