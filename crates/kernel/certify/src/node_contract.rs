@@ -36,6 +36,10 @@ pub(super) fn validate_state_node_contract(input: StateNodeContractInput<'_>) ->
             Some(spec::FrameworkNodeSpec::Bridge(bridge)) => {
                 bridge_node_id_from_spec(node.stable_key.as_str(), bridge)?
             }
+            Some(spec::FrameworkNodeSpec::SideEffectVerify(verify)) => {
+                spec::side_effect_verify_node_id(&verify.submit_node_id, &verify.pair_id)
+                    .map_err(|error| CertifyError::Spec(error.to_string()))?
+            }
             Some(spec::FrameworkNodeSpec::PublicOutputRender(render)) => render_node_id(
                 &node.scope_id,
                 node.stable_key.as_str(),

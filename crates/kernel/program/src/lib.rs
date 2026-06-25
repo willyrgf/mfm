@@ -21,7 +21,7 @@ use mfm_effects::{
 use mfm_ids::{
     AdapterKind, AdapterVersion, CellId, ContentDigest, DescriptorId, DigestAlgorithm, DigestBytes,
     EffectKind, NodeId, OperationInstanceId, OperationKind, OperationVersion, SchemaId, ScopeId,
-    SeedId, SemanticTypeId, StateKind, StateVersion,
+    SeedId, SemanticTypeId, SideEffectPairId, StateKind, StateVersion,
 };
 use mfm_spec::v1::MediaType;
 use mfm_spec::v1::{
@@ -2152,6 +2152,8 @@ pub struct StateNodeSpec {
     pub side_effect_resource_claim: Option<ResourceClaimSpec>,
     /// Terminal verification policy when this node mutates an external system.
     pub side_effect_verification: Option<SideEffectVerificationSpec>,
+    /// Forward side-effect verify framework node lowered for this submit node.
+    pub side_effect_verify: Option<SideEffectVerifyDraftSpec>,
     /// Canonical config binding.
     pub config: ConfigBindingSpec,
     /// Typed input binding.
@@ -2168,6 +2170,21 @@ pub struct StateNodeSpec {
     pub output_domain_keys: Vec<StableDomainKeyRef>,
     /// Planning lineage active while this node was emitted.
     pub planning_lineage: OperationLineage,
+}
+
+/// Draft metadata for a framework-owned side-effect verify node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SideEffectVerifyDraftSpec {
+    /// Certified side-effect pair id.
+    pub pair_id: SideEffectPairId,
+    /// Derived verify framework node id.
+    pub node_id: NodeId,
+    /// Verify framework output cell id.
+    pub output_cell_id: CellId,
+    /// Verify framework output value lineage ref.
+    pub output_value_lineage: ValueLineageRef,
+    /// Stable domain keys associated with the verify output value lineage.
+    pub output_domain_keys: Vec<StableDomainKeyRef>,
 }
 
 /// Operation lineage frame emitted by a registry-mediated call.
@@ -3933,7 +3950,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
             forward_config,
             forward_input,
             Vec::new(),
-            Some((forward_resource_claim, forward_verification)),
+            Some((forward_resource_claim, forward_verification, true)),
         )?;
         let forward = ForwardSideEffectHandle::new(forward_node.node_id.clone(), forward_handle);
         let remediation_input = match build_remediation_input(forward.clone()) {
@@ -3957,7 +3974,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
             remediation_config,
             remediation_input,
             Vec::new(),
-            Some((remediation_resource_claim, remediation_verification)),
+            Some((remediation_resource_claim, remediation_verification, false)),
         ) {
             Ok(planned) => planned,
             Err(error) => {
@@ -4040,7 +4057,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
             config,
             input,
             Vec::new(),
-            Some((resource_claim, verification)),
+            Some((resource_claim, verification, true)),
         )?;
         self.state_keys.insert(key_string);
         self.state_nodes.push(node.clone());
@@ -4054,7 +4071,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
         config: S::Config,
         input: I,
         output_domain_keys: Vec<StableDomainKeyRef>,
-        side_effect_contract: Option<(ResourceClaim, SideEffectVerificationSpec)>,
+        side_effect_contract: Option<(ResourceClaim, SideEffectVerificationSpec, bool)>,
     ) -> Result<(StateNodeSpec, Handle<'program, 'scope, S::Output>)>
     where
         S: StateSpec,
@@ -4073,7 +4090,9 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
         let descriptor = registered.descriptor();
         let side_effect_contract_digest = descriptor.side_effect_contract_digest().cloned();
         let side_effect_contract =
-            side_effect_contract.map(|(claim, verification)| (claim.into_spec(), verification));
+            side_effect_contract.map(|(claim, verification, verify_pair)| {
+                (claim.into_spec(), verification, verify_pair)
+            });
         match (&side_effect_contract_digest, &side_effect_contract) {
             (Some(_), Some(_)) | (None, None) => {}
             (Some(_), None) => {
@@ -4107,21 +4126,80 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
             &output_semantic_type_id,
             &output_schema_id,
         )?;
+        let side_effect_is_paired = side_effect_contract
+            .as_ref()
+            .map(|(_, _, verify_pair)| *verify_pair)
+            .unwrap_or(false);
         let lineage = state_value_lineage(
             &self.scope_id,
             &node_id,
             input.root(),
             &config_binding.config_ref_digest,
             &self.current_operation_lineage()?,
-            output_domain_keys.clone(),
+            if side_effect_is_paired {
+                Vec::new()
+            } else {
+                output_domain_keys.clone()
+            },
         )?;
         let value_lineage = value_lineage_ref(&lineage)?;
+        let side_effect_verify = match (
+            side_effect_contract_digest.as_ref(),
+            side_effect_contract.as_ref(),
+        ) {
+            (Some(contract_digest), Some((resource_claim, verification, true))) => {
+                let contract = mfm_spec::v1::SideEffectContractSpec {
+                    contract_digest: contract_digest.clone(),
+                    resource_claim: resource_claim.clone(),
+                    verification: verification.clone(),
+                };
+                let pair_id =
+                    mfm_spec::v1::side_effect_pair_id(&node_id, &output_cell_id, &contract)
+                        .map_err(|error| PlanError::Value(error.to_string()))?;
+                let verify_node_id = mfm_spec::v1::side_effect_verify_node_id(&node_id, &pair_id)
+                    .map_err(|error| PlanError::Value(error.to_string()))?;
+                let verify_output_cell_id = state_output_cell_id(
+                    &self.scope_id,
+                    &verify_node_id,
+                    &output_semantic_type_id,
+                    &output_schema_id,
+                )?;
+                let verify_config_ref =
+                    mfm_spec::v1::framework_config_ref("side_effect_verify", &verify_node_id)
+                        .map_err(|error| PlanError::Value(error.to_string()))?;
+                let verify_lineage = state_value_lineage_from_cells(
+                    &self.scope_id,
+                    &verify_node_id,
+                    vec![output_cell_id.clone()],
+                    Some(spec_config_ref_digest(&verify_config_ref)?),
+                    &self.current_operation_lineage()?,
+                    output_domain_keys.clone(),
+                )?;
+                Some(SideEffectVerifyDraftSpec {
+                    pair_id,
+                    node_id: verify_node_id,
+                    output_cell_id: verify_output_cell_id,
+                    output_value_lineage: value_lineage_ref(&verify_lineage)?,
+                    output_domain_keys: output_domain_keys.clone(),
+                })
+            }
+            _ => None,
+        };
+        let (handle_cell_id, handle_value_lineage) =
+            if let Some(verify) = side_effect_verify.as_ref() {
+                (
+                    verify.output_cell_id.clone(),
+                    verify.output_value_lineage.clone(),
+                )
+            } else {
+                (output_cell_id.clone(), value_lineage.clone())
+            };
         let handle = Handle::new(
-            output_cell_id.clone(),
+            handle_cell_id,
             self.scope_id.clone(),
             output_schema_id.clone(),
             output_semantic_type_id.clone(),
-            value_lineage.clone(),
+            handle_value_lineage,
         );
         let planning_lineage = self.current_operation_lineage()?;
         Ok((
@@ -4140,16 +4218,22 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
                 side_effect_contract_digest,
                 side_effect_resource_claim: side_effect_contract
                     .as_ref()
-                    .map(|(claim, _)| claim.clone()),
+                    .map(|(claim, _, _)| claim.clone()),
                 side_effect_verification: side_effect_contract
-                    .map(|(_, verification)| verification),
+                    .as_ref()
+                    .map(|(_, verification, _)| verification.clone()),
+                side_effect_verify,
                 config: config_binding,
                 input: input.spec(),
                 output_cell_id,
                 output_schema_id,
                 output_semantic_type_id,
                 output_value_lineage: value_lineage,
-                output_domain_keys,
+                output_domain_keys: if side_effect_is_paired {
+                    Vec::new()
+                } else {
+                    output_domain_keys
+                },
                 planning_lineage,
             },
             handle,
@@ -4163,6 +4247,9 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
     ) -> Result<()> {
         let mut allowed = BTreeSet::new();
         allowed.insert(forward_node.output_cell_id.clone());
+        if let Some(verify) = &forward_node.side_effect_verify {
+            allowed.insert(verify.output_cell_id.clone());
+        }
 
         let mut forward_inputs = Vec::new();
         collect_input_cell_ids(&forward_node.input.root, &mut forward_inputs);
@@ -5362,15 +5449,42 @@ fn state_value_lineage(
     let mut input_cells = Vec::new();
     collect_input_cell_ids(input_root, &mut input_cells);
     input_cells.sort();
+    state_value_lineage_from_cells(
+        scope_id,
+        node_id,
+        input_cells,
+        Some(config_ref_digest.clone()),
+        operation_lineage,
+        domain_keys,
+    )
+}
+
+fn state_value_lineage_from_cells(
+    scope_id: &ScopeId,
+    node_id: &NodeId,
+    mut input_cells: Vec<CellId>,
+    config_ref_digest: Option<ContentDigest>,
+    operation_lineage: &OperationLineage,
+    domain_keys: Vec<StableDomainKeyRef>,
+) -> Result<ValueLineage> {
+    input_cells.sort();
     Ok(ValueLineage {
         scope_id: scope_id.clone(),
         producer: CellProducer::Node(node_id.clone()),
         input_cells,
-        config_ref_digest: Some(config_ref_digest.clone()),
+        config_ref_digest,
         operation_lineage: operation_lineage.clone(),
         domain_keys,
         transform_policy: LineageTransformPolicy::StateOutput,
     })
+}
+
+fn spec_config_ref_digest(config_ref: &mfm_spec::v1::ConfigRef) -> Result<ContentDigest> {
+    canonical_digest(serde_json::json!({
+        "byte_len": config_ref.byte_len,
+        "content_digest": config_ref.digest.as_str(),
+        "schema_id": config_ref.schema_id.as_str(),
+    }))
 }
 
 fn cell_id(

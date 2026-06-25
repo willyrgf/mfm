@@ -875,6 +875,16 @@ fn linked_compensation_authoring_keeps_remediation_out_of_forward_nodes() {
         forward.side_effect_verification.as_ref(),
         Some(&SideEffectVerificationSpec::Receipt)
     );
+    let verify = forward
+        .side_effect_verify
+        .as_ref()
+        .expect("forward side-effect verify pair");
+    assert_ne!(verify.node_id, forward.node_id);
+    assert_ne!(verify.output_cell_id, forward.output_cell_id);
+    assert_eq!(
+        draft.public_output_spec().outputs()[0].cell().cell_id(),
+        &verify.output_cell_id
+    );
     let remediation = draft
         .remediation_nodes()
         .get(&forward.node_id)
@@ -891,6 +901,7 @@ fn linked_compensation_authoring_keeps_remediation_out_of_forward_nodes() {
         remediation.side_effect_verification.as_ref(),
         Some(&SideEffectVerificationSpec::Receipt)
     );
+    assert!(remediation.side_effect_verify.is_none());
     assert!(
         draft
             .state_nodes()

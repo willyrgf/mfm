@@ -450,6 +450,9 @@ pub enum DescriptorKind {}
 /// Marker for typed execution spec hashes.
 pub enum SpecHashKind {}
 
+/// Marker for certified side-effect submit/verify pair ids.
+pub enum SideEffectPairIdKind {}
+
 /// Marker for node ids.
 pub enum NodeIdKind {}
 
@@ -533,6 +536,9 @@ pub type DescriptorId = Identity<DescriptorKind>;
 
 /// Digest of a certified typed execution spec.
 pub type SpecHash = Identity<SpecHashKind>;
+
+/// Certified side-effect submit/verify pair identity.
+pub type SideEffectPairId = Identity<SideEffectPairIdKind>;
 
 /// Planned or certified node identity.
 pub type NodeId = Identity<NodeIdKind>;
@@ -804,6 +810,7 @@ impl_identity_category!(OperationKindKind, "operation", NamespaceNameDigest);
 impl_digest_only_category!(OperationInstanceIdKind, "op");
 impl_digest_only_category!(DescriptorKind, "descriptor");
 impl_digest_only_category!(SpecHashKind, "spec");
+impl_digest_only_category!(SideEffectPairIdKind, "side_effect_pair");
 impl_digest_only_category!(NodeIdKind, "node");
 impl_digest_only_category!(CellIdKind, "cell");
 impl_digest_only_category!(ScopeIdKind, "scope");
@@ -934,6 +941,9 @@ mod tests {
             SpecHash::parse(format!("spec:sha256-jcs-v1:{DIGEST_HEX}"))
                 .expect("spec hash")
                 .to_string(),
+            SideEffectPairId::parse(format!("side_effect_pair:sha256-jcs-v1:{DIGEST_HEX}"))
+                .expect("side-effect pair id")
+                .to_string(),
             OperationInstanceId::parse(format!("op:sha256-jcs-v1:{DIGEST_HEX}"))
                 .expect("operation instance id")
                 .to_string(),
@@ -971,6 +981,7 @@ mod tests {
             [
                 format!("descriptor:sha256-jcs-v1:{DIGEST_HEX}"),
                 format!("spec:sha256-jcs-v1:{DIGEST_HEX}"),
+                format!("side_effect_pair:sha256-jcs-v1:{DIGEST_HEX}"),
                 format!("op:sha256-jcs-v1:{DIGEST_HEX}"),
                 format!("node:sha256-jcs-v1:{DIGEST_HEX}"),
                 format!("cell:sha256-jcs-v1:{DIGEST_HEX}"),

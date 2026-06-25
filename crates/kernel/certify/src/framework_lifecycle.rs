@@ -9,6 +9,7 @@ pub(super) fn validate_framework_nodes(
     let mut retention_count = 0_usize;
     let mut completion_count = 0_usize;
     let mut resolve_count = 0_usize;
+    let mut verify_by_submit = BTreeMap::<NodeId, &spec::NodeSpec>::new();
     let mut lifecycle_outputs = BTreeMap::<CellId, &spec::NodeSpec>::new();
     let mut all_input_cells = BTreeMap::<CellId, Vec<NodeId>>::new();
     let mut nodes_by_id = BTreeMap::<NodeId, &spec::NodeSpec>::new();
@@ -79,6 +80,103 @@ pub(super) fn validate_framework_nodes(
                         format!("bridge node {} source cell is missing", node.node_id),
                     ));
                 }
+            }
+            Some(spec::FrameworkNodeSpec::SideEffectVerify(verify)) => {
+                let descriptor = descriptors.state(&node.descriptor_id)?;
+                validate_framework_descriptor_name(
+                    node,
+                    descriptor,
+                    "mfm.framework.side_effect_verify",
+                )?;
+                let submit = nodes_by_id.get(&verify.submit_node_id).ok_or_else(|| {
+                    problem(
+                        ProblemClass::InvalidTopology,
+                        format!(
+                            "side-effect verify node {} references missing submit node {}",
+                            node.node_id, verify.submit_node_id
+                        ),
+                    )
+                })?;
+                let Some(contract) = submit.side_effect.as_ref() else {
+                    return Err(problem(
+                        ProblemClass::InvalidSemanticTransition,
+                        format!(
+                            "side-effect verify node {} references non-side-effect submit node {}",
+                            node.node_id, submit.node_id
+                        ),
+                    ));
+                };
+                if submit.framework.is_some() {
+                    return Err(problem(
+                        ProblemClass::InvalidSemanticTransition,
+                        format!(
+                            "side-effect verify node {} references framework submit node {}",
+                            node.node_id, submit.node_id
+                        ),
+                    ));
+                }
+                if verify.submit_output_cell_id != submit.output_cell {
+                    return Err(problem(
+                        ProblemClass::InvalidTopology,
+                        format!(
+                            "side-effect verify node {} submit output anchor mismatch",
+                            node.node_id
+                        ),
+                    ));
+                }
+                let expected_pair =
+                    spec::side_effect_pair_id(&submit.node_id, &submit.output_cell, contract)
+                        .map_err(|error| CertifyError::Spec(error.to_string()))?;
+                if verify.pair_id != expected_pair {
+                    return Err(problem(
+                        ProblemClass::InvalidTopology,
+                        format!(
+                            "side-effect verify node {} pair id is not stable-id derived",
+                            node.node_id
+                        ),
+                    ));
+                }
+                let submit_descriptor = descriptors.state(&submit.descriptor_id)?;
+                validate_side_effect_verify_output_cell(node, submit_descriptor, cells)?;
+                let submit_output_cell =
+                    cells.get(submit.output_cell.as_str()).ok_or_else(|| {
+                        problem(
+                            ProblemClass::InvalidTopology,
+                            format!("submit node {} output cell is missing", submit.node_id),
+                        )
+                    })?;
+                validate_framework_input_binding(
+                    node,
+                    &spec::framework_lifecycle_receipt_input_binding(
+                        "side_effect_verify",
+                        "submit_output",
+                        submit_output_cell,
+                    )
+                    .map_err(|error| CertifyError::Spec(error.to_string()))?,
+                )?;
+                let input_cells = validate_input_binding(&node.input_bindings, cells)?;
+                if input_cells != vec![submit.output_cell.clone()] {
+                    return Err(problem(
+                        ProblemClass::InvalidTopology,
+                        format!(
+                            "side-effect verify node {} must depend on submit output cell",
+                            node.node_id
+                        ),
+                    ));
+                }
+                if verify_by_submit
+                    .insert(submit.node_id.clone(), node)
+                    .is_some()
+                {
+                    return Err(problem(
+                        ProblemClass::InvalidTopology,
+                        format!(
+                            "submit side-effect node {} has duplicate verify nodes",
+                            submit.node_id
+                        ),
+                    ));
+                }
+                validate_submit_output_consumers(submit, node, &all_input_cells, public_outputs)?;
             }
             Some(spec::FrameworkNodeSpec::PublicOutputRender(render)) => {
                 let descriptor = descriptors.state(&node.descriptor_id)?;
@@ -340,6 +438,20 @@ pub(super) fn validate_framework_nodes(
         ),
     ));
     }
+    for node in nodes {
+        if node.side_effect.is_some()
+            && node.framework.is_none()
+            && !verify_by_submit.contains_key(&node.node_id)
+        {
+            return Err(problem(
+                ProblemClass::InvalidTopology,
+                format!(
+                    "forward side-effect node {} is missing side-effect verify node",
+                    node.node_id
+                ),
+            ));
+        }
+    }
     validate_lifecycle_tail_finality(nodes, &nodes_by_id)?;
     Ok(())
 }
@@ -460,6 +572,12 @@ pub(super) fn validate_framework_descriptor_variant(
     let matches_variant = match descriptor.name.as_str() {
         "mfm.framework.bridge_same_value" => {
             matches!(&node.framework, Some(spec::FrameworkNodeSpec::Bridge(_)))
+        }
+        "mfm.framework.side_effect_verify" => {
+            matches!(
+                &node.framework,
+                Some(spec::FrameworkNodeSpec::SideEffectVerify(_))
+            )
         }
         "mfm.framework.render_public_outputs" => {
             matches!(
@@ -594,6 +712,77 @@ fn validate_framework_output_cell(
             format!(
                 "framework node {} output cell contract mismatch",
                 node.node_id
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_side_effect_verify_output_cell(
+    verify_node: &spec::NodeSpec,
+    submit_descriptor: &spec::StateDescriptorIdentity,
+    cells: &BTreeMap<String, spec::CellSpec>,
+) -> Result<()> {
+    let output = cells.get(verify_node.output_cell.as_str()).ok_or_else(|| {
+        problem(
+            ProblemClass::InvalidTopology,
+            format!(
+                "side-effect verify node {} missing output cell",
+                verify_node.node_id
+            ),
+        )
+    })?;
+    if output.schema_id != submit_descriptor.output_schema_id
+        || output.semantic_type_id != submit_descriptor.output_semantic_type_id
+        || output.terminal_policy != spec::CellTerminalPolicy::ProducedOnly
+        || output.storage_policy != spec::StoragePolicy::ContentAddressed
+        || output.redaction_policy != spec::RedactionPolicy::Public
+    {
+        return Err(problem(
+            ProblemClass::InvalidTerminalShape,
+            format!(
+                "side-effect verify node {} output cell contract mismatch",
+                verify_node.node_id
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_submit_output_consumers(
+    submit: &spec::NodeSpec,
+    verify: &spec::NodeSpec,
+    consumers_by_cell: &BTreeMap<CellId, Vec<NodeId>>,
+    public_outputs: &spec::PublicOutputSpec,
+) -> Result<()> {
+    if public_outputs
+        .outputs
+        .iter()
+        .any(|output| output.cell_id == submit.output_cell)
+    {
+        return Err(problem(
+            ProblemClass::InvalidTerminalShape,
+            format!(
+                "submit side-effect node {} output cell is public instead of verify-owned",
+                submit.node_id
+            ),
+        ));
+    }
+    let consumers = consumers_by_cell.get(&submit.output_cell).ok_or_else(|| {
+        problem(
+            ProblemClass::InvalidTopology,
+            format!(
+                "submit side-effect node {} output cell is not anchored by verify",
+                submit.node_id
+            ),
+        )
+    })?;
+    if consumers.len() != 1 || consumers.first() != Some(&verify.node_id) {
+        return Err(problem(
+            ProblemClass::InvalidTopology,
+            format!(
+                "submit side-effect node {} output cell may only feed its verify node",
+                submit.node_id
             ),
         ));
     }
