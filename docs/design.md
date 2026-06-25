@@ -32,8 +32,12 @@ they do not own workflow semantics.
 - Typed values, typed configs, public outputs, and event payloads must not contain secrets.
 - Replay and resume are driven by the stored certified spec and the authoritative run stream.
 - Replay adapters must answer only from recorded facts, typed artifacts, and side-effect evidence.
+- Admission, drive, verify, and replay must not consult mutable registries or external policy
+  oracles; outcome-affecting policy is resolved once into hash-defining certified spec material.
 - Side effects use typed intent, typed idempotency input, durable ledger events, and typed receipt
   or recovery evidence.
+- Side-effect verification policy is hash-defining certified config. `RunAdmitted` may record
+  launch audit evidence, but it is not independent finality or verification authority.
 - Certified saga decisions are derived from the certified spec plus append-only stream facts.
 - Manual saga resolution requires certified schema authority and a signed authorization proof.
 - Public output JSON is a render surface. Typed terminal cells plus public-output specs and events
@@ -319,17 +323,21 @@ crates/storages/stream-store-postgres
 
 Postgres is the only production persistence backend. It stores append-only `commits`, canonical
 `run_events`, artifact blobs/evidence, resource-lane claim/release/transition rows,
-commit cursor authority, and mutable operational resource-lane waiter rows. Observation
-list/watch rows are derived from strict authority at read time. Artifact bytes live in Postgres;
-production app, CLI, and REST paths do not stage, read, or migrate workflow artifacts through
-filesystem artifact roots. The schema and migrations are owned by
-`crates/storages/stream-store-postgres`; runtime callers validate schema compatibility and must not
-run startup auto-DDL. Logical-key admission folds authoritative
-`run_events`; there is no logical-key admission index. Resource-lane waiter rows are operational
-admission coordination for single-lane FIFO only: they can preserve retry order for live waiters, but
-cannot grant ownership and are never semantic authority for resume, replay, public-output rendering,
-side-effect legality, or completion. Observation rows and list/watch cursors are likewise never
-semantic authority for those decisions.
+commit cursor authority, store metadata, and mutable operational admission-lane coordination rows.
+`store_metadata.trust_scope_id` is store-owned, non-secret identity material for the deployment's
+trust boundary; callers cannot supply or update it. Observation list/watch rows are derived from
+strict authority at read time. Artifact bytes live in Postgres; production app, CLI, and REST paths
+do not stage, read, or migrate workflow artifacts through filesystem artifact roots. The schema and
+migrations are owned by `crates/storages/stream-store-postgres`; runtime callers validate schema
+compatibility and must not run startup auto-DDL. Because MFM is pre-production, replacing a persisted
+contract shape is a destructive schema change: delete obsolete tables and schema checks instead of
+adding compatibility migrations or dual old/new write paths. Logical-key admission folds
+authoritative `run_events`; there is no logical-key admission index. Admission-lane rows are
+operational coordination only. In v1 they serve single-lane FIFO resource claims and nowait execution
+claims; they can preserve retry order or active-driver liveness, but cannot grant ownership and are
+never semantic authority for resume, replay, public-output rendering, side-effect legality, or
+completion. Observation rows and list/watch cursors are likewise never semantic authority for those
+decisions.
 
 Production deployments must give the Postgres run store a dedicated MFM database tenancy. List/watch
 cursors order `commits` rows by `(append_xid, commit_sort_key)` behind a snapshot `xmin`
@@ -339,15 +347,16 @@ and artifact cleanup have no public v1 maintenance entry points; any future main
 first specify Postgres roles, ownership, credentials, and restore/clone runbooks.
 
 For single-lane exclusive resource-lane claim commits, Postgres enforces FIFO under the lane advisory
-transaction lock before materializing `ResourceLaneClaimed`: a claim can commit only when there is no
-active authoritative holder and no earlier live waiter. A `ResourceLaneClaimBlocked` result persists
-no run event, commit, resource-lane claim, resource-lane release, lane-transition, or other MFM domain
-authority row, but it may insert or refresh one mutable operational waiter row. Waiter leases bound
-dead process impact; expired, cancelled, or claimed waiters no longer block later waiters. Retries
-for an expired or cancelled deterministic claim fingerprint reuse the same waiter id but receive a
-fresh lane-local ticket, so stale priority is not restored. The store validates prepared claim
-semantics before enqueueing a waiter, preventing malformed claims from occupying the FIFO head.
-Release notifications, if present, are wake hints only and do not grant ownership.
+transaction lock before materializing `ResourceLaneClaimed`: a claim can commit only when the one
+requested lane has no active authoritative holder and no earlier live waiter. A
+`ResourceLaneClaimBlocked` result persists no run event, commit, resource-lane claim,
+resource-lane release, lane-transition, or other MFM domain authority row, but it may insert or
+refresh one mutable operational waiter row. Waiter leases bound dead process impact; expired,
+cancelled, or claimed waiters no longer block later waiters. Retries for an expired or cancelled
+deterministic claim fingerprint reuse the same waiter id but receive a fresh lane-local ticket, so
+stale priority is not restored. The store validates prepared claim semantics before enqueueing a
+waiter, preventing malformed claims from occupying the FIFO head. Release notifications, if present,
+are wake hints only and do not grant ownership.
 
 ## Runtime
 
@@ -442,6 +451,20 @@ constructors reject purpose mismatches, missing `SagaAdmitToken`, missing `SagaT
 artifact evidence that was not admitted in the same commit. Artifact blobs are admitted inside the
 append transaction; failed appends leave no authoritative run-store evidence.
 
+Normal launch identity is content-addressed from `RunIdentityMaterialV1` using canonical JSON:
+`certified_spec_hash`, store-owned `trust_scope_id`, and an optional
+`distinct_run_key_digest`. The run id must equal the digest of that material, and `RunAdmitted`
+records the material so attach, resume, replay, status, and public-output authority can fail closed
+on identity mismatch. Raw caller-supplied run ids are not a normal launch surface.
+
+Execution claims are operational liveness, not run authority. v1 uses a claim lane keyed by the
+derived run id with a 60 second TTL and a 20 second heartbeat interval. The invoker that starts or
+resumes the run drives it while renewing the claim; duplicate compatible launchers attach/report,
+and incompatible executable bindings report without driving. Automatic dead-driver takeover,
+background worker-pool dispatch, feed-driven dispatch, `due_at` re-wake, and long-wait tenure
+release are deferred. Manual `run resume <run_id>` is the v1 recovery trigger. While short
+receipt-level waits are active, the invoker loop keeps heartbeating instead of releasing tenure.
+
 Framework lifecycle work is represented by certified graph nodes, not ad hoc runtime side effects.
 Run admission is the sole pre-attempt root authority and is not represented by a certified graph
 node. `PublicOutputRender`, `ProjectRetentionManifest`, `CompleteRun`, and
@@ -482,8 +505,22 @@ The durable uncertainty boundary is the invocation-started event. After that bou
 recover or block using typed evidence; it must not duplicate an external mutation or guess from
 unstored state.
 
-`CertifiedSideEffectContract` is the single side-effect resource-claim authority shared by live
-execution, resume, and replay. The store exposes legal phase information through
+`CertifiedSideEffectContract` is the single side-effect resource-claim and verification authority
+shared by live execution, resume, and replay. Verification is a hash-defining contract value:
+`Receipt` terminalizes from receipt evidence, while `Finalized(depth)` terminalizes only from
+confirmation evidence at the certified depth. The depth is lowered into the certified spec, never
+resolved from a registry at admission or from worker-local policy. `RunAdmitted` may echo launch
+diagnostics, but it cannot override or duplicate this verification authority. Receipt-level
+terminalization is final-at-risk by explicit operation design: a later reorg can invalidate the
+published output or wedge the next nonce, and that recovery belongs to the deferred stuck-transaction
+or nonce-reclaim workflow.
+
+`CertifiedSideEffectContract` exposes domain output construction for the configured terminal
+evidence level. Runtime invokes the domain-owned receipt or confirmation output contract and never
+constructs domain output values itself. `NotSubmittedProven` is a defended investigation outcome,
+not a terminal result from one transient RPC miss.
+
+The store exposes legal phase information through
 `SideEffectLedgerState`, so transition admission is a typed state-machine check instead of an
 optional-field projection heuristic. Forward side-effect ambiguity is admissible only when paired in
 the same commit with the non-retryable attempt failure that engages saga handling.

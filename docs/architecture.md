@@ -66,6 +66,10 @@ Start, resume, replay, and public-output rendering must verify stored spec/certi
 against the production registry and compare stream evidence before constructing runtime, replay, or
 render authority.
 
+Admission, drive, verify, resume, and replay must not resolve outcome-affecting policy from mutable
+registries, worker-local defaults, or external oracles. Such policy belongs in typed config and
+certified spec material before runtime authority is constructed.
+
 Use `docs/persisted-public-surfaces.md` when reviewing data that is persisted, returned by CLI/REST,
 or exposed through app read paths. It classifies allowed data, forbidden secret classes, provenance
 authority, and tests for each surface.
@@ -528,13 +532,16 @@ Before merging a change, verify:
 - new public values/configs use typed descriptors and no floats/secrets
 - side effects have typed intent, idempotency, receipt/recovery, one mutation authority, and no
   retained signed raw transactions
-- certified saga policy is hash-defining spec data, and compensation/manual outcomes are derived
-  from certified policy plus stream evidence
+- certified saga and side-effect verification policy are hash-defining spec data, not policy
+  resolved by a registry at admission, and compensation/manual outcomes are derived from certified
+  policy plus stream evidence
 - manual resolution uses certified schema roles, certified verifier identity, certified operator
   authority snapshot, canonical proof bytes, signature verification, and quorum
 - replay paths cannot construct live capabilities
 - replay paths cannot call live signers, verifier registries, certification registries, keystores,
   or runtime signer sources
+- admission, drive, verify, and resume paths cannot call mutable policy registries or external
+  oracles for outcome-affecting decisions after certification
 - resume validates stored stream evidence against the certified spec
 - states declare capabilities but do not instantiate live transports or signer providers
 - transports implement capability contracts but do not define state-owned domain semantics
