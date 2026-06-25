@@ -59,6 +59,11 @@ must not authorize terminal saga commits.
 - `CompensateCompleted`: confirmed forward side effects create remediation obligations; unresolved
   remediation follows the certified `on_remediation_unresolved` directive.
 
+Side-effect verification policy is also hash-defining certified config. A side-effect contract
+chooses `Receipt` or `Finalized(depth)` during authoring/certification; runtime, resume, and replay
+read that certified value from the spec. No finality policy resolved by a registry at admission,
+worker-local default, or launch-time `RunAdmitted` echo is independent verification authority.
+
 Remediation linkage is structural. Remediation nodes live outside the forward graph and are linked
 to the forward side-effect node they compensate. Remediation reuses the side-effect protocol with
 `SideEffectLedgerPurpose::Remediation { forward_ledger_key }`; forward ledgers use
@@ -156,13 +161,14 @@ Every side-effect contract declares a resource claim:
 - `ManualOnly`: MFM makes no framework-derived cross-run concurrency claim.
 
 Only `Exclusive` takes a lane. `ExactTouchedSet` and `ManualOnly` do not acquire lane authority.
-For `Exclusive`, runtime appends `StateAttemptStarted`, resolves all concrete lane keys through pure
-capability preflight, and submits one `ResourceLaneClaimIntent` commit before invocation
-construction. The store admits that intent only when every requested lane can be acquired together;
-it materializes the committed `ResourceLaneClaimed` event, assigns the lane-local fencing token and
-transition sequence, and records the matching `resource_lane_claim_events` and
-`resource_lane_transitions` rows. A held lane blocks other ledgers for the same
-`(namespace, key_schema_id, key, exclusive)` lane across runs.
+Core saga v1 supports one concrete exclusive lane per side-effect ledger. For `Exclusive`, runtime
+appends `StateAttemptStarted`, resolves that lane key through pure capability preflight, and submits
+one `ResourceLaneClaimIntent` commit before invocation construction. The store admits that intent
+only when the requested lane is free and no earlier live waiter blocks it; it materializes the
+committed `ResourceLaneClaimed` event, assigns the lane-local fencing token and transition sequence,
+and records the matching `resource_lane_claim_events` and `resource_lane_transitions` rows. A held
+lane blocks other ledgers for the same `(namespace, key_schema_id, key, exclusive)` lane across
+runs.
 
 Ordinary contention returns `ResourceLaneClaimBlocked`. That outcome parks the open attempt before
 live IO; it is not a run event, not lane-transition authority, not persisted semantic authority, and
@@ -174,8 +180,9 @@ on lane-release notifications, but notifications are only wakeups; the durable o
 the append-only lane authority, and the FIFO signal is rechecked by store admission before any claim
 materializes.
 
-The no-deadlock invariant is structural: an attempt claims all required exclusive lanes in one
-all-or-nothing claim commit and never holds one lane while issuing a second blocking claim. Lanes
+The no-deadlock invariant is structural: a v1 attempt can hold at most one exclusive lane, and it
+never holds one lane while issuing a second blocking claim. Multi-lane admission, all-or-nothing
+multi-lane acquisition, deadlock ordering, and multi-lane starvation policy are deferred. Lanes
 release through committed `ResourceLaneReleaseIntent`/`ResourceLaneReleased` authority tied to the
 active claim and fencing token. Remediation ledgers acquire and release lanes under the same rules as
 forward ledgers.
@@ -215,10 +222,13 @@ The following remain outside the current certified saga contract:
 
 - full AC/DC-equivalence claims;
 - domain verifier APIs for commutativity, escrow, predicate snapshots, finality, or isolation;
+- automatic dead-driver takeover or background worker-pool dispatch;
+- `due_at` re-wake and execution-tenure release during long external waits;
+- pipelined nonces or multiple in-flight writes for one signer lane;
 - per-obligation manual targeting;
 - generic retry/replan/continuation policy;
 - cancellation semantics against remediation;
-- multi-lane lane fairness, deadlock detection, or global scheduling policy.
+- multi-lane admission, lane fairness, deadlock detection, or global scheduling policy.
 
 Generic lane fairness and queueing remain outside the current certified saga contract. The only v1
 fairness guarantee is the Postgres operational FIFO rule for live non-expired waiters on a single

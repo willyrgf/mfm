@@ -883,7 +883,6 @@ side-effect ledger non-terminal, the signer lane can remain held until manual re
 - Pipelined nonces (DEC-1); per-attempt execution leases (DEC-7); feed sharding and cross-run
   priority (DEC-9); multi-lane admission (§3 Non-goals); `due_at` re-wake + tenure-release-on-wait
   (DEC-6/DEC-8, for long `Finalized` waits at scale).
-- D5–D11 defaults to be rubber-stamped at ratification.
 - Concrete shapes: the prepared-invocation submission anchor (adapter) and the state's semantic
   `IdempotencyInput` (now distinct).
 
