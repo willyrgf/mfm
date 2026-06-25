@@ -358,7 +358,10 @@ fn attempt_plan(
 ) -> Result<Option<AttemptPlan>> {
     if matches!(
         &node.framework,
-        Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_))
+        Some(
+            spec::FrameworkNodeSpec::ResolveSagaTerminal(_)
+                | spec::FrameworkNodeSpec::SideEffectVerify(_)
+        )
     ) {
         return Ok(None);
     }

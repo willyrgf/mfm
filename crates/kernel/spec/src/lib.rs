@@ -347,7 +347,7 @@ pub mod v1 {
     use mfm_ids::{
         AdapterKind, AdapterVersion, ArtifactId, CellId, DescriptorId, EffectKind, EffectVersion,
         LoweringVersion, NodeId, OperationInstanceId, OperationKind, OperationVersion, SchemaId,
-        ScopeId, SeedId, SemanticTypeId, SpecVersion, StateKind, StateVersion,
+        ScopeId, SeedId, SemanticTypeId, SideEffectPairId, SpecVersion, StateKind, StateVersion,
     };
 
     /// v1 spec-version string.
@@ -425,6 +425,51 @@ pub mod v1 {
             byte_len: bytes.as_bytes().len() as u64,
             media_type: MediaType::new("application/json")?,
         })
+    }
+
+    /// Derives the certified side-effect pair id for one submit node and contract.
+    pub fn side_effect_pair_id(
+        submit_node_id: &NodeId,
+        submit_output_cell_id: &CellId,
+        contract: &SideEffectContractSpec,
+    ) -> Result<SideEffectPairId> {
+        Ok(SideEffectPairId::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            *content_digest(serde_json::json!({
+                "alg": DigestAlgorithm::Sha256JcsV1.as_str(),
+                "lowering_version": LOWERING_VERSION,
+                "side_effect_contract": contract.json(),
+                "submit_node_id": submit_node_id.as_str(),
+                "submit_output_cell_id": submit_output_cell_id.as_str(),
+            }))?
+            .digest(),
+        ))
+    }
+
+    /// Derives the framework verify node id for a certified side-effect pair.
+    pub fn side_effect_verify_node_id(
+        submit_node_id: &NodeId,
+        pair_id: &SideEffectPairId,
+    ) -> Result<NodeId> {
+        Ok(NodeId::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            *content_digest(serde_json::json!({
+                "alg": DigestAlgorithm::Sha256JcsV1.as_str(),
+                "framework": "side_effect_verify",
+                "lowering_version": LOWERING_VERSION,
+                "pair_id": pair_id.as_str(),
+                "submit_node_id": submit_node_id.as_str(),
+            }))?
+            .digest(),
+        ))
+    }
+
+    /// Derives the framework verify stable key for a side-effect submit key.
+    pub fn side_effect_verify_stable_key(submit_key: &StableAuthorKey) -> Result<StableAuthorKey> {
+        StableAuthorKey::new(format!(
+            "framework/side-effect-verify/{}",
+            submit_key.as_str()
+        ))
     }
 
     /// Returns the deterministic unit input binding for a lifecycle framework node.
@@ -1789,6 +1834,8 @@ pub mod v1 {
     pub enum FrameworkNodeSpec {
         /// Same-value bridge framework node.
         Bridge(BridgeNodeSpec),
+        /// Side-effect verification framework node.
+        SideEffectVerify(SideEffectVerifyNodeSpec),
         /// Public-output render framework node.
         PublicOutputRender(PublicOutputRenderNodeSpec),
         /// Retention-manifest projection lifecycle framework node.
@@ -1804,6 +1851,7 @@ pub mod v1 {
         pub fn config_kind(&self) -> &'static str {
             match self {
                 Self::Bridge(_) => "bridge_same_value",
+                Self::SideEffectVerify(_) => "side_effect_verify",
                 Self::PublicOutputRender(_) => "public_output_render",
                 Self::ProjectRetentionManifest(_) => "project_retention_manifest",
                 Self::CompleteRun(_) => "complete_run",
@@ -1816,6 +1864,10 @@ pub mod v1 {
                 Self::Bridge(spec) => serde_json::json!({
                     "bridge": spec.json(),
                     "kind": "bridge",
+                }),
+                Self::SideEffectVerify(spec) => serde_json::json!({
+                    "kind": "side_effect_verify",
+                    "side_effect_verify": spec.json(),
                 }),
                 Self::PublicOutputRender(spec) => serde_json::json!({
                     "kind": "public_output_render",
@@ -1833,6 +1885,27 @@ pub mod v1 {
                     "kind": "resolve_saga_terminal",
                     "resolve_saga_terminal": spec.json(),
                 }),
+            })
+        }
+    }
+
+    /// Side-effect verification framework node metadata.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct SideEffectVerifyNodeSpec {
+        /// Certified side-effect pair id.
+        pub pair_id: SideEffectPairId,
+        /// Submit node that owns the external mutation boundary.
+        pub submit_node_id: NodeId,
+        /// Submit node's internal output cell used as structural pair anchor.
+        pub submit_output_cell_id: CellId,
+    }
+
+    impl SideEffectVerifyNodeSpec {
+        fn json(&self) -> serde_json::Value {
+            serde_json::json!({
+                "pair_id": self.pair_id.as_str(),
+                "submit_node_id": self.submit_node_id.as_str(),
+                "submit_output_cell_id": self.submit_output_cell_id.as_str(),
             })
         }
     }
@@ -3101,6 +3174,9 @@ pub mod v1 {
             "bridge" => Ok(FrameworkNodeSpec::Bridge(parse_bridge_node(required(
                 object, "bridge",
             )?)?)),
+            "side_effect_verify" => Ok(FrameworkNodeSpec::SideEffectVerify(
+                parse_side_effect_verify_node(required(object, "side_effect_verify")?)?,
+            )),
             "public_output_render" => Ok(FrameworkNodeSpec::PublicOutputRender(
                 parse_public_output_render_node(
                     required(object, "public_output_render")?,
@@ -3121,6 +3197,17 @@ pub mod v1 {
             )),
             kind => Err(json_error(format!("unsupported framework kind {kind:?}"))),
         }
+    }
+
+    fn parse_side_effect_verify_node(
+        value: &serde_json::Value,
+    ) -> Result<SideEffectVerifyNodeSpec> {
+        let object = object(value, "side-effect verify node")?;
+        Ok(SideEffectVerifyNodeSpec {
+            pair_id: identity(required_str(object, "pair_id")?)?,
+            submit_node_id: identity(required_str(object, "submit_node_id")?)?,
+            submit_output_cell_id: identity(required_str(object, "submit_output_cell_id")?)?,
+        })
     }
 
     fn parse_bridge_node(value: &serde_json::Value) -> Result<BridgeNodeSpec> {

@@ -416,7 +416,9 @@ impl CertifiedFrameworkLifecycle {
                 Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_)) => {
                     set_framework_role(&mut resolve, node, "resolve-saga-terminal lifecycle node")?;
                 }
-                Some(spec::FrameworkNodeSpec::Bridge(_)) | None => {}
+                Some(spec::FrameworkNodeSpec::Bridge(_))
+                | Some(spec::FrameworkNodeSpec::SideEffectVerify(_))
+                | None => {}
             }
         }
 
@@ -2194,7 +2196,21 @@ impl<'a> DraftLowerer<'a> {
     fn lower_state_nodes(&mut self) -> Result<()> {
         for node in self.draft.state_nodes() {
             let lowered = self.lower_state_node(node)?;
-            self.nodes.push(lowered);
+            let side_effect = lowered.side_effect.is_some();
+            self.nodes.push(lowered.clone());
+            if side_effect {
+                let verify = node.side_effect_verify.as_ref().ok_or_else(|| {
+                    problem(
+                        ProblemClass::InvalidTopology,
+                        format!(
+                            "forward side-effect node {} is missing verify pair",
+                            node.node_id
+                        ),
+                    )
+                })?;
+                let verify = self.lower_side_effect_verify_node(node, &lowered, verify)?;
+                self.nodes.push(verify);
+            }
         }
         Ok(())
     }
@@ -2202,6 +2218,15 @@ impl<'a> DraftLowerer<'a> {
     fn lower_remediation_nodes(&mut self) -> Result<BTreeMap<NodeId, spec::NodeSpec>> {
         let mut remediations = BTreeMap::new();
         for (forward_node_id, node) in self.draft.remediation_nodes() {
+            if node.side_effect_verify.is_some() {
+                return Err(problem(
+                    ProblemClass::InvalidTopology,
+                    format!(
+                        "remediation node {} must not carry a verify pair",
+                        node.node_id
+                    ),
+                ));
+            }
             let lowered = self.lower_state_node(node)?;
             remediations.insert(forward_node_id.clone(), lowered);
         }
@@ -2300,6 +2325,126 @@ impl<'a> DraftLowerer<'a> {
             framework: None,
             planning_lineage,
             deterministic_predecessors: self.predecessors_for_inputs(&input_cells)?,
+        })
+    }
+
+    fn lower_side_effect_verify_node(
+        &mut self,
+        source: &program::StateNodeSpec,
+        submit: &spec::NodeSpec,
+        verify: &program::SideEffectVerifyDraftSpec,
+    ) -> Result<spec::NodeSpec> {
+        let submit_contract = submit.side_effect.as_ref().ok_or_else(|| {
+            problem(
+                ProblemClass::InvalidTopology,
+                format!("submit node {} is not a side-effect node", submit.node_id),
+            )
+        })?;
+        let expected_pair =
+            spec::side_effect_pair_id(&submit.node_id, &submit.output_cell, submit_contract)
+                .map_err(|error| CertifyError::Spec(error.to_string()))?;
+        if verify.pair_id != expected_pair {
+            return Err(problem(
+                ProblemClass::InvalidTopology,
+                format!(
+                    "verify pair for submit node {} is not stable-id derived",
+                    submit.node_id
+                ),
+            ));
+        }
+        let expected_verify_node =
+            spec::side_effect_verify_node_id(&submit.node_id, &verify.pair_id)
+                .map_err(|error| CertifyError::Spec(error.to_string()))?;
+        if verify.node_id != expected_verify_node {
+            return Err(problem(
+                ProblemClass::InvalidTopology,
+                format!(
+                    "verify node for submit node {} is not stable-id derived",
+                    submit.node_id
+                ),
+            ));
+        }
+        let config_ref = framework_config_ref("side_effect_verify", &verify.node_id)?;
+        self.insert_config_ref(config_ref.clone())?;
+        let submit_output_cell = self
+            .cells
+            .iter()
+            .find(|cell| cell.cell_id == submit.output_cell)
+            .cloned()
+            .ok_or_else(|| {
+                problem(
+                    ProblemClass::InvalidTopology,
+                    format!("submit node {} output cell is missing", submit.node_id),
+                )
+            })?;
+        let input_binding = spec::framework_lifecycle_receipt_input_binding(
+            "side_effect_verify",
+            "submit_output",
+            &submit_output_cell,
+        )
+        .map_err(|error| CertifyError::Spec(error.to_string()))?;
+        let descriptor = framework_side_effect_verify_descriptor(
+            &source.output_schema_id,
+            &source.output_semantic_type_id,
+            &config_ref.schema_id,
+            &input_binding.input_schema_id,
+        )?;
+        self.insert_descriptor(spec::DescriptorIdentity::State(Box::new(
+            descriptor.clone(),
+        )))?;
+        let planning_lineage = lower_planning_lineage(&source.planning_lineage);
+        let config_ref_digest = config_ref_digest(&config_ref)?;
+        self.insert_value_lineage(spec::ValueLineage {
+            lineage_ref: lineage_ref(verify.output_value_lineage.digest()),
+            scope_id: source.scope_id.clone(),
+            producer: spec::CellProducer::Node(verify.node_id.clone()),
+            input_cells: vec![submit.output_cell.clone()],
+            config_ref_digest: Some(config_ref_digest),
+            planning_lineage: planning_lineage.clone(),
+            domain_keys: verify
+                .output_domain_keys
+                .iter()
+                .map(lower_domain_key_ref)
+                .collect(),
+            transform_policy: spec::LineageTransformPolicy::StateOutput,
+        })?;
+        self.insert_cell(spec::CellSpec {
+            cell_id: verify.output_cell_id.clone(),
+            producer: spec::CellProducer::Node(verify.node_id.clone()),
+            scope_id: source.scope_id.clone(),
+            semantic_type_id: source.output_semantic_type_id.clone(),
+            schema_id: source.output_schema_id.clone(),
+            value_lineage: lineage_ref(verify.output_value_lineage.digest()),
+            terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
+            storage_policy: spec::StoragePolicy::ContentAddressed,
+            redaction_policy: spec::RedactionPolicy::Public,
+        })?;
+        Ok(spec::NodeSpec {
+            node_id: verify.node_id.clone(),
+            stable_key: spec::side_effect_verify_stable_key(&stable_author_key(
+                source.key.as_str(),
+            )?)
+            .map_err(|error| CertifyError::Spec(error.to_string()))?,
+            scope_id: source.scope_id.clone(),
+            state_kind: descriptor.state_kind,
+            state_version: descriptor.state_version,
+            descriptor_id: descriptor.descriptor_id,
+            config_ref,
+            input_bindings: input_binding,
+            output_cell: verify.output_cell_id.clone(),
+            effect_kind: descriptor.effect_kind,
+            capability_bindings: descriptor.capabilities,
+            adapter_bindings: Vec::new(),
+            side_effect: None,
+            framework: Some(spec::FrameworkNodeSpec::SideEffectVerify(
+                spec::SideEffectVerifyNodeSpec {
+                    pair_id: verify.pair_id.clone(),
+                    submit_node_id: submit.node_id.clone(),
+                    submit_output_cell_id: submit.output_cell.clone(),
+                },
+            )),
+            planning_lineage,
+            deterministic_predecessors: vec![submit.node_id.clone()],
         })
     }
 
@@ -3481,6 +3626,12 @@ fn validate_builtin_framework_state_descriptor(
             &descriptor.config_schema_id,
             &descriptor.input_schema_id,
         )?),
+        "mfm.framework.side_effect_verify" => Some(framework_side_effect_verify_descriptor(
+            &descriptor.output_schema_id,
+            &descriptor.output_semantic_type_id,
+            &descriptor.config_schema_id,
+            &descriptor.input_schema_id,
+        )?),
         "mfm.framework.render_public_outputs" => Some(framework_render_descriptor(
             &descriptor.output_schema_id,
             &descriptor.output_semantic_type_id,
@@ -4060,6 +4211,13 @@ fn validate_remediation_binding_scope(
 ) -> Result<()> {
     let mut allowed = BTreeSet::new();
     allowed.insert(forward.output_cell.clone());
+    for node in forward_nodes.values() {
+        if let Some(spec::FrameworkNodeSpec::SideEffectVerify(verify)) = &node.framework {
+            if verify.submit_node_id == forward.node_id {
+                allowed.insert(node.output_cell.clone());
+            }
+        }
+    }
     for input_cell in collect_input_cells(&forward.input_bindings.root) {
         collect_forward_ancestor_cells(input_cell, cells, forward_nodes, &mut allowed)?;
     }
@@ -4386,6 +4544,11 @@ fn expected_node_lineage(
             input_cells: vec![bridge.source_cell_id.clone()],
             config_ref_digest: None,
             transform_policy: spec::LineageTransformPolicy::SameValueBridge,
+        }),
+        Some(spec::FrameworkNodeSpec::SideEffectVerify(verify)) => Ok(ExpectedNodeLineage {
+            input_cells: vec![verify.submit_output_cell_id.clone()],
+            config_ref_digest: Some(config_ref_digest.clone()),
+            transform_policy: spec::LineageTransformPolicy::StateOutput,
         }),
         Some(spec::FrameworkNodeSpec::PublicOutputRender(render)) => Ok(ExpectedNodeLineage {
             input_cells: render
@@ -5482,6 +5645,34 @@ fn framework_bridge_descriptor(
             .map_err(|error| lower(error.to_string()))?
             .kind,
         runner: "pure",
+        capabilities: NoCaps::descriptor().map_err(|error| lower(error.to_string()))?,
+    })
+}
+
+fn framework_side_effect_verify_descriptor(
+    output_schema_id: &SchemaId,
+    output_semantic_type_id: &SemanticTypeId,
+    config_schema_id: &SchemaId,
+    input_schema_id: &SchemaId,
+) -> Result<spec::StateDescriptorIdentity> {
+    let state_kind = state_kind_json(
+        "side_effect_verify",
+        serde_json::json!({ "framework": "side_effect_verify" }),
+    )?;
+    let state_version = StateVersion::new("mfm.framework.state.side_effect_verify.v1")
+        .map_err(|error| lower(error.to_string()))?;
+    framework_state_descriptor(FrameworkStateDescriptorParts {
+        name: "mfm.framework.side_effect_verify",
+        state_kind,
+        state_version,
+        config_schema_id,
+        input_schema_id,
+        output_schema_id,
+        output_semantic_type_id,
+        effect_kind: mfm_effects::ReadExternal::descriptor()
+            .map_err(|error| lower(error.to_string()))?
+            .kind,
+        runner: "read_external",
         capabilities: NoCaps::descriptor().map_err(|error| lower(error.to_string()))?,
     })
 }
@@ -7301,6 +7492,116 @@ mod tests {
     }
 
     #[test]
+    fn certification_lowers_side_effect_submit_verify_pair() {
+        let (_registry, typed) = side_effect_registry_and_spec();
+        let submit = side_effect_submit_node(&typed);
+        let (verify_node, verify) = side_effect_verify_node(&typed);
+        let contract = submit.side_effect.as_ref().expect("submit side effect");
+        let expected_pair =
+            spec::side_effect_pair_id(&submit.node_id, &submit.output_cell, contract)
+                .expect("pair id");
+
+        assert_eq!(verify.submit_node_id, submit.node_id);
+        assert_eq!(verify.submit_output_cell_id, submit.output_cell);
+        assert_eq!(verify.pair_id, expected_pair);
+        assert_eq!(
+            verify_node.deterministic_predecessors,
+            vec![submit.node_id.clone()]
+        );
+        assert_ne!(verify_node.output_cell, submit.output_cell);
+        assert!(typed
+            .public_outputs
+            .outputs
+            .iter()
+            .any(|output| output.cell_id == verify_node.output_cell));
+        assert!(!typed
+            .public_outputs
+            .outputs
+            .iter()
+            .any(|output| output.cell_id == submit.output_cell));
+    }
+
+    #[test]
+    fn certification_rejects_missing_side_effect_verify_pair() {
+        let (registry, base) = side_effect_registry_and_spec();
+
+        assert_rejects(&registry, &base, ProblemClass::InvalidTopology, |spec| {
+            spec.nodes.retain(|node| {
+                !matches!(
+                    node.framework,
+                    Some(spec::FrameworkNodeSpec::SideEffectVerify(_))
+                )
+            });
+        });
+    }
+
+    #[test]
+    fn certification_rejects_orphan_side_effect_verify_pair() {
+        let (registry, base) = side_effect_registry_and_spec();
+
+        assert_rejects(&registry, &base, ProblemClass::InvalidTopology, |spec| {
+            spec.nodes.retain(|node| node.side_effect.is_none());
+        });
+    }
+
+    #[test]
+    fn certification_rejects_duplicate_side_effect_verify_pair() {
+        let (registry, base) = side_effect_registry_and_spec();
+
+        assert_rejects(&registry, &base, ProblemClass::InvalidTopology, |spec| {
+            let duplicate = side_effect_verify_node(spec).0.clone();
+            spec.nodes.push(duplicate);
+        });
+    }
+
+    #[test]
+    fn certification_rejects_bad_side_effect_verify_output_producer() {
+        let (registry, base) = side_effect_registry_and_spec();
+
+        assert_rejects(&registry, &base, ProblemClass::InvalidDataMeaning, |spec| {
+            let submit_node_id = side_effect_submit_node(spec).node_id.clone();
+            let verify_output_cell = side_effect_verify_node(spec).0.output_cell.clone();
+            let cell = spec
+                .cells
+                .iter_mut()
+                .find(|cell| cell.cell_id == verify_output_cell)
+                .expect("verify output cell");
+            cell.producer = spec::CellProducer::Node(submit_node_id);
+        });
+    }
+
+    #[test]
+    fn certification_rejects_public_submit_output_cell() {
+        let (registry, base) = side_effect_registry_and_spec();
+
+        assert_rejects(
+            &registry,
+            &base,
+            ProblemClass::InvalidTerminalShape,
+            |spec| {
+                let submit_output_cell = side_effect_submit_node(spec).output_cell.clone();
+                let submit_cell = spec
+                    .cells
+                    .iter()
+                    .find(|cell| cell.cell_id == submit_output_cell)
+                    .expect("submit output cell")
+                    .clone();
+                let public_output = spec
+                    .public_outputs
+                    .outputs
+                    .first_mut()
+                    .expect("public output");
+                public_output.cell_id = submit_cell.cell_id;
+                public_output.producer = submit_cell.producer;
+                public_output.scope_id = submit_cell.scope_id;
+                public_output.semantic_type_id = submit_cell.semantic_type_id;
+                public_output.schema_id = submit_cell.schema_id;
+                public_output.value_lineage = submit_cell.value_lineage;
+            },
+        );
+    }
+
+    #[test]
     fn side_effect_verification_policy_is_spec_authority_not_registry_authority() {
         let receipt =
             side_effect_draft_with_verification(program::SideEffectVerificationSpec::Receipt);
@@ -7914,6 +8215,38 @@ mod tests {
             .spec()
             .clone();
         (registry, spec)
+    }
+
+    fn side_effect_registry_and_spec() -> (CertificationRegistry, spec::TypedExecutionSpec) {
+        let draft = side_effect_draft();
+        let registry = CertificationRegistry::from_program_draft(&draft).expect("registry");
+        let spec = certify_program_draft(&draft)
+            .expect("certified")
+            .validated_spec()
+            .spec()
+            .clone();
+        (registry, spec)
+    }
+
+    fn side_effect_submit_node(typed: &spec::TypedExecutionSpec) -> &spec::NodeSpec {
+        typed
+            .nodes
+            .iter()
+            .find(|node| node.side_effect.is_some() && node.framework.is_none())
+            .expect("side-effect submit node")
+    }
+
+    fn side_effect_verify_node(
+        typed: &spec::TypedExecutionSpec,
+    ) -> (&spec::NodeSpec, &spec::SideEffectVerifyNodeSpec) {
+        typed
+            .nodes
+            .iter()
+            .find_map(|node| match &node.framework {
+                Some(spec::FrameworkNodeSpec::SideEffectVerify(verify)) => Some((node, verify)),
+                _ => None,
+            })
+            .expect("side-effect verify node")
     }
 
     fn side_effect_spec_with_manual(
