@@ -304,10 +304,10 @@ pub use admission_lanes::{
     resource_wait_fifo_admission_token, AdmissionAdvisoryLockKey, AdmissionLane,
     AdmissionLaneClass, AdmissionLaneId, AdmissionLaneKey, AdmissionLaneMode, AdmissionLease,
     AdmissionModeSpec, AdmissionToken, AdmissionWaiter, AdmissionWaiterId,
-    ExecutionClaimAdmissionLane, ExpiredExecutionClaim, NowaitSkip, NowaitSkipAdmissionBusy,
-    NowaitSkipAdmissionResult, ResourceAdmissionLane, WaitFifo, WaitFifoAdmissionBlock,
-    WaitFifoAdmissionGrant, WaitFifoAdmissionResult, EXECUTION_CLAIM_HEARTBEAT_INTERVAL_SECS,
-    EXECUTION_CLAIM_LEASE_TTL_SECS,
+    ExecutionClaimAdmissionLane, ExecutionClaimStatus, ExpiredExecutionClaim, NowaitSkip,
+    NowaitSkipAdmissionBusy, NowaitSkipAdmissionResult, ResourceAdmissionLane, WaitFifo,
+    WaitFifoAdmissionBlock, WaitFifoAdmissionGrant, WaitFifoAdmissionResult,
+    EXECUTION_CLAIM_HEARTBEAT_INTERVAL_SECS, EXECUTION_CLAIM_LEASE_TTL_SECS,
 };
 
 /// Shared canonical-JSON codec for kernel events, projections, and saga types.
@@ -4617,6 +4617,12 @@ pub trait ExecutionClaimStore {
         token: AdmissionToken,
     ) -> AsyncStoreFuture<'a, NowaitSkipAdmissionResult, Self::Error>;
 
+    /// Returns the current holder status for the execution claim without mutating it.
+    fn execution_claim_status<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> AsyncStoreFuture<'a, ExecutionClaimStatus, Self::Error>;
+
     /// Renews the execution claim only when `token` matches the current holder token.
     fn renew_execution_claim<'a>(
         &'a self,
@@ -5007,6 +5013,18 @@ impl RunMemoryCore {
             },
         );
         Ok(NowaitSkipAdmissionResult::Admitted(lease))
+    }
+
+    fn execution_claim_status(&self, run_id: &RunId) -> Result<ExecutionClaimStatus> {
+        let Some(holder) = self.execution_claims.get(run_id) else {
+            return Ok(ExecutionClaimStatus::Unclaimed);
+        };
+        let lease = execution_claim_lease(holder);
+        if holder.lease_expires_at_unix_ms <= unix_time_ms()? {
+            Ok(ExecutionClaimStatus::Expired(lease))
+        } else {
+            Ok(ExecutionClaimStatus::Live(lease))
+        }
     }
 
     fn renew_execution_claim(
@@ -5820,6 +5838,16 @@ impl ExecutionClaimStore for AsyncInMemoryRunStore {
         let result = self
             .lock_inner()
             .and_then(|mut store| store.acquire_execution_claim(run_id, token));
+        Box::pin(std::future::ready(result))
+    }
+
+    fn execution_claim_status<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> AsyncStoreFuture<'a, ExecutionClaimStatus, Self::Error> {
+        let result = self
+            .lock_inner()
+            .and_then(|store| store.execution_claim_status(run_id));
         Box::pin(std::future::ready(result))
     }
 

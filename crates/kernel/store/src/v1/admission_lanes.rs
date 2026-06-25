@@ -350,6 +350,17 @@ pub struct NowaitSkipAdmissionBusy {
     pub holder: Option<AdmissionLease>,
 }
 
+/// Read-only execution-claim status for one run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecutionClaimStatus {
+    /// No holder token is present for this run's execution-claim lane.
+    Unclaimed,
+    /// A holder token is present and its lease has not expired.
+    Live(AdmissionLease),
+    /// A holder token is present but its lease has expired and needs explicit reaping.
+    Expired(AdmissionLease),
+}
+
 /// Expired execution claim exposed for explicit manual reaping.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExpiredExecutionClaim {

@@ -210,6 +210,28 @@ pub(super) async fn acquire_execution_claim_client(
     ))
 }
 
+pub(super) async fn execution_claim_status_client(
+    pool: &PgPool,
+    run_id: &RunId,
+) -> Result<mfm_store::v1::ExecutionClaimStatus> {
+    let lane = mfm_store::v1::ExecutionClaimAdmissionLane::from_run_id(run_id)?;
+    let lane_id = lane.id().to_vec();
+    let row = sqlx::query(
+        "SELECT holder_token, \
+            (EXTRACT(EPOCH FROM lease_expires_at) * 1000)::BIGINT AS lease_expires_at_unix_ms, \
+            (lease_expires_at <= statement_timestamp()) AS lease_expired \
+         FROM admission_lane WHERE class = $1 AND lane_id = $2",
+    )
+    .bind(lane.class().as_str())
+    .bind(&lane_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| database_error("failed to read execution claim status", error))?;
+    row.map(|row| execution_claim_status_from_row(&lane, row))
+        .transpose()
+        .map(|status| status.unwrap_or(mfm_store::v1::ExecutionClaimStatus::Unclaimed))
+}
+
 pub(super) async fn renew_execution_claim_client(
     pool: &PgPool,
     run_id: &RunId,
@@ -454,6 +476,34 @@ fn optional_execution_claim_lease_from_row(
             .try_get("lease_expires_at_unix_ms")
             .map_err(|error| database_error("failed to decode execution claim lease", error))?,
     }))
+}
+
+fn execution_claim_status_from_row(
+    lane: &mfm_store::v1::ExecutionClaimAdmissionLane,
+    row: PgRow,
+) -> Result<mfm_store::v1::ExecutionClaimStatus> {
+    let Some(token) = row
+        .try_get::<Option<String>, _>("holder_token")
+        .map_err(|error| database_error("failed to decode execution claim token", error))?
+    else {
+        return Ok(mfm_store::v1::ExecutionClaimStatus::Unclaimed);
+    };
+    let lease = AdmissionLease {
+        lane: lane.erased_key(),
+        token: AdmissionToken::new(token)?,
+        lease_expires_at_unix_ms: row
+            .try_get("lease_expires_at_unix_ms")
+            .map_err(|error| database_error("failed to decode execution claim lease", error))?,
+    };
+    let expired = row
+        .try_get::<Option<bool>, _>("lease_expired")
+        .map_err(|error| database_error("failed to decode execution claim lease status", error))?
+        .unwrap_or(false);
+    if expired {
+        Ok(mfm_store::v1::ExecutionClaimStatus::Expired(lease))
+    } else {
+        Ok(mfm_store::v1::ExecutionClaimStatus::Live(lease))
+    }
 }
 
 fn expired_execution_claim_from_row(row: PgRow) -> Result<mfm_store::v1::ExpiredExecutionClaim> {

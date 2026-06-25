@@ -4171,6 +4171,12 @@ async fn run_admission_returns_bound_context_with_capability_and_framework_autho
         run_admitted.runner_executables,
         authority.bound_context().runner_executables()
     );
+    assert_eq!(
+        scheduler
+            .run_admitted_binding_compatibility(&fixture.runtime_spec, &run_admitted)
+            .expect("binding compatibility"),
+        RunAdmittedBindingCompatibility::Compatible
+    );
 }
 
 #[test]
@@ -4347,6 +4353,20 @@ async fn resume_rejects_runner_executable_identity_mismatch_before_attempt_start
         .expect("binding b");
     let resume_scheduler =
         test_scheduler(register_fixture_capabilities(changed_registry, &fixture));
+    let run_admitted = store
+        .load_run_stream(&fixture.run_id)
+        .into_iter()
+        .find_map(|event| match event.payload().clone() {
+            events::KernelEventPayload::RunAdmitted(payload) => Some(payload),
+            _ => None,
+        })
+        .expect("RunAdmitted payload");
+    assert_eq!(
+        resume_scheduler
+            .run_admitted_binding_compatibility(&fixture.runtime_spec, &run_admitted)
+            .expect("binding compatibility"),
+        RunAdmittedBindingCompatibility::IncompatibleExecutable
+    );
     let error = drive_once(
         &resume_scheduler,
         &mut store,
