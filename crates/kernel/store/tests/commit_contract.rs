@@ -35,8 +35,8 @@ use mfm_store::v1::{
     RunEventStore, RunMode, RunState, SagaAdmitToken, SagaEngagementProjection,
     SagaEngagementReason, SagaTerminal, SagaTerminalProof, SideEffectLedgerPhase,
     SideEffectLedgerRef, SideEffectPhase, SideEffectProgress, SideEffectTerminal,
-    StateAttemptStarted, StoreError, StreamSeq, EXECUTION_CLAIM_HEARTBEAT_INTERVAL_SECS,
-    EXECUTION_CLAIM_LEASE_TTL_SECS,
+    StateAttemptStarted, StoreError, StreamSeq, TrustScopeId, TrustScopeStore,
+    EXECUTION_CLAIM_HEARTBEAT_INTERVAL_SECS, EXECUTION_CLAIM_LEASE_TTL_SECS,
 };
 
 const SPEC_MEDIA_TYPE: &str = "application/vnd.mfm.typed-execution-spec+json;version=1";
@@ -568,6 +568,30 @@ fn execution_claim_contract_defaults_are_explicit() {
     assert_eq!(EXECUTION_CLAIM_LEASE_TTL_SECS, 60);
     assert_eq!(EXECUTION_CLAIM_HEARTBEAT_INTERVAL_SECS, 20);
     assert!(AdmissionToken::new("").is_err());
+}
+
+#[test]
+fn trust_scope_id_contract_is_store_owned_shape() {
+    let trust_scope = TrustScopeId::new("mfm.trust_scope.v1:0123456789abcdef0123456789abcdef")
+        .expect("trust scope id");
+    assert_eq!(
+        trust_scope.as_str(),
+        "mfm.trust_scope.v1:0123456789abcdef0123456789abcdef"
+    );
+    assert!(TrustScopeId::new("mfm.trust_scope.v2:0123456789abcdef0123456789abcdef").is_err());
+    assert!(TrustScopeId::new("mfm.trust_scope.v1:0123456789ABCDEF0123456789abcdef").is_err());
+    assert!(TrustScopeId::new("mfm.trust_scope.v1:0123456789abcdef").is_err());
+}
+
+#[test]
+fn in_memory_store_exposes_store_owned_trust_scope() {
+    let store = AsyncInMemoryRunStore::default();
+    let trust_scope =
+        poll_ready_store_future(store.load_trust_scope_id()).expect("load in-memory trust scope");
+    assert_eq!(
+        trust_scope.as_str(),
+        "mfm.trust_scope.v1:00000000000000000000000000000000"
+    );
 }
 
 #[test]

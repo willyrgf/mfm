@@ -25,6 +25,7 @@ use mfm_store::v1::{
     PreparedCommit, PreparedCommitPlan, RequiredRunState, ResourceLaneKey, Retention, RunAdmission,
     RunState, SagaEngagementReason, SagaTerminal, SagaTerminalProof, SideEffectPhase,
     SideEffectProgress, SideEffectTerminal, StateAttemptStarted, StoreError, StreamSeq,
+    TrustScopeId, TrustScopeStore,
 };
 use sqlx::postgres::PgConnectOptions;
 use sqlx::AssertSqlSafe;
@@ -147,6 +148,37 @@ async fn schema_validation_rejects_missing_mutation_guard_trigger() {
     crate::schema::validate_pool(&store.pool)
         .await
         .expect_err("missing mutation guard fails schema validation");
+
+    drop_schema(&store, &schema).await;
+}
+
+#[tokio::test]
+async fn store_trust_scope_survives_reconnects_and_rejects_mutation() {
+    let (store, schema) = test_store().await;
+
+    let trust_scope = store.load_trust_scope_id().await.expect("load trust scope");
+    assert!(trust_scope.as_str().starts_with(TrustScopeId::PREFIX));
+
+    let restarted = PostgresRunStore {
+        pool: store.pool.clone(),
+    };
+    let restarted_trust_scope = restarted
+        .load_trust_scope_id()
+        .await
+        .expect("load restarted trust scope");
+    assert_eq!(trust_scope, restarted_trust_scope);
+
+    sqlx::query(
+        "UPDATE store_metadata \
+         SET trust_scope_id = 'mfm.trust_scope.v1:ffffffffffffffffffffffffffffffff' \
+         WHERE singleton",
+    )
+    .execute(&store.pool)
+    .await
+    .expect_err("trust scope mutation is rejected");
+    crate::schema::validate_pool(&store.pool)
+        .await
+        .expect("metadata remains valid");
 
     drop_schema(&store, &schema).await;
 }
