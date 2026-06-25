@@ -1195,7 +1195,7 @@ fn assert_resource_lane_blocked(
     assert_eq!(holder.ledger_key, side_effect_ledger_key());
 }
 
-fn assert_resource_lane_waiter_blocked(
+fn assert_wait_fifo_admission_blocked(
     outcome: CommitOutcome,
     expected_lane_key: &ResourceLaneKey,
     expected_holder_run: Option<&RunId>,
@@ -1214,7 +1214,7 @@ fn assert_resource_lane_waiter_blocked(
             panic!("unexpected block holder {actual:?}, expected {expected:?}")
         }
     }
-    block.waiter.expect("resource lane waiter block")
+    block.waiter.expect("wait-fifo admission waiter block")
 }
 
 fn assert_corruption(error: PostgresStoreError, expected: &str) {
@@ -2548,7 +2548,7 @@ async fn resource_lane_append_admission_uses_stream_authority() {
 }
 
 #[tokio::test]
-async fn resource_lane_waiters_enforce_single_lane_fifo_after_release() {
+async fn admission_waiters_enforce_single_lane_fifo_after_release() {
     let (store, schema) = test_store().await;
     let holder_run = run_id(32);
     let first_waiter = run_id(33);
@@ -2577,14 +2577,14 @@ async fn resource_lane_waiters_enforce_single_lane_fifo_after_release() {
         .await
         .expect("holder resource lane prepare");
 
-    let first_waiter_block = assert_resource_lane_waiter_blocked(
+    let first_waiter_block = assert_wait_fifo_admission_blocked(
         append_resource_lane_prepare(&store, &first_waiter, "fifo-b-prepare", lane_value, 33)
             .await
             .expect("first waiter blocked by holder"),
         &lane_key,
         Some(&holder_run),
     );
-    let second_waiter_block = assert_resource_lane_waiter_blocked(
+    let second_waiter_block = assert_wait_fifo_admission_blocked(
         append_resource_lane_prepare(&store, &second_waiter, "fifo-c-prepare", lane_value, 34)
             .await
             .expect("second waiter blocked by holder"),
@@ -2597,7 +2597,7 @@ async fn resource_lane_waiters_enforce_single_lane_fifo_after_release() {
         .await
         .expect("holder release");
 
-    let second_retry_block = assert_resource_lane_waiter_blocked(
+    let second_retry_block = assert_wait_fifo_admission_blocked(
         append_resource_lane_prepare(&store, &second_waiter, "fifo-c-retry-1", lane_value, 34)
             .await
             .expect("second waiter cannot bypass first waiter"),
@@ -2625,7 +2625,7 @@ async fn resource_lane_waiters_enforce_single_lane_fifo_after_release() {
         first_waiter
     );
 
-    assert_resource_lane_waiter_blocked(
+    assert_wait_fifo_admission_blocked(
         append_resource_lane_prepare(&store, &second_waiter, "fifo-c-retry-2", lane_value, 34)
             .await
             .expect("second waiter blocked by first waiter holder"),

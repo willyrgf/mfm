@@ -67,10 +67,10 @@ impl PostgresRunStore {
                 "run commit head does not match persisted event stream".to_owned(),
             ));
         }
-        let locked_resource_lane_ids =
+        let locked_resource_admission_lanes =
             lock_resource_lanes_for_request_tx(&mut tx, request, &run_projection).await?;
-        for lane_id in &locked_resource_lane_ids {
-            expire_stale_waiters_tx(&mut tx, lane_id).await?;
+        for lane in locked_resource_admission_lanes.values() {
+            expire_wait_fifo_waiters_tx(&mut tx, lane).await?;
         }
         let resource_lane_state = load_resource_lane_state_tx(&mut tx).await?;
         let projections =
@@ -90,7 +90,14 @@ impl PostgresRunStore {
             StagedCommitOutcome::AdmissionBlocked(block) => {
                 if let Some(admission) = &claim_admission {
                     let mut block = *block;
-                    block.waiter = Some(enqueue_or_refresh_waiter_tx(&mut tx, admission).await?);
+                    block.waiter = Some(
+                        enqueue_or_refresh_wait_fifo_waiter_tx(
+                            &mut tx,
+                            &admission.lane,
+                            &admission.admission_token,
+                        )
+                        .await?,
+                    );
                     tx.commit().await.map_err(|_| {
                         PostgresStoreError::Database("failed to commit transaction")
                     })?;
@@ -186,7 +193,8 @@ impl PostgresRunStore {
             .map_err(|error| database_error("failed to insert run event", error))?;
         }
         if let Some(admission) = &claim_admission {
-            mark_waiter_claimed_tx(&mut tx, admission).await?;
+            mark_wait_fifo_waiter_admitted_tx(&mut tx, &admission.lane, &admission.admission_token)
+                .await?;
         }
         notify_observation_change_tx(&mut tx).await?;
 

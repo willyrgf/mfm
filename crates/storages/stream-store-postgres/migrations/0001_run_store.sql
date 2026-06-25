@@ -148,41 +148,70 @@ CREATE TABLE run_artifact_admissions (
   CONSTRAINT run_artifact_admissions_seq_positive CHECK (first_seq >= 1)
 );
 
-CREATE TABLE resource_lane_waiter_counters (
-  lane_id BYTEA PRIMARY KEY,
-  next_ticket BIGINT NOT NULL,
+CREATE TABLE admission_lane (
+  class TEXT NOT NULL,
+  lane_id BYTEA NOT NULL,
+  mode TEXT NOT NULL,
+  next_ticket BIGINT NULL,
+  holder_token TEXT NULL,
+  lease_expires_at TIMESTAMPTZ NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp(),
-  CONSTRAINT resource_lane_waiter_counters_lane_id_len CHECK (octet_length(lane_id) = 32),
-  CONSTRAINT resource_lane_waiter_counters_next_ticket_positive CHECK (next_ticket >= 1)
+  PRIMARY KEY (class, lane_id),
+  CONSTRAINT admission_lane_id_len CHECK (octet_length(lane_id) = 32),
+  CONSTRAINT admission_lane_class_v1 CHECK (class IN ('resource_lane', 'execution_claim')),
+  CONSTRAINT admission_lane_mode_v1 CHECK (mode IN ('wait_fifo', 'nowait_skip')),
+  CONSTRAINT admission_lane_class_mode_v1 CHECK (
+    (class = 'resource_lane' AND mode = 'wait_fifo')
+    OR (class = 'execution_claim' AND mode = 'nowait_skip')
+  ),
+  CONSTRAINT admission_lane_wait_fifo_shape CHECK (
+    mode <> 'wait_fifo'
+    OR (
+      next_ticket IS NOT NULL
+      AND next_ticket >= 1
+      AND holder_token IS NULL
+      AND lease_expires_at IS NULL
+    )
+  ),
+  CONSTRAINT admission_lane_nowait_skip_shape CHECK (
+    mode <> 'nowait_skip'
+    OR (
+      next_ticket IS NULL
+      AND ((holder_token IS NULL AND lease_expires_at IS NULL)
+        OR (holder_token IS NOT NULL AND lease_expires_at IS NOT NULL))
+    )
+  )
 );
 
-CREATE TABLE resource_lane_waiters (
-  waiter_id TEXT PRIMARY KEY,
+CREATE TABLE admission_waiter (
+  class TEXT NOT NULL,
   lane_id BYTEA NOT NULL,
   lane_ticket BIGINT NOT NULL,
-  run_id TEXT NOT NULL,
-  node_id TEXT NOT NULL,
-  attempt_id TEXT NOT NULL,
-  ledger_key TEXT NOT NULL,
-  invocation_epoch INTEGER NOT NULL,
-  claim_fingerprint TEXT NOT NULL,
-  status TEXT NOT NULL CHECK (status IN ('waiting', 'claimed', 'cancelled', 'expired')),
+  waiter_id TEXT NOT NULL,
+  token TEXT NOT NULL,
+  status TEXT NOT NULL,
   enqueued_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp(),
   lease_expires_at TIMESTAMPTZ NOT NULL,
-  CONSTRAINT resource_lane_waiters_lane_id_len CHECK (octet_length(lane_id) = 32),
-  CONSTRAINT resource_lane_waiters_lane_ticket_positive CHECK (lane_ticket >= 1),
-  CONSTRAINT resource_lane_waiters_invocation_epoch_nonnegative CHECK (invocation_epoch >= 0),
-  UNIQUE (lane_id, lane_ticket),
-  UNIQUE (lane_id, claim_fingerprint)
+  PRIMARY KEY (class, lane_id, lane_ticket),
+  CONSTRAINT admission_waiter_lane_fk FOREIGN KEY (class, lane_id) REFERENCES admission_lane(class, lane_id) ON DELETE RESTRICT,
+  CONSTRAINT admission_waiter_resource_wait_fifo_v1 CHECK (class = 'resource_lane'),
+  CONSTRAINT admission_waiter_lane_id_len CHECK (octet_length(lane_id) = 32),
+  CONSTRAINT admission_waiter_lane_ticket_positive CHECK (lane_ticket >= 1),
+  CONSTRAINT admission_waiter_id_nonempty CHECK (waiter_id <> ''),
+  CONSTRAINT admission_waiter_token_nonempty CHECK (token <> ''),
+  CONSTRAINT admission_waiter_status_v1 CHECK (status IN ('waiting', 'admitted', 'expired')),
+  UNIQUE (waiter_id),
+  UNIQUE (class, lane_id, token)
 );
 
-CREATE INDEX resource_lane_waiters_live_fifo_idx
-ON resource_lane_waiters (lane_id, status, lane_ticket)
+CREATE INDEX admission_waiter_live_fifo_idx
+ON admission_waiter (class, lane_id, lane_ticket)
 WHERE status = 'waiting';
 
-CREATE INDEX resource_lane_waiters_expiry_idx
-ON resource_lane_waiters (status, lease_expires_at)
+CREATE INDEX admission_waiter_waiting_expiry_idx
+ON admission_waiter (class, lane_id, lease_expires_at)
 WHERE status = 'waiting';
 
 CREATE TABLE run_observation_cursors (
