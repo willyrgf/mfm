@@ -333,6 +333,8 @@ pub struct RedactedEvmSourceEvidence {
 pub enum EvmBlockSelector {
     /// Latest available block.
     Latest,
+    /// Pending block, including known pool transactions when supported.
+    Pending,
     /// Concrete block number.
     Number(u64),
     /// Concrete block hash.

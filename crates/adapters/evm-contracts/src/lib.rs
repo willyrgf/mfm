@@ -567,6 +567,89 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         Ok(receipts)
     }
 
+    async fn reconcile_prepared_submission(
+        &self,
+        prepared: &PreparedContractInvocation,
+    ) -> Result<PreparedSubmissionReconciliation> {
+        let anchor_submissions = prepared_anchor_submissions(prepared)?;
+        let mut unlanded_nonces = Vec::new();
+        for (transaction, submission) in prepared
+            .transactions
+            .iter()
+            .zip(anchor_submissions.transactions.iter())
+        {
+            let transaction_hash = submission
+                .transaction_hash
+                .parse::<B256>()
+                .map_err(|_| EvmContractAdapterError::TransactionHashMismatch)?;
+            match self
+                .mutation
+                .receipt
+                .read_receipt(&EvmReceiptReadRequest {
+                    source_ref: self.route().source_ref().clone(),
+                    policy_id: self.route().policy_id().clone(),
+                    transaction_hash,
+                })
+                .await
+            {
+                Ok(response) => {
+                    if response.transaction_hash != transaction_hash {
+                        return Err(EvmContractAdapterError::TransactionHashMismatch);
+                    }
+                    if !response.status {
+                        return Err(EvmContractAdapterError::TransactionFailed);
+                    }
+                }
+                Err(EvmCapabilityError::ReceiptPending) => {
+                    unlanded_nonces.push(transaction.nonce);
+                }
+                Err(EvmCapabilityError::Provider { .. }) => {
+                    return Ok(PreparedSubmissionReconciliation::Indeterminate(
+                        anchor_submissions,
+                    ));
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+
+        if unlanded_nonces.is_empty() {
+            return Ok(PreparedSubmissionReconciliation::Observed(
+                anchor_submissions,
+            ));
+        }
+
+        let expected_signer =
+            parse_address(&prepared.expected_signer_address, "expected_signer_address")
+                .map_err(|error| EvmContractAdapterError::Model(error.message))?;
+        let pending_nonce = match self
+            .mutation
+            .nonce
+            .read_nonce(&EvmNonceReadRequest {
+                source_ref: self.route().source_ref().clone(),
+                policy_id: self.route().policy_id().clone(),
+                account: expected_signer,
+                block: EvmBlockSelector::Pending,
+            })
+            .await
+        {
+            Ok(response) => response.nonce,
+            Err(EvmCapabilityError::Provider { .. }) => {
+                return Ok(PreparedSubmissionReconciliation::Indeterminate(
+                    anchor_submissions,
+                ));
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if unlanded_nonces.iter().any(|nonce| pending_nonce > *nonce) {
+            return Ok(PreparedSubmissionReconciliation::Indeterminate(
+                anchor_submissions,
+            ));
+        }
+        Ok(PreparedSubmissionReconciliation::NotObserved(
+            anchor_submissions,
+        ))
+    }
+
     /// Projects deploy output from a confirmed deploy receipt and contract address.
     pub fn confirm_deploy(
         &self,
@@ -1313,6 +1396,83 @@ fn parse_prepared_transaction_hash(value: &str) -> Result<B256> {
         .map_err(|_| EvmContractAdapterError::InvalidPreparedInvocation)
 }
 
+fn prepared_anchor_submissions(
+    prepared: &PreparedContractInvocation,
+) -> Result<ContractTransactionSubmissions> {
+    ensure_prepared_invocation_public(prepared)?;
+    let mut transactions = Vec::with_capacity(prepared.transactions.len());
+    for transaction in &prepared.transactions {
+        parse_prepared_transaction_hash(&transaction.expected_transaction_hash)?;
+        transactions.push(ContractTransactionSubmission {
+            submission_version: 1,
+            transaction_hash: transaction.expected_transaction_hash.clone(),
+            signer_public_key: None,
+        });
+    }
+    Ok(ContractTransactionSubmissions {
+        submissions_version: 1,
+        transactions,
+    })
+}
+
+enum PreparedSubmissionReconciliation {
+    Observed(ContractTransactionSubmissions),
+    NotObserved(ContractTransactionSubmissions),
+    Indeterminate(ContractTransactionSubmissions),
+}
+
+async fn submit_or_recover_contract_submission(
+    runtime: &EvmContractRuntime,
+    prepared: &PreparedContractMutation,
+    action: SideEffectProtocolAction,
+) -> Result<
+    SideEffectSubmissionDecision<
+        ContractTransactionSubmissions,
+        ContractTransactionSubmissions,
+        ContractTransactionSubmissions,
+        ContractTransactionSubmissions,
+    >,
+> {
+    if matches!(
+        action,
+        SideEffectProtocolAction::SubmitOrRecoverSubmission { .. }
+    ) {
+        match runtime
+            .adapter()
+            .reconcile_prepared_submission(prepared.evidence())
+            .await?
+        {
+            PreparedSubmissionReconciliation::Observed(submissions) => {
+                return Ok(SideEffectSubmissionDecision::Observed(submissions));
+            }
+            PreparedSubmissionReconciliation::Indeterminate(anchor_submissions) => {
+                return Ok(SideEffectSubmissionDecision::Unknown(anchor_submissions));
+            }
+            PreparedSubmissionReconciliation::NotObserved(anchor_submissions) => {
+                return match runtime.adapter().submit_prepared(prepared).await {
+                    Ok(transactions) => Ok(SideEffectSubmissionDecision::Observed(
+                        ContractTransactionSubmissions {
+                            submissions_version: 1,
+                            transactions,
+                        },
+                    )),
+                    Err(EvmContractAdapterError::TransactionHashMismatch) => {
+                        Ok(SideEffectSubmissionDecision::Unknown(anchor_submissions))
+                    }
+                    Err(error) => Err(error),
+                };
+            }
+        }
+    }
+
+    Ok(SideEffectSubmissionDecision::Observed(
+        ContractTransactionSubmissions {
+            submissions_version: 1,
+            transactions: runtime.adapter().submit_prepared(prepared).await?,
+        },
+    ))
+}
+
 fn parse_optional_wei(value: Option<&str>) -> Result<u128> {
     value
         .map(|raw| parse_u128_quantity(raw, "value_wei").map_err(|error| error.message))
@@ -1869,7 +2029,7 @@ impl SideEffectDriverCallbacks for DeploySideEffectCallbacks<'_> {
     fn submit_or_recover_submission<'a, 'ctx>(
         &'a self,
         _ctx: &'a ErasedRunCtx<'ctx>,
-        _action: SideEffectProtocolAction,
+        action: SideEffectProtocolAction,
         prepared: Option<Self::PreparedInvocation>,
     ) -> SideEffectSubmissionDecisionFuture<
         'a,
@@ -1878,7 +2038,7 @@ impl SideEffectDriverCallbacks for DeploySideEffectCallbacks<'_> {
         Self::NotSubmittedProof,
         Self::AmbiguityEvidence,
     > {
-        Box::pin(async {
+        Box::pin(async move {
             let stored_prepared =
                 prepared.ok_or_else(|| missing_side_effect_artifact("prepared invocation"))?;
             let runtime = self
@@ -1889,11 +2049,9 @@ impl SideEffectDriverCallbacks for DeploySideEffectCallbacks<'_> {
                 &self.plan.intent,
                 &stored_prepared,
             )?;
-            let submissions = ContractTransactionSubmissions {
-                submissions_version: 1,
-                transactions: runtime.adapter().submit_prepared(&prepared).await?,
-            };
-            Ok(SideEffectSubmissionDecision::Observed(submissions))
+            submit_or_recover_contract_submission(&runtime, &prepared, action)
+                .await
+                .map_err(mfm_runtime::RuntimeError::from)
         })
     }
 }
@@ -1978,7 +2136,7 @@ impl SideEffectDriverCallbacks for ConfigureSideEffectCallbacks<'_> {
     fn submit_or_recover_submission<'a, 'ctx>(
         &'a self,
         _ctx: &'a ErasedRunCtx<'ctx>,
-        _action: SideEffectProtocolAction,
+        action: SideEffectProtocolAction,
         prepared: Option<Self::PreparedInvocation>,
     ) -> SideEffectSubmissionDecisionFuture<
         'a,
@@ -1987,7 +2145,7 @@ impl SideEffectDriverCallbacks for ConfigureSideEffectCallbacks<'_> {
         Self::NotSubmittedProof,
         Self::AmbiguityEvidence,
     > {
-        Box::pin(async {
+        Box::pin(async move {
             let stored_prepared =
                 prepared.ok_or_else(|| missing_side_effect_artifact("prepared invocation"))?;
             let runtime = self
@@ -1999,11 +2157,9 @@ impl SideEffectDriverCallbacks for ConfigureSideEffectCallbacks<'_> {
                 &self.plan.intent,
                 &stored_prepared,
             )?;
-            let submissions = ContractTransactionSubmissions {
-                submissions_version: 1,
-                transactions: runtime.adapter().submit_prepared(&prepared).await?,
-            };
-            Ok(SideEffectSubmissionDecision::Observed(submissions))
+            submit_or_recover_contract_submission(&runtime, &prepared, action)
+                .await
+                .map_err(mfm_runtime::RuntimeError::from)
         })
     }
 }
@@ -3401,6 +3557,217 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn recovery_observes_landed_anchor_without_resubmitting() {
+        let route = route();
+        let providers = TestEvmProviders;
+        let adapter = adapter(&route, &providers);
+        let config = validated_deploy_config("eip1559");
+        let intent = deploy_intent(&config);
+        let prepared = adapter
+            .prepare_deploy_invocation(&config, &intent)
+            .await
+            .expect("prepared");
+        let submit_count = Arc::new(Mutex::new(0_u32));
+        let recovery = Arc::new(RecoveryOnlyProviders {
+            receipt_mode: RecoveryReceiptMode::Landed,
+            pending_nonce: 7,
+            submit_count: Arc::clone(&submit_count),
+        });
+        let evm: Arc<dyn EvmContractProvider> = recovery.clone();
+        let signer: Arc<dyn SigningProvider> = recovery;
+        let runtime = EvmContractRuntime::new(route, evm, signer);
+
+        let decision = submit_or_recover_contract_submission(
+            &runtime,
+            &prepared,
+            SideEffectProtocolAction::SubmitOrRecoverSubmission {
+                invocation_epoch: 1,
+            },
+        )
+        .await
+        .expect("recovered");
+
+        let SideEffectSubmissionDecision::Observed(submissions) = decision else {
+            panic!("expected observed anchor recovery");
+        };
+        assert_eq!(*submit_count.lock().expect("submit count"), 0);
+        assert_eq!(
+            submissions.transactions[0].transaction_hash,
+            prepared.evidence().transactions[0].expected_transaction_hash
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_rebroadcasts_unlanded_anchor_after_resign_match() {
+        let route = route();
+        let providers = TestEvmProviders;
+        let adapter = adapter(&route, &providers);
+        let config = validated_deploy_config("eip1559");
+        let intent = deploy_intent(&config);
+        let prepared = adapter
+            .prepare_deploy_invocation(&config, &intent)
+            .await
+            .expect("prepared");
+        let submit_count = Arc::new(Mutex::new(0_u32));
+        let recovery = Arc::new(RecoveryOnlyProviders {
+            receipt_mode: RecoveryReceiptMode::Pending,
+            pending_nonce: 7,
+            submit_count: Arc::clone(&submit_count),
+        });
+        let evm: Arc<dyn EvmContractProvider> = recovery.clone();
+        let signer: Arc<dyn SigningProvider> = recovery;
+        let runtime = EvmContractRuntime::new(route, evm, signer);
+
+        let decision = submit_or_recover_contract_submission(
+            &runtime,
+            &prepared,
+            SideEffectProtocolAction::SubmitOrRecoverSubmission {
+                invocation_epoch: 1,
+            },
+        )
+        .await
+        .expect("recovered");
+
+        let SideEffectSubmissionDecision::Observed(submissions) = decision else {
+            panic!("expected observed rebroadcast");
+        };
+        assert_eq!(*submit_count.lock().expect("submit count"), 1);
+        assert_eq!(
+            submissions.transactions[0].transaction_hash,
+            prepared.evidence().transactions[0].expected_transaction_hash
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_does_not_rebroadcast_when_resign_hash_mismatches_anchor() {
+        let route = route();
+        let providers = TestEvmProviders;
+        let adapter = adapter(&route, &providers);
+        let config = validated_deploy_config("eip1559");
+        let intent = deploy_intent(&config);
+        let prepared = adapter
+            .prepare_deploy_invocation(&config, &intent)
+            .await
+            .expect("prepared");
+        let mut evidence = prepared.evidence().clone();
+        evidence.transactions[0].expected_transaction_hash =
+            "0x1111111111111111111111111111111111111111111111111111111111111111".to_owned();
+        let reconstructed = adapter
+            .reconstruct_deploy_invocation(&config, &intent, &evidence)
+            .expect("reconstructed");
+        let submit_count = Arc::new(Mutex::new(0_u32));
+        let recovery = Arc::new(RecoveryOnlyProviders {
+            receipt_mode: RecoveryReceiptMode::Pending,
+            pending_nonce: 7,
+            submit_count: Arc::clone(&submit_count),
+        });
+        let evm: Arc<dyn EvmContractProvider> = recovery.clone();
+        let signer: Arc<dyn SigningProvider> = recovery;
+        let runtime = EvmContractRuntime::new(route, evm, signer);
+
+        let decision = submit_or_recover_contract_submission(
+            &runtime,
+            &reconstructed,
+            SideEffectProtocolAction::SubmitOrRecoverSubmission {
+                invocation_epoch: 1,
+            },
+        )
+        .await
+        .expect("recovered");
+
+        let SideEffectSubmissionDecision::Unknown(evidence) = decision else {
+            panic!("expected unknown mismatched anchor evidence");
+        };
+        assert_eq!(*submit_count.lock().expect("submit count"), 0);
+        assert_eq!(
+            evidence.transactions[0].transaction_hash,
+            "0x1111111111111111111111111111111111111111111111111111111111111111"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_does_not_rebroadcast_when_nonce_already_occupied() {
+        let route = route();
+        let providers = TestEvmProviders;
+        let adapter = adapter(&route, &providers);
+        let config = validated_deploy_config("eip1559");
+        let intent = deploy_intent(&config);
+        let prepared = adapter
+            .prepare_deploy_invocation(&config, &intent)
+            .await
+            .expect("prepared");
+        let submit_count = Arc::new(Mutex::new(0_u32));
+        let recovery = Arc::new(RecoveryOnlyProviders {
+            receipt_mode: RecoveryReceiptMode::Pending,
+            pending_nonce: 8,
+            submit_count: Arc::clone(&submit_count),
+        });
+        let evm: Arc<dyn EvmContractProvider> = recovery.clone();
+        let signer: Arc<dyn SigningProvider> = recovery;
+        let runtime = EvmContractRuntime::new(route, evm, signer);
+
+        let decision = submit_or_recover_contract_submission(
+            &runtime,
+            &prepared,
+            SideEffectProtocolAction::SubmitOrRecoverSubmission {
+                invocation_epoch: 1,
+            },
+        )
+        .await
+        .expect("recovered");
+
+        let SideEffectSubmissionDecision::Unknown(evidence) = decision else {
+            panic!("expected unknown occupied nonce evidence");
+        };
+        assert_eq!(*submit_count.lock().expect("submit count"), 0);
+        assert_eq!(
+            evidence.transactions[0].transaction_hash,
+            prepared.evidence().transactions[0].expected_transaction_hash
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_records_unknown_on_transient_anchor_read_failure() {
+        let route = route();
+        let providers = TestEvmProviders;
+        let adapter = adapter(&route, &providers);
+        let config = validated_deploy_config("eip1559");
+        let intent = deploy_intent(&config);
+        let prepared = adapter
+            .prepare_deploy_invocation(&config, &intent)
+            .await
+            .expect("prepared");
+        let submit_count = Arc::new(Mutex::new(0_u32));
+        let recovery = Arc::new(RecoveryOnlyProviders {
+            receipt_mode: RecoveryReceiptMode::ProviderFailure,
+            pending_nonce: 7,
+            submit_count: Arc::clone(&submit_count),
+        });
+        let evm: Arc<dyn EvmContractProvider> = recovery.clone();
+        let signer: Arc<dyn SigningProvider> = recovery;
+        let runtime = EvmContractRuntime::new(route, evm, signer);
+
+        let decision = submit_or_recover_contract_submission(
+            &runtime,
+            &prepared,
+            SideEffectProtocolAction::SubmitOrRecoverSubmission {
+                invocation_epoch: 1,
+            },
+        )
+        .await
+        .expect("recovered");
+
+        let SideEffectSubmissionDecision::Unknown(evidence) = decision else {
+            panic!("expected unknown recovery evidence");
+        };
+        assert_eq!(*submit_count.lock().expect("submit count"), 0);
+        assert_eq!(
+            evidence.transactions[0].transaction_hash,
+            prepared.evidence().transactions[0].expected_transaction_hash
+        );
+    }
+
     #[test]
     fn prepared_invocation_guard_rejects_forbidden_runtime_terms() {
         for forbidden in forbidden_prepared_terms() {
@@ -3461,6 +3828,128 @@ mod tests {
             .collect::<Vec<_>>();
         keys.sort_unstable();
         keys
+    }
+
+    #[derive(Clone, Copy)]
+    enum RecoveryReceiptMode {
+        Landed,
+        Pending,
+        ProviderFailure,
+    }
+
+    struct RecoveryOnlyProviders {
+        receipt_mode: RecoveryReceiptMode,
+        pending_nonce: u64,
+        submit_count: Arc<Mutex<u32>>,
+    }
+
+    impl EvmChainIdentityProvider for RecoveryOnlyProviders {
+        fn chain_identity<'a>(
+            &'a self,
+            _request: &'a EvmChainIdentityRequest,
+        ) -> EvmCapabilityFuture<'a, EvmChainIdentityResponse> {
+            Box::pin(async { panic!("not used in recovery-only tests") })
+        }
+    }
+
+    impl EvmNonceReadProvider for RecoveryOnlyProviders {
+        fn read_nonce<'a>(
+            &'a self,
+            request: &'a EvmNonceReadRequest,
+        ) -> EvmCapabilityFuture<'a, EvmNonceReadResponse> {
+            let pending_nonce = self.pending_nonce;
+            assert_eq!(request.block, EvmBlockSelector::Pending);
+            Box::pin(async move {
+                Ok(EvmNonceReadResponse {
+                    evidence: evidence(),
+                    nonce: pending_nonce,
+                })
+            })
+        }
+    }
+
+    impl EvmFeeReadProvider for RecoveryOnlyProviders {
+        fn read_fee<'a>(
+            &'a self,
+            _request: &'a EvmFeeReadRequest,
+        ) -> EvmCapabilityFuture<'a, EvmFeeReadResponse> {
+            Box::pin(async { panic!("not used in recovery-only tests") })
+        }
+    }
+
+    impl EvmGasEstimateProvider for RecoveryOnlyProviders {
+        fn estimate_gas<'a>(
+            &'a self,
+            _request: &'a EvmGasEstimateRequest,
+        ) -> EvmCapabilityFuture<'a, EvmGasEstimateResponse> {
+            Box::pin(async { panic!("not used in recovery-only tests") })
+        }
+    }
+
+    impl EvmTransactionSubmitProvider for RecoveryOnlyProviders {
+        fn submit_transaction<'a>(
+            &'a self,
+            request: &'a EvmTransactionSubmitRequest,
+        ) -> EvmCapabilityFuture<'a, mfm_evm_capabilities::EvmTransactionSubmitResponse> {
+            let submit_count = Arc::clone(&self.submit_count);
+            let transaction_hash = request.signed_payload.transaction_hash();
+            Box::pin(async move {
+                *submit_count.lock().expect("submit count") += 1;
+                Ok(mfm_evm_capabilities::EvmTransactionSubmitResponse {
+                    evidence: evidence(),
+                    transaction_hash,
+                })
+            })
+        }
+    }
+
+    impl EvmReceiptReadProvider for RecoveryOnlyProviders {
+        fn read_receipt<'a>(
+            &'a self,
+            request: &'a EvmReceiptReadRequest,
+        ) -> EvmCapabilityFuture<'a, EvmReceiptReadResponse> {
+            let mode = self.receipt_mode;
+            let transaction_hash = request.transaction_hash;
+            Box::pin(async move {
+                match mode {
+                    RecoveryReceiptMode::Landed => Ok(EvmReceiptReadResponse {
+                        evidence: evidence(),
+                        transaction_hash,
+                        block_number: 42,
+                        status: true,
+                    }),
+                    RecoveryReceiptMode::Pending => Err(EvmCapabilityError::ReceiptPending),
+                    RecoveryReceiptMode::ProviderFailure => {
+                        Err(EvmCapabilityError::redacted_provider_failure("test rpc"))
+                    }
+                }
+            })
+        }
+    }
+
+    impl EvmCallReadProvider for RecoveryOnlyProviders {
+        fn read_call<'a>(
+            &'a self,
+            _request: &'a EvmCallReadRequest,
+        ) -> EvmCapabilityFuture<'a, EvmCallReadResponse> {
+            Box::pin(async { panic!("not used in recovery-only tests") })
+        }
+    }
+
+    impl EvmLogsReadProvider for RecoveryOnlyProviders {
+        fn read_logs<'a>(
+            &'a self,
+            _request: &'a EvmLogsReadRequest,
+        ) -> EvmCapabilityFuture<'a, EvmLogsReadResponse> {
+            Box::pin(async { panic!("not used in recovery-only tests") })
+        }
+    }
+
+    impl SigningProvider for RecoveryOnlyProviders {
+        fn sign<'a>(&'a self, request: &'a SigningRequest) -> mfm_signing::SigningFuture<'a> {
+            let result = test_signing_result(request);
+            Box::pin(async move { result })
+        }
     }
 
     #[test]
