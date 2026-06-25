@@ -98,7 +98,8 @@ fn remediation_for_forward(
                 && matches!(
                     &projection.ledger_purpose,
                     events::SideEffectLedgerPurpose::Remediation {
-                        forward_ledger_key: linked
+                        forward_ledger_key: linked,
+                        ..
                     } if linked == forward_ledger_key
                 )
         })

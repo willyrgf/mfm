@@ -3538,7 +3538,9 @@ fn resource_key_digest_material(material: ResourceKeyDigestMaterial<'_>) -> Stri
 fn ledger_purpose_status(purpose: &events::SideEffectLedgerPurpose) -> (String, Option<String>) {
     match purpose {
         events::SideEffectLedgerPurpose::Forward => ("forward".to_owned(), None),
-        events::SideEffectLedgerPurpose::Remediation { forward_ledger_key } => (
+        events::SideEffectLedgerPurpose::Remediation {
+            forward_ledger_key, ..
+        } => (
             "remediation".to_owned(),
             Some(forward_ledger_key.as_str().to_owned()),
         ),

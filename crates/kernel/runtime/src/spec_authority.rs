@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use mfm_certify::{
     CertifiedDescriptorSet, CertifiedSpecCertificate, CertifiedSpecGraph, CertifiedTypedSpec,
 };
-use mfm_ids::{CellId, DescriptorId, NodeId, SpecHash};
+use mfm_ids::{CellId, DescriptorId, NodeId, SideEffectPairId, SpecHash};
 #[cfg(test)]
 use mfm_ids::{ContentDigest, DigestAlgorithm};
 use mfm_spec::v1 as spec;
@@ -203,6 +203,21 @@ impl CertifiedRuntimeSpec {
             .find_map(|(forward_node_id, remediation)| {
                 (remediation.node_id == *remediation_node_id).then_some(forward_node_id)
             })
+    }
+
+    /// Returns the certified side-effect pair id for a submit node.
+    pub(crate) fn side_effect_pair_for_submit_node(
+        &self,
+        submit_node_id: &NodeId,
+    ) -> Option<&SideEffectPairId> {
+        self.nodes.values().find_map(|node| match &node.framework {
+            Some(spec::FrameworkNodeSpec::SideEffectVerify(verify))
+                if verify.submit_node_id == *submit_node_id =>
+            {
+                Some(&verify.pair_id)
+            }
+            _ => None,
+        })
     }
 
     /// Iterates certified remediation nodes keyed by their forward side-effect node id.

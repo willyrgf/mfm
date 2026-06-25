@@ -1,13 +1,13 @@
 use std::future::Future;
 use std::task::{Context, Poll, Waker};
 
-use mfm_canonical::PlainCanonicalJsonBytes;
+use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_events::v1::{self as events, side_effect, ArtifactRole, KernelEventPayload};
 use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind, CapabilityVersion, CellId,
     ContentDigest, DescriptorId, DigestAlgorithm, DigestBytes, EventId, LoweringVersion, NodeId,
-    RunId, SchemaId, ScopeId, SeedId, SemanticTypeId, SpecHash, SpecVersion, StateKind,
-    StateVersion,
+    RunId, SchemaId, ScopeId, SeedId, SemanticTypeId, SideEffectPairId, SpecHash, SpecVersion,
+    StateKind, StateVersion,
 };
 use mfm_manual_auth::{
     manual_authorization_proof_schema_id, ManualAuthorizationSignatureBytes,
@@ -163,6 +163,23 @@ fn attempt_id(byte: u8) -> AttemptId {
 
 fn node_id(byte: u8) -> NodeId {
     NodeId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
+}
+
+fn side_effect_pair_id_for_ledger(ledger_key: &events::SideEffectLedgerKey) -> SideEffectPairId {
+    SideEffectPairId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        sha256_digest_bytes(ledger_key.as_str().as_bytes()),
+    )
+}
+
+fn side_effect_pair_id() -> SideEffectPairId {
+    side_effect_pair_id_for_ledger(&side_effect_ledger_key())
+}
+
+fn side_effect_pair_role(
+    role: events::SideEffectPairRole,
+) -> (Option<SideEffectPairId>, Option<events::SideEffectPairRole>) {
+    (Some(side_effect_pair_id()), Some(role))
 }
 
 fn event_id(byte: u8) -> EventId {
@@ -478,6 +495,7 @@ fn side_effect_ledger_purpose() -> events::SideEffectLedgerPurpose {
 fn remediation_ledger_purpose() -> events::SideEffectLedgerPurpose {
     events::SideEffectLedgerPurpose::Remediation {
         forward_ledger_key: side_effect_ledger_key(),
+        forward_pair_id: None,
     }
 }
 
@@ -525,12 +543,15 @@ fn admission_lane_helpers_are_stable_and_domain_separated() {
     let resource_key = resource_key("admission-wallet-token", 241);
     let lane =
         ResourceAdmissionLane::from_resource_key_evidence(&resource_key).expect("resource lane");
+    let ledger_key = side_effect_ledger_key_with_suffix(241);
     let mut intent = events::ResourceLaneClaimIntent {
         spec_hash: spec_hash(241),
         node_id: node_id(241),
         attempt_id: attempt_id(241),
-        ledger_key: side_effect_ledger_key_with_suffix(241),
+        ledger_key: ledger_key.clone(),
         ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+        pair_id: Some(side_effect_pair_id_for_ledger(&ledger_key)),
+        pair_role: Some(events::SideEffectPairRole::Submit),
         invocation_epoch: 1,
         resource_key,
         requirement_digest: content_digest(241),
@@ -740,6 +761,7 @@ fn side_effect_attempt_started_for(node_id: NodeId, attempt_id: AttemptId) -> Ke
 }
 
 fn side_effect_intent(artifact_id: ArtifactId, digest: ContentDigest) -> KernelEventPayload {
+    let (pair_id, pair_role) = side_effect_pair_role(events::SideEffectPairRole::Submit);
     KernelEventPayload::SideEffectIntentPersisted(side_effect::IntentPersisted {
         spec_hash: spec_hash(1),
         node_id: node_id(70),
@@ -747,6 +769,8 @@ fn side_effect_intent(artifact_id: ArtifactId, digest: ContentDigest) -> KernelE
         attempt_id: attempt_id(72),
         ledger_key: side_effect_ledger_key(),
         ledger_purpose: side_effect_ledger_purpose(),
+        pair_id,
+        pair_role,
         invocation_epoch: 1,
         intent_schema_id: schema_id("mfm.test.side_effect_intent", 70),
         intent_hash: digest,
@@ -771,12 +795,15 @@ fn side_effect_claim_for_epoch(
     claim_generation: u32,
     token: &str,
 ) -> KernelEventPayload {
+    let (pair_id, pair_role) = side_effect_pair_role(events::SideEffectPairRole::Submit);
     KernelEventPayload::SideEffectClaimed(side_effect::Claimed {
         spec_hash: spec_hash(1),
         node_id: node_id(70),
         attempt_id: attempt_id(72),
         ledger_key: side_effect_ledger_key(),
         ledger_purpose: side_effect_ledger_purpose(),
+        pair_id,
+        pair_role,
         claim_owner: events::RunnerInvocationId::new("owner-1").expect("claim owner"),
         invocation_epoch,
         claim_generation,
@@ -785,12 +812,15 @@ fn side_effect_claim_for_epoch(
 }
 
 fn side_effect_claim_taken_over() -> KernelEventPayload {
+    let (pair_id, pair_role) = side_effect_pair_role(events::SideEffectPairRole::Submit);
     KernelEventPayload::SideEffectClaimTakenOver(side_effect::ClaimTakenOver {
         spec_hash: spec_hash(1),
         node_id: node_id(70),
         attempt_id: attempt_id(72),
         ledger_key: side_effect_ledger_key(),
         ledger_purpose: side_effect_ledger_purpose(),
+        pair_id,
+        pair_role,
         previous_claim_owner: events::RunnerInvocationId::new("owner-1").expect("previous owner"),
         new_claim_owner: events::RunnerInvocationId::new("owner-2").expect("new owner"),
         invocation_epoch: 1,
@@ -809,12 +839,15 @@ fn side_effect_claim_taken_over_generation(
     claim_generation: u32,
     token: &str,
 ) -> KernelEventPayload {
+    let (pair_id, pair_role) = side_effect_pair_role(events::SideEffectPairRole::Submit);
     KernelEventPayload::SideEffectClaimTakenOver(side_effect::ClaimTakenOver {
         spec_hash: spec_hash(1),
         node_id: node_id(70),
         attempt_id: attempt_id(72),
         ledger_key: side_effect_ledger_key(),
         ledger_purpose: side_effect_ledger_purpose(),
+        pair_id,
+        pair_role,
         previous_claim_owner: events::RunnerInvocationId::new("owner-1").expect("previous owner"),
         new_claim_owner: events::RunnerInvocationId::new("owner-2").expect("new owner"),
         invocation_epoch: 1,
@@ -855,12 +888,15 @@ fn side_effect_prepared_with_resource_key_for_epoch(
     token: &str,
     resource_key: Option<events::ResourceKeyEvidence>,
 ) -> KernelEventPayload {
+    let (pair_id, pair_role) = side_effect_pair_role(events::SideEffectPairRole::Submit);
     KernelEventPayload::SideEffectInvocationPrepared(side_effect::InvocationPrepared {
         spec_hash: spec_hash(1),
         node_id: node_id(70),
         attempt_id: attempt_id(72),
         ledger_key: side_effect_ledger_key(),
         ledger_purpose: side_effect_ledger_purpose(),
+        pair_id,
+        pair_role,
         invocation_epoch,
         claim_generation,
         claim_fencing_token: side_effect::ClaimFencingToken::new(token).expect("token"),
@@ -878,12 +914,15 @@ fn resource_lane_claim_intent_for_epoch(
     invocation_epoch: u32,
     resource_key: events::ResourceKeyEvidence,
 ) -> KernelEventPayload {
+    let (pair_id, pair_role) = side_effect_pair_role(events::SideEffectPairRole::Submit);
     KernelEventPayload::ResourceLaneClaimIntent(events::ResourceLaneClaimIntent {
         spec_hash: spec_hash(1),
         node_id: node_id(70),
         attempt_id: attempt_id(72),
         ledger_key: side_effect_ledger_key(),
         ledger_purpose: side_effect_ledger_purpose(),
+        pair_id,
+        pair_role,
         invocation_epoch,
         resource_key,
         requirement_digest: content_digest(210),
@@ -910,6 +949,11 @@ fn resource_lane_release_intent_from_projection(
         attempt_id: lane.attempt_id.clone(),
         ledger_key: ledger_key.clone(),
         ledger_purpose: lane.ledger_purpose.clone(),
+        pair_id: lane.pair_id.clone(),
+        pair_role: lane
+            .pair_id
+            .as_ref()
+            .map(|_| events::SideEffectPairRole::Verify),
         invocation_epoch: lane.invocation_epoch,
         claim_id: lane.claim_id.clone(),
         release_reason: events::ResourceLaneReleaseReason::new(reason).expect("release reason"),
@@ -921,12 +965,15 @@ fn resource_lane_release_intent_for(
     attempt_id: AttemptId,
     ledger_key: events::SideEffectLedgerKey,
 ) -> KernelEventPayload {
+    let (pair_id, pair_role) = side_effect_pair_role(events::SideEffectPairRole::Verify);
     KernelEventPayload::ResourceLaneReleaseIntent(events::ResourceLaneReleaseIntent {
         spec_hash: spec_hash(1),
         node_id,
         attempt_id,
         ledger_key,
         ledger_purpose: side_effect_ledger_purpose(),
+        pair_id,
+        pair_role,
         invocation_epoch: 1,
         claim_id: events::ResourceLaneClaimId::new("mfm.test.claim.1").expect("claim id"),
         release_reason: events::ResourceLaneReleaseReason::new("side_effect.terminal")
@@ -935,12 +982,15 @@ fn resource_lane_release_intent_for(
 }
 
 fn side_effect_started(owner: &str, claim_generation: u32, token: &str) -> KernelEventPayload {
+    let (pair_id, pair_role) = side_effect_pair_role(events::SideEffectPairRole::Submit);
     KernelEventPayload::SideEffectInvocationStarted(side_effect::InvocationStarted {
         spec_hash: spec_hash(1),
         node_id: node_id(70),
         attempt_id: attempt_id(72),
         ledger_key: side_effect_ledger_key(),
         ledger_purpose: side_effect_ledger_purpose(),
+        pair_id,
+        pair_role,
         invocation_epoch: 1,
         claim_owner: events::RunnerInvocationId::new(owner).expect("claim owner"),
         claim_generation,
@@ -969,12 +1019,15 @@ fn not_submitted_schema() -> SchemaId {
 }
 
 fn side_effect_not_submitted(artifact_id: ArtifactId, digest: ContentDigest) -> KernelEventPayload {
+    let (pair_id, pair_role) = side_effect_pair_role(events::SideEffectPairRole::Submit);
     KernelEventPayload::SideEffectNotSubmittedProven(side_effect::NotSubmittedProven {
         spec_hash: spec_hash(1),
         node_id: node_id(70),
         attempt_id: attempt_id(72),
         ledger_key: side_effect_ledger_key(),
         ledger_purpose: side_effect_ledger_purpose(),
+        pair_id,
+        pair_role,
         invocation_epoch: 1,
         proof_schema_id: not_submitted_schema(),
         proof_hash: digest,
@@ -986,12 +1039,15 @@ fn side_effect_submission_observed(
     artifact_id: ArtifactId,
     digest: ContentDigest,
 ) -> KernelEventPayload {
+    let (pair_id, pair_role) = side_effect_pair_role(events::SideEffectPairRole::Submit);
     KernelEventPayload::SideEffectSubmissionObserved(side_effect::SubmissionObserved {
         spec_hash: spec_hash(1),
         node_id: node_id(70),
         attempt_id: attempt_id(72),
         ledger_key: side_effect_ledger_key(),
         ledger_purpose: side_effect_ledger_purpose(),
+        pair_id,
+        pair_role,
         invocation_epoch: 1,
         submission_schema_id: submission_schema(),
         submission_hash: digest,
@@ -1000,12 +1056,15 @@ fn side_effect_submission_observed(
 }
 
 fn side_effect_ambiguous(artifact_id: ArtifactId, digest: ContentDigest) -> KernelEventPayload {
+    let (pair_id, pair_role) = side_effect_pair_role(events::SideEffectPairRole::Verify);
     KernelEventPayload::SideEffectAmbiguous(side_effect::Ambiguous {
         spec_hash: spec_hash(1),
         node_id: node_id(70),
         attempt_id: attempt_id(72),
         ledger_key: side_effect_ledger_key(),
         ledger_purpose: side_effect_ledger_purpose(),
+        pair_id,
+        pair_role,
         invocation_epoch: 1,
         ambiguity_code: events::AmbiguityCode::new("ambiguous").expect("ambiguity code"),
         evidence_schema_id: schema_id("mfm.test.ambiguity", 76),
@@ -1018,12 +1077,15 @@ fn side_effect_submission_unknown(
     artifact_id: ArtifactId,
     digest: ContentDigest,
 ) -> KernelEventPayload {
+    let (pair_id, pair_role) = side_effect_pair_role(events::SideEffectPairRole::Submit);
     KernelEventPayload::SideEffectSubmissionUnknown(side_effect::SubmissionUnknown {
         spec_hash: spec_hash(1),
         node_id: node_id(70),
         attempt_id: attempt_id(72),
         ledger_key: side_effect_ledger_key(),
         ledger_purpose: side_effect_ledger_purpose(),
+        pair_id,
+        pair_role,
         invocation_epoch: 1,
         evidence_schema_id: unknown_schema(),
         evidence_hash: digest,
@@ -1032,12 +1094,15 @@ fn side_effect_submission_unknown(
 }
 
 fn side_effect_receipt(artifact_id: ArtifactId, digest: ContentDigest) -> KernelEventPayload {
+    let (pair_id, pair_role) = side_effect_pair_role(events::SideEffectPairRole::Verify);
     KernelEventPayload::SideEffectReceiptObserved(side_effect::ReceiptObserved {
         spec_hash: spec_hash(1),
         node_id: node_id(70),
         attempt_id: attempt_id(72),
         ledger_key: side_effect_ledger_key(),
         ledger_purpose: side_effect_ledger_purpose(),
+        pair_id,
+        pair_role,
         invocation_epoch: 1,
         receipt_schema_id: receipt_schema(),
         receipt_hash: digest,
@@ -1048,12 +1113,15 @@ fn side_effect_receipt(artifact_id: ArtifactId, digest: ContentDigest) -> Kernel
 }
 
 fn side_effect_confirmation(artifact_id: ArtifactId, digest: ContentDigest) -> KernelEventPayload {
+    let (pair_id, pair_role) = side_effect_pair_role(events::SideEffectPairRole::Verify);
     KernelEventPayload::SideEffectConfirmationObserved(side_effect::ConfirmationObserved {
         spec_hash: spec_hash(1),
         node_id: node_id(70),
         attempt_id: attempt_id(72),
         ledger_key: side_effect_ledger_key(),
         ledger_purpose: side_effect_ledger_purpose(),
+        pair_id,
+        pair_role,
         invocation_epoch: 1,
         confirmation_schema_id: confirmation_schema(),
         confirmation_hash: digest,
@@ -1064,12 +1132,15 @@ fn side_effect_confirmation(artifact_id: ArtifactId, digest: ContentDigest) -> K
 }
 
 fn side_effect_failed(retryable: bool) -> KernelEventPayload {
+    let (pair_id, pair_role) = side_effect_pair_role(events::SideEffectPairRole::Verify);
     KernelEventPayload::SideEffectFailed(side_effect::Failed {
         spec_hash: spec_hash(1),
         node_id: node_id(70),
         attempt_id: attempt_id(72),
         ledger_key: side_effect_ledger_key(),
         ledger_purpose: side_effect_ledger_purpose(),
+        pair_id,
+        pair_role,
         invocation_epoch: 1,
         failure_phase: side_effect::FailurePhase::BeforeInvocationStarted,
         retryable,
@@ -1530,6 +1601,18 @@ fn set_side_effect_ledger(
     with_side_effect_payload_mut!(payload, inner, {
         inner.ledger_key = ledger_key.clone();
         inner.ledger_purpose = purpose.clone();
+        match &purpose {
+            events::SideEffectLedgerPurpose::Forward => {
+                inner.pair_id = Some(side_effect_pair_id_for_ledger(&ledger_key));
+                inner
+                    .pair_role
+                    .get_or_insert(events::SideEffectPairRole::Submit);
+            }
+            events::SideEffectLedgerPurpose::Remediation { .. } => {
+                inner.pair_id = None;
+                inner.pair_role = None;
+            }
+        }
     });
 }
 
@@ -4436,6 +4519,14 @@ fn resource_lane_releases_on_ledger_terminals_and_run_terminal() {
         28,
         true,
     );
+    let active_lane = not_submitted_store
+        .projection_snapshot()
+        .resource_lane(&lane_key)
+        .expect("active lane");
+    assert_eq!(
+        active_lane.pair_id.as_ref(),
+        Some(&side_effect_pair_id_for_ledger(&ledger))
+    );
     let mut started = side_effect_started("owner-1", 1, "token-1");
     set_side_effect_ledger(
         &mut started,
@@ -5062,7 +5153,10 @@ fn side_effect_ledger_purpose_cannot_change_after_intent() {
     };
     payload.ledger_purpose = events::SideEffectLedgerPurpose::Remediation {
         forward_ledger_key: side_effect_ledger_key(),
+        forward_pair_id: None,
     };
+    payload.pair_id = None;
+    payload.pair_role = None;
     let error = store
         .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
@@ -5339,8 +5433,38 @@ fn remediation_intent_requires_engaged_confirmed_forward_and_unique_link() {
     assert_projection_conflict_contains(error, "prior saga engagement");
 
     append_generic_nonretryable_failure(&mut store, &run_id, "remediation-engagement");
+    let mut wrong_pair = side_effect_intent(artifact_id(148), content_digest(149));
+    set_remediation_purpose(&mut wrong_pair, remediation_ledger_key(11));
+    let KernelEventPayload::SideEffectIntentPersisted(payload) = &mut wrong_pair else {
+        unreachable!("helper returns side-effect intent");
+    };
+    payload.ledger_purpose = events::SideEffectLedgerPurpose::Remediation {
+        forward_ledger_key: side_effect_ledger_key(),
+        forward_pair_id: Some(side_effect_pair_id_for_ledger(
+            &side_effect_ledger_key_with_suffix(99),
+        )),
+    };
+    let error = store
+        .append_prepared_commit(typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("remediation-wrong-pair").expect("commit key"),
+            payloads: vec![wrong_pair],
+            required_artifacts: vec![intent_artifact_ref(artifact_id(148), content_digest(149))],
+            preconditions: CommitPreconditions::default(),
+        })
+        .expect_err("remediation pair mismatch rejects");
+    assert_projection_conflict_contains(error, "forward pair");
+
     let mut remediation_intent = side_effect_intent(artifact_id(142), content_digest(143));
     set_remediation_purpose(&mut remediation_intent, remediation_ledger_key(1));
+    let KernelEventPayload::SideEffectIntentPersisted(payload) = &mut remediation_intent else {
+        unreachable!("helper returns side-effect intent");
+    };
+    payload.ledger_purpose = events::SideEffectLedgerPurpose::Remediation {
+        forward_ledger_key: side_effect_ledger_key(),
+        forward_pair_id: Some(side_effect_pair_id()),
+    };
     store
         .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
@@ -6210,7 +6334,24 @@ fn side_effect_ledger_state_exposes_valid_prepared_view() {
         .projection_snapshot()
         .side_effect_for_run(&run_id, &side_effect_ledger_key())
         .expect("side-effect projection");
+    let pair_id = side_effect_pair_id_for_ledger(&side_effect_ledger_key());
+    let pair_projection = store
+        .projection_snapshot()
+        .side_effect_for_pair(&run_id, &pair_id)
+        .expect("pair projection lookup")
+        .expect("pair projection");
+    assert_eq!(pair_projection.ledger_key, projection.ledger_key);
     let state = projection.ledger_state().expect("typed ledger state");
+    let pair_state = store
+        .projection_snapshot()
+        .side_effect_state_for_pair(&run_id, &pair_id)
+        .expect("pair state lookup")
+        .expect("pair state");
+    assert_eq!(pair_state.ledger_purpose(), state.ledger_purpose());
+    assert!(matches!(
+        pair_state.phase(),
+        SideEffectLedgerPhase::Prepared { .. }
+    ));
     assert!(state.is_forward_completion_candidate());
     let SideEffectLedgerPhase::Prepared {
         claim,
@@ -6391,6 +6532,8 @@ fn side_effect_phase_order_and_fencing_are_enforced() {
                     attempt_id: attempt_id(72),
                     ledger_key: side_effect_ledger_key(),
                     ledger_purpose: side_effect_ledger_purpose(),
+                    pair_id: Some(side_effect_pair_id()),
+                    pair_role: Some(events::SideEffectPairRole::Submit),
                     previous_claim_owner: events::RunnerInvocationId::new("owner-2")
                         .expect("previous owner"),
                     new_claim_owner: events::RunnerInvocationId::new("owner-3").expect("new owner"),

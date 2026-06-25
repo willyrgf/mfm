@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use mfm_certify::{CertifiedRemediationLink, CertifiedSideEffectContract};
 use mfm_events::v1 as events;
-use mfm_ids::{AttemptId, NodeId, RunId};
+use mfm_ids::{AttemptId, NodeId, RunId, SideEffectPairId};
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 
@@ -55,6 +55,7 @@ impl From<events::SideEffectEventKind> for HistoricalSideEffectPhase {
 pub(crate) struct HistoricalSideEffectLedger {
     node_id: NodeId,
     attempt_id: AttemptId,
+    pair_id: Option<SideEffectPairId>,
     phase: HistoricalSideEffectPhase,
     resource_key: Option<events::ResourceKeyEvidence>,
 }
@@ -67,7 +68,7 @@ pub(crate) fn validate_historical_side_effect_payload(
     projections: &store::ProjectionSnapshot,
     payload: &events::KernelEventPayload,
 ) -> Result<()> {
-    let (node_id, attempt_id, ledger_key, phase) = side_effect_payload_ref(payload)
+    let (node_id, attempt_id, ledger_key, pair_id, phase) = side_effect_payload_ref(payload)
         .ok_or_else(|| RuntimeError::InvalidRunStream("expected side-effect payload".to_owned()))?;
     let node = runtime_spec.node(node_id).ok_or_else(|| {
         RuntimeError::InvalidRunStream(format!("side-effect event for uncertified node {node_id}"))
@@ -118,6 +119,7 @@ pub(crate) fn validate_historical_side_effect_payload(
                     HistoricalSideEffectLedger {
                         node_id: node_id.clone(),
                         attempt_id: attempt_id.clone(),
+                        pair_id: pair_id.cloned(),
                         phase,
                         resource_key: None,
                     },
@@ -140,6 +142,12 @@ pub(crate) fn validate_historical_side_effect_payload(
             if ledger.node_id != *node_id || ledger.attempt_id != *attempt_id {
                 return Err(RuntimeError::InvalidRunStream(format!(
                     "side-effect ledger {} changed node or attempt authority",
+                    ledger_key
+                )));
+            }
+            if ledger.pair_id.as_ref() != pair_id {
+                return Err(RuntimeError::InvalidRunStream(format!(
+                    "side-effect ledger {} changed pair authority",
                     ledger_key
                 )));
             }
@@ -168,6 +176,7 @@ pub(crate) fn side_effect_payload_ref(
     &NodeId,
     &AttemptId,
     &events::SideEffectLedgerKey,
+    Option<&SideEffectPairId>,
     HistoricalSideEffectPhase,
 )> {
     payload.side_effect_ref().map(|side_effect| {
@@ -175,6 +184,7 @@ pub(crate) fn side_effect_payload_ref(
             side_effect.node_id,
             side_effect.attempt_id,
             side_effect.ledger_key,
+            side_effect.pair_id,
             HistoricalSideEffectPhase::from(side_effect.kind),
         )
     })
@@ -207,10 +217,26 @@ fn validate_side_effect_ledger_purpose(
     contract
         .validate_ledger_purpose(purpose)
         .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))?;
-    let events::SideEffectLedgerPurpose::Remediation { forward_ledger_key } = purpose else {
+    let events::SideEffectLedgerPurpose::Remediation {
+        forward_ledger_key,
+        forward_pair_id,
+    } = purpose
+    else {
         return Ok(());
     };
     let forward = projections.side_effect_for_run(run_id, forward_ledger_key);
+    if let Some(forward_pair_id) = forward_pair_id {
+        let pair_forward = projections
+            .side_effect_for_pair(run_id, forward_pair_id)
+            .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))?;
+        if pair_forward.map(|projection| &projection.ledger_key)
+            != forward.map(|projection| &projection.ledger_key)
+        {
+            return Err(RuntimeError::InvalidRunnerOutput(
+                "remediation forward pair does not match forward ledger key".to_owned(),
+            ));
+        }
+    }
     contract
         .validate_remediation_link(CertifiedRemediationLink {
             remediation_run_id: run_id,
@@ -448,8 +474,8 @@ pub(crate) fn validate_runner_side_effect_payload(
             node.node_id
         )));
     }
-    let (payload_node_id, payload_attempt_id, _, _) =
-        side_effect_payload_ref(payload).ok_or_else(|| {
+    let (payload_node_id, payload_attempt_id, _, _, _) = side_effect_payload_ref(payload)
+        .ok_or_else(|| {
             RuntimeError::InvalidRunnerOutput("expected side-effect payload".to_owned())
         })?;
     require_attempt(node, attempt_id, payload_node_id, payload_attempt_id)?;

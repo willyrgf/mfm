@@ -44,10 +44,29 @@ pub(super) fn resource_lane_for_release(
         }
         .into());
     };
+    if let Some(pair_id) = &intent.pair_id {
+        let Some((pair_lane_key, _)) = projections.resource_lanes().find(|(_, projection)| {
+            projection.holder.run_id == *run_id && projection.pair_id.as_ref() == Some(pair_id)
+        }) else {
+            return Err(StoreError::ProjectionConflict {
+                key: format!("resource_lane:{}", intent.ledger_key),
+                message: "resource lane release pair references unknown active claim".to_owned(),
+            }
+            .into());
+        };
+        if pair_lane_key != lane_key {
+            return Err(StoreError::ProjectionConflict {
+                key: format!("resource_lane:{}", intent.ledger_key),
+                message: "resource lane release pair does not match active holder".to_owned(),
+            }
+            .into());
+        }
+    }
     if active.claim_id != intent.claim_id
         || active.node_id != intent.node_id
         || active.attempt_id != intent.attempt_id
         || active.ledger_purpose != intent.ledger_purpose
+        || active.pair_id != intent.pair_id
         || active.invocation_epoch != intent.invocation_epoch
     {
         return Err(StoreError::ProjectionConflict {
