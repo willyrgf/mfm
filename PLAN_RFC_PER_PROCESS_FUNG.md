@@ -1,8 +1,10 @@
 # Implementation Plan: RFC Per-Process Fungibility
 
 Status: planning artifact for engineering execution
-Source RFC: `RFC_PER_PROCESS_FUNGIBILITY.md`
-Architect review: completed with a read-only architect-agent pass
+Source RFC: `RFC_PER_PROCESS_FUNGIBILITY.md` as of **tt9** (8 independent review passes + the R8
+registry-removal + the R9 review; decision log DEC-0..39)
+Architect review: incorporated; this plan additionally folds the R9 #2 incremental-landing
+constraint for the one-ledger cutover (Commit 12 additive → Commit 13b gated cutover).
 
 ## Ground Rules
 
@@ -107,6 +109,27 @@ engineering inputs. Do not start the broad refactors until these are resolved.
    Recommended decision: lane-state materialization is an optimization wave after the functional RFC
    lands. It is not required for initial ratification unless resource-lane folds become a measured
    bottleneck.
+
+## RFC Coverage Map
+
+Traceability from RFC workstreams / load-bearing decisions to the commits below. Reviewers use this
+to confirm nothing is dropped.
+
+| RFC element | Commit(s) |
+|---|---|
+| WS-A admission-lane primitive (DEC-12) | 2, 3, 4 |
+| WS-B run identity + claim + drive (DEC-18/22/28/29/34) | 5, 6, 7, 8, 9 |
+| WS-C verify pair + one-ledger (DEC-13/14/16/17/19/27/37) | 10, 11, 12, 13, 13b |
+| WS-D anchor + reconcile (DEC-2/15/20/30/35) | 14, 15, 16 |
+| WS-E perf/ops (DEC-10) | 19 |
+| Trust scope normative (DEC-31) | 5 |
+| Capability-at-ingress / resume-declines (DEC-3) | 7 (launch), 9 (resume) |
+| No mutable registry/oracle (DEC-39) | 1, 10, 16, + review checklist |
+| Finality is config, not registry-resolved (DEC-3 / DEC-36-superseded) | 1, 10 |
+| Receipt final-at-risk (DEC-32) | 10, 15, 17, 18 |
+| Lane release only at proven terminal (DEC-24/25) | 12, 13, 13b |
+| saga.md narrowed to single-lane (DEC-33) | 1, 17 |
+| Incremental WS-C cutover (R9 #2) | 12 additive → 13b gated cutover |
 
 ## Commit Stack
 
@@ -256,10 +279,21 @@ Verification:
 Purpose:
 
 - Add `RunIdentityMaterialV1` to typed event/spec authority.
+- **Derive `run_id = sha256-jcs-v1(RunIdentityMaterialV1)` here, in the app admission path**, from
+  `certified_spec_hash` + store `trust_scope_id` (+ `distinct_run_key_digest`, default `null`) — so
+  the validation below actually holds. Commit 7 only moves the **CLI/REST surface** onto this; it does
+  not introduce the derivation.
 - Record identity material in `RunAdmitted`.
 - Validate `run_id == sha256-jcs-v1(identity_material)` during admission, attach, resume, replay,
   status, and public-output authority construction.
 - Fail closed on identity mismatch.
+- Freeze the canonical `RunIdentityMaterialV1` / `distinct_run_key_digest` bytes with golden tests in
+  this commit (decision 4).
+
+Sequencing note: derivation and validation are co-dependent — validating hash-equality while the
+launch path still minted random ids would be red. The destructive-reset posture (decision 2) means
+there are no legacy random-id runs to validate against, so this commit is green on a fresh store.
+`--distinct-run-key` and the user-facing surface land in Commit 7.
 
 Files:
 
@@ -286,13 +320,15 @@ Verification:
 Purpose:
 
 - Remove `mfm_app::new_run_id()` from normal start flows.
-- Derive run id only after planning and certification, from:
-  `certified_spec_hash`, store `trust_scope_id`, and optional `distinct_run_key_digest`.
-- Add `--distinct-run-key` and REST equivalent.
+- Wire the **CLI/REST start path** onto the run-id derivation that landed in Commit 6 (this commit
+  does not re-implement derivation); expose `--distinct-run-key` and the REST equivalent.
 - Remove normal `--run-id` from start. If raw run ids remain, put them behind explicit
   admin/import/test-only APIs, not public normal launch.
 - Add typed launch outcomes:
   `Admitted`, `Attached`, `AlreadyDriving`, `IncompatibleExecutable`, `IdentityMismatch`.
+- **Capability-at-ingress (DEC-3):** initial launch verifies the invoker holds the capability to
+  satisfy the certified policy **before** appending `RunAdmitted`; lacking it is an ingress error, so
+  no admitted-but-undrivable run is ever created. (The resume/attach decline path is Commit 9.)
 
 Files:
 
@@ -320,6 +356,7 @@ Verification:
   distinct key -> different run id
   raw key is not persisted
   changed config/finality -> different certified spec and different run id
+  launch without the required policy capability fails before `RunAdmitted` (ingress, DEC-3)
 
 ### Commit 8: `runtime: attach duplicate launches without driving`
 
@@ -360,6 +397,9 @@ Purpose:
 - Release on terminal.
 - Stop/report on renewal failure.
 - Keep manual `run resume <run_id>` as the v1 recovery trigger.
+- A resumer/attacher lacking the policy capability **declines cleanly** — an operational stall that
+  surfaces in status, never a run failure or a new `RunAdmitted` (DEC-3, the resume side of
+  capability-at-ingress).
 - Do not dispatch from observation feed.
 
 Files:
@@ -424,6 +464,10 @@ Purpose:
 - Add certifier pairing validation:
   exactly one verify per submit, no orphan verify, no submit without verify, evidence-flow binding,
   and post-rewrite single-producer checks.
+- **Green-at-each-step (R9 #2):** the verify runner does not exist until Commit 13, so the scheduler
+  must treat a not-yet-driven verify node as a **non-terminal parked frontier node, not an error**,
+  keeping the full suite green across 11 -> 12 -> 13 -> 13b. Commits 11–13b are a coupled
+  sub-sequence: unit suites stay green at each step; end-to-end side-effect driving lands at 13b.
 
 Files:
 
@@ -444,17 +488,22 @@ Verification:
 - Compile-fail/golden tests for missing verify, orphan verify, duplicate verify, and bad output
   producer.
 
-### Commit 12: `store: rekey side effect ledgers by pair`
+### Commit 12: `store: add pair-keyed side effect authority (additive, dual-validated)`
 
-Purpose:
+Purpose (R9 #2 — additive, not big-bang; the cutover is Commit 13b):
 
-- Replace node/attempt-shaped side-effect ledger authority with certified pair authority.
-- Make event payload attribution explicit:
-  `(pair_id, role: submit|verify)` plus the phase-specific authority.
-- Move projection lookup to pair ledger key.
-- Bind resource-lane claim to submit role and release to verify role.
-- Retarget remediation linkage to pair identity.
-- Treat the forward fence atomically over the pair's terminal phase.
+- Introduce certified `SideEffectPair` authority **alongside** the existing node/attempt ledger
+  shape. Do **not** delete the old keying in this commit.
+- Add event payload attribution `(pair_id, role: submit|verify)` plus phase-specific authority,
+  recorded in addition to the current `node_id/attempt_id` attribution.
+- Add projection lookup by pair ledger key; keep the node/attempt projection readable in parallel.
+- Add pair-bound resource-lane claim (submit role) and release (verify role) next to the existing
+  release path.
+- Add a **dual-validation invariant**: for every ledger, the pair-keyed view and the node/attempt
+  view must resolve to the same store-admission decision and the same lane-release decision; any
+  divergence is a hard test failure.
+- Retarget remediation linkage and the forward fence to pair identity, validated against the old
+  linkage in parallel.
 
 Files:
 
@@ -467,9 +516,8 @@ Files:
 
 Delete:
 
-- Ledger-key derivation from `node_id + attempt_id`.
-- Store admission rules that treat submit and verify as unrelated ledgers.
-- Resource-lane release validation keyed to the old single node/attempt shape.
+- Nothing in this commit. Node/attempt keying is retired only at the cutover (Commit 13b), after
+  Commit 13's kill-mid-flight tests are green.
 
 Verification:
 
@@ -477,6 +525,8 @@ Verification:
 - `cargo test -p mfm-store`
 - `cargo test -p mfm-runtime`
 - `cargo test -p mfm-replay`
+- Dual-validation tests: pair-keyed and node/attempt-keyed authority agree on admission and lane
+  release for every fixture (zero divergence).
 - Tests for pair-bound claim/release, remediation targeting, and forward-fence behavior.
 
 ### Commit 13: `runtime: execute side effect verify nodes`
@@ -510,6 +560,45 @@ Verification:
 - `cargo test -p mfm-replay`
 - Kill-mid-submit and kill-mid-verify unit tests.
 - Replay test proving verify evidence uses no live IO.
+
+### Commit 13b: `store+runtime: cut over to pair-only ledger authority`
+
+Purpose (R9 #2 cutover — gated; lane mis-release is the one place safety lives):
+
+- Now that the verify runner (Commit 13) drives the pair end to end, make pair-keyed authority the
+  **sole** admission and lane-release authority.
+- Delete the node/attempt ledger keying, the old single-shape lane-release validation, and the
+  Commit 12 dual-validation scaffolding.
+
+Gate — all must be green **before** this commit lands:
+
+- Commit 13's kill-mid-submit and kill-mid-verify tests pass on the pair-keyed path.
+- Commit 12's dual-validation tests show zero divergence across the fixture set.
+
+Files:
+
+- `crates/kernel/events/src/lib.rs`
+- `crates/kernel/store/src/v1/*`
+- `crates/kernel/runtime/src/side_effect_driver.rs`
+- `crates/kernel/runtime/src/side_effect_lifecycle.rs`
+- `crates/storages/stream-store-postgres/src/run_store/*`
+
+Delete:
+
+- Ledger-key derivation from `node_id + attempt_id`.
+- Store admission rules that treat submit and verify as unrelated ledgers.
+- Resource-lane release validation keyed to the old single node/attempt shape.
+- The Commit 12 dual-validation scaffolding.
+
+Verification:
+
+- `cargo test -p mfm-events`
+- `cargo test -p mfm-store`
+- `cargo test -p mfm-runtime`
+- `cargo test -p mfm-replay`
+- Re-run the kill-mid-flight suite on pair-only authority.
+- Assert a lane is never mis-admitted or mis-released at any point across the 12 -> 13 -> 13b
+  sequence.
 
 ### Commit 14: `evm: record submission anchors`
 
@@ -704,10 +793,15 @@ Phase 1: admission and identity foundation.
 - This phase should finish with content-addressed run identity, attach-on-existing behavior, and
   active-driver execution claims, but without side-effect pair refactoring.
 
-Phase 2: side-effect pair authority.
+Phase 2: side-effect pair authority (largest blast radius — land it additively, per R9 #2).
 
-- Commits 10 through 13.
-- This is the largest blast radius. Do not start it until Phase 1 is green.
+- Order: Commit 10 (spec) -> 11 (lowering) -> 12 (additive pair authority, dual-validated) -> 13
+  (verify runner) -> 13b (cutover, gated by 13's kill-mid-flight tests + 12's dual-validation).
+- Do not start until Phase 1 is green. The node/attempt keying stays live (dual-validated) until the
+  verify runner proves the pair path end to end; only then does 13b delete it. No intermediate step
+  may leave store admission or lane release able to mis-admit or mis-release a lane.
+- Commits 11–13b are a coupled sub-sequence: unit suites stay green at each step (verify nodes are
+  parked, not errored, before Commit 13), and end-to-end side-effect driving lands at 13b.
 
 Phase 3: EVM verification and reconciliation.
 
