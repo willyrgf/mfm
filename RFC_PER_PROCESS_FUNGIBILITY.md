@@ -81,10 +81,12 @@ append-only, certified design.
 
 - A correctness model that depends only on the Postgres transaction boundary, never on process
   identity or lifetime.
-- Many disposable workers (CLI, daemon, REST host, agent session) coordinating only through
-  Postgres, with **at-least-once execution, at-most-once MFM-authored mutation per deterministic
-  anchor, and evidence-backed terminalization/compensation** — not a full AC/DC / exactly-once claim
-  (see `docs/saga.md`).
+- Many workers (CLI, daemon, REST host, agent session) coordinating only through Postgres. Processes
+  are **safe to lose** (a crash never corrupts; safety = the store), with **at-most-once MFM-authored
+  mutation per deterministic anchor** and evidence-backed terminalization/compensation. In v1, *making
+  progress* after a driver is lost requires **manual `run resume`** — automatic at-least-once recovery
+  is the deferred AC/DC + saga effort (§6.5/§12). Not a full AC/DC / exactly-once claim (see
+  `docs/saga.md`).
 - One reusable coordination primitive for all exclusive-admission needs.
 - Uniform, configurable side-effect verification (receipt vs finality) across all domains.
 - External-effect recovery behavior, once a run is live-driven or manually resumed, that requires no
@@ -261,7 +263,11 @@ config-file bytes, local path, unresolved "latest"), the certified spec's audit/
 it is build-independent and **not** simply the full spec hash. Resolved *semantic* inputs/config **are**
 in the preimage (different config/inputs ⇒ different run); only non-semantic spelling is excluded.
 Remediation-linked specs carry a `forward_run_id` whose handling the projection must define (WS-B,
-addresses MED-3).
+addresses MED-3). The **admission policy is resolved here against a pinned registry snapshot** —
+finality-policy depth and any registry-resolved descriptors are baked to concrete values, with the
+**registry-snapshot digest + resolver identity** folded into the preimage (DEC-3/DEC-36). So a registry
+policy change yields a *different* run id: identical launches before and after the change do not
+converge, and cannot expect different terminality from one run.
 
 **Run identity is semantic; the executable binding is a drive guard (DEC-29).** Executable identity is
 deliberately **out of run identity** — folding it in would make the same semantic work on a different
@@ -393,8 +399,9 @@ Two deterministic anchors, two layers; neither crosses the boundary.
 Receipt | Finalized(policy)` is hash-defining on `SideEffectContractSpec` — the semantic *class*
 plus a **certified finality-policy descriptor**. Because the numeric depth is outcome-affecting it
 is not taken from worker-local config: the certified policy is **resolved against the registry at
-run admission** to a concrete depth, recorded in `RunAdmitted` launch evidence, and read from the
-run stream by every worker and by replay. (Pure admission-pinning from local config would only move
+run admission** to a concrete depth, recorded in `RunAdmitted` launch evidence **with the
+registry-snapshot digest + resolver identity, which are folded into the run-id preimage** (DEC-36), and
+read from the run stream by every worker and by replay. (Pure admission-pinning from local config would only move
 the process dependence to *which worker admitted* — resolving from certified authority removes it.)
 At **initial launch** the invoker must hold the capability to satisfy the policy or the launch
 **fails before `RunAdmitted`** (an ingress failure, per `docs/design.md:216`) — an invoker-driven
@@ -410,7 +417,11 @@ only from confirmation (`output_from_confirmation`, `program/src/lib.rs:1561`) a
 level — `output_from_receipt(.. Receipt)` for `Receipt`, `output_from_confirmation(.. Confirmation)`
 for `Finalized` (the `Receipt` and `Confirmation` associated types already exist,
 `program/src/lib.rs:1534-1537`). Runtime validates terminal evidence against the *configured* level,
-not unconditionally `is_confirmed()`.
+not unconditionally `is_confirmed()`. **The verify framework node *invokes* this domain contract; it
+never constructs domain output itself (DEC-37).** The framework node owns the generic *lifecycle*
+(poll, terminalize, bind the cell, release the lane), but the output *value* is built by the domain
+`SideEffectState`'s certified `output_from_*` method, invoked through state/adapter descriptors — so
+`kernel/runtime` stays domain-free (`docs/architecture.md:80`).
 
 **(d) One ledger across the pair — a first-class *pair authority* redesign (DEC-14, DEC-17).** The
 verify node continues the submit node's ledger. This is *not* a projection-lookup tweak: side-effect
@@ -511,15 +522,32 @@ submit→terminal, a signer account executes at most **one side-effect per termi
 block at the default `Receipt` level, and ≈one per finality window only for explicitly-`Finalized`
 effects. On-chain *reads* are unconstrained. Horizontal scale of side-effecting work comes from
 **more signer accounts**, not more workers, until pipelined nonces (DEC-1) are lifted. (A
-`Receipt`-level reorg can gap the next nonce on that signer; nonce *continuity* self-heals via
-reconciliation, but an already-published output does not — see below.) (DEC-26)
+`Receipt`-level reorg can gap the next nonce on that signer; nonce continuity is **recovered** by the
+stuck-tx / nonce-reclaim recovery workflow, not auto-healed — the accepted, recoverable risk of
+choosing `Receipt`, see below.) (DEC-26)
 
-**Receipt is final-at-risk (DEC-32).** `Receipt`-level terminalization binds output and releases the
-lane at `ReceiptObserved` — *before* finality. The nonce self-heal above is the only thing that heals:
-once an effect has terminalized and downstream has consumed its output, a later reorg of that receipt
-has **no frontier left to reconcile** the original mutation, so the published output is not
-automatically repaired. `Receipt` is therefore explicitly **final-at-risk** — the designer accepts
-post-receipt reorg risk on the output. Outputs that must survive reorgs **must** use `Finalized`.
+**Receipt is final-at-risk — a deliberate, recoverable choice (DEC-32).** `Receipt`-level
+terminalization binds output and releases the lane at `ReceiptObserved` — *before* finality. A later
+reorg of that receipt leaves no frontier in the terminalized run to repair the original mutation, so
+(a) the published output may be invalid and (b) the next nonce on that signer may **wedge** (a
+released-and-reorged nonce that a subsequent run already advanced past). Both are the **accepted risk
+of choosing `Receipt`** — the op designer selects the verification level per side-effect, and picks
+`Finalized` when reorg safety matters. Neither is a correctness violation: the wedge is **recoverable**
+by the deferred stuck-tx / nonce-reclaim recovery workflow (cancel/replace the missing nonce to
+restore continuity), and a downstream that consumed a reorged-out `Receipt` output is the same
+final-at-risk acceptance. Outputs that must survive reorgs use `Finalized`. (Last round's "nonce
+continuity self-heals" was inaccurate — it is *recovered*, not automatic.)
+
+**`NotSubmittedProven` is the outcome of recovery *investigation*, not a single read (DEC-35).** "Nonce
+advanced + receipt absent" is an **ambiguity**, not a proof — its causes differ and so do the
+recoveries: the receipt may exist and merely failed to fetch (recover it from the tx hash); the tx may
+be **stuck in the pool** (cancel or bump gas); a **foreign tx** may have taken the nonce (terminal
+"superseded"); or it was truly never sent (resubmit). WS-D's chain-truth read resolves the clear cases
+in v1; the richer diagnosis-and-recovery (receipt recovery, stuck-tx cancel/bump) is part of the
+deferred AC/DC + saga recovery effort. `NotSubmittedProven` is the *terminal outcome* of whichever path
+resolves the ambiguity — which is also why a transient/lagging RPC read can never by itself release the
+lane: it triggers investigation, not terminalization. So the negative terminal is "not always about
+finality" — finality is one input among several.
 
 ### 6.6 Determinism, capabilities, replay
 
@@ -579,8 +607,13 @@ post-receipt reorg risk on the output. Outputs that must survive reorgs **must**
 | DEC-29 | Executable identity is a **drive-time determinism guard, NOT part of run identity** (`binding.rs:113`/`history.rs:212` enforce it on drive/resume). Same work → one run regardless of build; a different-build launcher **attaches/reports** ("needs compatible build"), never duplicates | Reverses build-scoped identity: avoids cross-build **double-execution** (review #1) while keeping the determinism guard; rolling upgrade drains on matching build, cross-build takeover deferred |
 | DEC-30 | v1 mid-submission reconciliation is **net-new EVM-verifier work (WS-D)** — chain-truth read + re-sign==anchor — not emergent from frontier driving; bare re-broadcast (today's `submit_or_recover_submission`) is insufficient and gated out | "At most one tx lands" holds *given* WS-D; without it, dropped-mempool + advanced-nonce is mishandled |
 | DEC-31 | **Normative:** one Postgres deployment = one trust domain (all launchers co-authorized for its signers); **trust scope is a factor of the run-id preimage**. Cross-tenant isolation is a non-goal (would need the launching principal in the preimage + claim + evidence) | A trust *boundary*, not a note (review #2); co-authorized convergence is safe, distrusting tenants out of scope |
-| DEC-32 | `Receipt`-level terminalization is **final-at-risk**: binds output / releases the lane pre-finality; a post-receipt reorg invalidates the published output with no automatic repair (only nonce continuity self-heals). Reorg-safe outputs use `Finalized` | review #4 — a terminalized effect has no frontier left to reconcile |
+| DEC-32 | `Receipt`-level terminalization is **final-at-risk** — the op designer's deliberate per-side-effect choice (`Finalized` is the safe option). A post-receipt reorg can invalidate the output **and** wedge the next nonce; both are **recoverable** via the deferred stuck-tx / nonce-reclaim workflow, not a safety hole and not auto-healed | R7 #1 — accepted+recoverable risk, not a forced hold-to-finality; corrects last round's "self-heals" |
 | DEC-33 | Ratification reconciles `docs/saga.md` ("every requested lane acquired together", `saga.md:161`) **down to single-lane** to match the code (`single_lane_claim_admission`, `resource_lanes.rs:94`); multi-lane stays deferred | review #6 — the saga contract overstated the single-lane implementation |
+| DEC-34 | *(Optional v1 hardening, recommended.)* `RunAdmitted` records first-class `RunIdentityEvidence` (projection algorithm/version, semantic-projection digest, trust scope, admission-policy digest); attach re-derives the projection from the stored spec and compares, failing closed on mismatch | MFM's no-bare-hash hygiene (R7 #3); guards a projection-bug / schema-evolution wrong-attach. Practical risk needs a hash collision → recommended, not required, for v1 |
+| DEC-35 | `NotSubmittedProven` is the terminal *outcome of recovery investigation* (receipt-recovery / stuck-tx cancel-or-bump / foreign-superseded / resubmit), not a single read; WS-D resolves clear cases, richer diagnosis is deferred | R7 #2 — "nonce advanced + receipt absent" is ambiguity; a transient RPC read triggers investigation, never terminalization; not always about finality |
+| DEC-36 | The **resolved** admission policy — finality depth + registry-snapshot digest + resolver identity — is folded into the run-id preimage and recorded in `RunAdmitted` | R7 #4 — registry-resolved terminality is outcome-affecting, so a registry change must yield a different run, not silent divergence |
+| DEC-37 | The framework `SideEffectVerify` node **invokes** the domain `SideEffectState::output_from_*` contract for the output value; it never constructs domain output in `kernel/runtime` | R7 #5 — keeps `kernel/runtime` domain-free (`architecture.md:80`); framework owns lifecycle, domain owns output |
+| DEC-38 | v1 claim is **processes are safe to lose** (a crash never corrupts), NOT automatic at-least-once progress — progress after a driver loss needs manual `run resume`; automatic at-least-once is the deferred recovery effort | R7 #6 — "at-least-once execution" overstated automatic progress for v1 |
 
 ## 8. Changes required (implementation plan)
 
@@ -651,8 +684,10 @@ with docs+tests in the same change. Five workstreams.
   evidence against the *configured* level instead of unconditional `is_confirmed()`
   (`kernel/program:1561`, `side_effect_lifecycle.rs:298`).
 - **Verify-node runner** (`kernel/runtime`): drive `Submission* → Receipt → Confirmation → terminal`
-  to the level; bind the verified output cell. Scheduler invariant once a run is driven:
-  non-terminal side-effect ledger ⇒ runnable frontier node (future `due_at` for long waits).
+  to the level; bind the verified output cell — **invoking** the domain `SideEffectState::output_from_*`
+  contract for the output value (DEC-37), never constructing domain output in the kernel. Scheduler
+  invariant once a run is driven: non-terminal side-effect ledger ⇒ runnable frontier node (future
+  `due_at` for long waits).
 - **Live `SideEffectVerifier`** contract (`crates/adapter-contracts`) + EVM impl
   (`crates/adapters/evm-contracts` + `crates/transports/evm`, relocating receipt/confirmation poll),
   behind a read capability.
@@ -738,6 +773,11 @@ side-effect ledger non-terminal, the signer lane can remain held until manual re
 | Capability-lacking invoker strands an admitted run (review #5) | Initial launch verifies capability **before** `RunAdmitted` (ingress failure, DEC-3); only resume/attach declines cleanly |
 | Receipt-level output invalidated by a post-receipt reorg (review #4) | `Receipt` is explicitly **final-at-risk** (DEC-32); outputs needing reorg-safety use `Finalized` |
 | `docs/saga.md` multi-lane contract diverges from single-lane code (review #6) | Reconcile saga.md down to single-lane at ratification (DEC-33); multi-lane deferred |
+| Receipt-reorg nonce wedge / invalid output (R7 #1) | Accepted, designer-chosen risk of `Receipt` (`Finalized` is the safe option); both recoverable via the deferred stuck-tx / nonce-reclaim workflow, not a safety hole (DEC-32) |
+| `NotSubmittedProven` released on a transient/lagging RPC read (R7 #2) | It is an investigation *outcome*, not a single read (DEC-35); a transient read triggers investigation, never terminalization |
+| Registry policy change silently diverges terminality (R7 #4) | Resolved admission policy + registry-snapshot digest in the run-id preimage and `RunAdmitted` (DEC-36); a change yields a different run |
+| Attach trusts a bare `run_id` digest (R7 #3) | Optional `RunIdentityEvidence` re-derived and compared at attach (DEC-34); wrong-attach needs a hash collision, so recommended hardening |
+| Verify node leaks domain output into the kernel (R7 #5) | Framework node **invokes** the domain `output_from_*` contract, never constructs output (DEC-37); `kernel/runtime` stays domain-free |
 
 ## 11. Testing strategy
 
@@ -768,7 +808,9 @@ side-effect ledger non-terminal, the signer lane can remain held until manual re
 
 - **Automatic resume + dead-driver takeover + reconciliation-on-takeover (DEC-21/23)** — part of the
   larger AC/DC + saga recovery effort, not this RFC. Includes **cross-build takeover** (resuming a run
-  admitted under different executables, DEC-29), which the executable drive-guard otherwise forbids.
+  admitted under different executables, DEC-29), and the **stuck-tx / nonce-reclaim / receipt-recovery
+  investigation** that resolves an ambiguous submission (`NotSubmittedProven` / `Confirmed`) and clears
+  a `Receipt`-reorg nonce wedge (DEC-32/35).
 - Pipelined nonces (DEC-1); per-attempt execution leases (DEC-7); feed sharding and cross-run
   priority (DEC-9); multi-lane admission (§3 Non-goals); `due_at` re-wake + tenure-release-on-wait
   (DEC-6/DEC-8, for long `Finalized` waits at scale).
