@@ -5754,6 +5754,16 @@ impl AsyncInMemoryRunStore {
             .and_then(|mut store| admit_artifact_evidence(&mut store.artifacts, admitted_artifacts))
     }
 
+    /// Marks an execution claim expired for tests that need stale-claim recovery without sleeping.
+    pub fn expire_execution_claim_for_test(&self, run_id: &RunId) -> Result<bool> {
+        let mut store = self.lock_inner()?;
+        let Some(holder) = store.execution_claims.get_mut(run_id) else {
+            return Ok(false);
+        };
+        holder.lease_expires_at_unix_ms = unix_time_ms()?.saturating_sub(1);
+        Ok(true)
+    }
+
     fn lock_inner(&self) -> Result<MutexGuard<'_, RunMemoryCore>> {
         self.inner
             .lock()

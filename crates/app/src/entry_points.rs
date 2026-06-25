@@ -62,8 +62,8 @@ mod tests {
     use crate::{OpVersion, PublicOpName};
     use mfm_authored_config::{AuthoredConfig, AuthoredConfigFormat};
     use mfm_store::v1::{
-        AdmissionToken, ExecutionClaimStore, NowaitSkipAdmissionResult, RunEventStore,
-        TrustScopeStore,
+        AdmissionToken, ExecutionClaimStatus, ExecutionClaimStore, NowaitSkipAdmissionResult,
+        RunEventStore, TrustScopeStore,
     };
     use std::sync::Arc;
 
@@ -375,6 +375,87 @@ mod tests {
             outcome.status(),
             crate::RunLaunchOutcomeStatus::AlreadyDriving
         );
+        assert_eq!(run_admitted_count(&store, &run_id).await, 1);
+    }
+
+    #[tokio::test]
+    async fn app_resume_reports_busy_for_live_execution_claim_without_driving() {
+        let entry_point_registry = production_entry_point_op_registry().expect("registry");
+        let certification_registry = crate::production_certification_registry().expect("cert");
+        let store = mfm_store::v1::AsyncInMemoryRunStore::default();
+        let trust_scope_id = store.load_trust_scope_id().await.expect("trust scope");
+        let prepared = prepare_portfolio_launch(
+            &entry_point_registry,
+            &certification_registry,
+            trust_scope_id,
+            sample_portfolio_config_json(),
+            None,
+        );
+        let run_id = prepared.request.run_id.clone();
+        let services = test_services(store.clone(), certification_registry);
+        let (_, started) = services
+            .launch_run(prepared.request)
+            .await
+            .expect("launch")
+            .into_response_parts()
+            .expect("run response");
+        let head_seq = started.head_seq;
+        let token = AdmissionToken::new("mfm.test.app.execution_claim.resume_busy")
+            .expect("execution claim token");
+        assert!(matches!(
+            store
+                .acquire_execution_claim(&run_id, token)
+                .await
+                .expect("claim execution"),
+            NowaitSkipAdmissionResult::Admitted(_)
+        ));
+
+        let resumed = services
+            .resume_stored_run(&run_id, crate::DriveMode::Once)
+            .await
+            .expect("resume response");
+
+        assert_eq!(resumed.scheduler_status, "execution_claim_busy");
+        assert_eq!(resumed.head_seq, head_seq);
+        assert_eq!(run_admitted_count(&store, &run_id).await, 1);
+    }
+
+    #[tokio::test]
+    async fn app_resume_declines_incompatible_executable_without_claiming() {
+        let entry_point_registry = production_entry_point_op_registry().expect("registry");
+        let certification_registry = crate::production_certification_registry().expect("cert");
+        let store = mfm_store::v1::AsyncInMemoryRunStore::default();
+        let trust_scope_id = store.load_trust_scope_id().await.expect("trust scope");
+        let prepared = prepare_portfolio_launch(
+            &entry_point_registry,
+            &certification_registry,
+            trust_scope_id,
+            sample_portfolio_config_json(),
+            None,
+        );
+        let run_id = prepared.request.run_id.clone();
+        let services = test_services(store.clone(), certification_registry);
+        services.launch_run(prepared.request).await.expect("launch");
+        let incompatible_services = crate::make_run_services_with_certification_registry(
+            crate::ErasedRunnerRegistry::new(),
+            store.clone(),
+            store.clone(),
+            crate::production_certification_registry().expect("cert"),
+        );
+
+        let resumed = incompatible_services
+            .resume_stored_run(&run_id, crate::DriveMode::Once)
+            .await
+            .expect("resume response");
+
+        assert_eq!(resumed.scheduler_status, "incompatible_executable");
+        assert!(matches!(
+            store
+                .execution_claim_status(&run_id)
+                .await
+                .expect("execution claim status"),
+            ExecutionClaimStatus::Unclaimed
+        ));
         assert_eq!(run_admitted_count(&store, &run_id).await, 1);
     }
 

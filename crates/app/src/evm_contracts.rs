@@ -131,10 +131,14 @@ mod tests {
         PublicSigningIdentity, SignatureBytes, SignerRef, SigningError, SigningFuture,
         SigningProvider, SigningRequest, SigningResult,
     };
-    use mfm_store::v1::{self as store, RetainedArtifactReadProvider, RunEventStore};
+    use mfm_store::v1::{
+        self as store, ExecutionClaimStatus, ExecutionClaimStore, RetainedArtifactReadProvider,
+        RunEventStore,
+    };
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::sync::Mutex;
+    use std::time::Duration;
 
     const TEST_SIGNER_HEX: &str =
         "4c0883a69102937d6231471b5dbb6204fe512961708279c2f802d6a8ebf2d3a4";
@@ -239,7 +243,7 @@ mod tests {
         let services = make_run_services_with_certification_registry(
             runners,
             store.clone(),
-            store,
+            store.clone(),
             certification,
         );
         let request = prepare_evm_entry_point_request(
@@ -272,6 +276,13 @@ mod tests {
             .await
             .expect("resume validate lifecycle");
         assert_eq!(resumed.run_mode, RunModeStatus::Completed);
+        assert!(matches!(
+            store
+                .execution_claim_status(&run_id)
+                .await
+                .expect("execution claim status"),
+            ExecutionClaimStatus::Unclaimed
+        ));
         let replay = services
             .verify_replay_for_run(&run_id)
             .await
@@ -290,6 +301,115 @@ mod tests {
             rendered.to_string().contains("\"valid\":true"),
             "rendered validation output must contain a valid report: {rendered}"
         );
+    }
+
+    #[tokio::test]
+    async fn app_runner_launch_once_releases_execution_claim_after_step() {
+        let store = store::AsyncInMemoryRunStore::default();
+        let artifacts = crate::artifact_read_provider_from_retained(store.clone());
+        let config = validate_config();
+        let configured = configured_contract();
+        let mut certification = CertificationRegistry::new();
+        mfm_op_evm_contract_lifecycle::register_contract_lifecycle_certification_descriptors(
+            &mut certification,
+        )
+        .expect("contract certification descriptors");
+        let mut runners = ErasedRunnerRegistry::new();
+        mfm_adapters_evm_contracts::register_contract_lifecycle_runners_with_factory(
+            &mut runners,
+            Arc::new(TestRuntimeFactory::new(artifacts)),
+        )
+        .expect("contract runners");
+        let services = make_run_services_with_certification_registry(
+            runners,
+            store.clone(),
+            store.clone(),
+            certification,
+        );
+        let mut request = prepare_evm_entry_point_request(
+            &services,
+            "evm_contract_validate",
+            json!({
+                "config": config,
+                "configured": configured,
+            }),
+        )
+        .await;
+        request.drive = DriveMode::Once;
+        let run_id = request.run_id.clone();
+
+        services
+            .launch_run(request)
+            .await
+            .expect("launch with one drive step");
+
+        assert!(matches!(
+            store
+                .execution_claim_status(&run_id)
+                .await
+                .expect("execution claim status"),
+            ExecutionClaimStatus::Unclaimed
+        ));
+    }
+
+    #[tokio::test]
+    async fn app_runner_reports_execution_claim_lost_after_renewal_failure() {
+        let store = store::AsyncInMemoryRunStore::default();
+        let artifacts = crate::artifact_read_provider_from_retained(store.clone());
+        let config = validate_config();
+        let configured = configured_contract();
+        let mut certification = CertificationRegistry::new();
+        mfm_op_evm_contract_lifecycle::register_contract_lifecycle_certification_descriptors(
+            &mut certification,
+        )
+        .expect("contract certification descriptors");
+        let mut runners = ErasedRunnerRegistry::new();
+        mfm_adapters_evm_contracts::register_contract_lifecycle_runners_with_factory(
+            &mut runners,
+            Arc::new(TestRuntimeFactory::with_chain_identity_delay(
+                artifacts,
+                Duration::from_millis(100),
+            )),
+        )
+        .expect("contract runners");
+        let services = make_run_services_with_certification_registry(
+            runners,
+            store.clone(),
+            store.clone(),
+            certification,
+        )
+        .with_execution_claim_heartbeat_interval_for_test(Duration::from_millis(10));
+        let request = prepare_evm_entry_point_request(
+            &services,
+            "evm_contract_validate",
+            json!({
+                "config": config,
+                "configured": configured,
+            }),
+        )
+        .await;
+        let run_id = request.run_id.clone();
+        services.launch_run(request).await.expect("append start");
+        let services_for_resume = services.clone();
+        let run_id_for_resume = run_id.clone();
+        let resume = tokio::spawn(async move {
+            services_for_resume
+                .resume_stored_run(&run_id_for_resume, DriveMode::Once)
+                .await
+                .expect("resume response")
+        });
+        let lease = wait_for_live_execution_claim(&store, &run_id).await;
+        assert!(
+            store
+                .release_execution_claim(&run_id, &lease.token)
+                .await
+                .expect("release execution claim"),
+            "test must remove the active claim before renewal"
+        );
+
+        let resumed = resume.await.expect("resume task");
+
+        assert_eq!(resumed.scheduler_status, "execution_claim_lost");
     }
 
     #[tokio::test]
@@ -604,6 +724,21 @@ mod tests {
 
     impl TestRuntimeFactory {
         fn new(artifacts: Arc<dyn ArtifactReadProvider>) -> Self {
+            Self::with_options(artifacts, false, None)
+        }
+
+        fn with_chain_identity_delay(
+            artifacts: Arc<dyn ArtifactReadProvider>,
+            delay: Duration,
+        ) -> Self {
+            Self::with_options(artifacts, false, Some(delay))
+        }
+
+        fn with_options(
+            artifacts: Arc<dyn ArtifactReadProvider>,
+            mutation: bool,
+            chain_identity_delay: Option<Duration>,
+        ) -> Self {
             let source_ref = EvmSourceRef::new("reth-dev").expect("source ref");
             let policy_id = EvmSourcePolicyId::new("reth-dev").expect("policy id");
             let reads = Arc::new(Mutex::new(TestEvmReads::default()));
@@ -611,8 +746,9 @@ mod tests {
                 source_ref: source_ref.clone(),
                 policy_id: policy_id.clone(),
                 chain_id: 31337,
-                mutation: false,
+                mutation,
                 fail_repeated_prepare_reads: false,
+                chain_identity_delay,
                 reads: Arc::clone(&reads),
             });
             Self {
@@ -639,6 +775,7 @@ mod tests {
                 chain_id: 31337,
                 mutation: true,
                 fail_repeated_prepare_reads,
+                chain_identity_delay: None,
                 reads: Arc::clone(&reads),
             });
             Self {
@@ -677,6 +814,7 @@ mod tests {
         chain_id: u64,
         mutation: bool,
         fail_repeated_prepare_reads: bool,
+        chain_identity_delay: Option<Duration>,
         reads: Arc<Mutex<TestEvmReads>>,
     }
 
@@ -731,6 +869,9 @@ mod tests {
             _request: &'a EvmChainIdentityRequest,
         ) -> EvmCapabilityFuture<'a, EvmChainIdentityResponse> {
             Box::pin(async move {
+                if let Some(delay) = self.chain_identity_delay {
+                    tokio::time::sleep(delay).await;
+                }
                 Ok(EvmChainIdentityResponse {
                     evidence: self.evidence(),
                     chain_id: self.chain_id,
@@ -884,6 +1025,25 @@ mod tests {
 
     fn failed_evm<'a, T>() -> EvmCapabilityFuture<'a, T> {
         Box::pin(async { Err(EvmCapabilityError::redacted_provider_failure("test evm")) })
+    }
+
+    async fn wait_for_live_execution_claim(
+        store: &store::AsyncInMemoryRunStore,
+        run_id: &mfm_ids::RunId,
+    ) -> store::AdmissionLease {
+        for _ in 0..100 {
+            match store
+                .execution_claim_status(run_id)
+                .await
+                .expect("execution claim status")
+            {
+                ExecutionClaimStatus::Live(lease) => return lease,
+                ExecutionClaimStatus::Unclaimed | ExecutionClaimStatus::Expired(_) => {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            }
+        }
+        panic!("execution claim was not acquired");
     }
 
     struct TestSignerRuntime {
