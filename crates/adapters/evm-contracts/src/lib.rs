@@ -2139,17 +2139,121 @@ async fn run_deploy_mutation(
     factory: &dyn EvmContractRuntimeFactory,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
     let plan = deploy_mutation_plan(&ctx, factory.artifacts()).await?;
-    let callbacks = DeploySideEffectCallbacks { factory, plan };
+    let callbacks = ContractMutationSideEffectCallbacks { factory, plan };
     SideEffectDriver::drive(ctx, &callbacks).await
 }
 
-struct DeploySideEffectCallbacks<'a> {
+struct ContractMutationSideEffectCallbacks<'a, P> {
     factory: &'a dyn EvmContractRuntimeFactory,
-    plan: DeployMutationPlan,
+    plan: P,
 }
 
-impl SideEffectDriverCallbacks for DeploySideEffectCallbacks<'_> {
+trait ContractMutationPlanOps: Send + Sync {
+    type Intent: MfmValue + Clone + Send + Sync + 'static;
+
+    fn intent(&self) -> &Self::Intent;
+
+    fn idempotency(&self) -> &ContractTransactionIdempotency;
+
+    fn network_id(&self) -> &str;
+
+    fn prepare_invocation<'a>(
+        &'a self,
+        runtime: &'a EvmContractRuntime,
+    ) -> SideEffectDriverFuture<'a, PreparedContractMutation>;
+
+    fn reconstruct_prepared_invocation(
+        &self,
+        runtime: &EvmContractRuntime,
+        prepared: &PreparedContractInvocation,
+    ) -> mfm_runtime::Result<PreparedContractMutation>;
+}
+
+impl ContractMutationPlanOps for DeployMutationPlan {
     type Intent = ContractDeployIntent;
+
+    fn intent(&self) -> &Self::Intent {
+        &self.intent
+    }
+
+    fn idempotency(&self) -> &ContractTransactionIdempotency {
+        &self.idempotency
+    }
+
+    fn network_id(&self) -> &str {
+        self.config.as_ref().network().network_id()
+    }
+
+    fn prepare_invocation<'a>(
+        &'a self,
+        runtime: &'a EvmContractRuntime,
+    ) -> SideEffectDriverFuture<'a, PreparedContractMutation> {
+        Box::pin(async move {
+            runtime
+                .adapter()
+                .prepare_deploy_invocation(&self.config, &self.intent)
+                .await
+                .map_err(mfm_runtime::RuntimeError::from)
+        })
+    }
+
+    fn reconstruct_prepared_invocation(
+        &self,
+        runtime: &EvmContractRuntime,
+        prepared: &PreparedContractInvocation,
+    ) -> mfm_runtime::Result<PreparedContractMutation> {
+        runtime
+            .adapter()
+            .reconstruct_deploy_invocation(&self.config, &self.intent, prepared)
+            .map_err(mfm_runtime::RuntimeError::from)
+    }
+}
+
+impl ContractMutationPlanOps for ConfigureMutationPlan {
+    type Intent = ContractConfigureIntent;
+
+    fn intent(&self) -> &Self::Intent {
+        &self.intent
+    }
+
+    fn idempotency(&self) -> &ContractTransactionIdempotency {
+        &self.idempotency
+    }
+
+    fn network_id(&self) -> &str {
+        self.config.as_ref().network().network_id()
+    }
+
+    fn prepare_invocation<'a>(
+        &'a self,
+        runtime: &'a EvmContractRuntime,
+    ) -> SideEffectDriverFuture<'a, PreparedContractMutation> {
+        Box::pin(async move {
+            runtime
+                .adapter()
+                .prepare_configure_invocation(&self.config, &self.input, &self.intent)
+                .await
+                .map_err(mfm_runtime::RuntimeError::from)
+        })
+    }
+
+    fn reconstruct_prepared_invocation(
+        &self,
+        runtime: &EvmContractRuntime,
+        prepared: &PreparedContractInvocation,
+    ) -> mfm_runtime::Result<PreparedContractMutation> {
+        runtime
+            .adapter()
+            .reconstruct_configure_invocation(&self.config, &self.input, &self.intent, prepared)
+            .map_err(mfm_runtime::RuntimeError::from)
+    }
+}
+
+impl<P> SideEffectDriverCallbacks for ContractMutationSideEffectCallbacks<'_, P>
+where
+    P: ContractMutationPlanOps,
+{
+    type Intent = P::Intent;
     type Idempotency = ContractTransactionIdempotency;
     type PreparedInvocation = PreparedContractInvocation;
     type Submission = ContractTransactionSubmissions;
@@ -2163,9 +2267,9 @@ impl SideEffectDriverCallbacks for DeploySideEffectCallbacks<'_> {
     ) -> SideEffectDriverFuture<'a, SideEffectIntentPlan<Self::Intent, Self::Idempotency>> {
         Box::pin(async {
             Ok(SideEffectIntentPlan {
-                intent: self.plan.intent.clone(),
-                idempotency: self.plan.idempotency.clone(),
-                idempotency_key: idempotency_key_ref(&self.plan.idempotency)?,
+                intent: self.plan.intent().clone(),
+                idempotency: self.plan.idempotency().clone(),
+                idempotency_key: idempotency_key_ref(self.plan.idempotency())?,
                 capability_binding: evm_transaction_submit_binding()?,
             })
         })
@@ -2178,13 +2282,8 @@ impl SideEffectDriverCallbacks for DeploySideEffectCallbacks<'_> {
     ) -> SideEffectDriverFuture<'a, SideEffectPreparedInvocationPlan<Self::PreparedInvocation>>
     {
         Box::pin(async {
-            let runtime = self
-                .factory
-                .runtime_for(self.plan.config.as_ref().network().network_id())?;
-            let prepared = runtime
-                .adapter()
-                .prepare_deploy_invocation(&self.plan.config, &self.plan.intent)
-                .await?;
+            let runtime = self.factory.runtime_for(self.plan.network_id())?;
+            let prepared = self.plan.prepare_invocation(&runtime).await?;
             Ok(SideEffectPreparedInvocationPlan::with_prepared_invocation(
                 prepared.evidence().clone(),
             ))
@@ -2222,14 +2321,10 @@ impl SideEffectDriverCallbacks for DeploySideEffectCallbacks<'_> {
         Box::pin(async move {
             let stored_prepared =
                 prepared.ok_or_else(|| missing_side_effect_artifact("prepared invocation"))?;
-            let runtime = self
-                .factory
-                .runtime_for(self.plan.config.as_ref().network().network_id())?;
-            let prepared = runtime.adapter().reconstruct_deploy_invocation(
-                &self.plan.config,
-                &self.plan.intent,
-                &stored_prepared,
-            )?;
+            let runtime = self.factory.runtime_for(self.plan.network_id())?;
+            let prepared = self
+                .plan
+                .reconstruct_prepared_invocation(&runtime, &stored_prepared)?;
             submit_or_recover_contract_submission(&runtime, &prepared, action)
                 .await
                 .map_err(mfm_runtime::RuntimeError::from)
@@ -2242,107 +2337,8 @@ async fn run_configure_mutation(
     factory: &dyn EvmContractRuntimeFactory,
 ) -> mfm_runtime::Result<ErasedRunnerOutput> {
     let plan = configure_mutation_plan(&ctx, factory.artifacts()).await?;
-    let callbacks = ConfigureSideEffectCallbacks { factory, plan };
+    let callbacks = ContractMutationSideEffectCallbacks { factory, plan };
     SideEffectDriver::drive(ctx, &callbacks).await
-}
-
-struct ConfigureSideEffectCallbacks<'a> {
-    factory: &'a dyn EvmContractRuntimeFactory,
-    plan: ConfigureMutationPlan,
-}
-
-impl SideEffectDriverCallbacks for ConfigureSideEffectCallbacks<'_> {
-    type Intent = ContractConfigureIntent;
-    type Idempotency = ContractTransactionIdempotency;
-    type PreparedInvocation = PreparedContractInvocation;
-    type Submission = ContractTransactionSubmissions;
-    type SubmissionUnknownEvidence = ContractTransactionSubmissions;
-    type NotSubmittedProof = ContractNotSubmittedProof;
-    type AmbiguityEvidence = ContractTransactionSubmissions;
-
-    fn intent_and_idempotency<'a, 'ctx>(
-        &'a self,
-        _ctx: &'a ErasedRunCtx<'ctx>,
-    ) -> SideEffectDriverFuture<'a, SideEffectIntentPlan<Self::Intent, Self::Idempotency>> {
-        Box::pin(async {
-            Ok(SideEffectIntentPlan {
-                intent: self.plan.intent.clone(),
-                idempotency: self.plan.idempotency.clone(),
-                idempotency_key: idempotency_key_ref(&self.plan.idempotency)?,
-                capability_binding: evm_transaction_submit_binding()?,
-            })
-        })
-    }
-
-    fn prepare_invocation<'a, 'ctx>(
-        &'a self,
-        _ctx: &'a ErasedRunCtx<'ctx>,
-        _plan: &'a SideEffectIntentPlan<Self::Intent, Self::Idempotency>,
-    ) -> SideEffectDriverFuture<'a, SideEffectPreparedInvocationPlan<Self::PreparedInvocation>>
-    {
-        Box::pin(async {
-            let runtime = self
-                .factory
-                .runtime_for(self.plan.config.as_ref().network().network_id())?;
-            let prepared = runtime
-                .adapter()
-                .prepare_configure_invocation(
-                    &self.plan.config,
-                    &self.plan.input,
-                    &self.plan.intent,
-                )
-                .await?;
-            Ok(SideEffectPreparedInvocationPlan::with_prepared_invocation(
-                prepared.evidence().clone(),
-            ))
-        })
-    }
-
-    fn reconstruct_prepared_invocation<'a, 'ctx>(
-        &'a self,
-        ctx: &'a ErasedRunCtx<'ctx>,
-        prepared: &'a store::SideEffectArtifactProjection,
-    ) -> SideEffectDriverFuture<'a, Self::PreparedInvocation> {
-        Box::pin(async {
-            load_prepared_invocation(
-                prepared,
-                events::ArtifactRole::PreparedInvocation,
-                ctx,
-                self.factory.artifacts(),
-            )
-            .await
-        })
-    }
-
-    fn submit_or_recover_submission<'a, 'ctx>(
-        &'a self,
-        _ctx: &'a ErasedRunCtx<'ctx>,
-        action: SideEffectProtocolAction,
-        prepared: Option<Self::PreparedInvocation>,
-    ) -> SideEffectSubmissionDecisionFuture<
-        'a,
-        Self::Submission,
-        Self::SubmissionUnknownEvidence,
-        Self::NotSubmittedProof,
-        Self::AmbiguityEvidence,
-    > {
-        Box::pin(async move {
-            let stored_prepared =
-                prepared.ok_or_else(|| missing_side_effect_artifact("prepared invocation"))?;
-            let runtime = self
-                .factory
-                .runtime_for(self.plan.config.as_ref().network().network_id())?;
-            let prepared = runtime.adapter().reconstruct_configure_invocation(
-                &self.plan.config,
-                &self.plan.input,
-                &self.plan.intent,
-                &stored_prepared,
-            )?;
-            submit_or_recover_contract_submission(&runtime, &prepared, action)
-                .await
-                .map_err(mfm_runtime::RuntimeError::from)
-        })
-    }
 }
 
 struct DeploySideEffectVerifyCallbacks<'a> {
@@ -2363,23 +2359,9 @@ impl SideEffectVerifyCallbacks for DeploySideEffectVerifyCallbacks<'_> {
     ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Receipt>> {
         Box::pin(async {
             let plan = deploy_mutation_plan_for_node(submit_node, self.factory.artifacts()).await?;
-            let prepared_projection = projected_prepared_artifact_for_submit(ctx, submit_node)?;
-            let prepared = load_prepared_invocation_for_node(
-                &prepared_projection,
-                events::ArtifactRole::PreparedInvocation,
-                ctx,
-                self.factory.artifacts(),
-                &submit_node.node_id,
-            )
-            .await?;
-            let submissions = load_side_effect_value_for_node::<ContractTransactionSubmissions>(
-                submission,
-                events::ArtifactRole::Submission,
-                ctx,
-                self.factory.artifacts(),
-                &submit_node.node_id,
-            )
-            .await?;
+            let (prepared, submissions) =
+                load_verify_prepared_and_submission(ctx, submit_node, submission, self.factory)
+                    .await?;
             let runtime = self
                 .factory
                 .runtime_for(plan.config.as_ref().network().network_id())?;
@@ -2503,23 +2485,9 @@ impl SideEffectVerifyCallbacks for ConfigureSideEffectVerifyCallbacks<'_> {
                 self.factory.artifacts(),
             )
             .await?;
-            let prepared_projection = projected_prepared_artifact_for_submit(ctx, submit_node)?;
-            let prepared = load_prepared_invocation_for_node(
-                &prepared_projection,
-                events::ArtifactRole::PreparedInvocation,
-                ctx,
-                self.factory.artifacts(),
-                &submit_node.node_id,
-            )
-            .await?;
-            let submissions = load_side_effect_value_for_node::<ContractTransactionSubmissions>(
-                submission,
-                events::ArtifactRole::Submission,
-                ctx,
-                self.factory.artifacts(),
-                &submit_node.node_id,
-            )
-            .await?;
+            let (prepared, submissions) =
+                load_verify_prepared_and_submission(ctx, submit_node, submission, self.factory)
+                    .await?;
             let runtime = self
                 .factory
                 .runtime_for(plan.config.as_ref().network().network_id())?;
@@ -2966,6 +2934,33 @@ async fn load_prepared_invocation_for_node(
     .await?;
     ensure_prepared_invocation_public(&prepared)?;
     Ok(prepared)
+}
+
+async fn load_verify_prepared_and_submission(
+    ctx: &ErasedRunCtx<'_>,
+    submit_node: &spec::NodeSpec,
+    submission: &store::SideEffectArtifactProjection,
+    factory: &dyn EvmContractRuntimeFactory,
+) -> mfm_runtime::Result<(PreparedContractInvocation, ContractTransactionSubmissions)> {
+    let artifacts = factory.artifacts();
+    let prepared_projection = projected_prepared_artifact_for_submit(ctx, submit_node)?;
+    let prepared = load_prepared_invocation_for_node(
+        &prepared_projection,
+        events::ArtifactRole::PreparedInvocation,
+        ctx,
+        artifacts,
+        &submit_node.node_id,
+    )
+    .await?;
+    let submissions = load_side_effect_value_for_node::<ContractTransactionSubmissions>(
+        submission,
+        events::ArtifactRole::Submission,
+        ctx,
+        artifacts,
+        &submit_node.node_id,
+    )
+    .await?;
+    Ok((prepared, submissions))
 }
 
 async fn load_side_effect_value<T>(
