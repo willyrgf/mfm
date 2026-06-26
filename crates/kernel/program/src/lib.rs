@@ -3950,7 +3950,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
             forward_config,
             forward_input,
             Vec::new(),
-            Some((forward_resource_claim, forward_verification, true)),
+            Some((forward_resource_claim, forward_verification)),
         )?;
         let forward = ForwardSideEffectHandle::new(forward_node.node_id.clone(), forward_handle);
         let remediation_input = match build_remediation_input(forward.clone()) {
@@ -3974,7 +3974,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
             remediation_config,
             remediation_input,
             Vec::new(),
-            Some((remediation_resource_claim, remediation_verification, true)),
+            Some((remediation_resource_claim, remediation_verification)),
         ) {
             Ok(planned) => planned,
             Err(error) => {
@@ -4057,7 +4057,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
             config,
             input,
             Vec::new(),
-            Some((resource_claim, verification, true)),
+            Some((resource_claim, verification)),
         )?;
         self.state_keys.insert(key_string);
         self.state_nodes.push(node.clone());
@@ -4071,7 +4071,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
         config: S::Config,
         input: I,
         output_domain_keys: Vec<StableDomainKeyRef>,
-        side_effect_contract: Option<(ResourceClaim, SideEffectVerificationSpec, bool)>,
+        side_effect_contract: Option<(ResourceClaim, SideEffectVerificationSpec)>,
     ) -> Result<(StateNodeSpec, Handle<'program, 'scope, S::Output>)>
     where
         S: StateSpec,
@@ -4090,9 +4090,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
         let descriptor = registered.descriptor();
         let side_effect_contract_digest = descriptor.side_effect_contract_digest().cloned();
         let side_effect_contract =
-            side_effect_contract.map(|(claim, verification, verify_pair)| {
-                (claim.into_spec(), verification, verify_pair)
-            });
+            side_effect_contract.map(|(claim, verification)| (claim.into_spec(), verification));
         match (&side_effect_contract_digest, &side_effect_contract) {
             (Some(_), Some(_)) | (None, None) => {}
             (Some(_), None) => {
@@ -4126,10 +4124,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
             &output_semantic_type_id,
             &output_schema_id,
         )?;
-        let side_effect_is_paired = side_effect_contract
-            .as_ref()
-            .map(|(_, _, verify_pair)| *verify_pair)
-            .unwrap_or(false);
+        let side_effect_is_paired = side_effect_contract.is_some();
         let lineage = state_value_lineage(
             &self.scope_id,
             &node_id,
@@ -4147,7 +4142,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
             side_effect_contract_digest.as_ref(),
             side_effect_contract.as_ref(),
         ) {
-            (Some(contract_digest), Some((resource_claim, verification, true))) => {
+            (Some(contract_digest), Some((resource_claim, verification))) => {
                 let contract = mfm_spec::v1::SideEffectContractSpec {
                     contract_digest: contract_digest.clone(),
                     resource_claim: resource_claim.clone(),
@@ -4218,10 +4213,10 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
                 side_effect_contract_digest,
                 side_effect_resource_claim: side_effect_contract
                     .as_ref()
-                    .map(|(claim, _, _)| claim.clone()),
+                    .map(|(claim, _)| claim.clone()),
                 side_effect_verification: side_effect_contract
                     .as_ref()
-                    .map(|(_, verification, _)| verification.clone()),
+                    .map(|(_, verification)| verification.clone()),
                 side_effect_verify,
                 config: config_binding,
                 input: input.spec(),
