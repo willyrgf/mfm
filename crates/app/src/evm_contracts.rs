@@ -26,6 +26,28 @@ impl mfm_adapters_evm_contracts::EvmContractRuntimeFactory for EnvEvmContractRun
         self.artifacts.as_ref()
     }
 
+    fn validate_runtime_for(
+        &self,
+        network_id: &str,
+        signer_ref: Option<&SignerRef>,
+    ) -> mfm_runtime::Result<()> {
+        let source_ref = EvmSourceRef::new(network_id).map_err(runtime_evm_capability_error)?;
+        let policy_id = EvmSourcePolicyId::new(network_id).map_err(runtime_evm_capability_error)?;
+        EvmJsonRpcClient::from_env()
+            .map_err(runtime_evm_transport_error)?
+            .validate_route(&policy_id, &source_ref)
+            .map_err(runtime_evm_transport_error)?;
+        if let Some(signer_ref) = signer_ref {
+            let signer = keystore_signer_provider_from_env()?;
+            if !signer.contains_signer(signer_ref) {
+                return Err(mfm_runtime::RuntimeError::RunnerBinding(
+                    "missing EVM signer binding".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn runtime_for(
         &self,
         network_id: &str,
@@ -100,7 +122,7 @@ fn runtime_signing_error(error: mfm_signing::SigningError) -> mfm_runtime::Runti
 mod tests {
     use super::*;
     use crate::{
-        make_run_services_with_certification_registry, prepare_entry_point_run_launch, DriveMode,
+        make_run_services_with_certification_registry, prepare_entry_point_run_launch,
         EntryPointRunLaunchInput, RunLaunchRequest, RunModeStatus, RunServices,
     };
     use mfm_adapters_evm_contracts::{
@@ -113,15 +135,18 @@ mod tests {
     use mfm_core::crypto::EthereumPrivateKey;
     use mfm_events::v1 as events;
     use mfm_evm_capabilities::{
+        EvmBlockReadProvider, EvmBlockReadRequest, EvmBlockReadResponse, EvmBlockSelector,
         EvmCallReadCapability, EvmCallReadProvider, EvmCallReadRequest, EvmCallReadResponse,
         EvmCapabilityError, EvmCapabilityFuture, EvmChainIdentityCapability,
         EvmChainIdentityProvider, EvmChainIdentityRequest, EvmChainIdentityResponse,
         EvmFeeReadProvider, EvmFeeReadRequest, EvmFeeReadResponse, EvmGasEstimateProvider,
         EvmGasEstimateRequest, EvmGasEstimateResponse, EvmLogEntry, EvmLogsReadCapability,
-        EvmLogsReadProvider, EvmLogsReadRequest, EvmLogsReadResponse, EvmNonceReadProvider,
-        EvmNonceReadRequest, EvmNonceReadResponse, EvmReceiptReadProvider, EvmReceiptReadRequest,
-        EvmReceiptReadResponse, EvmSourcePolicyId, EvmSourceRef, EvmTransactionSubmitProvider,
-        EvmTransactionSubmitRequest, EvmTransactionSubmitResponse, RedactedEvmSourceEvidence,
+        EvmLogsReadProvider, EvmLogsReadRequest, EvmLogsReadResponse, EvmNonceOccupancy,
+        EvmNonceOccupancyReadProvider, EvmNonceOccupancyReadRequest, EvmNonceOccupancyReadResponse,
+        EvmNonceReadProvider, EvmNonceReadRequest, EvmNonceReadResponse, EvmReceiptReadProvider,
+        EvmReceiptReadRequest, EvmReceiptReadResponse, EvmSourcePolicyId, EvmSourceRef,
+        EvmTransactionSubmitProvider, EvmTransactionSubmitRequest, EvmTransactionSubmitResponse,
+        RedactedEvmSourceEvidence,
     };
     use mfm_evm_contract_config::{ConfigurePhaseConfig, DeployPhaseConfig, ValidatePhaseConfig};
     use mfm_evm_contract_model::{ConfiguredContract, DeployedContract};
@@ -132,8 +157,8 @@ mod tests {
         SigningProvider, SigningRequest, SigningResult,
     };
     use mfm_store::v1::{
-        self as store, AdmissionToken, ExecutionClaimStatus, ExecutionClaimStore,
-        NowaitSkipAdmissionResult, RetainedArtifactReadProvider, RunEventStore,
+        self as store, ExecutionClaimStatus, ExecutionClaimStore, RetainedArtifactReadProvider,
+        RunEventStore,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -217,7 +242,6 @@ mod tests {
             certification_registry: services.certification_registry(),
             trust_scope_id: services.load_trust_scope_id().await.expect("trust scope"),
             distinct_run_key: None,
-            drive: DriveMode::AppendOnly,
         })
         .expect("entry-point launch request")
         .request
@@ -264,18 +288,13 @@ mod tests {
             .public_schema_id
             .clone();
 
-        let (_, started) = services
+        let (_, launched) = services
             .launch_run(request)
             .await
-            .expect("append start")
+            .expect("launch validate lifecycle")
             .into_response_parts()
             .expect("run response");
-        assert_eq!(started.run_mode, RunModeStatus::Forward);
-        let resumed = services
-            .resume_stored_run(&run_id, DriveMode::UntilBlocked)
-            .await
-            .expect("resume validate lifecycle");
-        assert_eq!(resumed.run_mode, RunModeStatus::Completed);
+        assert_eq!(launched.run_mode, RunModeStatus::Completed);
         assert!(matches!(
             store
                 .execution_claim_status(&run_id)
@@ -301,128 +320,6 @@ mod tests {
             rendered.to_string().contains("\"valid\":true"),
             "rendered validation output must contain a valid report: {rendered}"
         );
-    }
-
-    #[tokio::test]
-    async fn app_runner_launch_once_releases_execution_claim_after_step() {
-        let store = store::AsyncInMemoryRunStore::default();
-        let artifacts = crate::artifact_read_provider_from_retained(store.clone());
-        let config = validate_config();
-        let configured = configured_contract();
-        let mut certification = CertificationRegistry::new();
-        mfm_op_evm_contract_lifecycle::register_contract_lifecycle_certification_descriptors(
-            &mut certification,
-        )
-        .expect("contract certification descriptors");
-        let mut runners = ErasedRunnerRegistry::new();
-        mfm_adapters_evm_contracts::register_contract_lifecycle_runners_with_factory(
-            &mut runners,
-            Arc::new(TestRuntimeFactory::new(artifacts)),
-        )
-        .expect("contract runners");
-        let services = make_run_services_with_certification_registry(
-            runners,
-            store.clone(),
-            store.clone(),
-            certification,
-        );
-        let mut request = prepare_evm_entry_point_request(
-            &services,
-            "evm_contract_validate",
-            json!({
-                "config": config,
-                "configured": configured,
-            }),
-        )
-        .await;
-        request.drive = DriveMode::Once;
-        let run_id = request.run_id.clone();
-
-        services
-            .launch_run(request)
-            .await
-            .expect("launch with one drive step");
-
-        assert!(matches!(
-            store
-                .execution_claim_status(&run_id)
-                .await
-                .expect("execution claim status"),
-            ExecutionClaimStatus::Unclaimed
-        ));
-    }
-
-    #[tokio::test]
-    async fn app_runner_reaps_stale_execution_claim_and_resumes() {
-        let store = store::AsyncInMemoryRunStore::default();
-        let artifacts = crate::artifact_read_provider_from_retained(store.clone());
-        let config = validate_config();
-        let configured = configured_contract();
-        let mut certification = CertificationRegistry::new();
-        mfm_op_evm_contract_lifecycle::register_contract_lifecycle_certification_descriptors(
-            &mut certification,
-        )
-        .expect("contract certification descriptors");
-        let mut runners = ErasedRunnerRegistry::new();
-        mfm_adapters_evm_contracts::register_contract_lifecycle_runners_with_factory(
-            &mut runners,
-            Arc::new(TestRuntimeFactory::new(artifacts)),
-        )
-        .expect("contract runners");
-        let services = make_run_services_with_certification_registry(
-            runners,
-            store.clone(),
-            store.clone(),
-            certification,
-        );
-        let request = prepare_evm_entry_point_request(
-            &services,
-            "evm_contract_validate",
-            json!({
-                "config": config,
-                "configured": configured,
-            }),
-        )
-        .await;
-        let run_id = request.run_id.clone();
-        let (_, started) = services
-            .launch_run(request)
-            .await
-            .expect("append start")
-            .into_response_parts()
-            .expect("run response");
-        let stale_token = AdmissionToken::new("mfm.test.app.execution_claim.stale").expect("token");
-        assert!(matches!(
-            store
-                .acquire_execution_claim(&run_id, stale_token)
-                .await
-                .expect("claim execution"),
-            NowaitSkipAdmissionResult::Admitted(_)
-        ));
-        assert!(
-            store
-                .expire_execution_claim_for_test(&run_id)
-                .expect("expire execution claim"),
-            "test must mark the active execution claim stale"
-        );
-
-        let resumed = services
-            .resume_stored_run(&run_id, DriveMode::Once)
-            .await
-            .expect("resume after stale claim");
-
-        assert_ne!(resumed.scheduler_status, "execution_claim_busy");
-        assert!(
-            resumed.head_seq > started.head_seq,
-            "resume should drive the run after reaping the stale claim"
-        );
-        assert!(matches!(
-            store
-                .execution_claim_status(&run_id)
-                .await
-                .expect("execution claim status"),
-            ExecutionClaimStatus::Unclaimed
-        ));
     }
 
     #[tokio::test]
@@ -462,14 +359,15 @@ mod tests {
         )
         .await;
         let run_id = request.run_id.clone();
-        services.launch_run(request).await.expect("append start");
-        let services_for_resume = services.clone();
-        let run_id_for_resume = run_id.clone();
-        let resume = tokio::spawn(async move {
-            services_for_resume
-                .resume_stored_run(&run_id_for_resume, DriveMode::Once)
+        let services_for_launch = services.clone();
+        let launch = tokio::spawn(async move {
+            services_for_launch
+                .launch_run(request)
                 .await
-                .expect("resume response")
+                .expect("launch response")
+                .into_response_parts()
+                .expect("run response")
+                .1
         });
         let lease = wait_for_live_execution_claim(&store, &run_id).await;
         assert!(
@@ -480,7 +378,7 @@ mod tests {
             "test must remove the active claim before renewal"
         );
 
-        let resumed = resume.await.expect("resume task");
+        let resumed = launch.await.expect("launch task");
 
         assert_eq!(resumed.scheduler_status, "execution_claim_lost");
     }
@@ -518,18 +416,13 @@ mod tests {
         .await;
         let run_id = request.run_id.clone();
 
-        let (_, started) = services
+        let (_, launched) = services
             .launch_run(request)
             .await
-            .expect("append start")
+            .expect("launch validate lifecycle")
             .into_response_parts()
             .expect("run response");
-        assert_eq!(started.run_mode, RunModeStatus::Forward);
-        let resumed = services
-            .resume_stored_run(&run_id, DriveMode::UntilBlocked)
-            .await
-            .expect("resume validate lifecycle");
-        assert_eq!(resumed.run_mode, RunModeStatus::Completed);
+        assert_eq!(launched.run_mode, RunModeStatus::Completed);
         let stream = services
             .store()
             .load_run_stream(&run_id)
@@ -598,18 +491,13 @@ mod tests {
             .public_schema_id
             .clone();
 
-        let (_, started) = services
+        let (_, launched) = services
             .launch_run(request)
             .await
-            .expect("append start")
+            .expect("launch deploy lifecycle")
             .into_response_parts()
             .expect("run response");
-        assert_eq!(started.run_mode, RunModeStatus::Forward);
-        let resumed = services
-            .resume_stored_run(&run_id, DriveMode::UntilBlocked)
-            .await
-            .expect("resume deploy lifecycle");
-        assert_eq!(resumed.run_mode, RunModeStatus::Completed);
+        assert_eq!(launched.run_mode, RunModeStatus::Completed);
         let replay = services
             .verify_replay_for_run(&run_id)
             .await
@@ -680,18 +568,13 @@ mod tests {
             .public_schema_id
             .clone();
 
-        let (_, started) = services
+        let (_, launched) = services
             .launch_run(request)
             .await
-            .expect("append start")
+            .expect("launch full lifecycle")
             .into_response_parts()
             .expect("run response");
-        assert_eq!(started.run_mode, RunModeStatus::Forward);
-        let resumed = services
-            .resume_stored_run(&run_id, DriveMode::UntilBlocked)
-            .await
-            .expect("resume full lifecycle");
-        assert_eq!(resumed.run_mode, RunModeStatus::Completed);
+        assert_eq!(launched.run_mode, RunModeStatus::Completed);
         services
             .verify_replay_for_run(&run_id)
             .await
@@ -950,6 +833,25 @@ mod tests {
         }
     }
 
+    impl EvmBlockReadProvider for TestEvmProvider {
+        fn read_block<'a>(
+            &'a self,
+            request: &'a EvmBlockReadRequest,
+        ) -> EvmCapabilityFuture<'a, EvmBlockReadResponse> {
+            if !self.mutation {
+                return failed_evm();
+            }
+            assert_eq!(request.block, EvmBlockSelector::Latest);
+            Box::pin(async move {
+                Ok(EvmBlockReadResponse {
+                    evidence: self.evidence(),
+                    block_number: 64,
+                    block_hash: Default::default(),
+                })
+            })
+        }
+    }
+
     impl EvmNonceReadProvider for TestEvmProvider {
         fn read_nonce<'a>(
             &'a self,
@@ -1050,6 +952,20 @@ mod tests {
                     transaction_hash: request.transaction_hash,
                     block_number: 42,
                     status: true,
+                })
+            })
+        }
+    }
+
+    impl EvmNonceOccupancyReadProvider for TestEvmProvider {
+        fn read_nonce_occupancy<'a>(
+            &'a self,
+            _request: &'a EvmNonceOccupancyReadRequest,
+        ) -> EvmCapabilityFuture<'a, EvmNonceOccupancyReadResponse> {
+            Box::pin(async move {
+                Ok(EvmNonceOccupancyReadResponse {
+                    evidence: self.evidence(),
+                    outcome: EvmNonceOccupancy::Unknown,
                 })
             })
         }

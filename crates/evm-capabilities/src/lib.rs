@@ -121,6 +121,12 @@ evm_capability!(
     ReadExternalRole,
     "receipt.read"
 );
+evm_capability!(
+    /// EVM account nonce occupancy investigation authority.
+    EvmNonceOccupancyReadCapability,
+    ReadExternalRole,
+    "nonce_occupancy.read"
+);
 
 fn evm_capability_kind(name: &'static str) -> mfm_capabilities::Result<CapabilityKind> {
     CapabilityKind::new(
@@ -225,6 +231,15 @@ pub trait EvmReceiptReadProvider: Send + Sync {
         &'a self,
         request: &'a EvmReceiptReadRequest,
     ) -> EvmCapabilityFuture<'a, EvmReceiptReadResponse>;
+}
+
+/// Provider interface for EVM nonce occupancy investigations.
+pub trait EvmNonceOccupancyReadProvider: Send + Sync {
+    /// Reads explicit evidence for whether a concrete sender nonce is occupied by a non-anchor tx.
+    fn read_nonce_occupancy<'a>(
+        &'a self,
+        request: &'a EvmNonceOccupancyReadRequest,
+    ) -> EvmCapabilityFuture<'a, EvmNonceOccupancyReadResponse>;
 }
 
 /// Process-local EVM source reference.
@@ -629,6 +644,44 @@ pub struct EvmReceiptReadResponse {
     pub status: bool,
 }
 
+/// Request for account nonce occupancy investigation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvmNonceOccupancyReadRequest {
+    /// Source reference.
+    pub source_ref: EvmSourceRef,
+    /// Source policy id.
+    pub policy_id: EvmSourcePolicyId,
+    /// Sender account whose nonce is being investigated.
+    pub account: Address,
+    /// Sender nonce being investigated.
+    pub nonce: u64,
+    /// MFM recorded submission anchor that must not match an occupied transaction.
+    pub excluded_transaction_hash: B256,
+}
+
+/// Response for account nonce occupancy investigation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvmNonceOccupancyReadResponse {
+    /// Redacted source evidence.
+    pub evidence: RedactedEvmSourceEvidence,
+    /// Occupancy outcome.
+    pub outcome: EvmNonceOccupancy,
+}
+
+/// Explicit nonce occupancy outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EvmNonceOccupancy {
+    /// No defensible occupancy proof was available from this read.
+    Unknown,
+    /// A non-anchor transaction was observed occupying the sender nonce.
+    Occupied {
+        /// Occupying transaction hash.
+        transaction_hash: B256,
+        /// Block number when the occupying transaction is mined.
+        block_number: Option<u64>,
+    },
+}
+
 /// Closed invalid-request reasons.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EvmInvalidRequest {
@@ -718,6 +771,7 @@ mod tests {
                 "mfm.evm.gas_estimate.read",
                 "mfm.evm.transaction.submit",
                 "mfm.evm.receipt.read",
+                "mfm.evm.nonce_occupancy.read",
             ]
         );
         for name in names {
@@ -773,7 +827,7 @@ mod tests {
         assert!(!rendered.contains("1, 2, 3"));
     }
 
-    fn capability_names() -> [&'static str; 10] {
+    fn capability_names() -> [&'static str; 11] {
         [
             EvmChainIdentityCapability::name(),
             EvmBlockReadCapability::name(),
@@ -785,6 +839,7 @@ mod tests {
             EvmGasEstimateCapability::name(),
             EvmTransactionSubmitCapability::name(),
             EvmReceiptReadCapability::name(),
+            EvmNonceOccupancyReadCapability::name(),
         ]
     }
 }

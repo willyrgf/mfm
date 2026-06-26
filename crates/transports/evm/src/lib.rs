@@ -34,10 +34,11 @@ use mfm_evm_capabilities::{
     EvmChainIdentityProvider, EvmChainIdentityRequest, EvmChainIdentityResponse,
     EvmFeeReadProvider, EvmFeeReadRequest, EvmFeeReadResponse, EvmGasEstimateProvider,
     EvmGasEstimateRequest, EvmGasEstimateResponse, EvmLogEntry, EvmLogsReadProvider,
-    EvmLogsReadRequest, EvmLogsReadResponse, EvmNonceReadProvider, EvmNonceReadRequest,
-    EvmNonceReadResponse, EvmReceiptReadProvider, EvmReceiptReadRequest, EvmReceiptReadResponse,
-    EvmSourcePolicyId, EvmSourceRef, EvmTransactionSubmitProvider, EvmTransactionSubmitRequest,
-    EvmTransactionSubmitResponse, RedactedEvmSourceEvidence,
+    EvmLogsReadRequest, EvmLogsReadResponse, EvmNonceOccupancy, EvmNonceOccupancyReadProvider,
+    EvmNonceOccupancyReadRequest, EvmNonceOccupancyReadResponse, EvmNonceReadProvider,
+    EvmNonceReadRequest, EvmNonceReadResponse, EvmReceiptReadProvider, EvmReceiptReadRequest,
+    EvmReceiptReadResponse, EvmSourcePolicyId, EvmSourceRef, EvmTransactionSubmitProvider,
+    EvmTransactionSubmitRequest, EvmTransactionSubmitResponse, RedactedEvmSourceEvidence,
 };
 use mfm_evm_core::encoding::parse_u256_hex;
 use mfm_evm_core::hex::{bytes_to_hex_prefixed, hex_to_bytes};
@@ -300,6 +301,15 @@ impl EvmJsonRpcClient {
         let raw = std::env::var(MFM_EVM_RPC_SOURCES_JSON)
             .map_err(|_| EvmTransportError::InvalidRegistry)?;
         Ok(Self::new(EvmSourceRegistry::from_json_str(&raw)?))
+    }
+
+    /// Validates that a source policy can route to the requested source without network I/O.
+    pub fn validate_route(
+        &self,
+        policy_id: &EvmSourcePolicyId,
+        source_ref: &EvmSourceRef,
+    ) -> TransportResult<()> {
+        self.registry.candidates(policy_id, source_ref).map(|_| ())
     }
 
     async fn chain_identity_impl(
@@ -632,6 +642,65 @@ impl EvmJsonRpcClient {
         })
     }
 
+    async fn nonce_occupancy_read_impl(
+        &self,
+        request: &EvmNonceOccupancyReadRequest,
+    ) -> TransportResult<EvmNonceOccupancyReadResponse> {
+        let selected = self
+            .verified_source(&request.policy_id, &request.source_ref)
+            .await?;
+        let account = format!("{:?}", request.account).to_ascii_lowercase();
+        for block_tag in ["latest", "pending"] {
+            let result = self
+                .rpc_call(
+                    selected.source,
+                    "eth_getBlockByNumber",
+                    json!([block_tag, true]),
+                )
+                .await?;
+            let Some(transactions) = result.get("transactions").and_then(Value::as_array) else {
+                continue;
+            };
+            for transaction in transactions {
+                let Some(from) = transaction.get("from").and_then(Value::as_str) else {
+                    continue;
+                };
+                if from.to_ascii_lowercase() != account {
+                    continue;
+                }
+                let Some(raw_nonce) = transaction.get("nonce").and_then(Value::as_str) else {
+                    continue;
+                };
+                if parse_u64(raw_nonce)? != request.nonce {
+                    continue;
+                }
+                let hash = parse_b256_field(transaction, "hash")?;
+                if hash == request.excluded_transaction_hash {
+                    return Ok(EvmNonceOccupancyReadResponse {
+                        evidence: selected.evidence,
+                        outcome: EvmNonceOccupancy::Unknown,
+                    });
+                }
+                let block_number = transaction
+                    .get("blockNumber")
+                    .and_then(Value::as_str)
+                    .map(parse_u64)
+                    .transpose()?;
+                return Ok(EvmNonceOccupancyReadResponse {
+                    evidence: selected.evidence,
+                    outcome: EvmNonceOccupancy::Occupied {
+                        transaction_hash: hash,
+                        block_number,
+                    },
+                });
+            }
+        }
+        Ok(EvmNonceOccupancyReadResponse {
+            evidence: selected.evidence,
+            outcome: EvmNonceOccupancy::Unknown,
+        })
+    }
+
     async fn verified_source<'a>(
         &'a self,
         policy_id: &EvmSourcePolicyId,
@@ -802,6 +871,13 @@ impl_provider!(
     EvmReceiptReadResponse,
     receipt_read_impl
 );
+impl_provider!(
+    EvmNonceOccupancyReadProvider,
+    read_nonce_occupancy,
+    EvmNonceOccupancyReadRequest,
+    EvmNonceOccupancyReadResponse,
+    nonce_occupancy_read_impl
+);
 
 fn capability_error_from_transport(error: EvmTransportError) -> EvmCapabilityError {
     match error {
@@ -928,6 +1004,8 @@ mod tests {
     use tokio::net::TcpListener;
 
     const HASH_HEX: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
+    const OCCUPYING_HASH_HEX: &str =
+        "0x2222222222222222222222222222222222222222222222222222222222222222";
 
     #[tokio::test]
     async fn selects_source_by_policy_and_records_redacted_evidence() {
@@ -1099,6 +1177,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn nonce_occupancy_read_proves_non_anchor_transaction() {
+        let server = TestRpcServer::spawn_nonce_occupancy("0x1").await;
+        let client = client_for(&server.url, "primary", "mainnet", 1);
+        let response = client
+            .read_nonce_occupancy(&EvmNonceOccupancyReadRequest {
+                source_ref: EvmSourceRef::new("primary").expect("source"),
+                policy_id: EvmSourcePolicyId::new("mainnet").expect("policy"),
+                account: address!("0x1111111111111111111111111111111111111111"),
+                nonce: 7,
+                excluded_transaction_hash: HASH_HEX.parse::<B256>().expect("anchor hash"),
+            })
+            .await
+            .expect("nonce occupancy");
+
+        assert_eq!(response.evidence.chain_id, 1);
+        assert_eq!(
+            response.outcome,
+            EvmNonceOccupancy::Occupied {
+                transaction_hash: OCCUPYING_HASH_HEX.parse::<B256>().expect("occupying hash"),
+                block_number: Some(42),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn nonce_occupancy_read_does_not_prove_recorded_anchor() {
+        let server = TestRpcServer::spawn_nonce_occupancy("0x1").await;
+        let client = client_for(&server.url, "primary", "mainnet", 1);
+        let response = client
+            .read_nonce_occupancy(&EvmNonceOccupancyReadRequest {
+                source_ref: EvmSourceRef::new("primary").expect("source"),
+                policy_id: EvmSourcePolicyId::new("mainnet").expect("policy"),
+                account: address!("0x1111111111111111111111111111111111111111"),
+                nonce: 7,
+                excluded_transaction_hash: OCCUPYING_HASH_HEX.parse::<B256>().expect("anchor hash"),
+            })
+            .await
+            .expect("nonce occupancy");
+
+        assert_eq!(response.outcome, EvmNonceOccupancy::Unknown);
+    }
+
+    #[tokio::test]
     async fn supports_legacy_fee_source_without_eip1559_methods() {
         let server = TestRpcServer::spawn_legacy_fee("0x1").await;
         let client = client_for(&server.url, "primary", "mainnet", 1);
@@ -1229,6 +1350,10 @@ mod tests {
             Self::spawn_with_mode(TestRpcMode::PendingReceipt { chain_id }).await
         }
 
+        async fn spawn_nonce_occupancy(chain_id: &'static str) -> Self {
+            Self::spawn_with_mode(TestRpcMode::NonceOccupancy { chain_id }).await
+        }
+
         async fn spawn_failure() -> Self {
             Self::spawn_with_mode(TestRpcMode::Failure).await
         }
@@ -1322,6 +1447,20 @@ mod tests {
                                     body
                                 )
                             }
+                            TestRpcMode::NonceOccupancy { chain_id } => {
+                                let result = nonce_occupancy_rpc_result(chain_id, &method);
+                                let body = serde_json::json!({
+                                    "jsonrpc": "2.0",
+                                    "id": 1,
+                                    "result": result,
+                                })
+                                .to_string();
+                                format!(
+                                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                                    body.len(),
+                                    body
+                                )
+                            }
                             TestRpcMode::Failure => {
                                 "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\n\r\n"
                                     .to_owned()
@@ -1343,6 +1482,7 @@ mod tests {
         Ok { chain_id: &'static str },
         LegacyFee { chain_id: &'static str },
         PendingReceipt { chain_id: &'static str },
+        NonceOccupancy { chain_id: &'static str },
         Failure,
     }
 
@@ -1419,6 +1559,23 @@ mod tests {
                 "hash": HASH_HEX,
             }),
             other => panic!("unexpected legacy fee method {other}"),
+        }
+    }
+
+    fn nonce_occupancy_rpc_result(chain_id: &str, method: &str) -> Value {
+        match method {
+            "eth_chainId" => json!(chain_id),
+            "eth_getBlockByNumber" => json!({
+                "number": "0x2a",
+                "hash": HASH_HEX,
+                "transactions": [{
+                    "from": "0x1111111111111111111111111111111111111111",
+                    "nonce": "0x7",
+                    "hash": OCCUPYING_HASH_HEX,
+                    "blockNumber": "0x2a",
+                }],
+            }),
+            other => panic!("unexpected nonce occupancy method {other}"),
         }
     }
 }
