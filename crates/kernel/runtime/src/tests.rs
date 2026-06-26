@@ -8593,7 +8593,7 @@ async fn side_effect_ambiguity_blocks_independent_ready_nodes() {
 }
 
 #[tokio::test]
-async fn side_effect_output_before_confirmation_is_rejected() {
+async fn side_effect_output_before_terminal_evidence_is_rejected() {
     let fixture = fixture_with_first_side_effect_state();
     let mut registry = ErasedRunnerRegistry::new();
     registry
@@ -8641,6 +8641,114 @@ async fn side_effect_output_before_confirmation_is_rejected() {
     );
     let node = node_by_output(&fixture, &fixture.cell_a);
     assert_node_failed_with_code(&store, &node.node_id, "runner_output_invalid");
+}
+
+#[tokio::test]
+async fn receipt_policy_allows_submit_output_after_receipt() {
+    let fixture = fixture_with_first_exclusive_side_effect_state();
+    let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
+    let mut store = TestTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    let node = node_by_output(&fixture, &fixture.cell_a);
+    let attempt_id = append_synthetic_exclusive_receipt_phase(
+        &mut store,
+        &fixture,
+        node,
+        "wallet-submit-output-receipt",
+        "sidefx-submit-output-receipt",
+    );
+
+    let snapshot = store.projection_snapshot();
+    side_effect_lifecycle::SideEffectLifecycle::validate_terminal_batch_evidence(
+        &fixture.runtime_spec,
+        &fixture.run_id,
+        &snapshot,
+        node,
+        &attempt_id,
+        false,
+    )
+    .expect("receipt policy permits submit output after receipt");
+
+    append_terminal(
+        &mut store,
+        &fixture,
+        node,
+        &attempt_id,
+        artifact(0xe1),
+        content(0xe2),
+    );
+    validate_runtime_stream_for_tests(
+        &fixture.runtime_spec,
+        &fixture.run_id,
+        &store.load_run_stream(&fixture.run_id),
+    )
+    .expect("historical validation permits receipt-terminal submit output");
+}
+
+#[tokio::test]
+async fn finalized_policy_rejects_submit_output_after_receipt_before_confirmation() {
+    let fixture = runtime_side_effect_fixture(
+        RuntimeSideEffectFixtureShape::Chained,
+        RuntimeSideEffectClaim::Exclusive,
+        spec::SideEffectVerificationSpec::Finalized { depth: 1 },
+    );
+    let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
+    let mut store = TestTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    let node = node_by_output(&fixture, &fixture.cell_a);
+    let attempt_id = append_synthetic_exclusive_receipt_phase(
+        &mut store,
+        &fixture,
+        node,
+        "wallet-submit-output-finalized",
+        "sidefx-submit-output-finalized",
+    );
+
+    let snapshot = store.projection_snapshot();
+    let error = side_effect_lifecycle::SideEffectLifecycle::validate_terminal_batch_evidence(
+        &fixture.runtime_spec,
+        &fixture.run_id,
+        &snapshot,
+        node,
+        &attempt_id,
+        false,
+    )
+    .expect_err("finalized policy requires confirmation");
+    assert!(error
+        .to_string()
+        .contains("produced output before certified terminal evidence"));
+
+    append_terminal(
+        &mut store,
+        &fixture,
+        node,
+        &attempt_id,
+        artifact(0xe3),
+        content(0xe4),
+    );
+    let error = validate_runtime_stream_for_tests(
+        &fixture.runtime_spec,
+        &fixture.run_id,
+        &store.load_run_stream(&fixture.run_id),
+    )
+    .expect_err("historical validation requires finalized confirmation");
+    assert!(error
+        .to_string()
+        .contains("produced output before certified terminal evidence"));
 }
 
 #[test]
@@ -10627,6 +10735,43 @@ fn append_synthetic_receipt_observed(
             },
         })
         .expect("append synthetic receipt observed");
+}
+
+fn append_synthetic_exclusive_receipt_phase(
+    store: &mut TestTypedRunStore,
+    fixture: &Fixture,
+    node: &spec::NodeSpec,
+    key: &str,
+    commit_key: &str,
+) -> AttemptId {
+    let (attempt_id, ledger_key) =
+        append_synthetic_exclusive_prepare(store, fixture, &fixture.run_id, node, key, commit_key);
+    append_synthetic_invocation_started(
+        store,
+        fixture,
+        &fixture.run_id,
+        node,
+        &attempt_id,
+        &ledger_key,
+        &format!("{commit_key}-started"),
+    );
+    append_synthetic_submission_observed(
+        store,
+        fixture,
+        node,
+        &attempt_id,
+        &ledger_key,
+        &format!("{commit_key}-submission"),
+    );
+    append_synthetic_receipt_observed(
+        store,
+        fixture,
+        node,
+        &attempt_id,
+        &ledger_key,
+        &format!("{commit_key}-receipt"),
+    );
+    attempt_id
 }
 
 fn append_synthetic_submit_boundary_skipped(
