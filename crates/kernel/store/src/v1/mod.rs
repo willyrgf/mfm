@@ -5532,13 +5532,16 @@ fn materialize_resource_lane_intents(
                 )?;
                 let (lane_key, active) = resolve_active_resource_lane_release(
                     &active_lanes,
-                    &request.run_id,
-                    &intent.ledger_key,
-                    &intent.ledger_purpose,
-                    &intent.pair_id,
-                    intent.invocation_epoch,
-                    &intent.claim_id,
-                    "resource lane release intent does not match active claim",
+                    ResourceLaneReleaseMatch {
+                        run_id: &request.run_id,
+                        ledger_key: &intent.ledger_key,
+                        ledger_purpose: &intent.ledger_purpose,
+                        pair_id: &intent.pair_id,
+                        invocation_epoch: intent.invocation_epoch,
+                        claim_id: &intent.claim_id,
+                        mismatch_message:
+                            "resource lane release intent does not match active claim",
+                    },
                 )?;
                 let lane_key = lane_key.clone();
                 let active = active.clone();
@@ -8280,6 +8283,7 @@ pub use self::resource_lanes::resource_lane_release_intent_resolution;
 use self::resource_lanes::{
     acquire_resource_lane, release_resource_lane, require_no_resource_lane_for_holder,
     require_no_resource_lanes_for_run, resolve_active_resource_lane_release,
+    ResourceLaneReleaseMatch,
 };
 use self::side_effects::{
     note_saga_engagement, prepared_invocation_projection, require_active_attempt_for_side_effect,
