@@ -7802,10 +7802,15 @@ mod tests {
     fn certification_rejects_non_verify_submit_output_consumer() {
         let (registry, base) = side_effect_registry_and_spec();
 
-        assert_rejects(&registry, &base, ProblemClass::InvalidTopology, |spec| {
-            let submit_output_cell = side_effect_submit_node(spec).output_cell.clone();
-            append_user_receipt_consumer(spec, submit_output_cell, "user/submit-output");
-        });
+        assert_rejects(
+            &registry,
+            &base,
+            ProblemClass::InvalidSemanticTransition,
+            |spec| {
+                let submit_output_cell = side_effect_submit_node(spec).output_cell.clone();
+                append_user_receipt_consumer(spec, submit_output_cell, "user/submit-output");
+            },
+        );
     }
 
     #[test]
