@@ -30,6 +30,14 @@ pub enum SpecError {
     /// Persisted JSON decoding failed.
     #[error("spec JSON decoding error: {0}")]
     Json(String),
+    /// Certified side-effect submit/verify pair resolution failed.
+    #[error("side-effect verify pair error: {message}")]
+    SideEffectVerifyPair {
+        /// Machine-readable failure class.
+        kind: SideEffectVerifyPairErrorKind,
+        /// Stable diagnostic.
+        message: String,
+    },
     /// Canonical JSON construction failed.
     #[error("spec canonicalization error: {0}")]
     Canonical(String),
@@ -44,6 +52,21 @@ pub enum SpecError {
     /// Obsolete pre-v1 sketch shape was detected.
     #[error("obsolete spec shape: {0}")]
     ObsoleteSketchShape(String),
+}
+
+/// Machine-readable side-effect submit/verify pair resolution failure class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SideEffectVerifyPairErrorKind {
+    /// The requested node is not a side-effect verify framework node.
+    NotVerifyNode,
+    /// The verify node references a missing submit node.
+    MissingSubmitNode,
+    /// The verify node references a framework-owned node as its submit boundary.
+    FrameworkSubmitNode,
+    /// The verify node references a submit node without a side-effect contract.
+    NonSideEffectSubmitNode,
+    /// The verify node pair id is not derived from the submit node output cell and contract.
+    PairIdMismatch,
 }
 
 impl From<IdentityError> for SpecError {
@@ -369,7 +392,8 @@ pub mod v1 {
     use super::{
         canonical_json, checked_ascii_token, checked_author_key, checked_field_path,
         checked_resource_namespace, content_digest, spec_hash_from_canonical, ContentDigest,
-        DigestAlgorithm, PlainCanonicalJsonBytes, Result, SpecError, SpecHash,
+        DigestAlgorithm, PlainCanonicalJsonBytes, Result, SideEffectVerifyPairErrorKind, SpecError,
+        SpecHash,
     };
     use mfm_capabilities::{CapabilityDescriptor, CapabilityRole, CapabilitySetDescriptor};
     use mfm_ids::{
@@ -2069,32 +2093,44 @@ pub mod v1 {
         verify_node: &'a NodeSpec,
     ) -> Result<SideEffectVerifyPairRef<'a>> {
         let Some(FrameworkNodeSpec::SideEffectVerify(verify)) = &verify_node.framework else {
-            return Err(json_error(format!(
-                "node {} is not a side-effect verify node",
-                verify_node.node_id
-            )));
+            return Err(side_effect_verify_pair_error(
+                SideEffectVerifyPairErrorKind::NotVerifyNode,
+                format!(
+                    "node {} is not a side-effect verify node",
+                    verify_node.node_id
+                ),
+            ));
         };
         let submit_node = nodes
             .iter()
             .chain(remediations.values())
             .find(|node| node.node_id == verify.submit_node_id)
             .ok_or_else(|| {
-                json_error(format!(
-                    "side-effect verify node {} references missing submit node {}",
-                    verify_node.node_id, verify.submit_node_id
-                ))
+                side_effect_verify_pair_error(
+                    SideEffectVerifyPairErrorKind::MissingSubmitNode,
+                    format!(
+                        "side-effect verify node {} references missing submit node {}",
+                        verify_node.node_id, verify.submit_node_id
+                    ),
+                )
             })?;
         if submit_node.framework.is_some() {
-            return Err(json_error(format!(
-                "side-effect verify node {} references framework submit node {}",
-                verify_node.node_id, submit_node.node_id
-            )));
+            return Err(side_effect_verify_pair_error(
+                SideEffectVerifyPairErrorKind::FrameworkSubmitNode,
+                format!(
+                    "side-effect verify node {} references framework submit node {}",
+                    verify_node.node_id, submit_node.node_id
+                ),
+            ));
         }
         let submit_contract = submit_node.side_effect.as_ref().ok_or_else(|| {
-            json_error(format!(
-                "side-effect verify node {} references non-side-effect submit node {}",
-                verify_node.node_id, submit_node.node_id
-            ))
+            side_effect_verify_pair_error(
+                SideEffectVerifyPairErrorKind::NonSideEffectSubmitNode,
+                format!(
+                    "side-effect verify node {} references non-side-effect submit node {}",
+                    verify_node.node_id, submit_node.node_id
+                ),
+            )
         })?;
         let expected_pair = side_effect_pair_id(
             &submit_node.node_id,
@@ -2102,10 +2138,13 @@ pub mod v1 {
             submit_contract,
         )?;
         if verify.pair_id != expected_pair {
-            return Err(json_error(format!(
-                "side-effect verify node {} pair id is not stable-id derived",
-                verify_node.node_id
-            )));
+            return Err(side_effect_verify_pair_error(
+                SideEffectVerifyPairErrorKind::PairIdMismatch,
+                format!(
+                    "side-effect verify node {} pair id is not stable-id derived",
+                    verify_node.node_id
+                ),
+            ));
         }
         Ok(SideEffectVerifyPairRef {
             pair_id: &verify.pair_id,
@@ -2115,6 +2154,13 @@ pub mod v1 {
             submit_contract,
             submit_output_cell: &submit_node.output_cell,
         })
+    }
+
+    fn side_effect_verify_pair_error(
+        kind: SideEffectVerifyPairErrorKind,
+        message: String,
+    ) -> SpecError {
+        SpecError::SideEffectVerifyPair { kind, message }
     }
 
     /// Same-value bridge framework node metadata.
