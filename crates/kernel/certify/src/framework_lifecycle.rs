@@ -2,6 +2,7 @@ use super::*;
 
 pub(super) fn validate_framework_nodes(
     nodes: &[spec::NodeSpec],
+    remediations: &BTreeMap<NodeId, spec::NodeSpec>,
     cells: &BTreeMap<String, spec::CellSpec>,
     descriptors: &DescriptorIndex<'_>,
     public_outputs: &spec::PublicOutputSpec,
@@ -31,6 +32,9 @@ pub(super) fn validate_framework_nodes(
         ) {
             lifecycle_outputs.insert(node.output_cell.clone(), node);
         }
+    }
+    for remediation in remediations.values() {
+        nodes_by_id.insert(remediation.node_id.clone(), remediation);
     }
 
     for node in nodes {
@@ -452,12 +456,27 @@ pub(super) fn validate_framework_nodes(
             ));
         }
     }
-    validate_lifecycle_tail_finality(nodes, &nodes_by_id)?;
+    for remediation in remediations.values() {
+        if remediation.side_effect.is_some()
+            && remediation.framework.is_none()
+            && !verify_by_submit.contains_key(&remediation.node_id)
+        {
+            return Err(problem(
+                ProblemClass::InvalidTopology,
+                format!(
+                    "remediation side-effect node {} is missing side-effect verify node",
+                    remediation.node_id
+                ),
+            ));
+        }
+    }
+    validate_lifecycle_tail_finality(nodes, remediations, &nodes_by_id)?;
     Ok(())
 }
 
 fn validate_lifecycle_tail_finality(
     nodes: &[spec::NodeSpec],
+    remediations: &BTreeMap<NodeId, spec::NodeSpec>,
     nodes_by_id: &BTreeMap<NodeId, &spec::NodeSpec>,
 ) -> Result<()> {
     let render_node = nodes
@@ -486,6 +505,10 @@ fn validate_lifecycle_tail_finality(
                 | spec::FrameworkNodeSpec::CompleteRun(_)
                 | spec::FrameworkNodeSpec::ResolveSagaTerminal(_),
             ) => {}
+            Some(spec::FrameworkNodeSpec::SideEffectVerify(verify))
+                if remediations
+                    .values()
+                    .any(|remediation| remediation.node_id == verify.submit_node_id) => {}
             _ => {
                 return Err(problem(
                     ProblemClass::InvalidTopology,

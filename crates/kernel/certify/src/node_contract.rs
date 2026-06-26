@@ -7,6 +7,7 @@ pub(super) fn validate_state_node_contract(input: StateNodeContractInput<'_>) ->
         config_ref_digest,
         cells,
         lineages,
+        remediations,
         label,
         id_derivation,
         enforce_framework_lineage_inputs,
@@ -73,7 +74,19 @@ pub(super) fn validate_state_node_contract(input: StateNodeContractInput<'_>) ->
         ));
     }
     let expected_predecessors = predecessor_nodes(&input_cells, cells)?;
-    if expected_predecessors != node.deterministic_predecessors {
+    let remediation_verify_without_graph_predecessor = matches!(
+        &node.framework,
+        Some(spec::FrameworkNodeSpec::SideEffectVerify(verify))
+            if node.deterministic_predecessors.is_empty()
+                && expected_predecessors == vec![verify.submit_node_id.clone()]
+                && remediations
+                    .is_some_and(|remediations| remediations
+                        .values()
+                        .any(|remediation| remediation.node_id == verify.submit_node_id))
+    );
+    if !remediation_verify_without_graph_predecessor
+        && expected_predecessors != node.deterministic_predecessors
+    {
         return Err(problem(
         ProblemClass::InvalidTopology,
         format!(
