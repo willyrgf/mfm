@@ -621,13 +621,11 @@ pub mod v1 {
             }
         }
 
-        /// Returns the side-effect event view for payloads in the side-effect ledger family.
-        pub fn side_effect_ref(&self) -> Option<SideEffectEventRef<'_>> {
-            macro_rules! side_effect_ref {
+        /// Returns pair-ledger authority fields for payloads in the side-effect ledger family.
+        pub fn side_effect_ledger_ref(&self) -> Option<SideEffectPairLedgerEventRef<'_>> {
+            macro_rules! side_effect_ledger_ref {
                 ($payload:ident, $kind:ident, $claim_generation:expr) => {
-                    Some(SideEffectEventRef {
-                        node_id: &$payload.node_id,
-                        attempt_id: &$payload.attempt_id,
+                    Some(SideEffectPairLedgerEventRef {
                         ledger_key: &$payload.ledger_key,
                         ledger_purpose: &$payload.ledger_purpose,
                         pair_id: &$payload.pair_id,
@@ -641,51 +639,177 @@ pub mod v1 {
 
             match self {
                 Self::SideEffectIntentPersisted(payload) => {
-                    side_effect_ref!(payload, IntentPersisted, None)
+                    side_effect_ledger_ref!(payload, IntentPersisted, None)
                 }
                 Self::SideEffectClaimed(payload) => {
-                    side_effect_ref!(payload, Claimed, Some(payload.claim_generation))
+                    side_effect_ledger_ref!(payload, Claimed, Some(payload.claim_generation))
                 }
                 Self::SideEffectClaimTakenOver(payload) => {
-                    side_effect_ref!(payload, ClaimTakenOver, Some(payload.claim_generation))
+                    side_effect_ledger_ref!(payload, ClaimTakenOver, Some(payload.claim_generation))
                 }
                 Self::ResourceLaneClaimed(payload) => {
-                    side_effect_ref!(payload, ResourceLaneClaimed, None)
+                    side_effect_ledger_ref!(payload, ResourceLaneClaimed, None)
                 }
                 Self::ResourceLaneClaimIntent(payload) => {
-                    side_effect_ref!(payload, ResourceLaneClaimed, None)
+                    side_effect_ledger_ref!(payload, ResourceLaneClaimed, None)
                 }
                 Self::SideEffectInvocationPrepared(payload) => {
-                    side_effect_ref!(payload, InvocationPrepared, Some(payload.claim_generation))
+                    side_effect_ledger_ref!(
+                        payload,
+                        InvocationPrepared,
+                        Some(payload.claim_generation)
+                    )
                 }
                 Self::SideEffectInvocationStarted(payload) => {
-                    side_effect_ref!(payload, InvocationStarted, Some(payload.claim_generation))
+                    side_effect_ledger_ref!(
+                        payload,
+                        InvocationStarted,
+                        Some(payload.claim_generation)
+                    )
                 }
                 Self::SideEffectNotSubmittedProven(payload) => {
-                    side_effect_ref!(payload, NotSubmittedProven, None)
+                    side_effect_ledger_ref!(payload, NotSubmittedProven, None)
                 }
                 Self::SideEffectSubmissionObserved(payload) => {
-                    side_effect_ref!(payload, SubmissionObserved, None)
+                    side_effect_ledger_ref!(payload, SubmissionObserved, None)
                 }
                 Self::SideEffectSubmissionUnknown(payload) => {
-                    side_effect_ref!(payload, SubmissionUnknown, None)
+                    side_effect_ledger_ref!(payload, SubmissionUnknown, None)
                 }
                 Self::SideEffectReceiptObserved(payload) => {
-                    side_effect_ref!(payload, ReceiptObserved, None)
+                    side_effect_ledger_ref!(payload, ReceiptObserved, None)
                 }
                 Self::SideEffectConfirmationObserved(payload) => {
-                    side_effect_ref!(payload, ConfirmationObserved, None)
+                    side_effect_ledger_ref!(payload, ConfirmationObserved, None)
                 }
-                Self::SideEffectAmbiguous(payload) => side_effect_ref!(payload, Ambiguous, None),
-                Self::SideEffectFailed(payload) => side_effect_ref!(payload, Failed, None),
+                Self::SideEffectAmbiguous(payload) => {
+                    side_effect_ledger_ref!(payload, Ambiguous, None)
+                }
+                Self::SideEffectFailed(payload) => side_effect_ledger_ref!(payload, Failed, None),
                 Self::ResourceLaneReleased(payload) => {
-                    side_effect_ref!(payload, ResourceLaneReleased, None)
+                    side_effect_ledger_ref!(payload, ResourceLaneReleased, None)
                 }
                 Self::ResourceLaneReleaseIntent(payload) => {
-                    side_effect_ref!(payload, ResourceLaneReleased, None)
+                    side_effect_ledger_ref!(payload, ResourceLaneReleased, None)
                 }
                 _ => None,
             }
+        }
+
+        /// Returns emitter and attempt attribution for payloads in the side-effect ledger family.
+        pub fn side_effect_emitter_ref(&self) -> Option<SideEffectEmitterAttemptRef<'_>> {
+            macro_rules! side_effect_emitter_ref {
+                ($payload:ident, $kind:ident) => {
+                    Some(SideEffectEmitterAttemptRef {
+                        node_id: &$payload.node_id,
+                        attempt_id: &$payload.attempt_id,
+                        pair_role: $payload.pair_role,
+                        kind: SideEffectEventKind::$kind,
+                    })
+                };
+            }
+
+            match self {
+                Self::SideEffectIntentPersisted(payload) => {
+                    side_effect_emitter_ref!(payload, IntentPersisted)
+                }
+                Self::SideEffectClaimed(payload) => side_effect_emitter_ref!(payload, Claimed),
+                Self::SideEffectClaimTakenOver(payload) => {
+                    side_effect_emitter_ref!(payload, ClaimTakenOver)
+                }
+                Self::ResourceLaneClaimed(payload) => {
+                    side_effect_emitter_ref!(payload, ResourceLaneClaimed)
+                }
+                Self::ResourceLaneClaimIntent(payload) => {
+                    side_effect_emitter_ref!(payload, ResourceLaneClaimed)
+                }
+                Self::SideEffectInvocationPrepared(payload) => {
+                    side_effect_emitter_ref!(payload, InvocationPrepared)
+                }
+                Self::SideEffectInvocationStarted(payload) => {
+                    side_effect_emitter_ref!(payload, InvocationStarted)
+                }
+                Self::SideEffectNotSubmittedProven(payload) => {
+                    side_effect_emitter_ref!(payload, NotSubmittedProven)
+                }
+                Self::SideEffectSubmissionObserved(payload) => {
+                    side_effect_emitter_ref!(payload, SubmissionObserved)
+                }
+                Self::SideEffectSubmissionUnknown(payload) => {
+                    side_effect_emitter_ref!(payload, SubmissionUnknown)
+                }
+                Self::SideEffectReceiptObserved(payload) => {
+                    side_effect_emitter_ref!(payload, ReceiptObserved)
+                }
+                Self::SideEffectConfirmationObserved(payload) => {
+                    side_effect_emitter_ref!(payload, ConfirmationObserved)
+                }
+                Self::SideEffectAmbiguous(payload) => side_effect_emitter_ref!(payload, Ambiguous),
+                Self::SideEffectFailed(payload) => side_effect_emitter_ref!(payload, Failed),
+                Self::ResourceLaneReleased(payload) => {
+                    side_effect_emitter_ref!(payload, ResourceLaneReleased)
+                }
+                Self::ResourceLaneReleaseIntent(payload) => {
+                    side_effect_emitter_ref!(payload, ResourceLaneReleased)
+                }
+                _ => None,
+            }
+        }
+
+        /// Returns resource-lane holder/release authority fields for resource-lane payloads.
+        pub fn resource_lane_authority_ref(&self) -> Option<ResourceLaneAuthorityRef<'_>> {
+            match self {
+                Self::ResourceLaneClaimed(payload) => Some(ResourceLaneAuthorityRef {
+                    ledger: self.side_effect_ledger_ref()?,
+                    emitter: self.side_effect_emitter_ref()?,
+                    claim_id: Some(&payload.claim_id),
+                    claim_fencing_token: Some(payload.claim_fencing_token),
+                    lane_transition_seq: Some(payload.lane_transition_seq),
+                    release_reason: None,
+                }),
+                Self::ResourceLaneClaimIntent(_) => Some(ResourceLaneAuthorityRef {
+                    ledger: self.side_effect_ledger_ref()?,
+                    emitter: self.side_effect_emitter_ref()?,
+                    claim_id: None,
+                    claim_fencing_token: None,
+                    lane_transition_seq: None,
+                    release_reason: None,
+                }),
+                Self::ResourceLaneReleased(payload) => Some(ResourceLaneAuthorityRef {
+                    ledger: self.side_effect_ledger_ref()?,
+                    emitter: self.side_effect_emitter_ref()?,
+                    claim_id: Some(&payload.claim_id),
+                    claim_fencing_token: Some(payload.claim_fencing_token),
+                    lane_transition_seq: Some(payload.lane_transition_seq),
+                    release_reason: Some(&payload.release_reason),
+                }),
+                Self::ResourceLaneReleaseIntent(payload) => Some(ResourceLaneAuthorityRef {
+                    ledger: self.side_effect_ledger_ref()?,
+                    emitter: self.side_effect_emitter_ref()?,
+                    claim_id: Some(&payload.claim_id),
+                    claim_fencing_token: None,
+                    lane_transition_seq: None,
+                    release_reason: Some(&payload.release_reason),
+                }),
+                _ => None,
+            }
+        }
+
+        /// Returns the full side-effect event view for payloads in the side-effect ledger family.
+        pub fn side_effect_ref(&self) -> Option<SideEffectEventRef<'_>> {
+            let ledger = self.side_effect_ledger_ref()?;
+            let emitter = self.side_effect_emitter_ref()?;
+            Some(SideEffectEventRef {
+                node_id: emitter.node_id,
+                attempt_id: emitter.attempt_id,
+                ledger_key: ledger.ledger_key,
+                ledger_purpose: ledger.ledger_purpose,
+                pair_id: ledger.pair_id,
+                pair_role: ledger.pair_role,
+                invocation_epoch: ledger.invocation_epoch,
+                claim_generation: ledger.claim_generation,
+                kind: ledger.kind,
+            })
         }
 
         /// Returns artifact evidence requirements referenced by this payload.
@@ -725,6 +849,55 @@ pub mod v1 {
         Failed,
         /// Resource lane released.
         ResourceLaneReleased,
+    }
+
+    /// Pair-ledger authority fields common to side-effect event payloads.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct SideEffectPairLedgerEventRef<'a> {
+        /// Side-effect ledger key.
+        pub ledger_key: &'a SideEffectLedgerKey,
+        /// Side-effect ledger purpose.
+        pub ledger_purpose: &'a SideEffectLedgerPurpose,
+        /// Certified side-effect pair id.
+        pub pair_id: &'a SideEffectPairId,
+        /// Pair phase authority.
+        pub pair_role: SideEffectPairRole,
+        /// Invocation epoch when the payload carries one.
+        pub invocation_epoch: Option<u32>,
+        /// Claim generation when the payload carries one.
+        pub claim_generation: Option<u32>,
+        /// Side-effect payload kind.
+        pub kind: SideEffectEventKind,
+    }
+
+    /// Emitter and active-attempt attribution for side-effect event payloads.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct SideEffectEmitterAttemptRef<'a> {
+        /// Node id associated with the side-effect event.
+        pub node_id: &'a NodeId,
+        /// Attempt id associated with the side-effect event.
+        pub attempt_id: &'a AttemptId,
+        /// Pair phase emitted by the node.
+        pub pair_role: SideEffectPairRole,
+        /// Side-effect payload kind.
+        pub kind: SideEffectEventKind,
+    }
+
+    /// Resource-lane holder or release authority borrowed from a lane payload.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct ResourceLaneAuthorityRef<'a> {
+        /// Pair-ledger authority bound to the lane payload.
+        pub ledger: SideEffectPairLedgerEventRef<'a>,
+        /// Emitter and attempt attribution for the lane payload.
+        pub emitter: SideEffectEmitterAttemptRef<'a>,
+        /// Claim id when the lane payload has one.
+        pub claim_id: Option<&'a ResourceLaneClaimId>,
+        /// Store-assigned fencing token when materialized.
+        pub claim_fencing_token: Option<u64>,
+        /// Store-assigned lane-local transition sequence when materialized.
+        pub lane_transition_seq: Option<u64>,
+        /// Release reason when this is a release payload.
+        pub release_reason: Option<&'a ResourceLaneReleaseReason>,
     }
 
     /// Borrowed side-effect fields common to side-effect event payloads.

@@ -869,7 +869,7 @@ fn is_side_effect_terminal_disposition_payload(payload: &events::KernelEventPayl
 }
 
 fn is_side_effect_payload(payload: &events::KernelEventPayload) -> bool {
-    payload.side_effect_ref().is_some()
+    payload.side_effect_ledger_ref().is_some()
 }
 
 fn required_artifacts_for_payloads(
@@ -2499,7 +2499,7 @@ fn validate_side_effect_verify_runner_output(
     }
     if side_effect_payload
         && payloads.iter().any(|payload| {
-            payload.side_effect_ref().is_some()
+            payload.side_effect_ledger_ref().is_some()
                 && !matches!(
                     payload,
                     events::KernelEventPayload::ResourceLaneReleaseIntent(_)

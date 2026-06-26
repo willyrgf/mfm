@@ -342,11 +342,20 @@ pub(crate) fn side_effect_projection_for_attempt<'a>(
     let Some(pair_id) = certified_side_effect_pair_id(runtime_spec, node)? else {
         return Ok(None);
     };
-    let Some(projection) = projections.side_effect_for_pair(run_id, pair_id) else {
+    let Some(projection) = side_effect_projection_for_pair(run_id, projections, pair_id) else {
         return Ok(None);
     };
-    validate_side_effect_projection_matches_node(node, attempt_id, pair_id, projection)?;
+    validate_side_effect_actor_eligibility(node, attempt_id, pair_id, projection)?;
     Ok(Some(projection))
+}
+
+/// Returns the durable side-effect projection by run-scoped certified pair id.
+pub(crate) fn side_effect_projection_for_pair<'a>(
+    run_id: &RunId,
+    projections: &'a store::ProjectionSnapshot,
+    pair_id: &SideEffectPairId,
+) -> Option<&'a store::SideEffectProjection> {
+    projections.side_effect_for_pair(run_id, pair_id)
 }
 
 fn certified_side_effect_pair_id<'a>(
@@ -368,7 +377,7 @@ fn certified_side_effect_pair_id<'a>(
     }
 }
 
-fn validate_side_effect_projection_matches_node(
+fn validate_side_effect_actor_eligibility(
     node: &spec::NodeSpec,
     attempt_id: &AttemptId,
     pair_id: &SideEffectPairId,
