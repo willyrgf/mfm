@@ -292,8 +292,7 @@ mod tests {
             .launch_run(request)
             .await
             .expect("launch validate lifecycle")
-            .into_response_parts()
-            .expect("run response");
+            .into_response_parts();
         assert_eq!(launched.run_mode, RunModeStatus::Completed);
         assert!(matches!(
             store
@@ -366,7 +365,6 @@ mod tests {
                 .await
                 .expect("launch response")
                 .into_response_parts()
-                .expect("run response")
                 .1
         });
         let lease = wait_for_live_execution_claim(&store, &run_id).await;
@@ -420,8 +418,7 @@ mod tests {
             .launch_run(request)
             .await
             .expect("launch validate lifecycle")
-            .into_response_parts()
-            .expect("run response");
+            .into_response_parts();
         assert_eq!(launched.run_mode, RunModeStatus::Completed);
         let stream = services
             .store()
@@ -495,8 +492,7 @@ mod tests {
             .launch_run(request)
             .await
             .expect("launch deploy lifecycle")
-            .into_response_parts()
-            .expect("run response");
+            .into_response_parts();
         assert_eq!(launched.run_mode, RunModeStatus::Completed);
         let replay = services
             .verify_replay_for_run(&run_id)
@@ -572,8 +568,7 @@ mod tests {
             .launch_run(request)
             .await
             .expect("launch full lifecycle")
-            .into_response_parts()
-            .expect("run response");
+            .into_response_parts();
         assert_eq!(launched.run_mode, RunModeStatus::Completed);
         services
             .verify_replay_for_run(&run_id)

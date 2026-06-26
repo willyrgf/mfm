@@ -298,22 +298,6 @@ pub struct AdmissionWaiter {
     pub lease_expires_at_unix_ms: i64,
 }
 
-/// Successful FIFO admission.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WaitFifoAdmissionGrant {
-    /// Admitted FIFO lane.
-    pub lane: ResourceAdmissionLane,
-}
-
-/// FIFO admission result.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WaitFifoAdmissionResult {
-    /// The claim was admitted.
-    Admitted(WaitFifoAdmissionGrant),
-    /// The claim was blocked before domain authority was persisted.
-    Blocked(Box<WaitFifoAdmissionBlock>),
-}
-
 /// Result of a FIFO claim blocked before domain authority rows were persisted.
 ///
 /// A blocked claim persists no run event, commit, resource-lane claim, resource-lane release,
@@ -322,8 +306,6 @@ pub enum WaitFifoAdmissionResult {
 /// state only and never grant lane ownership.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WaitFifoAdmissionBlock {
-    /// Blocked resource-admission lane.
-    pub lane: ResourceAdmissionLane,
     /// Normalized resource lane key for status and diagnostics.
     pub resource_lane_key: ResourceLaneKey,
     /// Current authoritative holder of the lane, if one exists.

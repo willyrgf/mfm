@@ -826,8 +826,6 @@ mod tests {
         let witness = resource_lane_block_witness_from_outcome(
             &node_id,
             store::WaitFifoAdmissionBlock {
-                lane: store::ResourceAdmissionLane::from_resource_lane_key(&lane_key)
-                    .expect("resource admission lane"),
                 resource_lane_key: lane_key,
                 holder: Some(holder),
                 waiter: None,

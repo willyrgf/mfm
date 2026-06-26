@@ -542,13 +542,7 @@ where
         .public_schema_id
         .clone();
     let launch = services.launch_run(prepared.request).await?;
-    let (outcome, run) = launch.into_response_parts().ok_or_else(|| {
-        ApiError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "RunLaunchOutcomeInvalid",
-            "Run launch did not return a run response",
-        )
-    })?;
+    let (outcome, run) = launch.into_response_parts();
     let public_output = if run.run_mode == RunModeStatus::Completed {
         Some(
             services

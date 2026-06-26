@@ -260,20 +260,6 @@ pub struct ContractTransactionReceipt {
     pub receipt_evidence: Option<LifecycleArtifactEvidenceRef>,
 }
 
-/// Redaction-safe aggregate transaction receipt evidence.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
-#[mfm(
-    namespace = "mfm.evm.contract",
-    name = "transaction-receipts",
-    schema = "mfm.evm.contract.value.transaction_receipts"
-)]
-pub struct ContractTransactionReceipts {
-    /// Aggregate contract version.
-    pub receipts_version: u64,
-    /// Confirmed receipt evidence in deterministic transaction order.
-    pub transactions: Vec<ContractTransactionReceipt>,
-}
-
 /// Deployment receipt-level terminal evidence consumed by [`DeployContractState::output_from_receipt`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
 #[mfm(
