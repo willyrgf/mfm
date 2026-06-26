@@ -10257,6 +10257,86 @@ fn append_attempt_failure(
         .expect("append attempt failure");
 }
 
+struct SyntheticSideEffectAppend<'a> {
+    fixture: &'a Fixture,
+    run_id: &'a RunId,
+    node: &'a spec::NodeSpec,
+    attempt_id: &'a AttemptId,
+}
+
+impl<'a> SyntheticSideEffectAppend<'a> {
+    fn new(
+        fixture: &'a Fixture,
+        run_id: &'a RunId,
+        node: &'a spec::NodeSpec,
+        attempt_id: &'a AttemptId,
+    ) -> Self {
+        Self {
+            fixture,
+            run_id,
+            node,
+            attempt_id,
+        }
+    }
+
+    fn ledger_purpose(&self) -> events::SideEffectLedgerPurpose {
+        events::SideEffectLedgerPurpose::Forward
+    }
+
+    fn pair_fields(
+        &self,
+        node: &spec::NodeSpec,
+        role: events::SideEffectPairRole,
+    ) -> (SideEffectPairId, events::SideEffectPairRole) {
+        side_effect_pair_fields_for_purpose(
+            &self.fixture.runtime_spec,
+            &node.node_id,
+            &self.ledger_purpose(),
+            role,
+        )
+    }
+
+    fn append(
+        &self,
+        store: &mut TestTypedRunStore,
+        commit_key: &str,
+        payloads: Vec<events::KernelEventPayload>,
+        required_artifacts: Vec<store::ArtifactEvidenceRef>,
+        required_side_effect_state: store::RequiredSideEffectState,
+        require_attempt_started: bool,
+        expect: &'static str,
+    ) {
+        let required_present_logical_keys = require_attempt_started
+            .then(|| {
+                store::LogicalEventKey::new(format!(
+                    "attempt:{}:{}",
+                    self.node.node_id, self.attempt_id
+                ))
+                .expect("attempt logical key")
+            })
+            .into_iter()
+            .collect::<Vec<_>>();
+        store
+            .append_prepared_commit(store_typed_commit_request! {
+                run_id: self.run_id.clone(),
+                expected_next_seq: store.expected_next_seq(self.run_id),
+                commit_key: store::CommitKey::new(commit_key).expect("commit key"),
+                payloads: payloads,
+                required_artifacts: required_artifacts,
+                preconditions: store::CommitPreconditions {
+                    required_run_state: store::RequiredRunState::NotCompleted,
+                    required_present_logical_keys,
+                    required_side_effect_states: vec![store::SideEffectStatePrecondition {
+                        pair_id: fixture_side_effect_pair_id(self.fixture, self.node),
+                        required: required_side_effect_state,
+                    }],
+                    ..store::CommitPreconditions::default()
+                },
+            })
+            .expect(expect);
+    }
+}
+
 fn append_synthetic_exclusive_prepare(
     store: &mut TestTypedRunStore,
     fixture: &Fixture,
@@ -10321,109 +10401,91 @@ fn append_synthetic_exclusive_prepare(
         producer_seed_id: None,
         artifact_role: events::ArtifactRole::SideEffectIntent,
     };
-    let pair_id = fixture
-        .runtime_spec
-        .side_effect_pair_for_submit_node(&node.node_id)
-        .cloned()
-        .expect("side-effect pair");
-    let pair_role = events::SideEffectPairRole::Submit;
-    store
-        .append_prepared_commit(store_typed_commit_request! {
-            run_id: run_id.clone(),
-            expected_next_seq: store.expected_next_seq(run_id),
-            commit_key: store::CommitKey::new(commit_key).expect("commit key"),
-            payloads: vec![
-                events::KernelEventPayload::SideEffectIntentPersisted(
-                    events::side_effect::IntentPersisted {
-                        spec_hash: fixture.runtime_spec.spec_hash().clone(),
-                        node_id: node.node_id.clone(),
-                        scope_id: node.scope_id.clone(),
-                        attempt_id: attempt_id.clone(),
-                        ledger_key: ledger.clone(),
-                        ledger_purpose: events::SideEffectLedgerPurpose::Forward,
-                        pair_id: pair_id.clone(),
-                        pair_role,
-                        invocation_epoch: 1,
-                        intent_schema_id: node.config_ref.schema_id.clone(),
-                        intent_hash: intent_hash.clone(),
-                        intent_artifact_id,
-                        idempotency_input_schema_id: node.config_ref.schema_id.clone(),
-                        idempotency_input_hash: content(0xc3),
-                        idempotency_key: events::IdempotencyKeyRef::new(format!(
-                            "idem-{commit_key}"
-                        ))
+    let side_effect = SyntheticSideEffectAppend::new(fixture, run_id, node, &attempt_id);
+    let ledger_purpose = side_effect.ledger_purpose();
+    let (pair_id, pair_role) = side_effect.pair_fields(node, events::SideEffectPairRole::Submit);
+    side_effect.append(
+        store,
+        commit_key,
+        vec![
+            events::KernelEventPayload::SideEffectIntentPersisted(
+                events::side_effect::IntentPersisted {
+                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                    node_id: node.node_id.clone(),
+                    scope_id: node.scope_id.clone(),
+                    attempt_id: attempt_id.clone(),
+                    ledger_key: ledger.clone(),
+                    ledger_purpose: ledger_purpose.clone(),
+                    pair_id: pair_id.clone(),
+                    pair_role,
+                    invocation_epoch: 1,
+                    intent_schema_id: node.config_ref.schema_id.clone(),
+                    intent_hash: intent_hash.clone(),
+                    intent_artifact_id,
+                    idempotency_input_schema_id: node.config_ref.schema_id.clone(),
+                    idempotency_input_hash: content(0xc3),
+                    idempotency_key: events::IdempotencyKeyRef::new(format!("idem-{commit_key}"))
                         .expect("idempotency key"),
-                        capability_kind: side_effect_capability_kind(),
-                        capability_version: side_effect_capability_version(),
-                        adapter_kind: fixture.adapter_kind.clone(),
-                        adapter_version: fixture.adapter_version.clone(),
-                    },
-                ),
-                events::KernelEventPayload::SideEffectClaimed(events::side_effect::Claimed {
+                    capability_kind: side_effect_capability_kind(),
+                    capability_version: side_effect_capability_version(),
+                    adapter_kind: fixture.adapter_kind.clone(),
+                    adapter_version: fixture.adapter_version.clone(),
+                },
+            ),
+            events::KernelEventPayload::SideEffectClaimed(events::side_effect::Claimed {
+                spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                node_id: node.node_id.clone(),
+                attempt_id: attempt_id.clone(),
+                ledger_key: ledger.clone(),
+                ledger_purpose: ledger_purpose.clone(),
+                pair_id: pair_id.clone(),
+                pair_role,
+                claim_owner: events::RunnerInvocationId::new("owner-1").expect("claim owner"),
+                invocation_epoch: 1,
+                claim_generation: 1,
+                claim_fencing_token: events::side_effect::ClaimFencingToken::new("token-1")
+                    .expect("fencing token"),
+            }),
+            events::KernelEventPayload::ResourceLaneClaimIntent(events::ResourceLaneClaimIntent {
+                spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                node_id: node.node_id.clone(),
+                attempt_id: attempt_id.clone(),
+                ledger_key: ledger.clone(),
+                ledger_purpose: ledger_purpose.clone(),
+                pair_id: pair_id.clone(),
+                pair_role,
+                invocation_epoch: 1,
+                resource_key: resource_key.clone(),
+                requirement_digest: resource_lane_requirement_digest,
+                resolved_by_capability_impl: events::RunnerFactoryId::new(
+                    "mfm.test.side_effect_driver",
+                )
+                .expect("runner factory"),
+            }),
+            events::KernelEventPayload::SideEffectInvocationPrepared(
+                events::side_effect::InvocationPrepared {
                     spec_hash: fixture.runtime_spec.spec_hash().clone(),
                     node_id: node.node_id.clone(),
                     attempt_id: attempt_id.clone(),
                     ledger_key: ledger.clone(),
-                    ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                    ledger_purpose,
                     pair_id: pair_id.clone(),
                     pair_role,
-                    claim_owner: events::RunnerInvocationId::new("owner-1").expect("claim owner"),
                     invocation_epoch: 1,
                     claim_generation: 1,
                     claim_fencing_token: events::side_effect::ClaimFencingToken::new("token-1")
                         .expect("fencing token"),
-                }),
-                events::KernelEventPayload::ResourceLaneClaimIntent(events::ResourceLaneClaimIntent {
-                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
-                    node_id: node.node_id.clone(),
-                    attempt_id: attempt_id.clone(),
-                    ledger_key: ledger.clone(),
-                    ledger_purpose: events::SideEffectLedgerPurpose::Forward,
-                    pair_id: pair_id.clone(),
-                    pair_role,
-                    invocation_epoch: 1,
-                    resource_key: resource_key.clone(),
-                    requirement_digest: resource_lane_requirement_digest,
-                    resolved_by_capability_impl: events::RunnerFactoryId::new(
-                        "mfm.test.side_effect_driver",
-                    )
-                    .expect("runner factory"),
-                }),
-                events::KernelEventPayload::SideEffectInvocationPrepared(
-                    events::side_effect::InvocationPrepared {
-                        spec_hash: fixture.runtime_spec.spec_hash().clone(),
-                        node_id: node.node_id.clone(),
-                        attempt_id: attempt_id.clone(),
-                        ledger_key: ledger.clone(),
-                        ledger_purpose: events::SideEffectLedgerPurpose::Forward,
-                        pair_id: pair_id.clone(),
-                        pair_role,
-                        invocation_epoch: 1,
-                        claim_generation: 1,
-                        claim_fencing_token: events::side_effect::ClaimFencingToken::new("token-1")
-                            .expect("fencing token"),
-                        resource_key: Some(resource_key),
-                        prepared_artifact_id: None,
-                        prepared_hash: None,
-                    },
-                ),
-            ],
-            required_artifacts: vec![intent_artifact],
-            preconditions: store::CommitPreconditions {
-                required_run_state: store::RequiredRunState::NotCompleted,
-                required_present_logical_keys: vec![store::LogicalEventKey::new(format!(
-                    "attempt:{}:{}",
-                    node.node_id, attempt_id
-                ))
-                .expect("attempt logical key")],
-                required_side_effect_states: vec![store::SideEffectStatePrecondition {
-                    pair_id: fixture_side_effect_pair_id(fixture, node),
-                    required: store::RequiredSideEffectState::Absent,
-                }],
-                ..store::CommitPreconditions::default()
-            },
-        })
-        .expect("append synthetic side-effect prepare");
+                    resource_key: Some(resource_key),
+                    prepared_artifact_id: None,
+                    prepared_hash: None,
+                },
+            ),
+        ],
+        vec![intent_artifact],
+        store::RequiredSideEffectState::Absent,
+        true,
+        "append synthetic side-effect prepare",
+    );
     (attempt_id, ledger)
 }
 
@@ -10436,45 +10498,33 @@ fn append_synthetic_invocation_started(
     ledger: &events::SideEffectLedgerKey,
     commit_key: &str,
 ) {
-    let ledger_purpose = events::SideEffectLedgerPurpose::Forward;
-    let (pair_id, pair_role) = side_effect_pair_fields_for_purpose(
-        &fixture.runtime_spec,
-        &node.node_id,
-        &ledger_purpose,
-        events::SideEffectPairRole::Submit,
-    );
-    store
-        .append_prepared_commit(store_typed_commit_request! {
-            run_id: run_id.clone(),
-            expected_next_seq: store.expected_next_seq(run_id),
-            commit_key: store::CommitKey::new(commit_key).expect("commit key"),
-            payloads: vec![events::KernelEventPayload::SideEffectInvocationStarted(
-                events::side_effect::InvocationStarted {
-                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
-                    node_id: node.node_id.clone(),
-                    attempt_id: attempt_id.clone(),
-                    ledger_key: ledger.clone(),
-                    ledger_purpose,
-                    pair_id,
-                    pair_role,
-                    invocation_epoch: 1,
-                    claim_owner: events::RunnerInvocationId::new("owner-1").expect("claim owner"),
-                    claim_generation: 1,
-                    claim_fencing_token: events::side_effect::ClaimFencingToken::new("token-1")
-                        .expect("fencing token"),
-                },
-            )],
-            required_artifacts: Vec::new(),
-            preconditions: store::CommitPreconditions {
-                required_run_state: store::RequiredRunState::NotCompleted,
-                required_side_effect_states: vec![store::SideEffectStatePrecondition {
-                    pair_id: fixture_side_effect_pair_id(fixture, node),
-                    required: store::RequiredSideEffectState::InvocationPrepared,
-                }],
-                ..store::CommitPreconditions::default()
+    let side_effect = SyntheticSideEffectAppend::new(fixture, run_id, node, attempt_id);
+    let ledger_purpose = side_effect.ledger_purpose();
+    let (pair_id, pair_role) = side_effect.pair_fields(node, events::SideEffectPairRole::Submit);
+    side_effect.append(
+        store,
+        commit_key,
+        vec![events::KernelEventPayload::SideEffectInvocationStarted(
+            events::side_effect::InvocationStarted {
+                spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                node_id: node.node_id.clone(),
+                attempt_id: attempt_id.clone(),
+                ledger_key: ledger.clone(),
+                ledger_purpose,
+                pair_id,
+                pair_role,
+                invocation_epoch: 1,
+                claim_owner: events::RunnerInvocationId::new("owner-1").expect("claim owner"),
+                claim_generation: 1,
+                claim_fencing_token: events::side_effect::ClaimFencingToken::new("token-1")
+                    .expect("fencing token"),
             },
-        })
-        .expect("append synthetic invocation started");
+        )],
+        Vec::new(),
+        store::RequiredSideEffectState::InvocationPrepared,
+        false,
+        "append synthetic invocation started",
+    );
 }
 
 fn append_synthetic_exclusive_started(
@@ -10515,44 +10565,32 @@ fn append_synthetic_submission_observed(
         digest.clone(),
         events::ArtifactRole::Submission,
     );
-    let ledger_purpose = events::SideEffectLedgerPurpose::Forward;
-    let (pair_id, pair_role) = side_effect_pair_fields_for_purpose(
-        &fixture.runtime_spec,
-        &node.node_id,
-        &ledger_purpose,
-        events::SideEffectPairRole::Submit,
-    );
-    store
-        .append_prepared_commit(store_typed_commit_request! {
-            run_id: fixture.run_id.clone(),
-            expected_next_seq: store.expected_next_seq(&fixture.run_id),
-            commit_key: store::CommitKey::new(commit_key).expect("commit key"),
-            payloads: vec![events::KernelEventPayload::SideEffectSubmissionObserved(
-                events::side_effect::SubmissionObserved {
-                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
-                    node_id: node.node_id.clone(),
-                    attempt_id: attempt_id.clone(),
-                    ledger_key: ledger.clone(),
-                    ledger_purpose,
-                    pair_id,
-                    pair_role,
-                    invocation_epoch: 1,
-                    submission_schema_id: node.config_ref.schema_id.clone(),
-                    submission_hash: digest,
-                    submission_artifact_id: artifact_id,
-                },
-            )],
-            required_artifacts: vec![evidence],
-            preconditions: store::CommitPreconditions {
-                required_run_state: store::RequiredRunState::NotCompleted,
-                required_side_effect_states: vec![store::SideEffectStatePrecondition {
-                    pair_id: fixture_side_effect_pair_id(fixture, node),
-                    required: store::RequiredSideEffectState::InvocationStarted,
-                }],
-                ..store::CommitPreconditions::default()
+    let side_effect = SyntheticSideEffectAppend::new(fixture, &fixture.run_id, node, attempt_id);
+    let ledger_purpose = side_effect.ledger_purpose();
+    let (pair_id, pair_role) = side_effect.pair_fields(node, events::SideEffectPairRole::Submit);
+    side_effect.append(
+        store,
+        commit_key,
+        vec![events::KernelEventPayload::SideEffectSubmissionObserved(
+            events::side_effect::SubmissionObserved {
+                spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                node_id: node.node_id.clone(),
+                attempt_id: attempt_id.clone(),
+                ledger_key: ledger.clone(),
+                ledger_purpose,
+                pair_id,
+                pair_role,
+                invocation_epoch: 1,
+                submission_schema_id: node.config_ref.schema_id.clone(),
+                submission_hash: digest,
+                submission_artifact_id: artifact_id,
             },
-        })
-        .expect("append synthetic submission observed");
+        )],
+        vec![evidence],
+        store::RequiredSideEffectState::InvocationStarted,
+        false,
+        "append synthetic submission observed",
+    );
 }
 
 fn append_synthetic_receipt_observed(
@@ -10571,47 +10609,35 @@ fn append_synthetic_receipt_observed(
         digest.clone(),
         events::ArtifactRole::Receipt,
     );
-    let ledger_purpose = events::SideEffectLedgerPurpose::Forward;
-    let (pair_id, pair_role) = side_effect_pair_fields_for_purpose(
-        &fixture.runtime_spec,
-        &node.node_id,
-        &ledger_purpose,
-        events::SideEffectPairRole::Verify,
-    );
-    store
-        .append_prepared_commit(store_typed_commit_request! {
-            run_id: fixture.run_id.clone(),
-            expected_next_seq: store.expected_next_seq(&fixture.run_id),
-            commit_key: store::CommitKey::new(commit_key).expect("commit key"),
-            payloads: vec![events::KernelEventPayload::SideEffectReceiptObserved(
-                events::side_effect::ReceiptObserved {
-                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
-                    node_id: node.node_id.clone(),
-                    attempt_id: attempt_id.clone(),
-                    ledger_key: ledger.clone(),
-                    ledger_purpose,
-                    pair_id,
-                    pair_role,
-                    invocation_epoch: 1,
-                    receipt_schema_id: node.config_ref.schema_id.clone(),
-                    receipt_hash: digest,
-                    receipt_artifact_id: artifact_id,
-                    replay_verifier_id: events::ReplayVerifierId::new("mfm.test.driver.replay")
-                        .expect("replay verifier"),
-                    resource_touched_set: None,
-                },
-            )],
-            required_artifacts: vec![evidence],
-            preconditions: store::CommitPreconditions {
-                required_run_state: store::RequiredRunState::NotCompleted,
-                required_side_effect_states: vec![store::SideEffectStatePrecondition {
-                    pair_id: fixture_side_effect_pair_id(fixture, node),
-                    required: store::RequiredSideEffectState::SubmissionResult,
-                }],
-                ..store::CommitPreconditions::default()
+    let side_effect = SyntheticSideEffectAppend::new(fixture, &fixture.run_id, node, attempt_id);
+    let ledger_purpose = side_effect.ledger_purpose();
+    let (pair_id, pair_role) = side_effect.pair_fields(node, events::SideEffectPairRole::Verify);
+    side_effect.append(
+        store,
+        commit_key,
+        vec![events::KernelEventPayload::SideEffectReceiptObserved(
+            events::side_effect::ReceiptObserved {
+                spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                node_id: node.node_id.clone(),
+                attempt_id: attempt_id.clone(),
+                ledger_key: ledger.clone(),
+                ledger_purpose,
+                pair_id,
+                pair_role,
+                invocation_epoch: 1,
+                receipt_schema_id: node.config_ref.schema_id.clone(),
+                receipt_hash: digest,
+                receipt_artifact_id: artifact_id,
+                replay_verifier_id: events::ReplayVerifierId::new("mfm.test.driver.replay")
+                    .expect("replay verifier"),
+                resource_touched_set: None,
             },
-        })
-        .expect("append synthetic receipt observed");
+        )],
+        vec![evidence],
+        store::RequiredSideEffectState::SubmissionResult,
+        false,
+        "append synthetic receipt observed",
+    );
 }
 
 fn append_synthetic_exclusive_receipt_phase(
@@ -10723,51 +10749,37 @@ fn append_synthetic_verify_receipt_observed(
         digest.clone(),
         events::ArtifactRole::Receipt,
     );
-    let pair_id = fixture
-        .runtime_spec
-        .side_effect_pair_for_submit_node(&submit_node.node_id)
-        .cloned()
-        .expect("side-effect pair");
-    let pair_role = events::SideEffectPairRole::Verify;
-    store
-        .append_prepared_commit(store_typed_commit_request! {
-            run_id: fixture.run_id.clone(),
-            expected_next_seq: store.expected_next_seq(&fixture.run_id),
-            commit_key: store::CommitKey::new(commit_key).expect("commit key"),
-            payloads: vec![events::KernelEventPayload::SideEffectReceiptObserved(
-                events::side_effect::ReceiptObserved {
-                    spec_hash: fixture.runtime_spec.spec_hash().clone(),
-                    node_id: verify_node.node_id.clone(),
-                    attempt_id: verify_attempt_id.clone(),
-                    ledger_key: ledger.clone(),
-                    ledger_purpose: events::SideEffectLedgerPurpose::Forward,
-                    pair_id,
-                    pair_role,
-                    invocation_epoch: 1,
-                    receipt_schema_id: verify_node.config_ref.schema_id.clone(),
-                    receipt_hash: digest,
-                    receipt_artifact_id: artifact_id,
-                    replay_verifier_id: events::ReplayVerifierId::new("mfm.test.driver.replay")
-                        .expect("replay verifier"),
-                    resource_touched_set: None,
-                },
-            )],
-            required_artifacts: vec![evidence],
-            preconditions: store::CommitPreconditions {
-                required_run_state: store::RequiredRunState::NotCompleted,
-                required_present_logical_keys: vec![store::LogicalEventKey::new(format!(
-                    "attempt:{}:{}",
-                    verify_node.node_id, verify_attempt_id
-                ))
-                .expect("attempt logical key")],
-                required_side_effect_states: vec![store::SideEffectStatePrecondition {
-                    pair_id: fixture_side_effect_pair_id(fixture, verify_node),
-                    required: store::RequiredSideEffectState::SubmissionResult,
-                }],
-                ..store::CommitPreconditions::default()
+    let side_effect =
+        SyntheticSideEffectAppend::new(fixture, &fixture.run_id, verify_node, verify_attempt_id);
+    let ledger_purpose = side_effect.ledger_purpose();
+    let (pair_id, pair_role) =
+        side_effect.pair_fields(submit_node, events::SideEffectPairRole::Verify);
+    side_effect.append(
+        store,
+        commit_key,
+        vec![events::KernelEventPayload::SideEffectReceiptObserved(
+            events::side_effect::ReceiptObserved {
+                spec_hash: fixture.runtime_spec.spec_hash().clone(),
+                node_id: verify_node.node_id.clone(),
+                attempt_id: verify_attempt_id.clone(),
+                ledger_key: ledger.clone(),
+                ledger_purpose,
+                pair_id,
+                pair_role,
+                invocation_epoch: 1,
+                receipt_schema_id: verify_node.config_ref.schema_id.clone(),
+                receipt_hash: digest,
+                receipt_artifact_id: artifact_id,
+                replay_verifier_id: events::ReplayVerifierId::new("mfm.test.driver.replay")
+                    .expect("replay verifier"),
+                resource_touched_set: None,
             },
-        })
-        .expect("append synthetic verify receipt observed");
+        )],
+        vec![evidence],
+        store::RequiredSideEffectState::SubmissionResult,
+        true,
+        "append synthetic verify receipt observed",
+    );
 }
 
 fn append_synthetic_verify_confirmation_observed(
@@ -10787,12 +10799,11 @@ fn append_synthetic_verify_confirmation_observed(
         digest.clone(),
         events::ArtifactRole::Confirmation,
     );
-    let pair_id = fixture
-        .runtime_spec
-        .side_effect_pair_for_submit_node(&submit_node.node_id)
-        .cloned()
-        .expect("side-effect pair");
-    let pair_role = events::SideEffectPairRole::Verify;
+    let side_effect =
+        SyntheticSideEffectAppend::new(fixture, &fixture.run_id, verify_node, verify_attempt_id);
+    let ledger_purpose = side_effect.ledger_purpose();
+    let (pair_id, pair_role) =
+        side_effect.pair_fields(submit_node, events::SideEffectPairRole::Verify);
     let release = synthetic_resource_lane_release(
         store,
         fixture,
@@ -10812,7 +10823,7 @@ fn append_synthetic_verify_confirmation_observed(
             node_id: verify_node.node_id.clone(),
             attempt_id: verify_attempt_id.clone(),
             ledger_key: ledger.clone(),
-            ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+            ledger_purpose,
             pair_id,
             pair_role,
             invocation_epoch: 1,
@@ -10824,28 +10835,15 @@ fn append_synthetic_verify_confirmation_observed(
             resource_touched_set: None,
         },
     ));
-    store
-        .append_prepared_commit(store_typed_commit_request! {
-            run_id: fixture.run_id.clone(),
-            expected_next_seq: store.expected_next_seq(&fixture.run_id),
-            commit_key: store::CommitKey::new(commit_key).expect("commit key"),
-            payloads: payloads,
-            required_artifacts: vec![evidence],
-            preconditions: store::CommitPreconditions {
-                required_run_state: store::RequiredRunState::NotCompleted,
-                required_present_logical_keys: vec![store::LogicalEventKey::new(format!(
-                    "attempt:{}:{}",
-                    verify_node.node_id, verify_attempt_id
-                ))
-                .expect("attempt logical key")],
-                required_side_effect_states: vec![store::SideEffectStatePrecondition {
-                    pair_id: fixture_side_effect_pair_id(fixture, verify_node),
-                    required: store::RequiredSideEffectState::ReceiptObserved,
-                }],
-                ..store::CommitPreconditions::default()
-            },
-        })
-        .expect("append synthetic confirmation observed");
+    side_effect.append(
+        store,
+        commit_key,
+        payloads,
+        vec![evidence],
+        store::RequiredSideEffectState::ReceiptObserved,
+        true,
+        "append synthetic confirmation observed",
+    );
 }
 
 fn synthetic_resource_lane_release(
@@ -10957,24 +10955,15 @@ fn append_synthetic_ambiguous(
 ) {
     let evidence_hash = content(0xd5);
     let evidence_artifact_id = artifact(0xd6);
-    let evidence = store::ArtifactEvidenceRef {
-        artifact_id: evidence_artifact_id.clone(),
-        digest: evidence_hash.clone(),
-        byte_len: 19,
-        media_type: spec::MediaType::new("application/json").expect("media"),
-        schema_id: Some(node.config_ref.schema_id.clone()),
-        semantic_type_id: None,
-        producer_node_id: Some(node.node_id.clone()),
-        producer_seed_id: None,
-        artifact_role: events::ArtifactRole::AmbiguityEvidence,
-    };
-    let ledger_purpose = events::SideEffectLedgerPurpose::Forward;
-    let (pair_id, pair_role) = side_effect_pair_fields_for_purpose(
-        &fixture.runtime_spec,
-        &node.node_id,
-        &ledger_purpose,
-        events::SideEffectPairRole::Verify,
+    let evidence = side_effect_evidence(
+        node,
+        evidence_artifact_id.clone(),
+        evidence_hash.clone(),
+        events::ArtifactRole::AmbiguityEvidence,
     );
+    let side_effect = SyntheticSideEffectAppend::new(fixture, run_id, node, attempt_id);
+    let ledger_purpose = side_effect.ledger_purpose();
+    let (pair_id, pair_role) = side_effect.pair_fields(node, events::SideEffectPairRole::Verify);
     let release = synthetic_resource_lane_release(
         store,
         fixture,
@@ -11013,23 +11002,15 @@ fn append_synthetic_ambiguous(
             error: side_effect_error(false),
         },
     ));
-    store
-        .append_prepared_commit(store_typed_commit_request! {
-            run_id: run_id.clone(),
-            expected_next_seq: store.expected_next_seq(run_id),
-            commit_key: store::CommitKey::new(commit_key).expect("commit key"),
-            payloads: payloads,
-            required_artifacts: vec![evidence],
-            preconditions: store::CommitPreconditions {
-                required_run_state: store::RequiredRunState::NotCompleted,
-                required_side_effect_states: vec![store::SideEffectStatePrecondition {
-                    pair_id: fixture_side_effect_pair_id(fixture, node),
-                    required: store::RequiredSideEffectState::InvocationStarted,
-                }],
-                ..store::CommitPreconditions::default()
-            },
-        })
-        .expect("append synthetic ambiguity");
+    side_effect.append(
+        store,
+        commit_key,
+        payloads,
+        vec![evidence],
+        store::RequiredSideEffectState::InvocationStarted,
+        false,
+        "append synthetic ambiguity",
+    );
 }
 
 async fn append_manual_resolution(
