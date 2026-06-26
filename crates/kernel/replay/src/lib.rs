@@ -264,32 +264,10 @@ pub mod v1 {
     /// Request for replaying recorded side-effect evidence.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct SideEffectEvidenceReplayRequest {
-        /// Side-effect ledger key.
-        pub ledger_key: events::SideEffectLedgerKey,
         /// Stable side-effect pair id.
         pub pair_id: SideEffectPairId,
-        /// Node id that owns the side effect.
-        pub node_id: NodeId,
-        /// Attempt id that owns the side effect.
-        pub attempt_id: AttemptId,
         /// Invocation epoch to replay.
         pub invocation_epoch: u32,
-        /// Intent schema id expected by replay.
-        pub intent_schema_id: SchemaId,
-        /// Canonical intent hash expected by replay.
-        pub intent_hash: ContentDigest,
-        /// Idempotency input schema id expected by replay.
-        pub idempotency_input_schema_id: SchemaId,
-        /// Canonical idempotency input hash expected by replay.
-        pub idempotency_input_hash: ContentDigest,
-        /// Capability kind expected by the replaying state.
-        pub capability_kind: CapabilityKind,
-        /// Capability version expected by the replaying state.
-        pub capability_version: CapabilityVersion,
-        /// Adapter kind expected by the replaying state.
-        pub adapter_kind: AdapterKind,
-        /// Adapter version expected by the replaying state.
-        pub adapter_version: AdapterVersion,
         /// Evidence schema id expected by replay.
         pub evidence_schema_id: SchemaId,
         /// Canonical evidence hash expected by replay.
@@ -382,19 +360,8 @@ pub mod v1 {
         replay_verifier_id: Option<events::ReplayVerifierId>,
     ) -> SideEffectEvidenceReplayRequest {
         SideEffectEvidenceReplayRequest {
-            ledger_key: intent.ledger_key.clone(),
             pair_id: intent.pair_id.clone(),
-            node_id: intent.node_id.clone(),
-            attempt_id: intent.attempt_id.clone(),
             invocation_epoch: intent.invocation_epoch,
-            intent_schema_id: intent.intent_schema_id.clone(),
-            intent_hash: intent.intent_hash.clone(),
-            idempotency_input_schema_id: intent.idempotency_input_schema_id.clone(),
-            idempotency_input_hash: intent.idempotency_input_hash.clone(),
-            capability_kind: intent.capability_kind.clone(),
-            capability_version: intent.capability_version.clone(),
-            adapter_kind: intent.adapter_kind.clone(),
-            adapter_version: intent.adapter_version.clone(),
             evidence_schema_id,
             evidence_hash,
             replay_verifier_id,
@@ -1477,36 +1444,13 @@ pub mod v1 {
             &self,
             request: &SideEffectEvidenceReplayRequest,
         ) -> Result<()> {
-            self.verify_node_capability(
-                &request.node_id,
-                &request.capability_kind,
-                &request.capability_version,
-            )?;
-            self.verify_node_adapter(
-                &request.node_id,
-                &request.adapter_kind,
-                &request.adapter_version,
-            )?;
             let intent = self.intents.get(&request.pair_id).ok_or_else(|| {
                 ReplayError::new(
                     ReplayErrorKind::SideEffectMissing,
                     format!("missing side-effect intent {}", request.pair_id),
                 )
             })?;
-            if intent.ledger_key != request.ledger_key
-                || intent.pair_id != request.pair_id
-                || intent.node_id != request.node_id
-                || intent.attempt_id != request.attempt_id
-                || intent.invocation_epoch != request.invocation_epoch
-                || intent.intent_schema_id != request.intent_schema_id
-                || intent.intent_hash != request.intent_hash
-                || intent.idempotency_input_schema_id != request.idempotency_input_schema_id
-                || intent.idempotency_input_hash != request.idempotency_input_hash
-                || intent.capability_kind != request.capability_kind
-                || intent.capability_version != request.capability_version
-                || intent.adapter_kind != request.adapter_kind
-                || intent.adapter_version != request.adapter_version
-            {
+            if intent.invocation_epoch != request.invocation_epoch {
                 return Err(side_effect_mismatch(
                     "side-effect intent does not match replay request",
                 ));
@@ -3159,7 +3103,6 @@ pub mod v1 {
             let request = frame.submission_request().expect("submission request");
 
             assert_eq!(request.pair_id, pair_id);
-            assert_eq!(request.ledger_key, ledger_key);
             assert_eq!(request.invocation_epoch, 1);
             assert_eq!(request.evidence_schema_id, submission.submission_schema_id);
             assert_eq!(request.evidence_hash, submission_hash);
@@ -3197,7 +3140,6 @@ pub mod v1 {
             let request = frame.not_submitted_request().expect("proof request");
 
             assert_eq!(request.pair_id, pair_id);
-            assert_eq!(request.ledger_key, ledger_key);
             assert_eq!(request.invocation_epoch, 1);
             assert_eq!(request.evidence_schema_id, proof.proof_schema_id);
             assert_eq!(request.evidence_hash, proof_hash);
@@ -3240,7 +3182,6 @@ pub mod v1 {
             let request = frame.receipt_request().expect("receipt request");
 
             assert_eq!(request.pair_id, pair_id);
-            assert_eq!(request.ledger_key, ledger_key);
             assert_eq!(request.invocation_epoch, 1);
             assert_eq!(request.evidence_schema_id, receipt.receipt_schema_id);
             assert_eq!(request.evidence_hash, receipt_hash);
