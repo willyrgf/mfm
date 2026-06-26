@@ -3460,20 +3460,133 @@ mod tests {
             .expect("intent")
     }
 
-    struct TestEvmProviders;
+    struct DeployPreparationFixture {
+        route: EvmContractRuntimeRoute,
+        providers: TestEvmProviders,
+        config: ValidatedConfig<DeployPhaseConfig>,
+        intent: ContractDeployIntent,
+    }
+
+    impl DeployPreparationFixture {
+        fn new(style: &str) -> Self {
+            let route = route();
+            let providers = TestEvmProviders::preparation();
+            let config = validated_deploy_config(style);
+            let intent = deploy_intent(&config);
+            Self {
+                route,
+                providers,
+                config,
+                intent,
+            }
+        }
+
+        fn adapter(&self) -> EvmContractLifecycleAdapter<'_> {
+            adapter(&self.route, &self.providers)
+        }
+
+        async fn prepare(&self) -> PreparedContractMutation {
+            self.adapter()
+                .prepare_deploy_invocation(&self.config, &self.intent)
+                .await
+                .expect("prepared")
+        }
+    }
+
+    struct TestEvmProviders {
+        mode: TestEvmProviderMode,
+        submit_count: Arc<Mutex<u32>>,
+        receipt_failure_reads: Arc<Mutex<u32>>,
+    }
+
+    #[derive(Clone, Copy)]
+    enum TestEvmProviderMode {
+        Preparation,
+        Recovery {
+            receipt_mode: RecoveryReceiptMode,
+            pending_nonce: u64,
+            occupancy_mode: RecoveryOccupancyMode,
+        },
+        ReceiptFailure,
+        Finality,
+    }
+
+    impl TestEvmProviders {
+        fn preparation() -> Self {
+            Self::new(TestEvmProviderMode::Preparation)
+        }
+
+        fn recovery(
+            receipt_mode: RecoveryReceiptMode,
+            pending_nonce: u64,
+            occupancy_mode: RecoveryOccupancyMode,
+            submit_count: Arc<Mutex<u32>>,
+        ) -> Self {
+            Self {
+                mode: TestEvmProviderMode::Recovery {
+                    receipt_mode,
+                    pending_nonce,
+                    occupancy_mode,
+                },
+                submit_count,
+                receipt_failure_reads: Arc::new(Mutex::new(0)),
+            }
+        }
+
+        fn receipt_failure(reads: Arc<Mutex<u32>>) -> Self {
+            Self {
+                mode: TestEvmProviderMode::ReceiptFailure,
+                submit_count: Arc::new(Mutex::new(0)),
+                receipt_failure_reads: reads,
+            }
+        }
+
+        fn finality() -> Self {
+            Self::new(TestEvmProviderMode::Finality)
+        }
+
+        fn new(mode: TestEvmProviderMode) -> Self {
+            Self {
+                mode,
+                submit_count: Arc::new(Mutex::new(0)),
+                receipt_failure_reads: Arc::new(Mutex::new(0)),
+            }
+        }
+    }
+
+    fn runtime_from_provider(
+        route: EvmContractRuntimeRoute,
+        provider: TestEvmProviders,
+    ) -> EvmContractRuntime {
+        let provider = Arc::new(provider);
+        let evm: Arc<dyn EvmContractProvider> = provider.clone();
+        let signer: Arc<dyn SigningProvider> = provider;
+        EvmContractRuntime::new(route, evm, signer)
+    }
+
+    fn unexpected_evm_call<'a, T>(capability: &'static str) -> EvmCapabilityFuture<'a, T> {
+        Box::pin(async move { panic!("unexpected test EVM capability call: {capability}") })
+    }
+
+    fn unexpected_signing_call<'a>() -> mfm_signing::SigningFuture<'a> {
+        Box::pin(async { panic!("unexpected test signing provider call") })
+    }
 
     impl EvmChainIdentityProvider for TestEvmProviders {
         fn chain_identity<'a>(
             &'a self,
             _request: &'a EvmChainIdentityRequest,
         ) -> EvmCapabilityFuture<'a, EvmChainIdentityResponse> {
-            Box::pin(async {
-                Ok(EvmChainIdentityResponse {
-                    evidence: evidence(),
-                    chain_id: 1,
-                    client_version: Some("test-client".to_owned()),
-                })
-            })
+            match self.mode {
+                TestEvmProviderMode::Preparation => Box::pin(async {
+                    Ok(EvmChainIdentityResponse {
+                        evidence: evidence(),
+                        chain_id: 1,
+                        client_version: Some("test-client".to_owned()),
+                    })
+                }),
+                _ => unexpected_evm_call("chain_identity"),
+            }
         }
     }
 
@@ -3482,27 +3595,42 @@ mod tests {
             &'a self,
             _request: &'a EvmBlockReadRequest,
         ) -> EvmCapabilityFuture<'a, EvmBlockReadResponse> {
-            Box::pin(async {
-                Ok(EvmBlockReadResponse {
-                    evidence: evidence(),
-                    block_number: 64,
-                    block_hash: B256::from([0x64; 32]),
-                })
-            })
+            match self.mode {
+                TestEvmProviderMode::Finality => Box::pin(async {
+                    Ok(EvmBlockReadResponse {
+                        evidence: evidence(),
+                        block_number: 64,
+                        block_hash: B256::from([0x64; 32]),
+                    })
+                }),
+                _ => unexpected_evm_call("read_block"),
+            }
         }
     }
 
     impl EvmNonceReadProvider for TestEvmProviders {
         fn read_nonce<'a>(
             &'a self,
-            _request: &'a EvmNonceReadRequest,
+            request: &'a EvmNonceReadRequest,
         ) -> EvmCapabilityFuture<'a, EvmNonceReadResponse> {
-            Box::pin(async {
-                Ok(EvmNonceReadResponse {
-                    evidence: evidence(),
-                    nonce: 7,
-                })
-            })
+            match self.mode {
+                TestEvmProviderMode::Preparation => Box::pin(async {
+                    Ok(EvmNonceReadResponse {
+                        evidence: evidence(),
+                        nonce: 7,
+                    })
+                }),
+                TestEvmProviderMode::Recovery { pending_nonce, .. } => {
+                    assert_eq!(request.block, EvmBlockSelector::Pending);
+                    Box::pin(async move {
+                        Ok(EvmNonceReadResponse {
+                            evidence: evidence(),
+                            nonce: pending_nonce,
+                        })
+                    })
+                }
+                _ => unexpected_evm_call("read_nonce"),
+            }
         }
     }
 
@@ -3511,15 +3639,18 @@ mod tests {
             &'a self,
             _request: &'a EvmFeeReadRequest,
         ) -> EvmCapabilityFuture<'a, EvmFeeReadResponse> {
-            Box::pin(async {
-                Ok(EvmFeeReadResponse {
-                    evidence: evidence(),
-                    base_fee_per_gas: Some(5),
-                    priority_fee_per_gas: Some(3),
-                    max_fee_per_gas: Some(11),
-                    legacy_gas_price: Some(7),
-                })
-            })
+            match self.mode {
+                TestEvmProviderMode::Preparation => Box::pin(async {
+                    Ok(EvmFeeReadResponse {
+                        evidence: evidence(),
+                        base_fee_per_gas: Some(5),
+                        priority_fee_per_gas: Some(3),
+                        max_fee_per_gas: Some(11),
+                        legacy_gas_price: Some(7),
+                    })
+                }),
+                _ => unexpected_evm_call("read_fee"),
+            }
         }
     }
 
@@ -3528,39 +3659,108 @@ mod tests {
             &'a self,
             _request: &'a EvmGasEstimateRequest,
         ) -> EvmCapabilityFuture<'a, EvmGasEstimateResponse> {
-            Box::pin(async {
-                Ok(EvmGasEstimateResponse {
-                    evidence: evidence(),
-                    gas_limit: 21_000,
-                })
-            })
+            match self.mode {
+                TestEvmProviderMode::Preparation => Box::pin(async {
+                    Ok(EvmGasEstimateResponse {
+                        evidence: evidence(),
+                        gas_limit: 21_000,
+                    })
+                }),
+                _ => unexpected_evm_call("estimate_gas"),
+            }
         }
     }
 
     impl EvmTransactionSubmitProvider for TestEvmProviders {
         fn submit_transaction<'a>(
             &'a self,
-            _request: &'a EvmTransactionSubmitRequest,
+            request: &'a EvmTransactionSubmitRequest,
         ) -> EvmCapabilityFuture<'a, mfm_evm_capabilities::EvmTransactionSubmitResponse> {
-            Box::pin(async { panic!("not used in preparation tests") })
+            match self.mode {
+                TestEvmProviderMode::Recovery { .. } => {
+                    let submit_count = Arc::clone(&self.submit_count);
+                    let transaction_hash = request.signed_payload.transaction_hash();
+                    Box::pin(async move {
+                        *submit_count.lock().expect("submit count") += 1;
+                        Ok(mfm_evm_capabilities::EvmTransactionSubmitResponse {
+                            evidence: evidence(),
+                            transaction_hash,
+                        })
+                    })
+                }
+                _ => unexpected_evm_call("submit_transaction"),
+            }
         }
     }
 
     impl EvmReceiptReadProvider for TestEvmProviders {
         fn read_receipt<'a>(
             &'a self,
-            _request: &'a EvmReceiptReadRequest,
+            request: &'a EvmReceiptReadRequest,
         ) -> EvmCapabilityFuture<'a, EvmReceiptReadResponse> {
-            Box::pin(async { panic!("not used in preparation tests") })
+            match self.mode {
+                TestEvmProviderMode::Recovery { receipt_mode, .. } => {
+                    let transaction_hash = request.transaction_hash;
+                    Box::pin(async move {
+                        match receipt_mode {
+                            RecoveryReceiptMode::Landed => Ok(EvmReceiptReadResponse {
+                                evidence: evidence(),
+                                transaction_hash,
+                                block_number: 42,
+                                status: true,
+                            }),
+                            RecoveryReceiptMode::Pending => Err(EvmCapabilityError::ReceiptPending),
+                            RecoveryReceiptMode::ProviderFailure => {
+                                Err(EvmCapabilityError::redacted_provider_failure("test rpc"))
+                            }
+                        }
+                    })
+                }
+                TestEvmProviderMode::ReceiptFailure => {
+                    let reads = Arc::clone(&self.receipt_failure_reads);
+                    Box::pin(async move {
+                        let mut reads = reads.lock().map_err(|_| {
+                            EvmCapabilityError::redacted_provider_failure("test evm")
+                        })?;
+                        *reads += 1;
+                        Err(EvmCapabilityError::redacted_provider_failure("test evm"))
+                    })
+                }
+                _ => unexpected_evm_call("read_receipt"),
+            }
         }
     }
 
     impl EvmNonceOccupancyReadProvider for TestEvmProviders {
         fn read_nonce_occupancy<'a>(
             &'a self,
-            _request: &'a EvmNonceOccupancyReadRequest,
+            request: &'a EvmNonceOccupancyReadRequest,
         ) -> EvmCapabilityFuture<'a, mfm_evm_capabilities::EvmNonceOccupancyReadResponse> {
-            Box::pin(async { panic!("not used in preparation tests") })
+            match self.mode {
+                TestEvmProviderMode::Recovery { occupancy_mode, .. } => {
+                    let nonce = request.nonce;
+                    Box::pin(async move {
+                        match occupancy_mode {
+                            RecoveryOccupancyMode::Unknown => {
+                                Ok(mfm_evm_capabilities::EvmNonceOccupancyReadResponse {
+                                    evidence: evidence(),
+                                    outcome: EvmNonceOccupancy::Unknown,
+                                })
+                            }
+                            RecoveryOccupancyMode::Occupied { transaction_hash } => {
+                                Ok(mfm_evm_capabilities::EvmNonceOccupancyReadResponse {
+                                    evidence: evidence(),
+                                    outcome: EvmNonceOccupancy::Occupied {
+                                        transaction_hash,
+                                        block_number: Some(43 + nonce),
+                                    },
+                                })
+                            }
+                        }
+                    })
+                }
+                _ => unexpected_evm_call("read_nonce_occupancy"),
+            }
         }
     }
 
@@ -3569,7 +3769,7 @@ mod tests {
             &'a self,
             _request: &'a EvmCallReadRequest,
         ) -> EvmCapabilityFuture<'a, EvmCallReadResponse> {
-            Box::pin(async { panic!("not used in preparation tests") })
+            unexpected_evm_call("read_call")
         }
     }
 
@@ -3578,17 +3778,19 @@ mod tests {
             &'a self,
             _request: &'a EvmLogsReadRequest,
         ) -> EvmCapabilityFuture<'a, EvmLogsReadResponse> {
-            Box::pin(async { panic!("not used in preparation tests") })
+            unexpected_evm_call("read_logs")
         }
     }
 
     impl SigningProvider for TestEvmProviders {
-        fn sign<'a>(
-            &'a self,
-            request: &'a mfm_signing::SigningRequest,
-        ) -> mfm_signing::SigningFuture<'a> {
-            let result = test_signing_result(request);
-            Box::pin(async move { result })
+        fn sign<'a>(&'a self, request: &'a SigningRequest) -> mfm_signing::SigningFuture<'a> {
+            match self.mode {
+                TestEvmProviderMode::Preparation | TestEvmProviderMode::Recovery { .. } => {
+                    let result = test_signing_result(request);
+                    Box::pin(async move { result })
+                }
+                _ => unexpected_signing_call(),
+            }
         }
     }
 
@@ -3696,16 +3898,8 @@ mod tests {
 
     #[tokio::test]
     async fn deploy_preparation_defaults_to_eip1559_contract_creation() {
-        let route = route();
-        let providers = TestEvmProviders;
-        let adapter = adapter(&route, &providers);
-        let config = validated_deploy_config("eip1559");
-        let intent = deploy_intent(&config);
-
-        let prepared = adapter
-            .prepare_deploy_invocation(&config, &intent)
-            .await
-            .expect("prepared");
+        let fixture = DeployPreparationFixture::new("eip1559");
+        let prepared = fixture.prepare().await;
 
         assert_eq!(prepared.evidence().transactions.len(), 1);
         assert_eq!(
@@ -3721,16 +3915,8 @@ mod tests {
 
     #[tokio::test]
     async fn deploy_preparation_supports_legacy_contract_creation() {
-        let route = route();
-        let providers = TestEvmProviders;
-        let adapter = adapter(&route, &providers);
-        let config = validated_deploy_config("legacy");
-        let intent = deploy_intent(&config);
-
-        let prepared = adapter
-            .prepare_deploy_invocation(&config, &intent)
-            .await
-            .expect("prepared");
+        let fixture = DeployPreparationFixture::new("legacy");
+        let prepared = fixture.prepare().await;
 
         assert_eq!(
             prepared.evidence().transactions[0].style,
@@ -3744,15 +3930,8 @@ mod tests {
 
     #[tokio::test]
     async fn prepared_invocation_evidence_excludes_live_and_secret_surfaces() {
-        let route = route();
-        let providers = TestEvmProviders;
-        let adapter = adapter(&route, &providers);
-        let config = validated_deploy_config("eip1559");
-        let intent = deploy_intent(&config);
-        let prepared = adapter
-            .prepare_deploy_invocation(&config, &intent)
-            .await
-            .expect("prepared");
+        let fixture = DeployPreparationFixture::new("eip1559");
+        let prepared = fixture.prepare().await;
 
         ensure_prepared_invocation_public(prepared.evidence()).expect("public evidence");
         let evidence = prepared.evidence();
@@ -3822,18 +4001,11 @@ mod tests {
 
     #[tokio::test]
     async fn prepared_invocation_reconstruction_preserves_submission_anchor() {
-        let route = route();
-        let providers = TestEvmProviders;
-        let adapter = adapter(&route, &providers);
-        let config = validated_deploy_config("eip1559");
-        let intent = deploy_intent(&config);
-
-        let prepared = adapter
-            .prepare_deploy_invocation(&config, &intent)
-            .await
-            .expect("prepared");
-        let reconstructed = adapter
-            .reconstruct_deploy_invocation(&config, &intent, prepared.evidence())
+        let fixture = DeployPreparationFixture::new("eip1559");
+        let prepared = fixture.prepare().await;
+        let reconstructed = fixture
+            .adapter()
+            .reconstruct_deploy_invocation(&fixture.config, &fixture.intent, prepared.evidence())
             .expect("reconstructed");
 
         assert_eq!(reconstructed.evidence(), prepared.evidence());
@@ -3845,21 +4017,14 @@ mod tests {
 
     #[tokio::test]
     async fn submit_rejects_resigned_hash_mismatch_before_broadcast() {
-        let route = route();
-        let providers = TestEvmProviders;
-        let adapter = adapter(&route, &providers);
-        let config = validated_deploy_config("eip1559");
-        let intent = deploy_intent(&config);
-
-        let prepared = adapter
-            .prepare_deploy_invocation(&config, &intent)
-            .await
-            .expect("prepared");
+        let fixture = DeployPreparationFixture::new("eip1559");
+        let prepared = fixture.prepare().await;
         let mut evidence = prepared.evidence().clone();
         evidence.transactions[0].expected_transaction_hash =
             "0x1111111111111111111111111111111111111111111111111111111111111111".to_owned();
+        let adapter = fixture.adapter();
         let reconstructed = adapter
-            .reconstruct_deploy_invocation(&config, &intent, &evidence)
+            .reconstruct_deploy_invocation(&fixture.config, &fixture.intent, &evidence)
             .expect("reconstructed");
 
         assert!(matches!(
@@ -3870,25 +4035,18 @@ mod tests {
 
     #[tokio::test]
     async fn recovery_observes_landed_anchor_without_resubmitting() {
-        let route = route();
-        let providers = TestEvmProviders;
-        let adapter = adapter(&route, &providers);
-        let config = validated_deploy_config("eip1559");
-        let intent = deploy_intent(&config);
-        let prepared = adapter
-            .prepare_deploy_invocation(&config, &intent)
-            .await
-            .expect("prepared");
+        let fixture = DeployPreparationFixture::new("eip1559");
+        let prepared = fixture.prepare().await;
         let submit_count = Arc::new(Mutex::new(0_u32));
-        let recovery = Arc::new(RecoveryOnlyProviders {
-            receipt_mode: RecoveryReceiptMode::Landed,
-            pending_nonce: 7,
-            occupancy_mode: RecoveryOccupancyMode::Unknown,
-            submit_count: Arc::clone(&submit_count),
-        });
-        let evm: Arc<dyn EvmContractProvider> = recovery.clone();
-        let signer: Arc<dyn SigningProvider> = recovery;
-        let runtime = EvmContractRuntime::new(route, evm, signer);
+        let runtime = runtime_from_provider(
+            fixture.route,
+            TestEvmProviders::recovery(
+                RecoveryReceiptMode::Landed,
+                7,
+                RecoveryOccupancyMode::Unknown,
+                Arc::clone(&submit_count),
+            ),
+        );
 
         let decision = submit_or_recover_contract_submission(
             &runtime,
@@ -3912,25 +4070,18 @@ mod tests {
 
     #[tokio::test]
     async fn recovery_rebroadcasts_unlanded_anchor_after_resign_match() {
-        let route = route();
-        let providers = TestEvmProviders;
-        let adapter = adapter(&route, &providers);
-        let config = validated_deploy_config("eip1559");
-        let intent = deploy_intent(&config);
-        let prepared = adapter
-            .prepare_deploy_invocation(&config, &intent)
-            .await
-            .expect("prepared");
+        let fixture = DeployPreparationFixture::new("eip1559");
+        let prepared = fixture.prepare().await;
         let submit_count = Arc::new(Mutex::new(0_u32));
-        let recovery = Arc::new(RecoveryOnlyProviders {
-            receipt_mode: RecoveryReceiptMode::Pending,
-            pending_nonce: 7,
-            occupancy_mode: RecoveryOccupancyMode::Unknown,
-            submit_count: Arc::clone(&submit_count),
-        });
-        let evm: Arc<dyn EvmContractProvider> = recovery.clone();
-        let signer: Arc<dyn SigningProvider> = recovery;
-        let runtime = EvmContractRuntime::new(route, evm, signer);
+        let runtime = runtime_from_provider(
+            fixture.route,
+            TestEvmProviders::recovery(
+                RecoveryReceiptMode::Pending,
+                7,
+                RecoveryOccupancyMode::Unknown,
+                Arc::clone(&submit_count),
+            ),
+        );
 
         let decision = submit_or_recover_contract_submission(
             &runtime,
@@ -3954,31 +4105,25 @@ mod tests {
 
     #[tokio::test]
     async fn recovery_does_not_rebroadcast_when_resign_hash_mismatches_anchor() {
-        let route = route();
-        let providers = TestEvmProviders;
-        let adapter = adapter(&route, &providers);
-        let config = validated_deploy_config("eip1559");
-        let intent = deploy_intent(&config);
-        let prepared = adapter
-            .prepare_deploy_invocation(&config, &intent)
-            .await
-            .expect("prepared");
+        let fixture = DeployPreparationFixture::new("eip1559");
+        let prepared = fixture.prepare().await;
         let mut evidence = prepared.evidence().clone();
         evidence.transactions[0].expected_transaction_hash =
             "0x1111111111111111111111111111111111111111111111111111111111111111".to_owned();
-        let reconstructed = adapter
-            .reconstruct_deploy_invocation(&config, &intent, &evidence)
+        let reconstructed = fixture
+            .adapter()
+            .reconstruct_deploy_invocation(&fixture.config, &fixture.intent, &evidence)
             .expect("reconstructed");
         let submit_count = Arc::new(Mutex::new(0_u32));
-        let recovery = Arc::new(RecoveryOnlyProviders {
-            receipt_mode: RecoveryReceiptMode::Pending,
-            pending_nonce: 7,
-            occupancy_mode: RecoveryOccupancyMode::Unknown,
-            submit_count: Arc::clone(&submit_count),
-        });
-        let evm: Arc<dyn EvmContractProvider> = recovery.clone();
-        let signer: Arc<dyn SigningProvider> = recovery;
-        let runtime = EvmContractRuntime::new(route, evm, signer);
+        let runtime = runtime_from_provider(
+            fixture.route,
+            TestEvmProviders::recovery(
+                RecoveryReceiptMode::Pending,
+                7,
+                RecoveryOccupancyMode::Unknown,
+                Arc::clone(&submit_count),
+            ),
+        );
 
         let decision = submit_or_recover_contract_submission(
             &runtime,
@@ -4002,25 +4147,18 @@ mod tests {
 
     #[tokio::test]
     async fn recovery_keeps_advanced_nonce_unknown_without_occupancy_proof() {
-        let route = route();
-        let providers = TestEvmProviders;
-        let adapter = adapter(&route, &providers);
-        let config = validated_deploy_config("eip1559");
-        let intent = deploy_intent(&config);
-        let prepared = adapter
-            .prepare_deploy_invocation(&config, &intent)
-            .await
-            .expect("prepared");
+        let fixture = DeployPreparationFixture::new("eip1559");
+        let prepared = fixture.prepare().await;
         let submit_count = Arc::new(Mutex::new(0_u32));
-        let recovery = Arc::new(RecoveryOnlyProviders {
-            receipt_mode: RecoveryReceiptMode::Pending,
-            pending_nonce: 8,
-            occupancy_mode: RecoveryOccupancyMode::Unknown,
-            submit_count: Arc::clone(&submit_count),
-        });
-        let evm: Arc<dyn EvmContractProvider> = recovery.clone();
-        let signer: Arc<dyn SigningProvider> = recovery;
-        let runtime = EvmContractRuntime::new(route, evm, signer);
+        let runtime = runtime_from_provider(
+            fixture.route,
+            TestEvmProviders::recovery(
+                RecoveryReceiptMode::Pending,
+                8,
+                RecoveryOccupancyMode::Unknown,
+                Arc::clone(&submit_count),
+            ),
+        );
 
         let decision = submit_or_recover_contract_submission(
             &runtime,
@@ -4044,30 +4182,23 @@ mod tests {
 
     #[tokio::test]
     async fn recovery_proves_not_submitted_when_foreign_transaction_occupies_nonce() {
-        let route = route();
-        let providers = TestEvmProviders;
-        let adapter = adapter(&route, &providers);
-        let config = validated_deploy_config("eip1559");
-        let intent = deploy_intent(&config);
-        let prepared = adapter
-            .prepare_deploy_invocation(&config, &intent)
-            .await
-            .expect("prepared");
+        let fixture = DeployPreparationFixture::new("eip1559");
+        let prepared = fixture.prepare().await;
         let submit_count = Arc::new(Mutex::new(0_u32));
         let occupying_hash = "0x2222222222222222222222222222222222222222222222222222222222222222"
             .parse::<B256>()
             .expect("occupying hash");
-        let recovery = Arc::new(RecoveryOnlyProviders {
-            receipt_mode: RecoveryReceiptMode::Pending,
-            pending_nonce: 8,
-            occupancy_mode: RecoveryOccupancyMode::Occupied {
-                transaction_hash: occupying_hash,
-            },
-            submit_count: Arc::clone(&submit_count),
-        });
-        let evm: Arc<dyn EvmContractProvider> = recovery.clone();
-        let signer: Arc<dyn SigningProvider> = recovery;
-        let runtime = EvmContractRuntime::new(route, evm, signer);
+        let runtime = runtime_from_provider(
+            fixture.route,
+            TestEvmProviders::recovery(
+                RecoveryReceiptMode::Pending,
+                8,
+                RecoveryOccupancyMode::Occupied {
+                    transaction_hash: occupying_hash,
+                },
+                Arc::clone(&submit_count),
+            ),
+        );
 
         let decision = submit_or_recover_contract_submission(
             &runtime,
@@ -4097,25 +4228,18 @@ mod tests {
 
     #[tokio::test]
     async fn recovery_records_unknown_on_transient_anchor_read_failure() {
-        let route = route();
-        let providers = TestEvmProviders;
-        let adapter = adapter(&route, &providers);
-        let config = validated_deploy_config("eip1559");
-        let intent = deploy_intent(&config);
-        let prepared = adapter
-            .prepare_deploy_invocation(&config, &intent)
-            .await
-            .expect("prepared");
+        let fixture = DeployPreparationFixture::new("eip1559");
+        let prepared = fixture.prepare().await;
         let submit_count = Arc::new(Mutex::new(0_u32));
-        let recovery = Arc::new(RecoveryOnlyProviders {
-            receipt_mode: RecoveryReceiptMode::ProviderFailure,
-            pending_nonce: 7,
-            occupancy_mode: RecoveryOccupancyMode::Unknown,
-            submit_count: Arc::clone(&submit_count),
-        });
-        let evm: Arc<dyn EvmContractProvider> = recovery.clone();
-        let signer: Arc<dyn SigningProvider> = recovery;
-        let runtime = EvmContractRuntime::new(route, evm, signer);
+        let runtime = runtime_from_provider(
+            fixture.route,
+            TestEvmProviders::recovery(
+                RecoveryReceiptMode::ProviderFailure,
+                7,
+                RecoveryOccupancyMode::Unknown,
+                Arc::clone(&submit_count),
+            ),
+        );
 
         let decision = submit_or_recover_contract_submission(
             &runtime,
@@ -4212,160 +4336,6 @@ mod tests {
         Occupied { transaction_hash: B256 },
     }
 
-    struct RecoveryOnlyProviders {
-        receipt_mode: RecoveryReceiptMode,
-        pending_nonce: u64,
-        occupancy_mode: RecoveryOccupancyMode,
-        submit_count: Arc<Mutex<u32>>,
-    }
-
-    impl EvmChainIdentityProvider for RecoveryOnlyProviders {
-        fn chain_identity<'a>(
-            &'a self,
-            _request: &'a EvmChainIdentityRequest,
-        ) -> EvmCapabilityFuture<'a, EvmChainIdentityResponse> {
-            Box::pin(async { panic!("not used in recovery-only tests") })
-        }
-    }
-
-    impl EvmBlockReadProvider for RecoveryOnlyProviders {
-        fn read_block<'a>(
-            &'a self,
-            _request: &'a EvmBlockReadRequest,
-        ) -> EvmCapabilityFuture<'a, EvmBlockReadResponse> {
-            Box::pin(async { panic!("not used in recovery-only tests") })
-        }
-    }
-
-    impl EvmNonceReadProvider for RecoveryOnlyProviders {
-        fn read_nonce<'a>(
-            &'a self,
-            request: &'a EvmNonceReadRequest,
-        ) -> EvmCapabilityFuture<'a, EvmNonceReadResponse> {
-            let pending_nonce = self.pending_nonce;
-            assert_eq!(request.block, EvmBlockSelector::Pending);
-            Box::pin(async move {
-                Ok(EvmNonceReadResponse {
-                    evidence: evidence(),
-                    nonce: pending_nonce,
-                })
-            })
-        }
-    }
-
-    impl EvmFeeReadProvider for RecoveryOnlyProviders {
-        fn read_fee<'a>(
-            &'a self,
-            _request: &'a EvmFeeReadRequest,
-        ) -> EvmCapabilityFuture<'a, EvmFeeReadResponse> {
-            Box::pin(async { panic!("not used in recovery-only tests") })
-        }
-    }
-
-    impl EvmGasEstimateProvider for RecoveryOnlyProviders {
-        fn estimate_gas<'a>(
-            &'a self,
-            _request: &'a EvmGasEstimateRequest,
-        ) -> EvmCapabilityFuture<'a, EvmGasEstimateResponse> {
-            Box::pin(async { panic!("not used in recovery-only tests") })
-        }
-    }
-
-    impl EvmTransactionSubmitProvider for RecoveryOnlyProviders {
-        fn submit_transaction<'a>(
-            &'a self,
-            request: &'a EvmTransactionSubmitRequest,
-        ) -> EvmCapabilityFuture<'a, mfm_evm_capabilities::EvmTransactionSubmitResponse> {
-            let submit_count = Arc::clone(&self.submit_count);
-            let transaction_hash = request.signed_payload.transaction_hash();
-            Box::pin(async move {
-                *submit_count.lock().expect("submit count") += 1;
-                Ok(mfm_evm_capabilities::EvmTransactionSubmitResponse {
-                    evidence: evidence(),
-                    transaction_hash,
-                })
-            })
-        }
-    }
-
-    impl EvmReceiptReadProvider for RecoveryOnlyProviders {
-        fn read_receipt<'a>(
-            &'a self,
-            request: &'a EvmReceiptReadRequest,
-        ) -> EvmCapabilityFuture<'a, EvmReceiptReadResponse> {
-            let mode = self.receipt_mode;
-            let transaction_hash = request.transaction_hash;
-            Box::pin(async move {
-                match mode {
-                    RecoveryReceiptMode::Landed => Ok(EvmReceiptReadResponse {
-                        evidence: evidence(),
-                        transaction_hash,
-                        block_number: 42,
-                        status: true,
-                    }),
-                    RecoveryReceiptMode::Pending => Err(EvmCapabilityError::ReceiptPending),
-                    RecoveryReceiptMode::ProviderFailure => {
-                        Err(EvmCapabilityError::redacted_provider_failure("test rpc"))
-                    }
-                }
-            })
-        }
-    }
-
-    impl EvmNonceOccupancyReadProvider for RecoveryOnlyProviders {
-        fn read_nonce_occupancy<'a>(
-            &'a self,
-            request: &'a EvmNonceOccupancyReadRequest,
-        ) -> EvmCapabilityFuture<'a, mfm_evm_capabilities::EvmNonceOccupancyReadResponse> {
-            let mode = self.occupancy_mode;
-            let nonce = request.nonce;
-            Box::pin(async move {
-                match mode {
-                    RecoveryOccupancyMode::Unknown => {
-                        Ok(mfm_evm_capabilities::EvmNonceOccupancyReadResponse {
-                            evidence: evidence(),
-                            outcome: EvmNonceOccupancy::Unknown,
-                        })
-                    }
-                    RecoveryOccupancyMode::Occupied { transaction_hash } => {
-                        Ok(mfm_evm_capabilities::EvmNonceOccupancyReadResponse {
-                            evidence: evidence(),
-                            outcome: EvmNonceOccupancy::Occupied {
-                                transaction_hash,
-                                block_number: Some(43 + nonce),
-                            },
-                        })
-                    }
-                }
-            })
-        }
-    }
-
-    impl EvmCallReadProvider for RecoveryOnlyProviders {
-        fn read_call<'a>(
-            &'a self,
-            _request: &'a EvmCallReadRequest,
-        ) -> EvmCapabilityFuture<'a, EvmCallReadResponse> {
-            Box::pin(async { panic!("not used in recovery-only tests") })
-        }
-    }
-
-    impl EvmLogsReadProvider for RecoveryOnlyProviders {
-        fn read_logs<'a>(
-            &'a self,
-            _request: &'a EvmLogsReadRequest,
-        ) -> EvmCapabilityFuture<'a, EvmLogsReadResponse> {
-            Box::pin(async { panic!("not used in recovery-only tests") })
-        }
-    }
-
-    impl SigningProvider for RecoveryOnlyProviders {
-        fn sign<'a>(&'a self, request: &'a SigningRequest) -> mfm_signing::SigningFuture<'a> {
-            let result = test_signing_result(request);
-            Box::pin(async move { result })
-        }
-    }
-
     #[test]
     fn replay_verifier_uses_contract_namespace() {
         let verifier = EvmContractLifecycleReplayVerifier::new().expect("verifier");
@@ -4380,12 +4350,10 @@ mod tests {
     #[tokio::test]
     async fn receipt_polling_does_not_retry_permanent_capability_failures() {
         let reads = Arc::new(Mutex::new(0_u32));
-        let providers = Arc::new(ReceiptFailureProviders {
-            reads: Arc::clone(&reads),
-        });
-        let evm: Arc<dyn EvmContractProvider> = providers.clone();
-        let signer: Arc<dyn SigningProvider> = providers;
-        let runtime = EvmContractRuntime::new(route(), evm, signer);
+        let runtime = runtime_from_provider(
+            route(),
+            TestEvmProviders::receipt_failure(Arc::clone(&reads)),
+        );
         let transaction_hash = "0x1111111111111111111111111111111111111111111111111111111111111111";
         let prepared = PreparedContractInvocation {
             prepared_version: 1,
@@ -4432,9 +4400,7 @@ mod tests {
 
     #[tokio::test]
     async fn finality_confirmation_requires_certified_depth() {
-        let evm: Arc<dyn EvmContractProvider> = Arc::new(TestEvmProviders);
-        let signer: Arc<dyn SigningProvider> = Arc::new(TestEvmProviders);
-        let runtime = EvmContractRuntime::new(route(), evm, signer);
+        let runtime = runtime_from_provider(route(), TestEvmProviders::finality());
         let receipt = ContractTransactionReceipt {
             receipt_version: 1,
             transaction_hash: "0x1111111111111111111111111111111111111111111111111111111111111111"
@@ -4461,116 +4427,6 @@ mod tests {
         assert!(ensure_replay_confirmation_depth(3, 3).is_ok());
         let error = ensure_replay_confirmation_depth(2, 3).expect_err("insufficient replay depth");
         assert_eq!(error.kind, replay::ReplayErrorKind::SideEffectMismatch);
-    }
-
-    struct ReceiptFailureProviders {
-        reads: Arc<Mutex<u32>>,
-    }
-
-    impl EvmChainIdentityProvider for ReceiptFailureProviders {
-        fn chain_identity<'a>(
-            &'a self,
-            _request: &'a EvmChainIdentityRequest,
-        ) -> EvmCapabilityFuture<'a, EvmChainIdentityResponse> {
-            Box::pin(async { panic!("not used in receipt polling test") })
-        }
-    }
-
-    impl EvmBlockReadProvider for ReceiptFailureProviders {
-        fn read_block<'a>(
-            &'a self,
-            _request: &'a EvmBlockReadRequest,
-        ) -> EvmCapabilityFuture<'a, EvmBlockReadResponse> {
-            Box::pin(async { panic!("not used in receipt polling test") })
-        }
-    }
-
-    impl EvmNonceReadProvider for ReceiptFailureProviders {
-        fn read_nonce<'a>(
-            &'a self,
-            _request: &'a EvmNonceReadRequest,
-        ) -> EvmCapabilityFuture<'a, EvmNonceReadResponse> {
-            Box::pin(async { panic!("not used in receipt polling test") })
-        }
-    }
-
-    impl EvmFeeReadProvider for ReceiptFailureProviders {
-        fn read_fee<'a>(
-            &'a self,
-            _request: &'a EvmFeeReadRequest,
-        ) -> EvmCapabilityFuture<'a, EvmFeeReadResponse> {
-            Box::pin(async { panic!("not used in receipt polling test") })
-        }
-    }
-
-    impl EvmGasEstimateProvider for ReceiptFailureProviders {
-        fn estimate_gas<'a>(
-            &'a self,
-            _request: &'a EvmGasEstimateRequest,
-        ) -> EvmCapabilityFuture<'a, EvmGasEstimateResponse> {
-            Box::pin(async { panic!("not used in receipt polling test") })
-        }
-    }
-
-    impl EvmTransactionSubmitProvider for ReceiptFailureProviders {
-        fn submit_transaction<'a>(
-            &'a self,
-            _request: &'a EvmTransactionSubmitRequest,
-        ) -> EvmCapabilityFuture<'a, mfm_evm_capabilities::EvmTransactionSubmitResponse> {
-            Box::pin(async { panic!("not used in receipt polling test") })
-        }
-    }
-
-    impl EvmReceiptReadProvider for ReceiptFailureProviders {
-        fn read_receipt<'a>(
-            &'a self,
-            _request: &'a EvmReceiptReadRequest,
-        ) -> EvmCapabilityFuture<'a, EvmReceiptReadResponse> {
-            let reads = Arc::clone(&self.reads);
-            Box::pin(async move {
-                let mut reads = reads
-                    .lock()
-                    .map_err(|_| EvmCapabilityError::redacted_provider_failure("test evm"))?;
-                *reads += 1;
-                Err(EvmCapabilityError::redacted_provider_failure("test evm"))
-            })
-        }
-    }
-
-    impl EvmNonceOccupancyReadProvider for ReceiptFailureProviders {
-        fn read_nonce_occupancy<'a>(
-            &'a self,
-            _request: &'a EvmNonceOccupancyReadRequest,
-        ) -> EvmCapabilityFuture<'a, mfm_evm_capabilities::EvmNonceOccupancyReadResponse> {
-            Box::pin(async { panic!("not used in receipt polling test") })
-        }
-    }
-
-    impl EvmCallReadProvider for ReceiptFailureProviders {
-        fn read_call<'a>(
-            &'a self,
-            _request: &'a EvmCallReadRequest,
-        ) -> EvmCapabilityFuture<'a, EvmCallReadResponse> {
-            Box::pin(async { panic!("not used in receipt polling test") })
-        }
-    }
-
-    impl EvmLogsReadProvider for ReceiptFailureProviders {
-        fn read_logs<'a>(
-            &'a self,
-            _request: &'a EvmLogsReadRequest,
-        ) -> EvmCapabilityFuture<'a, EvmLogsReadResponse> {
-            Box::pin(async { panic!("not used in receipt polling test") })
-        }
-    }
-
-    impl SigningProvider for ReceiptFailureProviders {
-        fn sign<'a>(
-            &'a self,
-            _request: &'a mfm_signing::SigningRequest,
-        ) -> mfm_signing::SigningFuture<'a> {
-            Box::pin(async { panic!("not used in receipt polling test") })
-        }
     }
 
     #[test]
