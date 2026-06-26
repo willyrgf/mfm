@@ -29,8 +29,7 @@ use http::header::HeaderName;
 use mfm_app::{
     AppError, DistinctRunKey, EntryPointRunLaunchInput, ErrorClass, ManualResolutionDecision,
     ManualResolutionRecordRequest, ProductionRunStore, PublicOpName, PublicOutputResponse,
-    PublicSafeMessage, RunLaunchOutcomeStatus, RunModeStatus, RunResponse, RunServices,
-    RunStreamResponse,
+    PublicSafeMessage, RunLaunchOutcomeStatus, RunResponse, RunServices, RunStreamResponse,
 };
 use mfm_authored_config::{AuthoredConfig, AuthoredConfigFormat};
 use mfm_canonical::PlainCanonicalJsonBytes;
@@ -183,8 +182,19 @@ struct RouterState<S> {
     app: AppState<S>,
 }
 
-impl<S> RouterState<S>
-where
+trait RunCommandStore:
+    RunEventStore
+    + store::TrustScopeStore
+    + store::ExecutionClaimStore
+    + store::RetainedArtifactReadProvider
+    + Clone
+    + Send
+    + Sync
+    + 'static
+{
+}
+
+impl<S> RunCommandStore for S where
     S: RunEventStore
         + store::TrustScopeStore
         + store::ExecutionClaimStore
@@ -192,7 +202,23 @@ where
         + Clone
         + Send
         + Sync
-        + 'static,
+        + 'static
+{
+}
+
+trait RunObservationCommandStore:
+    RunCommandStore + RunObservationStore<Error = <Self as RunEventStore>::Error>
+{
+}
+
+impl<S> RunObservationCommandStore for S where
+    S: RunCommandStore + RunObservationStore<Error = <S as RunEventStore>::Error>
+{
+}
+
+impl<S> RouterState<S>
+where
+    S: RunCommandStore,
 {
     fn services(&self) -> Result<RunServices<S, S>, ApiError> {
         let runners = mfm_app::production_runner_registry(
@@ -302,14 +328,7 @@ async fn health() -> Json<serde_json::Value> {
 #[instrument(level = "debug", skip(state))]
 async fn ready<S>(State(state): State<RouterState<S>>) -> Result<Json<serde_json::Value>, ApiError>
 where
-    S: RunEventStore
-        + store::TrustScopeStore
-        + store::ExecutionClaimStore
-        + store::RetainedArtifactReadProvider
-        + Clone
-        + Send
-        + Sync
-        + 'static,
+    S: RunCommandStore,
 {
     state.app.store.load_trust_scope_id().await.map_err(|_| {
         ApiError::new(
@@ -469,15 +488,7 @@ async fn runs_list<S>(
     query: Result<Query<RunListQuery>, QueryRejection>,
 ) -> Result<Json<serde_json::Value>, ApiError>
 where
-    S: RunEventStore
-        + store::TrustScopeStore
-        + store::ExecutionClaimStore
-        + RunObservationStore<Error = <S as RunEventStore>::Error>
-        + store::RetainedArtifactReadProvider
-        + Clone
-        + Send
-        + Sync
-        + 'static,
+    S: RunObservationCommandStore,
 {
     let Query(query) = query.map_err(|_| {
         ApiError::new(
@@ -503,14 +514,7 @@ async fn runs_start<S>(
     body: Result<Json<RunStartBody>, JsonRejection>,
 ) -> Result<Json<serde_json::Value>, ApiError>
 where
-    S: RunEventStore
-        + store::TrustScopeStore
-        + store::ExecutionClaimStore
-        + store::RetainedArtifactReadProvider
-        + Clone
-        + Send
-        + Sync
-        + 'static,
+    S: RunCommandStore,
 {
     let Json(req) = body?;
     let services = state.services()?;
@@ -532,31 +536,12 @@ where
         trust_scope_id,
         distinct_run_key,
     })?;
-    let run_id = prepared.request.run_id.clone();
-    let public_output_schema_id = prepared
-        .request
-        .certified_spec
-        .envelope()
-        .spec
-        .public_outputs
-        .public_schema_id
-        .clone();
-    let launch = services.launch_run(prepared.request).await?;
-    let (outcome, run) = launch.into_response_parts();
-    let public_output = if run.run_mode == RunModeStatus::Completed {
-        Some(
-            services
-                .public_output(&run_id, &public_output_schema_id)
-                .await?,
-        )
-    } else {
-        None
-    };
+    let report = services.launch_prepared_entry_point_run(prepared).await?;
 
     json_ok(RunStartResponse {
-        outcome,
-        run,
-        public_output,
+        outcome: report.outcome,
+        run: report.run,
+        public_output: report.public_output,
     })
 }
 
@@ -567,14 +552,7 @@ async fn runs_resume<S>(
     body: Bytes,
 ) -> Result<Json<serde_json::Value>, ApiError>
 where
-    S: RunEventStore
-        + store::TrustScopeStore
-        + store::ExecutionClaimStore
-        + store::RetainedArtifactReadProvider
-        + Clone
-        + Send
-        + Sync
-        + 'static,
+    S: RunCommandStore,
 {
     let run_id = parse_run_id(&run_id)?;
     let _req: RunResumeBody = parse_optional_body(body)?;
@@ -590,14 +568,7 @@ async fn runs_manual_resolution<S>(
     body: Result<Json<ManualResolutionBody>, JsonRejection>,
 ) -> Result<Json<serde_json::Value>, ApiError>
 where
-    S: RunEventStore
-        + store::TrustScopeStore
-        + store::ExecutionClaimStore
-        + store::RetainedArtifactReadProvider
-        + Clone
-        + Send
-        + Sync
-        + 'static,
+    S: RunCommandStore,
 {
     let run_id = parse_run_id(&run_id)?;
     let Json(req) = body?;
@@ -629,14 +600,7 @@ async fn runs_status<S>(
     Path(run_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError>
 where
-    S: RunEventStore
-        + store::TrustScopeStore
-        + store::ExecutionClaimStore
-        + store::RetainedArtifactReadProvider
-        + Clone
-        + Send
-        + Sync
-        + 'static,
+    S: RunCommandStore,
 {
     let run_id = parse_run_id(&run_id)?;
     let data = state.services()?.run_status(&run_id).await?;
@@ -655,14 +619,7 @@ async fn runs_stream<S>(
     query: Result<Query<RunStreamQuery>, QueryRejection>,
 ) -> Result<Json<serde_json::Value>, ApiError>
 where
-    S: RunEventStore
-        + store::TrustScopeStore
-        + store::ExecutionClaimStore
-        + store::RetainedArtifactReadProvider
-        + Clone
-        + Send
-        + Sync
-        + 'static,
+    S: RunCommandStore,
 {
     let Query(query) = query.map_err(|_| {
         ApiError::new(
@@ -700,14 +657,7 @@ async fn runs_replay<S>(
     Path(run_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError>
 where
-    S: RunEventStore
-        + store::TrustScopeStore
-        + store::ExecutionClaimStore
-        + store::RetainedArtifactReadProvider
-        + Clone
-        + Send
-        + Sync
-        + 'static,
+    S: RunCommandStore,
 {
     let run_id = parse_run_id(&run_id)?;
     let data = state.services()?.verify_replay_for_run(&run_id).await?;
@@ -725,14 +675,7 @@ async fn runs_public_output<S>(
     Path((run_id, schema_id)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, ApiError>
 where
-    S: RunEventStore
-        + store::TrustScopeStore
-        + store::ExecutionClaimStore
-        + store::RetainedArtifactReadProvider
-        + Clone
-        + Send
-        + Sync
-        + 'static,
+    S: RunCommandStore,
 {
     let run_id = parse_run_id(&run_id)?;
     let schema_id = parse_schema_id(&schema_id)?;

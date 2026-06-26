@@ -7,7 +7,7 @@ use crate::support::run_store::{connect_run_services, RunStoresArgs};
 use clap::{Args, ValueEnum};
 use mfm_app::{
     DistinctRunKey, EntryPointRunLaunchInput, PublicOpName, PublicOutputResponse,
-    RunLaunchOutcomeStatus, RunModeStatus, RunResponse,
+    RunLaunchOutcomeStatus, RunResponse,
 };
 use mfm_authored_config::{AuthoredConfig, AuthoredConfigFormat};
 use serde::Serialize;
@@ -114,30 +114,11 @@ async fn execute_internal(args: &StartArgs) -> CommandResult<StartOutput> {
         trust_scope_id,
         distinct_run_key,
     })?;
-    let run_id = prepared.request.run_id.clone();
-    let public_output_schema_id = prepared
-        .request
-        .certified_spec
-        .envelope()
-        .spec
-        .public_outputs
-        .public_schema_id
-        .clone();
-    let launch = services.launch_run(prepared.request).await?;
-    let (outcome, run) = launch.into_response_parts();
-    let public_output = if run.run_mode == RunModeStatus::Completed {
-        Some(
-            services
-                .public_output(&run_id, &public_output_schema_id)
-                .await?,
-        )
-    } else {
-        None
-    };
+    let report = services.launch_prepared_entry_point_run(prepared).await?;
     Ok(CommandOutput::new(StartOutput {
-        outcome,
-        run,
-        public_output,
+        outcome: report.outcome,
+        run: report.run,
+        public_output: report.public_output,
     }))
 }
 

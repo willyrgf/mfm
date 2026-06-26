@@ -723,30 +723,13 @@ fn validate_side_effect_verify_output_cell(
     submit_descriptor: &spec::StateDescriptorIdentity,
     cells: &BTreeMap<String, spec::CellSpec>,
 ) -> Result<()> {
-    let output = cells.get(verify_node.output_cell.as_str()).ok_or_else(|| {
-        problem(
-            ProblemClass::InvalidTopology,
-            format!(
-                "side-effect verify node {} missing output cell",
-                verify_node.node_id
-            ),
-        )
-    })?;
-    if output.schema_id != submit_descriptor.output_schema_id
-        || output.semantic_type_id != submit_descriptor.output_semantic_type_id
-        || output.terminal_policy != spec::CellTerminalPolicy::ProducedOnly
-        || output.storage_policy != spec::StoragePolicy::ContentAddressed
-        || output.redaction_policy != spec::RedactionPolicy::Public
-    {
-        return Err(problem(
-            ProblemClass::InvalidTerminalShape,
-            format!(
-                "side-effect verify node {} output cell contract mismatch",
-                verify_node.node_id
-            ),
-        ));
-    }
-    Ok(())
+    validate_framework_output_cell(
+        verify_node,
+        cells,
+        &submit_descriptor.output_schema_id,
+        &submit_descriptor.output_semantic_type_id,
+        spec::StoragePolicy::ContentAddressed,
+    )
 }
 
 fn validate_submit_output_consumers(
