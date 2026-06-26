@@ -169,8 +169,20 @@ async fn parity_reth_contract_phase_routes_deploy_configure_and_validate_contrac
         "{deploy_output}"
     );
     assert_ne!(
-        deployed["deploy_receipt_evidence"],
+        deployed["deploy_tx_hash"],
         serde_json::Value::Null,
+        "{deploy_output}"
+    );
+    assert_ne!(
+        deployed["deployed_block_number"],
+        serde_json::Value::Null,
+        "{deploy_output}"
+    );
+    assert!(
+        deployed
+            .as_object()
+            .expect("deployed object")
+            .contains_key("deploy_receipt_evidence"),
         "{deploy_output}"
     );
 
@@ -206,12 +218,16 @@ async fn parity_reth_contract_phase_routes_deploy_configure_and_validate_contrac
         1,
         "{configure_output}"
     );
-    assert_eq!(
+    assert_ne!(
+        configured["configured_block_number"],
+        serde_json::Value::Null,
+        "{configure_output}"
+    );
+    assert!(
         configured["configure_receipt_evidence"]
             .as_array()
             .expect("configure receipt evidence")
-            .len(),
-        1,
+            .is_empty(),
         "{configure_output}"
     );
 

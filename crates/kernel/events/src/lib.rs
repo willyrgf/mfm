@@ -416,12 +416,23 @@ pub mod v1 {
         }
 
         /// Parses a persisted lowercase role tag.
-        pub fn from_str(value: &str) -> Option<Self> {
+        pub fn parse(value: &str) -> Option<Self> {
             match value {
                 "submit" => Some(Self::Submit),
                 "verify" => Some(Self::Verify),
                 _ => None,
             }
+        }
+    }
+
+    impl std::str::FromStr for SideEffectPairRole {
+        type Err = EventError;
+
+        fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+            Self::parse(value).ok_or_else(|| EventError::InvalidString {
+                field: "side_effect_pair_role",
+                value: value.to_owned(),
+            })
         }
     }
 
@@ -445,6 +456,10 @@ pub mod v1 {
     }
 
     /// Closed v1 typed kernel event payload enum.
+    ///
+    /// Payloads stay unboxed here to preserve the stable event API and keep schema-bearing
+    /// authority payloads directly inspectable at commit/replay boundaries.
+    #[allow(clippy::large_enum_variant)]
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum KernelEventPayload {
         /// Run start event.

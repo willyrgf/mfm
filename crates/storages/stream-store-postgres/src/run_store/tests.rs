@@ -1443,6 +1443,8 @@ async fn append_resource_lane_release(
                     attempt_id: lane.attempt_id.clone(),
                     ledger_key: side_effect_ledger_key(),
                     ledger_purpose: lane.ledger_purpose.clone(),
+                    pair_id: lane.pair_id.clone(),
+                    pair_role: events::SideEffectPairRole::Verify,
                     invocation_epoch: lane.invocation_epoch,
                     claim_id: lane.claim_id.clone(),
                     release_reason: events::ResourceLaneReleaseReason::new("mfm.test.release")
@@ -3361,7 +3363,7 @@ async fn side_effect_unknown_recovery_updates_submission_result_slot() {
     };
     let submission_result_key = format!(
         "sidefx:forward:{}:invocation:1:submission_result",
-        side_effect_ledger_key()
+        side_effect_pair_id()
     );
     assert_eq!(
         unknown.events()[0].logical_key().as_str(),
