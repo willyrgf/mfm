@@ -62,10 +62,8 @@ pub(super) fn resource_lane_for_release(
         .into());
     }
     if active.claim_id != intent.claim_id
-        || active.node_id != intent.node_id
-        || active.attempt_id != intent.attempt_id
-        || active.ledger_purpose != intent.ledger_purpose
         || active.pair_id != intent.pair_id
+        || active.ledger_purpose != intent.ledger_purpose
         || active.invocation_epoch != intent.invocation_epoch
     {
         return Err(StoreError::ProjectionConflict {

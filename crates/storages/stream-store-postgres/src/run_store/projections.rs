@@ -194,8 +194,7 @@ pub(super) fn fold_resource_lane_state(
                 })?;
                 if active_projection.claim_id != payload.claim_id
                     || active_projection.claim_fencing_token != payload.claim_fencing_token
-                    || active_projection.node_id != payload.node_id
-                    || active_projection.attempt_id != payload.attempt_id
+                    || active_projection.pair_id != payload.pair_id
                     || active_projection.ledger_purpose != payload.ledger_purpose
                     || active_projection.invocation_epoch != payload.invocation_epoch
                 {
@@ -220,6 +219,10 @@ pub(super) fn projection_snapshot_with_resource_lanes(
         run_states: snapshot
             .run_states()
             .map(|(run_id, state)| (run_id.clone(), *state))
+            .collect(),
+        run_spec_hashes: snapshot
+            .run_spec_hashes()
+            .map(|(run_id, spec_hash)| (run_id.clone(), spec_hash.clone()))
             .collect(),
         saga_policy_digests: snapshot
             .saga_policy_digests()

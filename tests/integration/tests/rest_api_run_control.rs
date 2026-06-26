@@ -2,16 +2,15 @@
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use mfm_authored_config::{AuthoredConfig, AuthoredConfigFormat};
 use mfm_events::v1 as events;
 use mfm_ids::{AttemptId, DigestAlgorithm, DigestBytes, RunId, SpecHash};
 use mfm_integration_tests::test_support;
-use mfm_portfolio_config::{
-    canonicalize_portfolio_snapshot_authored_config, PortfolioSnapshotAuthoredConfig,
-};
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
-use mfm_store::v1::RunEventStore;
+use mfm_store::v1::{RunEventStore, TrustScopeStore};
 use serde_json::Value;
+use std::sync::Arc;
 use tower::ServiceExt;
 
 const VALID_RUN_ID: &str =
@@ -150,7 +149,6 @@ async fn start_accepts_entry_point_toml_shape_with_default_format() {
             serde_json::json!({
                 "op": "missing_contract_test_op",
                 "config": "portfolio_id = \"main\"\n",
-                "drive": "append_only"
             }),
         ))
         .await
@@ -174,7 +172,6 @@ async fn start_accepts_entry_point_toml_shape_with_explicit_version() {
                 "op_version": 1,
                 "config_format": "toml",
                 "config": "portfolio_id = \"main\"\n",
-                "drive": "append_only"
             }),
         ))
         .await
@@ -200,7 +197,6 @@ async fn start_accepts_entry_point_json_object_config_shape() {
                     "portfolio_id": "main",
                     "wallets": []
                 },
-                "drive": "append_only"
             }),
         ))
         .await
@@ -227,7 +223,6 @@ async fn start_rejects_raw_run_id_field_as_unknown_json() {
                     "wallets": []
                 },
                 "run_id": VALID_RUN_ID,
-                "drive": "append_only"
             }),
         ))
         .await
@@ -244,29 +239,10 @@ async fn start_distinct_run_key_derives_separate_run_without_persisting_raw_key(
     let state = in_memory_state();
     let app = mfm_rest_api::make_app(state.clone());
     let raw_key = "distinct-alpha";
-
-    let first = app
-        .clone()
-        .oneshot(json_post(
-            "/v1/runs/start",
-            serde_json::json!({
-                "op": "portfolio_snapshot",
-                "config_format": "json",
-                "config": portfolio_snapshot_config(),
-                "drive": "append_only"
-            }),
-        ))
+    let first_run_id = prepare_portfolio_launch(&state, &portfolio_snapshot_config(), None)
         .await
-        .expect("first start response");
-    assert_eq!(first.status(), StatusCode::OK);
-    let first_body = response_json(first).await;
-    assert_eq!(first_body["data"]["outcome"], "admitted");
-    let first_run_id = RunId::parse(
-        first_body["data"]["run"]["run_id"]
-            .as_str()
-            .expect("first run id"),
-    )
-    .expect("typed first run id");
+        .request
+        .run_id;
 
     let distinct = app
         .oneshot(json_post(
@@ -276,7 +252,6 @@ async fn start_distinct_run_key_derives_separate_run_without_persisting_raw_key(
                 "config_format": "json",
                 "config": portfolio_snapshot_config(),
                 "distinct_run_key": raw_key,
-                "drive": "append_only"
             }),
         ))
         .await
@@ -310,11 +285,14 @@ async fn start_distinct_run_key_derives_separate_run_without_persisting_raw_key(
 }
 
 #[tokio::test]
-async fn evm_contract_start_accepts_all_entry_point_ops_append_only() {
+async fn evm_contract_start_requires_capability_before_admission_for_all_entry_point_ops() {
     let state = in_memory_state();
     let app = mfm_rest_api::make_app(state.clone());
 
     for (op, config) in evm_entry_point_configs() {
+        let prepared = prepare_entry_point_launch(&state, op, &config).await;
+        assert_evm_entry_point_evidence(&prepared.evidence, op);
+        let run_id = prepared.request.run_id.clone();
         let resp = app
             .clone()
             .oneshot(json_post(
@@ -324,29 +302,25 @@ async fn evm_contract_start_accepts_all_entry_point_ops_append_only() {
                     "op_version": 1,
                     "config_format": "json",
                     "config": config,
-                    "drive": "append_only"
                 }),
             ))
             .await
             .expect("EVM entry-point start response");
         let status = resp.status();
         let body = response_json(resp).await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-        assert_eq!(body["status"], "success");
-        assert_eq!(body["data"]["run"]["run_mode"], "forward", "{body}");
-        let run_id = RunId::parse(
-            body["data"]["run"]["run_id"]
-                .as_str()
-                .expect("response run id"),
-        )
-        .expect("typed run id");
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["status"], "error");
+        assert_eq!(body["error"]["code"], "LaunchRunnerUnavailable");
 
         let stream = state
             .store
             .load_run_stream(&run_id)
             .await
             .expect("run stream");
-        assert_evm_entry_point_evidence(&stream, op);
+        assert!(
+            stream.is_empty(),
+            "{op} must fail capability ingress before RunAdmitted"
+        );
     }
 }
 
@@ -357,32 +331,8 @@ async fn portfolio_status_route_reports_interrupted_attempt_and_framework_attemp
     let _env_restore = set_rpc_env(rpc_url);
     let state = in_memory_state();
     let config = portfolio_snapshot_config();
-    let certified = portfolio_status_spec_for_config(&config);
     let app = mfm_rest_api::make_app(state.clone());
-
-    let start = app
-        .clone()
-        .oneshot(json_post(
-            "/v1/runs/start",
-            serde_json::json!({
-                "op": "portfolio_snapshot",
-                "config_format": "json",
-                "config": config,
-                "drive": "append_only"
-            }),
-        ))
-        .await
-        .expect("start response");
-    assert_eq!(start.status(), StatusCode::OK);
-    let start_body = response_json(start).await;
-    assert_eq!(start_body["status"], "success");
-    assert_eq!(start_body["data"]["run"]["run_mode"], "forward");
-    let run_id = RunId::parse(
-        start_body["data"]["run"]["run_id"]
-            .as_str()
-            .expect("response run id"),
-    )
-    .expect("typed run id");
+    let (run_id, certified) = admit_portfolio_run_without_driving(&state, &config).await;
 
     let interrupted_node = certified
         .envelope()
@@ -768,14 +718,7 @@ fn evm_validate_entry_config_json() -> serde_json::Value {
     })
 }
 
-fn assert_evm_entry_point_evidence(stream: &[store::KernelEventEnvelope], op_name: &str) {
-    let evidence = stream
-        .iter()
-        .find_map(|event| match event.payload() {
-            events::KernelEventPayload::RunAdmitted(payload) => Some(&payload.entry_point),
-            _ => None,
-        })
-        .expect("RunAdmitted entry-point evidence");
+fn assert_evm_entry_point_evidence(evidence: &mfm_app::EntryPointLaunchEvidence, op_name: &str) {
     let registry = mfm_app::production_entry_point_op_registry().expect("entry-point registry");
     let public_name = mfm_app::PublicOpName::new(op_name).expect("public op name");
     let op = registry
@@ -785,7 +728,7 @@ fn assert_evm_entry_point_evidence(stream: &[store::KernelEventEnvelope], op_nam
         )
         .expect("EVM entry-point op");
 
-    assert_eq!(evidence.resolved_op_id.as_str(), op.op_id().to_string());
+    assert_eq!(evidence.resolved_op_id, op.op_id());
     assert_eq!(
         evidence.entry_point_registry_digest,
         registry.registry_digest().expect("registry digest")
@@ -873,14 +816,101 @@ impl Drop for EnvVarRestore {
     }
 }
 
-fn portfolio_status_spec_for_config(config: &serde_json::Value) -> mfm_certify::CertifiedTypedSpec {
-    let authored: PortfolioSnapshotAuthoredConfig =
-        serde_json::from_value(config.clone()).expect("portfolio authored config");
-    let canonical = canonicalize_portfolio_snapshot_authored_config(authored)
-        .expect("portfolio canonical config");
-    let draft = mfm_op_portfolio_tracker::portfolio_program_draft(canonical.into())
-        .expect("portfolio draft");
-    mfm_certify::certify_program_draft(&draft).expect("certified portfolio spec")
+async fn prepare_portfolio_launch(
+    state: &test_support::InMemoryRestAppState,
+    config: &serde_json::Value,
+    distinct_run_key: Option<&str>,
+) -> mfm_app::PreparedEntryPointRunLaunch {
+    prepare_entry_point_launch_with_options(
+        state,
+        "portfolio_snapshot",
+        None,
+        config,
+        distinct_run_key,
+    )
+    .await
+}
+
+async fn prepare_entry_point_launch(
+    state: &test_support::InMemoryRestAppState,
+    op_name: &str,
+    config: &serde_json::Value,
+) -> mfm_app::PreparedEntryPointRunLaunch {
+    prepare_entry_point_launch_with_options(
+        state,
+        op_name,
+        Some(mfm_app::OpVersion::new(1).expect("op version")),
+        config,
+        None,
+    )
+    .await
+}
+
+async fn prepare_entry_point_launch_with_options(
+    state: &test_support::InMemoryRestAppState,
+    op_name: &str,
+    op_version: Option<mfm_app::OpVersion>,
+    config: &serde_json::Value,
+    distinct_run_key: Option<&str>,
+) -> mfm_app::PreparedEntryPointRunLaunch {
+    let entry_point_registry = mfm_app::production_entry_point_op_registry().expect("entrypoints");
+    let certification_registry = mfm_app::production_certification_registry().expect("cert");
+    let trust_scope_id = state
+        .store
+        .load_trust_scope_id()
+        .await
+        .expect("trust scope");
+    let authored_config = AuthoredConfig::new(
+        AuthoredConfigFormat::Json,
+        serde_json::to_vec(config).expect("portfolio config json"),
+    )
+    .expect("authored config");
+    mfm_app::prepare_entry_point_run_launch(mfm_app::EntryPointRunLaunchInput {
+        entry_point_registry: &entry_point_registry,
+        public_op_name: mfm_app::PublicOpName::new(op_name).expect("op name"),
+        op_version,
+        authored_config,
+        certification_registry: &certification_registry,
+        trust_scope_id,
+        distinct_run_key: distinct_run_key
+            .map(mfm_app::DistinctRunKey::new)
+            .transpose()
+            .expect("distinct run key"),
+    })
+    .expect("prepared portfolio launch")
+}
+
+async fn admit_portfolio_run_without_driving(
+    state: &test_support::InMemoryRestAppState,
+    config: &serde_json::Value,
+) -> (RunId, mfm_certify::CertifiedTypedSpec) {
+    let prepared = prepare_portfolio_launch(state, config, None).await;
+    let run_id = prepared.request.run_id.clone();
+    let certified = prepared.request.certified_spec.clone();
+    let runners = mfm_app::production_runner_registry(
+        mfm_app::artifact_read_provider_from_retained(state.store.clone()),
+    )
+    .expect("production runners");
+    let scheduler = mfm_runtime::SerialTypedScheduler::new(runners, Arc::new(state.store.clone()));
+    let runtime_spec = mfm_runtime::CertifiedRuntimeSpec::new(prepared.request.certified_spec)
+        .expect("runtime spec");
+    let launch = scheduler
+        .prepare_run_launch(
+            &runtime_spec,
+            prepared.request.identity_material,
+            prepared.request.evidence,
+            state
+                .store
+                .expected_next_seq(&run_id)
+                .await
+                .expect("expected next seq"),
+        )
+        .expect("prepared launch");
+    scheduler
+        .start_run(&state.store, launch)
+        .await
+        .expect("start fixture run");
+    (run_id, certified)
 }
 
 async fn append_interrupted_attempt(
