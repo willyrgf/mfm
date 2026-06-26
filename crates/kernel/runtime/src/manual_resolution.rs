@@ -37,7 +37,9 @@ pub(crate) fn build_manual_resolution_prefix_authority_from_parts(
     projection
         .require_no_open_semantic_attempts_for_run(run_id)
         .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
-    let saga = projection.derive_saga_projection(run_id, &runtime_spec.spec().saga);
+    let terminal_policies = store::SideEffectTerminalPolicies::from_spec(runtime_spec.spec())?;
+    let saga =
+        projection.derive_saga_projection(run_id, &runtime_spec.spec().saga, &terminal_policies)?;
     let reason = saga.manual_block_reason.ok_or_else(|| {
         RuntimeError::InvalidRunStream(
             "manual resolution prefix is not manually blocked".to_owned(),
@@ -203,10 +205,9 @@ pub(crate) fn prepare_manual_resolution_commit(
         vec![evidence_ref.clone(), authorization_ref.clone()],
         store::CommitPreconditions {
             required_run_state: store::RequiredRunState::NotCompleted,
-            saga_admit_token: Some(store::SagaAdmitToken::new(
+            saga_admit_token: Some(store::SagaAdmitToken::from_spec(
                 claim.run_id.clone(),
-                claim.spec_hash.clone(),
-                runtime_spec.spec().saga.clone(),
+                runtime_spec.spec(),
             )?),
             ..store::CommitPreconditions::default()
         },

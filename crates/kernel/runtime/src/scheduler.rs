@@ -98,6 +98,7 @@ impl SerialTypedScheduler {
         expected_next_seq: store::StreamSeq,
     ) -> Result<PreparedRunLaunch> {
         let bound_context = self.run_contexts.load_bound_context(runtime_spec)?;
+        bound_context.validate_launch_ingress(runtime_spec, &evidence)?;
         RunAdmissionLifecycle::prepare_run_launch(
             runtime_spec,
             identity_material,
@@ -194,7 +195,12 @@ impl SerialTypedScheduler {
         )?;
         let verified =
             verify_manual_resolution_for_prefix(prefix, outcome, &evidence_artifact, proof_bytes)?;
-        let saga = projection.derive_saga_projection(run_id, &runtime_spec.spec().saga);
+        let terminal_policies = store::SideEffectTerminalPolicies::from_spec(runtime_spec.spec())?;
+        let saga = projection.derive_saga_projection(
+            run_id,
+            &runtime_spec.spec().saga,
+            &terminal_policies,
+        )?;
         let (commit, artifacts_to_stage) = prepare_manual_resolution_commit(
             runtime_spec,
             &stream,
@@ -212,14 +218,19 @@ impl SerialTypedScheduler {
     }
 
     /// Runs one deterministic runnable node against an async durable typed store, if any.
-    pub async fn drive_once<S: store::RunEventStore + ?Sized>(
+    pub async fn drive_once<S>(
         &self,
         store: &S,
         runtime_spec: &CertifiedRuntimeSpec,
         run_id: &RunId,
-    ) -> Result<SchedulerStatus> {
+        execution_claim_token: store::AdmissionToken,
+    ) -> Result<SchedulerStatus>
+    where
+        S: store::RunEventStore + store::ExecutionClaimStore + ?Sized,
+    {
         let mut blocked_lanes = BTreeSet::new();
         loop {
+            require_live_execution_claim(store, run_id, &execution_claim_token).await?;
             match self
                 .drive_once_with_blocked_lanes(store, runtime_spec, run_id, &blocked_lanes)
                 .await?
@@ -245,15 +256,20 @@ impl SerialTypedScheduler {
     }
 
     /// Runs deterministic runnable nodes against an async durable typed store until blocked.
-    pub async fn drive_until_blocked<S: store::RunEventStore + ?Sized>(
+    pub async fn drive_until_blocked<S>(
         &self,
         store: &S,
         runtime_spec: &CertifiedRuntimeSpec,
         run_id: &RunId,
-    ) -> Result<SchedulerStatus> {
+        execution_claim_token: store::AdmissionToken,
+    ) -> Result<SchedulerStatus>
+    where
+        S: store::RunEventStore + store::ExecutionClaimStore + ?Sized,
+    {
         let mut advanced = false;
         let mut blocked_lanes = BTreeSet::new();
         loop {
+            require_live_execution_claim(store, run_id, &execution_claim_token).await?;
             match self
                 .drive_once_with_blocked_lanes(store, runtime_spec, run_id, &blocked_lanes)
                 .await?
@@ -359,6 +375,35 @@ impl SerialTypedScheduler {
         AttemptLifecycle::new()
             .run(store, runtime_spec, run_id, view, bound_context, attempt)
             .await
+    }
+}
+
+async fn require_live_execution_claim<S>(
+    store: &S,
+    run_id: &RunId,
+    token: &store::AdmissionToken,
+) -> Result<()>
+where
+    S: store::ExecutionClaimStore + ?Sized,
+{
+    match store
+        .execution_claim_status(run_id)
+        .await
+        .map_err(async_store_error)?
+    {
+        store::ExecutionClaimStatus::Live(lease) if &lease.token == token => Ok(()),
+        store::ExecutionClaimStatus::Live(_) => Err(RuntimeError::ExecutionClaim(
+            "execution claim is held by a different token".to_owned(),
+        )),
+        store::ExecutionClaimStatus::Expired(lease) if &lease.token == token => Err(
+            RuntimeError::ExecutionClaim("execution claim is expired".to_owned()),
+        ),
+        store::ExecutionClaimStatus::Expired(_) => Err(RuntimeError::ExecutionClaim(
+            "execution claim is expired under a different token".to_owned(),
+        )),
+        store::ExecutionClaimStatus::Unclaimed => Err(RuntimeError::ExecutionClaim(
+            "execution claim is unclaimed".to_owned(),
+        )),
     }
 }
 

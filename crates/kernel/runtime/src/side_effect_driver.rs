@@ -1075,21 +1075,22 @@ fn linked_forward_pair_for_remediation(
     else {
         return Ok(None);
     };
-    Ok(ctx
-        .projections()
-        .side_effects()
-        .find_map(|(_, projection)| {
-            (projection.intent.node_id == *forward_node_id
-                && matches!(
-                    &projection.ledger_purpose,
-                    events::SideEffectLedgerPurpose::Forward
-                )
-                && matches!(
-                    projection.phase,
-                    store::SideEffectPhase::ConfirmationObserved { .. }
-                ))
-            .then(|| projection.pair_id.clone())
-        }))
+    let terminal_policies =
+        store::SideEffectTerminalPolicies::from_spec(ctx.runtime_spec().spec())?;
+    for (_, projection) in ctx.projections().side_effects() {
+        if projection.intent.node_id == *forward_node_id
+            && matches!(
+                &projection.ledger_purpose,
+                events::SideEffectLedgerPurpose::Forward
+            )
+            && terminal_policies
+                .require(&projection.pair_id)?
+                .is_terminal_phase(&projection.phase)
+        {
+            return Ok(Some(projection.pair_id.clone()));
+        }
+    }
+    Ok(None)
 }
 
 fn pre_invocation_linked_forward_pair_for_remediation(
@@ -1101,21 +1102,22 @@ fn pre_invocation_linked_forward_pair_for_remediation(
     else {
         return Ok(None);
     };
-    Ok(ctx
-        .projections()
-        .side_effects()
-        .find_map(|(_, projection)| {
-            (projection.intent.node_id == *forward_node_id
-                && matches!(
-                    &projection.ledger_purpose,
-                    events::SideEffectLedgerPurpose::Forward
-                )
-                && matches!(
-                    projection.phase,
-                    store::SideEffectPhase::ConfirmationObserved { .. }
-                ))
-            .then(|| projection.pair_id.clone())
-        }))
+    let terminal_policies =
+        store::SideEffectTerminalPolicies::from_spec(ctx.runtime_spec().spec())?;
+    for (_, projection) in ctx.projections().side_effects() {
+        if projection.intent.node_id == *forward_node_id
+            && matches!(
+                &projection.ledger_purpose,
+                events::SideEffectLedgerPurpose::Forward
+            )
+            && terminal_policies
+                .require(&projection.pair_id)?
+                .is_terminal_phase(&projection.phase)
+        {
+            return Ok(Some(projection.pair_id.clone()));
+        }
+    }
+    Ok(None)
 }
 
 fn runtime_side_effect_pair_id(

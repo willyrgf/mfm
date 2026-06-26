@@ -69,6 +69,34 @@ fn content_digest(value: serde_json::Value) -> Result<ContentDigest> {
     Ok(canonical_json(value)?.content_digest())
 }
 
+/// Returns the schema id for canonical persisted v1 typed execution specs.
+pub fn typed_execution_spec_schema_id() -> Result<SchemaId> {
+    let digest = content_digest(serde_json::json!({
+        "fields": [
+            "spec_version",
+            "lowering_version",
+            "config_refs",
+            "descriptor_identities",
+            "nodes",
+            "cells",
+            "seeds",
+            "edges",
+            "outputs",
+            "public_outputs",
+            "saga_policy",
+        ],
+        "media_type": v1::MEDIA_TYPE,
+        "name": "mfm.typed.execution_spec",
+        "version": "1",
+    }))?;
+    Ok(SchemaId::new(
+        "mfm.typed.execution_spec",
+        "1",
+        DigestAlgorithm::Sha256JcsV1,
+        *digest.digest(),
+    )?)
+}
+
 /// Returns the framework-owned schema id for public-output render receipts.
 pub fn public_output_receipt_schema_id() -> Result<SchemaId> {
     let digest = content_digest(serde_json::json!({
@@ -356,6 +384,11 @@ pub mod v1 {
     pub const MEDIA_TYPE: &str = "application/vnd.mfm.typed-execution-spec+json;version=1";
     /// v1 lowering-version string.
     pub const LOWERING_VERSION: &str = "mfm.typed.lowering.v1";
+
+    /// Returns the schema id for canonical persisted v1 typed execution specs.
+    pub fn typed_execution_spec_schema_id() -> Result<SchemaId> {
+        super::typed_execution_spec_schema_id()
+    }
 
     /// Returns the v1 framework-owned schema id for public-output render receipts.
     pub fn public_output_receipt_schema_id() -> Result<SchemaId> {

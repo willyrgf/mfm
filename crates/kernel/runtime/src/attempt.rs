@@ -370,6 +370,11 @@ impl<'a> AttemptLifecycle<'a> {
             .await
         {
             Ok(output) => output,
+            Err(RuntimeError::Blocked(_)) => {
+                return Ok(AttemptRunStatus::OperationalBlock {
+                    node_id: started_attempt.phase.node.node_id.clone(),
+                });
+            }
             Err(error) => {
                 return terminalize_observed_failure(store, failure_context, error).await;
             }

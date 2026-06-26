@@ -114,6 +114,9 @@ fn apply_run_admitted(
         .run_states
         .insert(payload.run_id.clone(), RunState::Started);
     projections
+        .run_spec_hashes
+        .insert(payload.run_id.clone(), payload.spec_hash.clone());
+    projections
         .saga_policy_digests
         .insert(payload.run_id.clone(), payload.saga_policy_digest.clone());
     let retention = projections
@@ -164,7 +167,6 @@ fn apply_run_completed(
             message: "run must be started and not completed".to_owned(),
         });
     }
-    require_forward_quiescence(projections, &payload.run_id)?;
     require_no_resource_lanes_for_run(projections, &payload.run_id, "run completion")?;
     projections
         .run_states
@@ -319,12 +321,6 @@ fn apply_side_effect_intent_persisted(
         &payload.ledger_purpose,
         &payload.pair_id,
         payload.pair_role,
-    )?;
-    require_remediation_intent_admissible(
-        projections,
-        envelope.run_id(),
-        &payload.ledger_key,
-        &payload.ledger_purpose,
     )?;
     require_active_attempt_for_side_effect(
         projections,
@@ -1015,7 +1011,6 @@ fn apply_manual_resolution_recorded(
         });
     }
     projections.require_no_open_semantic_attempts_for_run(&payload.run_id)?;
-    require_forward_quiescence(projections, &payload.run_id)?;
     require_no_resource_lanes_for_run(projections, &payload.run_id, "manual resolution")?;
     projections.manual_resolutions.insert(
         payload.run_id.clone(),

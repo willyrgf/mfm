@@ -112,8 +112,7 @@ Request shape:
   "config": {
     "...": "entry-point config"
   },
-  "distinct_run_key": "optional-key",
-  "drive": "until_blocked"
+  "distinct_run_key": "optional-key"
 }
 ```
 
@@ -130,15 +129,14 @@ Request notes:
   certified work. The raw key is not persisted; only a domain-separated digest enters run identity
   material.
 - `run_id` is not a normal start field.
-- `drive` is `until_blocked`, `append_only`, or `once`; it defaults to `until_blocked`.
 
 The response is `{"outcome": "...", "run": ..., "public_output": ...}` inside the standard success
 envelope. Fresh admissions report `admitted`. Duplicate starts for the same certified run identity
 report `attached` without driving; if another process holds a live execution claim they report
 `already_driving`; if this process cannot match admitted runner executable evidence they report
 `incompatible_executable`.
-`public_output` is present when the run completes during the selected drive mode and the op exposes
-a public output schema id.
+`public_output` is present when the run completes while driving and the op exposes a public output
+schema id.
 
 Portfolio snapshot:
 
@@ -161,8 +159,7 @@ EVM contract deploy:
   "config_format": "json",
   "config": {
     "...": "DeployPhaseConfig JSON"
-  },
-  "drive": "until_blocked"
+  }
 }
 ```
 
@@ -179,8 +176,7 @@ EVM contract configure:
     "deployed": {
       "...": "DeployedContract JSON"
     }
-  },
-  "drive": "until_blocked"
+  }
 }
 ```
 
@@ -197,8 +193,7 @@ EVM contract validate:
     "configured": {
       "...": "ConfiguredContract JSON"
     }
-  },
-  "drive": "until_blocked"
+  }
 }
 ```
 
@@ -210,8 +205,7 @@ EVM contract lifecycle:
   "config_format": "json",
   "config": {
     "...": "ContractLifecycleConfig JSON"
-  },
-  "drive": "until_blocked"
+  }
 }
 ```
 
@@ -241,9 +235,7 @@ Stable launch error codes:
 Resume:
 
 ```bash
-curl -s -X POST "http://127.0.0.1:3001/v1/runs/$RUN_ID/resume" \
-  -H "content-type: application/json" \
-  -d '{"drive":"once"}'
+curl -s -X POST "http://127.0.0.1:3001/v1/runs/$RUN_ID/resume"
 ```
 
 Manual resume is the v1 recovery trigger for a run left with an open execution claim,
@@ -265,8 +257,7 @@ curl -s -X POST "http://127.0.0.1:3001/v1/runs/$RUN_ID/manual-resolution" \
     },
     "authorization_proof": {
       "...": "canonical manual authorization proof JSON"
-    },
-    "drive": "until_blocked"
+    }
   }'
 ```
 
@@ -283,7 +274,6 @@ Optional fields:
 
 - `evidence_media_type`: defaults to `application/json`.
 - `note`: optional redaction-safe operator note recorded in `ManualResolutionRecorded`.
-- `drive`: `append_only`, `once`, or `until_blocked`; defaults to `until_blocked`.
 
 Replay verification:
 

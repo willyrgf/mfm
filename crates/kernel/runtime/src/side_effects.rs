@@ -82,8 +82,15 @@ pub(crate) fn validate_historical_side_effect_payload(
     }
     let contract = certified_side_effect_contract(runtime_spec, contract_node)
         .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
-    validate_side_effect_ledger_purpose(&contract, projections, run_id, payload)
-        .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
+    let terminal_policies = store::SideEffectTerminalPolicies::from_spec(runtime_spec.spec())?;
+    validate_side_effect_ledger_purpose(
+        &contract,
+        projections,
+        run_id,
+        payload,
+        &terminal_policies,
+    )
+    .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
     validate_side_effect_resource_claim(&contract, payload)
         .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
 
@@ -227,6 +234,7 @@ fn validate_side_effect_ledger_purpose(
     projections: &store::ProjectionSnapshot,
     run_id: &RunId,
     payload: &events::KernelEventPayload,
+    terminal_policies: &store::SideEffectTerminalPolicies,
 ) -> Result<()> {
     let purpose = side_effect_payload_ledger_purpose(payload).ok_or_else(|| {
         RuntimeError::InvalidRunnerOutput("expected side-effect payload".to_owned())
@@ -245,12 +253,14 @@ fn validate_side_effect_ledger_purpose(
             forward_run_id: forward.map(|projection| &projection.run_id),
             forward_node_id: forward.map(|projection| &projection.intent.node_id),
             forward_ledger_purpose: forward.map(|projection| &projection.ledger_purpose),
-            forward_confirmed: forward.is_some_and(|projection| {
-                matches!(
-                    projection.phase,
-                    store::SideEffectPhase::ConfirmationObserved { .. }
-                )
-            }),
+            forward_terminal: forward
+                .map(|projection| {
+                    terminal_policies
+                        .require(forward_pair_id)
+                        .map(|policy| policy.is_terminal_phase(&projection.phase))
+                })
+                .transpose()?
+                .unwrap_or(false),
         })
         .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))
 }
@@ -554,7 +564,14 @@ pub(crate) fn validate_runner_side_effect_payload(
     require_attempt(node, attempt_id, payload_node_id, payload_attempt_id)?;
     let contract = certified_side_effect_contract(runtime_spec, contract_node)
         .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))?;
-    validate_side_effect_ledger_purpose(&contract, projections, run_id, payload)?;
+    let terminal_policies = store::SideEffectTerminalPolicies::from_spec(runtime_spec.spec())?;
+    validate_side_effect_ledger_purpose(
+        &contract,
+        projections,
+        run_id,
+        payload,
+        &terminal_policies,
+    )?;
     validate_side_effect_resource_claim(&contract, payload)?;
     match payload {
         events::KernelEventPayload::SideEffectIntentPersisted(payload) => {

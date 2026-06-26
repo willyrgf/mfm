@@ -3,9 +3,7 @@ use std::path::PathBuf;
 use crate::commands::result::{CommandError, CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
-use crate::support::run_store::{
-    connect_run_services, drive_mode, parse_run_id, DriveArg, RunStoresArgs,
-};
+use crate::support::run_store::{connect_run_services, parse_run_id, RunStoresArgs};
 use clap::{Args, ValueEnum};
 use mfm_app::{ManualResolutionDecision, ManualResolutionRecordRequest, RunResponse};
 use mfm_canonical::PlainCanonicalJsonBytes;
@@ -35,10 +33,6 @@ pub(crate) struct ManualResolutionArgs {
     /// Optional redaction-safe operator note to attach to the resolution event.
     #[arg(long)]
     pub note: Option<String>,
-
-    /// Scheduler drive policy after the manual-resolution event is committed.
-    #[arg(long, value_enum, default_value_t = DriveArg::UntilBlocked)]
-    pub drive: DriveArg,
 
     /// Storage configuration for certified typed run events and artifacts.
     #[command(flatten)]
@@ -87,7 +81,6 @@ async fn execute_internal(args: &ManualResolutionArgs) -> CommandResult<RunRespo
             evidence_media_type: args.evidence_media_type.clone(),
             authorization_proof_bytes: proof_bytes,
             note: args.note.clone(),
-            drive: drive_mode(args.drive),
         })
         .await?;
     Ok(CommandOutput::new(response))

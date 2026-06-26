@@ -1312,8 +1312,6 @@ pub mod v1 {
     /// Schema-field policy required for an artifact role.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub enum ArtifactSchemaPolicy {
-        /// Launch artifacts may carry a certified schema or omit it for current compatibility.
-        OptionalLaunchSchema,
         /// Schema must equal the certified seed schema.
         ExactSeedSchema,
         /// Schema must equal the produced value cell schema.
@@ -1332,7 +1330,6 @@ pub mod v1 {
         /// Returns the stable policy label used by contract goldens.
         pub const fn as_str(self) -> &'static str {
             match self {
-                Self::OptionalLaunchSchema => "optional_launch_schema",
                 Self::ExactSeedSchema => "exact_seed_schema",
                 Self::ExactValueSchema => "exact_value_schema",
                 Self::ExactEvidenceSchema => "exact_evidence_schema",
@@ -1346,8 +1343,6 @@ pub mod v1 {
     /// Semantic-type-field policy required for an artifact role.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub enum ArtifactSemanticPolicy {
-        /// Launch artifacts may carry a certified semantic type or omit it for current compatibility.
-        OptionalLaunchSemantic,
         /// Semantic type must equal the certified seed semantic type.
         ExactSeedSemantic,
         /// Semantic type must equal the produced value cell semantic type.
@@ -1360,7 +1355,6 @@ pub mod v1 {
         /// Returns the stable policy label used by contract goldens.
         pub const fn as_str(self) -> &'static str {
             match self {
-                Self::OptionalLaunchSemantic => "optional_launch_semantic",
                 Self::ExactSeedSemantic => "exact_seed_semantic",
                 Self::ExactValueSemantic => "exact_value_semantic",
                 Self::Absent => "absent",
@@ -1561,8 +1555,8 @@ pub mod v1 {
                 Self::TypedExecutionSpec => ArtifactRoleContract {
                     role: self,
                     tag: "typed_execution_spec",
-                    schema: ArtifactSchemaPolicy::OptionalLaunchSchema,
-                    semantic: ArtifactSemanticPolicy::OptionalLaunchSemantic,
+                    schema: ArtifactSchemaPolicy::ExactEvidenceSchema,
+                    semantic: ArtifactSemanticPolicy::Absent,
                     producer: ArtifactProducerScope::LaunchOrGlobalNoSeed,
                     staging: ArtifactStagingClass::RunAdmission,
                     retention: ArtifactRetentionClass::FrameworkIgnored,
@@ -1571,8 +1565,8 @@ pub mod v1 {
                 Self::TypedSpecCertificate => ArtifactRoleContract {
                     role: self,
                     tag: "typed_spec_certificate",
-                    schema: ArtifactSchemaPolicy::OptionalLaunchSchema,
-                    semantic: ArtifactSemanticPolicy::OptionalLaunchSemantic,
+                    schema: ArtifactSchemaPolicy::ExactEvidenceSchema,
+                    semantic: ArtifactSemanticPolicy::Absent,
                     producer: ArtifactProducerScope::LaunchOrGlobalNoSeed,
                     staging: ArtifactStagingClass::RunAdmission,
                     retention: ArtifactRetentionClass::FrameworkIgnored,
@@ -1581,8 +1575,8 @@ pub mod v1 {
                 Self::TypedConfig => ArtifactRoleContract {
                     role: self,
                     tag: "typed_config",
-                    schema: ArtifactSchemaPolicy::OptionalLaunchSchema,
-                    semantic: ArtifactSemanticPolicy::OptionalLaunchSemantic,
+                    schema: ArtifactSchemaPolicy::ExactEvidenceSchema,
+                    semantic: ArtifactSemanticPolicy::Absent,
                     producer: ArtifactProducerScope::LaunchOrGlobalNoSeed,
                     staging: ArtifactStagingClass::RunAdmission,
                     retention: ArtifactRetentionClass::FrameworkIgnored,
@@ -4614,8 +4608,8 @@ pub mod v1 {
                 ArtifactRoleBaseline {
                     role: ArtifactRole::TypedExecutionSpec,
                     tag: "typed_execution_spec",
-                    schema_policy: "optional_launch_schema",
-                    semantic_policy: "optional_launch_semantic",
+                    schema_policy: "exact_evidence_schema",
+                    semantic_policy: "absent",
                     producer_policy: "launch_or_global_no_seed",
                     staging_class: "run_admission",
                     retention_class: "framework_ignored",
@@ -4624,8 +4618,8 @@ pub mod v1 {
                 ArtifactRoleBaseline {
                     role: ArtifactRole::TypedSpecCertificate,
                     tag: "typed_spec_certificate",
-                    schema_policy: "optional_launch_schema",
-                    semantic_policy: "optional_launch_semantic",
+                    schema_policy: "exact_evidence_schema",
+                    semantic_policy: "absent",
                     producer_policy: "launch_or_global_no_seed",
                     staging_class: "run_admission",
                     retention_class: "framework_ignored",
@@ -4634,8 +4628,8 @@ pub mod v1 {
                 ArtifactRoleBaseline {
                     role: ArtifactRole::TypedConfig,
                     tag: "typed_config",
-                    schema_policy: "optional_launch_schema",
-                    semantic_policy: "optional_launch_semantic",
+                    schema_policy: "exact_evidence_schema",
+                    semantic_policy: "absent",
                     producer_policy: "launch_or_global_no_seed",
                     staging_class: "run_admission",
                     retention_class: "framework_ignored",
@@ -4905,9 +4899,9 @@ pub mod v1 {
 
             assert_eq!(
                 rows,
-                "typed_execution_spec schema=optional_launch_schema semantic=optional_launch_semantic producer=launch_or_global_no_seed staging=run_admission retention=framework_ignored same_commit=run_admitted_artifact\n\
-typed_spec_certificate schema=optional_launch_schema semantic=optional_launch_semantic producer=launch_or_global_no_seed staging=run_admission retention=framework_ignored same_commit=run_admitted_artifact\n\
-typed_config schema=optional_launch_schema semantic=optional_launch_semantic producer=launch_or_global_no_seed staging=run_admission retention=framework_ignored same_commit=run_admitted_artifact\n\
+                "typed_execution_spec schema=exact_evidence_schema semantic=absent producer=launch_or_global_no_seed staging=run_admission retention=framework_ignored same_commit=run_admitted_artifact\n\
+typed_spec_certificate schema=exact_evidence_schema semantic=absent producer=launch_or_global_no_seed staging=run_admission retention=framework_ignored same_commit=run_admitted_artifact\n\
+typed_config schema=exact_evidence_schema semantic=absent producer=launch_or_global_no_seed staging=run_admission retention=framework_ignored same_commit=run_admitted_artifact\n\
 seed_input schema=exact_seed_schema semantic=exact_seed_semantic producer=seed_required staging=run_admission retention=framework_ignored same_commit=run_admitted_seed_cell\n\
 state_output schema=exact_value_schema semantic=exact_value_semantic producer=node_required staging=attempt_state_output retention=value_artifacts same_commit=payload_required_artifact\n\
 fact_response schema=exact_evidence_schema semantic=absent producer=node_required staging=attempt_fact_response retention=value_artifacts same_commit=payload_required_artifact\n\

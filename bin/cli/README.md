@@ -291,7 +291,6 @@ mfm_cli run start --op <NAME> --config <PATH> [OPTIONS]
   key is not persisted; only a domain-separated digest enters run identity material.
 - `--framework-version <VALUE>`: Framework version evidence recorded in `RunAdmitted`.
 - `--source-revision <VALUE>`: Source revision evidence recorded in `RunAdmitted` (or `MFM_SOURCE_REVISION`).
-- `--drive <append-only|once|until-blocked>`: Scheduler drive policy after `RunAdmitted`.
 - `--database-url <URL>`: PostgreSQL connection string (default: `$DATABASE_URL`)
 
 Examples:
@@ -302,8 +301,7 @@ mfm_cli run start --op evm_contract_lifecycle --config lifecycle.toml --op-versi
 ```
 
 Run start always resolves runner executable identities before `RunAdmitted`, because those identities
-are replay authority. `--drive append-only` suppresses post-start execution only; it does not bypass
-runner resolution. Specs that reference unported domain state descriptors fail with
+are replay authority. Specs that reference unported domain state descriptors fail with
 `LaunchRunnerUnavailable` before any typed run event is written. The production CLI runner registry
 contains the framework public-output renderer plus the portfolio and EVM contract domain runners
 used by registered entry-point ops.
@@ -327,15 +325,14 @@ Stable launch errors include:
 
 Resumes a certified typed run by loading the spec and certificate artifacts bound by `RunAdmitted`,
 verifying them against the production registry, rebuilding stream evidence, and driving the typed
-scheduler according to `--drive`.
+scheduler until it blocks or the run completes.
 
 **Usage:**
 ```sh
 mfm_cli run resume <RUN_ID> [OPTIONS]
 ```
 
-It rejects non-typed run ids before storage access. `--drive append-only` validates and reports the
-stored run without executing states.
+It rejects non-typed run ids before storage access.
 
 Manual `run resume <RUN_ID>` is the v1 recovery trigger for a run left with an open execution claim,
 side-effect uncertainty, or a resumable frontier. Automatic dead-driver takeover and background
@@ -366,7 +363,6 @@ mfm_cli run manual-resolution <RUN_ID> \
 - `--authorization-proof <PATH>`: Canonical or canonicalizable manual authorization proof JSON.
 - `--evidence-media-type <TYPE>`: Evidence media type recorded with the artifact (default: `application/json`).
 - `--note <TEXT>`: Optional redaction-safe operator note.
-- `--drive <append-only|once|until-blocked>`: Scheduler drive policy after the manual-resolution event.
 - `--database-url <URL>`: PostgreSQL connection string (default: `$DATABASE_URL`)
 
 Stable manual-resolution errors include:

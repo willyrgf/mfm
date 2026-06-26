@@ -547,8 +547,9 @@ pub(crate) fn saga_terminal_completion_outcome(
     run_id: &RunId,
     projections: &store::ProjectionSnapshot,
 ) -> Result<events::RunCompletionOutcome> {
+    let terminal_policies = store::SideEffectTerminalPolicies::from_spec(runtime_spec.spec())?;
     projections
-        .saga_terminal_completion_outcome(run_id, &runtime_spec.spec().saga)
+        .saga_terminal_completion_outcome(run_id, &runtime_spec.spec().saga, &terminal_policies)
         .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))
 }
 
@@ -559,7 +560,12 @@ pub(crate) fn saga_terminal_proof(
     prefix_next_seq: store::StreamSeq,
     manual: Option<mfm_manual_auth::VerifiedManualResolutionForPrefix>,
 ) -> Result<store::SagaTerminalProof> {
-    let saga = projections.derive_saga_projection(run_id, &runtime_spec.spec().saga);
+    let terminal_policies = store::SideEffectTerminalPolicies::from_spec(runtime_spec.spec())?;
+    let saga = projections.derive_saga_projection(
+        run_id,
+        &runtime_spec.spec().saga,
+        &terminal_policies,
+    )?;
     store::SagaTerminalProof::new(&runtime_spec.spec().saga, &saga, prefix_next_seq, manual)
         .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))
 }
