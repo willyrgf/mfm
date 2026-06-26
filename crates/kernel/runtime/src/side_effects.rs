@@ -291,11 +291,15 @@ pub(crate) fn validate_historical_side_effect_terminal(
                 node.node_id, attempt_id
             )));
         }
-        if ledger.phase == HistoricalSideEffectPhase::ConfirmationObserved {
+        let terminal_policies = store::SideEffectTerminalPolicies::from_spec(runtime_spec.spec())?;
+        if historical_phase_satisfies_terminal_policy(
+            terminal_policies.require(pair_id)?,
+            ledger.phase,
+        ) {
             return Ok(());
         }
         return Err(RuntimeError::InvalidRunStream(format!(
-            "side-effect node {} attempt {} produced output before confirmation",
+            "side-effect node {} attempt {} produced output before certified terminal evidence",
             node.node_id, attempt_id
         )));
     }
@@ -315,16 +319,10 @@ pub(crate) fn validate_historical_side_effect_terminal(
             node.node_id, submit.node_id
         )));
     };
-    let ok = match &contract.verification {
-        spec::SideEffectVerificationSpec::Receipt => matches!(
-            ledger.phase,
-            HistoricalSideEffectPhase::ReceiptObserved
-                | HistoricalSideEffectPhase::ConfirmationObserved
-        ),
-        spec::SideEffectVerificationSpec::Finalized { .. } => {
-            ledger.phase == HistoricalSideEffectPhase::ConfirmationObserved
-        }
-    };
+    let ok = historical_phase_satisfies_terminal_policy(
+        store::SideEffectTerminalPolicy::from_verification(&contract.verification),
+        ledger.phase,
+    );
     if ok {
         Ok(())
     } else {
@@ -392,6 +390,22 @@ fn historical_phase_has_submission_result(phase: HistoricalSideEffectPhase) -> b
             | HistoricalSideEffectPhase::Ambiguous
             | HistoricalSideEffectPhase::Failed
     )
+}
+
+fn historical_phase_satisfies_terminal_policy(
+    policy: store::SideEffectTerminalPolicy,
+    phase: HistoricalSideEffectPhase,
+) -> bool {
+    match policy {
+        store::SideEffectTerminalPolicy::Receipt => matches!(
+            phase,
+            HistoricalSideEffectPhase::ReceiptObserved
+                | HistoricalSideEffectPhase::ConfirmationObserved
+        ),
+        store::SideEffectTerminalPolicy::Confirmation => {
+            phase == HistoricalSideEffectPhase::ConfirmationObserved
+        }
+    }
 }
 
 pub(crate) fn node_uses_side_effect_terminal_validation(node: &spec::NodeSpec) -> bool {

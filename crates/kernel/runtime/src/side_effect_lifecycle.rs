@@ -166,7 +166,7 @@ impl SideEffectLifecycle {
         side_effect_projection_for_attempt(runtime_spec, run_id, projections, node, attempt_id)
     }
 
-    /// Validates that a side-effect attempt has confirmed terminal evidence before producing output.
+    /// Validates that a side-effect attempt has certified terminal evidence before producing output.
     pub(crate) fn validate_terminal_evidence(
         runtime_spec: &CertifiedRuntimeSpec,
         run_id: &RunId,
@@ -458,11 +458,16 @@ fn validate_side_effect_terminal_phase(
             node.node_id, attempt_id
         )));
     }
-    if state.is_confirmed() {
+    let pair_id = projection.pair_id.clone();
+    let terminal_policies = store::SideEffectTerminalPolicies::from_spec(runtime_spec.spec())?;
+    if terminal_policies
+        .require(&pair_id)?
+        .is_terminal_phase(&projection.phase)
+    {
         Ok(())
     } else {
         Err(RuntimeError::InvalidRunStream(format!(
-            "side-effect node {} attempt {} produced output before confirmation",
+            "side-effect node {} attempt {} produced output before certified terminal evidence",
             node.node_id, attempt_id
         )))
     }
