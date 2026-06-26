@@ -26,7 +26,11 @@ use mfm_program::{
 };
 use mfm_program_derive::{MfmConfig, MfmValue, PublicOutputs};
 use mfm_store::v1::{
-    test_support::prepared_commit_bundle_from_plan as test_bundle_from_plan, RunEventStore,
+    test_support::{
+        prepared_commit_bundle_from_plan as test_bundle_from_plan,
+        prepared_commit_plan_for_test as test_prepared_commit_plan,
+    },
+    RunEventStore,
 };
 use serde::{Deserialize, Serialize};
 
@@ -330,87 +334,6 @@ impl TestPreparedCommitExt for TestTypedRunStore {
         let plan = test_prepared_commit_plan(request, admitted_artifacts)?;
         self.append_test_commit_plan(plan)
     }
-}
-
-fn test_prepared_commit_plan(
-    request: store::CommitRequest,
-    admitted_artifacts: Vec<store::ArtifactEvidenceRef>,
-) -> store::Result<store::PreparedCommitPlan> {
-    let artifacts = store::CommitArtifactEvidenceSet::new(
-        request.required_artifacts().to_vec(),
-        admitted_artifacts,
-    )?;
-    if request
-        .payloads()
-        .iter()
-        .all(|payload| matches!(payload, events::KernelEventPayload::RunAdmitted(_)))
-    {
-        return store::PreparedCommit::<store::RunAdmission>::new(request, artifacts)
-            .map(store::PreparedCommitPlan::from);
-    }
-    if request
-        .payloads()
-        .iter()
-        .all(|payload| matches!(payload, events::KernelEventPayload::StateAttemptStarted(_)))
-    {
-        let mut preconditions = request.preconditions().clone();
-        preconditions.required_run_state = store::RequiredRunState::NotCompleted;
-        let request = request.with_preconditions(preconditions);
-        return store::PreparedCommit::<store::StateAttemptStarted>::new(request, artifacts)
-            .map(store::PreparedCommitPlan::from);
-    }
-    if request.payloads().iter().any(test_is_run_completed_payload) {
-        return store::PreparedCommit::<store::AttemptTerminal>::new(request, artifacts)
-            .map(store::PreparedCommitPlan::from);
-    }
-    if request
-        .payloads()
-        .iter()
-        .any(test_is_side_effect_terminal_payload)
-    {
-        return store::PreparedCommit::<store::SideEffectTerminal>::new(request, artifacts)
-            .map(store::PreparedCommitPlan::from);
-    }
-    if request
-        .payloads()
-        .iter()
-        .any(|payload| payload.side_effect_ref().is_some())
-    {
-        return store::PreparedCommit::<store::SideEffectProgress>::new(request, artifacts)
-            .map(store::PreparedCommitPlan::from);
-    }
-    if request.payloads().iter().any(test_is_retention_payload) {
-        return store::PreparedCommit::<store::Retention>::new(request, artifacts)
-            .map(store::PreparedCommitPlan::from);
-    }
-    store::PreparedCommit::<store::AttemptTerminal>::new(request, artifacts)
-        .map(store::PreparedCommitPlan::from)
-}
-
-fn test_is_retention_payload(payload: &events::KernelEventPayload) -> bool {
-    matches!(
-        payload,
-        events::KernelEventPayload::RetentionRefsAppended(_)
-            | events::KernelEventPayload::RetentionManifestProjected(_)
-    )
-}
-
-fn test_is_run_completed_payload(payload: &events::KernelEventPayload) -> bool {
-    matches!(payload, events::KernelEventPayload::RunCompleted(_))
-}
-
-fn test_is_side_effect_terminal_payload(payload: &events::KernelEventPayload) -> bool {
-    matches!(
-        payload,
-        events::KernelEventPayload::SideEffectNotSubmittedProven(_)
-            | events::KernelEventPayload::SideEffectSubmissionObserved(_)
-            | events::KernelEventPayload::SideEffectSubmissionUnknown(_)
-            | events::KernelEventPayload::SideEffectReceiptObserved(_)
-            | events::KernelEventPayload::SideEffectConfirmationObserved(_)
-            | events::KernelEventPayload::SideEffectAmbiguous(_)
-            | events::KernelEventPayload::SideEffectFailed(_)
-            | events::KernelEventPayload::ResourceLaneReleased(_)
-    )
 }
 
 fn validate_runtime_stream_for_tests(
