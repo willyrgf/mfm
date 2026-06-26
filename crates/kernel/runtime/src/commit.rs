@@ -9,8 +9,8 @@ use mfm_store::v1 as store;
 
 use crate::artifacts::{
     artifact_role_name, staged_artifact_binding_kind, staged_artifact_binding_role,
-    verify_artifact_bytes, StagedArtifact, StagedArtifactBindingKind, StagedRetentionRefs,
-    StagedSideEffectArtifactPhase,
+    staged_side_effect_artifact_phase, verify_artifact_bytes, StagedArtifact,
+    StagedArtifactBindingKind, StagedRetentionRefs, StagedSideEffectArtifactPhase,
 };
 use crate::binding::BoundRuntimeContext;
 use crate::framework::{
@@ -1405,6 +1405,15 @@ fn staged_payload_artifact_binding(
     payload: &events::KernelEventPayload,
     source: store::EventArtifactReferenceSource,
 ) -> Result<Option<StagedArtifactBindingKind>> {
+    if let Some(phase) = staged_side_effect_artifact_phase_for_source(source) {
+        return match payload.side_effect_ref() {
+            Some(side_effect) => {
+                staged_side_effect_artifact_binding(node, attempt_id, side_effect, phase)
+            }
+            None => Ok(None),
+        };
+    }
+
     match (payload, source) {
         (
             events::KernelEventPayload::FactRecorded(payload),
@@ -1441,102 +1450,6 @@ fn staged_payload_artifact_binding(
             require_attempt(node, attempt_id, &payload.node_id, &payload.attempt_id)?;
             Ok(Some(StagedArtifactBindingKind::RedactedDiagnostic))
         }
-        (
-            events::KernelEventPayload::SideEffectIntentPersisted(payload),
-            store::EventArtifactReferenceSource::SideEffectIntent,
-        ) => staged_side_effect_artifact_binding(
-            node,
-            attempt_id,
-            &payload.node_id,
-            &payload.attempt_id,
-            payload.ledger_key.clone(),
-            payload.invocation_epoch,
-            StagedSideEffectArtifactPhase::Intent,
-        ),
-        (
-            events::KernelEventPayload::SideEffectInvocationPrepared(payload),
-            store::EventArtifactReferenceSource::PreparedInvocation,
-        ) => staged_side_effect_artifact_binding(
-            node,
-            attempt_id,
-            &payload.node_id,
-            &payload.attempt_id,
-            payload.ledger_key.clone(),
-            payload.invocation_epoch,
-            StagedSideEffectArtifactPhase::PreparedInvocation,
-        ),
-        (
-            events::KernelEventPayload::SideEffectNotSubmittedProven(payload),
-            store::EventArtifactReferenceSource::NotSubmittedProof,
-        ) => staged_side_effect_artifact_binding(
-            node,
-            attempt_id,
-            &payload.node_id,
-            &payload.attempt_id,
-            payload.ledger_key.clone(),
-            payload.invocation_epoch,
-            StagedSideEffectArtifactPhase::NotSubmittedProof,
-        ),
-        (
-            events::KernelEventPayload::SideEffectSubmissionObserved(payload),
-            store::EventArtifactReferenceSource::Submission,
-        ) => staged_side_effect_artifact_binding(
-            node,
-            attempt_id,
-            &payload.node_id,
-            &payload.attempt_id,
-            payload.ledger_key.clone(),
-            payload.invocation_epoch,
-            StagedSideEffectArtifactPhase::Submission,
-        ),
-        (
-            events::KernelEventPayload::SideEffectSubmissionUnknown(payload),
-            store::EventArtifactReferenceSource::SubmissionUnknownEvidence,
-        ) => staged_side_effect_artifact_binding(
-            node,
-            attempt_id,
-            &payload.node_id,
-            &payload.attempt_id,
-            payload.ledger_key.clone(),
-            payload.invocation_epoch,
-            StagedSideEffectArtifactPhase::SubmissionUnknownEvidence,
-        ),
-        (
-            events::KernelEventPayload::SideEffectReceiptObserved(payload),
-            store::EventArtifactReferenceSource::Receipt,
-        ) => staged_side_effect_artifact_binding(
-            node,
-            attempt_id,
-            &payload.node_id,
-            &payload.attempt_id,
-            payload.ledger_key.clone(),
-            payload.invocation_epoch,
-            StagedSideEffectArtifactPhase::Receipt,
-        ),
-        (
-            events::KernelEventPayload::SideEffectConfirmationObserved(payload),
-            store::EventArtifactReferenceSource::Confirmation,
-        ) => staged_side_effect_artifact_binding(
-            node,
-            attempt_id,
-            &payload.node_id,
-            &payload.attempt_id,
-            payload.ledger_key.clone(),
-            payload.invocation_epoch,
-            StagedSideEffectArtifactPhase::Confirmation,
-        ),
-        (
-            events::KernelEventPayload::SideEffectAmbiguous(payload),
-            store::EventArtifactReferenceSource::AmbiguityEvidence,
-        ) => staged_side_effect_artifact_binding(
-            node,
-            attempt_id,
-            &payload.node_id,
-            &payload.attempt_id,
-            payload.ledger_key.clone(),
-            payload.invocation_epoch,
-            StagedSideEffectArtifactPhase::AmbiguityEvidence,
-        ),
         _ => Ok(None),
     }
 }
@@ -1544,18 +1457,53 @@ fn staged_payload_artifact_binding(
 fn staged_side_effect_artifact_binding(
     node: &spec::NodeSpec,
     attempt_id: &AttemptId,
-    node_id: &NodeId,
-    payload_attempt_id: &AttemptId,
-    ledger_key: events::SideEffectLedgerKey,
-    invocation_epoch: u32,
+    side_effect: events::SideEffectEventRef<'_>,
     phase: StagedSideEffectArtifactPhase,
 ) -> Result<Option<StagedArtifactBindingKind>> {
-    require_attempt(node, attempt_id, node_id, payload_attempt_id)?;
+    require_attempt(
+        node,
+        attempt_id,
+        side_effect.node_id,
+        side_effect.attempt_id,
+    )?;
+    let invocation_epoch = side_effect.invocation_epoch.ok_or_else(|| {
+        RuntimeError::InvalidRunnerOutput(format!(
+            "node {} side-effect artifact payload lacks invocation epoch",
+            node.node_id
+        ))
+    })?;
     Ok(Some(side_effect_artifact_binding(
-        ledger_key,
+        side_effect.ledger_key.clone(),
         invocation_epoch,
         phase,
     )))
+}
+
+fn staged_side_effect_artifact_phase_for_source(
+    source: store::EventArtifactReferenceSource,
+) -> Option<StagedSideEffectArtifactPhase> {
+    let role = match source {
+        store::EventArtifactReferenceSource::SideEffectIntent => {
+            events::ArtifactRole::SideEffectIntent
+        }
+        store::EventArtifactReferenceSource::PreparedInvocation => {
+            events::ArtifactRole::PreparedInvocation
+        }
+        store::EventArtifactReferenceSource::NotSubmittedProof => {
+            events::ArtifactRole::NotSubmittedProof
+        }
+        store::EventArtifactReferenceSource::Submission => events::ArtifactRole::Submission,
+        store::EventArtifactReferenceSource::SubmissionUnknownEvidence => {
+            events::ArtifactRole::SubmissionUnknownEvidence
+        }
+        store::EventArtifactReferenceSource::Receipt => events::ArtifactRole::Receipt,
+        store::EventArtifactReferenceSource::Confirmation => events::ArtifactRole::Confirmation,
+        store::EventArtifactReferenceSource::AmbiguityEvidence => {
+            events::ArtifactRole::AmbiguityEvidence
+        }
+        _ => return None,
+    };
+    staged_side_effect_artifact_phase(role)
 }
 
 fn staged_artifact_requirement_from_event_requirement(

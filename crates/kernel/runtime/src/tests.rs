@@ -1927,7 +1927,7 @@ fn side_effect_evidence_builder_builds_progress_evidence_with_replay_and_resourc
 
         match single_side_effect_payload(
             &builder
-                .submission_observed(side_effect.clone(), &value)
+                .submission_observed(side_effect.clone(), None, &value)
                 .expect("submission evidence"),
         ) {
             RunnerEventPayload::SideEffectSubmissionObserved(payload) => {
@@ -1938,7 +1938,7 @@ fn side_effect_evidence_builder_builds_progress_evidence_with_replay_and_resourc
         }
         match single_side_effect_payload(
             &builder
-                .submission_unknown(side_effect.clone(), &value)
+                .submission_unknown(side_effect.clone(), None, &value)
                 .expect("submission unknown evidence"),
         ) {
             RunnerEventPayload::SideEffectSubmissionUnknown(payload) => {
@@ -1949,7 +1949,7 @@ fn side_effect_evidence_builder_builds_progress_evidence_with_replay_and_resourc
         }
         match single_side_effect_payload(
             &builder
-                .not_submitted_proven(side_effect.clone(), &value)
+                .not_submitted_proven(side_effect.clone(), None, &value)
                 .expect("not-submitted evidence"),
         ) {
             RunnerEventPayload::SideEffectNotSubmittedProven(payload) => {
@@ -2002,6 +2002,7 @@ fn side_effect_evidence_builder_builds_progress_evidence_with_replay_and_resourc
             &builder
                 .ambiguous(
                     side_effect,
+                    None,
                     events::AmbiguityCode::new("side_effect_builder_test").expect("ambiguity code"),
                     &value,
                 )
@@ -6127,12 +6128,9 @@ fn side_effect_attempt_view_from_erased_context_is_empty_before_ledger() {
     let ctx = ErasedRunCtx::from_prepared(&invocation);
     let view = SideEffectAttemptView::from_erased_context(&ctx).expect("side-effect view");
 
-    assert!(view.is_empty());
     assert!(view.projection().is_none());
     assert!(view.ledger_state().is_none());
     assert!(view.phase().is_none());
-    assert!(view.ledger_key().is_none());
-    assert!(view.ledger_purpose().is_none());
 }
 
 #[tokio::test]
@@ -6175,10 +6173,12 @@ async fn side_effect_attempt_view_from_verified_context_exposes_ledger_state() {
         &attempt_id,
     )
     .expect("side-effect view");
-    assert!(!view.is_empty());
-    assert_eq!(view.ledger_key(), Some(&ledger_key));
     assert_eq!(
-        view.ledger_purpose(),
+        view.projection().map(|projection| &projection.ledger_key),
+        Some(&ledger_key)
+    );
+    assert_eq!(
+        view.ledger_state().map(|state| state.ledger_purpose()),
         Some(&events::SideEffectLedgerPurpose::Forward)
     );
     assert_eq!(
