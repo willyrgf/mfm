@@ -8262,6 +8262,7 @@ mod artifact_refs;
 
 mod projection;
 
+pub use self::resource_lanes::resource_lane_release_intent_resolution;
 use self::resource_lanes::{
     acquire_resource_lane, release_resource_lane, require_no_resource_lane_for_holder,
     require_no_resource_lanes_for_run,

@@ -161,8 +161,12 @@ fn resource_lane_release_resolution_is_pair_bound_not_attempt_bound() {
             .expect("release reason"),
     };
 
-    let lane = resource_lane_for_release(&run_id, &projections, &intent)
-        .expect("verify attempt releases pair-held lane");
+    let (resolved_lane_key, _) =
+        mfm_store::v1::resource_lane_release_intent_resolution(&run_id, &projections, &intent)
+            .expect("verify attempt releases pair-held lane");
+    assert_eq!(resolved_lane_key, &lane_key);
+    let lane = mfm_store::v1::ResourceAdmissionLane::from_resource_lane_key(resolved_lane_key)
+        .expect("resolved lane");
     let expected_lane = mfm_store::v1::ResourceAdmissionLane::from_resource_lane_key(&lane_key)
         .expect("expected lane");
     assert_eq!(lane.erased_key(), expected_lane.erased_key());

@@ -188,14 +188,7 @@ pub(super) async fn acquire_execution_claim_client(
         .map_err(|error| database_error("failed to begin execution claim transaction", error))?;
     lock_admission_lane_tx(&mut tx, &lane.erased_key()).await?;
 
-    if let Some(lease) = insert_execution_claim_holder_tx(&mut tx, run_id, &lane, &token).await? {
-        tx.commit()
-            .await
-            .map_err(|error| database_error("failed to commit execution claim acquire", error))?;
-        return Ok(mfm_store::v1::NowaitSkipAdmissionResult::Admitted(lease));
-    }
-    if let Some(lease) = set_empty_execution_claim_holder_tx(&mut tx, run_id, &lane, &token).await?
-    {
+    if let Some(lease) = admit_execution_claim_holder_tx(&mut tx, run_id, &lane, &token).await? {
         tx.commit()
             .await
             .map_err(|error| database_error("failed to commit execution claim acquire", error))?;
@@ -305,7 +298,7 @@ pub(super) async fn reap_expired_execution_claim_client(
     Ok(reaped)
 }
 
-async fn insert_execution_claim_holder_tx(
+async fn admit_execution_claim_holder_tx(
     tx: &mut Transaction<'_, Postgres>,
     run_id: &RunId,
     lane: &mfm_store::v1::ExecutionClaimAdmissionLane,
@@ -316,7 +309,12 @@ async fn insert_execution_claim_holder_tx(
         "INSERT INTO admission_lane \
          (class, lane_id, mode, holder_token, lease_expires_at, execution_run_id) \
          VALUES ($1,$2,$3,$4, statement_timestamp() + make_interval(secs => $5), $6) \
-         ON CONFLICT (class, lane_id) DO NOTHING \
+         ON CONFLICT (class, lane_id) DO UPDATE \
+         SET holder_token = EXCLUDED.holder_token, \
+             lease_expires_at = EXCLUDED.lease_expires_at, \
+             execution_run_id = EXCLUDED.execution_run_id, \
+             updated_at = statement_timestamp() \
+         WHERE admission_lane.holder_token IS NULL \
          RETURNING holder_token, (EXTRACT(EPOCH FROM lease_expires_at) * 1000)::BIGINT AS lease_expires_at_unix_ms",
     )
     .bind(lane.class().as_str())
@@ -327,33 +325,7 @@ async fn insert_execution_claim_holder_tx(
     .bind(run_id.as_str())
     .fetch_optional(&mut **tx)
     .await
-    .map_err(|error| database_error("failed to insert execution claim", error))?;
-    row.map(|row| execution_claim_lease_from_row(lane, row))
-        .transpose()
-}
-
-async fn set_empty_execution_claim_holder_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    run_id: &RunId,
-    lane: &mfm_store::v1::ExecutionClaimAdmissionLane,
-    token: &AdmissionToken,
-) -> Result<Option<AdmissionLease>> {
-    let lane_id = lane.id().to_vec();
-    let row = sqlx::query(
-        "UPDATE admission_lane \
-         SET holder_token = $3, lease_expires_at = statement_timestamp() + make_interval(secs => $4), \
-             execution_run_id = $5, updated_at = statement_timestamp() \
-         WHERE class = $1 AND lane_id = $2 AND holder_token IS NULL \
-         RETURNING holder_token, (EXTRACT(EPOCH FROM lease_expires_at) * 1000)::BIGINT AS lease_expires_at_unix_ms",
-    )
-    .bind(lane.class().as_str())
-    .bind(&lane_id)
-    .bind(token.as_str())
-    .bind(EXECUTION_CLAIM_LEASE_SECS)
-    .bind(run_id.as_str())
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(|error| database_error("failed to acquire empty execution claim", error))?;
+    .map_err(|error| database_error("failed to admit execution claim", error))?;
     row.map(|row| execution_claim_lease_from_row(lane, row))
         .transpose()
 }
