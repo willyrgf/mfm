@@ -96,6 +96,80 @@ fn resource_lane_key_for_pair(
         })
 }
 
+/// Resolves the active resource lane authorized by a release intent.
+///
+/// The returned lane is pair-bound: the active holder, side-effect pair, ledger purpose,
+/// invocation epoch, and claim id must all match the release intent.
+pub fn resource_lane_release_intent_resolution<'a>(
+    run_id: &RunId,
+    projections: &'a ProjectionSnapshot,
+    intent: &events::ResourceLaneReleaseIntent,
+) -> Result<(&'a ResourceLaneKey, &'a ResourceLaneProjection)> {
+    require_side_effect_pair_event(
+        &intent.ledger_key,
+        &intent.ledger_purpose,
+        &intent.pair_id,
+        intent.pair_role,
+        events::SideEffectPairRole::Verify,
+    )?;
+    resolve_resource_lane_release(
+        projections,
+        run_id,
+        &intent.ledger_key,
+        &intent.ledger_purpose,
+        &intent.pair_id,
+        intent.invocation_epoch,
+        &intent.claim_id,
+        "resource lane release intent does not match active claim",
+    )
+}
+
+fn resolve_resource_lane_release<'a>(
+    projections: &'a ProjectionSnapshot,
+    run_id: &RunId,
+    ledger_key: &events::SideEffectLedgerKey,
+    ledger_purpose: &events::SideEffectLedgerPurpose,
+    pair_id: &SideEffectPairId,
+    invocation_epoch: u32,
+    claim_id: &events::ResourceLaneClaimId,
+    mismatch_message: &'static str,
+) -> Result<(&'a ResourceLaneKey, &'a ResourceLaneProjection)> {
+    let holder = SideEffectPairLedgerRef::new(run_id.clone(), pair_id.clone());
+    let Some((key, active)) = projections
+        .resource_lanes
+        .iter()
+        .find(|(_, projection)| projection.holder == holder)
+    else {
+        return Err(StoreError::ProjectionConflict {
+            key: format!("resource_lane:{}", ledger_key),
+            message: "resource lane release requires an active claim".to_owned(),
+        });
+    };
+    let Some(pair_key) = resource_lane_key_for_pair(projections, run_id, pair_id) else {
+        return Err(StoreError::ProjectionConflict {
+            key: format!("resource_lane:{}", ledger_key),
+            message: "resource lane release pair references no active claim".to_owned(),
+        });
+    };
+    if &pair_key != key {
+        return Err(StoreError::ProjectionConflict {
+            key: format!("resource_lane:{}", ledger_key),
+            message: "resource lane release pair does not match active holder".to_owned(),
+        });
+    }
+    if active.pair_id != *pair_id
+        || active.ledger_purpose != *ledger_purpose
+        || active.invocation_epoch != invocation_epoch
+        || active.claim_id != *claim_id
+    {
+        return Err(StoreError::ProjectionConflict {
+            key: format!("resource_lane:{}:{}", key.namespace, key.key),
+            message: mismatch_message.to_owned(),
+        });
+    }
+    Ok((key, active))
+}
+
 pub(super) fn release_resource_lane(
     projections: &mut ProjectionSnapshot,
     run_id: &RunId,
@@ -108,40 +182,23 @@ pub(super) fn release_resource_lane(
         payload.pair_role,
         events::SideEffectPairRole::Verify,
     )?;
-    let holder = SideEffectPairLedgerRef::new(run_id.clone(), payload.pair_id.clone());
-    let Some(key) = resource_lane_key_for_holder(projections, &holder) else {
-        return Err(StoreError::ProjectionConflict {
-            key: format!("resource_lane:{}", payload.ledger_key),
-            message: "resource lane release requires an active claim".to_owned(),
-        });
-    };
-    let Some(pair_key) = resource_lane_key_for_pair(projections, run_id, &payload.pair_id) else {
-        return Err(StoreError::ProjectionConflict {
-            key: format!("resource_lane:{}", payload.ledger_key),
-            message: "resource lane release pair references no active claim".to_owned(),
-        });
-    };
-    if pair_key != key {
-        return Err(StoreError::ProjectionConflict {
-            key: format!("resource_lane:{}", payload.ledger_key),
-            message: "resource lane release pair does not match active holder".to_owned(),
-        });
-    }
-    let active = projections
-        .resource_lanes
-        .get(&key)
-        .expect("resource lane key was found from projection");
-    if active.pair_id != payload.pair_id
-        || active.ledger_purpose != payload.ledger_purpose
-        || active.invocation_epoch != payload.invocation_epoch
-        || active.claim_id != payload.claim_id
-        || active.claim_fencing_token != payload.claim_fencing_token
-    {
+    let (key, active) = resolve_resource_lane_release(
+        projections,
+        run_id,
+        &payload.ledger_key,
+        &payload.ledger_purpose,
+        &payload.pair_id,
+        payload.invocation_epoch,
+        &payload.claim_id,
+        "resource lane release does not match active claim",
+    )?;
+    if active.claim_fencing_token != payload.claim_fencing_token {
         return Err(StoreError::ProjectionConflict {
             key: format!("resource_lane:{}:{}", key.namespace, key.key),
             message: "resource lane release does not match active claim".to_owned(),
         });
     }
+    let key = key.clone();
     projections.resource_lanes.remove(&key);
     Ok(())
 }

@@ -16,7 +16,12 @@ pub(super) async fn lock_resource_lanes_for_request_tx(
                 lanes.insert(lane.erased_key(), lane);
             }
             events::KernelEventPayload::ResourceLaneReleaseIntent(intent) => {
-                let lane = resource_lane_for_release(request.run_id(), projections, intent)?;
+                let (lane_key, _) = mfm_store::v1::resource_lane_release_intent_resolution(
+                    request.run_id(),
+                    projections,
+                    intent,
+                )?;
+                let lane = mfm_store::v1::ResourceAdmissionLane::from_resource_lane_key(lane_key)?;
                 lanes.insert(lane.erased_key(), lane);
             }
             _ => {}
@@ -28,57 +33,9 @@ pub(super) async fn lock_resource_lanes_for_request_tx(
     Ok(lanes)
 }
 
-pub(super) fn resource_lane_for_release(
-    run_id: &RunId,
-    projections: &ProjectionSnapshot,
-    intent: &events::ResourceLaneReleaseIntent,
-) -> Result<mfm_store::v1::ResourceAdmissionLane> {
-    let holder =
-        mfm_store::v1::SideEffectPairLedgerRef::new(run_id.clone(), intent.pair_id.clone());
-    let Some((lane_key, active)) = projections
-        .resource_lanes()
-        .find(|(_, projection)| projection.holder == holder)
-    else {
-        return Err(StoreError::ProjectionConflict {
-            key: format!("resource_lane:{}", intent.ledger_key),
-            message: "resource lane release references unknown active claim".to_owned(),
-        }
-        .into());
-    };
-    let Some((pair_lane_key, _)) = projections.resource_lanes().find(|(_, projection)| {
-        projection.holder.run_id == *run_id && projection.pair_id == intent.pair_id
-    }) else {
-        return Err(StoreError::ProjectionConflict {
-            key: format!("resource_lane:{}", intent.ledger_key),
-            message: "resource lane release pair references unknown active claim".to_owned(),
-        }
-        .into());
-    };
-    if pair_lane_key != lane_key {
-        return Err(StoreError::ProjectionConflict {
-            key: format!("resource_lane:{}", intent.ledger_key),
-            message: "resource lane release pair does not match active holder".to_owned(),
-        }
-        .into());
-    }
-    if active.claim_id != intent.claim_id
-        || active.pair_id != intent.pair_id
-        || active.ledger_purpose != intent.ledger_purpose
-        || active.invocation_epoch != intent.invocation_epoch
-    {
-        return Err(StoreError::ProjectionConflict {
-            key: format!("resource_lane:{}:{}", lane_key.namespace, lane_key.key),
-            message: "resource lane release intent does not match active claim".to_owned(),
-        }
-        .into());
-    }
-    Ok(mfm_store::v1::ResourceAdmissionLane::from_resource_lane_key(lane_key)?)
-}
-
 pub(super) struct ResourceLaneClaimAdmission {
     pub(super) lane: mfm_store::v1::ResourceAdmissionLane,
     pub(super) lane_key: ResourceLaneKey,
-    pub(super) holder: mfm_store::v1::SideEffectPairLedgerRef,
     pub(super) admission_token: mfm_store::v1::AdmissionToken,
 }
 
@@ -101,41 +58,19 @@ pub(super) fn single_lane_claim_admission(
     let lane =
         mfm_store::v1::ResourceAdmissionLane::from_resource_key_evidence(&intent.resource_key)?;
     let lane_key = ResourceLaneKey::from_evidence(&intent.resource_key);
-    let holder = mfm_store::v1::SideEffectPairLedgerRef::new(
-        request.run_id().clone(),
-        intent.pair_id.clone(),
-    );
     let admission_token =
         mfm_store::v1::resource_wait_fifo_admission_token(request.run_id(), &lane, intent)?;
     Ok(Some(ResourceLaneClaimAdmission {
         lane,
         lane_key,
-        holder,
         admission_token,
     }))
 }
 
 pub(super) async fn resource_lane_fifo_pre_gate_tx(
     tx: &mut Transaction<'_, Postgres>,
-    projections: &ProjectionSnapshot,
     admission: &ResourceLaneClaimAdmission,
 ) -> Result<Option<mfm_store::v1::WaitFifoAdmissionBlock>> {
-    if let Some(active) = projections.resource_lane(&admission.lane_key) {
-        if active.holder != admission.holder {
-            let waiter = enqueue_or_refresh_wait_fifo_waiter_tx(
-                tx,
-                &admission.lane,
-                &admission.admission_token,
-            )
-            .await?;
-            return Ok(Some(mfm_store::v1::WaitFifoAdmissionBlock {
-                resource_lane_key: admission.lane_key.clone(),
-                holder: Some(active.holder.clone()),
-                waiter: Some(waiter),
-            }));
-        }
-    }
-
     if let Some(head) = head_wait_fifo_waiter_tx(tx, &admission.lane).await? {
         if head.admission_token != admission.admission_token {
             let waiter = enqueue_or_refresh_wait_fifo_waiter_tx(

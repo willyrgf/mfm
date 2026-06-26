@@ -107,9 +107,7 @@ impl PostgresRunStore {
             }
         };
         if let Some(admission) = &claim_admission {
-            if let Some(block) =
-                resource_lane_fifo_pre_gate_tx(&mut tx, &projections, admission).await?
-            {
+            if let Some(block) = resource_lane_fifo_pre_gate_tx(&mut tx, admission).await? {
                 tx.commit()
                     .await
                     .map_err(|_| PostgresStoreError::Database("failed to commit transaction"))?;
