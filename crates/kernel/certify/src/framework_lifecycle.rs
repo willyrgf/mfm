@@ -93,7 +93,7 @@ pub(super) fn validate_framework_nodes(
                     "mfm.framework.side_effect_verify",
                 )?;
                 let pair = spec::resolve_side_effect_verify_pair(nodes, remediations, node)
-                    .map_err(|error| problem(ProblemClass::InvalidTopology, error.to_string()))?;
+                    .map_err(side_effect_verify_pair_problem)?;
                 let submit = pair.submit_node;
                 let submit_descriptor = descriptors.state(&submit.descriptor_id)?;
                 validate_side_effect_verify_output_cell(node, submit_descriptor, cells)?;

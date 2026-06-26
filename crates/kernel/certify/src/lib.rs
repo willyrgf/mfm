@@ -18,6 +18,7 @@ use mfm_ids::{
 };
 use mfm_program as program;
 use mfm_spec::v1 as spec;
+use mfm_spec::SideEffectVerifyPairErrorKind;
 use mfm_values::MfmConfig;
 
 /// Result type for typed certification.
@@ -4591,6 +4592,19 @@ fn validate_lineage_references(
 
 mod framework_lifecycle;
 
+fn side_effect_verify_pair_problem(error: mfm_spec::SpecError) -> CertifyError {
+    let class = match &error {
+        mfm_spec::SpecError::SideEffectVerifyPair {
+            kind:
+                SideEffectVerifyPairErrorKind::FrameworkSubmitNode
+                | SideEffectVerifyPairErrorKind::NonSideEffectSubmitNode,
+            ..
+        } => ProblemClass::InvalidSemanticTransition,
+        _ => ProblemClass::InvalidTopology,
+    };
+    problem(class, error.to_string())
+}
+
 struct ExpectedNodeLineage {
     input_cells: Vec<CellId>,
     config_ref_digest: Option<ContentDigest>,
@@ -4621,7 +4635,7 @@ fn expected_node_lineage(
                 )
             })?;
             let pair = spec::resolve_side_effect_verify_pair(nodes, remediations, node)
-                .map_err(|error| problem(ProblemClass::InvalidTopology, error.to_string()))?;
+                .map_err(side_effect_verify_pair_problem)?;
             Ok(ExpectedNodeLineage {
                 input_cells: vec![pair.submit_output_cell.clone()],
                 config_ref_digest: Some(config_ref_digest.clone()),
