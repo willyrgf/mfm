@@ -1766,7 +1766,7 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
         else {
             return Ok(None);
         };
-        if lane.pair_id != side_effect.pair_id
+        if lane.holder.pair_id != side_effect.pair_id
             || lane.ledger_purpose != side_effect.ledger_purpose
             || lane.invocation_epoch != side_effect.invocation_epoch
         {
