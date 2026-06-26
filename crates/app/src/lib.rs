@@ -1030,6 +1030,17 @@ impl fmt::Display for PublicOutputResponse {
     }
 }
 
+/// App-level report for a start request after launch driving and optional public-output rendering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunStartReport {
+    /// Public launch outcome kind.
+    pub outcome: RunLaunchOutcomeStatus,
+    /// Current run status.
+    pub run: RunResponse,
+    /// Rendered public output when the run completed during launch.
+    pub public_output: Option<PublicOutputResponse>,
+}
+
 /// Non-forgeable authority to render one typed public output.
 ///
 /// This is minted only after the app verifies certified runtime authority, validates the
@@ -1446,6 +1457,37 @@ where
             .run_response_from_verified_status(&run_id, status)
             .await?;
         Ok(RunLaunchOutcome::Admitted { run })
+    }
+
+    /// Starts a prepared entry-point run and renders public output if the launch completes.
+    pub async fn launch_prepared_entry_point_run(
+        &self,
+        prepared: PreparedEntryPointRunLaunch,
+    ) -> Result<RunStartReport, AppError> {
+        let run_id = prepared.request.run_id.clone();
+        let public_output_schema_id = prepared
+            .request
+            .certified_spec
+            .envelope()
+            .spec
+            .public_outputs
+            .public_schema_id
+            .clone();
+        let launch = self.launch_run(prepared.request).await?;
+        let (outcome, run) = launch.into_response_parts();
+        let public_output = if run.run_mode == RunModeStatus::Completed {
+            Some(
+                self.public_output(&run_id, &public_output_schema_id)
+                    .await?,
+            )
+        } else {
+            None
+        };
+        Ok(RunStartReport {
+            outcome,
+            run,
+            public_output,
+        })
     }
 
     async fn attach_to_existing_run(
