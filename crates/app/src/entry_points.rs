@@ -141,7 +141,6 @@ mod tests {
             certification_registry: &certification_registry,
             trust_scope_id,
             distinct_run_key: None,
-            drive: crate::DriveMode::AppendOnly,
         })
         .expect("prepared entry-point launch");
 
@@ -411,7 +410,7 @@ mod tests {
         ));
 
         let resumed = services
-            .resume_stored_run(&run_id, crate::DriveMode::Once)
+            .resume_stored_run(&run_id)
             .await
             .expect("resume response");
 
@@ -444,7 +443,7 @@ mod tests {
         );
 
         let resumed = incompatible_services
-            .resume_stored_run(&run_id, crate::DriveMode::Once)
+            .resume_stored_run(&run_id)
             .await
             .expect("resume response");
 
@@ -592,7 +591,6 @@ mod tests {
             certification_registry,
             trust_scope_id,
             distinct_run_key,
-            drive: crate::DriveMode::AppendOnly,
         })
         .expect("prepared entry-point launch")
     }

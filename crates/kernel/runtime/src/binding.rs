@@ -4,8 +4,11 @@ use mfm_events::v1 as events;
 use mfm_ids::{ContentDigest, DigestAlgorithm, NodeId};
 use mfm_spec::v1 as spec;
 
-use crate::runners::{CapabilityImplementationBinding, ErasedRunnerBinding, ErasedRunnerRegistry};
-use crate::{canonical_json, CertifiedRuntimeSpec, Result, RuntimeError};
+use crate::runners::{
+    CapabilityImplementationBinding, ErasedRunnerBinding, ErasedRunnerRegistry,
+    RunnerIngressContext,
+};
+use crate::{canonical_json, CertifiedRuntimeSpec, Result, RunLaunchEvidence, RuntimeError};
 
 /// Runtime binding authority for one certified execution spec.
 ///
@@ -194,6 +197,25 @@ impl BoundRuntimeContext {
         Ok(())
     }
 
+    pub(crate) fn validate_launch_ingress(
+        &self,
+        runtime_spec: &CertifiedRuntimeSpec,
+        launch: &RunLaunchEvidence,
+    ) -> Result<()> {
+        for node_id in runtime_spec.topological_order() {
+            let node = runtime_spec.node(node_id).expect("topological node exists");
+            if node_requires_runner_ingress(node) {
+                self.validate_node_ingress(runtime_spec, node, launch)?;
+            }
+        }
+        for (_, node) in runtime_spec.remediations() {
+            if node_requires_runner_ingress(node) {
+                self.validate_node_ingress(runtime_spec, node, launch)?;
+            }
+        }
+        Ok(())
+    }
+
     fn require_node_authority(&self, node: &spec::NodeSpec) -> Result<()> {
         self.runner_binding_for(node)?;
         let Some(capabilities) = self.capability_authority_for(&node.node_id) else {
@@ -243,6 +265,18 @@ impl BoundRuntimeContext {
         }
         Ok(())
     }
+
+    fn validate_node_ingress(
+        &self,
+        runtime_spec: &CertifiedRuntimeSpec,
+        node: &spec::NodeSpec,
+        launch: &RunLaunchEvidence,
+    ) -> Result<()> {
+        let binding = self.runner_binding_for(node)?;
+        binding
+            .runner
+            .validate_ingress(RunnerIngressContext::new(runtime_spec, node, launch))
+    }
 }
 
 fn executable_identity_json(identity: &events::ExecutableIdentity) -> serde_json::Value {
@@ -253,6 +287,10 @@ fn executable_identity_json(identity: &events::ExecutableIdentity) -> serde_json
         "nix_derivation_hash": identity.nix_derivation_hash.as_ref().map(|value| value.as_str()),
         "nix_output_hash": identity.nix_output_hash.as_ref().map(|value| value.as_str()),
     })
+}
+
+fn node_requires_runner_ingress(node: &spec::NodeSpec) -> bool {
+    node.framework.is_none()
 }
 
 #[derive(Default)]

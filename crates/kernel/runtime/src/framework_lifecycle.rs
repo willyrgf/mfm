@@ -239,8 +239,12 @@ impl<'a> FrameworkAttemptLifecycle<'a> {
             )
         })?;
         let prefix_projection = store::ProjectionSnapshot::rebuild_from_run_stream(prefix_stream)?;
-        let prefix_saga =
-            prefix_projection.derive_saga_projection(run_id, &runtime_spec.spec().saga);
+        let terminal_policies = store::SideEffectTerminalPolicies::from_spec(runtime_spec.spec())?;
+        let prefix_saga = prefix_projection.derive_saga_projection(
+            run_id,
+            &runtime_spec.spec().saga,
+            &terminal_policies,
+        )?;
         if prefix_saga.run_mode != store::RunMode::ManualBlocked {
             return Err(RuntimeError::InvalidRunStream(format!(
                 "manual resolution prefix requires ManualBlocked saga mode, found {}",

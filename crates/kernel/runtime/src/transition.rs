@@ -97,9 +97,12 @@ impl TransitionLifecycle {
                 }
             }
         }
-        let saga = view
-            .projections
-            .derive_saga_projection(run_id, &runtime_spec.spec().saga);
+        let terminal_policies = store::SideEffectTerminalPolicies::from_spec(runtime_spec.spec())?;
+        let saga = view.projections.derive_saga_projection(
+            run_id,
+            &runtime_spec.spec().saga,
+            &terminal_policies,
+        )?;
         let blocked_nodes = blocked_node_ids(runtime_spec, view, blocked_lanes);
         match scheduler_decision_with_blocked_nodes(runtime_spec, run_id, view, &blocked_nodes)? {
             SchedulerDecision::Run(runnable) => classify_runnable(runtime_spec, runnable),

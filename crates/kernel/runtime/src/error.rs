@@ -20,6 +20,9 @@ pub enum RuntimeError {
     /// No node is runnable and the run is not complete.
     #[error("typed scheduler blocked: {0}")]
     Blocked(String),
+    /// The caller does not hold the run execution claim required to drive.
+    #[error("typed execution claim rejected: {0}")]
+    ExecutionClaim(String),
     /// Input materialization failed.
     #[error("typed input materialization failed: {0}")]
     InputMaterialization(String),

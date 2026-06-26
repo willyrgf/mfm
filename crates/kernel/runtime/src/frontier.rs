@@ -46,9 +46,12 @@ pub(crate) fn scheduler_decision_with_blocked_nodes<'a>(
     if view.projections.run_state(run_id) == store::RunState::Completed {
         return Ok(SchedulerDecision::Completed);
     }
-    let saga = view
-        .projections
-        .derive_saga_projection(run_id, &runtime_spec.spec().saga);
+    let terminal_policies = store::SideEffectTerminalPolicies::from_spec(runtime_spec.spec())?;
+    let saga = view.projections.derive_saga_projection(
+        run_id,
+        &runtime_spec.spec().saga,
+        &terminal_policies,
+    )?;
     if saga.engagement.is_some() {
         return saga_scheduler_decision(runtime_spec, view, &saga, blocked_nodes);
     }

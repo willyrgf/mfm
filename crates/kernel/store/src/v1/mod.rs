@@ -18,10 +18,11 @@ use mfm_ids::{
 };
 use mfm_manual_auth::{ManualResolutionBlockReason, VerifiedManualResolutionForPrefix};
 use mfm_spec::v1::{
-    CanonicalizerIdentity, CellProducer, DescriptorIdentity, ManualResolutionEvidenceSpec,
-    MediaType, OperationDescriptorIdentity, PublicFieldPath, RemediationUnresolvedSpec,
-    RendererDescriptorIdentity, RendererKind, RendererVersion, ResourceNamespace, SagaPolicySpec,
-    StateDescriptorIdentity, ValueLineageRef,
+    self as spec, CanonicalizerIdentity, CellProducer, DescriptorIdentity,
+    ManualResolutionEvidenceSpec, MediaType, OperationDescriptorIdentity, PublicFieldPath,
+    RemediationUnresolvedSpec, RendererDescriptorIdentity, RendererKind, RendererVersion,
+    ResourceNamespace, SagaPolicySpec, SideEffectVerificationSpec, StateDescriptorIdentity,
+    TypedExecutionSpec, ValueLineageRef,
 };
 
 use self::codec::{
@@ -856,6 +857,81 @@ pub struct SagaProjection {
     pub run_completion: Option<RunCompletionProjection>,
 }
 
+/// Certified terminal evidence policy for a side-effect pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SideEffectTerminalPolicy {
+    /// Receipt evidence is the terminal side-effect proof.
+    Receipt,
+    /// Confirmation evidence is the terminal side-effect proof.
+    Confirmation,
+}
+
+impl SideEffectTerminalPolicy {
+    /// Returns the terminal policy implied by a certified side-effect verification spec.
+    pub const fn from_verification(verification: &SideEffectVerificationSpec) -> Self {
+        match verification {
+            SideEffectVerificationSpec::Receipt => Self::Receipt,
+            SideEffectVerificationSpec::Finalized { .. } => Self::Confirmation,
+        }
+    }
+
+    /// Returns whether the projected phase satisfies this terminal policy.
+    pub const fn is_terminal_phase(self, phase: &SideEffectPhase) -> bool {
+        match self {
+            Self::Receipt => matches!(
+                phase,
+                SideEffectPhase::ReceiptObserved { .. }
+                    | SideEffectPhase::ConfirmationObserved { .. }
+            ),
+            Self::Confirmation => matches!(phase, SideEffectPhase::ConfirmationObserved { .. }),
+        }
+    }
+}
+
+/// Certified terminal policies for side-effect pairs in a typed spec.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SideEffectTerminalPolicies {
+    by_pair: BTreeMap<SideEffectPairId, SideEffectTerminalPolicy>,
+}
+
+impl SideEffectTerminalPolicies {
+    /// Builds terminal policies for every side-effect node in a certified typed spec.
+    pub fn from_spec(spec: &TypedExecutionSpec) -> Result<Self> {
+        let mut by_pair = BTreeMap::new();
+        for node in spec.nodes.iter().chain(spec.remediations.values()) {
+            let Some(contract) = node.side_effect.as_ref() else {
+                continue;
+            };
+            let pair_id = spec::side_effect_pair_id(&node.node_id, &node.output_cell, contract)
+                .map_err(|error| StoreError::Identity(error.to_string()))?;
+            by_pair.insert(
+                pair_id,
+                SideEffectTerminalPolicy::from_verification(&contract.verification),
+            );
+        }
+        Ok(Self { by_pair })
+    }
+
+    /// Builds terminal policies from explicit pair entries.
+    pub fn new(by_pair: BTreeMap<SideEffectPairId, SideEffectTerminalPolicy>) -> Self {
+        Self { by_pair }
+    }
+
+    /// Returns the policy for a side-effect pair.
+    pub fn get(&self, pair_id: &SideEffectPairId) -> Option<SideEffectTerminalPolicy> {
+        self.by_pair.get(pair_id).copied()
+    }
+
+    /// Returns the policy for a side-effect pair or a typed projection error.
+    pub fn require(&self, pair_id: &SideEffectPairId) -> Result<SideEffectTerminalPolicy> {
+        self.get(pair_id)
+            .ok_or_else(|| StoreError::ProjectionConflict {
+                key: format!("sidefx:{pair_id}:terminal_policy"),
+                message: "missing certified side-effect terminal policy".to_owned(),
+            })
+    }
+}
+
 fn require_closed_obligations_non_empty(
     policy: &SagaPolicySpec,
     saga: &SagaProjection,
@@ -1256,19 +1332,26 @@ pub struct SagaAdmitToken {
     spec_hash: SpecHash,
     saga_policy_digest: ContentDigest,
     saga_policy: SagaPolicySpec,
+    terminal_policies: SideEffectTerminalPolicies,
 }
 
 impl SagaAdmitToken {
     /// Mints a saga admission token from certified runtime policy authority.
-    pub fn new(run_id: RunId, spec_hash: SpecHash, saga_policy: SagaPolicySpec) -> Result<Self> {
+    pub fn from_spec(run_id: RunId, spec: &TypedExecutionSpec) -> Result<Self> {
+        let spec_hash = spec
+            .spec_hash()
+            .map_err(|error| StoreError::Canonical(error.to_string()))?;
+        let saga_policy = spec.saga.clone();
         let saga_policy_digest = saga_policy
             .saga_policy_digest()
             .map_err(|error| StoreError::Canonical(error.to_string()))?;
+        let terminal_policies = SideEffectTerminalPolicies::from_spec(spec)?;
         Ok(Self {
             run_id,
             spec_hash,
             saga_policy_digest,
             saga_policy,
+            terminal_policies,
         })
     }
 
@@ -1290,6 +1373,11 @@ impl SagaAdmitToken {
     /// Returns the certified saga policy carried by this token.
     pub fn saga_policy(&self) -> &SagaPolicySpec {
         &self.saga_policy
+    }
+
+    /// Returns the certified side-effect terminal policies carried by this token.
+    pub fn terminal_policies(&self) -> &SideEffectTerminalPolicies {
+        &self.terminal_policies
     }
 }
 
@@ -3770,6 +3858,7 @@ pub struct RetentionManifestProjection {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ProjectionSnapshot {
     run_states: BTreeMap<RunId, RunState>,
+    run_spec_hashes: BTreeMap<RunId, SpecHash>,
     saga_policy_digests: BTreeMap<RunId, ContentDigest>,
     run_completions: BTreeMap<RunId, RunCompletionProjection>,
     saga_engagements: BTreeMap<RunId, SagaEngagementProjection>,
@@ -3791,6 +3880,8 @@ pub struct ProjectionSnapshot {
 pub struct ProjectionSnapshotParts {
     /// Run lifecycle states.
     pub run_states: BTreeMap<RunId, RunState>,
+    /// Certified spec hash recorded at run start.
+    pub run_spec_hashes: BTreeMap<RunId, SpecHash>,
     /// Saga policy digest recorded at run start.
     pub saga_policy_digests: BTreeMap<RunId, ContentDigest>,
     /// Terminal run completion projections.
@@ -3823,6 +3914,7 @@ impl ProjectionSnapshot {
     pub fn from_parts(parts: ProjectionSnapshotParts) -> Result<Self> {
         let ProjectionSnapshotParts {
             run_states,
+            run_spec_hashes,
             saga_policy_digests,
             run_completions,
             saga_engagements,
@@ -3854,6 +3946,7 @@ impl ProjectionSnapshot {
         }
         Ok(Self {
             run_states,
+            run_spec_hashes,
             saga_policy_digests,
             run_completions,
             saga_engagements,
@@ -3901,6 +3994,11 @@ impl ProjectionSnapshot {
             .get(run_id)
             .copied()
             .unwrap_or(RunState::Absent)
+    }
+
+    /// Returns the certified spec hash recorded at run start.
+    pub fn run_spec_hash(&self, run_id: &RunId) -> Option<&SpecHash> {
+        self.run_spec_hashes.get(run_id)
     }
 
     /// Returns the saga policy digest recorded at run start.
@@ -4011,8 +4109,12 @@ impl ProjectionSnapshot {
     }
 
     /// Returns whether all past-boundary forward ledgers for the current projection are quiescent.
-    pub fn forward_ledgers_quiescent(&self, run_id: &RunId) -> bool {
-        forward_ledgers_quiescent(self, run_id)
+    pub fn forward_ledgers_quiescent(
+        &self,
+        run_id: &RunId,
+        terminal_policies: &SideEffectTerminalPolicies,
+    ) -> Result<bool> {
+        forward_ledgers_quiescent(self, run_id, terminal_policies)
     }
 
     /// Derives saga status from certified saga policy plus the current stream projection.
@@ -4020,8 +4122,9 @@ impl ProjectionSnapshot {
         &self,
         run_id: &RunId,
         policy: &SagaPolicySpec,
-    ) -> SagaProjection {
-        derive_saga_projection(self, run_id, policy)
+        terminal_policies: &SideEffectTerminalPolicies,
+    ) -> Result<SagaProjection> {
+        derive_saga_projection(self, run_id, policy, terminal_policies)
     }
 
     /// Requires that the current prefix derives a manual-blocked saga mode.
@@ -4029,9 +4132,10 @@ impl ProjectionSnapshot {
         &self,
         run_id: &RunId,
         policy: &SagaPolicySpec,
+        terminal_policies: &SideEffectTerminalPolicies,
     ) -> Result<()> {
         self.require_no_open_semantic_attempts_for_run(run_id)?;
-        let saga = self.derive_saga_projection(run_id, policy);
+        let saga = self.derive_saga_projection(run_id, policy, terminal_policies)?;
         if saga.run_mode == RunMode::ManualBlocked {
             Ok(())
         } else {
@@ -4050,8 +4154,9 @@ impl ProjectionSnapshot {
         &self,
         run_id: &RunId,
         policy: &SagaPolicySpec,
+        terminal_policies: &SideEffectTerminalPolicies,
     ) -> Result<events::RunCompletionOutcome> {
-        let saga = self.derive_saga_projection(run_id, policy);
+        let saga = self.derive_saga_projection(run_id, policy, terminal_policies)?;
         saga.run_mode
             .saga_terminal_outcome()
             .ok_or_else(|| StoreError::ProjectionConflict {
@@ -4066,6 +4171,11 @@ impl ProjectionSnapshot {
     /// Iterates projected run states.
     pub fn run_states(&self) -> impl Iterator<Item = (&RunId, &RunState)> {
         self.run_states.iter()
+    }
+
+    /// Iterates run-start certified spec hashes.
+    pub fn run_spec_hashes(&self) -> impl Iterator<Item = (&RunId, &SpecHash)> {
+        self.run_spec_hashes.iter()
     }
 
     /// Iterates run-start saga policy digests.
@@ -5289,6 +5399,7 @@ fn stage_run_commit_with_fingerprint(
         staged_logical_keys.insert(key);
         require_admission_preconditions(
             &staged_projections,
+            &request.run_id,
             &envelope.payload,
             request.preconditions.saga_admit_token.as_ref(),
         )?;
@@ -6178,6 +6289,10 @@ fn projection_with_resource_lanes(
             .run_states()
             .map(|(run_id, state)| (run_id.clone(), *state))
             .collect(),
+        run_spec_hashes: snapshot
+            .run_spec_hashes()
+            .map(|(run_id, spec_hash)| (run_id.clone(), spec_hash.clone()))
+            .collect(),
         saga_policy_digests: snapshot
             .saga_policy_digests()
             .map(|(run_id, digest)| (run_id.clone(), digest.clone()))
@@ -6569,16 +6684,6 @@ fn validate_artifact_schema_policy(
 ) -> Result<()> {
     let actual = evidence.schema_id.as_ref().map(SchemaId::as_str);
     match policy {
-        events::ArtifactSchemaPolicy::OptionalLaunchSchema => {
-            if let Some(schema_id) = &requirement.schema_id {
-                compare_artifact_option(
-                    &requirement.artifact_id,
-                    "schema_id",
-                    actual,
-                    Some(schema_id.as_str()),
-                )?;
-            }
-        }
         events::ArtifactSchemaPolicy::ExactSeedSchema
         | events::ArtifactSchemaPolicy::ExactValueSchema
         | events::ArtifactSchemaPolicy::ExactEvidenceSchema
@@ -6624,16 +6729,6 @@ fn validate_artifact_semantic_policy(
         .as_ref()
         .map(SemanticTypeId::as_str);
     match policy {
-        events::ArtifactSemanticPolicy::OptionalLaunchSemantic => {
-            if let Some(semantic_type_id) = &requirement.semantic_type_id {
-                compare_artifact_option(
-                    &requirement.artifact_id,
-                    "semantic_type_id",
-                    actual,
-                    Some(semantic_type_id.as_str()),
-                )?;
-            }
-        }
         events::ArtifactSemanticPolicy::ExactSeedSemantic
         | events::ArtifactSemanticPolicy::ExactValueSemantic => {
             if let Some(semantic_type_id) = &requirement.semantic_type_id {
@@ -8172,7 +8267,7 @@ use self::resource_lanes::{
 };
 use self::side_effects::{
     note_saga_engagement, prepared_invocation_projection, require_active_attempt_for_side_effect,
-    require_forward_fence_open, require_forward_quiescence, require_remediation_intent_admissible,
+    require_forward_fence_open, require_remediation_intent_admissible,
     require_side_effect_pair_consistent, require_side_effect_pair_event, require_side_effect_phase,
     require_side_effect_purpose, side_effect_projection_error, transition_side_effect_epoch_only,
     transition_side_effect_failure, EpochOnlyTransition,

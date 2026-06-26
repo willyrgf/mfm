@@ -35,6 +35,34 @@ pub const REGISTRY_DIGEST_ALGORITHM: &str = "mfm-certify.registry-digest.v1";
 /// Supported digest-only signing scheme for certified manual resolution decisions.
 pub const MANUAL_RESOLUTION_SIGNING_SCHEME: &str = "mfm.manual_resolution.digest_signature.v1";
 
+/// Returns the schema id for canonical persisted v1 typed-spec certificates.
+pub fn typed_spec_certificate_schema_id() -> Result<SchemaId> {
+    let digest = content_digest_json(serde_json::json!({
+        "fields": [
+            "certificate_version",
+            "media_type",
+            "certifier_algorithm",
+            "spec_hash",
+            "registry_digest",
+            "descriptor_identities",
+            "schema_role_grants",
+            "manual_authorization_verifiers",
+            "operator_authority_snapshots",
+            "certificate_hash",
+        ],
+        "media_type": CERTIFICATE_MEDIA_TYPE,
+        "name": "mfm.certified_typed_spec_certificate",
+        "version": "1",
+    }))?;
+    SchemaId::new(
+        "mfm.certified_typed_spec_certificate",
+        "1",
+        DigestAlgorithm::Sha256JcsV1,
+        *digest.digest(),
+    )
+    .map_err(|error| CertifyError::Certificate(error.to_string()))
+}
+
 /// Problem taxonomy class rejected by typed certification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ProblemClass {
@@ -752,12 +780,12 @@ impl CertifiedSideEffectContract {
                 forward_ledger_purpose,
                 events::SideEffectLedgerPurpose::Forward
             )
-            || !link.forward_confirmed
+            || !link.forward_terminal
         {
             return Err(problem(
                 ProblemClass::InvalidSemanticTransition,
                 format!(
-                    "remediation node {} linked ledger outside certified confirmed forward node {}",
+                    "remediation node {} linked ledger outside certified terminal forward node {}",
                     self.node_id, expected_forward_node_id
                 ),
             ));
@@ -779,8 +807,8 @@ pub struct CertifiedRemediationLink<'a> {
     pub forward_node_id: Option<&'a NodeId>,
     /// Ledger purpose of the linked forward ledger, when projected.
     pub forward_ledger_purpose: Option<&'a events::SideEffectLedgerPurpose>,
-    /// Whether the linked forward ledger is confirmed.
-    pub forward_confirmed: bool,
+    /// Whether the linked forward ledger has certified terminal side-effect evidence.
+    pub forward_terminal: bool,
 }
 
 /// Non-forgeable certified typed spec ready to become runtime authority.
@@ -7756,7 +7784,7 @@ mod tests {
                 forward_run_id: None,
                 forward_node_id: None,
                 forward_ledger_purpose: None,
-                forward_confirmed: false,
+                forward_terminal: false,
             })
             .is_err());
         assert!(contract
@@ -7766,7 +7794,7 @@ mod tests {
                 forward_run_id: Some(&run_id),
                 forward_node_id: Some(forward_node_id),
                 forward_ledger_purpose: Some(&forward_purpose),
-                forward_confirmed: true,
+                forward_terminal: true,
             })
             .is_ok());
     }

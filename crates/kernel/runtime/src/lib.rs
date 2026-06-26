@@ -69,7 +69,7 @@ pub use runner_kit::{
 pub use runners::{
     CapabilityImplementationBinding, CapabilityImplementationId, ErasedNodeRunner,
     ErasedRunnerBinding, ErasedRunnerFuture, ErasedRunnerOutput, ErasedRunnerRegistry,
-    PreInvocationRunnerFuture, RunnerEventPayload,
+    PreInvocationRunnerFuture, RunnerEventPayload, RunnerIngressContext,
 };
 pub use scheduler::{
     ManualResolutionRequest, RunAdmittedBindingCompatibility, SchedulerStatus, SerialTypedScheduler,

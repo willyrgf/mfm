@@ -27,10 +27,10 @@ use axum::Json;
 use axum::Router;
 use http::header::HeaderName;
 use mfm_app::{
-    AppError, DistinctRunKey, DriveMode, EntryPointRunLaunchInput, ErrorClass,
-    ManualResolutionDecision, ManualResolutionRecordRequest, ProductionRunStore, PublicOpName,
-    PublicOutputResponse, PublicSafeMessage, RunLaunchOutcomeStatus, RunModeStatus, RunResponse,
-    RunServices, RunStreamResponse,
+    AppError, DistinctRunKey, EntryPointRunLaunchInput, ErrorClass, ManualResolutionDecision,
+    ManualResolutionRecordRequest, ProductionRunStore, PublicOpName, PublicOutputResponse,
+    PublicSafeMessage, RunLaunchOutcomeStatus, RunModeStatus, RunResponse, RunServices,
+    RunStreamResponse,
 };
 use mfm_authored_config::{AuthoredConfig, AuthoredConfigFormat};
 use mfm_canonical::PlainCanonicalJsonBytes;
@@ -337,25 +337,6 @@ enum ManualResolutionKind {
     ManualResolutionV1,
 }
 
-#[derive(Debug, Clone, Copy, Default, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum RestDriveMode {
-    AppendOnly,
-    Once,
-    #[default]
-    UntilBlocked,
-}
-
-impl RestDriveMode {
-    fn into_app(self) -> DriveMode {
-        match self {
-            Self::AppendOnly => DriveMode::AppendOnly,
-            Self::Once => DriveMode::Once,
-            Self::UntilBlocked => DriveMode::UntilBlocked,
-        }
-    }
-}
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RunStartBody {
@@ -367,8 +348,6 @@ struct RunStartBody {
     config: serde_json::Value,
     #[serde(default)]
     distinct_run_key: Option<String>,
-    #[serde(default)]
-    drive: RestDriveMode,
 }
 
 #[derive(Debug, Serialize)]
@@ -396,10 +375,7 @@ impl From<RestConfigFormat> for AuthoredConfigFormat {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RunResumeBody {
-    #[serde(default)]
-    drive: RestDriveMode,
-}
+struct RunResumeBody {}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -412,8 +388,6 @@ struct ManualResolutionBody {
     evidence_media_type: String,
     #[serde(default)]
     note: Option<String>,
-    #[serde(default)]
-    drive: RestDriveMode,
 }
 
 #[derive(Debug, Deserialize)]
@@ -557,7 +531,6 @@ where
         certification_registry: services.certification_registry(),
         trust_scope_id,
         distinct_run_key,
-        drive: req.drive.into_app(),
     })?;
     let run_id = prepared.request.run_id.clone();
     let public_output_schema_id = prepared
@@ -610,11 +583,8 @@ where
         + 'static,
 {
     let run_id = parse_run_id(&run_id)?;
-    let req: RunResumeBody = parse_optional_body(body)?;
-    let data = state
-        .services()?
-        .resume_stored_run(&run_id, req.drive.into_app())
-        .await?;
+    let _req: RunResumeBody = parse_optional_body(body)?;
+    let data = state.services()?.resume_stored_run(&run_id).await?;
 
     json_ok(data)
 }
@@ -653,7 +623,6 @@ where
             evidence_media_type: req.evidence_media_type,
             authorization_proof_bytes: proof_bytes,
             note: req.note,
-            drive: req.drive.into_app(),
         })
         .await?;
 
@@ -893,8 +862,7 @@ mod tests {
                 "/v1/runs/start",
                 json!({
                     "op": "missing_entry_point_op",
-                    "config": "portfolio_id = \"main\"\n",
-                    "drive": "append_only"
+                    "config": "portfolio_id = \"main\"\n"
                 }),
             ))
             .await

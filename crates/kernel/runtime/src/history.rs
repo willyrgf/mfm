@@ -1125,14 +1125,20 @@ fn validate_historical_manual_resolution(
             )
         })?,
     )?;
+    let terminal_policies = store::SideEffectTerminalPolicies::from_spec(runtime_spec.spec())?;
     prefix_projection
-        .require_manual_resolution_admissible(&payload.run_id, &runtime_spec.spec().saga)
+        .require_manual_resolution_admissible(
+            &payload.run_id,
+            &runtime_spec.spec().saga,
+            &terminal_policies,
+        )
         .map_err(|error| RuntimeError::InvalidRunStream(error.to_string()))?;
-    if prefix_projection
-        .derive_saga_projection(&payload.run_id, &runtime_spec.spec().saga)
-        .manual_block_reason
-        .is_none()
-    {
+    let saga = prefix_projection.derive_saga_projection(
+        &payload.run_id,
+        &runtime_spec.spec().saga,
+        &terminal_policies,
+    )?;
+    if saga.manual_block_reason.is_none() {
         return Err(RuntimeError::InvalidRunStream(
             "manual resolution prefix lacks block reason".to_owned(),
         ));
@@ -2757,7 +2763,11 @@ pub(crate) fn validate_spec_artifact(
         || evidence.digest != digest
         || evidence.byte_len != canonical.as_bytes().len() as u64
         || evidence.media_type != runtime_spec.spec().media_type
-        || evidence.schema_id.is_some()
+        || evidence.schema_id.as_ref()
+            != Some(
+                &spec::typed_execution_spec_schema_id()
+                    .map_err(|error| RuntimeError::Identity(error.to_string()))?,
+            )
         || evidence.semantic_type_id.is_some()
         || evidence.producer_node_id.is_some()
         || evidence.producer_seed_id.is_some()
@@ -2786,7 +2796,11 @@ pub(crate) fn validate_certificate_artifact(
         || evidence.digest != digest
         || evidence.byte_len != canonical.as_bytes().len() as u64
         || evidence.media_type != media_type
-        || evidence.schema_id.is_some()
+        || evidence.schema_id.as_ref()
+            != Some(
+                &mfm_certify::typed_spec_certificate_schema_id()
+                    .map_err(|error| RuntimeError::Identity(error.to_string()))?,
+            )
         || evidence.semantic_type_id.is_some()
         || evidence.producer_node_id.is_some()
         || evidence.producer_seed_id.is_some()

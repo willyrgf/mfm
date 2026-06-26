@@ -44,25 +44,12 @@ pub(super) fn require_forward_fence_open(
     Ok(())
 }
 
-pub(super) fn require_forward_quiescence(
-    projections: &ProjectionSnapshot,
-    run_id: &RunId,
-) -> Result<()> {
-    if forward_ledgers_quiescent(projections, run_id) {
-        Ok(())
-    } else {
-        Err(StoreError::ProjectionConflict {
-            key: format!("run:{run_id}:quiescence"),
-            message: "past-boundary forward side-effect ledgers must be quiescent".to_owned(),
-        })
-    }
-}
-
 pub(super) fn require_remediation_intent_admissible(
     projections: &ProjectionSnapshot,
     run_id: &RunId,
     remediation_ledger_key: &events::SideEffectLedgerKey,
     purpose: &events::SideEffectLedgerPurpose,
+    terminal_policies: &SideEffectTerminalPolicies,
 ) -> Result<()> {
     let events::SideEffectLedgerPurpose::Remediation { forward_pair_id } = purpose else {
         return Ok(());
@@ -88,10 +75,13 @@ pub(super) fn require_remediation_intent_admissible(
             message: "remediation ledger references a non-forward ledger".to_owned(),
         });
     }
-    if !matches!(forward.phase, SideEffectPhase::ConfirmationObserved { .. }) {
+    if !terminal_policies
+        .require(forward_pair_id)?
+        .is_terminal_phase(&forward.phase)
+    {
         return Err(StoreError::ProjectionConflict {
             key: format!("sidefx:{remediation_ledger_key}"),
-            message: "remediation ledger requires confirmed forward ledger".to_owned(),
+            message: "remediation ledger requires terminal forward ledger".to_owned(),
         });
     }
     if projections.side_effects.values().any(|projection| {

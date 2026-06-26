@@ -435,6 +435,8 @@ pub mod v1 {
         pub confirmation: side_effect::ConfirmationObserved,
         /// Retained confirmation artifact evidence.
         pub artifact: StoredArtifactEvidenceRef,
+        /// Retained confirmation artifact bytes.
+        pub artifact_bytes: Vec<u8>,
     }
 
     /// Replay evidence returned for recorded side-effect ambiguity.
@@ -484,6 +486,8 @@ pub mod v1 {
         pub submission: Option<SubmissionReplayEvidence>,
         /// Receipt evidence observed before confirmation.
         pub receipt: Option<ReceiptReplayEvidence>,
+        /// Certified verification policy for the side effect.
+        pub verification: spec::SideEffectVerificationSpec,
         /// Confirmation evidence being verified.
         pub confirmation: ConfirmationReplayEvidence,
     }
@@ -908,6 +912,9 @@ pub mod v1 {
                     producer_node_id: Some(&confirmation.node_id),
                     producer_seed_id: None,
                 })?,
+                artifact_bytes: self
+                    .artifact_bytes(&confirmation.confirmation_artifact_id)?
+                    .to_vec(),
             })
         }
 
@@ -982,6 +989,7 @@ pub mod v1 {
                 intent: self.side_effect_intent_evidence(request)?,
                 submission: self.side_effect_submission_for(request)?,
                 receipt: self.side_effect_receipt_for(request)?,
+                verification: self.side_effect_verification_for_pair(&request.pair_id)?,
                 confirmation: confirmation.clone(),
             };
             verifier.verify_confirmation(&input)?;
@@ -1371,6 +1379,24 @@ pub mod v1 {
             }))
         }
 
+        fn side_effect_verification_for_pair(
+            &self,
+            pair_id: &SideEffectPairId,
+        ) -> Result<spec::SideEffectVerificationSpec> {
+            let (_, verify) = self.side_effect_verify_node_for_pair(pair_id)?;
+            let submit_node = self.node(&verify.submit_node_id)?;
+            let side_effect = submit_node.side_effect.as_ref().ok_or_else(|| {
+                ReplayError::new(
+                    ReplayErrorKind::CertifiedEvidenceMismatch,
+                    format!(
+                        "side-effect submit node {} has no certified side-effect contract",
+                        submit_node.node_id
+                    ),
+                )
+            })?;
+            Ok(side_effect.verification.clone())
+        }
+
         fn verify_side_effect_intent(
             &self,
             request: &SideEffectEvidenceReplayRequest,
@@ -1603,6 +1629,9 @@ pub mod v1 {
                 }
                 events::SideEffectLedgerPurpose::Forward => None,
             };
+            let terminal_policies =
+                store::SideEffectTerminalPolicies::from_spec(&self.certified_spec.spec)
+                    .map_err(store_error)?;
             contract
                 .validate_remediation_link(CertifiedRemediationLink {
                     remediation_run_id: &self.run_id.run_id,
@@ -1610,12 +1639,15 @@ pub mod v1 {
                     forward_run_id: forward.map(|projection| &projection.run_id),
                     forward_node_id: forward.map(|projection| &projection.intent.node_id),
                     forward_ledger_purpose: forward.map(|projection| &projection.ledger_purpose),
-                    forward_confirmed: forward.is_some_and(|projection| {
-                        matches!(
-                            projection.phase,
-                            store::SideEffectPhase::ConfirmationObserved { .. }
-                        )
-                    }),
+                    forward_terminal: forward
+                        .map(|projection| {
+                            terminal_policies
+                                .require(&projection.pair_id)
+                                .map(|policy| policy.is_terminal_phase(&projection.phase))
+                        })
+                        .transpose()
+                        .map_err(store_error)?
+                        .unwrap_or(false),
                 })
                 .map_err(certified_contract_mismatch)?;
             self.verify_node_capability(
@@ -1735,10 +1767,14 @@ pub mod v1 {
                 ProjectionSnapshot::rebuild_from_run_stream(&self.stream[..manual_start]).map_err(
                     |error| ReplayError::new(ReplayErrorKind::InvalidRunStream, error.to_string()),
                 )?;
+            let terminal_policies =
+                store::SideEffectTerminalPolicies::from_spec(&self.certified_spec.spec)
+                    .map_err(store_error)?;
             prefix_projection
                 .require_manual_resolution_admissible(
                     &payload.run_id,
                     &self.certified_spec.spec.saga,
+                    &terminal_policies,
                 )
                 .map_err(|error| {
                     ReplayError::new(
@@ -1747,7 +1783,17 @@ pub mod v1 {
                     )
                 })?;
             let prefix_saga = prefix_projection
-                .derive_saga_projection(&payload.run_id, &self.certified_spec.spec.saga);
+                .derive_saga_projection(
+                    &payload.run_id,
+                    &self.certified_spec.spec.saga,
+                    &terminal_policies,
+                )
+                .map_err(|error| {
+                    ReplayError::new(
+                        ReplayErrorKind::CertifiedEvidenceMismatch,
+                        error.to_string(),
+                    )
+                })?;
             let block_reason = prefix_saga.manual_block_reason.ok_or_else(|| {
                 certified_evidence_mismatch("manual resolution prefix lacks block reason")
             })?;
@@ -1889,10 +1935,14 @@ pub mod v1 {
                     let prefix_projection = ProjectionSnapshot::rebuild_from_run_stream(
                         &self.stream[..terminal_start],
                     )?;
+                    let terminal_policies =
+                        store::SideEffectTerminalPolicies::from_spec(&self.certified_spec.spec)
+                            .map_err(store_error)?;
                     let saga = prefix_projection.derive_saga_projection(
                         &self.run_id.run_id,
                         &self.certified_spec.spec.saga,
-                    );
+                        &terminal_policies,
+                    )?;
                     let proof = store::SagaTerminalProof::new(
                         &self.certified_spec.spec.saga,
                         &saga,
@@ -2433,6 +2483,18 @@ pub mod v1 {
                 })?;
             Ok(evidence.clone())
         }
+
+        fn artifact_bytes(&self, artifact_id: &ArtifactId) -> Result<&[u8]> {
+            self.artifact_bytes
+                .get(artifact_id)
+                .map(Vec::as_slice)
+                .ok_or_else(|| {
+                    ReplayError::new(
+                        ReplayErrorKind::ArtifactMissing,
+                        format!("missing replay-authorized artifact bytes for {artifact_id}"),
+                    )
+                })
+        }
     }
 
     fn artifact_map(
@@ -2571,6 +2633,9 @@ pub mod v1 {
                 }
                 events::SideEffectLedgerPurpose::Forward => None,
             };
+            let terminal_policies =
+                store::SideEffectTerminalPolicies::from_spec(&certified_spec.spec)
+                    .map_err(store_error)?;
             contract
                 .validate_remediation_link(CertifiedRemediationLink {
                     remediation_run_id: &side_effect.run_id,
@@ -2578,12 +2643,15 @@ pub mod v1 {
                     forward_run_id: forward.map(|projection| &projection.run_id),
                     forward_node_id: forward.map(|projection| &projection.intent.node_id),
                     forward_ledger_purpose: forward.map(|projection| &projection.ledger_purpose),
-                    forward_confirmed: forward.is_some_and(|projection| {
-                        matches!(
-                            projection.phase,
-                            store::SideEffectPhase::ConfirmationObserved { .. }
-                        )
-                    }),
+                    forward_terminal: forward
+                        .map(|projection| {
+                            terminal_policies
+                                .require(&projection.pair_id)
+                                .map(|policy| policy.is_terminal_phase(&projection.phase))
+                        })
+                        .transpose()
+                        .map_err(store_error)?
+                        .unwrap_or(false),
                 })
                 .map_err(certified_contract_mismatch)?;
         }
@@ -2690,6 +2758,10 @@ pub mod v1 {
         )
     }
 
+    fn store_error(error: store::StoreError) -> ReplayError {
+        ReplayError::from(error)
+    }
+
     fn run_admitted_payload(stream: &[KernelEventEnvelope]) -> Result<events::RunAdmitted> {
         let mut run_admitted = None;
         for envelope in stream {
@@ -2774,8 +2846,14 @@ pub mod v1 {
             &run_admitted.spec_artifact,
             ArtifactRole::TypedExecutionSpec,
         )?;
+        let spec_schema_id = spec::typed_execution_spec_schema_id().map_err(|error| {
+            ReplayError::new(
+                ReplayErrorKind::ArtifactMismatch,
+                format!("typed execution spec schema id is invalid: {error}"),
+            )
+        })?;
         if run_admitted.spec_artifact.content_digest != spec_digest(&certified_spec.spec_hash)
-            || run_admitted.spec_artifact.schema_id.is_some()
+            || run_admitted.spec_artifact.schema_id.as_ref() != Some(&spec_schema_id)
         {
             return Err(ReplayError::new(
                 ReplayErrorKind::ArtifactMismatch,
@@ -2787,6 +2865,19 @@ pub mod v1 {
             &run_admitted.certificate_artifact,
             ArtifactRole::TypedSpecCertificate,
         )?;
+        let certificate_schema_id =
+            mfm_certify::typed_spec_certificate_schema_id().map_err(|error| {
+                ReplayError::new(
+                    ReplayErrorKind::ArtifactMismatch,
+                    format!("typed spec certificate schema id is invalid: {error}"),
+                )
+            })?;
+        if run_admitted.certificate_artifact.schema_id.as_ref() != Some(&certificate_schema_id) {
+            return Err(ReplayError::new(
+                ReplayErrorKind::ArtifactMismatch,
+                "typed spec certificate artifact evidence does not match run admission",
+            ));
+        }
         for artifact in &run_admitted.config_artifacts {
             verify_run_artifact(artifacts, artifact, ArtifactRole::TypedConfig)?;
         }

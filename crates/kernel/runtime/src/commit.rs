@@ -1817,11 +1817,14 @@ fn runner_output_preconditions(
         &node.framework,
         Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_))
     ) {
-        preconditions.saga_admit_token = Some(store::SagaAdmitToken::new(
-            run_id.clone(),
-            runtime_spec.spec_hash().clone(),
-            runtime_spec.spec().saga.clone(),
-        )?);
+        preconditions.saga_admit_token = Some(saga_admit_token(runtime_spec, run_id)?);
+    }
+    if node.side_effect.is_some()
+        && runtime_spec
+            .forward_node_for_remediation(&node.node_id)
+            .is_some()
+    {
+        preconditions.saga_admit_token = Some(saga_admit_token(runtime_spec, run_id)?);
     }
 
     if let Some(verify) = side_effect_verify_spec(node) {
@@ -1988,6 +1991,16 @@ fn side_effect_verify_terminal_required_state(
             Ok(store::RequiredSideEffectState::ConfirmationObserved)
         }
     }
+}
+
+fn saga_admit_token(
+    runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
+) -> Result<store::SagaAdmitToken> {
+    Ok(store::SagaAdmitToken::from_spec(
+        run_id.clone(),
+        runtime_spec.spec(),
+    )?)
 }
 
 fn push_side_effect_precondition(

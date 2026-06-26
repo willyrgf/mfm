@@ -4,12 +4,13 @@ pub(super) fn derive_saga_projection(
     projections: &ProjectionSnapshot,
     run_id: &RunId,
     policy: &SagaPolicySpec,
-) -> SagaProjection {
-    let obligations = derive_saga_obligations(projections, run_id);
+    terminal_policies: &SideEffectTerminalPolicies,
+) -> Result<SagaProjection> {
+    let obligations = derive_saga_obligations(projections, run_id, terminal_policies)?;
     let run_completion = projections.run_completion(run_id).cloned();
     let manual_resolution = projections.manual_resolution(run_id).cloned();
     let engagement = projections.saga_engagement(run_id).cloned();
-    let forward_quiescent = forward_ledgers_quiescent(projections, run_id);
+    let forward_quiescent = forward_ledgers_quiescent(projections, run_id, terminal_policies)?;
     let has_forward_boundary = obligations
         .values()
         .any(|obligation| forward_ledger_crossed_boundary(&obligation.forward_phase));
@@ -44,7 +45,7 @@ pub(super) fn derive_saga_projection(
         )
     };
 
-    SagaProjection {
+    Ok(SagaProjection {
         run_id: run_id.clone(),
         run_mode,
         engagement,
@@ -53,13 +54,14 @@ pub(super) fn derive_saga_projection(
         obligations,
         manual_resolution,
         run_completion,
-    }
+    })
 }
 
 fn derive_saga_obligations(
     projections: &ProjectionSnapshot,
     run_id: &RunId,
-) -> BTreeMap<SideEffectPairId, SagaObligationProjection> {
+    terminal_policies: &SideEffectTerminalPolicies,
+) -> Result<BTreeMap<SideEffectPairId, SagaObligationProjection>> {
     projections
         .side_effects
         .values()
@@ -71,17 +73,21 @@ fn derive_saga_obligations(
                 )
         })
         .map(|forward| {
-            let remediation = remediation_for_forward(projections, run_id, &forward.pair_id);
-            (
+            let remediation =
+                remediation_for_forward(projections, run_id, &forward.pair_id, terminal_policies)?;
+            Ok((
                 forward.pair_id.clone(),
                 SagaObligationProjection {
                     forward_ledger_key: forward.ledger_key.clone(),
                     forward_pair_id: forward.pair_id.clone(),
                     forward_phase: forward.phase.clone(),
-                    classification: forward_ledger_classification(&forward.phase),
+                    classification: forward_ledger_classification(
+                        &forward.phase,
+                        terminal_policies.require(&forward.pair_id)?,
+                    ),
                     remediation,
                 },
-            )
+            ))
         })
         .collect()
 }
@@ -90,7 +96,8 @@ fn remediation_for_forward(
     projections: &ProjectionSnapshot,
     run_id: &RunId,
     forward_pair_id: &SideEffectPairId,
-) -> Option<RemediationLedgerProjection> {
+    terminal_policies: &SideEffectTerminalPolicies,
+) -> Result<Option<RemediationLedgerProjection>> {
     projections
         .side_effects
         .values()
@@ -106,17 +113,17 @@ fn remediation_for_forward(
         })
         .map(|projection| {
             let unresolved = remediation_unresolved_reason(projections, projection);
-            RemediationLedgerProjection {
+            Ok(RemediationLedgerProjection {
                 ledger_key: projection.ledger_key.clone(),
                 pair_id: projection.pair_id.clone(),
                 phase: projection.phase.clone(),
-                closed: matches!(
-                    projection.phase,
-                    SideEffectPhase::ConfirmationObserved { .. }
-                ),
+                closed: terminal_policies
+                    .require(&projection.pair_id)?
+                    .is_terminal_phase(&projection.phase),
                 unresolved,
-            }
+            })
         })
+        .transpose()
 }
 
 fn run_mode_for_uncompleted_quiescent_saga(
@@ -211,7 +218,10 @@ fn side_effect_failure_retryable(
     }
 }
 
-fn forward_ledger_classification(phase: &SideEffectPhase) -> ForwardLedgerClassification {
+fn forward_ledger_classification(
+    phase: &SideEffectPhase,
+    terminal_policy: SideEffectTerminalPolicy,
+) -> ForwardLedgerClassification {
     match phase {
         SideEffectPhase::IntentPersisted { .. }
         | SideEffectPhase::Claimed { .. }
@@ -220,28 +230,40 @@ fn forward_ledger_classification(phase: &SideEffectPhase) -> ForwardLedgerClassi
         | SideEffectPhase::Failed { .. } => ForwardLedgerClassification::NothingOwed,
         SideEffectPhase::InvocationStarted { .. }
         | SideEffectPhase::SubmissionObserved { .. }
-        | SideEffectPhase::SubmissionUnknown { .. }
-        | SideEffectPhase::ReceiptObserved { .. } => ForwardLedgerClassification::Pending,
-        SideEffectPhase::ConfirmationObserved { .. } => ForwardLedgerClassification::Owed,
+        | SideEffectPhase::SubmissionUnknown { .. } => ForwardLedgerClassification::Pending,
+        SideEffectPhase::ReceiptObserved { .. } | SideEffectPhase::ConfirmationObserved { .. } => {
+            if terminal_policy.is_terminal_phase(phase) {
+                ForwardLedgerClassification::Owed
+            } else {
+                ForwardLedgerClassification::Pending
+            }
+        }
         SideEffectPhase::Ambiguous { .. } => ForwardLedgerClassification::Unresolvable,
     }
 }
 
-pub(super) fn forward_ledgers_quiescent(projections: &ProjectionSnapshot, run_id: &RunId) -> bool {
-    projections
-        .side_effects
-        .values()
-        .filter(|projection| {
-            projection.run_id == *run_id
-                && matches!(
-                    projection.ledger_purpose,
-                    events::SideEffectLedgerPurpose::Forward
-                )
-        })
-        .all(|projection| {
-            !forward_ledger_crossed_boundary(&projection.phase)
-                || forward_ledger_phase_is_quiescent(&projection.phase)
-        })
+pub(super) fn forward_ledgers_quiescent(
+    projections: &ProjectionSnapshot,
+    run_id: &RunId,
+    terminal_policies: &SideEffectTerminalPolicies,
+) -> Result<bool> {
+    for projection in projections.side_effects.values().filter(|projection| {
+        projection.run_id == *run_id
+            && matches!(
+                projection.ledger_purpose,
+                events::SideEffectLedgerPurpose::Forward
+            )
+    }) {
+        if forward_ledger_crossed_boundary(&projection.phase)
+            && !forward_ledger_phase_is_quiescent(
+                &projection.phase,
+                terminal_policies.require(&projection.pair_id)?,
+            )
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn forward_ledger_crossed_boundary(phase: &SideEffectPhase) -> bool {
@@ -261,13 +283,21 @@ fn forward_ledger_crossed_boundary(phase: &SideEffectPhase) -> bool {
     )
 }
 
-fn forward_ledger_phase_is_quiescent(phase: &SideEffectPhase) -> bool {
-    matches!(
-        phase,
+fn forward_ledger_phase_is_quiescent(
+    phase: &SideEffectPhase,
+    terminal_policy: SideEffectTerminalPolicy,
+) -> bool {
+    match phase {
         SideEffectPhase::NotSubmittedProven { .. }
-            | SideEffectPhase::ReceiptObserved { .. }
-            | SideEffectPhase::ConfirmationObserved { .. }
-            | SideEffectPhase::Ambiguous { .. }
-            | SideEffectPhase::Failed { .. }
-    )
+        | SideEffectPhase::ConfirmationObserved { .. }
+        | SideEffectPhase::Ambiguous { .. }
+        | SideEffectPhase::Failed { .. } => true,
+        SideEffectPhase::ReceiptObserved { .. } => terminal_policy.is_terminal_phase(phase),
+        SideEffectPhase::IntentPersisted { .. }
+        | SideEffectPhase::Claimed { .. }
+        | SideEffectPhase::InvocationPrepared { .. }
+        | SideEffectPhase::InvocationStarted { .. }
+        | SideEffectPhase::SubmissionObserved { .. }
+        | SideEffectPhase::SubmissionUnknown { .. } => false,
+    }
 }

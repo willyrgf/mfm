@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use crate::commands::result::{CommandError, CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
-use crate::support::run_store::{connect_run_services, drive_mode, DriveArg, RunStoresArgs};
+use crate::support::run_store::{connect_run_services, RunStoresArgs};
 use clap::{Args, ValueEnum};
 use mfm_app::{
     DistinctRunKey, EntryPointRunLaunchInput, PublicOpName, PublicOutputResponse,
@@ -34,10 +34,6 @@ pub(crate) struct StartArgs {
     /// Caller-supplied key that forces a distinct run of otherwise identical certified work.
     #[arg(long, value_name = "KEY")]
     pub distinct_run_key: Option<String>,
-
-    /// Scheduler drive policy after the typed RunAdmitted event is committed.
-    #[arg(long, value_enum, default_value_t = DriveArg::UntilBlocked)]
-    pub drive: DriveArg,
 
     /// Storage configuration for certified typed run events and artifacts.
     #[command(flatten)]
@@ -117,7 +113,6 @@ async fn execute_internal(args: &StartArgs) -> CommandResult<StartOutput> {
         certification_registry: &certification_registry,
         trust_scope_id,
         distinct_run_key,
-        drive: drive_mode(args.drive),
     })?;
     let run_id = prepared.request.run_id.clone();
     let public_output_schema_id = prepared
@@ -256,7 +251,6 @@ mod tests {
             op_version: None,
             config_format: ConfigFormatArg::Json,
             distinct_run_key: None,
-            drive: DriveArg::AppendOnly,
             stores,
         }
     }

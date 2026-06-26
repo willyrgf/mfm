@@ -14,7 +14,8 @@ use crate::framework::{
     framework_resolve_saga_terminal_binding, framework_retention_manifest_binding,
 };
 use crate::{
-    ErasedRunCtx, PreInvocationRunCtx, Result, RuntimeError, StagedArtifact, StagedRetentionRefs,
+    CertifiedRuntimeSpec, ErasedRunCtx, PreInvocationRunCtx, Result, RunLaunchArtifact,
+    RunLaunchEvidence, RuntimeError, StagedArtifact, StagedRetentionRefs,
 };
 
 /// Boxed future returned by an erased typed runner.
@@ -25,11 +26,81 @@ pub type ErasedRunnerFuture<'a> =
 pub type PreInvocationRunnerFuture<'a> =
     Pin<Box<dyn Future<Output = Result<ErasedRunnerOutput>> + Send + 'a>>;
 
+/// Pre-admission context supplied to runner ingress validators.
+///
+/// This context contains only certified launch authority and caller-supplied launch artifact bytes.
+/// It exists so a runner can reject missing process-local capability before `RunAdmitted` is
+/// appended, without reading mutable store state or executing the node.
+#[derive(Clone, Copy)]
+pub struct RunnerIngressContext<'a> {
+    runtime_spec: &'a CertifiedRuntimeSpec,
+    node: &'a spec::NodeSpec,
+    launch: &'a RunLaunchEvidence,
+}
+
+impl<'a> RunnerIngressContext<'a> {
+    pub(crate) fn new(
+        runtime_spec: &'a CertifiedRuntimeSpec,
+        node: &'a spec::NodeSpec,
+        launch: &'a RunLaunchEvidence,
+    ) -> Self {
+        Self {
+            runtime_spec,
+            node,
+            launch,
+        }
+    }
+
+    /// Returns the certified runtime spec being launched.
+    pub fn runtime_spec(&self) -> &'a CertifiedRuntimeSpec {
+        self.runtime_spec
+    }
+
+    /// Returns the certified node bound to the runner.
+    pub fn node(&self) -> &'a spec::NodeSpec {
+        self.node
+    }
+
+    /// Returns the launch artifact matching this node's certified config ref.
+    pub fn config_artifact(&self) -> Result<&'a RunLaunchArtifact> {
+        self.config_artifact_for_node(self.node)
+    }
+
+    /// Returns the launch artifact matching another certified node's config ref.
+    pub fn config_artifact_for_node(
+        &self,
+        node: &'a spec::NodeSpec,
+    ) -> Result<&'a RunLaunchArtifact> {
+        let config = &node.config_ref;
+        self.launch
+            .config_artifacts
+            .iter()
+            .find(|artifact| {
+                artifact.evidence.artifact_id == config.artifact_id
+                    && artifact.evidence.digest == config.digest
+                    && artifact.evidence.byte_len == config.byte_len
+                    && artifact.evidence.media_type == config.media_type
+                    && artifact.evidence.schema_id.as_ref() == Some(&config.schema_id)
+            })
+            .ok_or_else(|| {
+                RuntimeError::RunnerBinding(format!(
+                    "missing launch config artifact for node {} schema {}",
+                    node.node_id, config.schema_id
+                ))
+            })
+    }
+}
+
 /// Object-safe erased runner boundary used after typed spec certification.
 ///
 /// Runner selection is keyed by the certified node descriptor id. The runner receives only
 /// store-verified input cell evidence and certified capability descriptors.
 pub trait ErasedNodeRunner: Send + Sync {
+    /// Validates process-local capability required to admit this certified node.
+    fn validate_ingress(&self, _ctx: RunnerIngressContext<'_>) -> Result<()> {
+        Ok(())
+    }
+
     /// Emits pre-invocation resource-lane claim evidence, if this runner owns such a claim.
     fn preclaim_resource_lane<'a>(
         &'a self,
