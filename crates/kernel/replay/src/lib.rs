@@ -1215,7 +1215,7 @@ pub mod v1 {
                         self.authorize_event_artifacts(envelope.payload())?;
                     }
                     KernelEventPayload::SideEffectAmbiguous(payload) => {
-                        self.verify_side_effect_event_against_intent(
+                        self.verify_side_effect_ambiguity_against_intent(
                             &payload.pair_id,
                             &payload.ledger_key,
                             payload.invocation_epoch,
@@ -1955,6 +1955,52 @@ pub mod v1 {
             node_id: &NodeId,
             attempt_id: &AttemptId,
         ) -> Result<()> {
+            let intent =
+                self.side_effect_intent_for_event(pair_id, ledger_key, invocation_epoch)?;
+            match pair_role {
+                events::SideEffectPairRole::Submit => {
+                    verify_side_effect_submit_claim_identity(
+                        intent,
+                        node_id,
+                        attempt_id,
+                        "side-effect event does not match persisted intent",
+                    )?;
+                }
+                events::SideEffectPairRole::Verify => {
+                    let (verify_node, verify) = self.side_effect_verify_node_for_pair(pair_id)?;
+                    if verify.submit_node_id != intent.node_id || verify_node.node_id != *node_id {
+                        return Err(side_effect_mismatch(
+                            "side-effect verify event does not match certified pair",
+                        ));
+                    }
+                    self.node(node_id)?;
+                }
+            }
+            Ok(())
+        }
+
+        fn verify_side_effect_ambiguity_against_intent(
+            &self,
+            pair_id: &SideEffectPairId,
+            ledger_key: &events::SideEffectLedgerKey,
+            invocation_epoch: u32,
+            pair_role: events::SideEffectPairRole,
+            node_id: &NodeId,
+            attempt_id: &AttemptId,
+        ) -> Result<()> {
+            let intent =
+                self.side_effect_intent_for_event(pair_id, ledger_key, invocation_epoch)?;
+            verify_side_effect_ambiguity_submit_claim_binding(
+                intent, pair_role, node_id, attempt_id,
+            )
+        }
+
+        fn side_effect_intent_for_event(
+            &self,
+            pair_id: &SideEffectPairId,
+            ledger_key: &events::SideEffectLedgerKey,
+            invocation_epoch: u32,
+        ) -> Result<&side_effect::IntentPersisted> {
             let intent = self.intents.get(pair_id).ok_or_else(|| {
                 ReplayError::new(
                     ReplayErrorKind::SideEffectMissing,
@@ -1969,25 +2015,7 @@ pub mod v1 {
                     "side-effect event does not match persisted intent",
                 ));
             }
-            match pair_role {
-                events::SideEffectPairRole::Submit => {
-                    if intent.node_id != *node_id || intent.attempt_id != *attempt_id {
-                        return Err(side_effect_mismatch(
-                            "side-effect event does not match persisted intent",
-                        ));
-                    }
-                }
-                events::SideEffectPairRole::Verify => {
-                    let (verify_node, verify) = self.side_effect_verify_node_for_pair(pair_id)?;
-                    if verify.submit_node_id != intent.node_id || verify_node.node_id != *node_id {
-                        return Err(side_effect_mismatch(
-                            "side-effect verify event does not match certified pair",
-                        ));
-                    }
-                    self.node(node_id)?;
-                }
-            }
-            Ok(())
+            Ok(intent)
         }
 
         fn side_effect_contract_node_for_pair_event(
@@ -2878,6 +2906,37 @@ pub mod v1 {
         ReplayError::new(ReplayErrorKind::SideEffectMismatch, message)
     }
 
+    fn verify_side_effect_ambiguity_submit_claim_binding(
+        intent: &side_effect::IntentPersisted,
+        pair_role: events::SideEffectPairRole,
+        node_id: &NodeId,
+        attempt_id: &AttemptId,
+    ) -> Result<()> {
+        if pair_role != events::SideEffectPairRole::Verify {
+            return Err(side_effect_mismatch(
+                "side-effect ambiguity event does not use verify pair role",
+            ));
+        }
+        verify_side_effect_submit_claim_identity(
+            intent,
+            node_id,
+            attempt_id,
+            "side-effect ambiguity event does not match persisted intent",
+        )
+    }
+
+    fn verify_side_effect_submit_claim_identity(
+        intent: &side_effect::IntentPersisted,
+        node_id: &NodeId,
+        attempt_id: &AttemptId,
+        mismatch_message: &'static str,
+    ) -> Result<()> {
+        if intent.node_id != *node_id || intent.attempt_id != *attempt_id {
+            return Err(side_effect_mismatch(mismatch_message));
+        }
+        Ok(())
+    }
+
     fn insert_unique<K, V>(
         map: &mut BTreeMap<K, V>,
         key: K,
@@ -3019,6 +3078,41 @@ pub mod v1 {
             assert_eq!(request.evidence_schema_id, receipt.receipt_schema_id);
             assert_eq!(request.evidence_hash, receipt_hash);
             assert_eq!(request.replay_verifier_id, Some(replay_verifier_id));
+        }
+
+        #[test]
+        fn side_effect_ambiguity_binding_uses_verify_role_and_submit_claim_identity() {
+            let pair_id = pair_id(0x71);
+            let ledger_key =
+                events::SideEffectLedgerKey::new("ambiguity-ledger").expect("ambiguity ledger key");
+            let intent = intent_persisted(pair_id, ledger_key);
+
+            verify_side_effect_ambiguity_submit_claim_binding(
+                &intent,
+                events::SideEffectPairRole::Verify,
+                &intent.node_id,
+                &intent.attempt_id,
+            )
+            .expect("verify-role ambiguity from submit claim is valid");
+
+            let wrong_node = node_id(0x72);
+            let error = verify_side_effect_ambiguity_submit_claim_binding(
+                &intent,
+                events::SideEffectPairRole::Verify,
+                &wrong_node,
+                &intent.attempt_id,
+            )
+            .expect_err("different submit node is invalid");
+            assert_eq!(error.kind, ReplayErrorKind::SideEffectMismatch);
+
+            let error = verify_side_effect_ambiguity_submit_claim_binding(
+                &intent,
+                events::SideEffectPairRole::Submit,
+                &intent.node_id,
+                &intent.attempt_id,
+            )
+            .expect_err("ambiguity must remain verify-role evidence");
+            assert_eq!(error.kind, ReplayErrorKind::SideEffectMismatch);
         }
 
         #[test]
