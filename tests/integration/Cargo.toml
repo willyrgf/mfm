@@ -10,6 +10,7 @@ category = "test-support"
 parity-tests = []
 
 [dependencies]
+axum = "0.7"
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { version = "1.0", features = ["v4"] }
@@ -37,7 +38,6 @@ mfm-rest-api = { path = "../../bin/rest-api" }
 
 [dev-dependencies]
 alloy-primitives = { workspace = true }
-axum = "0.7"
 k256 = { version = "0.13.0", features = ["ecdsa"] }
 mfm-evm-contract-config = { path = "../../crates/evm-contract-config" }
 mfm-evm-contract-model = { path = "../../crates/evm-contract-model" }

@@ -1,7 +1,6 @@
 #![allow(clippy::disallowed_methods)]
 
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::http::StatusCode;
 use axum::{routing::post, Json, Router};
 use mfm_app::{PublicOpName, RunModeStatus};
 use mfm_events::v1 as events;
@@ -11,6 +10,7 @@ use serde_json::json;
 use tower::ServiceExt;
 
 mod support;
+use support::{json_post, response_json};
 
 const NETWORK_ID: &str = "typed-local-eth";
 static RPC_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -236,23 +236,6 @@ fn set_rpc_env(rpc_url: String) {
 
 fn rest_test_app() -> axum::Router {
     mfm_rest_api::make_app(support::in_memory_rest_app_state())
-}
-
-fn json_post(uri: &str, body: serde_json::Value) -> Request<Body> {
-    let s = serde_json::to_string(&body).expect("json request must serialize");
-    Request::builder()
-        .method("POST")
-        .uri(uri)
-        .header("content-type", "application/json")
-        .body(Body::from(s))
-        .expect("request")
-}
-
-async fn response_json(resp: axum::response::Response) -> serde_json::Value {
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .expect("body bytes");
-    serde_json::from_slice(&bytes).expect("json response")
 }
 
 async fn rpc_handler(Json(request): Json<serde_json::Value>) -> Json<serde_json::Value> {

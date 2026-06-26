@@ -21,8 +21,8 @@ use mfm_spec::v1::{
     ResourceNamespace, SagaPolicySpec, ValueLineageRef,
 };
 use mfm_store::v1::{
-    AdmissionToken, AdmissionWaiter, ArtifactEvidenceRef, AttemptStatus, AttemptTerminal,
-    CellTerminalProjection, CommitArtifactEvidenceSet, CommitKey, CommitOutcome,
+    AdmissionLease, AdmissionToken, AdmissionWaiter, ArtifactEvidenceRef, AttemptStatus,
+    AttemptTerminal, CellTerminalProjection, CommitArtifactEvidenceSet, CommitKey, CommitOutcome,
     CommitPreconditions, ExecutionClaimStatus, ExecutionClaimStore, ManualResolution,
     NowaitSkipAdmissionResult, PreparedCommit, PreparedCommitPlan, RequiredRunState,
     ResourceLaneKey, Retention, RunAdmission, RunState, SagaEngagementReason, SagaTerminal,
@@ -192,67 +192,11 @@ async fn execution_claim_acquire_busy_and_release_are_token_matched() {
     let holder = admission_token("mfm.test.execution_claim.holder");
     let other = admission_token("mfm.test.execution_claim.other");
 
-    let admitted = store
-        .acquire_execution_claim(&run, holder.clone())
-        .await
-        .expect("acquire execution claim");
-    let NowaitSkipAdmissionResult::Admitted(lease) = admitted else {
-        panic!("first execution claim should be admitted");
-    };
-    assert_eq!(lease.token, holder);
-    assert!(matches!(
-        store
-            .execution_claim_status(&run)
-            .await
-            .expect("execution claim status"),
-        ExecutionClaimStatus::Live(status) if status.token == lease.token
-    ));
-
-    let busy = store
-        .acquire_execution_claim(&run, other.clone())
-        .await
-        .expect("busy execution claim");
-    let NowaitSkipAdmissionResult::Busy(busy) = busy else {
-        panic!("second execution claim should be busy");
-    };
-    assert_eq!(busy.holder.expect("busy holder").token, lease.token);
-
-    assert!(store
-        .renew_execution_claim(&run, &other)
-        .await
-        .expect("wrong-token renew")
-        .is_none());
-    assert!(!store
-        .release_execution_claim(&run, &other)
-        .await
-        .expect("wrong-token release"));
-
-    let renewed = store
-        .renew_execution_claim(&run, &lease.token)
-        .await
-        .expect("matching-token renew")
-        .expect("matching-token renew returns lease");
-    assert_eq!(renewed.token, lease.token);
-    assert!(renewed.lease_expires_at_unix_ms >= lease.lease_expires_at_unix_ms);
-
-    assert!(store
-        .release_execution_claim(&run, &renewed.token)
-        .await
-        .expect("matching-token release"));
-    assert!(matches!(
-        store
-            .execution_claim_status(&run)
-            .await
-            .expect("released execution claim status"),
-        ExecutionClaimStatus::Unclaimed
-    ));
-    assert!(matches!(
-        store
-            .acquire_execution_claim(&run, other)
-            .await
-            .expect("acquire after release"),
-        NowaitSkipAdmissionResult::Admitted(_)
-    ));
+    mfm_store::v1::test_support::assert_execution_claim_token_lifecycle_for_test(
+        &store, &run, holder, other,
+    )
+    .await
+    .expect("execution claim lifecycle");
 
     drop_schema(&store, &schema).await;
 }
@@ -264,13 +208,7 @@ async fn execution_claim_expiry_requires_explicit_reap() {
     let holder = admission_token("mfm.test.execution_claim.expired_holder");
     let other = admission_token("mfm.test.execution_claim.expired_other");
 
-    let admitted = store
-        .acquire_execution_claim(&run, holder.clone())
-        .await
-        .expect("acquire execution claim");
-    let NowaitSkipAdmissionResult::Admitted(lease) = admitted else {
-        panic!("first execution claim should be admitted");
-    };
+    let lease = acquire_execution_claim_lease(&store, &run, holder.clone()).await;
     expire_execution_claim_row(&store, &run).await;
     assert!(matches!(
         store
@@ -332,26 +270,14 @@ async fn execution_claim_stale_token_cannot_reap_newer_holder() {
     let second = admission_token("mfm.test.execution_claim.second");
     let third = admission_token("mfm.test.execution_claim.third");
 
-    assert!(matches!(
-        store
-            .acquire_execution_claim(&run, first.clone())
-            .await
-            .expect("first acquire"),
-        NowaitSkipAdmissionResult::Admitted(_)
-    ));
+    acquire_execution_claim_lease(&store, &run, first.clone()).await;
     expire_execution_claim_row(&store, &run).await;
     assert!(store
         .reap_expired_execution_claim(&run, &first)
         .await
         .expect("first reap"));
 
-    let admitted = store
-        .acquire_execution_claim(&run, second.clone())
-        .await
-        .expect("second acquire");
-    let NowaitSkipAdmissionResult::Admitted(second_lease) = admitted else {
-        panic!("second execution claim should be admitted");
-    };
+    let second_lease = acquire_execution_claim_lease(&store, &run, second.clone()).await;
     expire_execution_claim_row(&store, &run).await;
 
     assert!(!store
@@ -373,6 +299,21 @@ async fn execution_claim_stale_token_cannot_reap_newer_holder() {
         .expect("newer holder reap"));
 
     drop_schema(&store, &schema).await;
+}
+
+async fn acquire_execution_claim_lease(
+    store: &PostgresRunStore,
+    run_id: &RunId,
+    token: AdmissionToken,
+) -> AdmissionLease {
+    let admitted = store
+        .acquire_execution_claim(run_id, token)
+        .await
+        .expect("acquire execution claim");
+    let NowaitSkipAdmissionResult::Admitted(lease) = admitted else {
+        panic!("execution claim should be admitted");
+    };
+    lease
 }
 
 fn digest_bytes(byte: u8) -> DigestBytes {

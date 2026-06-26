@@ -79,6 +79,131 @@ fn fixture_terminal_policies(fixture: &Fixture) -> store::SideEffectTerminalPoli
     runtime_spec_terminal_policies(&fixture.runtime_spec)
 }
 
+macro_rules! delegate_execution_claim_store_to_inner {
+    ($ty:ty) => {
+        impl store::ExecutionClaimStore for $ty {
+            type Error = store::StoreError;
+
+            fn acquire_execution_claim<'a>(
+                &'a self,
+                run_id: &'a RunId,
+                token: store::AdmissionToken,
+            ) -> store::AsyncStoreFuture<'a, store::NowaitSkipAdmissionResult, Self::Error> {
+                self.inner.acquire_execution_claim(run_id, token)
+            }
+
+            fn execution_claim_status<'a>(
+                &'a self,
+                run_id: &'a RunId,
+            ) -> store::AsyncStoreFuture<'a, store::ExecutionClaimStatus, Self::Error> {
+                self.inner.execution_claim_status(run_id)
+            }
+
+            fn renew_execution_claim<'a>(
+                &'a self,
+                run_id: &'a RunId,
+                token: &'a store::AdmissionToken,
+            ) -> store::AsyncStoreFuture<'a, Option<store::AdmissionLease>, Self::Error> {
+                self.inner.renew_execution_claim(run_id, token)
+            }
+
+            fn release_execution_claim<'a>(
+                &'a self,
+                run_id: &'a RunId,
+                token: &'a store::AdmissionToken,
+            ) -> store::AsyncStoreFuture<'a, bool, Self::Error> {
+                self.inner.release_execution_claim(run_id, token)
+            }
+
+            fn expired_execution_claims<'a>(
+                &'a self,
+            ) -> store::AsyncStoreFuture<'a, Vec<store::ExpiredExecutionClaim>, Self::Error> {
+                self.inner.expired_execution_claims()
+            }
+
+            fn reap_expired_execution_claim<'a>(
+                &'a self,
+                run_id: &'a RunId,
+                token: &'a store::AdmissionToken,
+            ) -> store::AsyncStoreFuture<'a, bool, Self::Error> {
+                self.inner.reap_expired_execution_claim(run_id, token)
+            }
+        }
+    };
+}
+
+macro_rules! delegate_execution_claim_store_to_refcell_inner {
+    ($ty:ty) => {
+        impl store::ExecutionClaimStore for $ty {
+            type Error = store::StoreError;
+
+            fn acquire_execution_claim<'a>(
+                &'a self,
+                run_id: &'a RunId,
+                token: store::AdmissionToken,
+            ) -> store::AsyncStoreFuture<'a, store::NowaitSkipAdmissionResult, Self::Error> {
+                let result = block_on_ready(
+                    self.inner
+                        .borrow_mut()
+                        .acquire_execution_claim(run_id, token),
+                );
+                Box::pin(std::future::ready(result))
+            }
+
+            fn execution_claim_status<'a>(
+                &'a self,
+                run_id: &'a RunId,
+            ) -> store::AsyncStoreFuture<'a, store::ExecutionClaimStatus, Self::Error> {
+                let result = block_on_ready(self.inner.borrow().execution_claim_status(run_id));
+                Box::pin(std::future::ready(result))
+            }
+
+            fn renew_execution_claim<'a>(
+                &'a self,
+                run_id: &'a RunId,
+                token: &'a store::AdmissionToken,
+            ) -> store::AsyncStoreFuture<'a, Option<store::AdmissionLease>, Self::Error> {
+                let result =
+                    block_on_ready(self.inner.borrow_mut().renew_execution_claim(run_id, token));
+                Box::pin(std::future::ready(result))
+            }
+
+            fn release_execution_claim<'a>(
+                &'a self,
+                run_id: &'a RunId,
+                token: &'a store::AdmissionToken,
+            ) -> store::AsyncStoreFuture<'a, bool, Self::Error> {
+                let result = block_on_ready(
+                    self.inner
+                        .borrow_mut()
+                        .release_execution_claim(run_id, token),
+                );
+                Box::pin(std::future::ready(result))
+            }
+
+            fn expired_execution_claims<'a>(
+                &'a self,
+            ) -> store::AsyncStoreFuture<'a, Vec<store::ExpiredExecutionClaim>, Self::Error> {
+                let result = block_on_ready(self.inner.borrow().expired_execution_claims());
+                Box::pin(std::future::ready(result))
+            }
+
+            fn reap_expired_execution_claim<'a>(
+                &'a self,
+                run_id: &'a RunId,
+                token: &'a store::AdmissionToken,
+            ) -> store::AsyncStoreFuture<'a, bool, Self::Error> {
+                let result = block_on_ready(
+                    self.inner
+                        .borrow_mut()
+                        .reap_expired_execution_claim(run_id, token),
+                );
+                Box::pin(std::future::ready(result))
+            }
+        }
+    };
+}
+
 fn derive_fixture_saga(
     fixture: &Fixture,
     projection: store::ProjectionSnapshot,
@@ -386,54 +511,7 @@ impl store::RunEventStore for TestTypedRunStore {
     }
 }
 
-impl store::ExecutionClaimStore for TestTypedRunStore {
-    type Error = store::StoreError;
-
-    fn acquire_execution_claim<'a>(
-        &'a self,
-        run_id: &'a RunId,
-        token: store::AdmissionToken,
-    ) -> store::AsyncStoreFuture<'a, store::NowaitSkipAdmissionResult, Self::Error> {
-        self.inner.acquire_execution_claim(run_id, token)
-    }
-
-    fn execution_claim_status<'a>(
-        &'a self,
-        run_id: &'a RunId,
-    ) -> store::AsyncStoreFuture<'a, store::ExecutionClaimStatus, Self::Error> {
-        self.inner.execution_claim_status(run_id)
-    }
-
-    fn renew_execution_claim<'a>(
-        &'a self,
-        run_id: &'a RunId,
-        token: &'a store::AdmissionToken,
-    ) -> store::AsyncStoreFuture<'a, Option<store::AdmissionLease>, Self::Error> {
-        self.inner.renew_execution_claim(run_id, token)
-    }
-
-    fn release_execution_claim<'a>(
-        &'a self,
-        run_id: &'a RunId,
-        token: &'a store::AdmissionToken,
-    ) -> store::AsyncStoreFuture<'a, bool, Self::Error> {
-        self.inner.release_execution_claim(run_id, token)
-    }
-
-    fn expired_execution_claims<'a>(
-        &'a self,
-    ) -> store::AsyncStoreFuture<'a, Vec<store::ExpiredExecutionClaim>, Self::Error> {
-        self.inner.expired_execution_claims()
-    }
-
-    fn reap_expired_execution_claim<'a>(
-        &'a self,
-        run_id: &'a RunId,
-        token: &'a store::AdmissionToken,
-    ) -> store::AsyncStoreFuture<'a, bool, Self::Error> {
-        self.inner.reap_expired_execution_claim(run_id, token)
-    }
-}
+delegate_execution_claim_store_to_inner!(TestTypedRunStore);
 
 impl store::RetainedArtifactReadProvider for TestTypedRunStore {
     fn read_retained_artifact<'a>(
@@ -560,54 +638,7 @@ impl store::RunEventStore for RecordingTypedRunStore {
     }
 }
 
-impl store::ExecutionClaimStore for RecordingTypedRunStore {
-    type Error = store::StoreError;
-
-    fn acquire_execution_claim<'a>(
-        &'a self,
-        run_id: &'a RunId,
-        token: store::AdmissionToken,
-    ) -> store::AsyncStoreFuture<'a, store::NowaitSkipAdmissionResult, Self::Error> {
-        self.inner.acquire_execution_claim(run_id, token)
-    }
-
-    fn execution_claim_status<'a>(
-        &'a self,
-        run_id: &'a RunId,
-    ) -> store::AsyncStoreFuture<'a, store::ExecutionClaimStatus, Self::Error> {
-        self.inner.execution_claim_status(run_id)
-    }
-
-    fn renew_execution_claim<'a>(
-        &'a self,
-        run_id: &'a RunId,
-        token: &'a store::AdmissionToken,
-    ) -> store::AsyncStoreFuture<'a, Option<store::AdmissionLease>, Self::Error> {
-        self.inner.renew_execution_claim(run_id, token)
-    }
-
-    fn release_execution_claim<'a>(
-        &'a self,
-        run_id: &'a RunId,
-        token: &'a store::AdmissionToken,
-    ) -> store::AsyncStoreFuture<'a, bool, Self::Error> {
-        self.inner.release_execution_claim(run_id, token)
-    }
-
-    fn expired_execution_claims<'a>(
-        &'a self,
-    ) -> store::AsyncStoreFuture<'a, Vec<store::ExpiredExecutionClaim>, Self::Error> {
-        self.inner.expired_execution_claims()
-    }
-
-    fn reap_expired_execution_claim<'a>(
-        &'a self,
-        run_id: &'a RunId,
-        token: &'a store::AdmissionToken,
-    ) -> store::AsyncStoreFuture<'a, bool, Self::Error> {
-        self.inner.reap_expired_execution_claim(run_id, token)
-    }
-}
+delegate_execution_claim_store_to_inner!(RecordingTypedRunStore);
 
 impl store::RunEventStore for StaleOnceTypedRunStore {
     type Error = store::StoreError;
@@ -679,54 +710,7 @@ impl store::RunEventStore for StaleOnceTypedRunStore {
     }
 }
 
-impl store::ExecutionClaimStore for StaleOnceTypedRunStore {
-    type Error = store::StoreError;
-
-    fn acquire_execution_claim<'a>(
-        &'a self,
-        run_id: &'a RunId,
-        token: store::AdmissionToken,
-    ) -> store::AsyncStoreFuture<'a, store::NowaitSkipAdmissionResult, Self::Error> {
-        self.inner.acquire_execution_claim(run_id, token)
-    }
-
-    fn execution_claim_status<'a>(
-        &'a self,
-        run_id: &'a RunId,
-    ) -> store::AsyncStoreFuture<'a, store::ExecutionClaimStatus, Self::Error> {
-        self.inner.execution_claim_status(run_id)
-    }
-
-    fn renew_execution_claim<'a>(
-        &'a self,
-        run_id: &'a RunId,
-        token: &'a store::AdmissionToken,
-    ) -> store::AsyncStoreFuture<'a, Option<store::AdmissionLease>, Self::Error> {
-        self.inner.renew_execution_claim(run_id, token)
-    }
-
-    fn release_execution_claim<'a>(
-        &'a self,
-        run_id: &'a RunId,
-        token: &'a store::AdmissionToken,
-    ) -> store::AsyncStoreFuture<'a, bool, Self::Error> {
-        self.inner.release_execution_claim(run_id, token)
-    }
-
-    fn expired_execution_claims<'a>(
-        &'a self,
-    ) -> store::AsyncStoreFuture<'a, Vec<store::ExpiredExecutionClaim>, Self::Error> {
-        self.inner.expired_execution_claims()
-    }
-
-    fn reap_expired_execution_claim<'a>(
-        &'a self,
-        run_id: &'a RunId,
-        token: &'a store::AdmissionToken,
-    ) -> store::AsyncStoreFuture<'a, bool, Self::Error> {
-        self.inner.reap_expired_execution_claim(run_id, token)
-    }
-}
+delegate_execution_claim_store_to_inner!(StaleOnceTypedRunStore);
 
 type TestArtifactMap = BTreeMap<ArtifactId, (Vec<u8>, store::ArtifactEvidenceRef)>;
 
@@ -9082,72 +9066,7 @@ impl store::RunEventStore for StaleStreamStore<'_> {
     }
 }
 
-impl store::ExecutionClaimStore for StaleStreamStore<'_> {
-    type Error = store::StoreError;
-
-    fn acquire_execution_claim<'a>(
-        &'a self,
-        run_id: &'a RunId,
-        token: store::AdmissionToken,
-    ) -> store::AsyncStoreFuture<'a, store::NowaitSkipAdmissionResult, Self::Error> {
-        let result = block_on_ready(
-            self.inner
-                .borrow_mut()
-                .acquire_execution_claim(run_id, token),
-        );
-        Box::pin(std::future::ready(result))
-    }
-
-    fn execution_claim_status<'a>(
-        &'a self,
-        run_id: &'a RunId,
-    ) -> store::AsyncStoreFuture<'a, store::ExecutionClaimStatus, Self::Error> {
-        let result = block_on_ready(self.inner.borrow().execution_claim_status(run_id));
-        Box::pin(std::future::ready(result))
-    }
-
-    fn renew_execution_claim<'a>(
-        &'a self,
-        run_id: &'a RunId,
-        token: &'a store::AdmissionToken,
-    ) -> store::AsyncStoreFuture<'a, Option<store::AdmissionLease>, Self::Error> {
-        let result = block_on_ready(self.inner.borrow_mut().renew_execution_claim(run_id, token));
-        Box::pin(std::future::ready(result))
-    }
-
-    fn release_execution_claim<'a>(
-        &'a self,
-        run_id: &'a RunId,
-        token: &'a store::AdmissionToken,
-    ) -> store::AsyncStoreFuture<'a, bool, Self::Error> {
-        let result = block_on_ready(
-            self.inner
-                .borrow_mut()
-                .release_execution_claim(run_id, token),
-        );
-        Box::pin(std::future::ready(result))
-    }
-
-    fn expired_execution_claims<'a>(
-        &'a self,
-    ) -> store::AsyncStoreFuture<'a, Vec<store::ExpiredExecutionClaim>, Self::Error> {
-        let result = block_on_ready(self.inner.borrow().expired_execution_claims());
-        Box::pin(std::future::ready(result))
-    }
-
-    fn reap_expired_execution_claim<'a>(
-        &'a self,
-        run_id: &'a RunId,
-        token: &'a store::AdmissionToken,
-    ) -> store::AsyncStoreFuture<'a, bool, Self::Error> {
-        let result = block_on_ready(
-            self.inner
-                .borrow_mut()
-                .reap_expired_execution_claim(run_id, token),
-        );
-        Box::pin(std::future::ready(result))
-    }
-}
+delegate_execution_claim_store_to_refcell_inner!(StaleStreamStore<'_>);
 
 struct MissingInputArtifactRefStore<'a> {
     inner: RefCell<&'a mut TestTypedRunStore>,
@@ -9213,72 +9132,7 @@ impl store::RunEventStore for MissingInputArtifactRefStore<'_> {
     }
 }
 
-impl store::ExecutionClaimStore for MissingInputArtifactRefStore<'_> {
-    type Error = store::StoreError;
-
-    fn acquire_execution_claim<'a>(
-        &'a self,
-        run_id: &'a RunId,
-        token: store::AdmissionToken,
-    ) -> store::AsyncStoreFuture<'a, store::NowaitSkipAdmissionResult, Self::Error> {
-        let result = block_on_ready(
-            self.inner
-                .borrow_mut()
-                .acquire_execution_claim(run_id, token),
-        );
-        Box::pin(std::future::ready(result))
-    }
-
-    fn execution_claim_status<'a>(
-        &'a self,
-        run_id: &'a RunId,
-    ) -> store::AsyncStoreFuture<'a, store::ExecutionClaimStatus, Self::Error> {
-        let result = block_on_ready(self.inner.borrow().execution_claim_status(run_id));
-        Box::pin(std::future::ready(result))
-    }
-
-    fn renew_execution_claim<'a>(
-        &'a self,
-        run_id: &'a RunId,
-        token: &'a store::AdmissionToken,
-    ) -> store::AsyncStoreFuture<'a, Option<store::AdmissionLease>, Self::Error> {
-        let result = block_on_ready(self.inner.borrow_mut().renew_execution_claim(run_id, token));
-        Box::pin(std::future::ready(result))
-    }
-
-    fn release_execution_claim<'a>(
-        &'a self,
-        run_id: &'a RunId,
-        token: &'a store::AdmissionToken,
-    ) -> store::AsyncStoreFuture<'a, bool, Self::Error> {
-        let result = block_on_ready(
-            self.inner
-                .borrow_mut()
-                .release_execution_claim(run_id, token),
-        );
-        Box::pin(std::future::ready(result))
-    }
-
-    fn expired_execution_claims<'a>(
-        &'a self,
-    ) -> store::AsyncStoreFuture<'a, Vec<store::ExpiredExecutionClaim>, Self::Error> {
-        let result = block_on_ready(self.inner.borrow().expired_execution_claims());
-        Box::pin(std::future::ready(result))
-    }
-
-    fn reap_expired_execution_claim<'a>(
-        &'a self,
-        run_id: &'a RunId,
-        token: &'a store::AdmissionToken,
-    ) -> store::AsyncStoreFuture<'a, bool, Self::Error> {
-        let result = block_on_ready(
-            self.inner
-                .borrow_mut()
-                .reap_expired_execution_claim(run_id, token),
-        );
-        Box::pin(std::future::ready(result))
-    }
-}
+delegate_execution_claim_store_to_refcell_inner!(MissingInputArtifactRefStore<'_>);
 
 fn rewrite_envelope(
     event: &store::KernelEventEnvelope,

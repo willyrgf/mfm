@@ -28,16 +28,15 @@ use mfm_store::v1::{
     AsyncInMemoryRunStore, AsyncStoreFuture, AttemptStatus, AttemptTerminal,
     CellTerminalProjection, CommitArtifactEvidenceSet, CommitKey, CommitOutcome,
     CommitPreconditions, CommitRequest, CommittedRunStream, EventArtifactReferenceSource,
-    ExecutionClaimAdmissionLane, ExecutionClaimStore, ExistingArtifactAdmission,
-    ForwardLedgerClassification, KernelEventEnvelope, ManualBlockReason, ManualResolution,
-    ManualResolutionProjection, NowaitSkipAdmissionResult, PreparedCommit, PreparedCommitBundle,
-    PreparedCommitPlan, ProjectionSnapshot, PublicOutputProjection, RequiredRunState,
-    ResourceAdmissionLane, ResourceLaneKey, Retention, RunAdmission, RunCompletionProjection,
-    RunEventStore, RunMode, RunState, SagaAdmitToken, SagaEngagementProjection,
-    SagaEngagementReason, SagaTerminal, SagaTerminalProof, SideEffectLedgerPhase,
-    SideEffectPairLedgerRef, SideEffectPhase, SideEffectProgress, SideEffectTerminal,
-    SideEffectTerminalPolicies, SideEffectTerminalPolicy, StateAttemptStarted, StoreError,
-    StreamSeq, TrustScopeId, TrustScopeStore, EXECUTION_CLAIM_HEARTBEAT_INTERVAL_SECS,
+    ExecutionClaimAdmissionLane, ExistingArtifactAdmission, ForwardLedgerClassification,
+    KernelEventEnvelope, ManualBlockReason, ManualResolution, ManualResolutionProjection,
+    PreparedCommit, PreparedCommitBundle, PreparedCommitPlan, ProjectionSnapshot,
+    PublicOutputProjection, RequiredRunState, ResourceAdmissionLane, ResourceLaneKey, Retention,
+    RunAdmission, RunCompletionProjection, RunEventStore, RunMode, RunState, SagaAdmitToken,
+    SagaEngagementProjection, SagaEngagementReason, SagaTerminal, SagaTerminalProof,
+    SideEffectLedgerPhase, SideEffectPairLedgerRef, SideEffectPhase, SideEffectProgress,
+    SideEffectTerminal, SideEffectTerminalPolicies, SideEffectTerminalPolicy, StateAttemptStarted,
+    StoreError, StreamSeq, TrustScopeId, TrustScopeStore, EXECUTION_CLAIM_HEARTBEAT_INTERVAL_SECS,
     EXECUTION_CLAIM_LEASE_TTL_SECS,
 };
 
@@ -842,45 +841,12 @@ fn in_memory_execution_claims_are_token_matched() {
     let holder = AdmissionToken::new("mfm.test.execution_claim.holder").expect("holder token");
     let other = AdmissionToken::new("mfm.test.execution_claim.other").expect("other token");
 
-    let admitted = poll_ready_store_future(store.acquire_execution_claim(&run_id, holder.clone()))
-        .expect("acquire execution claim");
-    let NowaitSkipAdmissionResult::Admitted(first_lease) = admitted else {
-        panic!("first execution claim should be admitted");
-    };
-    assert_eq!(first_lease.token, holder);
-
-    let busy = poll_ready_store_future(store.acquire_execution_claim(&run_id, other.clone()))
-        .expect("busy execution claim");
-    let NowaitSkipAdmissionResult::Busy(busy) = busy else {
-        panic!("second execution claim should be busy");
-    };
-    assert_eq!(
-        busy.holder.expect("busy holder lease").token,
-        first_lease.token
-    );
-
-    assert!(
-        poll_ready_store_future(store.renew_execution_claim(&run_id, &other))
-            .expect("wrong-token renew does not fail")
-            .is_none()
-    );
-    assert!(
-        !poll_ready_store_future(store.release_execution_claim(&run_id, &other))
-            .expect("wrong-token release does not fail")
-    );
-
-    let renewed = poll_ready_store_future(store.renew_execution_claim(&run_id, &first_lease.token))
-        .expect("matching-token renew")
-        .expect("matching token returns lease");
-    assert_eq!(renewed.token, first_lease.token);
-
-    assert!(
-        poll_ready_store_future(store.release_execution_claim(&run_id, &renewed.token))
-            .expect("matching-token release")
-    );
-    let reacquired = poll_ready_store_future(store.acquire_execution_claim(&run_id, other.clone()))
-        .expect("reacquire execution claim");
-    assert!(matches!(reacquired, NowaitSkipAdmissionResult::Admitted(_)));
+    poll_ready_store_future(
+        mfm_store::v1::test_support::assert_execution_claim_token_lifecycle_for_test(
+            &store, &run_id, holder, other,
+        ),
+    )
+    .expect("execution claim lifecycle");
 }
 
 fn resource_touched_set(byte: u8) -> events::ResourceTouchedSetEvidence {
@@ -2831,6 +2797,40 @@ fn async_expected_next_seq(store: &AsyncInMemoryRunStore, run_id: &RunId) -> Str
     poll_ready_store_future(store.expected_next_seq(run_id)).expect("async expected next seq")
 }
 
+struct SideEffectPrepareFixture {
+    payloads: Vec<KernelEventPayload>,
+    required_artifacts: Vec<ArtifactEvidenceRef>,
+}
+
+fn side_effect_prepare_fixture_for_ledger(
+    ledger_key: events::SideEffectLedgerKey,
+    resource_key: events::ResourceKeyEvidence,
+    artifact_byte: u8,
+    node_id: NodeId,
+    attempt_id: AttemptId,
+) -> SideEffectPrepareFixture {
+    let artifact_id = artifact_id(artifact_byte);
+    let artifact_digest = content_digest(artifact_byte + 1);
+    let intent_evidence = intent_artifact_ref_for_node(
+        artifact_id.clone(),
+        artifact_digest.clone(),
+        node_id.clone(),
+    );
+    let purpose = events::SideEffectLedgerPurpose::Forward;
+    let mut intent = side_effect_intent(artifact_id, artifact_digest);
+    let mut claim = side_effect_claim();
+    let mut lane = resource_lane_claim_intent(resource_key.clone());
+    let mut prepared = side_effect_prepared_with_resource_key(1, "token-1", resource_key);
+    for payload in [&mut intent, &mut claim, &mut lane, &mut prepared] {
+        set_side_effect_ledger(payload, ledger_key.clone(), purpose.clone());
+        set_side_effect_node_attempt(payload, node_id.clone(), attempt_id.clone());
+    }
+    SideEffectPrepareFixture {
+        payloads: vec![intent, claim, lane, prepared],
+        required_artifacts: vec![intent_evidence],
+    }
+}
+
 fn append_async_side_effect_prepare_for_ledger(
     store: &AsyncInMemoryRunStore,
     run_id: &RunId,
@@ -2858,22 +2858,13 @@ fn append_async_side_effect_prepare_for_ledger(
     )
     .expect("append async sidefx attempt start");
 
-    let artifact_id = artifact_id(artifact_byte);
-    let artifact_digest = content_digest(artifact_byte + 1);
-    let intent_evidence = intent_artifact_ref_for_node(
-        artifact_id.clone(),
-        artifact_digest.clone(),
-        node_id.clone(),
+    let fixture = side_effect_prepare_fixture_for_ledger(
+        ledger_key,
+        resource_key,
+        artifact_byte,
+        node_id,
+        attempt_id,
     );
-    let purpose = events::SideEffectLedgerPurpose::Forward;
-    let mut intent = side_effect_intent(artifact_id, artifact_digest);
-    let mut claim = side_effect_claim();
-    let mut lane = resource_lane_claim_intent(resource_key.clone());
-    let mut prepared = side_effect_prepared_with_resource_key(1, "token-1", resource_key);
-    for payload in [&mut intent, &mut claim, &mut lane, &mut prepared] {
-        set_side_effect_ledger(payload, ledger_key.clone(), purpose.clone());
-        set_side_effect_node_attempt(payload, node_id.clone(), attempt_id.clone());
-    }
 
     append_async_prepared_commit(
         store,
@@ -2881,8 +2872,8 @@ fn append_async_side_effect_prepare_for_ledger(
             run_id: run_id.clone(),
             expected_next_seq: async_expected_next_seq(store, run_id),
             commit_key: CommitKey::new(commit_key).expect("commit key"),
-            payloads: vec![intent, claim, lane, prepared],
-            required_artifacts: vec![intent_evidence],
+            payloads: fixture.payloads,
+            required_artifacts: fixture.required_artifacts,
             preconditions: saga_preconditions(run_id, compensate_saga_policy()),
         },
     )
@@ -3071,30 +3062,21 @@ fn append_side_effect_prepare_for_ledger_on_attempt(
             .expect("append sidefx attempt start");
     }
 
-    let artifact_id = artifact_id(artifact_byte);
-    let artifact_digest = content_digest(artifact_byte + 1);
-    let intent_evidence = intent_artifact_ref_for_node(
-        artifact_id.clone(),
-        artifact_digest.clone(),
-        node_id.clone(),
+    let fixture = side_effect_prepare_fixture_for_ledger(
+        ledger_key,
+        resource_key,
+        artifact_byte,
+        node_id,
+        attempt_id,
     );
-    let purpose = events::SideEffectLedgerPurpose::Forward;
-    let mut intent = side_effect_intent(artifact_id, artifact_digest);
-    let mut claim = side_effect_claim();
-    let mut lane = resource_lane_claim_intent(resource_key.clone());
-    let mut prepared = side_effect_prepared_with_resource_key(1, "token-1", resource_key);
-    for payload in [&mut intent, &mut claim, &mut lane, &mut prepared] {
-        set_side_effect_ledger(payload, ledger_key.clone(), purpose.clone());
-        set_side_effect_node_attempt(payload, node_id.clone(), attempt_id.clone());
-    }
 
     store
         .append_prepared_commit(typed_commit_request! {
             run_id: run_id.clone(),
             expected_next_seq: store.expected_next_seq(run_id),
             commit_key: CommitKey::new(commit_key).expect("commit key"),
-            payloads: vec![intent, claim, lane, prepared],
-            required_artifacts: vec![intent_evidence],
+            payloads: fixture.payloads,
+            required_artifacts: fixture.required_artifacts,
             preconditions: saga_preconditions(run_id, compensate_saga_policy()),
         })
         .expect("append sidefx prepare");
