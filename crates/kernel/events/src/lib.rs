@@ -200,6 +200,37 @@ pub mod v1 {
         ResourceLaneReleaseReason,
         "resource lane release reason"
     );
+
+    /// Authority path that released an exclusive resource lane.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub enum ResourceLaneReleaseAuthority {
+        /// Certified verify node reached side-effect terminal evidence.
+        VerifyTerminal,
+        /// Operator-signed manual resolution released an ambiguous lane.
+        ManualResolution,
+    }
+
+    impl ResourceLaneReleaseAuthority {
+        /// Returns the stable persisted string for this authority path.
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                Self::VerifyTerminal => "verify_terminal",
+                Self::ManualResolution => "manual_resolution",
+            }
+        }
+
+        /// Parses a stable persisted authority string.
+        pub fn parse(value: &str) -> Result<Self> {
+            match value {
+                "verify_terminal" => Ok(Self::VerifyTerminal),
+                "manual_resolution" => Ok(Self::ManualResolution),
+                _ => Err(EventError::InvalidString {
+                    field: "resource lane release authority",
+                    value: value.to_owned(),
+                }),
+            }
+        }
+    }
     checked_string_type!(
         /// Runner invocation identity.
         RunnerInvocationId,
@@ -307,10 +338,6 @@ pub mod v1 {
     pub struct ResourceLaneReleased {
         /// Certified typed spec hash.
         pub spec_hash: SpecHash,
-        /// Node id that held the side-effect lane.
-        pub node_id: NodeId,
-        /// Attempt id that held the lane.
-        pub attempt_id: AttemptId,
         /// Side-effect ledger key.
         pub ledger_key: SideEffectLedgerKey,
         /// Side-effect ledger purpose.
@@ -327,6 +354,8 @@ pub mod v1 {
         pub release_id: ResourceLaneReleaseId,
         /// Fencing token from the active claim.
         pub claim_fencing_token: u64,
+        /// Certified release authority path.
+        pub release_authority: ResourceLaneReleaseAuthority,
         /// Reason the lane is being released.
         pub release_reason: ResourceLaneReleaseReason,
         /// Store-assigned lane-local transition sequence.
@@ -338,10 +367,6 @@ pub mod v1 {
     pub struct ResourceLaneReleaseIntent {
         /// Certified typed spec hash.
         pub spec_hash: SpecHash,
-        /// Node id that held the side-effect lane.
-        pub node_id: NodeId,
-        /// Attempt id that held the lane.
-        pub attempt_id: AttemptId,
         /// Side-effect ledger key.
         pub ledger_key: SideEffectLedgerKey,
         /// Side-effect ledger purpose.
@@ -354,6 +379,8 @@ pub mod v1 {
         pub invocation_epoch: u32,
         /// Claim being released.
         pub claim_id: ResourceLaneClaimId,
+        /// Certified release authority path.
+        pub release_authority: ResourceLaneReleaseAuthority,
         /// Reason the lane is being released.
         pub release_reason: ResourceLaneReleaseReason,
     }
@@ -746,12 +773,6 @@ pub mod v1 {
                 }
                 Self::SideEffectAmbiguous(payload) => side_effect_emitter_ref!(payload, Ambiguous),
                 Self::SideEffectFailed(payload) => side_effect_emitter_ref!(payload, Failed),
-                Self::ResourceLaneReleased(payload) => {
-                    side_effect_emitter_ref!(payload, ResourceLaneReleased)
-                }
-                Self::ResourceLaneReleaseIntent(payload) => {
-                    side_effect_emitter_ref!(payload, ResourceLaneReleased)
-                }
                 _ => None,
             }
         }
@@ -761,34 +782,38 @@ pub mod v1 {
             match self {
                 Self::ResourceLaneClaimed(payload) => Some(ResourceLaneAuthorityRef {
                     ledger: self.side_effect_ledger_ref()?,
-                    emitter: self.side_effect_emitter_ref()?,
+                    emitter: Some(self.side_effect_emitter_ref()?),
                     claim_id: Some(&payload.claim_id),
                     claim_fencing_token: Some(payload.claim_fencing_token),
                     lane_transition_seq: Some(payload.lane_transition_seq),
+                    release_authority: None,
                     release_reason: None,
                 }),
                 Self::ResourceLaneClaimIntent(_) => Some(ResourceLaneAuthorityRef {
                     ledger: self.side_effect_ledger_ref()?,
-                    emitter: self.side_effect_emitter_ref()?,
+                    emitter: Some(self.side_effect_emitter_ref()?),
                     claim_id: None,
                     claim_fencing_token: None,
                     lane_transition_seq: None,
+                    release_authority: None,
                     release_reason: None,
                 }),
                 Self::ResourceLaneReleased(payload) => Some(ResourceLaneAuthorityRef {
                     ledger: self.side_effect_ledger_ref()?,
-                    emitter: self.side_effect_emitter_ref()?,
+                    emitter: None,
                     claim_id: Some(&payload.claim_id),
                     claim_fencing_token: Some(payload.claim_fencing_token),
                     lane_transition_seq: Some(payload.lane_transition_seq),
+                    release_authority: Some(payload.release_authority),
                     release_reason: Some(&payload.release_reason),
                 }),
                 Self::ResourceLaneReleaseIntent(payload) => Some(ResourceLaneAuthorityRef {
                     ledger: self.side_effect_ledger_ref()?,
-                    emitter: self.side_effect_emitter_ref()?,
+                    emitter: None,
                     claim_id: Some(&payload.claim_id),
                     claim_fencing_token: None,
                     lane_transition_seq: None,
+                    release_authority: Some(payload.release_authority),
                     release_reason: Some(&payload.release_reason),
                 }),
                 _ => None,
@@ -888,14 +913,16 @@ pub mod v1 {
     pub struct ResourceLaneAuthorityRef<'a> {
         /// Pair-ledger authority bound to the lane payload.
         pub ledger: SideEffectPairLedgerEventRef<'a>,
-        /// Emitter and attempt attribution for the lane payload.
-        pub emitter: SideEffectEmitterAttemptRef<'a>,
+        /// Emitter and attempt attribution for lane claim payloads.
+        pub emitter: Option<SideEffectEmitterAttemptRef<'a>>,
         /// Claim id when the lane payload has one.
         pub claim_id: Option<&'a ResourceLaneClaimId>,
         /// Store-assigned fencing token when materialized.
         pub claim_fencing_token: Option<u64>,
         /// Store-assigned lane-local transition sequence when materialized.
         pub lane_transition_seq: Option<u64>,
+        /// Release authority when this is a release payload.
+        pub release_authority: Option<ResourceLaneReleaseAuthority>,
         /// Release reason when this is a release payload.
         pub release_reason: Option<&'a ResourceLaneReleaseReason>,
     }
@@ -3237,6 +3264,10 @@ pub mod v1 {
             | "SpecVersion" | "StateVersion" => mfm_version_type(type_name),
             "DigestAlgorithm" => unit_enum_type("DigestAlgorithm", &["sha256-jcs-v1"]),
             "SideEffectPairRole" => unit_enum_type("SideEffectPairRole", &["submit", "verify"]),
+            "ResourceLaneReleaseAuthority" => unit_enum_type(
+                "ResourceLaneReleaseAuthority",
+                &["verify_terminal", "manual_resolution"],
+            ),
             "MediaType" | "CanonicalizerIdentity" | "RendererVersion" => {
                 checked_token_type(type_name)
             }
@@ -4301,8 +4332,6 @@ pub mod v1 {
         schema_version: EVENT_SCHEMA_VERSION,
         fields: fields![
             EventFieldDescriptor::required("spec_hash", "SpecHash"),
-            EventFieldDescriptor::required("node_id", "NodeId"),
-            EventFieldDescriptor::required("attempt_id", "AttemptId"),
             EventFieldDescriptor::required("ledger_key", "SideEffectLedgerKey"),
             EventFieldDescriptor::required("ledger_purpose", "SideEffectLedgerPurpose"),
             EventFieldDescriptor::required("pair_id", "SideEffectPairId"),
@@ -4311,6 +4340,7 @@ pub mod v1 {
             EventFieldDescriptor::required("claim_id", "ResourceLaneClaimId"),
             EventFieldDescriptor::required("release_id", "ResourceLaneReleaseId"),
             EventFieldDescriptor::required("claim_fencing_token", "u64"),
+            EventFieldDescriptor::required("release_authority", "ResourceLaneReleaseAuthority",),
             EventFieldDescriptor::required("release_reason", "ResourceLaneReleaseReason"),
             EventFieldDescriptor::required("lane_transition_seq", "u64"),
         ],
@@ -4322,14 +4352,13 @@ pub mod v1 {
         schema_version: EVENT_SCHEMA_VERSION,
         fields: fields![
             EventFieldDescriptor::required("spec_hash", "SpecHash"),
-            EventFieldDescriptor::required("node_id", "NodeId"),
-            EventFieldDescriptor::required("attempt_id", "AttemptId"),
             EventFieldDescriptor::required("ledger_key", "SideEffectLedgerKey"),
             EventFieldDescriptor::required("ledger_purpose", "SideEffectLedgerPurpose"),
             EventFieldDescriptor::required("pair_id", "SideEffectPairId"),
             EventFieldDescriptor::required("pair_role", "SideEffectPairRole"),
             EventFieldDescriptor::required("invocation_epoch", "u32"),
             EventFieldDescriptor::required("claim_id", "ResourceLaneClaimId"),
+            EventFieldDescriptor::required("release_authority", "ResourceLaneReleaseAuthority",),
             EventFieldDescriptor::required("release_reason", "ResourceLaneReleaseReason"),
         ],
     };
@@ -5174,8 +5203,8 @@ mfm.events.v1.cell_skipped schema:mfm.events.v1.cell_skipped:1:sha256-jcs-v1:e82
 	mfm.events.v1.side_effect.confirmation_observed schema:mfm.events.v1.side_effect.confirmation_observed:1:sha256-jcs-v1:02250af51d07defdc363643ef0331ca787418be443659d3b20c7746eebdbd044 [Confirmation,ResourceTouchedSet]\n\
 	mfm.events.v1.side_effect.ambiguous schema:mfm.events.v1.side_effect.ambiguous:1:sha256-jcs-v1:664144513b8998b20b47a6662db2bfea3983532abe9612c8c49610d587681a35 [AmbiguityEvidence]\n\
 	mfm.events.v1.side_effect.failed schema:mfm.events.v1.side_effect.failed:1:sha256-jcs-v1:12849d61d18dc23a31a92afcafa05dfff5241e3180aa21defe20fc2501d1c577 [SideEffectFailureDiagnostic]\n\
-	mfm.events.v1.resource_lane.released schema:mfm.events.v1.resource_lane.released:1:sha256-jcs-v1:de6fed7cdb279cb2a5fcf32926538f85b0a171ea63b131aafeb3420084f610d5 []\n\
-	mfm.events.v1.resource_lane.release_intent schema:mfm.events.v1.resource_lane.release_intent:1:sha256-jcs-v1:cbf0e0d68c70dd683b729e3d3778ac966aee87db40bfe631e2c23fa2ee3a88a0 []\n\
+mfm.events.v1.resource_lane.released schema:mfm.events.v1.resource_lane.released:1:sha256-jcs-v1:deb55f4bd166fd7db42750a2bfc9c239cc35ea6ecd095857d77a6581345e5b9f []\n\
+mfm.events.v1.resource_lane.release_intent schema:mfm.events.v1.resource_lane.release_intent:1:sha256-jcs-v1:6d350f1296f633e0bf7985de1afa7cace7f6643d658daf16578f7eb68a67f67c []\n\
 mfm.events.v1.public_output_produced schema:mfm.events.v1.public_output_produced:1:sha256-jcs-v1:00d2531467818398553aa59e62c034fa0cd054e7856b89f425aeb4510f9c6776 [PublicOutputCell,PublicOutputRendered]\n\
 mfm.events.v1.public_output_render_failed schema:mfm.events.v1.public_output_render_failed:1:sha256-jcs-v1:38c7cf4189e8525be1c51f1d0601c024b69769e961b6cf5fd43193211e143d9d [PublicOutputRenderFailureDiagnostic]\n\
 mfm.events.v1.state_attempt_completed schema:mfm.events.v1.state_attempt_completed:1:sha256-jcs-v1:36800f9d3ae748d407bc2ea24339049471c8ffe40aa86c53b35b6c7c6cd6ee80 []\n\
@@ -5251,8 +5280,8 @@ mfm_events::v1::CellSkipped schema:mfm.events.v1.cell_skipped:1:sha256-jcs-v1:e8
 	mfm_events::v1::side_effect::ConfirmationObserved schema:mfm.events.v1.side_effect.confirmation_observed:1:sha256-jcs-v1:02250af51d07defdc363643ef0331ca787418be443659d3b20c7746eebdbd044\n\
 	mfm_events::v1::side_effect::Ambiguous schema:mfm.events.v1.side_effect.ambiguous:1:sha256-jcs-v1:664144513b8998b20b47a6662db2bfea3983532abe9612c8c49610d587681a35\n\
 	mfm_events::v1::side_effect::Failed schema:mfm.events.v1.side_effect.failed:1:sha256-jcs-v1:12849d61d18dc23a31a92afcafa05dfff5241e3180aa21defe20fc2501d1c577\n\
-	mfm_events::v1::ResourceLaneReleased schema:mfm.events.v1.resource_lane.released:1:sha256-jcs-v1:de6fed7cdb279cb2a5fcf32926538f85b0a171ea63b131aafeb3420084f610d5\n\
-	mfm_events::v1::ResourceLaneReleaseIntent schema:mfm.events.v1.resource_lane.release_intent:1:sha256-jcs-v1:cbf0e0d68c70dd683b729e3d3778ac966aee87db40bfe631e2c23fa2ee3a88a0\n\
+mfm_events::v1::ResourceLaneReleased schema:mfm.events.v1.resource_lane.released:1:sha256-jcs-v1:deb55f4bd166fd7db42750a2bfc9c239cc35ea6ecd095857d77a6581345e5b9f\n\
+mfm_events::v1::ResourceLaneReleaseIntent schema:mfm.events.v1.resource_lane.release_intent:1:sha256-jcs-v1:6d350f1296f633e0bf7985de1afa7cace7f6643d658daf16578f7eb68a67f67c\n\
 mfm_events::v1::PublicOutputProduced schema:mfm.events.v1.public_output_produced:1:sha256-jcs-v1:00d2531467818398553aa59e62c034fa0cd054e7856b89f425aeb4510f9c6776\n\
 mfm_events::v1::PublicOutputRenderFailed schema:mfm.events.v1.public_output_render_failed:1:sha256-jcs-v1:38c7cf4189e8525be1c51f1d0601c024b69769e961b6cf5fd43193211e143d9d\n\
 mfm_events::v1::StateAttemptCompleted schema:mfm.events.v1.state_attempt_completed:1:sha256-jcs-v1:36800f9d3ae748d407bc2ea24339049471c8ffe40aa86c53b35b6c7c6cd6ee80\n\

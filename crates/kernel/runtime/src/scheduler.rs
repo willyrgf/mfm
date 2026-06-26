@@ -16,7 +16,7 @@ use crate::history::{RuntimeRunView, VerifiedRunContextLoader};
 use crate::manual_resolution::{
     build_manual_resolution_prefix_authority_from_parts, certified_manual_resolution_spec,
     prepare_manual_resolution_commit, verify_manual_resolution_for_prefix,
-    ManualResolutionEvidenceArtifact,
+    ManualResolutionCommitInput, ManualResolutionEvidenceArtifact,
 };
 use crate::recovery::AttemptRecoveryLifecycle;
 use crate::runners::ErasedRunnerRegistry;
@@ -201,15 +201,17 @@ impl SerialTypedScheduler {
             &runtime_spec.spec().saga,
             &terminal_policies,
         )?;
-        let (commit, artifacts_to_stage) = prepare_manual_resolution_commit(
-            runtime_spec,
-            &stream,
-            &saga,
-            expected_next_seq,
-            verified,
-            evidence_artifact,
-            note,
-        )?;
+        let (commit, artifacts_to_stage) =
+            prepare_manual_resolution_commit(ManualResolutionCommitInput {
+                runtime_spec,
+                stream: &stream,
+                projection: &projection,
+                saga: &saga,
+                expected_next_seq,
+                verified,
+                evidence_artifact,
+                note,
+            })?;
         let bundle = prepared_commit_bundle(commit.into(), artifacts_to_stage)?;
         store
             .append_prepared_commit_bundle(bundle)

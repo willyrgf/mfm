@@ -21,6 +21,7 @@ pub struct BoundRuntimeContext {
     capability_authorities: BTreeMap<NodeId, BoundCapabilityAuthority>,
     framework_handlers: BTreeMap<NodeId, BoundFrameworkHandlerAuthority>,
     runner_executables: Vec<events::ExecutableIdentity>,
+    adapter_executables: Vec<events::ExecutableIdentity>,
 }
 
 /// Bound capability authority for a certified node.
@@ -103,12 +104,18 @@ impl BoundRuntimeContext {
             capability_authorities: accumulator.capability_authorities,
             framework_handlers: accumulator.framework_handlers,
             runner_executables: accumulator.runner_executables,
+            adapter_executables: accumulator.adapter_executables,
         })
     }
 
     /// Returns the runner executable identities admitted into `RunAdmitted` evidence.
     pub fn runner_executables(&self) -> &[events::ExecutableIdentity] {
         &self.runner_executables
+    }
+
+    /// Returns the adapter executable identities admitted into `RunAdmitted` evidence.
+    pub fn adapter_executables(&self) -> &[events::ExecutableIdentity] {
+        &self.adapter_executables
     }
 
     pub(crate) fn validate_run_admitted_executables(
@@ -124,12 +131,9 @@ impl BoundRuntimeContext {
         Ok(())
     }
 
-    pub(crate) fn admitted_binding_digest(
-        &self,
-        adapter_executables: &[events::ExecutableIdentity],
-    ) -> Result<ContentDigest> {
+    pub(crate) fn admitted_binding_digest(&self) -> Result<ContentDigest> {
         let canonical = canonical_json(serde_json::json!({
-            "adapter_executables": adapter_executables.iter().map(executable_identity_json).collect::<Vec<_>>(),
+            "adapter_executables": self.adapter_executables.iter().map(executable_identity_json).collect::<Vec<_>>(),
             "runner_executables": self.runner_executables.iter().map(executable_identity_json).collect::<Vec<_>>(),
         }))?;
         Ok(ContentDigest::from_digest(
@@ -143,7 +147,13 @@ impl BoundRuntimeContext {
         run_admitted: &events::RunAdmitted,
     ) -> Result<()> {
         self.validate_run_admitted_executables(run_admitted)?;
-        let digest = self.admitted_binding_digest(&run_admitted.adapter_executables)?;
+        if run_admitted.adapter_executables != self.adapter_executables {
+            return Err(RuntimeError::RunnerBinding(
+                "RunAdmitted adapter executable identities do not match bound runtime context"
+                    .to_owned(),
+            ));
+        }
+        let digest = self.admitted_binding_digest()?;
         if digest != run_admitted.admitted_binding_digest {
             return Err(RuntimeError::RunnerBinding(
                 "RunAdmitted binding digest does not match bound runtime context".to_owned(),
@@ -298,8 +308,10 @@ struct BindingAccumulator {
     bindings: BTreeMap<NodeId, ErasedRunnerBinding>,
     capability_authorities: BTreeMap<NodeId, BoundCapabilityAuthority>,
     framework_handlers: BTreeMap<NodeId, BoundFrameworkHandlerAuthority>,
-    seen_executables: BTreeSet<String>,
+    seen_runner_executables: BTreeSet<String>,
+    seen_adapter_executables: BTreeSet<(String, String)>,
     runner_executables: Vec<events::ExecutableIdentity>,
+    adapter_executables: Vec<events::ExecutableIdentity>,
 }
 
 /// Loader for runtime binding authority.
@@ -327,8 +339,9 @@ fn bind_node(
     accumulator: &mut BindingAccumulator,
 ) -> Result<()> {
     let descriptor = runtime_spec.state_descriptor_for_node(node)?;
-    let binding = runners.resolve(node, descriptor)?;
+    let binding = runners.resolve(runtime_spec, node, descriptor)?;
     let capability_implementations = runners.resolve_capability_implementations(node)?;
+    let adapter_executables = runners.resolve_adapter_executables(node)?;
     if accumulator
         .bindings
         .insert(node.node_id.clone(), binding.clone())
@@ -376,10 +389,21 @@ fn bind_node(
     }
 
     let executable_key = binding.executable().factory_id.as_str().to_owned();
-    if accumulator.seen_executables.insert(executable_key) {
+    if accumulator.seen_runner_executables.insert(executable_key) {
         accumulator
             .runner_executables
             .push(binding.executable().clone());
+    }
+    for adapter in adapter_executables {
+        let key = (
+            adapter.adapter_kind().as_str().to_owned(),
+            adapter.adapter_version().as_str().to_owned(),
+        );
+        if accumulator.seen_adapter_executables.insert(key) {
+            accumulator
+                .adapter_executables
+                .push(adapter.executable().clone());
+        }
     }
     Ok(())
 }

@@ -2489,7 +2489,6 @@ fn prepare_certified_run_launch(
             spec_artifact,
             certificate_artifact,
             config_artifacts,
-            adapter_executables: Vec::new(),
             seed_cells,
         },
     })

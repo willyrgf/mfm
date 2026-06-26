@@ -67,9 +67,9 @@ pub use runner_kit::{
     RunnerPayloadBuilder, RunnerRegistrationBuilder,
 };
 pub use runners::{
-    CapabilityImplementationBinding, CapabilityImplementationId, ErasedNodeRunner,
-    ErasedRunnerBinding, ErasedRunnerFuture, ErasedRunnerOutput, ErasedRunnerRegistry,
-    PreInvocationRunnerFuture, RunnerEventPayload, RunnerIngressContext,
+    AdapterExecutableBinding, CapabilityImplementationBinding, CapabilityImplementationId,
+    ErasedNodeRunner, ErasedRunnerBinding, ErasedRunnerFuture, ErasedRunnerOutput,
+    ErasedRunnerRegistry, PreInvocationRunnerFuture, RunnerEventPayload, RunnerIngressContext,
 };
 pub use scheduler::{
     ManualResolutionRequest, RunAdmittedBindingCompatibility, SchedulerStatus, SerialTypedScheduler,
@@ -78,7 +78,8 @@ pub use side_effect_driver::{
     SideEffectDriver, SideEffectDriverCallbacks, SideEffectDriverFuture, SideEffectIntentPlan,
     SideEffectLanePreclaimBuilder, SideEffectObservedEvidence, SideEffectPreparedInvocationPlan,
     SideEffectProtocolAction, SideEffectReplayEvidence, SideEffectSubmissionDecision,
-    SideEffectSubmissionDecisionFuture, SideEffectVerifyCallbacks, SideEffectVerifyDriver,
+    SideEffectSubmissionDecisionFuture, SideEffectUnknownSubmissionDecision,
+    SideEffectUnknownSubmissionDecisionFuture, SideEffectVerifyCallbacks, SideEffectVerifyDriver,
 };
 pub use side_effect_lifecycle::SideEffectAttemptView;
 pub use spec_authority::CertifiedRuntimeSpec;

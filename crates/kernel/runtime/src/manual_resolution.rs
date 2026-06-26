@@ -26,6 +26,17 @@ pub struct ManualResolutionEvidenceArtifact {
     pub media_type: spec::MediaType,
 }
 
+pub(crate) struct ManualResolutionCommitInput<'a> {
+    pub(crate) runtime_spec: &'a CertifiedRuntimeSpec,
+    pub(crate) stream: &'a [store::KernelEventEnvelope],
+    pub(crate) projection: &'a store::ProjectionSnapshot,
+    pub(crate) saga: &'a store::SagaProjection,
+    pub(crate) expected_next_seq: store::StreamSeq,
+    pub(crate) verified: VerifiedManualResolutionForPrefix,
+    pub(crate) evidence_artifact: ManualResolutionEvidenceArtifact,
+    pub(crate) note: Option<events::ManualResolutionNote>,
+}
+
 pub(crate) fn build_manual_resolution_prefix_authority_from_parts(
     runtime_spec: &CertifiedRuntimeSpec,
     run_id: &RunId,
@@ -92,17 +103,21 @@ pub(crate) fn verify_manual_resolution_for_prefix(
 }
 
 pub(crate) fn prepare_manual_resolution_commit(
-    runtime_spec: &CertifiedRuntimeSpec,
-    stream: &[store::KernelEventEnvelope],
-    saga: &store::SagaProjection,
-    expected_next_seq: store::StreamSeq,
-    verified: VerifiedManualResolutionForPrefix,
-    evidence_artifact: ManualResolutionEvidenceArtifact,
-    note: Option<events::ManualResolutionNote>,
+    input: ManualResolutionCommitInput<'_>,
 ) -> Result<(
     store::PreparedCommit<store::ManualResolution>,
     Vec<PreparedStagedArtifact>,
 )> {
+    let ManualResolutionCommitInput {
+        runtime_spec,
+        stream,
+        projection,
+        saga,
+        expected_next_seq,
+        verified,
+        evidence_artifact,
+        note,
+    } = input;
     let claim = verified.claim();
     let prefix = verified.prefix();
     if saga.run_mode != store::RunMode::ManualBlocked {
@@ -180,6 +195,23 @@ pub(crate) fn prepare_manual_resolution_commit(
     };
     verify_artifact_bytes(verified.proof_bytes(), &authorization_ref)?;
 
+    let mut payloads =
+        manual_resolution_resource_lane_release_intents(runtime_spec, &claim.run_id, projection)?;
+    payloads.push(events::KernelEventPayload::ManualResolutionRecorded(
+        events::ManualResolutionRecorded {
+            run_id: claim.run_id.clone(),
+            spec_hash: claim.spec_hash.clone(),
+            outcome: claim.outcome,
+            evidence_schema_id: claim.evidence.schema_id.clone(),
+            evidence_hash: claim.evidence.content_hash.clone(),
+            evidence_artifact_id: claim.evidence.artifact_id.clone(),
+            authorization_schema_id: authorization_schema_id.clone(),
+            authorization_hash: authorization_hash.clone(),
+            authorization_artifact_id: authorization_artifact_id.clone(),
+            note,
+        },
+    ));
+
     let request = store::CommitRequest::from_payloads(
         claim.run_id.clone(),
         expected_next_seq,
@@ -188,24 +220,11 @@ pub(crate) fn prepare_manual_resolution_commit(
             claim.outcome.as_str(),
             authorization_hash.as_str()
         ))?,
-        vec![events::KernelEventPayload::ManualResolutionRecorded(
-            events::ManualResolutionRecorded {
-                run_id: claim.run_id.clone(),
-                spec_hash: claim.spec_hash.clone(),
-                outcome: claim.outcome,
-                evidence_schema_id: claim.evidence.schema_id.clone(),
-                evidence_hash: claim.evidence.content_hash.clone(),
-                evidence_artifact_id: claim.evidence.artifact_id.clone(),
-                authorization_schema_id,
-                authorization_hash,
-                authorization_artifact_id,
-                note,
-            },
-        )],
+        payloads,
         vec![evidence_ref.clone(), authorization_ref.clone()],
         store::CommitPreconditions {
             required_run_state: store::RequiredRunState::NotCompleted,
-            saga_admit_token: Some(store::SagaAdmitToken::from_spec(
+            certified_run_authority: Some(store::CertifiedRunStoreAuthority::from_spec(
                 claim.run_id.clone(),
                 runtime_spec.spec(),
             )?),
@@ -233,6 +252,32 @@ pub(crate) fn prepare_manual_resolution_commit(
             },
         ],
     ))
+}
+
+fn manual_resolution_resource_lane_release_intents(
+    runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
+    projection: &store::ProjectionSnapshot,
+) -> Result<Vec<events::KernelEventPayload>> {
+    projection
+        .resource_lanes()
+        .filter(|(_, lane)| lane.holder.run_id == *run_id)
+        .map(|(_, lane)| {
+            Ok(events::KernelEventPayload::ResourceLaneReleaseIntent(
+                events::ResourceLaneReleaseIntent {
+                    spec_hash: runtime_spec.spec_hash().clone(),
+                    ledger_key: lane.ledger_key.clone(),
+                    ledger_purpose: lane.ledger_purpose.clone(),
+                    pair_id: lane.holder.pair_id.clone(),
+                    pair_role: events::SideEffectPairRole::Verify,
+                    invocation_epoch: lane.invocation_epoch,
+                    claim_id: lane.claim_id.clone(),
+                    release_authority: events::ResourceLaneReleaseAuthority::ManualResolution,
+                    release_reason: events::ResourceLaneReleaseReason::new("manual_resolution")?,
+                },
+            ))
+        })
+        .collect()
 }
 
 /// Computes the digest of a verified run stream prefix.

@@ -13,9 +13,9 @@ use mfm_values::MfmValue;
 use serde::Serialize;
 
 use crate::{
-    CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerBinding,
-    ErasedRunnerOutput, ErasedRunnerRegistry, Result, RunnerEventPayload, RuntimeError,
-    StagedArtifact, StagedRetentionRefs,
+    AdapterExecutableBinding, CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx,
+    ErasedRunnerBinding, ErasedRunnerOutput, ErasedRunnerRegistry, Result, RunnerEventPayload,
+    RuntimeError, StagedArtifact, StagedRetentionRefs,
 };
 
 /// Canonical JSON artifact prepared by a typed runner before runtime staging.
@@ -499,14 +499,13 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
     ) -> RunnerEventPayload {
         RunnerEventPayload::ResourceLaneReleaseIntent(events::ResourceLaneReleaseIntent {
             spec_hash: self.ctx.spec_hash().clone(),
-            node_id: self.ctx.node().node_id.clone(),
-            attempt_id: self.ctx.attempt_id().clone(),
             ledger_key: side_effect.ledger_key.clone(),
             ledger_purpose: side_effect.ledger_purpose.clone(),
             pair_id: side_effect.pair_id.clone(),
             pair_role: side_effect.pair_role(events::SideEffectPairRole::Verify),
             invocation_epoch: side_effect.invocation_epoch,
             claim_id,
+            release_authority: events::ResourceLaneReleaseAuthority::VerifyTerminal,
             release_reason,
         })
     }
@@ -568,6 +567,20 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
         side_effect: RunnerSideEffectBinding,
         proof: &RunnerJsonArtifact,
     ) -> Result<RunnerEventPayload> {
+        self.side_effect_not_submitted_proven_with_role(
+            side_effect,
+            events::SideEffectPairRole::Submit,
+            proof,
+        )
+    }
+
+    /// Builds a `SideEffectNotSubmittedProven` runner payload with an explicit pair role.
+    pub fn side_effect_not_submitted_proven_with_role(
+        &self,
+        side_effect: RunnerSideEffectBinding,
+        pair_role: events::SideEffectPairRole,
+        proof: &RunnerJsonArtifact,
+    ) -> Result<RunnerEventPayload> {
         ensure_artifact_role(proof, events::ArtifactRole::NotSubmittedProof)?;
         Ok(RunnerEventPayload::SideEffectNotSubmittedProven(
             side_effect::NotSubmittedProven {
@@ -577,7 +590,7 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
                 ledger_key: side_effect.ledger_key.clone(),
                 ledger_purpose: side_effect.ledger_purpose.clone(),
                 pair_id: side_effect.pair_id.clone(),
-                pair_role: side_effect.pair_role(events::SideEffectPairRole::Submit),
+                pair_role: side_effect.pair_role(pair_role),
                 invocation_epoch: side_effect.invocation_epoch,
                 proof_schema_id: artifact_schema_id(proof)?,
                 proof_hash: proof.evidence.digest.clone(),
@@ -592,6 +605,20 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
         side_effect: RunnerSideEffectBinding,
         submission: &RunnerJsonArtifact,
     ) -> Result<RunnerEventPayload> {
+        self.side_effect_submission_observed_with_role(
+            side_effect,
+            events::SideEffectPairRole::Submit,
+            submission,
+        )
+    }
+
+    /// Builds a `SideEffectSubmissionObserved` runner payload with an explicit pair role.
+    pub fn side_effect_submission_observed_with_role(
+        &self,
+        side_effect: RunnerSideEffectBinding,
+        pair_role: events::SideEffectPairRole,
+        submission: &RunnerJsonArtifact,
+    ) -> Result<RunnerEventPayload> {
         ensure_artifact_role(submission, events::ArtifactRole::Submission)?;
         Ok(RunnerEventPayload::SideEffectSubmissionObserved(
             side_effect::SubmissionObserved {
@@ -601,7 +628,7 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
                 ledger_key: side_effect.ledger_key.clone(),
                 ledger_purpose: side_effect.ledger_purpose.clone(),
                 pair_id: side_effect.pair_id.clone(),
-                pair_role: side_effect.pair_role(events::SideEffectPairRole::Submit),
+                pair_role: side_effect.pair_role(pair_role),
                 invocation_epoch: side_effect.invocation_epoch,
                 submission_schema_id: artifact_schema_id(submission)?,
                 submission_hash: submission.evidence.digest.clone(),
@@ -694,6 +721,7 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
     pub fn side_effect_ambiguous(
         &self,
         side_effect: RunnerSideEffectBinding,
+        pair_role: events::SideEffectPairRole,
         ambiguity_code: events::AmbiguityCode,
         evidence: &RunnerJsonArtifact,
     ) -> Result<RunnerEventPayload> {
@@ -706,7 +734,7 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
                 ledger_key: side_effect.ledger_key.clone(),
                 ledger_purpose: side_effect.ledger_purpose.clone(),
                 pair_id: side_effect.pair_id.clone(),
-                pair_role: side_effect.pair_role(events::SideEffectPairRole::Verify),
+                pair_role: side_effect.pair_role(pair_role),
                 invocation_epoch: side_effect.invocation_epoch,
                 ambiguity_code,
                 evidence_schema_id: artifact_schema_id(evidence)?,
@@ -720,6 +748,7 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
     pub fn side_effect_failed(
         &self,
         side_effect: RunnerSideEffectBinding,
+        pair_role: events::SideEffectPairRole,
         failure_phase: side_effect::FailurePhase,
         retryable: bool,
         error: events::MfmErrorInfo,
@@ -731,7 +760,7 @@ impl<'a, 'ctx> RunnerPayloadBuilder<'a, 'ctx> {
             ledger_key: side_effect.ledger_key.clone(),
             ledger_purpose: side_effect.ledger_purpose.clone(),
             pair_id: side_effect.pair_id.clone(),
-            pair_role: side_effect.pair_role(events::SideEffectPairRole::Verify),
+            pair_role: side_effect.pair_role(pair_role),
             invocation_epoch: side_effect.invocation_epoch,
             failure_phase,
             retryable,
@@ -860,15 +889,37 @@ impl<'a> RunnerRegistrationBuilder<'a> {
         self.register_runner(descriptor_id, factory_id, executable, runner)
     }
 
-    /// Registers the adapter-owned runner used by side-effect verify framework nodes.
+    /// Registers the adapter-owned runner used by side-effect verify framework nodes
+    /// for one certified side-effect submit descriptor.
     pub fn register_side_effect_verify_runner(
         &mut self,
+        submit_descriptor_id: DescriptorId,
         factory_id: events::RunnerFactoryId,
         executable: events::ExecutableIdentity,
         runner: Arc<dyn ErasedNodeRunner>,
     ) -> Result<&mut Self> {
+        self.registry.register_side_effect_verify_runner(
+            submit_descriptor_id,
+            factory_id,
+            executable,
+            runner,
+        )?;
+        Ok(self)
+    }
+
+    /// Registers executable evidence for one certified adapter binding.
+    pub fn register_adapter_executable(
+        &mut self,
+        adapter_kind: AdapterKind,
+        adapter_version: AdapterVersion,
+        executable: events::ExecutableIdentity,
+    ) -> Result<&mut Self> {
         self.registry
-            .register_side_effect_verify_runner(factory_id, executable, runner)?;
+            .register_adapter_executable(AdapterExecutableBinding::new(
+                adapter_kind,
+                adapter_version,
+                executable,
+            ))?;
         Ok(self)
     }
 }

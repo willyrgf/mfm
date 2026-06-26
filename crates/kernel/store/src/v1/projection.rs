@@ -5,7 +5,9 @@ pub(super) fn apply_projection(
     envelope: &KernelEventEnvelope,
 ) -> Result<()> {
     match envelope.payload() {
-        KernelEventPayload::RunAdmitted(payload) => apply_run_admitted(projections, payload)?,
+        KernelEventPayload::RunAdmitted(payload) => {
+            apply_run_admitted(projections, envelope.run_id(), payload)?
+        }
         KernelEventPayload::RunCompleted(payload) => {
             apply_run_completed(projections, &envelope.event_id, payload)?;
         }
@@ -101,8 +103,10 @@ pub(super) fn apply_projection(
 
 fn apply_run_admitted(
     projections: &mut ProjectionSnapshot,
+    run_id: &RunId,
     payload: &events::RunAdmitted,
 ) -> Result<()> {
+    validate_run_admitted_identity(run_id, payload)?;
     let state = projections.run_state(&payload.run_id);
     if state != RunState::Absent {
         return Err(StoreError::ProjectionConflict {
@@ -137,6 +141,37 @@ fn apply_run_admitted(
                 content_digest: seed.seed_artifact.content_digest.clone(),
             },
         );
+    }
+    Ok(())
+}
+
+fn validate_run_admitted_identity(run_id: &RunId, payload: &events::RunAdmitted) -> Result<()> {
+    if payload.run_id != *run_id {
+        return Err(StoreError::ProjectionConflict {
+            key: "run:admission".to_owned(),
+            message: "RunAdmitted run id does not match stream run id".to_owned(),
+        });
+    }
+    if payload.identity_material.certified_spec_hash != payload.spec_hash {
+        return Err(StoreError::ProjectionConflict {
+            key: "run:admission".to_owned(),
+            message: "RunAdmitted identity material spec hash does not match event spec hash"
+                .to_owned(),
+        });
+    }
+    let derived =
+        payload
+            .identity_material
+            .derive_run_id()
+            .map_err(|_| StoreError::ProjectionConflict {
+                key: "run:admission".to_owned(),
+                message: "RunAdmitted identity material is invalid".to_owned(),
+            })?;
+    if derived != payload.run_id {
+        return Err(StoreError::ProjectionConflict {
+            key: "run:admission".to_owned(),
+            message: "RunAdmitted run id does not match identity material".to_owned(),
+        });
     }
     Ok(())
 }
@@ -307,10 +342,9 @@ fn apply_side_effect_intent_persisted(
     envelope: &KernelEventEnvelope,
     payload: &side_effect::IntentPersisted,
 ) -> Result<()> {
-    require_side_effect_pair_event(
+    require_side_effect_pair_role(
         &payload.ledger_key,
         &payload.ledger_purpose,
-        &payload.pair_id,
         payload.pair_role,
         events::SideEffectPairRole::Submit,
     )?;
@@ -373,10 +407,9 @@ fn apply_side_effect_claimed(
     envelope: &KernelEventEnvelope,
     payload: &side_effect::Claimed,
 ) -> Result<()> {
-    require_side_effect_pair_event(
+    require_side_effect_pair_role(
         &payload.ledger_key,
         &payload.ledger_purpose,
-        &payload.pair_id,
         payload.pair_role,
         events::SideEffectPairRole::Submit,
     )?;
@@ -428,10 +461,9 @@ fn apply_side_effect_claim_taken_over(
     envelope: &KernelEventEnvelope,
     payload: &side_effect::ClaimTakenOver,
 ) -> Result<()> {
-    require_side_effect_pair_event(
+    require_side_effect_pair_role(
         &payload.ledger_key,
         &payload.ledger_purpose,
-        &payload.pair_id,
         payload.pair_role,
         events::SideEffectPairRole::Submit,
     )?;
@@ -479,10 +511,9 @@ fn apply_side_effect_invocation_prepared(
     envelope: &KernelEventEnvelope,
     payload: &side_effect::InvocationPrepared,
 ) -> Result<()> {
-    require_side_effect_pair_event(
+    require_side_effect_pair_role(
         &payload.ledger_key,
         &payload.ledger_purpose,
-        &payload.pair_id,
         payload.pair_role,
         events::SideEffectPairRole::Submit,
     )?;
@@ -573,10 +604,9 @@ fn apply_resource_lane_claimed(
     envelope: &KernelEventEnvelope,
     payload: &events::ResourceLaneClaimed,
 ) -> Result<()> {
-    require_side_effect_pair_event(
+    require_side_effect_pair_role(
         &payload.ledger_key,
         &payload.ledger_purpose,
-        &payload.pair_id,
         payload.pair_role,
         events::SideEffectPairRole::Submit,
     )?;
@@ -628,10 +658,9 @@ fn apply_side_effect_invocation_started(
     envelope: &KernelEventEnvelope,
     payload: &side_effect::InvocationStarted,
 ) -> Result<()> {
-    require_side_effect_pair_event(
+    require_side_effect_pair_role(
         &payload.ledger_key,
         &payload.ledger_purpose,
-        &payload.pair_id,
         payload.pair_role,
         events::SideEffectPairRole::Submit,
     )?;
@@ -688,7 +717,7 @@ fn apply_side_effect_not_submitted_proven(
             ledger_purpose: &payload.ledger_purpose,
             pair_id: &payload.pair_id,
             pair_role: payload.pair_role,
-            expected_pair_role: events::SideEffectPairRole::Submit,
+            expected_pair_role: PairRoleRequirement::SubmitOrVerify,
             required_previous: "submission_recovery",
         },
         |state| state.mark_not_submitted(envelope.event_id.clone(), payload),
@@ -720,7 +749,7 @@ fn apply_side_effect_submission_observed(
             ledger_purpose: &payload.ledger_purpose,
             pair_id: &payload.pair_id,
             pair_role: payload.pair_role,
-            expected_pair_role: events::SideEffectPairRole::Submit,
+            expected_pair_role: PairRoleRequirement::SubmitOrVerify,
             required_previous: "submission_recovery",
         },
         |state| state.record_submission(envelope.event_id.clone(), payload),
@@ -747,7 +776,7 @@ fn apply_side_effect_submission_unknown(
             ledger_purpose: &payload.ledger_purpose,
             pair_id: &payload.pair_id,
             pair_role: payload.pair_role,
-            expected_pair_role: events::SideEffectPairRole::Submit,
+            expected_pair_role: PairRoleRequirement::Exact(events::SideEffectPairRole::Submit),
             required_previous: "submission_recovery",
         },
         |state| state.mark_submission_unknown(envelope.event_id.clone(), payload),
@@ -774,7 +803,7 @@ fn apply_side_effect_receipt_observed(
             ledger_purpose: &payload.ledger_purpose,
             pair_id: &payload.pair_id,
             pair_role: payload.pair_role,
-            expected_pair_role: events::SideEffectPairRole::Verify,
+            expected_pair_role: PairRoleRequirement::Exact(events::SideEffectPairRole::Verify),
             required_previous: "submission_observed",
         },
         |state| state.record_receipt(envelope.event_id.clone(), payload),
@@ -801,7 +830,7 @@ fn apply_side_effect_confirmation_observed(
             ledger_purpose: &payload.ledger_purpose,
             pair_id: &payload.pair_id,
             pair_role: payload.pair_role,
-            expected_pair_role: events::SideEffectPairRole::Verify,
+            expected_pair_role: PairRoleRequirement::Exact(events::SideEffectPairRole::Verify),
             required_previous: "receipt",
         },
         |state| state.confirm(envelope.event_id.clone(), payload),
@@ -833,15 +862,10 @@ fn apply_side_effect_ambiguous(
             ledger_purpose: &payload.ledger_purpose,
             pair_id: &payload.pair_id,
             pair_role: payload.pair_role,
-            expected_pair_role: events::SideEffectPairRole::Verify,
+            expected_pair_role: PairRoleRequirement::SubmitOrVerify,
             required_previous: "ambiguity_source",
         },
         |state| state.mark_ambiguous(envelope.event_id.clone(), payload),
-    )?;
-    require_no_resource_lane_for_holder(
-        projections,
-        &SideEffectPairLedgerRef::new(envelope.run_id().clone(), payload.pair_id.clone()),
-        "ambiguity",
     )?;
     if matches!(
         payload.ledger_purpose,

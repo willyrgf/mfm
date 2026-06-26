@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use mfm_capabilities::{CapabilityDescriptor, CapabilitySetDescriptor};
 use mfm_events::v1 as events;
-use mfm_ids::DescriptorId;
+use mfm_ids::{AdapterKind, AdapterVersion, DescriptorId};
 use mfm_spec::v1 as spec;
 
 use crate::framework::{
@@ -343,12 +343,51 @@ impl CapabilityImplementationBinding {
     }
 }
 
+/// Registered runtime executable evidence for one certified adapter binding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdapterExecutableBinding {
+    adapter_kind: AdapterKind,
+    adapter_version: AdapterVersion,
+    executable: events::ExecutableIdentity,
+}
+
+impl AdapterExecutableBinding {
+    /// Creates adapter executable binding evidence.
+    pub fn new(
+        adapter_kind: AdapterKind,
+        adapter_version: AdapterVersion,
+        executable: events::ExecutableIdentity,
+    ) -> Self {
+        Self {
+            adapter_kind,
+            adapter_version,
+            executable,
+        }
+    }
+
+    /// Certified adapter kind covered by this executable.
+    pub fn adapter_kind(&self) -> &AdapterKind {
+        &self.adapter_kind
+    }
+
+    /// Certified adapter version covered by this executable.
+    pub fn adapter_version(&self) -> &AdapterVersion {
+        &self.adapter_version
+    }
+
+    /// Executable identity to bind into `RunAdmitted`.
+    pub fn executable(&self) -> &events::ExecutableIdentity {
+        &self.executable
+    }
+}
+
 /// Registry of erased runners keyed by certified state descriptor id.
 #[derive(Clone, Default)]
 pub struct ErasedRunnerRegistry {
     bindings: BTreeMap<DescriptorId, ErasedRunnerBinding>,
-    side_effect_verify: Option<ErasedFrameworkRunnerBinding>,
+    side_effect_verify_bindings: BTreeMap<DescriptorId, ErasedFrameworkRunnerBinding>,
     capability_implementations: BTreeMap<(String, String), CapabilityImplementationBinding>,
+    adapter_executables: BTreeMap<(String, String), AdapterExecutableBinding>,
 }
 
 #[derive(Clone)]
@@ -378,9 +417,11 @@ impl ErasedRunnerRegistry {
         Ok(())
     }
 
-    /// Registers the adapter-owned runner used by certified side-effect verify framework nodes.
+    /// Registers the adapter-owned runner used by certified side-effect verify framework nodes
+    /// for one certified side-effect submit descriptor.
     pub fn register_side_effect_verify_runner(
         &mut self,
+        submit_descriptor_id: DescriptorId,
         factory_id: events::RunnerFactoryId,
         executable: events::ExecutableIdentity,
         runner: Arc<dyn ErasedNodeRunner>,
@@ -391,16 +432,21 @@ impl ErasedRunnerRegistry {
                 executable.factory_id, factory_id
             )));
         }
-        if self.side_effect_verify.is_some() {
-            return Err(RuntimeError::RunnerBinding(
-                "duplicate side-effect verify runner binding".to_owned(),
-            ));
+        match self.side_effect_verify_bindings.entry(submit_descriptor_id) {
+            Entry::Vacant(entry) => {
+                entry.insert(ErasedFrameworkRunnerBinding {
+                    factory_id,
+                    executable,
+                    runner,
+                });
+            }
+            Entry::Occupied(entry) => {
+                return Err(RuntimeError::RunnerBinding(format!(
+                    "duplicate side-effect verify runner binding for submit descriptor {}",
+                    entry.key()
+                )));
+            }
         }
-        self.side_effect_verify = Some(ErasedFrameworkRunnerBinding {
-            factory_id,
-            executable,
-            runner,
-        });
         Ok(())
     }
 
@@ -422,6 +468,24 @@ impl ErasedRunnerRegistry {
         }
     }
 
+    /// Registers executable evidence for one certified adapter binding.
+    pub fn register_adapter_executable(&mut self, binding: AdapterExecutableBinding) -> Result<()> {
+        let key = adapter_executable_key(binding.adapter_kind(), binding.adapter_version());
+        match self.adapter_executables.entry(key) {
+            Entry::Vacant(entry) => {
+                entry.insert(binding);
+                Ok(())
+            }
+            Entry::Occupied(entry) if entry.get() == &binding => Ok(()),
+            Entry::Occupied(entry) => Err(RuntimeError::RunnerBinding(format!(
+                "duplicate adapter executable for {}:{} conflicts with registered executable {}",
+                binding.adapter_kind(),
+                binding.adapter_version(),
+                entry.get().executable().factory_id
+            ))),
+        }
+    }
+
     /// Registers one implementation id for every descriptor in a capability set.
     pub fn register_capability_set(
         &mut self,
@@ -439,6 +503,7 @@ impl ErasedRunnerRegistry {
 
     pub(crate) fn resolve(
         &self,
+        runtime_spec: &CertifiedRuntimeSpec,
         node: &spec::NodeSpec,
         descriptor: &spec::StateDescriptorIdentity,
     ) -> Result<ErasedRunnerBinding> {
@@ -470,12 +535,16 @@ impl ErasedRunnerRegistry {
             &node.framework,
             Some(spec::FrameworkNodeSpec::SideEffectVerify(_))
         ) {
-            let binding = self.side_effect_verify.as_ref().ok_or_else(|| {
-                RuntimeError::RunnerBinding(format!(
-                    "missing side-effect verify runner binding for node {} descriptor {}",
-                    node.node_id, node.descriptor_id
-                ))
-            })?;
+            let submit_descriptor_id = side_effect_verify_submit_descriptor_id(runtime_spec, node)?;
+            let binding = self
+                .side_effect_verify_bindings
+                .get(submit_descriptor_id)
+                .ok_or_else(|| {
+                    RuntimeError::RunnerBinding(format!(
+                        "missing side-effect verify runner binding for node {} submit descriptor {}",
+                        node.node_id, submit_descriptor_id
+                    ))
+                })?;
             if binding.factory_id.as_str() != descriptor.runner {
                 return Err(RuntimeError::RunnerBinding(format!(
                     "side-effect verify runner factory {} does not match descriptor runner {} for node {}",
@@ -536,6 +605,57 @@ impl ErasedRunnerRegistry {
         }
         Ok(bindings)
     }
+
+    pub(crate) fn resolve_adapter_executables(
+        &self,
+        node: &spec::NodeSpec,
+    ) -> Result<Vec<AdapterExecutableBinding>> {
+        let mut bindings = Vec::with_capacity(node.adapter_bindings.len());
+        for adapter in &node.adapter_bindings {
+            let key = adapter_executable_key(&adapter.adapter_kind, &adapter.adapter_version);
+            let binding = self.adapter_executables.get(&key).ok_or_else(|| {
+                RuntimeError::RunnerBinding(format!(
+                    "missing adapter executable for node {} adapter {}:{}",
+                    node.node_id, adapter.adapter_kind, adapter.adapter_version
+                ))
+            })?;
+            if binding.adapter_kind() != &adapter.adapter_kind
+                || binding.adapter_version() != &adapter.adapter_version
+            {
+                return Err(RuntimeError::RunnerBinding(format!(
+                    "adapter executable for node {} differs from certified adapter {}:{}",
+                    node.node_id, adapter.adapter_kind, adapter.adapter_version
+                )));
+            }
+            bindings.push(binding.clone());
+        }
+        Ok(bindings)
+    }
+}
+
+fn side_effect_verify_submit_descriptor_id<'a>(
+    runtime_spec: &'a CertifiedRuntimeSpec,
+    node: &spec::NodeSpec,
+) -> Result<&'a DescriptorId> {
+    let Some(spec::FrameworkNodeSpec::SideEffectVerify(verify)) = &node.framework else {
+        return Err(RuntimeError::RunnerBinding(format!(
+            "node {} is not a side-effect verify node",
+            node.node_id
+        )));
+    };
+    let submit_node = runtime_spec.node(&verify.submit_node_id).ok_or_else(|| {
+        RuntimeError::InvalidSpec(format!(
+            "side-effect verify node {} references missing submit node {}",
+            node.node_id, verify.submit_node_id
+        ))
+    })?;
+    if submit_node.side_effect.is_none() {
+        return Err(RuntimeError::InvalidSpec(format!(
+            "side-effect verify node {} references non-side-effect submit node {}",
+            node.node_id, submit_node.node_id
+        )));
+    }
+    Ok(&submit_node.descriptor_id)
 }
 
 fn capability_implementation_key(descriptor: &CapabilityDescriptor) -> (String, String) {
@@ -543,6 +663,10 @@ fn capability_implementation_key(descriptor: &CapabilityDescriptor) -> (String, 
         descriptor.kind.as_str().to_owned(),
         descriptor.version.as_str().to_owned(),
     )
+}
+
+fn adapter_executable_key(kind: &AdapterKind, version: &AdapterVersion) -> (String, String) {
+    (kind.as_str().to_owned(), version.as_str().to_owned())
 }
 
 fn is_valid_runtime_binding_id(value: &str) -> bool {

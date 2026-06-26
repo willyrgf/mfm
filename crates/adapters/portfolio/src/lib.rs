@@ -45,6 +45,7 @@ use serde::Serialize;
 
 const READ_FACTORY: &str = "read_external";
 const PURE_FACTORY: &str = "pure";
+const ADAPTER_FACTORY: &str = "portfolio_adapter";
 const CAPABILITY_IMPLEMENTATION_ID: &str = "mfm.portfolio.runtime.v1";
 
 /// EVM read capabilities required by portfolio adapter runners.
@@ -133,6 +134,12 @@ pub fn register_portfolio_runners(
     let mut registrations = RunnerRegistrationBuilder::new(registry, implementation_id);
     let read_factory = events::RunnerFactoryId::new(READ_FACTORY)?;
     let pure_factory = events::RunnerFactoryId::new(PURE_FACTORY)?;
+    let adapter_factory = events::RunnerFactoryId::new(ADAPTER_FACTORY)?;
+    registrations.register_adapter_executable(
+        portfolio_adapter_kind()?,
+        portfolio_adapter_version()?,
+        executable(adapter_factory)?,
+    )?;
     let prepare_sources = mfm_program::registered_state_descriptor::<PrepareSourcesState>()
         .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
     registrations.register_descriptor(
