@@ -31,6 +31,7 @@ use mfm_store::v1::test_support::{
     fixed_spec_hash_for_test as spec_hash, fixed_state_kind_for_test as state_kind,
     media_type_for_test as media_type, poll_ready_store_future_for_test as poll_ready_store_future,
     prepared_commit_bundle_from_plan as test_bundle_from_plan,
+    prepared_commit_plan_for_test as test_prepared_commit_plan,
     receipt_terminal_policies_for_projection_for_test as receipt_terminal_policies_for_projection,
     run_identity_material_for_test,
 };
@@ -43,11 +44,11 @@ use mfm_store::v1::{
     CommittedRunStream, EventArtifactReferenceSource, ExecutionClaimAdmissionLane,
     ForwardLedgerClassification, KernelEventEnvelope, ManualBlockReason, ManualResolution,
     ManualResolutionProjection, PreparedCommit, PreparedCommitPlan, ProjectionSnapshot,
-    PublicOutputProjection, RequiredRunState, ResourceAdmissionLane, ResourceLaneKey, Retention,
-    RunAdmission, RunCompletionProjection, RunEventStore, RunMode, RunState, SagaAdmitToken,
+    PublicOutputProjection, RequiredRunState, ResourceAdmissionLane, ResourceLaneKey, RunAdmission,
+    RunCompletionProjection, RunEventStore, RunMode, RunState, SagaAdmitToken,
     SagaEngagementProjection, SagaEngagementReason, SagaTerminal, SagaTerminalProof,
-    SideEffectLedgerPhase, SideEffectPairLedgerRef, SideEffectPhase, SideEffectProgress,
-    SideEffectTerminal, StateAttemptStarted, StoreError, StreamSeq, TrustScopeId, TrustScopeStore,
+    SideEffectLedgerPhase, SideEffectPairLedgerRef, SideEffectPhase, SideEffectTerminal,
+    StateAttemptStarted, StoreError, StreamSeq, TrustScopeId, TrustScopeStore,
     EXECUTION_CLAIM_HEARTBEAT_INTERVAL_SECS, EXECUTION_CLAIM_LEASE_TTL_SECS,
 };
 
@@ -2569,73 +2570,6 @@ impl TestPreparedCommitExt for StoreContractRunStore {
     }
 }
 
-fn test_prepared_commit_plan(
-    request: CommitRequest,
-    admitted_artifacts: Vec<ArtifactEvidenceRef>,
-) -> mfm_store::v1::Result<PreparedCommitPlan> {
-    let artifacts =
-        CommitArtifactEvidenceSet::new(request.required_artifacts().to_vec(), admitted_artifacts)?;
-    if request
-        .payloads()
-        .iter()
-        .all(|payload| matches!(payload, KernelEventPayload::RunAdmitted(_)))
-    {
-        return PreparedCommit::<RunAdmission>::new(request, artifacts)
-            .map(PreparedCommitPlan::from);
-    }
-    if request
-        .payloads()
-        .iter()
-        .all(|payload| matches!(payload, KernelEventPayload::StateAttemptStarted(_)))
-    {
-        let mut preconditions = request.preconditions().clone();
-        preconditions.required_run_state = RequiredRunState::NotCompleted;
-        let request = request.with_preconditions(preconditions);
-        return PreparedCommit::<StateAttemptStarted>::new(request, artifacts)
-            .map(PreparedCommitPlan::from);
-    }
-    if request
-        .payloads()
-        .iter()
-        .any(|payload| matches!(payload, KernelEventPayload::ManualResolutionRecorded(_)))
-    {
-        return Err(StoreError::InvalidPreparedCommitPurpose {
-            purpose: "manual_resolution",
-            message: "manual resolution commits requires verified manual resolution proof".into(),
-        });
-    }
-    if request.payloads().iter().any(test_is_saga_terminal_payload) {
-        return Err(StoreError::InvalidPreparedCommitPurpose {
-            purpose: "saga_terminal",
-            message: "saga terminal commits requires SagaTerminalProof".into(),
-        });
-    }
-    if request.payloads().iter().any(test_is_run_completed_payload) {
-        return PreparedCommit::<AttemptTerminal>::new(request, artifacts)
-            .map(PreparedCommitPlan::from);
-    }
-    if request
-        .payloads()
-        .iter()
-        .any(test_is_side_effect_terminal_payload)
-    {
-        return PreparedCommit::<SideEffectTerminal>::new(request, artifacts)
-            .map(PreparedCommitPlan::from);
-    }
-    if request
-        .payloads()
-        .iter()
-        .any(|payload| payload.side_effect_ref().is_some())
-    {
-        return PreparedCommit::<SideEffectProgress>::new(request, artifacts)
-            .map(PreparedCommitPlan::from);
-    }
-    if request.payloads().iter().any(test_is_retention_payload) {
-        return PreparedCommit::<Retention>::new(request, artifacts).map(PreparedCommitPlan::from);
-    }
-    PreparedCommit::<AttemptTerminal>::new(request, artifacts).map(PreparedCommitPlan::from)
-}
-
 fn append_async_prepared_commit(
     store: &AsyncInMemoryRunStore,
     request: CommitRequest,
@@ -2731,45 +2665,6 @@ fn append_async_side_effect_prepare_for_ledger(
         },
     )
     .expect("append async sidefx prepare");
-}
-
-fn test_is_retention_payload(payload: &KernelEventPayload) -> bool {
-    matches!(
-        payload,
-        KernelEventPayload::RetentionRefsAppended(_)
-            | KernelEventPayload::RetentionManifestProjected(_)
-    )
-}
-
-fn test_is_run_completed_payload(payload: &KernelEventPayload) -> bool {
-    matches!(payload, KernelEventPayload::RunCompleted(_))
-}
-
-fn test_is_side_effect_terminal_payload(payload: &KernelEventPayload) -> bool {
-    matches!(
-        payload,
-        KernelEventPayload::SideEffectNotSubmittedProven(_)
-            | KernelEventPayload::SideEffectSubmissionObserved(_)
-            | KernelEventPayload::SideEffectSubmissionUnknown(_)
-            | KernelEventPayload::SideEffectReceiptObserved(_)
-            | KernelEventPayload::SideEffectConfirmationObserved(_)
-            | KernelEventPayload::SideEffectAmbiguous(_)
-            | KernelEventPayload::SideEffectFailed(_)
-            | KernelEventPayload::ResourceLaneReleased(_)
-            | KernelEventPayload::ResourceLaneReleaseIntent(_)
-    )
-}
-
-fn test_is_saga_terminal_payload(payload: &KernelEventPayload) -> bool {
-    matches!(
-        payload,
-        KernelEventPayload::RunCompleted(events::RunCompleted {
-            outcome: events::RunCompletionOutcome::Compensated
-                | events::RunCompletionOutcome::ManuallyResolved
-                | events::RunCompletionOutcome::FailedWithoutAcdcClaim,
-            ..
-        })
-    )
 }
 
 fn run_start_request(run_id: RunId, commit_key: &str) -> CommitRequest {

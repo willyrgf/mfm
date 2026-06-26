@@ -41,6 +41,123 @@ pub fn prepared_commit_bundle_from_plan(plan: PreparedCommitPlan) -> Result<Prep
     PreparedCommitBundle::new(plan, Vec::new(), existing)
 }
 
+/// Builds a prepared commit plan for test fixtures from typed payload purpose.
+///
+/// This helper exists for tests that construct synthetic event streams across several commit
+/// purposes. It keeps production commit constructors authoritative and rejects fixture attempts
+/// that need manual-resolution or saga-terminal proof authority.
+pub fn prepared_commit_plan_for_test(
+    request: CommitRequest,
+    admitted_artifacts: Vec<ArtifactEvidenceRef>,
+) -> Result<PreparedCommitPlan> {
+    let artifacts =
+        CommitArtifactEvidenceSet::new(request.required_artifacts().to_vec(), admitted_artifacts)?;
+    if request
+        .payloads()
+        .iter()
+        .all(|payload| matches!(payload, events::KernelEventPayload::RunAdmitted(_)))
+    {
+        let mut preconditions = request.preconditions().clone();
+        preconditions.required_run_state = RequiredRunState::Absent;
+        let request = request.with_preconditions(preconditions);
+        return PreparedCommit::<RunAdmission>::new(request, artifacts)
+            .map(PreparedCommitPlan::from);
+    }
+    if request
+        .payloads()
+        .iter()
+        .all(|payload| matches!(payload, events::KernelEventPayload::StateAttemptStarted(_)))
+    {
+        let mut preconditions = request.preconditions().clone();
+        preconditions.required_run_state = RequiredRunState::NotCompleted;
+        let request = request.with_preconditions(preconditions);
+        return PreparedCommit::<StateAttemptStarted>::new(request, artifacts)
+            .map(PreparedCommitPlan::from);
+    }
+    if request.payloads().iter().any(is_manual_resolution_payload) {
+        return Err(StoreError::InvalidPreparedCommitPurpose {
+            purpose: "manual_resolution",
+            message: "manual resolution commits requires verified manual resolution proof".into(),
+        });
+    }
+    if request.payloads().iter().any(is_saga_terminal_payload) {
+        return Err(StoreError::InvalidPreparedCommitPurpose {
+            purpose: "saga_terminal",
+            message: "saga terminal commits requires SagaTerminalProof".into(),
+        });
+    }
+    if request.payloads().iter().any(is_run_completed_payload) {
+        return PreparedCommit::<AttemptTerminal>::new(request, artifacts)
+            .map(PreparedCommitPlan::from);
+    }
+    if request
+        .payloads()
+        .iter()
+        .any(is_side_effect_terminal_payload)
+    {
+        return PreparedCommit::<SideEffectTerminal>::new(request, artifacts)
+            .map(PreparedCommitPlan::from);
+    }
+    if request
+        .payloads()
+        .iter()
+        .any(|payload| payload.side_effect_ref().is_some())
+    {
+        return PreparedCommit::<SideEffectProgress>::new(request, artifacts)
+            .map(PreparedCommitPlan::from);
+    }
+    if request.payloads().iter().any(is_retention_payload) {
+        return PreparedCommit::<Retention>::new(request, artifacts).map(PreparedCommitPlan::from);
+    }
+    PreparedCommit::<AttemptTerminal>::new(request, artifacts).map(PreparedCommitPlan::from)
+}
+
+fn is_manual_resolution_payload(payload: &events::KernelEventPayload) -> bool {
+    matches!(
+        payload,
+        events::KernelEventPayload::ManualResolutionRecorded(_)
+    )
+}
+
+fn is_saga_terminal_payload(payload: &events::KernelEventPayload) -> bool {
+    matches!(
+        payload,
+        events::KernelEventPayload::RunCompleted(events::RunCompleted {
+            outcome: events::RunCompletionOutcome::Compensated
+                | events::RunCompletionOutcome::ManuallyResolved
+                | events::RunCompletionOutcome::FailedWithoutAcdcClaim,
+            ..
+        })
+    )
+}
+
+fn is_run_completed_payload(payload: &events::KernelEventPayload) -> bool {
+    matches!(payload, events::KernelEventPayload::RunCompleted(_))
+}
+
+fn is_side_effect_terminal_payload(payload: &events::KernelEventPayload) -> bool {
+    matches!(
+        payload,
+        events::KernelEventPayload::SideEffectNotSubmittedProven(_)
+            | events::KernelEventPayload::SideEffectSubmissionObserved(_)
+            | events::KernelEventPayload::SideEffectSubmissionUnknown(_)
+            | events::KernelEventPayload::SideEffectReceiptObserved(_)
+            | events::KernelEventPayload::SideEffectConfirmationObserved(_)
+            | events::KernelEventPayload::SideEffectAmbiguous(_)
+            | events::KernelEventPayload::SideEffectFailed(_)
+            | events::KernelEventPayload::ResourceLaneReleaseIntent(_)
+            | events::KernelEventPayload::ResourceLaneReleased(_)
+    )
+}
+
+fn is_retention_payload(payload: &events::KernelEventPayload) -> bool {
+    matches!(
+        payload,
+        events::KernelEventPayload::RetentionRefsAppended(_)
+            | events::KernelEventPayload::RetentionManifestProjected(_)
+    )
+}
+
 /// Appends a started or terminal test commit through the typed prepared-commit surface.
 ///
 /// This panics on fixture construction or store errors, matching normal integration-test helper

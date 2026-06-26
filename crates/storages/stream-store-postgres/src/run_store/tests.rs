@@ -30,7 +30,7 @@ use mfm_store::v1::test_support::{
     fixed_semantic_type_id_for_test as semantic_id, fixed_spec_hash_for_test as spec_hash,
     fixed_state_kind_for_test as state_kind, media_type_for_test as media_type,
     prepared_artifact_bytes_for_test as test_prepared_artifact_bytes,
-    run_identity_material_for_test,
+    prepared_commit_plan_for_test as test_prepared_commit_plan, run_identity_material_for_test,
 };
 use mfm_store::v1::{
     AdmissionLease, AdmissionToken, AdmissionWaiter, ArtifactEvidenceRef, AttemptStatus,
@@ -1268,76 +1268,6 @@ fn test_prepared_commit_bundle(
         .map(test_prepared_artifact_bytes)
         .collect::<mfm_store::v1::Result<Vec<_>>>()?;
     PreparedCommitBundle::new(plan, artifact_bytes, Vec::new())
-}
-
-fn test_prepared_commit_plan(
-    request: mfm_store::v1::CommitRequest,
-    artifacts: Vec<ArtifactEvidenceRef>,
-) -> mfm_store::v1::Result<PreparedCommitPlan> {
-    let artifact_set =
-        CommitArtifactEvidenceSet::new(request.required_artifacts().to_vec(), artifacts)?;
-    let payloads = request.payloads();
-    if payloads
-        .iter()
-        .all(|payload| matches!(payload, KernelEventPayload::RunAdmitted(_)))
-    {
-        let mut preconditions = request.preconditions().clone();
-        preconditions.required_run_state = RequiredRunState::Absent;
-        let request = request.with_preconditions(preconditions);
-        return Ok(PreparedCommit::<RunAdmission>::new(request, artifact_set)?.into());
-    }
-    if payloads
-        .iter()
-        .all(|payload| matches!(payload, KernelEventPayload::StateAttemptStarted(_)))
-    {
-        let mut preconditions = request.preconditions().clone();
-        preconditions.required_run_state = RequiredRunState::NotCompleted;
-        let request = request.with_preconditions(preconditions);
-        return Ok(PreparedCommit::<StateAttemptStarted>::new(request, artifact_set)?.into());
-    }
-    if payloads.iter().any(test_is_run_completed_payload) {
-        return Ok(PreparedCommit::<AttemptTerminal>::new(request, artifact_set)?.into());
-    }
-    if payloads.iter().any(test_is_side_effect_terminal_payload) {
-        return Ok(PreparedCommit::<SideEffectTerminal>::new(request, artifact_set)?.into());
-    }
-    if payloads
-        .iter()
-        .any(|payload| payload.side_effect_ref().is_some())
-    {
-        return Ok(PreparedCommit::<SideEffectProgress>::new(request, artifact_set)?.into());
-    }
-    if payloads.iter().any(test_is_retention_payload) {
-        return Ok(PreparedCommit::<Retention>::new(request, artifact_set)?.into());
-    }
-    Ok(PreparedCommit::<AttemptTerminal>::new(request, artifact_set)?.into())
-}
-
-fn test_is_retention_payload(payload: &KernelEventPayload) -> bool {
-    matches!(
-        payload,
-        KernelEventPayload::RetentionRefsAppended(_)
-            | KernelEventPayload::RetentionManifestProjected(_)
-    )
-}
-
-fn test_is_run_completed_payload(payload: &KernelEventPayload) -> bool {
-    matches!(payload, KernelEventPayload::RunCompleted(_))
-}
-
-fn test_is_side_effect_terminal_payload(payload: &KernelEventPayload) -> bool {
-    matches!(
-        payload,
-        KernelEventPayload::SideEffectNotSubmittedProven(_)
-            | KernelEventPayload::SideEffectSubmissionObserved(_)
-            | KernelEventPayload::SideEffectSubmissionUnknown(_)
-            | KernelEventPayload::SideEffectReceiptObserved(_)
-            | KernelEventPayload::SideEffectConfirmationObserved(_)
-            | KernelEventPayload::SideEffectAmbiguous(_)
-            | KernelEventPayload::SideEffectFailed(_)
-            | KernelEventPayload::ResourceLaneReleaseIntent(_)
-            | KernelEventPayload::ResourceLaneReleased(_)
-    )
 }
 
 async fn append_run_start(
