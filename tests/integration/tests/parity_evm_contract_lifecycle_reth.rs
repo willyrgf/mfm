@@ -5,7 +5,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
-use mfm_integration_tests::test_support;
+use mfm_integration_tests::test_support::{self, empty_post, json_post, response_json};
 
 const NETWORK_ID: &str = "reth-local";
 const DEFAULT_PARITY_RETH_HTTP_PORT: &str = "8565";
@@ -644,31 +644,6 @@ async fn rpc_chain_id(rpc_url: &str) -> u64 {
 
 fn rest_test_app() -> axum::Router {
     mfm_rest_api::make_app(test_support::in_memory_rest_app_state())
-}
-
-fn json_post(uri: &str, body: serde_json::Value) -> Request<Body> {
-    let s = serde_json::to_string(&body).expect("json request must serialize");
-    Request::builder()
-        .method("POST")
-        .uri(uri)
-        .header("content-type", "application/json")
-        .body(Body::from(s))
-        .expect("request")
-}
-
-fn empty_post(uri: &str) -> Request<Body> {
-    Request::builder()
-        .method("POST")
-        .uri(uri)
-        .body(Body::empty())
-        .expect("request")
-}
-
-async fn response_json(resp: axum::response::Response) -> serde_json::Value {
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .expect("body bytes");
-    serde_json::from_slice(&bytes).expect("json response")
 }
 
 fn response_phase(body: &serde_json::Value) -> Option<&str> {

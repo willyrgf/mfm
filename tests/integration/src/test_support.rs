@@ -4,6 +4,8 @@
 use std::fs;
 use std::path::PathBuf;
 
+use axum::body::Body;
+use axum::http::Request;
 use mfm_core::keystore::{Keystore, KeystoreConfig};
 use mfm_store::v1 as store;
 
@@ -15,6 +17,34 @@ pub fn in_memory_rest_app_state() -> InMemoryRestAppState {
     mfm_rest_api::AppState {
         store: store::AsyncInMemoryRunStore::default(),
     }
+}
+
+/// Builds a JSON POST request for REST integration tests.
+pub fn json_post(uri: &str, body: serde_json::Value) -> Request<Body> {
+    let payload = serde_json::to_string(&body).expect("request body serializes");
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(Body::from(payload))
+        .expect("request")
+}
+
+/// Builds an empty-body POST request for REST integration tests.
+pub fn empty_post(uri: &str) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .body(Body::empty())
+        .expect("request")
+}
+
+/// Parses an Axum response body as JSON for REST integration tests.
+pub async fn response_json(response: axum::response::Response) -> serde_json::Value {
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("response body");
+    serde_json::from_slice(&bytes).expect("response json")
 }
 
 /// Calls a JSON-RPC endpoint and returns the response `result`.

@@ -95,24 +95,6 @@ fn rest_test_app() -> axum::Router {
     mfm_rest_api::make_app(in_memory_rest_app_state())
 }
 
-fn json_post(uri: &str, body: serde_json::Value) -> Request<Body> {
-    let payload = serde_json::to_string(&body).expect("request body serializes");
-    Request::builder()
-        .method("POST")
-        .uri(uri)
-        .header("content-type", "application/json")
-        .body(Body::from(payload))
-        .expect("request")
-}
-
-fn empty_post(uri: &str) -> Request<Body> {
-    Request::builder()
-        .method("POST")
-        .uri(uri)
-        .body(Body::empty())
-        .expect("request")
-}
-
 async fn portfolio_snapshot_post(
     app: &axum::Router,
     payload: &serde_json::Value,
@@ -138,13 +120,6 @@ async fn portfolio_snapshot_post(
     );
     assert_eq!(body["status"], "success");
     body
-}
-
-async fn response_json(response: axum::response::Response) -> serde_json::Value {
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("response body");
-    serde_json::from_slice(&bytes).expect("response json")
 }
 
 fn parse_run_response(value: &serde_json::Value) -> RunResponse {

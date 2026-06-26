@@ -319,6 +319,9 @@ pub use admission_lanes::{
 /// store maps into its own error type via `From`.
 pub mod codec;
 
+#[cfg(feature = "test-support")]
+pub mod test_support;
+
 fn canonical_json(value: serde_json::Value) -> Result<PlainCanonicalJsonBytes> {
     let json =
         serde_json::to_string(&value).map_err(|error| StoreError::Serialize(error.to_string()))?;

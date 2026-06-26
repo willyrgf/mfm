@@ -8,6 +8,7 @@ use axum::http::{Request, StatusCode};
 use sqlx::{AssertSqlSafe, PgPool};
 use tower::ServiceExt;
 
+use mfm_integration_tests::test_support::response_json;
 use mfm_stream_store_postgres::{PostgresRunStore, PostgresSchema, PostgresStoreError};
 
 const VALID_RUN_ID: &str =
@@ -74,13 +75,6 @@ async fn drop_schema(database_url: &str, schema: &str) {
 fn schema_scoped_database_url(database_url: &str, schema: &str) -> String {
     let separator = if database_url.contains('?') { '&' } else { '?' };
     format!("{database_url}{separator}options=-csearch_path%3D{schema}")
-}
-
-async fn response_json(resp: axum::response::Response) -> serde_json::Value {
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .expect("body bytes");
-    serde_json::from_slice(&bytes).expect("json response")
 }
 
 #[tokio::test]

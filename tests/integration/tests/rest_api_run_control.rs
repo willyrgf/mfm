@@ -4,8 +4,8 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use mfm_authored_config::{AuthoredConfig, AuthoredConfigFormat};
 use mfm_events::v1 as events;
-use mfm_ids::{AttemptId, DigestAlgorithm, DigestBytes, RunId, SpecHash};
-use mfm_integration_tests::test_support;
+use mfm_ids::RunId;
+use mfm_integration_tests::test_support::{self, empty_post, json_post, response_json};
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 use mfm_store::v1::{RunEventStore, TrustScopeStore};
@@ -19,31 +19,6 @@ const VALID_SCHEMA_ID: &str =
     "schema:mfm.test.public:1:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000002";
 const PORTFOLIO_NETWORK_ID: &str = "rest-control-eth";
 static RPC_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-fn json_post(uri: &str, body: serde_json::Value) -> Request<Body> {
-    let s = serde_json::to_string(&body).expect("json request must serialize");
-    Request::builder()
-        .method("POST")
-        .uri(uri)
-        .header("content-type", "application/json")
-        .body(Body::from(s))
-        .expect("request")
-}
-
-fn empty_post(uri: &str) -> Request<Body> {
-    Request::builder()
-        .method("POST")
-        .uri(uri)
-        .body(Body::empty())
-        .expect("request")
-}
-
-async fn response_json(resp: axum::response::Response) -> serde_json::Value {
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .expect("body bytes");
-    serde_json::from_slice(&bytes).expect("json response")
-}
 
 fn test_app() -> axum::Router {
     let state = test_support::in_memory_rest_app_state();
@@ -341,8 +316,8 @@ async fn portfolio_status_route_reports_interrupted_attempt_and_framework_attemp
         .iter()
         .find(|node| node.framework.is_none())
         .expect("domain node");
-    let interrupted_attempt_id = fixed_attempt_id(0x41);
-    append_interrupted_attempt(
+    let interrupted_attempt_id = store::test_support::fixed_attempt_id_for_test(0x41);
+    store::test_support::append_interrupted_attempt_for_test(
         &state.store,
         &run_id,
         certified.spec_hash(),
@@ -911,121 +886,6 @@ async fn admit_portfolio_run_without_driving(
         .await
         .expect("start fixture run");
     (run_id, certified)
-}
-
-async fn append_interrupted_attempt(
-    store: &store::AsyncInMemoryRunStore,
-    run_id: &RunId,
-    spec_hash: &SpecHash,
-    node: &spec::NodeSpec,
-    attempt_id: &AttemptId,
-) {
-    let start = store::CommitRequest::from_payloads(
-        run_id.clone(),
-        store
-            .expected_next_seq(run_id)
-            .await
-            .expect("expected next seq"),
-        store::CommitKey::new("rest-interrupted-attempt-start").expect("commit key"),
-        vec![events::KernelEventPayload::StateAttemptStarted(
-            events::StateAttemptStarted {
-                spec_hash: spec_hash.clone(),
-                node_id: node.node_id.clone(),
-                attempt_id: attempt_id.clone(),
-                attempt_no: 1,
-                state_kind: node.state_kind.clone(),
-                state_version: node.state_version.clone(),
-            },
-        )],
-        Vec::new(),
-        store::CommitPreconditions {
-            required_run_state: store::RequiredRunState::NotCompleted,
-            required_cell_states: vec![store::CellStatePrecondition {
-                cell_id: node.output_cell.clone(),
-                required: store::RequiredCellState::Absent,
-            }],
-            ..store::CommitPreconditions::default()
-        },
-    )
-    .expect("attempt start request");
-    append_run_commit(store, start).await;
-
-    let interrupted = store::CommitRequest::from_payloads(
-        run_id.clone(),
-        store
-            .expected_next_seq(run_id)
-            .await
-            .expect("expected next seq"),
-        store::CommitKey::new("rest-interrupted-attempt-terminal").expect("commit key"),
-        vec![events::KernelEventPayload::StateAttemptInterrupted(
-            events::StateAttemptInterrupted {
-                spec_hash: spec_hash.clone(),
-                node_id: node.node_id.clone(),
-                attempt_id: attempt_id.clone(),
-            },
-        )],
-        Vec::new(),
-        store::CommitPreconditions {
-            required_run_state: store::RequiredRunState::NotCompleted,
-            required_cell_states: vec![store::CellStatePrecondition {
-                cell_id: node.output_cell.clone(),
-                required: store::RequiredCellState::Absent,
-            }],
-            ..store::CommitPreconditions::default()
-        },
-    )
-    .expect("attempt interrupted request");
-    append_run_commit(store, interrupted).await;
-}
-
-async fn append_run_commit(store: &store::AsyncInMemoryRunStore, request: store::CommitRequest) {
-    let admitted_artifacts = request.required_artifacts().to_vec();
-    let artifacts = store::CommitArtifactEvidenceSet::new(
-        request.required_artifacts().to_vec(),
-        admitted_artifacts,
-    )
-    .expect("artifact evidence set");
-    let plan = if request
-        .payloads()
-        .iter()
-        .all(|payload| matches!(payload, events::KernelEventPayload::StateAttemptStarted(_)))
-    {
-        store::PreparedCommit::<store::StateAttemptStarted>::new(request, artifacts)
-            .expect("prepared attempt-start commit")
-            .into()
-    } else {
-        store::PreparedCommit::<store::AttemptTerminal>::new(request, artifacts)
-            .expect("prepared attempt-terminal commit")
-            .into()
-    };
-    let bundle = test_bundle_from_plan(plan).expect("prepared commit bundle");
-    store
-        .append_prepared_commit_bundle(bundle)
-        .await
-        .expect("append typed commit");
-}
-
-fn test_bundle_from_plan(
-    plan: store::PreparedCommitPlan,
-) -> store::Result<store::PreparedCommitBundle> {
-    let existing = plan
-        .admitted_artifacts()
-        .iter()
-        .map(|evidence| {
-            Ok(store::ExistingArtifactAdmission::new(
-                evidence.artifact_id.clone(),
-                evidence.evidence_hash()?,
-            ))
-        })
-        .collect::<store::Result<Vec<_>>>()?;
-    store::PreparedCommitBundle::new(plan, Vec::new(), existing)
-}
-
-fn fixed_attempt_id(byte: u8) -> AttemptId {
-    AttemptId::from_digest(
-        DigestAlgorithm::Sha256JcsV1,
-        DigestBytes::from_array([byte; 32]),
-    )
 }
 
 fn assert_framework_started_before_terminal_evidence(

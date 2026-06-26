@@ -43,6 +43,7 @@ mfm-op-proof = { path = "../../crates/ops/proof-op" }
 mfm-program = { path = "../../crates/kernel/program" }
 mfm-runtime = { path = "../../crates/kernel/runtime" }
 mfm-spec = { path = "../../crates/kernel/spec" }
+mfm-store = { path = "../../crates/kernel/store", features = ["test-support"] }
 tempfile = "3.0"
 assert_cmd = "2.0"
 predicates = "3.0"
