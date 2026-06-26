@@ -47,6 +47,10 @@ pub trait ErasedNodeRunner: Send + Sync {
 /// Scheduler, framework lifecycle, artifact reference, retention, and run lifecycle events are
 /// intentionally absent. The runtime middleware derives those authoritative payloads after
 /// validating this runner-facing payload set against the certified spec and store projections.
+///
+/// Payload variants stay unboxed so runner output uses the same direct event payload shapes as the
+/// kernel stream at the validation boundary.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunnerEventPayload {
     /// Recorded read fact event.

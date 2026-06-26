@@ -2942,13 +2942,15 @@ impl OwnedSideEffectLedgerState {
         let claim = self.require_observed_submission_claim()?.clone();
         require_claim_or_verify_context_for_observation(
             &self.core.ledger_key,
-            &self.core.pair_id,
-            &payload.pair_id,
-            payload.pair_role,
             &claim,
-            &payload.node_id,
-            &payload.attempt_id,
-            payload.invocation_epoch,
+            ObservationClaimContext {
+                ledger_pair_id: &self.core.pair_id,
+                payload_pair_id: &payload.pair_id,
+                payload_pair_role: payload.pair_role,
+                node_id: &payload.node_id,
+                attempt_id: &payload.attempt_id,
+                invocation_epoch: payload.invocation_epoch,
+            },
         )?;
         self.core.event_id = event_id;
         self.retained.receipt = Some(SideEffectArtifactProjection {
@@ -2972,13 +2974,15 @@ impl OwnedSideEffectLedgerState {
         let claim = self.require_phase_claim("receipt")?.clone();
         require_claim_or_verify_context_for_observation(
             &self.core.ledger_key,
-            &self.core.pair_id,
-            &payload.pair_id,
-            payload.pair_role,
             &claim,
-            &payload.node_id,
-            &payload.attempt_id,
-            payload.invocation_epoch,
+            ObservationClaimContext {
+                ledger_pair_id: &self.core.pair_id,
+                payload_pair_id: &payload.pair_id,
+                payload_pair_role: payload.pair_role,
+                node_id: &payload.node_id,
+                attempt_id: &payload.attempt_id,
+                invocation_epoch: payload.invocation_epoch,
+            },
         )?;
         self.core.event_id = event_id;
         self.retained.confirmation = Some(SideEffectArtifactProjection {
@@ -3333,19 +3337,24 @@ fn require_claim_context_for_payload(
     Ok(())
 }
 
+struct ObservationClaimContext<'a> {
+    ledger_pair_id: &'a SideEffectPairId,
+    payload_pair_id: &'a SideEffectPairId,
+    payload_pair_role: events::SideEffectPairRole,
+    node_id: &'a NodeId,
+    attempt_id: &'a AttemptId,
+    invocation_epoch: u32,
+}
+
 fn require_claim_or_verify_context_for_observation(
     ledger_key: &events::SideEffectLedgerKey,
-    ledger_pair_id: &SideEffectPairId,
-    payload_pair_id: &SideEffectPairId,
-    payload_pair_role: events::SideEffectPairRole,
     claim: &SideEffectClaimProjection,
-    node_id: &NodeId,
-    attempt_id: &AttemptId,
-    invocation_epoch: u32,
+    context: ObservationClaimContext<'_>,
 ) -> Result<()> {
-    if payload_pair_role == events::SideEffectPairRole::Verify && ledger_pair_id == payload_pair_id
+    if context.payload_pair_role == events::SideEffectPairRole::Verify
+        && context.ledger_pair_id == context.payload_pair_id
     {
-        if claim.invocation_epoch != invocation_epoch {
+        if claim.invocation_epoch != context.invocation_epoch {
             return Err(side_effect_key_conflict(
                 ledger_key,
                 "invocation epoch does not match active claim",
@@ -3356,9 +3365,9 @@ fn require_claim_or_verify_context_for_observation(
     require_claim_context_for_payload(
         ledger_key,
         claim,
-        node_id,
-        attempt_id,
-        invocation_epoch,
+        context.node_id,
+        context.attempt_id,
+        context.invocation_epoch,
         claim.claim_generation,
         &claim.claim_fencing_token,
         Some(&claim.claim_owner),
@@ -9347,7 +9356,7 @@ fn parse_side_effect_pair_role(
     field: &'static str,
 ) -> CodecResult<events::SideEffectPairRole> {
     let value = required_str(json, field)?;
-    events::SideEffectPairRole::from_str(value)
+    events::SideEffectPairRole::parse(value)
         .ok_or_else(|| CodecError::Identity(format!("unknown side-effect pair role {value}")))
 }
 

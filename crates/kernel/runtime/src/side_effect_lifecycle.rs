@@ -429,14 +429,14 @@ pub(crate) fn validate_side_effect_terminal_evidence(
     node: &spec::NodeSpec,
     attempt_id: &AttemptId,
 ) -> Result<()> {
-    let terminal_skipped = match projections.cell_terminal(&node.output_cell) {
+    let terminal_skipped = matches!(
+        projections.cell_terminal(&node.output_cell),
         Some(store::CellTerminalProjection::Skipped {
             node_id,
             attempt_id: cell_attempt_id,
             ..
-        }) if node_id == &node.node_id && cell_attempt_id == attempt_id => true,
-        _ => false,
-    };
+        }) if node_id == &node.node_id && cell_attempt_id == attempt_id
+    );
     validate_side_effect_terminal_phase(
         runtime_spec,
         run_id,
