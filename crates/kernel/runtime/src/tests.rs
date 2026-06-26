@@ -10304,7 +10304,6 @@ impl<'a> SyntheticSideEffectAppend<'a> {
         required_artifacts: Vec<store::ArtifactEvidenceRef>,
         required_side_effect_state: store::RequiredSideEffectState,
         require_attempt_started: bool,
-        expect: &'static str,
     ) {
         let required_present_logical_keys = require_attempt_started
             .then(|| {
@@ -10333,7 +10332,7 @@ impl<'a> SyntheticSideEffectAppend<'a> {
                     ..store::CommitPreconditions::default()
                 },
             })
-            .expect(expect);
+            .expect("append synthetic side-effect commit");
     }
 }
 
@@ -10484,7 +10483,6 @@ fn append_synthetic_exclusive_prepare(
         vec![intent_artifact],
         store::RequiredSideEffectState::Absent,
         true,
-        "append synthetic side-effect prepare",
     );
     (attempt_id, ledger)
 }
@@ -10523,7 +10521,6 @@ fn append_synthetic_invocation_started(
         Vec::new(),
         store::RequiredSideEffectState::InvocationPrepared,
         false,
-        "append synthetic invocation started",
     );
 }
 
@@ -10589,7 +10586,6 @@ fn append_synthetic_submission_observed(
         vec![evidence],
         store::RequiredSideEffectState::InvocationStarted,
         false,
-        "append synthetic submission observed",
     );
 }
 
@@ -10636,7 +10632,6 @@ fn append_synthetic_receipt_observed(
         vec![evidence],
         store::RequiredSideEffectState::SubmissionResult,
         false,
-        "append synthetic receipt observed",
     );
 }
 
@@ -10778,7 +10773,6 @@ fn append_synthetic_verify_receipt_observed(
         vec![evidence],
         store::RequiredSideEffectState::SubmissionResult,
         true,
-        "append synthetic verify receipt observed",
     );
 }
 
@@ -10842,7 +10836,6 @@ fn append_synthetic_verify_confirmation_observed(
         vec![evidence],
         store::RequiredSideEffectState::ReceiptObserved,
         true,
-        "append synthetic confirmation observed",
     );
 }
 
@@ -11009,7 +11002,6 @@ fn append_synthetic_ambiguous(
         vec![evidence],
         store::RequiredSideEffectState::InvocationStarted,
         false,
-        "append synthetic ambiguity",
     );
 }
 
