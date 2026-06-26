@@ -2543,22 +2543,13 @@ async fn side_effect_driver_submits_from_started_projection() {
     .await
     .expect("start run");
     let node = node_by_output(&fixture, &fixture.cell_a);
-    let (attempt_id, ledger_key) = append_synthetic_exclusive_prepare(
+    let (attempt_id, ledger_key) = append_synthetic_exclusive_started(
         &mut store,
         &fixture,
         &fixture.run_id,
         node,
         "wallet-driver-submit",
         "sidefx-driver-submit",
-    );
-    append_synthetic_invocation_started(
-        &mut store,
-        &fixture,
-        &fixture.run_id,
-        node,
-        &attempt_id,
-        &ledger_key,
-        "sidefx-driver-submit-started",
     );
     let callbacks = TestSideEffectDriverCallbacks::new(&fixture);
 
@@ -2591,22 +2582,13 @@ async fn side_effect_driver_persists_submission_recovery_decisions() {
     .await
     .expect("start run");
     let node = node_by_output(&fixture, &fixture.cell_a);
-    let (attempt_id, ledger_key) = append_synthetic_exclusive_prepare(
+    let (attempt_id, _ledger_key) = append_synthetic_exclusive_started(
         &mut store,
         &fixture,
         &fixture.run_id,
         node,
         "wallet-driver-recovery",
         "sidefx-driver-recovery",
-    );
-    append_synthetic_invocation_started(
-        &mut store,
-        &fixture,
-        &fixture.run_id,
-        node,
-        &attempt_id,
-        &ledger_key,
-        "sidefx-driver-recovery-started",
     );
 
     for (decision, expected) in [
@@ -2660,22 +2642,13 @@ async fn side_effect_submission_unknown_keeps_exclusive_resource_lane_held() {
     .expect("start run");
     let node = node_by_output(&fixture, &fixture.cell_a);
     let pair_id = fixture_side_effect_pair_id(&fixture, node);
-    let (attempt_id, ledger_key) = append_synthetic_exclusive_prepare(
+    let (attempt_id, _ledger_key) = append_synthetic_exclusive_started(
         &mut store,
         &fixture,
         &fixture.run_id,
         node,
         "wallet-driver-unknown-lane",
         "sidefx-driver-unknown-lane",
-    );
-    append_synthetic_invocation_started(
-        &mut store,
-        &fixture,
-        &fixture.run_id,
-        node,
-        &attempt_id,
-        &ledger_key,
-        "sidefx-driver-unknown-lane-started",
     );
     let before_unknown = store.projection_snapshot();
     let (lane_key, held_lane) =
@@ -2745,22 +2718,13 @@ async fn side_effect_verify_driver_maps_receipt_to_state_output() {
     .await
     .expect("start run");
     let node = node_by_output(&fixture, &fixture.cell_a);
-    let (submit_attempt_id, ledger_key) = append_synthetic_exclusive_prepare(
+    let (submit_attempt_id, ledger_key) = append_synthetic_exclusive_started(
         &mut store,
         &fixture,
         &fixture.run_id,
         node,
         "wallet-driver-output",
         "sidefx-driver-output",
-    );
-    append_synthetic_invocation_started(
-        &mut store,
-        &fixture,
-        &fixture.run_id,
-        node,
-        &submit_attempt_id,
-        &ledger_key,
-        "sidefx-driver-output-started",
     );
     append_synthetic_submission_observed(
         &mut store,
@@ -2890,22 +2854,13 @@ async fn side_effect_driver_rejects_ambiguous_projection() {
     .await
     .expect("start run");
     let node = node_by_output(&fixture, &fixture.cell_a);
-    let (attempt_id, ledger_key) = append_synthetic_exclusive_prepare(
+    let (attempt_id, ledger_key) = append_synthetic_exclusive_started(
         &mut store,
         &fixture,
         &fixture.run_id,
         node,
         "wallet-driver-ambiguous",
         "sidefx-driver-ambiguous",
-    );
-    append_synthetic_invocation_started(
-        &mut store,
-        &fixture,
-        &fixture.run_id,
-        node,
-        &attempt_id,
-        &ledger_key,
-        "sidefx-driver-ambiguous-started",
     );
     append_synthetic_ambiguous(
         &mut store,
@@ -7660,22 +7615,13 @@ async fn runtime_materializes_confirmed_forward_output_before_failed_without_cla
     .await
     .expect("start run");
 
-    let (forward_attempt, ledger) = append_synthetic_exclusive_prepare(
+    let (forward_attempt, ledger) = append_synthetic_exclusive_started(
         &mut store,
         &fixture,
         &fixture.run_id,
         &forward_node,
         "wallet-confirmed-forward-output-before-failure",
         "sidefx-confirmed-forward-output-before-failure",
-    );
-    append_synthetic_invocation_started(
-        &mut store,
-        &fixture,
-        &fixture.run_id,
-        &forward_node,
-        &forward_attempt,
-        &ledger,
-        "sidefx-confirmed-forward-output-before-failure-started",
     );
     append_synthetic_submission_observed(
         &mut store,
@@ -10608,6 +10554,28 @@ fn append_synthetic_invocation_started(
         .expect("append synthetic invocation started");
 }
 
+fn append_synthetic_exclusive_started(
+    store: &mut TestTypedRunStore,
+    fixture: &Fixture,
+    run_id: &RunId,
+    node: &spec::NodeSpec,
+    key: &str,
+    commit_key: &str,
+) -> (AttemptId, events::SideEffectLedgerKey) {
+    let (attempt_id, ledger_key) =
+        append_synthetic_exclusive_prepare(store, fixture, run_id, node, key, commit_key);
+    append_synthetic_invocation_started(
+        store,
+        fixture,
+        run_id,
+        node,
+        &attempt_id,
+        &ledger_key,
+        &format!("{commit_key}-started"),
+    );
+    (attempt_id, ledger_key)
+}
+
 fn append_synthetic_submission_observed(
     store: &mut TestTypedRunStore,
     fixture: &Fixture,
@@ -10731,16 +10699,7 @@ fn append_synthetic_exclusive_receipt_phase(
     commit_key: &str,
 ) -> AttemptId {
     let (attempt_id, ledger_key) =
-        append_synthetic_exclusive_prepare(store, fixture, &fixture.run_id, node, key, commit_key);
-    append_synthetic_invocation_started(
-        store,
-        fixture,
-        &fixture.run_id,
-        node,
-        &attempt_id,
-        &ledger_key,
-        &format!("{commit_key}-started"),
-    );
+        append_synthetic_exclusive_started(store, fixture, &fixture.run_id, node, key, commit_key);
     append_synthetic_submission_observed(
         store,
         fixture,
