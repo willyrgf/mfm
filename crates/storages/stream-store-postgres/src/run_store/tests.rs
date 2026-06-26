@@ -7,7 +7,7 @@ use mfm_events::v1::{self as events, ArtifactRole, KernelEventPayload};
 use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind, CapabilityVersion, CellId,
     ContentDigest, DigestAlgorithm, EffectKind, EffectVersion, LoweringVersion, NodeId, RunId,
-    SchemaId, SideEffectPairId, SpecVersion, StateVersion,
+    SchemaId, SideEffectPairId, SpecHash, SpecVersion, StateVersion,
 };
 use mfm_manual_auth::{
     manual_authorization_proof_schema_id, ManualAuthorizationSignatureBytes,
@@ -25,20 +25,20 @@ use mfm_store::v1::test_support::{
     confirmation_terminal_policies_for_projection_for_test as confirmation_terminal_policies_for_projection,
     fixed_attempt_id_for_test as attempt_id, fixed_cell_id_for_test as cell_id,
     fixed_descriptor_id_for_test as descriptor_id, fixed_digest_bytes_for_test as digest_bytes,
-    fixed_node_id_for_test as node_id, fixed_run_id_for_test as run_id,
-    fixed_schema_id_for_test as schema_id, fixed_scope_id_for_test as scope_id,
-    fixed_semantic_type_id_for_test as semantic_id, fixed_spec_hash_for_test as spec_hash,
-    fixed_state_kind_for_test as state_kind, media_type_for_test as media_type,
+    fixed_node_id_for_test as node_id, fixed_schema_id_for_test as schema_id,
+    fixed_scope_id_for_test as scope_id, fixed_semantic_type_id_for_test as semantic_id,
+    fixed_spec_hash_for_test as spec_hash, fixed_state_kind_for_test as state_kind,
+    media_type_for_test as media_type,
     prepared_artifact_bytes_for_test as test_prepared_artifact_bytes,
     prepared_commit_plan_for_test as test_prepared_commit_plan, run_identity_material_for_test,
 };
 use mfm_store::v1::{
     AdmissionLease, AdmissionToken, AdmissionWaiter, ArtifactEvidenceRef, AttemptStatus,
-    CellTerminalProjection, CommitArtifactEvidenceSet, CommitKey, CommitOutcome,
-    CommitPreconditions, ExecutionClaimStatus, ExecutionClaimStore, ManualResolution,
-    NowaitSkipAdmissionResult, PreparedCommit, PreparedCommitPlan, RequiredRunState,
-    ResourceLaneKey, Retention, RunState, SagaEngagementReason, SagaTerminal, SagaTerminalProof,
-    SideEffectPhase, StoreError, StreamSeq, TrustScopeId, TrustScopeStore,
+    CellTerminalProjection, CertifiedRunStoreAuthority, CommitArtifactEvidenceSet, CommitKey,
+    CommitOutcome, CommitPreconditions, ExecutionClaimStatus, ExecutionClaimStore,
+    ManualResolution, NowaitSkipAdmissionResult, PreparedCommit, PreparedCommitPlan,
+    RequiredRunState, ResourceLaneKey, Retention, RunState, SagaEngagementReason, SagaTerminal,
+    SagaTerminalProof, SideEffectPhase, StoreError, StreamSeq, TrustScopeId, TrustScopeStore,
 };
 use sqlx::postgres::PgConnectOptions;
 use sqlx::AssertSqlSafe;
@@ -353,10 +353,6 @@ async fn expire_execution_claim_row(store: &PostgresRunStore, run_id: &RunId) {
     .expect("expire execution claim row");
 }
 
-fn run_admitted(run_id: RunId) -> KernelEventPayload {
-    run_admitted_with_saga_policy(run_id, &SagaPolicySpec::NoSideEffects)
-}
-
 fn run_admitted_with_saga_policy(
     run_id: RunId,
     saga_policy: &SagaPolicySpec,
@@ -367,10 +363,7 @@ fn run_admitted_with_saga_policy(
         .expect("saga authority spec hash");
     let spec_artifact = spec_artifact_ref();
     let certificate_artifact = certificate_artifact_ref();
-    let identity_material = run_identity_material_for_test(
-        certified_spec_hash.clone(),
-        "40404040404040404040404040404040",
-    );
+    let identity_material = run_identity_material_for_run_id(&run_id, saga_policy);
     KernelEventPayload::RunAdmitted(Box::new(events::RunAdmitted {
         run_id,
         identity_material,
@@ -689,9 +682,9 @@ fn sign_manual_claim_digest(signing_key: &k256::ecdsa::SigningKey, digest: &[u8;
 fn saga_preconditions(run_id: &RunId, policy: SagaPolicySpec) -> CommitPreconditions {
     let spec = saga_authority_spec(policy);
     CommitPreconditions {
-        saga_admit_token: Some(
-            mfm_store::v1::SagaAdmitToken::from_spec(run_id.clone(), &spec)
-                .expect("saga admit token"),
+        certified_run_authority: Some(
+            mfm_store::v1::CertifiedRunStoreAuthority::from_spec(run_id.clone(), &spec)
+                .expect("certified run authority"),
         ),
         ..CommitPreconditions::default()
     }
@@ -706,8 +699,24 @@ fn side_effect_pair_id() -> SideEffectPairId {
 }
 
 fn side_effect_pair_id_for_contract(contract: &spec::SideEffectContractSpec) -> SideEffectPairId {
-    spec::side_effect_pair_id(&node_id(70), &side_effect_output_cell(), contract)
+    spec::side_effect_pair_id(&submit_node_id(), &side_effect_output_cell(), contract)
         .expect("certified side-effect pair id")
+}
+
+fn submit_node_id() -> NodeId {
+    node_id(70)
+}
+
+fn submit_attempt_id() -> AttemptId {
+    attempt_id(72)
+}
+
+fn verify_node_id() -> NodeId {
+    node_id(170)
+}
+
+fn verify_attempt_id() -> AttemptId {
+    attempt_id(172)
 }
 
 fn side_effect_output_cell() -> CellId {
@@ -763,6 +772,51 @@ fn saga_authority_spec(policy: SagaPolicySpec) -> spec::TypedExecutionSpec {
         public_schema_id: public_schema_id.clone(),
         canonicalizer_identity: CanonicalizerIdentity::new("mfm.jcs.v1").expect("canonicalizer"),
     };
+    let submit_node_id = submit_node_id();
+    let submit_output_cell = side_effect_output_cell();
+    let pair_id = spec::side_effect_pair_id(&submit_node_id, &submit_output_cell, &contract)
+        .expect("side-effect pair id");
+    let submit_node = spec::NodeSpec {
+        node_id: submit_node_id.clone(),
+        stable_key: spec::StableAuthorKey::new("side-effect").expect("stable key"),
+        scope_id: scope_id(71),
+        state_kind: state_kind.clone(),
+        state_version: state_version.clone(),
+        descriptor_id: state_descriptor_id.clone(),
+        config_ref: config_ref.clone(),
+        input_bindings: input_bindings.clone(),
+        output_cell: submit_output_cell.clone(),
+        effect_kind: effect_kind.clone(),
+        capability_bindings: capability_bindings.clone(),
+        adapter_bindings: Vec::new(),
+        side_effect: Some(contract.clone()),
+        framework: None,
+        planning_lineage: planning_lineage.clone(),
+        deterministic_predecessors: Vec::new(),
+    };
+    let verify_node = spec::NodeSpec {
+        node_id: verify_node_id(),
+        stable_key: spec::StableAuthorKey::new("side-effect-verify").expect("stable key"),
+        scope_id: scope_id(171),
+        state_kind: state_kind.clone(),
+        state_version: state_version.clone(),
+        descriptor_id: state_descriptor_id.clone(),
+        config_ref: config_ref.clone(),
+        input_bindings: input_bindings.clone(),
+        output_cell: submit_output_cell,
+        effect_kind: effect_kind.clone(),
+        capability_bindings: capability_bindings.clone(),
+        adapter_bindings: Vec::new(),
+        side_effect: None,
+        framework: Some(spec::FrameworkNodeSpec::SideEffectVerify(
+            spec::SideEffectVerifyNodeSpec {
+                pair_id,
+                submit_node_id: submit_node_id.clone(),
+            },
+        )),
+        planning_lineage: planning_lineage.clone(),
+        deterministic_predecessors: vec![submit_node_id],
+    };
     spec::TypedExecutionSpec::new(spec::TypedExecutionSpecParts {
         authoring: spec::AuthoringProvenance::StateComposition {
             descriptor: spec::CompositionDescriptor {
@@ -797,24 +851,7 @@ fn saga_authority_spec(policy: SagaPolicySpec) -> spec::TypedExecutionSpec {
             spec::DescriptorIdentity::Renderer(Box::new(renderer_descriptor.clone())),
         ],
         config_refs: vec![config_ref.clone()],
-        nodes: vec![spec::NodeSpec {
-            node_id: node_id(70),
-            stable_key: spec::StableAuthorKey::new("side-effect").expect("stable key"),
-            scope_id: scope_id(71),
-            state_kind,
-            state_version,
-            descriptor_id: state_descriptor_id,
-            config_ref,
-            input_bindings,
-            output_cell: side_effect_output_cell(),
-            effect_kind,
-            capability_bindings,
-            adapter_bindings: Vec::new(),
-            side_effect: Some(contract),
-            framework: None,
-            planning_lineage: planning_lineage.clone(),
-            deterministic_predecessors: Vec::new(),
-        }],
+        nodes: vec![submit_node, verify_node],
         remediations: BTreeMap::new(),
         cells: Vec::new(),
         value_lineages: Vec::new(),
@@ -828,15 +865,63 @@ fn saga_authority_spec(policy: SagaPolicySpec) -> spec::TypedExecutionSpec {
     .expect("saga authority spec")
 }
 
+fn run_id(byte: u8) -> RunId {
+    run_id_with_saga_policy(byte, &SagaPolicySpec::NoSideEffects)
+}
+
+fn run_id_with_saga_policy(byte: u8, policy: &SagaPolicySpec) -> RunId {
+    run_identity_material_for_saga_policy(byte, policy)
+        .derive_run_id()
+        .expect("test run id")
+}
+
+fn run_identity_material_for_saga_policy(
+    byte: u8,
+    policy: &SagaPolicySpec,
+) -> events::RunIdentityMaterialV1 {
+    let authority_spec = saga_authority_spec(policy.clone());
+    let certified_spec_hash = authority_spec
+        .spec_hash()
+        .expect("saga authority spec hash");
+    run_identity_material_for_test(certified_spec_hash, &trust_scope_hex(byte))
+}
+
+fn run_identity_material_for_run_id(
+    run_id: &RunId,
+    policy: &SagaPolicySpec,
+) -> events::RunIdentityMaterialV1 {
+    (0..=u8::MAX)
+        .map(|byte| run_identity_material_for_saga_policy(byte, policy))
+        .find(|material| {
+            material
+                .derive_run_id()
+                .map(|derived| &derived == run_id)
+                .unwrap_or(false)
+        })
+        .expect("test run id must be derived from saga policy identity material")
+}
+
+fn trust_scope_hex(byte: u8) -> String {
+    format!("{byte:02x}").repeat(16)
+}
+
 fn side_effect_ledger_purpose() -> events::SideEffectLedgerPurpose {
     events::SideEffectLedgerPurpose::Forward
 }
 
 fn side_effect_attempt_started() -> KernelEventPayload {
+    side_effect_attempt_started_for(submit_node_id(), submit_attempt_id())
+}
+
+fn side_effect_verify_attempt_started() -> KernelEventPayload {
+    side_effect_attempt_started_for(verify_node_id(), verify_attempt_id())
+}
+
+fn side_effect_attempt_started_for(node_id: NodeId, attempt_id: AttemptId) -> KernelEventPayload {
     KernelEventPayload::StateAttemptStarted(events::StateAttemptStarted {
         spec_hash: spec_hash(1),
-        node_id: node_id(70),
-        attempt_id: attempt_id(72),
+        node_id,
+        attempt_id,
         attempt_no: 1,
         state_kind: state_kind(70),
         state_version: StateVersion::new("mfm.test.side_effect_state.v1").expect("state version"),
@@ -846,9 +931,9 @@ fn side_effect_attempt_started() -> KernelEventPayload {
 fn side_effect_intent(artifact_id: ArtifactId, digest: ContentDigest) -> KernelEventPayload {
     KernelEventPayload::SideEffectIntentPersisted(events::side_effect::IntentPersisted {
         spec_hash: spec_hash(1),
-        node_id: node_id(70),
+        node_id: submit_node_id(),
         scope_id: scope_id(71),
-        attempt_id: attempt_id(72),
+        attempt_id: submit_attempt_id(),
         ledger_key: side_effect_ledger_key(),
         ledger_purpose: side_effect_ledger_purpose(),
         pair_id: side_effect_pair_id(),
@@ -883,8 +968,8 @@ fn side_effect_intent(artifact_id: ArtifactId, digest: ContentDigest) -> KernelE
 fn side_effect_claim() -> KernelEventPayload {
     KernelEventPayload::SideEffectClaimed(events::side_effect::Claimed {
         spec_hash: spec_hash(1),
-        node_id: node_id(70),
-        attempt_id: attempt_id(72),
+        node_id: submit_node_id(),
+        attempt_id: submit_attempt_id(),
         ledger_key: side_effect_ledger_key(),
         ledger_purpose: side_effect_ledger_purpose(),
         pair_id: side_effect_pair_id(),
@@ -899,8 +984,8 @@ fn side_effect_claim() -> KernelEventPayload {
 fn side_effect_prepared() -> KernelEventPayload {
     KernelEventPayload::SideEffectInvocationPrepared(events::side_effect::InvocationPrepared {
         spec_hash: spec_hash(1),
-        node_id: node_id(70),
-        attempt_id: attempt_id(72),
+        node_id: submit_node_id(),
+        attempt_id: submit_attempt_id(),
         ledger_key: side_effect_ledger_key(),
         ledger_purpose: side_effect_ledger_purpose(),
         pair_id: side_effect_pair_id(),
@@ -933,8 +1018,8 @@ fn resource_lane_key(value: &str) -> ResourceLaneKey {
 fn resource_lane_claim_intent(resource_key: events::ResourceKeyEvidence) -> KernelEventPayload {
     KernelEventPayload::ResourceLaneClaimIntent(events::ResourceLaneClaimIntent {
         spec_hash: spec_hash(1),
-        node_id: node_id(70),
-        attempt_id: attempt_id(72),
+        node_id: submit_node_id(),
+        attempt_id: submit_attempt_id(),
         ledger_key: side_effect_ledger_key(),
         ledger_purpose: side_effect_ledger_purpose(),
         pair_id: side_effect_pair_id(),
@@ -950,8 +1035,8 @@ fn resource_lane_claim_intent(resource_key: events::ResourceKeyEvidence) -> Kern
 fn side_effect_started() -> KernelEventPayload {
     KernelEventPayload::SideEffectInvocationStarted(events::side_effect::InvocationStarted {
         spec_hash: spec_hash(1),
-        node_id: node_id(70),
-        attempt_id: attempt_id(72),
+        node_id: submit_node_id(),
+        attempt_id: submit_attempt_id(),
         ledger_key: side_effect_ledger_key(),
         ledger_purpose: side_effect_ledger_purpose(),
         pair_id: side_effect_pair_id(),
@@ -977,8 +1062,8 @@ fn side_effect_submission_unknown(
 ) -> KernelEventPayload {
     KernelEventPayload::SideEffectSubmissionUnknown(events::side_effect::SubmissionUnknown {
         spec_hash: spec_hash(1),
-        node_id: node_id(70),
-        attempt_id: attempt_id(72),
+        node_id: submit_node_id(),
+        attempt_id: submit_attempt_id(),
         ledger_key: side_effect_ledger_key(),
         ledger_purpose: side_effect_ledger_purpose(),
         pair_id: side_effect_pair_id(),
@@ -996,8 +1081,8 @@ fn side_effect_submission_observed(
 ) -> KernelEventPayload {
     KernelEventPayload::SideEffectSubmissionObserved(events::side_effect::SubmissionObserved {
         spec_hash: spec_hash(1),
-        node_id: node_id(70),
-        attempt_id: attempt_id(72),
+        node_id: submit_node_id(),
+        attempt_id: submit_attempt_id(),
         ledger_key: side_effect_ledger_key(),
         ledger_purpose: side_effect_ledger_purpose(),
         pair_id: side_effect_pair_id(),
@@ -1012,8 +1097,8 @@ fn side_effect_submission_observed(
 fn side_effect_ambiguous(artifact_id: ArtifactId, digest: ContentDigest) -> KernelEventPayload {
     KernelEventPayload::SideEffectAmbiguous(events::side_effect::Ambiguous {
         spec_hash: spec_hash(1),
-        node_id: node_id(70),
-        attempt_id: attempt_id(72),
+        node_id: verify_node_id(),
+        attempt_id: verify_attempt_id(),
         ledger_key: side_effect_ledger_key(),
         ledger_purpose: side_effect_ledger_purpose(),
         pair_id: side_effect_pair_id(),
@@ -1027,7 +1112,36 @@ fn side_effect_ambiguous(artifact_id: ArtifactId, digest: ContentDigest) -> Kern
 }
 
 fn side_effect_attempt_failed() -> KernelEventPayload {
-    side_effect_attempt_failed_for(node_id(70), attempt_id(72))
+    side_effect_attempt_failed_for(verify_node_id(), verify_attempt_id())
+}
+
+fn side_effect_submit_boundary_output_skipped() -> KernelEventPayload {
+    KernelEventPayload::CellSkipped(events::CellSkipped {
+        spec_hash: spec_hash(1),
+        node_id: submit_node_id(),
+        cell_id: side_effect_output_cell(),
+        scope_id: scope_id(71),
+        attempt_id: submit_attempt_id(),
+        semantic_type_id: semantic_id("side_effect_output", 98),
+        schema_id: schema_id("mfm.test.side_effect_output", 97),
+        value_lineage: ValueLineageRef {
+            lineage_digest: content_digest(99),
+        },
+        skip_reason: events::SkipReason {
+            code: events::ErrorCode::new("side_effect_submission_boundary")
+                .expect("skip reason code"),
+            safe_message: "side-effect submit boundary recorded; verification is delegated to the paired verify node".to_owned(),
+        },
+    })
+}
+
+fn side_effect_submit_attempt_completed() -> KernelEventPayload {
+    KernelEventPayload::StateAttemptCompleted(events::StateAttemptCompleted {
+        spec_hash: spec_hash(1),
+        node_id: submit_node_id(),
+        attempt_id: submit_attempt_id(),
+        output_cell_id: side_effect_output_cell(),
+    })
 }
 
 fn side_effect_attempt_failed_for(node_id: NodeId, attempt_id: AttemptId) -> KernelEventPayload {
@@ -1048,7 +1162,7 @@ fn side_effect_attempt_failed_for(node_id: NodeId, attempt_id: AttemptId) -> Ker
 }
 
 fn side_effect_failed() -> KernelEventPayload {
-    side_effect_failed_for(node_id(70), attempt_id(72))
+    side_effect_failed_for(verify_node_id(), verify_attempt_id())
 }
 
 fn side_effect_failed_for(node_id: NodeId, attempt_id: AttemptId) -> KernelEventPayload {
@@ -1145,6 +1259,12 @@ fn side_effect_artifact_ref(
     schema_id: SchemaId,
     role: ArtifactRole,
 ) -> ArtifactEvidenceRef {
+    let producer_node_id = match role {
+        ArtifactRole::Receipt | ArtifactRole::Confirmation | ArtifactRole::AmbiguityEvidence => {
+            verify_node_id()
+        }
+        _ => submit_node_id(),
+    };
     ArtifactEvidenceRef {
         artifact_id,
         digest,
@@ -1152,7 +1272,7 @@ fn side_effect_artifact_ref(
         media_type: media_type("application/json"),
         schema_id: Some(schema_id),
         semantic_type_id: None,
-        producer_node_id: Some(node_id(70)),
+        producer_node_id: Some(producer_node_id),
         producer_seed_id: None,
         artifact_role: role,
     }
@@ -1217,6 +1337,149 @@ fn request(
     .expect("typed commit request")
 }
 
+fn certified_request(
+    run_id: RunId,
+    seq: u64,
+    key: &str,
+    payloads: Vec<KernelEventPayload>,
+) -> mfm_store::v1::CommitRequest {
+    certified_request_with_saga_policy(run_id, seq, key, payloads, SagaPolicySpec::NoSideEffects)
+}
+
+fn certified_request_with_saga_policy(
+    run_id: RunId,
+    seq: u64,
+    key: &str,
+    mut payloads: Vec<KernelEventPayload>,
+    saga_policy: SagaPolicySpec,
+) -> mfm_store::v1::CommitRequest {
+    let preconditions = certify_payloads_for_policy(&run_id, saga_policy, &mut payloads);
+    mfm_store::v1::CommitRequest::from_payloads(
+        run_id,
+        StreamSeq::new(seq).expect("seq"),
+        CommitKey::new(key).expect("commit key"),
+        payloads,
+        Vec::new(),
+        preconditions,
+    )
+    .expect("typed certified commit request")
+}
+
+fn certify_payloads_for_policy(
+    run_id: &RunId,
+    saga_policy: SagaPolicySpec,
+    payloads: &mut [KernelEventPayload],
+) -> CommitPreconditions {
+    let authority_spec = saga_authority_spec(saga_policy);
+    let certified_spec_hash = authority_spec
+        .spec_hash()
+        .expect("saga authority spec hash");
+    for payload in payloads {
+        set_payload_spec_hash(payload, &certified_spec_hash);
+    }
+    CommitPreconditions {
+        certified_run_authority: Some(
+            CertifiedRunStoreAuthority::from_spec(run_id.clone(), &authority_spec)
+                .expect("certified run authority"),
+        ),
+        ..CommitPreconditions::default()
+    }
+}
+
+fn set_payload_spec_hash(payload: &mut KernelEventPayload, spec_hash: &SpecHash) {
+    match payload {
+        KernelEventPayload::RunAdmitted(payload) => payload.spec_hash = spec_hash.clone(),
+        KernelEventPayload::StateAttemptStarted(payload) => payload.spec_hash = spec_hash.clone(),
+        KernelEventPayload::FactRecorded(payload) => payload.spec_hash = spec_hash.clone(),
+        KernelEventPayload::ArtifactReferenced(payload) => payload.spec_hash = spec_hash.clone(),
+        KernelEventPayload::CellProduced(payload) => payload.spec_hash = spec_hash.clone(),
+        KernelEventPayload::CellSkipped(payload) => payload.spec_hash = spec_hash.clone(),
+        KernelEventPayload::SideEffectIntentPersisted(payload) => {
+            payload.spec_hash = spec_hash.clone();
+        }
+        KernelEventPayload::SideEffectClaimed(payload) => payload.spec_hash = spec_hash.clone(),
+        KernelEventPayload::SideEffectClaimTakenOver(payload) => {
+            payload.spec_hash = spec_hash.clone();
+        }
+        KernelEventPayload::ResourceLaneClaimed(payload) => payload.spec_hash = spec_hash.clone(),
+        KernelEventPayload::ResourceLaneClaimIntent(payload) => {
+            payload.spec_hash = spec_hash.clone();
+        }
+        KernelEventPayload::SideEffectInvocationPrepared(payload) => {
+            payload.spec_hash = spec_hash.clone();
+        }
+        KernelEventPayload::SideEffectInvocationStarted(payload) => {
+            payload.spec_hash = spec_hash.clone();
+        }
+        KernelEventPayload::SideEffectNotSubmittedProven(payload) => {
+            payload.spec_hash = spec_hash.clone();
+        }
+        KernelEventPayload::SideEffectSubmissionObserved(payload) => {
+            payload.spec_hash = spec_hash.clone();
+        }
+        KernelEventPayload::SideEffectSubmissionUnknown(payload) => {
+            payload.spec_hash = spec_hash.clone();
+        }
+        KernelEventPayload::SideEffectReceiptObserved(payload) => {
+            payload.spec_hash = spec_hash.clone();
+        }
+        KernelEventPayload::SideEffectConfirmationObserved(payload) => {
+            payload.spec_hash = spec_hash.clone();
+        }
+        KernelEventPayload::SideEffectAmbiguous(payload) => payload.spec_hash = spec_hash.clone(),
+        KernelEventPayload::SideEffectFailed(payload) => payload.spec_hash = spec_hash.clone(),
+        KernelEventPayload::ResourceLaneReleased(payload) => payload.spec_hash = spec_hash.clone(),
+        KernelEventPayload::ResourceLaneReleaseIntent(payload) => {
+            payload.spec_hash = spec_hash.clone();
+        }
+        KernelEventPayload::PublicOutputProduced(payload) => payload.spec_hash = spec_hash.clone(),
+        KernelEventPayload::PublicOutputRenderFailed(payload) => {
+            payload.spec_hash = spec_hash.clone();
+        }
+        KernelEventPayload::StateAttemptCompleted(payload) => payload.spec_hash = spec_hash.clone(),
+        KernelEventPayload::StateAttemptInterrupted(payload) => {
+            payload.spec_hash = spec_hash.clone();
+        }
+        KernelEventPayload::StateAttemptFailed(payload) => payload.spec_hash = spec_hash.clone(),
+        KernelEventPayload::ManualResolutionRecorded(payload) => {
+            payload.spec_hash = spec_hash.clone();
+        }
+        KernelEventPayload::RunCompleted(payload) => payload.spec_hash = spec_hash.clone(),
+        KernelEventPayload::RetentionRefsAppended(payload) => payload.spec_hash = spec_hash.clone(),
+        KernelEventPayload::RetentionManifestProjected(payload) => {
+            payload.spec_hash = spec_hash.clone();
+        }
+    }
+}
+
+fn run_start_request(run_id: RunId, key: &str) -> mfm_store::v1::CommitRequest {
+    run_start_request_with_saga_policy(run_id, key, &SagaPolicySpec::NoSideEffects)
+}
+
+fn run_start_request_with_saga_policy(
+    run_id: RunId,
+    key: &str,
+    saga_policy: &SagaPolicySpec,
+) -> mfm_store::v1::CommitRequest {
+    let authority_spec = saga_authority_spec(saga_policy.clone());
+    mfm_store::v1::CommitRequest::from_payloads(
+        run_id.clone(),
+        StreamSeq::FIRST,
+        CommitKey::new(key).expect("commit key"),
+        vec![run_admitted_with_saga_policy(run_id.clone(), saga_policy)],
+        vec![spec_artifact_ref(), certificate_artifact_ref()],
+        CommitPreconditions {
+            required_run_state: RequiredRunState::Absent,
+            certified_run_authority: Some(
+                CertifiedRunStoreAuthority::from_spec(run_id.clone(), &authority_spec)
+                    .expect("certified run authority"),
+            ),
+            ..CommitPreconditions::default()
+        },
+    )
+    .expect("typed run start request")
+}
+
 async fn append_prepared(
     store: &PostgresRunStore,
     mut request: mfm_store::v1::CommitRequest,
@@ -1276,12 +1539,7 @@ async fn append_run_start(
 ) -> Result<CommitOutcome> {
     append_prepared(
         store,
-        request(
-            run_id.clone(),
-            1,
-            commit_key,
-            vec![run_admitted(run_id.clone())],
-        ),
+        run_start_request(run_id.clone(), commit_key),
         vec![spec_artifact_ref(), certificate_artifact_ref()],
     )
     .await
@@ -1294,7 +1552,7 @@ async fn append_resource_lane_attempt_start(
 ) -> Result<CommitOutcome> {
     append_prepared(
         store,
-        request(
+        certified_request(
             run_id.clone(),
             2,
             commit_key,
@@ -1316,7 +1574,7 @@ async fn append_resource_lane_prepare(
     let intent_digest = content_digest(artifact_byte);
     append_prepared(
         store,
-        request(
+        certified_request(
             run_id.clone(),
             3,
             commit_key,
@@ -1355,23 +1613,39 @@ async fn append_resource_lane_release(
         .await
         .expect("release next seq")
         .as_u64();
+    let verify_start_key = format!("{commit_key}-verify-attempt-start");
     append_prepared(
         store,
-        request(
+        certified_request(
+            run_id.clone(),
+            next_seq,
+            verify_start_key.as_str(),
+            vec![side_effect_verify_attempt_started()],
+        ),
+        Vec::new(),
+    )
+    .await?;
+    let next_seq = store
+        .expected_next_seq(run_id)
+        .await
+        .expect("release next seq after verify start")
+        .as_u64();
+    append_prepared(
+        store,
+        certified_request(
             run_id.clone(),
             next_seq,
             commit_key,
             vec![
                 KernelEventPayload::ResourceLaneReleaseIntent(events::ResourceLaneReleaseIntent {
                     spec_hash: spec_hash(1),
-                    node_id: lane.node_id.clone(),
-                    attempt_id: lane.attempt_id.clone(),
                     ledger_key: side_effect_ledger_key(),
                     ledger_purpose: lane.ledger_purpose.clone(),
                     pair_id: lane.holder.pair_id.clone(),
                     pair_role: events::SideEffectPairRole::Verify,
                     invocation_epoch: lane.invocation_epoch,
                     claim_id: lane.claim_id.clone(),
+                    release_authority: events::ResourceLaneReleaseAuthority::VerifyTerminal,
                     release_reason: events::ResourceLaneReleaseReason::new("mfm.test.release")
                         .expect("release reason"),
                 }),
@@ -1518,7 +1792,7 @@ async fn prepared_commit_idempotency_fingerprint_includes_admitted_artifacts() {
     conflicting_evidence.media_type = media_type("application/octet-stream");
     append_prepared(
         &store,
-        request(run.clone(), 1, "run-start", vec![run_admitted(run.clone())]),
+        run_start_request(run.clone(), "run-start"),
         vec![spec_artifact_ref(), certificate_artifact_ref()],
     )
     .await
@@ -2200,12 +2474,7 @@ async fn artifact_authority_accepts_distinct_evidence_for_same_artifact_id() {
 
     append_prepared(
         &store,
-        request(
-            run.clone(),
-            1,
-            "same-id-run-start",
-            vec![run_admitted(run.clone())],
-        ),
+        run_start_request(run.clone(), "same-id-run-start"),
         vec![spec_artifact_ref(), certificate_artifact_ref()],
     )
     .await
@@ -2416,7 +2685,7 @@ async fn commit_key_sequence_and_projection_rebuild_contract() {
 
     append_prepared(
         &store,
-        request(run.clone(), 1, "run-start", vec![run_admitted(run.clone())]),
+        run_start_request(run.clone(), "run-start"),
         vec![spec_artifact_ref(), certificate_artifact_ref()],
     )
     .await
@@ -2513,7 +2782,7 @@ async fn interrupted_attempt_projection_rebuilds_from_events() {
 
     append_prepared(
         &store,
-        request(run.clone(), 1, "run-start", vec![run_admitted(run.clone())]),
+        run_start_request(run.clone(), "run-start"),
         vec![spec_artifact_ref(), certificate_artifact_ref()],
     )
     .await
@@ -2579,19 +2848,14 @@ async fn resource_lane_projection_rebuilds_from_events() {
 
     append_prepared(
         &store,
-        request(
-            run.clone(),
-            1,
-            "resource-run-start",
-            vec![run_admitted(run.clone())],
-        ),
+        run_start_request(run.clone(), "resource-run-start"),
         vec![spec_artifact_ref(), certificate_artifact_ref()],
     )
     .await
     .expect("run start");
     append_prepared(
         &store,
-        request(
+        certified_request(
             run.clone(),
             2,
             "resource-attempt-start",
@@ -2603,7 +2867,7 @@ async fn resource_lane_projection_rebuilds_from_events() {
     .expect("attempt start");
     append_prepared(
         &store,
-        request(
+        certified_request(
             run.clone(),
             3,
             "resource-prepare",
@@ -2641,12 +2905,7 @@ async fn resource_lane_projection_rebuilds_from_events() {
     let peer_run = run_id(24);
     append_prepared(
         &store,
-        request(
-            peer_run.clone(),
-            1,
-            "resource-peer-run-start",
-            vec![run_admitted(peer_run.clone())],
-        ),
+        run_start_request(peer_run.clone(), "resource-peer-run-start"),
         vec![spec_artifact_ref(), certificate_artifact_ref()],
     )
     .await
@@ -2844,28 +3103,24 @@ async fn admission_waiters_enforce_single_lane_fifo_after_release() {
 #[tokio::test]
 async fn saga_projection_rebuilds_from_events() {
     let (store, schema) = test_store().await;
-    let run = run_id(41);
     let saga_policy = manual_saga_policy(42);
+    let run = run_id_with_saga_policy(41, &saga_policy);
 
     append_prepared(
         &store,
-        request(
-            run.clone(),
-            1,
-            "saga-run-start",
-            vec![run_admitted_with_saga_policy(run.clone(), &saga_policy)],
-        ),
+        run_start_request_with_saga_policy(run.clone(), "saga-run-start", &saga_policy),
         vec![spec_artifact_ref(), certificate_artifact_ref()],
     )
     .await
     .expect("run start");
     append_prepared(
         &store,
-        request(
+        certified_request_with_saga_policy(
             run.clone(),
             2,
             "saga-side-effect-attempt-start",
             vec![side_effect_attempt_started()],
+            saga_policy.clone(),
         ),
         Vec::new(),
     )
@@ -2875,7 +3130,7 @@ async fn saga_projection_rebuilds_from_events() {
     let intent_digest = content_digest(40);
     append_prepared(
         &store,
-        request(
+        certified_request_with_saga_policy(
             run.clone(),
             3,
             "saga-side-effect-prepare",
@@ -2884,6 +3139,7 @@ async fn saga_projection_rebuilds_from_events() {
                 side_effect_claim(),
                 side_effect_prepared(),
             ],
+            saga_policy.clone(),
         ),
         vec![side_effect_artifact_ref(
             intent_artifact,
@@ -2898,15 +3154,29 @@ async fn saga_projection_rebuilds_from_events() {
     let ambiguity_digest = content_digest(140);
     append_prepared(
         &store,
-        request(
+        certified_request_with_saga_policy(
             run.clone(),
             4,
+            "saga-side-effect-verify-attempt-start",
+            vec![side_effect_verify_attempt_started()],
+            saga_policy.clone(),
+        ),
+        Vec::new(),
+    )
+    .await
+    .expect("side-effect verify attempt start");
+    append_prepared(
+        &store,
+        certified_request_with_saga_policy(
+            run.clone(),
+            5,
             "saga-side-effect-ambiguous",
             vec![
                 side_effect_started(),
                 side_effect_ambiguous(ambiguity_artifact.clone(), ambiguity_digest.clone()),
                 side_effect_attempt_failed(),
             ],
+            saga_policy.clone(),
         ),
         vec![side_effect_artifact_ref(
             ambiguity_artifact,
@@ -2917,11 +3187,27 @@ async fn saga_projection_rebuilds_from_events() {
     )
     .await
     .expect("side-effect ambiguous");
-    let verified = verified_manual_resolution_for_seq(&run, 5, 42);
+    append_prepared(
+        &store,
+        certified_request_with_saga_policy(
+            run.clone(),
+            6,
+            "saga-side-effect-submit-attempt-completed",
+            vec![
+                side_effect_submit_boundary_output_skipped(),
+                side_effect_submit_attempt_completed(),
+            ],
+            saga_policy.clone(),
+        ),
+        Vec::new(),
+    )
+    .await
+    .expect("side-effect submit attempt completed");
+    let verified = verified_manual_resolution_for_seq(&run, 7, 42);
     let manual_artifacts = manual_resolution_artifacts(&verified);
     let manual_request = mfm_store::v1::CommitRequest::from_payloads(
         run.clone(),
-        StreamSeq::new(5).expect("manual resolution seq"),
+        StreamSeq::new(7).expect("manual resolution seq"),
         CommitKey::new("saga-manual-resolution").expect("commit key"),
         vec![manual_resolution_recorded(&verified)],
         manual_artifacts.clone(),
@@ -2981,18 +3267,14 @@ async fn saga_projection_rebuilds_from_events() {
         before
     );
 
-    let terminal_run = run_id(43);
     let terminal_policy = SagaPolicySpec::FailWithoutAcdcClaim;
+    let terminal_run = run_id_with_saga_policy(43, &terminal_policy);
     append_prepared(
         &store,
-        request(
+        run_start_request_with_saga_policy(
             terminal_run.clone(),
-            1,
             "saga-terminal-run-start",
-            vec![run_admitted_with_saga_policy(
-                terminal_run.clone(),
-                &terminal_policy,
-            )],
+            &terminal_policy,
         ),
         vec![spec_artifact_ref(), certificate_artifact_ref()],
     )
@@ -3000,11 +3282,12 @@ async fn saga_projection_rebuilds_from_events() {
     .expect("terminal run start");
     append_prepared(
         &store,
-        request(
+        certified_request_with_saga_policy(
             terminal_run.clone(),
             2,
             "saga-terminal-side-effect-attempt-start",
             vec![side_effect_attempt_started()],
+            terminal_policy.clone(),
         ),
         Vec::new(),
     )
@@ -3014,7 +3297,7 @@ async fn saga_projection_rebuilds_from_events() {
     let terminal_intent_digest = content_digest(150);
     append_prepared(
         &store,
-        request(
+        certified_request_with_saga_policy(
             terminal_run.clone(),
             3,
             "saga-terminal-side-effect-prepare",
@@ -3026,6 +3309,7 @@ async fn saga_projection_rebuilds_from_events() {
                 side_effect_claim(),
                 side_effect_prepared(),
             ],
+            terminal_policy.clone(),
         ),
         vec![side_effect_artifact_ref(
             terminal_intent_artifact,
@@ -3040,9 +3324,22 @@ async fn saga_projection_rebuilds_from_events() {
     let terminal_ambiguity_digest = content_digest(152);
     append_prepared(
         &store,
-        request(
+        certified_request_with_saga_policy(
             terminal_run.clone(),
             4,
+            "saga-terminal-side-effect-verify-attempt-start",
+            vec![side_effect_verify_attempt_started()],
+            terminal_policy.clone(),
+        ),
+        Vec::new(),
+    )
+    .await
+    .expect("terminal side-effect verify attempt start");
+    append_prepared(
+        &store,
+        certified_request_with_saga_policy(
+            terminal_run.clone(),
+            5,
             "saga-terminal-side-effect-ambiguous",
             vec![
                 side_effect_started(),
@@ -3052,6 +3349,7 @@ async fn saga_projection_rebuilds_from_events() {
                 ),
                 side_effect_attempt_failed(),
             ],
+            terminal_policy.clone(),
         ),
         vec![side_effect_artifact_ref(
             terminal_ambiguity_artifact,
@@ -3062,6 +3360,22 @@ async fn saga_projection_rebuilds_from_events() {
     )
     .await
     .expect("terminal side-effect ambiguous");
+    append_prepared(
+        &store,
+        certified_request_with_saga_policy(
+            terminal_run.clone(),
+            6,
+            "saga-terminal-side-effect-submit-attempt-completed",
+            vec![
+                side_effect_submit_boundary_output_skipped(),
+                side_effect_submit_attempt_completed(),
+            ],
+            terminal_policy.clone(),
+        ),
+        Vec::new(),
+    )
+    .await
+    .expect("terminal side-effect submit attempt completed");
     let terminal_before_completion = store
         .status_projection_snapshot(&terminal_run)
         .await
@@ -3071,16 +3385,13 @@ async fn saga_projection_rebuilds_from_events() {
     let terminal_saga = terminal_before_completion
         .derive_saga_projection(&terminal_run, &terminal_policy, &terminal_policies)
         .expect("terminal saga projection");
-    let terminal_proof = SagaTerminalProof::new(
-        &terminal_policy,
-        &terminal_saga,
-        store
-            .expected_next_seq(&terminal_run)
-            .await
-            .expect("terminal next seq"),
-        None,
-    )
-    .expect("terminal proof");
+    let terminal_next_seq = store
+        .expected_next_seq(&terminal_run)
+        .await
+        .expect("terminal next seq");
+    let terminal_proof =
+        SagaTerminalProof::new(&terminal_policy, &terminal_saga, terminal_next_seq, None)
+            .expect("terminal proof");
     let terminal_spec_hash = saga_authority_spec(terminal_policy.clone())
         .spec_hash()
         .expect("terminal saga authority spec hash");
@@ -3094,7 +3405,7 @@ async fn saga_projection_rebuilds_from_events() {
     payload.spec_hash = terminal_spec_hash;
     let terminal_request = request(
         terminal_run.clone(),
-        5,
+        terminal_next_seq.as_u64(),
         "saga-terminal-run-completed",
         vec![terminal_completion],
     );
@@ -3142,7 +3453,7 @@ async fn required_artifacts_and_fact_projection_are_atomic() {
     let run = run_id(10);
     append_prepared(
         &store,
-        request(run.clone(), 1, "run-start", vec![run_admitted(run.clone())]),
+        run_start_request(run.clone(), "run-start"),
         vec![spec_artifact_ref(), certificate_artifact_ref()],
     )
     .await
@@ -3218,7 +3529,7 @@ async fn side_effect_unknown_recovery_updates_submission_result_slot() {
 
     append_prepared(
         &store,
-        request(run.clone(), 1, "run-start", vec![run_admitted(run.clone())]),
+        run_start_request(run.clone(), "run-start"),
         vec![spec_artifact_ref(), certificate_artifact_ref()],
     )
     .await
@@ -3228,7 +3539,7 @@ async fn side_effect_unknown_recovery_updates_submission_result_slot() {
     let intent_digest = content_digest(14);
     append_prepared(
         &store,
-        request(
+        certified_request(
             run.clone(),
             2,
             "sidefx-attempt-start",
@@ -3240,7 +3551,7 @@ async fn side_effect_unknown_recovery_updates_submission_result_slot() {
     .expect("attempt start");
     append_prepared(
         &store,
-        request(
+        certified_request(
             run.clone(),
             3,
             "sidefx-prepare",
@@ -3261,7 +3572,7 @@ async fn side_effect_unknown_recovery_updates_submission_result_slot() {
     .expect("prepare");
     append_prepared(
         &store,
-        request(
+        certified_request(
             run.clone(),
             4,
             "sidefx-started",
@@ -3276,7 +3587,7 @@ async fn side_effect_unknown_recovery_updates_submission_result_slot() {
     let unknown_digest = content_digest(16);
     let unknown_outcome = append_prepared(
         &store,
-        request(
+        certified_request(
             run.clone(),
             5,
             "sidefx-submission-unknown",
@@ -3310,7 +3621,7 @@ async fn side_effect_unknown_recovery_updates_submission_result_slot() {
     let submission_digest = content_digest(18);
     let observed_outcome = append_prepared(
         &store,
-        request(
+        certified_request(
             run.clone(),
             6,
             "sidefx-submission-observed-after-unknown",
@@ -3352,7 +3663,9 @@ async fn side_effect_unknown_recovery_updates_submission_result_slot() {
 
     let stored_payload_hash = sqlx::query_scalar::<_, String>(
         "SELECT payload_hash FROM run_events \
-         WHERE run_id = $1 AND logical_key = $2",
+         WHERE run_id = $1 AND logical_key = $2 \
+         ORDER BY seq DESC, ordinal DESC \
+         LIMIT 1",
     )
     .bind(run.as_str())
     .bind(submission_result_key.as_str())

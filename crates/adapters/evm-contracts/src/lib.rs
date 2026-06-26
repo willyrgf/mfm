@@ -75,6 +75,7 @@ use mfm_runtime::{
     SideEffectDriverFuture, SideEffectIntentPlan, SideEffectLanePreclaimBuilder,
     SideEffectObservedEvidence, SideEffectPreparedInvocationPlan, SideEffectProtocolAction,
     SideEffectReplayEvidence, SideEffectSubmissionDecision, SideEffectSubmissionDecisionFuture,
+    SideEffectUnknownSubmissionDecision, SideEffectUnknownSubmissionDecisionFuture,
     SideEffectVerifyCallbacks, SideEffectVerifyDriver,
 };
 use mfm_signing::{PublicKeyBytes, SignerRef, SigningProvider};
@@ -1496,6 +1497,23 @@ enum PreparedSubmissionReconciliation {
     Indeterminate(ContractTransactionSubmissions),
 }
 
+fn transaction_hash_mismatch_ambiguity(
+    evidence: ContractTransactionSubmissions,
+) -> Result<
+    SideEffectSubmissionDecision<
+        ContractTransactionSubmissions,
+        ContractTransactionSubmissions,
+        ContractNotSubmittedProof,
+        ContractTransactionSubmissions,
+    >,
+> {
+    Ok(SideEffectSubmissionDecision::Ambiguous {
+        ambiguity_code: events::AmbiguityCode::new("mfm.evm.transaction_hash_mismatch")
+            .map_err(|error| EvmContractAdapterError::Model(error.to_string()))?,
+        evidence,
+    })
+}
+
 async fn submit_or_recover_contract_submission(
     runtime: &EvmContractRuntime,
     prepared: &PreparedContractMutation,
@@ -1535,7 +1553,7 @@ async fn submit_or_recover_contract_submission(
                         },
                     )),
                     Err(EvmContractAdapterError::TransactionHashMismatch) => {
-                        Ok(SideEffectSubmissionDecision::Unknown(anchor_submissions))
+                        transaction_hash_mismatch_ambiguity(anchor_submissions)
                     }
                     Err(error) => Err(error),
                 };
@@ -1543,12 +1561,51 @@ async fn submit_or_recover_contract_submission(
         }
     }
 
-    Ok(SideEffectSubmissionDecision::Observed(
-        ContractTransactionSubmissions {
-            submissions_version: 1,
-            transactions: runtime.adapter().submit_prepared(prepared).await?,
-        },
-    ))
+    match runtime.adapter().submit_prepared(prepared).await {
+        Ok(transactions) => Ok(SideEffectSubmissionDecision::Observed(
+            ContractTransactionSubmissions {
+                submissions_version: 1,
+                transactions,
+            },
+        )),
+        Err(EvmContractAdapterError::TransactionHashMismatch) => {
+            transaction_hash_mismatch_ambiguity(prepared_anchor_submissions(prepared.evidence())?)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn recover_unknown_contract_submission<P>(
+    runtime: &EvmContractRuntime,
+    plan: &P,
+    prepared: &PreparedContractInvocation,
+) -> mfm_runtime::Result<
+    SideEffectUnknownSubmissionDecision<
+        ContractTransactionSubmissions,
+        ContractNotSubmittedProof,
+        ContractTransactionSubmissions,
+    >,
+>
+where
+    P: ContractMutationPlanOps,
+{
+    let prepared = plan.reconstruct_prepared_invocation(runtime, prepared)?;
+    match runtime
+        .adapter()
+        .reconcile_prepared_submission(prepared.evidence())
+        .await?
+    {
+        PreparedSubmissionReconciliation::Observed(submissions) => {
+            Ok(SideEffectUnknownSubmissionDecision::Observed(submissions))
+        }
+        PreparedSubmissionReconciliation::NotSubmitted(proof) => {
+            Ok(SideEffectUnknownSubmissionDecision::NotSubmitted(proof))
+        }
+        PreparedSubmissionReconciliation::Indeterminate(_)
+        | PreparedSubmissionReconciliation::NotObserved(_) => {
+            Ok(SideEffectUnknownSubmissionDecision::StillUnknown)
+        }
+    }
 }
 
 fn parse_optional_wei(value: Option<&str>) -> Result<u128> {
@@ -1667,6 +1724,7 @@ fn forbidden_prepared_terms() -> Vec<String> {
 
 const READ_FACTORY: &str = "read_external";
 const SIDE_EFFECT_FACTORY: &str = "apply_side_effect";
+const ADAPTER_FACTORY: &str = "evm_contract_lifecycle_adapter";
 const CAPABILITY_IMPLEMENTATION_ID: &str = "mfm.evm_contracts.runtime.v1";
 
 /// EVM capability provider set required by contract lifecycle runners.
@@ -1779,6 +1837,14 @@ pub fn register_contract_lifecycle_runners_with_factory(
     let mut registrations = RunnerRegistrationBuilder::new(registry, implementation_id);
     let side_effect_factory = events::RunnerFactoryId::new(SIDE_EFFECT_FACTORY)?;
     let read_factory = events::RunnerFactoryId::new(READ_FACTORY)?;
+    let adapter_factory = events::RunnerFactoryId::new(ADAPTER_FACTORY)?;
+    let adapter_binding = evm_contract_lifecycle_adapter_binding()
+        .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
+    registrations.register_adapter_executable(
+        adapter_binding.adapter_kind().clone(),
+        adapter_binding.adapter_version().clone(),
+        executable(adapter_factory)?,
+    )?;
     let deploy = mfm_program::registered_state_descriptor::<DeployContractState>()
         .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
     registrations.register_descriptor(
@@ -1815,6 +1881,15 @@ pub fn register_contract_lifecycle_runners_with_factory(
         }),
     )?;
     registrations.register_side_effect_verify_runner(
+        deploy.descriptor_id().clone(),
+        read_factory.clone(),
+        executable(read_factory.clone())?,
+        Arc::new(ContractVerifyRunner {
+            factory: factory.clone(),
+        }),
+    )?;
+    registrations.register_side_effect_verify_runner(
+        configure.descriptor_id().clone(),
         read_factory.clone(),
         executable(read_factory)?,
         Arc::new(ContractVerifyRunner { factory }),
@@ -2265,7 +2340,7 @@ where
         &'a self,
         _ctx: &'a ErasedRunCtx<'ctx>,
     ) -> SideEffectDriverFuture<'a, SideEffectIntentPlan<Self::Intent, Self::Idempotency>> {
-        Box::pin(async {
+        Box::pin(async move {
             Ok(SideEffectIntentPlan {
                 intent: self.plan.intent().clone(),
                 idempotency: self.plan.idempotency().clone(),
@@ -2281,7 +2356,7 @@ where
         _plan: &'a SideEffectIntentPlan<Self::Intent, Self::Idempotency>,
     ) -> SideEffectDriverFuture<'a, SideEffectPreparedInvocationPlan<Self::PreparedInvocation>>
     {
-        Box::pin(async {
+        Box::pin(async move {
             let runtime = self.factory.runtime_for(self.plan.network_id())?;
             let prepared = self.plan.prepare_invocation(&runtime).await?;
             Ok(SideEffectPreparedInvocationPlan::with_prepared_invocation(
@@ -2295,7 +2370,7 @@ where
         ctx: &'a ErasedRunCtx<'ctx>,
         prepared: &'a store::SideEffectArtifactProjection,
     ) -> SideEffectDriverFuture<'a, Self::PreparedInvocation> {
-        Box::pin(async {
+        Box::pin(async move {
             load_prepared_invocation(
                 prepared,
                 events::ArtifactRole::PreparedInvocation,
@@ -2346,9 +2421,43 @@ struct DeploySideEffectVerifyCallbacks<'a> {
 }
 
 impl SideEffectVerifyCallbacks for DeploySideEffectVerifyCallbacks<'_> {
+    type Submission = ContractTransactionSubmissions;
     type Receipt = ContractDeployReceipt;
     type Confirmation = ContractDeployConfirmation;
     type Output = DeployedContract;
+    type NotSubmittedProof = ContractNotSubmittedProof;
+    type AmbiguityEvidence = ContractTransactionSubmissions;
+
+    fn recover_unknown_submission<'a, 'ctx>(
+        &'a self,
+        ctx: &'a ErasedRunCtx<'ctx>,
+        submit_node: &'a spec::NodeSpec,
+        _submit_inputs: &'a MaterializedInputs,
+        prepared_invocation: Option<&'a store::SideEffectArtifactProjection>,
+    ) -> SideEffectUnknownSubmissionDecisionFuture<
+        'a,
+        Self::Submission,
+        Self::NotSubmittedProof,
+        Self::AmbiguityEvidence,
+    > {
+        Box::pin(async move {
+            let plan = deploy_mutation_plan_for_node(submit_node, self.factory.artifacts()).await?;
+            let prepared_projection = prepared_invocation
+                .ok_or_else(|| missing_side_effect_artifact("prepared invocation"))?;
+            let prepared = load_prepared_invocation_for_node(
+                prepared_projection,
+                events::ArtifactRole::PreparedInvocation,
+                ctx,
+                self.factory.artifacts(),
+                &submit_node.node_id,
+            )
+            .await?;
+            let runtime = self
+                .factory
+                .runtime_for(plan.config.as_ref().network().network_id())?;
+            recover_unknown_contract_submission(&runtime, &plan, &prepared).await
+        })
+    }
 
     fn read_receipt<'a, 'ctx>(
         &'a self,
@@ -2467,9 +2576,48 @@ struct ConfigureSideEffectVerifyCallbacks<'a> {
 }
 
 impl SideEffectVerifyCallbacks for ConfigureSideEffectVerifyCallbacks<'_> {
+    type Submission = ContractTransactionSubmissions;
     type Receipt = ContractConfigureReceipt;
     type Confirmation = ContractConfigureConfirmation;
     type Output = ConfiguredContract;
+    type NotSubmittedProof = ContractNotSubmittedProof;
+    type AmbiguityEvidence = ContractTransactionSubmissions;
+
+    fn recover_unknown_submission<'a, 'ctx>(
+        &'a self,
+        ctx: &'a ErasedRunCtx<'ctx>,
+        submit_node: &'a spec::NodeSpec,
+        submit_inputs: &'a MaterializedInputs,
+        prepared_invocation: Option<&'a store::SideEffectArtifactProjection>,
+    ) -> SideEffectUnknownSubmissionDecisionFuture<
+        'a,
+        Self::Submission,
+        Self::NotSubmittedProof,
+        Self::AmbiguityEvidence,
+    > {
+        Box::pin(async move {
+            let plan = configure_mutation_plan_for_inputs(
+                submit_node,
+                submit_inputs,
+                self.factory.artifacts(),
+            )
+            .await?;
+            let prepared_projection = prepared_invocation
+                .ok_or_else(|| missing_side_effect_artifact("prepared invocation"))?;
+            let prepared = load_prepared_invocation_for_node(
+                prepared_projection,
+                events::ArtifactRole::PreparedInvocation,
+                ctx,
+                self.factory.artifacts(),
+                &submit_node.node_id,
+            )
+            .await?;
+            let runtime = self
+                .factory
+                .runtime_for(plan.config.as_ref().network().network_id())?;
+            recover_unknown_contract_submission(&runtime, &plan, &prepared).await
+        })
+    }
 
     fn read_receipt<'a, 'ctx>(
         &'a self,
@@ -3507,6 +3655,9 @@ mod tests {
             pending_nonce: u64,
             occupancy_mode: RecoveryOccupancyMode,
         },
+        SubmitHashMismatch {
+            returned_hash: B256,
+        },
         ReceiptFailure,
         Finality,
     }
@@ -3543,6 +3694,14 @@ mod tests {
 
         fn finality() -> Self {
             Self::new(TestEvmProviderMode::Finality)
+        }
+
+        fn submit_hash_mismatch(returned_hash: B256, submit_count: Arc<Mutex<u32>>) -> Self {
+            Self {
+                mode: TestEvmProviderMode::SubmitHashMismatch { returned_hash },
+                submit_count,
+                receipt_failure_reads: Arc::new(Mutex::new(0)),
+            }
         }
 
         fn new(mode: TestEvmProviderMode) -> Self {
@@ -3688,6 +3847,16 @@ mod tests {
                         })
                     })
                 }
+                TestEvmProviderMode::SubmitHashMismatch { returned_hash } => {
+                    let submit_count = Arc::clone(&self.submit_count);
+                    Box::pin(async move {
+                        *submit_count.lock().expect("submit count") += 1;
+                        Ok(mfm_evm_capabilities::EvmTransactionSubmitResponse {
+                            evidence: evidence(),
+                            transaction_hash: returned_hash,
+                        })
+                    })
+                }
                 _ => unexpected_evm_call("submit_transaction"),
             }
         }
@@ -3785,7 +3954,9 @@ mod tests {
     impl SigningProvider for TestEvmProviders {
         fn sign<'a>(&'a self, request: &'a SigningRequest) -> mfm_signing::SigningFuture<'a> {
             match self.mode {
-                TestEvmProviderMode::Preparation | TestEvmProviderMode::Recovery { .. } => {
+                TestEvmProviderMode::Preparation
+                | TestEvmProviderMode::Recovery { .. }
+                | TestEvmProviderMode::SubmitHashMismatch { .. } => {
                     let result = test_signing_result(request);
                     Box::pin(async move { result })
                 }
@@ -4135,13 +4306,58 @@ mod tests {
         .await
         .expect("recovered");
 
-        let SideEffectSubmissionDecision::Unknown(evidence) = decision else {
-            panic!("expected unknown mismatched anchor evidence");
+        let SideEffectSubmissionDecision::Ambiguous {
+            ambiguity_code,
+            evidence,
+        } = decision
+        else {
+            panic!("expected ambiguous mismatched anchor evidence");
         };
         assert_eq!(*submit_count.lock().expect("submit count"), 0);
+        assert_eq!(ambiguity_code.as_str(), "mfm.evm.transaction_hash_mismatch");
         assert_eq!(
             evidence.transactions[0].transaction_hash,
             "0x1111111111111111111111111111111111111111111111111111111111111111"
+        );
+    }
+
+    #[tokio::test]
+    async fn fresh_submit_records_ambiguity_when_provider_returns_mismatched_hash() {
+        let fixture = DeployPreparationFixture::new("eip1559");
+        let prepared = fixture.prepare().await;
+        let submit_count = Arc::new(Mutex::new(0_u32));
+        let mismatched_hash = B256::from([0x11; 32]);
+        let runtime = runtime_from_provider(
+            fixture.route,
+            TestEvmProviders::submit_hash_mismatch(mismatched_hash, Arc::clone(&submit_count)),
+        );
+
+        let decision = submit_or_recover_contract_submission(
+            &runtime,
+            &prepared,
+            SideEffectProtocolAction::StartPreparedAndSubmitOrRecoverSubmission {
+                invocation_epoch: 1,
+            },
+        )
+        .await
+        .expect("fresh submit mismatch handled");
+
+        let SideEffectSubmissionDecision::Ambiguous {
+            ambiguity_code,
+            evidence,
+        } = decision
+        else {
+            panic!("expected ambiguous provider hash mismatch evidence");
+        };
+        assert_eq!(*submit_count.lock().expect("submit count"), 1);
+        assert_eq!(ambiguity_code.as_str(), "mfm.evm.transaction_hash_mismatch");
+        assert_eq!(
+            evidence.transactions[0].transaction_hash,
+            prepared.evidence().transactions[0].expected_transaction_hash
+        );
+        assert_ne!(
+            evidence.transactions[0].transaction_hash,
+            format!("{mismatched_hash:?}")
         );
     }
 

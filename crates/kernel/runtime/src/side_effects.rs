@@ -65,6 +65,16 @@ pub(crate) fn validate_historical_side_effect_payload(
     projections: &store::ProjectionSnapshot,
     payload: &events::KernelEventPayload,
 ) -> Result<()> {
+    if validate_resource_lane_release_payload(
+        runtime_spec,
+        run_id,
+        projections,
+        payload,
+        None,
+        None,
+    )? {
+        return Ok(());
+    }
     let (node_id, attempt_id, ledger_key, pair_id, phase) = side_effect_payload_ref(payload)
         .ok_or_else(|| RuntimeError::InvalidRunStream("expected side-effect payload".to_owned()))?;
     let node = runtime_spec.node(node_id).ok_or_else(|| {
@@ -566,6 +576,16 @@ pub(crate) fn validate_runner_side_effect_payload(
     projections: &store::ProjectionSnapshot,
     payload: &events::KernelEventPayload,
 ) -> Result<()> {
+    if validate_resource_lane_release_payload(
+        runtime_spec,
+        run_id,
+        projections,
+        payload,
+        Some(events::ResourceLaneReleaseAuthority::VerifyTerminal),
+        Some(node),
+    )? {
+        return Ok(());
+    }
     let contract_node = side_effect_contract_node_for_payload(runtime_spec, node, payload)?;
     let (payload_node_id, payload_attempt_id, _, _, _) = side_effect_payload_ref(payload)
         .ok_or_else(|| {
@@ -639,6 +659,65 @@ pub(crate) fn validate_runner_side_effect_payload(
         _ => {}
     }
     Ok(())
+}
+
+fn validate_resource_lane_release_payload(
+    runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
+    projections: &store::ProjectionSnapshot,
+    payload: &events::KernelEventPayload,
+    expected_authority: Option<events::ResourceLaneReleaseAuthority>,
+    verify_node: Option<&spec::NodeSpec>,
+) -> Result<bool> {
+    let Some(resource) = payload.resource_lane_authority_ref() else {
+        return Ok(false);
+    };
+    let Some(release_authority) = resource.release_authority else {
+        return Ok(false);
+    };
+    if let Some(expected) = expected_authority {
+        if release_authority != expected {
+            return Err(RuntimeError::InvalidRunnerOutput(format!(
+                "resource-lane release authority {} is not valid in this runtime context",
+                release_authority.as_str()
+            )));
+        }
+    }
+    if resource.ledger.pair_role != events::SideEffectPairRole::Verify {
+        return Err(RuntimeError::InvalidRunnerOutput(format!(
+            "resource-lane release for pair {} must use verify role",
+            resource.ledger.pair_id
+        )));
+    }
+    let pair = runtime_spec
+        .spec()
+        .side_effect_verify_pair_for_pair_id(resource.ledger.pair_id)
+        .map_err(|error| RuntimeError::InvalidSpec(error.to_string()))?;
+    if let Some(node) = verify_node {
+        let Some(spec::FrameworkNodeSpec::SideEffectVerify(verify)) = &node.framework else {
+            return Err(RuntimeError::InvalidRunnerOutput(format!(
+                "node {} emitted a resource-lane release without verify framework authority",
+                node.node_id
+            )));
+        };
+        if verify.pair_id != *resource.ledger.pair_id || pair.verify_node.node_id != node.node_id {
+            return Err(RuntimeError::InvalidRunnerOutput(format!(
+                "node {} emitted a resource-lane release outside certified pair {}",
+                node.node_id, resource.ledger.pair_id
+            )));
+        }
+    }
+    let contract =
+        CertifiedSideEffectContract::for_node(runtime_spec.spec(), &pair.submit_node.node_id)
+            .map_err(|error| RuntimeError::InvalidRunnerOutput(error.to_string()))?;
+    validate_side_effect_ledger_purpose(
+        &contract,
+        projections,
+        run_id,
+        payload,
+        &store::SideEffectTerminalPolicies::from_spec(runtime_spec.spec())?,
+    )?;
+    Ok(true)
 }
 
 fn validate_side_effect_resource_claim(

@@ -6,10 +6,9 @@ pub(super) fn acquire_resource_lane(
     event_id: &EventId,
     payload: &events::ResourceLaneClaimed,
 ) -> Result<()> {
-    require_side_effect_pair_event(
+    require_side_effect_pair_role(
         &payload.ledger_key,
         &payload.ledger_purpose,
-        &payload.pair_id,
         payload.pair_role,
         events::SideEffectPairRole::Submit,
     )?;
@@ -206,10 +205,9 @@ pub fn resource_lane_release_intent_resolution<'a>(
     projections: &'a ProjectionSnapshot,
     intent: &events::ResourceLaneReleaseIntent,
 ) -> Result<(&'a ResourceLaneKey, &'a ResourceLaneProjection)> {
-    require_side_effect_pair_event(
+    require_side_effect_pair_role(
         &intent.ledger_key,
         &intent.ledger_purpose,
-        &intent.pair_id,
         intent.pair_role,
         events::SideEffectPairRole::Verify,
     )?;
@@ -239,10 +237,9 @@ pub(super) fn release_resource_lane(
     run_id: &RunId,
     payload: &events::ResourceLaneReleased,
 ) -> Result<()> {
-    require_side_effect_pair_event(
+    require_side_effect_pair_role(
         &payload.ledger_key,
         &payload.ledger_purpose,
-        &payload.pair_id,
         payload.pair_role,
         events::SideEffectPairRole::Verify,
     )?;

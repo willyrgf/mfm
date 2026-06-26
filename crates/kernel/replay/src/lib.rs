@@ -719,6 +719,7 @@ pub mod v1 {
                 &retained_artifacts,
             )?;
             verify_remediation_ledger_links(&certified_spec, &projection)?;
+            verify_resource_lane_release_adjacency(&certified_spec, &stream)?;
 
             let mut broker = Self {
                 certified_spec,
@@ -1095,13 +1096,12 @@ pub mod v1 {
                         self.verify_resource_lane_claim(payload, &mut resource_keys)?;
                     }
                     KernelEventPayload::ResourceLaneReleased(payload) => {
-                        self.verify_side_effect_event_against_intent(
+                        self.verify_resource_lane_release_against_intent(
                             &payload.pair_id,
                             &payload.ledger_key,
                             payload.invocation_epoch,
                             payload.pair_role,
-                            &payload.node_id,
-                            &payload.attempt_id,
+                            payload.release_authority,
                         )?;
                     }
                     KernelEventPayload::ResourceLaneClaimIntent(_)
@@ -1721,6 +1721,34 @@ pub mod v1 {
             Ok(())
         }
 
+        fn verify_resource_lane_release_against_intent(
+            &self,
+            pair_id: &SideEffectPairId,
+            ledger_key: &events::SideEffectLedgerKey,
+            invocation_epoch: u32,
+            pair_role: events::SideEffectPairRole,
+            release_authority: events::ResourceLaneReleaseAuthority,
+        ) -> Result<()> {
+            if pair_role != events::SideEffectPairRole::Verify {
+                return Err(side_effect_mismatch(
+                    "resource lane release requires verify pair role",
+                ));
+            }
+            match release_authority {
+                events::ResourceLaneReleaseAuthority::VerifyTerminal
+                | events::ResourceLaneReleaseAuthority::ManualResolution => {}
+            }
+            let intent =
+                self.side_effect_intent_for_event(pair_id, ledger_key, invocation_epoch)?;
+            let (_verify_node, verify) = self.side_effect_verify_node_for_pair(pair_id)?;
+            if verify.submit_node_id != intent.node_id {
+                return Err(side_effect_mismatch(
+                    "resource lane release does not match certified pair",
+                ));
+            }
+            Ok(())
+        }
+
         fn verify_resource_touched_set(
             &self,
             pair_id: &SideEffectPairId,
@@ -2052,10 +2080,13 @@ pub mod v1 {
             node_id: &NodeId,
             attempt_id: &AttemptId,
         ) -> Result<()> {
-            let intent =
-                self.side_effect_intent_for_event(pair_id, ledger_key, invocation_epoch)?;
-            verify_side_effect_ambiguity_submit_claim_binding(
-                intent, pair_role, node_id, attempt_id,
+            self.verify_side_effect_event_against_intent(
+                pair_id,
+                ledger_key,
+                invocation_epoch,
+                pair_role,
+                node_id,
+                attempt_id,
             )
         }
 
@@ -2527,17 +2558,18 @@ pub mod v1 {
     ) -> Result<BTreeMap<ArtifactId, Vec<u8>>> {
         let mut map = BTreeMap::new();
         for artifact in artifacts {
-            if map
-                .insert(artifact.artifact_id.clone(), artifact.bytes)
-                .is_some()
-            {
-                return Err(ReplayError::new(
-                    ReplayErrorKind::ArtifactMismatch,
-                    format!(
-                        "conflicting retained artifact bytes for {}",
-                        artifact.artifact_id
-                    ),
-                ));
+            match map.entry(artifact.artifact_id) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(artifact.bytes);
+                }
+                std::collections::btree_map::Entry::Occupied(entry) => {
+                    if entry.get() != &artifact.bytes {
+                        return Err(ReplayError::new(
+                            ReplayErrorKind::ArtifactMismatch,
+                            format!("conflicting retained artifact bytes for {}", entry.key()),
+                        ));
+                    }
+                }
             }
         }
         Ok(map)
@@ -2615,6 +2647,149 @@ pub mod v1 {
             index = end;
         }
         Ok(found)
+    }
+
+    fn verify_resource_lane_release_adjacency(
+        certified_spec: &HashedSpecEnvelope,
+        stream: &[KernelEventEnvelope],
+    ) -> Result<()> {
+        let terminal_policies = store::SideEffectTerminalPolicies::from_spec(&certified_spec.spec)
+            .map_err(store_error)?;
+        let mut index = 0;
+        while index < stream.len() {
+            let first = &stream[index];
+            let seq = first.seq();
+            let commit_key = first.commit_key().clone();
+            let start = index;
+            let mut end = index + 1;
+            while end < stream.len()
+                && stream[end].seq() == seq
+                && stream[end].commit_key() == &commit_key
+            {
+                end += 1;
+            }
+            let payloads = stream[start..end]
+                .iter()
+                .map(KernelEventEnvelope::payload)
+                .collect::<Vec<_>>();
+            verify_resource_lane_release_payload_adjacency(&terminal_policies, &payloads)?;
+            index = end;
+        }
+        Ok(())
+    }
+
+    fn verify_resource_lane_release_payload_adjacency(
+        terminal_policies: &store::SideEffectTerminalPolicies,
+        payloads: &[&KernelEventPayload],
+    ) -> Result<()> {
+        for (index, payload) in payloads.iter().enumerate() {
+            let KernelEventPayload::ResourceLaneReleased(release) = payload else {
+                continue;
+            };
+            match release.release_authority {
+                events::ResourceLaneReleaseAuthority::VerifyTerminal => {
+                    let mut matched = false;
+                    for terminal in &payloads[index + 1..] {
+                        if side_effect_terminal_matches_resource_lane_release(
+                            terminal,
+                            release,
+                            terminal_policies,
+                        )? {
+                            matched = true;
+                            break;
+                        }
+                    }
+                    if !matched {
+                        return Err(ReplayError::new(
+                            ReplayErrorKind::InvalidRunStream,
+                            "resource lane release requires matching verify-terminal payload in the same commit",
+                        ));
+                    }
+                }
+                events::ResourceLaneReleaseAuthority::ManualResolution => {
+                    if !payloads[index + 1..].iter().any(|payload| {
+                        matches!(payload, KernelEventPayload::ManualResolutionRecorded(_))
+                    }) {
+                        return Err(ReplayError::new(
+                            ReplayErrorKind::InvalidRunStream,
+                            "manual resource lane release requires ManualResolutionRecorded in the same commit",
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn side_effect_terminal_matches_resource_lane_release(
+        terminal: &KernelEventPayload,
+        release: &events::ResourceLaneReleased,
+        terminal_policies: &store::SideEffectTerminalPolicies,
+    ) -> Result<bool> {
+        let Some(terminal) = terminal.side_effect_ledger_ref() else {
+            return Ok(false);
+        };
+        if terminal.ledger_key != &release.ledger_key
+            || terminal.ledger_purpose != &release.ledger_purpose
+            || terminal.pair_id != &release.pair_id
+            || terminal.invocation_epoch != Some(release.invocation_epoch)
+        {
+            return Ok(false);
+        }
+        if !side_effect_terminal_release_role_allowed(
+            terminal.kind,
+            terminal.pair_role,
+            release.pair_role,
+        ) {
+            return Ok(false);
+        }
+        side_effect_terminal_release_policy_allowed(
+            terminal.kind,
+            terminal.pair_id,
+            terminal_policies,
+        )
+    }
+
+    fn side_effect_terminal_release_policy_allowed(
+        terminal_kind: events::SideEffectEventKind,
+        pair_id: &SideEffectPairId,
+        terminal_policies: &store::SideEffectTerminalPolicies,
+    ) -> Result<bool> {
+        Ok(match terminal_kind {
+            events::SideEffectEventKind::ReceiptObserved => {
+                terminal_policies.require(pair_id).map_err(store_error)?
+                    == store::SideEffectTerminalPolicy::Receipt
+            }
+            events::SideEffectEventKind::ConfirmationObserved
+            | events::SideEffectEventKind::NotSubmittedProven
+            | events::SideEffectEventKind::Failed => true,
+            _ => false,
+        })
+    }
+
+    fn side_effect_terminal_release_role_allowed(
+        terminal_kind: events::SideEffectEventKind,
+        terminal_role: events::SideEffectPairRole,
+        release_role: events::SideEffectPairRole,
+    ) -> bool {
+        if release_role != events::SideEffectPairRole::Verify {
+            return false;
+        }
+        match terminal_kind {
+            events::SideEffectEventKind::NotSubmittedProven => matches!(
+                terminal_role,
+                events::SideEffectPairRole::Submit | events::SideEffectPairRole::Verify
+            ),
+            events::SideEffectEventKind::ReceiptObserved
+            | events::SideEffectEventKind::ConfirmationObserved => {
+                terminal_role == events::SideEffectPairRole::Verify
+            }
+            events::SideEffectEventKind::Failed => matches!(
+                terminal_role,
+                events::SideEffectPairRole::Submit | events::SideEffectPairRole::Verify
+            ),
+            _ => false,
+        }
     }
 
     fn verify_remediation_ledger_links(
@@ -3006,25 +3181,6 @@ pub mod v1 {
         ReplayError::new(ReplayErrorKind::SideEffectMismatch, message)
     }
 
-    fn verify_side_effect_ambiguity_submit_claim_binding(
-        intent: &side_effect::IntentPersisted,
-        pair_role: events::SideEffectPairRole,
-        node_id: &NodeId,
-        attempt_id: &AttemptId,
-    ) -> Result<()> {
-        if pair_role != events::SideEffectPairRole::Verify {
-            return Err(side_effect_mismatch(
-                "side-effect ambiguity event does not use verify pair role",
-            ));
-        }
-        verify_side_effect_submit_claim_identity(
-            intent,
-            node_id,
-            attempt_id,
-            "side-effect ambiguity event does not match persisted intent",
-        )
-    }
-
     fn verify_side_effect_submit_claim_identity(
         intent: &side_effect::IntentPersisted,
         node_id: &NodeId,
@@ -3178,38 +3334,160 @@ pub mod v1 {
         }
 
         #[test]
-        fn side_effect_ambiguity_binding_uses_verify_role_and_submit_claim_identity() {
+        fn side_effect_ambiguity_submit_claim_identity_matches_intent() {
             let pair_id = pair_id(0x71);
             let ledger_key =
                 events::SideEffectLedgerKey::new("ambiguity-ledger").expect("ambiguity ledger key");
             let intent = intent_persisted(pair_id, ledger_key);
 
-            verify_side_effect_ambiguity_submit_claim_binding(
+            verify_side_effect_submit_claim_identity(
                 &intent,
-                events::SideEffectPairRole::Verify,
                 &intent.node_id,
                 &intent.attempt_id,
+                "side-effect ambiguity event does not match persisted intent",
             )
             .expect("verify-role ambiguity from submit claim is valid");
 
             let wrong_node = node_id(0x72);
-            let error = verify_side_effect_ambiguity_submit_claim_binding(
+            let error = verify_side_effect_submit_claim_identity(
                 &intent,
-                events::SideEffectPairRole::Verify,
                 &wrong_node,
                 &intent.attempt_id,
+                "side-effect ambiguity event does not match persisted intent",
             )
             .expect_err("different submit node is invalid");
             assert_eq!(error.kind, ReplayErrorKind::SideEffectMismatch);
+        }
 
-            let error = verify_side_effect_ambiguity_submit_claim_binding(
-                &intent,
-                events::SideEffectPairRole::Submit,
-                &intent.node_id,
-                &intent.attempt_id,
+        #[test]
+        fn resource_lane_release_requires_later_verify_terminal_payload() {
+            let pair_id = pair_id(0x81);
+            let ledger_key =
+                events::SideEffectLedgerKey::new("release-ledger").expect("ledger key");
+            let terminal_policies = side_effect_terminal_policies(
+                pair_id.clone(),
+                store::SideEffectTerminalPolicy::Confirmation,
+            );
+            let release = resource_lane_released(
+                pair_id.clone(),
+                ledger_key.clone(),
+                events::ResourceLaneReleaseAuthority::VerifyTerminal,
+            );
+            let confirmation = side_effect_confirmation(pair_id, ledger_key);
+
+            verify_resource_lane_release_payload_adjacency(
+                &terminal_policies,
+                &[&release, &confirmation],
             )
-            .expect_err("ambiguity must remain verify-role evidence");
-            assert_eq!(error.kind, ReplayErrorKind::SideEffectMismatch);
+            .expect("release before matching terminal is valid");
+            let error = verify_resource_lane_release_payload_adjacency(
+                &terminal_policies,
+                &[&confirmation, &release],
+            )
+            .expect_err("terminal before release does not authorize release");
+
+            assert_eq!(error.kind, ReplayErrorKind::InvalidRunStream);
+            assert!(error.message.contains("matching verify-terminal payload"));
+        }
+
+        #[test]
+        fn verify_release_accepts_submit_role_side_effect_failure_terminal() {
+            let pair_id = pair_id(0x8d);
+            let ledger_key =
+                events::SideEffectLedgerKey::new("release-failure-ledger").expect("ledger key");
+            let terminal_policies = side_effect_terminal_policies(
+                pair_id.clone(),
+                store::SideEffectTerminalPolicy::Confirmation,
+            );
+            let release = resource_lane_released(
+                pair_id.clone(),
+                ledger_key.clone(),
+                events::ResourceLaneReleaseAuthority::VerifyTerminal,
+            );
+            let failed = side_effect_failed(
+                pair_id.clone(),
+                ledger_key.clone(),
+                events::SideEffectPairRole::Submit,
+            );
+
+            verify_resource_lane_release_payload_adjacency(
+                &terminal_policies,
+                &[&release, &failed],
+            )
+            .expect("verify-authority release can be backed by submit-role failure terminal");
+
+            let submit_release = resource_lane_released_with_role(
+                pair_id,
+                ledger_key,
+                events::SideEffectPairRole::Submit,
+                events::ResourceLaneReleaseAuthority::VerifyTerminal,
+            );
+            let error = verify_resource_lane_release_payload_adjacency(
+                &terminal_policies,
+                &[&submit_release, &failed],
+            )
+            .expect_err("resource lane release must retain verify authority role");
+            assert_eq!(error.kind, ReplayErrorKind::InvalidRunStream);
+        }
+
+        #[test]
+        fn resource_lane_release_terminal_policy_is_replayed() {
+            let pair_id = pair_id(0x84);
+            let ledger_key =
+                events::SideEffectLedgerKey::new("release-policy-ledger").expect("ledger key");
+            let release = resource_lane_released(
+                pair_id.clone(),
+                ledger_key.clone(),
+                events::ResourceLaneReleaseAuthority::VerifyTerminal,
+            );
+            let receipt = side_effect_receipt(pair_id.clone(), ledger_key);
+            let confirmation_policy = side_effect_terminal_policies(
+                pair_id.clone(),
+                store::SideEffectTerminalPolicy::Confirmation,
+            );
+            let receipt_policy =
+                side_effect_terminal_policies(pair_id, store::SideEffectTerminalPolicy::Receipt);
+
+            let error = verify_resource_lane_release_payload_adjacency(
+                &confirmation_policy,
+                &[&release, &receipt],
+            )
+            .expect_err("receipt cannot release a confirmation-policy lane");
+            assert_eq!(error.kind, ReplayErrorKind::InvalidRunStream);
+
+            verify_resource_lane_release_payload_adjacency(&receipt_policy, &[&release, &receipt])
+                .expect("receipt-policy lane can release on receipt");
+        }
+
+        #[test]
+        fn manual_resource_lane_release_requires_later_manual_resolution_record() {
+            let pair_id = pair_id(0x87);
+            let ledger_key =
+                events::SideEffectLedgerKey::new("manual-release-ledger").expect("ledger key");
+            let terminal_policies = store::SideEffectTerminalPolicies::new(BTreeMap::new());
+            let release = resource_lane_released(
+                pair_id,
+                ledger_key,
+                events::ResourceLaneReleaseAuthority::ManualResolution,
+            );
+            let manual = manual_resolution_recorded();
+
+            verify_resource_lane_release_payload_adjacency(
+                &terminal_policies,
+                &[&release, &manual],
+            )
+            .expect("manual release before manual record is valid");
+            let error =
+                verify_resource_lane_release_payload_adjacency(&terminal_policies, &[&release])
+                    .expect_err("manual release without manual record rejects");
+            assert_eq!(error.kind, ReplayErrorKind::InvalidRunStream);
+
+            let error = verify_resource_lane_release_payload_adjacency(
+                &terminal_policies,
+                &[&manual, &release],
+            )
+            .expect_err("manual record before release does not authorize release");
+            assert_eq!(error.kind, ReplayErrorKind::InvalidRunStream);
         }
 
         #[test]
@@ -3272,6 +3550,149 @@ pub mod v1 {
                 adapter_version: AdapterVersion::new("mfm.replay.test.adapter.v1")
                     .expect("adapter version"),
             }
+        }
+
+        fn resource_lane_released(
+            pair_id: SideEffectPairId,
+            ledger_key: events::SideEffectLedgerKey,
+            release_authority: events::ResourceLaneReleaseAuthority,
+        ) -> KernelEventPayload {
+            resource_lane_released_with_role(
+                pair_id,
+                ledger_key,
+                events::SideEffectPairRole::Verify,
+                release_authority,
+            )
+        }
+
+        fn resource_lane_released_with_role(
+            pair_id: SideEffectPairId,
+            ledger_key: events::SideEffectLedgerKey,
+            pair_role: events::SideEffectPairRole,
+            release_authority: events::ResourceLaneReleaseAuthority,
+        ) -> KernelEventPayload {
+            KernelEventPayload::ResourceLaneReleased(events::ResourceLaneReleased {
+                spec_hash: spec_hash(0x80),
+                ledger_key,
+                ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                pair_id,
+                pair_role,
+                invocation_epoch: 1,
+                claim_id: events::ResourceLaneClaimId::new("mfm.replay.test.claim")
+                    .expect("claim id"),
+                release_id: events::ResourceLaneReleaseId::new("mfm.replay.test.release")
+                    .expect("release id"),
+                claim_fencing_token: 1,
+                release_authority,
+                release_reason: events::ResourceLaneReleaseReason::new("side_effect.terminal")
+                    .expect("release reason"),
+                lane_transition_seq: 2,
+            })
+        }
+
+        fn side_effect_confirmation(
+            pair_id: SideEffectPairId,
+            ledger_key: events::SideEffectLedgerKey,
+        ) -> KernelEventPayload {
+            KernelEventPayload::SideEffectConfirmationObserved(side_effect::ConfirmationObserved {
+                spec_hash: spec_hash(0x80),
+                node_id: node_id(0x82),
+                attempt_id: attempt_id(0x83),
+                ledger_key,
+                ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                pair_id,
+                pair_role: events::SideEffectPairRole::Verify,
+                invocation_epoch: 1,
+                confirmation_schema_id: schema_id("mfm.replay.test.confirmation", 0x84),
+                confirmation_hash: content_digest(0x85),
+                confirmation_artifact_id: artifact_id(0x86),
+                replay_verifier_id: events::ReplayVerifierId::new(
+                    "mfm.replay.test.confirmation.verifier",
+                )
+                .expect("replay verifier id"),
+                resource_touched_set: None,
+            })
+        }
+
+        fn side_effect_failed(
+            pair_id: SideEffectPairId,
+            ledger_key: events::SideEffectLedgerKey,
+            pair_role: events::SideEffectPairRole,
+        ) -> KernelEventPayload {
+            KernelEventPayload::SideEffectFailed(side_effect::Failed {
+                spec_hash: spec_hash(0x80),
+                node_id: node_id(0x8e),
+                attempt_id: attempt_id(0x8f),
+                ledger_key,
+                ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                pair_id,
+                pair_role,
+                invocation_epoch: 1,
+                failure_phase: side_effect::FailurePhase::BeforeInvocationStarted,
+                retryable: false,
+                error: events::MfmErrorInfo::new(
+                    events::ErrorCode::new("mfm.replay.test.side_effect_failed")
+                        .expect("error code"),
+                    events::ErrorCategory::SideEffect,
+                    false,
+                    "side-effect failed",
+                )
+                .expect("error info"),
+            })
+        }
+
+        fn side_effect_receipt(
+            pair_id: SideEffectPairId,
+            ledger_key: events::SideEffectLedgerKey,
+        ) -> KernelEventPayload {
+            KernelEventPayload::SideEffectReceiptObserved(side_effect::ReceiptObserved {
+                spec_hash: spec_hash(0x80),
+                node_id: node_id(0x88),
+                attempt_id: attempt_id(0x89),
+                ledger_key,
+                ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+                pair_id,
+                pair_role: events::SideEffectPairRole::Verify,
+                invocation_epoch: 1,
+                receipt_schema_id: schema_id("mfm.replay.test.receipt", 0x8a),
+                receipt_hash: content_digest(0x8b),
+                receipt_artifact_id: artifact_id(0x8c),
+                replay_verifier_id: events::ReplayVerifierId::new(
+                    "mfm.replay.test.receipt.verifier",
+                )
+                .expect("replay verifier id"),
+                resource_touched_set: None,
+            })
+        }
+
+        fn manual_resolution_recorded() -> KernelEventPayload {
+            KernelEventPayload::ManualResolutionRecorded(events::ManualResolutionRecorded {
+                run_id: run_id(0x90),
+                spec_hash: spec_hash(0x80),
+                outcome: events::ManualResolutionOutcome::ConfirmRemediated,
+                evidence_schema_id: schema_id("mfm.replay.test.manual_evidence", 0x91),
+                evidence_hash: content_digest(0x92),
+                evidence_artifact_id: artifact_id(0x93),
+                authorization_schema_id: schema_id("mfm.replay.test.manual_authorization", 0x94),
+                authorization_hash: content_digest(0x95),
+                authorization_artifact_id: artifact_id(0x96),
+                note: None,
+            })
+        }
+
+        fn side_effect_terminal_policies(
+            pair_id: SideEffectPairId,
+            policy: store::SideEffectTerminalPolicy,
+        ) -> store::SideEffectTerminalPolicies {
+            store::SideEffectTerminalPolicies::new(BTreeMap::from([(pair_id, policy)]))
+        }
+
+        fn spec_hash(byte: u8) -> SpecHash {
+            SpecHash::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
+        }
+
+        fn run_id(byte: u8) -> RunId {
+            RunId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
         }
 
         fn pair_id(byte: u8) -> SideEffectPairId {

@@ -44,6 +44,37 @@ pub(super) fn require_forward_fence_open(
     Ok(())
 }
 
+pub(super) fn require_forward_terminal_closure_admissible(
+    projections: &ProjectionSnapshot,
+    run_id: &RunId,
+    ledger_key: &events::SideEffectLedgerKey,
+    purpose: &events::SideEffectLedgerPurpose,
+    pair_id: &SideEffectPairId,
+) -> Result<()> {
+    if matches!(purpose, events::SideEffectLedgerPurpose::Forward)
+        && projections.saga_engagement(run_id).is_some()
+    {
+        if projections
+            .side_effect_for_pair(run_id, pair_id)
+            .is_some_and(|projection| {
+                projection.pair_id == *pair_id
+                    && projection.ledger_key == *ledger_key
+                    && matches!(
+                        projection.ledger_purpose,
+                        events::SideEffectLedgerPurpose::Forward
+                    )
+            })
+        {
+            return Ok(());
+        }
+        return Err(StoreError::ProjectionConflict {
+            key: format!("sidefx:{ledger_key}"),
+            message: "forward side-effect terminal event rejected after saga engagement".to_owned(),
+        });
+    }
+    Ok(())
+}
+
 pub(super) fn require_remediation_intent_admissible(
     projections: &ProjectionSnapshot,
     run_id: &RunId,
@@ -102,10 +133,9 @@ pub(super) fn require_remediation_intent_admissible(
     Ok(())
 }
 
-pub(super) fn require_side_effect_pair_event(
+pub(super) fn require_side_effect_pair_role(
     ledger_key: &events::SideEffectLedgerKey,
     purpose: &events::SideEffectLedgerPurpose,
-    _pair_id: &SideEffectPairId,
     pair_role: events::SideEffectPairRole,
     expected_role: events::SideEffectPairRole,
 ) -> Result<()> {
@@ -279,8 +309,14 @@ pub(super) struct EpochOnlyTransition<'a> {
     pub(super) ledger_purpose: &'a events::SideEffectLedgerPurpose,
     pub(super) pair_id: &'a SideEffectPairId,
     pub(super) pair_role: events::SideEffectPairRole,
-    pub(super) expected_pair_role: events::SideEffectPairRole,
+    pub(super) expected_pair_role: PairRoleRequirement,
     pub(super) required_previous: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PairRoleRequirement {
+    Exact(events::SideEffectPairRole),
+    SubmitOrVerify,
 }
 
 pub(super) fn transition_side_effect_epoch_only(
@@ -288,10 +324,9 @@ pub(super) fn transition_side_effect_epoch_only(
     transition: EpochOnlyTransition<'_>,
     transition_state: impl FnOnce(OwnedSideEffectLedgerState) -> Result<OwnedSideEffectLedgerState>,
 ) -> Result<()> {
-    require_side_effect_pair_event(
+    require_side_effect_pair_role_requirement(
         transition.ledger_key,
         transition.ledger_purpose,
-        transition.pair_id,
         transition.pair_role,
         transition.expected_pair_role,
     )?;
@@ -324,26 +359,53 @@ pub(super) fn transition_side_effect_epoch_only(
     Ok(())
 }
 
+fn require_side_effect_pair_role_requirement(
+    ledger_key: &events::SideEffectLedgerKey,
+    purpose: &events::SideEffectLedgerPurpose,
+    pair_role: events::SideEffectPairRole,
+    expected_role: PairRoleRequirement,
+) -> Result<()> {
+    match expected_role {
+        PairRoleRequirement::Exact(expected_role) => {
+            require_side_effect_pair_role(ledger_key, purpose, pair_role, expected_role)
+        }
+        PairRoleRequirement::SubmitOrVerify => match purpose {
+            events::SideEffectLedgerPurpose::Forward
+            | events::SideEffectLedgerPurpose::Remediation { .. } => {
+                if matches!(
+                    pair_role,
+                    events::SideEffectPairRole::Submit | events::SideEffectPairRole::Verify
+                ) {
+                    Ok(())
+                } else {
+                    Err(side_effect_projection_error(
+                        ledger_key,
+                        "side-effect pair role does not match event phase",
+                    ))
+                }
+            }
+        },
+    }
+}
+
 pub(super) fn transition_side_effect_failure(
     projections: &mut ProjectionSnapshot,
     run_id: &RunId,
     payload: &side_effect::Failed,
     event_id: EventId,
 ) -> Result<()> {
-    require_side_effect_pair_event(
+    require_side_effect_pair_role_requirement(
         &payload.ledger_key,
         &payload.ledger_purpose,
-        &payload.pair_id,
         payload.pair_role,
-        events::SideEffectPairRole::Verify,
+        PairRoleRequirement::SubmitOrVerify,
     )?;
-    require_forward_fence_open(
+    require_forward_terminal_closure_admissible(
         projections,
         run_id,
         &payload.ledger_key,
         &payload.ledger_purpose,
         &payload.pair_id,
-        payload.pair_role,
     )?;
     let Some(previous) = projections.side_effect_for_pair(run_id, &payload.pair_id) else {
         return Err(side_effect_projection_error(

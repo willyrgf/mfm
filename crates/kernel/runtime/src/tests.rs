@@ -751,6 +751,18 @@ fn register_spec_capabilities(
     registry: &mut ErasedRunnerRegistry,
     runtime_spec: &CertifiedRuntimeSpec,
 ) {
+    register_spec_capabilities_with_adapter_executable(
+        registry,
+        runtime_spec,
+        test_adapter_executable_identity(),
+    );
+}
+
+fn register_spec_capabilities_with_adapter_executable(
+    registry: &mut ErasedRunnerRegistry,
+    runtime_spec: &CertifiedRuntimeSpec,
+    adapter_executable: events::ExecutableIdentity,
+) {
     let implementation_id =
         CapabilityImplementationId::new("mfm.test.capability").expect("capability implementation");
     for node in runtime_spec
@@ -762,6 +774,26 @@ fn register_spec_capabilities(
         registry
             .register_capability_set(&node.capability_bindings, implementation_id.clone())
             .expect("capability binding");
+        for adapter in &node.adapter_bindings {
+            registry
+                .register_adapter_executable(AdapterExecutableBinding::new(
+                    adapter.adapter_kind.clone(),
+                    adapter.adapter_version.clone(),
+                    adapter_executable.clone(),
+                ))
+                .expect("adapter executable binding");
+        }
+    }
+}
+
+fn test_adapter_executable_identity() -> events::ExecutableIdentity {
+    let factory_id = events::RunnerFactoryId::new("test_adapter").expect("factory");
+    events::ExecutableIdentity {
+        factory_id,
+        cargo_package_digest: content(0xe3),
+        binary_digest: content(0xe4),
+        nix_derivation_hash: None,
+        nix_output_hash: None,
     }
 }
 
@@ -1648,6 +1680,7 @@ fn runner_kit_builders_create_context_bound_artifacts_payloads_and_output() {
     let ambiguity_payload = payloads
         .side_effect_ambiguous(
             side_effect.clone(),
+            events::SideEffectPairRole::Verify,
             events::AmbiguityCode::new("runner_kit_test").expect("ambiguity code"),
             &ambiguity,
         )
@@ -1665,6 +1698,7 @@ fn runner_kit_builders_create_context_bound_artifacts_payloads_and_output() {
 
     let failed = payloads.side_effect_failed(
         side_effect.clone(),
+        events::SideEffectPairRole::Verify,
         events::side_effect::FailurePhase::BeforeInvocationStarted,
         true,
         events::MfmErrorInfo::new(
@@ -1911,6 +1945,7 @@ fn side_effect_evidence_builder_builds_progress_evidence_with_replay_and_resourc
             &builder
                 .ambiguous(
                     side_effect,
+                    events::SideEffectPairRole::Verify,
                     None,
                     events::AmbiguityCode::new("side_effect_builder_test").expect("ambiguity code"),
                     &value,
@@ -2090,9 +2125,61 @@ impl SideEffectDriverCallbacks for TestSideEffectDriverCallbacks {
 }
 
 impl SideEffectVerifyCallbacks for TestSideEffectDriverCallbacks {
+    type Submission = FixtureSideEffectEvidence;
     type Receipt = FixtureSideEffectEvidence;
     type Confirmation = FixtureSideEffectEvidence;
     type Output = FixtureOutputValue;
+    type NotSubmittedProof = FixtureSideEffectEvidence;
+    type AmbiguityEvidence = FixtureSideEffectEvidence;
+
+    fn recover_unknown_submission<'a, 'ctx>(
+        &'a self,
+        ctx: &'a ErasedRunCtx<'ctx>,
+        _submit_node: &'a spec::NodeSpec,
+        _submit_inputs: &'a MaterializedInputs,
+        _prepared_invocation: Option<&'a store::SideEffectArtifactProjection>,
+    ) -> SideEffectUnknownSubmissionDecisionFuture<
+        'a,
+        Self::Submission,
+        Self::NotSubmittedProof,
+        Self::AmbiguityEvidence,
+    > {
+        let decision = self.submission_decision.clone();
+        let node_id = ctx.node().node_id.as_str().to_owned();
+        let attempt_id = ctx.attempt_id().as_str().to_owned();
+        Box::pin(async move {
+            Ok(match decision {
+                TestSubmissionDecision::Observed => {
+                    SideEffectUnknownSubmissionDecision::Observed(FixtureSideEffectEvidence {
+                        amount: 55,
+                        node_id: node_id.clone(),
+                        attempt_id: attempt_id.clone(),
+                    })
+                }
+                TestSubmissionDecision::Unknown => {
+                    SideEffectUnknownSubmissionDecision::StillUnknown
+                }
+                TestSubmissionDecision::NotSubmitted => {
+                    SideEffectUnknownSubmissionDecision::NotSubmitted(FixtureSideEffectEvidence {
+                        amount: 57,
+                        node_id: node_id.clone(),
+                        attempt_id: attempt_id.clone(),
+                    })
+                }
+                TestSubmissionDecision::Ambiguous => {
+                    SideEffectUnknownSubmissionDecision::Ambiguous {
+                        ambiguity_code: events::AmbiguityCode::new("mfm_test_driver_ambiguous")
+                            .expect("ambiguity code"),
+                        evidence: FixtureSideEffectEvidence {
+                            amount: 58,
+                            node_id,
+                            attempt_id,
+                        },
+                    }
+                }
+            })
+        })
+    }
 
     fn read_receipt<'a, 'ctx>(
         &'a self,
@@ -2608,6 +2695,13 @@ async fn side_effect_submission_unknown_keeps_exclusive_resource_lane_held() {
                 pair_id: pair_id.clone(),
                 required: store::RequiredSideEffectState::InvocationStarted,
             }],
+            certified_run_authority: Some(
+                store::CertifiedRunStoreAuthority::from_spec(
+                    fixture.run_id.clone(),
+                    fixture.runtime_spec.spec(),
+                )
+                .expect("certified run authority"),
+            ),
             ..store::CommitPreconditions::default()
         },
     );
@@ -2686,13 +2780,9 @@ async fn side_effect_verify_driver_maps_receipt_to_state_output() {
     .expect("driver output");
 
     assert_eq!(output.staged_artifacts.len(), 1);
-    assert_eq!(output.payloads.len(), 2);
+    assert_eq!(output.payloads.len(), 1);
     assert!(matches!(
         output.payloads[0],
-        RunnerEventPayload::ResourceLaneReleaseIntent(_)
-    ));
-    assert!(matches!(
-        output.payloads[1],
         RunnerEventPayload::CellProduced(_)
     ));
 }
@@ -2714,8 +2804,8 @@ async fn side_effect_receipt_verification_releases_exclusive_resource_lane() {
     let verify_node = side_effect_verify_node_for_submit(&fixture, &submit_node).clone();
     let pair_id = fixture_side_effect_pair_id(&fixture, &submit_node);
     let mut saw_lane_claimed = false;
-    let mut saw_receipt_with_lane_held = false;
-    let mut released_after_receipt = false;
+    let mut released_with_receipt_before_output = false;
+    let mut terminal_output_after_release = false;
 
     for _ in 0..10 {
         assert_ne!(
@@ -2738,28 +2828,28 @@ async fn side_effect_receipt_verification_releases_exclusive_resource_lane() {
         if matches!(
             side_effect.phase,
             store::SideEffectPhase::ReceiptObserved { .. }
-        ) && active_lane.is_some()
+        ) && active_lane.is_none()
             && snapshot.cell_terminal(&verify_node.output_cell).is_none()
         {
-            saw_receipt_with_lane_held = true;
+            released_with_receipt_before_output = true;
         }
-        if saw_receipt_with_lane_held
+        if released_with_receipt_before_output
             && active_lane.is_none()
             && snapshot.cell_terminal(&verify_node.output_cell).is_some()
         {
-            released_after_receipt = true;
+            terminal_output_after_release = true;
             break;
         }
     }
 
     assert!(saw_lane_claimed, "exclusive side effect must claim a lane");
     assert!(
-        saw_receipt_with_lane_held,
-        "receipt evidence alone should not release the lane before terminal output"
+        released_with_receipt_before_output,
+        "receipt evidence should release the lane before terminal output"
     );
     assert!(
-        released_after_receipt,
-        "receipt-level terminal output should release the exclusive lane"
+        terminal_output_after_release,
+        "receipt-level terminal output should be produced after lane release"
     );
 }
 
@@ -2874,6 +2964,11 @@ async fn side_effect_driver_starts_and_submits_from_prepared_projection() {
                     pair_id: pair_id.clone(),
                     required: store::RequiredSideEffectState::InvocationPrepared,
                 }],
+                certified_run_authority: Some(store::CertifiedRunStoreAuthority::from_spec(
+                    fixture.run_id.clone(),
+                    fixture.runtime_spec.spec(),
+                )
+                .expect("certified run authority")),
                 ..store::CommitPreconditions::default()
             },
         })
@@ -3127,7 +3222,7 @@ fn runner_registration_builder_preserves_explicit_binding_authority() {
         .expect("runner registration");
 
     let binding = registry
-        .resolve(node, descriptor)
+        .resolve(&fixture.runtime_spec, node, descriptor)
         .expect("registered runner");
     assert_eq!(binding.factory_id(), &factory_id);
     assert_eq!(binding.executable(), &executable);
@@ -4850,6 +4945,14 @@ async fn run_admission_returns_bound_context_with_capability_and_framework_autho
         run_admitted.runner_executables,
         authority.bound_context().runner_executables()
     );
+    assert!(
+        !authority.bound_context().adapter_executables().is_empty(),
+        "fixture must exercise adapter executable binding evidence"
+    );
+    assert_eq!(
+        run_admitted.adapter_executables,
+        authority.bound_context().adapter_executables()
+    );
     assert_eq!(
         scheduler
             .run_admitted_binding_compatibility(&fixture.runtime_spec, &run_admitted)
@@ -5057,6 +5160,58 @@ async fn resume_rejects_runner_executable_identity_mismatch_before_attempt_start
 
     assert!(matches!(error, RuntimeError::RunnerBinding(message)
             if message.contains("runner executable identities")));
+    assert_eq!(
+        store.load_run_stream(&fixture.run_id).len(),
+        stream_len_before
+    );
+}
+
+#[tokio::test]
+async fn resume_rejects_adapter_executable_identity_mismatch_before_attempt_start() {
+    let fixture = fixture();
+    let launch_scheduler = test_scheduler(registered_fixture_runners(&fixture));
+    let mut store = TestTypedRunStore::new();
+    start_fixture_run(
+        &launch_scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    let stream_len_before = store.load_run_stream(&fixture.run_id).len();
+
+    let mut changed_adapter = test_adapter_executable_identity();
+    changed_adapter.binary_digest = content(0xef);
+    let resume_scheduler = test_scheduler(registered_fixture_runners_with_adapter_executable(
+        &fixture,
+        changed_adapter,
+    ));
+    let run_admitted = store
+        .load_run_stream(&fixture.run_id)
+        .into_iter()
+        .find_map(|event| match event.payload().clone() {
+            events::KernelEventPayload::RunAdmitted(payload) => Some(payload),
+            _ => None,
+        })
+        .expect("RunAdmitted payload");
+    assert_eq!(
+        resume_scheduler
+            .run_admitted_binding_compatibility(&fixture.runtime_spec, &run_admitted)
+            .expect("binding compatibility"),
+        RunAdmittedBindingCompatibility::IncompatibleExecutable
+    );
+    let error = drive_once(
+        &resume_scheduler,
+        &mut store,
+        &fixture.runtime_spec,
+        &fixture.run_id,
+    )
+    .await
+    .expect_err("changed adapter executable identity should reject bound context");
+
+    assert!(matches!(error, RuntimeError::RunnerBinding(message)
+            if message.contains("adapter executable identities")));
     assert_eq!(
         store.load_run_stream(&fixture.run_id).len(),
         stream_len_before
@@ -8499,7 +8654,7 @@ async fn side_effect_output_before_terminal_evidence_is_rejected() {
 }
 
 #[tokio::test]
-async fn receipt_policy_allows_submit_output_after_receipt() {
+async fn receipt_policy_allows_verify_output_after_receipt() {
     let fixture = fixture_with_first_exclusive_side_effect_state();
     let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
     let mut store = TestTypedRunStore::new();
@@ -8511,22 +8666,30 @@ async fn receipt_policy_allows_submit_output_after_receipt() {
     )
     .await
     .expect("start run");
-    let node = node_by_output(&fixture, &fixture.cell_a);
-    let attempt_id = append_synthetic_exclusive_receipt_phase(
+    let submit_node = node_by_output(&fixture, &fixture.cell_a);
+    let submit_attempt_id = append_synthetic_exclusive_receipt_phase(
         &mut store,
         &fixture,
-        node,
+        submit_node,
         "wallet-submit-output-receipt",
         "sidefx-submit-output-receipt",
     );
+    let verify_node = side_effect_verify_node_for_submit(&fixture, submit_node);
+    let verify_attempt_id = attempt_id(
+        &fixture.run_id,
+        fixture.runtime_spec.spec_hash(),
+        &verify_node.node_id,
+        1,
+    )
+    .expect("verify attempt id");
 
     let snapshot = store.projection_snapshot();
     side_effect_lifecycle::SideEffectLifecycle::validate_terminal_batch_evidence(
         &fixture.runtime_spec,
         &fixture.run_id,
         &snapshot,
-        node,
-        &attempt_id,
+        verify_node,
+        &verify_attempt_id,
         false,
     )
     .expect("receipt policy permits submit output after receipt");
@@ -8534,8 +8697,8 @@ async fn receipt_policy_allows_submit_output_after_receipt() {
     append_terminal(
         &mut store,
         &fixture,
-        node,
-        &attempt_id,
+        verify_node,
+        &verify_attempt_id,
         artifact(0xe1),
         content(0xe2),
     );
@@ -8544,11 +8707,15 @@ async fn receipt_policy_allows_submit_output_after_receipt() {
         &fixture.run_id,
         &store.load_run_stream(&fixture.run_id),
     )
-    .expect("historical validation permits receipt-terminal submit output");
+    .expect("historical validation permits receipt-terminal verify output");
+    assert!(store
+        .projection_snapshot()
+        .attempt(&submit_node.node_id, &submit_attempt_id)
+        .is_some());
 }
 
 #[tokio::test]
-async fn finalized_policy_rejects_submit_output_after_receipt_before_confirmation() {
+async fn finalized_policy_rejects_verify_output_after_receipt_before_confirmation() {
     let fixture = runtime_side_effect_fixture(
         RuntimeSideEffectFixtureShape::Chained,
         RuntimeSideEffectClaim::Exclusive,
@@ -8564,22 +8731,30 @@ async fn finalized_policy_rejects_submit_output_after_receipt_before_confirmatio
     )
     .await
     .expect("start run");
-    let node = node_by_output(&fixture, &fixture.cell_a);
-    let attempt_id = append_synthetic_exclusive_receipt_phase(
+    let submit_node = node_by_output(&fixture, &fixture.cell_a);
+    append_synthetic_exclusive_receipt_phase(
         &mut store,
         &fixture,
-        node,
+        submit_node,
         "wallet-submit-output-finalized",
         "sidefx-submit-output-finalized",
     );
+    let verify_node = side_effect_verify_node_for_submit(&fixture, submit_node);
+    let verify_attempt_id = attempt_id(
+        &fixture.run_id,
+        fixture.runtime_spec.spec_hash(),
+        &verify_node.node_id,
+        1,
+    )
+    .expect("verify attempt id");
 
     let snapshot = store.projection_snapshot();
     let error = side_effect_lifecycle::SideEffectLifecycle::validate_terminal_batch_evidence(
         &fixture.runtime_spec,
         &fixture.run_id,
         &snapshot,
-        node,
-        &attempt_id,
+        verify_node,
+        &verify_attempt_id,
         false,
     )
     .expect_err("finalized policy requires confirmation");
@@ -8590,8 +8765,8 @@ async fn finalized_policy_rejects_submit_output_after_receipt_before_confirmatio
     append_terminal(
         &mut store,
         &fixture,
-        node,
-        &attempt_id,
+        verify_node,
+        &verify_attempt_id,
         artifact(0xe3),
         content(0xe4),
     );
@@ -9829,7 +10004,6 @@ fn run_start_evidence(
             .iter()
             .map(|config| config_artifact(&fixture.runtime_spec, config))
             .collect(),
-        adapter_executables: Vec::new(),
         seed_cells: seed_cells.into_iter().map(seed_launch_cell).collect(),
     }
 }
@@ -10329,6 +10503,11 @@ impl<'a> SyntheticSideEffectAppend<'a> {
                         pair_id: fixture_side_effect_pair_id(self.fixture, self.node),
                         required: required_side_effect_state,
                     }],
+                    certified_run_authority: Some(store::CertifiedRunStoreAuthority::from_spec(
+                        self.run_id.clone(),
+                        self.fixture.runtime_spec.spec(),
+                    )
+                    .expect("certified run authority")),
                     ..store::CommitPreconditions::default()
                 },
             })
@@ -10597,41 +10776,30 @@ fn append_synthetic_receipt_observed(
     ledger: &events::SideEffectLedgerKey,
     commit_key: &str,
 ) {
-    let artifact_id = artifact(0xd9);
-    let digest = content(0xda);
-    let evidence = side_effect_evidence(
-        node,
-        artifact_id.clone(),
-        digest.clone(),
-        events::ArtifactRole::Receipt,
-    );
-    let side_effect = SyntheticSideEffectAppend::new(fixture, &fixture.run_id, node, attempt_id);
-    let ledger_purpose = side_effect.ledger_purpose();
-    let (pair_id, pair_role) = side_effect.pair_fields(node, events::SideEffectPairRole::Verify);
-    side_effect.append(
+    if store
+        .projection_snapshot()
+        .cell_terminal(&node.output_cell)
+        .is_none()
+    {
+        append_synthetic_submit_boundary_skipped(
+            store,
+            fixture,
+            node,
+            attempt_id,
+            ledger,
+            &format!("{commit_key}-submit-boundary"),
+        );
+    }
+    let verify_node = side_effect_verify_node_for_submit(fixture, node).clone();
+    let verify_attempt_id = append_or_get_started_attempt(store, fixture, &verify_node, 1);
+    append_synthetic_verify_receipt_observed(
         store,
+        fixture,
+        node,
+        &verify_node,
+        &verify_attempt_id,
+        ledger,
         commit_key,
-        vec![events::KernelEventPayload::SideEffectReceiptObserved(
-            events::side_effect::ReceiptObserved {
-                spec_hash: fixture.runtime_spec.spec_hash().clone(),
-                node_id: node.node_id.clone(),
-                attempt_id: attempt_id.clone(),
-                ledger_key: ledger.clone(),
-                ledger_purpose,
-                pair_id,
-                pair_role,
-                invocation_epoch: 1,
-                receipt_schema_id: node.config_ref.schema_id.clone(),
-                receipt_hash: digest,
-                receipt_artifact_id: artifact_id,
-                replay_verifier_id: events::ReplayVerifierId::new("mfm.test.driver.replay")
-                    .expect("replay verifier"),
-                resource_touched_set: None,
-            },
-        )],
-        vec![evidence],
-        store::RequiredSideEffectState::SubmissionResult,
-        false,
     );
 }
 
@@ -10844,7 +11012,7 @@ fn synthetic_resource_lane_release(
     fixture: &Fixture,
     run_id: &RunId,
     node: &spec::NodeSpec,
-    attempt_id: &AttemptId,
+    _attempt_id: &AttemptId,
     ledger: &events::SideEffectLedgerKey,
     reason: &str,
 ) -> Option<events::KernelEventPayload> {
@@ -10864,14 +11032,13 @@ fn synthetic_resource_lane_release(
     Some(events::KernelEventPayload::ResourceLaneReleaseIntent(
         events::ResourceLaneReleaseIntent {
             spec_hash: fixture.runtime_spec.spec_hash().clone(),
-            node_id: node.node_id.clone(),
-            attempt_id: attempt_id.clone(),
             ledger_key: ledger.clone(),
             ledger_purpose: events::SideEffectLedgerPurpose::Forward,
             pair_id: lane.holder.pair_id.clone(),
             pair_role: events::SideEffectPairRole::Verify,
             invocation_epoch: lane.invocation_epoch,
             claim_id: lane.claim_id.clone(),
+            release_authority: events::ResourceLaneReleaseAuthority::VerifyTerminal,
             release_reason: events::ResourceLaneReleaseReason::new(reason).expect("release reason"),
         },
     ))
@@ -10956,22 +11123,9 @@ fn append_synthetic_ambiguous(
     );
     let side_effect = SyntheticSideEffectAppend::new(fixture, run_id, node, attempt_id);
     let ledger_purpose = side_effect.ledger_purpose();
-    let (pair_id, pair_role) = side_effect.pair_fields(node, events::SideEffectPairRole::Verify);
-    let release = synthetic_resource_lane_release(
-        store,
-        fixture,
-        run_id,
-        node,
-        attempt_id,
-        ledger,
-        "side_effect.ambiguous",
-    );
-    let mut payloads = Vec::new();
-    if let Some(release) = release {
-        payloads.push(release);
-    }
-    payloads.push(events::KernelEventPayload::SideEffectAmbiguous(
-        events::side_effect::Ambiguous {
+    let (pair_id, pair_role) = side_effect.pair_fields(node, events::SideEffectPairRole::Submit);
+    let payloads = vec![
+        events::KernelEventPayload::SideEffectAmbiguous(events::side_effect::Ambiguous {
             spec_hash: fixture.runtime_spec.spec_hash().clone(),
             node_id: node.node_id.clone(),
             attempt_id: attempt_id.clone(),
@@ -10984,17 +11138,15 @@ fn append_synthetic_ambiguous(
             evidence_schema_id: node.config_ref.schema_id.clone(),
             evidence_hash,
             evidence_artifact_id,
-        },
-    ));
-    payloads.push(events::KernelEventPayload::StateAttemptFailed(
-        events::StateAttemptFailed {
+        }),
+        events::KernelEventPayload::StateAttemptFailed(events::StateAttemptFailed {
             spec_hash: fixture.runtime_spec.spec_hash().clone(),
             node_id: node.node_id.clone(),
             attempt_id: attempt_id.clone(),
             retryable: false,
             error: side_effect_error(false),
-        },
-    ));
+        }),
+    ];
     side_effect.append(
         store,
         commit_key,
@@ -11150,6 +11302,11 @@ fn append_fact(
                     node.node_id, attempt_id
                 ))
                 .expect("attempt logical key")],
+                certified_run_authority: Some(store::CertifiedRunStoreAuthority::from_spec(
+                    fixture.run_id.clone(),
+                    fixture.runtime_spec.spec(),
+                )
+                .expect("certified run authority")),
                 ..store::CommitPreconditions::default()
             },
         })
@@ -11346,6 +11503,11 @@ fn append_not_submitted_proven(
                     node.node_id, attempt_id
                 ))
                 .expect("attempt logical key")],
+                certified_run_authority: Some(store::CertifiedRunStoreAuthority::from_spec(
+                    fixture.run_id.clone(),
+                    fixture.runtime_spec.spec(),
+                )
+                .expect("certified run authority")),
                 ..store::CommitPreconditions::default()
             },
         })
@@ -11554,8 +11716,19 @@ fn runtime_order_is_deterministic_for_reordered_spec_nodes() {
 }
 
 fn registered_fixture_runners(fixture: &Fixture) -> ErasedRunnerRegistry {
+    registered_fixture_runners_with_adapter_executable(fixture, test_adapter_executable_identity())
+}
+
+fn registered_fixture_runners_with_adapter_executable(
+    fixture: &Fixture,
+    adapter_executable: events::ExecutableIdentity,
+) -> ErasedRunnerRegistry {
     let mut registry = ErasedRunnerRegistry::new();
-    register_spec_capabilities(&mut registry, &fixture.runtime_spec);
+    register_spec_capabilities_with_adapter_executable(
+        &mut registry,
+        &fixture.runtime_spec,
+        adapter_executable,
+    );
     registry
         .register(binding(
             fixture.descriptor_a.clone(),
@@ -11644,7 +11817,11 @@ fn registered_first_side_effect_and_verify_runners_with<
 ) -> ErasedRunnerRegistry {
     let mut registry = ErasedRunnerRegistry::new();
     register_spec_capabilities(&mut registry, &fixture.runtime_spec);
-    register_side_effect_verify_runner_with(&mut registry, verify_runner);
+    let submit_descriptor_id = side_effect_submit_descriptor_ids(fixture)
+        .into_iter()
+        .next()
+        .expect("side-effect submit descriptor");
+    register_side_effect_verify_runner_with(&mut registry, submit_descriptor_id, verify_runner);
     registry
         .register(binding(
             fixture.descriptor_a.clone(),
@@ -11701,16 +11878,24 @@ fn register_side_effect_verify_fixture_runner(
     registry: &mut ErasedRunnerRegistry,
     fixture: &Fixture,
 ) {
-    register_side_effect_verify_runner_with(registry, DriverSideEffectVerifyRunner::new(fixture));
+    for descriptor_id in side_effect_submit_descriptor_ids(fixture) {
+        register_side_effect_verify_runner_with(
+            registry,
+            descriptor_id,
+            DriverSideEffectVerifyRunner::new(fixture),
+        );
+    }
 }
 
 fn register_side_effect_verify_runner_with<R: ErasedNodeRunner + 'static>(
     registry: &mut ErasedRunnerRegistry,
+    submit_descriptor_id: DescriptorId,
     runner: R,
 ) {
     let factory_id = events::RunnerFactoryId::new("read_external").expect("factory");
     registry
         .register_side_effect_verify_runner(
+            submit_descriptor_id,
             factory_id.clone(),
             events::ExecutableIdentity {
                 factory_id,
@@ -11722,6 +11907,22 @@ fn register_side_effect_verify_runner_with<R: ErasedNodeRunner + 'static>(
             Arc::new(runner),
         )
         .expect("side-effect verify binding");
+}
+
+fn side_effect_submit_descriptor_ids(fixture: &Fixture) -> Vec<DescriptorId> {
+    let mut descriptors = BTreeSet::new();
+    for node in fixture
+        .runtime_spec
+        .spec()
+        .nodes
+        .iter()
+        .chain(fixture.runtime_spec.spec().remediations.values())
+    {
+        if node.side_effect.is_some() {
+            descriptors.insert(node.descriptor_id.clone());
+        }
+    }
+    descriptors.into_iter().collect()
 }
 
 fn binding<R: ErasedNodeRunner + 'static>(
@@ -13644,7 +13845,7 @@ fn side_effect_failed(
 ) -> RunnerEventPayload {
     let ledger_purpose = side_effect_ledger_purpose_for_ctx(ctx);
     let (pair_id, pair_role) =
-        side_effect_pair_fields_for_ctx(ctx, &ledger_purpose, events::SideEffectPairRole::Verify);
+        side_effect_pair_fields_for_ctx(ctx, &ledger_purpose, events::SideEffectPairRole::Submit);
     RunnerEventPayload::SideEffectFailed(events::side_effect::Failed {
         spec_hash: ctx.spec_hash().clone(),
         node_id: ctx.node().node_id.clone(),

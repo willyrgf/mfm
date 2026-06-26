@@ -529,6 +529,34 @@ pub type SideEffectSubmissionDecisionFuture<
     SideEffectSubmissionDecision<Submission, UnknownEvidence, NotSubmittedProof, AmbiguityEvidence>,
 >;
 
+/// Verify-side recovery result for a previously unknown submission.
+pub enum SideEffectUnknownSubmissionDecision<Submission, NotSubmittedProof, AmbiguityEvidence> {
+    /// Submission was observed and can be persisted by the verify role.
+    Observed(Submission),
+    /// Submission status remains unknown; the scheduler must stop without committing evidence.
+    StillUnknown,
+    /// The invocation was proven not submitted by the verify role.
+    NotSubmitted(NotSubmittedProof),
+    /// Recovery became ambiguous and must stop emitting further evidence.
+    Ambiguous {
+        /// Ambiguity classifier code.
+        ambiguity_code: events::AmbiguityCode,
+        /// Redaction-safe ambiguity evidence.
+        evidence: AmbiguityEvidence,
+    },
+}
+
+/// Boxed future returned by verify-side unknown-submission recovery callbacks.
+pub type SideEffectUnknownSubmissionDecisionFuture<
+    'a,
+    Submission,
+    NotSubmittedProof,
+    AmbiguityEvidence,
+> = SideEffectDriverFuture<
+    'a,
+    SideEffectUnknownSubmissionDecision<Submission, NotSubmittedProof, AmbiguityEvidence>,
+>;
+
 /// Observed side-effect evidence plus replay verifier metadata.
 pub struct SideEffectObservedEvidence<T> {
     /// Typed observed evidence.
@@ -748,19 +776,45 @@ impl SideEffectDriver {
             SideEffectSubmissionDecision::Ambiguous {
                 ambiguity_code,
                 evidence,
-            } => builder.ambiguous(side_effect, start_claim, ambiguity_code, &evidence),
+            } => builder.ambiguous(
+                side_effect,
+                events::SideEffectPairRole::Submit,
+                start_claim,
+                ambiguity_code,
+                &evidence,
+            ),
         }
     }
 }
 
 /// Adapter callbacks used by the generic side-effect verify driver.
 pub trait SideEffectVerifyCallbacks {
+    /// Typed submission evidence recovered by the verify role.
+    type Submission: MfmValue + Send + Sync + 'static;
     /// Typed receipt evidence.
     type Receipt: MfmValue + Send + Sync + 'static;
     /// Typed confirmation evidence.
     type Confirmation: MfmValue + Send + Sync + 'static;
     /// Typed state output built from terminal verification evidence.
     type Output: MfmValue + Send + Sync + 'static;
+    /// Typed not-submitted proof evidence recovered by the verify role.
+    type NotSubmittedProof: MfmValue + Send + Sync + 'static;
+    /// Typed ambiguity evidence recovered by the verify role.
+    type AmbiguityEvidence: MfmValue + Send + Sync + 'static;
+
+    /// Recovers a previously unknown submission without crossing the submission boundary again.
+    fn recover_unknown_submission<'a, 'ctx>(
+        &'a self,
+        ctx: &'a ErasedRunCtx<'ctx>,
+        submit_node: &'a spec::NodeSpec,
+        submit_inputs: &'a MaterializedInputs,
+        prepared_invocation: Option<&'a store::SideEffectArtifactProjection>,
+    ) -> SideEffectUnknownSubmissionDecisionFuture<
+        'a,
+        Self::Submission,
+        Self::NotSubmittedProof,
+        Self::AmbiguityEvidence,
+    >;
 
     /// Reads receipt evidence for an observed submission.
     fn read_receipt<'a, 'ctx>(
@@ -859,11 +913,17 @@ impl SideEffectVerifyDriver {
                 let receipt = callbacks
                     .read_receipt(&ctx, submit_node, &submit_inputs, submission)
                     .await?;
-                SideEffectEvidenceBuilder::new(&ctx).receipt_observed(
-                    side_effect,
-                    &receipt.evidence,
-                    receipt.replay,
-                )
+                let builder = SideEffectEvidenceBuilder::new(&ctx);
+                match &submit_contract.verification {
+                    spec::SideEffectVerificationSpec::Receipt => builder.receipt_observed_terminal(
+                        side_effect,
+                        &receipt.evidence,
+                        receipt.replay,
+                    ),
+                    spec::SideEffectVerificationSpec::Finalized { .. } => {
+                        builder.receipt_observed(side_effect, &receipt.evidence, receipt.replay)
+                    }
+                }
             }
             store::SideEffectLedgerPhase::SubmissionKnown {
                 status: store::SideEffectSubmissionState::NotSubmitted,
@@ -878,23 +938,57 @@ impl SideEffectVerifyDriver {
             store::SideEffectLedgerPhase::SubmissionKnown {
                 status: store::SideEffectSubmissionState::Unknown,
                 ..
-            } => Err(RuntimeError::InvalidRunnerOutput(format!(
-                "side-effect verify node {} cannot verify unknown submission for pair {}",
-                ctx.node().node_id,
-                verify.pair_id
-            ))),
+            } => {
+                let decision = callbacks
+                    .recover_unknown_submission(
+                        &ctx,
+                        submit_node,
+                        &submit_inputs,
+                        projection.prepared_invocation.as_ref(),
+                    )
+                    .await?;
+                let builder = SideEffectEvidenceBuilder::new(&ctx);
+                match decision {
+                    SideEffectUnknownSubmissionDecision::Observed(submission) => builder
+                        .submission_observed_with_role(
+                            side_effect,
+                            events::SideEffectPairRole::Verify,
+                            None,
+                            &submission,
+                        ),
+                    SideEffectUnknownSubmissionDecision::StillUnknown => {
+                        Err(RuntimeError::Blocked(format!(
+                            "side-effect verify node {} still cannot resolve unknown submission for pair {}",
+                            ctx.node().node_id,
+                            verify.pair_id
+                        )))
+                    }
+                    SideEffectUnknownSubmissionDecision::NotSubmitted(proof) => builder
+                        .not_submitted_proven_with_role(
+                            side_effect,
+                            events::SideEffectPairRole::Verify,
+                            None,
+                            &proof,
+                        ),
+                    SideEffectUnknownSubmissionDecision::Ambiguous {
+                        ambiguity_code,
+                        evidence,
+                    } => builder.ambiguous(
+                        side_effect,
+                        events::SideEffectPairRole::Verify,
+                        None,
+                        ambiguity_code,
+                        &evidence,
+                    ),
+                }
+            }
             store::SideEffectLedgerPhase::ReceiptObserved { receipt, .. } => {
                 match &submit_contract.verification {
                     spec::SideEffectVerificationSpec::Receipt => {
                         let output = callbacks
                             .map_receipt_to_output(&ctx, submit_node, &submit_inputs, receipt)
                             .await?;
-                        build_side_effect_state_output_with_release(
-                            &ctx,
-                            side_effect,
-                            &output,
-                            "side_effect.receipt_verified",
-                        )
+                        build_side_effect_state_output(&ctx, &output)
                     }
                     spec::SideEffectVerificationSpec::Finalized { .. } => {
                         let confirmation = callbacks
@@ -917,23 +1011,13 @@ impl SideEffectVerifyDriver {
                     let output = callbacks
                         .map_receipt_to_output(&ctx, submit_node, &submit_inputs, receipt)
                         .await?;
-                    build_side_effect_state_output_with_release(
-                        &ctx,
-                        side_effect,
-                        &output,
-                        "side_effect.receipt_verified",
-                    )
+                    build_side_effect_state_output(&ctx, &output)
                 }
                 spec::SideEffectVerificationSpec::Finalized { .. } => {
                     let output = callbacks
                         .map_confirmation_to_output(&ctx, submit_node, &submit_inputs, confirmation)
                         .await?;
-                    build_side_effect_state_output_with_release(
-                        &ctx,
-                        side_effect,
-                        &output,
-                        "side_effect.finalized",
-                    )
+                    build_side_effect_state_output(&ctx, &output)
                 }
             },
             store::SideEffectLedgerPhase::IntentPersisted { .. }
@@ -1335,11 +1419,9 @@ fn build_submit_boundary_skipped_output(
     ]))
 }
 
-fn build_side_effect_state_output_with_release<Output>(
+fn build_side_effect_state_output<Output>(
     ctx: &ErasedRunCtx<'_>,
-    side_effect: RunnerSideEffectBinding,
     output: &Output,
-    release_reason: &'static str,
 ) -> Result<ErasedRunnerOutput>
 where
     Output: MfmValue,
@@ -1350,11 +1432,6 @@ where
     let mut runner_output = RunnerOutputBuilder::new(ctx);
     runner_output.stage_attempt_artifact(&artifact)?;
     runner_output.retain_runtime_evidence(&artifact);
-    if let Some(release) = SideEffectEvidenceBuilder::new(ctx)
-        .resource_lane_released_payload(side_effect, release_reason)?
-    {
-        runner_output.payload(release);
-    }
     runner_output.payload(payloads.cell_produced(&artifact)?);
     Ok(runner_output.finish())
 }
@@ -1381,6 +1458,7 @@ fn build_side_effect_failed_with_release(
     )?;
     runner_output.payload(payloads.side_effect_failed(
         side_effect,
+        events::SideEffectPairRole::Verify,
         failure_phase,
         retryable,
         error,
@@ -1492,6 +1570,24 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
     where
         Proof: MfmValue,
     {
+        self.not_submitted_proven_with_role(
+            side_effect,
+            events::SideEffectPairRole::Submit,
+            start_claim,
+            proof,
+        )
+    }
+
+    fn not_submitted_proven_with_role<Proof>(
+        &self,
+        side_effect: RunnerSideEffectBinding,
+        pair_role: events::SideEffectPairRole,
+        start_claim: Option<RunnerClaimBinding>,
+        proof: &Proof,
+    ) -> Result<ErasedRunnerOutput>
+    where
+        Proof: MfmValue,
+    {
         let artifacts = RunnerArtifactBuilder::new(self.ctx);
         let artifact = artifacts.not_submitted_proof(proof)?;
         self.terminal_single_artifact_output(
@@ -1500,7 +1596,11 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
             &artifact,
             "side_effect.not_submitted",
             |payloads, side_effect, artifact| {
-                payloads.side_effect_not_submitted_proven(side_effect, artifact)
+                payloads.side_effect_not_submitted_proven_with_role(
+                    side_effect,
+                    pair_role,
+                    artifact,
+                )
             },
         )
     }
@@ -1515,6 +1615,24 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
     where
         Submission: MfmValue,
     {
+        self.submission_observed_with_role(
+            side_effect,
+            events::SideEffectPairRole::Submit,
+            start_claim,
+            submission,
+        )
+    }
+
+    fn submission_observed_with_role<Submission>(
+        &self,
+        side_effect: RunnerSideEffectBinding,
+        pair_role: events::SideEffectPairRole,
+        start_claim: Option<RunnerClaimBinding>,
+        submission: &Submission,
+    ) -> Result<ErasedRunnerOutput>
+    where
+        Submission: MfmValue,
+    {
         let artifacts = RunnerArtifactBuilder::new(self.ctx);
         let artifact = artifacts.submission(submission)?;
         self.single_artifact_output_with_optional_start(
@@ -1523,7 +1641,7 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
             &artifact,
             None,
             |payloads, side_effect, artifact| {
-                payloads.side_effect_submission_observed(side_effect, artifact)
+                payloads.side_effect_submission_observed_with_role(side_effect, pair_role, artifact)
             },
         )
     }
@@ -1573,6 +1691,34 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
         })
     }
 
+    /// Builds terminal receipt-observed evidence and releases any active resource lane.
+    pub fn receipt_observed_terminal<Receipt>(
+        &self,
+        side_effect: RunnerSideEffectBinding,
+        receipt: &Receipt,
+        replay: SideEffectReplayEvidence,
+    ) -> Result<ErasedRunnerOutput>
+    where
+        Receipt: MfmValue,
+    {
+        let artifacts = RunnerArtifactBuilder::new(self.ctx);
+        let artifact = artifacts.receipt(receipt)?;
+        self.terminal_single_artifact_output(
+            side_effect,
+            None,
+            &artifact,
+            "side_effect.receipt_observed",
+            |payloads, side_effect, artifact| {
+                payloads.side_effect_receipt_observed(
+                    side_effect,
+                    artifact,
+                    replay.replay_verifier_id,
+                    replay.resource_touched_set,
+                )
+            },
+        )
+    }
+
     /// Builds confirmation observed evidence.
     pub fn confirmation_observed<Confirmation>(
         &self,
@@ -1605,6 +1751,7 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
     pub fn ambiguous<Evidence>(
         &self,
         side_effect: RunnerSideEffectBinding,
+        pair_role: events::SideEffectPairRole,
         start_claim: Option<RunnerClaimBinding>,
         ambiguity_code: events::AmbiguityCode,
         evidence: &Evidence,
@@ -1614,13 +1761,13 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
     {
         let artifacts = RunnerArtifactBuilder::new(self.ctx);
         let artifact = artifacts.ambiguity_evidence(evidence)?;
-        self.terminal_single_artifact_output(
+        self.single_artifact_output_with_optional_start(
             side_effect,
             start_claim,
             &artifact,
-            "side_effect.ambiguous",
+            None,
             |payloads, side_effect, artifact| {
-                payloads.side_effect_ambiguous(side_effect, ambiguity_code, artifact)
+                payloads.side_effect_ambiguous(side_effect, pair_role, ambiguity_code, artifact)
             },
         )
     }

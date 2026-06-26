@@ -1328,18 +1328,52 @@ pub struct SideEffectStatePrecondition {
     pub required: RequiredSideEffectState,
 }
 
-/// Certified saga admission authority for a run.
+/// Certified side-effect pair authority used by typed store admission.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SagaAdmitToken {
+pub struct CertifiedSideEffectPairAuthority {
+    /// Certified side-effect pair id.
+    pub pair_id: SideEffectPairId,
+    /// Submit node that owns the mutation boundary.
+    pub submit_node_id: NodeId,
+    /// Verify framework node that owns terminal evidence and output.
+    pub verify_node_id: NodeId,
+    /// Submit node output cell used as the pair's structural anchor.
+    pub submit_output_cell: CellId,
+    /// Certified terminal policy for the pair.
+    pub terminal_policy: SideEffectTerminalPolicy,
+}
+
+impl CertifiedSideEffectPairAuthority {
+    /// Returns the certified node id for the given pair role.
+    pub fn node_for_role(&self, role: events::SideEffectPairRole) -> &NodeId {
+        match role {
+            events::SideEffectPairRole::Submit => &self.submit_node_id,
+            events::SideEffectPairRole::Verify => &self.verify_node_id,
+        }
+    }
+
+    /// Returns the side-effect state that satisfies successful terminal output.
+    pub const fn terminal_state_required(&self) -> RequiredSideEffectState {
+        match self.terminal_policy {
+            SideEffectTerminalPolicy::Receipt => RequiredSideEffectState::ReceiptObserved,
+            SideEffectTerminalPolicy::Confirmation => RequiredSideEffectState::ConfirmationObserved,
+        }
+    }
+}
+
+/// Certified store admission authority for a run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertifiedRunStoreAuthority {
     run_id: RunId,
     spec_hash: SpecHash,
     saga_policy_digest: ContentDigest,
     saga_policy: SagaPolicySpec,
     terminal_policies: SideEffectTerminalPolicies,
+    side_effect_pairs: BTreeMap<SideEffectPairId, CertifiedSideEffectPairAuthority>,
 }
 
-impl SagaAdmitToken {
-    /// Mints a saga admission token from certified runtime policy authority.
+impl CertifiedRunStoreAuthority {
+    /// Mints store admission authority from a certified typed spec.
     pub fn from_spec(run_id: RunId, spec: &TypedExecutionSpec) -> Result<Self> {
         let spec_hash = spec
             .spec_hash()
@@ -1349,16 +1383,44 @@ impl SagaAdmitToken {
             .saga_policy_digest()
             .map_err(|error| StoreError::Canonical(error.to_string()))?;
         let terminal_policies = SideEffectTerminalPolicies::from_spec(spec)?;
+        let mut side_effect_pairs = BTreeMap::new();
+        for node in spec.nodes.iter().chain(spec.remediations.values()) {
+            if node.side_effect.is_none() {
+                continue;
+            }
+            let pair = spec
+                .side_effect_verify_pair_for_submit_node(&node.node_id)
+                .map_err(|error| StoreError::Identity(error.to_string()))?;
+            let terminal_policy =
+                SideEffectTerminalPolicy::from_verification(&pair.submit_contract.verification);
+            let authority = CertifiedSideEffectPairAuthority {
+                pair_id: pair.pair_id.clone(),
+                submit_node_id: pair.submit_node.node_id.clone(),
+                verify_node_id: pair.verify_node.node_id.clone(),
+                submit_output_cell: pair.submit_output_cell.clone(),
+                terminal_policy,
+            };
+            if side_effect_pairs
+                .insert(authority.pair_id.clone(), authority)
+                .is_some()
+            {
+                return Err(StoreError::Identity(format!(
+                    "duplicate side-effect pair authority for {}",
+                    pair.pair_id
+                )));
+            }
+        }
         Ok(Self {
             run_id,
             spec_hash,
             saga_policy_digest,
             saga_policy,
             terminal_policies,
+            side_effect_pairs,
         })
     }
 
-    /// Returns the token run id.
+    /// Returns the authority run id.
     pub fn run_id(&self) -> &RunId {
         &self.run_id
     }
@@ -1382,6 +1444,26 @@ impl SagaAdmitToken {
     pub fn terminal_policies(&self) -> &SideEffectTerminalPolicies {
         &self.terminal_policies
     }
+
+    /// Returns certified side-effect pair authority.
+    pub fn side_effect_pair(
+        &self,
+        pair_id: &SideEffectPairId,
+    ) -> Result<&CertifiedSideEffectPairAuthority> {
+        self.side_effect_pairs
+            .get(pair_id)
+            .ok_or_else(|| StoreError::ProjectionConflict {
+                key: format!("sidefx_pair:{pair_id}"),
+                message: "missing certified side-effect pair authority".to_owned(),
+            })
+    }
+
+    /// Iterates certified side-effect pair authorities.
+    pub fn side_effect_pairs(
+        &self,
+    ) -> impl Iterator<Item = (&SideEffectPairId, &CertifiedSideEffectPairAuthority)> {
+        self.side_effect_pairs.iter()
+    }
 }
 
 /// Commit preconditions checked atomically with appending the payload batch.
@@ -1399,8 +1481,8 @@ pub struct CommitPreconditions {
     pub required_side_effect_states: Vec<SideEffectStatePrecondition>,
     /// Whether no public-output projection may exist.
     pub required_public_output_absent: bool,
-    /// Certified saga admission authority used by manual and terminal saga events.
-    pub saga_admit_token: Option<SagaAdmitToken>,
+    /// Certified run store authority used by policy-bound and side-effect commits.
+    pub certified_run_authority: Option<CertifiedRunStoreAuthority>,
 }
 
 /// Payload-level typed commit request.
@@ -2636,6 +2718,7 @@ struct SubmissionResultContext<'a> {
     event_id: EventId,
     ledger_key: &'a events::SideEffectLedgerKey,
     ledger_purpose: &'a events::SideEffectLedgerPurpose,
+    pair_role: events::SideEffectPairRole,
     node_id: &'a NodeId,
     attempt_id: &'a AttemptId,
     invocation_epoch: u32,
@@ -2967,6 +3050,7 @@ impl OwnedSideEffectLedgerState {
                 event_id,
                 ledger_key: &payload.ledger_key,
                 ledger_purpose: &payload.ledger_purpose,
+                pair_role: payload.pair_role,
                 node_id: &payload.node_id,
                 attempt_id: &payload.attempt_id,
                 invocation_epoch: payload.invocation_epoch,
@@ -2987,6 +3071,7 @@ impl OwnedSideEffectLedgerState {
                 event_id,
                 ledger_key: &payload.ledger_key,
                 ledger_purpose: &payload.ledger_purpose,
+                pair_role: payload.pair_role,
                 node_id: &payload.node_id,
                 attempt_id: &payload.attempt_id,
                 invocation_epoch: payload.invocation_epoch,
@@ -3014,6 +3099,7 @@ impl OwnedSideEffectLedgerState {
                 event_id,
                 ledger_key: &payload.ledger_key,
                 ledger_purpose: &payload.ledger_purpose,
+                pair_role: payload.pair_role,
                 node_id: &payload.node_id,
                 attempt_id: &payload.attempt_id,
                 invocation_epoch: payload.invocation_epoch,
@@ -3095,12 +3181,17 @@ impl OwnedSideEffectLedgerState {
     ) -> Result<Self> {
         self.require_purpose(&payload.ledger_key, &payload.ledger_purpose)?;
         let claim = self.require_ambiguity_source_claim()?.clone();
-        require_claim_identity(
+        require_claim_or_verify_context_for_observation(
             &self.core.ledger_key,
             &claim,
-            &payload.node_id,
-            &payload.attempt_id,
-            payload.invocation_epoch,
+            ObservationClaimContext {
+                ledger_pair_id: &self.core.pair_id,
+                payload_pair_id: &payload.pair_id,
+                payload_pair_role: payload.pair_role,
+                node_id: &payload.node_id,
+                attempt_id: &payload.attempt_id,
+                invocation_epoch: payload.invocation_epoch,
+            },
         )?;
         self.core.event_id = event_id;
         self.phase = OwnedSideEffectLedgerPhase::Ambiguous {
@@ -3127,12 +3218,17 @@ impl OwnedSideEffectLedgerState {
                 }
                 OwnedSideEffectLedgerPhase::Claimed { claim }
                 | OwnedSideEffectLedgerPhase::Prepared { claim } => {
-                    require_claim_identity(
+                    require_claim_or_verify_context_for_observation(
                         &self.core.ledger_key,
                         claim,
-                        &payload.node_id,
-                        &payload.attempt_id,
-                        payload.invocation_epoch,
+                        ObservationClaimContext {
+                            ledger_pair_id: &self.core.pair_id,
+                            payload_pair_id: &payload.pair_id,
+                            payload_pair_role: payload.pair_role,
+                            node_id: &payload.node_id,
+                            attempt_id: &payload.attempt_id,
+                            invocation_epoch: payload.invocation_epoch,
+                        },
                     )?;
                     Some(claim.clone())
                 }
@@ -3143,12 +3239,17 @@ impl OwnedSideEffectLedgerState {
             },
             side_effect::FailurePhase::AfterNotSubmittedProven => match &self.phase {
                 OwnedSideEffectLedgerPhase::NotSubmitted { claim } => {
-                    require_claim_identity(
+                    require_claim_or_verify_context_for_observation(
                         &self.core.ledger_key,
                         claim,
-                        &payload.node_id,
-                        &payload.attempt_id,
-                        payload.invocation_epoch,
+                        ObservationClaimContext {
+                            ledger_pair_id: &self.core.pair_id,
+                            payload_pair_id: &payload.pair_id,
+                            payload_pair_role: payload.pair_role,
+                            node_id: &payload.node_id,
+                            attempt_id: &payload.attempt_id,
+                            invocation_epoch: payload.invocation_epoch,
+                        },
                     )?;
                     Some(claim.clone())
                 }
@@ -3174,14 +3275,27 @@ impl OwnedSideEffectLedgerState {
         next_phase: impl FnOnce(&SideEffectClaimProjection) -> OwnedSideEffectLedgerPhase,
     ) -> Result<Self> {
         self.require_purpose(context.ledger_key, context.ledger_purpose)?;
-        let claim = self.require_submission_recovery_claim()?.clone();
-        require_claim_identity(
-            &self.core.ledger_key,
-            &claim,
-            context.node_id,
-            context.attempt_id,
-            context.invocation_epoch,
-        )?;
+        let claim = self
+            .require_submission_recovery_claim_for_role(context.pair_role)?
+            .clone();
+        match context.pair_role {
+            events::SideEffectPairRole::Submit => {
+                require_claim_identity(
+                    &self.core.ledger_key,
+                    &claim,
+                    context.node_id,
+                    context.attempt_id,
+                    context.invocation_epoch,
+                )?;
+            }
+            events::SideEffectPairRole::Verify => {
+                if claim.invocation_epoch != context.invocation_epoch {
+                    return Err(
+                        self.error("verify recovery invocation epoch does not match active claim")
+                    );
+                }
+            }
+        }
         self.core.event_id = context.event_id;
         self.phase = next_phase(&claim);
         Ok(self)
@@ -3252,6 +3366,19 @@ impl OwnedSideEffectLedgerState {
             OwnedSideEffectLedgerPhase::Started { claim }
             | OwnedSideEffectLedgerPhase::SubmissionUnknown { claim } => Ok(claim),
             _ => Err(self.error("submission recovery requires started or unknown phase")),
+        }
+    }
+
+    fn require_submission_recovery_claim_for_role(
+        &self,
+        pair_role: events::SideEffectPairRole,
+    ) -> Result<&SideEffectClaimProjection> {
+        match pair_role {
+            events::SideEffectPairRole::Submit => self.require_submission_recovery_claim(),
+            events::SideEffectPairRole::Verify => match &self.phase {
+                OwnedSideEffectLedgerPhase::SubmissionUnknown { claim } => Ok(claim),
+                _ => Err(self.error("verify submission recovery requires unknown phase")),
+            },
         }
     }
 
@@ -5401,7 +5528,7 @@ fn stage_run_commit_with_fingerprint(
             &staged_projections,
             &request.run_id,
             &envelope.payload,
-            request.preconditions.saga_admit_token.as_ref(),
+            request.preconditions.certified_run_authority.as_ref(),
         )?;
         projection::apply_projection(&mut staged_projections, &envelope)?;
         events.push(envelope);
@@ -5434,10 +5561,9 @@ fn materialize_resource_lane_intents(
     for payload in &request.payloads {
         match payload {
             KernelEventPayload::ResourceLaneClaimIntent(intent) => {
-                require_side_effect_pair_event(
+                require_side_effect_pair_role(
                     &intent.ledger_key,
                     &intent.ledger_purpose,
-                    &intent.pair_id,
                     intent.pair_role,
                     events::SideEffectPairRole::Submit,
                 )?;
@@ -5523,10 +5649,9 @@ fn materialize_resource_lane_intents(
                 materialized_payloads.push(KernelEventPayload::ResourceLaneClaimed(claimed));
             }
             KernelEventPayload::ResourceLaneReleaseIntent(intent) => {
-                require_side_effect_pair_event(
+                require_side_effect_pair_role(
                     &intent.ledger_key,
                     &intent.ledger_purpose,
-                    &intent.pair_id,
                     intent.pair_role,
                     events::SideEffectPairRole::Verify,
                 )?;
@@ -5573,8 +5698,6 @@ fn materialize_resource_lane_intents(
                 )?;
                 let released = events::ResourceLaneReleased {
                     spec_hash: intent.spec_hash.clone(),
-                    node_id: intent.node_id.clone(),
-                    attempt_id: intent.attempt_id.clone(),
                     ledger_key: intent.ledger_key.clone(),
                     ledger_purpose: intent.ledger_purpose.clone(),
                     pair_id: intent.pair_id.clone(),
@@ -5583,6 +5706,7 @@ fn materialize_resource_lane_intents(
                     claim_id: intent.claim_id.clone(),
                     release_id,
                     claim_fencing_token: active.claim_fencing_token,
+                    release_authority: intent.release_authority,
                     release_reason: intent.release_reason.clone(),
                     lane_transition_seq,
                 };
@@ -5715,7 +5839,6 @@ fn derive_resource_lane_release_id(
     fingerprint: &CommitFingerprint,
 ) -> Result<events::ResourceLaneReleaseId> {
     let digest = canonical_json(serde_json::json!({
-        "attempt_id": intent.attempt_id.as_str(),
         "claim_fencing_token": claim_fencing_token,
         "claim_id": intent.claim_id.as_str(),
         "commit_fingerprint": fingerprint.as_digest().as_str(),
@@ -5727,9 +5850,9 @@ fn derive_resource_lane_release_id(
         "lane_transition_seq": lane_transition_seq,
         "ledger_key": intent.ledger_key.as_str(),
         "ledger_purpose": side_effect_ledger_purpose_json(&intent.ledger_purpose),
-        "node_id": intent.node_id.as_str(),
         "pair_id": intent.pair_id.as_str(),
         "pair_role": intent.pair_role.as_str(),
+        "release_authority": intent.release_authority.as_str(),
         "release_reason": intent.release_reason.as_str(),
         "run_id": run_id.as_str(),
     }))?
@@ -6963,10 +7086,61 @@ fn validate_run_start_commit(request: &CommitRequest) -> Result<()> {
             "run-admission commits must contain exactly one RunAdmitted payload",
         ));
     }
+    let Some(KernelEventPayload::RunAdmitted(payload)) = request.payloads.first() else {
+        unreachable!("run-admission payload shape was checked above");
+    };
+    let authority = request
+        .preconditions
+        .certified_run_authority
+        .as_ref()
+        .ok_or_else(|| {
+            invalid_prepared_commit_purpose(
+                RunAdmission::NAME,
+                "run admission requires certified run store authority",
+            )
+        })?;
+    if authority.run_id() != request.run_id() || authority.spec_hash() != &payload.spec_hash {
+        return Err(invalid_prepared_commit_purpose(
+            RunAdmission::NAME,
+            "certified run store authority does not match RunAdmitted",
+        ));
+    }
+    validate_run_admitted_identity_for_request(request.run_id(), payload)?;
     if request.preconditions.required_run_state != RequiredRunState::Absent {
         return Err(invalid_prepared_commit_purpose(
             RunAdmission::NAME,
             "run admission requires absent-run precondition",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_run_admitted_identity_for_request(
+    run_id: &RunId,
+    payload: &events::RunAdmitted,
+) -> Result<()> {
+    if payload.run_id != *run_id {
+        return Err(invalid_prepared_commit_purpose(
+            RunAdmission::NAME,
+            "RunAdmitted run id does not match commit run id",
+        ));
+    }
+    if payload.identity_material.certified_spec_hash != payload.spec_hash {
+        return Err(invalid_prepared_commit_purpose(
+            RunAdmission::NAME,
+            "RunAdmitted identity material spec hash does not match event spec hash",
+        ));
+    }
+    let derived = payload.identity_material.derive_run_id().map_err(|_| {
+        invalid_prepared_commit_purpose(
+            RunAdmission::NAME,
+            "RunAdmitted identity material is invalid",
+        )
+    })?;
+    if derived != payload.run_id {
+        return Err(invalid_prepared_commit_purpose(
+            RunAdmission::NAME,
+            "RunAdmitted run id does not match identity material",
         ));
     }
     Ok(())
@@ -7023,6 +7197,12 @@ fn validate_side_effect_terminal_commit(request: &CommitRequest) -> Result<()> {
         is_side_effect_terminal_disposition_payload,
         "missing side-effect terminal payload",
     )?;
+    if request.preconditions.certified_run_authority.is_none() {
+        return Err(invalid_prepared_commit_purpose(
+            SideEffectTerminal::NAME,
+            "side-effect terminal commits require certified run authority",
+        ));
+    }
     validate_side_effect_terminal_resource_lane_release_batch(request)?;
     validate_terminal_attempt_cell_pairs(&request.payloads)
 }
@@ -7039,7 +7219,14 @@ fn validate_side_effect_progress_commit(request: &CommitRequest) -> Result<()> {
         request,
         is_side_effect_payload,
         "missing side-effect payload",
-    )
+    )?;
+    if request.preconditions.certified_run_authority.is_none() {
+        return Err(invalid_prepared_commit_purpose(
+            SideEffectProgress::NAME,
+            "side-effect progress commits require certified run authority",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_retention_commit(request: &CommitRequest) -> Result<()> {
@@ -7059,15 +7246,50 @@ fn validate_retention_commit(request: &CommitRequest) -> Result<()> {
 }
 
 fn validate_manual_resolution_commit(request: &CommitRequest) -> Result<()> {
-    if request.payloads.len() != 1
-        || !matches!(
-            request.payloads.first(),
-            Some(KernelEventPayload::ManualResolutionRecorded(_))
-        )
-    {
+    let manual_resolution_count = request
+        .payloads
+        .iter()
+        .filter(|payload| matches!(payload, KernelEventPayload::ManualResolutionRecorded(_)))
+        .count();
+    if manual_resolution_count != 1 {
         return Err(invalid_prepared_commit_purpose(
             ManualResolution::NAME,
             "manual resolution commits must contain exactly one ManualResolutionRecorded payload",
+        ));
+    }
+    if !matches!(
+        request.payloads.last(),
+        Some(KernelEventPayload::ManualResolutionRecorded(_))
+    ) {
+        return Err(invalid_prepared_commit_purpose(
+            ManualResolution::NAME,
+            "manual resolution release intents must precede ManualResolutionRecorded",
+        ));
+    }
+    if request.payloads.iter().any(|payload| {
+        !matches!(
+            payload,
+            KernelEventPayload::ManualResolutionRecorded(_)
+                | KernelEventPayload::ResourceLaneReleaseIntent(_)
+        )
+    }) {
+        return Err(invalid_prepared_commit_purpose(
+            ManualResolution::NAME,
+            "manual resolution commits may only contain resource lane release intents and ManualResolutionRecorded",
+        ));
+    }
+    if request.payloads.iter().any(|payload| {
+        matches!(
+            payload,
+            KernelEventPayload::ResourceLaneReleaseIntent(events::ResourceLaneReleaseIntent {
+                release_authority,
+                ..
+            }) if *release_authority != events::ResourceLaneReleaseAuthority::ManualResolution
+        )
+    }) {
+        return Err(invalid_prepared_commit_purpose(
+            ManualResolution::NAME,
+            "manual resolution release intents require manual resolution release authority",
         ));
     }
     if request.preconditions.required_run_state != RequiredRunState::NotCompleted {
@@ -7076,10 +7298,10 @@ fn validate_manual_resolution_commit(request: &CommitRequest) -> Result<()> {
             "manual resolution requires not-completed run precondition",
         ));
     }
-    if request.preconditions.saga_admit_token.is_none() {
+    if request.preconditions.certified_run_authority.is_none() {
         return Err(invalid_prepared_commit_purpose(
             ManualResolution::NAME,
-            "manual resolution requires saga admit token",
+            "manual resolution requires certified run authority",
         ));
     }
     Ok(())
@@ -7107,12 +7329,12 @@ fn validate_manual_resolution_commit_with_proof(
     let payload = manual_resolutions[0];
     let token = request
         .preconditions
-        .saga_admit_token
+        .certified_run_authority
         .as_ref()
         .ok_or_else(|| {
             invalid_prepared_commit_purpose(
                 ManualResolution::NAME,
-                "manual resolution requires saga admit token",
+                "manual resolution requires certified run authority",
             )
         })?;
     let prefix = proof.prefix();
@@ -7160,13 +7382,13 @@ fn validate_manual_resolution_commit_with_proof(
         .ok_or_else(|| {
             invalid_prepared_commit_purpose(
                 ManualResolution::NAME,
-                "saga admit token policy does not permit manual proof block reason",
+                "certified run authority policy does not permit manual proof block reason",
             )
         })?;
     if certified_manual_policy != prefix.manual_policy() {
         return Err(invalid_prepared_commit_purpose(
             ManualResolution::NAME,
-            "manual proof policy does not match saga admit token",
+            "manual proof policy does not match certified run authority",
         ));
     }
     Ok(())
@@ -7191,10 +7413,10 @@ fn validate_saga_terminal_commit(request: &CommitRequest) -> Result<()> {
             "saga terminal resolution commits must contain exactly one RunCompleted payload",
         ));
     }
-    if request.preconditions.saga_admit_token.is_none() {
+    if request.preconditions.certified_run_authority.is_none() {
         return Err(invalid_prepared_commit_purpose(
             SagaTerminal::NAME,
-            "saga terminal resolution requires saga admit token",
+            "saga terminal resolution requires certified run authority",
         ));
     }
     validate_terminal_attempt_cell_pairs(&request.payloads)
@@ -7222,12 +7444,12 @@ fn validate_saga_terminal_commit_with_proof(
     let payload = completed[0];
     let token = request
         .preconditions
-        .saga_admit_token
+        .certified_run_authority
         .as_ref()
         .ok_or_else(|| {
             invalid_prepared_commit_purpose(
                 SagaTerminal::NAME,
-                "saga terminal resolution requires saga admit token",
+                "saga terminal resolution requires certified run authority",
             )
         })?;
     if proof.run_id() != request.run_id()
@@ -7248,7 +7470,7 @@ fn validate_saga_terminal_commit_with_proof(
     if proof.saga_policy_digest() != token.saga_policy_digest() {
         return Err(invalid_prepared_commit_purpose(
             SagaTerminal::NAME,
-            "SagaTerminalProof saga policy digest does not match admit token",
+            "SagaTerminalProof saga policy digest does not match certified run authority",
         ));
     }
     let proof_outcome = proof.outcome();
@@ -7322,11 +7544,12 @@ fn validate_attempt_terminal_resource_lane_release_batch(request: &CommitRequest
                 .enumerate()
                 .any(|(terminal_index, terminal)| {
                     terminal_index > release_index
-                        && (terminal_payload_matches_resource_lane_release(
+                        && terminal_payload_matches_resource_lane_release(
                             terminal,
                             &release_ref,
                             TerminalReleaseMatchKind::AttemptTerminal,
-                        ) || is_run_completed_payload(terminal))
+                            None,
+                        )
                 });
         if !matched_terminal {
             return Err(invalid_prepared_commit_purpose(
@@ -7342,6 +7565,16 @@ fn validate_side_effect_terminal_resource_lane_release_batch(
     request: &CommitRequest,
 ) -> Result<()> {
     reject_terminal_resource_lane_claims(SideEffectTerminal::NAME, request)?;
+    let authority = request
+        .preconditions
+        .certified_run_authority
+        .as_ref()
+        .ok_or_else(|| {
+            invalid_prepared_commit_purpose(
+                SideEffectTerminal::NAME,
+                "side-effect terminal resource-lane release requires certified run authority",
+            )
+        })?;
     for (release_index, release) in request
         .payloads
         .iter()
@@ -7362,6 +7595,7 @@ fn validate_side_effect_terminal_resource_lane_release_batch(
                             terminal,
                             &release_ref,
                             TerminalReleaseMatchKind::SideEffectTerminal,
+                            Some(authority),
                         )
                 });
         if !matched_terminal {
@@ -7397,13 +7631,17 @@ fn terminal_payload_matches_resource_lane_release(
     terminal: &KernelEventPayload,
     release: &events::ResourceLaneAuthorityRef<'_>,
     kind: TerminalReleaseMatchKind,
+    authority: Option<&CertifiedRunStoreAuthority>,
 ) -> bool {
     match kind {
         TerminalReleaseMatchKind::AttemptTerminal => {
             attempt_terminal_payload_matches_release(terminal, release)
         }
         TerminalReleaseMatchKind::SideEffectTerminal => {
-            side_effect_terminal_payload_matches_release(terminal, release)
+            let Some(authority) = authority else {
+                return false;
+            };
+            side_effect_terminal_payload_matches_release(terminal, release, authority)
         }
     }
 }
@@ -7412,18 +7650,18 @@ fn attempt_terminal_payload_matches_release(
     terminal: &KernelEventPayload,
     release: &events::ResourceLaneAuthorityRef<'_>,
 ) -> bool {
+    let Some(emitter) = release.emitter else {
+        return false;
+    };
     match terminal {
         KernelEventPayload::StateAttemptCompleted(payload) => {
-            payload.node_id == *release.emitter.node_id
-                && payload.attempt_id == *release.emitter.attempt_id
+            payload.node_id == *emitter.node_id && payload.attempt_id == *emitter.attempt_id
         }
         KernelEventPayload::StateAttemptInterrupted(payload) => {
-            payload.node_id == *release.emitter.node_id
-                && payload.attempt_id == *release.emitter.attempt_id
+            payload.node_id == *emitter.node_id && payload.attempt_id == *emitter.attempt_id
         }
         KernelEventPayload::StateAttemptFailed(payload) => {
-            payload.node_id == *release.emitter.node_id
-                && payload.attempt_id == *release.emitter.attempt_id
+            payload.node_id == *emitter.node_id && payload.attempt_id == *emitter.attempt_id
         }
         _ => false,
     }
@@ -7432,7 +7670,11 @@ fn attempt_terminal_payload_matches_release(
 fn side_effect_terminal_payload_matches_release(
     terminal: &KernelEventPayload,
     release: &events::ResourceLaneAuthorityRef<'_>,
+    authority: &CertifiedRunStoreAuthority,
 ) -> bool {
+    if release.release_authority != Some(events::ResourceLaneReleaseAuthority::VerifyTerminal) {
+        return false;
+    }
     if !is_side_effect_terminal_disposition_payload(terminal) {
         return false;
     }
@@ -7448,6 +7690,27 @@ fn side_effect_terminal_payload_matches_release(
             terminal.pair_role,
             release.ledger.pair_role,
         )
+        && side_effect_terminal_release_policy_allowed(terminal.kind, terminal.pair_id, authority)
+}
+
+fn side_effect_terminal_release_policy_allowed(
+    terminal_kind: events::SideEffectEventKind,
+    pair_id: &SideEffectPairId,
+    authority: &CertifiedRunStoreAuthority,
+) -> bool {
+    let Ok(pair) = authority.side_effect_pair(pair_id) else {
+        return false;
+    };
+    match terminal_kind {
+        events::SideEffectEventKind::ReceiptObserved => {
+            pair.terminal_policy == SideEffectTerminalPolicy::Receipt
+        }
+        events::SideEffectEventKind::ConfirmationObserved => true,
+        events::SideEffectEventKind::NotSubmittedProven | events::SideEffectEventKind::Failed => {
+            true
+        }
+        _ => false,
+    }
 }
 
 fn side_effect_terminal_release_role_allowed(
@@ -7460,14 +7723,19 @@ fn side_effect_terminal_release_role_allowed(
     }
     match terminal_kind {
         events::SideEffectEventKind::NotSubmittedProven => {
-            terminal_role == events::SideEffectPairRole::Submit
+            matches!(
+                terminal_role,
+                events::SideEffectPairRole::Submit | events::SideEffectPairRole::Verify
+            )
         }
         events::SideEffectEventKind::ReceiptObserved
-        | events::SideEffectEventKind::ConfirmationObserved
-        | events::SideEffectEventKind::Ambiguous
-        | events::SideEffectEventKind::Failed => {
+        | events::SideEffectEventKind::ConfirmationObserved => {
             terminal_role == events::SideEffectPairRole::Verify
         }
+        events::SideEffectEventKind::Failed => matches!(
+            terminal_role,
+            events::SideEffectPairRole::Submit | events::SideEffectPairRole::Verify
+        ),
         _ => false,
     }
 }
@@ -7519,10 +7787,7 @@ fn is_side_effect_terminal_disposition_payload(payload: &KernelEventPayload) -> 
 
 fn is_side_effect_terminal_commit_payload(payload: &KernelEventPayload) -> bool {
     is_side_effect_payload(payload)
-        || matches!(
-            payload,
-            KernelEventPayload::StateAttemptFailed(_) | KernelEventPayload::ArtifactReferenced(_)
-        )
+        || is_attempt_terminal_payload(payload)
         || is_retention_ref_payload(payload)
 }
 
@@ -8288,9 +8553,9 @@ use self::resource_lanes::{
 use self::side_effects::{
     note_saga_engagement, prepared_invocation_projection, require_active_attempt_for_side_effect,
     require_forward_fence_open, require_remediation_intent_admissible,
-    require_side_effect_pair_consistent, require_side_effect_pair_event, require_side_effect_phase,
+    require_side_effect_pair_consistent, require_side_effect_pair_role, require_side_effect_phase,
     require_side_effect_purpose, side_effect_projection_error, transition_side_effect_epoch_only,
-    transition_side_effect_failure, EpochOnlyTransition,
+    transition_side_effect_failure, EpochOnlyTransition, PairRoleRequirement,
 };
 
 mod resource_lanes;
@@ -8595,30 +8860,28 @@ fn payload_json(payload: &KernelEventPayload) -> serde_json::Value {
             "variant": "SideEffectFailed",
         }),
         KernelEventPayload::ResourceLaneReleased(payload) => serde_json::json!({
-            "attempt_id": payload.attempt_id.as_str(),
             "claim_fencing_token": payload.claim_fencing_token,
             "claim_id": payload.claim_id.as_str(),
             "invocation_epoch": payload.invocation_epoch,
             "lane_transition_seq": payload.lane_transition_seq,
             "ledger_key": payload.ledger_key.as_str(),
             "ledger_purpose": side_effect_ledger_purpose_json(&payload.ledger_purpose),
-            "node_id": payload.node_id.as_str(),
             "pair_id": payload.pair_id.as_str(),
             "pair_role": payload.pair_role.as_str(),
+            "release_authority": payload.release_authority.as_str(),
             "release_id": payload.release_id.as_str(),
             "release_reason": payload.release_reason.as_str(),
             "spec_hash": payload.spec_hash.as_str(),
             "variant": "ResourceLaneReleased",
         }),
         KernelEventPayload::ResourceLaneReleaseIntent(payload) => serde_json::json!({
-            "attempt_id": payload.attempt_id.as_str(),
             "claim_id": payload.claim_id.as_str(),
             "invocation_epoch": payload.invocation_epoch,
             "ledger_key": payload.ledger_key.as_str(),
             "ledger_purpose": side_effect_ledger_purpose_json(&payload.ledger_purpose),
-            "node_id": payload.node_id.as_str(),
             "pair_id": payload.pair_id.as_str(),
             "pair_role": payload.pair_role.as_str(),
+            "release_authority": payload.release_authority.as_str(),
             "release_reason": payload.release_reason.as_str(),
             "spec_hash": payload.spec_hash.as_str(),
             "variant": "ResourceLaneReleaseIntent",
@@ -9122,8 +9385,6 @@ pub fn payload_from_json_value(json: &serde_json::Value) -> Result<KernelEventPa
         "ResourceLaneReleased" => Ok(KernelEventPayload::ResourceLaneReleased(
             events::ResourceLaneReleased {
                 spec_hash: parse_identity(required_str(json, "spec_hash")?)?,
-                node_id: parse_identity(required_str(json, "node_id")?)?,
-                attempt_id: parse_identity(required_str(json, "attempt_id")?)?,
                 ledger_key: events::SideEffectLedgerKey::new(required_str(json, "ledger_key")?)?,
                 ledger_purpose: parse_side_effect_ledger_purpose(required_obj(
                     json,
@@ -9135,6 +9396,10 @@ pub fn payload_from_json_value(json: &serde_json::Value) -> Result<KernelEventPa
                 claim_id: events::ResourceLaneClaimId::new(required_str(json, "claim_id")?)?,
                 release_id: events::ResourceLaneReleaseId::new(required_str(json, "release_id")?)?,
                 claim_fencing_token: required_u64(json, "claim_fencing_token")?,
+                release_authority: parse_resource_lane_release_authority(required_str(
+                    json,
+                    "release_authority",
+                )?)?,
                 release_reason: events::ResourceLaneReleaseReason::new(required_str(
                     json,
                     "release_reason",
@@ -9642,6 +9907,14 @@ fn parse_retention_reason(value: &str) -> Result<events::RetentionReason> {
     }
 }
 
+fn parse_resource_lane_release_authority(
+    value: &str,
+) -> Result<events::ResourceLaneReleaseAuthority> {
+    events::ResourceLaneReleaseAuthority::parse(value).map_err(|error| {
+        StoreError::Identity(format!("invalid resource lane release authority: {error}"))
+    })
+}
+
 fn parse_vec<T>(
     json: &serde_json::Value,
     field: &'static str,
@@ -9702,11 +9975,11 @@ fn preconditions_json(preconditions: &CommitPreconditions) -> serde_json::Value 
         "required_public_output_absent": preconditions.required_public_output_absent,
         "required_run_state": required_run_state_str(preconditions.required_run_state),
         "required_side_effect_states": side_effects,
-        "saga_admit_token": preconditions.saga_admit_token.as_ref().map(saga_admit_token_json),
+        "certified_run_authority": preconditions.certified_run_authority.as_ref().map(certified_run_authority_json),
     })
 }
 
-fn saga_admit_token_json(token: &SagaAdmitToken) -> serde_json::Value {
+fn certified_run_authority_json(token: &CertifiedRunStoreAuthority) -> serde_json::Value {
     serde_json::json!({
         "run_id": token.run_id().as_str(),
         "saga_policy_digest": token.saga_policy_digest().as_str(),

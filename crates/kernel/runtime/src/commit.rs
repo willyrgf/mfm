@@ -43,8 +43,6 @@ pub struct RunLaunchEvidence {
     pub certificate_artifact: RunLaunchArtifact,
     /// Staged config artifacts for every certified config reference.
     pub config_artifacts: Vec<RunLaunchArtifact>,
-    /// Adapter executable identities bound to the run.
-    pub adapter_executables: Vec<events::ExecutableIdentity>,
     /// Seed cells materialized at run start.
     pub seed_cells: Vec<RunLaunchSeedCell>,
 }
@@ -220,9 +218,8 @@ impl CommitPlanner {
         required_artifacts.push(certificate_artifact.clone());
         required_artifacts.extend(config_artifacts.iter().cloned());
         required_artifacts.extend(seed_cells.values().map(store_seed_artifact));
-        let adapter_executables = evidence.adapter_executables;
-        let admitted_binding_digest =
-            bound_context.admitted_binding_digest(&adapter_executables)?;
+        let adapter_executables = bound_context.adapter_executables().to_vec();
+        let admitted_binding_digest = bound_context.admitted_binding_digest()?;
         let run_admitted = events::RunAdmitted {
             run_id: run_id.clone(),
             identity_material,
@@ -253,7 +250,7 @@ impl CommitPlanner {
         let admitted_artifacts = required_artifacts.clone();
         let start_payload = events::KernelEventPayload::RunAdmitted(Box::new(run_admitted));
         let request = store::CommitRequest::from_payloads(
-            run_id,
+            run_id.clone(),
             expected_next_seq,
             store::CommitKey::new(format!(
                 "run-admission:{}",
@@ -263,6 +260,10 @@ impl CommitPlanner {
             required_artifacts.clone(),
             store::CommitPreconditions {
                 required_run_state: store::RequiredRunState::Absent,
+                certified_run_authority: Some(store::CertifiedRunStoreAuthority::from_spec(
+                    run_id.clone(),
+                    runtime_spec.spec(),
+                )?),
                 ..store::CommitPreconditions::default()
             },
         )?;
@@ -541,7 +542,7 @@ impl CommitPlanner {
                             ledger_key: projection.ledger_key.clone(),
                             ledger_purpose: projection.ledger_purpose.clone(),
                             pair_id: projection.pair_id.clone(),
-                            pair_role: events::SideEffectPairRole::Verify,
+                            pair_role: events::SideEffectPairRole::Submit,
                             invocation_epoch: *invocation_epoch,
                             failure_phase:
                                 events::side_effect::FailurePhase::BeforeInvocationStarted,
@@ -615,6 +616,10 @@ impl CommitPlanner {
         preconditions
             .required_cell_states
             .extend(node_cell_preconditions(input.runtime_spec, input.node)?);
+        if payloads.iter().any(is_side_effect_terminal_payload) {
+            preconditions.certified_run_authority =
+                Some(certified_run_authority(input.runtime_spec, input.run_id)?);
+        }
         let required_artifacts =
             required_artifacts_for_payloads(input.view, required_artifacts, &payloads)?;
         let request = store::CommitRequest::from_payloads(
@@ -738,14 +743,13 @@ fn resource_lane_release_intent_for_failure(
     Ok(Some(events::KernelEventPayload::ResourceLaneReleaseIntent(
         events::ResourceLaneReleaseIntent {
             spec_hash: runtime_spec.spec_hash().clone(),
-            node_id: node.node_id.clone(),
-            attempt_id: attempt_id.clone(),
             ledger_key: projection.ledger_key.clone(),
             ledger_purpose: projection.ledger_purpose.clone(),
             pair_id: projection.pair_id.clone(),
             pair_role: events::SideEffectPairRole::Verify,
             invocation_epoch,
             claim_id: lane.claim_id.clone(),
+            release_authority: events::ResourceLaneReleaseAuthority::VerifyTerminal,
             release_reason: events::ResourceLaneReleaseReason::new("side_effect.failed")?,
         },
     )))
@@ -758,7 +762,7 @@ fn prepare_runner_output_commit_plan(
 ) -> Result<store::PreparedCommitPlan> {
     let payloads = request.payloads();
     if payloads.iter().any(is_saga_terminal_payload)
-        && request.preconditions().saga_admit_token.is_some()
+        && request.preconditions().certified_run_authority.is_some()
     {
         let proof = saga_terminal_proof.ok_or_else(|| {
             RuntimeError::InvalidRunnerOutput(
@@ -780,18 +784,14 @@ fn prepare_runner_output_commit_plan(
     {
         return Ok(store::PreparedCommit::<store::Retention>::new(request, artifacts)?.into());
     }
-    if payloads.iter().any(is_attempt_terminal_payload)
-        && !payloads
-            .iter()
-            .any(is_side_effect_terminal_disposition_payload)
-    {
-        return Ok(
-            store::PreparedCommit::<store::AttemptTerminal>::new(request, artifacts)?.into(),
-        );
-    }
     if payloads.iter().any(is_side_effect_terminal_payload) {
         return Ok(
             store::PreparedCommit::<store::SideEffectTerminal>::new(request, artifacts)?.into(),
+        );
+    }
+    if payloads.iter().any(is_attempt_terminal_payload) {
+        return Ok(
+            store::PreparedCommit::<store::AttemptTerminal>::new(request, artifacts)?.into(),
         );
     }
     if payloads.iter().any(is_side_effect_payload) {
@@ -1765,14 +1765,12 @@ fn runner_output_preconditions(
         &node.framework,
         Some(spec::FrameworkNodeSpec::ResolveSagaTerminal(_))
     ) {
-        preconditions.saga_admit_token = Some(saga_admit_token(runtime_spec, run_id)?);
+        preconditions.certified_run_authority =
+            Some(certified_run_authority(runtime_spec, run_id)?);
     }
-    if node.side_effect.is_some()
-        && runtime_spec
-            .forward_node_for_remediation(&node.node_id)
-            .is_some()
-    {
-        preconditions.saga_admit_token = Some(saga_admit_token(runtime_spec, run_id)?);
+    if node.side_effect.is_some() || side_effect_verify_spec(node).is_some() {
+        preconditions.certified_run_authority =
+            Some(certified_run_authority(runtime_spec, run_id)?);
     }
 
     if let Some(verify) = side_effect_verify_spec(node) {
@@ -1933,11 +1931,11 @@ fn side_effect_verify_terminal_required_state(
     }
 }
 
-fn saga_admit_token(
+fn certified_run_authority(
     runtime_spec: &CertifiedRuntimeSpec,
     run_id: &RunId,
-) -> Result<store::SagaAdmitToken> {
-    Ok(store::SagaAdmitToken::from_spec(
+) -> Result<store::CertifiedRunStoreAuthority> {
+    Ok(store::CertifiedRunStoreAuthority::from_spec(
         run_id.clone(),
         runtime_spec.spec(),
     )?)
@@ -2464,12 +2462,16 @@ fn validate_side_effect_verify_runner_output(
         )));
     }
     if side_effect_payload && !terminal_cell && !completed {
-        if payloads.iter().any(|payload| {
+        let has_resource_lane_release = payloads.iter().any(|payload| {
             matches!(
                 payload,
                 events::KernelEventPayload::ResourceLaneReleaseIntent(_)
             )
-        }) {
+        });
+        let has_side_effect_terminal_disposition = payloads
+            .iter()
+            .any(is_side_effect_terminal_disposition_payload);
+        if has_resource_lane_release && !has_side_effect_terminal_disposition {
             return Err(RuntimeError::InvalidRunnerOutput(format!(
                 "side-effect verify node {} returned a resource-lane release without terminal evidence",
                 node.node_id

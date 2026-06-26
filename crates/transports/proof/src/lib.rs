@@ -23,10 +23,13 @@ use mfm_replay::v1 as replay;
 use mfm_runtime::{
     CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture,
     ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCellTerminal, MaterializedInputNode,
-    RunnerArtifactBuilder, RunnerCapabilityBinding, RunnerOutputBuilder, RunnerPayloadBuilder,
-    RunnerRegistrationBuilder, SideEffectDriver, SideEffectDriverCallbacks, SideEffectDriverFuture,
-    SideEffectIntentPlan, SideEffectPreparedInvocationPlan, SideEffectProtocolAction,
+    MaterializedInputs, RunnerArtifactBuilder, RunnerCapabilityBinding, RunnerOutputBuilder,
+    RunnerPayloadBuilder, RunnerRegistrationBuilder, SideEffectDriver, SideEffectDriverCallbacks,
+    SideEffectDriverFuture, SideEffectIntentPlan, SideEffectObservedEvidence,
+    SideEffectPreparedInvocationPlan, SideEffectProtocolAction, SideEffectReplayEvidence,
     SideEffectSubmissionDecision, SideEffectSubmissionDecisionFuture,
+    SideEffectUnknownSubmissionDecision, SideEffectUnknownSubmissionDecisionFuture,
+    SideEffectVerifyCallbacks, SideEffectVerifyDriver,
 };
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
@@ -37,6 +40,7 @@ const ACCEPT_PROOF_ACTION: &str = "accept";
 const READ_FACTORY: &str = "read_external";
 const SIDE_EFFECT_FACTORY: &str = "apply_side_effect";
 const PURE_FACTORY: &str = "pure";
+const ADAPTER_FACTORY: &str = "proof_adapter";
 const REPLAY_VERIFIER_ID: &str = "mfm.proof.replay.deterministic.v1";
 const CAPABILITY_IMPLEMENTATION_ID: &str = "mfm.proof.runtime.deterministic.v1";
 
@@ -46,6 +50,12 @@ pub fn register_deterministic_proof_runners(
 ) -> mfm_runtime::Result<()> {
     let implementation_id = CapabilityImplementationId::new(CAPABILITY_IMPLEMENTATION_ID)?;
     let mut registrations = RunnerRegistrationBuilder::new(registry, implementation_id);
+    let adapter_factory = events::RunnerFactoryId::new(ADAPTER_FACTORY)?;
+    registrations.register_adapter_executable(
+        proof_adapter_kind()?,
+        proof_adapter_version()?,
+        executable(adapter_factory)?,
+    )?;
 
     let read = mfm_program::registered_state_descriptor::<ProofReadFactState>()
         .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
@@ -54,7 +64,7 @@ pub fn register_deterministic_proof_runners(
         read.descriptor_id().clone(),
         read.capabilities(),
         read_factory.clone(),
-        executable(read_factory)?,
+        executable(read_factory.clone())?,
         Arc::new(ProofReadRunner),
     )?;
     let side_effect = mfm_program::registered_state_descriptor::<ProofApplySideEffectState>()
@@ -65,6 +75,12 @@ pub fn register_deterministic_proof_runners(
         side_effect.capabilities(),
         side_effect_factory.clone(),
         executable(side_effect_factory)?,
+        Arc::new(ProofSideEffectRunner),
+    )?;
+    registrations.register_side_effect_verify_runner(
+        side_effect.descriptor_id().clone(),
+        read_factory.clone(),
+        executable(read_factory)?,
         Arc::new(ProofSideEffectRunner),
     )?;
     let assemble = mfm_program::registered_state_descriptor::<ProofAssembleOutputState>()
@@ -150,29 +166,49 @@ async fn run_read(ctx: ErasedRunCtx<'_>) -> mfm_runtime::Result<ErasedRunnerOutp
 }
 
 async fn run_side_effect(ctx: ErasedRunCtx<'_>) -> mfm_runtime::Result<ErasedRunnerOutput> {
+    let config_node = proof_side_effect_config_node(&ctx)?;
     let accept = ProofApplyConfig::new(ACCEPT_PROOF_ACTION)
         .map_err(mfm_runtime::RuntimeError::InvalidRunnerOutput)?;
-    if ensure_config::<ProofApplyConfig>(&ctx.node().config_ref, &accept).is_ok() {
-        return SideEffectDriver::drive(
-            ctx,
-            &ProofSideEffectCallbacks {
-                action: ACCEPT_PROOF_ACTION,
-                ambiguous: false,
-            },
-        )
-        .await;
+    let (action, ambiguous) =
+        if ensure_config::<ProofApplyConfig>(&config_node.config_ref, &accept).is_ok() {
+            (ACCEPT_PROOF_ACTION, false)
+        } else {
+            let manual_resolution = ProofApplyConfig::new(MANUAL_RESOLUTION_PROOF_ACTION)
+                .map_err(mfm_runtime::RuntimeError::InvalidRunnerOutput)?;
+            ensure_config::<ProofApplyConfig>(&config_node.config_ref, &manual_resolution)?;
+            (MANUAL_RESOLUTION_PROOF_ACTION, true)
+        };
+    let callbacks = ProofSideEffectCallbacks { action, ambiguous };
+    if matches!(
+        &ctx.node().framework,
+        Some(spec::FrameworkNodeSpec::SideEffectVerify(_))
+    ) {
+        return SideEffectVerifyDriver::drive(ctx, &callbacks).await;
     }
-    let manual_resolution = ProofApplyConfig::new(MANUAL_RESOLUTION_PROOF_ACTION)
-        .map_err(mfm_runtime::RuntimeError::InvalidRunnerOutput)?;
-    ensure_config::<ProofApplyConfig>(&ctx.node().config_ref, &manual_resolution)?;
-    SideEffectDriver::drive(
-        ctx,
-        &ProofSideEffectCallbacks {
-            action: MANUAL_RESOLUTION_PROOF_ACTION,
-            ambiguous: true,
-        },
-    )
-    .await
+    SideEffectDriver::drive(ctx, &callbacks).await
+}
+
+fn proof_side_effect_config_node<'a>(
+    ctx: &'a ErasedRunCtx<'a>,
+) -> mfm_runtime::Result<&'a spec::NodeSpec> {
+    let Some(spec::FrameworkNodeSpec::SideEffectVerify(verify)) = &ctx.node().framework else {
+        return Ok(ctx.node());
+    };
+    let submit_node = ctx.certified_node(&verify.submit_node_id).ok_or_else(|| {
+        mfm_runtime::RuntimeError::InvalidRunnerOutput(format!(
+            "proof side-effect verify node {} references missing submit node {}",
+            ctx.node().node_id,
+            verify.submit_node_id
+        ))
+    })?;
+    if submit_node.side_effect.is_none() {
+        return Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(format!(
+            "proof side-effect verify node {} references non-side-effect submit node {}",
+            ctx.node().node_id,
+            submit_node.node_id
+        )));
+    }
+    Ok(submit_node)
 }
 
 struct ProofSideEffectCallbacks {
@@ -245,7 +281,39 @@ impl SideEffectDriverCallbacks for ProofSideEffectCallbacks {
     > {
         Box::pin(async move {
             if self.ambiguous {
-                Ok(SideEffectSubmissionDecision::Ambiguous {
+                Ok(SideEffectSubmissionDecision::Unknown(
+                    proof_side_effect_result()?,
+                ))
+            } else {
+                Ok(SideEffectSubmissionDecision::Observed(proof_submission()?))
+            }
+        })
+    }
+}
+
+impl SideEffectVerifyCallbacks for ProofSideEffectCallbacks {
+    type Submission = ProofSubmission;
+    type Receipt = ProofReceipt;
+    type Confirmation = ProofConfirmation;
+    type Output = ProofSideEffectResult;
+    type NotSubmittedProof = ProofSideEffectResult;
+    type AmbiguityEvidence = ProofSideEffectResult;
+
+    fn recover_unknown_submission<'a, 'ctx>(
+        &'a self,
+        _ctx: &'a ErasedRunCtx<'ctx>,
+        _submit_node: &'a spec::NodeSpec,
+        _submit_inputs: &'a MaterializedInputs,
+        _prepared_invocation: Option<&'a store::SideEffectArtifactProjection>,
+    ) -> SideEffectUnknownSubmissionDecisionFuture<
+        'a,
+        Self::Submission,
+        Self::NotSubmittedProof,
+        Self::AmbiguityEvidence,
+    > {
+        Box::pin(async move {
+            if self.ambiguous {
+                Ok(SideEffectUnknownSubmissionDecision::Ambiguous {
                     ambiguity_code: events::AmbiguityCode::new("mfm.proof.manual_resolution")
                         .map_err(|error| {
                             mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
@@ -253,9 +321,61 @@ impl SideEffectDriverCallbacks for ProofSideEffectCallbacks {
                     evidence: proof_side_effect_result()?,
                 })
             } else {
-                Ok(SideEffectSubmissionDecision::Observed(proof_submission()?))
+                Ok(SideEffectUnknownSubmissionDecision::Observed(
+                    proof_submission()?,
+                ))
             }
         })
+    }
+
+    fn read_receipt<'a, 'ctx>(
+        &'a self,
+        _ctx: &'a ErasedRunCtx<'ctx>,
+        _submit_node: &'a spec::NodeSpec,
+        _submit_inputs: &'a MaterializedInputs,
+        _submission: &'a store::SideEffectArtifactProjection,
+    ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Receipt>> {
+        Box::pin(async {
+            Ok(SideEffectObservedEvidence {
+                evidence: proof_receipt()?,
+                replay: proof_replay_evidence()?,
+            })
+        })
+    }
+
+    fn build_confirmation<'a, 'ctx>(
+        &'a self,
+        _ctx: &'a ErasedRunCtx<'ctx>,
+        _submit_node: &'a spec::NodeSpec,
+        _submit_inputs: &'a MaterializedInputs,
+        _receipt: &'a store::SideEffectArtifactProjection,
+    ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Confirmation>> {
+        Box::pin(async {
+            Ok(SideEffectObservedEvidence {
+                evidence: proof_confirmation()?,
+                replay: proof_replay_evidence()?,
+            })
+        })
+    }
+
+    fn map_receipt_to_output<'a, 'ctx>(
+        &'a self,
+        _ctx: &'a ErasedRunCtx<'ctx>,
+        _submit_node: &'a spec::NodeSpec,
+        _submit_inputs: &'a MaterializedInputs,
+        _receipt: &'a store::SideEffectArtifactProjection,
+    ) -> SideEffectDriverFuture<'a, Self::Output> {
+        Box::pin(async { proof_side_effect_result() })
+    }
+
+    fn map_confirmation_to_output<'a, 'ctx>(
+        &'a self,
+        _ctx: &'a ErasedRunCtx<'ctx>,
+        _submit_node: &'a spec::NodeSpec,
+        _submit_inputs: &'a MaterializedInputs,
+        _confirmation: &'a store::SideEffectArtifactProjection,
+    ) -> SideEffectDriverFuture<'a, Self::Output> {
+        Box::pin(async { proof_side_effect_result() })
     }
 }
 
@@ -448,6 +568,13 @@ fn short_digest(digest: &ContentDigest) -> String {
 
 fn replay_verifier_id() -> mfm_runtime::Result<events::ReplayVerifierId> {
     Ok(events::ReplayVerifierId::new(REPLAY_VERIFIER_ID)?)
+}
+
+fn proof_replay_evidence() -> mfm_runtime::Result<SideEffectReplayEvidence> {
+    Ok(SideEffectReplayEvidence {
+        replay_verifier_id: replay_verifier_id()?,
+        resource_touched_set: None,
+    })
 }
 
 fn ensure_digest<T>(label: &str, actual: &ContentDigest, expected: &T) -> replay::Result<()>
