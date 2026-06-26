@@ -60,7 +60,7 @@ Typed-core code distinguishes data, evidence, authority, and implementation arti
 | `CertifiedDescriptorSet` / `CertifiedFrameworkLifecycle` | yes, within certified spec authority | Certified descriptor and framework lifecycle views derived from a validated spec. Runtime consumes these views instead of recertifying raw descriptor tables. |
 | `mfm_runtime::CertifiedRuntimeSpec` | yes, runtime-only | Runtime wrapper derived only from `CertifiedTypedSpec`; owns scheduler indexes and erased runner derivation. |
 | `PreparedCommit<Purpose>` / `PreparedCommitPlan` | yes, store mutation | Purpose-specific commit authority built by runtime/app authority. The store rejects mismatched payload purpose, missing saga proof, and missing admitted artifact evidence. |
-| `SagaAdmitToken` | yes, store admission | Policy-bound run-start/saga admission token tied to run id and certified spec hash. |
+| `SagaAdmitToken` | yes, store admission | Policy-bound run-start/saga admission token minted from the certified typed spec and tied to run id, certified spec hash, saga policy, and side-effect terminal policies. Store admission checks the token spec hash against the projected `RunAdmitted.spec_hash`, not only the incoming saga payload. |
 | `ManualResolutionProofAuthority` / `VerifiedManualResolutionForPrefix` | yes, manual resolution | Prefix-bound proof authority over a certified manual-blocked stream prefix, retained artifacts, canonical proof bytes, and certified operator policy. |
 | `CertifiedSideEffectContract` | yes, side-effect verification | Certified resource-claim and side-effect contract authority shared by live execution, resume, and replay. |
 | `SideEffectLedgerState` | yes, store transition | Typed ledger state used by store/runtime to admit only legal side-effect transitions. |
@@ -466,6 +466,8 @@ and incompatible executable bindings report without driving. Automatic dead-driv
 background worker-pool dispatch, feed-driven dispatch, `due_at` re-wake, and long-wait tenure
 release are deferred. Manual `run resume <run_id>` is the v1 recovery trigger. While short
 receipt-level waits are active, the invoker loop keeps heartbeating instead of releasing tenure.
+Runtime drive entry points require a live execution-claim token and an `ExecutionClaimStore`; callers
+without the current token cannot drive through the public scheduler API.
 
 Framework lifecycle work is represented by certified graph nodes, not ad hoc runtime side effects.
 Run admission is the sole pre-attempt root authority and is not represented by a certified graph
