@@ -1,14 +1,11 @@
 use std::collections::BTreeMap;
-use std::future::Future;
-use std::task::{Context, Poll, Waker};
 
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_events::v1::{self as events, side_effect, ArtifactRole, KernelEventPayload};
 use mfm_ids::{
-    AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind, CapabilityVersion, CellId,
-    ContentDigest, DescriptorId, DigestAlgorithm, DigestBytes, EffectKind, EffectVersion, EventId,
-    LoweringVersion, NodeId, RunId, SchemaId, ScopeId, SeedId, SemanticTypeId, SideEffectPairId,
-    SpecHash, SpecVersion, StateKind, StateVersion,
+    AdapterVersion, ArtifactId, AttemptId, CapabilityVersion, CellId, ContentDigest,
+    DigestAlgorithm, EffectKind, EffectVersion, LoweringVersion, NodeId, RunId, SchemaId, SeedId,
+    SideEffectPairId, SpecVersion, StateVersion,
 };
 use mfm_manual_auth::{
     manual_authorization_proof_schema_id, ManualAuthorizationSignatureBytes,
@@ -18,26 +15,40 @@ use mfm_manual_auth::{
     VerifiedManualResolutionForPrefix,
 };
 use mfm_spec::v1::{
-    self as spec, CanonicalizerIdentity, CellProducer, ManualResolutionEvidenceSpec, MediaType,
+    self as spec, CanonicalizerIdentity, CellProducer, ManualResolutionEvidenceSpec,
     PublicFieldPath, RemediationUnresolvedSpec, ResourceNamespace, SagaPolicySpec, ValueLineageRef,
+};
+use mfm_store::v1::test_support::{
+    confirmation_terminal_policies_for_projection_for_test as confirmation_terminal_policies_for_projection,
+    empty_terminal_policies_for_test as empty_terminal_policies,
+    fixed_adapter_kind_for_test as adapter_kind, fixed_artifact_id_for_test as artifact_id,
+    fixed_attempt_id_for_test as attempt_id, fixed_capability_kind_for_test as capability_kind,
+    fixed_cell_id_for_test as cell_id, fixed_content_digest_for_test as content_digest,
+    fixed_descriptor_id_for_test as descriptor_id, fixed_digest_bytes_for_test as digest_bytes,
+    fixed_event_id_for_test as event_id, fixed_node_id_for_test as node_id,
+    fixed_run_id_for_test as run_id, fixed_schema_id_for_test as schema_id,
+    fixed_scope_id_for_test as scope_id, fixed_semantic_type_id_for_test as semantic_id,
+    fixed_spec_hash_for_test as spec_hash, fixed_state_kind_for_test as state_kind,
+    media_type_for_test as media_type, poll_ready_store_future_for_test as poll_ready_store_future,
+    prepared_commit_bundle_from_plan as test_bundle_from_plan,
+    receipt_terminal_policies_for_projection_for_test as receipt_terminal_policies_for_projection,
+    run_identity_material_for_test,
 };
 use mfm_store::v1::{
     admission_advisory_lock_key, admission_waiter_id, event_artifact_requirements,
     payload_canonical_json, payload_from_json_value, resource_wait_fifo_admission_token,
     AdmissionLaneClass, AdmissionLaneMode, AdmissionToken, ArtifactEvidenceRef,
-    AsyncInMemoryRunStore, AsyncStoreFuture, AttemptStatus, AttemptTerminal,
-    CellTerminalProjection, CommitArtifactEvidenceSet, CommitKey, CommitOutcome,
-    CommitPreconditions, CommitRequest, CommittedRunStream, EventArtifactReferenceSource,
-    ExecutionClaimAdmissionLane, ExistingArtifactAdmission, ForwardLedgerClassification,
-    KernelEventEnvelope, ManualBlockReason, ManualResolution, ManualResolutionProjection,
-    PreparedCommit, PreparedCommitBundle, PreparedCommitPlan, ProjectionSnapshot,
+    AsyncInMemoryRunStore, AttemptStatus, AttemptTerminal, CellTerminalProjection,
+    CommitArtifactEvidenceSet, CommitKey, CommitOutcome, CommitPreconditions, CommitRequest,
+    CommittedRunStream, EventArtifactReferenceSource, ExecutionClaimAdmissionLane,
+    ForwardLedgerClassification, KernelEventEnvelope, ManualBlockReason, ManualResolution,
+    ManualResolutionProjection, PreparedCommit, PreparedCommitPlan, ProjectionSnapshot,
     PublicOutputProjection, RequiredRunState, ResourceAdmissionLane, ResourceLaneKey, Retention,
     RunAdmission, RunCompletionProjection, RunEventStore, RunMode, RunState, SagaAdmitToken,
     SagaEngagementProjection, SagaEngagementReason, SagaTerminal, SagaTerminalProof,
     SideEffectLedgerPhase, SideEffectPairLedgerRef, SideEffectPhase, SideEffectProgress,
-    SideEffectTerminal, SideEffectTerminalPolicies, SideEffectTerminalPolicy, StateAttemptStarted,
-    StoreError, StreamSeq, TrustScopeId, TrustScopeStore, EXECUTION_CLAIM_HEARTBEAT_INTERVAL_SECS,
-    EXECUTION_CLAIM_LEASE_TTL_SECS,
+    SideEffectTerminal, StateAttemptStarted, StoreError, StreamSeq, TrustScopeId, TrustScopeStore,
+    EXECUTION_CLAIM_HEARTBEAT_INTERVAL_SECS, EXECUTION_CLAIM_LEASE_TTL_SECS,
 };
 
 const SPEC_MEDIA_TYPE: &str = "application/vnd.mfm.typed-execution-spec+json;version=1";
@@ -104,70 +115,6 @@ impl StoreContractRunStore {
     }
 }
 
-fn test_bundle_from_plan(plan: PreparedCommitPlan) -> mfm_store::v1::Result<PreparedCommitBundle> {
-    let existing = plan
-        .admitted_artifacts()
-        .iter()
-        .map(|evidence| {
-            Ok(ExistingArtifactAdmission::new(
-                evidence.artifact_id.clone(),
-                evidence.evidence_hash()?,
-            ))
-        })
-        .collect::<mfm_store::v1::Result<Vec<_>>>()?;
-    PreparedCommitBundle::new(plan, Vec::new(), existing)
-}
-
-fn poll_ready_store_future<T, E>(
-    mut future: AsyncStoreFuture<'_, T, E>,
-) -> std::result::Result<T, E> {
-    let waker = Waker::noop();
-    let mut context = Context::from_waker(waker);
-    match Future::poll(future.as_mut(), &mut context) {
-        Poll::Ready(result) => result,
-        Poll::Pending => panic!("async in-memory store future should be ready"),
-    }
-}
-
-fn digest_bytes(byte: u8) -> DigestBytes {
-    DigestBytes::from_array([byte; 32])
-}
-
-fn content_digest(byte: u8) -> ContentDigest {
-    ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
-}
-
-fn spec_hash(byte: u8) -> SpecHash {
-    SpecHash::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
-}
-
-fn run_id(byte: u8) -> RunId {
-    RunId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
-}
-
-fn test_run_identity_material_for_spec_hash(
-    certified_spec_hash: SpecHash,
-) -> events::RunIdentityMaterialV1 {
-    events::RunIdentityMaterialV1 {
-        certified_spec_hash,
-        trust_scope_id: TrustScopeId::new("mfm.trust_scope.v1:30303030303030303030303030303030")
-            .expect("test trust scope"),
-        distinct_run_key_digest: None,
-    }
-}
-
-fn artifact_id(byte: u8) -> ArtifactId {
-    ArtifactId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
-}
-
-fn attempt_id(byte: u8) -> AttemptId {
-    AttemptId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
-}
-
-fn node_id(byte: u8) -> NodeId {
-    NodeId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
-}
-
 fn legacy_side_effect_pair_id_for_ledger(
     ledger_key: &events::SideEffectLedgerKey,
 ) -> SideEffectPairId {
@@ -195,38 +142,6 @@ fn side_effect_pair_id_for_contract(contract: &spec::SideEffectContractSpec) -> 
 
 fn side_effect_output_cell() -> CellId {
     cell_id(78)
-}
-
-fn terminal_policies_for_projection(
-    projection: &ProjectionSnapshot,
-    run_id: &RunId,
-    terminal_policy: SideEffectTerminalPolicy,
-) -> SideEffectTerminalPolicies {
-    SideEffectTerminalPolicies::new(
-        projection
-            .side_effects()
-            .filter(|(_, side_effect)| side_effect.run_id == *run_id)
-            .map(|(_, side_effect)| (side_effect.pair_id.clone(), terminal_policy))
-            .collect::<BTreeMap<_, _>>(),
-    )
-}
-
-fn confirmation_terminal_policies_for_projection(
-    projection: &ProjectionSnapshot,
-    run_id: &RunId,
-) -> SideEffectTerminalPolicies {
-    terminal_policies_for_projection(projection, run_id, SideEffectTerminalPolicy::Confirmation)
-}
-
-fn receipt_terminal_policies_for_projection(
-    projection: &ProjectionSnapshot,
-    run_id: &RunId,
-) -> SideEffectTerminalPolicies {
-    terminal_policies_for_projection(projection, run_id, SideEffectTerminalPolicy::Receipt)
-}
-
-fn empty_terminal_policies() -> SideEffectTerminalPolicies {
-    SideEffectTerminalPolicies::new(BTreeMap::new())
 }
 
 fn default_side_effect_contract() -> spec::SideEffectContractSpec {
@@ -387,71 +302,6 @@ fn side_effect_pair_role(
     (side_effect_pair_id(), role)
 }
 
-fn event_id(byte: u8) -> EventId {
-    EventId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
-}
-
-fn descriptor_id(byte: u8) -> DescriptorId {
-    DescriptorId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
-}
-
-fn cell_id(byte: u8) -> CellId {
-    CellId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
-}
-
-fn scope_id(byte: u8) -> ScopeId {
-    ScopeId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
-}
-
-fn schema_id(name: &str, byte: u8) -> SchemaId {
-    SchemaId::new(name, "1", DigestAlgorithm::Sha256JcsV1, digest_bytes(byte)).expect("schema id")
-}
-
-fn semantic_id(name: &str, byte: u8) -> SemanticTypeId {
-    SemanticTypeId::new(
-        "mfm.test",
-        name,
-        "1",
-        DigestAlgorithm::Sha256JcsV1,
-        digest_bytes(byte),
-    )
-    .expect("semantic id")
-}
-
-fn state_kind(byte: u8) -> StateKind {
-    StateKind::new(
-        "mfm.test",
-        "state",
-        DigestAlgorithm::Sha256JcsV1,
-        digest_bytes(byte),
-    )
-    .expect("state kind")
-}
-
-fn capability_kind(byte: u8) -> CapabilityKind {
-    CapabilityKind::new(
-        "mfm.test",
-        "capability",
-        DigestAlgorithm::Sha256JcsV1,
-        digest_bytes(byte),
-    )
-    .expect("capability kind")
-}
-
-fn adapter_kind(byte: u8) -> AdapterKind {
-    AdapterKind::new(
-        "mfm.test",
-        "adapter",
-        DigestAlgorithm::Sha256JcsV1,
-        digest_bytes(byte),
-    )
-    .expect("adapter kind")
-}
-
-fn media_type(value: &str) -> MediaType {
-    MediaType::new(value).expect("media type")
-}
-
 fn run_admitted(run_id: RunId) -> KernelEventPayload {
     run_admitted_with_saga_policy(run_id, &SagaPolicySpec::NoSideEffects)
 }
@@ -466,7 +316,10 @@ fn run_admitted_with_saga_policy(
         .expect("saga authority spec hash");
     let spec_artifact = spec_artifact_ref();
     let certificate_artifact = certificate_artifact_ref();
-    let identity_material = test_run_identity_material_for_spec_hash(certified_spec_hash.clone());
+    let identity_material = run_identity_material_for_test(
+        certified_spec_hash.clone(),
+        "30303030303030303030303030303030",
+    );
     KernelEventPayload::RunAdmitted(Box::new(events::RunAdmitted {
         run_id,
         identity_material,

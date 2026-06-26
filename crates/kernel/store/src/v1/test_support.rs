@@ -1,9 +1,30 @@
 //! Test-only helpers for typed store contract fixtures.
 
+use std::collections::BTreeMap;
+use std::future::Future;
+use std::task::{Context, Poll, Waker};
+
 use super::*;
+use mfm_canonical::sha256_digest_bytes;
 use mfm_events::v1 as events;
-use mfm_ids::{AttemptId, DigestAlgorithm, DigestBytes, RunId, SpecHash};
+use mfm_ids::{
+    AdapterKind, ArtifactId, AttemptId, CapabilityKind, CellId, ContentDigest, DescriptorId,
+    DigestAlgorithm, DigestBytes, EventId, NodeId, RunId, SchemaId, ScopeId, SemanticTypeId,
+    SpecHash, StateKind, TrustScopeId,
+};
 use mfm_spec::v1 as spec;
+
+/// Polls an in-memory store future that is expected to complete immediately.
+pub fn poll_ready_store_future_for_test<T, E>(
+    mut future: AsyncStoreFuture<'_, T, E>,
+) -> std::result::Result<T, E> {
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    match Future::poll(future.as_mut(), &mut context) {
+        Poll::Ready(result) => result,
+        Poll::Pending => panic!("async in-memory store future should be ready"),
+    }
+}
 
 /// Builds a prepared commit bundle that treats all admitted artifact evidence as pre-existing.
 pub fn prepared_commit_bundle_from_plan(plan: PreparedCommitPlan) -> Result<PreparedCommitBundle> {
@@ -190,10 +211,243 @@ where
     })
 }
 
+/// Returns deterministic digest bytes made from one repeated byte.
+pub fn fixed_digest_bytes_for_test(byte: u8) -> DigestBytes {
+    DigestBytes::from_array([byte; 32])
+}
+
+/// Returns a deterministic content digest made from one repeated digest byte.
+pub fn fixed_content_digest_for_test(byte: u8) -> ContentDigest {
+    ContentDigest::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        fixed_digest_bytes_for_test(byte),
+    )
+}
+
+/// Returns a deterministic spec hash made from one repeated digest byte.
+pub fn fixed_spec_hash_for_test(byte: u8) -> SpecHash {
+    SpecHash::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        fixed_digest_bytes_for_test(byte),
+    )
+}
+
+/// Returns a deterministic run id made from one repeated digest byte.
+pub fn fixed_run_id_for_test(byte: u8) -> RunId {
+    RunId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        fixed_digest_bytes_for_test(byte),
+    )
+}
+
+/// Returns a deterministic artifact id made from one repeated digest byte.
+pub fn fixed_artifact_id_for_test(byte: u8) -> ArtifactId {
+    ArtifactId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        fixed_digest_bytes_for_test(byte),
+    )
+}
+
 /// Returns a deterministic attempt id made from one repeated digest byte.
 pub fn fixed_attempt_id_for_test(byte: u8) -> AttemptId {
     AttemptId::from_digest(
         DigestAlgorithm::Sha256JcsV1,
-        DigestBytes::from_array([byte; 32]),
+        fixed_digest_bytes_for_test(byte),
     )
+}
+
+/// Returns a deterministic node id made from one repeated digest byte.
+pub fn fixed_node_id_for_test(byte: u8) -> NodeId {
+    NodeId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        fixed_digest_bytes_for_test(byte),
+    )
+}
+
+/// Returns a deterministic cell id made from one repeated digest byte.
+pub fn fixed_cell_id_for_test(byte: u8) -> CellId {
+    CellId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        fixed_digest_bytes_for_test(byte),
+    )
+}
+
+/// Returns a deterministic scope id made from one repeated digest byte.
+pub fn fixed_scope_id_for_test(byte: u8) -> ScopeId {
+    ScopeId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        fixed_digest_bytes_for_test(byte),
+    )
+}
+
+/// Returns a deterministic event id made from one repeated digest byte.
+pub fn fixed_event_id_for_test(byte: u8) -> EventId {
+    EventId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        fixed_digest_bytes_for_test(byte),
+    )
+}
+
+/// Returns a deterministic descriptor id made from one repeated digest byte.
+pub fn fixed_descriptor_id_for_test(byte: u8) -> DescriptorId {
+    DescriptorId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        fixed_digest_bytes_for_test(byte),
+    )
+}
+
+/// Returns a deterministic schema id in version 1.
+pub fn fixed_schema_id_for_test(name: &str, byte: u8) -> SchemaId {
+    SchemaId::new(
+        name,
+        "1",
+        DigestAlgorithm::Sha256JcsV1,
+        fixed_digest_bytes_for_test(byte),
+    )
+    .expect("schema id")
+}
+
+/// Returns a deterministic semantic type id in the `mfm.test` namespace.
+pub fn fixed_semantic_type_id_for_test(name: &str, byte: u8) -> SemanticTypeId {
+    SemanticTypeId::new(
+        "mfm.test",
+        name,
+        "1",
+        DigestAlgorithm::Sha256JcsV1,
+        fixed_digest_bytes_for_test(byte),
+    )
+    .expect("semantic id")
+}
+
+/// Returns a deterministic state kind in the `mfm.test` namespace.
+pub fn fixed_state_kind_for_test(byte: u8) -> StateKind {
+    StateKind::new(
+        "mfm.test",
+        "state",
+        DigestAlgorithm::Sha256JcsV1,
+        fixed_digest_bytes_for_test(byte),
+    )
+    .expect("state kind")
+}
+
+/// Returns a deterministic capability kind in the `mfm.test` namespace.
+pub fn fixed_capability_kind_for_test(byte: u8) -> CapabilityKind {
+    CapabilityKind::new(
+        "mfm.test",
+        "capability",
+        DigestAlgorithm::Sha256JcsV1,
+        fixed_digest_bytes_for_test(byte),
+    )
+    .expect("capability kind")
+}
+
+/// Returns a deterministic adapter kind in the `mfm.test` namespace.
+pub fn fixed_adapter_kind_for_test(byte: u8) -> AdapterKind {
+    AdapterKind::new(
+        "mfm.test",
+        "adapter",
+        DigestAlgorithm::Sha256JcsV1,
+        fixed_digest_bytes_for_test(byte),
+    )
+    .expect("adapter kind")
+}
+
+/// Returns a parsed test media type.
+pub fn media_type_for_test(value: &str) -> spec::MediaType {
+    spec::MediaType::new(value).expect("media type")
+}
+
+/// Returns deterministic artifact bytes for tests that persist real blobs.
+pub fn artifact_bytes_for_test(byte: u8) -> Vec<u8> {
+    vec![byte; 128]
+}
+
+/// Returns the content digest for deterministic artifact bytes.
+pub fn artifact_content_digest_for_test(byte: u8) -> ContentDigest {
+    ContentDigest::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        sha256_digest_bytes(&artifact_bytes_for_test(byte)),
+    )
+}
+
+/// Returns the artifact id for deterministic artifact bytes.
+pub fn artifact_bytes_artifact_id_for_test(byte: u8) -> ArtifactId {
+    let digest = artifact_content_digest_for_test(byte);
+    ArtifactId::from_digest(digest.algorithm(), *digest.digest())
+}
+
+/// Finds deterministic artifact bytes by content digest.
+pub fn artifact_bytes_for_digest_for_test(digest: &ContentDigest) -> Option<Vec<u8>> {
+    (u8::MIN..=u8::MAX)
+        .map(artifact_bytes_for_test)
+        .find(|bytes| {
+            ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, sha256_digest_bytes(bytes))
+                == *digest
+        })
+}
+
+/// Builds verified prepared artifact bytes for deterministic artifact test fixtures.
+pub fn prepared_artifact_bytes_for_test(
+    evidence: &ArtifactEvidenceRef,
+) -> Result<PreparedArtifactBytes> {
+    let bytes = artifact_bytes_for_digest_for_test(&evidence.digest).ok_or_else(|| {
+        StoreError::ArtifactEvidenceMismatch {
+            artifact_id: evidence.artifact_id.clone(),
+            field: "bytes",
+        }
+    })?;
+    PreparedArtifactBytes::new(bytes, evidence.clone())
+}
+
+/// Builds run identity material for a deterministic test trust scope suffix.
+pub fn run_identity_material_for_test(
+    certified_spec_hash: SpecHash,
+    trust_scope_hex: &str,
+) -> events::RunIdentityMaterialV1 {
+    events::RunIdentityMaterialV1 {
+        certified_spec_hash,
+        trust_scope_id: TrustScopeId::new(format!("{}{}", TrustScopeId::PREFIX, trust_scope_hex))
+            .expect("test trust scope"),
+        distinct_run_key_digest: None,
+    }
+}
+
+/// Builds side-effect terminal policies for projected side-effect ledgers in one run.
+pub fn terminal_policies_for_projection_for_test(
+    projection: &ProjectionSnapshot,
+    run_id: &RunId,
+    terminal_policy: SideEffectTerminalPolicy,
+) -> SideEffectTerminalPolicies {
+    SideEffectTerminalPolicies::new(
+        projection
+            .side_effects()
+            .filter(|(_, side_effect)| side_effect.run_id == *run_id)
+            .map(|(_, side_effect)| (side_effect.pair_id.clone(), terminal_policy))
+            .collect::<BTreeMap<_, _>>(),
+    )
+}
+
+/// Builds confirmation terminal policies for projected side-effect ledgers in one run.
+pub fn confirmation_terminal_policies_for_projection_for_test(
+    projection: &ProjectionSnapshot,
+    run_id: &RunId,
+) -> SideEffectTerminalPolicies {
+    terminal_policies_for_projection_for_test(
+        projection,
+        run_id,
+        SideEffectTerminalPolicy::Confirmation,
+    )
+}
+
+/// Builds receipt terminal policies for projected side-effect ledgers in one run.
+pub fn receipt_terminal_policies_for_projection_for_test(
+    projection: &ProjectionSnapshot,
+    run_id: &RunId,
+) -> SideEffectTerminalPolicies {
+    terminal_policies_for_projection_for_test(projection, run_id, SideEffectTerminalPolicy::Receipt)
+}
+
+/// Returns empty side-effect terminal policies.
+pub fn empty_terminal_policies_for_test() -> SideEffectTerminalPolicies {
+    SideEffectTerminalPolicies::new(BTreeMap::new())
 }
