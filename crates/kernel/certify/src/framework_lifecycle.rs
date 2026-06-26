@@ -85,65 +85,20 @@ pub(super) fn validate_framework_nodes(
                     ));
                 }
             }
-            Some(spec::FrameworkNodeSpec::SideEffectVerify(verify)) => {
+            Some(spec::FrameworkNodeSpec::SideEffectVerify(_verify)) => {
                 let descriptor = descriptors.state(&node.descriptor_id)?;
                 validate_framework_descriptor_name(
                     node,
                     descriptor,
                     "mfm.framework.side_effect_verify",
                 )?;
-                let submit = nodes_by_id.get(&verify.submit_node_id).ok_or_else(|| {
-                    problem(
-                        ProblemClass::InvalidTopology,
-                        format!(
-                            "side-effect verify node {} references missing submit node {}",
-                            node.node_id, verify.submit_node_id
-                        ),
-                    )
-                })?;
-                let Some(contract) = submit.side_effect.as_ref() else {
-                    return Err(problem(
-                        ProblemClass::InvalidSemanticTransition,
-                        format!(
-                            "side-effect verify node {} references non-side-effect submit node {}",
-                            node.node_id, submit.node_id
-                        ),
-                    ));
-                };
-                if submit.framework.is_some() {
-                    return Err(problem(
-                        ProblemClass::InvalidSemanticTransition,
-                        format!(
-                            "side-effect verify node {} references framework submit node {}",
-                            node.node_id, submit.node_id
-                        ),
-                    ));
-                }
-                if verify.submit_output_cell_id != submit.output_cell {
-                    return Err(problem(
-                        ProblemClass::InvalidTopology,
-                        format!(
-                            "side-effect verify node {} submit output anchor mismatch",
-                            node.node_id
-                        ),
-                    ));
-                }
-                let expected_pair =
-                    spec::side_effect_pair_id(&submit.node_id, &submit.output_cell, contract)
-                        .map_err(|error| CertifyError::Spec(error.to_string()))?;
-                if verify.pair_id != expected_pair {
-                    return Err(problem(
-                        ProblemClass::InvalidTopology,
-                        format!(
-                            "side-effect verify node {} pair id is not stable-id derived",
-                            node.node_id
-                        ),
-                    ));
-                }
+                let pair = spec::resolve_side_effect_verify_pair(nodes, remediations, node)
+                    .map_err(|error| problem(ProblemClass::InvalidTopology, error.to_string()))?;
+                let submit = pair.submit_node;
                 let submit_descriptor = descriptors.state(&submit.descriptor_id)?;
                 validate_side_effect_verify_output_cell(node, submit_descriptor, cells)?;
                 let submit_output_cell =
-                    cells.get(submit.output_cell.as_str()).ok_or_else(|| {
+                    cells.get(pair.submit_output_cell.as_str()).ok_or_else(|| {
                         problem(
                             ProblemClass::InvalidTopology,
                             format!("submit node {} output cell is missing", submit.node_id),
@@ -159,7 +114,7 @@ pub(super) fn validate_framework_nodes(
                     .map_err(|error| CertifyError::Spec(error.to_string()))?,
                 )?;
                 let input_cells = validate_input_binding(&node.input_bindings, cells)?;
-                if input_cells != vec![submit.output_cell.clone()] {
+                if input_cells != vec![pair.submit_output_cell.clone()] {
                     return Err(problem(
                         ProblemClass::InvalidTopology,
                         format!(

@@ -817,23 +817,13 @@ impl SideEffectVerifyDriver {
                 )));
             }
         };
-        let submit_node = ctx
+        let pair = ctx
             .runtime_spec()
-            .node(&verify.submit_node_id)
-            .ok_or_else(|| {
-                RuntimeError::InvalidSpec(format!(
-                    "side-effect verify node {} references missing submit node {}",
-                    ctx.node().node_id,
-                    verify.submit_node_id
-                ))
-            })?;
-        let submit_contract = submit_node.side_effect.as_ref().ok_or_else(|| {
-            RuntimeError::InvalidSpec(format!(
-                "side-effect verify node {} references non-side-effect submit node {}",
-                ctx.node().node_id,
-                submit_node.node_id
-            ))
-        })?;
+            .spec()
+            .side_effect_verify_pair_for_verify_node(&ctx.node().node_id)
+            .map_err(|error| RuntimeError::InvalidSpec(error.to_string()))?;
+        let submit_node = pair.submit_node;
+        let submit_contract = pair.submit_contract;
         let projection = ctx
             .projections()
             .side_effect_for_pair(ctx.run_id(), &verify.pair_id)

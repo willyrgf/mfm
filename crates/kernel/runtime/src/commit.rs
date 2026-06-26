@@ -1919,19 +1919,11 @@ fn side_effect_verify_terminal_required_state(
     runtime_spec: &CertifiedRuntimeSpec,
     verify: &spec::SideEffectVerifyNodeSpec,
 ) -> Result<store::RequiredSideEffectState> {
-    let submit = runtime_spec.node(&verify.submit_node_id).ok_or_else(|| {
-        RuntimeError::InvalidSpec(format!(
-            "side-effect verify node references missing submit node {}",
-            verify.submit_node_id
-        ))
-    })?;
-    let contract = submit.side_effect.as_ref().ok_or_else(|| {
-        RuntimeError::InvalidSpec(format!(
-            "side-effect verify node references non-side-effect submit node {}",
-            verify.submit_node_id
-        ))
-    })?;
-    match &contract.verification {
+    let pair = runtime_spec
+        .spec()
+        .side_effect_verify_pair_for_pair_id(&verify.pair_id)
+        .map_err(|error| RuntimeError::InvalidSpec(error.to_string()))?;
+    match &pair.submit_contract.verification {
         spec::SideEffectVerificationSpec::Receipt => {
             Ok(store::RequiredSideEffectState::ReceiptObserved)
         }
