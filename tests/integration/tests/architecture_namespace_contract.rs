@@ -25,7 +25,7 @@ const SEMANTIC_FIELD_EXCEPTION_COUNTS: &[(&str, &str, usize)] = &[
     ("crates/portfolio/model/src/portfolio.rs", "password", 1),
     ("crates/portfolio/model/src/portfolio.rs", "mnemonic", 2),
     ("crates/portfolio/model/src/symbol.rs", "authorization", 2),
-    ("crates/kernel/certify/src/lib.rs", "authorization", 79),
+    ("crates/kernel/certify/src/lib.rs", "authorization", 80),
     ("crates/kernel/program/src/lib.rs", "authorization", 15),
     ("crates/kernel/runtime/src/tests.rs", "authorization", 10),
     ("crates/ops/proof-op/src/lib.rs", "authorization", 5),

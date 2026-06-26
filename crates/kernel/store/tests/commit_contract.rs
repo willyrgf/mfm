@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::task::{Context, Poll, Waker};
 
@@ -5,9 +6,9 @@ use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_events::v1::{self as events, side_effect, ArtifactRole, KernelEventPayload};
 use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind, CapabilityVersion, CellId,
-    ContentDigest, DescriptorId, DigestAlgorithm, DigestBytes, EventId, LoweringVersion, NodeId,
-    RunId, SchemaId, ScopeId, SeedId, SemanticTypeId, SideEffectPairId, SpecHash, SpecVersion,
-    StateKind, StateVersion,
+    ContentDigest, DescriptorId, DigestAlgorithm, DigestBytes, EffectKind, EffectVersion, EventId,
+    LoweringVersion, NodeId, RunId, SchemaId, ScopeId, SeedId, SemanticTypeId, SideEffectPairId,
+    SpecHash, SpecVersion, StateKind, StateVersion,
 };
 use mfm_manual_auth::{
     manual_authorization_proof_schema_id, ManualAuthorizationSignatureBytes,
@@ -35,8 +36,9 @@ use mfm_store::v1::{
     RunEventStore, RunMode, RunState, SagaAdmitToken, SagaEngagementProjection,
     SagaEngagementReason, SagaTerminal, SagaTerminalProof, SideEffectLedgerPhase,
     SideEffectPairLedgerRef, SideEffectPhase, SideEffectProgress, SideEffectTerminal,
-    StateAttemptStarted, StoreError, StreamSeq, TrustScopeId, TrustScopeStore,
-    EXECUTION_CLAIM_HEARTBEAT_INTERVAL_SECS, EXECUTION_CLAIM_LEASE_TTL_SECS,
+    SideEffectTerminalPolicies, SideEffectTerminalPolicy, StateAttemptStarted, StoreError,
+    StreamSeq, TrustScopeId, TrustScopeStore, EXECUTION_CLAIM_HEARTBEAT_INTERVAL_SECS,
+    EXECUTION_CLAIM_LEASE_TTL_SECS,
 };
 
 const SPEC_MEDIA_TYPE: &str = "application/vnd.mfm.typed-execution-spec+json;version=1";
@@ -144,9 +146,11 @@ fn run_id(byte: u8) -> RunId {
     RunId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
 }
 
-fn test_run_identity_material() -> events::RunIdentityMaterialV1 {
+fn test_run_identity_material_for_spec_hash(
+    certified_spec_hash: SpecHash,
+) -> events::RunIdentityMaterialV1 {
     events::RunIdentityMaterialV1 {
-        certified_spec_hash: spec_hash(1),
+        certified_spec_hash,
         trust_scope_id: TrustScopeId::new("mfm.trust_scope.v1:30303030303030303030303030303030")
             .expect("test trust scope"),
         distinct_run_key_digest: None,
@@ -165,15 +169,217 @@ fn node_id(byte: u8) -> NodeId {
     NodeId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
 }
 
-fn side_effect_pair_id_for_ledger(ledger_key: &events::SideEffectLedgerKey) -> SideEffectPairId {
+fn legacy_side_effect_pair_id_for_ledger(
+    ledger_key: &events::SideEffectLedgerKey,
+) -> SideEffectPairId {
     SideEffectPairId::from_digest(
         DigestAlgorithm::Sha256JcsV1,
         sha256_digest_bytes(ledger_key.as_str().as_bytes()),
     )
 }
 
+fn side_effect_pair_id_for_ledger(ledger_key: &events::SideEffectLedgerKey) -> SideEffectPairId {
+    if ledger_key == &side_effect_ledger_key() {
+        return side_effect_pair_id();
+    }
+    legacy_side_effect_pair_id_for_ledger(ledger_key)
+}
+
 fn side_effect_pair_id() -> SideEffectPairId {
-    side_effect_pair_id_for_ledger(&side_effect_ledger_key())
+    side_effect_pair_id_for_contract(&default_side_effect_contract())
+}
+
+fn side_effect_pair_id_for_contract(contract: &spec::SideEffectContractSpec) -> SideEffectPairId {
+    spec::side_effect_pair_id(&node_id(70), &side_effect_output_cell(), contract)
+        .expect("certified side-effect pair id")
+}
+
+fn side_effect_output_cell() -> CellId {
+    cell_id(78)
+}
+
+fn terminal_policies_for_projection(
+    projection: &ProjectionSnapshot,
+    run_id: &RunId,
+    terminal_policy: SideEffectTerminalPolicy,
+) -> SideEffectTerminalPolicies {
+    SideEffectTerminalPolicies::new(
+        projection
+            .side_effects()
+            .filter(|(_, side_effect)| side_effect.run_id == *run_id)
+            .map(|(_, side_effect)| (side_effect.pair_id.clone(), terminal_policy))
+            .collect::<BTreeMap<_, _>>(),
+    )
+}
+
+fn confirmation_terminal_policies_for_projection(
+    projection: &ProjectionSnapshot,
+    run_id: &RunId,
+) -> SideEffectTerminalPolicies {
+    terminal_policies_for_projection(projection, run_id, SideEffectTerminalPolicy::Confirmation)
+}
+
+fn receipt_terminal_policies_for_projection(
+    projection: &ProjectionSnapshot,
+    run_id: &RunId,
+) -> SideEffectTerminalPolicies {
+    terminal_policies_for_projection(projection, run_id, SideEffectTerminalPolicy::Receipt)
+}
+
+fn empty_terminal_policies() -> SideEffectTerminalPolicies {
+    SideEffectTerminalPolicies::new(BTreeMap::new())
+}
+
+fn default_side_effect_contract() -> spec::SideEffectContractSpec {
+    side_effect_contract_with_verification(spec::SideEffectVerificationSpec::Finalized { depth: 1 })
+}
+
+fn side_effect_contract_with_verification(
+    verification: spec::SideEffectVerificationSpec,
+) -> spec::SideEffectContractSpec {
+    spec::SideEffectContractSpec {
+        contract_digest: content_digest(77),
+        resource_claim: spec::ResourceClaimSpec::ManualOnly,
+        verification,
+    }
+}
+
+fn saga_authority_spec(policy: SagaPolicySpec) -> spec::TypedExecutionSpec {
+    saga_authority_spec_with_verification(
+        policy,
+        spec::SideEffectVerificationSpec::Finalized { depth: 1 },
+    )
+}
+
+fn saga_authority_spec_with_verification(
+    policy: SagaPolicySpec,
+    verification: spec::SideEffectVerificationSpec,
+) -> spec::TypedExecutionSpec {
+    let planning_lineage = spec::PlanningLineage {
+        active_operation_instances: Vec::new(),
+        completed_operation_frames: Vec::new(),
+        lineage_digest: content_digest(85),
+    };
+    let public_schema_id = schema_id("mfm.test.public_output", 3);
+    let contract = side_effect_contract_with_verification(verification);
+    let config_ref = spec::ConfigRef {
+        schema_id: schema_id("mfm.test.side_effect_config", 89),
+        artifact_id: artifact_id(90),
+        digest: content_digest(91),
+        byte_len: 2,
+        media_type: media_type("application/json"),
+    };
+    let input_bindings = spec::InputBindingSpec {
+        input_schema_id: schema_id("mfm.test.side_effect_input", 92),
+        input_descriptor_id: descriptor_id(93),
+        root: spec::InputBindingNodeSpec::Unit,
+        digest: content_digest(94),
+    };
+    let state_kind = state_kind(70);
+    let state_version = StateVersion::new("mfm.test.side_effect_state.v1").expect("state version");
+    let state_descriptor_id = descriptor_id(88);
+    let effect_kind = EffectKind::new(
+        "mfm.test",
+        "side_effect",
+        DigestAlgorithm::Sha256JcsV1,
+        digest_bytes(95),
+    )
+    .expect("effect kind");
+    let capability_bindings =
+        mfm_capabilities::CapabilitySetDescriptor::new(Vec::new()).expect("empty capabilities");
+    let renderer_descriptor = spec::RendererDescriptorIdentity {
+        descriptor_id: descriptor_id(96),
+        renderer_kind: spec::RendererKind::new("public-output/json").expect("renderer kind"),
+        renderer_version: spec::RendererVersion::new("mfm.renderer.test.v1")
+            .expect("renderer version"),
+        public_schema_id: public_schema_id.clone(),
+        canonicalizer_identity: CanonicalizerIdentity::new("mfm.jcs.v1").expect("canonicalizer"),
+    };
+    spec::TypedExecutionSpec::new(spec::TypedExecutionSpecParts {
+        authoring: spec::AuthoringProvenance::StateComposition {
+            descriptor: spec::CompositionDescriptor {
+                descriptor_id: descriptor_id(86),
+                name: "mfm.test.saga_authority".to_owned(),
+                version: "mfm.test.saga_authority.v1".to_owned(),
+            },
+            config_hash: content_digest(87),
+        },
+        saga: policy,
+        scopes: Vec::new(),
+        seeds: Vec::new(),
+        descriptor_identities: vec![
+            spec::DescriptorIdentity::State(Box::new(spec::StateDescriptorIdentity {
+                descriptor_id: state_descriptor_id.clone(),
+                name: "mfm.test.side_effect".to_owned(),
+                state_kind: state_kind.clone(),
+                state_version: state_version.clone(),
+                config_schema_id: config_ref.schema_id.clone(),
+                input_schema_id: input_bindings.input_schema_id.clone(),
+                output_schema_id: schema_id("mfm.test.side_effect_output", 97),
+                output_semantic_type_id: semantic_id("side_effect_output", 98),
+                effect_kind: effect_kind.clone(),
+                effect_class: "side_effect".to_owned(),
+                effect_name: "side_effect".to_owned(),
+                effect_version: EffectVersion::new("mfm.test.side_effect.v1")
+                    .expect("effect version"),
+                capabilities: capability_bindings.clone(),
+                runner: "mfm.test.runner".to_owned(),
+                side_effect_contract_digest: Some(contract.contract_digest.clone()),
+            })),
+            spec::DescriptorIdentity::Renderer(Box::new(renderer_descriptor.clone())),
+        ],
+        config_refs: vec![config_ref.clone()],
+        nodes: vec![spec::NodeSpec {
+            node_id: node_id(70),
+            stable_key: spec::StableAuthorKey::new("side-effect").expect("stable key"),
+            scope_id: scope_id(71),
+            state_kind,
+            state_version,
+            descriptor_id: state_descriptor_id,
+            config_ref,
+            input_bindings,
+            output_cell: side_effect_output_cell(),
+            effect_kind,
+            capability_bindings,
+            adapter_bindings: Vec::new(),
+            side_effect: Some(contract),
+            framework: None,
+            planning_lineage: planning_lineage.clone(),
+            deterministic_predecessors: Vec::new(),
+        }],
+        remediations: BTreeMap::new(),
+        cells: Vec::new(),
+        value_lineages: Vec::new(),
+        planning_lineage: Vec::new(),
+        public_outputs: spec::PublicOutputSpec {
+            public_schema_id: public_schema_id.clone(),
+            outputs: Vec::new(),
+            renderer_descriptor,
+        },
+    })
+    .expect("saga authority spec")
+}
+
+fn saga_authority_spec_with_authoring_config_hash(
+    policy: SagaPolicySpec,
+    config_hash: ContentDigest,
+) -> spec::TypedExecutionSpec {
+    let mut spec = saga_authority_spec(policy);
+    match &mut spec.authoring {
+        spec::AuthoringProvenance::StateComposition {
+            config_hash: authoring_config_hash,
+            ..
+        }
+        | spec::AuthoringProvenance::OperationExpansion {
+            config_hash: authoring_config_hash,
+            ..
+        }
+        | spec::AuthoringProvenance::MixedComposition {
+            config_hash: authoring_config_hash,
+            ..
+        } => *authoring_config_hash = config_hash,
+    }
+    spec
 }
 
 fn side_effect_pair_role(
@@ -255,14 +461,18 @@ fn run_admitted_with_saga_policy(
     run_id: RunId,
     saga_policy: &SagaPolicySpec,
 ) -> KernelEventPayload {
+    let authority_spec = saga_authority_spec(saga_policy.clone());
+    let certified_spec_hash = authority_spec
+        .spec_hash()
+        .expect("saga authority spec hash");
     let spec_artifact = spec_artifact_ref();
     let certificate_artifact = certificate_artifact_ref();
-    let identity_material = test_run_identity_material();
+    let identity_material = test_run_identity_material_for_spec_hash(certified_spec_hash.clone());
     KernelEventPayload::RunAdmitted(Box::new(events::RunAdmitted {
         run_id,
         identity_material,
         entry_point: entry_point_launch_evidence(),
-        spec_hash: spec_hash(1),
+        spec_hash: certified_spec_hash,
         spec_artifact: run_artifact_ref(&spec_artifact),
         certificate_artifact: run_artifact_ref(&certificate_artifact),
         config_artifacts: Vec::new(),
@@ -1201,6 +1411,22 @@ fn run_completed_for_run(
     })
 }
 
+fn run_completed_for_run_with_policy(
+    run_id: RunId,
+    outcome: events::RunCompletionOutcome,
+    policy: SagaPolicySpec,
+) -> KernelEventPayload {
+    let spec_hash = saga_authority_spec(policy)
+        .spec_hash()
+        .expect("run completion saga authority spec hash");
+    let mut payload = run_completed_for_run(run_id, outcome);
+    let KernelEventPayload::RunCompleted(inner) = &mut payload else {
+        unreachable!("helper returns run completed payload");
+    };
+    inner.spec_hash = spec_hash;
+    payload
+}
+
 fn completed_outcome(byte: u8) -> events::RunCompletionOutcome {
     events::RunCompletionOutcome::Completed(Box::new(events::PublicOutputCompletionEvidence {
         public_output_schema_id: schema_id("mfm.test.public_output", 3),
@@ -1294,9 +1520,10 @@ fn compensate_saga_policy() -> SagaPolicySpec {
 }
 
 fn saga_preconditions(run_id: &RunId, policy: SagaPolicySpec) -> CommitPreconditions {
+    let spec = saga_authority_spec(policy);
     CommitPreconditions {
         saga_admit_token: Some(
-            SagaAdmitToken::new(run_id.clone(), spec_hash(1), policy).expect("saga admit token"),
+            SagaAdmitToken::from_spec(run_id.clone(), &spec).expect("saga admit token"),
         ),
         ..CommitPreconditions::default()
     }
@@ -1309,13 +1536,25 @@ fn manual_resolution_request(
     byte: u8,
     policy: SagaPolicySpec,
 ) -> CommitRequest {
+    let spec = saga_authority_spec(policy);
+    let spec_hash = spec.spec_hash().expect("saga authority spec hash");
+    let mut manual_resolution = manual_resolution_recorded_for_run(run_id.clone(), byte);
+    let KernelEventPayload::ManualResolutionRecorded(payload) = &mut manual_resolution else {
+        unreachable!("helper returns manual resolution payload");
+    };
+    payload.spec_hash = spec_hash;
     CommitRequest::from_payloads(
         run_id.clone(),
         expected_next_seq,
         CommitKey::new(commit_key).expect("commit key"),
-        vec![manual_resolution_recorded_for_run(run_id.clone(), byte)],
+        vec![manual_resolution],
         manual_resolution_artifacts(byte),
-        saga_preconditions(run_id, policy),
+        CommitPreconditions {
+            saga_admit_token: Some(
+                SagaAdmitToken::from_spec(run_id.clone(), &spec).expect("saga admit token"),
+            ),
+            ..CommitPreconditions::default()
+        },
     )
     .expect("manual resolution request")
 }
@@ -1361,9 +1600,12 @@ fn proof_manual_evidence_ref() -> ManualResolutionEvidenceRef {
 }
 
 fn verified_manual_resolution_for_seq(expected_next_seq: u64) -> VerifiedManualResolutionForPrefix {
+    let spec_hash = saga_authority_spec(proof_manual_saga_policy())
+        .spec_hash()
+        .expect("manual saga authority spec hash");
     let prefix = ManualResolutionPrefixAuthority::new(
         run_id(220),
-        spec_hash(1),
+        spec_hash,
         expected_next_seq,
         content_digest(250),
         ManualResolutionBlockReason::PolicyManualResolution,
@@ -1403,61 +1645,39 @@ fn manual_signature_candidates(
     expected_next_seq: u64,
     claim: &ManualResolutionAuthorizationClaim,
 ) -> Vec<ManualSignatureCandidate> {
-    let (r_hex, s_hex, normalized_s_hex) = match expected_next_seq {
-        7 => (
-            "a380063901f4c963898f2f997bd0ffa1b54cd07d1c8ec8800c395bcce745c54c",
-            "e26f1b7d09fb4faf752e566187aa835583d36a747a488c34ab441491849f239d",
-            "1d90e482f604b0508ad1a99e78557ca936db727235001407148e49fb4b971da4",
-        ),
-        8 => (
-            "3e7e3a08374ccd3e3bc9d4b63ac4b7b167feceb2f9208f9367770906eadced20",
-            "02260e1cc68113c6d29a5b2f7efe88e7f5bcc78c9855290a973545800c0ff060",
-            "02260e1cc68113c6d29a5b2f7efe88e7f5bcc78c9855290a973545800c0ff060",
-        ),
-        9 => (
-            "5b5d0a504ca7952abf53ba2eb4d1c5904e11882caac055d3cd95a88e1c37fff7",
-            "22f2c34f3ccefe5ed956db06e43046024f6a1c371574db19a2a60e7c84f76a93",
-            "22f2c34f3ccefe5ed956db06e43046024f6a1c371574db19a2a60e7c84f76a93",
-        ),
-        other => panic!("missing manual signature fixture for sequence {other}"),
-    };
+    let _ = expected_next_seq;
     let policy = proof_manual_evidence_spec().authorization;
     let operator = policy.authority.operators[0].clone();
-    [s_hex, normalized_s_hex]
-        .into_iter()
-        .flat_map(|s| {
-            [0_u8, 1]
-                .into_iter()
-                .map(move |recovery_id| (s, recovery_id))
-        })
-        .map(|(s, recovery_id)| {
-            let mut signature = hex_to_bytes(r_hex);
-            signature.extend(hex_to_bytes(s));
-            signature.push(recovery_id);
-            let proof = ManualResolutionAuthorizationProof {
-                verifier_id: policy.verifier_id.clone(),
-                signing_scheme: policy.signing_scheme.clone(),
-                claim: claim.clone(),
-                signatures: vec![ManualResolutionAuthorizationSignature {
-                    operator_id: operator.operator_id.clone(),
-                    public_identity: operator.public_identity.clone(),
-                    signature: ManualAuthorizationSignatureBytes::new(signature)
-                        .expect("manual signature bytes"),
-                }],
-            };
-            ManualSignatureCandidate {
-                proof_bytes: proof.canonical_json().expect("manual proof canonical json"),
-            }
-        })
-        .collect()
+    let claim_digest = claim.digest().expect("manual claim digest");
+    let proof = ManualResolutionAuthorizationProof {
+        verifier_id: policy.verifier_id.clone(),
+        signing_scheme: policy.signing_scheme.clone(),
+        claim: claim.clone(),
+        signatures: vec![ManualResolutionAuthorizationSignature {
+            operator_id: operator.operator_id,
+            public_identity: operator.public_identity,
+            signature: ManualAuthorizationSignatureBytes::new(sign_manual_claim_digest(
+                claim_digest.digest().as_bytes(),
+            ))
+            .expect("manual signature bytes"),
+        }],
+    };
+    vec![ManualSignatureCandidate {
+        proof_bytes: proof.canonical_json().expect("manual proof canonical json"),
+    }]
 }
 
-fn hex_to_bytes(value: &str) -> Vec<u8> {
-    assert_eq!(value.len() % 2, 0, "hex string length");
-    (0..value.len())
-        .step_by(2)
-        .map(|index| u8::from_str_radix(&value[index..index + 2], 16).expect("hex byte"))
-        .collect()
+fn sign_manual_claim_digest(digest: &[u8; 32]) -> Vec<u8> {
+    let mut key_bytes = [0u8; 32];
+    key_bytes[31] = 1;
+    let secret_key = k256::SecretKey::from_slice(&key_bytes).expect("test key");
+    let signing_key = k256::ecdsa::SigningKey::from(&secret_key);
+    let (signature, recovery_id) = signing_key
+        .sign_prehash_recoverable(digest)
+        .expect("manual signature");
+    let mut signature_bytes = signature.to_bytes().to_vec();
+    signature_bytes.push(u8::from(recovery_id.is_y_odd()));
+    signature_bytes
 }
 
 fn manual_authorization_ref(proof_bytes: &[u8]) -> ManualResolutionEvidenceRef {
@@ -1595,10 +1815,22 @@ fn set_side_effect_ledger(
     ledger_key: events::SideEffectLedgerKey,
     purpose: events::SideEffectLedgerPurpose,
 ) {
+    let remediation_spec_hash = matches!(
+        &purpose,
+        events::SideEffectLedgerPurpose::Remediation { .. }
+    )
+    .then(|| {
+        saga_authority_spec(compensate_saga_policy())
+            .spec_hash()
+            .expect("remediation saga authority spec hash")
+    });
     with_side_effect_payload_mut!(payload, inner, {
         inner.ledger_key = ledger_key.clone();
         inner.ledger_purpose = purpose.clone();
         inner.pair_id = side_effect_pair_id_for_ledger(&ledger_key);
+        if let Some(spec_hash) = remediation_spec_hash.clone() {
+            inner.spec_hash = spec_hash;
+        }
     });
 }
 
@@ -2353,7 +2585,7 @@ fn commit_rejects_secret_shaped_persisted_error_message() {
             commit_key: CommitKey::new("public-diagnostic-secret-attempt-start").expect("commit key"),
             payloads: vec![fact_attempt_started()],
             required_artifacts: Vec::new(),
-            preconditions: CommitPreconditions::default(),
+            preconditions: saga_preconditions(&run_id, compensate_saga_policy()),
         })
         .expect("append attempt start");
 
@@ -2369,7 +2601,7 @@ fn commit_rejects_secret_shaped_persisted_error_message() {
             commit_key: CommitKey::new("public-diagnostic-secret-attempt-failed").expect("commit key"),
             payloads: vec![failure],
             required_artifacts: Vec::new(),
-            preconditions: CommitPreconditions::default(),
+            preconditions: saga_preconditions(&run_id, compensate_saga_policy()),
         })
         .expect_err("secret-shaped diagnostic rejects before append");
 
@@ -2392,7 +2624,7 @@ fn commit_rejects_non_redacted_diagnostic_artifact_ref() {
             commit_key: CommitKey::new("public-diagnostic-artifact-attempt-start").expect("commit key"),
             payloads: vec![fact_attempt_started()],
             required_artifacts: Vec::new(),
-            preconditions: CommitPreconditions::default(),
+            preconditions: saga_preconditions(&run_id, compensate_saga_policy()),
         })
         .expect("append attempt start");
 
@@ -2432,7 +2664,7 @@ fn commit_rejects_non_redacted_diagnostic_artifact_ref() {
             commit_key: CommitKey::new("public-diagnostic-artifact-attempt-failed").expect("commit key"),
             payloads: vec![failure],
             required_artifacts: vec![required_artifact],
-            preconditions: CommitPreconditions::default(),
+            preconditions: saga_preconditions(&run_id, compensate_saga_policy()),
         })
         .expect_err("non-redacted diagnostic artifact rejects before append");
 
@@ -2449,7 +2681,7 @@ fn spec_artifact_ref() -> ArtifactEvidenceRef {
         digest: ContentDigest::from_digest(hash.algorithm(), *hash.digest()),
         byte_len: 128,
         media_type: media_type(SPEC_MEDIA_TYPE),
-        schema_id: None,
+        schema_id: Some(spec::typed_execution_spec_schema_id().expect("typed spec schema")),
         semantic_type_id: None,
         producer_node_id: None,
         producer_seed_id: None::<SeedId>,
@@ -2463,7 +2695,9 @@ fn certificate_artifact_ref() -> ArtifactEvidenceRef {
         digest: content_digest(4),
         byte_len: 64,
         media_type: media_type(mfm_certify::CERTIFICATE_MEDIA_TYPE),
-        schema_id: None,
+        schema_id: Some(
+            mfm_certify::typed_spec_certificate_schema_id().expect("typed certificate schema"),
+        ),
         semantic_type_id: None,
         producer_node_id: None,
         producer_seed_id: None::<SeedId>,
@@ -2619,7 +2853,7 @@ fn append_async_side_effect_prepare_for_ledger(
                 attempt_id.clone(),
             )],
             required_artifacts: Vec::new(),
-            preconditions: CommitPreconditions::default(),
+            preconditions: saga_preconditions(run_id, compensate_saga_policy()),
         },
     )
     .expect("append async sidefx attempt start");
@@ -2649,7 +2883,7 @@ fn append_async_side_effect_prepare_for_ledger(
             commit_key: CommitKey::new(commit_key).expect("commit key"),
             payloads: vec![intent, claim, lane, prepared],
             required_artifacts: vec![intent_evidence],
-            preconditions: CommitPreconditions::default(),
+            preconditions: saga_preconditions(run_id, compensate_saga_policy()),
         },
     )
     .expect("append async sidefx prepare");
@@ -2717,6 +2951,35 @@ fn run_start_request_with_saga_policy(
     .expect("run start request")
 }
 
+#[test]
+fn run_admission_rejects_schema_less_launch_artifacts() {
+    let run_id = run_id(176);
+    let mut payload = run_admitted(run_id.clone());
+    let KernelEventPayload::RunAdmitted(run_admitted) = &mut payload else {
+        unreachable!("helper returns run admission");
+    };
+    run_admitted.spec_artifact.schema_id = None;
+
+    let request = CommitRequest::from_payloads(
+        run_id,
+        StreamSeq::FIRST,
+        CommitKey::new("schema-less-launch-artifact").expect("commit key"),
+        vec![payload],
+        vec![spec_artifact_ref(), certificate_artifact_ref()],
+        CommitPreconditions {
+            required_run_state: RequiredRunState::Absent,
+            ..CommitPreconditions::default()
+        },
+    )
+    .expect("run start request");
+
+    let mut store = StoreContractRunStore::new();
+    let error = store
+        .append_prepared_commit(request)
+        .expect_err("schema-less launch artifact must reject");
+    assert_invalid_prepared_commit_contains(error, "schema_id");
+}
+
 fn ensure_test_run_admitted(store: &mut StoreContractRunStore, run_id: &RunId, commit_key: &str) {
     if store.expected_next_seq(run_id) == StreamSeq::FIRST {
         store
@@ -2737,7 +3000,7 @@ fn append_side_effect_prepare(store: &mut StoreContractRunStore, run_id: &RunId)
             commit_key: CommitKey::new("sidefx-attempt-start").expect("commit key"),
             payloads: vec![side_effect_attempt_started()],
             required_artifacts: Vec::new(),
-            preconditions: CommitPreconditions::default(),
+            preconditions: saga_preconditions(run_id, compensate_saga_policy()),
         })
         .expect("append sidefx attempt start");
     store
@@ -2751,7 +3014,7 @@ fn append_side_effect_prepare(store: &mut StoreContractRunStore, run_id: &RunId)
                 side_effect_prepared(1, "token-1"),
             ],
             required_artifacts: vec![intent_evidence],
-            preconditions: CommitPreconditions::default(),
+            preconditions: saga_preconditions(run_id, compensate_saga_policy()),
         })
         .expect("append sidefx prepare");
 }
@@ -2832,7 +3095,7 @@ fn append_side_effect_prepare_for_ledger_on_attempt(
             commit_key: CommitKey::new(commit_key).expect("commit key"),
             payloads: vec![intent, claim, lane, prepared],
             required_artifacts: vec![intent_evidence],
-            preconditions: CommitPreconditions::default(),
+            preconditions: saga_preconditions(run_id, compensate_saga_policy()),
         })
         .expect("append sidefx prepare");
 }
@@ -2845,7 +3108,7 @@ fn append_side_effect_started(store: &mut StoreContractRunStore, run_id: &RunId)
             commit_key: CommitKey::new("sidefx-started").expect("commit key"),
             payloads: vec![side_effect_started("owner-1", 1, "token-1")],
             required_artifacts: Vec::new(),
-            preconditions: CommitPreconditions::default(),
+            preconditions: saga_preconditions(run_id, compensate_saga_policy()),
         })
         .expect("append sidefx started");
 }
@@ -2863,7 +3126,7 @@ fn append_generic_nonretryable_failure(
             commit_key: CommitKey::new(format!("{key_prefix}-attempt-start")).expect("commit key"),
             payloads: vec![fact_attempt_started()],
             required_artifacts: Vec::new(),
-            preconditions: CommitPreconditions::default(),
+            preconditions: saga_preconditions(run_id, compensate_saga_policy()),
         })
         .expect("append generic attempt start");
     store
@@ -2873,7 +3136,7 @@ fn append_generic_nonretryable_failure(
             commit_key: CommitKey::new(format!("{key_prefix}-attempt-failed")).expect("commit key"),
             payloads: vec![fact_attempt_failed(false)],
             required_artifacts: Vec::new(),
-            preconditions: CommitPreconditions::default(),
+            preconditions: saga_preconditions(run_id, compensate_saga_policy()),
         })
         .expect("append generic attempt failure");
 }
@@ -3038,7 +3301,7 @@ fn append_remediation_confirmation(
                     ArtifactRole::Confirmation,
                 ),
             ],
-            preconditions: CommitPreconditions::default(),
+            preconditions: saga_preconditions(run_id, compensate_saga_policy()),
         })
         .expect("append remediation confirmation");
 }
@@ -5441,8 +5704,13 @@ fn forward_fence_rejects_boundary_events_after_engagement() {
 fn remediation_intent_requires_engaged_confirmed_forward_and_unique_link() {
     let run_id = run_id(120);
     let mut store = StoreContractRunStore::new();
+    let policy = compensate_saga_policy();
     store
-        .append_prepared_commit(run_start_request(run_id.clone(), "remediation-run-start"))
+        .append_prepared_commit(run_start_request_with_saga_policy(
+            run_id.clone(),
+            "remediation-run-start",
+            &policy,
+        ))
         .expect("append run start");
     append_forward_confirmation(&mut store, &run_id);
 
@@ -5455,7 +5723,7 @@ fn remediation_intent_requires_engaged_confirmed_forward_and_unique_link() {
             commit_key: CommitKey::new("remediation-before-engagement").expect("commit key"),
             payloads: vec![remediation_intent],
             required_artifacts: vec![intent_artifact_ref(artifact_id(140), content_digest(141))],
-            preconditions: CommitPreconditions::default(),
+            preconditions: saga_preconditions(&run_id, policy.clone()),
         })
         .expect_err("remediation before engagement rejects");
     assert_projection_conflict_contains(error, "prior saga engagement");
@@ -5476,7 +5744,7 @@ fn remediation_intent_requires_engaged_confirmed_forward_and_unique_link() {
             commit_key: CommitKey::new("remediation-wrong-pair").expect("commit key"),
             payloads: vec![wrong_pair],
             required_artifacts: vec![intent_artifact_ref(artifact_id(148), content_digest(149))],
-            preconditions: CommitPreconditions::default(),
+            preconditions: saga_preconditions(&run_id, policy.clone()),
         })
         .expect_err("remediation pair mismatch rejects");
     assert_projection_conflict_contains(error, "forward pair");
@@ -5496,7 +5764,7 @@ fn remediation_intent_requires_engaged_confirmed_forward_and_unique_link() {
             commit_key: CommitKey::new("remediation-admitted").expect("commit key"),
             payloads: vec![remediation_intent],
             required_artifacts: vec![intent_artifact_ref(artifact_id(142), content_digest(143))],
-            preconditions: CommitPreconditions::default(),
+            preconditions: saga_preconditions(&run_id, policy.clone()),
         })
         .expect("confirmed forward remediation is admitted after engagement");
 
@@ -5509,7 +5777,7 @@ fn remediation_intent_requires_engaged_confirmed_forward_and_unique_link() {
             commit_key: CommitKey::new("remediation-duplicate").expect("commit key"),
             payloads: vec![duplicate],
             required_artifacts: vec![intent_artifact_ref(artifact_id(144), content_digest(145))],
-            preconditions: CommitPreconditions::default(),
+            preconditions: saga_preconditions(&run_id, policy.clone()),
         })
         .expect_err("duplicate remediation rejects");
     assert_projection_conflict_contains(error, "already exists for forward pair");
@@ -5517,9 +5785,10 @@ fn remediation_intent_requires_engaged_confirmed_forward_and_unique_link() {
     let unconfirmed_run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(121));
     let mut unconfirmed = StoreContractRunStore::new();
     unconfirmed
-        .append_prepared_commit(run_start_request(
+        .append_prepared_commit(run_start_request_with_saga_policy(
             unconfirmed_run_id.clone(),
             "unconfirmed-run-start",
+            &policy,
         ))
         .expect("append run start");
     append_side_effect_prepare(&mut unconfirmed, &unconfirmed_run_id);
@@ -5537,10 +5806,67 @@ fn remediation_intent_requires_engaged_confirmed_forward_and_unique_link() {
             commit_key: CommitKey::new("remediation-unconfirmed").expect("commit key"),
             payloads: vec![remediation_intent],
             required_artifacts: vec![intent_artifact_ref(artifact_id(146), content_digest(147))],
-            preconditions: CommitPreconditions::default(),
+            preconditions: saga_preconditions(&unconfirmed_run_id, policy),
         })
         .expect_err("unconfirmed forward remediation rejects");
-    assert_projection_conflict_contains(error, "requires confirmed forward ledger");
+    assert_projection_conflict_contains(error, "requires terminal forward ledger");
+}
+
+#[test]
+fn remediation_intent_rejects_saga_token_from_same_policy_different_spec_hash() {
+    let run_id = run_id(222);
+    let mut store = StoreContractRunStore::new();
+    let policy = compensate_saga_policy();
+    store
+        .append_prepared_commit(run_start_request_with_saga_policy(
+            run_id.clone(),
+            "remediation-spec-authority-run-start",
+            &policy,
+        ))
+        .expect("append run start");
+    append_forward_confirmation(&mut store, &run_id);
+    append_generic_nonretryable_failure(&mut store, &run_id, "remediation-spec-authority");
+
+    let alternate_spec =
+        saga_authority_spec_with_authoring_config_hash(policy.clone(), content_digest(188));
+    let alternate_spec_hash = alternate_spec
+        .spec_hash()
+        .expect("alternate saga authority spec hash");
+    assert_ne!(
+        store
+            .projection_snapshot()
+            .run_spec_hash(&run_id)
+            .expect("run-start spec hash"),
+        &alternate_spec_hash
+    );
+
+    let mut remediation_intent = side_effect_intent(artifact_id(188), content_digest(189));
+    set_remediation_purpose(&mut remediation_intent, remediation_ledger_key(18));
+    let KernelEventPayload::SideEffectIntentPersisted(payload) = &mut remediation_intent else {
+        unreachable!("helper returns side-effect intent");
+    };
+    payload.spec_hash = alternate_spec_hash;
+    payload.ledger_purpose = events::SideEffectLedgerPurpose::Remediation {
+        forward_pair_id: side_effect_pair_id(),
+    };
+
+    let error = store
+        .append_prepared_commit(typed_commit_request! {
+            run_id: run_id.clone(),
+            expected_next_seq: store.expected_next_seq(&run_id),
+            commit_key: CommitKey::new("remediation-spec-authority-reject").expect("commit key"),
+            payloads: vec![remediation_intent],
+            required_artifacts: vec![intent_artifact_ref(artifact_id(188), content_digest(189))],
+            preconditions: CommitPreconditions {
+                saga_admit_token: Some(
+                    SagaAdmitToken::from_spec(run_id.clone(), &alternate_spec)
+                        .expect("alternate saga admit token"),
+                ),
+                ..CommitPreconditions::default()
+            },
+        })
+        .expect_err("alternate-spec saga token rejects");
+    assert_projection_conflict_contains(error, "spec hash does not match run start");
 }
 
 #[test]
@@ -5925,7 +6251,7 @@ fn saga_admit_token_must_match_run_start_policy_digest() {
         &verified,
     )
     .expect_err("mismatched saga token rejects before admission");
-    assert_invalid_prepared_commit_contains(error, "policy does not match saga admit token");
+    assert_invalid_prepared_commit_contains(error, "spec hash");
 }
 
 #[test]
@@ -6020,9 +6346,12 @@ fn saga_run_completed_requires_terminal_proof() {
     append_side_effect_prepare(&mut store, &terminal_run);
     append_side_effect_started(&mut store, &terminal_run);
     append_generic_nonretryable_failure(&mut store, &terminal_run, "terminal-quiescence");
+    let terminal_policies =
+        confirmation_terminal_policies_for_projection(store.projection_snapshot(), &terminal_run);
     let saga = store
         .projection_snapshot()
-        .derive_saga_projection(&terminal_run, &policy);
+        .derive_saga_projection(&terminal_run, &policy, &terminal_policies)
+        .expect("saga projection");
     let proof_error =
         SagaTerminalProof::new(&policy, &saga, store.expected_next_seq(&terminal_run), None)
             .expect_err("proof rejects before terminal saga mode");
@@ -6062,9 +6391,12 @@ fn saga_run_completed_requires_terminal_proof() {
             preconditions: CommitPreconditions::default(),
         })
         .expect("append confirmed side-effect attempt failure");
+    let forged_terminal_policies =
+        confirmation_terminal_policies_for_projection(forged.projection_snapshot(), &forged_run);
     let saga = forged
         .projection_snapshot()
-        .derive_saga_projection(&forged_run, &forged_policy);
+        .derive_saga_projection(&forged_run, &forged_policy, &forged_terminal_policies)
+        .expect("saga projection");
     let proof_error = SagaTerminalProof::new(
         &forged_policy,
         &saga,
@@ -6078,9 +6410,10 @@ fn saga_run_completed_requires_terminal_proof() {
             run_id: forged_run.clone(),
             expected_next_seq: forged.expected_next_seq(&forged_run),
             commit_key: CommitKey::new("terminal-forged-manual").expect("commit key"),
-            payloads: vec![run_completed_for_run(
+            payloads: vec![run_completed_for_run_with_policy(
                 forged_run.clone(),
                 events::RunCompletionOutcome::ManuallyResolved,
+                forged_policy.clone(),
             )],
             required_artifacts: Vec::new(),
             preconditions: saga_preconditions(&forged_run, forged_policy.clone()),
@@ -6099,9 +6432,12 @@ fn saga_run_completed_requires_terminal_proof() {
     forged
         .append_test_commit_plan(prepared.into())
         .expect("manual resolution admitted");
+    let forged_terminal_policies =
+        confirmation_terminal_policies_for_projection(forged.projection_snapshot(), &forged_run);
     let saga = forged
         .projection_snapshot()
-        .derive_saga_projection(&forged_run, &forged_policy);
+        .derive_saga_projection(&forged_run, &forged_policy, &forged_terminal_policies)
+        .expect("saga projection");
     let proof_error = SagaTerminalProof::new(
         &forged_policy,
         &saga,
@@ -6125,18 +6461,21 @@ fn saga_terminal_prepared_commit_requires_matching_proof() {
         ))
         .expect("append run start");
     append_generic_nonretryable_failure(&mut store, &run_id, "terminal-proof-failure");
+    let terminal_policies = empty_terminal_policies();
     let saga = store
         .projection_snapshot()
-        .derive_saga_projection(&run_id, &policy);
+        .derive_saga_projection(&run_id, &policy, &terminal_policies)
+        .expect("saga projection");
     let proof = SagaTerminalProof::new(&policy, &saga, store.expected_next_seq(&run_id), None)
         .expect("failed terminal proof authority");
     let request = typed_commit_request! {
         run_id: run_id.clone(),
         expected_next_seq: store.expected_next_seq(&run_id),
         commit_key: CommitKey::new("terminal-proof").expect("commit key"),
-        payloads: vec![run_completed_for_run(
+        payloads: vec![run_completed_for_run_with_policy(
             run_id.clone(),
             events::RunCompletionOutcome::FailedWithoutAcdcClaim,
+            policy.clone(),
         )],
         required_artifacts: Vec::new(),
         preconditions: saga_preconditions(&run_id, policy),
@@ -6158,6 +6497,74 @@ fn saga_terminal_prepared_commit_requires_matching_proof() {
 }
 
 #[test]
+fn saga_terminal_rejects_saga_token_from_same_policy_different_spec_hash() {
+    let run_id = run_id(127);
+    let policy = SagaPolicySpec::FailWithoutAcdcClaim;
+    let mut store = StoreContractRunStore::new();
+    store
+        .append_prepared_commit(run_start_request_with_saga_policy(
+            run_id.clone(),
+            "terminal-spec-authority-run-start",
+            &policy,
+        ))
+        .expect("append run start");
+    append_generic_nonretryable_failure(&mut store, &run_id, "terminal-spec-authority-failure");
+
+    let terminal_policies = empty_terminal_policies();
+    let saga = store
+        .projection_snapshot()
+        .derive_saga_projection(&run_id, &policy, &terminal_policies)
+        .expect("saga projection");
+    let proof = SagaTerminalProof::new(&policy, &saga, store.expected_next_seq(&run_id), None)
+        .expect("terminal proof authority");
+
+    let alternate_spec =
+        saga_authority_spec_with_authoring_config_hash(policy.clone(), content_digest(189));
+    let alternate_spec_hash = alternate_spec
+        .spec_hash()
+        .expect("alternate saga authority spec hash");
+    assert_ne!(
+        store
+            .projection_snapshot()
+            .run_spec_hash(&run_id)
+            .expect("run-start spec hash"),
+        &alternate_spec_hash
+    );
+
+    let mut completion = run_completed_for_run_with_policy(
+        run_id.clone(),
+        events::RunCompletionOutcome::FailedWithoutAcdcClaim,
+        policy,
+    );
+    let KernelEventPayload::RunCompleted(payload) = &mut completion else {
+        unreachable!("helper returns run completed payload");
+    };
+    payload.spec_hash = alternate_spec_hash;
+
+    let request = typed_commit_request! {
+        run_id: run_id.clone(),
+        expected_next_seq: store.expected_next_seq(&run_id),
+        commit_key: CommitKey::new("terminal-spec-authority-reject").expect("commit key"),
+        payloads: vec![completion],
+        required_artifacts: Vec::new(),
+        preconditions: CommitPreconditions {
+            saga_admit_token: Some(
+                SagaAdmitToken::from_spec(run_id.clone(), &alternate_spec)
+                    .expect("alternate saga admit token"),
+            ),
+            ..CommitPreconditions::default()
+        },
+    };
+    let prepared =
+        PreparedCommit::<SagaTerminal>::new(request, CommitArtifactEvidenceSet::empty(), &proof)
+            .expect("alternate-spec saga terminal prepared commit");
+    let error = store
+        .append_test_commit_plan(prepared.into())
+        .expect_err("alternate-spec saga token rejects");
+    assert_projection_conflict_contains(error, "spec hash does not match run start");
+}
+
+#[test]
 fn saga_terminal_prepared_commit_rejects_cross_run_proof() {
     let proof_run = run_id(123);
     let request_run = run_id(124);
@@ -6175,9 +6582,11 @@ fn saga_terminal_prepared_commit_rejects_cross_run_proof() {
         &proof_run,
         "terminal-cross-run-proof-failure",
     );
+    let terminal_policies = empty_terminal_policies();
     let proof_saga = proof_store
         .projection_snapshot()
-        .derive_saga_projection(&proof_run, &policy);
+        .derive_saga_projection(&proof_run, &policy, &terminal_policies)
+        .expect("saga projection");
     let proof = SagaTerminalProof::new(
         &policy,
         &proof_saga,
@@ -6190,9 +6599,10 @@ fn saga_terminal_prepared_commit_rejects_cross_run_proof() {
         run_id: request_run.clone(),
         expected_next_seq: StreamSeq::new(1).expect("stream seq"),
         commit_key: CommitKey::new("terminal-cross-run-request").expect("commit key"),
-        payloads: vec![run_completed_for_run(
+        payloads: vec![run_completed_for_run_with_policy(
             request_run.clone(),
             events::RunCompletionOutcome::FailedWithoutAcdcClaim,
+            policy.clone(),
         )],
         required_artifacts: Vec::new(),
         preconditions: saga_preconditions(&request_run, policy),
@@ -6216,9 +6626,11 @@ fn saga_terminal_prepared_commit_rejects_policy_digest_mismatch() {
         ))
         .expect("append run start");
     append_generic_nonretryable_failure(&mut store, &run_id, "terminal-policy-proof-failure");
+    let terminal_policies = empty_terminal_policies();
     let saga = store
         .projection_snapshot()
-        .derive_saga_projection(&run_id, &policy);
+        .derive_saga_projection(&run_id, &policy, &terminal_policies)
+        .expect("saga projection");
     let proof = SagaTerminalProof::new(&policy, &saga, store.expected_next_seq(&run_id), None)
         .expect("terminal proof authority");
 
@@ -6226,9 +6638,10 @@ fn saga_terminal_prepared_commit_rejects_policy_digest_mismatch() {
         run_id: run_id.clone(),
         expected_next_seq: store.expected_next_seq(&run_id),
         commit_key: CommitKey::new("terminal-policy-mismatch").expect("commit key"),
-        payloads: vec![run_completed_for_run(
+        payloads: vec![run_completed_for_run_with_policy(
             run_id.clone(),
             events::RunCompletionOutcome::FailedWithoutAcdcClaim,
+            compensate_saga_policy(),
         )],
         required_artifacts: Vec::new(),
         preconditions: saga_preconditions(&run_id, compensate_saga_policy()),
@@ -6256,9 +6669,11 @@ fn saga_terminal_prepared_commit_rejects_stale_prefix_proof() {
         &run_id,
         "terminal-current-proof-failure",
     );
+    let terminal_policies = empty_terminal_policies();
     let proof_saga = proof_store
         .projection_snapshot()
-        .derive_saga_projection(&run_id, &policy);
+        .derive_saga_projection(&run_id, &policy, &terminal_policies)
+        .expect("saga projection");
     let proof = SagaTerminalProof::new(
         &policy,
         &proof_saga,
@@ -6279,9 +6694,10 @@ fn saga_terminal_prepared_commit_rejects_stale_prefix_proof() {
         run_id: run_id.clone(),
         expected_next_seq: store.expected_next_seq(&run_id),
         commit_key: CommitKey::new("terminal-current-nonterminal").expect("commit key"),
-        payloads: vec![run_completed_for_run(
+        payloads: vec![run_completed_for_run_with_policy(
             run_id.clone(),
             events::RunCompletionOutcome::FailedWithoutAcdcClaim,
+            policy.clone(),
         )],
         required_artifacts: Vec::new(),
         preconditions: saga_preconditions(&run_id, policy),
@@ -6293,7 +6709,7 @@ fn saga_terminal_prepared_commit_rejects_stale_prefix_proof() {
 }
 
 #[test]
-fn receipt_observed_forward_ledger_is_quiescent_but_not_owed() {
+fn receipt_observed_forward_ledger_waits_for_confirmation_under_finalized_policy() {
     let run_id = run_id(127);
     let mut store = StoreContractRunStore::new();
     store
@@ -6303,11 +6719,16 @@ fn receipt_observed_forward_ledger_is_quiescent_but_not_owed() {
         ))
         .expect("append run start");
     append_forward_receipt(&mut store, &run_id);
+    append_generic_nonretryable_failure(&mut store, &run_id, "receipt-finalized-pending");
 
+    let terminal_policies =
+        confirmation_terminal_policies_for_projection(store.projection_snapshot(), &run_id);
     let projection = store
         .projection_snapshot()
-        .derive_saga_projection(&run_id, &compensate_saga_policy());
-    assert!(projection.forward_quiescent);
+        .derive_saga_projection(&run_id, &compensate_saga_policy(), &terminal_policies)
+        .expect("saga projection");
+    assert!(!projection.forward_quiescent);
+    assert_eq!(projection.run_mode, RunMode::Forward);
     let obligation = projection
         .obligations
         .get(&side_effect_pair_id())
@@ -6316,38 +6737,60 @@ fn receipt_observed_forward_ledger_is_quiescent_but_not_owed() {
         obligation.classification,
         ForwardLedgerClassification::Pending
     );
+}
 
+#[test]
+fn receipt_observed_forward_ledger_is_terminal_under_receipt_policy() {
+    let run_id = run_id(128);
+    let mut store = StoreContractRunStore::new();
     store
-        .append_prepared_commit(typed_commit_request! {
-            run_id: run_id.clone(),
-            expected_next_seq: store.expected_next_seq(&run_id),
-            commit_key: CommitKey::new("receipt-quiescence-complete").expect("commit key"),
-            payloads: vec![run_completed_for_run(run_id.clone(), completed_outcome(127))],
-            required_artifacts: Vec::new(),
-            preconditions: CommitPreconditions::default(),
-        })
-        .expect("receipt-observed forward ledger permits normal completion");
+        .append_prepared_commit(run_start_request(
+            run_id.clone(),
+            "receipt-terminal-run-start",
+        ))
+        .expect("append run start");
+    append_forward_receipt(&mut store, &run_id);
+    append_generic_nonretryable_failure(&mut store, &run_id, "receipt-terminal-engagement");
+
+    let terminal_policies =
+        receipt_terminal_policies_for_projection(store.projection_snapshot(), &run_id);
+    let projection = store
+        .projection_snapshot()
+        .derive_saga_projection(&run_id, &compensate_saga_policy(), &terminal_policies)
+        .expect("saga projection");
+    assert!(projection.forward_quiescent);
+    assert_eq!(projection.run_mode, RunMode::Remediating);
+    let obligation = projection
+        .obligations
+        .get(&side_effect_pair_id())
+        .expect("receipt-observed forward obligation");
+    assert_eq!(obligation.classification, ForwardLedgerClassification::Owed);
 }
 
 #[test]
 fn saga_projection_derives_obligations_and_run_mode_from_policy_and_stream() {
     let run_id = run_id(120);
     let mut store = StoreContractRunStore::new();
+    let policy = SagaPolicySpec::CompensateCompleted {
+        on_remediation_unresolved: RemediationUnresolvedSpec::FailWithoutAcdcClaim,
+    };
     store
-        .append_prepared_commit(run_start_request(
+        .append_prepared_commit(run_start_request_with_saga_policy(
             run_id.clone(),
             "saga-projection-run-start",
+            &policy,
         ))
         .expect("append run start");
     append_forward_confirmation(&mut store, &run_id);
     append_generic_nonretryable_failure(&mut store, &run_id, "saga-projection-engagement");
-
-    let policy = SagaPolicySpec::CompensateCompleted {
-        on_remediation_unresolved: RemediationUnresolvedSpec::FailWithoutAcdcClaim,
-    };
     let projection = store
         .projection_snapshot()
-        .derive_saga_projection(&run_id, &policy);
+        .derive_saga_projection(
+            &run_id,
+            &policy,
+            &confirmation_terminal_policies_for_projection(store.projection_snapshot(), &run_id),
+        )
+        .expect("saga projection");
     assert_eq!(projection.run_mode, RunMode::Remediating);
     assert!(projection.engagement.is_some());
     assert!(projection.forward_quiescent);
@@ -6366,7 +6809,12 @@ fn saga_projection_derives_obligations_and_run_mode_from_policy_and_stream() {
     };
     let manual_projection = store
         .projection_snapshot()
-        .derive_saga_projection(&run_id, &manual_policy);
+        .derive_saga_projection(
+            &run_id,
+            &manual_policy,
+            &confirmation_terminal_policies_for_projection(store.projection_snapshot(), &run_id),
+        )
+        .expect("saga projection");
     assert_eq!(manual_projection.run_mode, RunMode::ManualBlocked);
     assert_eq!(
         manual_projection.manual_block_reason,
@@ -6377,7 +6825,12 @@ fn saga_projection_derives_obligations_and_run_mode_from_policy_and_stream() {
     append_remediation_confirmation(&mut store, &run_id, remediation_key.clone());
     let projection = store
         .projection_snapshot()
-        .derive_saga_projection(&run_id, &policy);
+        .derive_saga_projection(
+            &run_id,
+            &policy,
+            &confirmation_terminal_policies_for_projection(store.projection_snapshot(), &run_id),
+        )
+        .expect("saga projection");
     assert_eq!(projection.run_mode, RunMode::Compensated);
     let obligation = projection
         .obligations

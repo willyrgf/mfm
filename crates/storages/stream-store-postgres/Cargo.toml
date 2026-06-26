@@ -21,6 +21,8 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 k256 = { version = "0.13.0", features = ["ecdsa"] }
+mfm-capabilities = { path = "../../kernel/capabilities" }
+mfm-certify = { path = "../../kernel/certify" }
 mfm-manual-auth = { path = "../../kernel/manual-auth" }
 
 [features]

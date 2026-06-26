@@ -2,9 +2,9 @@
 
 use k256::ecdsa::SigningKey;
 use mfm_app::{
-    DriveMode, EntryPointOpId, EntryPointOpPlan, EntryPointOpRegistry, EntryPointRunLaunchInput,
-    LaunchableOp, ManualResolutionDecision, ManualResolutionRecordRequest, OpLaunchError,
-    OpVersion, PublicOpName, RunModeStatus,
+    EntryPointOpId, EntryPointOpPlan, EntryPointOpRegistry, EntryPointRunLaunchInput, LaunchableOp,
+    ManualResolutionDecision, ManualResolutionRecordRequest, OpLaunchError, OpVersion,
+    PublicOpName, RunModeStatus,
 };
 use mfm_authored_config::{AuthoredConfig, AuthoredConfigFormat};
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
@@ -58,7 +58,6 @@ async fn public_manual_resolution_scenario_records_resolution_and_hides_proof_by
         certification_registry: &registry,
         trust_scope_id,
         distinct_run_key: None,
-        drive: DriveMode::UntilBlocked,
     })
     .expect("launch request");
 
@@ -127,7 +126,6 @@ async fn public_manual_resolution_scenario_records_resolution_and_hides_proof_by
             evidence_media_type: "application/json".to_owned(),
             authorization_proof_bytes: proof_bytes.clone(),
             note: Some("reviewed externally".to_owned()),
-            drive: DriveMode::UntilBlocked,
         })
         .await
         .expect("manual resolution");
@@ -252,7 +250,12 @@ async fn signed_manual_resolution_proof_bytes(
         .expect("run stream");
     let projection =
         store::ProjectionSnapshot::rebuild_from_run_stream(&stream).expect("projection rebuild");
-    let saga = projection.derive_saga_projection(run_id, &certified.envelope().spec.saga);
+    let terminal_policies =
+        store::SideEffectTerminalPolicies::from_spec(&certified.envelope().spec)
+            .expect("terminal policies");
+    let saga = projection
+        .derive_saga_projection(run_id, &certified.envelope().spec.saga, &terminal_policies)
+        .expect("saga projection");
     let reason = saga.manual_block_reason.expect("manual block reason");
     let expected_next_seq = services
         .store()

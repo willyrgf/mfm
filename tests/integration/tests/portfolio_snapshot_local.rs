@@ -16,13 +16,13 @@ const NETWORK_ID: &str = "typed-local-eth";
 static RPC_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[tokio::test]
-async fn portfolio_snapshot_resumes_from_append_only_start() {
+async fn portfolio_snapshot_starts_to_completion() {
     let _env_guard = RPC_ENV_LOCK.lock().await;
     let rpc_url = start_rpc_mock().await;
     set_rpc_env(rpc_url);
 
     let result = support::resume_portfolio_snapshot(portfolio_payload()).await;
-    assert_eq!(result.started.run_mode, RunModeStatus::Forward);
+    assert_eq!(result.started.run_mode, RunModeStatus::Completed);
     assert_eq!(result.resumed.run_mode, RunModeStatus::Completed);
     assert_eq!(result.started.spec_hash, result.resumed.spec_hash);
     assert_eq!(result.authority.spec_hash, result.resumed.spec_hash);
@@ -81,7 +81,6 @@ async fn rest_portfolio_snapshot_matches_public_output() {
                 "op": "portfolio_snapshot",
                 "config_format": "json",
                 "config": portfolio_payload(),
-                "drive": "until_blocked"
             }),
         ))
         .await
@@ -123,7 +122,6 @@ async fn rest_portfolio_snapshot_defaults_toml_and_renders_public_output() {
             json!({
                 "op": "portfolio_snapshot",
                 "config": portfolio_payload_toml(),
-                "drive": "until_blocked"
             }),
         ))
         .await
@@ -158,7 +156,7 @@ async fn portfolio_runner_output_summary_matches_golden() {
     let state = support::in_memory_rest_app_state();
     let store = state.store.clone();
     let app = mfm_rest_api::make_app(state);
-    let response = local_portfolio_snapshot_post(&app, &portfolio_payload(), "until_blocked").await;
+    let response = local_portfolio_snapshot_post(&app, &portfolio_payload()).await;
     let run_id = RunId::parse(response["data"]["run"]["run_id"].as_str().expect("run id"))
         .expect("typed run id");
     let stream = store.load_run_stream(&run_id).await.expect("run stream");
@@ -194,7 +192,6 @@ async fn start_rpc_mock() -> String {
 async fn local_portfolio_snapshot_post(
     app: &axum::Router,
     payload: &serde_json::Value,
-    drive: &str,
 ) -> serde_json::Value {
     let response = app
         .clone()
@@ -204,7 +201,6 @@ async fn local_portfolio_snapshot_post(
                 "op": "portfolio_snapshot",
                 "config_format": "json",
                 "config": payload,
-                "drive": drive,
             }),
         ))
         .await

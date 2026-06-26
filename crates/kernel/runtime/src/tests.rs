@@ -68,6 +68,30 @@ fn fixture_side_effect_pair_id(fixture: &Fixture, node: &spec::NodeSpec) -> Side
     }
 }
 
+fn runtime_spec_terminal_policies(
+    runtime_spec: &CertifiedRuntimeSpec,
+) -> store::SideEffectTerminalPolicies {
+    store::SideEffectTerminalPolicies::from_spec(runtime_spec.spec())
+        .expect("certified side-effect terminal policies")
+}
+
+fn fixture_terminal_policies(fixture: &Fixture) -> store::SideEffectTerminalPolicies {
+    runtime_spec_terminal_policies(&fixture.runtime_spec)
+}
+
+fn derive_fixture_saga(
+    fixture: &Fixture,
+    projection: store::ProjectionSnapshot,
+) -> store::SagaProjection {
+    projection
+        .derive_saga_projection(
+            &fixture.run_id,
+            &fixture.runtime_spec.spec().saga,
+            &fixture_terminal_policies(fixture),
+        )
+        .expect("saga projection")
+}
+
 fn side_effect_pair_fields_for_purpose(
     runtime_spec: &CertifiedRuntimeSpec,
     node_id: &NodeId,
@@ -362,6 +386,55 @@ impl store::RunEventStore for TestTypedRunStore {
     }
 }
 
+impl store::ExecutionClaimStore for TestTypedRunStore {
+    type Error = store::StoreError;
+
+    fn acquire_execution_claim<'a>(
+        &'a self,
+        run_id: &'a RunId,
+        token: store::AdmissionToken,
+    ) -> store::AsyncStoreFuture<'a, store::NowaitSkipAdmissionResult, Self::Error> {
+        self.inner.acquire_execution_claim(run_id, token)
+    }
+
+    fn execution_claim_status<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> store::AsyncStoreFuture<'a, store::ExecutionClaimStatus, Self::Error> {
+        self.inner.execution_claim_status(run_id)
+    }
+
+    fn renew_execution_claim<'a>(
+        &'a self,
+        run_id: &'a RunId,
+        token: &'a store::AdmissionToken,
+    ) -> store::AsyncStoreFuture<'a, Option<store::AdmissionLease>, Self::Error> {
+        self.inner.renew_execution_claim(run_id, token)
+    }
+
+    fn release_execution_claim<'a>(
+        &'a self,
+        run_id: &'a RunId,
+        token: &'a store::AdmissionToken,
+    ) -> store::AsyncStoreFuture<'a, bool, Self::Error> {
+        self.inner.release_execution_claim(run_id, token)
+    }
+
+    fn expired_execution_claims<'a>(
+        &'a self,
+    ) -> store::AsyncStoreFuture<'a, Vec<store::ExpiredExecutionClaim>, Self::Error> {
+        self.inner.expired_execution_claims()
+    }
+
+    fn reap_expired_execution_claim<'a>(
+        &'a self,
+        run_id: &'a RunId,
+        token: &'a store::AdmissionToken,
+    ) -> store::AsyncStoreFuture<'a, bool, Self::Error> {
+        self.inner.reap_expired_execution_claim(run_id, token)
+    }
+}
+
 impl store::RetainedArtifactReadProvider for TestTypedRunStore {
     fn read_retained_artifact<'a>(
         &'a self,
@@ -487,6 +560,55 @@ impl store::RunEventStore for RecordingTypedRunStore {
     }
 }
 
+impl store::ExecutionClaimStore for RecordingTypedRunStore {
+    type Error = store::StoreError;
+
+    fn acquire_execution_claim<'a>(
+        &'a self,
+        run_id: &'a RunId,
+        token: store::AdmissionToken,
+    ) -> store::AsyncStoreFuture<'a, store::NowaitSkipAdmissionResult, Self::Error> {
+        self.inner.acquire_execution_claim(run_id, token)
+    }
+
+    fn execution_claim_status<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> store::AsyncStoreFuture<'a, store::ExecutionClaimStatus, Self::Error> {
+        self.inner.execution_claim_status(run_id)
+    }
+
+    fn renew_execution_claim<'a>(
+        &'a self,
+        run_id: &'a RunId,
+        token: &'a store::AdmissionToken,
+    ) -> store::AsyncStoreFuture<'a, Option<store::AdmissionLease>, Self::Error> {
+        self.inner.renew_execution_claim(run_id, token)
+    }
+
+    fn release_execution_claim<'a>(
+        &'a self,
+        run_id: &'a RunId,
+        token: &'a store::AdmissionToken,
+    ) -> store::AsyncStoreFuture<'a, bool, Self::Error> {
+        self.inner.release_execution_claim(run_id, token)
+    }
+
+    fn expired_execution_claims<'a>(
+        &'a self,
+    ) -> store::AsyncStoreFuture<'a, Vec<store::ExpiredExecutionClaim>, Self::Error> {
+        self.inner.expired_execution_claims()
+    }
+
+    fn reap_expired_execution_claim<'a>(
+        &'a self,
+        run_id: &'a RunId,
+        token: &'a store::AdmissionToken,
+    ) -> store::AsyncStoreFuture<'a, bool, Self::Error> {
+        self.inner.reap_expired_execution_claim(run_id, token)
+    }
+}
+
 impl store::RunEventStore for StaleOnceTypedRunStore {
     type Error = store::StoreError;
 
@@ -554,6 +676,55 @@ impl store::RunEventStore for StaleOnceTypedRunStore {
         run_id: &'a RunId,
     ) -> store::AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
         self.inner.status_projection_snapshot(run_id)
+    }
+}
+
+impl store::ExecutionClaimStore for StaleOnceTypedRunStore {
+    type Error = store::StoreError;
+
+    fn acquire_execution_claim<'a>(
+        &'a self,
+        run_id: &'a RunId,
+        token: store::AdmissionToken,
+    ) -> store::AsyncStoreFuture<'a, store::NowaitSkipAdmissionResult, Self::Error> {
+        self.inner.acquire_execution_claim(run_id, token)
+    }
+
+    fn execution_claim_status<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> store::AsyncStoreFuture<'a, store::ExecutionClaimStatus, Self::Error> {
+        self.inner.execution_claim_status(run_id)
+    }
+
+    fn renew_execution_claim<'a>(
+        &'a self,
+        run_id: &'a RunId,
+        token: &'a store::AdmissionToken,
+    ) -> store::AsyncStoreFuture<'a, Option<store::AdmissionLease>, Self::Error> {
+        self.inner.renew_execution_claim(run_id, token)
+    }
+
+    fn release_execution_claim<'a>(
+        &'a self,
+        run_id: &'a RunId,
+        token: &'a store::AdmissionToken,
+    ) -> store::AsyncStoreFuture<'a, bool, Self::Error> {
+        self.inner.release_execution_claim(run_id, token)
+    }
+
+    fn expired_execution_claims<'a>(
+        &'a self,
+    ) -> store::AsyncStoreFuture<'a, Vec<store::ExpiredExecutionClaim>, Self::Error> {
+        self.inner.expired_execution_claims()
+    }
+
+    fn reap_expired_execution_claim<'a>(
+        &'a self,
+        run_id: &'a RunId,
+        token: &'a store::AdmissionToken,
+    ) -> store::AsyncStoreFuture<'a, bool, Self::Error> {
+        self.inner.reap_expired_execution_claim(run_id, token)
     }
 }
 
@@ -2018,6 +2189,65 @@ async fn exclusive_side_effect_prepare_failure_after_claim_terminalizes_attempt(
 }
 
 #[tokio::test]
+async fn runner_block_leaves_started_attempt_open_without_failure() {
+    let fixture = fixture();
+    let node = node_by_output(&fixture, &fixture.cell_a).clone();
+    let mut registry = ErasedRunnerRegistry::new();
+    register_spec_capabilities(&mut registry, &fixture.runtime_spec);
+    registry
+        .register(binding(
+            fixture.descriptor_a.clone(),
+            "pure",
+            BlockingRunner,
+        ))
+        .expect("binding blocking node");
+    registry
+        .register(binding(
+            fixture.descriptor_b.clone(),
+            "read",
+            RecordingRunner {
+                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                output_artifact: artifact(0xb1),
+                output_digest: content(0xb2),
+            },
+        ))
+        .expect("binding b");
+    let scheduler = test_scheduler(registry);
+    let mut store = TestTypedRunStore::new();
+    start_fixture_run(
+        &scheduler,
+        &mut store,
+        &fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+
+    assert_eq!(
+        drive_once(
+            &scheduler,
+            &mut store,
+            &fixture.runtime_spec,
+            &fixture.run_id,
+        )
+        .await
+        .expect("blocked runner leaves attempt open"),
+        SchedulerStatus::Blocked
+    );
+    let stream = store.load_run_stream(&fixture.run_id);
+    assert!(stream.iter().any(|event| matches!(
+        event.payload(),
+        events::KernelEventPayload::StateAttemptStarted(payload)
+            if payload.node_id == node.node_id
+    )));
+    assert!(stream.iter().all(|event| !matches!(
+        event.payload(),
+        events::KernelEventPayload::StateAttemptFailed(payload)
+            if payload.node_id == node.node_id
+    )));
+}
+
+#[tokio::test]
 async fn side_effect_driver_submits_from_started_projection() {
     let fixture = fixture_with_first_exclusive_side_effect_state();
     let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
@@ -3078,8 +3308,7 @@ async fn no_second_authority_full_run_stages_and_admits_first_artifact_reference
         .expect("start run");
 
     assert_eq!(
-        scheduler
-            .drive_until_blocked(&store, &fixture.runtime_spec, &fixture.run_id)
+        drive_until_blocked_with_claim(&scheduler, &store, &fixture.runtime_spec, &fixture.run_id)
             .await
             .expect("drive full representative run"),
         SchedulerStatus::PublicOutputProjected
@@ -3377,10 +3606,14 @@ async fn retention_manifest_projection_retry_is_idempotent_after_current_store_a
 
     let stale_store = StaleStreamStore::new(&mut store, stale_stream);
     assert_eq!(
-        scheduler
-            .drive_once(&stale_store, &fixture.runtime_spec, &fixture.run_id)
-            .await
-            .expect("idempotent retention retry"),
+        drive_once_with_claim(
+            &scheduler,
+            &stale_store,
+            &fixture.runtime_spec,
+            &fixture.run_id
+        )
+        .await
+        .expect("idempotent retention retry"),
         SchedulerStatus::Advanced
     );
 }
@@ -4738,8 +4971,7 @@ async fn runner_invocation_requires_committed_produced_input_artifact_reference(
     {
         let corrupt_store = StaleStreamStore::new(&mut store, corrupt_stream);
         assert!(matches!(
-            scheduler
-                .drive_once(&corrupt_store, &fixture.runtime_spec, &fixture.run_id)
+            drive_once_with_claim(&scheduler, &corrupt_store, &fixture.runtime_spec, &fixture.run_id)
                 .await,
             Err(RuntimeError::InputMaterialization(message))
                 if message.contains("is not committed in the run stream")
@@ -4778,10 +5010,14 @@ async fn post_start_materialization_failure_terminalizes_attempt() {
     {
         let corrupt_store = MissingInputArtifactRefStore::new(&mut store, producer_node_id);
         assert_eq!(
-            scheduler
-                .drive_once(&corrupt_store, &fixture.runtime_spec, &fixture.run_id)
-                .await
-                .expect("terminalize materialization failure"),
+            drive_once_with_claim(
+                &scheduler,
+                &corrupt_store,
+                &fixture.runtime_spec,
+                &fixture.run_id
+            )
+            .await
+            .expect("terminalize materialization failure"),
             SchedulerStatus::Advanced
         );
     }
@@ -6218,8 +6454,7 @@ async fn scheduler_reloads_and_redecides_after_stale_expected_sequence_on_termin
         .expect("start run");
 
     assert_eq!(
-        scheduler
-            .drive_once(&store, &fixture.runtime_spec, &fixture.run_id)
+        drive_once_with_claim(&scheduler, &store, &fixture.runtime_spec, &fixture.run_id)
             .await
             .expect("drive after injected stale terminal append"),
         SchedulerStatus::Advanced
@@ -6516,10 +6751,7 @@ async fn runtime_fails_pre_boundary_forward_attempt_before_saga_terminal() {
     let failing_attempt = append_or_get_started_attempt(&mut store, &fixture, &failing_node, 1);
     append_attempt_failure(&mut store, &fixture, &failing_node, &failing_attempt, false);
     assert_eq!(
-        store
-            .projection_snapshot()
-            .derive_saga_projection(&fixture.run_id, &fixture.runtime_spec.spec().saga)
-            .run_mode,
+        derive_fixture_saga(&fixture, store.projection_snapshot()).run_mode,
         store::RunMode::FailedWithoutAcdcClaim
     );
 
@@ -6770,9 +7002,7 @@ async fn runtime_remediates_confirmed_forward_ledgers_in_reverse_confirmation_or
 
     let failure_attempt = append_or_get_started_attempt(&mut store, &fixture, &failure_node, 1);
     append_attempt_failure(&mut store, &fixture, &failure_node, &failure_attempt, false);
-    let saga = store
-        .projection_snapshot()
-        .derive_saga_projection(&fixture.run_id, &fixture.runtime_spec.spec().saga);
+    let saga = derive_fixture_saga(&fixture, store.projection_snapshot());
     assert_eq!(saga.run_mode, store::RunMode::Remediating);
     assert_eq!(saga.obligations.len(), 2);
 
@@ -6792,10 +7022,7 @@ async fn runtime_remediates_confirmed_forward_ledgers_in_reverse_confirmation_or
             ),
             "unexpected remediation status: {status:?}"
         );
-        if store
-            .projection_snapshot()
-            .derive_saga_projection(&fixture.run_id, &fixture.runtime_spec.spec().saga)
-            .run_mode
+        if derive_fixture_saga(&fixture, store.projection_snapshot()).run_mode
             == store::RunMode::Compensated
         {
             break;
@@ -6806,9 +7033,7 @@ async fn runtime_remediates_confirmed_forward_ledgers_in_reverse_confirmation_or
         remediation_order,
         vec![forward_b_pair.clone(), forward_a_pair.clone()]
     );
-    let saga = store
-        .projection_snapshot()
-        .derive_saga_projection(&fixture.run_id, &fixture.runtime_spec.spec().saga);
+    let saga = derive_fixture_saga(&fixture, store.projection_snapshot());
     assert_eq!(saga.run_mode, store::RunMode::Compensated);
     for forward_ledger in [forward_a_ledger, forward_b_ledger] {
         let forward_pair = forward_pair_for_ledger(&store.projection_snapshot(), &forward_ledger);
@@ -6939,9 +7164,7 @@ async fn runtime_compensated_saga_resume_boundaries_do_not_duplicate_mutations()
 
     let failure_attempt = append_or_get_started_attempt(&mut store, &fixture, &failure_node, 1);
     append_attempt_failure(&mut store, &fixture, &failure_node, &failure_attempt, false);
-    let saga = store
-        .projection_snapshot()
-        .derive_saga_projection(&fixture.run_id, &fixture.runtime_spec.spec().saga);
+    let saga = derive_fixture_saga(&fixture, store.projection_snapshot());
     assert_eq!(saga.run_mode, store::RunMode::Remediating);
     assert_eq!(saga.obligations.len(), 2);
 
@@ -7013,10 +7236,7 @@ async fn runtime_compensated_saga_resume_boundaries_do_not_duplicate_mutations()
         .is_some());
     assert_no_duplicate_side_effect_submissions(&store, &fixture.run_id);
     assert_eq!(
-        store
-            .projection_snapshot()
-            .derive_saga_projection(&fixture.run_id, &fixture.runtime_spec.spec().saga)
-            .run_mode,
+        derive_fixture_saga(&fixture, store.projection_snapshot()).run_mode,
         store::RunMode::Compensated
     );
     assert_ne!(
@@ -7097,9 +7317,7 @@ async fn runtime_resolves_clean_failure_without_acdc_claim() {
 
     let failure_attempt = append_or_get_started_attempt(&mut store, &fixture, &failure_node, 1);
     append_attempt_failure(&mut store, &fixture, &failure_node, &failure_attempt, false);
-    let saga = store
-        .projection_snapshot()
-        .derive_saga_projection(&fixture.run_id, &fixture.runtime_spec.spec().saga);
+    let saga = derive_fixture_saga(&fixture, store.projection_snapshot());
     assert_eq!(saga.run_mode, store::RunMode::FailedWithoutAcdcClaim);
     assert!(saga.obligations.is_empty());
 
@@ -7239,9 +7457,7 @@ async fn runtime_materializes_confirmed_forward_output_before_failed_without_cla
 
     let failure_attempt = append_or_get_started_attempt(&mut store, &fixture, &failure_node, 1);
     append_attempt_failure(&mut store, &fixture, &failure_node, &failure_attempt, false);
-    let saga = store
-        .projection_snapshot()
-        .derive_saga_projection(&fixture.run_id, &fixture.runtime_spec.spec().saga);
+    let saga = derive_fixture_saga(&fixture, store.projection_snapshot());
     assert_eq!(saga.run_mode, store::RunMode::FailedWithoutAcdcClaim);
 
     assert_eq!(
@@ -7336,9 +7552,7 @@ async fn runtime_resolves_manual_resolution_terminal() {
             SchedulerStatus::Advanced
         );
     }
-    let saga = store
-        .projection_snapshot()
-        .derive_saga_projection(&fixture.run_id, &fixture.runtime_spec.spec().saga);
+    let saga = derive_fixture_saga(&fixture, store.projection_snapshot());
     assert_eq!(saga.run_mode, store::RunMode::ManualBlocked);
     assert_eq!(
         saga.manual_block_reason,
@@ -7352,9 +7566,7 @@ async fn runtime_resolves_manual_resolution_terminal() {
         events::ManualResolutionOutcome::ConfirmRemediated,
     )
     .await;
-    let saga = store
-        .projection_snapshot()
-        .derive_saga_projection(&fixture.run_id, &fixture.runtime_spec.spec().saga);
+    let saga = derive_fixture_saga(&fixture, store.projection_snapshot());
     assert_eq!(saga.run_mode, store::RunMode::ManuallyResolved);
 
     let fresh_scheduler = SerialTypedScheduler::new(
@@ -7429,9 +7641,7 @@ async fn runtime_rejects_manual_resolution_prefix_with_open_attempt() {
             SchedulerStatus::Advanced
         );
     }
-    let saga = store
-        .projection_snapshot()
-        .derive_saga_projection(&fixture.run_id, &fixture.runtime_spec.spec().saga);
+    let saga = derive_fixture_saga(&fixture, store.projection_snapshot());
     assert_eq!(saga.run_mode, store::RunMode::ManualBlocked);
 
     let node_b = fixture
@@ -8542,9 +8752,15 @@ impl ErasedNodeRunner for FailActiveSideEffectAfterSagaRunner {
 
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move {
+            let terminal_policies = runtime_spec_terminal_policies(ctx.runtime_spec());
             let saga = ctx
                 .projections()
-                .derive_saga_projection(ctx.run_id(), &ctx.runtime_spec().spec().saga);
+                .derive_saga_projection(
+                    ctx.run_id(),
+                    &ctx.runtime_spec().spec().saga,
+                    &terminal_policies,
+                )
+                .expect("saga projection");
             let projected = side_effect_projection_for_attempt(
                 ctx.runtime_spec(),
                 ctx.run_id(),
@@ -8866,6 +9082,73 @@ impl store::RunEventStore for StaleStreamStore<'_> {
     }
 }
 
+impl store::ExecutionClaimStore for StaleStreamStore<'_> {
+    type Error = store::StoreError;
+
+    fn acquire_execution_claim<'a>(
+        &'a self,
+        run_id: &'a RunId,
+        token: store::AdmissionToken,
+    ) -> store::AsyncStoreFuture<'a, store::NowaitSkipAdmissionResult, Self::Error> {
+        let result = block_on_ready(
+            self.inner
+                .borrow_mut()
+                .acquire_execution_claim(run_id, token),
+        );
+        Box::pin(std::future::ready(result))
+    }
+
+    fn execution_claim_status<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> store::AsyncStoreFuture<'a, store::ExecutionClaimStatus, Self::Error> {
+        let result = block_on_ready(self.inner.borrow().execution_claim_status(run_id));
+        Box::pin(std::future::ready(result))
+    }
+
+    fn renew_execution_claim<'a>(
+        &'a self,
+        run_id: &'a RunId,
+        token: &'a store::AdmissionToken,
+    ) -> store::AsyncStoreFuture<'a, Option<store::AdmissionLease>, Self::Error> {
+        let result = block_on_ready(self.inner.borrow_mut().renew_execution_claim(run_id, token));
+        Box::pin(std::future::ready(result))
+    }
+
+    fn release_execution_claim<'a>(
+        &'a self,
+        run_id: &'a RunId,
+        token: &'a store::AdmissionToken,
+    ) -> store::AsyncStoreFuture<'a, bool, Self::Error> {
+        let result = block_on_ready(
+            self.inner
+                .borrow_mut()
+                .release_execution_claim(run_id, token),
+        );
+        Box::pin(std::future::ready(result))
+    }
+
+    fn expired_execution_claims<'a>(
+        &'a self,
+    ) -> store::AsyncStoreFuture<'a, Vec<store::ExpiredExecutionClaim>, Self::Error> {
+        let result = block_on_ready(self.inner.borrow().expired_execution_claims());
+        Box::pin(std::future::ready(result))
+    }
+
+    fn reap_expired_execution_claim<'a>(
+        &'a self,
+        run_id: &'a RunId,
+        token: &'a store::AdmissionToken,
+    ) -> store::AsyncStoreFuture<'a, bool, Self::Error> {
+        let result = block_on_ready(
+            self.inner
+                .borrow_mut()
+                .reap_expired_execution_claim(run_id, token),
+        );
+        Box::pin(std::future::ready(result))
+    }
+}
+
 struct MissingInputArtifactRefStore<'a> {
     inner: RefCell<&'a mut TestTypedRunStore>,
     producer_node_id: NodeId,
@@ -8926,6 +9209,73 @@ impl store::RunEventStore for MissingInputArtifactRefStore<'_> {
         _run_id: &'a RunId,
     ) -> store::AsyncStoreFuture<'a, store::ProjectionSnapshot, Self::Error> {
         let result = Ok(self.inner.borrow().projection_snapshot().clone());
+        Box::pin(std::future::ready(result))
+    }
+}
+
+impl store::ExecutionClaimStore for MissingInputArtifactRefStore<'_> {
+    type Error = store::StoreError;
+
+    fn acquire_execution_claim<'a>(
+        &'a self,
+        run_id: &'a RunId,
+        token: store::AdmissionToken,
+    ) -> store::AsyncStoreFuture<'a, store::NowaitSkipAdmissionResult, Self::Error> {
+        let result = block_on_ready(
+            self.inner
+                .borrow_mut()
+                .acquire_execution_claim(run_id, token),
+        );
+        Box::pin(std::future::ready(result))
+    }
+
+    fn execution_claim_status<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> store::AsyncStoreFuture<'a, store::ExecutionClaimStatus, Self::Error> {
+        let result = block_on_ready(self.inner.borrow().execution_claim_status(run_id));
+        Box::pin(std::future::ready(result))
+    }
+
+    fn renew_execution_claim<'a>(
+        &'a self,
+        run_id: &'a RunId,
+        token: &'a store::AdmissionToken,
+    ) -> store::AsyncStoreFuture<'a, Option<store::AdmissionLease>, Self::Error> {
+        let result = block_on_ready(self.inner.borrow_mut().renew_execution_claim(run_id, token));
+        Box::pin(std::future::ready(result))
+    }
+
+    fn release_execution_claim<'a>(
+        &'a self,
+        run_id: &'a RunId,
+        token: &'a store::AdmissionToken,
+    ) -> store::AsyncStoreFuture<'a, bool, Self::Error> {
+        let result = block_on_ready(
+            self.inner
+                .borrow_mut()
+                .release_execution_claim(run_id, token),
+        );
+        Box::pin(std::future::ready(result))
+    }
+
+    fn expired_execution_claims<'a>(
+        &'a self,
+    ) -> store::AsyncStoreFuture<'a, Vec<store::ExpiredExecutionClaim>, Self::Error> {
+        let result = block_on_ready(self.inner.borrow().expired_execution_claims());
+        Box::pin(std::future::ready(result))
+    }
+
+    fn reap_expired_execution_claim<'a>(
+        &'a self,
+        run_id: &'a RunId,
+        token: &'a store::AdmissionToken,
+    ) -> store::AsyncStoreFuture<'a, bool, Self::Error> {
+        let result = block_on_ready(
+            self.inner
+                .borrow_mut()
+                .reap_expired_execution_claim(run_id, token),
+        );
         Box::pin(std::future::ready(result))
     }
 }
@@ -9235,7 +9585,7 @@ async fn drive_once(
     runtime_spec: &CertifiedRuntimeSpec,
     run_id: &RunId,
 ) -> Result<SchedulerStatus> {
-    scheduler.drive_once(&*store, runtime_spec, run_id).await
+    drive_once_with_claim(scheduler, &*store, runtime_spec, run_id).await
 }
 
 async fn drive_until_blocked(
@@ -9244,9 +9594,71 @@ async fn drive_until_blocked(
     runtime_spec: &CertifiedRuntimeSpec,
     run_id: &RunId,
 ) -> Result<SchedulerStatus> {
+    drive_until_blocked_with_claim(scheduler, &*store, runtime_spec, run_id).await
+}
+
+async fn drive_once_with_claim<S>(
+    scheduler: &SerialTypedScheduler,
+    store: &S,
+    runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
+) -> Result<SchedulerStatus>
+where
+    S: store::RunEventStore + store::ExecutionClaimStore + ?Sized,
+{
+    let token = execution_claim_token(store, run_id).await?;
     scheduler
-        .drive_until_blocked(&*store, runtime_spec, run_id)
+        .drive_once(store, runtime_spec, run_id, token)
         .await
+}
+
+async fn drive_until_blocked_with_claim<S>(
+    scheduler: &SerialTypedScheduler,
+    store: &S,
+    runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
+) -> Result<SchedulerStatus>
+where
+    S: store::RunEventStore + store::ExecutionClaimStore + ?Sized,
+{
+    let token = execution_claim_token(store, run_id).await?;
+    scheduler
+        .drive_until_blocked(store, runtime_spec, run_id, token)
+        .await
+}
+
+async fn execution_claim_token<S>(store: &S, run_id: &RunId) -> Result<store::AdmissionToken>
+where
+    S: store::ExecutionClaimStore + ?Sized,
+{
+    loop {
+        match store
+            .execution_claim_status(run_id)
+            .await
+            .map_err(crate::error::async_store_error)?
+        {
+            store::ExecutionClaimStatus::Live(lease) => return Ok(lease.token),
+            store::ExecutionClaimStatus::Expired(lease) => {
+                store
+                    .reap_expired_execution_claim(run_id, &lease.token)
+                    .await
+                    .map_err(crate::error::async_store_error)?;
+            }
+            store::ExecutionClaimStatus::Unclaimed => {
+                let token = store::AdmissionToken::new(format!(
+                    "mfm.test.runtime.execution_claim:{run_id}"
+                ))?;
+                match store
+                    .acquire_execution_claim(run_id, token)
+                    .await
+                    .map_err(crate::error::async_store_error)?
+                {
+                    store::NowaitSkipAdmissionResult::Admitted(lease) => return Ok(lease.token),
+                    store::NowaitSkipAdmissionResult::Busy(_) => {}
+                }
+            }
+        }
+    }
 }
 
 async fn record_manual_resolution(
@@ -9319,7 +9731,7 @@ fn spec_artifact(runtime_spec: &CertifiedRuntimeSpec) -> RunLaunchArtifact {
             digest,
             byte_len: canonical.as_bytes().len() as u64,
             media_type: runtime_spec.spec().media_type.clone(),
-            schema_id: None,
+            schema_id: Some(spec::typed_execution_spec_schema_id().expect("typed spec schema")),
             semantic_type_id: None,
             producer_node_id: None,
             producer_seed_id: None,
@@ -9342,7 +9754,9 @@ fn certificate_artifact(runtime_spec: &CertifiedRuntimeSpec) -> RunLaunchArtifac
             byte_len: canonical.as_bytes().len() as u64,
             media_type: spec::MediaType::new(mfm_certify::CERTIFICATE_MEDIA_TYPE)
                 .expect("certificate media type"),
-            schema_id: None,
+            schema_id: Some(
+                mfm_certify::typed_spec_certificate_schema_id().expect("typed certificate schema"),
+            ),
             semantic_type_id: None,
             producer_node_id: None,
             producer_seed_id: None,
@@ -13468,9 +13882,7 @@ async fn drive_until_compensated_before_terminal(
     fixture: &Fixture,
 ) {
     for _ in 0..24 {
-        let saga = store
-            .projection_snapshot()
-            .derive_saga_projection(&fixture.run_id, &fixture.runtime_spec.spec().saga);
+        let saga = derive_fixture_saga(fixture, store.projection_snapshot());
         if saga.run_mode == store::RunMode::Compensated
             && store.projection_snapshot().run_state(&fixture.run_id) != store::RunState::Completed
         {

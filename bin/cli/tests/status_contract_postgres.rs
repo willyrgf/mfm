@@ -11,7 +11,7 @@ use mfm_store::v1::{RunEventStore, TrustScopeStore};
 use serde_json::Value;
 use sqlx::{AssertSqlSafe, PgPool};
 use std::process::Output;
-use tempfile::TempDir;
+use std::sync::Arc;
 
 const ENV_EVM_RPC_SOURCES_JSON: &str = "MFM_EVM_RPC_SOURCES_JSON";
 const PORTFOLIO_NETWORK_ID: &str = "ethereum-mainnet";
@@ -34,10 +34,7 @@ async fn run_status_reports_interrupted_attempt_and_framework_attempts_from_hist
     let store = ProductionRunStore::connect(&scoped_database_url)
         .await
         .expect("connect typed postgres store");
-    let temp = TempDir::new().expect("temp dir");
-    let config_path = temp.path().join("portfolio.json");
     let config = sample_portfolio_config_json();
-    std::fs::write(&config_path, &config).expect("write portfolio config");
     let trust_scope_id = store.load_trust_scope_id().await.expect("load trust scope");
     let entry_point_registry = mfm_app::production_entry_point_op_registry().expect("entrypoints");
     let certification_registry = mfm_app::production_certification_registry().expect("cert");
@@ -53,34 +50,30 @@ async fn run_status_reports_interrupted_attempt_and_framework_attempts_from_hist
         certification_registry: &certification_registry,
         trust_scope_id,
         distinct_run_key: None,
-        drive: mfm_app::DriveMode::AppendOnly,
     })
     .expect("prepared entry-point launch");
     let run_id = prepared.request.run_id.clone();
     let certified = prepared.request.certified_spec.clone();
 
-    let start_args = vec![
-        "--output-format".to_owned(),
-        "json".to_owned(),
-        "run".to_owned(),
-        "start".to_owned(),
-        "--op".to_owned(),
-        "portfolio_snapshot".to_owned(),
-        "--config".to_owned(),
-        config_path.display().to_string(),
-        "--config-format".to_owned(),
-        "json".to_owned(),
-        "--drive".to_owned(),
-        "append-only".to_owned(),
-        "--database-url".to_owned(),
-        scoped_database_url.clone(),
-    ];
-    let start = run_cli(&start_args);
-    assert_success(&start);
-    let start_json = parse_success_json(&start.stdout);
-    assert_eq!(start_json["outcome"], "admitted");
-    assert_eq!(start_json["run"]["run_mode"], "forward");
-    assert_eq!(start_json["run"]["run_id"], run_id.as_str());
+    let runners = mfm_app::production_runner_registry(
+        mfm_app::artifact_read_provider_from_retained(store.clone()),
+    )
+    .expect("production runners");
+    let scheduler = mfm_runtime::SerialTypedScheduler::new(runners, Arc::new(store.clone()));
+    let runtime_spec = mfm_runtime::CertifiedRuntimeSpec::new(prepared.request.certified_spec)
+        .expect("runtime spec");
+    let launch = scheduler
+        .prepare_run_launch(
+            &runtime_spec,
+            prepared.request.identity_material,
+            prepared.request.evidence,
+            store.expected_next_seq(&run_id).await.expect("next seq"),
+        )
+        .expect("prepared launch");
+    scheduler
+        .start_run(&store, launch)
+        .await
+        .expect("start fixture run");
 
     let interrupted_node = certified
         .envelope()
@@ -105,8 +98,6 @@ async fn run_status_reports_interrupted_attempt_and_framework_attempts_from_hist
         "run".to_owned(),
         "resume".to_owned(),
         run_id.as_str().to_owned(),
-        "--drive".to_owned(),
-        "until-blocked".to_owned(),
         "--database-url".to_owned(),
         scoped_database_url.clone(),
     ]);

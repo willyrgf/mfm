@@ -49,7 +49,7 @@ pub struct TypedPortfolioSnapshotResponse {
 #[allow(dead_code)]
 pub async fn run_portfolio_snapshot(payload: serde_json::Value) -> TypedPortfolioSnapshotResponse {
     let app = rest_test_app();
-    let response = portfolio_snapshot_post(&app, &payload, "until_blocked").await;
+    let response = portfolio_snapshot_post(&app, &payload).await;
     let run = parse_run_response(&response["data"]["run"]);
     let public_output = parse_public_output_response(
         response["data"]
@@ -68,33 +68,22 @@ pub async fn run_portfolio_snapshot(payload: serde_json::Value) -> TypedPortfoli
     }
 }
 
-/// Starts a typed portfolio snapshot run with `append_only` and then resumes it to completion.
+/// Starts a typed portfolio snapshot run and returns the completed response.
 #[allow(dead_code)]
 pub async fn resume_portfolio_snapshot(
     payload: serde_json::Value,
 ) -> TypedPortfolioSnapshotResponse {
     let app = rest_test_app();
-    let response = portfolio_snapshot_post(&app, &payload, "append_only").await;
-    let started = parse_run_response(&response["data"]["run"]);
-    assert_eq!(started.run_mode, RunModeStatus::Forward);
-
-    let run_id = &started.run_id;
-    let resume = app
-        .clone()
-        .oneshot(empty_post(&format!("/v1/runs/{run_id}/resume")))
-        .await
-        .expect("resume typed portfolio run");
-    assert_eq!(resume.status(), StatusCode::OK);
-    let resumed_payload = response_json(resume).await;
-    assert_eq!(resumed_payload["status"], "success");
-    let resumed = parse_run_response(&resumed_payload["data"]);
+    let response = portfolio_snapshot_post(&app, &payload).await;
+    let resumed = parse_run_response(&response["data"]["run"]);
+    assert_eq!(resumed.run_mode, RunModeStatus::Completed);
 
     let authority = replay_and_public_output_authority(&app, &resumed, &payload).await;
     let public_output =
         fetch_public_output(&app, &resumed.run_id, &parse_public_schema_id(&payload)).await;
 
     TypedPortfolioSnapshotResponse {
-        started,
+        started: resumed.clone(),
         resumed: resumed.clone(),
         run: resumed,
         public_output,
@@ -127,7 +116,6 @@ fn empty_post(uri: &str) -> Request<Body> {
 async fn portfolio_snapshot_post(
     app: &axum::Router,
     payload: &serde_json::Value,
-    drive: &str,
 ) -> serde_json::Value {
     let response = app
         .clone()
@@ -137,7 +125,6 @@ async fn portfolio_snapshot_post(
                 "op": "portfolio_snapshot",
                 "config_format": "json",
                 "config": payload,
-                "drive": drive,
             }),
         ))
         .await

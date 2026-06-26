@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -5,8 +6,9 @@ use mfm_canonical::sha256_digest_bytes;
 use mfm_events::v1::{self as events, ArtifactRole, KernelEventPayload};
 use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind, CapabilityVersion, CellId,
-    ContentDigest, DigestAlgorithm, DigestBytes, LoweringVersion, NodeId, RunId, SchemaId, ScopeId,
-    SemanticTypeId, SideEffectPairId, SpecHash, SpecVersion, StateKind, StateVersion,
+    ContentDigest, DescriptorId, DigestAlgorithm, DigestBytes, EffectKind, EffectVersion,
+    LoweringVersion, NodeId, RunId, SchemaId, ScopeId, SemanticTypeId, SideEffectPairId, SpecHash,
+    SpecVersion, StateKind, StateVersion,
 };
 use mfm_manual_auth::{
     manual_authorization_proof_schema_id, ManualAuthorizationSignatureBytes,
@@ -392,9 +394,11 @@ fn run_id(byte: u8) -> RunId {
     RunId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
 }
 
-fn test_run_identity_material() -> events::RunIdentityMaterialV1 {
+fn test_run_identity_material_for_spec_hash(
+    certified_spec_hash: SpecHash,
+) -> events::RunIdentityMaterialV1 {
     events::RunIdentityMaterialV1 {
-        certified_spec_hash: spec_hash(1),
+        certified_spec_hash,
         trust_scope_id: TrustScopeId::new("mfm.trust_scope.v1:40404040404040404040404040404040")
             .expect("test trust scope"),
         distinct_run_key_digest: None,
@@ -469,6 +473,10 @@ fn semantic_id(name: &str, byte: u8) -> SemanticTypeId {
     .expect("semantic id")
 }
 
+fn descriptor_id(byte: u8) -> DescriptorId {
+    DescriptorId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
+}
+
 fn state_kind(byte: u8) -> StateKind {
     StateKind::new(
         "mfm.test",
@@ -508,14 +516,18 @@ fn run_admitted_with_saga_policy(
     run_id: RunId,
     saga_policy: &SagaPolicySpec,
 ) -> KernelEventPayload {
+    let authority_spec = saga_authority_spec(saga_policy.clone());
+    let certified_spec_hash = authority_spec
+        .spec_hash()
+        .expect("saga authority spec hash");
     let spec_artifact = spec_artifact_ref();
     let certificate_artifact = certificate_artifact_ref();
-    let identity_material = test_run_identity_material();
+    let identity_material = test_run_identity_material_for_spec_hash(certified_spec_hash.clone());
     KernelEventPayload::RunAdmitted(Box::new(events::RunAdmitted {
         run_id,
         identity_material,
         entry_point: entry_point_launch_evidence(),
-        spec_hash: spec_hash(1),
+        spec_hash: certified_spec_hash,
         spec_artifact: run_artifact_ref(&spec_artifact),
         certificate_artifact: run_artifact_ref(&certificate_artifact),
         config_artifacts: Vec::new(),
@@ -738,12 +750,16 @@ fn verified_manual_resolution_for_seq(
     expected_next_seq: u64,
     byte: u8,
 ) -> VerifiedManualResolutionForPrefix {
-    let SagaPolicySpec::ManualResolution { manual } = manual_saga_policy(byte) else {
+    let policy = manual_saga_policy(byte);
+    let spec_hash = saga_authority_spec(policy.clone())
+        .spec_hash()
+        .expect("manual saga authority spec hash");
+    let SagaPolicySpec::ManualResolution { manual } = policy else {
         unreachable!("manual_saga_policy builds manual policy")
     };
     let prefix = ManualResolutionPrefixAuthority::new(
         run_id.clone(),
-        spec_hash(1),
+        spec_hash,
         expected_next_seq,
         content_digest(byte + 3),
         ManualResolutionBlockReason::PolicyManualResolution,
@@ -823,9 +839,10 @@ fn sign_manual_claim_digest(signing_key: &k256::ecdsa::SigningKey, digest: &[u8;
 }
 
 fn saga_preconditions(run_id: &RunId, policy: SagaPolicySpec) -> CommitPreconditions {
+    let spec = saga_authority_spec(policy);
     CommitPreconditions {
         saga_admit_token: Some(
-            mfm_store::v1::SagaAdmitToken::new(run_id.clone(), spec_hash(1), policy)
+            mfm_store::v1::SagaAdmitToken::from_spec(run_id.clone(), &spec)
                 .expect("saga admit token"),
         ),
         ..CommitPreconditions::default()
@@ -837,9 +854,147 @@ fn side_effect_ledger_key() -> events::SideEffectLedgerKey {
 }
 
 fn side_effect_pair_id() -> SideEffectPairId {
-    SideEffectPairId::from_digest(
+    side_effect_pair_id_for_contract(&default_side_effect_contract())
+}
+
+fn side_effect_pair_id_for_contract(contract: &spec::SideEffectContractSpec) -> SideEffectPairId {
+    spec::side_effect_pair_id(&node_id(70), &side_effect_output_cell(), contract)
+        .expect("certified side-effect pair id")
+}
+
+fn side_effect_output_cell() -> CellId {
+    cell_id(78)
+}
+
+fn default_side_effect_contract() -> spec::SideEffectContractSpec {
+    spec::SideEffectContractSpec {
+        contract_digest: content_digest(77),
+        resource_claim: spec::ResourceClaimSpec::ManualOnly,
+        verification: spec::SideEffectVerificationSpec::Finalized { depth: 1 },
+    }
+}
+
+fn saga_authority_spec(policy: SagaPolicySpec) -> spec::TypedExecutionSpec {
+    let planning_lineage = spec::PlanningLineage {
+        active_operation_instances: Vec::new(),
+        completed_operation_frames: Vec::new(),
+        lineage_digest: content_digest(85),
+    };
+    let public_schema_id = schema_id("mfm.test.public_output", 3);
+    let contract = default_side_effect_contract();
+    let config_ref = spec::ConfigRef {
+        schema_id: schema_id("mfm.test.side_effect_config", 89),
+        artifact_id: artifact_id(90),
+        digest: content_digest(91),
+        byte_len: 2,
+        media_type: media_type("application/json"),
+    };
+    let input_bindings = spec::InputBindingSpec {
+        input_schema_id: schema_id("mfm.test.side_effect_input", 92),
+        input_descriptor_id: descriptor_id(93),
+        root: spec::InputBindingNodeSpec::Unit,
+        digest: content_digest(94),
+    };
+    let state_kind = state_kind(70);
+    let state_version = StateVersion::new("mfm.test.side_effect_state.v1").expect("state version");
+    let state_descriptor_id = descriptor_id(88);
+    let effect_kind = EffectKind::new(
+        "mfm.test",
+        "side_effect",
         DigestAlgorithm::Sha256JcsV1,
-        sha256_digest_bytes(side_effect_ledger_key().as_str().as_bytes()),
+        digest_bytes(95),
+    )
+    .expect("effect kind");
+    let capability_bindings =
+        mfm_capabilities::CapabilitySetDescriptor::new(Vec::new()).expect("empty capabilities");
+    let renderer_descriptor = spec::RendererDescriptorIdentity {
+        descriptor_id: descriptor_id(96),
+        renderer_kind: spec::RendererKind::new("public-output/json").expect("renderer kind"),
+        renderer_version: spec::RendererVersion::new("mfm.renderer.test.v1")
+            .expect("renderer version"),
+        public_schema_id: public_schema_id.clone(),
+        canonicalizer_identity: CanonicalizerIdentity::new("mfm.jcs.v1").expect("canonicalizer"),
+    };
+    spec::TypedExecutionSpec::new(spec::TypedExecutionSpecParts {
+        authoring: spec::AuthoringProvenance::StateComposition {
+            descriptor: spec::CompositionDescriptor {
+                descriptor_id: descriptor_id(86),
+                name: "mfm.test.saga_authority".to_owned(),
+                version: "mfm.test.saga_authority.v1".to_owned(),
+            },
+            config_hash: content_digest(87),
+        },
+        saga: policy,
+        scopes: Vec::new(),
+        seeds: Vec::new(),
+        descriptor_identities: vec![
+            spec::DescriptorIdentity::State(Box::new(spec::StateDescriptorIdentity {
+                descriptor_id: state_descriptor_id.clone(),
+                name: "mfm.test.side_effect".to_owned(),
+                state_kind: state_kind.clone(),
+                state_version: state_version.clone(),
+                config_schema_id: config_ref.schema_id.clone(),
+                input_schema_id: input_bindings.input_schema_id.clone(),
+                output_schema_id: schema_id("mfm.test.side_effect_output", 97),
+                output_semantic_type_id: semantic_id("side_effect_output", 98),
+                effect_kind: effect_kind.clone(),
+                effect_class: "side_effect".to_owned(),
+                effect_name: "side_effect".to_owned(),
+                effect_version: EffectVersion::new("mfm.test.side_effect.v1")
+                    .expect("effect version"),
+                capabilities: capability_bindings.clone(),
+                runner: "mfm.test.runner".to_owned(),
+                side_effect_contract_digest: Some(contract.contract_digest.clone()),
+            })),
+            spec::DescriptorIdentity::Renderer(Box::new(renderer_descriptor.clone())),
+        ],
+        config_refs: vec![config_ref.clone()],
+        nodes: vec![spec::NodeSpec {
+            node_id: node_id(70),
+            stable_key: spec::StableAuthorKey::new("side-effect").expect("stable key"),
+            scope_id: scope_id(71),
+            state_kind,
+            state_version,
+            descriptor_id: state_descriptor_id,
+            config_ref,
+            input_bindings,
+            output_cell: side_effect_output_cell(),
+            effect_kind,
+            capability_bindings,
+            adapter_bindings: Vec::new(),
+            side_effect: Some(contract),
+            framework: None,
+            planning_lineage: planning_lineage.clone(),
+            deterministic_predecessors: Vec::new(),
+        }],
+        remediations: BTreeMap::new(),
+        cells: Vec::new(),
+        value_lineages: Vec::new(),
+        planning_lineage: Vec::new(),
+        public_outputs: spec::PublicOutputSpec {
+            public_schema_id: public_schema_id.clone(),
+            outputs: Vec::new(),
+            renderer_descriptor,
+        },
+    })
+    .expect("saga authority spec")
+}
+
+fn confirmation_terminal_policies_for_projection(
+    projection: &mfm_store::v1::ProjectionSnapshot,
+    run_id: &RunId,
+) -> mfm_store::v1::SideEffectTerminalPolicies {
+    mfm_store::v1::SideEffectTerminalPolicies::new(
+        projection
+            .side_effects()
+            .filter(|(_, side_effect)| side_effect.run_id == *run_id)
+            .map(|(_, side_effect)| {
+                (
+                    side_effect.pair_id.clone(),
+                    mfm_store::v1::SideEffectTerminalPolicy::Confirmation,
+                )
+            })
+            .collect::<BTreeMap<_, _>>(),
     )
 }
 
@@ -1042,10 +1197,14 @@ fn side_effect_ambiguous(artifact_id: ArtifactId, digest: ContentDigest) -> Kern
 }
 
 fn side_effect_attempt_failed() -> KernelEventPayload {
+    side_effect_attempt_failed_for(node_id(70), attempt_id(72))
+}
+
+fn side_effect_attempt_failed_for(node_id: NodeId, attempt_id: AttemptId) -> KernelEventPayload {
     KernelEventPayload::StateAttemptFailed(events::StateAttemptFailed {
         spec_hash: spec_hash(1),
-        node_id: node_id(70),
-        attempt_id: attempt_id(72),
+        node_id,
+        attempt_id,
         retryable: false,
         error: events::MfmErrorInfo {
             code: events::ErrorCode::new("side_effect_ambiguous").expect("error code"),
@@ -1059,10 +1218,14 @@ fn side_effect_attempt_failed() -> KernelEventPayload {
 }
 
 fn side_effect_failed() -> KernelEventPayload {
+    side_effect_failed_for(node_id(70), attempt_id(72))
+}
+
+fn side_effect_failed_for(node_id: NodeId, attempt_id: AttemptId) -> KernelEventPayload {
     KernelEventPayload::SideEffectFailed(events::side_effect::Failed {
         spec_hash: spec_hash(1),
-        node_id: node_id(70),
-        attempt_id: attempt_id(72),
+        node_id,
+        attempt_id,
         ledger_key: side_effect_ledger_key(),
         ledger_purpose: side_effect_ledger_purpose(),
         pair_id: side_effect_pair_id(),
@@ -1171,7 +1334,7 @@ fn spec_artifact_ref() -> ArtifactEvidenceRef {
         digest: content_digest(2),
         byte_len: 128,
         media_type: media_type("application/vnd.mfm.typed-execution-spec+json;version=1"),
-        schema_id: None,
+        schema_id: Some(spec::typed_execution_spec_schema_id().expect("typed spec schema")),
         semantic_type_id: None,
         producer_node_id: None,
         producer_seed_id: None,
@@ -1185,7 +1348,9 @@ fn certificate_artifact_ref() -> ArtifactEvidenceRef {
         digest: content_digest(4),
         byte_len: 128,
         media_type: media_type("application/vnd.mfm.typed-spec-certificate+json;version=1"),
-        schema_id: None,
+        schema_id: Some(
+            mfm_certify::typed_spec_certificate_schema_id().expect("typed certificate schema"),
+        ),
         semantic_type_id: None,
         producer_node_id: None,
         producer_seed_id: None,
@@ -3141,8 +3306,11 @@ async fn saga_projection_rebuilds_from_events() {
         .status_projection_snapshot(&terminal_run)
         .await
         .expect("terminal projection before completion");
-    let terminal_saga =
-        terminal_before_completion.derive_saga_projection(&terminal_run, &terminal_policy);
+    let terminal_policies =
+        confirmation_terminal_policies_for_projection(&terminal_before_completion, &terminal_run);
+    let terminal_saga = terminal_before_completion
+        .derive_saga_projection(&terminal_run, &terminal_policy, &terminal_policies)
+        .expect("terminal saga projection");
     let terminal_proof = SagaTerminalProof::new(
         &terminal_policy,
         &terminal_saga,
@@ -3153,17 +3321,25 @@ async fn saga_projection_rebuilds_from_events() {
         None,
     )
     .expect("terminal proof");
+    let terminal_spec_hash = saga_authority_spec(terminal_policy.clone())
+        .spec_hash()
+        .expect("terminal saga authority spec hash");
+    let mut terminal_completion = run_completed(
+        terminal_run.clone(),
+        events::RunCompletionOutcome::FailedWithoutAcdcClaim,
+    );
+    let KernelEventPayload::RunCompleted(payload) = &mut terminal_completion else {
+        unreachable!("run_completed helper returns RunCompleted payload");
+    };
+    payload.spec_hash = terminal_spec_hash;
     let terminal_request = request(
         terminal_run.clone(),
         5,
         "saga-terminal-run-completed",
-        vec![run_completed(
-            terminal_run.clone(),
-            events::RunCompletionOutcome::FailedWithoutAcdcClaim,
-        )],
+        vec![terminal_completion],
     );
-    let terminal_request =
-        terminal_request.with_preconditions(saga_preconditions(&terminal_run, terminal_policy));
+    let terminal_request = terminal_request
+        .with_preconditions(saga_preconditions(&terminal_run, terminal_policy.clone()));
     let terminal_commit = PreparedCommit::<SagaTerminal>::new(
         terminal_request,
         CommitArtifactEvidenceSet::empty(),

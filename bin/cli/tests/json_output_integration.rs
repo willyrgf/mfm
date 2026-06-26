@@ -397,8 +397,6 @@ fn test_run_start_requires_store_trust_scope_before_config_decode() {
             "portfolio_snapshot",
             "--config",
             config_path.to_str().unwrap(),
-            "--drive",
-            "append-only",
         ])
         .output()
         .expect("Failed to execute command");
