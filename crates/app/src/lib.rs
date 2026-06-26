@@ -917,8 +917,6 @@ pub enum RunLaunchOutcomeStatus {
     AlreadyDriving,
     /// The launch request found the same run identity with incompatible executable bindings.
     IncompatibleExecutable,
-    /// The stored run identity material did not match the derived identity.
-    IdentityMismatch,
 }
 
 impl RunLaunchOutcomeStatus {
@@ -929,7 +927,6 @@ impl RunLaunchOutcomeStatus {
             Self::Attached => "attached",
             Self::AlreadyDriving => "already_driving",
             Self::IncompatibleExecutable => "incompatible_executable",
-            Self::IdentityMismatch => "identity_mismatch",
         }
     }
 }
@@ -963,11 +960,6 @@ pub enum RunLaunchOutcome {
         /// Current run status for the existing run.
         run: RunResponse,
     },
-    /// This launch found stored identity material that did not match the derived run id.
-    IdentityMismatch {
-        /// Run id whose stored identity material did not validate.
-        run_id: String,
-    },
 }
 
 impl RunLaunchOutcome {
@@ -978,31 +970,28 @@ impl RunLaunchOutcome {
             Self::Attached { .. } => RunLaunchOutcomeStatus::Attached,
             Self::AlreadyDriving { .. } => RunLaunchOutcomeStatus::AlreadyDriving,
             Self::IncompatibleExecutable { .. } => RunLaunchOutcomeStatus::IncompatibleExecutable,
-            Self::IdentityMismatch { .. } => RunLaunchOutcomeStatus::IdentityMismatch,
         }
     }
 
-    /// Returns the run response when this outcome carries one.
-    pub fn run(&self) -> Option<&RunResponse> {
+    /// Returns the run response carried by this outcome.
+    pub fn run(&self) -> &RunResponse {
         match self {
             Self::Admitted { run }
             | Self::Attached { run }
             | Self::AlreadyDriving { run }
-            | Self::IncompatibleExecutable { run } => Some(run),
-            Self::IdentityMismatch { .. } => None,
+            | Self::IncompatibleExecutable { run } => run,
         }
     }
 
-    /// Splits this outcome into the public kind and run response when one is available.
-    pub fn into_response_parts(self) -> Option<(RunLaunchOutcomeStatus, RunResponse)> {
+    /// Splits this outcome into the public kind and run response.
+    pub fn into_response_parts(self) -> (RunLaunchOutcomeStatus, RunResponse) {
         match self {
-            Self::Admitted { run } => Some((RunLaunchOutcomeStatus::Admitted, run)),
-            Self::Attached { run } => Some((RunLaunchOutcomeStatus::Attached, run)),
-            Self::AlreadyDriving { run } => Some((RunLaunchOutcomeStatus::AlreadyDriving, run)),
+            Self::Admitted { run } => (RunLaunchOutcomeStatus::Admitted, run),
+            Self::Attached { run } => (RunLaunchOutcomeStatus::Attached, run),
+            Self::AlreadyDriving { run } => (RunLaunchOutcomeStatus::AlreadyDriving, run),
             Self::IncompatibleExecutable { run } => {
-                Some((RunLaunchOutcomeStatus::IncompatibleExecutable, run))
+                (RunLaunchOutcomeStatus::IncompatibleExecutable, run)
             }
-            Self::IdentityMismatch { .. } => None,
         }
     }
 }

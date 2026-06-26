@@ -129,7 +129,6 @@ pub(super) async fn resource_lane_fifo_pre_gate_tx(
             )
             .await?;
             return Ok(Some(mfm_store::v1::WaitFifoAdmissionBlock {
-                lane: admission.lane.clone(),
                 resource_lane_key: admission.lane_key.clone(),
                 holder: Some(active.holder.clone()),
                 waiter: Some(waiter),
@@ -146,7 +145,6 @@ pub(super) async fn resource_lane_fifo_pre_gate_tx(
             )
             .await?;
             return Ok(Some(mfm_store::v1::WaitFifoAdmissionBlock {
-                lane: admission.lane.clone(),
                 resource_lane_key: admission.lane_key.clone(),
                 holder: None,
                 waiter: Some(waiter),

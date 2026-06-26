@@ -307,8 +307,8 @@ pub use admission_lanes::{
     AdmissionModeSpec, AdmissionToken, AdmissionWaiter, AdmissionWaiterId,
     ExecutionClaimAdmissionLane, ExecutionClaimStatus, ExpiredExecutionClaim, NowaitSkip,
     NowaitSkipAdmissionBusy, NowaitSkipAdmissionResult, ResourceAdmissionLane, WaitFifo,
-    WaitFifoAdmissionBlock, WaitFifoAdmissionGrant, WaitFifoAdmissionResult,
-    EXECUTION_CLAIM_HEARTBEAT_INTERVAL_SECS, EXECUTION_CLAIM_LEASE_TTL_SECS,
+    WaitFifoAdmissionBlock, EXECUTION_CLAIM_HEARTBEAT_INTERVAL_SECS,
+    EXECUTION_CLAIM_LEASE_TTL_SECS,
 };
 
 /// Shared canonical-JSON codec for kernel events, projections, and saga types.
@@ -5471,10 +5471,8 @@ fn materialize_resource_lane_intents(
                 }
                 if let Some(existing) = active_lanes.get(&lane_key) {
                     if existing.holder != holder {
-                        let lane = ResourceAdmissionLane::from_resource_lane_key(&lane_key)?;
                         return Ok(ResourceLaneMaterialization::Blocked(Box::new(
                             WaitFifoAdmissionBlock {
-                                lane,
                                 resource_lane_key: lane_key,
                                 holder: Some(existing.holder.clone()),
                                 waiter: None,

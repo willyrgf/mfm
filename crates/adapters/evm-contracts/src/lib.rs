@@ -84,9 +84,9 @@ use mfm_state_evm_contracts::{
     ConfigureContractState, ContractConfigureConfirmation, ContractConfigureIntent,
     ContractConfigureReceipt, ContractDeployConfirmation, ContractDeployIntent,
     ContractDeployReceipt, ContractTransactionIdempotency, ContractTransactionReceipt,
-    ContractTransactionReceipts, ContractTransactionSubmission, ContractTransactionSubmissions,
-    ContractValidationReadRequest, ContractValidationReadResponse, DeployContractState,
-    ValidateContractInput, ValidateContractState,
+    ContractTransactionSubmission, ContractTransactionSubmissions, ContractValidationReadRequest,
+    ContractValidationReadResponse, DeployContractState, ValidateContractInput,
+    ValidateContractState,
 };
 use mfm_store::v1 as store;
 use mfm_values::{MfmConfig, MfmValue};
@@ -741,45 +741,6 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         Ok(PreparedSubmissionReconciliation::NotObserved(
             anchor_submissions,
         ))
-    }
-
-    /// Projects deploy output from a confirmed deploy receipt and contract address.
-    pub fn confirm_deploy(
-        &self,
-        config: &ValidatedConfig<DeployPhaseConfig>,
-        intent: &ContractDeployIntent,
-        receipt: ContractTransactionReceipt,
-        contract_address: Address,
-        confirmations: u64,
-    ) -> Result<mfm_evm_contract_model::DeployedContract> {
-        let state = DeployContractState::new(config.clone())?;
-        let confirmation = ContractDeployConfirmation {
-            confirmation_version: 1,
-            confirmations,
-            contract_address: normalize_address(&format!("{contract_address:?}"))
-                .map_err(EvmContractAdapterError::Model)?,
-            receipt,
-        };
-        Ok(state.output_from_confirmation(&(), intent, &confirmation)?)
-    }
-
-    /// Projects configure output from confirmed configure receipts.
-    pub fn confirm_configure(
-        &self,
-        config: &ValidatedConfig<ConfigurePhaseConfig>,
-        input: &ConfigureContractInput,
-        intent: &ContractConfigureIntent,
-        receipts: Vec<ContractTransactionReceipt>,
-        confirmations: u64,
-    ) -> Result<ConfiguredContract> {
-        let state = ConfigureContractState::new(config.clone())?;
-        let confirmation = ContractConfigureConfirmation {
-            confirmation_version: 1,
-            confirmations,
-            configured_block_number: receipts.iter().map(|receipt| receipt.block_number).max(),
-            receipts,
-        };
-        Ok(state.output_from_confirmation(input, intent, &confirmation)?)
     }
 
     /// Executes validation reads and projects a validation response.
@@ -2422,10 +2383,7 @@ impl SideEffectVerifyCallbacks for DeploySideEffectVerifyCallbacks<'_> {
             let runtime = self
                 .factory
                 .runtime_for(plan.config.as_ref().network().network_id())?;
-            let receipts = ContractTransactionReceipts {
-                receipts_version: 1,
-                transactions: read_receipts_with_poll(&runtime, &prepared, &submissions).await?,
-            };
+            let receipts = read_receipts_with_poll(&runtime, &prepared, &submissions).await?;
             Ok(SideEffectObservedEvidence {
                 evidence: ContractDeployReceipt {
                     receipt_version: 1,
@@ -3237,15 +3195,14 @@ fn missing_side_effect_artifact(label: &str) -> mfm_runtime::RuntimeError {
 }
 
 fn single_receipt(
-    receipts: ContractTransactionReceipts,
-) -> mfm_runtime::Result<mfm_state_evm_contracts::ContractTransactionReceipt> {
-    let mut transactions = receipts.transactions;
-    if transactions.len() != 1 {
+    mut receipts: Vec<ContractTransactionReceipt>,
+) -> mfm_runtime::Result<ContractTransactionReceipt> {
+    if receipts.len() != 1 {
         return Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(
             "contract deploy confirmation requires exactly one receipt".to_owned(),
         ));
     }
-    Ok(transactions.remove(0))
+    Ok(receipts.remove(0))
 }
 
 fn deploy_receipt_with_evidence(

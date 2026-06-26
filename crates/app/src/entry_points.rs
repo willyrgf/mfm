@@ -271,10 +271,7 @@ mod tests {
             second_outcome.status(),
             crate::RunLaunchOutcomeStatus::Attached
         );
-        assert_eq!(
-            second_outcome.run().expect("attached run").scheduler_status,
-            "observed"
-        );
+        assert_eq!(second_outcome.run().scheduler_status, "observed");
         assert_eq!(run_admitted_count(&store, &run_id).await, 1);
     }
 
@@ -396,8 +393,7 @@ mod tests {
             .launch_run(prepared.request)
             .await
             .expect("launch")
-            .into_response_parts()
-            .expect("run response");
+            .into_response_parts();
         let head_seq = started.head_seq;
         let token = AdmissionToken::new("mfm.test.app.execution_claim.resume_busy")
             .expect("execution claim token");

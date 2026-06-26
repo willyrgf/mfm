@@ -67,8 +67,7 @@ async fn public_manual_resolution_scenario_records_resolution_and_hides_proof_by
         .launch_run(launch.request)
         .await
         .expect("launch")
-        .into_response_parts()
-        .expect("run response");
+        .into_response_parts();
     assert_eq!(blocked.run_mode, RunModeStatus::ManualBlocked);
     let blocked_replay = services
         .verify_replay_for_run(&run_id)

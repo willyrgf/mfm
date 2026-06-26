@@ -124,12 +124,7 @@ async fn execute_internal(args: &StartArgs) -> CommandResult<StartOutput> {
         .public_schema_id
         .clone();
     let launch = services.launch_run(prepared.request).await?;
-    let (outcome, run) = launch.into_response_parts().ok_or_else(|| {
-        CommandError::backend(
-            "RunLaunchOutcomeInvalid",
-            "Run launch did not return a run response",
-        )
-    })?;
+    let (outcome, run) = launch.into_response_parts();
     let public_output = if run.run_mode == RunModeStatus::Completed {
         Some(
             services
