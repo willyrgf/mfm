@@ -53,8 +53,6 @@ impl From<events::SideEffectEventKind> for HistoricalSideEffectPhase {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HistoricalSideEffectLedger {
-    node_id: NodeId,
-    attempt_id: AttemptId,
     phase: HistoricalSideEffectPhase,
     resource_key: Option<events::ResourceKeyEvidence>,
 }
@@ -119,8 +117,6 @@ pub(crate) fn validate_historical_side_effect_payload(
                 .insert(
                     pair_id.clone(),
                     HistoricalSideEffectLedger {
-                        node_id: node_id.clone(),
-                        attempt_id: attempt_id.clone(),
                         phase,
                         resource_key: None,
                     },
@@ -168,22 +164,22 @@ pub(crate) fn side_effect_payload_ref(
     &SideEffectPairId,
     HistoricalSideEffectPhase,
 )> {
-    payload.side_effect_ref().map(|side_effect| {
-        (
-            side_effect.node_id,
-            side_effect.attempt_id,
-            side_effect.ledger_key,
-            side_effect.pair_id,
-            HistoricalSideEffectPhase::from(side_effect.kind),
-        )
-    })
+    let emitter = payload.side_effect_emitter_ref()?;
+    let ledger = payload.side_effect_ledger_ref()?;
+    Some((
+        emitter.node_id,
+        emitter.attempt_id,
+        ledger.ledger_key,
+        ledger.pair_id,
+        HistoricalSideEffectPhase::from(ledger.kind),
+    ))
 }
 
 fn side_effect_payload_ledger_purpose(
     payload: &events::KernelEventPayload,
 ) -> Option<&events::SideEffectLedgerPurpose> {
     payload
-        .side_effect_ref()
+        .side_effect_ledger_ref()
         .map(|side_effect| side_effect.ledger_purpose)
 }
 
@@ -208,7 +204,7 @@ fn side_effect_contract_node_for_payload<'a>(
             node.node_id
         )));
     };
-    let Some(side_effect) = payload.side_effect_ref() else {
+    let Some(side_effect) = payload.side_effect_ledger_ref() else {
         return Err(RuntimeError::InvalidRunnerOutput(
             "expected side-effect payload".to_owned(),
         ));

@@ -5540,44 +5540,18 @@ fn materialize_resource_lane_intents(
                     intent.pair_role,
                     events::SideEffectPairRole::Verify,
                 )?;
-                let holder =
-                    SideEffectPairLedgerRef::new(request.run_id.clone(), intent.pair_id.clone());
-                let Some((lane_key, active)) = active_lanes
-                    .iter()
-                    .find(|(_, active)| active.holder == holder)
-                    .map(|(lane_key, active)| (lane_key.clone(), active.clone()))
-                else {
-                    return Err(StoreError::ProjectionConflict {
-                        key: format!("resource_lane_pair:{}", intent.pair_id),
-                        message: "resource lane release requires an active claim".to_owned(),
-                    });
-                };
-                let Some(pair_key) =
-                    materialized_lane_key_for_pair(&active_lanes, &request.run_id, &intent.pair_id)
-                else {
-                    return Err(StoreError::ProjectionConflict {
-                        key: format!("resource_lane_pair:{}", intent.pair_id),
-                        message: "resource lane release pair references no active claim".to_owned(),
-                    });
-                };
-                if pair_key != lane_key {
-                    return Err(StoreError::ProjectionConflict {
-                        key: format!("resource_lane_pair:{}", intent.pair_id),
-                        message: "resource lane release pair does not match active holder"
-                            .to_owned(),
-                    });
-                }
-                if active.pair_id != intent.pair_id
-                    || active.ledger_purpose != intent.ledger_purpose
-                    || active.invocation_epoch != intent.invocation_epoch
-                    || active.claim_id != intent.claim_id
-                {
-                    return Err(StoreError::ProjectionConflict {
-                        key: format!("resource_lane:{}:{}", lane_key.namespace, lane_key.key),
-                        message: "resource lane release intent does not match active claim"
-                            .to_owned(),
-                    });
-                }
+                let (lane_key, active) = resolve_active_resource_lane_release(
+                    &active_lanes,
+                    &request.run_id,
+                    &intent.ledger_key,
+                    &intent.ledger_purpose,
+                    &intent.pair_id,
+                    intent.invocation_epoch,
+                    &intent.claim_id,
+                    "resource lane release intent does not match active claim",
+                )?;
+                let lane_key = lane_key.clone();
+                let active = active.clone();
                 let authority = resource_lane_authority.get_mut(&lane_key).ok_or_else(|| {
                     StoreError::ProjectionConflict {
                         key: format!("resource_lane:{}:{}", lane_key.namespace, lane_key.key),
@@ -7347,7 +7321,7 @@ fn validate_attempt_terminal_resource_lane_release_batch(request: &CommitRequest
         .enumerate()
         .filter(|(_, payload)| is_resource_lane_release_payload(payload))
     {
-        let Some(release_ref) = release.side_effect_ref() else {
+        let Some(release_ref) = release.resource_lane_authority_ref() else {
             continue;
         };
         let matched_terminal =
@@ -7357,8 +7331,11 @@ fn validate_attempt_terminal_resource_lane_release_batch(request: &CommitRequest
                 .enumerate()
                 .any(|(terminal_index, terminal)| {
                     terminal_index > release_index
-                        && (attempt_terminal_matches_release(terminal, &release_ref)
-                            || is_run_completed_payload(terminal))
+                        && (terminal_payload_matches_resource_lane_release(
+                            terminal,
+                            &release_ref,
+                            TerminalReleaseMatchKind::AttemptTerminal,
+                        ) || is_run_completed_payload(terminal))
                 });
         if !matched_terminal {
             return Err(invalid_prepared_commit_purpose(
@@ -7380,7 +7357,7 @@ fn validate_side_effect_terminal_resource_lane_release_batch(
         .enumerate()
         .filter(|(_, payload)| is_resource_lane_release_payload(payload))
     {
-        let Some(release_ref) = release.side_effect_ref() else {
+        let Some(release_ref) = release.resource_lane_authority_ref() else {
             continue;
         };
         let matched_terminal =
@@ -7390,7 +7367,11 @@ fn validate_side_effect_terminal_resource_lane_release_batch(
                 .enumerate()
                 .any(|(terminal_index, terminal)| {
                     terminal_index > release_index
-                        && side_effect_terminal_disposition_matches_release(terminal, &release_ref)
+                        && terminal_payload_matches_resource_lane_release(
+                            terminal,
+                            &release_ref,
+                            TerminalReleaseMatchKind::SideEffectTerminal,
+                        )
                 });
         if !matched_terminal {
             return Err(invalid_prepared_commit_purpose(
@@ -7415,44 +7396,89 @@ fn reject_terminal_resource_lane_claims(
     Ok(())
 }
 
-fn attempt_terminal_matches_release(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalReleaseMatchKind {
+    AttemptTerminal,
+    SideEffectTerminal,
+}
+
+fn terminal_payload_matches_resource_lane_release(
     terminal: &KernelEventPayload,
-    release: &events::SideEffectEventRef<'_>,
+    release: &events::ResourceLaneAuthorityRef<'_>,
+    kind: TerminalReleaseMatchKind,
+) -> bool {
+    match kind {
+        TerminalReleaseMatchKind::AttemptTerminal => {
+            attempt_terminal_payload_matches_release(terminal, release)
+        }
+        TerminalReleaseMatchKind::SideEffectTerminal => {
+            side_effect_terminal_payload_matches_release(terminal, release)
+        }
+    }
+}
+
+fn attempt_terminal_payload_matches_release(
+    terminal: &KernelEventPayload,
+    release: &events::ResourceLaneAuthorityRef<'_>,
 ) -> bool {
     match terminal {
         KernelEventPayload::StateAttemptCompleted(payload) => {
-            payload.node_id == *release.node_id && payload.attempt_id == *release.attempt_id
+            payload.node_id == *release.emitter.node_id
+                && payload.attempt_id == *release.emitter.attempt_id
         }
         KernelEventPayload::StateAttemptInterrupted(payload) => {
-            payload.node_id == *release.node_id && payload.attempt_id == *release.attempt_id
+            payload.node_id == *release.emitter.node_id
+                && payload.attempt_id == *release.emitter.attempt_id
         }
         KernelEventPayload::StateAttemptFailed(payload) => {
-            payload.node_id == *release.node_id && payload.attempt_id == *release.attempt_id
+            payload.node_id == *release.emitter.node_id
+                && payload.attempt_id == *release.emitter.attempt_id
         }
         _ => false,
     }
 }
 
-fn side_effect_terminal_disposition_matches_release(
+fn side_effect_terminal_payload_matches_release(
     terminal: &KernelEventPayload,
-    release: &events::SideEffectEventRef<'_>,
+    release: &events::ResourceLaneAuthorityRef<'_>,
 ) -> bool {
-    is_side_effect_terminal_disposition_payload(terminal)
-        && terminal
-            .side_effect_ref()
-            .is_some_and(|terminal_ref| side_effect_refs_share_lane(&terminal_ref, release))
+    if !is_side_effect_terminal_disposition_payload(terminal) {
+        return false;
+    }
+    let Some(terminal) = terminal.side_effect_ledger_ref() else {
+        return false;
+    };
+    terminal.ledger_key == release.ledger.ledger_key
+        && terminal.ledger_purpose == release.ledger.ledger_purpose
+        && terminal.pair_id == release.ledger.pair_id
+        && terminal.invocation_epoch == release.ledger.invocation_epoch
+        && side_effect_terminal_release_role_allowed(
+            terminal.kind,
+            terminal.pair_role,
+            release.ledger.pair_role,
+        )
 }
 
-fn side_effect_refs_share_lane(
-    left: &events::SideEffectEventRef<'_>,
-    right: &events::SideEffectEventRef<'_>,
+fn side_effect_terminal_release_role_allowed(
+    terminal_kind: events::SideEffectEventKind,
+    terminal_role: events::SideEffectPairRole,
+    release_role: events::SideEffectPairRole,
 ) -> bool {
-    left.node_id == right.node_id
-        && left.attempt_id == right.attempt_id
-        && left.ledger_key == right.ledger_key
-        && left.ledger_purpose == right.ledger_purpose
-        && left.pair_id == right.pair_id
-        && left.invocation_epoch == right.invocation_epoch
+    if release_role != events::SideEffectPairRole::Verify {
+        return false;
+    }
+    match terminal_kind {
+        events::SideEffectEventKind::NotSubmittedProven => {
+            terminal_role == events::SideEffectPairRole::Submit
+        }
+        events::SideEffectEventKind::ReceiptObserved
+        | events::SideEffectEventKind::ConfirmationObserved
+        | events::SideEffectEventKind::Ambiguous
+        | events::SideEffectEventKind::Failed => {
+            terminal_role == events::SideEffectPairRole::Verify
+        }
+        _ => false,
+    }
 }
 
 fn is_attempt_terminal_payload(payload: &KernelEventPayload) -> bool {
@@ -7515,7 +7541,7 @@ fn is_side_effect_progress_commit_payload(payload: &KernelEventPayload) -> bool 
 }
 
 fn is_side_effect_payload(payload: &KernelEventPayload) -> bool {
-    payload.side_effect_ref().is_some()
+    payload.side_effect_ledger_ref().is_some()
 }
 
 fn is_resource_lane_claim_payload(payload: &KernelEventPayload) -> bool {
@@ -8265,7 +8291,7 @@ mod projection;
 pub use self::resource_lanes::resource_lane_release_intent_resolution;
 use self::resource_lanes::{
     acquire_resource_lane, release_resource_lane, require_no_resource_lane_for_holder,
-    require_no_resource_lanes_for_run,
+    require_no_resource_lanes_for_run, resolve_active_resource_lane_release,
 };
 use self::side_effects::{
     note_saga_engagement, prepared_invocation_projection, require_active_attempt_for_side_effect,
