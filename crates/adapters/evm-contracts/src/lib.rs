@@ -36,13 +36,15 @@ use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_capabilities::CapabilitySpec;
 use mfm_events::v1::{self as events, side_effect};
 use mfm_evm_capabilities::{
-    EvmBlockSelector, EvmCallReadCapability, EvmCallReadProvider, EvmCallReadRequest,
-    EvmCapabilityError, EvmChainIdentityCapability, EvmChainIdentityProvider,
-    EvmChainIdentityRequest, EvmFeeReadProvider, EvmFeeReadRequest, EvmGasEstimateProvider,
-    EvmGasEstimateRequest, EvmLogsReadCapability, EvmLogsReadProvider, EvmLogsReadRequest,
-    EvmNonceReadProvider, EvmNonceReadRequest, EvmReceiptReadProvider, EvmReceiptReadRequest,
-    EvmSourcePolicyId, EvmSourceRef, EvmTransactionSubmitCapability, EvmTransactionSubmitProvider,
-    EvmTransactionSubmitRequest, SignedEvmPayload,
+    EvmBlockReadProvider, EvmBlockReadRequest, EvmBlockSelector, EvmCallReadCapability,
+    EvmCallReadProvider, EvmCallReadRequest, EvmCapabilityError, EvmChainIdentityCapability,
+    EvmChainIdentityProvider, EvmChainIdentityRequest, EvmFeeReadProvider, EvmFeeReadRequest,
+    EvmGasEstimateProvider, EvmGasEstimateRequest, EvmLogsReadCapability, EvmLogsReadProvider,
+    EvmLogsReadRequest, EvmNonceOccupancy, EvmNonceOccupancyReadProvider,
+    EvmNonceOccupancyReadRequest, EvmNonceReadProvider, EvmNonceReadRequest,
+    EvmReceiptReadProvider, EvmReceiptReadRequest, EvmSourcePolicyId, EvmSourceRef,
+    EvmTransactionSubmitCapability, EvmTransactionSubmitProvider, EvmTransactionSubmitRequest,
+    SignedEvmPayload,
 };
 use mfm_evm_contract_config::{
     ConfigurePhaseConfig, DeployPhaseConfig, EvmTransactionPolicy,
@@ -68,12 +70,12 @@ use mfm_runtime::{
     CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture,
     ErasedRunnerOutput, ErasedRunnerRegistry, MaterializedCell, MaterializedCellTerminal,
     MaterializedInputNode, MaterializedInputs, PreInvocationRunCtx, PreInvocationRunnerFuture,
-    RunnerArtifactBuilder, RunnerCapabilityBinding, RunnerOutputBuilder, RunnerPayloadBuilder,
-    RunnerRegistrationBuilder, SideEffectDriver, SideEffectDriverCallbacks, SideEffectDriverFuture,
-    SideEffectIntentPlan, SideEffectLanePreclaimBuilder, SideEffectObservedEvidence,
-    SideEffectPreparedInvocationPlan, SideEffectProtocolAction, SideEffectReplayEvidence,
-    SideEffectSubmissionDecision, SideEffectSubmissionDecisionFuture, SideEffectVerifyCallbacks,
-    SideEffectVerifyDriver,
+    RunnerArtifactBuilder, RunnerCapabilityBinding, RunnerIngressContext, RunnerOutputBuilder,
+    RunnerPayloadBuilder, RunnerRegistrationBuilder, SideEffectDriver, SideEffectDriverCallbacks,
+    SideEffectDriverFuture, SideEffectIntentPlan, SideEffectLanePreclaimBuilder,
+    SideEffectObservedEvidence, SideEffectPreparedInvocationPlan, SideEffectProtocolAction,
+    SideEffectReplayEvidence, SideEffectSubmissionDecision, SideEffectSubmissionDecisionFuture,
+    SideEffectVerifyCallbacks, SideEffectVerifyDriver,
 };
 use mfm_signing::{PublicKeyBytes, SignerRef, SigningProvider};
 use mfm_spec::v1 as spec;
@@ -132,6 +134,8 @@ impl EvmContractRuntimeRoute {
 pub struct EvmContractMutationProviders<'a> {
     /// Chain identity provider.
     pub chain_identity: &'a dyn EvmChainIdentityProvider,
+    /// Block summary provider.
+    pub block: &'a dyn EvmBlockReadProvider,
     /// Nonce provider.
     pub nonce: &'a dyn EvmNonceReadProvider,
     /// Fee provider.
@@ -144,6 +148,8 @@ pub struct EvmContractMutationProviders<'a> {
     pub submit: &'a dyn EvmTransactionSubmitProvider,
     /// Receipt provider.
     pub receipt: &'a dyn EvmReceiptReadProvider,
+    /// Nonce occupancy investigation provider.
+    pub nonce_occupancy: &'a dyn EvmNonceOccupancyReadProvider,
 }
 
 impl fmt::Debug for EvmContractMutationProviders<'_> {
@@ -267,6 +273,30 @@ pub struct PreparedContractTransactionEvidence {
     pub expected_transaction_hash: String,
 }
 
+/// Defended proof that a prepared anchor was not the transaction occupying its sender nonce.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, MfmValue)]
+#[mfm(
+    namespace = "mfm.evm.contract",
+    name = "not-submitted-proof",
+    schema = "mfm.evm.contract.adapter.not_submitted_proof"
+)]
+pub struct ContractNotSubmittedProof {
+    /// Proof schema version.
+    pub proof_version: u32,
+    /// Expected MFM-authored transaction hash from the prepared invocation.
+    pub expected_transaction_hash: String,
+    /// Non-anchor transaction observed at the same sender nonce.
+    pub occupying_transaction_hash: String,
+    /// Mined block number for the occupying transaction, when known.
+    pub occupying_block_number: Option<u64>,
+    /// Sender address bound by the prepared invocation.
+    pub signer_address: String,
+    /// Sender nonce that was occupied.
+    pub nonce: u64,
+    /// EVM chain id reported by the evidence source.
+    pub evidence_chain_id: u64,
+}
+
 /// Prepared mutation containing public evidence plus transient signing requests.
 pub struct PreparedContractMutation {
     evidence: PreparedContractInvocation,
@@ -342,6 +372,23 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
     /// Returns the process-local route used by this adapter.
     pub const fn route(&self) -> &EvmContractRuntimeRoute {
         self.route.route
+    }
+
+    /// Reads the latest block number for mutation finality checks.
+    pub async fn latest_block_number(&self, expected_chain_id: u64) -> Result<u64> {
+        let response = self
+            .mutation
+            .block
+            .read_block(&EvmBlockReadRequest {
+                source_ref: self.route.route.source_ref().clone(),
+                policy_id: self.route.route.policy_id().clone(),
+                block: EvmBlockSelector::Latest,
+            })
+            .await?;
+        if response.evidence.chain_id != expected_chain_id {
+            return Err(EvmContractAdapterError::ChainMismatch);
+        }
+        Ok(response.block_number)
     }
 
     /// Prepares a deploy invocation with EIP-1559 default and legacy support.
@@ -572,7 +619,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         prepared: &PreparedContractInvocation,
     ) -> Result<PreparedSubmissionReconciliation> {
         let anchor_submissions = prepared_anchor_submissions(prepared)?;
-        let mut unlanded_nonces = Vec::new();
+        let mut unlanded_transactions = Vec::new();
         for (transaction, submission) in prepared
             .transactions
             .iter()
@@ -601,7 +648,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
                     }
                 }
                 Err(EvmCapabilityError::ReceiptPending) => {
-                    unlanded_nonces.push(transaction.nonce);
+                    unlanded_transactions.push(transaction);
                 }
                 Err(EvmCapabilityError::Provider { .. }) => {
                     return Ok(PreparedSubmissionReconciliation::Indeterminate(
@@ -612,7 +659,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
             }
         }
 
-        if unlanded_nonces.is_empty() {
+        if unlanded_transactions.is_empty() {
             return Ok(PreparedSubmissionReconciliation::Observed(
                 anchor_submissions,
             ));
@@ -640,10 +687,56 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
             }
             Err(error) => return Err(error.into()),
         };
-        if unlanded_nonces.iter().any(|nonce| pending_nonce > *nonce) {
-            return Ok(PreparedSubmissionReconciliation::Indeterminate(
-                anchor_submissions,
-            ));
+        for transaction in &unlanded_transactions {
+            if pending_nonce <= transaction.nonce {
+                continue;
+            }
+            match self
+                .mutation
+                .nonce_occupancy
+                .read_nonce_occupancy(&EvmNonceOccupancyReadRequest {
+                    source_ref: self.route().source_ref().clone(),
+                    policy_id: self.route().policy_id().clone(),
+                    account: expected_signer,
+                    nonce: transaction.nonce,
+                    excluded_transaction_hash: parse_prepared_transaction_hash(
+                        &transaction.expected_transaction_hash,
+                    )?,
+                })
+                .await
+            {
+                Ok(response) => match response.outcome {
+                    EvmNonceOccupancy::Occupied {
+                        transaction_hash,
+                        block_number,
+                    } => {
+                        return Ok(PreparedSubmissionReconciliation::NotSubmitted(
+                            ContractNotSubmittedProof {
+                                proof_version: 1,
+                                expected_transaction_hash: transaction
+                                    .expected_transaction_hash
+                                    .clone(),
+                                occupying_transaction_hash: format!("{transaction_hash:?}"),
+                                occupying_block_number: block_number,
+                                signer_address: prepared.expected_signer_address.clone(),
+                                nonce: transaction.nonce,
+                                evidence_chain_id: response.evidence.chain_id,
+                            },
+                        ));
+                    }
+                    EvmNonceOccupancy::Unknown => {
+                        return Ok(PreparedSubmissionReconciliation::Indeterminate(
+                            anchor_submissions,
+                        ));
+                    }
+                },
+                Err(EvmCapabilityError::Provider { .. }) => {
+                    return Ok(PreparedSubmissionReconciliation::Indeterminate(
+                        anchor_submissions,
+                    ));
+                }
+                Err(error) => return Err(error.into()),
+            }
         }
         Ok(PreparedSubmissionReconciliation::NotObserved(
             anchor_submissions,
@@ -657,10 +750,12 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         intent: &ContractDeployIntent,
         receipt: ContractTransactionReceipt,
         contract_address: Address,
+        confirmations: u64,
     ) -> Result<mfm_evm_contract_model::DeployedContract> {
         let state = DeployContractState::new(config.clone())?;
         let confirmation = ContractDeployConfirmation {
             confirmation_version: 1,
+            confirmations,
             contract_address: normalize_address(&format!("{contract_address:?}"))
                 .map_err(EvmContractAdapterError::Model)?,
             receipt,
@@ -675,10 +770,12 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
         input: &ConfigureContractInput,
         intent: &ContractConfigureIntent,
         receipts: Vec<ContractTransactionReceipt>,
+        confirmations: u64,
     ) -> Result<ConfiguredContract> {
         let state = ConfigureContractState::new(config.clone())?;
         let confirmation = ContractConfigureConfirmation {
             confirmation_version: 1,
+            confirmations,
             configured_block_number: receipts.iter().map(|receipt| receipt.block_number).max(),
             receipts,
         };
@@ -1101,8 +1198,25 @@ impl replay::SideEffectReplayVerifier for EvmContractLifecycleReplayVerifier {
         let schema = &input.confirmation.confirmation.confirmation_schema_id;
         let deploy = ContractDeployConfirmation::schema_id().map_err(replay_value_error)?;
         let configure = ContractConfigureConfirmation::schema_id().map_err(replay_value_error)?;
-        if schema == &deploy || schema == &configure {
-            Ok(())
+        let required_depth = match &input.verification {
+            spec::SideEffectVerificationSpec::Finalized { depth } => *depth,
+            spec::SideEffectVerificationSpec::Receipt => {
+                return Err(replay::ReplayError::new(
+                    replay::ReplayErrorKind::SideEffectMismatch,
+                    "receipt-only contract lifecycle side effect recorded confirmation evidence",
+                ));
+            }
+        };
+        if schema == &deploy {
+            let confirmation: ContractDeployConfirmation =
+                serde_json::from_slice(&input.confirmation.artifact_bytes)
+                    .map_err(replay_json_error)?;
+            ensure_replay_confirmation_depth(confirmation.confirmations, required_depth)
+        } else if schema == &configure {
+            let confirmation: ContractConfigureConfirmation =
+                serde_json::from_slice(&input.confirmation.artifact_bytes)
+                    .map_err(replay_json_error)?;
+            ensure_replay_confirmation_depth(confirmation.confirmations, required_depth)
         } else {
             Err(replay::ReplayError::new(
                 replay::ReplayErrorKind::SideEffectMismatch,
@@ -1417,6 +1531,7 @@ fn prepared_anchor_submissions(
 enum PreparedSubmissionReconciliation {
     Observed(ContractTransactionSubmissions),
     NotObserved(ContractTransactionSubmissions),
+    NotSubmitted(ContractNotSubmittedProof),
     Indeterminate(ContractTransactionSubmissions),
 }
 
@@ -1428,7 +1543,7 @@ async fn submit_or_recover_contract_submission(
     SideEffectSubmissionDecision<
         ContractTransactionSubmissions,
         ContractTransactionSubmissions,
-        ContractTransactionSubmissions,
+        ContractNotSubmittedProof,
         ContractTransactionSubmissions,
     >,
 > {
@@ -1446,6 +1561,9 @@ async fn submit_or_recover_contract_submission(
             }
             PreparedSubmissionReconciliation::Indeterminate(anchor_submissions) => {
                 return Ok(SideEffectSubmissionDecision::Unknown(anchor_submissions));
+            }
+            PreparedSubmissionReconciliation::NotSubmitted(proof) => {
+                return Ok(SideEffectSubmissionDecision::NotSubmitted(proof));
             }
             PreparedSubmissionReconciliation::NotObserved(anchor_submissions) => {
                 return match runtime.adapter().submit_prepared(prepared).await {
@@ -1544,6 +1662,26 @@ fn replay_value_error(error: mfm_values::ValueError) -> replay::ReplayError {
     )
 }
 
+fn replay_json_error(error: serde_json::Error) -> replay::ReplayError {
+    replay::ReplayError::new(
+        replay::ReplayErrorKind::SideEffectMismatch,
+        error.to_string(),
+    )
+}
+
+fn ensure_replay_confirmation_depth(confirmations: u64, required_depth: u64) -> replay::Result<()> {
+    if confirmations >= required_depth {
+        Ok(())
+    } else {
+        Err(replay::ReplayError::new(
+            replay::ReplayErrorKind::SideEffectMismatch,
+            format!(
+                "contract lifecycle confirmation depth {confirmations} is below certified depth {required_depth}"
+            ),
+        ))
+    }
+}
+
 fn forbidden_prepared_terms() -> Vec<String> {
     vec![
         ["raw", "_transaction"].concat(),
@@ -1576,11 +1714,13 @@ const CAPABILITY_IMPLEMENTATION_ID: &str = "mfm.evm_contracts.runtime.v1";
 /// only groups the capability contracts the adapter needs.
 pub trait EvmContractProvider:
     EvmChainIdentityProvider
+    + EvmBlockReadProvider
     + EvmNonceReadProvider
     + EvmFeeReadProvider
     + EvmGasEstimateProvider
     + EvmTransactionSubmitProvider
     + EvmReceiptReadProvider
+    + EvmNonceOccupancyReadProvider
     + EvmCallReadProvider
     + EvmLogsReadProvider
 {
@@ -1588,11 +1728,13 @@ pub trait EvmContractProvider:
 
 impl<T> EvmContractProvider for T where
     T: EvmChainIdentityProvider
+        + EvmBlockReadProvider
         + EvmNonceReadProvider
         + EvmFeeReadProvider
         + EvmGasEstimateProvider
         + EvmTransactionSubmitProvider
         + EvmReceiptReadProvider
+        + EvmNonceOccupancyReadProvider
         + EvmCallReadProvider
         + EvmLogsReadProvider
 {
@@ -1602,6 +1744,16 @@ impl<T> EvmContractProvider for T where
 pub trait EvmContractRuntimeFactory: Send + Sync {
     /// Returns the artifact reader used to materialize configs, inputs, and side-effect evidence.
     fn artifacts(&self) -> &dyn ArtifactReadProvider;
+
+    /// Validates process-local runtime bindings for launch ingress before `RunAdmitted`.
+    fn validate_runtime_for(
+        &self,
+        network_id: &str,
+        signer_ref: Option<&SignerRef>,
+    ) -> mfm_runtime::Result<()> {
+        let _ = signer_ref;
+        self.runtime_for(network_id).map(|_| ())
+    }
 
     /// Returns process-local EVM and signing capabilities for `network_id`.
     fn runtime_for(&self, network_id: &str) -> mfm_runtime::Result<EvmContractRuntime>;
@@ -1639,12 +1791,14 @@ impl EvmContractRuntime {
             &self.route,
             EvmContractMutationProviders {
                 chain_identity: evm,
+                block: evm,
                 nonce: evm,
                 fee: evm,
                 gas: evm,
                 signer: self.signer.as_ref(),
                 submit: evm,
                 receipt: evm,
+                nonce_occupancy: evm,
             },
             EvmContractReadProviders {
                 chain_identity: evm,
@@ -1731,6 +1885,13 @@ struct ContractValidateRunner {
 }
 
 impl ErasedNodeRunner for ContractValidateRunner {
+    fn validate_ingress(&self, ctx: RunnerIngressContext<'_>) -> mfm_runtime::Result<()> {
+        let config = load_launch_config::<ValidatePhaseConfig>(&ctx)?;
+        self.factory
+            .validate_runtime_for(config.as_ref().network().network_id(), None)
+            .map(|_| ())
+    }
+
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move { run_validate(ctx, self.factory.as_ref()).await })
     }
@@ -1741,6 +1902,11 @@ struct ContractVerifyRunner {
 }
 
 impl ErasedNodeRunner for ContractVerifyRunner {
+    fn validate_ingress(&self, ctx: RunnerIngressContext<'_>) -> mfm_runtime::Result<()> {
+        let submit_node = side_effect_verify_submit_node_for_ingress(&ctx)?;
+        validate_mutation_runtime_for_node(&ctx, submit_node, self.factory.as_ref())
+    }
+
     fn run_erased<'a>(&'a self, ctx: ErasedRunCtx<'a>) -> ErasedRunnerFuture<'a> {
         Box::pin(async move { run_verify(ctx, self.factory.as_ref()).await })
     }
@@ -1758,6 +1924,10 @@ struct ContractMutationRunner {
 }
 
 impl ErasedNodeRunner for ContractMutationRunner {
+    fn validate_ingress(&self, ctx: RunnerIngressContext<'_>) -> mfm_runtime::Result<()> {
+        validate_mutation_runtime_for_node(&ctx, ctx.node(), self.factory.as_ref())
+    }
+
     fn preclaim_resource_lane<'a>(
         &'a self,
         ctx: &'a PreInvocationRunCtx<'a>,
@@ -1821,6 +1991,26 @@ fn side_effect_verify_submit_node<'a>(
     })
 }
 
+fn side_effect_verify_submit_node_for_ingress<'a>(
+    ctx: &'a RunnerIngressContext<'a>,
+) -> mfm_runtime::Result<&'a spec::NodeSpec> {
+    let Some(spec::FrameworkNodeSpec::SideEffectVerify(verify)) = &ctx.node().framework else {
+        return Err(mfm_runtime::RuntimeError::RunnerBinding(format!(
+            "node {} is not a side-effect verify node",
+            ctx.node().node_id
+        )));
+    };
+    ctx.runtime_spec()
+        .node(&verify.submit_node_id)
+        .ok_or_else(|| {
+            mfm_runtime::RuntimeError::RunnerBinding(format!(
+                "side-effect verify node {} references missing submit node {}",
+                ctx.node().node_id,
+                verify.submit_node_id
+            ))
+        })
+}
+
 fn mutation_phase_for_submit_node(
     node: &spec::NodeSpec,
 ) -> mfm_runtime::Result<ContractMutationRunnerPhase> {
@@ -1838,6 +2028,37 @@ fn mutation_phase_for_submit_node(
         "side-effect verify submit node {} is not an EVM contract mutation",
         node.node_id
     )))
+}
+
+fn validate_mutation_runtime_for_node(
+    ctx: &RunnerIngressContext<'_>,
+    node: &spec::NodeSpec,
+    factory: &dyn EvmContractRuntimeFactory,
+) -> mfm_runtime::Result<()> {
+    match mutation_phase_for_submit_node(node)? {
+        ContractMutationRunnerPhase::Deploy => {
+            let config = load_launch_config_for_node::<DeployPhaseConfig>(ctx, node)?;
+            let signer_ref = config
+                .as_ref()
+                .signer()
+                .signer_ref()
+                .map_err(runtime_ingress_model_error)?;
+            factory
+                .validate_runtime_for(config.as_ref().network().network_id(), Some(&signer_ref))
+                .map(|_| ())
+        }
+        ContractMutationRunnerPhase::Configure => {
+            let config = load_launch_config_for_node::<ConfigurePhaseConfig>(ctx, node)?;
+            let signer_ref = config
+                .as_ref()
+                .signer()
+                .signer_ref()
+                .map_err(runtime_ingress_model_error)?;
+            factory
+                .validate_runtime_for(config.as_ref().network().network_id(), Some(&signer_ref))
+                .map(|_| ())
+        }
+    }
 }
 
 async fn preclaim_mutation_lane(
@@ -1972,7 +2193,7 @@ impl SideEffectDriverCallbacks for DeploySideEffectCallbacks<'_> {
     type PreparedInvocation = PreparedContractInvocation;
     type Submission = ContractTransactionSubmissions;
     type SubmissionUnknownEvidence = ContractTransactionSubmissions;
-    type NotSubmittedProof = ContractTransactionSubmissions;
+    type NotSubmittedProof = ContractNotSubmittedProof;
     type AmbiguityEvidence = ContractTransactionSubmissions;
 
     fn intent_and_idempotency<'a, 'ctx>(
@@ -2075,7 +2296,7 @@ impl SideEffectDriverCallbacks for ConfigureSideEffectCallbacks<'_> {
     type PreparedInvocation = PreparedContractInvocation;
     type Submission = ContractTransactionSubmissions;
     type SubmissionUnknownEvidence = ContractTransactionSubmissions;
-    type NotSubmittedProof = ContractTransactionSubmissions;
+    type NotSubmittedProof = ContractNotSubmittedProof;
     type AmbiguityEvidence = ContractTransactionSubmissions;
 
     fn intent_and_idempotency<'a, 'ctx>(
@@ -2219,11 +2440,16 @@ impl SideEffectVerifyCallbacks for DeploySideEffectVerifyCallbacks<'_> {
     fn build_confirmation<'a, 'ctx>(
         &'a self,
         ctx: &'a ErasedRunCtx<'ctx>,
-        _submit_node: &'a spec::NodeSpec,
+        submit_node: &'a spec::NodeSpec,
         _submit_inputs: &'a MaterializedInputs,
         receipt: &'a store::SideEffectArtifactProjection,
     ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Confirmation>> {
         Box::pin(async {
+            let plan = deploy_mutation_plan_for_node(submit_node, self.factory.artifacts()).await?;
+            let runtime = self
+                .factory
+                .runtime_for(plan.config.as_ref().network().network_id())?;
+            let required_depth = finalized_depth_for_submit_node(submit_node)?;
             let (receipt, receipt_evidence) = load_side_effect_artifact::<ContractDeployReceipt>(
                 receipt,
                 events::ArtifactRole::Receipt,
@@ -2232,9 +2458,17 @@ impl SideEffectVerifyCallbacks for DeploySideEffectVerifyCallbacks<'_> {
             )
             .await?;
             let receipt = deploy_receipt_with_evidence(receipt, &receipt_evidence);
+            let confirmations = verified_finality_confirmations(
+                &runtime,
+                plan.config.as_ref().network().expected_chain_id(),
+                std::slice::from_ref(&receipt.receipt),
+                required_depth,
+            )
+            .await?;
             Ok(SideEffectObservedEvidence {
                 evidence: ContractDeployConfirmation {
                     confirmation_version: 1,
+                    confirmations,
                     contract_address: receipt.contract_address,
                     receipt: receipt.receipt,
                 },
@@ -2349,11 +2583,21 @@ impl SideEffectVerifyCallbacks for ConfigureSideEffectVerifyCallbacks<'_> {
     fn build_confirmation<'a, 'ctx>(
         &'a self,
         ctx: &'a ErasedRunCtx<'ctx>,
-        _submit_node: &'a spec::NodeSpec,
-        _submit_inputs: &'a MaterializedInputs,
+        submit_node: &'a spec::NodeSpec,
+        submit_inputs: &'a MaterializedInputs,
         receipt: &'a store::SideEffectArtifactProjection,
     ) -> SideEffectDriverFuture<'a, SideEffectObservedEvidence<Self::Confirmation>> {
         Box::pin(async {
+            let plan = configure_mutation_plan_for_inputs(
+                submit_node,
+                submit_inputs,
+                self.factory.artifacts(),
+            )
+            .await?;
+            let runtime = self
+                .factory
+                .runtime_for(plan.config.as_ref().network().network_id())?;
+            let required_depth = finalized_depth_for_submit_node(submit_node)?;
             let (receipt, receipt_evidence) =
                 load_side_effect_artifact::<ContractConfigureReceipt>(
                     receipt,
@@ -2363,9 +2607,17 @@ impl SideEffectVerifyCallbacks for ConfigureSideEffectVerifyCallbacks<'_> {
                 )
                 .await?;
             let receipt = configure_receipt_with_evidence(receipt, &receipt_evidence);
+            let confirmations = verified_finality_confirmations(
+                &runtime,
+                plan.config.as_ref().network().expected_chain_id(),
+                &receipt.receipts,
+                required_depth,
+            )
+            .await?;
             Ok(SideEffectObservedEvidence {
                 evidence: ContractConfigureConfirmation {
                     confirmation_version: 1,
+                    confirmations,
                     configured_block_number: receipt.configured_block_number,
                     receipts: receipt.receipts,
                 },
@@ -2577,6 +2829,59 @@ async fn read_receipts_with_poll(
     ))
 }
 
+fn finalized_depth_for_submit_node(submit_node: &spec::NodeSpec) -> mfm_runtime::Result<u64> {
+    match submit_node
+        .side_effect
+        .as_ref()
+        .map(|contract| &contract.verification)
+    {
+        Some(spec::SideEffectVerificationSpec::Finalized { depth }) => Ok(*depth),
+        Some(spec::SideEffectVerificationSpec::Receipt) => {
+            Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(format!(
+                "contract lifecycle submit node {} has receipt-only verification",
+                submit_node.node_id
+            )))
+        }
+        None => Err(mfm_runtime::RuntimeError::InvalidSpec(format!(
+            "contract lifecycle submit node {} lacks side-effect contract",
+            submit_node.node_id
+        ))),
+    }
+}
+
+async fn verified_finality_confirmations(
+    runtime: &EvmContractRuntime,
+    expected_chain_id: u64,
+    receipts: &[ContractTransactionReceipt],
+    required_depth: u64,
+) -> mfm_runtime::Result<u64> {
+    let Some(highest_receipt_block) = receipts.iter().map(|receipt| receipt.block_number).max()
+    else {
+        return Err(mfm_runtime::RuntimeError::InvalidRunnerOutput(
+            "contract lifecycle finality requires at least one receipt".to_owned(),
+        ));
+    };
+    let latest_block = runtime
+        .adapter()
+        .latest_block_number(expected_chain_id)
+        .await
+        .map_err(mfm_runtime::RuntimeError::from)?;
+    let confirmations = latest_block
+        .checked_sub(highest_receipt_block)
+        .map(|distance| distance.saturating_add(1))
+        .ok_or_else(|| {
+            mfm_runtime::RuntimeError::Blocked(format!(
+                "contract lifecycle finality latest block {latest_block} is behind receipt block {highest_receipt_block}"
+            ))
+        })?;
+    if confirmations < required_depth {
+        return Err(mfm_runtime::RuntimeError::Blocked(format!(
+            "contract lifecycle finality depth {required_depth} not reached; observed {confirmations}"
+        )));
+    }
+    Ok(confirmations)
+}
+
 async fn load_validate_input(
     inputs: &mfm_runtime::MaterializedInputs,
     artifacts: &dyn ArtifactReadProvider,
@@ -2631,6 +2936,31 @@ where
     T: MfmConfig + DeserializeOwned,
 {
     load_config_for_node(ctx.node(), artifacts).await
+}
+
+fn load_launch_config<T>(ctx: &RunnerIngressContext<'_>) -> mfm_runtime::Result<ValidatedConfig<T>>
+where
+    T: MfmConfig + DeserializeOwned,
+{
+    load_launch_config_for_node(ctx, ctx.node())
+}
+
+fn load_launch_config_for_node<T>(
+    ctx: &RunnerIngressContext<'_>,
+    node: &spec::NodeSpec,
+) -> mfm_runtime::Result<ValidatedConfig<T>>
+where
+    T: MfmConfig + DeserializeOwned,
+{
+    let artifact = ctx.config_artifact_for_node(node)?;
+    let config = serde_json::from_slice::<T>(&artifact.bytes).map_err(|error| {
+        mfm_runtime::RuntimeError::RunnerBinding(format!(
+            "launch config for node {} failed to decode: {error}",
+            node.node_id
+        ))
+    })?;
+    ValidatedConfig::new(config)
+        .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))
 }
 
 async fn load_config_for_node<T>(
@@ -2984,6 +3314,10 @@ fn runtime_state_error(error: mfm_program::StateError) -> mfm_runtime::RuntimeEr
     mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
 }
 
+fn runtime_ingress_model_error(error: String) -> mfm_runtime::RuntimeError {
+    mfm_runtime::RuntimeError::RunnerBinding(error)
+}
+
 /// Redaction-safe contract adapter error.
 #[derive(Debug, thiserror::Error)]
 pub enum EvmContractAdapterError {
@@ -3083,9 +3417,9 @@ impl From<EvmContractAdapterError> for replay::ReplayError {
 mod tests {
     use super::*;
     use mfm_evm_capabilities::{
-        EvmCallReadResponse, EvmCapabilityFuture, EvmChainIdentityResponse, EvmFeeReadResponse,
-        EvmGasEstimateResponse, EvmLogsReadResponse, EvmNonceReadResponse, EvmReceiptReadResponse,
-        RedactedEvmSourceEvidence,
+        EvmBlockReadResponse, EvmCallReadResponse, EvmCapabilityFuture, EvmChainIdentityResponse,
+        EvmFeeReadResponse, EvmGasEstimateResponse, EvmLogsReadResponse, EvmNonceReadResponse,
+        EvmReceiptReadResponse, RedactedEvmSourceEvidence,
     };
     use mfm_evm_signing::{
         primitive_signature_from_bytes, recover_signing_address,
@@ -3191,6 +3525,21 @@ mod tests {
         }
     }
 
+    impl EvmBlockReadProvider for TestEvmProviders {
+        fn read_block<'a>(
+            &'a self,
+            _request: &'a EvmBlockReadRequest,
+        ) -> EvmCapabilityFuture<'a, EvmBlockReadResponse> {
+            Box::pin(async {
+                Ok(EvmBlockReadResponse {
+                    evidence: evidence(),
+                    block_number: 64,
+                    block_hash: B256::from([0x64; 32]),
+                })
+            })
+        }
+    }
+
     impl EvmNonceReadProvider for TestEvmProviders {
         fn read_nonce<'a>(
             &'a self,
@@ -3250,6 +3599,15 @@ mod tests {
             &'a self,
             _request: &'a EvmReceiptReadRequest,
         ) -> EvmCapabilityFuture<'a, EvmReceiptReadResponse> {
+            Box::pin(async { panic!("not used in preparation tests") })
+        }
+    }
+
+    impl EvmNonceOccupancyReadProvider for TestEvmProviders {
+        fn read_nonce_occupancy<'a>(
+            &'a self,
+            _request: &'a EvmNonceOccupancyReadRequest,
+        ) -> EvmCapabilityFuture<'a, mfm_evm_capabilities::EvmNonceOccupancyReadResponse> {
             Box::pin(async { panic!("not used in preparation tests") })
         }
     }
@@ -3356,12 +3714,14 @@ mod tests {
             route,
             EvmContractMutationProviders {
                 chain_identity: providers,
+                block: providers,
                 nonce: providers,
                 fee: providers,
                 gas: providers,
                 signer: providers,
                 submit: providers,
                 receipt: providers,
+                nonce_occupancy: providers,
             },
             EvmContractReadProviders {
                 chain_identity: providers,
@@ -3571,6 +3931,7 @@ mod tests {
         let recovery = Arc::new(RecoveryOnlyProviders {
             receipt_mode: RecoveryReceiptMode::Landed,
             pending_nonce: 7,
+            occupancy_mode: RecoveryOccupancyMode::Unknown,
             submit_count: Arc::clone(&submit_count),
         });
         let evm: Arc<dyn EvmContractProvider> = recovery.clone();
@@ -3612,6 +3973,7 @@ mod tests {
         let recovery = Arc::new(RecoveryOnlyProviders {
             receipt_mode: RecoveryReceiptMode::Pending,
             pending_nonce: 7,
+            occupancy_mode: RecoveryOccupancyMode::Unknown,
             submit_count: Arc::clone(&submit_count),
         });
         let evm: Arc<dyn EvmContractProvider> = recovery.clone();
@@ -3659,6 +4021,7 @@ mod tests {
         let recovery = Arc::new(RecoveryOnlyProviders {
             receipt_mode: RecoveryReceiptMode::Pending,
             pending_nonce: 7,
+            occupancy_mode: RecoveryOccupancyMode::Unknown,
             submit_count: Arc::clone(&submit_count),
         });
         let evm: Arc<dyn EvmContractProvider> = recovery.clone();
@@ -3686,7 +4049,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recovery_does_not_rebroadcast_when_nonce_already_occupied() {
+    async fn recovery_keeps_advanced_nonce_unknown_without_occupancy_proof() {
         let route = route();
         let providers = TestEvmProviders;
         let adapter = adapter(&route, &providers);
@@ -3700,6 +4063,7 @@ mod tests {
         let recovery = Arc::new(RecoveryOnlyProviders {
             receipt_mode: RecoveryReceiptMode::Pending,
             pending_nonce: 8,
+            occupancy_mode: RecoveryOccupancyMode::Unknown,
             submit_count: Arc::clone(&submit_count),
         });
         let evm: Arc<dyn EvmContractProvider> = recovery.clone();
@@ -3727,6 +4091,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recovery_proves_not_submitted_when_foreign_transaction_occupies_nonce() {
+        let route = route();
+        let providers = TestEvmProviders;
+        let adapter = adapter(&route, &providers);
+        let config = validated_deploy_config("eip1559");
+        let intent = deploy_intent(&config);
+        let prepared = adapter
+            .prepare_deploy_invocation(&config, &intent)
+            .await
+            .expect("prepared");
+        let submit_count = Arc::new(Mutex::new(0_u32));
+        let occupying_hash = "0x2222222222222222222222222222222222222222222222222222222222222222"
+            .parse::<B256>()
+            .expect("occupying hash");
+        let recovery = Arc::new(RecoveryOnlyProviders {
+            receipt_mode: RecoveryReceiptMode::Pending,
+            pending_nonce: 8,
+            occupancy_mode: RecoveryOccupancyMode::Occupied {
+                transaction_hash: occupying_hash,
+            },
+            submit_count: Arc::clone(&submit_count),
+        });
+        let evm: Arc<dyn EvmContractProvider> = recovery.clone();
+        let signer: Arc<dyn SigningProvider> = recovery;
+        let runtime = EvmContractRuntime::new(route, evm, signer);
+
+        let decision = submit_or_recover_contract_submission(
+            &runtime,
+            &prepared,
+            SideEffectProtocolAction::SubmitOrRecoverSubmission {
+                invocation_epoch: 1,
+            },
+        )
+        .await
+        .expect("recovered");
+
+        let SideEffectSubmissionDecision::NotSubmitted(proof) = decision else {
+            panic!("expected not-submitted proof");
+        };
+        assert_eq!(*submit_count.lock().expect("submit count"), 0);
+        assert_eq!(
+            proof.expected_transaction_hash,
+            prepared.evidence().transactions[0].expected_transaction_hash
+        );
+        assert_eq!(
+            proof.occupying_transaction_hash,
+            "0x2222222222222222222222222222222222222222222222222222222222222222"
+        );
+        assert_eq!(proof.nonce, prepared.evidence().transactions[0].nonce);
+        assert_eq!(proof.evidence_chain_id, 1);
+    }
+
+    #[tokio::test]
     async fn recovery_records_unknown_on_transient_anchor_read_failure() {
         let route = route();
         let providers = TestEvmProviders;
@@ -3741,6 +4158,7 @@ mod tests {
         let recovery = Arc::new(RecoveryOnlyProviders {
             receipt_mode: RecoveryReceiptMode::ProviderFailure,
             pending_nonce: 7,
+            occupancy_mode: RecoveryOccupancyMode::Unknown,
             submit_count: Arc::clone(&submit_count),
         });
         let evm: Arc<dyn EvmContractProvider> = recovery.clone();
@@ -3836,9 +4254,16 @@ mod tests {
         ProviderFailure,
     }
 
+    #[derive(Clone, Copy)]
+    enum RecoveryOccupancyMode {
+        Unknown,
+        Occupied { transaction_hash: B256 },
+    }
+
     struct RecoveryOnlyProviders {
         receipt_mode: RecoveryReceiptMode,
         pending_nonce: u64,
+        occupancy_mode: RecoveryOccupancyMode,
         submit_count: Arc<Mutex<u32>>,
     }
 
@@ -3847,6 +4272,15 @@ mod tests {
             &'a self,
             _request: &'a EvmChainIdentityRequest,
         ) -> EvmCapabilityFuture<'a, EvmChainIdentityResponse> {
+            Box::pin(async { panic!("not used in recovery-only tests") })
+        }
+    }
+
+    impl EvmBlockReadProvider for RecoveryOnlyProviders {
+        fn read_block<'a>(
+            &'a self,
+            _request: &'a EvmBlockReadRequest,
+        ) -> EvmCapabilityFuture<'a, EvmBlockReadResponse> {
             Box::pin(async { panic!("not used in recovery-only tests") })
         }
     }
@@ -3920,6 +4354,35 @@ mod tests {
                     RecoveryReceiptMode::Pending => Err(EvmCapabilityError::ReceiptPending),
                     RecoveryReceiptMode::ProviderFailure => {
                         Err(EvmCapabilityError::redacted_provider_failure("test rpc"))
+                    }
+                }
+            })
+        }
+    }
+
+    impl EvmNonceOccupancyReadProvider for RecoveryOnlyProviders {
+        fn read_nonce_occupancy<'a>(
+            &'a self,
+            request: &'a EvmNonceOccupancyReadRequest,
+        ) -> EvmCapabilityFuture<'a, mfm_evm_capabilities::EvmNonceOccupancyReadResponse> {
+            let mode = self.occupancy_mode;
+            let nonce = request.nonce;
+            Box::pin(async move {
+                match mode {
+                    RecoveryOccupancyMode::Unknown => {
+                        Ok(mfm_evm_capabilities::EvmNonceOccupancyReadResponse {
+                            evidence: evidence(),
+                            outcome: EvmNonceOccupancy::Unknown,
+                        })
+                    }
+                    RecoveryOccupancyMode::Occupied { transaction_hash } => {
+                        Ok(mfm_evm_capabilities::EvmNonceOccupancyReadResponse {
+                            evidence: evidence(),
+                            outcome: EvmNonceOccupancy::Occupied {
+                                transaction_hash,
+                                block_number: Some(43 + nonce),
+                            },
+                        })
                     }
                 }
             })
@@ -4015,6 +4478,39 @@ mod tests {
         assert_eq!(*reads.lock().expect("reads"), 1);
     }
 
+    #[tokio::test]
+    async fn finality_confirmation_requires_certified_depth() {
+        let evm: Arc<dyn EvmContractProvider> = Arc::new(TestEvmProviders);
+        let signer: Arc<dyn SigningProvider> = Arc::new(TestEvmProviders);
+        let runtime = EvmContractRuntime::new(route(), evm, signer);
+        let receipt = ContractTransactionReceipt {
+            receipt_version: 1,
+            transaction_hash: "0x1111111111111111111111111111111111111111111111111111111111111111"
+                .to_owned(),
+            block_number: 63,
+            status: true,
+            receipt_evidence: None,
+        };
+
+        let confirmations =
+            verified_finality_confirmations(&runtime, 1, std::slice::from_ref(&receipt), 2)
+                .await
+                .expect("sufficient confirmations");
+        assert_eq!(confirmations, 2);
+
+        let error = verified_finality_confirmations(&runtime, 1, std::slice::from_ref(&receipt), 3)
+            .await
+            .expect_err("insufficient confirmations");
+        assert!(matches!(error, mfm_runtime::RuntimeError::Blocked(_)));
+    }
+
+    #[test]
+    fn replay_confirmation_depth_rejects_insufficient_certified_depth() {
+        assert!(ensure_replay_confirmation_depth(3, 3).is_ok());
+        let error = ensure_replay_confirmation_depth(2, 3).expect_err("insufficient replay depth");
+        assert_eq!(error.kind, replay::ReplayErrorKind::SideEffectMismatch);
+    }
+
     struct ReceiptFailureProviders {
         reads: Arc<Mutex<u32>>,
     }
@@ -4024,6 +4520,15 @@ mod tests {
             &'a self,
             _request: &'a EvmChainIdentityRequest,
         ) -> EvmCapabilityFuture<'a, EvmChainIdentityResponse> {
+            Box::pin(async { panic!("not used in receipt polling test") })
+        }
+    }
+
+    impl EvmBlockReadProvider for ReceiptFailureProviders {
+        fn read_block<'a>(
+            &'a self,
+            _request: &'a EvmBlockReadRequest,
+        ) -> EvmCapabilityFuture<'a, EvmBlockReadResponse> {
             Box::pin(async { panic!("not used in receipt polling test") })
         }
     }
@@ -4077,6 +4582,15 @@ mod tests {
                 *reads += 1;
                 Err(EvmCapabilityError::redacted_provider_failure("test evm"))
             })
+        }
+    }
+
+    impl EvmNonceOccupancyReadProvider for ReceiptFailureProviders {
+        fn read_nonce_occupancy<'a>(
+            &'a self,
+            _request: &'a EvmNonceOccupancyReadRequest,
+        ) -> EvmCapabilityFuture<'a, mfm_evm_capabilities::EvmNonceOccupancyReadResponse> {
+            Box::pin(async { panic!("not used in receipt polling test") })
         }
     }
 

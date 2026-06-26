@@ -24,8 +24,9 @@ use mfm_canonical::sha256_digest_bytes;
 use mfm_capabilities::{CapabilityError, CapabilitySpec};
 use mfm_evm_capabilities::{
     EvmBlockReadCapability, EvmCallReadCapability, EvmChainIdentityCapability,
-    EvmFeeReadCapability, EvmGasEstimateCapability, EvmLogsReadCapability, EvmNonceReadCapability,
-    EvmReceiptReadCapability, EvmTransactionSubmitCapability,
+    EvmFeeReadCapability, EvmGasEstimateCapability, EvmLogsReadCapability,
+    EvmNonceOccupancyReadCapability, EvmNonceReadCapability, EvmReceiptReadCapability,
+    EvmTransactionSubmitCapability,
 };
 use mfm_ids::{AdapterKind, AdapterVersion, CapabilityKind, DigestAlgorithm};
 
@@ -150,6 +151,7 @@ pub fn evm_contract_lifecycle_required_capabilities() -> Result<Vec<CapabilityKi
         capability_kind::<EvmGasEstimateCapability>()?,
         capability_kind::<EvmTransactionSubmitCapability>()?,
         capability_kind::<EvmReceiptReadCapability>()?,
+        capability_kind::<EvmNonceOccupancyReadCapability>()?,
     ])
 }
 
@@ -215,6 +217,9 @@ mod tests {
             .required_capabilities()
             .iter()
             .any(|capability| capability.canonical_name() == Some("mfm.evm/transaction.submit")));
+        assert!(descriptor.required_capabilities().iter().any(|capability| {
+            capability.canonical_name() == Some("mfm.evm/nonce_occupancy.read")
+        }));
     }
 
     #[test]

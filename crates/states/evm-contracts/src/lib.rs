@@ -21,8 +21,8 @@ use mfm_capabilities::NoCaps;
 use mfm_effects::{ApplySideEffect, Pure, ReadExternal};
 use mfm_evm_capabilities::{
     EvmCallReadCapability, EvmChainIdentityCapability, EvmFeeReadCapability,
-    EvmGasEstimateCapability, EvmLogsReadCapability, EvmNonceReadCapability,
-    EvmReceiptReadCapability, EvmTransactionSubmitCapability,
+    EvmGasEstimateCapability, EvmLogsReadCapability, EvmNonceOccupancyReadCapability,
+    EvmNonceReadCapability, EvmReceiptReadCapability, EvmTransactionSubmitCapability,
 };
 use mfm_evm_contract_config::{
     ConfigurePhaseConfig, DeployPhaseConfig, EvmNetworkIntent, EvmTransactionPolicy,
@@ -54,6 +54,7 @@ type ContractMutationCaps = (
     SigningCapability,
     EvmTransactionSubmitCapability,
     EvmReceiptReadCapability,
+    EvmNonceOccupancyReadCapability,
 );
 
 type ContractValidationReadCaps = (
@@ -299,6 +300,8 @@ pub struct ContractDeployReceipt {
 pub struct ContractDeployConfirmation {
     /// Confirmation contract version.
     pub confirmation_version: u64,
+    /// Confirmations proven by the confirmation adapter when this artifact was recorded.
+    pub confirmations: u64,
     /// Deployed contract address.
     pub contract_address: String,
     /// Confirmed transaction receipt.
@@ -331,6 +334,8 @@ pub struct ContractConfigureReceipt {
 pub struct ContractConfigureConfirmation {
     /// Confirmation contract version.
     pub confirmation_version: u64,
+    /// Confirmations proven by the confirmation adapter when this artifact was recorded.
+    pub confirmations: u64,
     /// Confirmed transaction receipts.
     pub receipts: Vec<ContractTransactionReceipt>,
     /// Highest observed configuration block, when known.
@@ -1144,6 +1149,7 @@ mod tests {
                 &intent,
                 &ContractConfigureConfirmation {
                     confirmation_version: 1,
+                    confirmations: 1,
                     receipts: vec![ContractTransactionReceipt {
                         receipt_version: 1,
                         transaction_hash: "0x02".to_owned(),
@@ -1181,6 +1187,7 @@ mod tests {
                 },
                 &ContractConfigureConfirmation {
                     confirmation_version: 1,
+                    confirmations: 1,
                     receipts: Vec::new(),
                     configured_block_number: None,
                 },
