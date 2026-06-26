@@ -545,6 +545,156 @@ pub mod v1 {
     type ReplayArtifactAuthorityKey = (ArtifactId, ContentDigest);
     type SideEffectKey = (SideEffectPairId, u32);
 
+    trait SideEffectReplayArtifact {
+        fn artifact_id(&self) -> &ArtifactId;
+        fn evidence_hash(&self) -> &ContentDigest;
+        fn evidence_schema_id(&self) -> &SchemaId;
+        fn artifact_role(&self) -> ArtifactRole;
+        fn producer_node_id(&self) -> &NodeId;
+        fn mismatch_message(&self) -> &'static str;
+        fn replay_verifier_id(&self) -> Option<&events::ReplayVerifierId> {
+            None
+        }
+    }
+
+    impl SideEffectReplayArtifact for side_effect::SubmissionObserved {
+        fn artifact_id(&self) -> &ArtifactId {
+            &self.submission_artifact_id
+        }
+
+        fn evidence_hash(&self) -> &ContentDigest {
+            &self.submission_hash
+        }
+
+        fn evidence_schema_id(&self) -> &SchemaId {
+            &self.submission_schema_id
+        }
+
+        fn artifact_role(&self) -> ArtifactRole {
+            ArtifactRole::Submission
+        }
+
+        fn producer_node_id(&self) -> &NodeId {
+            &self.node_id
+        }
+
+        fn mismatch_message(&self) -> &'static str {
+            "submission evidence mismatch"
+        }
+    }
+
+    impl SideEffectReplayArtifact for side_effect::NotSubmittedProven {
+        fn artifact_id(&self) -> &ArtifactId {
+            &self.proof_artifact_id
+        }
+
+        fn evidence_hash(&self) -> &ContentDigest {
+            &self.proof_hash
+        }
+
+        fn evidence_schema_id(&self) -> &SchemaId {
+            &self.proof_schema_id
+        }
+
+        fn artifact_role(&self) -> ArtifactRole {
+            ArtifactRole::NotSubmittedProof
+        }
+
+        fn producer_node_id(&self) -> &NodeId {
+            &self.node_id
+        }
+
+        fn mismatch_message(&self) -> &'static str {
+            "not-submitted proof evidence mismatch"
+        }
+    }
+
+    impl SideEffectReplayArtifact for side_effect::ReceiptObserved {
+        fn artifact_id(&self) -> &ArtifactId {
+            &self.receipt_artifact_id
+        }
+
+        fn evidence_hash(&self) -> &ContentDigest {
+            &self.receipt_hash
+        }
+
+        fn evidence_schema_id(&self) -> &SchemaId {
+            &self.receipt_schema_id
+        }
+
+        fn artifact_role(&self) -> ArtifactRole {
+            ArtifactRole::Receipt
+        }
+
+        fn producer_node_id(&self) -> &NodeId {
+            &self.node_id
+        }
+
+        fn mismatch_message(&self) -> &'static str {
+            "receipt evidence mismatch"
+        }
+
+        fn replay_verifier_id(&self) -> Option<&events::ReplayVerifierId> {
+            Some(&self.replay_verifier_id)
+        }
+    }
+
+    impl SideEffectReplayArtifact for side_effect::ConfirmationObserved {
+        fn artifact_id(&self) -> &ArtifactId {
+            &self.confirmation_artifact_id
+        }
+
+        fn evidence_hash(&self) -> &ContentDigest {
+            &self.confirmation_hash
+        }
+
+        fn evidence_schema_id(&self) -> &SchemaId {
+            &self.confirmation_schema_id
+        }
+
+        fn artifact_role(&self) -> ArtifactRole {
+            ArtifactRole::Confirmation
+        }
+
+        fn producer_node_id(&self) -> &NodeId {
+            &self.node_id
+        }
+
+        fn mismatch_message(&self) -> &'static str {
+            "confirmation evidence mismatch"
+        }
+
+        fn replay_verifier_id(&self) -> Option<&events::ReplayVerifierId> {
+            Some(&self.replay_verifier_id)
+        }
+    }
+
+    impl SideEffectReplayArtifact for side_effect::Ambiguous {
+        fn artifact_id(&self) -> &ArtifactId {
+            &self.evidence_artifact_id
+        }
+
+        fn evidence_hash(&self) -> &ContentDigest {
+            &self.evidence_hash
+        }
+
+        fn evidence_schema_id(&self) -> &SchemaId {
+            &self.evidence_schema_id
+        }
+
+        fn artifact_role(&self) -> ArtifactRole {
+            ArtifactRole::AmbiguityEvidence
+        }
+
+        fn producer_node_id(&self) -> &NodeId {
+            &self.node_id
+        }
+
+        fn mismatch_message(&self) -> &'static str {
+            "ambiguity evidence mismatch"
+        }
+    }
+
     /// Evidence-only broker for certified typed replay.
     #[derive(Debug, Clone)]
     pub struct ReplayBroker {
@@ -754,31 +904,11 @@ pub mod v1 {
             request: &SideEffectEvidenceReplayRequest,
         ) -> Result<SubmissionReplayEvidence> {
             self.verify_side_effect_intent(request)?;
-            let submission = self
-                .submissions
-                .get(&(request.pair_id.clone(), request.invocation_epoch))
-                .ok_or_else(|| {
-                    ReplayError::new(
-                        ReplayErrorKind::SideEffectMissing,
-                        format!("missing side-effect submission {}", request.pair_id),
-                    )
-                })?;
-            if submission.submission_schema_id != request.evidence_schema_id
-                || submission.submission_hash != request.evidence_hash
-            {
-                return Err(side_effect_mismatch("submission evidence mismatch"));
-            }
+            let submission =
+                self.required_side_effect_record(&self.submissions, request, "submission")?;
             Ok(SubmissionReplayEvidence {
                 submission: submission.clone(),
-                artifact: self.verify_artifact(ArtifactEvidenceExpectation {
-                    artifact_id: &submission.submission_artifact_id,
-                    digest: &submission.submission_hash,
-                    schema_id: Some(&submission.submission_schema_id),
-                    semantic_type_id: None,
-                    role: ArtifactRole::Submission,
-                    producer_node_id: Some(&submission.node_id),
-                    producer_seed_id: None,
-                })?,
+                artifact: self.verify_requested_side_effect_artifact(request, submission)?,
             })
         }
 
@@ -788,36 +918,14 @@ pub mod v1 {
             request: &SideEffectEvidenceReplayRequest,
         ) -> Result<NotSubmittedReplayEvidence> {
             self.verify_side_effect_intent(request)?;
-            let proof = self
-                .not_submitted
-                .get(&(request.pair_id.clone(), request.invocation_epoch))
-                .ok_or_else(|| {
-                    ReplayError::new(
-                        ReplayErrorKind::SideEffectMissing,
-                        format!(
-                            "missing side-effect not-submitted proof {}",
-                            request.pair_id
-                        ),
-                    )
-                })?;
-            if proof.proof_schema_id != request.evidence_schema_id
-                || proof.proof_hash != request.evidence_hash
-            {
-                return Err(side_effect_mismatch(
-                    "not-submitted proof evidence mismatch",
-                ));
-            }
+            let proof = self.required_side_effect_record(
+                &self.not_submitted,
+                request,
+                "not-submitted proof",
+            )?;
             Ok(NotSubmittedReplayEvidence {
                 proof: proof.clone(),
-                artifact: self.verify_artifact(ArtifactEvidenceExpectation {
-                    artifact_id: &proof.proof_artifact_id,
-                    digest: &proof.proof_hash,
-                    schema_id: Some(&proof.proof_schema_id),
-                    semantic_type_id: None,
-                    role: ArtifactRole::NotSubmittedProof,
-                    producer_node_id: Some(&proof.node_id),
-                    producer_seed_id: None,
-                })?,
+                artifact: self.verify_requested_side_effect_artifact(request, proof)?,
             })
         }
 
@@ -845,35 +953,10 @@ pub mod v1 {
             request: &SideEffectEvidenceReplayRequest,
         ) -> Result<ReceiptReplayEvidence> {
             self.verify_side_effect_intent(request)?;
-            let receipt = self
-                .receipts
-                .get(&(request.pair_id.clone(), request.invocation_epoch))
-                .ok_or_else(|| {
-                    ReplayError::new(
-                        ReplayErrorKind::SideEffectMissing,
-                        format!("missing side-effect receipt {}", request.pair_id),
-                    )
-                })?;
-            verify_replay_verifier(
-                request.replay_verifier_id.as_ref(),
-                &receipt.replay_verifier_id,
-            )?;
-            if receipt.receipt_schema_id != request.evidence_schema_id
-                || receipt.receipt_hash != request.evidence_hash
-            {
-                return Err(side_effect_mismatch("receipt evidence mismatch"));
-            }
+            let receipt = self.required_side_effect_record(&self.receipts, request, "receipt")?;
             Ok(ReceiptReplayEvidence {
                 receipt: receipt.clone(),
-                artifact: self.verify_artifact(ArtifactEvidenceExpectation {
-                    artifact_id: &receipt.receipt_artifact_id,
-                    digest: &receipt.receipt_hash,
-                    schema_id: Some(&receipt.receipt_schema_id),
-                    semantic_type_id: None,
-                    role: ArtifactRole::Receipt,
-                    producer_node_id: Some(&receipt.node_id),
-                    producer_seed_id: None,
-                })?,
+                artifact: self.verify_requested_side_effect_artifact(request, receipt)?,
             })
         }
 
@@ -883,35 +966,11 @@ pub mod v1 {
             request: &SideEffectEvidenceReplayRequest,
         ) -> Result<ConfirmationReplayEvidence> {
             self.verify_side_effect_intent(request)?;
-            let confirmation = self
-                .confirmations
-                .get(&(request.pair_id.clone(), request.invocation_epoch))
-                .ok_or_else(|| {
-                    ReplayError::new(
-                        ReplayErrorKind::SideEffectMissing,
-                        format!("missing side-effect confirmation {}", request.pair_id),
-                    )
-                })?;
-            verify_replay_verifier(
-                request.replay_verifier_id.as_ref(),
-                &confirmation.replay_verifier_id,
-            )?;
-            if confirmation.confirmation_schema_id != request.evidence_schema_id
-                || confirmation.confirmation_hash != request.evidence_hash
-            {
-                return Err(side_effect_mismatch("confirmation evidence mismatch"));
-            }
+            let confirmation =
+                self.required_side_effect_record(&self.confirmations, request, "confirmation")?;
             Ok(ConfirmationReplayEvidence {
                 confirmation: confirmation.clone(),
-                artifact: self.verify_artifact(ArtifactEvidenceExpectation {
-                    artifact_id: &confirmation.confirmation_artifact_id,
-                    digest: &confirmation.confirmation_hash,
-                    schema_id: Some(&confirmation.confirmation_schema_id),
-                    semantic_type_id: None,
-                    role: ArtifactRole::Confirmation,
-                    producer_node_id: Some(&confirmation.node_id),
-                    producer_seed_id: None,
-                })?,
+                artifact: self.verify_requested_side_effect_artifact(request, confirmation)?,
                 artifact_bytes: self
                     .artifact_bytes(&confirmation.confirmation_artifact_id)?
                     .to_vec(),
@@ -924,31 +983,11 @@ pub mod v1 {
             request: &SideEffectEvidenceReplayRequest,
         ) -> Result<AmbiguityReplayEvidence> {
             self.verify_side_effect_intent(request)?;
-            let ambiguity = self
-                .ambiguities
-                .get(&(request.pair_id.clone(), request.invocation_epoch))
-                .ok_or_else(|| {
-                    ReplayError::new(
-                        ReplayErrorKind::SideEffectMissing,
-                        format!("missing side-effect ambiguity {}", request.pair_id),
-                    )
-                })?;
-            if ambiguity.evidence_schema_id != request.evidence_schema_id
-                || ambiguity.evidence_hash != request.evidence_hash
-            {
-                return Err(side_effect_mismatch("ambiguity evidence mismatch"));
-            }
+            let ambiguity =
+                self.required_side_effect_record(&self.ambiguities, request, "ambiguity")?;
             Ok(AmbiguityReplayEvidence {
                 ambiguity: ambiguity.clone(),
-                artifact: self.verify_artifact(ArtifactEvidenceExpectation {
-                    artifact_id: &ambiguity.evidence_artifact_id,
-                    digest: &ambiguity.evidence_hash,
-                    schema_id: Some(&ambiguity.evidence_schema_id),
-                    semantic_type_id: None,
-                    role: ArtifactRole::AmbiguityEvidence,
-                    producer_node_id: Some(&ambiguity.node_id),
-                    producer_seed_id: None,
-                })?,
+                artifact: self.verify_requested_side_effect_artifact(request, ambiguity)?,
             })
         }
 
@@ -1331,27 +1370,75 @@ pub mod v1 {
             })
         }
 
+        fn required_side_effect_record<'a, T>(
+            &'a self,
+            records: &'a BTreeMap<SideEffectKey, T>,
+            request: &SideEffectEvidenceReplayRequest,
+            label: &'static str,
+        ) -> Result<&'a T> {
+            records
+                .get(&(request.pair_id.clone(), request.invocation_epoch))
+                .ok_or_else(|| {
+                    ReplayError::new(
+                        ReplayErrorKind::SideEffectMissing,
+                        format!("missing side-effect {label} {}", request.pair_id),
+                    )
+                })
+        }
+
+        fn optional_side_effect_record<'a, T>(
+            &'a self,
+            records: &'a BTreeMap<SideEffectKey, T>,
+            request: &SideEffectEvidenceReplayRequest,
+        ) -> Option<&'a T> {
+            records.get(&(request.pair_id.clone(), request.invocation_epoch))
+        }
+
+        fn verify_requested_side_effect_artifact<T>(
+            &self,
+            request: &SideEffectEvidenceReplayRequest,
+            evidence: &T,
+        ) -> Result<StoredArtifactEvidenceRef>
+        where
+            T: SideEffectReplayArtifact,
+        {
+            if let Some(recorded) = evidence.replay_verifier_id() {
+                verify_replay_verifier(request.replay_verifier_id.as_ref(), recorded)?;
+            }
+            if evidence.evidence_schema_id() != &request.evidence_schema_id
+                || evidence.evidence_hash() != &request.evidence_hash
+            {
+                return Err(side_effect_mismatch(evidence.mismatch_message()));
+            }
+            self.verify_side_effect_artifact(evidence)
+        }
+
+        fn verify_side_effect_artifact<T>(&self, evidence: &T) -> Result<StoredArtifactEvidenceRef>
+        where
+            T: SideEffectReplayArtifact,
+        {
+            self.verify_artifact(ArtifactEvidenceExpectation {
+                artifact_id: evidence.artifact_id(),
+                digest: evidence.evidence_hash(),
+                schema_id: Some(evidence.evidence_schema_id()),
+                semantic_type_id: None,
+                role: evidence.artifact_role(),
+                producer_node_id: Some(evidence.producer_node_id()),
+                producer_seed_id: None,
+            })
+        }
+
         fn side_effect_submission_for(
             &self,
             request: &SideEffectEvidenceReplayRequest,
         ) -> Result<Option<SubmissionReplayEvidence>> {
-            let Some(submission) = self
-                .submissions
-                .get(&(request.pair_id.clone(), request.invocation_epoch))
+            let Some(submission) = self.optional_side_effect_record(&self.submissions, request)
             else {
                 return Ok(None);
             };
             Ok(Some(SubmissionReplayEvidence {
                 submission: submission.clone(),
-                artifact: self.verify_artifact(ArtifactEvidenceExpectation {
-                    artifact_id: &submission.submission_artifact_id,
-                    digest: &submission.submission_hash,
-                    schema_id: Some(&submission.submission_schema_id),
-                    semantic_type_id: None,
-                    role: ArtifactRole::Submission,
-                    producer_node_id: Some(&submission.node_id),
-                    producer_seed_id: None,
-                })?,
+                artifact: self.verify_side_effect_artifact(submission)?,
             }))
         }
 
@@ -1359,23 +1446,12 @@ pub mod v1 {
             &self,
             request: &SideEffectEvidenceReplayRequest,
         ) -> Result<Option<ReceiptReplayEvidence>> {
-            let Some(receipt) = self
-                .receipts
-                .get(&(request.pair_id.clone(), request.invocation_epoch))
-            else {
+            let Some(receipt) = self.optional_side_effect_record(&self.receipts, request) else {
                 return Ok(None);
             };
             Ok(Some(ReceiptReplayEvidence {
                 receipt: receipt.clone(),
-                artifact: self.verify_artifact(ArtifactEvidenceExpectation {
-                    artifact_id: &receipt.receipt_artifact_id,
-                    digest: &receipt.receipt_hash,
-                    schema_id: Some(&receipt.receipt_schema_id),
-                    semantic_type_id: None,
-                    role: ArtifactRole::Receipt,
-                    producer_node_id: Some(&receipt.node_id),
-                    producer_seed_id: None,
-                })?,
+                artifact: self.verify_side_effect_artifact(receipt)?,
             }))
         }
 

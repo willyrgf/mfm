@@ -2,7 +2,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use mfm_events::v1::{self as events, side_effect};
-use mfm_ids::{ArtifactId, ContentDigest};
+use mfm_ids::{ArtifactId, AttemptId, ContentDigest, NodeId, RunId, SideEffectPairId};
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 use mfm_values::MfmValue;
@@ -736,36 +736,19 @@ impl SideEffectDriver {
             _ => None,
         };
         match decision {
-            SideEffectSubmissionDecision::Observed(submission) => match start_claim {
-                Some(claim) => {
-                    builder.start_prepared_and_submission_observed(side_effect, claim, &submission)
-                }
-                None => builder.submission_observed(side_effect, &submission),
-            },
-            SideEffectSubmissionDecision::Unknown(evidence) => match start_claim {
-                Some(claim) => {
-                    builder.start_prepared_and_submission_unknown(side_effect, claim, &evidence)
-                }
-                None => builder.submission_unknown(side_effect, &evidence),
-            },
-            SideEffectSubmissionDecision::NotSubmitted(proof) => match start_claim {
-                Some(claim) => {
-                    builder.start_prepared_and_not_submitted_proven(side_effect, claim, &proof)
-                }
-                None => builder.not_submitted_proven(side_effect, &proof),
-            },
+            SideEffectSubmissionDecision::Observed(submission) => {
+                builder.submission_observed(side_effect, start_claim, &submission)
+            }
+            SideEffectSubmissionDecision::Unknown(evidence) => {
+                builder.submission_unknown(side_effect, start_claim, &evidence)
+            }
+            SideEffectSubmissionDecision::NotSubmitted(proof) => {
+                builder.not_submitted_proven(side_effect, start_claim, &proof)
+            }
             SideEffectSubmissionDecision::Ambiguous {
                 ambiguity_code,
                 evidence,
-            } => match start_claim {
-                Some(claim) => builder.start_prepared_and_ambiguous(
-                    side_effect,
-                    claim,
-                    ambiguity_code,
-                    &evidence,
-                ),
-                None => builder.ambiguous(side_effect, ambiguity_code, &evidence),
-            },
+            } => builder.ambiguous(side_effect, start_claim, ambiguity_code, &evidence),
         }
     }
 }
@@ -992,22 +975,34 @@ fn side_effect_binding(
 
 fn runtime_side_effect_binding(ctx: &ErasedRunCtx<'_>) -> Result<RunnerSideEffectBinding> {
     let ledger_purpose = runtime_ledger_purpose(ctx)?;
-    let pair_id = runtime_side_effect_pair_id(ctx, &ledger_purpose)?;
-    let ledger_key = side_effect_ledger_key(ctx.run_id(), &pair_id, &ledger_purpose)?;
-    Ok(RunnerSideEffectBinding {
-        ledger_key,
+    side_effect_binding_for(
+        ctx.run_id(),
+        ctx.runtime_spec(),
+        &ctx.node().node_id,
         ledger_purpose,
-        pair_id,
-        invocation_epoch: 1,
-    })
+    )
 }
 
 fn pre_invocation_side_effect_binding(
     ctx: &PreInvocationRunCtx<'_>,
 ) -> Result<RunnerSideEffectBinding> {
     let ledger_purpose = pre_invocation_ledger_purpose(ctx)?;
-    let pair_id = pre_invocation_side_effect_pair_id(ctx, &ledger_purpose)?;
-    let ledger_key = side_effect_ledger_key(ctx.run_id(), &pair_id, &ledger_purpose)?;
+    side_effect_binding_for(
+        ctx.run_id(),
+        ctx.runtime_spec(),
+        &ctx.node().node_id,
+        ledger_purpose,
+    )
+}
+
+fn side_effect_binding_for(
+    run_id: &RunId,
+    runtime_spec: &CertifiedRuntimeSpec,
+    node_id: &NodeId,
+    ledger_purpose: events::SideEffectLedgerPurpose,
+) -> Result<RunnerSideEffectBinding> {
+    let pair_id = forward_side_effect_pair_id(runtime_spec, node_id, &ledger_purpose)?;
+    let ledger_key = side_effect_ledger_key(run_id, &pair_id, &ledger_purpose)?;
     Ok(RunnerSideEffectBinding {
         ledger_key,
         ledger_purpose,
@@ -1059,9 +1054,7 @@ fn pre_invocation_ledger_purpose(
         .unwrap_or(events::SideEffectLedgerPurpose::Forward))
 }
 
-fn linked_forward_pair_for_remediation(
-    ctx: &ErasedRunCtx<'_>,
-) -> Result<Option<mfm_ids::SideEffectPairId>> {
+fn linked_forward_pair_for_remediation(ctx: &ErasedRunCtx<'_>) -> Result<Option<SideEffectPairId>> {
     if let Some(projection) = SideEffectAttemptView::from_erased_context(ctx)?.projection() {
         if let events::SideEffectLedgerPurpose::Remediation { forward_pair_id } =
             &projection.ledger_purpose
@@ -1069,42 +1062,25 @@ fn linked_forward_pair_for_remediation(
             return Ok(Some(forward_pair_id.clone()));
         }
     }
-    let Some(forward_node_id) = ctx
-        .runtime_spec()
-        .forward_node_for_remediation(&ctx.node().node_id)
-    else {
-        return Ok(None);
-    };
-    let terminal_policies =
-        store::SideEffectTerminalPolicies::from_spec(ctx.runtime_spec().spec())?;
-    for (_, projection) in ctx.projections().side_effects() {
-        if projection.intent.node_id == *forward_node_id
-            && matches!(
-                &projection.ledger_purpose,
-                events::SideEffectLedgerPurpose::Forward
-            )
-            && terminal_policies
-                .require(&projection.pair_id)?
-                .is_terminal_phase(&projection.phase)
-        {
-            return Ok(Some(projection.pair_id.clone()));
-        }
-    }
-    Ok(None)
+    terminal_forward_pair_for_remediation(ctx.runtime_spec(), ctx.projections(), ctx.node())
 }
 
 fn pre_invocation_linked_forward_pair_for_remediation(
     ctx: &PreInvocationRunCtx<'_>,
-) -> Result<Option<mfm_ids::SideEffectPairId>> {
-    let Some(forward_node_id) = ctx
-        .runtime_spec()
-        .forward_node_for_remediation(&ctx.node().node_id)
-    else {
+) -> Result<Option<SideEffectPairId>> {
+    terminal_forward_pair_for_remediation(ctx.runtime_spec(), ctx.projections(), ctx.node())
+}
+
+fn terminal_forward_pair_for_remediation(
+    runtime_spec: &CertifiedRuntimeSpec,
+    projections: &store::ProjectionSnapshot,
+    node: &spec::NodeSpec,
+) -> Result<Option<SideEffectPairId>> {
+    let Some(forward_node_id) = runtime_spec.forward_node_for_remediation(&node.node_id) else {
         return Ok(None);
     };
-    let terminal_policies =
-        store::SideEffectTerminalPolicies::from_spec(ctx.runtime_spec().spec())?;
-    for (_, projection) in ctx.projections().side_effects() {
+    let terminal_policies = store::SideEffectTerminalPolicies::from_spec(runtime_spec.spec())?;
+    for (_, projection) in projections.side_effects() {
         if projection.intent.node_id == *forward_node_id
             && matches!(
                 &projection.ledger_purpose,
@@ -1120,25 +1096,11 @@ fn pre_invocation_linked_forward_pair_for_remediation(
     Ok(None)
 }
 
-fn runtime_side_effect_pair_id(
-    ctx: &ErasedRunCtx<'_>,
-    ledger_purpose: &events::SideEffectLedgerPurpose,
-) -> Result<mfm_ids::SideEffectPairId> {
-    forward_side_effect_pair_id(ctx.runtime_spec(), &ctx.node().node_id, ledger_purpose)
-}
-
-fn pre_invocation_side_effect_pair_id(
-    ctx: &PreInvocationRunCtx<'_>,
-    ledger_purpose: &events::SideEffectLedgerPurpose,
-) -> Result<mfm_ids::SideEffectPairId> {
-    forward_side_effect_pair_id(ctx.runtime_spec(), &ctx.node().node_id, ledger_purpose)
-}
-
 fn forward_side_effect_pair_id(
     runtime_spec: &CertifiedRuntimeSpec,
-    node_id: &mfm_ids::NodeId,
+    node_id: &NodeId,
     ledger_purpose: &events::SideEffectLedgerPurpose,
-) -> Result<mfm_ids::SideEffectPairId> {
+) -> Result<SideEffectPairId> {
     match ledger_purpose {
         events::SideEffectLedgerPurpose::Forward
         | events::SideEffectLedgerPurpose::Remediation { .. } => runtime_spec
@@ -1174,14 +1136,14 @@ fn runtime_claim_authority(
     claim_generation: u32,
     resource_key: Option<events::ResourceKeyEvidence>,
 ) -> Result<RuntimeSideEffectClaimAuthority> {
-    let claim_owner = runtime_claim_owner(ctx, side_effect, claim_generation)?;
-    let claim_fencing_token = runtime_claim_fencing_token(ctx, side_effect, claim_generation)?;
-    Ok(RuntimeSideEffectClaimAuthority {
-        claim_owner,
+    claim_authority_for(
+        ctx.run_id(),
+        &ctx.node().node_id,
+        ctx.attempt_id(),
+        side_effect,
         claim_generation,
-        claim_fencing_token,
         resource_key,
-    })
+    )
 }
 
 fn pre_invocation_claim_authority(
@@ -1190,9 +1152,27 @@ fn pre_invocation_claim_authority(
     claim_generation: u32,
     resource_key: Option<events::ResourceKeyEvidence>,
 ) -> Result<RuntimeSideEffectClaimAuthority> {
-    let claim_owner = pre_invocation_claim_owner(ctx, side_effect, claim_generation)?;
+    claim_authority_for(
+        ctx.run_id(),
+        &ctx.node().node_id,
+        ctx.attempt_id(),
+        side_effect,
+        claim_generation,
+        resource_key,
+    )
+}
+
+fn claim_authority_for(
+    run_id: &RunId,
+    node_id: &NodeId,
+    attempt_id: &AttemptId,
+    side_effect: &RunnerSideEffectBinding,
+    claim_generation: u32,
+    resource_key: Option<events::ResourceKeyEvidence>,
+) -> Result<RuntimeSideEffectClaimAuthority> {
+    let claim_owner = claim_owner_for(run_id, node_id, attempt_id, side_effect, claim_generation)?;
     let claim_fencing_token =
-        pre_invocation_claim_fencing_token(ctx, side_effect, claim_generation)?;
+        claim_fencing_token_for(node_id, attempt_id, side_effect, claim_generation)?;
     Ok(RuntimeSideEffectClaimAuthority {
         claim_owner,
         claim_generation,
@@ -1201,17 +1181,19 @@ fn pre_invocation_claim_authority(
     })
 }
 
-fn runtime_claim_owner(
-    ctx: &ErasedRunCtx<'_>,
+fn claim_owner_for(
+    run_id: &RunId,
+    node_id: &NodeId,
+    attempt_id: &AttemptId,
     side_effect: &RunnerSideEffectBinding,
     claim_generation: u32,
 ) -> Result<events::RunnerInvocationId> {
     let digest = crate::content_digest_json(serde_json::json!({
-        "attempt_id": ctx.attempt_id().as_str(),
+        "attempt_id": attempt_id.as_str(),
         "claim_generation": claim_generation,
         "ledger_key": side_effect.ledger_key.as_str(),
-        "node_id": ctx.node().node_id.as_str(),
-        "run_id": ctx.run_id().as_str(),
+        "node_id": node_id.as_str(),
+        "run_id": run_id.as_str(),
     }))?;
     Ok(events::RunnerInvocationId::new(format!(
         "mfm.runtime.owner.{}",
@@ -1219,52 +1201,17 @@ fn runtime_claim_owner(
     ))?)
 }
 
-fn pre_invocation_claim_owner(
-    ctx: &PreInvocationRunCtx<'_>,
-    side_effect: &RunnerSideEffectBinding,
-    claim_generation: u32,
-) -> Result<events::RunnerInvocationId> {
-    let digest = crate::content_digest_json(serde_json::json!({
-        "attempt_id": ctx.attempt_id().as_str(),
-        "claim_generation": claim_generation,
-        "ledger_key": side_effect.ledger_key.as_str(),
-        "node_id": ctx.node().node_id.as_str(),
-        "run_id": ctx.run_id().as_str(),
-    }))?;
-    Ok(events::RunnerInvocationId::new(format!(
-        "mfm.runtime.owner.{}",
-        short_digest(&digest)
-    ))?)
-}
-
-fn runtime_claim_fencing_token(
-    ctx: &ErasedRunCtx<'_>,
+fn claim_fencing_token_for(
+    node_id: &NodeId,
+    attempt_id: &AttemptId,
     side_effect: &RunnerSideEffectBinding,
     claim_generation: u32,
 ) -> Result<side_effect::ClaimFencingToken> {
     let digest = crate::content_digest_json(serde_json::json!({
-        "attempt_id": ctx.attempt_id().as_str(),
+        "attempt_id": attempt_id.as_str(),
         "claim_generation": claim_generation,
         "ledger_key": side_effect.ledger_key.as_str(),
-        "node_id": ctx.node().node_id.as_str(),
-        "purpose": "side-effect-claim-fencing",
-    }))?;
-    Ok(side_effect::ClaimFencingToken::new(format!(
-        "mfm.runtime.token.{}",
-        short_digest(&digest)
-    ))?)
-}
-
-fn pre_invocation_claim_fencing_token(
-    ctx: &PreInvocationRunCtx<'_>,
-    side_effect: &RunnerSideEffectBinding,
-    claim_generation: u32,
-) -> Result<side_effect::ClaimFencingToken> {
-    let digest = crate::content_digest_json(serde_json::json!({
-        "attempt_id": ctx.attempt_id().as_str(),
-        "claim_generation": claim_generation,
-        "ledger_key": side_effect.ledger_key.as_str(),
-        "node_id": ctx.node().node_id.as_str(),
+        "node_id": node_id.as_str(),
         "purpose": "side-effect-claim-fencing",
     }))?;
     Ok(side_effect::ClaimFencingToken::new(format!(
@@ -1549,6 +1496,7 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
     pub fn not_submitted_proven<Proof>(
         &self,
         side_effect: RunnerSideEffectBinding,
+        start_claim: Option<RunnerClaimBinding>,
         proof: &Proof,
     ) -> Result<ErasedRunnerOutput>
     where
@@ -1558,30 +1506,7 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
         let artifact = artifacts.not_submitted_proof(proof)?;
         self.terminal_single_artifact_output(
             side_effect,
-            None,
-            &artifact,
-            "side_effect.not_submitted",
-            |payloads, side_effect, artifact| {
-                payloads.side_effect_not_submitted_proven(side_effect, artifact)
-            },
-        )
-    }
-
-    /// Builds invocation-started and not-submitted proof evidence for a prepared invocation.
-    pub fn start_prepared_and_not_submitted_proven<Proof>(
-        &self,
-        side_effect: RunnerSideEffectBinding,
-        claim: RunnerClaimBinding,
-        proof: &Proof,
-    ) -> Result<ErasedRunnerOutput>
-    where
-        Proof: MfmValue,
-    {
-        let artifacts = RunnerArtifactBuilder::new(self.ctx);
-        let artifact = artifacts.not_submitted_proof(proof)?;
-        self.terminal_single_artifact_output(
-            side_effect,
-            Some(claim),
+            start_claim,
             &artifact,
             "side_effect.not_submitted",
             |payloads, side_effect, artifact| {
@@ -1594,6 +1519,7 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
     pub fn submission_observed<Submission>(
         &self,
         side_effect: RunnerSideEffectBinding,
+        start_claim: Option<RunnerClaimBinding>,
         submission: &Submission,
     ) -> Result<ErasedRunnerOutput>
     where
@@ -1601,27 +1527,11 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
     {
         let artifacts = RunnerArtifactBuilder::new(self.ctx);
         let artifact = artifacts.submission(submission)?;
-        self.single_artifact_output(side_effect, &artifact, |payloads, side_effect, artifact| {
-            payloads.side_effect_submission_observed(side_effect, artifact)
-        })
-    }
-
-    /// Builds invocation-started and submission-observed evidence for a prepared invocation.
-    pub fn start_prepared_and_submission_observed<Submission>(
-        &self,
-        side_effect: RunnerSideEffectBinding,
-        claim: RunnerClaimBinding,
-        submission: &Submission,
-    ) -> Result<ErasedRunnerOutput>
-    where
-        Submission: MfmValue,
-    {
-        let artifacts = RunnerArtifactBuilder::new(self.ctx);
-        let artifact = artifacts.submission(submission)?;
-        self.started_single_artifact_output(
+        self.single_artifact_output_with_optional_start(
             side_effect,
-            claim,
+            start_claim,
             &artifact,
+            None,
             |payloads, side_effect, artifact| {
                 payloads.side_effect_submission_observed(side_effect, artifact)
             },
@@ -1632,6 +1542,7 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
     pub fn submission_unknown<Evidence>(
         &self,
         side_effect: RunnerSideEffectBinding,
+        start_claim: Option<RunnerClaimBinding>,
         evidence: &Evidence,
     ) -> Result<ErasedRunnerOutput>
     where
@@ -1639,27 +1550,11 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
     {
         let artifacts = RunnerArtifactBuilder::new(self.ctx);
         let artifact = artifacts.submission_unknown(evidence)?;
-        self.single_artifact_output(side_effect, &artifact, |payloads, side_effect, artifact| {
-            payloads.side_effect_submission_unknown(side_effect, artifact)
-        })
-    }
-
-    /// Builds invocation-started and submission-unknown evidence for a prepared invocation.
-    pub fn start_prepared_and_submission_unknown<Evidence>(
-        &self,
-        side_effect: RunnerSideEffectBinding,
-        claim: RunnerClaimBinding,
-        evidence: &Evidence,
-    ) -> Result<ErasedRunnerOutput>
-    where
-        Evidence: MfmValue,
-    {
-        let artifacts = RunnerArtifactBuilder::new(self.ctx);
-        let artifact = artifacts.submission_unknown(evidence)?;
-        self.started_single_artifact_output(
+        self.single_artifact_output_with_optional_start(
             side_effect,
-            claim,
+            start_claim,
             &artifact,
+            None,
             |payloads, side_effect, artifact| {
                 payloads.side_effect_submission_unknown(side_effect, artifact)
             },
@@ -1720,6 +1615,7 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
     pub fn ambiguous<Evidence>(
         &self,
         side_effect: RunnerSideEffectBinding,
+        start_claim: Option<RunnerClaimBinding>,
         ambiguity_code: events::AmbiguityCode,
         evidence: &Evidence,
     ) -> Result<ErasedRunnerOutput>
@@ -1730,31 +1626,7 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
         let artifact = artifacts.ambiguity_evidence(evidence)?;
         self.terminal_single_artifact_output(
             side_effect,
-            None,
-            &artifact,
-            "side_effect.ambiguous",
-            |payloads, side_effect, artifact| {
-                payloads.side_effect_ambiguous(side_effect, ambiguity_code, artifact)
-            },
-        )
-    }
-
-    /// Builds invocation-started and ambiguity evidence for a prepared invocation.
-    pub fn start_prepared_and_ambiguous<Evidence>(
-        &self,
-        side_effect: RunnerSideEffectBinding,
-        claim: RunnerClaimBinding,
-        ambiguity_code: events::AmbiguityCode,
-        evidence: &Evidence,
-    ) -> Result<ErasedRunnerOutput>
-    where
-        Evidence: MfmValue,
-    {
-        let artifacts = RunnerArtifactBuilder::new(self.ctx);
-        let artifact = artifacts.ambiguity_evidence(evidence)?;
-        self.terminal_single_artifact_output(
-            side_effect,
-            Some(claim),
+            start_claim,
             &artifact,
             "side_effect.ambiguous",
             |payloads, side_effect, artifact| {
@@ -1824,29 +1696,6 @@ impl<'a, 'ctx> SideEffectEvidenceBuilder<'a, 'ctx> {
         ) -> Result<crate::RunnerEventPayload>,
     {
         self.single_artifact_output_with_optional_start(side_effect, None, artifact, None, payload)
-    }
-
-    fn started_single_artifact_output<F>(
-        &self,
-        side_effect: RunnerSideEffectBinding,
-        claim: RunnerClaimBinding,
-        artifact: &RunnerJsonArtifact,
-        payload: F,
-    ) -> Result<ErasedRunnerOutput>
-    where
-        F: FnOnce(
-            &RunnerPayloadBuilder<'_, '_>,
-            RunnerSideEffectBinding,
-            &RunnerJsonArtifact,
-        ) -> Result<crate::RunnerEventPayload>,
-    {
-        self.single_artifact_output_with_optional_start(
-            side_effect,
-            Some(claim),
-            artifact,
-            None,
-            payload,
-        )
     }
 
     fn terminal_single_artifact_output<F>(

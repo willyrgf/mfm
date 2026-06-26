@@ -103,23 +103,6 @@ impl<'a> SideEffectAttemptView<'a> {
             .as_ref()
             .map(store::SideEffectLedgerState::phase)
     }
-
-    /// Returns the side-effect ledger key, when this attempt has persisted ledger evidence.
-    pub fn ledger_key(&self) -> Option<&'a events::SideEffectLedgerKey> {
-        self.projection.map(|projection| &projection.ledger_key)
-    }
-
-    /// Returns the side-effect ledger purpose, when this attempt has persisted ledger evidence.
-    pub fn ledger_purpose(&self) -> Option<&'a events::SideEffectLedgerPurpose> {
-        self.ledger_state
-            .as_ref()
-            .map(store::SideEffectLedgerState::ledger_purpose)
-    }
-
-    /// Returns true when this attempt has no side-effect ledger projection yet.
-    pub fn is_empty(&self) -> bool {
-        self.projection.is_none()
-    }
 }
 
 /// Runtime lifecycle guard for side-effect attempt uncertainty and recovery evidence.
