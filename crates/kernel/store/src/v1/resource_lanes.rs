@@ -45,11 +45,6 @@ pub(super) fn acquire_resource_lane(
                     existing.holder.run_id, existing.holder.pair_id
                 ),
             });
-        } else if existing.pair_id != payload.pair_id {
-            return Err(StoreError::ProjectionConflict {
-                key: format!("resource_lane:{}:{}", lane_key.namespace, lane_key.key),
-                message: "resource lane claim pair authority does not match active lane".to_owned(),
-            });
         }
     }
 
@@ -60,7 +55,6 @@ pub(super) fn acquire_resource_lane(
             holder,
             ledger_key: payload.ledger_key.clone(),
             ledger_purpose: payload.ledger_purpose.clone(),
-            pair_id: payload.pair_id.clone(),
             node_id: payload.node_id.clone(),
             attempt_id: payload.attempt_id.clone(),
             invocation_epoch: payload.invocation_epoch,
@@ -91,7 +85,7 @@ fn resource_lane_key_for_pair(
         .resource_lanes
         .iter()
         .find_map(|(key, projection)| {
-            (projection.holder.run_id == *run_id && projection.pair_id == *pair_id)
+            (projection.holder.run_id == *run_id && projection.holder.pair_id == *pair_id)
                 .then(|| key.clone())
         })
 }

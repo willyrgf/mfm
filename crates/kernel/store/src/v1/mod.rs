@@ -3552,8 +3552,6 @@ pub struct ResourceLaneProjection {
     pub ledger_key: events::SideEffectLedgerKey,
     /// Ledger purpose.
     pub ledger_purpose: events::SideEffectLedgerPurpose,
-    /// Certified side-effect pair id that owns the active lane.
-    pub pair_id: SideEffectPairId,
     /// Node id that prepared the invocation.
     pub node_id: NodeId,
     /// Attempt id that prepared the invocation.
@@ -4856,7 +4854,6 @@ pub struct CommitBase {
 struct MaterializedActiveLane {
     holder: SideEffectPairLedgerRef,
     ledger_purpose: events::SideEffectLedgerPurpose,
-    pair_id: SideEffectPairId,
     node_id: NodeId,
     attempt_id: AttemptId,
     invocation_epoch: u32,
@@ -5481,13 +5478,6 @@ fn materialize_resource_lane_intents(
                                 waiter: None,
                             },
                         )));
-                    } else if existing.pair_id != intent.pair_id {
-                        return Err(StoreError::ProjectionConflict {
-                            key: format!("resource_lane:{}:{}", lane_key.namespace, lane_key.key),
-                            message:
-                                "resource lane claim pair authority does not match active lane"
-                                    .to_owned(),
-                        });
                     }
                 }
 
@@ -5627,7 +5617,6 @@ impl MaterializedActiveLane {
         Self {
             holder: projection.holder.clone(),
             ledger_purpose: projection.ledger_purpose.clone(),
-            pair_id: projection.pair_id.clone(),
             node_id: projection.node_id.clone(),
             attempt_id: projection.attempt_id.clone(),
             invocation_epoch: projection.invocation_epoch,
@@ -5641,7 +5630,6 @@ impl MaterializedActiveLane {
         Self {
             holder: SideEffectPairLedgerRef::new(run_id.clone(), payload.pair_id.clone()),
             ledger_purpose: payload.ledger_purpose.clone(),
-            pair_id: payload.pair_id.clone(),
             node_id: payload.node_id.clone(),
             attempt_id: payload.attempt_id.clone(),
             invocation_epoch: payload.invocation_epoch,
@@ -5672,7 +5660,7 @@ fn materialized_lane_key_for_pair(
     pair_id: &SideEffectPairId,
 ) -> Option<ResourceLaneKey> {
     active_lanes.iter().find_map(|(key, active)| {
-        (active.holder.run_id == *run_id && active.pair_id == *pair_id).then(|| key.clone())
+        (active.holder.run_id == *run_id && active.holder.pair_id == *pair_id).then(|| key.clone())
     })
 }
 
@@ -10412,7 +10400,7 @@ pub fn resource_lane_projection_json(
         "ledger_purpose": side_effect_ledger_purpose_json(&projection.ledger_purpose),
         "namespace": lane_key.namespace.as_str(),
         "node_id": projection.node_id.as_str(),
-        "pair_id": projection.pair_id.as_str(),
+        "pair_id": projection.holder.pair_id.as_str(),
         "run_id": projection.holder.run_id.as_str(),
     })
 }
@@ -10435,7 +10423,6 @@ pub fn parse_resource_lane_projection(
         ),
         ledger_key: events::SideEffectLedgerKey::new(required_str(json, "ledger_key")?)?,
         ledger_purpose: parse_side_effect_ledger_purpose(required_obj(json, "ledger_purpose")?)?,
-        pair_id: parse_identity(required_str(json, "pair_id")?)?,
         node_id: parse_identity(required_str(json, "node_id")?)?,
         attempt_id: parse_identity(required_str(json, "attempt_id")?)?,
         invocation_epoch: required_u32(json, "invocation_epoch")?,

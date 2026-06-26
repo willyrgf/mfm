@@ -1549,7 +1549,7 @@ async fn append_resource_lane_release(
                     attempt_id: lane.attempt_id.clone(),
                     ledger_key: side_effect_ledger_key(),
                     ledger_purpose: lane.ledger_purpose.clone(),
-                    pair_id: lane.pair_id.clone(),
+                    pair_id: lane.holder.pair_id.clone(),
                     pair_role: events::SideEffectPairRole::Verify,
                     invocation_epoch: lane.invocation_epoch,
                     claim_id: lane.claim_id.clone(),

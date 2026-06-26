@@ -11009,7 +11009,7 @@ fn synthetic_resource_lane_release(
             attempt_id: attempt_id.clone(),
             ledger_key: ledger.clone(),
             ledger_purpose: events::SideEffectLedgerPurpose::Forward,
-            pair_id: lane.pair_id.clone(),
+            pair_id: lane.holder.pair_id.clone(),
             pair_role: events::SideEffectPairRole::Verify,
             invocation_epoch: lane.invocation_epoch,
             claim_id: lane.claim_id.clone(),

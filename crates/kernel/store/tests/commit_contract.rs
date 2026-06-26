@@ -1125,7 +1125,7 @@ fn resource_lane_release_intent_from_projection(
         attempt_id: lane.attempt_id.clone(),
         ledger_key: ledger_key.clone(),
         ledger_purpose: lane.ledger_purpose.clone(),
-        pair_id: lane.pair_id.clone(),
+        pair_id: lane.holder.pair_id.clone(),
         pair_role: events::SideEffectPairRole::Verify,
         invocation_epoch: lane.invocation_epoch,
         claim_id: lane.claim_id.clone(),
@@ -4801,7 +4801,10 @@ fn resource_lane_releases_on_ledger_terminals_and_run_terminal() {
         .projection_snapshot()
         .resource_lane(&lane_key)
         .expect("active lane");
-    assert_eq!(active_lane.pair_id, side_effect_pair_id_for_ledger(&ledger));
+    assert_eq!(
+        active_lane.holder.pair_id,
+        side_effect_pair_id_for_ledger(&ledger)
+    );
     let mut started = side_effect_started("owner-1", 1, "token-1");
     set_side_effect_ledger(
         &mut started,

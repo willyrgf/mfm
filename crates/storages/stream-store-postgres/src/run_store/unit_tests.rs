@@ -118,7 +118,6 @@ fn resource_lane_release_resolution_is_pair_bound_not_attempt_bound() {
             holder: mfm_store::v1::SideEffectPairLedgerRef::new(run_id.clone(), pair_id.clone()),
             ledger_key: events::SideEffectLedgerKey::new("ledger-1").expect("ledger key"),
             ledger_purpose: events::SideEffectLedgerPurpose::Forward,
-            pair_id: pair_id.clone(),
             node_id: NodeId::from_digest(
                 DigestAlgorithm::Sha256JcsV1,
                 DigestBytes::from_array([15; 32]),
