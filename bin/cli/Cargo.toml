@@ -39,6 +39,7 @@ axum = "0.7"
 mfm-certify = { path = "../../crates/kernel/certify" }
 mfm-events = { path = "../../crates/kernel/events" }
 mfm-manual-auth = { path = "../../crates/kernel/manual-auth" }
+mfm-integration-tests = { path = "../../tests/integration" }
 mfm-op-proof = { path = "../../crates/ops/proof-op" }
 mfm-program = { path = "../../crates/kernel/program" }
 mfm-runtime = { path = "../../crates/kernel/runtime" }

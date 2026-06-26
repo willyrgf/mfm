@@ -2,15 +2,12 @@
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use mfm_authored_config::{AuthoredConfig, AuthoredConfigFormat};
 use mfm_events::v1 as events;
 use mfm_ids::RunId;
 use mfm_integration_tests::test_support::{self, empty_post, json_post, response_json};
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
-use mfm_store::v1::{RunEventStore, TrustScopeStore};
-use serde_json::Value;
-use std::sync::Arc;
+use mfm_store::v1::RunEventStore;
 use tower::ServiceExt;
 
 const VALID_RUN_ID: &str =
@@ -214,10 +211,14 @@ async fn start_distinct_run_key_derives_separate_run_without_persisting_raw_key(
     let state = in_memory_state();
     let app = mfm_rest_api::make_app(state.clone());
     let raw_key = "distinct-alpha";
-    let first_run_id = prepare_portfolio_launch(&state, &portfolio_snapshot_config(), None)
-        .await
-        .request
-        .run_id;
+    let first_run_id = test_support::prepare_portfolio_launch_for_store(
+        &state.store,
+        &portfolio_snapshot_config(),
+        None,
+    )
+    .await
+    .request
+    .run_id;
 
     let distinct = app
         .oneshot(json_post(
@@ -265,7 +266,14 @@ async fn evm_contract_start_requires_capability_before_admission_for_all_entry_p
     let app = mfm_rest_api::make_app(state.clone());
 
     for (op, config) in evm_entry_point_configs() {
-        let prepared = prepare_entry_point_launch(&state, op, &config).await;
+        let prepared = test_support::prepare_entry_point_launch_for_store(
+            &state.store,
+            op,
+            Some(mfm_app::OpVersion::new(1).expect("op version")),
+            &config,
+            None,
+        )
+        .await;
         assert_evm_entry_point_evidence(&prepared.evidence, op);
         let run_id = prepared.request.run_id.clone();
         let resp = app
@@ -302,12 +310,14 @@ async fn evm_contract_start_requires_capability_before_admission_for_all_entry_p
 #[tokio::test]
 async fn portfolio_status_route_reports_interrupted_attempt_and_framework_attempts_from_history() {
     let _env_guard = RPC_ENV_LOCK.lock().await;
-    let rpc_url = start_rpc_mock().await;
-    let _env_restore = set_rpc_env(rpc_url);
+    let rpc_url = test_support::start_portfolio_rpc_mock(31337).await;
+    let _env_restore =
+        test_support::set_evm_rpc_sources_env_for_test(PORTFOLIO_NETWORK_ID, 31337, rpc_url);
     let state = in_memory_state();
     let config = portfolio_snapshot_config();
     let app = mfm_rest_api::make_app(state.clone());
-    let (run_id, certified) = admit_portfolio_run_without_driving(&state, &config).await;
+    let (run_id, certified) =
+        test_support::admit_portfolio_run_without_driving(&state.store, &config).await;
 
     let interrupted_node = certified
         .envelope()
@@ -412,7 +422,7 @@ async fn portfolio_status_route_reports_interrupted_attempt_and_framework_attemp
     let stream_events = stream_body["data"]["events"]
         .as_array()
         .expect("stream events");
-    assert_framework_started_before_terminal_evidence(
+    test_support::assert_framework_started_before_terminal_evidence(
         stream_events,
         attempts,
         &certified.envelope().spec.nodes,
@@ -708,306 +718,4 @@ fn assert_evm_entry_point_evidence(evidence: &mfm_app::EntryPointLaunchEvidence,
         evidence.entry_point_registry_digest,
         registry.registry_digest().expect("registry digest")
     );
-}
-
-async fn start_rpc_mock() -> String {
-    let app = axum::Router::new().route("/", axum::routing::post(rpc_handler));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind rpc mock");
-    let addr = listener.local_addr().expect("rpc mock addr");
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.expect("rpc mock serve");
-    });
-    format!("http://{addr}")
-}
-
-async fn rpc_handler(
-    axum::Json(request): axum::Json<serde_json::Value>,
-) -> axum::Json<serde_json::Value> {
-    let id = request
-        .get("id")
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!(1));
-    let method = request
-        .get("method")
-        .and_then(|value| value.as_str())
-        .expect("json-rpc method");
-    let result = match method {
-        "eth_chainId" => serde_json::json!("0x7a69"),
-        "eth_getBlockByNumber" => serde_json::json!({
-            "number": "0x64",
-            "hash": "0x1111111111111111111111111111111111111111111111111111111111111111"
-        }),
-        "eth_getBalance" => serde_json::json!("0xde0b6b3a7640000"),
-        other => panic!("unexpected rpc method {other}"),
-    };
-    axum::Json(serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "result": result
-    }))
-}
-
-fn set_rpc_env(rpc_url: String) -> EnvVarRestore {
-    let previous = std::env::var("MFM_EVM_RPC_SOURCES_JSON").ok();
-    std::env::set_var(
-        "MFM_EVM_RPC_SOURCES_JSON",
-        serde_json::json!({
-            "sources": [
-                {
-                    "id": PORTFOLIO_NETWORK_ID,
-                    "expected_chain_id": 31337,
-                    "rpc_url": rpc_url,
-                    "authorization": null
-                }
-            ],
-            "policies": [
-                {
-                    "id": PORTFOLIO_NETWORK_ID,
-                    "ordered_sources": [PORTFOLIO_NETWORK_ID]
-                }
-            ]
-        })
-        .to_string(),
-    );
-    EnvVarRestore {
-        name: "MFM_EVM_RPC_SOURCES_JSON",
-        previous,
-    }
-}
-
-struct EnvVarRestore {
-    name: &'static str,
-    previous: Option<String>,
-}
-
-impl Drop for EnvVarRestore {
-    fn drop(&mut self) {
-        match &self.previous {
-            Some(value) => std::env::set_var(self.name, value),
-            None => std::env::remove_var(self.name),
-        }
-    }
-}
-
-async fn prepare_portfolio_launch(
-    state: &test_support::InMemoryRestAppState,
-    config: &serde_json::Value,
-    distinct_run_key: Option<&str>,
-) -> mfm_app::PreparedEntryPointRunLaunch {
-    prepare_entry_point_launch_with_options(
-        state,
-        "portfolio_snapshot",
-        None,
-        config,
-        distinct_run_key,
-    )
-    .await
-}
-
-async fn prepare_entry_point_launch(
-    state: &test_support::InMemoryRestAppState,
-    op_name: &str,
-    config: &serde_json::Value,
-) -> mfm_app::PreparedEntryPointRunLaunch {
-    prepare_entry_point_launch_with_options(
-        state,
-        op_name,
-        Some(mfm_app::OpVersion::new(1).expect("op version")),
-        config,
-        None,
-    )
-    .await
-}
-
-async fn prepare_entry_point_launch_with_options(
-    state: &test_support::InMemoryRestAppState,
-    op_name: &str,
-    op_version: Option<mfm_app::OpVersion>,
-    config: &serde_json::Value,
-    distinct_run_key: Option<&str>,
-) -> mfm_app::PreparedEntryPointRunLaunch {
-    let entry_point_registry = mfm_app::production_entry_point_op_registry().expect("entrypoints");
-    let certification_registry = mfm_app::production_certification_registry().expect("cert");
-    let trust_scope_id = state
-        .store
-        .load_trust_scope_id()
-        .await
-        .expect("trust scope");
-    let authored_config = AuthoredConfig::new(
-        AuthoredConfigFormat::Json,
-        serde_json::to_vec(config).expect("portfolio config json"),
-    )
-    .expect("authored config");
-    mfm_app::prepare_entry_point_run_launch(mfm_app::EntryPointRunLaunchInput {
-        entry_point_registry: &entry_point_registry,
-        public_op_name: mfm_app::PublicOpName::new(op_name).expect("op name"),
-        op_version,
-        authored_config,
-        certification_registry: &certification_registry,
-        trust_scope_id,
-        distinct_run_key: distinct_run_key
-            .map(mfm_app::DistinctRunKey::new)
-            .transpose()
-            .expect("distinct run key"),
-    })
-    .expect("prepared portfolio launch")
-}
-
-async fn admit_portfolio_run_without_driving(
-    state: &test_support::InMemoryRestAppState,
-    config: &serde_json::Value,
-) -> (RunId, mfm_certify::CertifiedTypedSpec) {
-    let prepared = prepare_portfolio_launch(state, config, None).await;
-    let run_id = prepared.request.run_id.clone();
-    let certified = prepared.request.certified_spec.clone();
-    let runners = mfm_app::production_runner_registry(
-        mfm_app::artifact_read_provider_from_retained(state.store.clone()),
-    )
-    .expect("production runners");
-    let scheduler = mfm_runtime::SerialTypedScheduler::new(runners, Arc::new(state.store.clone()));
-    let runtime_spec = mfm_runtime::CertifiedRuntimeSpec::new(prepared.request.certified_spec)
-        .expect("runtime spec");
-    let launch = scheduler
-        .prepare_run_launch(
-            &runtime_spec,
-            prepared.request.identity_material,
-            prepared.request.evidence,
-            state
-                .store
-                .expected_next_seq(&run_id)
-                .await
-                .expect("expected next seq"),
-        )
-        .expect("prepared launch");
-    scheduler
-        .start_run(&state.store, launch)
-        .await
-        .expect("start fixture run");
-    (run_id, certified)
-}
-
-fn assert_framework_started_before_terminal_evidence(
-    stream_events: &[Value],
-    attempts: &[Value],
-    nodes: &[spec::NodeSpec],
-    run_id: &RunId,
-) {
-    for node in nodes.iter().filter(|node| node.framework.is_some()) {
-        let required_kind = match &node.framework {
-            Some(spec::FrameworkNodeSpec::PublicOutputRender(_)) => "public_output_render",
-            Some(spec::FrameworkNodeSpec::ProjectRetentionManifest(_)) => {
-                "project_retention_manifest"
-            }
-            Some(spec::FrameworkNodeSpec::CompleteRun(_)) => "complete_run",
-            _ => continue,
-        };
-        let attempt = attempts
-            .iter()
-            .find(|attempt| {
-                attempt["node_id"].as_str() == Some(node.node_id.as_str())
-                    && attempt["disposition"].as_str() == Some("completed")
-            })
-            .unwrap_or_else(|| {
-                panic!(
-                    "missing completed {required_kind} framework attempt for {}",
-                    node.node_id
-                )
-            });
-        let attempt_id = attempt["attempt_id"].as_str().expect("attempt id");
-        let attempt_key = format!("attempt:{}:{}", node.node_id, attempt_id);
-        let start_index = stream_event_position(
-            stream_events,
-            |event| {
-                event["logical_key"].as_str() == Some(attempt_key.as_str())
-                    && event["event_schema_id"]
-                        .as_str()
-                        .is_some_and(|schema| schema.contains("state_attempt_started"))
-            },
-            &format!("framework start {attempt_key}"),
-        );
-        let completed_index = stream_event_position(
-            stream_events,
-            |event| {
-                event["logical_key"].as_str() == Some(attempt_key.as_str())
-                    && event["event_schema_id"]
-                        .as_str()
-                        .is_some_and(|schema| schema.contains("state_attempt_completed"))
-            },
-            &format!("framework completion {attempt_key}"),
-        );
-        assert!(
-            start_index < completed_index,
-            "framework StateAttemptStarted must precede StateAttemptCompleted for {attempt_key}"
-        );
-
-        match &node.framework {
-            Some(spec::FrameworkNodeSpec::PublicOutputRender(_)) => {
-                let public_output_index = stream_event_position(
-                    stream_events,
-                    |event| {
-                        event["logical_key"]
-                            .as_str()
-                            .is_some_and(|key| key.starts_with("public_output:"))
-                            && event["event_schema_id"]
-                                .as_str()
-                                .is_some_and(|schema| schema.contains("public_output_produced"))
-                    },
-                    "public-output terminal evidence",
-                );
-                assert!(
-                    start_index < public_output_index,
-                    "public-output framework start must precede public output evidence"
-                );
-            }
-            Some(spec::FrameworkNodeSpec::ProjectRetentionManifest(_)) => {
-                let retention_prefix = format!("retention:{}:manifest:", run_id);
-                let retention_index = stream_event_position(
-                    stream_events,
-                    |event| {
-                        event["logical_key"]
-                            .as_str()
-                            .is_some_and(|key| key.starts_with(&retention_prefix))
-                            && event["event_schema_id"].as_str().is_some_and(|schema| {
-                                schema.contains("retention_manifest_projected")
-                            })
-                    },
-                    "retention manifest terminal evidence",
-                );
-                assert!(
-                    start_index < retention_index,
-                    "retention framework start must precede retention manifest evidence"
-                );
-            }
-            Some(spec::FrameworkNodeSpec::CompleteRun(_)) => {
-                let completed_run_index = stream_event_position(
-                    stream_events,
-                    |event| {
-                        event["logical_key"].as_str() == Some("run:complete")
-                            && event["event_schema_id"]
-                                .as_str()
-                                .is_some_and(|schema| schema.contains("run_completed"))
-                    },
-                    "run completion terminal evidence",
-                );
-                assert!(
-                    start_index < completed_run_index,
-                    "complete-run framework start must precede run completion evidence"
-                );
-            }
-            _ => {}
-        }
-    }
-}
-
-fn stream_event_position(
-    events: &[Value],
-    predicate: impl Fn(&Value) -> bool,
-    label: &str,
-) -> usize {
-    events
-        .iter()
-        .position(predicate)
-        .unwrap_or_else(|| panic!("missing stream event for {label}"))
 }
