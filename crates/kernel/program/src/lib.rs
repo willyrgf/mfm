@@ -3974,7 +3974,7 @@ impl<'program, 'scope> ScopeBuilder<'program, 'scope> {
             remediation_config,
             remediation_input,
             Vec::new(),
-            Some((remediation_resource_claim, remediation_verification, false)),
+            Some((remediation_resource_claim, remediation_verification, true)),
         ) {
             Ok(planned) => planned,
             Err(error) => {

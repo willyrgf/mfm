@@ -2246,16 +2246,18 @@ impl<'a> DraftLowerer<'a> {
     fn lower_remediation_nodes(&mut self) -> Result<BTreeMap<NodeId, spec::NodeSpec>> {
         let mut remediations = BTreeMap::new();
         for (forward_node_id, node) in self.draft.remediation_nodes() {
-            if node.side_effect_verify.is_some() {
-                return Err(problem(
-                    ProblemClass::InvalidTopology,
-                    format!(
-                        "remediation node {} must not carry a verify pair",
-                        node.node_id
-                    ),
-                ));
-            }
             let lowered = self.lower_state_node(node)?;
+            if lowered.side_effect.is_some() {
+                let verify = node.side_effect_verify.as_ref().ok_or_else(|| {
+                    problem(
+                        ProblemClass::InvalidTopology,
+                        format!("remediation node {} is missing verify pair", node.node_id),
+                    )
+                })?;
+                let mut verify = self.lower_side_effect_verify_node(node, &lowered, verify)?;
+                verify.deterministic_predecessors.clear();
+                self.nodes.push(verify);
+            }
             remediations.insert(forward_node_id.clone(), lowered);
         }
         Ok(remediations)
@@ -3245,6 +3247,7 @@ fn validate_typed_spec(
     validate_seeds(&spec.seeds, &scope_ids, &cell_index)?;
     let node_index = validate_nodes(
         &spec.nodes,
+        &spec.remediations,
         &scope_ids,
         &descriptor_index,
         &config_refs,
@@ -3864,6 +3867,7 @@ struct StateNodeContractInput<'a> {
     config_ref_digest: &'a ContentDigest,
     cells: &'a BTreeMap<String, spec::CellSpec>,
     lineages: &'a BTreeMap<String, spec::ValueLineage>,
+    remediations: Option<&'a BTreeMap<NodeId, spec::NodeSpec>>,
     label: &'static str,
     id_derivation: StateNodeIdDerivation,
     enforce_framework_lineage_inputs: bool,
@@ -3873,6 +3877,7 @@ mod node_contract;
 
 fn validate_nodes(
     nodes: &[spec::NodeSpec],
+    remediations: &BTreeMap<NodeId, spec::NodeSpec>,
     scope_ids: &BTreeSet<String>,
     descriptors: &DescriptorIndex<'_>,
     config_refs: &ConfigIndex,
@@ -3912,6 +3917,7 @@ fn validate_nodes(
             config_ref_digest: &config_ref_digest,
             cells,
             lineages,
+            remediations: Some(remediations),
             label: "node",
             id_derivation: StateNodeIdDerivation::FrameworkAware,
             enforce_framework_lineage_inputs: true,
@@ -3926,7 +3932,13 @@ fn validate_nodes(
             ));
         }
     }
-    framework_lifecycle::validate_framework_nodes(nodes, cells, descriptors, public_outputs)?;
+    framework_lifecycle::validate_framework_nodes(
+        nodes,
+        remediations,
+        cells,
+        descriptors,
+        public_outputs,
+    )?;
     validate_node_graph_acyclic(&index)?;
     Ok(index)
 }
@@ -4229,6 +4241,7 @@ fn validate_remediation_node_contract(
         config_ref_digest: &config_ref_digest,
         cells,
         lineages,
+        remediations: None,
         label: "remediation node",
         id_derivation: StateNodeIdDerivation::StateOnly,
         enforce_framework_lineage_inputs: false,
@@ -7843,26 +7856,20 @@ mod tests {
             remediation.node_id = node_id(0xb1);
             spec.remediations.insert(node_id(0xb0), remediation);
         });
-        assert_rejects(
-            &registry,
-            &base,
-            ProblemClass::InvalidSemanticTransition,
-            |spec| {
-                let remediation = spec
-                    .remediations
-                    .values()
-                    .next()
-                    .expect("remediation")
-                    .clone();
-                let mut cloned = remediation;
-                cloned.node_id = node_id(0xb2);
-                let lifecycle_node =
-                    find_lifecycle_node_mut::<spec::PublicOutputRenderNodeSpec>(spec)
-                        .node_id
-                        .clone();
-                spec.remediations.insert(lifecycle_node, cloned);
-            },
-        );
+        assert_rejects(&registry, &base, ProblemClass::InvalidTopology, |spec| {
+            let remediation = spec
+                .remediations
+                .values()
+                .next()
+                .expect("remediation")
+                .clone();
+            let mut cloned = remediation;
+            cloned.node_id = node_id(0xb2);
+            let lifecycle_node = find_lifecycle_node_mut::<spec::PublicOutputRenderNodeSpec>(spec)
+                .node_id
+                .clone();
+            spec.remediations.insert(lifecycle_node, cloned);
+        });
         assert_rejects(&registry, &base, ProblemClass::InvalidTopology, |spec| {
             spec.remediations.clear();
         });
@@ -7921,15 +7928,10 @@ mod tests {
     #[test]
     fn certification_rejects_out_of_scope_remediation_bindings() {
         let (registry, base) = compensating_registry_and_spec();
-        assert_rejects(
-            &registry,
-            &base,
-            ProblemClass::InvalidInterfaceWiring,
-            |spec| {
-                let render_receipt = lifecycle_render_receipt_cell(spec);
-                retarget_first_remediation_input(spec, render_receipt);
-            },
-        );
+        assert_rejects(&registry, &base, ProblemClass::InvalidTopology, |spec| {
+            let render_receipt = lifecycle_render_receipt_cell(spec);
+            retarget_first_remediation_input(spec, render_receipt);
+        });
     }
 
     #[test]

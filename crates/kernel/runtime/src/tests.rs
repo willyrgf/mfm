@@ -7,7 +7,8 @@ use std::task::{Context, Poll, Waker};
 
 use mfm_canonical::sha256_digest_bytes;
 use mfm_capabilities::{
-    CapabilityDescriptor, CapabilityRole, CapabilitySetDescriptor, EffectSpec, ManagedPlatformWrite,
+    CapabilityDescriptor, CapabilityRole, CapabilitySetDescriptor, CapabilitySpec, EffectSpec,
+    ExternalMutationAuthorityRole, ManagedPlatformWrite, ReadExternalRole,
 };
 use mfm_ids::{
     ArtifactId, DigestBytes, EffectKind, EffectVersion, EventId, SchemaId, ScopeId, SeedId,
@@ -18,8 +19,10 @@ use mfm_manual_auth::{
     ManualResolutionAuthorizationSignature, ManualResolutionEvidenceRef,
 };
 use mfm_program::{
-    build_root_with_registries, CanonicalSeed, PublicOutputKey, PureState, RootBuilder, ScopeKey,
-    StateKey, StateRegistryBuilder, StateResult, StateSpec,
+    build_root_with_registries, AdapterBindingSpec, CanonicalSeed, IdempotencyKey, PublicOutputKey,
+    PureState, ReadState, RemediationNodeParams, ResourceClaim, RootBuilder, ScopeKey,
+    SideEffectNodeParams, SideEffectSagaPolicy, SideEffectState, StateKey, StateRegistryBuilder,
+    StateResult, StateSpec,
 };
 use mfm_program_derive::{MfmConfig, MfmValue, PublicOutputs};
 use mfm_store::v1::RunEventStore;
@@ -35,6 +38,8 @@ const D6: DigestBytes = DigestBytes::from_array([0x16; 32]);
 const D7: DigestBytes = DigestBytes::from_array([0x17; 32]);
 const D8: DigestBytes = DigestBytes::from_array([0x18; 32]);
 const D9: DigestBytes = DigestBytes::from_array([0x19; 32]);
+const APPLY_SIDE_EFFECT_RUNNER: &str = "apply_side_effect";
+const READ_EXTERNAL_RUNNER: &str = "read_external";
 
 fn fixture_value_semantic_id() -> SemanticTypeId {
     SemanticTypeId::new("mfm.test", "value", "1", DigestAlgorithm::Sha256JcsV1, D9)
@@ -952,6 +957,307 @@ impl PureState for CertifierState {
     }
 }
 
+#[derive(PublicOutputs)]
+#[mfm(schema = "mfm.runtime.test.fixture_outputs")]
+struct FixturePublicOutputs<'p, 's> {
+    result: mfm_program::Handle<'p, 's, FixtureOutputValue>,
+}
+
+#[derive(PublicOutputs)]
+#[mfm(schema = "mfm.runtime.test.dual_fixture_outputs")]
+struct DualFixturePublicOutputs<'p, 's> {
+    result: mfm_program::Handle<'p, 's, FixtureOutputValue>,
+    side_effect: mfm_program::Handle<'p, 's, FixtureOutputValue>,
+}
+
+struct RuntimeReadCap;
+
+impl CapabilitySpec for RuntimeReadCap {
+    type Role = ReadExternalRole;
+
+    fn kind() -> mfm_capabilities::Result<CapabilityKind> {
+        CapabilityKind::new("mfm.test", "read-db", DigestAlgorithm::Sha256JcsV1, D0)
+            .map_err(|error| mfm_capabilities::CapabilityError::Identity(error.to_string()))
+    }
+
+    fn version() -> mfm_capabilities::Result<CapabilityVersion> {
+        CapabilityVersion::new("mfm.cap.read_db.v1")
+            .map_err(|error| mfm_capabilities::CapabilityError::Identity(error.to_string()))
+    }
+
+    fn name() -> &'static str {
+        "read-db"
+    }
+}
+
+struct RuntimeMutationCap;
+
+impl CapabilitySpec for RuntimeMutationCap {
+    type Role = ExternalMutationAuthorityRole;
+
+    fn kind() -> mfm_capabilities::Result<CapabilityKind> {
+        Ok(side_effect_capability_kind())
+    }
+
+    fn version() -> mfm_capabilities::Result<CapabilityVersion> {
+        Ok(side_effect_capability_version())
+    }
+
+    fn name() -> &'static str {
+        "external-mutation"
+    }
+}
+
+fn runtime_adapter_binding() -> AdapterBindingSpec {
+    AdapterBindingSpec {
+        adapter_kind: AdapterKind::new("mfm.test", "adapter", DigestAlgorithm::Sha256JcsV1, D1)
+            .expect("adapter kind"),
+        adapter_version: AdapterVersion::new("mfm.adapter.v1").expect("adapter version"),
+    }
+}
+
+fn runtime_state_kind(name: &str, digest: DigestBytes) -> mfm_program::Result<StateKind> {
+    StateKind::new(
+        "mfm.runtime.test",
+        name,
+        DigestAlgorithm::Sha256JcsV1,
+        digest,
+    )
+    .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
+}
+
+macro_rules! impl_runtime_read_state {
+    ($state:ident, $input:ty, $kind:literal, $version:literal, $name:literal, $digest:expr) => {
+        struct $state {
+            config: CertifierConfig,
+        }
+
+        impl StateSpec for $state {
+            type Config = CertifierConfig;
+            type Input = $input;
+            type Output = FixtureOutputValue;
+            type Effect = mfm_effects::ReadExternal;
+            type Caps = (RuntimeReadCap,);
+
+            fn kind() -> mfm_program::Result<StateKind> {
+                runtime_state_kind($kind, $digest)
+            }
+
+            fn version() -> mfm_program::Result<StateVersion> {
+                StateVersion::new($version)
+                    .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
+            }
+
+            fn name() -> &'static str {
+                $name
+            }
+
+            fn new(
+                config: mfm_program::ValidatedConfig<Self::Config>,
+            ) -> mfm_program::Result<Self> {
+                Ok(Self {
+                    config: config.into_inner(),
+                })
+            }
+        }
+
+        impl ReadState for $state {
+            type RunFuture<'a> = std::future::Ready<StateResult<Self::Output>>;
+
+            fn run<'a>(
+                &'a self,
+                _input: Self::Input,
+                _caps: &'a Self::Caps,
+            ) -> Self::RunFuture<'a> {
+                std::future::ready(Ok(FixtureOutputValue {
+                    amount: self.config.multiplier,
+                    node_id: $name.to_owned(),
+                    attempt_id: "typed-read".to_owned(),
+                }))
+            }
+        }
+    };
+}
+
+macro_rules! impl_runtime_side_effect_state {
+    ($state:ident, $input:ty, $kind:literal, $version:literal, $name:literal, $digest:expr) => {
+        struct $state {
+            config: CertifierConfig,
+        }
+
+        impl StateSpec for $state {
+            type Config = CertifierConfig;
+            type Input = $input;
+            type Output = FixtureOutputValue;
+            type Effect = mfm_effects::ApplySideEffect;
+            type Caps = (RuntimeMutationCap,);
+
+            fn kind() -> mfm_program::Result<StateKind> {
+                runtime_state_kind($kind, $digest)
+            }
+
+            fn version() -> mfm_program::Result<StateVersion> {
+                StateVersion::new($version)
+                    .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
+            }
+
+            fn name() -> &'static str {
+                $name
+            }
+
+            fn adapter_bindings() -> mfm_program::Result<Vec<AdapterBindingSpec>> {
+                Ok(vec![runtime_adapter_binding()])
+            }
+
+            fn new(
+                config: mfm_program::ValidatedConfig<Self::Config>,
+            ) -> mfm_program::Result<Self> {
+                Ok(Self {
+                    config: config.into_inner(),
+                })
+            }
+        }
+
+        impl SideEffectState for $state {
+            type Intent = FixtureSideEffectEvidence;
+            type IdempotencyInput = FixtureSideEffectEvidence;
+            type Submission = FixtureSideEffectEvidence;
+            type Receipt = FixtureSideEffectEvidence;
+            type Confirmation = FixtureSideEffectEvidence;
+            type SubmitFuture<'a> = std::future::Ready<StateResult<Self::Submission>>;
+
+            fn prepare_intent(&self, input: &Self::Input) -> StateResult<Self::Intent> {
+                let amount = serde_json::to_value(input)
+                    .ok()
+                    .and_then(|value| value.get("amount").and_then(serde_json::Value::as_u64))
+                    .unwrap_or(self.config.multiplier);
+                Ok(FixtureSideEffectEvidence {
+                    amount,
+                    node_id: $name.to_owned(),
+                    attempt_id: "typed-intent".to_owned(),
+                })
+            }
+
+            fn idempotency_input(
+                &self,
+                _input: &Self::Input,
+                intent: &Self::Intent,
+            ) -> StateResult<Self::IdempotencyInput> {
+                Ok(intent.clone())
+            }
+
+            fn submit<'a>(
+                &'a self,
+                intent: &'a Self::Intent,
+                _key: &'a IdempotencyKey<Self::IdempotencyInput>,
+                _caps: &'a Self::Caps,
+            ) -> Self::SubmitFuture<'a> {
+                std::future::ready(Ok(intent.clone()))
+            }
+
+            fn output_from_receipt(
+                &self,
+                _input: &Self::Input,
+                _intent: &Self::Intent,
+                receipt: &Self::Receipt,
+            ) -> StateResult<Self::Output> {
+                Ok(FixtureOutputValue {
+                    amount: receipt.amount,
+                    node_id: receipt.node_id.clone(),
+                    attempt_id: receipt.attempt_id.clone(),
+                })
+            }
+
+            fn output_from_confirmation(
+                &self,
+                _input: &Self::Input,
+                _intent: &Self::Intent,
+                confirmation: &Self::Confirmation,
+            ) -> StateResult<Self::Output> {
+                Ok(FixtureOutputValue {
+                    amount: confirmation.amount,
+                    node_id: confirmation.node_id.clone(),
+                    attempt_id: confirmation.attempt_id.clone(),
+                })
+            }
+        }
+    };
+}
+
+impl_runtime_side_effect_state!(
+    RuntimeSubmitAState,
+    CertifierValue,
+    "submit-a",
+    "mfm.runtime.test.submit_a.v1",
+    "mfm.runtime.test.submit_a",
+    DigestBytes::from_array([0xa1; 32])
+);
+impl_runtime_side_effect_state!(
+    RuntimeSubmitBState,
+    FixtureOutputValue,
+    "submit-b",
+    "mfm.runtime.test.submit_b.v1",
+    "mfm.runtime.test.submit_b",
+    DigestBytes::from_array([0xa2; 32])
+);
+impl_runtime_read_state!(
+    RuntimeReadState,
+    FixtureOutputValue,
+    "read-output",
+    "mfm.runtime.test.read_output.v1",
+    "mfm.runtime.test.read_output",
+    DigestBytes::from_array([0xa3; 32])
+);
+impl_runtime_read_state!(
+    RuntimeSeedReadState,
+    CertifierValue,
+    "read-seed",
+    "mfm.runtime.test.read_seed.v1",
+    "mfm.runtime.test.read_seed",
+    DigestBytes::from_array([0xa4; 32])
+);
+
+struct RuntimeTailState {
+    config: CertifierConfig,
+}
+
+impl StateSpec for RuntimeTailState {
+    type Config = CertifierConfig;
+    type Input = FixtureOutputValue;
+    type Output = FixtureOutputValue;
+    type Effect = mfm_effects::Pure;
+    type Caps = mfm_capabilities::NoCaps;
+
+    fn kind() -> mfm_program::Result<StateKind> {
+        runtime_state_kind("tail", DigestBytes::from_array([0xa5; 32]))
+    }
+
+    fn version() -> mfm_program::Result<StateVersion> {
+        StateVersion::new("mfm.runtime.test.tail.v1")
+            .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
+    }
+
+    fn name() -> &'static str {
+        "mfm.runtime.test.tail"
+    }
+
+    fn new(config: mfm_program::ValidatedConfig<Self::Config>) -> mfm_program::Result<Self> {
+        Ok(Self {
+            config: config.into_inner(),
+        })
+    }
+}
+
+impl PureState for RuntimeTailState {
+    fn run(&self, input: Self::Input) -> StateResult<Self::Output> {
+        Ok(FixtureOutputValue {
+            amount: input.amount * self.config.multiplier,
+            node_id: input.node_id,
+            attempt_id: input.attempt_id,
+        })
+    }
+}
+
 fn certifier_backed_runtime_authority() -> (
     mfm_certify::CertifiedTypedSpec,
     mfm_certify::CertificationRegistry,
@@ -999,6 +1305,11 @@ const DE: DigestBytes = DigestBytes::from_array([0x1e; 32]);
 const DF: DigestBytes = DigestBytes::from_array([0x1f; 32]);
 const TEST_CONFIG_BYTES: &[u8] = b"{}";
 const TEST_SEED_BYTES: &[u8] = br#"{"seed":true}"#;
+const CERTIFIER_SEED_BYTES: &[u8] = br#"{"amount":2}"#;
+const CONFIG_MULTIPLIER_1_BYTES: &[u8] = br#"{"multiplier":1}"#;
+const CONFIG_MULTIPLIER_3_BYTES: &[u8] = br#"{"multiplier":3}"#;
+const CONFIG_MULTIPLIER_5_BYTES: &[u8] = br#"{"multiplier":5}"#;
+const CONFIG_MULTIPLIER_7_BYTES: &[u8] = br#"{"multiplier":7}"#;
 
 #[derive(Clone)]
 struct Fixture {
@@ -6929,14 +7240,14 @@ async fn runtime_remediates_confirmed_forward_ledgers_in_reverse_confirmation_or
     registry
         .register(binding(
             fixture.descriptor_a.clone(),
-            "sidefx",
+            APPLY_SIDE_EFFECT_RUNNER,
             DriverSideEffectRunner::new(&fixture),
         ))
         .expect("binding forward a");
     registry
         .register(binding(
             fixture.descriptor_b.clone(),
-            "sidefx",
+            APPLY_SIDE_EFFECT_RUNNER,
             DriverSideEffectRunner::new(&fixture),
         ))
         .expect("binding forward b");
@@ -6946,7 +7257,7 @@ async fn runtime_remediates_confirmed_forward_ledgers_in_reverse_confirmation_or
                 .descriptor_c
                 .clone()
                 .expect("failing node descriptor"),
-            "fail",
+            "pure",
             BlockingRunner,
         ))
         .expect("binding failure node");
@@ -7328,12 +7639,8 @@ async fn runtime_resolves_clean_failure_without_acdc_claim() {
 
 #[tokio::test]
 async fn runtime_materializes_confirmed_forward_output_before_failed_without_claim_terminal() {
-    let fixture = fixture_with_independent_second_node_and_first_side_effect_state();
-    let descriptor_a = fixture.descriptor_a.clone();
-    let fixture = with_first_side_effect_verification(
-        with_exclusive_resource_claims(fixture, std::slice::from_ref(&descriptor_a)),
-        spec::SideEffectVerificationSpec::Finalized { depth: 1 },
-    );
+    let fixture =
+        fixture_with_independent_second_node_and_first_exclusive_finalized_side_effect_state();
     let forward_node = node_by_output(&fixture, &fixture.cell_a).clone();
     let forward_output = effective_output_cell_for_node(&fixture, &forward_node);
     let failure_node = node_by_output(&fixture, &fixture.cell_b).clone();
@@ -7341,14 +7648,14 @@ async fn runtime_materializes_confirmed_forward_output_before_failed_without_cla
     registry
         .register(binding(
             fixture.descriptor_a.clone(),
-            "sidefx",
+            APPLY_SIDE_EFFECT_RUNNER,
             DriverSideEffectRunner::new(&fixture),
         ))
         .expect("binding side effect");
     registry
         .register(binding(
             fixture.descriptor_b.clone(),
-            "read",
+            READ_EXTERNAL_RUNNER,
             RecordingRunner {
                 expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
                 output_artifact: artifact(0xb1),
@@ -7492,7 +7799,7 @@ async fn runtime_resolves_manual_resolution_terminal() {
     registry
         .register(binding(
             fixture.descriptor_a.clone(),
-            "sidefx",
+            APPLY_SIDE_EFFECT_RUNNER,
             DriverSideEffectRunner::new(&fixture)
                 .with_submission_decision(TestSubmissionDecision::Ambiguous),
         ))
@@ -7500,7 +7807,7 @@ async fn runtime_resolves_manual_resolution_terminal() {
     registry
         .register(binding(
             fixture.descriptor_b.clone(),
-            "read",
+            READ_EXTERNAL_RUNNER,
             RecordingRunner {
                 expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
                 output_artifact: artifact(0xb1),
@@ -7585,7 +7892,7 @@ async fn runtime_rejects_manual_resolution_prefix_with_open_attempt() {
     registry
         .register(binding(
             fixture.descriptor_a.clone(),
-            "sidefx",
+            APPLY_SIDE_EFFECT_RUNNER,
             DriverSideEffectRunner::new(&fixture)
                 .with_submission_decision(TestSubmissionDecision::Ambiguous),
         ))
@@ -7593,7 +7900,7 @@ async fn runtime_rejects_manual_resolution_prefix_with_open_attempt() {
     registry
         .register(binding(
             fixture.descriptor_b.clone(),
-            "read",
+            READ_EXTERNAL_RUNNER,
             RecordingRunner {
                 expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
                 output_artifact: artifact(0xb1),
@@ -7662,7 +7969,7 @@ async fn runtime_missing_manual_terminal_authorization_artifact_leaves_open_atte
     registry
         .register(binding(
             fixture.descriptor_a.clone(),
-            "sidefx",
+            APPLY_SIDE_EFFECT_RUNNER,
             DriverSideEffectRunner::new(&fixture)
                 .with_submission_decision(TestSubmissionDecision::Ambiguous),
         ))
@@ -7670,7 +7977,7 @@ async fn runtime_missing_manual_terminal_authorization_artifact_leaves_open_atte
     registry
         .register(binding(
             fixture.descriptor_b.clone(),
-            "read",
+            READ_EXTERNAL_RUNNER,
             RecordingRunner {
                 expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
                 output_artifact: artifact(0xb1),
@@ -7773,7 +8080,7 @@ async fn runtime_rejects_manual_resolution_before_manual_blocked() {
     registry
         .register(binding(
             fixture.descriptor_a.clone(),
-            "sidefx",
+            APPLY_SIDE_EFFECT_RUNNER,
             DriverSideEffectRunner::new(&fixture)
                 .with_submission_decision(TestSubmissionDecision::Ambiguous),
         ))
@@ -7781,7 +8088,7 @@ async fn runtime_rejects_manual_resolution_before_manual_blocked() {
     registry
         .register(binding(
             fixture.descriptor_b.clone(),
-            "read",
+            READ_EXTERNAL_RUNNER,
             RecordingRunner {
                 expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
                 output_artifact: artifact(0xb1),
@@ -7832,14 +8139,14 @@ async fn runtime_rejects_forward_node_emitting_remediation_ledger_purpose() {
     registry
         .register(binding(
             fixture.descriptor_a.clone(),
-            "sidefx",
+            APPLY_SIDE_EFFECT_RUNNER,
             ForwardEmitsRemediationPurposeRunner,
         ))
         .expect("binding a");
     registry
         .register(binding(
             fixture.descriptor_b.clone(),
-            "read",
+            READ_EXTERNAL_RUNNER,
             RecordingRunner {
                 expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
                 output_artifact: artifact(0xb1),
@@ -7889,14 +8196,14 @@ async fn runtime_rejects_remediation_node_emitting_forward_ledger_purpose() {
     registry
         .register(binding(
             fixture.descriptor_a.clone(),
-            "sidefx",
+            APPLY_SIDE_EFFECT_RUNNER,
             RemediationEmitsForwardPurposeRunner::new(&fixture),
         ))
         .expect("binding a");
     registry
         .register(binding(
             fixture.descriptor_b.clone(),
-            "sidefx",
+            APPLY_SIDE_EFFECT_RUNNER,
             RemediationEmitsForwardPurposeRunner::new(&fixture),
         ))
         .expect("binding b");
@@ -7906,7 +8213,7 @@ async fn runtime_rejects_remediation_node_emitting_forward_ledger_purpose() {
                 .descriptor_c
                 .clone()
                 .expect("failing node descriptor"),
-            "fail",
+            "pure",
             BlockingRunner,
         ))
         .expect("binding failure node");
@@ -8098,7 +8405,7 @@ async fn side_effect_staged_artifact_must_match_payload_ledger_binding() {
     registry
         .register(binding(
             fixture.descriptor_a.clone(),
-            "sidefx",
+            APPLY_SIDE_EFFECT_RUNNER,
             WrongLedgerStagedSideEffectRunner {
                 cap_kind: side_effect_capability_kind(),
                 cap_version: side_effect_capability_version(),
@@ -8110,7 +8417,7 @@ async fn side_effect_staged_artifact_must_match_payload_ledger_binding() {
     registry
         .register(binding(
             fixture.descriptor_b.clone(),
-            "read",
+            READ_EXTERNAL_RUNNER,
             RecordingRunner {
                 expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
                 output_artifact: artifact(0xb1),
@@ -8151,7 +8458,7 @@ async fn side_effect_ambiguous_phase_blocks_resume() {
     registry
         .register(binding(
             fixture.descriptor_a.clone(),
-            "sidefx",
+            APPLY_SIDE_EFFECT_RUNNER,
             DriverSideEffectRunner::new(&fixture)
                 .with_submission_decision(TestSubmissionDecision::Ambiguous),
         ))
@@ -8159,7 +8466,7 @@ async fn side_effect_ambiguous_phase_blocks_resume() {
     registry
         .register(binding(
             fixture.descriptor_b.clone(),
-            "read",
+            READ_EXTERNAL_RUNNER,
             RecordingRunner {
                 expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
                 output_artifact: artifact(0xb1),
@@ -8223,7 +8530,7 @@ async fn side_effect_ambiguity_blocks_independent_ready_nodes() {
     registry
         .register(binding(
             fixture.descriptor_a.clone(),
-            "sidefx",
+            APPLY_SIDE_EFFECT_RUNNER,
             DriverSideEffectRunner::new(&fixture)
                 .with_submission_decision(TestSubmissionDecision::Ambiguous),
         ))
@@ -8231,7 +8538,7 @@ async fn side_effect_ambiguity_blocks_independent_ready_nodes() {
     registry
         .register(binding(
             fixture.descriptor_b.clone(),
-            "read",
+            READ_EXTERNAL_RUNNER,
             RecordingRunner {
                 expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
                 output_artifact: artifact(0xb1),
@@ -8292,7 +8599,7 @@ async fn side_effect_output_before_confirmation_is_rejected() {
     registry
         .register(binding(
             fixture.descriptor_a.clone(),
-            "sidefx",
+            APPLY_SIDE_EFFECT_RUNNER,
             PrematureSideEffectOutputRunner {
                 output_artifact: artifact(0xa1),
                 output_digest: content(0xa2),
@@ -8302,7 +8609,7 @@ async fn side_effect_output_before_confirmation_is_rejected() {
     registry
         .register(binding(
             fixture.descriptor_b.clone(),
-            "read",
+            READ_EXTERNAL_RUNNER,
             RecordingRunner {
                 expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
                 output_artifact: artifact(0xb1),
@@ -9636,6 +9943,20 @@ fn config_artifact(
             })
         })
         .unwrap_or_else(|| TEST_CONFIG_BYTES.to_vec());
+    let bytes = if digest_for_bytes(&bytes) == config.digest {
+        bytes
+    } else {
+        [
+            CONFIG_MULTIPLIER_1_BYTES,
+            CONFIG_MULTIPLIER_3_BYTES,
+            CONFIG_MULTIPLIER_5_BYTES,
+            CONFIG_MULTIPLIER_7_BYTES,
+        ]
+        .into_iter()
+        .find(|candidate| digest_for_bytes(candidate) == config.digest)
+        .expect("known test config bytes")
+        .to_vec()
+    };
     assert_eq!(digest_for_bytes(&bytes), config.digest);
     RunLaunchArtifact {
         bytes,
@@ -9654,10 +9975,14 @@ fn config_artifact(
 }
 
 fn seed_launch_cell(seed: events::SeedCellRef) -> RunLaunchSeedCell {
-    RunLaunchSeedCell {
-        bytes: TEST_SEED_BYTES.to_vec(),
-        cell: seed,
-    }
+    let bytes = if seed.digest == digest_for_bytes(TEST_SEED_BYTES) {
+        TEST_SEED_BYTES.to_vec()
+    } else if seed.digest == digest_for_bytes(CERTIFIER_SEED_BYTES) {
+        CERTIFIER_SEED_BYTES.to_vec()
+    } else {
+        TEST_SEED_BYTES.to_vec()
+    };
+    RunLaunchSeedCell { bytes, cell: seed }
 }
 
 fn terminal_payloads(
@@ -11277,14 +11602,14 @@ fn registered_side_effect_fixture_runners(fixture: &Fixture) -> ErasedRunnerRegi
     registry
         .register(binding(
             fixture.descriptor_a.clone(),
-            "sidefx",
+            APPLY_SIDE_EFFECT_RUNNER,
             DriverSideEffectRunner::new(fixture),
         ))
         .expect("binding a");
     registry
         .register(binding(
             fixture.descriptor_b.clone(),
-            "read",
+            READ_EXTERNAL_RUNNER,
             RecordingRunner {
                 expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
                 output_artifact: artifact(0xb1),
@@ -11303,12 +11628,16 @@ fn registered_first_side_effect_runners_with<R: ErasedNodeRunner + 'static>(
     register_spec_capabilities(&mut registry, &fixture.runtime_spec);
     register_side_effect_verify_fixture_runner(&mut registry, fixture);
     registry
-        .register(binding(fixture.descriptor_a.clone(), "sidefx", runner))
+        .register(binding(
+            fixture.descriptor_a.clone(),
+            APPLY_SIDE_EFFECT_RUNNER,
+            runner,
+        ))
         .expect("binding a");
     registry
         .register(binding(
             fixture.descriptor_b.clone(),
-            "read",
+            READ_EXTERNAL_RUNNER,
             RecordingRunner {
                 expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
                 output_artifact: artifact(0xb1),
@@ -11331,12 +11660,16 @@ fn registered_first_side_effect_and_verify_runners_with<
     register_spec_capabilities(&mut registry, &fixture.runtime_spec);
     register_side_effect_verify_runner_with(&mut registry, verify_runner);
     registry
-        .register(binding(fixture.descriptor_a.clone(), "sidefx", runner))
+        .register(binding(
+            fixture.descriptor_a.clone(),
+            APPLY_SIDE_EFFECT_RUNNER,
+            runner,
+        ))
         .expect("binding a");
     registry
         .register(binding(
             fixture.descriptor_b.clone(),
-            "read",
+            READ_EXTERNAL_RUNNER,
             RecordingRunner {
                 expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
                 output_artifact: artifact(0xb1),
@@ -11354,14 +11687,14 @@ fn compensated_saga_scheduler(fixture: &Fixture) -> SerialTypedScheduler {
     registry
         .register(binding(
             fixture.descriptor_a.clone(),
-            "sidefx",
+            APPLY_SIDE_EFFECT_RUNNER,
             DriverSideEffectRunner::new(fixture),
         ))
         .expect("binding forward a");
     registry
         .register(binding(
             fixture.descriptor_b.clone(),
-            "sidefx",
+            APPLY_SIDE_EFFECT_RUNNER,
             DriverSideEffectRunner::new(fixture),
         ))
         .expect("binding forward b");
@@ -11371,7 +11704,7 @@ fn compensated_saga_scheduler(fixture: &Fixture) -> SerialTypedScheduler {
                 .descriptor_c
                 .clone()
                 .expect("failing node descriptor"),
-            "fail",
+            "pure",
             BlockingRunner,
         ))
         .expect("binding failure node");
@@ -11773,24 +12106,6 @@ fn append_runtime_resolve_saga_terminal_lifecycle_node(
         deterministic_predecessors: Vec::new(),
     });
     node_id
-}
-
-fn runtime_predecessors_for_inputs(
-    typed: &spec::TypedExecutionSpec,
-    input_cells: &[CellId],
-) -> Vec<NodeId> {
-    let mut predecessors = BTreeSet::new();
-    for input_cell in input_cells {
-        let cell = typed
-            .cells
-            .iter()
-            .find(|cell| cell.cell_id == *input_cell)
-            .expect("input cell");
-        if let spec::CellProducer::Node(node_id) = &cell.producer {
-            predecessors.insert(node_id.clone());
-        }
-    }
-    predecessors.into_iter().collect()
 }
 
 fn fixture() -> Fixture {
@@ -12202,6 +12517,282 @@ fn fixture_with_retention_lifecycle_node() -> Fixture {
     fixture()
 }
 
+#[derive(Clone, Copy)]
+enum RuntimeSideEffectClaim {
+    ManualOnly,
+    Exclusive,
+    ExactTouchedSet,
+}
+
+impl RuntimeSideEffectClaim {
+    fn into_resource_claim(self) -> ResourceClaim {
+        match self {
+            Self::ManualOnly => ResourceClaim::manual_only(),
+            Self::Exclusive => ResourceClaim::exclusive(
+                exclusive_resource_namespace(),
+                <CertifierValue as mfm_values::MfmValue>::schema_id()
+                    .expect("exclusive key schema"),
+            ),
+            Self::ExactTouchedSet => ResourceClaim::exact_touched_set(
+                exact_touched_set_resource_namespace(),
+                <FixtureSideEffectEvidence as mfm_values::MfmValue>::schema_id()
+                    .expect("touched-set evidence schema"),
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RuntimeSideEffectFixtureShape {
+    Chained,
+    IndependentSecond,
+    CompensatingPairWithFailingTail,
+}
+
+fn runtime_side_effect_fixture(
+    shape: RuntimeSideEffectFixtureShape,
+    claim: RuntimeSideEffectClaim,
+    verification: spec::SideEffectVerificationSpec,
+) -> Fixture {
+    let mut states = StateRegistryBuilder::new();
+    states
+        .register::<RuntimeSubmitAState>()
+        .expect("submit a registration");
+    states
+        .register::<RuntimeSubmitBState>()
+        .expect("submit b registration");
+    states
+        .register::<RuntimeReadState>()
+        .expect("read registration");
+    states
+        .register::<RuntimeSeedReadState>()
+        .expect("seed read registration");
+    states
+        .register::<RuntimeTailState>()
+        .expect("tail registration");
+    let seed = CanonicalSeed::from_value(&CertifierValue { amount: 2 }).expect("seed");
+    let seed_digest = seed.content_digest().clone();
+    let seed_byte_len = seed.byte_len() as u64;
+    let draft = build_root_with_registries(
+        ScopeKey::new("root").expect("root key"),
+        states.snapshot(),
+        mfm_program::OperationRegistryBuilder::new().snapshot(),
+        |root: &mut RootBuilder<'_, '_>| {
+            if matches!(
+                shape,
+                RuntimeSideEffectFixtureShape::CompensatingPairWithFailingTail
+            ) {
+                root.set_saga_policy(SideEffectSagaPolicy::CompensateCompleted {
+                    on_remediation_unresolved:
+                        mfm_program::RemediationUnresolved::FailWithoutAcdcClaim,
+                })?;
+            } else {
+                root.set_saga_policy(SideEffectSagaPolicy::FailWithoutAcdcClaim)?;
+            }
+            let input = root.seed(mfm_program::SeedKey::new("initial")?, seed.clone())?;
+            match shape {
+                RuntimeSideEffectFixtureShape::Chained => {
+                    let forward = root.scope().side_effect::<RuntimeSubmitAState, _>(
+                        StateKey::new("a")?,
+                        CertifierConfig { multiplier: 3 },
+                        input,
+                        claim.into_resource_claim(),
+                        verification.clone(),
+                    )?;
+                    let result = root.scope().state::<RuntimeReadState, _>(
+                        StateKey::new("b")?,
+                        CertifierConfig { multiplier: 5 },
+                        forward.into_handle(),
+                    )?;
+                    root.bind_public_outputs(
+                        PublicOutputKey::new("terminal")?,
+                        &FixturePublicOutputs { result },
+                    )
+                }
+                RuntimeSideEffectFixtureShape::IndependentSecond => {
+                    let forward = root.scope().side_effect::<RuntimeSubmitAState, _>(
+                        StateKey::new("a")?,
+                        CertifierConfig { multiplier: 3 },
+                        input.clone(),
+                        claim.into_resource_claim(),
+                        verification.clone(),
+                    )?;
+                    let side_effect = forward.into_handle();
+                    let result = root.scope().state::<RuntimeSeedReadState, _>(
+                        StateKey::new("b")?,
+                        CertifierConfig { multiplier: 5 },
+                        input,
+                    )?;
+                    root.bind_public_outputs(
+                        PublicOutputKey::new("terminal")?,
+                        &DualFixturePublicOutputs {
+                            result,
+                            side_effect,
+                        },
+                    )
+                }
+                RuntimeSideEffectFixtureShape::CompensatingPairWithFailingTail => {
+                    let (forward_a, _remediation_a) = root
+                        .scope()
+                        .side_effect_with_compensation::<
+                            RuntimeSubmitAState,
+                            RuntimeSubmitBState,
+                            _,
+                            _,
+                            _,
+                        >(
+                            SideEffectNodeParams {
+                                key: StateKey::new("a")?,
+                                config: CertifierConfig { multiplier: 3 },
+                                input,
+                                resource_claim: claim.into_resource_claim(),
+                                verification: verification.clone(),
+                            },
+                            RemediationNodeParams {
+                                key: StateKey::new("remediate-a")?,
+                                config: CertifierConfig { multiplier: 1 },
+                                resource_claim: claim.into_resource_claim(),
+                                verification: verification.clone(),
+                            },
+                            |forward| Ok(forward.into_handle()),
+                        )?;
+                    let (forward_b, _remediation_b) = root
+                        .scope()
+                        .side_effect_with_compensation::<
+                            RuntimeSubmitBState,
+                            RuntimeSubmitBState,
+                            _,
+                            _,
+                            _,
+                        >(
+                            SideEffectNodeParams {
+                                key: StateKey::new("b")?,
+                                config: CertifierConfig { multiplier: 7 },
+                                input: forward_a.into_handle(),
+                                resource_claim: claim.into_resource_claim(),
+                                verification: verification.clone(),
+                            },
+                            RemediationNodeParams {
+                                key: StateKey::new("remediate-b")?,
+                                config: CertifierConfig { multiplier: 1 },
+                                resource_claim: claim.into_resource_claim(),
+                                verification,
+                            },
+                            |forward| Ok(forward.into_handle()),
+                        )?;
+                    let result = root.scope().state::<RuntimeTailState, _>(
+                        StateKey::new("c")?,
+                        CertifierConfig { multiplier: 1 },
+                        forward_b.into_handle(),
+                    )?;
+                    root.bind_public_outputs(
+                        PublicOutputKey::new("terminal")?,
+                        &FixturePublicOutputs { result },
+                    )
+                }
+            }
+        },
+    )
+    .expect("side-effect draft");
+    let certified = mfm_certify::certify_program_draft(&draft).expect("certified side-effect spec");
+    let runtime_spec = CertifiedRuntimeSpec::new(certified).expect("runtime spec");
+    fixture_from_runtime_spec(shape, runtime_spec, seed_digest, seed_byte_len)
+}
+
+fn fixture_from_runtime_spec(
+    shape: RuntimeSideEffectFixtureShape,
+    runtime_spec: CertifiedRuntimeSpec,
+    seed_digest: ContentDigest,
+    seed_byte_len: u64,
+) -> Fixture {
+    let spec = runtime_spec.spec();
+    let seed = spec.seeds.first().expect("seed");
+    let seed_ref = events::SeedCellRef {
+        seed_id: seed.seed_id.clone(),
+        cell_id: seed.cell_id.clone(),
+        scope_id: seed.scope_id.clone(),
+        semantic_type_id: seed.semantic_type_id.clone(),
+        schema_id: seed.schema_id.clone(),
+        digest: seed_digest.clone(),
+        seed_artifact: events::ArtifactEvidenceRef {
+            artifact_id: ArtifactId::from_digest(seed_digest.algorithm(), *seed_digest.digest()),
+            role: events::ArtifactRole::SeedInput,
+            schema_id: seed.schema_id.clone(),
+            semantic_type_id: Some(seed.semantic_type_id.clone()),
+            content_digest: seed_digest,
+            byte_len: seed_byte_len,
+            media_type: spec::MediaType::new("application/json").expect("media"),
+        },
+    };
+    let node_a = runtime_node_by_descriptor_name(&runtime_spec, "mfm.runtime.test.submit_a");
+    let node_b_name = match shape {
+        RuntimeSideEffectFixtureShape::Chained => "mfm.runtime.test.read_output",
+        RuntimeSideEffectFixtureShape::IndependentSecond => "mfm.runtime.test.read_seed",
+        RuntimeSideEffectFixtureShape::CompensatingPairWithFailingTail => {
+            "mfm.runtime.test.submit_b"
+        }
+    };
+    let node_b = runtime_node_by_descriptor_name(&runtime_spec, node_b_name);
+    let node_c = matches!(
+        shape,
+        RuntimeSideEffectFixtureShape::CompensatingPairWithFailingTail
+    )
+    .then(|| runtime_node_by_descriptor_name(&runtime_spec, "mfm.runtime.test.tail"));
+    let render = runtime_spec
+        .spec()
+        .nodes
+        .iter()
+        .find(|node| {
+            matches!(
+                node.framework,
+                Some(spec::FrameworkNodeSpec::PublicOutputRender(_))
+            )
+        })
+        .expect("render node");
+    let render_node = render.node_id.clone();
+    let render_cell = render.output_cell.clone();
+    let identity_material = run_identity_material(&runtime_spec);
+    let run_id = identity_material.derive_run_id().expect("run id");
+    let adapter_binding = runtime_adapter_binding();
+    Fixture {
+        runtime_spec,
+        run_id,
+        distinct_run_key_digest: None,
+        seed_ref,
+        descriptor_a: node_a.descriptor_id.clone(),
+        descriptor_b: node_b.descriptor_id.clone(),
+        descriptor_c: node_c.as_ref().map(|node| node.descriptor_id.clone()),
+        render_node,
+        render_cell,
+        cell_a: node_a.output_cell.clone(),
+        cell_b: node_b.output_cell.clone(),
+        cell_c: node_c.map(|node| node.output_cell),
+        cap_kind: RuntimeReadCap::kind().expect("read cap kind"),
+        cap_version: RuntimeReadCap::version().expect("read cap version"),
+        adapter_kind: adapter_binding.adapter_kind,
+        adapter_version: adapter_binding.adapter_version,
+    }
+}
+
+fn runtime_node_by_descriptor_name(
+    runtime_spec: &CertifiedRuntimeSpec,
+    name: &str,
+) -> spec::NodeSpec {
+    runtime_spec
+        .spec()
+        .nodes
+        .iter()
+        .find(|node| {
+            runtime_spec
+                .state_descriptor_for_node(node)
+                .expect("state descriptor")
+                .name
+                == name
+        })
+        .cloned()
+        .unwrap_or_else(|| panic!("node for descriptor {name}"))
+}
+
 async fn drive_until_public_output_produced(
     scheduler: &SerialTypedScheduler,
     store: &mut TestTypedRunStore,
@@ -12273,507 +12864,44 @@ fn fixture_with_first_managed_write_state() -> Fixture {
     fixture
 }
 
-fn refresh_side_effect_verify_nodes(typed: &mut spec::TypedExecutionSpec) {
-    let old_verify_links = typed
-        .nodes
-        .iter()
-        .filter_map(|node| match &node.framework {
-            Some(spec::FrameworkNodeSpec::SideEffectVerify(verify)) => Some((
-                verify.submit_node_id.clone(),
-                (node.node_id.clone(), node.output_cell.clone()),
-            )),
-            _ => None,
-        })
-        .collect::<BTreeMap<_, _>>();
-    let verify_node_ids = typed
-        .nodes
-        .iter()
-        .filter(|node| {
-            matches!(
-                &node.framework,
-                Some(spec::FrameworkNodeSpec::SideEffectVerify(_))
-            )
-        })
-        .map(|node| node.node_id.clone())
-        .collect::<BTreeSet<_>>();
-    let verify_cell_ids = typed
-        .nodes
-        .iter()
-        .filter(|node| verify_node_ids.contains(&node.node_id))
-        .map(|node| node.output_cell.clone())
-        .collect::<BTreeSet<_>>();
-    let verify_descriptor_ids = typed
-        .nodes
-        .iter()
-        .filter(|node| verify_node_ids.contains(&node.node_id))
-        .map(|node| node.descriptor_id.clone())
-        .collect::<BTreeSet<_>>();
-    let verify_config_artifacts = typed
-        .nodes
-        .iter()
-        .filter(|node| verify_node_ids.contains(&node.node_id))
-        .map(|node| node.config_ref.artifact_id.clone())
-        .collect::<BTreeSet<_>>();
-
-    typed
-        .nodes
-        .retain(|node| !verify_node_ids.contains(&node.node_id));
-    typed
-        .cells
-        .retain(|cell| !verify_cell_ids.contains(&cell.cell_id));
-    typed
-        .value_lineages
-        .retain(|lineage| match &lineage.producer {
-            spec::CellProducer::Node(node_id) => !verify_node_ids.contains(node_id),
-            spec::CellProducer::Seed(_) => true,
-        });
-    typed
-        .config_refs
-        .retain(|config| !verify_config_artifacts.contains(&config.artifact_id));
-    typed
-        .descriptor_identities
-        .retain(|descriptor| match descriptor {
-            spec::DescriptorIdentity::State(identity) => {
-                !verify_descriptor_ids.contains(&identity.descriptor_id)
-            }
-            _ => true,
-        });
-
-    let mut submit_nodes = typed
-        .nodes
-        .iter()
-        .filter(|node| node.side_effect.is_some() && node.framework.is_none())
-        .cloned()
-        .map(|node| (node, true))
-        .collect::<Vec<_>>();
-    submit_nodes.extend(
-        typed
-            .remediations
-            .values()
-            .filter(|node| node.side_effect.is_some() && node.framework.is_none())
-            .cloned()
-            .map(|node| (node, false)),
-    );
-    for (submit, include_predecessor) in submit_nodes {
-        if let Some(cell) = typed
-            .cells
-            .iter_mut()
-            .find(|cell| cell.cell_id == submit.output_cell)
-        {
-            cell.terminal_policy = spec::CellTerminalPolicy::MaybeSkipped;
-        }
-        let verify = append_side_effect_verify_node(typed, &submit, include_predecessor);
-        rewrite_side_effect_verify_consumers(
-            typed,
-            &submit,
-            old_verify_links.get(&submit.node_id),
-            &verify,
-        );
-    }
-}
-
-fn append_side_effect_verify_node(
-    typed: &mut spec::TypedExecutionSpec,
-    submit: &spec::NodeSpec,
-    include_predecessor: bool,
-) -> spec::NodeSpec {
-    let contract = submit
-        .side_effect
-        .as_ref()
-        .expect("submit side-effect contract");
-    let pair_id = spec::side_effect_pair_id(&submit.node_id, &submit.output_cell, contract)
-        .expect("side-effect pair id");
-    let node_id =
-        spec::side_effect_verify_node_id(&submit.node_id, &pair_id).expect("verify node id");
-    let output_cell = CellId::from_digest(
-        DigestAlgorithm::Sha256JcsV1,
-        *content_digest_json(serde_json::json!({
-            "framework": "side_effect_verify",
-            "kind": "output_cell",
-            "pair_id": pair_id.as_str(),
-            "submit_node_id": submit.node_id.as_str(),
-        }))
-        .expect("verify output cell digest")
-        .digest(),
-    );
-    let descriptor_id = DescriptorId::from_digest(
-        DigestAlgorithm::Sha256JcsV1,
-        *content_digest_json(serde_json::json!({
-            "framework": "side_effect_verify",
-            "kind": "descriptor",
-            "pair_id": pair_id.as_str(),
-            "submit_node_id": submit.node_id.as_str(),
-        }))
-        .expect("verify descriptor digest")
-        .digest(),
-    );
-    let state_kind = StateKind::new(
-        "mfm.framework.state",
-        "side_effect_verify",
-        DigestAlgorithm::Sha256JcsV1,
-        *content_digest_json(serde_json::json!({
-            "framework": "side_effect_verify",
-            "kind": "state",
-        }))
-        .expect("verify state kind digest")
-        .digest(),
-    )
-    .expect("verify state kind");
-    let config_ref =
-        spec::framework_config_ref("side_effect_verify", &node_id).expect("verify config ref");
-    let submit_output_cell = typed
-        .cells
-        .iter()
-        .find(|cell| cell.cell_id == submit.output_cell)
-        .cloned()
-        .expect("submit output cell");
-    let input_bindings = spec::framework_lifecycle_maybe_skipped_cell_input_binding(
-        "side_effect_verify",
-        "submit_output",
-        &submit_output_cell,
-    )
-    .expect("verify input binding");
-    let submit_descriptor = typed
-        .descriptor_identities
-        .iter()
-        .find_map(|descriptor| match descriptor {
-            spec::DescriptorIdentity::State(identity)
-                if identity.descriptor_id == submit.descriptor_id =>
-            {
-                Some(identity.as_ref().clone())
-            }
-            _ => None,
-        })
-        .expect("submit descriptor");
-    let read_external = mfm_effects::ReadExternal::descriptor().expect("read external effect");
-    typed.config_refs.push(config_ref.clone());
-    typed
-        .descriptor_identities
-        .push(spec::DescriptorIdentity::State(Box::new(
-            spec::StateDescriptorIdentity {
-                descriptor_id: descriptor_id.clone(),
-                name: "mfm.framework.side_effect_verify".to_owned(),
-                state_kind: state_kind.clone(),
-                state_version: StateVersion::new("mfm.framework.state.side_effect_verify.v1")
-                    .expect("verify state version"),
-                config_schema_id: config_ref.schema_id.clone(),
-                input_schema_id: input_bindings.input_schema_id.clone(),
-                output_schema_id: submit_descriptor.output_schema_id.clone(),
-                output_semantic_type_id: submit_descriptor.output_semantic_type_id.clone(),
-                effect_kind: read_external.kind.clone(),
-                effect_class: read_external.class.as_str().to_owned(),
-                effect_name: read_external.name.to_owned(),
-                effect_version: read_external.version,
-                capabilities: CapabilitySetDescriptor::new(Vec::new()).expect("no caps"),
-                runner: "read_external".to_owned(),
-                side_effect_contract_digest: None,
-            },
-        )));
-    let value_lineage = spec::ValueLineageRef {
-        lineage_digest: content_digest_json(serde_json::json!({
-            "framework": "side_effect_verify",
-            "kind": "lineage",
-            "pair_id": pair_id.as_str(),
-            "submit_node_id": submit.node_id.as_str(),
-        }))
-        .expect("verify value lineage"),
-    };
-    typed.value_lineages.push(spec::ValueLineage {
-        lineage_ref: value_lineage.clone(),
-        scope_id: submit.scope_id.clone(),
-        producer: spec::CellProducer::Node(node_id.clone()),
-        input_cells: vec![submit.output_cell.clone()],
-        config_ref_digest: Some(config_ref.digest.clone()),
-        planning_lineage: submit.planning_lineage.clone(),
-        domain_keys: Vec::new(),
-        transform_policy: spec::LineageTransformPolicy::StateOutput,
-    });
-    typed.cells.push(spec::CellSpec {
-        cell_id: output_cell.clone(),
-        producer: spec::CellProducer::Node(node_id.clone()),
-        scope_id: submit.scope_id.clone(),
-        semantic_type_id: submit_descriptor.output_semantic_type_id,
-        schema_id: submit_descriptor.output_schema_id,
-        value_lineage,
-        terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
-        storage_policy: spec::StoragePolicy::ContentAddressed,
-        redaction_policy: spec::RedactionPolicy::Public,
-    });
-    let verify_node = spec::NodeSpec {
-        node_id,
-        stable_key: spec::side_effect_verify_stable_key(&submit.stable_key)
-            .expect("verify stable key"),
-        scope_id: submit.scope_id.clone(),
-        state_kind,
-        state_version: StateVersion::new("mfm.framework.state.side_effect_verify.v1")
-            .expect("verify state version"),
-        descriptor_id,
-        config_ref,
-        input_bindings,
-        output_cell,
-        effect_kind: read_external.kind,
-        capability_bindings: CapabilitySetDescriptor::new(Vec::new()).expect("no caps"),
-        adapter_bindings: Vec::new(),
-        side_effect: None,
-        framework: Some(spec::FrameworkNodeSpec::SideEffectVerify(
-            spec::SideEffectVerifyNodeSpec {
-                pair_id,
-                submit_node_id: submit.node_id.clone(),
-                submit_output_cell_id: submit.output_cell.clone(),
-            },
-        )),
-        planning_lineage: submit.planning_lineage.clone(),
-        deterministic_predecessors: if include_predecessor {
-            vec![submit.node_id.clone()]
-        } else {
-            Vec::new()
-        },
-    };
-    typed.nodes.push(verify_node.clone());
-    verify_node
-}
-
-fn rewrite_side_effect_verify_consumers(
-    typed: &mut spec::TypedExecutionSpec,
-    submit: &spec::NodeSpec,
-    old_verify: Option<&(NodeId, CellId)>,
-    verify: &spec::NodeSpec,
-) {
-    let verify_cell = typed
-        .cells
-        .iter()
-        .find(|cell| cell.cell_id == verify.output_cell)
-        .cloned()
-        .expect("verify output cell");
-    for node in &mut typed.nodes {
-        if node.node_id == verify.node_id {
-            continue;
-        }
-        replace_input_cell_binding(
-            &mut node.input_bindings.root,
-            &submit.output_cell,
-            &verify_cell,
-        );
-        if let Some((_, old_verify_cell)) = old_verify {
-            replace_input_cell_binding(
-                &mut node.input_bindings.root,
-                old_verify_cell,
-                &verify_cell,
-            );
-        }
-        node.input_bindings.digest =
-            content_digest_json(input_node_json(&node.input_bindings.root)).expect("input digest");
-        for predecessor in &mut node.deterministic_predecessors {
-            if *predecessor == submit.node_id
-                || old_verify
-                    .as_ref()
-                    .is_some_and(|(old_verify_node, _)| predecessor == old_verify_node)
-            {
-                *predecessor = verify.node_id.clone();
-            }
-        }
-        node.deterministic_predecessors.sort();
-        node.deterministic_predecessors.dedup();
-        if let Some(spec::FrameworkNodeSpec::PublicOutputRender(render)) = &mut node.framework {
-            for public_output in &mut render.required_cells {
-                replace_public_output_cell(public_output, &submit.output_cell, &verify_cell);
-                if let Some((_, old_verify_cell)) = old_verify {
-                    replace_public_output_cell(public_output, old_verify_cell, &verify_cell);
-                }
-            }
-        }
-    }
-    for remediation in typed.remediations.values_mut() {
-        replace_input_cell_binding(
-            &mut remediation.input_bindings.root,
-            &submit.output_cell,
-            &verify_cell,
-        );
-        if let Some((_, old_verify_cell)) = old_verify {
-            replace_input_cell_binding(
-                &mut remediation.input_bindings.root,
-                old_verify_cell,
-                &verify_cell,
-            );
-        }
-        remediation.input_bindings.digest =
-            content_digest_json(input_node_json(&remediation.input_bindings.root))
-                .expect("remediation input digest");
-        for predecessor in &mut remediation.deterministic_predecessors {
-            if *predecessor == submit.node_id
-                || old_verify
-                    .as_ref()
-                    .is_some_and(|(old_verify_node, _)| predecessor == old_verify_node)
-            {
-                *predecessor = verify.node_id.clone();
-            }
-        }
-        remediation.deterministic_predecessors.sort();
-        remediation.deterministic_predecessors.dedup();
-    }
-    for lineage in &mut typed.value_lineages {
-        for input_cell in &mut lineage.input_cells {
-            if *input_cell == submit.output_cell
-                || old_verify
-                    .as_ref()
-                    .is_some_and(|(_, old_verify_cell)| input_cell == old_verify_cell)
-            {
-                *input_cell = verify.output_cell.clone();
-            }
-        }
-    }
-    for public_output in &mut typed.public_outputs.outputs {
-        replace_public_output_cell(public_output, &submit.output_cell, &verify_cell);
-        if let Some((_, old_verify_cell)) = old_verify {
-            replace_public_output_cell(public_output, old_verify_cell, &verify_cell);
-        }
-    }
-}
-
-fn replace_public_output_cell(
-    public_output: &mut spec::PublicOutputCell,
-    from: &CellId,
-    to: &spec::CellSpec,
-) {
-    if public_output.cell_id != *from {
-        return;
-    }
-    public_output.cell_id = to.cell_id.clone();
-    public_output.producer = to.producer.clone();
-    public_output.scope_id = to.scope_id.clone();
-    public_output.semantic_type_id = to.semantic_type_id.clone();
-    public_output.schema_id = to.schema_id.clone();
-    public_output.value_lineage = to.value_lineage.clone();
-    public_output.required_terminal = spec::RequiredTerminal::ProducedOnly;
-}
-
-fn replace_input_cell_binding(
-    input: &mut spec::InputBindingNodeSpec,
-    from: &CellId,
-    to: &spec::CellSpec,
-) {
-    match input {
-        spec::InputBindingNodeSpec::Unit => {}
-        spec::InputBindingNodeSpec::Cell(cell) => {
-            if cell.cell_id == *from {
-                cell.cell_id = to.cell_id.clone();
-                cell.semantic_type_id = to.semantic_type_id.clone();
-                cell.schema_id = to.schema_id.clone();
-                cell.value_lineage = to.value_lineage.clone();
-                cell.required_terminal = spec::RequiredTerminal::ProducedOnly;
-            }
-        }
-        spec::InputBindingNodeSpec::Tuple(elements)
-        | spec::InputBindingNodeSpec::Vec { elements, .. }
-        | spec::InputBindingNodeSpec::NonEmptyVec { elements, .. } => {
-            for element in elements {
-                replace_input_cell_binding(element, from, to);
-            }
-        }
-        spec::InputBindingNodeSpec::Struct(fields) => {
-            for field in fields {
-                replace_input_cell_binding(&mut field.node, from, to);
-            }
-        }
-    }
-}
-
 fn fixture_with_first_side_effect_state() -> Fixture {
-    let mut fixture = fixture();
-    let mut envelope = fixture.runtime_spec.envelope().clone();
-    let side_effect = EffectKind::new("mfm.test", "side-effect", DigestAlgorithm::Sha256JcsV1, D8)
-        .expect("side-effect");
-    let side_effect_cap = CapabilityDescriptor::new(
-        side_effect_capability_kind(),
-        side_effect_capability_version(),
-        CapabilityRole::ExternalMutationAuthority,
-        "external-mutation",
+    runtime_side_effect_fixture(
+        RuntimeSideEffectFixtureShape::Chained,
+        RuntimeSideEffectClaim::ManualOnly,
+        spec::SideEffectVerificationSpec::Receipt,
     )
-    .expect("side-effect cap");
-    let side_effect_caps =
-        CapabilitySetDescriptor::new(vec![side_effect_cap]).expect("side-effect caps");
-    let contract_digest = content(0x88);
-    for node in &mut envelope.spec.nodes {
-        if node.descriptor_id == fixture.descriptor_a {
-            node.effect_kind = side_effect.clone();
-            node.capability_bindings = side_effect_caps.clone();
-            node.adapter_bindings = vec![spec::AdapterBinding {
-                adapter_kind: fixture.adapter_kind.clone(),
-                adapter_version: fixture.adapter_version.clone(),
-                binding_digest: None,
-            }];
-            node.side_effect = Some(spec::SideEffectContractSpec {
-                contract_digest: contract_digest.clone(),
-                resource_claim: spec::ResourceClaimSpec::ManualOnly,
-                verification: spec::SideEffectVerificationSpec::Receipt,
-            });
-        }
-    }
-    for descriptor in &mut envelope.spec.descriptor_identities {
-        if let spec::DescriptorIdentity::State(identity) = descriptor {
-            if identity.descriptor_id == fixture.descriptor_a {
-                identity.effect_kind = side_effect.clone();
-                identity.effect_class = "sidefx".to_owned();
-                identity.effect_name = "sidefx".to_owned();
-                identity.capabilities = side_effect_caps.clone();
-                identity.runner = "sidefx".to_owned();
-                identity.side_effect_contract_digest = Some(contract_digest.clone());
-            }
-        }
-    }
-    refresh_side_effect_verify_nodes(&mut envelope.spec);
-    let envelope = spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
-    fixture.runtime_spec =
-        CertifiedRuntimeSpec::from_verified_envelope(envelope).expect("runtime spec");
-    refresh_fixture_run_id(&mut fixture);
-    fixture
 }
 
 fn fixture_with_first_exclusive_side_effect_state() -> Fixture {
-    let fixture = fixture_with_first_side_effect_state();
-    let descriptors = vec![fixture.descriptor_a.clone()];
-    with_exclusive_resource_claims(fixture, &descriptors)
+    runtime_side_effect_fixture(
+        RuntimeSideEffectFixtureShape::Chained,
+        RuntimeSideEffectClaim::Exclusive,
+        spec::SideEffectVerificationSpec::Receipt,
+    )
 }
 
 fn fixture_with_first_finalized_side_effect_state() -> Fixture {
-    let fixture = fixture_with_first_side_effect_state();
-    with_first_side_effect_verification(
-        fixture,
+    runtime_side_effect_fixture(
+        RuntimeSideEffectFixtureShape::Chained,
+        RuntimeSideEffectClaim::ManualOnly,
         spec::SideEffectVerificationSpec::Finalized { depth: 1 },
     )
 }
 
 fn fixture_with_first_exact_touched_set_side_effect_state() -> Fixture {
-    let fixture = fixture_with_first_side_effect_state();
-    let descriptors = vec![fixture.descriptor_a.clone()];
-    with_exact_touched_set_resource_claims(fixture, &descriptors)
+    runtime_side_effect_fixture(
+        RuntimeSideEffectFixtureShape::Chained,
+        RuntimeSideEffectClaim::ExactTouchedSet,
+        spec::SideEffectVerificationSpec::Receipt,
+    )
 }
 
 fn fixture_with_first_exact_touched_set_finalized_side_effect_state() -> Fixture {
-    let fixture = fixture_with_first_finalized_side_effect_state();
-    let descriptors = vec![fixture.descriptor_a.clone()];
-    with_exact_touched_set_resource_claims(fixture, &descriptors)
-}
-
-fn with_first_side_effect_verification(
-    mut fixture: Fixture,
-    verification: spec::SideEffectVerificationSpec,
-) -> Fixture {
-    let mut envelope = fixture.runtime_spec.envelope().clone();
-    for node in &mut envelope.spec.nodes {
-        if node.descriptor_id == fixture.descriptor_a {
-            node.side_effect
-                .as_mut()
-                .expect("first descriptor is side effect")
-                .verification = verification.clone();
-        }
-    }
-    refresh_side_effect_verify_nodes(&mut envelope.spec);
-    let envelope = spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
-    fixture.runtime_spec =
-        CertifiedRuntimeSpec::from_verified_envelope(envelope).expect("runtime spec");
-    refresh_fixture_run_id(&mut fixture);
-    fixture
+    runtime_side_effect_fixture(
+        RuntimeSideEffectFixtureShape::Chained,
+        RuntimeSideEffectClaim::ExactTouchedSet,
+        spec::SideEffectVerificationSpec::Finalized { depth: 1 },
+    )
 }
 
 fn fixture_with_manual_resolution_side_effect_state() -> Fixture {
@@ -12820,554 +12948,28 @@ fn manual_authorization(byte: u8) -> spec::ManualResolutionAuthorizationSpec {
 }
 
 fn fixture_with_independent_second_node_and_first_side_effect_state() -> Fixture {
-    let mut fixture = fixture_with_first_side_effect_state();
-    let mut envelope = fixture.runtime_spec.envelope().clone();
-    let seed_cell = envelope
-        .spec
-        .cells
-        .iter()
-        .find(|cell| cell.cell_id == fixture.seed_ref.cell_id)
-        .expect("seed cell")
-        .clone();
-    let node_b_id = envelope
-        .spec
-        .nodes
-        .iter()
-        .find(|node| node.descriptor_id == fixture.descriptor_b)
-        .expect("node b")
-        .node_id
-        .clone();
-    let cell_a = envelope
-        .spec
-        .cells
-        .iter()
-        .find(|cell| cell.cell_id == fixture.cell_a)
-        .expect("cell a")
-        .clone();
-    let cell_a_public_output = spec::PublicOutputCell {
-        public_field_path: spec::PublicFieldPath::new("side_effect").expect("field"),
-        cell_id: cell_a.cell_id.clone(),
-        producer: cell_a.producer.clone(),
-        scope_id: cell_a.scope_id.clone(),
-        semantic_type_id: cell_a.semantic_type_id.clone(),
-        schema_id: cell_a.schema_id.clone(),
-        value_lineage: cell_a.value_lineage.clone(),
-        required_terminal: spec::RequiredTerminal::ProducedOnly,
-    };
-    envelope
-        .spec
-        .public_outputs
-        .outputs
-        .push(cell_a_public_output);
-    let public_output_cells = envelope.spec.public_outputs.outputs.clone();
-    let output_spec_digest = envelope
-        .spec
-        .public_outputs
-        .digest()
-        .expect("public output digest");
-    let render_input_root = spec::InputBindingNodeSpec::Struct(
-        public_output_cells
-            .iter()
-            .map(|public_output| spec::NamedInputBindingSpec {
-                field_path: public_output.public_field_path.clone(),
-                node: spec::InputBindingNodeSpec::Cell(Box::new(spec::InputBindingCellSpec {
-                    field_path: public_output.public_field_path.clone(),
-                    cell_id: public_output.cell_id.clone(),
-                    semantic_type_id: public_output.semantic_type_id.clone(),
-                    schema_id: public_output.schema_id.clone(),
-                    required_terminal: public_output.required_terminal,
-                    value_lineage: public_output.value_lineage.clone(),
-                })),
-            })
-            .collect(),
-    );
-    let render_predecessors = runtime_predecessors_for_inputs(
-        &envelope.spec,
-        &public_output_cells
-            .iter()
-            .map(|public_output| public_output.cell_id.clone())
-            .collect::<Vec<_>>(),
-    );
-    for node in &mut envelope.spec.nodes {
-        if node.descriptor_id == fixture.descriptor_b {
-            node.input_bindings.root =
-                spec::InputBindingNodeSpec::Cell(Box::new(spec::InputBindingCellSpec {
-                    field_path: spec::PublicFieldPath::new("input").expect("field"),
-                    cell_id: seed_cell.cell_id.clone(),
-                    semantic_type_id: seed_cell.semantic_type_id.clone(),
-                    schema_id: seed_cell.schema_id.clone(),
-                    required_terminal: spec::RequiredTerminal::ProducedOnly,
-                    value_lineage: seed_cell.value_lineage.clone(),
-                }));
-            node.deterministic_predecessors.clear();
-        }
-        if node.node_id == fixture.render_node {
-            if let Some(spec::FrameworkNodeSpec::PublicOutputRender(render)) = &mut node.framework {
-                render.output_spec_digest = output_spec_digest.clone();
-                render.required_cells = public_output_cells.clone();
-            }
-            node.input_bindings.root = render_input_root.clone();
-            node.input_bindings.digest =
-                content_digest_json(input_node_json(&node.input_bindings.root))
-                    .expect("render input digest");
-            node.deterministic_predecessors = render_predecessors.clone();
-        }
-    }
-    for lineage in &mut envelope.spec.value_lineages {
-        if lineage.producer == spec::CellProducer::Node(node_b_id.clone()) {
-            lineage.input_cells = vec![seed_cell.cell_id.clone()];
-        }
-        if lineage.producer == spec::CellProducer::Node(fixture.render_node.clone()) {
-            lineage.input_cells = public_output_cells
-                .iter()
-                .map(|public_output| public_output.cell_id.clone())
-                .collect();
-        }
-    }
-    let envelope = spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
-    fixture.runtime_spec =
-        CertifiedRuntimeSpec::from_verified_envelope(envelope).expect("runtime spec");
-    refresh_fixture_run_id(&mut fixture);
-    fixture
+    runtime_side_effect_fixture(
+        RuntimeSideEffectFixtureShape::IndependentSecond,
+        RuntimeSideEffectClaim::ManualOnly,
+        spec::SideEffectVerificationSpec::Receipt,
+    )
+}
+
+fn fixture_with_independent_second_node_and_first_exclusive_finalized_side_effect_state() -> Fixture
+{
+    runtime_side_effect_fixture(
+        RuntimeSideEffectFixtureShape::IndependentSecond,
+        RuntimeSideEffectClaim::Exclusive,
+        spec::SideEffectVerificationSpec::Finalized { depth: 1 },
+    )
 }
 
 fn fixture_with_two_side_effects_and_failing_tail() -> Fixture {
-    let mut fixture = fixture();
-    let mut envelope = fixture.runtime_spec.envelope().clone();
-    let side_effect = EffectKind::new("mfm.test", "side-effect", DigestAlgorithm::Sha256JcsV1, D8)
-        .expect("side-effect");
-    let side_effect_cap = CapabilityDescriptor::new(
-        side_effect_capability_kind(),
-        side_effect_capability_version(),
-        CapabilityRole::ExternalMutationAuthority,
-        "external-mutation",
+    runtime_side_effect_fixture(
+        RuntimeSideEffectFixtureShape::CompensatingPairWithFailingTail,
+        RuntimeSideEffectClaim::ManualOnly,
+        spec::SideEffectVerificationSpec::Finalized { depth: 1 },
     )
-    .expect("side-effect cap");
-    let side_effect_caps =
-        CapabilitySetDescriptor::new(vec![side_effect_cap]).expect("side-effect caps");
-    let contract_digest = content(0x88);
-    for node in &mut envelope.spec.nodes {
-        if node.descriptor_id == fixture.descriptor_a || node.descriptor_id == fixture.descriptor_b
-        {
-            node.effect_kind = side_effect.clone();
-            node.capability_bindings = side_effect_caps.clone();
-            node.adapter_bindings = vec![spec::AdapterBinding {
-                adapter_kind: fixture.adapter_kind.clone(),
-                adapter_version: fixture.adapter_version.clone(),
-                binding_digest: None,
-            }];
-            node.side_effect = Some(spec::SideEffectContractSpec {
-                contract_digest: contract_digest.clone(),
-                resource_claim: spec::ResourceClaimSpec::ManualOnly,
-                verification: spec::SideEffectVerificationSpec::Finalized { depth: 1 },
-            });
-        }
-    }
-    for descriptor in &mut envelope.spec.descriptor_identities {
-        if let spec::DescriptorIdentity::State(identity) = descriptor {
-            if identity.descriptor_id == fixture.descriptor_a
-                || identity.descriptor_id == fixture.descriptor_b
-            {
-                identity.effect_kind = side_effect.clone();
-                identity.effect_class = "sidefx".to_owned();
-                identity.effect_name = "sidefx".to_owned();
-                identity.capabilities = side_effect_caps.clone();
-                identity.runner = "sidefx".to_owned();
-                identity.side_effect_contract_digest = Some(contract_digest.clone());
-            }
-        }
-    }
-
-    let scope = envelope.spec.scopes[0].scope_id.clone();
-    let planning = envelope.spec.scopes[0].planning_lineage.clone();
-    let node_b = envelope
-        .spec
-        .nodes
-        .iter()
-        .find(|node| node.descriptor_id == fixture.descriptor_b)
-        .expect("node b")
-        .clone();
-    let cell_b = envelope
-        .spec
-        .cells
-        .iter()
-        .find(|cell| cell.cell_id == fixture.cell_b)
-        .expect("cell b")
-        .clone();
-    let config_ref = node_b.config_ref.clone();
-    let node_c = NodeId::from_digest(
-        DigestAlgorithm::Sha256JcsV1,
-        DigestBytes::from_array([0x70; 32]),
-    );
-    let cell_c = CellId::from_digest(
-        DigestAlgorithm::Sha256JcsV1,
-        DigestBytes::from_array([0x71; 32]),
-    );
-    let descriptor_c = DescriptorId::from_digest(
-        DigestAlgorithm::Sha256JcsV1,
-        DigestBytes::from_array([0x72; 32]),
-    );
-    let lineage_c = spec::ValueLineageRef {
-        lineage_digest: content(0x74),
-    };
-    let failure_effect = EffectKind::new(
-        "mfm.test",
-        "nonretryable-failure",
-        DigestAlgorithm::Sha256JcsV1,
-        DigestBytes::from_array([0x75; 32]),
-    )
-    .expect("failure effect");
-    let no_caps = CapabilitySetDescriptor::new(Vec::new()).expect("no caps");
-    let node_c_input_root =
-        spec::InputBindingNodeSpec::Cell(Box::new(spec::InputBindingCellSpec {
-            field_path: spec::PublicFieldPath::new("input").expect("field"),
-            cell_id: cell_b.cell_id.clone(),
-            semantic_type_id: cell_b.semantic_type_id.clone(),
-            schema_id: cell_b.schema_id.clone(),
-            required_terminal: spec::RequiredTerminal::ProducedOnly,
-            value_lineage: cell_b.value_lineage.clone(),
-        }));
-    let node_c_spec = spec::NodeSpec {
-        node_id: node_c.clone(),
-        stable_key: spec::StableAuthorKey::new("c").expect("stable key"),
-        scope_id: scope.clone(),
-        state_kind: StateKind::new(
-            "mfm.test",
-            "c",
-            DigestAlgorithm::Sha256JcsV1,
-            DigestBytes::from_array([0x76; 32]),
-        )
-        .expect("state c"),
-        state_version: StateVersion::new("mfm.test.state.c.v1").expect("state version"),
-        descriptor_id: descriptor_c.clone(),
-        config_ref: config_ref.clone(),
-        input_bindings: spec::InputBindingSpec {
-            input_schema_id: cell_b.schema_id.clone(),
-            input_descriptor_id: DescriptorId::from_digest(
-                DigestAlgorithm::Sha256JcsV1,
-                DigestBytes::from_array([0x77; 32]),
-            ),
-            digest: content_digest_json(input_node_json(&node_c_input_root))
-                .expect("node c input digest"),
-            root: node_c_input_root,
-        },
-        output_cell: cell_c.clone(),
-        effect_kind: failure_effect.clone(),
-        capability_bindings: no_caps.clone(),
-        adapter_bindings: Vec::new(),
-        side_effect: None,
-        framework: None,
-        planning_lineage: planning.clone(),
-        deterministic_predecessors: vec![node_b.node_id.clone()],
-    };
-    envelope
-        .spec
-        .descriptor_identities
-        .push(spec::DescriptorIdentity::State(Box::new(
-            spec::StateDescriptorIdentity {
-                descriptor_id: descriptor_c.clone(),
-                name: "mfm.test.state.c".to_owned(),
-                state_kind: node_c_spec.state_kind.clone(),
-                state_version: node_c_spec.state_version.clone(),
-                config_schema_id: config_ref.schema_id.clone(),
-                input_schema_id: node_c_spec.input_bindings.input_schema_id.clone(),
-                output_schema_id: cell_b.schema_id.clone(),
-                output_semantic_type_id: cell_b.semantic_type_id.clone(),
-                effect_kind: failure_effect.clone(),
-                effect_class: "fail".to_owned(),
-                effect_name: "fail".to_owned(),
-                effect_version: EffectVersion::new("mfm.effect.v1").expect("effect version"),
-                capabilities: no_caps.clone(),
-                runner: "fail".to_owned(),
-                side_effect_contract_digest: None,
-            },
-        )));
-    envelope.spec.cells.push(spec::CellSpec {
-        cell_id: cell_c.clone(),
-        producer: spec::CellProducer::Node(node_c.clone()),
-        scope_id: scope.clone(),
-        semantic_type_id: cell_b.semantic_type_id.clone(),
-        schema_id: cell_b.schema_id.clone(),
-        value_lineage: lineage_c.clone(),
-        terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
-        storage_policy: spec::StoragePolicy::ContentAddressed,
-        redaction_policy: spec::RedactionPolicy::Public,
-    });
-    envelope.spec.value_lineages.push(spec::ValueLineage {
-        lineage_ref: lineage_c.clone(),
-        scope_id: scope.clone(),
-        producer: spec::CellProducer::Node(node_c.clone()),
-        input_cells: vec![cell_b.cell_id.clone()],
-        config_ref_digest: Some(config_ref.digest.clone()),
-        planning_lineage: planning.clone(),
-        domain_keys: Vec::new(),
-        transform_policy: spec::LineageTransformPolicy::StateOutput,
-    });
-    envelope.spec.nodes.push(node_c_spec);
-
-    let public_output_cell = spec::PublicOutputCell {
-        public_field_path: spec::PublicFieldPath::new("result").expect("field"),
-        cell_id: cell_c.clone(),
-        producer: spec::CellProducer::Node(node_c.clone()),
-        scope_id: scope.clone(),
-        semantic_type_id: cell_b.semantic_type_id.clone(),
-        schema_id: cell_b.schema_id.clone(),
-        value_lineage: lineage_c,
-        required_terminal: spec::RequiredTerminal::ProducedOnly,
-    };
-    envelope.spec.public_outputs.outputs = vec![public_output_cell.clone()];
-    let public_output_digest = envelope
-        .spec
-        .public_outputs
-        .digest()
-        .expect("public output digest");
-    let render_input_root = spec::InputBindingNodeSpec::Struct(vec![spec::NamedInputBindingSpec {
-        field_path: public_output_cell.public_field_path.clone(),
-        node: spec::InputBindingNodeSpec::Cell(Box::new(spec::InputBindingCellSpec {
-            field_path: public_output_cell.public_field_path.clone(),
-            cell_id: public_output_cell.cell_id.clone(),
-            semantic_type_id: public_output_cell.semantic_type_id.clone(),
-            schema_id: public_output_cell.schema_id.clone(),
-            required_terminal: public_output_cell.required_terminal,
-            value_lineage: public_output_cell.value_lineage.clone(),
-        })),
-    }]);
-    for node in &mut envelope.spec.nodes {
-        if node.node_id == fixture.render_node {
-            if let Some(spec::FrameworkNodeSpec::PublicOutputRender(render)) = &mut node.framework {
-                render.output_spec_digest = public_output_digest.clone();
-                render.required_cells = vec![public_output_cell.clone()];
-            }
-            node.input_bindings.root = render_input_root.clone();
-            node.input_bindings.digest =
-                content_digest_json(input_node_json(&node.input_bindings.root))
-                    .expect("render input digest");
-            node.deterministic_predecessors = vec![node_c.clone()];
-        }
-    }
-    for lineage in &mut envelope.spec.value_lineages {
-        if lineage.producer == spec::CellProducer::Node(fixture.render_node.clone()) {
-            lineage.input_cells = vec![cell_c.clone()];
-        }
-    }
-
-    let forward_a = envelope
-        .spec
-        .nodes
-        .iter()
-        .find(|node| node.descriptor_id == fixture.descriptor_a)
-        .expect("node a")
-        .clone();
-    let forward_b = envelope
-        .spec
-        .nodes
-        .iter()
-        .find(|node| node.descriptor_id == fixture.descriptor_b)
-        .expect("node b")
-        .clone();
-    let cell_a = envelope
-        .spec
-        .cells
-        .iter()
-        .find(|cell| cell.cell_id == fixture.cell_a)
-        .expect("cell a")
-        .clone();
-    let remediation_a = remediation_node_for_forward(
-        &forward_a,
-        &cell_a,
-        DigestBytes::from_array([0x80; 32]),
-        DigestBytes::from_array([0x81; 32]),
-        DigestBytes::from_array([0x82; 32]),
-    );
-    let remediation_b = remediation_node_for_forward(
-        &forward_b,
-        &cell_b,
-        DigestBytes::from_array([0x83; 32]),
-        DigestBytes::from_array([0x84; 32]),
-        DigestBytes::from_array([0x85; 32]),
-    );
-    append_remediation_output_cell(&mut envelope.spec, &remediation_a, content(0x86));
-    append_remediation_output_cell(&mut envelope.spec, &remediation_b, content(0x87));
-    envelope
-        .spec
-        .remediations
-        .insert(forward_a.node_id.clone(), remediation_a);
-    envelope
-        .spec
-        .remediations
-        .insert(forward_b.node_id.clone(), remediation_b);
-    envelope.spec.saga = spec::SagaPolicySpec::CompensateCompleted {
-        on_remediation_unresolved: spec::RemediationUnresolvedSpec::FailWithoutAcdcClaim,
-    };
-
-    refresh_side_effect_verify_nodes(&mut envelope.spec);
-    let envelope = spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
-    fixture.runtime_spec =
-        CertifiedRuntimeSpec::from_verified_envelope(envelope).expect("runtime spec");
-    refresh_fixture_run_id(&mut fixture);
-    fixture.descriptor_c = Some(descriptor_c);
-    fixture.cell_c = Some(cell_c);
-    fixture
-}
-
-fn with_exclusive_resource_claims(mut fixture: Fixture, descriptors: &[DescriptorId]) -> Fixture {
-    let mut envelope = fixture.runtime_spec.envelope().clone();
-    let side_effect = EffectKind::new("mfm.test", "side-effect", DigestAlgorithm::Sha256JcsV1, D8)
-        .expect("side-effect");
-    let side_effect_cap = CapabilityDescriptor::new(
-        side_effect_capability_kind(),
-        side_effect_capability_version(),
-        CapabilityRole::ExternalMutationAuthority,
-        "external-mutation",
-    )
-    .expect("side-effect cap");
-    let side_effect_caps =
-        CapabilitySetDescriptor::new(vec![side_effect_cap]).expect("side-effect caps");
-    let contract_digest = content(0x88);
-    let resource_claim = spec::ResourceClaimSpec::Exclusive {
-        namespace: exclusive_resource_namespace(),
-        key_schema: fixture.seed_ref.schema_id.clone(),
-    };
-    for node in envelope
-        .spec
-        .nodes
-        .iter_mut()
-        .chain(envelope.spec.remediations.values_mut())
-    {
-        if descriptors
-            .iter()
-            .any(|descriptor| descriptor == &node.descriptor_id)
-        {
-            node.effect_kind = side_effect.clone();
-            node.capability_bindings = side_effect_caps.clone();
-            node.adapter_bindings = vec![spec::AdapterBinding {
-                adapter_kind: fixture.adapter_kind.clone(),
-                adapter_version: fixture.adapter_version.clone(),
-                binding_digest: None,
-            }];
-            node.side_effect = Some(spec::SideEffectContractSpec {
-                contract_digest: contract_digest.clone(),
-                resource_claim: resource_claim.clone(),
-                verification: spec::SideEffectVerificationSpec::Receipt,
-            });
-        }
-    }
-    for descriptor in &mut envelope.spec.descriptor_identities {
-        if let spec::DescriptorIdentity::State(identity) = descriptor {
-            if descriptors
-                .iter()
-                .any(|descriptor| descriptor == &identity.descriptor_id)
-            {
-                identity.effect_kind = side_effect.clone();
-                identity.effect_class = "sidefx".to_owned();
-                identity.effect_name = "sidefx".to_owned();
-                identity.capabilities = side_effect_caps.clone();
-                identity.runner = "sidefx".to_owned();
-                identity.side_effect_contract_digest = Some(contract_digest.clone());
-            }
-        }
-    }
-    refresh_side_effect_verify_nodes(&mut envelope.spec);
-    let envelope = spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
-    fixture.runtime_spec =
-        CertifiedRuntimeSpec::from_verified_envelope(envelope).expect("runtime spec");
-    refresh_fixture_run_id(&mut fixture);
-    fixture
-}
-
-fn with_exact_touched_set_resource_claims(
-    mut fixture: Fixture,
-    descriptors: &[DescriptorId],
-) -> Fixture {
-    let mut envelope = fixture.runtime_spec.envelope().clone();
-    for node in envelope
-        .spec
-        .nodes
-        .iter_mut()
-        .chain(envelope.spec.remediations.values_mut())
-    {
-        if descriptors
-            .iter()
-            .any(|descriptor| descriptor == &node.descriptor_id)
-        {
-            let side_effect = node
-                .side_effect
-                .as_mut()
-                .expect("exact touched-set descriptor is a side-effect node");
-            side_effect.resource_claim = spec::ResourceClaimSpec::ExactTouchedSet {
-                namespace: exact_touched_set_resource_namespace(),
-                evidence_schema: <FixtureSideEffectEvidence as mfm_values::MfmValue>::schema_id()
-                    .expect("fixture side-effect evidence schema"),
-            };
-        }
-    }
-    refresh_side_effect_verify_nodes(&mut envelope.spec);
-    let envelope = spec::HashedSpecEnvelope::new(envelope.spec, envelope.audit).expect("rehash");
-    fixture.runtime_spec =
-        CertifiedRuntimeSpec::from_verified_envelope(envelope).expect("runtime spec");
-    refresh_fixture_run_id(&mut fixture);
-    fixture
-}
-
-fn remediation_node_for_forward(
-    forward: &spec::NodeSpec,
-    forward_output: &spec::CellSpec,
-    node_digest: DigestBytes,
-    cell_digest: DigestBytes,
-    input_descriptor_digest: DigestBytes,
-) -> spec::NodeSpec {
-    let mut remediation = forward.clone();
-    remediation.node_id = NodeId::from_digest(DigestAlgorithm::Sha256JcsV1, node_digest);
-    remediation.stable_key =
-        spec::StableAuthorKey::new(format!("remediation/{}", forward.stable_key.as_str()))
-            .expect("remediation stable key");
-    remediation.output_cell = CellId::from_digest(DigestAlgorithm::Sha256JcsV1, cell_digest);
-    remediation.input_bindings.root =
-        spec::InputBindingNodeSpec::Cell(Box::new(spec::InputBindingCellSpec {
-            field_path: spec::PublicFieldPath::new("input").expect("field"),
-            cell_id: forward.output_cell.clone(),
-            semantic_type_id: forward_output.semantic_type_id.clone(),
-            schema_id: forward_output.schema_id.clone(),
-            required_terminal: spec::RequiredTerminal::ProducedOnly,
-            value_lineage: forward_output.value_lineage.clone(),
-        }));
-    remediation.input_bindings.input_descriptor_id =
-        DescriptorId::from_digest(DigestAlgorithm::Sha256JcsV1, input_descriptor_digest);
-    remediation.input_bindings.digest =
-        content_digest_json(input_node_json(&remediation.input_bindings.root))
-            .expect("remediation input digest");
-    remediation.deterministic_predecessors = Vec::new();
-    remediation
-}
-
-fn append_remediation_output_cell(
-    typed: &mut spec::TypedExecutionSpec,
-    remediation: &spec::NodeSpec,
-    lineage_digest: ContentDigest,
-) {
-    let descriptor = typed
-        .descriptor_identities
-        .iter()
-        .find_map(|identity| match identity {
-            spec::DescriptorIdentity::State(state)
-                if state.descriptor_id == remediation.descriptor_id =>
-            {
-                Some(state)
-            }
-            _ => None,
-        })
-        .expect("remediation descriptor");
-    typed.cells.push(spec::CellSpec {
-        cell_id: remediation.output_cell.clone(),
-        producer: spec::CellProducer::Node(remediation.node_id.clone()),
-        scope_id: remediation.scope_id.clone(),
-        semantic_type_id: descriptor.output_semantic_type_id.clone(),
-        schema_id: descriptor.output_schema_id.clone(),
-        value_lineage: spec::ValueLineageRef { lineage_digest },
-        terminal_policy: spec::CellTerminalPolicy::ProducedOnly,
-        storage_policy: spec::StoragePolicy::ContentAddressed,
-        redaction_policy: spec::RedactionPolicy::Public,
-    });
 }
 
 struct NodeSpecFixture {
