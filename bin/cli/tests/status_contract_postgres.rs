@@ -3,7 +3,6 @@
 
 use assert_cmd::Command;
 use mfm_app::{ProductionPostgresSchema, ProductionRunStore};
-use mfm_integration_tests::test_support;
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 use serde_json::Value;
@@ -12,12 +11,15 @@ use std::process::Output;
 
 static RPC_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+#[path = "../../../tests/integration/src/run_control_support.rs"]
+mod run_control_support;
+
 #[tokio::test]
 async fn run_status_reports_interrupted_attempt_and_framework_attempts_from_history() {
     let _rpc_env_guard = RPC_ENV_LOCK.lock().await;
-    let rpc_url = test_support::start_portfolio_rpc_mock(1).await;
+    let rpc_url = run_control_support::start_portfolio_rpc_mock(1).await;
     let _rpc_restore =
-        test_support::set_evm_rpc_sources_env_for_test("ethereum-mainnet", 1, rpc_url);
+        run_control_support::set_evm_rpc_sources_env_for_test("ethereum-mainnet", 1, rpc_url);
     let database_url =
         std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for parity tests");
     let schema = unique_schema();
@@ -32,7 +34,7 @@ async fn run_status_reports_interrupted_attempt_and_framework_attempts_from_hist
         .expect("connect typed postgres store");
     let config = sample_portfolio_config();
     let (run_id, certified) =
-        test_support::admit_portfolio_run_without_driving(&store, &config).await;
+        run_control_support::admit_portfolio_run_without_driving(&store, &config).await;
 
     let interrupted_node = certified
         .envelope()
@@ -133,7 +135,7 @@ async fn run_status_reports_interrupted_attempt_and_framework_attempts_from_hist
     assert_success(&stream);
     let stream_json = parse_success_json(&stream.stdout);
     let stream_events = stream_json["events"].as_array().expect("stream events");
-    test_support::assert_framework_started_before_terminal_evidence(
+    run_control_support::assert_framework_started_before_terminal_evidence(
         stream_events,
         attempts,
         &certified.envelope().spec.nodes,
