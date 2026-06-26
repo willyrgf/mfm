@@ -49,7 +49,9 @@ The typed boundary separates data, evidence, authority, and implementation artif
 - `CertifiedDescriptorSet` and `CertifiedFrameworkLifecycle` are certified spec authority views
 - `CertifiedRuntimeSpec` is runtime authority derived only from `CertifiedTypedSpec`
 - `PreparedCommit<Purpose>` and `PreparedCommitPlan` are store mutation authority built by runtime
-- `SagaAdmitToken` is the store admission authority for policy-bound run-start and saga commits
+- `SagaAdmitToken` is minted from the certified typed spec and is the store admission authority for
+  policy-bound run-start and saga commits, including side-effect terminal policy derivation; store
+  admission must match it to the projected `RunAdmitted.spec_hash`
 - `ManualResolutionProofAuthority` and `VerifiedManualResolutionForPrefix` are manual proof
   authority over a certified blocked prefix
 - `CertifiedSideEffectContract` is shared live, resume, and replay authority for side-effect claims
@@ -340,6 +342,7 @@ Allowed:
 - `mfm.evm.call.read`
 - `mfm.evm.logs.read`
 - `mfm.evm.nonce.read`
+- `mfm.evm.nonce_occupancy.read`
 - `mfm.evm.transaction.submit`
 - `mfm.signing.sign`
 - `mfm.artifact.read`

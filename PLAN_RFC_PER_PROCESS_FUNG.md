@@ -1,6 +1,6 @@
 # Implementation Plan: RFC Per-Process Fungibility
 
-Status: planning artifact for engineering execution
+Status: implemented; retained as traceability for the RFC cutover
 Source RFC: `RFC_PER_PROCESS_FUNGIBILITY.md` as of **tt9** (8 independent review passes + the R8
 registry-removal + the R9 review; decision log DEC-0..39)
 Architect review: incorporated; this plan additionally folds the R9 #2 incremental-landing
@@ -393,6 +393,8 @@ Purpose:
 
 - Add the claim-backed invoker drive loop.
 - Acquire execution claim before driving.
+- Public runtime drive APIs require a live execution-claim token and an `ExecutionClaimStore`;
+  the unclaimed drive path is not exposed.
 - Heartbeat while driving.
 - Release on terminal.
 - Stop/report on renewal failure.
@@ -567,6 +569,9 @@ Purpose (R9 #2 cutover — gated; lane mis-release is the one place safety lives
 
 - Now that the verify runner (Commit 13) drives the pair end to end, make pair-keyed authority the
   **sole** admission and lane-release authority.
+- Project `RunAdmitted.spec_hash` as store-owned authority and require `SagaAdmitToken` to match
+  that projected hash for remediation and terminal saga admission. Matching only the incoming saga
+  payload is insufficient.
 - Delete the node/attempt ledger keying, the old single-shape lane-release validation, and the
   Commit 12 dual-validation scaffolding.
 
@@ -599,6 +604,8 @@ Verification:
 - Re-run the kill-mid-flight suite on pair-only authority.
 - Assert a lane is never mis-admitted or mis-released at any point across the 12 -> 13 -> 13b
   sequence.
+- Regression tests reject saga/remediation admission when a token is minted from a same-policy but
+  different certified spec hash than the admitted run.
 
 ### Commit 14: `evm: record submission anchors`
 

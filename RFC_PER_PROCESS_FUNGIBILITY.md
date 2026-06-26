@@ -1,6 +1,6 @@
 # RFC: Per-Process Fungibility
 
-Status: **Proposed** (pre-ratification; no code changed)
+Status: **Implemented** (kept as the design record for the per-process fungibility cutover)
 Date: 2026-06-24
 Scope: MFM execution model, coordination layer, and side-effect lifecycle
 Derivation / reasoning record: `MFM_PROCESS_FUNGIBLE.md` (R1–R4). This RFC is the consolidated,
