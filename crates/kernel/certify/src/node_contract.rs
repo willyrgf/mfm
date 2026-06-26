@@ -2,6 +2,7 @@ use super::*;
 
 pub(super) fn validate_state_node_contract(input: StateNodeContractInput<'_>) -> Result<()> {
     let StateNodeContractInput {
+        nodes,
         node,
         descriptor,
         config_ref_digest,
@@ -128,7 +129,8 @@ pub(super) fn validate_state_node_contract(input: StateNodeContractInput<'_>) ->
             format!("{label} {} output lineage producer mismatch", node.node_id),
         ));
     }
-    let expected_lineage = expected_node_lineage(node, &input_cells, config_ref_digest)?;
+    let expected_lineage =
+        expected_node_lineage(node, &input_cells, config_ref_digest, nodes, remediations)?;
     if enforce_framework_lineage_inputs
         && node.framework.is_some()
         && sorted_cell_ids(input_cells.clone())

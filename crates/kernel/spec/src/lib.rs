@@ -964,6 +964,80 @@ pub mod v1 {
             Self::from_json_str(input)
         }
 
+        /// Resolves a certified side-effect verify pair by verify node id.
+        pub fn side_effect_verify_pair_for_verify_node(
+            &self,
+            verify_node_id: &NodeId,
+        ) -> Result<SideEffectVerifyPairRef<'_>> {
+            let verify_node = self
+                .nodes
+                .iter()
+                .find(|node| &node.node_id == verify_node_id)
+                .ok_or_else(|| {
+                    json_error(format!(
+                        "side-effect verify node {verify_node_id} is not present in spec"
+                    ))
+                })?;
+            self.resolve_side_effect_verify_pair(verify_node)
+        }
+
+        /// Resolves a certified side-effect verify pair by pair id.
+        pub fn side_effect_verify_pair_for_pair_id(
+            &self,
+            pair_id: &SideEffectPairId,
+        ) -> Result<SideEffectVerifyPairRef<'_>> {
+            let mut matches = self.nodes.iter().filter(|node| {
+                matches!(
+                    &node.framework,
+                    Some(FrameworkNodeSpec::SideEffectVerify(verify))
+                        if verify.pair_id == *pair_id
+                )
+            });
+            let verify_node = matches.next().ok_or_else(|| {
+                json_error(format!(
+                    "side-effect pair {pair_id} has no certified verify node"
+                ))
+            })?;
+            if matches.next().is_some() {
+                return Err(json_error(format!(
+                    "side-effect pair {pair_id} has multiple certified verify nodes"
+                )));
+            }
+            self.resolve_side_effect_verify_pair(verify_node)
+        }
+
+        /// Resolves a certified side-effect verify pair by submit node id.
+        pub fn side_effect_verify_pair_for_submit_node(
+            &self,
+            submit_node_id: &NodeId,
+        ) -> Result<SideEffectVerifyPairRef<'_>> {
+            let mut matches = self.nodes.iter().filter(|node| {
+                matches!(
+                    &node.framework,
+                    Some(FrameworkNodeSpec::SideEffectVerify(verify))
+                        if verify.submit_node_id == *submit_node_id
+                )
+            });
+            let verify_node = matches.next().ok_or_else(|| {
+                json_error(format!(
+                    "submit node {submit_node_id} is missing certified side-effect verify node"
+                ))
+            })?;
+            if matches.next().is_some() {
+                return Err(json_error(format!(
+                    "submit node {submit_node_id} has multiple certified side-effect verify nodes"
+                )));
+            }
+            self.resolve_side_effect_verify_pair(verify_node)
+        }
+
+        fn resolve_side_effect_verify_pair<'a>(
+            &'a self,
+            verify_node: &'a NodeSpec,
+        ) -> Result<SideEffectVerifyPairRef<'a>> {
+            resolve_side_effect_verify_pair(&self.nodes, &self.remediations, verify_node)
+        }
+
         fn json(&self) -> Result<serde_json::Value> {
             let descriptor_index = DescriptorJsonIndex::new(&self.descriptor_identities)?;
             Ok(serde_json::json!({
@@ -1960,8 +2034,6 @@ pub mod v1 {
         pub pair_id: SideEffectPairId,
         /// Submit node that owns the external mutation boundary.
         pub submit_node_id: NodeId,
-        /// Submit node's internal output cell used as structural pair anchor.
-        pub submit_output_cell_id: CellId,
     }
 
     impl SideEffectVerifyNodeSpec {
@@ -1969,9 +2041,80 @@ pub mod v1 {
             serde_json::json!({
                 "pair_id": self.pair_id.as_str(),
                 "submit_node_id": self.submit_node_id.as_str(),
-                "submit_output_cell_id": self.submit_output_cell_id.as_str(),
             })
         }
+    }
+
+    /// Resolved side-effect submit/verify pair authority derived from a typed spec.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct SideEffectVerifyPairRef<'a> {
+        /// Certified side-effect pair id.
+        pub pair_id: &'a SideEffectPairId,
+        /// Framework verify node.
+        pub verify_node: &'a NodeSpec,
+        /// Framework verify metadata.
+        pub verify: &'a SideEffectVerifyNodeSpec,
+        /// Submit node that owns the external mutation boundary.
+        pub submit_node: &'a NodeSpec,
+        /// Submit node side-effect contract.
+        pub submit_contract: &'a SideEffectContractSpec,
+        /// Submit node internal output cell used as the structural anchor.
+        pub submit_output_cell: &'a CellId,
+    }
+
+    /// Resolves a side-effect verify pair from typed spec node collections.
+    pub fn resolve_side_effect_verify_pair<'a>(
+        nodes: &'a [NodeSpec],
+        remediations: &'a BTreeMap<NodeId, NodeSpec>,
+        verify_node: &'a NodeSpec,
+    ) -> Result<SideEffectVerifyPairRef<'a>> {
+        let Some(FrameworkNodeSpec::SideEffectVerify(verify)) = &verify_node.framework else {
+            return Err(json_error(format!(
+                "node {} is not a side-effect verify node",
+                verify_node.node_id
+            )));
+        };
+        let submit_node = nodes
+            .iter()
+            .chain(remediations.values())
+            .find(|node| node.node_id == verify.submit_node_id)
+            .ok_or_else(|| {
+                json_error(format!(
+                    "side-effect verify node {} references missing submit node {}",
+                    verify_node.node_id, verify.submit_node_id
+                ))
+            })?;
+        if submit_node.framework.is_some() {
+            return Err(json_error(format!(
+                "side-effect verify node {} references framework submit node {}",
+                verify_node.node_id, submit_node.node_id
+            )));
+        }
+        let submit_contract = submit_node.side_effect.as_ref().ok_or_else(|| {
+            json_error(format!(
+                "side-effect verify node {} references non-side-effect submit node {}",
+                verify_node.node_id, submit_node.node_id
+            ))
+        })?;
+        let expected_pair = side_effect_pair_id(
+            &submit_node.node_id,
+            &submit_node.output_cell,
+            submit_contract,
+        )?;
+        if verify.pair_id != expected_pair {
+            return Err(json_error(format!(
+                "side-effect verify node {} pair id is not stable-id derived",
+                verify_node.node_id
+            )));
+        }
+        Ok(SideEffectVerifyPairRef {
+            pair_id: &verify.pair_id,
+            verify_node,
+            verify,
+            submit_node,
+            submit_contract,
+            submit_output_cell: &submit_node.output_cell,
+        })
     }
 
     /// Same-value bridge framework node metadata.
@@ -3270,7 +3413,6 @@ pub mod v1 {
         Ok(SideEffectVerifyNodeSpec {
             pair_id: identity(required_str(object, "pair_id")?)?,
             submit_node_id: identity(required_str(object, "submit_node_id")?)?,
-            submit_output_cell_id: identity(required_str(object, "submit_output_cell_id")?)?,
         })
     }
 

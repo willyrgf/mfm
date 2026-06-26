@@ -210,14 +210,10 @@ impl CertifiedRuntimeSpec {
         &self,
         submit_node_id: &NodeId,
     ) -> Option<&SideEffectPairId> {
-        self.nodes.values().find_map(|node| match &node.framework {
-            Some(spec::FrameworkNodeSpec::SideEffectVerify(verify))
-                if verify.submit_node_id == *submit_node_id =>
-            {
-                Some(&verify.pair_id)
-            }
-            _ => None,
-        })
+        self.spec()
+            .side_effect_verify_pair_for_submit_node(submit_node_id)
+            .ok()
+            .map(|pair| pair.pair_id)
     }
 
     /// Iterates certified remediation nodes keyed by their forward side-effect node id.

@@ -1426,18 +1426,12 @@ pub mod v1 {
             &self,
             pair_id: &SideEffectPairId,
         ) -> Result<spec::SideEffectVerificationSpec> {
-            let (_, verify) = self.side_effect_verify_node_for_pair(pair_id)?;
-            let submit_node = self.node(&verify.submit_node_id)?;
-            let side_effect = submit_node.side_effect.as_ref().ok_or_else(|| {
-                ReplayError::new(
-                    ReplayErrorKind::CertifiedEvidenceMismatch,
-                    format!(
-                        "side-effect submit node {} has no certified side-effect contract",
-                        submit_node.node_id
-                    ),
-                )
-            })?;
-            Ok(side_effect.verification.clone())
+            let pair = self
+                .certified_spec
+                .spec
+                .side_effect_verify_pair_for_pair_id(pair_id)
+                .map_err(certified_spec_error)?;
+            Ok(pair.submit_contract.verification.clone())
         }
 
         fn verify_side_effect_intent(
@@ -2125,24 +2119,12 @@ pub mod v1 {
             &self,
             pair_id: &SideEffectPairId,
         ) -> Result<(&spec::NodeSpec, &spec::SideEffectVerifyNodeSpec)> {
-            self.certified_spec
+            let pair = self
+                .certified_spec
                 .spec
-                .nodes
-                .iter()
-                .find_map(|node| match &node.framework {
-                    Some(spec::FrameworkNodeSpec::SideEffectVerify(verify))
-                        if verify.pair_id == *pair_id =>
-                    {
-                        Some((node, verify))
-                    }
-                    _ => None,
-                })
-                .ok_or_else(|| {
-                    ReplayError::new(
-                        ReplayErrorKind::CertifiedEvidenceMismatch,
-                        format!("side-effect pair {pair_id} has no certified verify node"),
-                    )
-                })
+                .side_effect_verify_pair_for_pair_id(pair_id)
+                .map_err(certified_spec_error)?;
+            Ok((pair.verify_node, pair.verify))
         }
 
         fn verify_cell_produced_against_spec(&self, payload: &events::CellProduced) -> Result<()> {
@@ -2772,6 +2754,13 @@ pub mod v1 {
     }
 
     fn certified_contract_mismatch(error: mfm_certify::CertifyError) -> ReplayError {
+        ReplayError::new(
+            ReplayErrorKind::CertifiedEvidenceMismatch,
+            error.to_string(),
+        )
+    }
+
+    fn certified_spec_error(error: mfm_spec::SpecError) -> ReplayError {
         ReplayError::new(
             ReplayErrorKind::CertifiedEvidenceMismatch,
             error.to_string(),
