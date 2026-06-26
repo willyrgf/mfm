@@ -20,6 +20,20 @@ use mfm_spec::v1::{
     self as spec, CanonicalizerIdentity, ManualResolutionEvidenceSpec, MediaType,
     ResourceNamespace, SagaPolicySpec, ValueLineageRef,
 };
+use mfm_store::v1::test_support::{
+    artifact_bytes_artifact_id_for_test as artifact_id,
+    artifact_bytes_for_test as test_artifact_bytes,
+    artifact_content_digest_for_test as content_digest,
+    confirmation_terminal_policies_for_projection_for_test as confirmation_terminal_policies_for_projection,
+    fixed_attempt_id_for_test as attempt_id, fixed_cell_id_for_test as cell_id,
+    fixed_descriptor_id_for_test as descriptor_id, fixed_digest_bytes_for_test as digest_bytes,
+    fixed_node_id_for_test as node_id, fixed_run_id_for_test as run_id,
+    fixed_schema_id_for_test as schema_id, fixed_scope_id_for_test as scope_id,
+    fixed_semantic_type_id_for_test as semantic_id, fixed_spec_hash_for_test as spec_hash,
+    fixed_state_kind_for_test as state_kind, media_type_for_test as media_type,
+    prepared_artifact_bytes_for_test as test_prepared_artifact_bytes,
+    run_identity_material_for_test,
+};
 use mfm_store::v1::{
     AdmissionLease, AdmissionToken, AdmissionWaiter, ArtifactEvidenceRef, AttemptStatus,
     AttemptTerminal, CellTerminalProjection, CommitArtifactEvidenceSet, CommitKey, CommitOutcome,
@@ -316,64 +330,6 @@ async fn acquire_execution_claim_lease(
     lease
 }
 
-fn digest_bytes(byte: u8) -> DigestBytes {
-    DigestBytes::from_array([byte; 32])
-}
-
-fn content_digest(byte: u8) -> ContentDigest {
-    ContentDigest::from_digest(
-        DigestAlgorithm::Sha256JcsV1,
-        sha256_digest_bytes(&test_artifact_bytes(byte)),
-    )
-}
-
-fn spec_hash(byte: u8) -> SpecHash {
-    SpecHash::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
-}
-
-fn run_id(byte: u8) -> RunId {
-    RunId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
-}
-
-fn test_run_identity_material_for_spec_hash(
-    certified_spec_hash: SpecHash,
-) -> events::RunIdentityMaterialV1 {
-    events::RunIdentityMaterialV1 {
-        certified_spec_hash,
-        trust_scope_id: TrustScopeId::new("mfm.trust_scope.v1:40404040404040404040404040404040")
-            .expect("test trust scope"),
-        distinct_run_key_digest: None,
-    }
-}
-
-fn artifact_id(byte: u8) -> ArtifactId {
-    let digest = content_digest(byte);
-    ArtifactId::from_digest(digest.algorithm(), *digest.digest())
-}
-
-fn test_artifact_bytes(byte: u8) -> Vec<u8> {
-    vec![byte; 128]
-}
-
-fn test_artifact_bytes_for_digest(digest: &ContentDigest) -> Option<Vec<u8>> {
-    (u8::MIN..=u8::MAX).map(test_artifact_bytes).find(|bytes| {
-        ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, sha256_digest_bytes(bytes))
-            == *digest
-    })
-}
-
-fn test_prepared_artifact_bytes(
-    evidence: &ArtifactEvidenceRef,
-) -> mfm_store::v1::Result<PreparedArtifactBytes> {
-    let bytes = test_artifact_bytes_for_digest(&evidence.digest).ok_or_else(|| {
-        StoreError::ArtifactEvidenceMismatch {
-            artifact_id: evidence.artifact_id.clone(),
-            field: "bytes",
-        }
-    })?;
-    PreparedArtifactBytes::new(bytes, evidence.clone())
-}
-
 fn prepared_artifact_bytes_from_bytes(bytes: Vec<u8>, role: ArtifactRole) -> PreparedArtifactBytes {
     let digest =
         ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, sha256_digest_bytes(&bytes));
@@ -381,55 +337,6 @@ fn prepared_artifact_bytes_from_bytes(bytes: Vec<u8>, role: ArtifactRole) -> Pre
     let mut evidence = store_artifact_ref(artifact_id, digest, role);
     evidence.byte_len = bytes.len() as u64;
     PreparedArtifactBytes::new(bytes, evidence).expect("prepared artifact bytes")
-}
-
-fn node_id(byte: u8) -> NodeId {
-    NodeId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
-}
-
-fn attempt_id(byte: u8) -> AttemptId {
-    AttemptId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
-}
-
-fn cell_id(byte: u8) -> CellId {
-    CellId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
-}
-
-fn scope_id(byte: u8) -> ScopeId {
-    ScopeId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
-}
-
-fn schema_id(name: &str, byte: u8) -> SchemaId {
-    SchemaId::new(name, "1", DigestAlgorithm::Sha256JcsV1, digest_bytes(byte)).expect("schema id")
-}
-
-fn semantic_id(name: &str, byte: u8) -> SemanticTypeId {
-    SemanticTypeId::new(
-        "mfm.test",
-        name,
-        "1",
-        DigestAlgorithm::Sha256JcsV1,
-        digest_bytes(byte),
-    )
-    .expect("semantic id")
-}
-
-fn descriptor_id(byte: u8) -> DescriptorId {
-    DescriptorId::from_digest(DigestAlgorithm::Sha256JcsV1, digest_bytes(byte))
-}
-
-fn state_kind(byte: u8) -> StateKind {
-    StateKind::new(
-        "mfm.test",
-        "state",
-        DigestAlgorithm::Sha256JcsV1,
-        digest_bytes(byte),
-    )
-    .expect("state kind")
-}
-
-fn media_type(value: &str) -> MediaType {
-    MediaType::new(value).expect("media type")
 }
 
 fn admission_token(value: &str) -> AdmissionToken {
@@ -463,7 +370,10 @@ fn run_admitted_with_saga_policy(
         .expect("saga authority spec hash");
     let spec_artifact = spec_artifact_ref();
     let certificate_artifact = certificate_artifact_ref();
-    let identity_material = test_run_identity_material_for_spec_hash(certified_spec_hash.clone());
+    let identity_material = run_identity_material_for_test(
+        certified_spec_hash.clone(),
+        "40404040404040404040404040404040",
+    );
     KernelEventPayload::RunAdmitted(Box::new(events::RunAdmitted {
         run_id,
         identity_material,
@@ -919,24 +829,6 @@ fn saga_authority_spec(policy: SagaPolicySpec) -> spec::TypedExecutionSpec {
         },
     })
     .expect("saga authority spec")
-}
-
-fn confirmation_terminal_policies_for_projection(
-    projection: &mfm_store::v1::ProjectionSnapshot,
-    run_id: &RunId,
-) -> mfm_store::v1::SideEffectTerminalPolicies {
-    mfm_store::v1::SideEffectTerminalPolicies::new(
-        projection
-            .side_effects()
-            .filter(|(_, side_effect)| side_effect.run_id == *run_id)
-            .map(|(_, side_effect)| {
-                (
-                    side_effect.pair_id.clone(),
-                    mfm_store::v1::SideEffectTerminalPolicy::Confirmation,
-                )
-            })
-            .collect::<BTreeMap<_, _>>(),
-    )
 }
 
 fn side_effect_ledger_purpose() -> events::SideEffectLedgerPurpose {

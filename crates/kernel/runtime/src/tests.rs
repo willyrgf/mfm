@@ -25,7 +25,9 @@ use mfm_program::{
     StateResult, StateSpec,
 };
 use mfm_program_derive::{MfmConfig, MfmValue, PublicOutputs};
-use mfm_store::v1::RunEventStore;
+use mfm_store::v1::{
+    test_support::prepared_commit_bundle_from_plan as test_bundle_from_plan, RunEventStore,
+};
 use serde::{Deserialize, Serialize};
 
 const D0: DigestBytes = DigestBytes::from_array([0x10; 32]);
@@ -328,22 +330,6 @@ impl TestPreparedCommitExt for TestTypedRunStore {
         let plan = test_prepared_commit_plan(request, admitted_artifacts)?;
         self.append_test_commit_plan(plan)
     }
-}
-
-fn test_bundle_from_plan(
-    plan: store::PreparedCommitPlan,
-) -> store::Result<store::PreparedCommitBundle> {
-    let existing = plan
-        .admitted_artifacts()
-        .iter()
-        .map(|evidence| {
-            Ok(store::ExistingArtifactAdmission::new(
-                evidence.artifact_id.clone(),
-                evidence.evidence_hash()?,
-            ))
-        })
-        .collect::<store::Result<Vec<_>>>()?;
-    store::PreparedCommitBundle::new(plan, Vec::new(), existing)
 }
 
 fn test_prepared_commit_plan(
