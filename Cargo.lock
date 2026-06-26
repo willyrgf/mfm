@@ -1997,6 +1997,7 @@ dependencies = [
  "mfm-evm-contract-model",
  "mfm-evm-core",
  "mfm-ids",
+ "mfm-integration-tests",
  "mfm-manual-auth",
  "mfm-op-evm-contract-lifecycle",
  "mfm-op-portfolio-tracker",
