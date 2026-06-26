@@ -133,19 +133,33 @@ impl ActiveResourceLaneReleaseView for MaterializedActiveLane {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct ResourceLaneReleaseMatch<'a> {
+    pub(super) run_id: &'a RunId,
+    pub(super) ledger_key: &'a events::SideEffectLedgerKey,
+    pub(super) ledger_purpose: &'a events::SideEffectLedgerPurpose,
+    pub(super) pair_id: &'a SideEffectPairId,
+    pub(super) invocation_epoch: u32,
+    pub(super) claim_id: &'a events::ResourceLaneClaimId,
+    pub(super) mismatch_message: &'static str,
+}
+
 pub(super) fn resolve_active_resource_lane_release<'a, L>(
     active_lanes: &'a BTreeMap<ResourceLaneKey, L>,
-    run_id: &RunId,
-    ledger_key: &events::SideEffectLedgerKey,
-    ledger_purpose: &events::SideEffectLedgerPurpose,
-    pair_id: &SideEffectPairId,
-    invocation_epoch: u32,
-    claim_id: &events::ResourceLaneClaimId,
-    mismatch_message: &'static str,
+    release: ResourceLaneReleaseMatch<'_>,
 ) -> Result<(&'a ResourceLaneKey, &'a L)>
 where
     L: ActiveResourceLaneReleaseView,
 {
+    let ResourceLaneReleaseMatch {
+        run_id,
+        ledger_key,
+        ledger_purpose,
+        pair_id,
+        invocation_epoch,
+        claim_id,
+        mismatch_message,
+    } = release;
     let holder = SideEffectPairLedgerRef::new(run_id.clone(), pair_id.clone());
     let Some((key, active)) = active_lanes
         .iter()
@@ -201,36 +215,23 @@ pub fn resource_lane_release_intent_resolution<'a>(
     )?;
     resolve_resource_lane_release(
         projections,
-        run_id,
-        &intent.ledger_key,
-        &intent.ledger_purpose,
-        &intent.pair_id,
-        intent.invocation_epoch,
-        &intent.claim_id,
-        "resource lane release intent does not match active claim",
+        ResourceLaneReleaseMatch {
+            run_id,
+            ledger_key: &intent.ledger_key,
+            ledger_purpose: &intent.ledger_purpose,
+            pair_id: &intent.pair_id,
+            invocation_epoch: intent.invocation_epoch,
+            claim_id: &intent.claim_id,
+            mismatch_message: "resource lane release intent does not match active claim",
+        },
     )
 }
 
 fn resolve_resource_lane_release<'a>(
     projections: &'a ProjectionSnapshot,
-    run_id: &RunId,
-    ledger_key: &events::SideEffectLedgerKey,
-    ledger_purpose: &events::SideEffectLedgerPurpose,
-    pair_id: &SideEffectPairId,
-    invocation_epoch: u32,
-    claim_id: &events::ResourceLaneClaimId,
-    mismatch_message: &'static str,
+    release: ResourceLaneReleaseMatch<'_>,
 ) -> Result<(&'a ResourceLaneKey, &'a ResourceLaneProjection)> {
-    resolve_active_resource_lane_release(
-        &projections.resource_lanes,
-        run_id,
-        ledger_key,
-        ledger_purpose,
-        pair_id,
-        invocation_epoch,
-        claim_id,
-        mismatch_message,
-    )
+    resolve_active_resource_lane_release(&projections.resource_lanes, release)
 }
 
 pub(super) fn release_resource_lane(
@@ -247,13 +248,15 @@ pub(super) fn release_resource_lane(
     )?;
     let (key, active) = resolve_resource_lane_release(
         projections,
-        run_id,
-        &payload.ledger_key,
-        &payload.ledger_purpose,
-        &payload.pair_id,
-        payload.invocation_epoch,
-        &payload.claim_id,
-        "resource lane release does not match active claim",
+        ResourceLaneReleaseMatch {
+            run_id,
+            ledger_key: &payload.ledger_key,
+            ledger_purpose: &payload.ledger_purpose,
+            pair_id: &payload.pair_id,
+            invocation_epoch: payload.invocation_epoch,
+            claim_id: &payload.claim_id,
+            mismatch_message: "resource lane release does not match active claim",
+        },
     )?;
     if active.claim_fencing_token != payload.claim_fencing_token {
         return Err(StoreError::ProjectionConflict {

@@ -3246,13 +3246,15 @@ fn validate_typed_spec(
     validate_seeds(&spec.seeds, &scope_ids, &cell_index)?;
     let node_index = validate_nodes(
         &spec.nodes,
-        &spec.remediations,
-        &scope_ids,
-        &descriptor_index,
-        &config_refs,
-        &cell_index,
-        &lineage_index,
-        &spec.public_outputs,
+        NodeValidationContext {
+            remediations: &spec.remediations,
+            scope_ids: &scope_ids,
+            descriptors: &descriptor_index,
+            config_refs: &config_refs,
+            cells: &cell_index,
+            lineages: &lineage_index,
+            public_outputs: &spec.public_outputs,
+        },
     )?;
     validate_saga_structure(SagaValidationContext {
         typed: spec,
@@ -3875,16 +3877,29 @@ struct StateNodeContractInput<'a> {
 
 mod node_contract;
 
+struct NodeValidationContext<'a, 'd> {
+    remediations: &'a BTreeMap<NodeId, spec::NodeSpec>,
+    scope_ids: &'a BTreeSet<String>,
+    descriptors: &'a DescriptorIndex<'d>,
+    config_refs: &'a ConfigIndex,
+    cells: &'a BTreeMap<String, spec::CellSpec>,
+    lineages: &'a BTreeMap<String, spec::ValueLineage>,
+    public_outputs: &'a spec::PublicOutputSpec,
+}
+
 fn validate_nodes(
     nodes: &[spec::NodeSpec],
-    remediations: &BTreeMap<NodeId, spec::NodeSpec>,
-    scope_ids: &BTreeSet<String>,
-    descriptors: &DescriptorIndex<'_>,
-    config_refs: &ConfigIndex,
-    cells: &BTreeMap<String, spec::CellSpec>,
-    lineages: &BTreeMap<String, spec::ValueLineage>,
-    public_outputs: &spec::PublicOutputSpec,
+    context: NodeValidationContext<'_, '_>,
 ) -> Result<BTreeMap<String, spec::NodeSpec>> {
+    let NodeValidationContext {
+        remediations,
+        scope_ids,
+        descriptors,
+        config_refs,
+        cells,
+        lineages,
+        public_outputs,
+    } = context;
     let mut index = BTreeMap::new();
     for node in nodes {
         if !scope_ids.contains(node.scope_id.as_str()) {
