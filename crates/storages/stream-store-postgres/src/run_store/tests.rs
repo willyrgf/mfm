@@ -6,9 +6,8 @@ use mfm_canonical::sha256_digest_bytes;
 use mfm_events::v1::{self as events, ArtifactRole, KernelEventPayload};
 use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind, CapabilityVersion, CellId,
-    ContentDigest, DescriptorId, DigestAlgorithm, DigestBytes, EffectKind, EffectVersion,
-    LoweringVersion, NodeId, RunId, SchemaId, ScopeId, SemanticTypeId, SideEffectPairId, SpecHash,
-    SpecVersion, StateKind, StateVersion,
+    ContentDigest, DigestAlgorithm, EffectKind, EffectVersion, LoweringVersion, NodeId, RunId,
+    SchemaId, SideEffectPairId, SpecVersion, StateVersion,
 };
 use mfm_manual_auth::{
     manual_authorization_proof_schema_id, ManualAuthorizationSignatureBytes,
@@ -17,12 +16,11 @@ use mfm_manual_auth::{
     ManualResolutionProofAuthority, VerifiedManualResolutionForPrefix,
 };
 use mfm_spec::v1::{
-    self as spec, CanonicalizerIdentity, ManualResolutionEvidenceSpec, MediaType,
-    ResourceNamespace, SagaPolicySpec, ValueLineageRef,
+    self as spec, CanonicalizerIdentity, ManualResolutionEvidenceSpec, ResourceNamespace,
+    SagaPolicySpec, ValueLineageRef,
 };
 use mfm_store::v1::test_support::{
     artifact_bytes_artifact_id_for_test as artifact_id,
-    artifact_bytes_for_test as test_artifact_bytes,
     artifact_content_digest_for_test as content_digest,
     confirmation_terminal_policies_for_projection_for_test as confirmation_terminal_policies_for_projection,
     fixed_attempt_id_for_test as attempt_id, fixed_cell_id_for_test as cell_id,
