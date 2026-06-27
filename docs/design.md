@@ -32,6 +32,8 @@ they do not own workflow semantics.
 - Typed values, typed configs, public outputs, and event payloads must not contain secrets.
 - Replay and resume are driven by the stored certified spec and the authoritative run stream.
 - Replay adapters must answer only from recorded facts, typed artifacts, and side-effect evidence.
+- Process identity and process topology are not semantic authority. Workers are interchangeable
+  executors over the store, and leases/claims are liveness coordination only.
 - Admission, drive, verify, and replay must not consult mutable registries or external policy
   oracles; outcome-affecting policy is resolved once into hash-defining certified spec material.
 - Side effects use typed intent, typed idempotency input, durable ledger events, and typed receipt
@@ -359,6 +361,43 @@ derived run id; acquire does not auto-reap expired holders, and renew/release/re
 the caller's token still matches the current holder. The store validates prepared claim semantics
 before enqueueing a waiter, preventing malformed claims from occupying the FIFO head. Release
 notifications, if present, are wake hints only and do not grant ownership.
+
+## Process-Fungible Execution
+
+MFM is a Postgres-coordinated durable execution fabric. The semantic unit is the certified run, not
+the process that happens to drive it. Correctness lives in the certified spec, the append-only run
+stream, and the store transaction boundary. Process topology is an operational deployment choice:
+one service may drive many runs, many invokers may each drive one run, and compatible workers may
+resume the same run at different times without changing the run's meaning.
+
+Workers are disposable and interchangeable only within the run's certified executable and capability
+bindings. A worker may drive a run when it matches the stored executable identities, has the required
+runtime capability bindings, and holds the current execution claim token. A same-identity launcher
+with compatible bindings attaches and reports when another holder is active; a launcher with
+incompatible executable bindings reports without driving. These checks are determinism guards, not
+run identity material.
+
+Leases, admission waiters, execution claims, notifications, and observation cursors are operational
+liveness mechanisms. They can reduce duplicate effort, preserve single-lane FIFO retry order, wake
+blocked invokers, or coordinate the current active driver. They do not grant semantic authority to
+append events, replay, resume, render public output, own resource lanes, cross side-effect
+boundaries, or decide terminal run state. A false reap or duplicate execution-claim holder can waste
+work, but the per-run append transaction, prepared commit authority, stream preconditions, resource
+lane authority events, side-effect fencing, and certified verification rules remain the safety
+boundary.
+
+External mutation is the one boundary that cannot be made atomic with the store transaction. MFM
+therefore corners external effects into the certified side-effect ledger: resource-lane exclusivity,
+typed idempotency, prepared invocation evidence, receipt/finality verification, recovery evidence,
+and saga engagement are the authority. Lease expiry is never permission to redo an external
+mutation; it is permission to re-examine the durable ledger and either continue from recorded
+evidence, record defended terminal evidence, or block for manual/resolution work under certified
+policy.
+
+v1 is invoker-driven and manual-resumable. Automatic dead-driver takeover, background worker-pool
+dispatch, feed-driven dispatch, `due_at` re-wake, long-wait tenure release, pipelined nonces, and
+multi-lane admission remain deferred unless this document and `docs/saga.md` are updated with a new
+certified contract.
 
 ## Runtime
 
