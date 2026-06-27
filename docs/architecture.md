@@ -33,6 +33,12 @@ typed or authored input
 The certified typed execution spec is the runtime contract. Runner plans, route names, command
 names, source scans, CI summary keys, rendered JSON, and projection rows are not semantic authority.
 
+Process fungibility is part of this boundary. Certified runs are store-owned durable work, not
+process-owned work. App and binary code may construct process-local stores, transports, signer
+providers, and driver loops, but those process-local choices cannot define run identity, side-effect
+authority, replay authority, public-output authority, or terminal status. Execution claims,
+admission waiters, observations, and notifications are liveness and coordination mechanisms only.
+
 For the proposed consolidation of public run-start ingress around registered entry-point
 operations, see `docs/RFC_ENTRYPOINT_OP.md`.
 
@@ -538,6 +544,9 @@ Before merging a change, verify:
 - certified saga and side-effect verification policy are hash-defining spec data, not policy
   resolved by a registry at admission, and compensation/manual outcomes are derived from certified
   policy plus stream evidence
+- process topology remains operational: process-local resources and execution claims do not become
+  run identity, side-effect authority, replay authority, public-output authority, or terminal-status
+  authority
 - manual resolution uses certified schema roles, certified verifier identity, certified operator
   authority snapshot, canonical proof bytes, signature verification, and quorum
 - replay paths cannot construct live capabilities
