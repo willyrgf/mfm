@@ -33,7 +33,7 @@ control events.
 
 The kernel encodes saga authority in proof objects instead of repeated validators:
 
-- `SagaAdmitToken` is minted from the certified typed spec and binds run-start and saga admission to
+- `CertifiedRunStoreAuthority` is minted from the certified typed spec and binds run-start and saga admission to
   the certified run id, spec hash, saga policy, and side-effect terminal policies. Store admission
   checks that spec hash against the projected `RunAdmitted.spec_hash`.
 - `CertifiedSideEffectContract` validates resource claims and side-effect contract evidence for

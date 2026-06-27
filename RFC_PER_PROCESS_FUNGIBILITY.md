@@ -19,8 +19,9 @@ that **matches a run's bound executables** can drive it — correctness lives in
 transaction boundary, never in process topology. (v1 is invoker-driven and manual-resumable; full
 automatic disposable-worker recovery is deferred — §6.5, §12.)
 
-Most of the substrate already exists (per-run serialization, append-only authority, sharded
-resource lanes, a durable observation/watch feed). The remaining work is three coherent pieces:
+Most of the substrate already existed (per-run serialization, append-only authority, sharded
+resource lanes, a durable observation/watch feed). The implemented cutover has three coherent
+pieces:
 
 1. **A unified admission-lane primitive** — one durable mechanism for fair, fenced, lease-reaped
    exclusive admission that serves both *resource lanes* (wallet/nonce contention) and *execution
@@ -62,19 +63,19 @@ therefore cannot be process-local: it must be shared, durable, and reconstructab
 processes as needed. The shared durable coordinator already exists — Postgres plus the typed,
 append-only, certified design.
 
-### 2.3 What is missing today
+### 2.3 What the cutover fixes
 
-- **Random run identity, no execution claim, and no automatic takeover.** Execution is invoker-driven
-  (the process that starts a run drives it) — fine — but default run ids are random today
-  (`mfm_app::new_run_id()` hashes a UUIDv4, and CLI/REST use it when no run id is supplied). That
-  means two identical launches create two independent runs. There is also no durable execution claim
-  to coordinate active drivers of the same run, and no automatic way for another process to take over
-  a dead driver's run (deferred to the AC/DC + saga recovery effort). The observation feed is
-  read/observe only.
-- **No external-effect reconciliation.** A worker that submits a transaction and dies leaves an
-  ambiguous nonce; nothing reads chain truth to resolve landed-vs-never-sent.
-- **Verification is not productized.** Receipt/finality checking is embedded ad hoc inside the
-  side-effect runner rather than configurable per state and reusable across domains.
+- **Content-addressed run identity and execution claims.** Normal CLI/REST launches derive
+  `RunIdentityMaterialV1` from the certified spec hash, deployment trust scope, and optional
+  distinct-run digest; `RunAdmitted` carries that material and store admission rejects mismatches.
+  The execution claim coordinates active drivers of the same run id. Automatic takeover remains
+  deferred to the AC/DC + saga recovery effort; the observation feed is read/observe only.
+- **External-effect reconciliation without unsafe re-broadcast.** Submit and verify recovery read the
+  recorded submission anchor before deciding whether the external mutation was observed, proved not
+  submitted, still unknown, or ambiguous. A prepared-anchor mismatch is ambiguity evidence, not a
+  fallback path.
+- **Productized verification.** Receipt/finality checking is a side-effect verification framework
+  state with explicit store validation and replay evidence.
 
 ## 3. Goals and non-goals
 
@@ -307,8 +308,8 @@ resolves "latest", the **resolved** op id/version is recorded in hash-defining `
 `RunIdentityMaterialV1` is part of `RunAdmitted` evidence, and the store/runtime validate
 `run_id == sha256-jcs-v1(identity_material)`. Attach loads the existing `RunAdmitted` and compares
 the stored identity material; a mismatch is identity collision/corruption. This makes the launch
-identity a replacement for the old random default path and the RFC's former custom projection, not an
-additional authority beside `RunAdmitted`.
+identity the normal start path and the RFC's former custom projection replacement, not an additional
+authority beside `RunAdmitted`.
 
 **Executable binding remains a drive guard (DEC-29).** Executable identity is not a direct field of
 `RunIdentityMaterialV1`; the admitted executables stay where the code already enforces them:
@@ -320,8 +321,8 @@ changes the certified spec hash, that is different certified work and therefore 
 model intentionally avoids a separate semantic equivalence layer. The first admitter's executables
 become the run's bound build. Consequence (rolling upgrade): an in-flight run is driven/resumed only
 by a matching build until the deferred AC/DC + saga effort adds cross-build takeover.
-Today's implementation lacks all of this: `mfm_app::new_run_id()` hashes a random UUID and CLI/REST use
-it by default; WS-B replaces that default with this derived run id.
+The normal app/CLI/REST launch path now uses this derived run id; raw caller-supplied run ids remain
+admin/import/test-only rather than a user-facing way to fork identical certified work.
 
 **Idempotent by default, distinct-run on request (DEC-28).** Because the run id is the certified-spec
 content address inside a trust scope, two launches of the same certified spec converge on **one** run
@@ -472,10 +473,9 @@ never constructs domain output itself (DEC-37).** The framework node owns the ge
 **(d) One ledger across the pair — a first-class *pair authority* redesign (DEC-14, DEC-17).** The
 verify node continues the submit node's ledger. This is *not* a projection-lookup tweak: side-effect
 authority is node/attempt-shaped **down to the event schemas** — `IntentPersisted` and its siblings
-carry `node_id`/`scope_id`/`attempt_id` (`events.rs:2389`), as do store admission, lane release
-(`resource_lanes.rs:75`), and artifact producer evidence (`store/v1/mod.rs:6931`). One ledger across
-two nodes therefore requires a **first-class certified `SideEffectPair` authority** that the schema
-and validation understand:
+carry `node_id`/`scope_id`/`attempt_id` (`events.rs:2389`), as do store admission and artifact
+producer evidence (`store/v1/mod.rs:6931`). One ledger across two nodes therefore requires a
+**first-class certified `SideEffectPair` authority** that the schema and validation understand:
 1. **Pair identity** — lowering mints a certified pair `(submit_node, verify_node)`; the ledger key
    derives from `(run, pair_id)`, not `{attempt_id, node_id}` (`side_effect_driver.rs:1096`).
 2. **Event attribution** — side-effect event payloads are attributed to a `(pair, role ∈ {submit,
@@ -528,15 +528,12 @@ ordinary frontier node:
 - A worker that dies mid-verification leaves a **runnable verify node**; manual `run resume` in v1
   (or future automatic recovery) re-drives it.
 - A worker that dies mid-submission leaves an **open submit attempt**; manual `run resume` in v1
-  (or future automatic recovery) re-runs the attempt path. **The safe reconciliation — chain-truth
-  read → `Confirmed` / `NotSubmittedProven`, plus the re-sign == recorded-anchor assertion — is
-  net-new EVM-verifier work (WS-D), not emergent from frontier driving**: today's recovery callback
-  blindly re-broadcasts and returns `Observed` (`adapters/evm-contracts/src/lib.rs:1758-1774`).
-  Safety floor *given WS-D*: the tx is pinned to one nonce, so **at most one tx can land — never a
-  double-spend**, and recorded-anchor reconstruction makes re-broadcast idempotent. *Without WS-D*,
-  bare re-broadcast mishandles a tx dropped from the mempool whose nonce has since advanced (reorg /
-  foreign use) — recording `Observed` for a tx that can never land — so WS-D's reconcile-before-resubmit
-  is a **hard gate**, not optional.
+  (or future automatic recovery) re-runs the attempt path. Recovery must reconcile from the committed
+  prepared-invocation anchor before any submit-side re-broadcast decision. Verify-side recovery from
+  `SubmissionUnknown` is read-only: it emits `SubmissionObserved`, `NotSubmittedProven`, stays
+  blocked as still unknown, or records `Ambiguous` evidence. The tx is pinned to one nonce, so **at
+  most one tx can land — never a double-spend**; anchor reconstruction and mismatch-to-ambiguity keep
+  an unsafe re-broadcast from turning uncertainty into false progress.
 - The wallet lane releases **only** when the verify node terminalizes, so a dead worker can wedge the
   wallet until manual resume. That is an explicit v1 availability tradeoff; it is safer than
   timeout-releasing an ambiguous nonce.
@@ -602,13 +599,13 @@ finality" — finality is one input among several.
   mechanism as its primary safety move. The primary invariant is that the submission anchor (the
   prepared-invocation expected hash, §6.4a) is recorded before the boundary; recovery
   **reconstructs it from the committed prepared invocation and asserts the re-signed hash equals
-  it** before any re-broadcast. A determinism-violating signer fails closed instead of
-  double-submitting. **Disposition on mismatch (review Med-6):** the re-sign check gates
+  it** before any submit-side re-broadcast. A determinism-violating signer records ambiguity instead
+  of double-submitting. **Disposition on mismatch (review Med-6):** the re-sign check gates
   *resubmission*, not reconciliation — the verify node still reconciles by the *recorded* anchor
-  against chain truth. On-chain → confirm + release the lane; provably not on-chain and
-  unresubmittable → a **defined terminal**: `NotSubmittedProven` → failure-with-lane-release
-  (default `FailWithoutAcdcClaim`), or a `ManualResolution`-policy manual block that holds the lane
-  pending operator action. Never a silent ledger/lane wedge.
+  against chain truth. If the anchor is on-chain, the run confirms and releases the lane; if it is
+  provably absent and not resubmittable because the prepared anchor no longer matches, the ledger
+  records ambiguity and keeps the lane held for operator resolution. Never a silent ledger/lane
+  wedge.
 - **Capabilities split semantic vs operational** (unchanged): outcome-affecting authority (signer
   ref, expected chain id, expected address) is pinned to the run and verified at admission;
   transport routing (RPC URL, source id) is per-worker. Verification needs only **read**
@@ -636,12 +633,12 @@ finality" — finality is one input among several.
 | DEC-12 | Unify resource lanes + execution claims into one admission-lane primitive | One table-pair, one `admit(mode)`; primitive owns order+lease, caller owns authority |
 | DEC-13 | Side-effect verification is a paired framework state (submit + verify) | Uniform/configurable verification; once resumed, reconciliation follows the ordinary frontier instead of bespoke machinery |
 | DEC-14 | One ledger across the verify pair (**committed**) — re-key by certified pair identity, projection-by-ledger-key, pair-bound release, multi-node payload validation | Simplest end state; decouples attempt vs ledger lifecycle. Two-linked-ledger rejected (less effort, more complex end state) |
-| DEC-15 | Recovery reconstructs the anchor from the committed prepared invocation and asserts re-sign == it before re-broadcast | The production signer path is already deterministic; artifact reconstruction is the load-bearing invariant because nonce/fee/gas are live reads |
+| DEC-15 | Recovery reconstructs the anchor from the committed prepared invocation and asserts re-sign == it before any submit-side re-broadcast | The production signer path is already deterministic; artifact reconstruction is the load-bearing invariant because nonce/fee/gas are live reads |
 | DEC-16 | Side-effect terminal output via a typed terminal-evidence model (`output_from_receipt` / `output_from_confirmation`), validated against the configured level | Enables `Receipt`-level terminalization; output is confirmation-only today |
 | DEC-17 | One-ledger's first-class certified `SideEffectPair` authority (pair identity, event attribution, store admission, pair-bound release, producer evidence) is accepted as the chosen path | Node/attempt shaping reaches the event schemas (`events.rs:2389`); blast radius accepted, not a reason to switch |
 | DEC-18 | Default run id = content address of `RunIdentityMaterialV1 { certified_spec_hash, trust_scope_id, distinct_run_key_digest }` | Exact certified work converges; no custom semantic projection; `NowaitSkip` coordinates active drivers of that identity |
 | DEC-19 | Lowering re-points the original output cell's producer to the verify node; submit binds no downstream cell | Downstream never observes "submitted" before "verified"; one producer per cell |
-| DEC-20 | Re-sign mismatch gates resubmission only; reconcile by the recorded anchor to a defined terminal (failure-with-lane-release or policy manual-block) | Never a silent ledger/lane wedge |
+| DEC-20 | Re-sign mismatch gates resubmission only; reconcile by the recorded anchor, and record ambiguity when the prepared anchor cannot be safely resubmitted | Never a silent ledger/lane wedge; the lane stays held until the ambiguity is resolved |
 | DEC-21 | Automatic takeover of a side-effecting run requires reconciliation → deferred to the AC/DC + saga recovery effort | v1 uses explicit manual resume; safety does not depend on single-driver uniqueness |
 | DEC-22 | **Invoker-driven** execution (not pool-dispatched): the starting process drives its run; the execution claim = active-driver coordination + future recovery substrate; the observation feed is status/watch only | Corrects a worker-pool misframing; no feed-driven dispatch → no snapshot-frontier liveness coupling |
 | DEC-23 | Dead-driver **automatic resume** (background sweep over expired claims) — **DEFERRED** to the AC/DC + saga recovery effort | v1 recovery is manual `run resume`; a dead driver can hold a signer lane until resumed |
@@ -651,7 +648,7 @@ finality" — finality is one input among several.
 | DEC-27 | `SideEffectVerify` is its **own validation family** (N-cardinality pairing invariant, evidence binding, post-rewrite single-producer check), not a singleton like other framework nodes | Zero per-author LOC, but real new certifier/lowering work |
 | DEC-28 | Runs are **idempotent by exact certified spec** (same `certified_spec_hash` + trust scope + no distinct key → one run); a caller forces a distinct run of identical certified work via `--distinct-run-key`, or by supplying a distinguishing input that changes the certified spec hash | The safe multi-agent default for exact certified work; raw `--run-id` is admin/import/test-only |
 | DEC-29 | Executable identity is a **drive-time determinism guard, NOT a direct field of run identity** (`binding.rs:113`/`history.rs:212` enforce it on drive/resume). Same run identity + different executables attaches/reports ("needs compatible build"); build changes that alter the certified spec hash are different certified work | Keeps executable binding out of `RunIdentityMaterialV1` while making the conservative exact-spec boundary explicit; rolling upgrade drains on matching build, cross-build takeover deferred |
-| DEC-30 | v1 mid-submission reconciliation is **net-new EVM-verifier work (WS-D)** — chain-truth read + re-sign==anchor — not emergent from frontier driving; bare re-broadcast (today's `submit_or_recover_submission`) is insufficient and gated out | "At most one tx lands" holds *given* WS-D; without it, dropped-mempool + advanced-nonce is mishandled |
+| DEC-30 | v1 mid-submission reconciliation is **net-new EVM-verifier work (WS-D)** — chain-truth read + re-sign==anchor — not emergent from frontier driving; bare re-broadcast is insufficient and gated out | "At most one tx lands" holds *given* WS-D; without it, dropped-mempool + advanced-nonce is mishandled |
 | DEC-31 | **Normative:** one Postgres deployment = one trust domain (all launchers co-authorized for its signers); deployment-owned `trust_scope_id` is a factor of `RunIdentityMaterialV1`. Cross-tenant isolation is a non-goal (would need the launching principal in `RunIdentityMaterialV1` + claim + evidence) | A trust *boundary*, not a note (review #2); co-authorized convergence is safe, distrusting tenants out of scope |
 | DEC-32 | `Receipt`-level terminalization is **final-at-risk** — the op designer's deliberate per-side-effect choice (`Finalized` is the safe option). A post-receipt reorg can invalidate the output **and** wedge the next nonce; both are **recoverable** via the deferred stuck-tx / nonce-reclaim workflow, not a safety hole and not auto-healed | R7 #1 — accepted+recoverable risk, not a forced hold-to-finality; corrects last round's "self-heals" |
 | DEC-33 | Ratification reconciles `docs/saga.md` ("every requested lane acquired together", `saga.md:161`) **down to single-lane** to match the code (`single_lane_claim_admission`, `resource_lanes.rs:94`); multi-lane stays deferred | review #6 — the saga contract overstated the single-lane implementation |
@@ -727,13 +724,12 @@ with docs+tests in the same change. Five workstreams.
   forward-fence** (`runtime/src/side_effects.rs:213`, `docs/saga.md`) (`kernel/store`,
   `kernel/runtime`). This is foundational: without pair-keyed authority, the verify node cannot
   continue the submit node's ledger or release the wallet lane.
-- **Land the phase gate incrementally, not big-bang (R9 #2).** Because the re-key touches
-  store-admission acceptance and wallet-lane release — the one place safety lives — introduce pair
-  identity *additively*, **dual-validate** old (`attempt_id`/`node_id`) and new (pair) keys under test,
-  then cut over; the §11 kill-mid-submit / kill-mid-verify tests **gate** the cutover rather than
-  follow it. No intermediate step may leave store admission or lane release able to mis-admit or
-  mis-release a lane. The one-ledger *end state* is unchanged (DEC-14/17); this constrains only how it
-  lands.
+- **Land the phase gate as a direct cutover, not a compatibility path (R9 #2).** Because the re-key
+  touches store-admission acceptance and wallet-lane release — the one place safety lives — delete
+  obsolete attempt/node-shaped authority at the cutover boundary and gate the change with the §11
+  kill-mid-submit / kill-mid-verify tests. No intermediate step may leave store admission or lane
+  release able to mis-admit or mis-release a lane. The one-ledger *end state* is unchanged
+  (DEC-14/17); compatibility shims are explicitly out of scope.
 - **`FrameworkNodeSpec::SideEffectVerify`** spec types + parse/json (`kernel/spec`); lowering inserts
   it after each side-effect node and records the **certified pair identity** (`kernel/program`). Its
   **own validation family** (`kernel/certify/framework_lifecycle.rs`): N-cardinality pairing
@@ -762,14 +758,12 @@ with docs+tests in the same change. Five workstreams.
 
 ### WS-D — Anchor reconstruction & reconciliation (hard gate, not emergent)
 
-- **Replace bare re-broadcast with reconcile-before-resubmit (DEC-30).** Today's EVM recovery callback
-  `submit_or_recover_submission` unconditionally re-broadcasts and returns `Observed`
-  (`adapters/evm-contracts/src/lib.rs:1758-1774`). WS-D makes the live `SideEffectVerifier` read chain
-  truth first and emit `Confirmed` / `NotSubmittedProven` / still-`Unknown`, driving the generic
-  `SideEffectSubmissionDecision` (`side_effect_driver.rs:848-878`) instead of always-`Observed`. This
-  is a **hard gate** of the verify-pair, not optional.
+- **Replace bare re-broadcast with reconcile-before-resubmit (DEC-30).** EVM recovery reads chain
+  truth first and emits `Observed`, `NotSubmittedProven`, still-`Unknown`, or `Ambiguous`, driving the
+  generic side-effect submission decision instead of treating recovery as always observed. This is a
+  **hard gate** of the verify-pair, not optional.
 - **Re-sign == recorded-anchor assertion** in the submit-node recovery path (`kernel/runtime`);
-  fail closed on mismatch before any re-broadcast.
+  record ambiguity on mismatch before any re-broadcast.
 - **Signer determinism remains a contract invariant** (`crates/signing`); the production ECDSA path
   already uses RFC 6979-style deterministic signing, so the load-bearing invariant is anchor
   reconstruction, not the signature (DEC-15).
@@ -798,7 +792,7 @@ time, but correctness does not depend on that uniqueness: false reaps/races cost
 work, while per-run append CAS and side-effect fencing preserve safety. If a dead driver leaves a
 side-effect ledger non-terminal, the signer lane can remain held until manual resume drives the run.
 
-## 9. Migration & compatibility
+## 9. Cutover Impact
 
 - **`resource_lane_waiters` → `admission_lane`/`admission_waiter`.** A fresh schema is acceptable;
   resource-lane *holders* are event-derived (rebuilt from the stream), so only the operational
@@ -826,9 +820,9 @@ side-effect ledger non-terminal, the signer lane can remain held until manual re
 | Outcome-affecting launch material is missing from `certified_spec_hash` | Treat it as a certification/assembly bug: make the material content-addressed config/definitions in the certified spec before deriving `RunIdentityMaterialV1`, or fail before `RunAdmitted` (DEC-18/39) |
 | One-ledger redesign reaches event schemas / store admission / lane release / producer evidence (wide blast radius) | Accepted as the chosen end state and a WS-C phase gate (DEC-14/17); pair-authority schema design in §6.4d + replay/kill-mid-flight tests; two-linked-ledger considered and rejected |
 | Fungible workers terminalize finality at different depths | Depth is certified **config in the spec** (§6.4b), captured by `certified_spec_hash` and read identically by all workers and replay — no registry or worker-local resolution; a worker lacking the capability declines the claim |
-| Signer cannot reproduce a recorded anchor → wedged lane | Defined terminal disposition (DEC-20): reconcile by the recorded anchor; failure-with-lane-release or policy manual-block, never a silent wedge |
+| Signer cannot reproduce a recorded anchor → wedged lane | Defined ambiguity disposition (DEC-20): reconcile by the recorded anchor; if it cannot be safely resubmitted, record ambiguity and keep the lane held for operator resolution |
 | Automatic takeover of a side-effecting run without reconciliation | Automatic resume is deferred to the AC/DC + saga effort (DEC-21/23); v1 uses explicit manual resume, and ambiguous ledgers keep the signer lane held until driven |
-| Signer determinism regresses | Production signer is already deterministic; re-sign == recorded-anchor assertion catches mismatch before re-broadcast (DEC-15/20) |
+| Signer determinism regresses | Production signer is already deterministic; re-sign == recorded-anchor assertion catches mismatch before submit-side recovery can re-broadcast and records ambiguity (DEC-15/20) |
 | Herd on the claim table (future resume sweep / concurrent invokers) | Content-addressed run id gives one lane per exact certified spec identity; `NowaitSkip` try-acquire losers pay one `UPDATE`; duplicate invokers attach/report rather than do driver work (DEC-18/22) |
 | Postgres as the coordination/scaling ceiling | Per-run and per-lane locks parallelize disjoint work; materialized lane projection (WS-E) removes the O(history) fold |
 | Wallet wedged by a dead driver before verify terminal | Accepted v1 availability tradeoff: manual `run resume` is the recovery trigger; the lane releases at the ledger's proven terminal (DEC-25), never on a timeout. Automatic recovery is deferred |
@@ -836,7 +830,7 @@ side-effect ledger non-terminal, the signer lane can remain held until manual re
 | `ManualResolution` holds a wallet lane | Only when the ambiguity itself needs an operator (rare; most ambiguity auto-reconciles); blocks only same-signer effects; mitigate operationally (per-class signers, fast alerting) (DEC-25) |
 | Same run identity on a different build double-drives if executables are accepted as identity | Executables are a **drive guard, not a direct `RunIdentityMaterialV1` field** (DEC-29); a same-identity different-build launcher attaches/reports via try-admit→attach. If the build changes `certified_spec_hash`, it is different certified work and a different run |
 | "Any worker drives any run" overstated — drive is executable-scoped and v1 is manual-resumable (review #3) | Doctrine scoped in §1/§6.1: driving requires matching executables; v1 invoker-driven + manual resume; full auto-recovery deferred |
-| Manual resume of an ambiguous submission left unreconciled (bare re-broadcast) | WS-D reconcile-before-resubmit (chain truth → Confirmed/NotSubmittedProven, re-sign==anchor) is a hard gate (DEC-30), replacing today's always-`Observed` callback |
+| Manual resume of an ambiguous submission left unreconciled (bare re-broadcast) | WS-D reconcile-before-resubmit is a hard gate (DEC-30): chain truth resolves observed/not-submitted cases, still-unknown blocks, and anchor mismatch records ambiguity |
 | Dedup convergence under mutual distrust drives a side effect under another launcher's signer | One deployment = one trust domain, deployment-owned `trust_scope_id` in `RunIdentityMaterialV1` (DEC-31, normative); cross-tenant isolation is a non-goal |
 | Capability-lacking invoker strands an admitted run (review #5) | Initial launch verifies capability **before** `RunAdmitted` (ingress failure, DEC-3); only resume/attach declines cleanly |
 | Receipt-level output invalidated by a post-receipt reorg (review #4) | `Receipt` is explicitly **final-at-risk** (DEC-32); outputs needing reorg-safety use `Finalized` |
@@ -863,12 +857,12 @@ side-effect ledger non-terminal, the signer lane can remain held until manual re
   fixtures.
 - **Side-effect manual recovery:** kill-mid-submit and kill-mid-verify integration tests against a
   local chain (reth) asserting the signer lane remains held until manual resume, at-most-once
-  landing, idempotent re-broadcast, and correct `Receipt/Confirmation/NotSubmittedProven`
+  landing, reconcile-before-submit recovery, and correct `Receipt/Confirmation/NotSubmittedProven`
   terminalization after resume. Resume must **reconcile via a chain-truth read**, not bare
   re-broadcast: a tx dropped from the mempool with an advanced nonce terminalizes `NotSubmittedProven`,
   not `Observed` (DEC-30).
 - **Determinism:** assert re-sign reproduces the recorded anchor; a deliberately non-deterministic
-  signer fixture must fail closed.
+  signer fixture must record ambiguity and avoid re-broadcast.
 - **Replay:** verify-node evidence replays from recorded facts with no live IO.
 - **Boundary:** cargo-metadata + compile-fail fixtures keeping the admission primitive
   domain-agnostic and the verifier read-only; an execution-path test asserting drive/verify take **no
@@ -897,7 +891,7 @@ side-effect ledger non-terminal, the signer lane can remain held until manual re
 | Per-lane advisory lock + FIFO waiters | `run_store/resource_lanes.rs:32-45,134-310` |
 | Observation/watch feed + NOTIFY | `run_store/observations.rs:104-268,379-461`; channel `mod.rs:89` |
 | Observation surface (app/REST/CLI) | `crates/app/src/lib.rs`; `bin/rest-api/src/lib.rs`; `bin/cli/src/commands/run/list.rs` |
-| Current random run-id default | `crates/app/src/lib.rs:454`; `bin/cli/src/commands/run/start.rs:99`; `bin/rest-api/src/lib.rs:716` |
+| Content-addressed run identity material | `crates/app/src/lib.rs`; `kernel/runtime/src/commit.rs`; `kernel/store/src/v1/mod.rs` |
 | Scheduler decision (`Run` / `Blocked` / `Completed`) | `crates/kernel/runtime/src/frontier.rs:31` |
 | Side-effect fencing | `kernel/store/src/v1/{projection.rs:36,412 , resource_lanes.rs:42,80 , mod.rs:2179-2220}` |
 | Side-effect phases/events | `kernel/events/src/lib.rs:413-439`; `SideEffectPhase` in `store/v1` |
@@ -912,7 +906,7 @@ side-effect ledger non-terminal, the signer lane can remain held until manual re
 | Remediation link / forward fence | `runtime/src/side_effects.rs:213`; `docs/saga.md` |
 | Side-effect terminal output (confirmation-only today) | `program/src/lib.rs:1561`; `side_effect_lifecycle.rs:313` |
 | RunAdmitted records driver executables; drive-path binding check | `kernel/runtime/src/commit.rs:235-237`; `binding.rs:113`; `history.rs:212` |
-| EVM recovery: bare re-broadcast (always `Observed`); generic submission decisions | `adapters/evm-contracts/src/lib.rs:1758-1774`; `runtime/src/side_effect_driver.rs:848-878` |
+| EVM recovery decisions; generic submission decisions | `adapters/evm-contracts/src/lib.rs`; `runtime/src/side_effect_driver.rs` |
 | Ledger key derivation (attempt-scoped today) | `kernel/runtime/src/side_effect_driver.rs:1091-1127` |
 | Certified spec hash vs audit envelope; remediation link material | `kernel/spec/src/lib.rs` `TypedExecutionSpec`; `TypedExecutionSpecAudit`; `certify` `forward_run_id` |
 | saga.md multi-lane contract vs single-lane code | `docs/saga.md:159-169`; `run_store/resource_lanes.rs:94` |

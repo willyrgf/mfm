@@ -49,7 +49,7 @@ The typed boundary separates data, evidence, authority, and implementation artif
 - `CertifiedDescriptorSet` and `CertifiedFrameworkLifecycle` are certified spec authority views
 - `CertifiedRuntimeSpec` is runtime authority derived only from `CertifiedTypedSpec`
 - `PreparedCommit<Purpose>` and `PreparedCommitPlan` are store mutation authority built by runtime
-- `SagaAdmitToken` is minted from the certified typed spec and is the store admission authority for
+- `CertifiedRunStoreAuthority` is minted from the certified typed spec and is the store admission authority for
   policy-bound run-start and saga commits, including side-effect terminal policy derivation; store
   admission must match it to the projected `RunAdmitted.spec_hash`
 - `ManualResolutionProofAuthority` and `VerifiedManualResolutionForPrefix` are manual proof
@@ -65,8 +65,8 @@ The typed boundary separates data, evidence, authority, and implementation artif
 - rendered public-output JSON is an output/cache surface only
 
 Start, resume, replay, and public-output rendering must verify stored spec/certificate artifacts
-against the production registry and compare stream evidence before constructing runtime, replay, or
-render authority.
+against the compiled certification registry and compare stream evidence before constructing runtime,
+replay, or render authority.
 
 Admission, drive, verify, resume, and replay must not resolve outcome-affecting policy from mutable
 registries, worker-local defaults, or external oracles. Such policy belongs in typed config and

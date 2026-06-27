@@ -569,9 +569,9 @@ Purpose (R9 #2 cutover — gated; lane mis-release is the one place safety lives
 
 - Now that the verify runner (Commit 13) drives the pair end to end, make pair-keyed authority the
   **sole** admission and lane-release authority.
-- Project `RunAdmitted.spec_hash` as store-owned authority and require `SagaAdmitToken` to match
-  that projected hash for remediation and terminal saga admission. Matching only the incoming saga
-  payload is insufficient.
+- Project `RunAdmitted.spec_hash` as store-owned authority and require
+  `CertifiedRunStoreAuthority` to match that projected hash for remediation and terminal saga
+  admission. Matching only the incoming saga payload is insufficient.
 - Delete the node/attempt ledger keying, the old single-shape lane-release validation, and the
   Commit 12 dual-validation scaffolding.
 

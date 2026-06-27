@@ -60,7 +60,7 @@ Typed-core code distinguishes data, evidence, authority, and implementation arti
 | `CertifiedDescriptorSet` / `CertifiedFrameworkLifecycle` | yes, within certified spec authority | Certified descriptor and framework lifecycle views derived from a validated spec. Runtime consumes these views instead of recertifying raw descriptor tables. |
 | `mfm_runtime::CertifiedRuntimeSpec` | yes, runtime-only | Runtime wrapper derived only from `CertifiedTypedSpec`; owns scheduler indexes and erased runner derivation. |
 | `PreparedCommit<Purpose>` / `PreparedCommitPlan` | yes, store mutation | Purpose-specific commit authority built by runtime/app authority. The store rejects mismatched payload purpose, missing saga proof, and missing admitted artifact evidence. |
-| `SagaAdmitToken` | yes, store admission | Policy-bound run-start/saga admission token minted from the certified typed spec and tied to run id, certified spec hash, saga policy, and side-effect terminal policies. Store admission checks the token spec hash against the projected `RunAdmitted.spec_hash`, not only the incoming saga payload. |
+| `CertifiedRunStoreAuthority` | yes, store admission | Policy-bound run-start/certified run authority minted from the certified typed spec and tied to run id, certified spec hash, saga policy, and side-effect terminal policies. Store admission checks the token spec hash against the projected `RunAdmitted.spec_hash`, not only the incoming saga payload. |
 | `ManualResolutionProofAuthority` / `VerifiedManualResolutionForPrefix` | yes, manual resolution | Prefix-bound proof authority over a certified manual-blocked stream prefix, retained artifacts, canonical proof bytes, and certified operator policy. |
 | `CertifiedSideEffectContract` | yes, side-effect verification | Certified resource-claim and side-effect contract authority shared by live execution, resume, and replay. |
 | `SideEffectLedgerState` | yes, store transition | Typed ledger state used by store/runtime to admit only legal side-effect transitions. |
@@ -449,7 +449,7 @@ protocol rules are enforced, commit preconditions are built, and artifact bytes/
 admitted only by the commit that first references them. Production callers submit
 `PreparedCommitBundle` values built from purpose-specific `PreparedCommit<Purpose>` authority;
 stores do not expose or accept a raw typed-batch or plan-only append escape hatch. Purpose
-constructors reject purpose mismatches, missing `SagaAdmitToken`, missing `SagaTerminalProof`, or
+constructors reject purpose mismatches, missing `CertifiedRunStoreAuthority`, missing `SagaTerminalProof`, or
 artifact evidence that was not admitted in the same commit. Artifact blobs are admitted inside the
 append transaction; failed appends leave no authoritative run-store evidence.
 
@@ -480,9 +480,9 @@ Resume loads the stored certified spec, rebuilds the verified history and projec
 stream, verifies completed cell and side-effect evidence against the spec, then advances only from a
 type-valid frontier.
 
-Replay loads the stored certified spec and certificate artifacts, verifies them against the
-production registry, compares the hashes to `RunAdmitted`, rebuilds stream evidence, and uses replay
-adapters only. Live capability construction during replay is a contract violation.
+Replay loads the stored certified spec and certificate artifacts, verifies them against the compiled
+certification registry, compares the hashes to `RunAdmitted`, rebuilds stream evidence, and uses
+replay adapters only. Live capability construction during replay is a contract violation.
 
 Manual-resolution replay additionally verifies that the stream prefix derives `ManualBlocked`, the
 event matches certified policy, evidence and authorization artifacts match certified roles and
