@@ -324,8 +324,8 @@ Stable launch errors include:
 ### `run resume`
 
 Resumes a certified typed run by loading the spec and certificate artifacts bound by `RunAdmitted`,
-verifying them against the production registry, rebuilding stream evidence, and driving the typed
-scheduler until it blocks or the run completes.
+verifying them against the compiled certification registry, rebuilding stream evidence, and driving
+the typed scheduler until it blocks or the run completes.
 
 **Usage:**
 ```sh
