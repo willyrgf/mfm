@@ -510,6 +510,15 @@ The CLI's behavior can be modified using environment variables, which is ideal f
   }'
   ```
 
+- **`MFM_EVM_NETWORK_ROUTES_JSON`**: Optional runtime route map from semantic config
+  `network_id` values to process-local EVM source and policy ids.
+  ```sh
+  export MFM_EVM_NETWORK_ROUTES_JSON='[
+    {"network_id":"ethereum-mainnet","source_ref":"publicnode-ethereum-mainnet","policy_id":"publicnode-ethereum-mainnet"},
+    {"network_id":"reth-dev","source_ref":"reth-local","policy_id":"reth-local"}
+  ]'
+  ```
+
 - **`MFM_EVM_SIGNERS_JSON`**: Optional runtime signer registry consumed by typed EVM contract
   workflows. Signer provider entries resolve non-secret `signer_ref` values from config to
   process-local providers without exposing private keys in typed values or outputs.
@@ -527,7 +536,7 @@ The CLI's behavior can be modified using environment variables, which is ideal f
 - Typed EVM RPC source configuration requires `expected_chain_id` on every configured source and at
   least one policy with an ordered source list.
 - Typed EVM contract requests use semantic `network_id` plus `expected_chain_id`; the app runtime
-  uses `network_id` as the process-local EVM source and policy id when resolving
+  resolves `network_id` through `MFM_EVM_NETWORK_ROUTES_JSON` before using
   `MFM_EVM_RPC_SOURCES_JSON`.
 - Typed EVM contract requests use non-secret `signer_ref`; the app runtime resolves it against
   `MFM_EVM_SIGNERS_JSON`.

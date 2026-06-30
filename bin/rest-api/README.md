@@ -25,6 +25,7 @@ Environment variables:
 - `DATABASE_URL`: Postgres URL for the certified run store (required)
 - `MFM_SOURCE_REVISION`: optional source revision evidence for typed run starts
 - `MFM_EVM_RPC_SOURCES_JSON`: runtime-only EVM source registry for EVM contract entry-point runs
+- `MFM_EVM_NETWORK_ROUTES_JSON`: runtime-only map from semantic network ids to EVM source/policy ids
 - `MFM_EVM_SIGNERS_JSON`: runtime-only signer provider registry for EVM contract entry-point runs
 
 The REST API validates the PostgreSQL schema on startup and does not create or
@@ -210,8 +211,9 @@ EVM contract lifecycle:
 ```
 
 EVM configs carry semantic network intent, expected chain id, artifact refs, and non-secret signer
-intent. The runtime derives EVM source and policy ids from the config's `network.network_id`, and
-resolves them against `MFM_EVM_RPC_SOURCES_JSON`. The config's `signer.signer_ref` resolves against
+intent. The runtime resolves the config's `network.network_id` through
+`MFM_EVM_NETWORK_ROUTES_JSON`, then resolves the selected source and policy against
+`MFM_EVM_RPC_SOURCES_JSON`. The config's `signer.signer_ref` resolves against
 `MFM_EVM_SIGNERS_JSON`. Process-local RPC endpoints and keystore paths never belong in the
 entry-point config.
 

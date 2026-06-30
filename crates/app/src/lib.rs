@@ -43,6 +43,7 @@ pub use mfm_stream_store_postgres::PostgresSchema as ProductionPostgresSchema;
 mod entry_point;
 mod entry_points;
 mod evm_contracts;
+mod evm_runtime_routes;
 
 pub use entry_point::{
     EntryPointOpId, EntryPointOpPlan, EntryPointOpRegistry, EntryPointOpResolveError,
@@ -357,12 +358,14 @@ pub fn production_runner_registry(
             Ok(client) => Arc::new(client),
             Err(_) => Arc::new(mfm_adapters_portfolio::UnavailablePortfolioEvmProvider),
         };
+    let evm_routes = evm_runtime_routes::EvmRuntimeRoutes::from_env()?;
     let portfolio_capabilities = mfm_adapters_portfolio::PortfolioRunnerCapabilities::new(
         portfolio_artifacts,
         portfolio_evm,
+        evm_routes.portfolio_routes()?,
     );
     mfm_adapters_portfolio::register_portfolio_runners(&mut registry, portfolio_capabilities)?;
-    evm_contracts::register_contract_lifecycle_runners(&mut registry, artifacts)?;
+    evm_contracts::register_contract_lifecycle_runners(&mut registry, artifacts, evm_routes)?;
     mfm_transports_proof::register_deterministic_proof_runners(&mut registry)?;
     Ok(registry)
 }

@@ -17,6 +17,8 @@ Typed EVM transports discover RPC sources from environment variables:
 
 - `MFM_EVM_RPC_SOURCES_JSON`: JSON source registry with endpoint-bearing `sources` and ordered
   fallback `policies`.
+- `MFM_EVM_NETWORK_ROUTES_JSON`: JSON array mapping semantic `network_id` values from typed config
+  to process-local EVM `source_ref` and `policy_id` values.
 - `MFM_EVM_SIGNERS_JSON`: JSON array of runtime signer-provider entries used by contract lifecycle
   routes.
 
@@ -31,6 +33,12 @@ Policy object fields:
 
 - `id`: stable policy id used only for runtime selection and diagnostics
 - `ordered_sources`: source ids tried in order
+
+Network route fields:
+
+- `network_id`: semantic network id from a certified portfolio or contract lifecycle config
+- `source_ref`: process-local EVM source id from `MFM_EVM_RPC_SOURCES_JSON.sources[].id`
+- `policy_id`: process-local EVM policy id from `MFM_EVM_RPC_SOURCES_JSON.policies[].id`
 
 Example:
 
@@ -63,13 +71,29 @@ Example:
 }
 ```
 
+Example route map:
+
+```json
+[
+  {
+    "network_id": "ethereum-mainnet",
+    "source_ref": "publicnode-ethereum-mainnet",
+    "policy_id": "publicnode-ethereum-mainnet"
+  },
+  {
+    "network_id": "reth-dev",
+    "source_ref": "reth-local",
+    "policy_id": "reth-local"
+  }
+]
+```
+
 Do not persist `rpc_url` or authorization material in typed values, specs, events, artifacts, public
 outputs, or fixtures.
 
-Contract lifecycle configs carry `network.network_id`; app runtime assembly uses that value as both
-the process-local source id and policy id when resolving `MFM_EVM_RPC_SOURCES_JSON`. The runtime
-registry must therefore define matching `sources[].id` and `policies[].id` entries for each
-contract lifecycle `network_id`.
+Contract lifecycle and portfolio configs carry semantic network ids. App runtime assembly resolves
+those ids through `MFM_EVM_NETWORK_ROUTES_JSON` before using `MFM_EVM_RPC_SOURCES_JSON`. The
+semantic `network_id` does not need to equal a process-local source id or policy id.
 
 ## `control_scope`
 

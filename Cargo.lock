@@ -2106,6 +2106,7 @@ dependencies = [
  "mfm-op-portfolio-tracker",
  "mfm-op-proof",
  "mfm-portfolio-config",
+ "mfm-portfolio-model",
  "mfm-program",
  "mfm-program-derive",
  "mfm-replay",

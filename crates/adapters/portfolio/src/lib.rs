@@ -5,6 +5,7 @@
 //! and EVM capability contracts. Concrete artifact stores and live EVM transports are supplied by
 //! app assembly.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use alloy_primitives::{Address, U256};
@@ -20,6 +21,7 @@ use mfm_evm_capabilities::{
 use mfm_evm_core::encoding::{encode_erc20_balance_of, encode_erc20_decimals, parse_u8_u256};
 use mfm_evm_core::hex::hex_to_bytes;
 use mfm_ids::ContentDigest;
+use mfm_portfolio_model::ids::NetworkId;
 use mfm_program::ValidatedConfig;
 use mfm_runtime::{
     CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture,
@@ -103,15 +105,21 @@ fn unavailable_evm<'a, T>() -> EvmCapabilityFuture<'a, T> {
 pub struct PortfolioRunnerCapabilities {
     artifacts: Arc<dyn ArtifactReadProvider>,
     evm: Arc<dyn PortfolioEvmProvider>,
+    evm_routes: PortfolioEvmRoutes,
 }
 
 impl PortfolioRunnerCapabilities {
-    /// Creates portfolio runner capabilities from artifact and EVM providers.
+    /// Creates portfolio runner capabilities from artifact, EVM provider, and explicit routes.
     pub fn new(
         artifacts: Arc<dyn ArtifactReadProvider>,
         evm: Arc<dyn PortfolioEvmProvider>,
+        evm_routes: PortfolioEvmRoutes,
     ) -> Self {
-        Self { artifacts, evm }
+        Self {
+            artifacts,
+            evm,
+            evm_routes,
+        }
     }
 
     fn artifacts(&self) -> Arc<dyn ArtifactReadProvider> {
@@ -120,6 +128,80 @@ impl PortfolioRunnerCapabilities {
 
     fn evm(&self) -> Arc<dyn PortfolioEvmProvider> {
         Arc::clone(&self.evm)
+    }
+
+    fn evm_routes(&self) -> PortfolioEvmRoutes {
+        self.evm_routes.clone()
+    }
+}
+
+/// Runtime EVM route for one semantic portfolio network id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortfolioEvmRoute {
+    network_id: NetworkId,
+    source_ref: EvmSourceRef,
+    policy_id: EvmSourcePolicyId,
+}
+
+impl PortfolioEvmRoute {
+    /// Creates an explicit portfolio network to EVM runtime route.
+    pub fn new(
+        network_id: NetworkId,
+        source_ref: EvmSourceRef,
+        policy_id: EvmSourcePolicyId,
+    ) -> Self {
+        Self {
+            network_id,
+            source_ref,
+            policy_id,
+        }
+    }
+
+    /// Returns the semantic portfolio network id.
+    pub fn network_id(&self) -> &NetworkId {
+        &self.network_id
+    }
+
+    /// Returns the EVM runtime source reference.
+    pub fn source_ref(&self) -> &EvmSourceRef {
+        &self.source_ref
+    }
+
+    /// Returns the EVM source policy id.
+    pub fn policy_id(&self) -> &EvmSourcePolicyId {
+        &self.policy_id
+    }
+}
+
+/// Runtime EVM route registry for portfolio network ids.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PortfolioEvmRoutes {
+    routes: BTreeMap<NetworkId, (EvmSourceRef, EvmSourcePolicyId)>,
+}
+
+impl PortfolioEvmRoutes {
+    /// Creates an explicit route registry, rejecting duplicate network ids.
+    pub fn new(routes: impl IntoIterator<Item = PortfolioEvmRoute>) -> mfm_runtime::Result<Self> {
+        let mut by_network = BTreeMap::new();
+        for route in routes {
+            let network_id = route.network_id;
+            if by_network
+                .insert(network_id.clone(), (route.source_ref, route.policy_id))
+                .is_some()
+            {
+                return Err(mfm_runtime::RuntimeError::RunnerBinding(format!(
+                    "duplicate portfolio EVM route for network {}",
+                    network_id.as_str()
+                )));
+            }
+        }
+        Ok(Self { routes: by_network })
+    }
+
+    /// Returns the configured route for `network_id`.
+    pub fn route(&self, network_id: &str) -> Option<(EvmSourceRef, EvmSourcePolicyId)> {
+        let network_id = NetworkId::new(network_id).ok()?;
+        self.routes.get(&network_id).cloned()
     }
 }
 
@@ -131,6 +213,7 @@ pub fn register_portfolio_runners(
     let implementation_id = CapabilityImplementationId::new(CAPABILITY_IMPLEMENTATION_ID)?;
     let artifacts = capabilities.artifacts();
     let evm = capabilities.evm();
+    let evm_routes = capabilities.evm_routes();
     let mut registrations = RunnerRegistrationBuilder::new(registry, implementation_id);
     let read_factory = events::RunnerFactoryId::new(READ_FACTORY)?;
     let pure_factory = events::RunnerFactoryId::new(PURE_FACTORY)?;
@@ -172,6 +255,7 @@ pub fn register_portfolio_runners(
         Arc::new(PinViewsRunner {
             artifacts: artifacts.clone(),
             evm: evm.clone(),
+            evm_routes: evm_routes.clone(),
         }),
     )?;
     let resolve_valuations =
@@ -196,6 +280,7 @@ pub fn register_portfolio_runners(
         Arc::new(ObserveBatchRunner {
             artifacts: artifacts.clone(),
             evm,
+            evm_routes,
         }),
     )?;
     let merge_observations =
@@ -301,6 +386,7 @@ impl ErasedNodeRunner for ResolveSubjectsRunner {
 struct PinViewsRunner {
     artifacts: Arc<dyn ArtifactReadProvider>,
     evm: Arc<dyn PortfolioEvmProvider>,
+    evm_routes: PortfolioEvmRoutes,
 }
 
 impl ErasedNodeRunner for PinViewsRunner {
@@ -313,7 +399,8 @@ impl ErasedNodeRunner for PinViewsRunner {
                 self.artifacts.as_ref(),
             )
             .await?;
-            let backend = EvmCapabilityPortfolioBackend::new(Arc::clone(&self.evm));
+            let backend =
+                EvmCapabilityPortfolioBackend::new(Arc::clone(&self.evm), self.evm_routes.clone());
             let output = pin_views_with_backend(config, &backend)
                 .await
                 .map_err(portfolio_read_runtime_error)?;
@@ -356,6 +443,7 @@ impl ErasedNodeRunner for ResolveValuationsRunner {
 struct ObserveBatchRunner {
     artifacts: Arc<dyn ArtifactReadProvider>,
     evm: Arc<dyn PortfolioEvmProvider>,
+    evm_routes: PortfolioEvmRoutes,
 }
 
 impl ErasedNodeRunner for ObserveBatchRunner {
@@ -367,7 +455,8 @@ impl ErasedNodeRunner for ObserveBatchRunner {
                 load_struct_input::<ObserveBatchInput>(ctx.inputs(), self.artifacts.as_ref())
                     .await?;
             let block_number = evm_block_number_for(&input.views, config.network().network_id());
-            let backend = EvmCapabilityPortfolioBackend::new(Arc::clone(&self.evm));
+            let backend =
+                EvmCapabilityPortfolioBackend::new(Arc::clone(&self.evm), self.evm_routes.clone());
             let output = observe_batch_with_backend(config, &input, &backend).await;
             let request = ObservationRequest {
                 wallet_id: config.wallet().wallet_id.to_string(),
@@ -683,21 +772,24 @@ fn runtime_capability_error(error: mfm_capabilities::CapabilityError) -> mfm_run
 #[derive(Clone)]
 struct EvmCapabilityPortfolioBackend {
     evm: Arc<dyn PortfolioEvmProvider>,
+    routes: PortfolioEvmRoutes,
 }
 
 impl EvmCapabilityPortfolioBackend {
-    fn new(evm: Arc<dyn PortfolioEvmProvider>) -> Self {
-        Self { evm }
+    fn new(evm: Arc<dyn PortfolioEvmProvider>, routes: PortfolioEvmRoutes) -> Self {
+        Self { evm, routes }
     }
 
     fn route(
         &self,
         network_id: &str,
     ) -> Result<(EvmSourceRef, EvmSourcePolicyId), PortfolioReadError> {
-        Ok((
-            EvmSourceRef::new(network_id).map_err(portfolio_evm_invalid_route)?,
-            EvmSourcePolicyId::new(network_id).map_err(portfolio_evm_invalid_route)?,
-        ))
+        self.routes.route(network_id).ok_or_else(|| {
+            PortfolioReadError::new(
+                "evm_route_missing",
+                "portfolio EVM runtime route was not configured for network",
+            )
+        })
     }
 
     async fn read_evm_block_number(&self, network_id: &str) -> Result<u64, PortfolioReadError> {
@@ -853,13 +945,6 @@ fn wallet_evm_address(config: &ObserveBatchConfig) -> Result<Address, PortfolioR
         ));
     };
     parse_address(address, "wallet address")
-}
-
-fn portfolio_evm_invalid_route(error: EvmCapabilityError) -> PortfolioReadError {
-    PortfolioReadError::new(
-        "evm_route_invalid",
-        format!("portfolio EVM source route was invalid: {error}"),
-    )
 }
 
 fn portfolio_evm_capability_error(error: EvmCapabilityError) -> PortfolioReadError {

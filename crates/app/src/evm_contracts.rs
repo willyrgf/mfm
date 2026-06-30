@@ -1,23 +1,25 @@
 use std::sync::Arc;
 
 use mfm_artifact_capabilities::ArtifactReadProvider;
-use mfm_evm_capabilities::{EvmSourcePolicyId, EvmSourceRef};
 use mfm_signers_keystore::{KeystoreSignerProvider, KeystoreSignerRegistryEntry};
 use mfm_signing::SignerRef;
 use mfm_transports_evm::EvmJsonRpcClient;
 use serde::Deserialize;
 use uuid::Uuid;
 
+use crate::evm_runtime_routes::EvmRuntimeRoutes;
+
 const ENV_EVM_SIGNERS_JSON: &str = "MFM_EVM_SIGNERS_JSON";
 
 #[derive(Clone)]
 struct EnvEvmContractRuntimeFactory {
     artifacts: Arc<dyn ArtifactReadProvider>,
+    routes: EvmRuntimeRoutes,
 }
 
 impl EnvEvmContractRuntimeFactory {
-    fn new(artifacts: Arc<dyn ArtifactReadProvider>) -> Self {
-        Self { artifacts }
+    fn new(artifacts: Arc<dyn ArtifactReadProvider>, routes: EvmRuntimeRoutes) -> Self {
+        Self { artifacts, routes }
     }
 }
 
@@ -31,11 +33,10 @@ impl mfm_adapters_evm_contracts::EvmContractRuntimeFactory for EnvEvmContractRun
         network_id: &str,
         signer_ref: Option<&SignerRef>,
     ) -> mfm_runtime::Result<()> {
-        let source_ref = EvmSourceRef::new(network_id).map_err(runtime_evm_capability_error)?;
-        let policy_id = EvmSourcePolicyId::new(network_id).map_err(runtime_evm_capability_error)?;
+        let route = self.routes.route(network_id)?;
         EvmJsonRpcClient::from_env()
             .map_err(runtime_evm_transport_error)?
-            .validate_route(&policy_id, &source_ref)
+            .validate_route(route.policy_id(), route.source_ref())
             .map_err(runtime_evm_transport_error)?;
         if let Some(signer_ref) = signer_ref {
             let signer = keystore_signer_provider_from_env()?;
@@ -52,10 +53,7 @@ impl mfm_adapters_evm_contracts::EvmContractRuntimeFactory for EnvEvmContractRun
         &self,
         network_id: &str,
     ) -> mfm_runtime::Result<mfm_adapters_evm_contracts::EvmContractRuntime> {
-        let route = mfm_adapters_evm_contracts::EvmContractRuntimeRoute::new(
-            EvmSourceRef::new(network_id).map_err(runtime_evm_capability_error)?,
-            EvmSourcePolicyId::new(network_id).map_err(runtime_evm_capability_error)?,
-        );
+        let route = self.routes.route(network_id)?.into_contract_route();
         let evm = Arc::new(EvmJsonRpcClient::from_env().map_err(runtime_evm_transport_error)?);
         let signer = Arc::new(keystore_signer_provider_from_env()?);
         Ok(mfm_adapters_evm_contracts::EvmContractRuntime::new(
@@ -95,17 +93,12 @@ fn keystore_signer_provider_from_env() -> mfm_runtime::Result<KeystoreSignerProv
 pub(crate) fn register_contract_lifecycle_runners(
     registry: &mut mfm_runtime::ErasedRunnerRegistry,
     artifacts: Arc<dyn ArtifactReadProvider>,
+    routes: EvmRuntimeRoutes,
 ) -> mfm_runtime::Result<()> {
     mfm_adapters_evm_contracts::register_contract_lifecycle_runners_with_factory(
         registry,
-        Arc::new(EnvEvmContractRuntimeFactory::new(artifacts)),
+        Arc::new(EnvEvmContractRuntimeFactory::new(artifacts, routes)),
     )
-}
-
-fn runtime_evm_capability_error(
-    error: mfm_evm_capabilities::EvmCapabilityError,
-) -> mfm_runtime::RuntimeError {
-    mfm_runtime::RuntimeError::RunnerBinding(error.to_string())
 }
 
 fn runtime_evm_transport_error(

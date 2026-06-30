@@ -31,6 +31,7 @@ mfm-op-evm-contract-lifecycle = { path = "../ops/evm-contract-lifecycle-op" }
 mfm-op-portfolio-tracker = { path = "../ops/portfolio-tracker-op" }
 mfm-op-proof = { path = "../ops/proof-op" }
 mfm-portfolio-config = { path = "../portfolio-config" }
+mfm-portfolio-model = { path = "../portfolio/model" }
 mfm-program = { path = "../kernel/program" }
 mfm-replay = { path = "../kernel/replay" }
 mfm-runtime = { path = "../kernel/runtime" }
