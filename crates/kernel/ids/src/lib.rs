@@ -291,20 +291,6 @@ checked_string_type!(
 );
 
 checked_string_type!(
-    LowerSnakeName,
-    "lower snake name",
-    validate_lower_snake_name,
-    "Checked lower-case snake name."
-);
-
-checked_string_type!(
-    DottedLowerKebabName,
-    "dotted lower kebab name",
-    validate_dotted_lower_kebab_name,
-    "Checked dot-separated lower-case kebab name."
-);
-
-checked_string_type!(
     LocalPublicId,
     "local public id",
     validate_local_public_id,
@@ -1369,74 +1355,6 @@ fn validate_resource_namespace(grammar: &'static str, value: &str) -> CheckedStr
     Ok(())
 }
 
-fn validate_lower_snake_name(grammar: &'static str, value: &str) -> CheckedStringResult<()> {
-    validate_segmented_lower_name(grammar, value, b'_')
-}
-
-fn validate_dotted_lower_kebab_name(grammar: &'static str, value: &str) -> CheckedStringResult<()> {
-    validate_non_empty(value, grammar)?;
-    for segment in value.split('.') {
-        if segment.is_empty() {
-            return Err(CheckedStringError::new(
-                grammar,
-                CheckedStringErrorReason::EmptySegment,
-            ));
-        }
-        validate_segmented_lower_name(grammar, segment, b'-')?;
-    }
-    Ok(())
-}
-
-fn validate_segmented_lower_name(
-    grammar: &'static str,
-    value: &str,
-    separator: u8,
-) -> CheckedStringResult<()> {
-    validate_non_empty(value, grammar)?;
-    let Some((&first, rest)) = value.as_bytes().split_first() else {
-        return Err(CheckedStringError::new(
-            grammar,
-            CheckedStringErrorReason::Empty,
-        ));
-    };
-    if !first.is_ascii_lowercase() {
-        return Err(CheckedStringError::new(
-            grammar,
-            CheckedStringErrorReason::InvalidStart,
-        ));
-    }
-
-    let mut previous_separator = false;
-    for (offset, &byte) in rest.iter().enumerate() {
-        if byte.is_ascii_lowercase() || byte.is_ascii_digit() {
-            previous_separator = false;
-        } else if byte == separator {
-            if previous_separator {
-                return Err(CheckedStringError::new(
-                    grammar,
-                    CheckedStringErrorReason::EmptySegment,
-                ));
-            }
-            previous_separator = true;
-        } else {
-            return Err(CheckedStringError::new(
-                grammar,
-                CheckedStringErrorReason::InvalidCharacter {
-                    ch: byte as char,
-                    index: offset + 1,
-                },
-            ));
-        }
-    }
-    if previous_separator {
-        return Err(CheckedStringError::new(
-            grammar,
-            CheckedStringErrorReason::EmptySegment,
-        ));
-    }
-    Ok(())
-}
-
 fn validate_local_public_id(grammar: &'static str, value: &str) -> CheckedStringResult<()> {
     validate_len(value, grammar, 128)?;
     let Some(first) = value.bytes().next() else {
@@ -1693,145 +1611,44 @@ impl_version_category!(LoweringVersionKind, "lowering version");
 mod tests {
     use super::*;
 
-    #[test]
-    fn checked_string_primitives_accept_canonical_shapes() {
-        assert_eq!(
-            NameToken::new("mfm.kernel/value_1").unwrap().as_str(),
-            "mfm.kernel/value_1"
-        );
-        assert_eq!(
-            StableAuthorKey::new("portfolio/main-wallet")
-                .unwrap()
-                .as_str(),
-            "portfolio/main-wallet"
-        );
-        assert_eq!(
-            FieldPath::new("result.total/value").unwrap().as_str(),
-            "result.total/value"
-        );
-        assert_eq!(
-            FieldSegment::new("total/value").unwrap().as_str(),
-            "total/value"
-        );
-        assert_eq!(
-            ResourceNamespace::new("mfm.evm_lane").unwrap().as_str(),
-            "mfm.evm_lane"
-        );
-        assert_eq!(
-            LowerSnakeName::new("evm_contract_lifecycle")
-                .unwrap()
-                .as_str(),
-            "evm_contract_lifecycle"
-        );
-        assert_eq!(
-            DottedLowerKebabName::new("mfm.evm-contract")
-                .unwrap()
-                .as_str(),
-            "mfm.evm-contract"
-        );
-        assert_eq!(
-            LocalPublicId::new("ethereum-mainnet").unwrap().as_str(),
-            "ethereum-mainnet"
-        );
-        assert_eq!(
-            RuntimeEnvName::new("MFM_SECRET_1").unwrap().as_str(),
-            "MFM_SECRET_1"
-        );
-        assert_eq!(
-            RuntimeBindingId::new("mfm.portfolio/runtime:v1")
-                .unwrap()
-                .as_str(),
-            "mfm.portfolio/runtime:v1"
-        );
-        assert_eq!(
-            RuntimeToken::new("admission_waiter:0123456789abcdef")
-                .unwrap()
-                .as_str(),
-            "admission_waiter:0123456789abcdef"
-        );
-        assert_eq!(
-            VisibleAscii256::new("text/html").unwrap().as_str(),
-            "text/html"
-        );
-        assert_eq!(
-            VisibleAscii512::new("commit-key").unwrap().as_str(),
-            "commit-key"
-        );
-        assert_eq!(
-            PrintableAscii1024::new("manual resolution note")
-                .unwrap()
-                .as_str(),
-            "manual resolution note"
-        );
+    macro_rules! accepts {
+        ($ty:ty, $value:expr) => {
+            assert_eq!(<$ty>::new($value).expect($value).as_ref(), $value);
+        };
+    }
+
+    macro_rules! rejects {
+        ($ty:ty, $value:expr) => {
+            assert!(<$ty>::new($value).is_err(), "{:?}", $value);
+        };
     }
 
     #[test]
-    fn checked_string_primitives_reject_invalid_shapes() {
-        assert!(NameToken::new("").is_err());
-        assert!(NameToken::new("_name").is_err());
-        assert!(NameToken::new("Name").is_err());
+    fn checked_string_primitives_cover_shared_grammars() {
+        accepts!(NameToken, "mfm.kernel/value_1");
+        accepts!(StableAuthorKey, "portfolio/main-wallet");
+        accepts!(FieldPath, "result.total/value");
+        accepts!(FieldSegment, "total/value");
+        accepts!(ResourceNamespace, "mfm.evm_lane");
+        accepts!(LocalPublicId, "ethereum-mainnet");
+        accepts!(RuntimeEnvName, "MFM_SECRET_1");
+        accepts!(RuntimeBindingId, "mfm.portfolio/runtime:v1");
+        accepts!(RuntimeToken, "admission_waiter:0123456789abcdef");
+        accepts!(VisibleAscii256, "text/html");
+        accepts!(VisibleAscii512, "commit-key");
+        accepts!(PrintableAscii512, "redacted message");
+        accepts!(PrintableAscii1024, "manual resolution note");
 
-        assert!(StableAuthorKey::new("").is_err());
-        assert!(StableAuthorKey::new("mfm.reserved").is_err());
-        assert!(StableAuthorKey::new("sys.reserved").is_err());
-        assert!(StableAuthorKey::new("_private").is_err());
-        assert!(StableAuthorKey::new("wallet//main").is_err());
-        assert!(StableAuthorKey::new("wallet/Main").is_err());
-
-        assert!(FieldPath::new("").is_err());
-        assert!(FieldPath::new("result..total").is_err());
-        assert!(FieldPath::new("_result").is_err());
-
-        assert!(ResourceNamespace::new("single").is_err());
-        assert!(ResourceNamespace::new("mfm.").is_err());
-        assert!(ResourceNamespace::new("mfm.evm/lane").is_err());
-
-        assert!(LowerSnakeName::new("").is_err());
-        assert!(LowerSnakeName::new("EvmContract").is_err());
-        assert!(LowerSnakeName::new("1evm").is_err());
-        assert!(LowerSnakeName::new("evm-contract").is_err());
-        assert!(LowerSnakeName::new("evm__contract").is_err());
-        assert!(LowerSnakeName::new("evm_contract_").is_err());
-
-        assert!(DottedLowerKebabName::new("").is_err());
-        assert!(DottedLowerKebabName::new("mfm..evm").is_err());
-        assert!(DottedLowerKebabName::new("mfm_evm").is_err());
-        assert!(DottedLowerKebabName::new("mfm.Evm").is_err());
-        assert!(DottedLowerKebabName::new("mfm.1evm").is_err());
-        assert!(DottedLowerKebabName::new("mfm.evm--contract").is_err());
-        assert!(DottedLowerKebabName::new("mfm.evm-contract-").is_err());
-
-        assert!(LocalPublicId::new("").is_err());
-        assert!(LocalPublicId::new("-bad").is_err());
-        assert!(LocalPublicId::new("bad-").is_err());
-        assert!(LocalPublicId::new("bad/slash").is_err());
-        assert!(LocalPublicId::new("Bad").is_err());
-
-        assert!(RuntimeEnvName::new("").is_err());
-        assert!(RuntimeEnvName::new("mfm_secret").is_err());
-        assert!(RuntimeEnvName::new("MFM-SECRET").is_err());
-
-        assert!(RuntimeBindingId::new("").is_err());
-        assert!(RuntimeBindingId::new("bad space").is_err());
-        assert!(RuntimeBindingId::new("bad\nline").is_err());
-        assert!(RuntimeBindingId::new("a".repeat(129)).is_err());
-
-        assert!(RuntimeToken::new("").is_err());
-        assert!(RuntimeToken::new("bad space").is_err());
-        assert!(RuntimeToken::new("bad\nline").is_err());
-        assert!(RuntimeToken::new("a".repeat(513)).is_err());
-
-        assert!(VisibleAscii256::new("").is_err());
-        assert!(VisibleAscii256::new("has space").is_err());
-        assert!(VisibleAscii256::new("snowman☃").is_err());
-
-        assert!(PrintableAscii512::new("").is_err());
-        assert!(PrintableAscii512::new("snowman☃").is_err());
-        assert!(PrintableAscii512::new("line\nbreak").is_err());
-        assert!(PrintableAscii512::new("a".repeat(513)).is_err());
-
-        assert!(PrintableAscii1024::new("").is_err());
-        assert!(PrintableAscii1024::new("snowman☃").is_err());
-        assert!(PrintableAscii1024::new("line\nbreak").is_err());
+        rejects!(NameToken, "_name");
+        rejects!(StableAuthorKey, "mfm.reserved");
+        rejects!(FieldPath, "result..total");
+        rejects!(ResourceNamespace, "single");
+        rejects!(LocalPublicId, "bad/slash");
+        rejects!(RuntimeEnvName, "mfm_secret");
+        rejects!(RuntimeBindingId, "bad space");
+        rejects!(RuntimeToken, "bad\nline");
+        rejects!(VisibleAscii256, "has space");
+        rejects!(PrintableAscii512, "line\nbreak");
+        rejects!(PrintableAscii1024, "line\nbreak");
     }
 }

@@ -68,8 +68,7 @@ use mfm_evm_core::encoding;
 use mfm_evm_core::hex as common_hex;
 use mfm_evm_core::tx::parse_u128_quantity;
 use mfm_ids::{
-    ArtifactId, CheckedStringError, CheckedStringErrorReason, ContentDigest, LocalPublicId,
-    SchemaId, SemanticTypeId, StableAuthorKey,
+    ArtifactId, ContentDigest, LocalPublicId, SchemaId, SemanticTypeId, StableAuthorKey,
 };
 use mfm_program_derive::{MfmConfig, MfmValue};
 use serde::de::{self, Deserializer};
@@ -121,202 +120,120 @@ fn require_non_empty(kind: &'static str, value: &str) -> Result<(), EvmContractS
     }
 }
 
-fn checked_string_scalar_error(
+macro_rules! evm_string_scalar {
+    ($ty:ident, $validator:ident, $kind:literal, $semantic:literal, $schema:literal, $doc:literal) => {
+        #[doc = $doc]
+        #[derive(
+            Clone,
+            Debug,
+            PartialEq,
+            Eq,
+            PartialOrd,
+            Ord,
+            Hash,
+            Serialize,
+            Deserialize,
+            MfmValue,
+        )]
+        #[serde(try_from = "String", into = "String")]
+        #[mfm(namespace = "mfm.evm.contract", name = $semantic, schema = $schema, transparent_string)]
+        pub struct $ty {
+            raw: String,
+        }
+
+        impl $ty {
+            /// Creates a checked EVM contract scalar authority.
+            pub fn new(value: impl Into<String>) -> Result<Self, EvmContractScalarError> {
+                let raw = value.into();
+                $validator($kind, &raw)?;
+                Ok(Self { raw })
+            }
+
+            /// Returns the canonical string representation.
+            pub fn as_str(&self) -> &str {
+                &self.raw
+            }
+
+            /// Consumes this authority into its canonical string representation.
+            pub fn into_string(self) -> String {
+                self.raw
+            }
+        }
+
+        impl AsRef<str> for $ty {
+            fn as_ref(&self) -> &str {
+                self.as_str()
+            }
+        }
+
+        impl Deref for $ty {
+            type Target = str;
+
+            fn deref(&self) -> &Self::Target {
+                self.as_str()
+            }
+        }
+
+        impl fmt::Display for $ty {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(self.as_str())
+            }
+        }
+
+        impl FromStr for $ty {
+            type Err = EvmContractScalarError;
+
+            fn from_str(value: &str) -> Result<Self, Self::Err> {
+                Self::new(value)
+            }
+        }
+
+        impl TryFrom<String> for $ty {
+            type Error = EvmContractScalarError;
+
+            fn try_from(value: String) -> Result<Self, Self::Error> {
+                Self::new(value)
+            }
+        }
+
+        impl From<$ty> for String {
+            fn from(value: $ty) -> Self {
+                value.raw
+            }
+        }
+
+        impl PartialEq<&str> for $ty {
+            fn eq(&self, other: &&str) -> bool {
+                self.as_str() == *other
+            }
+        }
+    };
+}
+
+fn require_stable_author_key(
     kind: &'static str,
-    error: CheckedStringError,
-) -> EvmContractScalarError {
-    match error.reason() {
-        CheckedStringErrorReason::Empty => EvmContractScalarError::Empty { kind },
-        _ => EvmContractScalarError::InvalidString {
+    value: &str,
+) -> Result<(), EvmContractScalarError> {
+    StableAuthorKey::new(value)
+        .map(|_| ())
+        .map_err(|error| EvmContractScalarError::InvalidString {
             kind,
             message: error.to_string(),
-        },
-    }
+        })
 }
 
-macro_rules! evm_string_scalar {
-    ($ty:ident, $kind:literal, $semantic:literal, $schema:literal, $doc:literal) => {
-        #[doc = $doc]
-        #[derive(
-            Clone,
-            Debug,
-            PartialEq,
-            Eq,
-            PartialOrd,
-            Ord,
-            Hash,
-            Serialize,
-            Deserialize,
-            MfmValue,
-        )]
-        #[serde(try_from = "String", into = "String")]
-        #[mfm(namespace = "mfm.evm.contract", name = $semantic, schema = $schema, transparent_string)]
-        pub struct $ty {
-            raw: String,
-        }
-
-        impl $ty {
-            /// Creates a checked EVM contract scalar authority.
-            pub fn new(value: impl Into<String>) -> Result<Self, EvmContractScalarError> {
-                let raw = value.into();
-                require_non_empty($kind, &raw)?;
-                Ok(Self { raw })
-            }
-
-            /// Returns the canonical string representation.
-            pub fn as_str(&self) -> &str {
-                &self.raw
-            }
-
-            /// Consumes this authority into its canonical string representation.
-            pub fn into_string(self) -> String {
-                self.raw
-            }
-        }
-
-        impl AsRef<str> for $ty {
-            fn as_ref(&self) -> &str {
-                self.as_str()
-            }
-        }
-
-        impl Deref for $ty {
-            type Target = str;
-
-            fn deref(&self) -> &Self::Target {
-                self.as_str()
-            }
-        }
-
-        impl fmt::Display for $ty {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str(self.as_str())
-            }
-        }
-
-        impl FromStr for $ty {
-            type Err = EvmContractScalarError;
-
-            fn from_str(value: &str) -> Result<Self, Self::Err> {
-                Self::new(value)
-            }
-        }
-
-        impl TryFrom<String> for $ty {
-            type Error = EvmContractScalarError;
-
-            fn try_from(value: String) -> Result<Self, Self::Error> {
-                Self::new(value)
-            }
-        }
-
-        impl From<$ty> for String {
-            fn from(value: $ty) -> Self {
-                value.raw
-            }
-        }
-
-        impl PartialEq<&str> for $ty {
-            fn eq(&self, other: &&str) -> bool {
-                self.as_str() == *other
-            }
-        }
-    };
+fn require_local_public_id(kind: &'static str, value: &str) -> Result<(), EvmContractScalarError> {
+    LocalPublicId::new(value)
+        .map(|_| ())
+        .map_err(|error| EvmContractScalarError::InvalidString {
+            kind,
+            message: error.to_string(),
+        })
 }
 
-macro_rules! checked_evm_string_scalar {
-    ($ty:ident, $checker:ty, $kind:literal, $semantic:literal, $schema:literal, $doc:literal) => {
-        #[doc = $doc]
-        #[derive(
-            Clone,
-            Debug,
-            PartialEq,
-            Eq,
-            PartialOrd,
-            Ord,
-            Hash,
-            Serialize,
-            Deserialize,
-            MfmValue,
-        )]
-        #[serde(try_from = "String", into = "String")]
-        #[mfm(namespace = "mfm.evm.contract", name = $semantic, schema = $schema, transparent_string)]
-        pub struct $ty {
-            raw: String,
-        }
-
-        impl $ty {
-            /// Creates a checked EVM contract scalar authority.
-            pub fn new(value: impl Into<String>) -> Result<Self, EvmContractScalarError> {
-                let raw = value.into();
-                <$checker>::new(&raw).map_err(|error| checked_string_scalar_error($kind, error))?;
-                Ok(Self { raw })
-            }
-
-            /// Returns the canonical string representation.
-            pub fn as_str(&self) -> &str {
-                &self.raw
-            }
-
-            /// Consumes this authority into its canonical string representation.
-            pub fn into_string(self) -> String {
-                self.raw
-            }
-        }
-
-        impl AsRef<str> for $ty {
-            fn as_ref(&self) -> &str {
-                self.as_str()
-            }
-        }
-
-        impl Deref for $ty {
-            type Target = str;
-
-            fn deref(&self) -> &Self::Target {
-                self.as_str()
-            }
-        }
-
-        impl fmt::Display for $ty {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str(self.as_str())
-            }
-        }
-
-        impl FromStr for $ty {
-            type Err = EvmContractScalarError;
-
-            fn from_str(value: &str) -> Result<Self, Self::Err> {
-                Self::new(value)
-            }
-        }
-
-        impl TryFrom<String> for $ty {
-            type Error = EvmContractScalarError;
-
-            fn try_from(value: String) -> Result<Self, Self::Error> {
-                Self::new(value)
-            }
-        }
-
-        impl From<$ty> for String {
-            fn from(value: $ty) -> Self {
-                value.raw
-            }
-        }
-
-        impl PartialEq<&str> for $ty {
-            fn eq(&self, other: &&str) -> bool {
-                self.as_str() == *other
-            }
-        }
-    };
-}
-
-checked_evm_string_scalar!(
+evm_string_scalar!(
     EvmNetworkId,
-    StableAuthorKey,
+    require_stable_author_key,
     "network_id",
     "network-id",
     "mfm.evm.contract.id.network",
@@ -325,6 +242,7 @@ checked_evm_string_scalar!(
 
 evm_string_scalar!(
     FunctionName,
+    require_non_empty,
     "function",
     "function-name",
     "mfm.evm.contract.id.function",
@@ -333,15 +251,16 @@ evm_string_scalar!(
 
 evm_string_scalar!(
     EventName,
+    require_non_empty,
     "event",
     "event-name",
     "mfm.evm.contract.id.event",
     "Checked EVM ABI event name."
 );
 
-checked_evm_string_scalar!(
+evm_string_scalar!(
     ArtifactPort,
-    LocalPublicId,
+    require_local_public_id,
     "artifact_port",
     "artifact-port",
     "mfm.evm.contract.id.artifact_port",

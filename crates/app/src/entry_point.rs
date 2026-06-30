@@ -8,30 +8,26 @@ use mfm_authored_config::{
     AuthoredConfig, AuthoredConfigError, AuthoredConfigFormat, EntryPointDescriptor,
 };
 use mfm_canonical::PlainCanonicalJsonBytes;
-use mfm_ids::{ContentDigest, DottedLowerKebabName, LowerSnakeName};
+use mfm_ids::{ContentDigest, NameToken, ResourceNamespace};
 use mfm_program::{
     TypedProgramConfigMaterial, TypedProgramDraft, TypedProgramLaunchPlan, TypedProgramSeedMaterial,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-const PUBLIC_OP_NAME_PATTERN: &str = "[a-z][a-z0-9]*(?:_[a-z0-9]+)*";
-const ENTRY_POINT_NAMESPACE_PATTERN: &str =
-    "[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:\\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*)*";
-
 /// Public entry-point operation name accepted by CLI and REST transports.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct PublicOpName(LowerSnakeName);
+pub struct PublicOpName(NameToken);
 
 impl PublicOpName {
     /// Creates a checked public operation name.
     pub fn new(value: impl AsRef<str>) -> Result<Self, EntryPointOpResolveError> {
         let value = value.as_ref();
-        LowerSnakeName::new(value).map(Self).map_err(|_| {
+        NameToken::new(value).map(Self).map_err(|error| {
             EntryPointOpResolveError::new(
                 "InvalidPublicOpName",
-                format!("public op name must match {PUBLIC_OP_NAME_PATTERN}"),
+                format!("public op name is invalid: {error}"),
             )
         })
     }
@@ -103,9 +99,9 @@ impl FromStr for OpVersion {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct EntryPointOpId {
     /// Domain namespace for the entry-point operation.
-    pub namespace: DottedLowerKebabName,
+    pub namespace: ResourceNamespace,
     /// Stable domain operation name within the namespace.
-    pub name: LowerSnakeName,
+    pub name: NameToken,
     /// Public operation version.
     pub version: OpVersion,
 }
@@ -119,16 +115,16 @@ impl EntryPointOpId {
     ) -> Result<Self, EntryPointOpResolveError> {
         let namespace = namespace.as_ref();
         let name = name.as_ref();
-        let namespace = DottedLowerKebabName::new(namespace).map_err(|_| {
+        let namespace = ResourceNamespace::new(namespace).map_err(|error| {
             EntryPointOpResolveError::new(
                 "InvalidEntryPointOpId",
-                format!("entry-point op namespace must match {ENTRY_POINT_NAMESPACE_PATTERN}"),
+                format!("entry-point op namespace is invalid: {error}"),
             )
         })?;
-        let name = LowerSnakeName::new(name).map_err(|_| {
+        let name = NameToken::new(name).map_err(|error| {
             EntryPointOpResolveError::new(
                 "InvalidEntryPointOpId",
-                format!("entry-point op name must match {PUBLIC_OP_NAME_PATTERN}"),
+                format!("entry-point op name is invalid: {error}"),
             )
         })?;
         Ok(Self {
