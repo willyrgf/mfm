@@ -1,5 +1,7 @@
 use std::marker::PhantomData;
 
+use mfm_ids::RuntimeToken;
+
 use super::*;
 
 const ADMISSION_LANE_ID_DOMAIN: &[u8] = b"mfm.admission_lane.id.v1";
@@ -234,23 +236,20 @@ impl ExecutionClaimAdmissionLane {
 
 /// Operational admission token.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct AdmissionToken(String);
+pub struct AdmissionToken(RuntimeToken);
 
 impl AdmissionToken {
-    /// Creates an admission token from a non-empty stable string.
+    /// Creates an admission token from a checked runtime token string.
     pub fn new(value: impl Into<String>) -> Result<Self> {
         let value = value.into();
-        if value.is_empty() {
-            return Err(StoreError::Identity(
-                "admission token must not be empty".to_owned(),
-            ));
-        }
-        Ok(Self(value))
+        RuntimeToken::new(&value)
+            .map(Self)
+            .map_err(|_| StoreError::Identity("admission token was invalid".to_owned()))
     }
 
     /// Returns the stable token string.
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0.as_str()
     }
 }
 
@@ -267,23 +266,20 @@ pub struct AdmissionLease {
 
 /// Deterministic operational waiter id.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct AdmissionWaiterId(String);
+pub struct AdmissionWaiterId(RuntimeToken);
 
 impl AdmissionWaiterId {
-    /// Creates a waiter id from a non-empty stable string.
+    /// Creates a waiter id from a checked runtime token string.
     pub fn new(value: impl Into<String>) -> Result<Self> {
         let value = value.into();
-        if value.is_empty() {
-            return Err(StoreError::Identity(
-                "admission waiter id must not be empty".to_owned(),
-            ));
-        }
-        Ok(Self(value))
+        RuntimeToken::new(&value)
+            .map(Self)
+            .map_err(|_| StoreError::Identity("admission waiter id was invalid".to_owned()))
     }
 
     /// Returns the stable waiter id string.
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0.as_str()
     }
 }
 

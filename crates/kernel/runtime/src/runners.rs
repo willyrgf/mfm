@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use mfm_capabilities::{CapabilityDescriptor, CapabilitySetDescriptor};
 use mfm_events::v1 as events;
-use mfm_ids::{AdapterKind, AdapterVersion, DescriptorId};
+use mfm_ids::{AdapterKind, AdapterVersion, DescriptorId, RuntimeBindingId};
 use mfm_spec::v1 as spec;
 
 use crate::framework::{
@@ -287,29 +287,26 @@ impl ErasedRunnerBinding {
 
 /// Non-secret runtime identifier for one concrete capability implementation.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct CapabilityImplementationId(String);
+pub struct CapabilityImplementationId(RuntimeBindingId);
 
 impl CapabilityImplementationId {
     /// Creates a checked runtime capability implementation id.
     pub fn new(value: impl Into<String>) -> Result<Self> {
         let value = value.into();
-        if !is_valid_runtime_binding_id(&value) {
-            return Err(RuntimeError::RunnerBinding(format!(
-                "invalid capability implementation id {value:?}"
-            )));
-        }
-        Ok(Self(value))
+        RuntimeBindingId::new(&value).map(Self).map_err(|_| {
+            RuntimeError::RunnerBinding(format!("invalid capability implementation id {value:?}"))
+        })
     }
 
     /// Returns the stable runtime implementation id string.
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0.as_str()
     }
 }
 
 impl fmt::Display for CapabilityImplementationId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(self.as_str())
     }
 }
 
@@ -667,12 +664,4 @@ fn capability_implementation_key(descriptor: &CapabilityDescriptor) -> (String, 
 
 fn adapter_executable_key(kind: &AdapterKind, version: &AdapterVersion) -> (String, String) {
     (kind.as_str().to_owned(), version.as_str().to_owned())
-}
-
-fn is_valid_runtime_binding_id(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 128
-        && value
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '/' | ':'))
 }

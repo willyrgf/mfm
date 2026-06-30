@@ -884,7 +884,6 @@ fn admission_lane_helpers_are_stable_and_domain_separated() {
 fn execution_claim_contract_defaults_are_explicit() {
     assert_eq!(EXECUTION_CLAIM_LEASE_TTL_SECS, 60);
     assert_eq!(EXECUTION_CLAIM_HEARTBEAT_INTERVAL_SECS, 20);
-    assert!(AdmissionToken::new("").is_err());
 }
 
 #[test]

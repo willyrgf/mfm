@@ -8,9 +8,9 @@ use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind, CapabilityVersion, CellId,
     ContentDigest, DescriptorId, DigestAlgorithm, EventId, IdentityError, LoweringVersion, NodeId,
-    PrintableAscii1024 as CheckedPrintableAscii1024, RunId, SchemaId, ScopeId, SeedId,
-    SemanticTypeId, SideEffectPairId, SpecHash, SpecVersion, StateKind, StateVersion, TrustScopeId,
-    VisibleAscii256 as CheckedVisibleAscii256,
+    PrintableAscii1024 as CheckedPrintableAscii1024, PrintableAscii512 as CheckedPrintableAscii512,
+    RunId, SchemaId, ScopeId, SeedId, SemanticTypeId, SideEffectPairId, SpecHash, SpecVersion,
+    StateKind, StateVersion, TrustScopeId, VisibleAscii256 as CheckedVisibleAscii256,
 };
 use mfm_spec::v1::{
     CanonicalizerIdentity, CellProducer, DescriptorIdentity, MediaType, PublicFieldPath,
@@ -2589,7 +2589,6 @@ pub mod v1 {
         }
     }
 
-    const MAX_PUBLIC_SAFE_MESSAGE_BYTES: usize = 512;
     const SECRET_SHAPED_DIAGNOSTIC_MARKERS: &[&str] = &[
         "private key",
         "private_key",
@@ -2617,24 +2616,12 @@ pub mod v1 {
     ];
 
     fn validate_public_error_text(field: &'static str, value: &str) -> Result<()> {
-        if value.is_empty() {
-            return Err(EventError::InvalidPublicDiagnostic {
+        CheckedPrintableAscii512::new(value).map_err(|error| {
+            EventError::InvalidPublicDiagnostic {
                 field,
-                reason: "message must not be empty",
-            });
-        }
-        if value.len() > MAX_PUBLIC_SAFE_MESSAGE_BYTES {
-            return Err(EventError::InvalidPublicDiagnostic {
-                field,
-                reason: "message exceeds public length limit",
-            });
-        }
-        if !value.bytes().all(|byte| matches!(byte, 0x20..=0x7e)) {
-            return Err(EventError::InvalidPublicDiagnostic {
-                field,
-                reason: "message must be printable ASCII",
-            });
-        }
+                reason: public_error_text_reason(error.reason()),
+            }
+        })?;
         if contains_secret_shaped_diagnostic(value) {
             return Err(EventError::InvalidPublicDiagnostic {
                 field,
@@ -2642,6 +2629,24 @@ pub mod v1 {
             });
         }
         Ok(())
+    }
+
+    fn public_error_text_reason(reason: &mfm_ids::CheckedStringErrorReason) -> &'static str {
+        match reason {
+            mfm_ids::CheckedStringErrorReason::Empty => "message must not be empty",
+            mfm_ids::CheckedStringErrorReason::TooLong { .. } => {
+                "message exceeds public length limit"
+            }
+            mfm_ids::CheckedStringErrorReason::SegmentTooLong { .. }
+            | mfm_ids::CheckedStringErrorReason::InvalidCharacter { .. }
+            | mfm_ids::CheckedStringErrorReason::InvalidStart
+            | mfm_ids::CheckedStringErrorReason::InvalidEnd
+            | mfm_ids::CheckedStringErrorReason::MissingSeparator { .. }
+            | mfm_ids::CheckedStringErrorReason::EmptySegment
+            | mfm_ids::CheckedStringErrorReason::ReservedPrefix { .. } => {
+                "message must be printable ASCII"
+            }
+        }
     }
 
     fn contains_secret_shaped_diagnostic(value: &str) -> bool {
