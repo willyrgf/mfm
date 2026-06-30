@@ -270,24 +270,6 @@ impl From<OpLaunchError> for AppError {
     }
 }
 
-/// Builds typed app services backed by a durable async typed run event store.
-pub fn make_run_services<S, A>(
-    runners: ErasedRunnerRegistry,
-    store: S,
-    artifacts: A,
-) -> RunServices<S, A>
-where
-    S: store::RunEventStore + store::TrustScopeStore + Send + Sync,
-    A: store::RetainedArtifactReadProvider + Clone + Send + Sync + 'static,
-{
-    make_run_services_with_certification_registry(
-        runners,
-        store,
-        artifacts,
-        CertificationRegistry::new(),
-    )
-}
-
 /// Builds typed async app services with an explicit trusted certification registry.
 pub fn make_run_services_with_certification_registry<S, A>(
     runners: ErasedRunnerRegistry,

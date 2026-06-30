@@ -6,7 +6,6 @@ use std::str::FromStr;
 use bs58;
 use mfm_program_derive::MfmValue;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use crate::ids::{
     ExternalSignerId, KeystoreEntryId, NetworkId, NormalizedEvmAddress, PortfolioScalarError,
@@ -387,13 +386,6 @@ pub enum WalletConfigError {
         /// Metadata key associated with the rejected content.
         key: String,
     },
-}
-
-/// Decodes and validates a canonical wallet config.
-pub fn decode_wallet_config(value: &Value) -> Result<WalletConfig, WalletConfigError> {
-    let cfg: WalletConfig = serde_json::from_value(value.clone())
-        .map_err(|err| WalletConfigError::Decode(err.to_string()))?;
-    cfg.validated()
 }
 
 fn validate_bitcoin_address(raw: &str) -> Result<(), String> {

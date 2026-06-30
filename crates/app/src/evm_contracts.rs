@@ -113,3 +113,8 @@ fn runtime_signing_error(error: mfm_signing::SigningError) -> mfm_runtime::Runti
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+fn test_run_store() -> mfm_store::v1::AsyncInMemoryRunStore {
+    mfm_store::v1::AsyncInMemoryRunStore::default()
+}

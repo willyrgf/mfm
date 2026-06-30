@@ -1247,20 +1247,6 @@ pub fn prepare_validate_assertions(
     Ok((reads, events))
 }
 
-/// Normalizes an optional wei value into RPC hex quantity form.
-pub fn parse_value_wei_to_hex(value_wei: &Option<WeiAmount>) -> Result<Option<String>, String> {
-    let raw = value_wei.as_ref().map(|value| value.as_str().to_owned());
-    common_abi::parse_value_wei_to_hex(&raw).map_err(|error| error.message)
-}
-
-/// Ensures the receipt-poll budget is non-zero.
-pub fn ensure_nonzero_polls(max_receipt_polls: u64) -> Result<(), String> {
-    if max_receipt_polls == 0 {
-        return Err("max_receipt_polls must be > 0".to_string());
-    }
-    Ok(())
-}
-
 /// Normalizes an EVM address to canonical lowercase `0x`-prefixed form.
 pub fn normalize_address(value: &str) -> Result<String, String> {
     encoding::normalize_address(value).map_err(|error| error.message)

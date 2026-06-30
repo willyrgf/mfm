@@ -11,6 +11,7 @@ const SYMBOL_ID: &str = "eth.native.reth-local";
 const CONTROL_SCOPE: &str = "parity/portfolio-snapshot/eth-only";
 const DEFAULT_PARITY_RETH_HTTP_PORT: &str = "8565";
 const ENV_EVM_RPC_SOURCES_JSON: &str = "MFM_EVM_RPC_SOURCES_JSON";
+const ENV_EVM_NETWORK_ROUTES_JSON: &str = "MFM_EVM_NETWORK_ROUTES_JSON";
 
 fn canonical_portfolio_snapshot_payload(
     wallet_address: &str,
@@ -243,6 +244,17 @@ fn set_runtime_source_registry(chain_id: u64, rpc_url: &str) {
                 }
             ]
         })
+        .to_string(),
+    );
+    std::env::set_var(
+        ENV_EVM_NETWORK_ROUTES_JSON,
+        serde_json::json!([
+            {
+                "network_id": NETWORK_ID,
+                "source_ref": NETWORK_ID,
+                "policy_id": NETWORK_ID
+            }
+        ])
         .to_string(),
     );
 }

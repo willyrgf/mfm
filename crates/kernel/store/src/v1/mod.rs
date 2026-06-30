@@ -5857,65 +5857,6 @@ fn derive_resource_lane_release_id(
     ))?)
 }
 
-/// Builds a store-owned committed batch for an already persisted prepared commit plan.
-///
-/// Durable stores use this after a same-fingerprint prepared plan commit-key hit so the idempotent
-/// result can return the original sequence even when the caller's `expected_next_seq` is stale.
-pub fn build_prepared_commit_plan_batch(
-    plan: &PreparedCommitPlan,
-    committed_seq: StreamSeq,
-) -> Result<CommittedBatch> {
-    let fingerprint = prepared_commit_plan_fingerprint(plan)?;
-    build_committed_batch_with_fingerprint(plan.request(), committed_seq, fingerprint)
-}
-
-fn build_committed_batch_with_fingerprint(
-    request: &CommitRequest,
-    committed_seq: StreamSeq,
-    fingerprint: CommitFingerprint,
-) -> Result<CommittedBatch> {
-    validate_terminal_attempt_cell_pairs(&request.payloads)?;
-    validate_terminal_side_effect_evidence_pairs(&request.payloads)?;
-    validate_retention_manifest_pairs(&request.payloads)?;
-
-    let mut events = Vec::with_capacity(request.payloads.len());
-    for (index, payload) in request.payloads.iter().cloned().enumerate() {
-        let canonical_payload = payload_canonical_json(&payload)?;
-        let payload_hash = canonical_payload.content_digest();
-        let schema_id = payload.event_schema_id()?;
-        let logical_key = derive_logical_key(&payload, &payload_hash)?;
-        let ordinal = CommitOrdinal::from_index(index)?;
-        let event_id = derive_event_id(
-            &request.run_id,
-            committed_seq,
-            ordinal,
-            &schema_id,
-            &payload_hash,
-        )?;
-        let spec_hash = payload_spec_hash(&payload);
-        events.push(KernelEventEnvelope {
-            event_id,
-            event_schema_id: schema_id,
-            run_id: request.run_id.clone(),
-            seq: committed_seq,
-            ordinal,
-            spec_hash,
-            commit_key: request.commit_key.clone(),
-            logical_key,
-            payload_hash,
-            payload,
-        });
-    }
-
-    Ok(CommittedBatch {
-        run_id: request.run_id.clone(),
-        commit_key: request.commit_key.clone(),
-        fingerprint,
-        seq: committed_seq,
-        events,
-    })
-}
-
 #[cfg(any(test, feature = "test-support"))]
 impl RunMemoryCore {
     fn projection_snapshot(&self) -> &ProjectionSnapshot {

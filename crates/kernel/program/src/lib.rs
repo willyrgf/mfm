@@ -36,8 +36,7 @@ pub use mfm_spec::v1::{
     SideEffectVerificationSpec,
 };
 use mfm_values::{
-    MfmConfig, MfmValue, PublicOutputDescriptor, SchemaDescriptor, SchemaShape, StateInput,
-    ValueTerminalPolicy,
+    MfmConfig, MfmValue, SchemaDescriptor, SchemaShape, StateInput, ValueTerminalPolicy,
 };
 pub use mfm_values::{NonEmpty, ValidatedConfig};
 
@@ -4948,11 +4947,6 @@ where
         bridge_nodes: builder.scope.bridge_nodes,
         public_output_spec: bound.public_output_spec,
     })
-}
-
-/// Returns the public schema id for a derive-backed public output descriptor.
-pub fn public_schema_id<P: PublicOutputDescriptor>() -> Result<SchemaId> {
-    P::public_schema_id().map_err(|error| PlanError::Value(error.to_string()))
 }
 
 fn finalize_saga_policy(

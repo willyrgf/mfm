@@ -4,7 +4,6 @@ use std::fmt;
 
 use mfm_program_derive::MfmValue;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use crate::aave::AaveProtocolPositionConfig;
 use crate::ids::{
@@ -699,22 +698,6 @@ pub enum ValuationSourceRegistryError {
         /// Duplicate valuation source id.
         source_id: String,
     },
-}
-
-/// Decodes and validates a canonical symbol config.
-pub fn decode_symbol_config(value: &Value) -> Result<SymbolConfig, SymbolConfigError> {
-    let cfg: SymbolConfig = serde_json::from_value(value.clone())
-        .map_err(|err| SymbolConfigError::Decode(err.to_string()))?;
-    cfg.validated()
-}
-
-/// Decodes and validates a valuation source registry.
-pub fn decode_valuation_source_registry(
-    value: &Value,
-) -> Result<ValuationSourceRegistry, ValuationSourceRegistryError> {
-    let registry: ValuationSourceRegistry = serde_json::from_value(value.clone())
-        .map_err(|err| ValuationSourceRegistryError::Decode(err.to_string()))?;
-    registry.validated()
 }
 
 /// Validates a canonical symbol config.

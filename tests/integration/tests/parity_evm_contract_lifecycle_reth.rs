@@ -10,6 +10,7 @@ use mfm_integration_tests::test_support::{self, empty_post, json_post, response_
 const NETWORK_ID: &str = "reth-local";
 const DEFAULT_PARITY_RETH_HTTP_PORT: &str = "8565";
 const ENV_EVM_RPC_SOURCES_JSON: &str = "MFM_EVM_RPC_SOURCES_JSON";
+const ENV_EVM_NETWORK_ROUTES_JSON: &str = "MFM_EVM_NETWORK_ROUTES_JSON";
 const ENV_EVM_SIGNERS_JSON: &str = "MFM_EVM_SIGNERS_JSON";
 static EVM_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -26,6 +27,7 @@ async fn parity_reth_contract_lifecycle_rest_route_completes_and_replays() {
                 .runtime_source_registry_json(NETWORK_ID, chain_id, &rpc_url)
                 .to_string(),
         ),
+        (ENV_EVM_NETWORK_ROUTES_JSON, evm_network_routes_json()),
         (
             ENV_EVM_SIGNERS_JSON,
             wallet.runtime_signer_registry_json().to_string(),
@@ -141,6 +143,7 @@ async fn parity_reth_contract_phase_routes_deploy_configure_and_validate_contrac
                 .runtime_source_registry_json(NETWORK_ID, chain_id, &rpc_url)
                 .to_string(),
         ),
+        (ENV_EVM_NETWORK_ROUTES_JSON, evm_network_routes_json()),
         (
             ENV_EVM_SIGNERS_JSON,
             wallet.runtime_signer_registry_json().to_string(),
@@ -605,6 +608,17 @@ fn network_json(chain_id: u64) -> serde_json::Value {
         "network_id": NETWORK_ID,
         "expected_chain_id": chain_id,
     })
+}
+
+fn evm_network_routes_json() -> String {
+    serde_json::json!([
+        {
+            "network_id": NETWORK_ID,
+            "source_ref": NETWORK_ID,
+            "policy_id": NETWORK_ID
+        }
+    ])
+    .to_string()
 }
 
 fn required_rpc_url_for_source(source_id: &str) -> String {

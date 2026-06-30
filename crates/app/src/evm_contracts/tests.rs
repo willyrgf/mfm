@@ -125,7 +125,7 @@ where
 
 #[tokio::test]
 async fn app_runner_resumes_replays_and_renders_validate_only_lifecycle_run() {
-    let store = store::AsyncInMemoryRunStore::default();
+    let store = test_run_store();
     let artifacts = crate::artifact_read_provider_from_retained(store.clone());
     let config = validate_config();
     let configured = configured_contract();
@@ -199,7 +199,7 @@ async fn app_runner_resumes_replays_and_renders_validate_only_lifecycle_run() {
 
 #[tokio::test]
 async fn app_runner_reports_execution_claim_lost_after_renewal_failure() {
-    let store = store::AsyncInMemoryRunStore::default();
+    let store = test_run_store();
     let artifacts = crate::artifact_read_provider_from_retained(store.clone());
     let config = validate_config();
     let configured = configured_contract();
@@ -259,7 +259,7 @@ async fn app_runner_reports_execution_claim_lost_after_renewal_failure() {
 
 #[tokio::test]
 async fn app_runner_records_distinct_validation_capability_facts() {
-    let store = store::AsyncInMemoryRunStore::default();
+    let store = test_run_store();
     let artifacts = crate::artifact_read_provider_from_retained(store.clone());
     let configured = configured_contract();
     let mut certification = CertificationRegistry::new();
@@ -318,7 +318,7 @@ async fn app_runner_records_distinct_validation_capability_facts() {
 
 #[tokio::test]
 async fn app_runner_resumes_replays_and_renders_deploy_lifecycle_run() {
-    let store = store::AsyncInMemoryRunStore::default();
+    let store = test_run_store();
     let artifacts = crate::artifact_read_provider_from_retained(store.clone());
     let signer = test_contract_signer();
     let config = deploy_config(&signer.address);
@@ -386,7 +386,7 @@ async fn app_runner_resumes_replays_and_renders_deploy_lifecycle_run() {
 
 #[tokio::test]
 async fn app_runner_resumes_replays_and_renders_full_lifecycle_run() {
-    let store = store::AsyncInMemoryRunStore::default();
+    let store = test_run_store();
     let artifacts = crate::artifact_read_provider_from_retained(store.clone());
     let signer = test_contract_signer();
     let config = ContractLifecycleConfig::new(
@@ -866,10 +866,14 @@ fn failed_evm<'a, T>() -> EvmCapabilityFuture<'a, T> {
     Box::pin(async { Err(EvmCapabilityError::redacted_provider_failure("test evm")) })
 }
 
-async fn wait_for_live_execution_claim(
-    store: &store::AsyncInMemoryRunStore,
+async fn wait_for_live_execution_claim<S>(
+    store: &S,
     run_id: &mfm_ids::RunId,
-) -> store::AdmissionLease {
+) -> store::AdmissionLease
+where
+    S: ExecutionClaimStore,
+    S::Error: std::fmt::Debug,
+{
     for _ in 0..100 {
         match store
             .execution_claim_status(run_id)

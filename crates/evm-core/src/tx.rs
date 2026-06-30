@@ -26,7 +26,7 @@
 
 use alloy_primitives::{keccak256, Address, PrimitiveSignature, B256};
 
-use crate::hex::{bytes_to_hex_prefixed, hex_to_bytes, normalize_hex_str};
+use crate::hex::bytes_to_hex_prefixed;
 use crate::rlp::{
     rlp_encode_bytes, rlp_encode_list, rlp_encode_list_preencoded, trim_leading_zero_bytes,
     u128_to_min_be, u64_to_min_be,
@@ -209,11 +209,6 @@ pub fn encode_signed_legacy_tx(tx: &LegacyTxToSign, sig: PrimitiveSignature) -> 
     ])
 }
 
-/// Encodes a signed EIP-155 protected legacy transaction as `0x`-prefixed hex.
-pub fn encode_signed_legacy_tx_hex(tx: &LegacyTxToSign, sig: PrimitiveSignature) -> String {
-    bytes_to_hex_prefixed(&encode_signed_legacy_tx(tx, sig))
-}
-
 /// Encodes a signed EIP-1559 transaction as type-prefixed raw bytes.
 pub fn encode_signed_eip1559_tx(tx: &Eip1559TxToSign, sig: PrimitiveSignature) -> Vec<u8> {
     let mut raw = vec![0x02];
@@ -235,17 +230,6 @@ pub fn raw_transaction_hash_bytes(bytes: &[u8]) -> Result<String, UtilError> {
         ));
     }
     Ok(bytes_to_hex_prefixed(keccak256(bytes).as_slice()))
-}
-
-/// Computes the expected EVM transaction hash for a signed raw transaction.
-pub fn raw_transaction_hash(raw_tx_hex: &str) -> Result<String, UtilError> {
-    let normalized = normalize_hex_str(raw_tx_hex).map_err(|_| {
-        UtilError::new("invalid_raw_transaction", "raw transaction hex was invalid")
-    })?;
-    let bytes = hex_to_bytes(&normalized).map_err(|_| {
-        UtilError::new("invalid_raw_transaction", "raw transaction hex was invalid")
-    })?;
-    raw_transaction_hash_bytes(&bytes)
 }
 
 fn legacy_unsigned_payload(tx: &LegacyTxToSign) -> Vec<u8> {
