@@ -137,7 +137,10 @@ fn generated_value_descriptor_is_stable() {
     let descriptor = PricedAsset::schema_descriptor().expect("descriptor");
 
     assert_eq!(descriptor.identity.schema_kind, SchemaKind::Value);
-    assert_eq!(descriptor.identity.schema_name, "mfm.test.priced_asset");
+    assert_eq!(
+        descriptor.identity.schema_name.as_str(),
+        "mfm.test.priced_asset"
+    );
     assert_eq!(descriptor.identity.schema_version.as_str(), "1");
     assert_eq!(
         descriptor.audit.provenance(),
@@ -158,7 +161,10 @@ fn transparent_string_value_descriptor_uses_string_shape() {
     let descriptor = AccountId::schema_descriptor().expect("descriptor");
 
     assert_eq!(descriptor.identity.schema_kind, SchemaKind::Value);
-    assert_eq!(descriptor.identity.schema_name, "mfm.test.account_id");
+    assert_eq!(
+        descriptor.identity.schema_name.as_str(),
+        "mfm.test.account_id"
+    );
     assert_eq!(descriptor.identity.shape, SchemaShape::String);
     assert_eq!(
         serde_json::to_value(AccountId {
@@ -175,7 +181,10 @@ fn transparent_map_value_descriptor_uses_map_shape() {
     let descriptor = PublicMetadata::schema_descriptor().expect("descriptor");
 
     assert_eq!(descriptor.identity.schema_kind, SchemaKind::Value);
-    assert_eq!(descriptor.identity.schema_name, "mfm.test.public_metadata");
+    assert_eq!(
+        descriptor.identity.schema_name.as_str(),
+        "mfm.test.public_metadata"
+    );
     assert_eq!(
         descriptor.identity.shape,
         SchemaShape::BTreeMapString {

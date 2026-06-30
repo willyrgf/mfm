@@ -6,18 +6,20 @@ use mfm_store::v1 as store;
 
 /// Environment variable carrying process-local EVM RPC source configuration.
 pub const ENV_EVM_RPC_SOURCES_JSON: &str = "MFM_EVM_RPC_SOURCES_JSON";
+const ENV_EVM_NETWORK_ROUTES_JSON: &str = "MFM_EVM_NETWORK_ROUTES_JSON";
 
 /// Restores an environment variable to its previous test value when dropped.
 pub struct EnvVarRestore {
-    name: &'static str,
-    previous: Option<String>,
+    previous: Vec<(&'static str, Option<String>)>,
 }
 
 impl Drop for EnvVarRestore {
     fn drop(&mut self) {
-        match &self.previous {
-            Some(value) => std::env::set_var(self.name, value),
-            None => std::env::remove_var(self.name),
+        for (name, previous) in self.previous.drain(..) {
+            match previous {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
         }
     }
 }
@@ -79,7 +81,16 @@ pub fn set_evm_rpc_sources_env_for_test(
     expected_chain_id: u64,
     rpc_url: String,
 ) -> EnvVarRestore {
-    let previous = std::env::var(ENV_EVM_RPC_SOURCES_JSON).ok();
+    let previous = vec![
+        (
+            ENV_EVM_RPC_SOURCES_JSON,
+            std::env::var(ENV_EVM_RPC_SOURCES_JSON).ok(),
+        ),
+        (
+            ENV_EVM_NETWORK_ROUTES_JSON,
+            std::env::var(ENV_EVM_NETWORK_ROUTES_JSON).ok(),
+        ),
+    ];
     std::env::set_var(
         ENV_EVM_RPC_SOURCES_JSON,
         serde_json::json!({
@@ -100,10 +111,18 @@ pub fn set_evm_rpc_sources_env_for_test(
         })
         .to_string(),
     );
-    EnvVarRestore {
-        name: ENV_EVM_RPC_SOURCES_JSON,
-        previous,
-    }
+    std::env::set_var(
+        ENV_EVM_NETWORK_ROUTES_JSON,
+        serde_json::json!([
+            {
+                "network_id": network_id,
+                "source_ref": network_id,
+                "policy_id": network_id
+            }
+        ])
+        .to_string(),
+    );
+    EnvVarRestore { previous }
 }
 
 /// Prepares a portfolio snapshot entry-point launch against the supplied store trust scope.

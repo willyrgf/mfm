@@ -1542,7 +1542,7 @@ fn is_lower_or_digit(ch: char) -> bool {
 }
 
 fn is_lower_or_digit_byte(byte: u8) -> bool {
-    byte.is_ascii_digit() || matches!(byte, b'a'..=b'z')
+    byte.is_ascii_digit() || byte.is_ascii_lowercase()
 }
 
 mod private {

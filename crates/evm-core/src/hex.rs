@@ -70,11 +70,6 @@ pub fn bytes_to_hex_prefixed(bytes: &[u8]) -> String {
     format!("0x{}", hex::encode(bytes))
 }
 
-/// Hex-encodes a UTF-8 string without adding a `0x` prefix.
-pub fn hex_encode_utf8(value: &str) -> String {
-    hex::encode(value.as_bytes())
-}
-
 /// Converts a single ASCII hex digit into its numeric value.
 pub fn hex_nibble(c: u8) -> Option<u8> {
     match c {

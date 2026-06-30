@@ -232,6 +232,17 @@ fn set_rpc_env(rpc_url: String) {
         })
         .to_string(),
     );
+    std::env::set_var(
+        "MFM_EVM_NETWORK_ROUTES_JSON",
+        json!([
+            {
+                "network_id": NETWORK_ID,
+                "source_ref": NETWORK_ID,
+                "policy_id": NETWORK_ID
+            }
+        ])
+        .to_string(),
+    );
 }
 
 fn rest_test_app() -> axum::Router {

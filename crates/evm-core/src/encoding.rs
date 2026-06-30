@@ -7,12 +7,12 @@
 //!
 //! ```rust
 //! use alloy_primitives::Address;
-//! use mfm_evm_core::encoding::{encode_erc20_balance_of, normalize_address, u64_hex_quantity};
+//! use mfm_evm_core::encoding::{encode_erc20_balance_of, normalize_address, parse_u256_hex};
 //!
 //! let owner = Address::from([0x11; 20]);
 //! let calldata = encode_erc20_balance_of(&owner);
 //! assert!(calldata.starts_with("0x70a08231"));
-//! assert_eq!(u64_hex_quantity(15), "0xf");
+//! assert_eq!(parse_u256_hex("0xf")?.to_string(), "15");
 //! assert_eq!(
 //!     normalize_address("0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")?,
 //!     "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -22,7 +22,7 @@
 
 use alloy_primitives::{Address, U256};
 
-use crate::hex::{bytes_to_hex_prefixed, hex_to_bytes, normalize_hex_str};
+use crate::hex::{hex_to_bytes, normalize_hex_str};
 use crate::util_error::UtilError;
 
 /// Function selector for `balanceOf(address)`.
@@ -34,14 +34,6 @@ pub const ERC20_SELECTOR_DECIMALS: [u8; 4] = [0x31, 0x3c, 0xe5, 0x67];
 pub fn address_hex_lower(addr: &Address) -> String {
     // Debug formatting is lowercase and stable.
     format!("{addr:?}")
-}
-
-/// Formats an [`Address`] as lowercase hex without the `0x` prefix.
-pub fn address_hex_lower_no0x(addr: &Address) -> String {
-    address_hex_lower(addr)
-        .strip_prefix("0x")
-        .unwrap_or("")
-        .to_string()
 }
 
 /// Encodes the calldata for `balanceOf(address)`.
@@ -58,14 +50,6 @@ pub fn encode_erc20_decimals() -> String {
     let mut data = Vec::with_capacity(4);
     data.extend_from_slice(&ERC20_SELECTOR_DECIMALS);
     format!("0x{}", hex::encode(data))
-}
-
-/// Formats a JSON-RPC quantity value.
-pub fn u64_hex_quantity(n: u64) -> String {
-    if n == 0 {
-        return "0x0".to_string();
-    }
-    format!("0x{:x}", n)
 }
 
 /// Formats a `U256` using a decimal point at `decimals` places.
@@ -115,17 +99,6 @@ pub fn parse_u256_hex(s: &str) -> Result<U256, UtilError> {
     Ok(U256::from_be_slice(&bytes))
 }
 
-/// Parses a JSON value that must contain a hex-encoded `U256` string.
-pub fn parse_u256_hex_value(v: &serde_json::Value) -> Result<U256, UtilError> {
-    let Some(s) = v.as_str() else {
-        return Err(UtilError::new(
-            "evm_response_invalid",
-            "evm response was not a hex u256",
-        ));
-    };
-    parse_u256_hex(s)
-}
-
 /// Converts a `U256` into `u8`, returning an error on overflow.
 pub fn parse_u8_u256(v: U256) -> Result<u8, UtilError> {
     if v > U256::from(u8::MAX) {
@@ -135,42 +108,6 @@ pub fn parse_u8_u256(v: U256) -> Result<u8, UtilError> {
         ));
     }
     Ok(v.to::<u8>())
-}
-
-/// Validates that a JSON value contains a `0x`-prefixed hex string response.
-pub fn parse_hex_string_response(value: &serde_json::Value) -> Result<String, UtilError> {
-    let Some(s) = value.as_str() else {
-        return Err(UtilError::new(
-            "evm_response_invalid",
-            "evm response was not a hex string",
-        ));
-    };
-    let Some(rest) = s.strip_prefix("0x") else {
-        return Err(UtilError::new(
-            "evm_response_invalid",
-            "evm response was not a hex string",
-        ));
-    };
-    if !rest.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(UtilError::new(
-            "evm_response_invalid",
-            "evm response was not a hex string",
-        ));
-    }
-    Ok(s.to_string())
-}
-
-/// Validates that a JSON value contains a hex-encoded `U256` response.
-pub fn parse_u256_hex_response(value: &serde_json::Value) -> Result<String, UtilError> {
-    let s = parse_hex_string_response(value)?;
-    let rest = s.strip_prefix("0x").unwrap_or_default();
-    if rest.is_empty() || rest.len() > 64 {
-        return Err(UtilError::new(
-            "evm_response_invalid",
-            "evm response was not a hex u256",
-        ));
-    }
-    Ok(s)
 }
 
 /// Encodes a `u64` into a 32-byte ABI word.
@@ -214,11 +151,6 @@ pub fn normalize_address(raw: &str) -> Result<String, UtilError> {
         ));
     }
     Ok(format!("0x{}", rest.to_ascii_lowercase()))
-}
-
-/// Encodes a raw address as a lowercase `0x`-prefixed hex string.
-pub fn address_to_hex_prefixed(addr: &[u8; 20]) -> String {
-    bytes_to_hex_prefixed(addr)
 }
 
 #[cfg(test)]

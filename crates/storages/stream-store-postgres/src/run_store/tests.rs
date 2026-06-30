@@ -20,17 +20,15 @@ use mfm_spec::v1::{
     SagaPolicySpec, ValueLineageRef,
 };
 use mfm_store::v1::test_support::{
-    artifact_bytes_artifact_id_for_test as artifact_id,
-    artifact_content_digest_for_test as content_digest,
+    artifact_bytes_for_digest_for_test, artifact_content_digest_for_test as content_digest,
     confirmation_terminal_policies_for_projection_for_test as confirmation_terminal_policies_for_projection,
     fixed_attempt_id_for_test as attempt_id, fixed_cell_id_for_test as cell_id,
     fixed_descriptor_id_for_test as descriptor_id, fixed_digest_bytes_for_test as digest_bytes,
     fixed_node_id_for_test as node_id, fixed_schema_id_for_test as schema_id,
     fixed_scope_id_for_test as scope_id, fixed_semantic_type_id_for_test as semantic_id,
     fixed_spec_hash_for_test as spec_hash, fixed_state_kind_for_test as state_kind,
-    media_type_for_test as media_type,
-    prepared_artifact_bytes_for_test as test_prepared_artifact_bytes,
-    prepared_commit_plan_for_test as test_prepared_commit_plan, run_identity_material_for_test,
+    media_type_for_test as media_type, prepared_commit_plan_for_test as test_prepared_commit_plan,
+    run_identity_material_for_test,
 };
 use mfm_store::v1::{
     AdmissionLease, AdmissionToken, AdmissionWaiter, ArtifactEvidenceRef, AttemptStatus,
@@ -54,6 +52,23 @@ fn unique_schema() -> String {
         .as_nanos();
     let counter = SCHEMA_COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("run_store_{}_{}_{}", std::process::id(), nanos, counter)
+}
+
+fn artifact_id(byte: u8) -> ArtifactId {
+    let digest = content_digest(byte);
+    ArtifactId::from_digest(digest.algorithm(), *digest.digest())
+}
+
+fn test_prepared_artifact_bytes(
+    evidence: &ArtifactEvidenceRef,
+) -> mfm_store::v1::Result<PreparedArtifactBytes> {
+    let bytes = artifact_bytes_for_digest_for_test(&evidence.digest).ok_or_else(|| {
+        StoreError::ArtifactEvidenceMismatch {
+            artifact_id: evidence.artifact_id.clone(),
+            field: "bytes",
+        }
+    })?;
+    PreparedArtifactBytes::new(bytes, evidence.clone())
 }
 
 async fn test_store() -> (PostgresRunStore, String) {

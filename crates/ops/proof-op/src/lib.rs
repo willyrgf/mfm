@@ -14,7 +14,7 @@
 //! assert_eq!(draft.state_nodes().len(), 3);
 //! ```
 
-use mfm_certify::{certify_program_draft, CertifiedSchemaRole, CertifiedTypedSpec};
+use mfm_certify::{CertifiedSchemaRole, CertifiedTypedSpec};
 pub use mfm_collectors_proof::{
     proof_adapter_kind, proof_adapter_version, ProofApplyConfig, ProofApplySideEffectState,
     ProofAssembleConfig, ProofAssembleInput, ProofAssembleInputHandles, ProofAssembleOutputState,
@@ -228,15 +228,6 @@ pub fn proof_manual_resolution_evidence_schema_id() -> mfm_program::Result<Schem
     .map_err(|error| mfm_program::PlanError::Key(error.to_string()))
 }
 
-/// Builds and certifies the typed proof program.
-pub fn certified_proof_spec(
-    config: ProofWorkflowConfig,
-) -> mfm_certify::Result<CertifiedTypedSpec> {
-    let draft = proof_program_draft(config)
-        .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?;
-    certify_program_draft(&draft)
-}
-
 /// Builds and certifies the proof workflow variant that awaits manual resolution.
 pub fn certified_manual_resolution_proof_spec(
     config: ProofWorkflowConfig,
@@ -284,7 +275,7 @@ mod tests {
             "proof state descriptors must not expose dynamic context"
         );
 
-        let certified = certify_program_draft(&draft).expect("certified proof spec");
+        let certified = mfm_certify::certify_program_draft(&draft).expect("certified proof spec");
         certified.envelope().verify_hash().expect("hash verifies");
         let side_effect = certified
             .envelope()

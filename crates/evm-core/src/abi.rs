@@ -660,20 +660,6 @@ where
     Ok(out)
 }
 
-/// Normalizes optional transaction value input from decimal or hex into lowercase hex.
-pub fn parse_value_wei_to_hex(value_wei: &Option<String>) -> Result<Option<String>, UtilError> {
-    let Some(raw) = value_wei else {
-        return Ok(None);
-    };
-    if raw.starts_with("0x") || raw.starts_with("0X") {
-        return Ok(Some(normalize_hex_str(raw)?));
-    }
-    let v = raw
-        .parse::<u128>()
-        .map_err(|_| UtilError::new("invalid_value_wei", "value_wei must be decimal or 0x hex"))?;
-    Ok(Some(format!("0x{:x}", v)))
-}
-
 /// Decodes a single-output `eth_call` response into a JSON value when the type is supported.
 ///
 /// Unsupported output types fall back to the normalized hex string.

@@ -349,14 +349,6 @@ pub fn fixed_spec_hash_for_test(byte: u8) -> SpecHash {
     )
 }
 
-/// Returns a deterministic run id made from one repeated digest byte.
-pub fn fixed_run_id_for_test(byte: u8) -> RunId {
-    RunId::from_digest(
-        DigestAlgorithm::Sha256JcsV1,
-        fixed_digest_bytes_for_test(byte),
-    )
-}
-
 /// Returns a deterministic artifact id made from one repeated digest byte.
 pub fn fixed_artifact_id_for_test(byte: u8) -> ArtifactId {
     ArtifactId::from_digest(
@@ -487,12 +479,6 @@ pub fn artifact_content_digest_for_test(byte: u8) -> ContentDigest {
     )
 }
 
-/// Returns the artifact id for deterministic artifact bytes.
-pub fn artifact_bytes_artifact_id_for_test(byte: u8) -> ArtifactId {
-    let digest = artifact_content_digest_for_test(byte);
-    ArtifactId::from_digest(digest.algorithm(), *digest.digest())
-}
-
 /// Finds deterministic artifact bytes by content digest.
 pub fn artifact_bytes_for_digest_for_test(digest: &ContentDigest) -> Option<Vec<u8>> {
     (u8::MIN..=u8::MAX)
@@ -501,19 +487,6 @@ pub fn artifact_bytes_for_digest_for_test(digest: &ContentDigest) -> Option<Vec<
             ContentDigest::from_digest(DigestAlgorithm::Sha256JcsV1, sha256_digest_bytes(bytes))
                 == *digest
         })
-}
-
-/// Builds verified prepared artifact bytes for deterministic artifact test fixtures.
-pub fn prepared_artifact_bytes_for_test(
-    evidence: &ArtifactEvidenceRef,
-) -> Result<PreparedArtifactBytes> {
-    let bytes = artifact_bytes_for_digest_for_test(&evidence.digest).ok_or_else(|| {
-        StoreError::ArtifactEvidenceMismatch {
-            artifact_id: evidence.artifact_id.clone(),
-            field: "bytes",
-        }
-    })?;
-    PreparedArtifactBytes::new(bytes, evidence.clone())
 }
 
 /// Builds run identity material for a deterministic test trust scope suffix.
