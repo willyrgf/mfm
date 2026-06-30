@@ -6,16 +6,15 @@ Draft.
 
 ## Problem
 
-MFM currently mixes runtime-only process wiring across several environment variables:
+MFM currently carries live capability wiring across several environment JSON variables:
 
 - `MFM_EVM_RPC_SOURCES_JSON`
 - `MFM_EVM_NETWORK_ROUTES_JSON`
 - `MFM_EVM_SIGNERS_JSON`
-- `DATABASE_URL`
 
-The EVM variables are especially awkward because they carry structured configuration in environment
-values. That makes local development, review, shell history, Nixfied task wiring, and service
-deployment harder than necessary.
+Those variables are awkward because they carry structured configuration in environment values. That
+makes local development, review, shell history, Nixfied task wiring, and service deployment harder
+than necessary.
 
 The current shape also exposes implementation details at the user boundary. A caller must understand
 the split between EVM sources, source policies, semantic network routes, and signer bindings before
@@ -32,18 +31,24 @@ That split makes failures depend on workflow internals instead of a single runti
 contract. If a workflow requires EVM RPC, missing or invalid runtime wiring should fail consistently,
 with redacted diagnostics, before live execution depends on it.
 
-At the same time, RPC endpoints, provider auth, keystore paths, unlock files, and store connection
-strings must not move into authored workflow config. Authored `--config` remains semantic run input:
-it is validated, certified, hashed into run semantics, replayed, and may influence public artifacts.
-Runtime process wiring is local capability configuration and must remain outside typed values, specs,
-events, artifacts, and public outputs.
+At the same time, RPC endpoints, provider auth, keystore paths, and unlock files must not move into
+authored workflow config. Authored `--config` remains semantic run input: it is validated,
+certified, hashed into run semantics, replayed, and may influence public artifacts. Runtime process
+wiring is local capability configuration and must remain outside typed values, specs, events,
+artifacts, and public outputs.
+
+The production run store remains separate process wiring. `DATABASE_URL` or an explicit
+`--database-url` continues to select the durable store. Store availability should be checked early by
+store/app service construction, but the store URL is not part of this live capability runtime config
+file.
 
 ## Goals
 
-- Provide one runtime-only configuration file for process wiring, including store selection and live
-  capability bindings.
+- Provide one runtime-only configuration file for live capability bindings.
 - Keep authored workflow config semantic and free of endpoints, auth material, keystore paths, and
   other local process resources.
+- Keep production run-store selection on the existing `DATABASE_URL` / `--database-url` surface, with
+  early store availability checks before live start/resume drive.
 - Make portfolio and contract lifecycle runtime validation consistent.
 - Make signer validation effect-scoped: read-only workflows can use public addresses without signer
   runtime bindings, while signing-capable side-effect workflows must have signer bindings.
@@ -67,7 +72,8 @@ events, artifacts, and public outputs.
 
 ## Proposed Solution
 
-Introduce a single runtime configuration file and pass it explicitly to process entry points.
+Introduce a single runtime configuration file for live capabilities and pass it explicitly to live
+process entry points.
 
 CLI example:
 
@@ -87,21 +93,19 @@ If a process manager needs environment-based wiring, the environment should poin
 MFM_RUNTIME_CONFIG_FILE=runtime.toml mfm-rest-api
 ```
 
-The environment value is only a path. Structured runtime configuration belongs in the file.
+The environment value is only a path. Structured live capability configuration belongs in the file.
+Store configuration remains `DATABASE_URL` or `--database-url`.
 
 ## Runtime Config Shape
 
 Common single-source local development example:
 
 ```toml
-[store.postgres]
-database_url = "postgresql://postgres:postgres@127.0.0.1:5432/mfm_dev"
-
 [evm.sources.reth-local]
 expected_chain_id = 31337
 rpc_url = "http://127.0.0.1:8545"
 
-[evm.routes.reth-local]
+[evm.routes.reth-dev]
 source_ref = "reth-local"
 # policy_id is optional here; it defaults to source_ref and synthesizes a same-id
 # single-source policy for the common case.
@@ -110,9 +114,6 @@ source_ref = "reth-local"
 Advanced fallback example:
 
 ```toml
-[store.postgres]
-database_url_env = "MFM_DATABASE_URL"
-
 [evm.sources.primary-mainnet]
 expected_chain_id = 1
 rpc_url_env = "MFM_MAINNET_PRIMARY_RPC_URL"
@@ -145,16 +146,17 @@ file indirection. Direct values are useful for local development and single-file
 Indirection remains recommended for managed secret injection. In all cases, runtime config is a
 secret-bearing process-local file: it must not be committed as a fixture, emitted in logs, recorded in
 run streams or artifacts, or returned through CLI/REST/public-output surfaces. RPC URLs, RPC auth
-values, database URLs, keystore paths, unlock-file paths, passwords, and private-key material are
-always redacted in diagnostics. Private keys and mnemonics must not be represented directly in this
-file.
+values, keystore paths, unlock-file paths, passwords, and private-key material are always redacted in
+diagnostics. Private keys, mnemonics, and direct password values must not be represented directly in
+this file.
 
 ## Semantics
 
-`store.postgres` defines how the process obtains the production Postgres connection string. Supported
-sources should include a direct `database_url` for local/single-file setup and indirection such as
-`database_url_env` or `database_url_file` / `database_url_file_env` for managed deployments. The
-resolved URL is secret-bearing and must be redacted.
+Production store selection is intentionally not part of this runtime config. CLI and REST entry
+points continue to obtain the production Postgres connection string from `DATABASE_URL` or
+`--database-url`. The resolved URL is secret-bearing and must be redacted. Live start/resume and
+evidence-only replay, status, stream inspection, and public-output rendering all need a working store,
+but store access is durable authority access rather than live EVM/signer capability wiring.
 
 `evm.sources` defines process-local EVM JSON-RPC endpoints. Source ids are local routing keys.
 `expected_chain_id` is a runtime assertion about that source and must match the semantic chain id
@@ -171,9 +173,11 @@ single-source policy from `source_ref` for the common case. Explicit policies sh
 fallback is intended.
 
 `evm.routes` maps semantic workflow `network_id` values to process-local source and policy ids. This
-keeps domain network labels separate from local endpoint names. `source_ref` is the preferred
-starting source within `policy_id`; it must be a member of that policy's `ordered_sources`. Routes do
-not carry authoritative chain ids, because chain identity is semantic workflow input.
+keeps domain network labels separate from local endpoint names. Route keys use semantic network-id
+grammar, while `source_ref` and `policy_id` use local runtime id grammar. `source_ref` is the
+preferred starting source within `policy_id`; it must be a member of that policy's
+`ordered_sources`. Routes do not carry authoritative chain ids, because chain identity is semantic
+workflow input.
 
 `evm.signers` maps semantic `signer_ref` values to local signer providers. The config may reference
 keystore paths and unlock files directly or through indirection, but those references remain
@@ -185,12 +189,26 @@ signer identity remains semantic typed config and non-secret evidence, not runti
 Runtime validation should be shared by all EVM-backed workflows, but it should be layered so generic
 runtime-config parsing does not learn workflow semantics.
 
+### Store Preflight
+
+The run store is outside this runtime config file but still must fail early. Process entry points that
+need the durable run store should resolve `DATABASE_URL` or `--database-url`, connect to Postgres,
+validate schema compatibility, and load the store trust scope during app/store service construction.
+
+For live `start` and `resume`, this happens before workflow admission, execution-claim acquisition,
+driver loops, or any state-machine attempt event. For evidence-only commands such as status, stream
+inspection, replay, and public-output rendering, the same store preflight happens before constructing
+verified run-history or replay/render authority.
+
+Store preflight is not semantic workflow validation. The database URL is not hashed into run
+semantics, not recorded in `RunAdmitted`, and not part of replay authority.
+
 ### Runtime Config Shape Validation
 
 When the file is parsed, the runtime config validator should check deployment-local shape:
 
-- every configured store source is well-formed and redaction-safe;
-- every EVM source id, policy id, route key, and signer ref uses the checked local-id grammar;
+- every EVM source id, policy id, and signer ref uses the checked local-id grammar;
+- every route key uses checked semantic network-id grammar;
 - every EVM source has exactly one endpoint source (`rpc_url`, `rpc_url_env`, or file indirection);
 - direct RPC URLs are syntactically valid and do not contain URL userinfo;
 - RPC authorization has at most one source, whether direct or indirect;
@@ -209,17 +227,19 @@ not include RPC URLs, auth material, database URLs, passwords, private keys, key
 paths, or signed transactions, regardless of whether those values came directly from the file or from
 indirection.
 
-### Workflow Requirement Validation
+### Live Capability Ingress Validation
 
-Before `RunAdmitted` for live execution, adapter-owned runner ingress should derive runtime
-requirements from certified nodes and launch config artifacts:
+Before live execution starts driving the state machine, adapter-owned runner ingress should derive
+runtime requirements from certified nodes and config artifacts:
 
 - EVM read requirements: `(network_id, expected_chain_id)` for portfolio reads and contract
   validation reads.
 - EVM mutation requirements: `(network_id, expected_chain_id, signer_ref)` for signing-capable
   side-effect nodes such as contract deploy/configure submit nodes.
 
-The common validator should then check:
+The runtime/app layer should invoke these runner-owned ingress checks rather than embedding workflow
+semantics in app code. Shared helpers may validate common route/policy/source and signer-binding
+rules, but adapters own requirement extraction. The checks should cover:
 
 - every required semantic network has a runtime route;
 - every route's selected policy has only sources whose `expected_chain_id` matches the required
@@ -227,6 +247,11 @@ The common validator should then check:
 - the same `network_id` is not required with conflicting `expected_chain_id` values in one
   certified workflow;
 - every EVM mutation requirement has a configured signer provider for its `signer_ref`.
+
+For new live starts, ingress validation runs before `RunAdmitted`. For live resume/drive, ingress
+validation runs after the stored certified spec and retained config artifacts have been verified, but
+before any state-machine transition is driven or any attempt event is appended. It should not create a
+parallel workflow planner or make runtime config part of run identity.
 
 Signer validation is effect-scoped. Public addresses in read-only portfolio or validation configs
 are query subjects, not signer authority, and must not require `[evm.signers]`. For mutation
@@ -245,7 +270,7 @@ accepting an unavailable provider until first use. Contract lifecycle runners sh
 read-only phases without signer bindings and mutation phases with signer bindings.
 
 Adapters and transports should still validate defensively when used, but the primary user-facing
-failure should come from this common preflight.
+failure should come from ingress validation before live state-machine drive.
 
 Live `eth_chainId` checks may run as transport readiness or first-use validation, but they are not
 certification or replay authority. Static preflight compares semantic expected chain ids to runtime
@@ -254,8 +279,9 @@ chain id before using it.
 
 ## Evidence and Replay
 
-Replay must not load runtime config, construct live transports, call live signers, or inspect
-keystores. Replay verifies from certified spec/certificate artifacts, the append-only run stream,
+Replay must not load live capability runtime config, construct live transports, call live signers, or
+inspect keystores. Replay still connects to the durable run store through `DATABASE_URL` or
+`--database-url`, then verifies from certified spec/certificate artifacts, the append-only run stream,
 retained artifacts, and recorded read/side-effect evidence.
 
 Status, stream inspection, replay, and public-output rendering services must be constructible without
@@ -277,8 +303,10 @@ operation crates or state crates.
 
 Suggested ownership:
 
-- `mfm-runtime-config` or `mfm-app`: parse runtime configuration and validate deployment-local
-  shape.
+- `mfm-runtime-config` or `mfm-app`: parse live capability runtime configuration and validate
+  deployment-local shape. If a dedicated crate is added, keep it to schema parsing, redacted
+  diagnostics, and reduced typed descriptors; it must not construct stores, transports, signers, app
+  services, runners, or replay services.
 - `mfm-transports-evm`: construct clients from explicit typed source registries; no direct env
   parsing in the primary path; validate route/policy membership and live chain id defensively.
 - `mfm-adapters-*`: receive explicit capabilities, routes, and signer providers; derive
@@ -286,11 +314,13 @@ Suggested ownership:
   artifacts.
 - `mfm-signers-*`: construct signer providers from explicit typed signer registries; verify expected
   public identities at signing time without leaking secret-bearing details.
-- `mfm-app`: orchestrate common preflight from adapter-owned requirements and runtime-config
-  validators; do not own workflow planning or state semantics; keep evidence-only service assembly
-  independent from live runtime capability validity.
-- binaries: read CLI/env file path, pass parsed runtime config into app assembly.
-- Nixfied: generate or pass a runtime config file for managed dev services.
+- `mfm-app`: construct the production store from `DATABASE_URL` / `--database-url`, construct live
+  transports and signer providers from parsed runtime config, invoke adapter-owned ingress
+  validation before live drive, and keep evidence-only service assembly independent from live runtime
+  capability validity.
+- binaries: for live-capability commands and services, read the CLI/env file path and pass parsed
+  runtime config into app assembly.
+- Nixfied: generate or pass a live capability runtime config file for managed dev services.
 
 ## Migration Direction
 
@@ -302,14 +332,18 @@ Recommended migration:
 1. Add `--runtime-config <PATH>` to `mfm run start` and `mfm run resume`.
 2. Add REST runtime config file support.
 3. Introduce typed runtime config parsing and validation.
-4. Normalize existing `--database-url`, `DATABASE_URL`, `--evm-rpc-sources`, and EVM environment JSON
-   compatibility inputs into the same typed runtime config model before app assembly. Direct values
-   and indirect sources should resolve through the same redacted runtime value types.
-5. Replace direct reads of `MFM_EVM_RPC_SOURCES_JSON`, `MFM_EVM_NETWORK_ROUTES_JSON`, and
+4. Keep `--database-url` and `DATABASE_URL` as the production store surface, with early store
+   preflight in app/store service construction.
+5. Normalize existing `--evm-rpc-sources` and EVM environment JSON compatibility inputs into the same
+   typed live capability runtime config model before live app assembly. Direct values and indirect
+   sources should resolve through the same redacted runtime value types.
+6. Replace direct reads of `MFM_EVM_RPC_SOURCES_JSON`, `MFM_EVM_NETWORK_ROUTES_JSON`, and
    `MFM_EVM_SIGNERS_JSON` with explicit runtime config plumbing.
-6. Update Nixfied Reth/Postgres workflows to generate or pass runtime config files.
-7. Update docs and tests to use `runtime.toml`.
-8. Remove the environment JSON blobs as documented primary APIs.
+7. Update Nixfied Reth workflows to generate or pass live capability runtime config files. Generated
+   files should be written outside the repository under the active runtime/Nixfied state directory
+   with secret-bearing file handling.
+8. Update docs and tests to use `runtime.toml` for EVM/signer capability wiring.
+9. Remove the environment JSON blobs as documented primary APIs.
 
 Temporary compatibility can exist only as an implementation bridge if needed, but it should not be
 documented as the preferred surface.
