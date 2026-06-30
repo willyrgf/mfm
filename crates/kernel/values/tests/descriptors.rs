@@ -1,5 +1,15 @@
-use super::*;
-use mfm_ids::{ArtifactId, DigestAlgorithm, DigestBytes, SchemaId, SemanticTypeId};
+use std::collections::BTreeMap;
+
+use mfm_ids::{
+    ArtifactId, ContentDigest, DigestAlgorithm, DigestBytes, SchemaId, SchemaVersion,
+    SemanticTypeId,
+};
+use mfm_values::*;
+
+fn schema_version(value: &str) -> Result<SchemaVersion> {
+    SchemaVersion::new(value).map_err(|error| ValueError::Identity(error.to_string()))
+}
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,7 +40,7 @@ impl MfmValue for ExampleValue {
                     FieldDescriptor::required("label", SchemaShape::String),
                 ])?,
             )?,
-            SchemaAudit::derive_generated("mfm-test", "mfm_test::ExampleValue", "mfm-derive/1"),
+            SchemaAudit::__derive_generated("mfm-test", "mfm_test::ExampleValue", "mfm-derive/1"),
         )
     }
 }
@@ -53,7 +63,7 @@ impl MfmConfig for ExampleConfig {
                     SchemaShape::Bool,
                 )])?,
             )?,
-            SchemaAudit::derive_generated("mfm-test", "mfm_test::ExampleConfig", "mfm-derive/1"),
+            SchemaAudit::__derive_generated("mfm-test", "mfm_test::ExampleConfig", "mfm-derive/1"),
         )
     }
 }
@@ -76,7 +86,7 @@ impl PublicOutputDescriptor for ExamplePublicOutput {
                     },
                 )])?,
             )?,
-            SchemaAudit::derive_generated(
+            SchemaAudit::__derive_generated(
                 "mfm-test",
                 "mfm_test::ExamplePublicOutput",
                 "mfm-derive/1",
@@ -116,7 +126,8 @@ fn descriptor_identity_has_golden_canonical_json_and_schema_id() {
 fn schema_id_uses_identity_not_audit() {
     let descriptor = ExampleValue::schema_descriptor().expect("example descriptor");
     let mut changed_audit = descriptor.clone();
-    changed_audit.audit = SchemaAudit::framework("other-crate", "other::ExampleValue");
+    changed_audit.audit =
+        SchemaAudit::__derive_generated("other-crate", "other::ExampleValue", "other-derive/1");
 
     assert_eq!(
         descriptor.schema_id().expect("descriptor schema id"),

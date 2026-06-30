@@ -31,9 +31,6 @@ use serde::de::{self, DeserializeOwned, Deserializer};
 use serde::ser::{SerializeStruct, Serializer};
 use serde::{Deserialize, Serialize};
 
-#[cfg(test)]
-mod tests;
-
 // Keep this list intentionally small and high-signal to avoid false positives on public
 // descriptive fields while still blocking common secret-bearing persisted surfaces.
 const SECRET_MARKERS: &[&str] = &[
@@ -477,22 +474,6 @@ impl SchemaAudit {
             rust_type_path: rust_type_path.into(),
             provenance: DescriptorProvenance::FrameworkOwned,
             derive_macro_version: None,
-            source_package: None,
-        }
-    }
-
-    /// Creates derive-generated audit provenance.
-    #[cfg(test)]
-    pub(crate) fn derive_generated(
-        owner_crate: impl Into<String>,
-        rust_type_path: impl Into<String>,
-        derive_macro_version: impl Into<String>,
-    ) -> Self {
-        Self {
-            owner_crate: owner_crate.into(),
-            rust_type_path: rust_type_path.into(),
-            provenance: DescriptorProvenance::DeriveGenerated,
-            derive_macro_version: Some(derive_macro_version.into()),
             source_package: None,
         }
     }

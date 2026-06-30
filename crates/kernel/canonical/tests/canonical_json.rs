@@ -1,4 +1,4 @@
-use super::*;
+use mfm_canonical::*;
 
 #[test]
 fn canonicalizes_object_and_digest_vector() {
