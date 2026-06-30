@@ -3419,13 +3419,13 @@ pub enum EvmContractAdapterError {
     State(String),
     /// EVM capability provider failed.
     #[error("EVM capability failed: {0}")]
-    EvmCapability(mfm_evm_capabilities::EvmCapabilityError),
+    EvmCapability(#[from] mfm_evm_capabilities::EvmCapabilityError),
     /// Signing provider failed.
     #[error("signing provider failed: {0}")]
-    Signing(mfm_signing::SigningError),
+    Signing(#[from] mfm_signing::SigningError),
     /// EVM signing bridge failed.
     #[error("EVM signing failed: {0}")]
-    EvmSigning(mfm_evm_signing::EvmSigningError),
+    EvmSigning(#[from] mfm_evm_signing::EvmSigningError),
     /// Artifact read failed.
     #[error("artifact read failed: {0}")]
     ArtifactRead(mfm_artifact_capabilities::ArtifactReadError),
@@ -3467,24 +3467,6 @@ impl From<mfm_program::PlanError> for EvmContractAdapterError {
 impl From<mfm_program::StateError> for EvmContractAdapterError {
     fn from(error: mfm_program::StateError) -> Self {
         Self::State(error.to_string())
-    }
-}
-
-impl From<mfm_evm_capabilities::EvmCapabilityError> for EvmContractAdapterError {
-    fn from(error: mfm_evm_capabilities::EvmCapabilityError) -> Self {
-        Self::EvmCapability(error)
-    }
-}
-
-impl From<mfm_signing::SigningError> for EvmContractAdapterError {
-    fn from(error: mfm_signing::SigningError) -> Self {
-        Self::Signing(error)
-    }
-}
-
-impl From<mfm_evm_signing::EvmSigningError> for EvmContractAdapterError {
-    fn from(error: mfm_evm_signing::EvmSigningError) -> Self {
-        Self::EvmSigning(error)
     }
 }
 

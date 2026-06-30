@@ -325,22 +325,10 @@ pub fn plan_portfolio_snapshot_entry_point(
 pub enum PortfolioSnapshotPlanError {
     /// Authored portfolio snapshot config failed canonical validation.
     #[error("portfolio snapshot config failed: {0}")]
-    Config(PortfolioSnapshotConfigError),
+    Config(#[from] PortfolioSnapshotConfigError),
     /// Program drafting or config material selection failed.
     #[error("portfolio snapshot planning failed: {0}")]
-    Plan(mfm_program::PlanError),
-}
-
-impl From<PortfolioSnapshotConfigError> for PortfolioSnapshotPlanError {
-    fn from(error: PortfolioSnapshotConfigError) -> Self {
-        Self::Config(error)
-    }
-}
-
-impl From<mfm_program::PlanError> for PortfolioSnapshotPlanError {
-    fn from(error: mfm_program::PlanError) -> Self {
-        Self::Plan(error)
-    }
+    Plan(#[from] mfm_program::PlanError),
 }
 
 fn networks_by_id(

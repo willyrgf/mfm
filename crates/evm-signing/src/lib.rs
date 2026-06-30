@@ -276,7 +276,7 @@ fn digest_from_hash(hash: B256) -> mfm_ids::DigestBytes {
 pub enum EvmSigningError {
     /// Generic signing contract failed.
     #[error("EVM signing request failed: {0}")]
-    Signing(SigningError),
+    Signing(#[from] SigningError),
     /// Provider result did not match the request.
     #[error("EVM signing result mismatch for {field}")]
     SigningResultMismatch {
@@ -295,12 +295,6 @@ pub enum EvmSigningError {
     /// Raw transaction bytes were invalid.
     #[error("EVM raw transaction was invalid")]
     InvalidRawTransaction,
-}
-
-impl From<SigningError> for EvmSigningError {
-    fn from(error: SigningError) -> Self {
-        Self::Signing(error)
-    }
 }
 
 /// Closed EVM signature validation failures.

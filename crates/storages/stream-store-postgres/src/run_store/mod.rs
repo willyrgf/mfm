@@ -35,7 +35,7 @@ use crate::schema::{connect_pool, validate_pool};
 pub enum PostgresStoreError {
     /// Typed store contract validation failed.
     #[error("{0}")]
-    Store(StoreError),
+    Store(#[from] StoreError),
     /// PostgreSQL operation failed.
     #[error("postgres run store error: {0}")]
     Database(&'static str),
@@ -50,12 +50,6 @@ impl StoreErrorInspection for PostgresStoreError {
             Self::Store(error) => Some(error),
             Self::Database(_) | Self::Corruption(_) => None,
         }
-    }
-}
-
-impl From<StoreError> for PostgresStoreError {
-    fn from(error: StoreError) -> Self {
-        Self::Store(error)
     }
 }
 
