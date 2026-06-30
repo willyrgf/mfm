@@ -13,8 +13,8 @@ use mfm_capabilities::{
 };
 use mfm_effects::{ApplySideEffect, Pure, ReadExternal};
 use mfm_ids::{
-    AdapterKind, AdapterVersion, CapabilityKind, CapabilityVersion, DigestAlgorithm, StateKind,
-    StateVersion,
+    AdapterKind, AdapterVersion, CapabilityKind, CapabilityVersion, DigestAlgorithm, LocalPublicId,
+    StateKind, StateVersion,
 };
 use mfm_program::{
     AdapterBindingSpec, IdempotencyKey, PureState, ReadState, SideEffectState, StateResult,
@@ -146,7 +146,7 @@ pub struct ProofApplyConfig {
 }
 
 impl ProofApplyConfig {
-    /// Creates a proof apply config with a non-empty action.
+    /// Creates a proof apply config with a checked action.
     pub fn new(action: impl Into<String>) -> Result<Self, String> {
         Ok(Self {
             action: ProofActionName::new(action)?,
@@ -180,7 +180,7 @@ impl<'de> Deserialize<'de> for ProofApplyConfig {
     }
 }
 
-/// Stable non-empty proof action authority.
+/// Stable local proof action authority.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash, MfmValue)]
 #[serde(try_from = "String", into = "String")]
 #[mfm(
@@ -197,9 +197,7 @@ impl ProofActionName {
     /// Creates a checked proof action name.
     pub fn new(value: impl Into<String>) -> Result<Self, String> {
         let raw = value.into();
-        if raw.is_empty() || raw.trim() != raw {
-            return Err("proof action must be non-empty without surrounding whitespace".to_owned());
-        }
+        LocalPublicId::new(&raw).map_err(|error| error.to_string())?;
         Ok(Self { raw })
     }
 
@@ -298,7 +296,7 @@ impl Default for ProofWorkflowConfig {
     fn default() -> Self {
         Self::new(
             ProofReadConfig { fact_n: 1 },
-            ProofApplyConfig::new("accept").expect("default proof action is non-empty"),
+            ProofApplyConfig::new("accept").expect("default proof action is checked"),
         )
     }
 }
@@ -712,9 +710,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn proof_apply_config_rejects_empty_actions_at_construction() {
+    fn proof_apply_config_accepts_checked_actions_at_construction() {
         assert!(ProofApplyConfig::new("accept").is_ok());
-        assert!(ProofApplyConfig::new("   ").is_err());
     }
 
     #[test]
