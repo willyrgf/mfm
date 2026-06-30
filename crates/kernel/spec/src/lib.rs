@@ -5,7 +5,11 @@
 //! used by typed certification, runtime, replay, and storage.
 
 use mfm_canonical::PlainCanonicalJsonBytes;
-use mfm_ids::{ContentDigest, DigestAlgorithm, IdentityError, SchemaId, SemanticTypeId, SpecHash};
+use mfm_ids::{
+    ContentDigest, DigestAlgorithm, FieldPath as CheckedFieldPath, IdentityError,
+    ResourceNamespace as CheckedResourceNamespace, SchemaId, SemanticTypeId, SpecHash,
+    StableAuthorKey as CheckedStableAuthorKey, VisibleAscii256 as CheckedVisibleAscii256,
+};
 
 /// Result type for typed execution spec helpers.
 pub type Result<T> = std::result::Result<T, SpecError>;
@@ -269,111 +273,25 @@ fn spec_hash_from_canonical(canonical: &PlainCanonicalJsonBytes) -> SpecHash {
     SpecHash::from_digest(DigestAlgorithm::Sha256JcsV1, canonical.digest_bytes())
 }
 
-fn checked_ascii_token(field: &'static str, value: impl AsRef<str>) -> Result<String> {
-    let value = value.as_ref();
-    if value.is_empty()
-        || value.len() > 256
-        || !value.bytes().all(|byte| matches!(byte, 0x21..=0x7e))
-    {
-        return Err(SpecError::InvalidString {
-            field,
-            value: value.to_owned(),
-        });
-    }
-    Ok(value.to_owned())
-}
-
-fn checked_author_key(field: &'static str, value: impl AsRef<str>) -> Result<String> {
-    let value = value.as_ref();
-    if value.is_empty()
-        || value.len() > 256
-        || value.starts_with("mfm.")
-        || value.starts_with("sys.")
-        || value.starts_with('_')
-        || !value.split('/').all(is_valid_author_key_segment)
-    {
-        return Err(SpecError::InvalidString {
-            field,
-            value: value.to_owned(),
-        });
-    }
-    Ok(value.to_owned())
-}
-
-fn is_valid_author_key_segment(segment: &str) -> bool {
-    if segment.is_empty() || segment.len() > 64 {
-        return false;
-    }
-    let mut chars = segment.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    (first.is_ascii_lowercase() || first.is_ascii_digit())
-        && chars.all(|ch| {
-            ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '.' | '_' | '-')
-        })
-}
-
-fn checked_field_path(field: &'static str, value: impl AsRef<str>) -> Result<String> {
-    let value = value.as_ref();
-    if value.split('.').all(is_valid_field_segment) {
-        Ok(value.to_owned())
-    } else {
-        Err(SpecError::InvalidString {
-            field,
-            value: value.to_owned(),
-        })
-    }
-}
-
-fn is_valid_field_segment(segment: &str) -> bool {
-    let mut chars = segment.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    first.is_ascii_alphanumeric()
-        && chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '/'))
-}
-
-fn checked_resource_namespace(field: &'static str, value: impl AsRef<str>) -> Result<String> {
-    let value = value.as_ref();
-    if value.len() <= 256
-        && value.contains('.')
-        && value.split('.').all(is_valid_resource_namespace_segment)
-    {
-        Ok(value.to_owned())
-    } else {
-        Err(SpecError::InvalidString {
-            field,
-            value: value.to_owned(),
-        })
-    }
-}
-
-fn is_valid_resource_namespace_segment(segment: &str) -> bool {
-    let mut chars = segment.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    (first.is_ascii_lowercase() || first.is_ascii_digit())
-        && chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '_' | '-'))
-}
-
 macro_rules! checked_string_type {
-    ($(#[$doc:meta])* $name:ident, $field:literal, $checker:ident) => {
+    ($(#[$doc:meta])* $name:ident, $field:literal, $primitive:ty) => {
         $(#[$doc])*
         #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        pub struct $name(String);
+        pub struct $name($primitive);
 
         impl $name {
             #[doc = concat!("Creates a checked `", stringify!($name), "`.")]
             pub fn new(value: impl AsRef<str>) -> Result<Self> {
-                $checker($field, value).map(Self)
+                let value = value.as_ref();
+                <$primitive>::new(value).map(Self).map_err(|_| SpecError::InvalidString {
+                    field: $field,
+                    value: value.to_owned(),
+                })
             }
 
             #[doc = concat!("Returns the persisted `", stringify!($name), "` string.")]
             pub fn as_str(&self) -> &str {
-                &self.0
+                self.0.as_str()
             }
         }
 

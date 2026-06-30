@@ -33,7 +33,10 @@
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
+use std::ops::Deref;
 use std::str::FromStr;
+
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Result type for identity parsing and construction.
 pub type Result<T> = std::result::Result<T, IdentityError>;
@@ -58,6 +61,350 @@ impl IdentityError {
         &self.message
     }
 }
+
+/// Result type for checked string primitive construction.
+pub type CheckedStringResult<T> = std::result::Result<T, CheckedStringError>;
+
+/// Stable reason returned when a checked string primitive rejects input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CheckedStringErrorReason {
+    /// The value was empty.
+    Empty,
+    /// The value exceeded the maximum byte length.
+    TooLong {
+        /// Maximum allowed byte length.
+        max: usize,
+    },
+    /// The value did not contain a required separator.
+    MissingSeparator {
+        /// Required separator.
+        separator: char,
+    },
+    /// A delimited segment was empty.
+    EmptySegment,
+    /// A delimited segment exceeded its maximum byte length.
+    SegmentTooLong {
+        /// Maximum allowed segment byte length.
+        max: usize,
+    },
+    /// The value used a reserved prefix.
+    ReservedPrefix {
+        /// Reserved prefix.
+        prefix: &'static str,
+    },
+    /// The first character was not accepted by the grammar.
+    InvalidStart,
+    /// The last character was not accepted by the grammar.
+    InvalidEnd,
+    /// A character was not accepted by the grammar.
+    InvalidCharacter {
+        /// Rejected character.
+        ch: char,
+        /// Character index.
+        index: usize,
+    },
+}
+
+/// Error returned when a checked string primitive violates its grammar.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{grammar} failed validation: {reason}")]
+pub struct CheckedStringError {
+    grammar: &'static str,
+    reason: CheckedStringErrorReason,
+}
+
+impl CheckedStringError {
+    fn new(grammar: &'static str, reason: CheckedStringErrorReason) -> Self {
+        Self { grammar, reason }
+    }
+
+    /// Returns the checked-string grammar that rejected input.
+    pub const fn grammar(&self) -> &'static str {
+        self.grammar
+    }
+
+    /// Returns the stable validation failure reason.
+    pub const fn reason(&self) -> &CheckedStringErrorReason {
+        &self.reason
+    }
+}
+
+impl fmt::Display for CheckedStringErrorReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => f.write_str("empty"),
+            Self::TooLong { max } => write!(f, "too long; max {max} bytes"),
+            Self::MissingSeparator { separator } => {
+                write!(f, "missing required separator `{separator}`")
+            }
+            Self::EmptySegment => f.write_str("empty segment"),
+            Self::SegmentTooLong { max } => write!(f, "segment too long; max {max} bytes"),
+            Self::ReservedPrefix { prefix } => write!(f, "reserved prefix `{prefix}`"),
+            Self::InvalidStart => f.write_str("invalid start character"),
+            Self::InvalidEnd => f.write_str("invalid end character"),
+            Self::InvalidCharacter { ch, index } => {
+                write!(f, "invalid character `{ch}` at index {index}")
+            }
+        }
+    }
+}
+
+impl From<CheckedStringError> for IdentityError {
+    fn from(error: CheckedStringError) -> Self {
+        Self::new(error.to_string())
+    }
+}
+
+macro_rules! checked_string_type {
+    ($ty:ident, $grammar:literal, $validator:ident, $doc:literal) => {
+        #[doc = $doc]
+        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub struct $ty {
+            raw: String,
+        }
+
+        impl $ty {
+            #[doc = concat!("Creates a checked `", stringify!($ty), "`.")]
+            pub fn new(value: impl AsRef<str>) -> CheckedStringResult<Self> {
+                let value = value.as_ref();
+                $validator($grammar, value)?;
+                Ok(Self {
+                    raw: value.to_owned(),
+                })
+            }
+
+            #[doc = concat!("Returns this `", stringify!($ty), "` as a string slice.")]
+            pub fn as_str(&self) -> &str {
+                &self.raw
+            }
+
+            #[doc = concat!("Consumes this `", stringify!($ty), "` into its string.")]
+            pub fn into_string(self) -> String {
+                self.raw
+            }
+        }
+
+        impl AsRef<str> for $ty {
+            fn as_ref(&self) -> &str {
+                self.as_str()
+            }
+        }
+
+        impl Deref for $ty {
+            type Target = str;
+
+            fn deref(&self) -> &Self::Target {
+                self.as_str()
+            }
+        }
+
+        impl fmt::Display for $ty {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(self.as_str())
+            }
+        }
+
+        impl FromStr for $ty {
+            type Err = CheckedStringError;
+
+            fn from_str(value: &str) -> CheckedStringResult<Self> {
+                Self::new(value)
+            }
+        }
+
+        impl TryFrom<String> for $ty {
+            type Error = CheckedStringError;
+
+            fn try_from(value: String) -> CheckedStringResult<Self> {
+                Self::new(value)
+            }
+        }
+
+        impl TryFrom<&str> for $ty {
+            type Error = CheckedStringError;
+
+            fn try_from(value: &str) -> CheckedStringResult<Self> {
+                Self::new(value)
+            }
+        }
+
+        impl From<$ty> for String {
+            fn from(value: $ty) -> Self {
+                value.raw
+            }
+        }
+
+        impl Serialize for $ty {
+            fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+            where
+                S: Serializer,
+            {
+                serializer.serialize_str(self.as_str())
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $ty {
+            fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                let value = String::deserialize(deserializer)?;
+                Self::new(&value).map_err(serde::de::Error::custom)
+            }
+        }
+    };
+}
+
+checked_string_type!(
+    NameToken,
+    "name token",
+    validate_name_token,
+    "Checked identity name/version token."
+);
+
+checked_string_type!(
+    StableAuthorKey,
+    "stable author key",
+    validate_stable_author_key,
+    "Stable author-provided key used as deterministic identity input."
+);
+
+checked_string_type!(
+    FieldSegment,
+    "field segment",
+    validate_field_segment,
+    "Checked field-path segment."
+);
+
+checked_string_type!(
+    FieldPath,
+    "field path",
+    validate_field_path,
+    "Checked dot-separated field path."
+);
+
+checked_string_type!(
+    ResourceNamespace,
+    "resource namespace",
+    validate_resource_namespace,
+    "Checked cross-run resource namespace."
+);
+
+checked_string_type!(
+    LocalPublicId,
+    "local public id",
+    validate_local_public_id,
+    "Checked process-local public identifier."
+);
+
+checked_string_type!(
+    RuntimeEnvName,
+    "runtime env name",
+    validate_runtime_env_name,
+    "Checked runtime environment variable name."
+);
+
+/// Checked visible ASCII token with a caller-selected maximum byte length.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct VisibleAscii<const MAX: usize> {
+    raw: String,
+}
+
+impl<const MAX: usize> VisibleAscii<MAX> {
+    /// Creates a checked visible ASCII token.
+    pub fn new(value: impl AsRef<str>) -> CheckedStringResult<Self> {
+        let value = value.as_ref();
+        validate_visible_ascii("visible ascii", value, MAX)?;
+        Ok(Self {
+            raw: value.to_owned(),
+        })
+    }
+
+    /// Returns this token as a string slice.
+    pub fn as_str(&self) -> &str {
+        &self.raw
+    }
+
+    /// Consumes this token into its string.
+    pub fn into_string(self) -> String {
+        self.raw
+    }
+}
+
+impl<const MAX: usize> AsRef<str> for VisibleAscii<MAX> {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl<const MAX: usize> Deref for VisibleAscii<MAX> {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl<const MAX: usize> fmt::Display for VisibleAscii<MAX> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl<const MAX: usize> FromStr for VisibleAscii<MAX> {
+    type Err = CheckedStringError;
+
+    fn from_str(value: &str) -> CheckedStringResult<Self> {
+        Self::new(value)
+    }
+}
+
+impl<const MAX: usize> TryFrom<String> for VisibleAscii<MAX> {
+    type Error = CheckedStringError;
+
+    fn try_from(value: String) -> CheckedStringResult<Self> {
+        Self::new(value)
+    }
+}
+
+impl<const MAX: usize> TryFrom<&str> for VisibleAscii<MAX> {
+    type Error = CheckedStringError;
+
+    fn try_from(value: &str) -> CheckedStringResult<Self> {
+        Self::new(value)
+    }
+}
+
+impl<const MAX: usize> From<VisibleAscii<MAX>> for String {
+    fn from(value: VisibleAscii<MAX>) -> Self {
+        value.raw
+    }
+}
+
+impl<const MAX: usize> Serialize for VisibleAscii<MAX> {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de, const MAX: usize> Deserialize<'de> for VisibleAscii<MAX> {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(&value).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Visible ASCII token capped at 256 bytes.
+pub type VisibleAscii256 = VisibleAscii<256>;
+
+/// Visible ASCII token capped at 512 bytes.
+pub type VisibleAscii512 = VisibleAscii<512>;
 
 /// Digest algorithm identifiers accepted by typed kernel identity strings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -728,28 +1075,8 @@ fn require_part_count(prefix: &str, parts: &[&str], expected: usize) -> Result<(
     )))
 }
 
-fn validate_token(field: &str, value: &str) -> Result<()> {
-    let mut chars = value.chars();
-    let Some(first) = chars.next() else {
-        return Err(IdentityError::new(format!("{field} must not be empty")));
-    };
-
-    if !first.is_ascii_lowercase() && !first.is_ascii_digit() {
-        return Err(IdentityError::new(format!(
-            "{field} must start with [a-z0-9], got '{value}'"
-        )));
-    }
-
-    for ch in chars {
-        if ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '.' | '_' | '-' | '/') {
-            continue;
-        }
-        return Err(IdentityError::new(format!(
-            "{field} contains invalid character '{ch}' in '{value}'"
-        )));
-    }
-
-    Ok(())
+fn validate_token(field: &'static str, value: &str) -> Result<()> {
+    validate_name_token(field, value).map_err(IdentityError::from)
 }
 
 fn decode_hex_nibble(byte: u8) -> Result<u8> {
@@ -760,6 +1087,284 @@ fn decode_hex_nibble(byte: u8) -> Result<u8> {
             "digest must contain only lowercase hex characters",
         )),
     }
+}
+
+fn validate_name_token(grammar: &'static str, value: &str) -> CheckedStringResult<()> {
+    validate_non_empty(value, grammar)?;
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return Err(CheckedStringError::new(
+            grammar,
+            CheckedStringErrorReason::Empty,
+        ));
+    };
+    if !is_lower_or_digit(first) {
+        return Err(CheckedStringError::new(
+            grammar,
+            CheckedStringErrorReason::InvalidStart,
+        ));
+    }
+    for (offset, ch) in chars.enumerate() {
+        if is_lower_or_digit(ch) || matches!(ch, '.' | '_' | '-' | '/') {
+            continue;
+        }
+        return Err(CheckedStringError::new(
+            grammar,
+            CheckedStringErrorReason::InvalidCharacter {
+                ch,
+                index: offset + 1,
+            },
+        ));
+    }
+    Ok(())
+}
+
+fn validate_stable_author_key(grammar: &'static str, value: &str) -> CheckedStringResult<()> {
+    validate_len(value, grammar, 256)?;
+    for prefix in ["mfm.", "sys.", "_"] {
+        if value.starts_with(prefix) {
+            return Err(CheckedStringError::new(
+                grammar,
+                CheckedStringErrorReason::ReservedPrefix { prefix },
+            ));
+        }
+    }
+    for segment in value.split('/') {
+        validate_segment_len(grammar, segment, 64)?;
+        let mut chars = segment.chars();
+        let Some(first) = chars.next() else {
+            return Err(CheckedStringError::new(
+                grammar,
+                CheckedStringErrorReason::EmptySegment,
+            ));
+        };
+        if !is_lower_or_digit(first) {
+            return Err(CheckedStringError::new(
+                grammar,
+                CheckedStringErrorReason::InvalidStart,
+            ));
+        }
+        for (offset, ch) in chars.enumerate() {
+            if is_lower_or_digit(ch) || matches!(ch, '.' | '_' | '-') {
+                continue;
+            }
+            return Err(CheckedStringError::new(
+                grammar,
+                CheckedStringErrorReason::InvalidCharacter {
+                    ch,
+                    index: offset + 1,
+                },
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_field_segment(grammar: &'static str, value: &str) -> CheckedStringResult<()> {
+    validate_non_empty(value, grammar)?;
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return Err(CheckedStringError::new(
+            grammar,
+            CheckedStringErrorReason::Empty,
+        ));
+    };
+    if !first.is_ascii_alphanumeric() {
+        return Err(CheckedStringError::new(
+            grammar,
+            CheckedStringErrorReason::InvalidStart,
+        ));
+    }
+    for (offset, ch) in chars.enumerate() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '/') {
+            continue;
+        }
+        return Err(CheckedStringError::new(
+            grammar,
+            CheckedStringErrorReason::InvalidCharacter {
+                ch,
+                index: offset + 1,
+            },
+        ));
+    }
+    Ok(())
+}
+
+fn validate_field_path(grammar: &'static str, value: &str) -> CheckedStringResult<()> {
+    validate_non_empty(value, grammar)?;
+    for segment in value.split('.') {
+        validate_field_segment(grammar, segment)?;
+    }
+    Ok(())
+}
+
+fn validate_resource_namespace(grammar: &'static str, value: &str) -> CheckedStringResult<()> {
+    validate_len(value, grammar, 256)?;
+    if !value.contains('.') {
+        return Err(CheckedStringError::new(
+            grammar,
+            CheckedStringErrorReason::MissingSeparator { separator: '.' },
+        ));
+    }
+    for segment in value.split('.') {
+        validate_non_empty(segment, grammar).map_err(|_| {
+            CheckedStringError::new(grammar, CheckedStringErrorReason::EmptySegment)
+        })?;
+        let mut chars = segment.chars();
+        let Some(first) = chars.next() else {
+            return Err(CheckedStringError::new(
+                grammar,
+                CheckedStringErrorReason::EmptySegment,
+            ));
+        };
+        if !is_lower_or_digit(first) {
+            return Err(CheckedStringError::new(
+                grammar,
+                CheckedStringErrorReason::InvalidStart,
+            ));
+        }
+        for (offset, ch) in chars.enumerate() {
+            if is_lower_or_digit(ch) || matches!(ch, '_' | '-') {
+                continue;
+            }
+            return Err(CheckedStringError::new(
+                grammar,
+                CheckedStringErrorReason::InvalidCharacter {
+                    ch,
+                    index: offset + 1,
+                },
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_local_public_id(grammar: &'static str, value: &str) -> CheckedStringResult<()> {
+    validate_len(value, grammar, 128)?;
+    let Some(first) = value.bytes().next() else {
+        return Err(CheckedStringError::new(
+            grammar,
+            CheckedStringErrorReason::Empty,
+        ));
+    };
+    let Some(last) = value.bytes().last() else {
+        return Err(CheckedStringError::new(
+            grammar,
+            CheckedStringErrorReason::Empty,
+        ));
+    };
+    if !is_lower_or_digit_byte(first) {
+        return Err(CheckedStringError::new(
+            grammar,
+            CheckedStringErrorReason::InvalidStart,
+        ));
+    }
+    if !is_lower_or_digit_byte(last) {
+        return Err(CheckedStringError::new(
+            grammar,
+            CheckedStringErrorReason::InvalidEnd,
+        ));
+    }
+    for (index, byte) in value.bytes().enumerate() {
+        if is_lower_or_digit_byte(byte) || matches!(byte, b'.' | b'_' | b'-') {
+            continue;
+        }
+        return Err(CheckedStringError::new(
+            grammar,
+            CheckedStringErrorReason::InvalidCharacter {
+                ch: byte as char,
+                index,
+            },
+        ));
+    }
+    Ok(())
+}
+
+fn validate_runtime_env_name(grammar: &'static str, value: &str) -> CheckedStringResult<()> {
+    validate_len(value, grammar, 256)?;
+    for (index, byte) in value.bytes().enumerate() {
+        if matches!(byte, b'A'..=b'Z' | b'0'..=b'9' | b'_') {
+            continue;
+        }
+        return Err(CheckedStringError::new(
+            grammar,
+            CheckedStringErrorReason::InvalidCharacter {
+                ch: byte as char,
+                index,
+            },
+        ));
+    }
+    Ok(())
+}
+
+fn validate_visible_ascii(
+    grammar: &'static str,
+    value: &str,
+    max: usize,
+) -> CheckedStringResult<()> {
+    validate_len(value, grammar, max)?;
+    for (index, byte) in value.bytes().enumerate() {
+        if matches!(byte, 0x21..=0x7e) {
+            continue;
+        }
+        return Err(CheckedStringError::new(
+            grammar,
+            CheckedStringErrorReason::InvalidCharacter {
+                ch: byte as char,
+                index,
+            },
+        ));
+    }
+    Ok(())
+}
+
+fn validate_len(value: &str, grammar: &'static str, max: usize) -> CheckedStringResult<()> {
+    validate_non_empty(value, grammar)?;
+    if value.len() > max {
+        return Err(CheckedStringError::new(
+            grammar,
+            CheckedStringErrorReason::TooLong { max },
+        ));
+    }
+    Ok(())
+}
+
+fn validate_non_empty(value: &str, grammar: &'static str) -> CheckedStringResult<()> {
+    if value.is_empty() {
+        return Err(CheckedStringError::new(
+            grammar,
+            CheckedStringErrorReason::Empty,
+        ));
+    }
+    Ok(())
+}
+
+fn validate_segment_len(
+    grammar: &'static str,
+    segment: &str,
+    max: usize,
+) -> CheckedStringResult<()> {
+    if segment.is_empty() {
+        return Err(CheckedStringError::new(
+            grammar,
+            CheckedStringErrorReason::EmptySegment,
+        ));
+    }
+    if segment.len() > max {
+        return Err(CheckedStringError::new(
+            grammar,
+            CheckedStringErrorReason::SegmentTooLong { max },
+        ));
+    }
+    Ok(())
+}
+
+fn is_lower_or_digit(ch: char) -> bool {
+    ch.is_ascii_lowercase() || ch.is_ascii_digit()
+}
+
+fn is_lower_or_digit_byte(byte: u8) -> bool {
+    byte.is_ascii_digit() || matches!(byte, b'a'..=b'z')
 }
 
 mod private {
@@ -838,3 +1443,83 @@ impl_version_category!(AdapterVersionKind, "adapter version");
 impl_version_category!(OperationVersionKind, "operation version");
 impl_version_category!(SpecVersionKind, "spec version");
 impl_version_category!(LoweringVersionKind, "lowering version");
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn checked_string_primitives_accept_canonical_shapes() {
+        assert_eq!(
+            NameToken::new("mfm.kernel/value_1").unwrap().as_str(),
+            "mfm.kernel/value_1"
+        );
+        assert_eq!(
+            StableAuthorKey::new("portfolio/main-wallet")
+                .unwrap()
+                .as_str(),
+            "portfolio/main-wallet"
+        );
+        assert_eq!(
+            FieldPath::new("result.total/value").unwrap().as_str(),
+            "result.total/value"
+        );
+        assert_eq!(
+            FieldSegment::new("total/value").unwrap().as_str(),
+            "total/value"
+        );
+        assert_eq!(
+            ResourceNamespace::new("mfm.evm_lane").unwrap().as_str(),
+            "mfm.evm_lane"
+        );
+        assert_eq!(
+            LocalPublicId::new("ethereum-mainnet").unwrap().as_str(),
+            "ethereum-mainnet"
+        );
+        assert_eq!(
+            RuntimeEnvName::new("MFM_SECRET_1").unwrap().as_str(),
+            "MFM_SECRET_1"
+        );
+        assert_eq!(VisibleAscii256::new("text/html").unwrap().as_str(), "text/html");
+        assert_eq!(
+            VisibleAscii512::new("commit-key").unwrap().as_str(),
+            "commit-key"
+        );
+    }
+
+    #[test]
+    fn checked_string_primitives_reject_invalid_shapes() {
+        assert!(NameToken::new("").is_err());
+        assert!(NameToken::new("_name").is_err());
+        assert!(NameToken::new("Name").is_err());
+
+        assert!(StableAuthorKey::new("").is_err());
+        assert!(StableAuthorKey::new("mfm.reserved").is_err());
+        assert!(StableAuthorKey::new("sys.reserved").is_err());
+        assert!(StableAuthorKey::new("_private").is_err());
+        assert!(StableAuthorKey::new("wallet//main").is_err());
+        assert!(StableAuthorKey::new("wallet/Main").is_err());
+
+        assert!(FieldPath::new("").is_err());
+        assert!(FieldPath::new("result..total").is_err());
+        assert!(FieldPath::new("_result").is_err());
+
+        assert!(ResourceNamespace::new("single").is_err());
+        assert!(ResourceNamespace::new("mfm.").is_err());
+        assert!(ResourceNamespace::new("mfm.evm/lane").is_err());
+
+        assert!(LocalPublicId::new("").is_err());
+        assert!(LocalPublicId::new("-bad").is_err());
+        assert!(LocalPublicId::new("bad-").is_err());
+        assert!(LocalPublicId::new("bad/slash").is_err());
+        assert!(LocalPublicId::new("Bad").is_err());
+
+        assert!(RuntimeEnvName::new("").is_err());
+        assert!(RuntimeEnvName::new("mfm_secret").is_err());
+        assert!(RuntimeEnvName::new("MFM-SECRET").is_err());
+
+        assert!(VisibleAscii256::new("").is_err());
+        assert!(VisibleAscii256::new("has space").is_err());
+        assert!(VisibleAscii256::new("snowman☃").is_err());
+    }
+}

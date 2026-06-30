@@ -30,7 +30,7 @@ use mfm_canonical::sha256_digest_bytes;
 use mfm_capabilities::{
     CapabilityError, CapabilitySpec, ExternalMutationAuthorityRole, ReadExternalRole,
 };
-use mfm_ids::{CapabilityKind, CapabilityVersion, DigestAlgorithm};
+use mfm_ids::{CapabilityKind, CapabilityVersion, DigestAlgorithm, LocalPublicId};
 
 /// Result type for EVM capability contracts.
 pub type Result<T> = std::result::Result<T, EvmCapabilityError>;
@@ -244,24 +244,24 @@ pub trait EvmNonceOccupancyReadProvider: Send + Sync {
 
 /// Process-local EVM source reference.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct EvmSourceRef(String);
+pub struct EvmSourceRef(LocalPublicId);
 
 impl EvmSourceRef {
     /// Creates a checked EVM source reference.
     pub fn new(value: impl AsRef<str>) -> Result<Self> {
-        validate_identifier("source_ref", value.as_ref())?;
-        Ok(Self(value.as_ref().to_owned()))
+        let value = LocalPublicId::new(value).map_err(invalid_identifier)?;
+        Ok(Self(value))
     }
 
     /// Returns the checked source reference string.
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0.as_str()
     }
 }
 
 impl fmt::Display for EvmSourceRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(self.as_str())
     }
 }
 
@@ -283,30 +283,30 @@ impl TryFrom<String> for EvmSourceRef {
 
 impl From<EvmSourceRef> for String {
     fn from(value: EvmSourceRef) -> Self {
-        value.0
+        value.0.into_string()
     }
 }
 
 /// Process-local EVM source policy id.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct EvmSourcePolicyId(String);
+pub struct EvmSourcePolicyId(LocalPublicId);
 
 impl EvmSourcePolicyId {
     /// Creates a checked EVM source policy id.
     pub fn new(value: impl AsRef<str>) -> Result<Self> {
-        validate_identifier("source_policy_id", value.as_ref())?;
-        Ok(Self(value.as_ref().to_owned()))
+        let value = LocalPublicId::new(value).map_err(invalid_identifier)?;
+        Ok(Self(value))
     }
 
     /// Returns the checked policy id string.
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0.as_str()
     }
 }
 
 impl fmt::Display for EvmSourcePolicyId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(self.as_str())
     }
 }
 
@@ -328,7 +328,7 @@ impl TryFrom<String> for EvmSourcePolicyId {
 
 impl From<EvmSourcePolicyId> for String {
     fn from(value: EvmSourcePolicyId) -> Self {
-        value.0
+        value.0.into_string()
     }
 }
 
@@ -727,25 +727,8 @@ impl EvmCapabilityError {
     }
 }
 
-fn validate_identifier(_field: &'static str, value: &str) -> Result<()> {
-    if value.is_empty() || value.len() > 128 {
-        return Err(EvmCapabilityError::InvalidRequest {
-            reason: EvmInvalidRequest::InvalidIdentifier,
-        });
+fn invalid_identifier(_source: mfm_ids::CheckedStringError) -> EvmCapabilityError {
+    EvmCapabilityError::InvalidRequest {
+        reason: EvmInvalidRequest::InvalidIdentifier,
     }
-    let first = value.as_bytes()[0];
-    let last = value.as_bytes()[value.len() - 1];
-    if !matches!(first, b'a'..=b'z' | b'0'..=b'9') || !matches!(last, b'a'..=b'z' | b'0'..=b'9') {
-        return Err(EvmCapabilityError::InvalidRequest {
-            reason: EvmInvalidRequest::InvalidIdentifier,
-        });
-    }
-    for byte in value.bytes() {
-        if !matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-') {
-            return Err(EvmCapabilityError::InvalidRequest {
-                reason: EvmInvalidRequest::InvalidIdentifier,
-            });
-        }
-    }
-    Ok(())
 }

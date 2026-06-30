@@ -2315,6 +2315,7 @@ dependencies = [
 name = "mfm-ids"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "thiserror",
 ]
 

@@ -12,7 +12,10 @@ use std::pin::Pin;
 
 use mfm_canonical::sha256_digest_bytes;
 use mfm_capabilities::{CapabilityError, CapabilitySpec, SupportRole};
-use mfm_ids::{CapabilityKind, CapabilityVersion, DigestAlgorithm, DigestBytes};
+use mfm_ids::{
+    CapabilityKind, CapabilityVersion, CheckedStringError, CheckedStringErrorReason,
+    DigestAlgorithm, DigestBytes, LocalPublicId, RuntimeEnvName,
+};
 use serde::{Deserialize, Serialize};
 
 /// Result type for signer contracts.
@@ -21,8 +24,6 @@ pub type Result<T> = std::result::Result<T, SigningError>;
 /// Boxed future returned by signer providers.
 pub type SigningFuture<'a> = Pin<Box<dyn Future<Output = Result<SigningResult>> + Send + 'a>>;
 
-const MAX_PUBLIC_ID_LEN: usize = 128;
-const MAX_RUNTIME_NAME_LEN: usize = 256;
 const MAX_PUBLIC_KEY_LEN: usize = 4096;
 const MAX_SIGNATURE_LEN: usize = 4096;
 
@@ -66,24 +67,24 @@ pub trait SigningProvider: Send + Sync {
 /// Process-local signer reference used by workflow config and runtime binding.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct SignerRef(String);
+pub struct SignerRef(LocalPublicId);
 
 impl SignerRef {
     /// Creates a checked signer reference.
     pub fn new(value: impl AsRef<str>) -> Result<Self> {
-        validate_public_id(SigningIdentifierKind::SignerRef, value.as_ref())?;
-        Ok(Self(value.as_ref().to_owned()))
+        let value = checked_local_public_id(SigningIdentifierKind::SignerRef, value)?;
+        Ok(Self(value))
     }
 
     /// Returns the canonical signer reference string.
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0.as_str()
     }
 }
 
 impl fmt::Display for SignerRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(self.as_str())
     }
 }
 
@@ -105,31 +106,31 @@ impl TryFrom<String> for SignerRef {
 
 impl From<SignerRef> for String {
     fn from(value: SignerRef) -> Self {
-        value.0
+        value.0.into_string()
     }
 }
 
 /// Signing algorithm identifier, such as an EVM or Ed25519 signing algorithm.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct SigningAlgorithmId(String);
+pub struct SigningAlgorithmId(LocalPublicId);
 
 impl SigningAlgorithmId {
     /// Creates a checked signing algorithm identifier.
     pub fn new(value: impl AsRef<str>) -> Result<Self> {
-        validate_public_id(SigningIdentifierKind::Algorithm, value.as_ref())?;
-        Ok(Self(value.as_ref().to_owned()))
+        let value = checked_local_public_id(SigningIdentifierKind::Algorithm, value)?;
+        Ok(Self(value))
     }
 
     /// Returns the canonical identifier string.
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0.as_str()
     }
 }
 
 impl fmt::Display for SigningAlgorithmId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(self.as_str())
     }
 }
 
@@ -151,31 +152,31 @@ impl TryFrom<String> for SigningAlgorithmId {
 
 impl From<SigningAlgorithmId> for String {
     fn from(value: SigningAlgorithmId) -> Self {
-        value.0
+        value.0.into_string()
     }
 }
 
 /// Signing domain identifier that scopes signed bytes to a protocol/domain.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct SigningDomainId(String);
+pub struct SigningDomainId(LocalPublicId);
 
 impl SigningDomainId {
     /// Creates a checked signing domain identifier.
     pub fn new(value: impl AsRef<str>) -> Result<Self> {
-        validate_public_id(SigningIdentifierKind::Domain, value.as_ref())?;
-        Ok(Self(value.as_ref().to_owned()))
+        let value = checked_local_public_id(SigningIdentifierKind::Domain, value)?;
+        Ok(Self(value))
     }
 
     /// Returns the canonical identifier string.
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0.as_str()
     }
 }
 
 impl fmt::Display for SigningDomainId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(self.as_str())
     }
 }
 
@@ -197,31 +198,31 @@ impl TryFrom<String> for SigningDomainId {
 
 impl From<SigningDomainId> for String {
     fn from(value: SigningDomainId) -> Self {
-        value.0
+        value.0.into_string()
     }
 }
 
 /// Signing purpose identifier that explains why a request is being signed.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct SigningPurposeId(String);
+pub struct SigningPurposeId(LocalPublicId);
 
 impl SigningPurposeId {
     /// Creates a checked signing purpose identifier.
     pub fn new(value: impl AsRef<str>) -> Result<Self> {
-        validate_public_id(SigningIdentifierKind::Purpose, value.as_ref())?;
-        Ok(Self(value.as_ref().to_owned()))
+        let value = checked_local_public_id(SigningIdentifierKind::Purpose, value)?;
+        Ok(Self(value))
     }
 
     /// Returns the canonical identifier string.
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0.as_str()
     }
 }
 
 impl fmt::Display for SigningPurposeId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(self.as_str())
     }
 }
 
@@ -243,7 +244,7 @@ impl TryFrom<String> for SigningPurposeId {
 
 impl From<SigningPurposeId> for String {
     fn from(value: SigningPurposeId) -> Self {
-        value.0
+        value.0.into_string()
     }
 }
 
@@ -274,18 +275,18 @@ pub fn manual_resolution_signing_request(
 
 /// Runtime signer provider identifier.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SigningProviderId(String);
+pub struct SigningProviderId(LocalPublicId);
 
 impl SigningProviderId {
     /// Creates a checked runtime provider identifier.
     pub fn new(value: impl AsRef<str>) -> Result<Self> {
-        validate_public_id(SigningIdentifierKind::Provider, value.as_ref())?;
-        Ok(Self(value.as_ref().to_owned()))
+        let value = checked_local_public_id(SigningIdentifierKind::Provider, value)?;
+        Ok(Self(value))
     }
 
     /// Returns the provider identifier string.
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0.as_str()
     }
 }
 
@@ -331,25 +332,25 @@ impl SignerProviderRuntimeConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeSecretSource {
     kind: RuntimeSecretSourceKind,
-    name: String,
+    name: RuntimeEnvName,
 }
 
 impl RuntimeSecretSource {
     /// Creates a runtime secret reference to an environment variable.
     pub fn env_var(name: impl AsRef<str>) -> Result<Self> {
-        validate_runtime_name(SigningIdentifierKind::RuntimeSecretSource, name.as_ref())?;
+        let name = checked_runtime_env_name(SigningIdentifierKind::RuntimeSecretSource, name)?;
         Ok(Self {
             kind: RuntimeSecretSourceKind::EnvVar,
-            name: name.as_ref().to_owned(),
+            name,
         })
     }
 
     /// Creates a runtime secret reference to an environment variable containing a path.
     pub fn path_env_var(name: impl AsRef<str>) -> Result<Self> {
-        validate_runtime_name(SigningIdentifierKind::RuntimeSecretSource, name.as_ref())?;
+        let name = checked_runtime_env_name(SigningIdentifierKind::RuntimeSecretSource, name)?;
         Ok(Self {
             kind: RuntimeSecretSourceKind::PathEnvVar,
-            name: name.as_ref().to_owned(),
+            name,
         })
     }
 
@@ -360,7 +361,7 @@ impl RuntimeSecretSource {
 
     /// Returns the process-local source name.
     pub fn name(&self) -> &str {
-        &self.name
+        self.name.as_str()
     }
 }
 
@@ -457,7 +458,7 @@ impl fmt::Debug for SigningRequest {
 pub struct PublicSigningIdentity {
     algorithm: SigningAlgorithmId,
     public_key: Option<PublicKeyBytes>,
-    account_id: Option<String>,
+    account_id: Option<LocalPublicId>,
 }
 
 impl PublicSigningIdentity {
@@ -472,9 +473,9 @@ impl PublicSigningIdentity {
                 reason: SigningRequestError::MissingPublicIdentity,
             });
         }
-        if let Some(account_id) = &account_id {
-            validate_public_id(SigningIdentifierKind::Account, account_id)?;
-        }
+        let account_id = account_id
+            .map(|account_id| checked_local_public_id(SigningIdentifierKind::Account, account_id))
+            .transpose()?;
         Ok(Self {
             algorithm,
             public_key,
@@ -494,7 +495,7 @@ impl PublicSigningIdentity {
 
     /// Returns the public account identifier, when available.
     pub fn account_id(&self) -> Option<&str> {
-        self.account_id.as_deref()
+        self.account_id.as_ref().map(LocalPublicId::as_str)
     }
 }
 
@@ -502,7 +503,7 @@ impl PublicSigningIdentity {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExpectedSignerIdentity {
     public_key: Option<PublicKeyBytes>,
-    account_id: Option<String>,
+    account_id: Option<LocalPublicId>,
 }
 
 impl ExpectedSignerIdentity {
@@ -516,10 +517,10 @@ impl ExpectedSignerIdentity {
 
     /// Expects a specific public account identifier.
     pub fn account_id(account_id: impl AsRef<str>) -> Result<Self> {
-        validate_public_id(SigningIdentifierKind::Account, account_id.as_ref())?;
+        let account_id = checked_local_public_id(SigningIdentifierKind::Account, account_id)?;
         Ok(Self {
             public_key: None,
-            account_id: Some(account_id.as_ref().to_owned()),
+            account_id: Some(account_id),
         })
     }
 
@@ -528,10 +529,10 @@ impl ExpectedSignerIdentity {
         public_key: PublicKeyBytes,
         account_id: impl AsRef<str>,
     ) -> Result<Self> {
-        validate_public_id(SigningIdentifierKind::Account, account_id.as_ref())?;
+        let account_id = checked_local_public_id(SigningIdentifierKind::Account, account_id)?;
         Ok(Self {
             public_key: Some(public_key),
-            account_id: Some(account_id.as_ref().to_owned()),
+            account_id: Some(account_id),
         })
     }
 
@@ -761,65 +762,33 @@ impl SigningError {
     }
 }
 
-fn validate_public_id(kind: SigningIdentifierKind, value: &str) -> Result<()> {
-    validate_id_len(kind, value, MAX_PUBLIC_ID_LEN)?;
-    validate_id_edges(kind, value)?;
-    for byte in value.bytes() {
-        if !matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-') {
-            return Err(SigningError::InvalidIdentifier {
-                kind,
-                reason: SigningValidationError::InvalidCharacter,
-            });
-        }
-    }
-    Ok(())
+fn checked_local_public_id(
+    kind: SigningIdentifierKind,
+    value: impl AsRef<str>,
+) -> Result<LocalPublicId> {
+    LocalPublicId::new(value).map_err(|error| signing_identifier_error(kind, error))
 }
 
-fn validate_runtime_name(kind: SigningIdentifierKind, value: &str) -> Result<()> {
-    validate_id_len(kind, value, MAX_RUNTIME_NAME_LEN)?;
-    for byte in value.bytes() {
-        if !matches!(byte, b'A'..=b'Z' | b'0'..=b'9' | b'_') {
-            return Err(SigningError::InvalidIdentifier {
-                kind,
-                reason: SigningValidationError::InvalidCharacter,
-            });
-        }
-    }
-    Ok(())
+fn checked_runtime_env_name(
+    kind: SigningIdentifierKind,
+    value: impl AsRef<str>,
+) -> Result<RuntimeEnvName> {
+    RuntimeEnvName::new(value).map_err(|error| signing_identifier_error(kind, error))
 }
 
-fn validate_id_len(kind: SigningIdentifierKind, value: &str, max: usize) -> Result<()> {
-    if value.is_empty() {
-        return Err(SigningError::InvalidIdentifier {
-            kind,
-            reason: SigningValidationError::Empty,
-        });
-    }
-    if value.len() > max {
-        return Err(SigningError::InvalidIdentifier {
-            kind,
-            reason: SigningValidationError::TooLong,
-        });
-    }
-    Ok(())
-}
-
-fn validate_id_edges(kind: SigningIdentifierKind, value: &str) -> Result<()> {
-    let first = value.as_bytes()[0];
-    if !matches!(first, b'a'..=b'z' | b'0'..=b'9') {
-        return Err(SigningError::InvalidIdentifier {
-            kind,
-            reason: SigningValidationError::InvalidStart,
-        });
-    }
-    let last = value.as_bytes()[value.len() - 1];
-    if !matches!(last, b'a'..=b'z' | b'0'..=b'9') {
-        return Err(SigningError::InvalidIdentifier {
-            kind,
-            reason: SigningValidationError::InvalidEnd,
-        });
-    }
-    Ok(())
+fn signing_identifier_error(kind: SigningIdentifierKind, error: CheckedStringError) -> SigningError {
+    let reason = match error.reason() {
+        CheckedStringErrorReason::Empty => SigningValidationError::Empty,
+        CheckedStringErrorReason::TooLong { .. }
+        | CheckedStringErrorReason::SegmentTooLong { .. } => SigningValidationError::TooLong,
+        CheckedStringErrorReason::InvalidStart => SigningValidationError::InvalidStart,
+        CheckedStringErrorReason::InvalidEnd => SigningValidationError::InvalidEnd,
+        CheckedStringErrorReason::InvalidCharacter { .. }
+        | CheckedStringErrorReason::MissingSeparator { .. }
+        | CheckedStringErrorReason::EmptySegment
+        | CheckedStringErrorReason::ReservedPrefix { .. } => SigningValidationError::InvalidCharacter,
+    };
+    SigningError::InvalidIdentifier { kind, reason }
 }
 
 fn validate_bytes_len(len: usize, max: usize, reason: SigningRequestError) -> Result<()> {

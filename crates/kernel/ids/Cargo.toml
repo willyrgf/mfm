@@ -15,4 +15,5 @@ name = "mfm_ids"
 path = "src/lib.rs"
 
 [dependencies]
+serde = { workspace = true }
 thiserror = { workspace = true }
