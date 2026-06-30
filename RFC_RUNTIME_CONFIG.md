@@ -114,7 +114,6 @@ Common single-source local development example:
 
 ```toml
 [evm.sources.reth-local]
-expected_chain_id = 31337
 rpc_url = "http://127.0.0.1:8545"
 
 [evm.routes.reth-dev]
@@ -127,12 +126,10 @@ Advanced fallback example:
 
 ```toml
 [evm.sources.primary-mainnet]
-expected_chain_id = 1
 rpc_url_env = "MFM_MAINNET_PRIMARY_RPC_URL"
 auth_header_env = "MFM_MAINNET_PRIMARY_AUTH_HEADER"
 
 [evm.sources.secondary-mainnet]
-expected_chain_id = 1
 rpc_url_env = "MFM_MAINNET_SECONDARY_RPC_URL"
 
 [evm.policies.ethereum-mainnet]
@@ -170,11 +167,11 @@ points continue to obtain the production Postgres connection string from `DATABA
 evidence-only replay, status, stream inspection, and public-output rendering all need a working store,
 but store access is durable authority access rather than live EVM/signer capability wiring.
 
-`evm.sources` defines process-local EVM JSON-RPC endpoints. Source ids are local routing keys.
-`expected_chain_id` is source-local sanity metadata used for deployment binding compatibility and
-operator diagnostics. It must match the semantic chain ids routed through that source, but it is not
-the workflow authority. The authoritative expected chain id for a live EVM call comes from the typed
-capability request guard derived from certified state config or input.
+`evm.sources` defines process-local EVM JSON-RPC endpoints. Source ids are local routing keys. Source
+entries do not need an authoritative `expected_chain_id`; the authoritative expected chain id for a
+live EVM call comes from the typed capability request guard derived from certified state config or
+input. Compatibility parsers may accept legacy source-level chain-id metadata as optional diagnostic
+metadata, but no code may treat it as workflow authority.
 
 Each EVM source should support direct endpoint/auth values and indirection. Examples include
 `rpc_url`, `rpc_url_env`, `rpc_url_file`, `rpc_url_file_env`, `auth_header`, `auth_header_env`,
@@ -212,8 +209,8 @@ The responsibility split is:
 | Layer | Validates | Must not |
 |---|---|---|
 | Store preflight | Postgres connectivity, schema/migration compatibility, store metadata, trust-scope setup | Become runtime config, workflow semantics, run evidence, or replay authority |
-| Runtime config shape validation | File syntax, local id grammar, endpoint/auth source shape, source-local chain metadata shape, route/policy membership, signer provider entry shape | Perform live IO, unlock signers, inspect workflow state, or record evidence |
-| Deployment ingress validation | The certified run's required semantic networks and signer refs have local runtime bindings; source-local chain metadata is compatible with semantic requirements | Call `eth_chainId`, read contract/account state, unlock/sign, append events, or create run status |
+| Runtime config shape validation | File syntax, local id grammar, endpoint/auth source shape, route/policy membership, signer provider entry shape | Perform live IO, unlock signers, inspect workflow state, or record evidence |
+| Deployment ingress validation | The certified run's required semantic networks and signer refs have local runtime bindings | Call `eth_chainId`, read contract/account state, unlock/sign, append events, or create run status |
 | Guarded capability calls | Every live capability call satisfies mandatory request guards using observed response evidence, such as EVM chain identity or signer public identity | Run before `RunAdmitted`, consult replay-time runtime config, or hide workflow topology |
 | Semantic validation states | Workflow-domain assertions that need typed outputs, dependencies, facts, or artifacts | Replace mandatory capability guards for baseline safety invariants |
 | Management/readiness diagnostics | Operator visibility into current deployment health | Authorize or pre-validate later user runs |
@@ -287,7 +284,6 @@ When a live capability section is parsed, the runtime config validator should ch
 - every EVM source has exactly one endpoint source (`rpc_url`, `rpc_url_env`, or file indirection);
 - direct RPC URLs are syntactically valid and do not contain URL userinfo;
 - RPC authorization has at most one source, whether direct or indirect;
-- every EVM source has a non-zero `expected_chain_id`;
 - every explicit policy has at least one unique source;
 - every policy source exists;
 - every route references an existing source and policy;
@@ -312,13 +308,15 @@ binding requirements from certified nodes and config artifacts:
 - EVM mutation requirements: `(network_id, expected_chain_id, signer_ref)` for signing-capable
   side-effect nodes such as contract deploy/configure submit nodes.
 
+The `expected_chain_id` in these requirements identifies the guard the live provider must enforce. It
+is not compared to live RPC state, and it is not matched against authoritative runtime-config chain
+truth.
+
 The runtime/app layer should invoke these runner-owned ingress checks rather than embedding workflow
 semantics in app code. Shared helpers may validate common route/policy/source and signer-binding
 rules, but adapters own requirement extraction. The checks should cover:
 
 - every required semantic network has a runtime route;
-- every route's selected policy has only sources whose source-local `expected_chain_id` is compatible
-  with the required semantic chain id;
 - the same `network_id` is not required with conflicting `expected_chain_id` values in one
   certified workflow;
 - every EVM mutation requirement has a configured signer provider for its `signer_ref`.
@@ -435,6 +433,21 @@ identity, the signing request requires that public identity, and the signer resu
 transient raw signed bytes are materialized. Do not add a separate pre-admission signing challenge for
 this baseline guard.
 
+This design should remove or avoid several older validation structures:
+
+- no mandatory operation-planned "validate EVM chain identity" node at the start of every EVM workflow;
+- no pre-`RunAdmitted` live `eth_chainId` readiness gate for user runs;
+- no app-owned workflow semantic validator that interprets portfolio or contract lifecycle config;
+- no adapter-local route tables whose only purpose is to turn `network_id` into `source_ref` and
+  `policy_id` before building every EVM request;
+- no state/adapter-facing EVM capability request fields for `source_ref` or `policy_id`; route
+  selection is provider-local and appears only as redacted response evidence;
+- no required source-level `expected_chain_id` in runtime config; semantic chain identity comes from
+  the request guard;
+- no repeated per-adapter "call chain_identity, compare expected_chain_id, then do the real request"
+  prelude. That behavior should collapse into the guarded EVM provider/transport layer, with adapters
+  deriving guards and defensively verifying returned guard evidence.
+
 Other guard-like checks should use the same rule when they are local to a capability request/response:
 
 - artifact reads should continue verifying requested artifact id, digest, schema id, semantic type id,
@@ -534,11 +547,11 @@ Suggested ownership:
   bindings supplied by app assembly; validate route/policy membership without workflow semantics.
   Live chain-id checks belong inside guarded certified capability calls or explicit diagnostic
   readiness commands, not runtime-config parsing or deployment ingress.
-- `mfm-adapters-*`: receive explicit capabilities, routes, and signer providers; derive
+- `mfm-adapters-*`: receive explicit capability providers and signer providers; derive
   workflow-specific deployment binding requirements in runner ingress from certified nodes and config
   artifacts; derive capability guards from certified state config/input for each guarded request;
   defensively verify guard evidence; bind semantic validation state intent to live/replay capability
-  providers.
+  providers. Adapters should not own EVM route tables except as temporary migration shims.
 - `mfm-signers-*`: construct signer providers from explicit typed signer registries; verify expected
   public identities at signing time without leaking secret-bearing details.
 - `mfm-storages-stream-store-postgres`: own Postgres store preflight checks for connection,
@@ -581,26 +594,32 @@ Recommended migration:
 9. Introduce a sibling Postgres store preflight guard/check contract for connection,
    migration/schema compatibility, and store metadata/trust-scope setup. Keep it outside runtime
    config, certified specs, run streams, replay, and public output.
-10. Normalize existing `--evm-rpc-sources` and EVM environment JSON compatibility inputs into the same
+10. Remove source-level `expected_chain_id` from the canonical runtime config shape. Compatibility
+   parsers may accept legacy source chain metadata only as optional redacted diagnostics; request
+   guards remain authoritative.
+11. Remove adapter-local EVM route wrappers whose only job is to inject `source_ref` and `policy_id`
+   into capability requests. Route resolution belongs in the guarded provider/transport, and selected
+   route ids appear only as redacted evidence.
+12. Normalize existing `--evm-rpc-sources` and EVM environment JSON compatibility inputs into the same
    typed live capability runtime config model before live app assembly. Direct values and indirect
    sources should resolve through the same redacted runtime value types.
-11. Replace direct reads of `MFM_EVM_RPC_SOURCES_JSON`, `MFM_EVM_NETWORK_ROUTES_JSON`, and
+13. Replace direct reads of `MFM_EVM_RPC_SOURCES_JSON`, `MFM_EVM_NETWORK_ROUTES_JSON`, and
    `MFM_EVM_SIGNERS_JSON` with explicit runtime config plumbing.
-12. Update Nixfied Reth workflows to generate or pass live capability runtime config files. Generated
+14. Update Nixfied Reth workflows to generate or pass live capability runtime config files. Generated
    files should be written outside the repository under the active runtime/Nixfied state directory
    with secret-bearing file handling.
-13. Add tests that distinguish deployment ingress from guarded capability failures and semantic
+15. Add tests that distinguish deployment ingress from guarded capability failures and semantic
    validation: ingress failures append no `RunAdmitted`, guarded EVM chain mismatches fail after
    admission as capability/state-attempt failures with replayable redacted evidence, semantic
    validation records replayable evidence after admission, and replay succeeds with live runtime
    config and signer/RPC environment removed.
-14. Add tests that malformed or missing live runtime config does not block REST startup, status,
+16. Add tests that malformed or missing live runtime config does not block REST startup, status,
     stream inspection, replay, or public-output rendering, while live start/resume reports redacted
     deployment errors only when the certified run needs the affected capability.
-15. Add store preflight tests for unavailable Postgres, migration/schema incompatibility,
+17. Add store preflight tests for unavailable Postgres, migration/schema incompatibility,
     metadata/trust-scope setup, and redaction of database URLs.
-16. Update docs and tests to use `runtime.toml` or `runtime.json` for EVM/signer capability wiring.
-17. Remove the environment JSON blobs as documented primary APIs.
+18. Update docs and tests to use `runtime.toml` or `runtime.json` for EVM/signer capability wiring.
+19. Remove the environment JSON blobs as documented primary APIs.
 
 Temporary compatibility can exist only as an implementation bridge if needed, but it should not be
 documented as the preferred surface.
@@ -616,8 +635,8 @@ documented as the preferred surface.
 - TOML and JSON are both supported from the first implementation.
 - Direct keystore paths and unlock-file paths are allowed runtime-local values. They are not limited
   to local development, but they remain forbidden in persisted, public, fixture, and replay surfaces.
-- EVM chain identity is a mandatory guarded capability invariant. Runtime config source
-  `expected_chain_id` is local binding metadata; the authoritative expected chain id for a live EVM
+- EVM chain identity is a mandatory guarded capability invariant. The canonical runtime config shape
+  does not need source-level `expected_chain_id`; the authoritative expected chain id for a live EVM
   call comes from the certified request guard.
 - Postgres connection, migration/schema, and trust-scope checks use a sibling store preflight guard
   pattern. They are not part of live capability runtime config, not certified workflow semantics, and
