@@ -155,6 +155,21 @@ impl From<CheckedStringError> for IdentityError {
     }
 }
 
+/// Returns a short stable display fragment from an id-like string.
+///
+/// The fragment is derived from the suffix after the final `:` separator, keeps
+/// ASCII alphanumeric characters only, and is capped at `max_len` characters.
+pub fn short_stable_id_fragment(value: &str, max_len: usize) -> String {
+    value
+        .rsplit(':')
+        .next()
+        .unwrap_or(value)
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .take(max_len)
+        .collect()
+}
+
 macro_rules! checked_string_type {
     ($ty:ident, $grammar:literal, $validator:ident, $doc:literal) => {
         #[doc = $doc]
@@ -1650,5 +1665,13 @@ mod tests {
         rejects!(VisibleAscii256, "has space");
         rejects!(PrintableAscii512, "line\nbreak");
         rejects!(PrintableAscii1024, "line\nbreak");
+    }
+
+    #[test]
+    fn short_stable_id_fragment_uses_alphanumeric_suffix() {
+        assert_eq!(
+            short_stable_id_fragment("content:sha256-jcs-v1:0123-45zz", 6),
+            "012345"
+        );
     }
 }

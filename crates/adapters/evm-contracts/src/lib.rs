@@ -61,7 +61,8 @@ use mfm_evm_core::rlp::{rlp_encode_list, u64_to_min_be};
 use mfm_evm_core::tx::{parse_address, parse_u128_quantity, Eip1559TxToSign, LegacyTxToSign};
 use mfm_evm_signing::EvmSigningRequest;
 use mfm_ids::{
-    CapabilityKind, CapabilityVersion, ContentDigest, DigestAlgorithm, NodeId, SchemaId,
+    short_stable_id_fragment, CapabilityKind, CapabilityVersion, ContentDigest, DigestAlgorithm,
+    NodeId, SchemaId,
 };
 use mfm_program::{SideEffectState, StateSpec, ValidatedConfig};
 use mfm_program_derive::MfmValue;
@@ -3373,19 +3374,8 @@ fn idempotency_key_ref(
 ) -> mfm_runtime::Result<events::IdempotencyKeyRef> {
     Ok(events::IdempotencyKeyRef::new(format!(
         "mfm.evm.contract.idem.{}",
-        short_stable_key(&idempotency.key)
+        short_stable_id_fragment(&idempotency.key, 32)
     ))?)
-}
-
-fn short_stable_key(value: &str) -> String {
-    value
-        .rsplit(':')
-        .next()
-        .unwrap_or(value)
-        .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric())
-        .take(32)
-        .collect()
 }
 
 fn digest_json(value: serde_json::Value) -> mfm_runtime::Result<ContentDigest> {

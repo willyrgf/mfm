@@ -18,7 +18,7 @@ use mfm_collectors_proof::{
     MANUAL_RESOLUTION_PROOF_ACTION,
 };
 use mfm_events::v1::{self as events, side_effect};
-use mfm_ids::ContentDigest;
+use mfm_ids::{short_stable_id_fragment, ContentDigest};
 use mfm_replay::v1 as replay;
 use mfm_runtime::{
     CapabilityImplementationId, ErasedNodeRunner, ErasedRunCtx, ErasedRunnerFuture,
@@ -238,7 +238,7 @@ impl SideEffectDriverCallbacks for ProofSideEffectCallbacks {
                 idempotency,
                 idempotency_key: events::IdempotencyKeyRef::new(format!(
                     "idem-{}",
-                    short_digest(&idem_hash)
+                    short_stable_id_fragment(idem_hash.as_str(), 16)
                 ))?,
                 capability_binding: proof_mutation_binding()?,
             })
@@ -553,17 +553,6 @@ fn proof_side_effect_result() -> mfm_runtime::Result<ProofSideEffectResult> {
         confirmations: confirmation.confirmations,
         status: "confirmed".to_owned(),
     })
-}
-
-fn short_digest(digest: &ContentDigest) -> String {
-    digest
-        .as_str()
-        .rsplit(':')
-        .next()
-        .unwrap_or(digest.as_str())
-        .chars()
-        .take(16)
-        .collect()
 }
 
 fn replay_verifier_id() -> mfm_runtime::Result<events::ReplayVerifierId> {

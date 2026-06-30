@@ -2,7 +2,9 @@ use std::future::Future;
 use std::pin::Pin;
 
 use mfm_events::v1::{self as events, side_effect};
-use mfm_ids::{ArtifactId, AttemptId, ContentDigest, NodeId, RunId, SideEffectPairId};
+use mfm_ids::{
+    short_stable_id_fragment, ArtifactId, AttemptId, ContentDigest, NodeId, RunId, SideEffectPairId,
+};
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
 use mfm_values::MfmValue;
@@ -1200,7 +1202,7 @@ fn side_effect_ledger_key(
     }))?;
     Ok(events::SideEffectLedgerKey::new(format!(
         "mfm.runtime.side_effect.{}",
-        short_digest(&digest)
+        short_stable_id_fragment(digest.as_str(), 32)
     ))?)
 }
 
@@ -1271,7 +1273,7 @@ fn claim_owner_for(
     }))?;
     Ok(events::RunnerInvocationId::new(format!(
         "mfm.runtime.owner.{}",
-        short_digest(&digest)
+        short_stable_id_fragment(digest.as_str(), 32)
     ))?)
 }
 
@@ -1290,7 +1292,7 @@ fn claim_fencing_token_for(
     }))?;
     Ok(side_effect::ClaimFencingToken::new(format!(
         "mfm.runtime.token.{}",
-        short_digest(&digest)
+        short_stable_id_fragment(digest.as_str(), 32)
     ))?)
 }
 
@@ -1341,18 +1343,6 @@ fn ledger_purpose_key(ledger_purpose: &events::SideEffectLedgerPurpose) -> serde
             "kind": "remediation",
         }),
     }
-}
-
-fn short_digest(digest: &ContentDigest) -> String {
-    digest
-        .as_str()
-        .rsplit(':')
-        .next()
-        .unwrap_or(digest.as_str())
-        .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric())
-        .take(32)
-        .collect()
 }
 
 fn canonical_mfm_value<T>(value: &T) -> Result<mfm_canonical::PlainCanonicalJsonBytes>

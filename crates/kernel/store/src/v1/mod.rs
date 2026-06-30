@@ -12,9 +12,10 @@ use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_capabilities::{CapabilityDescriptor, CapabilityRole, CapabilitySetDescriptor};
 use mfm_events::v1::{self as events, side_effect, ArtifactRole, KernelEventPayload};
 use mfm_ids::{
-    AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind, CapabilityVersion, CellId,
-    ContentDigest, DigestAlgorithm, EventId, IdentityError, NodeId, RunId, SchemaId, ScopeId,
-    SeedId, SemanticTypeId, SideEffectPairId, SpecHash, StateKind, StateVersion, VisibleAscii512,
+    short_stable_id_fragment, AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind,
+    CapabilityVersion, CellId, ContentDigest, DigestAlgorithm, EventId, IdentityError, NodeId,
+    RunId, SchemaId, ScopeId, SeedId, SemanticTypeId, SideEffectPairId, SpecHash, StateKind,
+    StateVersion, VisibleAscii512,
 };
 use mfm_manual_auth::{ManualResolutionBlockReason, VerifiedManualResolutionForPrefix};
 use mfm_spec::v1::{
@@ -5819,7 +5820,7 @@ fn derive_resource_lane_claim_id(
     .content_digest();
     Ok(events::ResourceLaneClaimId::new(format!(
         "mfm.store.lane.claim.{}",
-        short_digest(&digest)
+        short_stable_id_fragment(digest.as_str(), 32)
     ))?)
 }
 
@@ -5852,20 +5853,8 @@ fn derive_resource_lane_release_id(
     .content_digest();
     Ok(events::ResourceLaneReleaseId::new(format!(
         "mfm.store.lane.release.{}",
-        short_digest(&digest)
+        short_stable_id_fragment(digest.as_str(), 32)
     ))?)
-}
-
-fn short_digest(digest: &ContentDigest) -> String {
-    digest
-        .as_str()
-        .rsplit(':')
-        .next()
-        .unwrap_or(digest.as_str())
-        .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric())
-        .take(32)
-        .collect()
 }
 
 /// Builds a store-owned committed batch for an already persisted prepared commit plan.
