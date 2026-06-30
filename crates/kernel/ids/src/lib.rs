@@ -318,6 +318,20 @@ checked_string_type!(
     "Checked runtime environment variable name."
 );
 
+checked_string_type!(
+    RuntimeBindingId,
+    "runtime binding id",
+    validate_runtime_binding_id,
+    "Checked runtime capability binding identifier."
+);
+
+checked_string_type!(
+    RuntimeToken,
+    "runtime token",
+    validate_runtime_token,
+    "Checked operational runtime token."
+);
+
 /// Checked visible ASCII token with a caller-selected maximum byte length.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct VisibleAscii<const MAX: usize> {
@@ -518,6 +532,9 @@ impl<'de, const MAX: usize> Deserialize<'de> for PrintableAscii<MAX> {
 
 /// Printable ASCII text capped at 1024 bytes.
 pub type PrintableAscii1024 = PrintableAscii<1024>;
+
+/// Printable ASCII text capped at 512 bytes.
+pub type PrintableAscii512 = PrintableAscii<512>;
 
 /// Digest algorithm identifiers accepted by typed kernel identity strings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -1478,6 +1495,32 @@ fn validate_runtime_env_name(grammar: &'static str, value: &str) -> CheckedStrin
     Ok(())
 }
 
+fn validate_runtime_binding_id(grammar: &'static str, value: &str) -> CheckedStringResult<()> {
+    validate_runtime_identifier(grammar, value, 128)
+}
+
+fn validate_runtime_token(grammar: &'static str, value: &str) -> CheckedStringResult<()> {
+    validate_runtime_identifier(grammar, value, 512)
+}
+
+fn validate_runtime_identifier(
+    grammar: &'static str,
+    value: &str,
+    max: usize,
+) -> CheckedStringResult<()> {
+    validate_len(value, grammar, max)?;
+    for (index, ch) in value.chars().enumerate() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '/' | ':') {
+            continue;
+        }
+        return Err(CheckedStringError::new(
+            grammar,
+            CheckedStringErrorReason::InvalidCharacter { ch, index },
+        ));
+    }
+    Ok(())
+}
+
 fn validate_visible_ascii(
     grammar: &'static str,
     value: &str,
@@ -1695,6 +1738,18 @@ mod tests {
             "MFM_SECRET_1"
         );
         assert_eq!(
+            RuntimeBindingId::new("mfm.portfolio/runtime:v1")
+                .unwrap()
+                .as_str(),
+            "mfm.portfolio/runtime:v1"
+        );
+        assert_eq!(
+            RuntimeToken::new("admission_waiter:0123456789abcdef")
+                .unwrap()
+                .as_str(),
+            "admission_waiter:0123456789abcdef"
+        );
+        assert_eq!(
             VisibleAscii256::new("text/html").unwrap().as_str(),
             "text/html"
         );
@@ -1756,9 +1811,24 @@ mod tests {
         assert!(RuntimeEnvName::new("mfm_secret").is_err());
         assert!(RuntimeEnvName::new("MFM-SECRET").is_err());
 
+        assert!(RuntimeBindingId::new("").is_err());
+        assert!(RuntimeBindingId::new("bad space").is_err());
+        assert!(RuntimeBindingId::new("bad\nline").is_err());
+        assert!(RuntimeBindingId::new("a".repeat(129)).is_err());
+
+        assert!(RuntimeToken::new("").is_err());
+        assert!(RuntimeToken::new("bad space").is_err());
+        assert!(RuntimeToken::new("bad\nline").is_err());
+        assert!(RuntimeToken::new("a".repeat(513)).is_err());
+
         assert!(VisibleAscii256::new("").is_err());
         assert!(VisibleAscii256::new("has space").is_err());
         assert!(VisibleAscii256::new("snowman☃").is_err());
+
+        assert!(PrintableAscii512::new("").is_err());
+        assert!(PrintableAscii512::new("snowman☃").is_err());
+        assert!(PrintableAscii512::new("line\nbreak").is_err());
+        assert!(PrintableAscii512::new("a".repeat(513)).is_err());
 
         assert!(PrintableAscii1024::new("").is_err());
         assert!(PrintableAscii1024::new("snowman☃").is_err());
