@@ -406,6 +406,105 @@ pub type VisibleAscii256 = VisibleAscii<256>;
 /// Visible ASCII token capped at 512 bytes.
 pub type VisibleAscii512 = VisibleAscii<512>;
 
+/// Checked printable ASCII text with a caller-selected maximum byte length.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PrintableAscii<const MAX: usize> {
+    raw: String,
+}
+
+impl<const MAX: usize> PrintableAscii<MAX> {
+    /// Creates checked printable ASCII text.
+    pub fn new(value: impl AsRef<str>) -> CheckedStringResult<Self> {
+        let value = value.as_ref();
+        validate_printable_ascii("printable ascii", value, MAX)?;
+        Ok(Self {
+            raw: value.to_owned(),
+        })
+    }
+
+    /// Returns this text as a string slice.
+    pub fn as_str(&self) -> &str {
+        &self.raw
+    }
+
+    /// Consumes this text into its string.
+    pub fn into_string(self) -> String {
+        self.raw
+    }
+}
+
+impl<const MAX: usize> AsRef<str> for PrintableAscii<MAX> {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl<const MAX: usize> Deref for PrintableAscii<MAX> {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl<const MAX: usize> fmt::Display for PrintableAscii<MAX> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl<const MAX: usize> FromStr for PrintableAscii<MAX> {
+    type Err = CheckedStringError;
+
+    fn from_str(value: &str) -> CheckedStringResult<Self> {
+        Self::new(value)
+    }
+}
+
+impl<const MAX: usize> TryFrom<String> for PrintableAscii<MAX> {
+    type Error = CheckedStringError;
+
+    fn try_from(value: String) -> CheckedStringResult<Self> {
+        Self::new(value)
+    }
+}
+
+impl<const MAX: usize> TryFrom<&str> for PrintableAscii<MAX> {
+    type Error = CheckedStringError;
+
+    fn try_from(value: &str) -> CheckedStringResult<Self> {
+        Self::new(value)
+    }
+}
+
+impl<const MAX: usize> From<PrintableAscii<MAX>> for String {
+    fn from(value: PrintableAscii<MAX>) -> Self {
+        value.raw
+    }
+}
+
+impl<const MAX: usize> Serialize for PrintableAscii<MAX> {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de, const MAX: usize> Deserialize<'de> for PrintableAscii<MAX> {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(&value).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Printable ASCII text capped at 1024 bytes.
+pub type PrintableAscii1024 = PrintableAscii<1024>;
+
 /// Digest algorithm identifiers accepted by typed kernel identity strings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum DigestAlgorithm {
@@ -1318,6 +1417,27 @@ fn validate_visible_ascii(
     Ok(())
 }
 
+fn validate_printable_ascii(
+    grammar: &'static str,
+    value: &str,
+    max: usize,
+) -> CheckedStringResult<()> {
+    validate_len(value, grammar, max)?;
+    for (index, byte) in value.bytes().enumerate() {
+        if matches!(byte, 0x20..=0x7e) {
+            continue;
+        }
+        return Err(CheckedStringError::new(
+            grammar,
+            CheckedStringErrorReason::InvalidCharacter {
+                ch: byte as char,
+                index,
+            },
+        ));
+    }
+    Ok(())
+}
+
 fn validate_len(value: &str, grammar: &'static str, max: usize) -> CheckedStringResult<()> {
     validate_non_empty(value, grammar)?;
     if value.len() > max {
@@ -1480,10 +1600,19 @@ mod tests {
             RuntimeEnvName::new("MFM_SECRET_1").unwrap().as_str(),
             "MFM_SECRET_1"
         );
-        assert_eq!(VisibleAscii256::new("text/html").unwrap().as_str(), "text/html");
+        assert_eq!(
+            VisibleAscii256::new("text/html").unwrap().as_str(),
+            "text/html"
+        );
         assert_eq!(
             VisibleAscii512::new("commit-key").unwrap().as_str(),
             "commit-key"
+        );
+        assert_eq!(
+            PrintableAscii1024::new("manual resolution note")
+                .unwrap()
+                .as_str(),
+            "manual resolution note"
         );
     }
 
@@ -1521,5 +1650,9 @@ mod tests {
         assert!(VisibleAscii256::new("").is_err());
         assert!(VisibleAscii256::new("has space").is_err());
         assert!(VisibleAscii256::new("snowman☃").is_err());
+
+        assert!(PrintableAscii1024::new("").is_err());
+        assert!(PrintableAscii1024::new("snowman☃").is_err());
+        assert!(PrintableAscii1024::new("line\nbreak").is_err());
     }
 }
