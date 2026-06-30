@@ -227,10 +227,10 @@ not include RPC URLs, auth material, database URLs, passwords, private keys, key
 paths, or signed transactions, regardless of whether those values came directly from the file or from
 indirection.
 
-### Live Capability Ingress Validation
+### Deployment Ingress Validation
 
-Before live execution starts driving the state machine, adapter-owned runner ingress should derive
-runtime requirements from certified nodes and config artifacts:
+Before live execution is admitted or resumed, adapter-owned runner ingress should derive deployment
+binding requirements from certified nodes and config artifacts:
 
 - EVM read requirements: `(network_id, expected_chain_id)` for portfolio reads and contract
   validation reads.
@@ -248,18 +248,24 @@ rules, but adapters own requirement extraction. The checks should cover:
   certified workflow;
 - every EVM mutation requirement has a configured signer provider for its `signer_ref`.
 
-For new live starts, ingress validation runs before `RunAdmitted`. For live resume/drive, ingress
-validation runs after the stored certified spec and retained config artifacts have been verified, but
-before any state-machine transition is driven or any attempt event is appended. It should not create a
-parallel workflow planner or make runtime config part of run identity.
+Deployment ingress validation is intentionally not a workflow. It appends no events, records no
+artifacts, does not acquire execution claims, and does not produce run status or public output. For
+new live starts, it runs before `RunAdmitted`; failures reject launch and leave no run stream. For
+live resume/drive, it runs after the stored certified spec and retained config artifacts have been
+verified, but before any state-machine transition is driven or any attempt event is appended.
+
+Deployment ingress validation must not perform live semantic observations. It should not call
+`eth_chainId`, unlock keystores, sign challenge material, inspect contract state, read account state,
+or probe private key material. It checks that the process has the deployment bindings needed for the
+certified run. It must not create a parallel workflow planner, make runtime config part of run
+identity, or produce replay authority.
 
 Signer validation is effect-scoped. Public addresses in read-only portfolio or validation configs
 are query subjects, not signer authority, and must not require `[evm.signers]`. For mutation
-workflows, preflight verifies that a signer binding exists. It should not unlock keystores or probe
-private key material during admission unless a future explicit read-only signer-public-identity
-capability is introduced. The actual expected public identity check happens when the signing request
-is materialized: typed config supplies the expected public identity, the signer result verifies that
-identity, and raw signed transaction bytes remain transient.
+workflows, ingress validation verifies that a signer binding exists. It should not unlock keystores
+or probe private key material during admission. The actual expected public identity check happens when
+the signing request is materialized: typed config supplies the expected public identity, the signer
+result verifies that identity, and raw signed transaction bytes remain transient.
 
 Portfolio and contract lifecycle should therefore fail the same way for missing EVM runtime wiring.
 Non-EVM portfolio configs should not require EVM runtime configuration, and read-only EVM portfolio
@@ -270,12 +276,41 @@ accepting an unavailable provider until first use. Contract lifecycle runners sh
 read-only phases without signer bindings and mutation phases with signer bindings.
 
 Adapters and transports should still validate defensively when used, but the primary user-facing
-failure should come from ingress validation before live state-machine drive.
+failure for missing deployment wiring should come from ingress validation before live state-machine
+drive.
 
-Live `eth_chainId` checks may run as transport readiness or first-use validation, but they are not
-certification or replay authority. Static preflight compares semantic expected chain ids to runtime
-source `expected_chain_id`; transports still verify that the live endpoint reports that configured
-chain id before using it.
+### Semantic Capability Validation
+
+Any validation that observes live external state and affects workflow correctness belongs inside the
+certified user run as ordinary typed states. Operations may plan those validation states before
+dependent work, but operations must not execute live validation themselves. States own the validation
+semantics, adapters bind state intent to explicit capabilities, and transports/signers perform the
+live protocol work.
+
+Examples of semantic capability validation include:
+
+- live `eth_chainId` reads when chain identity evidence is part of the workflow correctness boundary;
+- deployed bytecode or contract-call checks;
+- account, nonce, balance, log, receipt, or contract-state reads;
+- signer public-identity checks if a future read-only signer identity capability is introduced.
+
+Those states run after `RunAdmitted`, record typed facts or artifacts, and replay from recorded
+evidence only. If a validation result blocks downstream work, the dependency should be represented in
+the certified graph so downstream states cannot execute without the validation output. A failed
+semantic validation is a normal post-admission state outcome with redacted diagnostics, not a launch
+ingress failure.
+
+Live `eth_chainId` checks that are performed by transports as readiness or first-use defense are not
+certification or replay authority by themselves. If the observed chain identity is workflow evidence,
+it must also be represented through a certified read state and recorded evidence.
+
+### Management Validation Runs
+
+A separate management or readiness workflow may be useful for operator diagnostics, but it cannot
+authorize or replace validation in a later user run. Its result is non-authoritative for the later run
+because runtime-observed values cannot mutate the topology or semantics of a separately certified
+run, and the live world may change between readiness and launch. If management validation is added,
+it should be presented as diagnostics/readiness, not as hidden pre-admission authority.
 
 ## Evidence and Replay
 
@@ -289,11 +324,13 @@ valid live runtime capability configuration. A malformed or missing runtime conf
 start/resume/drive of nodes that need those capabilities, but it must not block evidence-only read or
 replay paths.
 
-Recorded EVM evidence may include redacted `source_ref`, `policy_id`, observed `chain_id`, semantic
-`network_id`, and semantic expected chain id as audit provenance. Replay must not resolve those
-runtime refs against the current runtime config. Adapters that build typed outputs from EVM reads
-must validate observed chain id against semantic expected chain id before producing output, including
-portfolio pin/read paths.
+Recorded EVM evidence may include redacted `selected_source_ref`, `policy_id`, observed `chain_id`,
+semantic `network_id`, and semantic expected chain id as audit provenance. `selected_source_ref`
+means the actual source that served the call after policy fallback, not merely the route's preferred
+starting source. These runtime refs are not consistency, retry, replay, or public-output authority:
+replay must not resolve them against the current runtime config, and retry behavior must not depend
+on them. Adapters that build typed outputs from EVM reads must validate observed chain id against
+semantic expected chain id before producing output, including portfolio pin/read paths.
 
 ## Architecture Placement
 
@@ -310,12 +347,12 @@ Suggested ownership:
 - `mfm-transports-evm`: construct clients from explicit typed source registries; no direct env
   parsing in the primary path; validate route/policy membership and live chain id defensively.
 - `mfm-adapters-*`: receive explicit capabilities, routes, and signer providers; derive
-  workflow-specific runtime requirements in runner ingress from certified nodes and launch config
-  artifacts.
+  workflow-specific deployment binding requirements in runner ingress from certified nodes and config
+  artifacts; bind semantic validation state intent to live/replay capability providers.
 - `mfm-signers-*`: construct signer providers from explicit typed signer registries; verify expected
   public identities at signing time without leaking secret-bearing details.
 - `mfm-app`: construct the production store from `DATABASE_URL` / `--database-url`, construct live
-  transports and signer providers from parsed runtime config, invoke adapter-owned ingress
+  transports and signer providers from parsed runtime config, invoke adapter-owned deployment ingress
   validation before live drive, and keep evidence-only service assembly independent from live runtime
   capability validity.
 - binaries: for live-capability commands and services, read the CLI/env file path and pass parsed
@@ -342,8 +379,11 @@ Recommended migration:
 7. Update Nixfied Reth workflows to generate or pass live capability runtime config files. Generated
    files should be written outside the repository under the active runtime/Nixfied state directory
    with secret-bearing file handling.
-8. Update docs and tests to use `runtime.toml` for EVM/signer capability wiring.
-9. Remove the environment JSON blobs as documented primary APIs.
+8. Add tests that distinguish deployment ingress from semantic validation: ingress failures append no
+   `RunAdmitted`, semantic validation records replayable evidence after admission, and replay succeeds
+   with live runtime config and signer/RPC environment removed.
+9. Update docs and tests to use `runtime.toml` for EVM/signer capability wiring.
+10. Remove the environment JSON blobs as documented primary APIs.
 
 Temporary compatibility can exist only as an implementation bridge if needed, but it should not be
 documented as the preferred surface.
@@ -355,4 +395,4 @@ documented as the preferred surface.
 - Should runtime config support JSON from day one, or should TOML be the only authored format until a
   machine-generated JSON use case appears?
 - Should a separate readiness command perform live `eth_chainId` checks for every configured source,
-  distinct from launch preflight and replay?
+  distinct from deployment ingress and replay?
