@@ -14,7 +14,7 @@ use mfm_events::v1::{self as events, side_effect, ArtifactRole, KernelEventPaylo
 use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind, CapabilityVersion, CellId,
     ContentDigest, DigestAlgorithm, EventId, IdentityError, NodeId, RunId, SchemaId, ScopeId,
-    SeedId, SemanticTypeId, SideEffectPairId, SpecHash, StateKind, StateVersion,
+    SeedId, SemanticTypeId, SideEffectPairId, SpecHash, StateKind, StateVersion, VisibleAscii512,
 };
 use mfm_manual_auth::{ManualResolutionBlockReason, VerifiedManualResolutionForPrefix};
 use mfm_spec::v1::{
@@ -329,17 +329,10 @@ fn canonical_json(value: serde_json::Value) -> Result<PlainCanonicalJsonBytes> {
         .map_err(|error| StoreError::Canonical(error.to_string()))
 }
 
-fn checked_ascii_key(field: &'static str, value: impl AsRef<str>) -> Result<String> {
+fn checked_store_key(field: &'static str, value: impl AsRef<str>) -> Result<VisibleAscii512> {
     let value = value.as_ref();
-    if value.is_empty()
-        || value.len() > 512
-        || !value.bytes().all(|byte| matches!(byte, 0x21..=0x7e))
-    {
-        return Err(StoreError::Identity(format!(
-            "{field} must be 1..=512 visible ASCII bytes"
-        )));
-    }
-    Ok(value.to_owned())
+    VisibleAscii512::new(value)
+        .map_err(|_| StoreError::Identity(format!("{field} must be 1..=512 visible ASCII bytes")))
 }
 
 /// Contiguous store-owned sequence for an atomic run commit.
@@ -405,17 +398,17 @@ impl fmt::Display for CommitOrdinal {
 
 /// Commit-key idempotency key supplied by a typed scheduler.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct CommitKey(String);
+pub struct CommitKey(VisibleAscii512);
 
 impl CommitKey {
     /// Creates a checked commit key.
     pub fn new(value: impl AsRef<str>) -> Result<Self> {
-        checked_ascii_key("commit key", value).map(Self)
+        checked_store_key("commit key", value).map(Self)
     }
 
     /// Returns the persisted commit key string.
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0.as_str()
     }
 }
 
@@ -427,17 +420,17 @@ impl fmt::Display for CommitKey {
 
 /// Store-derived logical event key used for duplicate/conflict checks.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct LogicalEventKey(String);
+pub struct LogicalEventKey(VisibleAscii512);
 
 impl LogicalEventKey {
     /// Creates a checked logical key for typed preconditions.
     pub fn new(value: impl AsRef<str>) -> Result<Self> {
-        checked_ascii_key("logical event key", value).map(Self)
+        checked_store_key("logical event key", value).map(Self)
     }
 
     /// Returns the persisted logical key string.
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0.as_str()
     }
 }
 

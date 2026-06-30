@@ -12,6 +12,7 @@ use std::collections::BTreeSet;
 pub use mfm_effects::{
     ApplySideEffect, EffectClass, EffectSpec, ManagedPlatformWrite, Pure, ReadExternal,
 };
+use mfm_ids::NameToken;
 pub use mfm_ids::{CapabilityKind, CapabilityVersion};
 
 #[cfg(test)]
@@ -146,7 +147,7 @@ pub struct CapabilityDescriptor {
     /// Capability role.
     pub role: CapabilityRole,
     /// Stable capability name.
-    pub name: String,
+    pub name: NameToken,
 }
 
 impl CapabilityDescriptor {
@@ -157,12 +158,10 @@ impl CapabilityDescriptor {
         role: CapabilityRole,
         name: impl Into<String>,
     ) -> Result<Self> {
-        let name = name.into();
-        if !is_valid_descriptor_name(&name) {
-            return Err(CapabilityError::Descriptor(format!(
-                "invalid capability descriptor name {name:?}"
-            )));
-        }
+        let raw_name = name.into();
+        let name = NameToken::new(&raw_name).map_err(|_| {
+            CapabilityError::Descriptor(format!("invalid capability descriptor name {raw_name:?}"))
+        })?;
 
         Ok(Self {
             kind,
@@ -389,19 +388,6 @@ fn invalid_set(effect: &'static str, message: &'static str) -> CapabilityError {
         effect,
         message: message.to_owned(),
     }
-}
-
-fn is_valid_descriptor_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    if !first.is_ascii_lowercase() && !first.is_ascii_digit() {
-        return false;
-    }
-    chars.all(|ch| {
-        ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '.' | '_' | '-' | '/')
-    })
 }
 
 mod private {

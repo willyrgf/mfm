@@ -308,8 +308,8 @@ pub mod v1 {
     use std::collections::BTreeMap;
 
     use super::{
-        canonical_json, checked_ascii_token, checked_author_key, checked_field_path,
-        checked_resource_namespace, content_digest, spec_hash_from_canonical, ContentDigest,
+        canonical_json, content_digest, spec_hash_from_canonical, CheckedFieldPath,
+        CheckedResourceNamespace, CheckedStableAuthorKey, CheckedVisibleAscii256, ContentDigest,
         DigestAlgorithm, PlainCanonicalJsonBytes, Result, SideEffectVerifyPairErrorKind, SpecError,
         SpecHash,
     };
@@ -629,73 +629,73 @@ pub mod v1 {
         /// Checked media type string.
         MediaType,
         "media type",
-        checked_ascii_token
+        CheckedVisibleAscii256
     );
     checked_string_type!(
         /// Stable author key persisted in specs.
         StableAuthorKey,
         "stable author key",
-        checked_author_key
+        CheckedStableAuthorKey
     );
     checked_string_type!(
         /// Public output field path persisted in specs.
         PublicFieldPath,
         "public field path",
-        checked_field_path
+        CheckedFieldPath
     );
     checked_string_type!(
         /// Stable renderer kind string.
         RendererKind,
         "renderer kind",
-        checked_author_key
+        CheckedStableAuthorKey
     );
     checked_string_type!(
         /// Stable renderer version string.
         RendererVersion,
         "renderer version",
-        checked_ascii_token
+        CheckedVisibleAscii256
     );
     checked_string_type!(
         /// Canonicalizer identity string used by a renderer.
         CanonicalizerIdentity,
         "canonicalizer identity",
-        checked_ascii_token
+        CheckedVisibleAscii256
     );
     checked_string_type!(
         /// Capability-style resource namespace for cross-run resource claims.
         ResourceNamespace,
         "resource namespace",
-        checked_resource_namespace
+        CheckedResourceNamespace
     );
     checked_string_type!(
         /// Manual authorization verifier identity certified for manual saga resolution.
         ManualAuthorizationVerifierId,
         "manual authorization verifier id",
-        checked_ascii_token
+        CheckedVisibleAscii256
     );
     checked_string_type!(
         /// Operator authority snapshot identity certified for manual saga resolution.
         OperatorAuthorityId,
         "operator authority id",
-        checked_ascii_token
+        CheckedVisibleAscii256
     );
     checked_string_type!(
         /// Stable operator identity inside a certified operator authority snapshot.
         OperatorId,
         "operator id",
-        checked_ascii_token
+        CheckedVisibleAscii256
     );
     checked_string_type!(
         /// Public operator identity that may authorize a manual saga resolution.
         OperatorPublicIdentity,
         "operator public identity",
-        checked_ascii_token
+        CheckedVisibleAscii256
     );
     checked_string_type!(
         /// Manual-resolution signing scheme identifier.
         ManualSigningSchemeSpec,
         "manual signing scheme",
-        checked_ascii_token
+        CheckedVisibleAscii256
     );
 
     /// Parsed or constructed typed spec data that has not been certified.

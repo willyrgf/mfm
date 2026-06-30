@@ -8,8 +8,9 @@ use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_ids::{
     AdapterKind, AdapterVersion, ArtifactId, AttemptId, CapabilityKind, CapabilityVersion, CellId,
     ContentDigest, DescriptorId, DigestAlgorithm, EventId, IdentityError, LoweringVersion, NodeId,
-    RunId, SchemaId, ScopeId, SeedId, SemanticTypeId, SideEffectPairId, SpecHash, SpecVersion,
-    StateKind, StateVersion, TrustScopeId,
+    PrintableAscii1024 as CheckedPrintableAscii1024, RunId, SchemaId, ScopeId, SeedId,
+    SemanticTypeId, SideEffectPairId, SpecHash, SpecVersion, StateKind, StateVersion, TrustScopeId,
+    VisibleAscii256 as CheckedVisibleAscii256,
 };
 use mfm_spec::v1::{
     CanonicalizerIdentity, CellProducer, DescriptorIdentity, MediaType, PublicFieldPath,
@@ -68,49 +69,27 @@ fn canonical_json(value: serde_json::Value) -> Result<PlainCanonicalJsonBytes> {
         .map_err(|error| EventError::Canonical(error.to_string()))
 }
 
-fn checked_ascii_token(field: &'static str, value: impl AsRef<str>) -> Result<String> {
-    let value = value.as_ref();
-    if value.is_empty()
-        || value.len() > 256
-        || !value.bytes().all(|byte| matches!(byte, 0x21..=0x7e))
-    {
-        return Err(EventError::InvalidString {
-            field,
-            value: value.to_owned(),
-        });
-    }
-    Ok(value.to_owned())
-}
-
-fn checked_printable_text(field: &'static str, value: impl AsRef<str>) -> Result<String> {
-    let value = value.as_ref();
-    if value.is_empty()
-        || value.len() > 1024
-        || !value.bytes().all(|byte| matches!(byte, 0x20..=0x7e))
-    {
-        return Err(EventError::InvalidString {
-            field,
-            value: value.to_owned(),
-        });
-    }
-    Ok(value.to_owned())
-}
-
 macro_rules! checked_string_type {
     ($(#[$doc:meta])* $name:ident, $field:literal) => {
         $(#[$doc])*
         #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        pub struct $name(String);
+        pub struct $name(CheckedVisibleAscii256);
 
         impl $name {
             #[doc = concat!("Creates a checked `", stringify!($name), "`.")]
             pub fn new(value: impl AsRef<str>) -> Result<Self> {
-                checked_ascii_token($field, value).map(Self)
+                let value = value.as_ref();
+                CheckedVisibleAscii256::new(value)
+                    .map(Self)
+                    .map_err(|_| EventError::InvalidString {
+                        field: $field,
+                        value: value.to_owned(),
+                    })
             }
 
             #[doc = concat!("Returns the persisted `", stringify!($name), "` string.")]
             pub fn as_str(&self) -> &str {
-                &self.0
+                self.0.as_str()
             }
         }
 
@@ -126,17 +105,23 @@ macro_rules! checked_text_type {
     ($(#[$doc:meta])* $name:ident, $field:literal) => {
         $(#[$doc])*
         #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        pub struct $name(String);
+        pub struct $name(CheckedPrintableAscii1024);
 
         impl $name {
             #[doc = concat!("Creates a checked `", stringify!($name), "`.")]
             pub fn new(value: impl AsRef<str>) -> Result<Self> {
-                checked_printable_text($field, value).map(Self)
+                let value = value.as_ref();
+                CheckedPrintableAscii1024::new(value)
+                    .map(Self)
+                    .map_err(|_| EventError::InvalidString {
+                        field: $field,
+                        value: value.to_owned(),
+                    })
             }
 
             #[doc = concat!("Returns the persisted `", stringify!($name), "` string.")]
             pub fn as_str(&self) -> &str {
-                &self.0
+                self.0.as_str()
             }
         }
 
@@ -1086,17 +1071,23 @@ pub mod v1 {
 
     /// Fully qualified app entry-point operation id.
     #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    pub struct EntryPointOpId(String);
+    pub struct EntryPointOpId(CheckedVisibleAscii256);
 
     impl EntryPointOpId {
         /// Creates a checked entry-point op id.
         pub fn new(value: impl AsRef<str>) -> Result<Self> {
-            checked_ascii_token("entry point op id", value).map(Self)
+            let value = value.as_ref();
+            CheckedVisibleAscii256::new(value)
+                .map(Self)
+                .map_err(|_| EventError::InvalidString {
+                    field: "entry point op id",
+                    value: value.to_owned(),
+                })
         }
 
         /// Returns the entry-point op id string.
         pub fn as_str(&self) -> &str {
-            &self.0
+            self.0.as_str()
         }
     }
 
@@ -3147,19 +3138,18 @@ pub mod v1 {
         })
     }
 
-    fn checked_token_type(type_name: &'static str) -> serde_json::Value {
+    fn visible_ascii_256_type(type_name: &'static str) -> serde_json::Value {
         serde_json::json!({
-            "charset": "visible_ascii",
-            "kind": "checked_ascii_token",
+            "kind": "mfm_ids_visible_ascii",
             "max_len": 256,
             "name": type_name,
             "non_empty": true,
         })
     }
 
-    fn checked_author_key_type(type_name: &'static str) -> serde_json::Value {
+    fn stable_author_key_type(type_name: &'static str) -> serde_json::Value {
         serde_json::json!({
-            "kind": "checked_author_key",
+            "kind": "mfm_ids_stable_author_key",
             "name": type_name,
             "persisted_as": "string",
         })
@@ -3167,19 +3157,17 @@ pub mod v1 {
 
     fn public_field_path_type() -> serde_json::Value {
         serde_json::json!({
-            "kind": "checked_public_field_path",
+            "kind": "mfm_ids_field_path",
             "name": "PublicFieldPath",
             "persisted_as": "string",
-            "segment_charset": "ascii_alphanumeric_or_underscore_dash_slash",
         })
     }
 
     fn resource_namespace_type() -> serde_json::Value {
         serde_json::json!({
-            "kind": "checked_resource_namespace",
+            "kind": "mfm_ids_resource_namespace",
             "name": "ResourceNamespace",
             "persisted_as": "string",
-            "segment_charset": "ascii_lower_digit_underscore_dash_dot",
         })
     }
 
@@ -3269,11 +3257,11 @@ pub mod v1 {
                 &["verify_terminal", "manual_resolution"],
             ),
             "MediaType" | "CanonicalizerIdentity" | "RendererVersion" => {
-                checked_token_type(type_name)
+                visible_ascii_256_type(type_name)
             }
             "PublicFieldPath" => public_field_path_type(),
             "ResourceNamespace" => resource_namespace_type(),
-            "RendererKind" => checked_author_key_type(type_name),
+            "RendererKind" => stable_author_key_type(type_name),
             "RunnerFactoryId"
             | "NixDerivationHash"
             | "NixOutputHash"
@@ -3289,7 +3277,7 @@ pub mod v1 {
             | "AmbiguityCode"
             | "ErrorCode"
             | "ClaimFencingToken"
-            | "EntryPointOpId" => checked_token_type(type_name),
+            | "EntryPointOpId" => visible_ascii_256_type(type_name),
             "EntryPointLaunchEvidence" => struct_type(
                 "EntryPointLaunchEvidence",
                 vec![

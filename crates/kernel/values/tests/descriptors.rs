@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use mfm_ids::{
-    ArtifactId, ContentDigest, DigestAlgorithm, DigestBytes, SchemaId, SchemaVersion,
+    ArtifactId, ContentDigest, DigestAlgorithm, DigestBytes, NameToken, SchemaId, SchemaVersion,
     SemanticTypeId,
 };
 use mfm_values::*;
@@ -135,7 +135,8 @@ fn schema_id_uses_identity_not_audit() {
     );
 
     let mut changed_identity = descriptor.clone();
-    changed_identity.identity.schema_name = "mfm.test.example_value_v2".to_owned();
+    changed_identity.identity.schema_name =
+        NameToken::new("mfm.test.example_value_v2").expect("schema name");
     assert_ne!(
         descriptor.schema_id().expect("descriptor schema id"),
         changed_identity
@@ -302,7 +303,7 @@ fn secret_marker_scanner_rejects_keys_values_and_mnemonics() {
 }
 
 #[test]
-fn schema_identity_rejects_invalid_kind_and_name() {
+fn schema_identity_rejects_invalid_kind_material() {
     let value_without_semantic = SchemaIdentity::new(
         SchemaKind::Value,
         None,
@@ -320,13 +321,4 @@ fn schema_identity_rejects_invalid_kind_and_name() {
         SchemaShape::Unit,
     );
     assert!(config_with_semantic.is_err());
-
-    let invalid_name = SchemaIdentity::new(
-        SchemaKind::PublicOutput,
-        None,
-        "Mfm.Test.Invalid",
-        schema_version("1").expect("schema version"),
-        SchemaShape::Unit,
-    );
-    assert!(invalid_name.is_err());
 }

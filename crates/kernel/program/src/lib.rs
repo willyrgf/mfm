@@ -20,8 +20,10 @@ use mfm_effects::{
 };
 use mfm_ids::{
     AdapterKind, AdapterVersion, CellId, ContentDigest, DescriptorId, DigestAlgorithm, DigestBytes,
-    EffectKind, NodeId, OperationInstanceId, OperationKind, OperationVersion, SchemaId, ScopeId,
-    SeedId, SemanticTypeId, SideEffectPairId, StateKind, StateVersion,
+    EffectKind, FieldPath as CheckedFieldPath, FieldSegment as CheckedFieldSegment, NodeId,
+    OperationInstanceId, OperationKind, OperationVersion, SchemaId, ScopeId, SeedId,
+    SemanticTypeId, SideEffectPairId, StableAuthorKey as CheckedStableAuthorKey, StateKind,
+    StateVersion,
 };
 use mfm_spec::v1::MediaType;
 use mfm_spec::v1::{
@@ -138,7 +140,7 @@ pub enum PlanError {
 
 /// Stable root or child scope author key.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ScopeKey(String);
+pub struct ScopeKey(CheckedStableAuthorKey);
 
 impl ScopeKey {
     /// Creates a checked scope key.
@@ -148,13 +150,13 @@ impl ScopeKey {
 
     /// Returns the stable key string.
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0.as_str()
     }
 }
 
 /// Stable root seed author key.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SeedKey(String);
+pub struct SeedKey(CheckedStableAuthorKey);
 
 impl SeedKey {
     /// Creates a checked seed key.
@@ -164,13 +166,13 @@ impl SeedKey {
 
     /// Returns the stable key string.
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0.as_str()
     }
 }
 
 /// Stable public-output binding key.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct PublicOutputKey(String);
+pub struct PublicOutputKey(CheckedStableAuthorKey);
 
 impl PublicOutputKey {
     /// Creates a checked public-output key.
@@ -180,13 +182,13 @@ impl PublicOutputKey {
 
     /// Returns the stable key string.
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0.as_str()
     }
 }
 
 /// Stable bridge node author key.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct BridgeKey(String);
+pub struct BridgeKey(CheckedStableAuthorKey);
 
 impl BridgeKey {
     /// Creates a checked bridge key.
@@ -196,13 +198,13 @@ impl BridgeKey {
 
     /// Returns the stable key string.
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0.as_str()
     }
 }
 
 /// Stable state node author key.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct StateKey(String);
+pub struct StateKey(CheckedStableAuthorKey);
 
 impl StateKey {
     /// Creates a checked state key.
@@ -212,13 +214,13 @@ impl StateKey {
 
     /// Returns the stable key string.
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0.as_str()
     }
 }
 
 /// Stable operation author key.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct OperationKey(String);
+pub struct OperationKey(CheckedStableAuthorKey);
 
 impl OperationKey {
     /// Creates a checked operation key.
@@ -228,13 +230,13 @@ impl OperationKey {
 
     /// Returns the stable key string.
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0.as_str()
     }
 }
 
 /// Stable public-output field path.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct PublicFieldPath(String);
+pub struct PublicFieldPath(CheckedFieldPath);
 
 impl PublicFieldPath {
     /// Creates a checked public field path.
@@ -244,18 +246,21 @@ impl PublicFieldPath {
 
     /// Returns the stable field path string.
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0.as_str()
     }
 }
 
 /// Stable field path inside a state input binding tree.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct InputFieldPath(String);
+pub struct InputFieldPath(CheckedFieldPath);
 
 impl InputFieldPath {
     /// Creates the root input field path.
     pub fn root() -> Self {
-        Self("root".to_owned())
+        Self(
+            CheckedFieldPath::new("root")
+                .expect("static root input field path must satisfy field-path grammar"),
+        )
     }
 
     /// Creates a checked input field path.
@@ -266,16 +271,20 @@ impl InputFieldPath {
     /// Appends a checked child segment.
     pub fn child(&self, value: impl AsRef<str>) -> Result<Self> {
         let segment = checked_field_segment("input field segment", value.as_ref())?;
-        if self.0 == "root" {
-            Ok(Self(segment))
+        if self.0.as_str() == "root" {
+            checked_field_path("input field path", segment.as_str()).map(Self)
         } else {
-            Ok(Self(format!("{}.{}", self.0, segment)))
+            checked_field_path(
+                "input field path",
+                format!("{}.{}", self.0.as_str(), segment.as_str()),
+            )
+            .map(Self)
         }
     }
 
     /// Returns the stable field path string.
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0.as_str()
     }
 }
 
@@ -5004,71 +5013,26 @@ fn finalize_saga_policy(
     Ok(policy.into())
 }
 
-fn checked_key(label: &str, value: &str) -> Result<String> {
-    if is_valid_author_key(value) {
-        Ok(value.to_owned())
-    } else {
-        Err(PlanError::Key(format!(
-            "{label} {value:?} must use stable key grammar"
-        )))
-    }
+fn checked_key(label: &str, value: &str) -> Result<CheckedStableAuthorKey> {
+    CheckedStableAuthorKey::new(value)
+        .map_err(|_| PlanError::Key(format!("{label} {value:?} must use stable key grammar")))
 }
 
-fn is_valid_author_key(value: &str) -> bool {
-    if value.is_empty()
-        || value.len() > 256
-        || value.starts_with("mfm.")
-        || value.starts_with("sys.")
-        || value.starts_with('_')
-    {
-        return false;
-    }
-    value.split('/').all(is_valid_author_key_segment)
+fn checked_field_path(label: &str, value: impl AsRef<str>) -> Result<CheckedFieldPath> {
+    let value = value.as_ref();
+    CheckedFieldPath::new(value).map_err(|_| {
+        PlanError::Key(format!(
+            "{label} {value:?} must contain non-empty field segments"
+        ))
+    })
 }
 
-fn is_valid_author_key_segment(segment: &str) -> bool {
-    if segment.is_empty() || segment.len() > 64 {
-        return false;
-    }
-    let mut chars = segment.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    (first.is_ascii_lowercase() || first.is_ascii_digit())
-        && chars.all(|ch| {
-            ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '.' | '_' | '-')
-        })
-}
-
-fn checked_field_path(label: &str, value: &str) -> Result<String> {
-    if value.split('.').all(is_valid_field_segment) {
-        Ok(value.to_owned())
-    } else {
-        Err(PlanError::Key(format!(
-            "{label} {value:?} must contain non-empty ASCII field segments"
-        )))
-    }
-}
-
-fn checked_field_segment(label: &str, value: &str) -> Result<String> {
-    if is_valid_field_segment(value) {
-        Ok(value.to_owned())
-    } else {
-        Err(PlanError::Key(format!(
-            "{label} {value:?} must be a non-empty ASCII field segment"
-        )))
-    }
-}
-
-fn is_valid_field_segment(value: &str) -> bool {
-    let mut chars = value.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    if !first.is_ascii_alphanumeric() {
-        return false;
-    }
-    chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '/'))
+fn checked_field_segment(label: &str, value: &str) -> Result<CheckedFieldSegment> {
+    CheckedFieldSegment::new(value).map_err(|_| {
+        PlanError::Key(format!(
+            "{label} {value:?} must be a non-empty field segment"
+        ))
+    })
 }
 
 fn canonical_digest(value: serde_json::Value) -> Result<ContentDigest> {

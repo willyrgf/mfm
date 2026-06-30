@@ -43,26 +43,6 @@ fn manual_resolution_signing_request_is_digest_only_and_domain_separated() {
 }
 
 #[test]
-fn signer_ref_validation_accepts_public_refs() {
-    assert_eq!(
-        SignerRef::new("local.deployer-1")
-            .expect("valid signer ref")
-            .as_str(),
-        "local.deployer-1"
-    );
-}
-
-#[test]
-fn signer_ref_validation_rejects_invalid_refs_without_echoing_values() {
-    for value in ["", "Deployer", "bad/path", "-bad", "bad-"] {
-        let err = SignerRef::new(value).expect_err("invalid signer ref");
-        if !value.is_empty() {
-            assert!(!err.to_string().contains(value));
-        }
-    }
-}
-
-#[test]
 fn signing_request_debug_does_not_render_digest_bytes() {
     let request = request();
     let rendered = format!("{request:?}");

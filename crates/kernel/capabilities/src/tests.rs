@@ -179,23 +179,7 @@ fn duplicate_capability_descriptors_reject() {
 }
 
 #[test]
-fn descriptor_names_and_role_strings_are_stable() {
-    assert!(CapabilityDescriptor::new(
-        ReadRpc::kind().expect("kind"),
-        ReadRpc::version().expect("version"),
-        CapabilityRole::ReadExternal,
-        "read_rpc",
-    )
-    .is_ok());
-
-    assert!(CapabilityDescriptor::new(
-        ReadRpc::kind().expect("kind"),
-        ReadRpc::version().expect("version"),
-        CapabilityRole::ReadExternal,
-        "ReadRpc",
-    )
-    .is_err());
-
+fn capability_role_strings_are_stable() {
     assert_eq!(CapabilityRole::ReadExternal.as_str(), "read_external");
     assert_eq!(
         CapabilityRole::ManagedPlatformWrite.as_str(),

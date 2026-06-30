@@ -3,10 +3,9 @@ use std::ops::Deref;
 use std::str::FromStr;
 
 use mfm_evm_core::encoding::normalize_address;
+use mfm_ids::{CheckedStringError, StableAuthorKey};
 use mfm_program_derive::MfmValue;
 use serde::{Deserialize, Serialize};
-
-use crate::domain_key::{validate_author_key, StableDomainKeyError};
 
 /// Error returned when constructing portfolio scalar authorities.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -19,7 +18,7 @@ pub enum PortfolioScalarError {
         /// Rejected scalar value.
         value: String,
         /// Underlying author-key grammar error.
-        source: StableDomainKeyError,
+        source: CheckedStringError,
     },
     /// A scalar was not a normalized EVM address.
     #[error("{kind} `{value}` must be a normalized EVM address")]
@@ -55,13 +54,13 @@ macro_rules! portfolio_id_type {
             /// Creates a checked portfolio scalar authority.
             pub fn new(value: impl Into<String>) -> Result<Self, PortfolioScalarError> {
                 let raw = value.into();
-                validate_author_key(&raw).map_err(|source| {
-                    PortfolioScalarError::InvalidAuthorKey {
+                let raw = StableAuthorKey::new(&raw)
+                    .map_err(|source| PortfolioScalarError::InvalidAuthorKey {
                         kind: $kind,
                         value: raw.clone(),
                         source,
-                    }
-                })?;
+                    })?
+                    .into_string();
                 Ok(Self { raw })
             }
 

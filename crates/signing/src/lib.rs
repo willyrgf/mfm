@@ -776,7 +776,10 @@ fn checked_runtime_env_name(
     RuntimeEnvName::new(value).map_err(|error| signing_identifier_error(kind, error))
 }
 
-fn signing_identifier_error(kind: SigningIdentifierKind, error: CheckedStringError) -> SigningError {
+fn signing_identifier_error(
+    kind: SigningIdentifierKind,
+    error: CheckedStringError,
+) -> SigningError {
     let reason = match error.reason() {
         CheckedStringErrorReason::Empty => SigningValidationError::Empty,
         CheckedStringErrorReason::TooLong { .. }
@@ -786,7 +789,9 @@ fn signing_identifier_error(kind: SigningIdentifierKind, error: CheckedStringErr
         CheckedStringErrorReason::InvalidCharacter { .. }
         | CheckedStringErrorReason::MissingSeparator { .. }
         | CheckedStringErrorReason::EmptySegment
-        | CheckedStringErrorReason::ReservedPrefix { .. } => SigningValidationError::InvalidCharacter,
+        | CheckedStringErrorReason::ReservedPrefix { .. } => {
+            SigningValidationError::InvalidCharacter
+        }
     };
     SigningError::InvalidIdentifier { kind, reason }
 }

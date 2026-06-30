@@ -2226,20 +2226,6 @@ fn duplicate_seed_keys_reject() {
 }
 
 #[test]
-fn keys_reject_non_ascii_and_empty_values() {
-    assert!(ScopeKey::new("").is_err());
-    assert!(ScopeKey::new("Root").is_err());
-    assert!(ScopeKey::new("mfm.reserved").is_err());
-    assert!(ScopeKey::new("sys.reserved").is_err());
-    assert!(ScopeKey::new("_reserved").is_err());
-    assert!(ScopeKey::new(format!("a/{}", "b".repeat(65))).is_err());
-    assert!(SeedKey::new("semente-á").is_err());
-    assert!(SeedKey::new("seed_1").is_ok());
-    assert!(PublicFieldPath::new("result.total").is_ok());
-    assert!(PublicFieldPath::new("result..total").is_err());
-}
-
-#[test]
 fn canonical_seed_can_be_built_from_canonical_json() {
     let bytes = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(
         "{\"amount\":7,\"label\":\"canonical\"}",

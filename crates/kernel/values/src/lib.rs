@@ -24,7 +24,7 @@ use std::marker::PhantomData;
 
 use mfm_canonical::{CanonicalJsonBytes, CanonicalValue};
 use mfm_ids::{
-    ArtifactId, ContentDigest, DigestAlgorithm, DigestBytes, SchemaId, SchemaVersion,
+    ArtifactId, ContentDigest, DigestAlgorithm, DigestBytes, NameToken, SchemaId, SchemaVersion,
     SemanticTypeId,
 };
 use serde::de::{self, DeserializeOwned, Deserializer};
@@ -354,7 +354,7 @@ impl SchemaDescriptor {
         self.identity.validate()?;
         let digest = self.identity_canonical_json().digest_bytes();
         SchemaId::new(
-            &self.identity.schema_name,
+            self.identity.schema_name.as_str(),
             self.identity.schema_version.as_str(),
             DigestAlgorithm::Sha256JcsV1,
             digest,
@@ -371,7 +371,7 @@ pub struct SchemaIdentity {
     /// Semantic type identity for value schemas.
     pub semantic_type_id: Option<SemanticTypeId>,
     /// Stable schema name.
-    pub schema_name: String,
+    pub schema_name: NameToken,
     /// Manually assigned schema version.
     pub schema_version: SchemaVersion,
     /// Canonical serialized shape.
@@ -393,10 +393,14 @@ impl SchemaIdentity {
         schema_version: SchemaVersion,
         shape: SchemaShape,
     ) -> Result<Self> {
+        let raw_schema_name = schema_name.into();
+        let schema_name = NameToken::new(&raw_schema_name).map_err(|_| {
+            ValueError::Descriptor(format!("invalid schema name {raw_schema_name:?}"))
+        })?;
         let identity = Self {
             schema_kind,
             semantic_type_id,
-            schema_name: schema_name.into(),
+            schema_name,
             schema_version,
             shape,
             canonicalization: DigestAlgorithm::Sha256JcsV1,
@@ -408,7 +412,6 @@ impl SchemaIdentity {
     }
 
     fn validate(&self) -> Result<()> {
-        validate_schema_name(&self.schema_name)?;
         match (self.schema_kind, self.semantic_type_id.as_ref()) {
             (SchemaKind::Value, Some(_)) => Ok(()),
             (SchemaKind::Value, None) => Err(ValueError::Descriptor(
@@ -442,7 +445,7 @@ impl SchemaIdentity {
                 self.persisted_surface.to_canonical_value(),
             ),
             ("schema_kind", string(self.schema_kind.as_str())),
-            ("schema_name", string(&self.schema_name)),
+            ("schema_name", string(self.schema_name.as_str())),
             ("schema_version", string(self.schema_version.as_str())),
             (
                 "semantic_type_id",
@@ -1359,32 +1362,6 @@ fn reject_duplicate_names<'a>(
             )));
         }
     }
-    Ok(())
-}
-
-fn validate_schema_name(value: &str) -> Result<()> {
-    let mut chars = value.chars();
-    let Some(first) = chars.next() else {
-        return Err(ValueError::Descriptor(
-            "schema name must not be empty".to_owned(),
-        ));
-    };
-
-    if !first.is_ascii_lowercase() && !first.is_ascii_digit() {
-        return Err(ValueError::Descriptor(format!(
-            "schema name must start with [a-z0-9], got '{value}'"
-        )));
-    }
-
-    for ch in chars {
-        if ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '.' | '_' | '-' | '/') {
-            continue;
-        }
-        return Err(ValueError::Descriptor(format!(
-            "schema name contains invalid character '{ch}' in '{value}'"
-        )));
-    }
-
     Ok(())
 }
 
