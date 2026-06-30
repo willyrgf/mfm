@@ -9,10 +9,10 @@ It is inspired by the practices used in large Rust codebases: modular crates, st
 - Follow `docs/code-quality.md` for every code, test, documentation, build, and workflow change.
 - Do not introduce hacks, monkey patches, partial workarounds, or fragile compatibility shims.
 - If the requested change needs missing underlying support, add that support properly or report the blocker honestly.
-- Use focused Cargo verification by default. Prefer targeted `cargo test`, `cargo check`,
+- Use focused Cargo verification while developing. Prefer targeted `cargo test`, `cargo check`,
   `cargo metadata`, namespace scans, schema checks, and manually started service parity tests.
-- Do not use Nixfied test/CI wrappers as the default gate. Use Nixfied commands only when the
-  change is specifically about Nixfied behavior or the user asks for them.
+- Before each commit, run `nix run .#check`, `nix run .#test`, and `nix run .#test-db`.
+- Run `nix run .#ci` after major work or for final merge-readiness validation.
 - Write commit subjects in lower case. Examples: `mfm-core bump to 0.1.30`, `fix nix task wrappers to preserve caller cwd`, `docs: refresh repo map for typed crates`, `docs: publish umbrella earlier with live links only`, `docs: point crate metadata at mfm repo`.
 - Never log, print, or persist secrets (passwords, mnemonics, private keys).
 - Preserve crate boundaries: libraries stay usable without the CLI.
@@ -48,7 +48,7 @@ Key invariants to preserve (high risk if violated):
 
 ## Verification Entry Points
 
-Use Cargo and focused checks first:
+Use Cargo and focused checks while developing:
 
 - `cargo fmt --all -- --check`
 - `cargo check --workspace`
@@ -61,11 +61,13 @@ For parity tests that need Postgres, Reth, or other live services, start those s
 run the focused Cargo test with explicit environment variables such as `DATABASE_URL`,
 `RETH_HTTP_PORT`, or `MFM_EVM_RPC_SOURCES_JSON`.
 
-For final merge-readiness validation, or when a user explicitly asks for managed live-service
-coverage instead of a local `DATABASE_URL`/service setup, use the Nixfied managed gates:
+Before each commit, run the Nixfied managed gates:
 
+- `nix run .#check`: rustfmt, clippy, and architecture/cargo metadata contracts.
+- `nix run .#test`: `cargo nextest run --workspace` plus `cargo test --workspace --doc` without managed external services.
 - `nix run .#test-db`: managed Postgres plus SQLx schema drift checks and Postgres parity tests.
-- `nix run .#ci`: full managed CI with Postgres, Reth, and all parity tests.
+
+Run `nix run .#ci` after major work or for final merge-readiness validation.
 
 ## Key Docs:
 
