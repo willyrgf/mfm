@@ -8,7 +8,7 @@ use mfm_authored_config::{
     AuthoredConfig, AuthoredConfigError, AuthoredConfigFormat, EntryPointDescriptor,
 };
 use mfm_canonical::PlainCanonicalJsonBytes;
-use mfm_ids::ContentDigest;
+use mfm_ids::{ContentDigest, DottedLowerKebabName, LowerSnakeName};
 use mfm_program::{
     TypedProgramConfigMaterial, TypedProgramDraft, TypedProgramLaunchPlan, TypedProgramSeedMaterial,
 };
@@ -22,30 +22,29 @@ const ENTRY_POINT_NAMESPACE_PATTERN: &str =
 /// Public entry-point operation name accepted by CLI and REST transports.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct PublicOpName(String);
+pub struct PublicOpName(LowerSnakeName);
 
 impl PublicOpName {
     /// Creates a checked public operation name.
     pub fn new(value: impl AsRef<str>) -> Result<Self, EntryPointOpResolveError> {
         let value = value.as_ref();
-        if !matches_segmented_ascii_identifier(value, b'_') {
-            return Err(EntryPointOpResolveError::new(
+        LowerSnakeName::new(value).map(Self).map_err(|_| {
+            EntryPointOpResolveError::new(
                 "InvalidPublicOpName",
                 format!("public op name must match {PUBLIC_OP_NAME_PATTERN}"),
-            ));
-        }
-        Ok(Self(value.to_owned()))
+            )
+        })
     }
 
     /// Returns the public name as transport text.
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0.as_str()
     }
 }
 
 impl fmt::Display for PublicOpName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(self.as_str())
     }
 }
 
@@ -104,9 +103,9 @@ impl FromStr for OpVersion {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct EntryPointOpId {
     /// Domain namespace for the entry-point operation.
-    pub namespace: String,
+    pub namespace: DottedLowerKebabName,
     /// Stable domain operation name within the namespace.
-    pub name: String,
+    pub name: LowerSnakeName,
     /// Public operation version.
     pub version: OpVersion,
 }
@@ -120,21 +119,21 @@ impl EntryPointOpId {
     ) -> Result<Self, EntryPointOpResolveError> {
         let namespace = namespace.as_ref();
         let name = name.as_ref();
-        if !matches_entry_point_namespace(namespace) {
-            return Err(EntryPointOpResolveError::new(
+        let namespace = DottedLowerKebabName::new(namespace).map_err(|_| {
+            EntryPointOpResolveError::new(
                 "InvalidEntryPointOpId",
                 format!("entry-point op namespace must match {ENTRY_POINT_NAMESPACE_PATTERN}"),
-            ));
-        }
-        if !matches_segmented_ascii_identifier(name, b'_') {
-            return Err(EntryPointOpResolveError::new(
+            )
+        })?;
+        let name = LowerSnakeName::new(name).map_err(|_| {
+            EntryPointOpResolveError::new(
                 "InvalidEntryPointOpId",
                 format!("entry-point op name must match {PUBLIC_OP_NAME_PATTERN}"),
-            ));
-        }
+            )
+        })?;
         Ok(Self {
-            namespace: namespace.to_owned(),
-            name: name.to_owned(),
+            namespace,
+            name,
             version,
         })
     }
@@ -142,7 +141,13 @@ impl EntryPointOpId {
 
 impl fmt::Display for EntryPointOpId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}:{}", self.namespace, self.name, self.version)
+        write!(
+            f,
+            "{}:{}:{}",
+            self.namespace.as_str(),
+            self.name.as_str(),
+            self.version
+        )
     }
 }
 
@@ -391,8 +396,8 @@ impl EntryPointOpRegistry {
                 entries.push(serde_json::json!({
                     "accepted_config_formats": formats,
                     "op_id": {
-                        "name": op_id.name,
-                        "namespace": op_id.namespace,
+                        "name": op_id.name.as_str(),
+                        "namespace": op_id.namespace.as_str(),
                         "version": op_id.version.get(),
                     },
                     "public_name": public_name.as_str(),
@@ -481,33 +486,6 @@ impl From<AuthoredConfigError> for OpLaunchError {
     fn from(error: AuthoredConfigError) -> Self {
         Self::new(error.code().to_owned(), error.message().to_owned())
     }
-}
-
-fn matches_entry_point_namespace(value: &str) -> bool {
-    value
-        .split('.')
-        .all(|segment| matches_segmented_ascii_identifier(segment, b'-'))
-}
-
-fn matches_segmented_ascii_identifier(value: &str, separator: u8) -> bool {
-    let Some((&first, rest)) = value.as_bytes().split_first() else {
-        return false;
-    };
-    if !first.is_ascii_lowercase() {
-        return false;
-    }
-
-    let mut previous_separator = false;
-    for &byte in rest {
-        if byte.is_ascii_lowercase() || byte.is_ascii_digit() {
-            previous_separator = false;
-        } else if byte == separator && !previous_separator {
-            previous_separator = true;
-        } else {
-            return false;
-        }
-    }
-    !previous_separator
 }
 
 #[cfg(test)]
@@ -709,14 +687,6 @@ mod tests {
             first.registry_digest().unwrap(),
             different.registry_digest().unwrap()
         );
-    }
-
-    #[test]
-    fn public_op_name_uses_lowercase_snake_case() {
-        assert!(PublicOpName::new("evm_contract_lifecycle").is_ok());
-        assert!(PublicOpName::new("EvmContractLifecycle").is_err());
-        assert!(PublicOpName::new("evm__contract").is_err());
-        assert!(PublicOpName::new("evm_contract_").is_err());
     }
 
     #[test]

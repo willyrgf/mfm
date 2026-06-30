@@ -291,6 +291,20 @@ checked_string_type!(
 );
 
 checked_string_type!(
+    LowerSnakeName,
+    "lower snake name",
+    validate_lower_snake_name,
+    "Checked lower-case snake name."
+);
+
+checked_string_type!(
+    DottedLowerKebabName,
+    "dotted lower kebab name",
+    validate_dotted_lower_kebab_name,
+    "Checked dot-separated lower-case kebab name."
+);
+
+checked_string_type!(
     LocalPublicId,
     "local public id",
     validate_local_public_id,
@@ -1338,6 +1352,74 @@ fn validate_resource_namespace(grammar: &'static str, value: &str) -> CheckedStr
     Ok(())
 }
 
+fn validate_lower_snake_name(grammar: &'static str, value: &str) -> CheckedStringResult<()> {
+    validate_segmented_lower_name(grammar, value, b'_')
+}
+
+fn validate_dotted_lower_kebab_name(grammar: &'static str, value: &str) -> CheckedStringResult<()> {
+    validate_non_empty(value, grammar)?;
+    for segment in value.split('.') {
+        if segment.is_empty() {
+            return Err(CheckedStringError::new(
+                grammar,
+                CheckedStringErrorReason::EmptySegment,
+            ));
+        }
+        validate_segmented_lower_name(grammar, segment, b'-')?;
+    }
+    Ok(())
+}
+
+fn validate_segmented_lower_name(
+    grammar: &'static str,
+    value: &str,
+    separator: u8,
+) -> CheckedStringResult<()> {
+    validate_non_empty(value, grammar)?;
+    let Some((&first, rest)) = value.as_bytes().split_first() else {
+        return Err(CheckedStringError::new(
+            grammar,
+            CheckedStringErrorReason::Empty,
+        ));
+    };
+    if !first.is_ascii_lowercase() {
+        return Err(CheckedStringError::new(
+            grammar,
+            CheckedStringErrorReason::InvalidStart,
+        ));
+    }
+
+    let mut previous_separator = false;
+    for (offset, &byte) in rest.iter().enumerate() {
+        if byte.is_ascii_lowercase() || byte.is_ascii_digit() {
+            previous_separator = false;
+        } else if byte == separator {
+            if previous_separator {
+                return Err(CheckedStringError::new(
+                    grammar,
+                    CheckedStringErrorReason::EmptySegment,
+                ));
+            }
+            previous_separator = true;
+        } else {
+            return Err(CheckedStringError::new(
+                grammar,
+                CheckedStringErrorReason::InvalidCharacter {
+                    ch: byte as char,
+                    index: offset + 1,
+                },
+            ));
+        }
+    }
+    if previous_separator {
+        return Err(CheckedStringError::new(
+            grammar,
+            CheckedStringErrorReason::EmptySegment,
+        ));
+    }
+    Ok(())
+}
+
 fn validate_local_public_id(grammar: &'static str, value: &str) -> CheckedStringResult<()> {
     validate_len(value, grammar, 128)?;
     let Some(first) = value.bytes().next() else {
@@ -1593,6 +1675,18 @@ mod tests {
             "mfm.evm_lane"
         );
         assert_eq!(
+            LowerSnakeName::new("evm_contract_lifecycle")
+                .unwrap()
+                .as_str(),
+            "evm_contract_lifecycle"
+        );
+        assert_eq!(
+            DottedLowerKebabName::new("mfm.evm-contract")
+                .unwrap()
+                .as_str(),
+            "mfm.evm-contract"
+        );
+        assert_eq!(
             LocalPublicId::new("ethereum-mainnet").unwrap().as_str(),
             "ethereum-mainnet"
         );
@@ -1636,6 +1730,21 @@ mod tests {
         assert!(ResourceNamespace::new("single").is_err());
         assert!(ResourceNamespace::new("mfm.").is_err());
         assert!(ResourceNamespace::new("mfm.evm/lane").is_err());
+
+        assert!(LowerSnakeName::new("").is_err());
+        assert!(LowerSnakeName::new("EvmContract").is_err());
+        assert!(LowerSnakeName::new("1evm").is_err());
+        assert!(LowerSnakeName::new("evm-contract").is_err());
+        assert!(LowerSnakeName::new("evm__contract").is_err());
+        assert!(LowerSnakeName::new("evm_contract_").is_err());
+
+        assert!(DottedLowerKebabName::new("").is_err());
+        assert!(DottedLowerKebabName::new("mfm..evm").is_err());
+        assert!(DottedLowerKebabName::new("mfm_evm").is_err());
+        assert!(DottedLowerKebabName::new("mfm.Evm").is_err());
+        assert!(DottedLowerKebabName::new("mfm.1evm").is_err());
+        assert!(DottedLowerKebabName::new("mfm.evm--contract").is_err());
+        assert!(DottedLowerKebabName::new("mfm.evm-contract-").is_err());
 
         assert!(LocalPublicId::new("").is_err());
         assert!(LocalPublicId::new("-bad").is_err());

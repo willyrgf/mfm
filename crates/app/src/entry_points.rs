@@ -131,7 +131,7 @@ mod tests {
         let prepared = fixture.prepare_sample_portfolio(None);
 
         assert_eq!(
-            prepared.evidence.resolved_op_id.name,
+            prepared.evidence.resolved_op_id.name.as_str(),
             mfm_op_portfolio_tracker::PORTFOLIO_SNAPSHOT_ENTRY_POINT.name
         );
         assert_eq!(
