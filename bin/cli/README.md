@@ -300,6 +300,17 @@ mfm_cli run start --op portfolio_snapshot --config portfolio.toml
 mfm_cli run start --op evm_contract_lifecycle --config lifecycle.toml --op-version 1
 ```
 
+For local development against a managed persistent run-store database, use:
+
+```sh
+nix run .#mfm-start -- --op portfolio_snapshot --config portfolio.toml
+```
+
+`.#mfm-start` starts a Nixfied-managed PostgreSQL process in slot 9 for the
+command, keeps the data directory under the Nixfied state root for `mfm/dev/9`,
+runs the typed store migrations, sets `DATABASE_URL`, and then delegates to
+`mfm run start`. It does not change the raw packaged CLI exposed by `.#mfm`.
+
 Run start always resolves runner executable identities before `RunAdmitted`, because those identities
 are replay authority. Specs that reference unported domain state descriptors fail with
 `LaunchRunnerUnavailable` before any typed run event is written. The production CLI runner registry

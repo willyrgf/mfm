@@ -252,6 +252,22 @@ in
       env = postgresSqlxEnv;
       requires = [ "postgres" ];
     };
+    mfm-start-store = {
+      serviceLifetime = "persistent-until-down";
+      invocation = {
+        tools = [ sqlxCli ];
+        run = [
+          "sqlx"
+          "migrate"
+          "run"
+          "--source"
+          "crates/storages/stream-store-postgres/migrations"
+        ];
+        env = postgresSqlxEnv;
+        timeoutMs = 60000;
+      };
+      requires = [ "postgres" ];
+    };
     parity-postgres-rest-api = cargoLeaf {
       run = [
         "cargo"

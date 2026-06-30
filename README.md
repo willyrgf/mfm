@@ -120,9 +120,16 @@ Run binaries locally:
 
 ```bash
 nix run .#mfm -- --help
+nix run .#mfm-start -- --op portfolio_snapshot --config portfolio.toml
 cargo run -p mfm -- --help
 cargo run -p mfm-rest-api
 ```
+
+`.#mfm-start` is a local development wrapper for `mfm run start`. It starts a
+Nixfied-managed PostgreSQL process in slot 9, keeps the dev database under the
+Nixfied state root for `mfm/dev/9`, applies the typed run-store migrations
+idempotently, sets `DATABASE_URL`, and then delegates to the existing CLI. The
+raw packaged CLI remains `.#mfm`.
 
 ## License
 MIT (see [`LICENSE`](LICENSE)).
