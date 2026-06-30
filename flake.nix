@@ -54,6 +54,7 @@
             cargo = rustToolchain;
             rustc = rustToolchain;
           };
+          projectApps = nixfied.lib.${system}.projectApps ./nixfied.nix;
         in
         {
           default = self.packages.${system}.model;
@@ -79,6 +80,58 @@
               ln -s "$out/bin/mfm_cli" "$out/bin/mfm"
             '';
           };
+          mfm-start = pkgs.writeShellApplication {
+            name = "mfm-start";
+            runtimeInputs = [
+              self.packages.${system}.mfm
+              pkgs.jq
+            ];
+            text = ''
+              if [[ $# -eq 0 ]]; then
+                exec mfm run start --help
+              fi
+              case "''${1:-}" in
+                -h|--help)
+                  exec mfm run start "$@"
+                  ;;
+              esac
+
+              slot=9
+              nixfied_run="${projectApps.run.program}"
+              nixfied_down="${projectApps.down.program}"
+
+              store_output="$("$nixfied_run" --task mfm-start-store --slot "$slot" --json)"
+              host="$(
+                jq -r '.services[] | select(.serviceId == "postgres") | .selectedEndpoint.host' \
+                  <<<"$store_output" \
+                  | tail -n 1
+              )"
+              port="$(
+                jq -r '.services[] | select(.serviceId == "postgres") | .selectedEndpoint.port' \
+                  <<<"$store_output" \
+                  | tail -n 1
+              )"
+              if [[ -z "$host" || -z "$port" || "$host" == "null" || "$port" == "null" ]]; then
+                printf '%s\n' "mfm-start could not resolve the managed Postgres endpoint" >&2
+                printf '%s\n' "$store_output" >&2
+                exit 1
+              fi
+
+              # shellcheck disable=SC2329
+              cleanup() {
+                "$nixfied_down" --slot "$slot" >/dev/null || true
+              }
+              trap cleanup EXIT
+
+              export DATABASE_URL="postgresql://postgres@$host:$port/postgres"
+
+              set +e
+              mfm run start "$@"
+              status=$?
+              set -e
+              exit "$status"
+            '';
+          };
         }
       );
 
@@ -92,6 +145,10 @@
           mfm = {
             type = "app";
             program = "${self.packages.${system}.mfm}/bin/mfm";
+          };
+          mfm-start = {
+            type = "app";
+            program = "${self.packages.${system}.mfm-start}/bin/mfm-start";
           };
         }
       );
