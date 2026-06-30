@@ -1,13 +1,14 @@
 use std::collections::BTreeMap;
 
 use mfm_evm_capabilities::{EvmSourcePolicyId, EvmSourceRef};
+use mfm_evm_contract_model::EvmNetworkId;
 use serde::Deserialize;
 
 const ENV_EVM_NETWORK_ROUTES_JSON: &str = "MFM_EVM_NETWORK_ROUTES_JSON";
 
 #[derive(Clone)]
 pub(crate) struct EvmRuntimeRoutes {
-    routes: BTreeMap<String, EvmRuntimeRoute>,
+    routes: BTreeMap<EvmNetworkId, EvmRuntimeRoute>,
 }
 
 impl EvmRuntimeRoutes {
@@ -21,18 +22,15 @@ impl EvmRuntimeRoutes {
             .map_err(runtime_route_config_error)?;
         let mut routes = BTreeMap::new();
         for entry in entries {
-            if entry.network_id.trim().is_empty() {
-                return Err(route_error(
-                    "EVM network route network_id must be non-empty",
-                ));
-            }
+            let network_id =
+                EvmNetworkId::new(&entry.network_id).map_err(runtime_route_network_error)?;
             let source_ref =
                 EvmSourceRef::new(&entry.source_ref).map_err(runtime_route_capability_error)?;
             let policy_id =
                 EvmSourcePolicyId::new(&entry.policy_id).map_err(runtime_route_capability_error)?;
             if routes
                 .insert(
-                    entry.network_id.clone(),
+                    network_id,
                     EvmRuntimeRoute {
                         source_ref,
                         policy_id,
@@ -47,8 +45,9 @@ impl EvmRuntimeRoutes {
     }
 
     pub(crate) fn route(&self, network_id: &str) -> mfm_runtime::Result<EvmRuntimeRoute> {
+        let network_id = EvmNetworkId::new(network_id).map_err(runtime_route_network_error)?;
         self.routes
-            .get(network_id)
+            .get(&network_id)
             .cloned()
             .ok_or_else(|| route_error("missing EVM runtime route for network"))
     }
@@ -60,8 +59,8 @@ impl EvmRuntimeRoutes {
             .routes
             .iter()
             .map(|(network_id, route)| {
-                let network_id =
-                    mfm_portfolio_model::ids::NetworkId::new(network_id).map_err(|_| {
+                let network_id = mfm_portfolio_model::ids::NetworkId::new(network_id.as_str())
+                    .map_err(|_| {
                         route_error("EVM network route network_id must use portfolio id grammar")
                     })?;
                 Ok(mfm_adapters_portfolio::PortfolioEvmRoute::new(
@@ -105,6 +104,12 @@ struct EnvEvmNetworkRoute {
 
 fn runtime_route_config_error(error: serde_json::Error) -> mfm_runtime::RuntimeError {
     mfm_runtime::RuntimeError::RunnerBinding(format!("invalid EVM network route config: {error}"))
+}
+
+fn runtime_route_network_error(
+    error: mfm_evm_contract_model::EvmContractScalarError,
+) -> mfm_runtime::RuntimeError {
+    mfm_runtime::RuntimeError::RunnerBinding(format!("invalid EVM network route: {error}"))
 }
 
 fn runtime_route_capability_error(

@@ -72,6 +72,9 @@ fn wei_amount(value: String, field: &'static str) -> Result<WeiAmount, String> {
         EvmContractScalarError::InvalidIdentity { message, .. } => {
             format!("{field} must be a valid typed identity: {message}")
         }
+        EvmContractScalarError::InvalidString { message, .. } => {
+            format!("{field} must be a valid checked string: {message}")
+        }
         EvmContractScalarError::Empty { .. } => format!("{field} must be non-empty"),
     })
 }

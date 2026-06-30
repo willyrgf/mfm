@@ -67,7 +67,10 @@ use mfm_evm_core::abi as common_abi;
 use mfm_evm_core::encoding;
 use mfm_evm_core::hex as common_hex;
 use mfm_evm_core::tx::parse_u128_quantity;
-use mfm_ids::{ArtifactId, ContentDigest, SchemaId, SemanticTypeId};
+use mfm_ids::{
+    ArtifactId, CheckedStringError, CheckedStringErrorReason, ContentDigest, LocalPublicId,
+    SchemaId, SemanticTypeId, StableAuthorKey,
+};
 use mfm_program_derive::{MfmConfig, MfmValue};
 use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
@@ -100,6 +103,14 @@ pub enum EvmContractScalarError {
         /// Parser diagnostic.
         message: String,
     },
+    /// A checked string failed its shared grammar.
+    #[error("{kind} must be a valid checked string: {message}")]
+    InvalidString {
+        /// Human-readable scalar kind.
+        kind: &'static str,
+        /// Parser diagnostic.
+        message: String,
+    },
 }
 
 fn require_non_empty(kind: &'static str, value: &str) -> Result<(), EvmContractScalarError> {
@@ -107,6 +118,19 @@ fn require_non_empty(kind: &'static str, value: &str) -> Result<(), EvmContractS
         Err(EvmContractScalarError::Empty { kind })
     } else {
         Ok(())
+    }
+}
+
+fn checked_string_scalar_error(
+    kind: &'static str,
+    error: CheckedStringError,
+) -> EvmContractScalarError {
+    match error.reason() {
+        CheckedStringErrorReason::Empty => EvmContractScalarError::Empty { kind },
+        _ => EvmContractScalarError::InvalidString {
+            kind,
+            message: error.to_string(),
+        },
     }
 }
 
@@ -200,8 +224,99 @@ macro_rules! evm_string_scalar {
     };
 }
 
-evm_string_scalar!(
+macro_rules! checked_evm_string_scalar {
+    ($ty:ident, $checker:ty, $kind:literal, $semantic:literal, $schema:literal, $doc:literal) => {
+        #[doc = $doc]
+        #[derive(
+            Clone,
+            Debug,
+            PartialEq,
+            Eq,
+            PartialOrd,
+            Ord,
+            Hash,
+            Serialize,
+            Deserialize,
+            MfmValue,
+        )]
+        #[serde(try_from = "String", into = "String")]
+        #[mfm(namespace = "mfm.evm.contract", name = $semantic, schema = $schema, transparent_string)]
+        pub struct $ty {
+            raw: String,
+        }
+
+        impl $ty {
+            /// Creates a checked EVM contract scalar authority.
+            pub fn new(value: impl Into<String>) -> Result<Self, EvmContractScalarError> {
+                let raw = value.into();
+                <$checker>::new(&raw).map_err(|error| checked_string_scalar_error($kind, error))?;
+                Ok(Self { raw })
+            }
+
+            /// Returns the canonical string representation.
+            pub fn as_str(&self) -> &str {
+                &self.raw
+            }
+
+            /// Consumes this authority into its canonical string representation.
+            pub fn into_string(self) -> String {
+                self.raw
+            }
+        }
+
+        impl AsRef<str> for $ty {
+            fn as_ref(&self) -> &str {
+                self.as_str()
+            }
+        }
+
+        impl Deref for $ty {
+            type Target = str;
+
+            fn deref(&self) -> &Self::Target {
+                self.as_str()
+            }
+        }
+
+        impl fmt::Display for $ty {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(self.as_str())
+            }
+        }
+
+        impl FromStr for $ty {
+            type Err = EvmContractScalarError;
+
+            fn from_str(value: &str) -> Result<Self, Self::Err> {
+                Self::new(value)
+            }
+        }
+
+        impl TryFrom<String> for $ty {
+            type Error = EvmContractScalarError;
+
+            fn try_from(value: String) -> Result<Self, Self::Error> {
+                Self::new(value)
+            }
+        }
+
+        impl From<$ty> for String {
+            fn from(value: $ty) -> Self {
+                value.raw
+            }
+        }
+
+        impl PartialEq<&str> for $ty {
+            fn eq(&self, other: &&str) -> bool {
+                self.as_str() == *other
+            }
+        }
+    };
+}
+
+checked_evm_string_scalar!(
     EvmNetworkId,
+    StableAuthorKey,
     "network_id",
     "network-id",
     "mfm.evm.contract.id.network",
@@ -224,8 +339,9 @@ evm_string_scalar!(
     "Checked EVM ABI event name."
 );
 
-evm_string_scalar!(
+checked_evm_string_scalar!(
     ArtifactPort,
+    LocalPublicId,
     "artifact_port",
     "artifact-port",
     "mfm.evm.contract.id.artifact_port",
@@ -1224,13 +1340,6 @@ pub fn ensure_nonzero_polls(max_receipt_polls: u64) -> Result<(), String> {
         return Err("max_receipt_polls must be > 0".to_string());
     }
     Ok(())
-}
-
-/// Ensures the configured artifact context port is non-empty.
-pub fn ensure_nonempty_artifact_port(artifact_port: &str) -> Result<(), String> {
-    ArtifactPort::new(artifact_port)
-        .map(|_| ())
-        .map_err(|error| error.to_string())
 }
 
 /// Normalizes an EVM address to canonical lowercase `0x`-prefixed form.

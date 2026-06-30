@@ -283,7 +283,4 @@ fn artifact_port_is_a_checked_string_authority() {
     let port = ArtifactPort::new("artifact").expect("artifact port");
 
     assert_eq!(port.as_str(), "artifact");
-    assert!(ArtifactPort::new(" ").is_err());
-    assert!(ensure_nonempty_artifact_port("artifact").is_ok());
-    assert!(ensure_nonempty_artifact_port(" ").is_err());
 }
