@@ -1,5 +1,10 @@
 #![allow(clippy::disallowed_methods)]
 
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
+
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use mfm_events::v1 as events;
@@ -24,6 +29,75 @@ fn test_app() -> axum::Router {
 
 fn in_memory_state() -> test_support::InMemoryRestAppState {
     test_support::in_memory_rest_app_state()
+}
+
+async fn start_portfolio_rpc_chain_flip_mock(first_chain_id: u64, later_chain_id: u64) -> String {
+    let state = Arc::new(PortfolioRpcChainFlipState {
+        first_chain_id,
+        later_chain_id,
+        chain_id_calls: AtomicUsize::new(0),
+    });
+    let app = axum::Router::new()
+        .route("/", axum::routing::post(portfolio_rpc_chain_flip_handler))
+        .with_state(state);
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind rpc mock");
+    let addr = listener.local_addr().expect("rpc mock addr");
+    listener
+        .set_nonblocking(true)
+        .expect("set rpc mock nonblocking");
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("rpc mock runtime");
+        runtime.block_on(async move {
+            let listener = tokio::net::TcpListener::from_std(listener).expect("tokio rpc listener");
+            axum::serve(listener, app).await.expect("rpc mock serve");
+        });
+    });
+    format!("http://{addr}")
+}
+
+struct PortfolioRpcChainFlipState {
+    first_chain_id: u64,
+    later_chain_id: u64,
+    chain_id_calls: AtomicUsize,
+}
+
+async fn portfolio_rpc_chain_flip_handler(
+    axum::extract::State(state): axum::extract::State<Arc<PortfolioRpcChainFlipState>>,
+    axum::Json(request): axum::Json<serde_json::Value>,
+) -> axum::Json<serde_json::Value> {
+    let id = request
+        .get("id")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!(1));
+    let method = request
+        .get("method")
+        .and_then(|value| value.as_str())
+        .expect("json-rpc method");
+    let result = match method {
+        "eth_chainId" => {
+            let calls = state.chain_id_calls.fetch_add(1, Ordering::SeqCst);
+            let chain_id = if calls == 0 {
+                state.first_chain_id
+            } else {
+                state.later_chain_id
+            };
+            serde_json::json!(format!("0x{chain_id:x}"))
+        }
+        "eth_getBlockByNumber" => serde_json::json!({
+            "number": "0x64",
+            "hash": "0x1111111111111111111111111111111111111111111111111111111111111111"
+        }),
+        "eth_getBalance" => serde_json::json!("0xde0b6b3a7640000"),
+        other => panic!("unexpected rpc method {other}"),
+    };
+    axum::Json(serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": result
+    }))
 }
 
 #[tokio::test]
@@ -370,6 +444,101 @@ async fn portfolio_chain_mismatch_fails_after_admission_with_redacted_diagnostic
     assert!(!diagnostic_json
         .to_string()
         .contains(&runtime_config_path.display().to_string()));
+
+    std::fs::remove_file(&runtime_config_path).expect("remove runtime config");
+    let replay = app
+        .oneshot(empty_post(&format!("/v1/runs/{run_id}/replay")))
+        .await
+        .expect("replay response");
+    assert_eq!(replay.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn portfolio_observe_batch_chain_mismatch_is_attempt_failure() {
+    let rpc_url = start_portfolio_rpc_chain_flip_mock(31337, 31338).await;
+    let runtime_config_dir = tempfile::tempdir().expect("runtime config tempdir");
+    let runtime_config_path = test_support::write_evm_runtime_config_for_test(
+        runtime_config_dir.path(),
+        PORTFOLIO_NETWORK_ID,
+        &rpc_url,
+        None,
+    );
+    let mut state = in_memory_state();
+    state.runtime_config_path = Some(runtime_config_path.clone());
+    let app = mfm_rest_api::make_app(state.clone());
+
+    let resp = app
+        .clone()
+        .oneshot(json_post(
+            "/v1/runs/start",
+            serde_json::json!({
+                "op": "portfolio_snapshot",
+                "config_format": "json",
+                "config": portfolio_snapshot_config(),
+            }),
+        ))
+        .await
+        .expect("delayed chain mismatch start response");
+    let status = resp.status();
+    let body = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["outcome"], "admitted");
+
+    let run_id = RunId::parse(body["data"]["run"]["run_id"].as_str().expect("run id"))
+        .expect("typed run id");
+    let stream = state.store.load_run_stream(&run_id).await.expect("stream");
+    let admitted_index = stream
+        .iter()
+        .position(|event| matches!(event.payload(), events::KernelEventPayload::RunAdmitted(_)))
+        .expect("RunAdmitted");
+    let pinned_index = stream
+        .iter()
+        .position(|event| match event.payload() {
+            events::KernelEventPayload::CellProduced(payload) => payload
+                .schema_id
+                .as_str()
+                .contains("mfm.portfolio.pinned_views"),
+            _ => false,
+        })
+        .expect("pinned views cell");
+    let failed_index = stream
+        .iter()
+        .position(|event| {
+            matches!(
+                event.payload(),
+                events::KernelEventPayload::StateAttemptFailed(_)
+            )
+        })
+        .expect("StateAttemptFailed");
+    assert!(admitted_index < pinned_index);
+    assert!(pinned_index < failed_index);
+
+    let events::KernelEventPayload::StateAttemptFailed(failed) = stream[failed_index].payload()
+    else {
+        panic!("expected failed attempt");
+    };
+    let diagnostic = failed
+        .error
+        .diagnostic_ref
+        .as_ref()
+        .expect("chain mismatch records diagnostic artifact");
+    let diagnostic_artifact = state
+        .store
+        .read_retained_artifact(&diagnostic_artifact_requirement(diagnostic))
+        .await
+        .expect("diagnostic artifact");
+    let diagnostic_json = serde_json::from_slice::<serde_json::Value>(diagnostic_artifact.bytes())
+        .expect("diagnostic json");
+    assert_eq!(
+        diagnostic_json["public_details"],
+        serde_json::json!({
+            "network_id": PORTFOLIO_NETWORK_ID,
+            "expected_chain_id": 31337,
+            "observed_chain_id": 31338,
+            "source_ref": PORTFOLIO_NETWORK_ID,
+            "policy_id": PORTFOLIO_NETWORK_ID,
+        })
+    );
 
     std::fs::remove_file(&runtime_config_path).expect("remove runtime config");
     let replay = app

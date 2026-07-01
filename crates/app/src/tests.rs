@@ -115,6 +115,43 @@ fn resource_key_status_redacts_raw_key() {
     assert!(!rendered.contains("\"key\""));
 }
 
+#[test]
+fn replay_diagnostic_rejects_digest_matched_evm_guard_tampering() {
+    let certified_guard = EvmChainGuard::new(
+        EvmNetworkId::new("rest-control-eth").expect("network id"),
+        31337,
+    )
+    .expect("guard");
+
+    for details in [
+        serde_json::json!({
+            "network_id": "rest-control-eth",
+            "expected_chain_id": 31338,
+            "observed_chain_id": 31339,
+            "source_ref": "primary",
+            "policy_id": "primary",
+        }),
+        serde_json::json!({
+            "network_id": "other-eth",
+            "expected_chain_id": 31337,
+            "observed_chain_id": 31338,
+            "source_ref": "primary",
+            "policy_id": "primary",
+        }),
+    ] {
+        let digest = canonical_value_digest(&details).expect("details digest");
+        let expected = events::RedactedJson::new(digest);
+        let error = verify_replay_public_details(
+            Some(&expected),
+            &details,
+            std::slice::from_ref(&certified_guard),
+        )
+        .expect_err("digest-matched guard tampering must fail replay");
+
+        assert_eq!(error.code, "ReplayDiagnosticInvalid");
+    }
+}
+
 #[tokio::test]
 async fn run_read_services_are_evidence_only() {
     let source = include_str!("lib.rs");

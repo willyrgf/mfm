@@ -22,7 +22,7 @@ use mfm_authored_config::AuthoredConfig;
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_certify::{CertificationRegistry, CertifiedTypedSpec};
 use mfm_events::v1 as events;
-use mfm_evm_capabilities::{EvmNetworkId, EvmSourcePolicyId, EvmSourceRef};
+use mfm_evm_capabilities::{EvmChainGuard, EvmNetworkId, EvmSourcePolicyId, EvmSourceRef};
 use mfm_ids::{
     ArtifactId, ContentDigest, DigestAlgorithm, EventId, RunId, SchemaId, SeedId, SemanticTypeId,
     SpecHash, TrustScopeId,
@@ -1448,8 +1448,13 @@ where
     /// Verifies replay authority for a run using retained typed artifact evidence only.
     pub async fn verify_replay_for_run(&self, run_id: &RunId) -> Result<ReplayResponse, AppError> {
         let context = self.load_verified_run_read_context(run_id).await?;
-        verify_replay_diagnostics_from_recorded_artifacts(&self.artifacts, context.events())
-            .await?;
+        verify_replay_diagnostics_from_recorded_artifacts(
+            &self.artifacts,
+            context.runtime_spec(),
+            run_id,
+            context.events(),
+        )
+        .await?;
         let authority = replay_read_authority_for_run(context.runtime_spec(), context.view())?;
         let broker = ReplayBroker::from_read_authority(authority)?;
         let stream = context.events();
@@ -1648,8 +1653,13 @@ where
     /// Verifies replay authority for a run using retained typed artifact evidence only.
     pub async fn verify_replay_for_run(&self, run_id: &RunId) -> Result<ReplayResponse, AppError> {
         let context = self.load_verified_run_read_context(run_id).await?;
-        verify_replay_diagnostics_from_recorded_artifacts(&self.artifacts, context.events())
-            .await?;
+        verify_replay_diagnostics_from_recorded_artifacts(
+            &self.artifacts,
+            context.runtime_spec(),
+            run_id,
+            context.events(),
+        )
+        .await?;
         let authority = replay_read_authority_for_run(context.runtime_spec(), context.view())?;
         let broker = ReplayBroker::from_read_authority(authority)?;
         let stream = context.events();
@@ -2238,8 +2248,12 @@ async fn verified_run_read_context_from_events(
 
 async fn verify_replay_diagnostics_from_recorded_artifacts(
     artifacts: &(impl store::RetainedArtifactReadProvider + ?Sized),
+    runtime_spec: &CertifiedRuntimeSpec,
+    run_id: &RunId,
     stream: &[store::KernelEventEnvelope],
 ) -> Result<(), AppError> {
+    let run_admitted = run_admitted_payload(run_id, stream)?;
+    let launch = stored_launch_evidence_from_run_admitted(artifacts, run_admitted).await?;
     for event in stream {
         let events::KernelEventPayload::StateAttemptFailed(payload) = event.payload() else {
             continue;
@@ -2256,22 +2270,78 @@ async fn verify_replay_diagnostics_from_recorded_artifacts(
             .map_err(|_| replay_diagnostic_error())?;
         let null_details = serde_json::Value::Null;
         let details = diagnostic.get("public_details").unwrap_or(&null_details);
-        match (&payload.error.public_details, details) {
-            (Some(_), serde_json::Value::Null) => return Err(replay_diagnostic_error()),
-            (Some(expected), details) => {
-                let digest = canonical_value_digest(details)?;
-                if digest != expected.content_digest {
-                    return Err(replay_diagnostic_error());
-                }
-                if is_evm_chain_mismatch_details(details) {
-                    validate_evm_chain_mismatch_details(details)?;
-                }
-            }
-            (None, serde_json::Value::Null) => {}
-            (None, _) => return Err(replay_diagnostic_error()),
-        }
+        let guards = if is_evm_chain_mismatch_details(details) {
+            certified_evm_chain_guards_for_failed_node(runtime_spec, &launch, &payload.node_id)?
+        } else {
+            Vec::new()
+        };
+        verify_replay_public_details(payload.error.public_details.as_ref(), details, &guards)?;
     }
     Ok(())
+}
+
+fn verify_replay_public_details(
+    expected: Option<&events::RedactedJson>,
+    details: &serde_json::Value,
+    certified_guards: &[EvmChainGuard],
+) -> Result<(), AppError> {
+    match (expected, details) {
+        (Some(_), serde_json::Value::Null) => Err(replay_diagnostic_error()),
+        (Some(expected), details) => {
+            let digest = canonical_value_digest(details)?;
+            if digest != expected.content_digest {
+                return Err(replay_diagnostic_error());
+            }
+            if is_evm_chain_mismatch_details(details) {
+                validate_evm_chain_mismatch_details(details, certified_guards)?;
+            }
+            Ok(())
+        }
+        (None, serde_json::Value::Null) => Ok(()),
+        (None, _) => Err(replay_diagnostic_error()),
+    }
+}
+
+fn certified_evm_chain_guards_for_failed_node(
+    runtime_spec: &CertifiedRuntimeSpec,
+    launch: &RunLaunchEvidence,
+    node_id: &mfm_ids::NodeId,
+) -> Result<Vec<EvmChainGuard>, AppError> {
+    let node = runtime_spec
+        .node(node_id)
+        .ok_or_else(replay_diagnostic_error)?;
+    let artifact = launch_config_artifact_for_node(launch, node)?;
+    let mut guards = mfm_adapters_portfolio::evm_chain_guards_from_launch_config(
+        &node.config_ref.schema_id,
+        &artifact.bytes,
+    )
+    .map_err(|_| replay_diagnostic_error())?;
+    guards.extend(
+        mfm_adapters_evm_contracts::evm_chain_guards_from_launch_config(
+            &node.config_ref.schema_id,
+            &artifact.bytes,
+        )
+        .map_err(|_| replay_diagnostic_error())?,
+    );
+    Ok(guards)
+}
+
+fn launch_config_artifact_for_node<'a>(
+    launch: &'a RunLaunchEvidence,
+    node: &spec::NodeSpec,
+) -> Result<&'a RunLaunchArtifact, AppError> {
+    let config = &node.config_ref;
+    launch
+        .config_artifacts
+        .iter()
+        .find(|artifact| {
+            artifact.evidence.artifact_id == config.artifact_id
+                && artifact.evidence.digest == config.digest
+                && artifact.evidence.byte_len == config.byte_len
+                && artifact.evidence.media_type == config.media_type
+                && artifact.evidence.schema_id.as_ref() == Some(&config.schema_id)
+        })
+        .ok_or_else(replay_diagnostic_error)
 }
 
 fn diagnostic_artifact_requirement(
@@ -2302,7 +2372,10 @@ fn is_evm_chain_mismatch_details(value: &serde_json::Value) -> bool {
         || object.contains_key("policy_id")
 }
 
-fn validate_evm_chain_mismatch_details(value: &serde_json::Value) -> Result<(), AppError> {
+fn validate_evm_chain_mismatch_details(
+    value: &serde_json::Value,
+    certified_guards: &[EvmChainGuard],
+) -> Result<(), AppError> {
     let object = value.as_object().ok_or_else(replay_diagnostic_error)?;
     const FIELDS: [&str; 5] = [
         "network_id",
@@ -2338,6 +2411,11 @@ fn validate_evm_chain_mismatch_details(value: &serde_json::Value) -> Result<(), 
     EvmSourceRef::new(source_ref).map_err(|_| replay_diagnostic_error())?;
     EvmSourcePolicyId::new(policy_id).map_err(|_| replay_diagnostic_error())?;
     if expected_chain_id == 0 || expected_chain_id == observed_chain_id {
+        return Err(replay_diagnostic_error());
+    }
+    if !certified_guards.iter().any(|guard| {
+        guard.network_id().as_str() == network_id && guard.expected_chain_id() == expected_chain_id
+    }) {
         return Err(replay_diagnostic_error());
     }
     Ok(())

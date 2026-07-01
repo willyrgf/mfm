@@ -5,7 +5,7 @@
 //! and EVM capability contracts. Concrete artifact stores and live EVM transports are supplied by
 //! app assembly.
 
-use std::sync::Arc;
+use std::{fmt, sync::Arc};
 
 use alloy_primitives::{Address, U256};
 use mfm_artifact_capabilities::{ArtifactReadProvider, ArtifactReadRequest};
@@ -19,7 +19,7 @@ use mfm_evm_capabilities::{
 };
 use mfm_evm_core::encoding::{encode_erc20_balance_of, encode_erc20_decimals, parse_u8_u256};
 use mfm_evm_core::hex::hex_to_bytes;
-use mfm_ids::ContentDigest;
+use mfm_ids::{ContentDigest, SchemaId};
 use mfm_portfolio_model::portfolio::{NetworkConfig, NetworkFamilyConfig};
 use mfm_portfolio_model::symbol::BalanceReaderConfig;
 use mfm_program::ValidatedConfig;
@@ -65,6 +65,55 @@ impl<T> PortfolioEvmProvider for T where
 pub trait PortfolioRuntimeValidator: Send + Sync {
     /// Validates that the process can resolve an EVM guard without live network IO.
     fn validate_evm_guard(&self, guard: &EvmChainGuard) -> mfm_runtime::Result<()>;
+}
+
+/// Redaction-safe portfolio adapter error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortfolioAdapterError {
+    message: String,
+}
+
+impl PortfolioAdapterError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for PortfolioAdapterError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for PortfolioAdapterError {}
+
+/// Extracts certified EVM guards from a portfolio launch config artifact.
+pub fn evm_chain_guards_from_launch_config(
+    schema_id: &SchemaId,
+    bytes: &[u8],
+) -> Result<Vec<EvmChainGuard>, PortfolioAdapterError> {
+    if schema_id == &config_schema::<PinViewsConfig>()? {
+        let config = decode_replay_config::<PinViewsConfig>(bytes)?;
+        return config
+            .networks()
+            .iter()
+            .filter(|network| network.family() == NetworkFamilyConfig::Evm)
+            .map(|network| portfolio_evm_guard(network).map_err(portfolio_adapter_error))
+            .collect();
+    }
+    if schema_id == &config_schema::<ObserveBatchConfig>()? {
+        let config = decode_replay_config::<ObserveBatchConfig>(bytes)?;
+        return if observe_batch_requires_evm(&config) {
+            Ok(vec![
+                portfolio_evm_guard(config.network()).map_err(portfolio_adapter_error)?
+            ])
+        } else {
+            Ok(Vec::new())
+        };
+    }
+    Ok(Vec::new())
 }
 
 /// Runtime capabilities used by portfolio adapter runners.
@@ -376,7 +425,9 @@ impl ErasedNodeRunner for ObserveBatchRunner {
                     .await?;
             let block_number = evm_block_number_for(&input.views, config.network().network_id());
             let backend = EvmCapabilityPortfolioBackend::new(Arc::clone(&self.evm));
-            let output = observe_batch_with_backend(config, &input, &backend).await;
+            let output = observe_batch_with_backend(config, &input, &backend)
+                .await
+                .map_err(portfolio_read_runtime_error)?;
             let request = ObservationRequest {
                 wallet_id: config.wallet().wallet_id.to_string(),
                 symbol_id: config.symbol().symbol_id.to_string(),
@@ -546,6 +597,25 @@ where
             "portfolio config failed validation: {error}"
         ))
     })
+}
+
+fn decode_replay_config<T>(bytes: &[u8]) -> Result<T, PortfolioAdapterError>
+where
+    T: MfmConfig + DeserializeOwned,
+{
+    let config = serde_json::from_slice(bytes)
+        .map_err(|error| PortfolioAdapterError::new(format!("config decode failed: {error}")))?;
+    ValidatedConfig::new(config)
+        .map(ValidatedConfig::into_inner)
+        .map_err(|error| PortfolioAdapterError::new(format!("config validation failed: {error}")))
+}
+
+fn config_schema<T>() -> Result<SchemaId, PortfolioAdapterError>
+where
+    T: MfmConfig,
+{
+    T::schema_id()
+        .map_err(|error| PortfolioAdapterError::new(format!("config schema failed: {error}")))
 }
 
 fn observe_batch_requires_evm(config: &ObserveBatchConfig) -> bool {
@@ -920,7 +990,9 @@ fn portfolio_evm_capability_error(error: EvmCapabilityError) -> PortfolioReadErr
         format!("portfolio EVM read capability failed: {error}"),
     );
     if let Some(details) = details {
-        error.with_redacted_details(details)
+        error
+            .with_redacted_details(details)
+            .with_fatal_attempt_failure()
     } else {
         error
     }
@@ -945,6 +1017,10 @@ fn portfolio_read_runtime_error(error: PortfolioReadError) -> mfm_runtime::Runti
 
 fn portfolio_runtime_binding_error(error: PortfolioReadError) -> mfm_runtime::RuntimeError {
     mfm_runtime::RuntimeError::RunnerBinding(error.to_string())
+}
+
+fn portfolio_adapter_error(error: PortfolioReadError) -> PortfolioAdapterError {
+    PortfolioAdapterError::new(error.to_string())
 }
 
 #[cfg(test)]
