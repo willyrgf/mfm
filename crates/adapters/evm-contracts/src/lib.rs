@@ -12,7 +12,7 @@
 //! use mfm_adapters_evm_contracts::replay_verifier_id;
 //! use mfm_evm_capabilities::{EvmChainGuard, EvmNetworkId};
 //!
-//! let guard = EvmChainGuard::new(EvmNetworkId::new("reth-dev")?, 31337);
+//! let guard = EvmChainGuard::new(EvmNetworkId::new("reth-dev")?, 31337)?;
 //! assert_eq!(guard.expected_chain_id(), 31337);
 //! assert_eq!(replay_verifier_id()?.as_str(), "mfm.evm.contract.replay.v1");
 //! # Ok::<(), Box<dyn std::error::Error>>(())
@@ -3365,10 +3365,7 @@ fn runtime_capability_error(error: mfm_capabilities::CapabilityError) -> mfm_run
 }
 
 fn evm_chain_guard(network_id: &str, expected_chain_id: u64) -> Result<EvmChainGuard> {
-    Ok(EvmChainGuard::new(
-        EvmNetworkId::new(network_id)?,
-        expected_chain_id,
-    ))
+    EvmChainGuard::new(EvmNetworkId::new(network_id)?, expected_chain_id).map_err(Into::into)
 }
 
 fn runtime_artifact_read_error(

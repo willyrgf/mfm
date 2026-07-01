@@ -306,7 +306,12 @@ impl EvmJsonRpcClient {
 
     /// Validates that a guard can resolve to a source policy without network I/O.
     pub fn validate_guard(&self, guard: &EvmChainGuard) -> TransportResult<()> {
-        let route = self.routes.route(guard.network_id())?;
+        self.validate_route_binding(guard.network_id())
+    }
+
+    /// Validates that a semantic network route resolves to a source policy without network I/O.
+    pub fn validate_route_binding(&self, network_id: &EvmNetworkId) -> TransportResult<()> {
+        let route = self.routes.route(network_id)?;
         self.registry
             .candidates(route.policy_id(), route.source_ref())
             .map(|_| ())
@@ -358,6 +363,7 @@ impl EvmJsonRpcClient {
             .ok_or(EvmTransportError::InvalidResponse)
             .and_then(parse_u64)?;
         let block_hash = parse_b256_field(&value, "hash")?;
+        validate_block_identity(&request.block, block_number, block_hash)?;
         Ok(EvmBlockReadResponse {
             evidence: selected.evidence,
             block_number,
@@ -450,6 +456,9 @@ impl EvmJsonRpcClient {
             .iter()
             .map(parse_log_entry)
             .collect::<TransportResult<Vec<_>>>()?;
+        for log in &logs {
+            validate_log_matches_request(request, log)?;
+        }
         Ok(EvmLogsReadResponse {
             evidence: selected.evidence,
             logs,
@@ -604,6 +613,9 @@ impl EvmJsonRpcClient {
             return Err(EvmTransportError::ReceiptPending);
         }
         let transaction_hash = parse_b256_field(&result, "transactionHash")?;
+        if transaction_hash != request.transaction_hash {
+            return Err(EvmTransportError::InvalidResponse);
+        }
         let block_number = result
             .get("blockNumber")
             .and_then(Value::as_str)
@@ -959,6 +971,54 @@ fn parse_log_entry(value: &Value) -> TransportResult<EvmLogEntry> {
         transaction_hash,
         log_index,
     })
+}
+
+fn validate_block_identity(
+    selector: &EvmBlockSelector,
+    block_number: u64,
+    block_hash: B256,
+) -> TransportResult<()> {
+    match selector {
+        EvmBlockSelector::Number(expected) if *expected != block_number => {
+            Err(EvmTransportError::InvalidResponse)
+        }
+        EvmBlockSelector::Hash(expected) if *expected != block_hash => {
+            Err(EvmTransportError::InvalidResponse)
+        }
+        _ => Ok(()),
+    }
+}
+
+fn validate_log_matches_request(
+    request: &EvmLogsReadRequest,
+    log: &EvmLogEntry,
+) -> TransportResult<()> {
+    if let Some(expected_address) = request.address {
+        if expected_address != log.address {
+            return Err(EvmTransportError::InvalidResponse);
+        }
+    }
+    for (expected, observed) in request.topics.iter().zip(log.topics.iter()) {
+        if expected != observed {
+            return Err(EvmTransportError::InvalidResponse);
+        }
+    }
+    if log.topics.len() < request.topics.len() {
+        return Err(EvmTransportError::InvalidResponse);
+    }
+    if let Some(block_number) = log.block_number {
+        if let EvmBlockSelector::Number(from_block) = request.from_block {
+            if block_number < from_block {
+                return Err(EvmTransportError::InvalidResponse);
+            }
+        }
+        if let EvmBlockSelector::Number(to_block) = request.to_block {
+            if block_number > to_block {
+                return Err(EvmTransportError::InvalidResponse);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Redaction-safe EVM transport setup/runtime error.
