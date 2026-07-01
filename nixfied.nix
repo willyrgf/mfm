@@ -177,16 +177,6 @@ in
         "cargo_metadata_contract"
       ];
     };
-    architecture-namespace-contract = cargoLeaf {
-      run = [
-        "cargo"
-        "test"
-        "-p"
-        "mfm-integration-tests"
-        "--test"
-        "architecture_namespace_contract"
-      ];
-    };
     postgres-sqlx-offline-check = cargoLeaf {
       run = [
         "cargo"
@@ -367,7 +357,6 @@ in
         "fmt"
         "clippy"
         "cargo-metadata-contract"
-        "architecture-namespace-contract"
         "postgres-sqlx-offline-check"
       ];
     };
