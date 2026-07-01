@@ -9,10 +9,14 @@ facts through the existing typed state-machine model. The platform should not in
 fact event for collectors. Instead, `FactRecorded` should become the universal primitive for adding
 knowledge to MFM.
 
-Every eligible `FactRecorded` event should be projected by the store into a searchable
-`PlatformFactRef` index. The run stream remains strict authority. The platform fact index is a
-store-maintained projection that makes facts discoverable and reusable across runs and MFM
-instances sharing the same store/artifact layer.
+Every valid `FactRecorded` event must carry typed fact-key publication evidence. Platform-visible
+facts are projected by the store into a searchable `PlatformFactRef` index. The run stream remains
+strict authority. The platform fact index is a store-maintained projection that makes facts
+discoverable and reusable across runs and MFM instances sharing the same store/artifact layer.
+
+This is a breaking event-contract reset. Existing opaque/ad hoc fact keys are not preserved by a
+compatibility layer. Development stores and artifacts are reset, and all fact producers move to the
+typed fact-key API.
 
 In short:
 
@@ -38,15 +42,16 @@ The existing typed state-machine model already has the right execution primitive
 - runtime commits typed events and artifacts atomically
 - replay reads recorded evidence only
 
-What is missing is a generalized way for recorded facts to become platform knowledge. Today
-`FactRecorded` is treated mainly as attempt-local read evidence. That provenance is valuable and
-should be preserved, but the fact should also become discoverable platform knowledge unless the
-producer explicitly marks it private.
+What is missing is a generalized way for recorded facts to become platform knowledge. `FactRecorded`
+should remain attempt-provenanced evidence, but the event contract should now require typed fact-key
+material so the same event can also become discoverable platform knowledge unless the producer
+explicitly marks it private.
 
 ## Goals
 
 - Reuse operations, states, adapters, transports, runtime, store, and replay primitives.
 - Treat `FactRecorded` as the canonical platform knowledge primitive.
+- Require every `FactRecorded` to use typed fact-key material through the `MfmFactKey` API.
 - Make facts searchable and reusable through a store-maintained `PlatformFactRef` projection.
 - Derive searchable domain fields from typed fact-key material, not from ad hoc labels or
   domain-specific `PlatformFactRef` fields.
@@ -62,6 +67,7 @@ producer explicitly marks it private.
 - Do not let state implementations publish facts through ad hoc side channels.
 - Do not parse domain-specific artifact JSON in PostgreSQL triggers.
 - Do not make `PlatformFactRef` a domain-specific struct or an arbitrary label bag.
+- Do not preserve opaque legacy fact keys or add compatibility shims for old fact records.
 - Do not put secrets into facts, artifacts, public projections, or diagnostics.
 - Do not make mutable "latest fact" rows authoritative.
 
@@ -88,13 +94,14 @@ wallet_tx_collector_cycle
   -> complete_cycle
 ```
 
-The app, CLI, REST service, or future scheduler may repeatedly launch or resume such cycles. The
-looping process is operational. The durable knowledge is the committed run stream and artifacts.
+App assembly, CLI, or REST may repeatedly start or resume collector cycles through the ordinary run
+surfaces. The looping process is operational. The durable knowledge is the committed run stream and
+artifacts. There is no collector-specific daemon or special CLI/REST execution API in the v1 design.
 
 ### Platform Fact
 
-A platform fact is a `FactRecorded` event that is eligible for platform indexing. It is a fact claim
-with provenance, not an unqualified global truth.
+A platform fact is a platform-visible `FactRecorded` event. It is a fact claim with provenance, not
+an unqualified global truth.
 
 Examples:
 
@@ -120,8 +127,9 @@ example, a wallet balance key should identify chain, network, account, asset, an
 not the balance amount. A weather observation key should identify the place and measurement kind,
 but not the measured temperature.
 
-Fact key material should be typed and schema-described. The platform should derive both the stable
-`FactKey` and the searchable key fields from that typed material.
+Fact key material is mandatory for every `FactRecorded` event. It should be typed and
+schema-described. The platform derives both the stable `FactKey` and the searchable key fields from
+that typed material. An opaque caller-chosen fact key is not valid in the new contract.
 
 Conceptual contract:
 
@@ -210,7 +218,7 @@ not the current platform index or a live collector.
 
 ## FactRecorded Generalization
 
-`FactRecorded` should gain an explicit visibility policy.
+`FactRecorded` must carry typed publication evidence. Visibility is part of that evidence.
 
 Suggested shape:
 
@@ -230,24 +238,32 @@ FactVisibility::Platform
 `RunPrivate` means the fact remains valid run-stream evidence for the producing run, but the store
 does not expose it through the platform fact index.
 
-This is intentionally small. The first step is not to redesign fact semantics. It is to state that
-facts are platform knowledge by default and to let producers opt out.
-
-`FactRecorded` should also carry enough typed key metadata for the store to project facts without
-understanding domain artifact payloads:
+Every `FactRecorded` must also carry enough typed key metadata for the store to validate and project
+facts without understanding domain artifact payloads:
 
 ```rust
-pub struct FactKeyEvidence {
+pub struct FactPublicationEvidence {
+    pub visibility: FactVisibility,
     pub fact_key: FactKey,
     pub key_schema_id: SchemaId,
     pub key_material_hash: ContentDigest,
     pub searchable_fields: Vec<FactKeyField>,
+    pub observed_at: Option<Timestamp>,
 }
 ```
 
 The runtime or runner helper should build this from typed fact-key material. The PostgreSQL store
 then copies these already-typed fields into projection tables. It does not parse arbitrary response
 artifacts or request JSON to discover domain search keys.
+
+The canonical key material is required at fact-publication time, but v1 does not persist the raw key
+material inline in `FactRecorded` and does not retain a separate key-material artifact. The event
+persists the schema id, canonical material hash, derived `FactKey`, and schema-declared searchable
+fields. Persisting raw key material can be revisited for an audit/export use case, but it is not
+needed for the initial projection.
+
+There is no valid "old shape" `FactRecorded` after this change. If a runner cannot provide
+`FactPublicationEvidence`, it cannot record a fact.
 
 ## PlatformFactRef
 
@@ -287,9 +303,15 @@ pub struct PlatformFactRef {
 `recorded_at` is store-owned and always available. In the current PostgreSQL store it can be derived
 from the commit row's `committed_at` value.
 
-`observed_at` is source/domain time. It must not require the store to understand arbitrary
-domain-specific artifact JSON. A future typed summary contract may provide it. Until then it may be
-absent or carried in typed fact metadata supplied by the runtime/event layer.
+`observed_at` is optional source/domain time carried directly by `FactRecorded` publication evidence.
+It should be captured as close to the external observation as the fact producer can honestly support.
+If the source provides a timestamp that is part of the fact semantics, use that. Otherwise, a live
+adapter or transport may supply the time at the successful observation or normalization boundary.
+State logic must still avoid ambient clocks, and if no trustworthy source or runner timestamp exists,
+`observed_at` remains absent.
+
+The store must not derive `observed_at` by parsing arbitrary domain-specific artifact JSON. It only
+copies the typed value supplied by the event layer into the projection.
 
 Ordering authority should still prefer store order over timestamps. Timestamps are for search,
 filtering, dashboards, and human-facing inspection. Store sequence, commit ordering, and event
@@ -478,8 +500,12 @@ Example cycle:
 4. emit FactRecorded events
 5. emit checkpoint fact
 6. complete cycle
-7. scheduler/app starts the next cycle
+7. app, CLI, or REST starts or resumes the next ordinary run cycle
 ```
+
+Collector cycles do not require a new scheduler surface, daemon command, or REST execution mode in
+the first implementation. They are normal certified runs. Operational code may choose when to launch
+the next cycle, but that choice is not durable semantic authority.
 
 ## Consuming Platform Facts
 
@@ -503,21 +529,19 @@ run's recorded selected reference and retained artifacts.
 Initial query APIs should expose platform facts as references and summaries, not raw authority
 internals.
 
-Likely filters:
+The v1 public surface should be deliberately small:
 
-- exact fact key
-- fact key schema id
-- typed fact key field equality or range
-- request schema id
-- request hash
-- response schema id
-- capability kind/version
-- adapter kind/version
-- source run id
-- recorded-at range
-- observed-at range
-- after cursor
+- CLI: `mfm facts query`
+- REST: `GET /v1/facts`
+- required `key_schema` / `--key-schema`
+- repeatable schema-declared field equality filters
+- optional exact `fact_key` / `--fact-key`
+- opaque cursor
 - limit
+
+The initial API lists fact references by key schema and field filters. It does not need capability,
+adapter, source-run, request/response, observed-at, or range filters until the first collector use
+case proves they are necessary.
 
 Public pagination should use opaque cursors. It should not expose internal append XIDs, sort keys,
 cursor versions, or store epochs.
@@ -536,6 +560,14 @@ mfm facts query \
   --field country=IE \
   --field locality=Dublin \
   --field measure=temperature
+```
+
+REST examples:
+
+```text
+GET /v1/facts?key_schema=mfm.wallet.balance.v1&field=chain%3Dbitcoin&field=network%3Dmainnet
+
+GET /v1/facts?key_schema=mfm.weather.observation.v1&field=country%3DIE&field=measure%3Dtemperature
 ```
 
 Domain-specific commands may provide friendlier syntax, but they should compile down to the same
@@ -584,33 +616,47 @@ Facts and platform projections must remain atomic.
 
 ## Migration Path
 
+This RFC assumes a destructive development reset, not backward compatibility. Existing fact records,
+artifacts, and projections are discarded with the old store baseline.
+
 1. Document `FactRecorded` as the platform knowledge primitive.
-2. Add `FactVisibility` to `FactRecorded`, defaulting to platform-visible.
-3. Add typed fact-key material support and schema-declared searchable key fields.
+2. Add mandatory `FactPublicationEvidence` to `FactRecorded`, including `FactVisibility`,
+   `MfmFactKey` material, key schema, material hash, searchable fields, and optional `observed_at`.
+3. Replace ad hoc `FactKey` construction with typed fact-key material support and schema-declared
+   searchable key fields.
 4. Add `PlatformFactRef` types and query DTOs.
 5. Add the `platform_facts` and `platform_fact_key_fields` projection tables to the PostgreSQL
    store.
 6. Populate both projection tables in the same append transaction that inserts `run_events`.
-7. Add query APIs over platform facts and fact-key fields.
+7. Add the initial CLI and REST query APIs over platform facts and fact-key fields.
 8. Add tests for atomicity, private filtering, key-field filtering, ordering, timestamp filters,
    idempotent retry, projection rebuild, and replay pinning.
 9. Build the first collector as a recurring certified workflow that emits ordinary
    platform-visible `FactRecorded` events.
 
-## Open Questions
+## Resolved Decisions
 
-- Should `observed_at` be a direct field on `FactRecorded`, or should it come from a typed fact
-  summary descriptor?
-- Should typed fact-key material be embedded directly in `FactRecorded`, retained as a small
-  key-material artifact, or represented only by hash plus schema-declared searchable fields?
-- What scalar types should `FactKeyFieldValue` support in v1?
-- What is the minimal public query API for the first collector use case?
-- Should fact visibility be a simple enum or should it include future named scopes?
-- How should cross-store fact export/import prove source store trust scope and retained artifact
-  evidence?
-- Should collector cycles be scheduled by app assembly, a new scheduler surface, or an explicit CLI
-  daemon command first?
-- Which fact schemas should be treated as checkpoints versus domain observations?
+- `observed_at` is an optional direct field in `FactRecorded` publication evidence. The store copies
+  it into `platform_facts`; it never extracts it from domain artifacts.
+- Typed fact-key material is required at publication time, but v1 persists only the schema id,
+  material hash, derived `FactKey`, and schema-declared searchable fields.
+- `FactKeyFieldValue` v1 supports `Text`, `I64`, `U64`, `Bool`, `Timestamp`, and `Digest`.
+- The initial public query API is `mfm facts query` and `GET /v1/facts`, listing fact references by
+  key schema and equality field filters with opaque cursor pagination.
+- Fact visibility is a simple `Platform` / `RunPrivate` enum in v1. Named scopes are deferred until
+  there is a concrete authorization model.
+- Cross-store fact export/import is deferred. It is not required for the first platform fact
+  projection or collector workflow.
+- Collector cycles run through ordinary app, CLI, and REST run start/resume flows. There is no v1
+  collector daemon, scheduler surface, or special execution API.
+
+## Deferred Questions
+
+- Which fact schemas should be treated as checkpoints versus domain observations? The first
+  implementation can model checkpoints as ordinary `FactRecorded` events with dedicated checkpoint
+  schemas, but the final taxonomy likely needs transport-, adapter-, and domain-specific review.
+- How should a future cross-store fact export/import bundle prove source store trust scope, source
+  run/event identity, stream authority, and retained artifact evidence?
 
 ## Preferred First Implementation
 
@@ -620,11 +666,14 @@ Start with the smallest vertical slice:
 - one companion key-field projection table
 - one `PlatformFactRef` query path
 - one typed fact-key material path with schema-declared searchable fields
+- mandatory `FactPublicationEvidence` on every `FactRecorded`
 - `FactVisibility::Platform` and `FactVisibility::RunPrivate`
-- no `observed_at` extraction unless the event layer carries it explicitly
+- optional direct `observed_at` on `FactPublicationEvidence`, copied into projection without artifact
+  extraction
 - no SQL triggers for typed extraction
 - one collector-style workflow that records facts and checkpoints using existing state-machine
   primitives
+- collector cycles launched and resumed as ordinary runs through existing app, CLI, and REST surfaces
 
 This proves the central model: MFM's knowledge graph is built from ordinary `FactRecorded` events,
 not a separate collector event system.
