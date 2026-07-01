@@ -231,18 +231,18 @@ Likely touched:
 
 Old code/surfaces to delete:
 
-- `MFM_EVM_RPC_SOURCES_JSON`
-- `MFM_EVM_NETWORK_ROUTES_JSON`
-- `MFM_EVM_SIGNERS_JSON`
-- `--evm-rpc-sources`
+- `legacy EVM RPC source JSON env`
+- `legacy EVM network route JSON env`
+- `legacy EVM signer JSON env`
+- `legacy EVM RPC sources flag`
 - Related old EVM compatibility inputs.
-- `EvmJsonRpcClient::from_env`
+- `EVM transport env constructor`
 - Legacy EVM source JSON parser.
 - Source-level runtime `expected_chain_id`.
 - `crates/app/src/evm_runtime_routes.rs` if it only exists for adapter-local
   route plumbing.
 - App/env signer parsing.
-- `KeystoreSignerRegistryEntry::from_env_sources`.
+- `keystore signer env-source constructor`.
 - Adapter-facing route wrappers and request fields exposing `source_ref` and
   `policy_id`.
 - Mandatory operation-planned baseline EVM chain identity validation nodes or
@@ -400,7 +400,7 @@ Tests to add/update:
   needs the malformed or missing family.
 - Namespace scan forbids old env constants, old from-env constructors,
   source-level runtime `expected_chain_id`, adapter-facing `source_ref` and
-  `policy_id`, and `--evm-rpc-sources`.
+  `policy_id`, and `legacy EVM RPC sources flag`.
 - Cargo metadata forbids `mfm-transports-evm` depending on
   `mfm-runtime-config`.
 - Cargo metadata or namespace tests forbid ops/states depending on runtime config.
@@ -467,7 +467,7 @@ Documentation updates:
 9. Postgres authority guard: commit 3.
 10. Remove source-level runtime `expected_chain_id`: commits 1, 4, and 6.
 11. Remove adapter route wrappers: commits 4 and 6.
-12. Remove `--evm-rpc-sources` and EVM env compatibility inputs: commits 4 and 6.
+12. Remove `legacy EVM RPC sources flag` and EVM env compatibility inputs: commits 4 and 6.
 13. Delete old env constants, from-env wiring, source-chain plumbing, and request
     route plumbing: commits 4 and 6.
 14. Nixfied runtime config generation/passing: commits 4 and 6.
@@ -485,7 +485,7 @@ Documentation updates:
 | REST starts even when live runtime config is missing or malformed | 4, 6 |
 | Live start/resume validates required bindings; evidence-only paths do not | 2, 4, 6 |
 | Parsing/resolution/shape validation live only in `mfm-runtime-config` | 1, 4, 6 |
-| No legacy JSON envs, `--evm-rpc-sources`, or source-level chain id | 4, 6 |
+| No legacy JSON envs, `legacy EVM RPC sources flag`, or source-level chain id | 4, 6 |
 | Env names are selectors; resolved values/paths/secrets are redacted | 1, 4, 6 |
 | TOML and JSON are both supported from the first implementation | 1 |
 | Direct keystore/unlock paths are allowed but never persisted or public | 1, 4, 6 |
@@ -505,12 +505,12 @@ Documentation updates:
 
 ## Deletion checklist
 
-- [ ] `MFM_EVM_RPC_SOURCES_JSON`
-- [ ] `MFM_EVM_NETWORK_ROUTES_JSON`
-- [ ] `MFM_EVM_SIGNERS_JSON`
-- [ ] `--evm-rpc-sources`
+- [ ] `legacy EVM RPC source JSON env`
+- [ ] `legacy EVM network route JSON env`
+- [ ] `legacy EVM signer JSON env`
+- [ ] `legacy EVM RPC sources flag`
 - [ ] Related old EVM compatibility inputs.
-- [ ] `EvmJsonRpcClient::from_env`.
+- [ ] `EVM transport env constructor`.
 - [ ] Old live runtime `from_env` constructors.
 - [ ] Legacy EVM runtime source JSON parser.
 - [ ] Source-level `expected_chain_id` in runtime config.
@@ -520,7 +520,7 @@ Documentation updates:
 - [ ] EVM capability request fields carrying adapter-selected `source_ref` and
   `policy_id`.
 - [ ] App/env signer parsing.
-- [ ] `KeystoreSignerRegistryEntry::from_env_sources`.
+- [ ] `keystore signer env-source constructor`.
 - [ ] Mandatory operation-planned EVM chain identity validation nodes or preludes
   where guarded capability calls replace them.
 - [ ] Stale Nixfied generation of old EVM JSON env surfaces.

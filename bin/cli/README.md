@@ -482,27 +482,13 @@ mfm_cli run replay <RUN_ID> [OPTIONS]
 
 ## Configuration
 
-The CLI's behavior can be modified using environment variables, which is ideal for CI/CD pipelines and automated scripts.
+The CLI's process-level configuration is intentionally narrow.
 
 - **`MFM_OUTPUT_FORMAT`**: Sets the default output format for all commands. Valid values are `text` and `json`. Command-line `--output-format` flag takes precedence.
   ```sh
   export MFM_OUTPUT_FORMAT="json"
   mfm_cli keystore list  # Will output JSON
   ```
-
-- **`MFM_KEYSTORE_PATH`**: Default keystore path used by keystore CLI commands when `--keystore` is not provided. The CLI resolves this before launching the underlying op.
-  ```sh
-  export MFM_KEYSTORE_PATH="/etc/mfm/prod.keystore"
-  mfm_cli keystore list
-  ```
-
-- **`MFM_KEYSTORE_PASSWORD`**: Provides the keystore password non-interactively. If this is set, the CLI will not prompt for a password.
-  ```sh
-  export MFM_KEYSTORE_PASSWORD="my-super-secret-password"
-  mfm_cli keystore list
-  ```
-
-- **`MFM_INTEGRATION_TEST`**: When set to `1`, the CLI uses a faster, less secure KDF configuration for the keystore. **This should only be used for testing purposes.**
 
 - **`DATABASE_URL`**: PostgreSQL connection string used by `run` commands (unless `--database-url` is provided).
   ```sh
@@ -522,13 +508,20 @@ The CLI's behavior can be modified using environment variables, which is ideal f
   [evm.routes.reth-dev]
   source_ref = "reth-local"
 
-  [evm.signers.deployer]
-  provider = "keystore"
-  entry_id = "<uuid>"
+  [keystores.default]
   keystore_path = "/run/mfm/deployer.keystore"
   unlock_file = "/run/mfm/deployer.password"
+
+  [signers.deployer]
+  provider = "keystore"
+  keystore_ref = "default"
+  entry_id = "<uuid>"
   ```
 
+- Direct keystore commands use either `--keystore <PATH>`, which prompts locally for credentials,
+  or a runtime-config keystore profile selected by `--runtime-config <PATH>` or
+  `MFM_RUNTIME_CONFIG_FILE`. `--keystore-ref <REF>` defaults to `default` for runtime-config
+  selection.
 - Typed EVM contract requests use semantic `network_id` plus `expected_chain_id`; transports
   resolve `network_id` through the runtime config route registry and verify the observed chain id
   for every guarded live request.
@@ -542,8 +535,10 @@ The CLI's behavior can be modified using environment variables, which is ideal f
 
 ## Best Practices
 
-- **For interactive use**, rely on the built-in prompts for passwords and confirmations.
-- **For scripting and automation**, use a combination of environment variables (`MFM_KEYSTORE_PASSWORD`, `MFM_KEYSTORE_PATH`), the `--stdin` flag for input, and the `--yes` flag to bypass confirmations.
+- **For interactive use**, pass `--keystore <PATH>` and rely on the built-in prompts for passwords
+  and confirmations.
+- **For scripting and automation**, use runtime-config keystore profiles with unlock files, the
+  `--stdin` flag for import material, and `--yes` to bypass confirmations where supported.
 - **For AI agents and programmatic use**, use `--output-format json` to get structured, machine-readable responses with predictable error codes.
 - **Secure your environment**: When using environment variables, ensure the security of your shell history and environment.
 - **Backup your keystore file**: The CLI manages keys, but you are responsible for securely backing up the keystore file itself.
@@ -554,7 +549,7 @@ The CLI is designed to be AI-friendly with consistent JSON output that makes it 
 
 - Parse command results reliably using the standardized `{"status": "success", "data": {...}}` format
 - Handle errors gracefully with structured error responses containing stable error codes
-- Integrate with automation pipelines using environment variables and non-interactive modes
+- Integrate with automation pipelines using runtime config and non-interactive modes
 - Process keystore operations programmatically without human intervention
 
 **Example AI workflow:**

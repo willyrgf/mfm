@@ -37,11 +37,14 @@ source_ref = "reth-local"
 source_ref = "mainnet-primary"
 policy_id = "mainnet"
 
-[evm.signers.deployer]
-provider = "keystore"
-entry_id = "00000000-0000-0000-0000-000000000000"
+[keystores.default]
 keystore_path = "/run/mfm/deployer.keystore"
 unlock_file = "/run/mfm/deployer.password"
+
+[signers.deployer]
+provider = "keystore"
+keystore_ref = "default"
+entry_id = "00000000-0000-0000-0000-000000000000"
 ```
 
 JSON with the same shape is also accepted by `mfm-runtime-config`.

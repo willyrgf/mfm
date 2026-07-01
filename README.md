@@ -65,7 +65,7 @@ User-facing docs:
 
 Crate docs:
 
-- Core primitives (keystore + config models): [`crates/core/README.md`](crates/core/README.md)
+- Core primitives (keystore + crypto): [`crates/core/README.md`](crates/core/README.md)
 - Typed runtime: [`crates/kernel/runtime/README.md`](crates/kernel/runtime/README.md)
 - Typed store contract: [`crates/kernel/store/README.md`](crates/kernel/store/README.md)
 - Typed replay: [`crates/kernel/replay/README.md`](crates/kernel/replay/README.md)

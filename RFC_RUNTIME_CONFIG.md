@@ -8,9 +8,9 @@ Draft.
 
 MFM currently carries live capability wiring across several environment JSON variables:
 
-- `MFM_EVM_RPC_SOURCES_JSON`
-- `MFM_EVM_NETWORK_ROUTES_JSON`
-- `MFM_EVM_SIGNERS_JSON`
+- `legacy EVM RPC source JSON env`
+- `legacy EVM network route JSON env`
+- `legacy EVM signer JSON env`
 
 Those variables are awkward because they carry structured configuration in environment values. That
 makes local development, review, shell history, Nixfied task wiring, and service deployment harder
@@ -144,11 +144,14 @@ policy_id = "ethereum-mainnet"
 Signer example:
 
 ```toml
-[evm.signers.deployer]
-provider = "keystore"
-entry_id = "00000000-0000-0000-0000-000000000000"
+[keystores.default]
 keystore_path = "/path/to/keystore.json"
 unlock_file = "/path/to/password-file"
+
+[signers.deployer]
+provider = "keystore"
+keystore_ref = "default"
+entry_id = "00000000-0000-0000-0000-000000000000"
 ```
 
 The runtime config may contain direct runtime-local values or point to values through environment or
@@ -198,12 +201,13 @@ workflow-specific network semantics. `source_ref` and `policy_id` use local runt
 policy's `ordered_sources`. Routes do not carry authoritative chain ids, because chain identity is
 semantic workflow input.
 
-`evm.signers` maps non-secret typed workflow `signer_ref` lookup keys to local signer provider
-bindings. `signer_ref` is not a provider identity; provider id, keystore entry id, keystore paths,
-unlock-file paths, and unlock sources are runtime-local. The config may reference keystore paths and
-unlock files directly or through indirection, but those references remain runtime-only. Direct
-unlock-file paths are allowed; direct password values are not. Expected public signer identity
-remains semantic typed config and non-secret evidence, not runtime config.
+`keystores` maps local keystore profile refs to keystore paths and unlock files. `signers` maps
+non-secret typed workflow `signer_ref` lookup keys to local signer provider bindings and references
+one of those keystore profiles. `signer_ref` is not a provider identity; provider id, keystore entry
+id, keystore paths, unlock-file paths, and unlock sources are runtime-local. The config may reference
+keystore paths and unlock files directly or through indirection, but those references remain
+runtime-only. Direct unlock-file paths are allowed; direct password values are not. Expected public
+signer identity remains semantic typed config and non-secret evidence, not runtime config.
 
 ## Validation Model
 
@@ -381,7 +385,7 @@ ids, signer entries, endpoints, and auth material must not enter `RunIdentityMat
 adapter, runner, and capability implementation identities.
 
 Signer validation is effect-scoped. Public addresses in read-only portfolio or validation configs
-are query subjects, not signer authority, and must not require `[evm.signers]`. For mutation
+are query subjects, not signer authority, and must not require `[signers]`. For mutation
 workflows, ingress validation verifies that a signer binding exists. It should not unlock keystores
 or probe private key material during admission. The actual expected public identity check happens when
 the signing request is materialized: typed config supplies the expected public identity, the signer
@@ -657,11 +661,11 @@ Recommended migration:
 11. Remove adapter-local EVM route wrappers whose only job is to inject `source_ref` and `policy_id`
     into capability requests. Route resolution belongs in the guarded provider/transport, and selected
     route ids appear only as redacted evidence.
-12. Remove existing `--evm-rpc-sources` and EVM environment JSON compatibility inputs rather than
+12. Remove existing `legacy EVM RPC sources flag` and EVM environment JSON compatibility inputs rather than
    normalizing them as compatibility shims. Direct values and indirect sources should resolve only
    through the new redacted runtime value types.
 13. Delete the old EVM runtime wiring surfaces: env constants, direct reads of
-   `MFM_EVM_RPC_SOURCES_JSON`, `MFM_EVM_NETWORK_ROUTES_JSON`, and `MFM_EVM_SIGNERS_JSON`, `from_env`
+   `legacy EVM RPC source JSON env`, `legacy EVM network route JSON env`, and `legacy EVM signer JSON env`
    constructors, source-level runtime `expected_chain_id` fields/parsers/tests, and old route-table
    request plumbing that exposes `source_ref` or `policy_id` to adapters/states.
 14. Update Nixfied Reth workflows to generate or pass live capability runtime config files. Generated
@@ -696,7 +700,7 @@ configuration surfaces deliberately and update docs/tests in the same change.
 - Runtime config parsing, direct/env/file value-source resolution, and shape validation live in
   `mfm-runtime-config`; that crate must not construct stores, transports, signers, app services,
   runners, or replay services.
-- MFM does not preserve compatibility for legacy EVM runtime JSON blobs, `--evm-rpc-sources`, or
+- MFM does not preserve compatibility for legacy EVM runtime JSON blobs, `legacy EVM RPC sources flag`, or
   source-level `expected_chain_id`; those surfaces are removed or rejected.
 - Environment variable names are runtime-local selectors, not secret material by themselves. Resolved
   values, paths, URLs, authorization headers, passwords, private keys, and signed material remain

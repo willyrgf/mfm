@@ -31,6 +31,19 @@ const SEMANTIC_FIELD_EXCEPTION_COUNTS: &[(&str, &str, usize)] = &[
     ("crates/ops/proof-op/src/lib.rs", "authorization", 5),
 ];
 
+const REMOVED_RUNTIME_CONFIG_EXCEPTION_COUNTS: &[(&str, &str, usize)] = &[
+    (
+        "bin/cli/tests/cli_environment_tests.rs",
+        "MFM_KEYSTORE_PATH",
+        1,
+    ),
+    (
+        "crates/runtime-config/tests/runtime_config.rs",
+        "evm.signers",
+        1,
+    ),
+];
+
 #[test]
 fn semantic_surface_runtime_fields_match_tracked_exception_counts() {
     let root = repo_root();
@@ -92,10 +105,21 @@ fn old_evm_runtime_env_surfaces_do_not_return() {
         "MFM_EVM_RPC_SOURCES_JSON",
         "MFM_EVM_NETWORK_ROUTES_JSON",
         "MFM_EVM_SIGNERS_JSON",
+        "MFM_KEYSTORE_PATH",
+        "MFM_KEYSTORE_PASSWORD",
+        "MFM_KEYSTORE_PASSWORD_FILE",
+        "MFM_INTEGRATION_TEST",
         "--evm-rpc-sources",
         "EvmJsonRpcClient::from_env",
         "KeystoreSignerRegistryEntry::from_env_sources",
         "from_env_sources",
+        "evm.signers",
+        "SignerProviderRuntimeConfig",
+        "RuntimeSecretSource",
+        "KeystorePathSource",
+        "KeystorePasswordSource",
+        "mfm_core::config",
+        "pub mod config",
         "UnavailablePortfolioEvmProvider",
         "EvmContractRuntimeRoute",
         "PortfolioEvmRoute",
@@ -105,7 +129,7 @@ fn old_evm_runtime_env_surfaces_do_not_return() {
         "old EVM runtime surface",
         &entries,
         &forbidden,
-        &[],
+        REMOVED_RUNTIME_CONFIG_EXCEPTION_COUNTS,
         |path, _source| !TEST_HARNESS_PATHS.contains(&path),
     );
 }
