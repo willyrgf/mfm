@@ -532,6 +532,13 @@ replay adapters only. Live capability construction during replay is a contract v
 Replay service construction itself is evidence-only app assembly: it must not construct the live
 runner registry, live transports, signer providers, keystores, or live capability runtime config.
 
+Live EVM chain identity is enforced at each guarded capability call from the semantic network id and
+expected chain id in the certified request. A route that resolves but observes the wrong chain fails
+after `RunAdmitted` as a guarded attempt/capability failure with closed redacted evidence: semantic
+network id, expected chain id, observed chain id when available, selected source ref, and source
+policy id. Replay providers verify that recorded evidence against the same request guard and never
+resolve source refs or policy ids through current runtime config.
+
 Manual-resolution replay additionally verifies that the stream prefix derives `ManualBlocked`, the
 event matches certified policy, evidence and authorization artifacts match certified roles and
 digests, the canonical proof claim matches the event and prefix exactly, signatures verify, signers

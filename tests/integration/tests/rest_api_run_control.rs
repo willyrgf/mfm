@@ -270,6 +270,67 @@ async fn start_distinct_run_key_derives_separate_run_without_persisting_raw_key(
 }
 
 #[tokio::test]
+async fn portfolio_chain_mismatch_fails_after_admission_with_redacted_diagnostic() {
+    let rpc_url = test_support::start_portfolio_rpc_mock(31338).await;
+    let runtime_config_dir = tempfile::tempdir().expect("runtime config tempdir");
+    let runtime_config_path = test_support::write_evm_runtime_config_for_test(
+        runtime_config_dir.path(),
+        PORTFOLIO_NETWORK_ID,
+        &rpc_url,
+        None,
+    );
+    let mut state = in_memory_state();
+    state.runtime_config_path = Some(runtime_config_path.clone());
+    let app = mfm_rest_api::make_app(state.clone());
+
+    let resp = app
+        .oneshot(json_post(
+            "/v1/runs/start",
+            serde_json::json!({
+                "op": "portfolio_snapshot",
+                "config_format": "json",
+                "config": portfolio_snapshot_config(),
+            }),
+        ))
+        .await
+        .expect("chain mismatch start response");
+    let status = resp.status();
+    let body = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["outcome"], "admitted");
+    assert_ne!(body["data"]["run"]["run_mode"], "completed");
+
+    let run_id = RunId::parse(body["data"]["run"]["run_id"].as_str().expect("run id"))
+        .expect("typed run id");
+    let stream = state.store.load_run_stream(&run_id).await.expect("stream");
+    let admitted_index = stream
+        .iter()
+        .position(|event| matches!(event.payload(), events::KernelEventPayload::RunAdmitted(_)))
+        .expect("RunAdmitted");
+    let failed_index = stream
+        .iter()
+        .position(|event| {
+            matches!(
+                event.payload(),
+                events::KernelEventPayload::StateAttemptFailed(_)
+            )
+        })
+        .expect("StateAttemptFailed");
+    assert!(admitted_index < failed_index);
+    let failed = stream[failed_index].payload();
+    let events::KernelEventPayload::StateAttemptFailed(failed) = failed else {
+        panic!("expected failed attempt");
+    };
+    assert_eq!(failed.error.category, events::ErrorCategory::Validation);
+    assert_eq!(failed.error.safe_message, "runner output failed validation");
+
+    let rendered = format!("{body:?} {stream:?}");
+    assert!(!rendered.contains(&rpc_url));
+    assert!(!rendered.contains(&runtime_config_path.display().to_string()));
+    assert!(!rendered.contains("31338"));
+}
+
+#[tokio::test]
 async fn evm_contract_start_requires_capability_before_admission_for_all_entry_point_ops() {
     let state = in_memory_state();
     let app = mfm_rest_api::make_app(state.clone());

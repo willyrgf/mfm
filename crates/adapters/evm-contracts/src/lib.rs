@@ -336,13 +336,11 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
             .mutation
             .block
             .read_block(&EvmBlockReadRequest {
-                guard,
+                guard: guard.clone(),
                 block: EvmBlockSelector::Latest,
             })
             .await?;
-        if response.evidence.observed_chain_id != expected_chain_id {
-            return Err(EvmContractAdapterError::ChainMismatch);
-        }
+        response.evidence.verify_guard(&guard)?;
         Ok(response.block_number)
     }
 
@@ -491,6 +489,17 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
             &prepared.evidence().network_id,
             prepared.evidence().expected_chain_id,
         )?;
+        let chain = self
+            .mutation
+            .chain_identity
+            .chain_identity(&EvmChainIdentityRequest {
+                guard: guard.clone(),
+            })
+            .await?;
+        chain.evidence.verify_guard(&guard)?;
+        if chain.chain_id != prepared.evidence().expected_chain_id {
+            return Err(EvmContractAdapterError::ChainMismatch);
+        }
         let mut submissions = Vec::with_capacity(prepared.signing_requests.len());
         for (transaction, signing_request) in prepared
             .evidence()
@@ -523,6 +532,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
                     signed_payload: payload,
                 })
                 .await?;
+            response.evidence.verify_guard(&guard)?;
             if response.transaction_hash != expected_hash {
                 return Err(EvmContractAdapterError::TransactionHashMismatch);
             }
@@ -556,6 +566,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
                     transaction_hash,
                 })
                 .await?;
+            response.evidence.verify_guard(&guard)?;
             if response.transaction_hash != transaction_hash {
                 return Err(EvmContractAdapterError::TransactionHashMismatch);
             }
@@ -599,6 +610,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
                 .await
             {
                 Ok(response) => {
+                    response.evidence.verify_guard(&guard)?;
                     if response.transaction_hash != transaction_hash {
                         return Err(EvmContractAdapterError::TransactionHashMismatch);
                     }
@@ -637,7 +649,10 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
             })
             .await
         {
-            Ok(response) => response.nonce,
+            Ok(response) => {
+                response.evidence.verify_guard(&guard)?;
+                response.nonce
+            }
             Err(EvmCapabilityError::Provider { .. }) => {
                 return Ok(PreparedSubmissionReconciliation::Indeterminate(
                     anchor_submissions,
@@ -662,31 +677,34 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
                 })
                 .await
             {
-                Ok(response) => match response.outcome {
-                    EvmNonceOccupancy::Occupied {
-                        transaction_hash,
-                        block_number,
-                    } => {
-                        return Ok(PreparedSubmissionReconciliation::NotSubmitted(
-                            ContractNotSubmittedProof {
-                                proof_version: 1,
-                                expected_transaction_hash: transaction
-                                    .expected_transaction_hash
-                                    .clone(),
-                                occupying_transaction_hash: format!("{transaction_hash:?}"),
-                                occupying_block_number: block_number,
-                                signer_address: prepared.expected_signer_address.clone(),
-                                nonce: transaction.nonce,
-                                evidence_chain_id: response.evidence.observed_chain_id,
-                            },
-                        ));
+                Ok(response) => {
+                    response.evidence.verify_guard(&guard)?;
+                    match response.outcome {
+                        EvmNonceOccupancy::Occupied {
+                            transaction_hash,
+                            block_number,
+                        } => {
+                            return Ok(PreparedSubmissionReconciliation::NotSubmitted(
+                                ContractNotSubmittedProof {
+                                    proof_version: 1,
+                                    expected_transaction_hash: transaction
+                                        .expected_transaction_hash
+                                        .clone(),
+                                    occupying_transaction_hash: format!("{transaction_hash:?}"),
+                                    occupying_block_number: block_number,
+                                    signer_address: prepared.expected_signer_address.clone(),
+                                    nonce: transaction.nonce,
+                                    evidence_chain_id: response.evidence.observed_chain_id,
+                                },
+                            ));
+                        }
+                        EvmNonceOccupancy::Unknown => {
+                            return Ok(PreparedSubmissionReconciliation::Indeterminate(
+                                anchor_submissions,
+                            ));
+                        }
                     }
-                    EvmNonceOccupancy::Unknown => {
-                        return Ok(PreparedSubmissionReconciliation::Indeterminate(
-                            anchor_submissions,
-                        ));
-                    }
-                },
+                }
                 Err(EvmCapabilityError::Provider { .. }) => {
                     return Ok(PreparedSubmissionReconciliation::Indeterminate(
                         anchor_submissions,
@@ -720,6 +738,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
                 guard: guard.clone(),
             })
             .await?;
+        chain.evidence.verify_guard(&guard)?;
         if chain.chain_id != request.expected_chain_id {
             return Err(EvmContractAdapterError::ChainMismatch);
         }
@@ -778,11 +797,12 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
                 guard: guard.clone(),
             })
             .await?;
+        chain.evidence.verify_guard(&guard)?;
         if chain.chain_id != expected_chain_id {
             return Err(EvmContractAdapterError::ChainMismatch);
         }
 
-        let nonce = self
+        let nonce_response = self
             .mutation
             .nonce
             .read_nonce(&EvmNonceReadRequest {
@@ -790,8 +810,9 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
                 account: expected_signer,
                 block: EvmBlockSelector::Latest,
             })
-            .await?
-            .nonce;
+            .await?;
+        nonce_response.evidence.verify_guard(&guard)?;
+        let nonce = nonce_response.nonce;
         let fees = self
             .mutation
             .fee
@@ -799,6 +820,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
                 guard: guard.clone(),
             })
             .await?;
+        fees.evidence.verify_guard(&guard)?;
 
         let mut evidence = Vec::with_capacity(tx_inputs.len());
         let mut signing_requests = Vec::with_capacity(tx_inputs.len());
@@ -806,7 +828,8 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
             let gas_limit = match policy.gas_limit() {
                 Some(gas_limit) => gas_limit,
                 None => {
-                    self.mutation
+                    let gas = self
+                        .mutation
                         .gas
                         .estimate_gas(&EvmGasEstimateRequest {
                             guard: guard.clone(),
@@ -815,8 +838,9 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
                             value_wei: input.value_wei,
                             data: input.data.clone(),
                         })
-                        .await?
-                        .gas_limit
+                        .await?;
+                    gas.evidence.verify_guard(&guard)?;
+                    gas.gas_limit
                 }
             };
             let tx_nonce = nonce
@@ -965,6 +989,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
                     block: EvmBlockSelector::Latest,
                 })
                 .await?;
+            response.evidence.verify_guard(guard)?;
             let actual_json = decode_single_output_to_json(
                 &prepared.outputs,
                 &bytes_to_hex_prefixed(&response.return_data),
@@ -998,6 +1023,7 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
                     topics: vec![topic],
                 })
                 .await?;
+            logs.evidence.verify_guard(guard)?;
             let observed_count = logs.logs.len() as u64;
             event_results.push(ValidationEventResult {
                 event: prepared.event.clone(),
