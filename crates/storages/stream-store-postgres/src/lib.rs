@@ -13,6 +13,10 @@
 //!     "postgres://postgres:postgres@localhost/mfm",
 //! )
 //! .await?;
+//! let _authority = mfm_stream_store_postgres::PostgresSchema::validate(
+//!     "postgres://postgres:postgres@localhost/mfm",
+//! )
+//! .await?;
 //! let _store = mfm_stream_store_postgres::PostgresRunStore::connect(
 //!     "postgres://postgres:postgres@localhost/mfm",
 //! )
@@ -24,5 +28,7 @@
 mod run_store;
 mod schema;
 
-pub use run_store::{PostgresRunStore, PostgresStoreError};
+pub use run_store::{
+    PostgresRunStore, PostgresStoreAuthority, PostgresStoreAuthorityError, PostgresStoreError,
+};
 pub use schema::PostgresSchema;
