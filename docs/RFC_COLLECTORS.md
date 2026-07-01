@@ -48,6 +48,8 @@ producer explicitly marks it private.
 - Reuse operations, states, adapters, transports, runtime, store, and replay primitives.
 - Treat `FactRecorded` as the canonical platform knowledge primitive.
 - Make facts searchable and reusable through a store-maintained `PlatformFactRef` projection.
+- Derive searchable domain fields from typed fact-key material, not from ad hoc labels or
+  domain-specific `PlatformFactRef` fields.
 - Keep run streams and artifact evidence as strict authority.
 - Let collectors be recurring certified workflows, not special daemons with independent semantics.
 - Make platform visibility the default for facts, with an explicit private opt-out.
@@ -59,6 +61,7 @@ producer explicitly marks it private.
 - Do not make live collectors semantic authority.
 - Do not let state implementations publish facts through ad hoc side channels.
 - Do not parse domain-specific artifact JSON in PostgreSQL triggers.
+- Do not make `PlatformFactRef` a domain-specific struct or an arbitrary label bag.
 - Do not put secrets into facts, artifacts, public projections, or diagnostics.
 - Do not make mutable "latest fact" rows authoritative.
 
@@ -108,6 +111,31 @@ and its admitted artifact evidence.
 
 It is not separate authority. It is a searchable reference into existing authority.
 
+### Fact Key Material
+
+Fact key material is the typed, canonical input used to derive a `FactKey`.
+
+It answers the question "what is this fact about?" without including the observed value itself. For
+example, a wallet balance key should identify chain, network, account, asset, and balance kind, but
+not the balance amount. A weather observation key should identify the place and measurement kind,
+but not the measured temperature.
+
+Fact key material should be typed and schema-described. The platform should derive both the stable
+`FactKey` and the searchable key fields from that typed material.
+
+Conceptual contract:
+
+```rust
+pub trait MfmFactKey {
+    fn key_schema_id() -> SchemaId;
+    fn canonical_key_material(&self) -> PlainCanonicalJsonBytes;
+    fn searchable_fields(&self) -> Vec<FactKeyField>;
+}
+```
+
+`searchable_fields` is not an arbitrary label map. It is a bounded, schema-declared projection of
+the key material into generic scalar fields the store can index.
+
 ## Design Principles
 
 ### Facts Are Claims With Provenance
@@ -152,6 +180,28 @@ The platform fact projection must be rebuildable from strict authority:
 The projection is useful for queries, but it must not replace run-stream validation, artifact
 evidence validation, or replay authority.
 
+### Search Comes From Fact Keys
+
+`PlatformFactRef` should remain generic. Domain search fields should come from the typed fact-key
+material that generated `fact_key`.
+
+This avoids two bad outcomes:
+
+- hardcoding domains such as wallet balances, weather, prices, or chain heads into the platform
+  fact reference
+- adding arbitrary labels that bypass schema review and become an unbounded query surface
+
+The generic platform only needs to understand:
+
+- fact key schema id
+- canonical fact key hash
+- schema-declared searchable key fields
+- fact provenance
+- artifact evidence
+
+Domain-specific CLI commands can still be ergonomic. They map friendly arguments into typed
+fact-key schema fields.
+
 ### Live Search Is Not Replay
 
 A live run may query platform facts. Once it chooses a fact, the chosen reference must be recorded
@@ -183,6 +233,22 @@ does not expose it through the platform fact index.
 This is intentionally small. The first step is not to redesign fact semantics. It is to state that
 facts are platform knowledge by default and to let producers opt out.
 
+`FactRecorded` should also carry enough typed key metadata for the store to project facts without
+understanding domain artifact payloads:
+
+```rust
+pub struct FactKeyEvidence {
+    pub fact_key: FactKey,
+    pub key_schema_id: SchemaId,
+    pub key_material_hash: ContentDigest,
+    pub searchable_fields: Vec<FactKeyField>,
+}
+```
+
+The runtime or runner helper should build this from typed fact-key material. The PostgreSQL store
+then copies these already-typed fields into projection tables. It does not parse arbitrary response
+artifacts or request JSON to discover domain search keys.
+
 ## PlatformFactRef
 
 Suggested logical shape:
@@ -204,6 +270,8 @@ pub struct PlatformFactRef {
     pub node_id: NodeId,
     pub attempt_id: AttemptId,
     pub fact_key: FactKey,
+    pub fact_key_schema_id: SchemaId,
+    pub fact_key_material_hash: ContentDigest,
     pub request_schema_id: SchemaId,
     pub request_hash: ContentDigest,
     pub response_schema_id: SchemaId,
@@ -227,6 +295,48 @@ Ordering authority should still prefer store order over timestamps. Timestamps a
 filtering, dashboards, and human-facing inspection. Store sequence, commit ordering, and event
 ordinal remain the deterministic ordering basis.
 
+`PlatformFactRef` intentionally does not include fields such as `chain`, `network`, `asset`,
+`location`, or `measure`. Those live in a companion key-field projection generated from typed
+fact-key material.
+
+## Searchable Fact Key Fields
+
+Searchable fact key fields are generic scalar projections of typed fact-key material.
+
+Conceptual shape:
+
+```rust
+pub struct FactKeyField {
+    pub path: FactKeyFieldPath,
+    pub value: FactKeyFieldValue,
+}
+
+pub enum FactKeyFieldValue {
+    Text(String),
+    I64(i64),
+    U64(u64),
+    Bool(bool),
+    Timestamp(Timestamp),
+    Digest(ContentDigest),
+}
+```
+
+The field path should be schema-declared and stable, for example:
+
+```text
+chain
+network
+account_ref
+asset_ref
+balance_kind
+country
+locality
+measure
+```
+
+The platform treats these as generic typed fields, not domain semantics. Domain crates own the
+fact-key schema and decide which fields are searchable.
+
 ## Store Projection
 
 The PostgreSQL store should maintain a normal projection table, not a PostgreSQL materialized view.
@@ -245,6 +355,8 @@ CREATE TABLE platform_facts (
   node_id TEXT NOT NULL,
   attempt_id TEXT NOT NULL,
   fact_key TEXT NOT NULL,
+  fact_key_schema_id TEXT NOT NULL,
+  fact_key_material_hash TEXT NOT NULL,
   request_schema_id TEXT NOT NULL,
   request_hash TEXT NOT NULL,
   response_schema_id TEXT NOT NULL,
@@ -255,6 +367,28 @@ CREATE TABLE platform_facts (
   adapter_kind TEXT NOT NULL,
   adapter_version TEXT NOT NULL,
   PRIMARY KEY (source_run_id, source_event_id)
+);
+```
+
+Searchable key fields should use a companion projection table:
+
+```sql
+CREATE TABLE platform_fact_key_fields (
+  source_run_id TEXT NOT NULL,
+  source_event_id TEXT NOT NULL,
+  fact_key_schema_id TEXT NOT NULL,
+  field_path TEXT NOT NULL,
+  value_type TEXT NOT NULL,
+  value_text TEXT NULL,
+  value_i64 BIGINT NULL,
+  value_u64 NUMERIC(20,0) NULL,
+  value_bool BOOLEAN NULL,
+  value_timestamp TIMESTAMPTZ NULL,
+  value_digest TEXT NULL,
+  PRIMARY KEY (source_run_id, source_event_id, field_path),
+  FOREIGN KEY (source_run_id, source_event_id)
+    REFERENCES platform_facts(source_run_id, source_event_id)
+    ON DELETE RESTRICT
 );
 ```
 
@@ -279,6 +413,15 @@ CREATE INDEX platform_facts_response_schema_recorded_idx
 
 CREATE INDEX platform_facts_capability_recorded_idx
   ON platform_facts (capability_kind, capability_version, recorded_at DESC);
+
+CREATE INDEX platform_fact_key_fields_text_idx
+  ON platform_fact_key_fields (fact_key_schema_id, field_path, value_text);
+
+CREATE INDEX platform_fact_key_fields_i64_idx
+  ON platform_fact_key_fields (fact_key_schema_id, field_path, value_i64);
+
+CREATE INDEX platform_fact_key_fields_timestamp_idx
+  ON platform_fact_key_fields (fact_key_schema_id, field_path, value_timestamp);
 ```
 
 The exact index set should be driven by initial query APIs and measured usage.
@@ -301,7 +444,7 @@ projection should happen inside that same append transaction. That gives:
 
 The database should not duplicate Rust event-schema decoding logic or parse domain-specific fact
 payloads from JSON. The typed store implementation already receives typed event payloads before
-inserting `run_events`; it should derive platform fact rows there.
+inserting `run_events`; it should derive platform fact rows and fact-key-field rows there.
 
 Database triggers should remain focused on database-level invariants such as append-only mutation
 guards and timestamp/transaction metadata.
@@ -362,7 +505,9 @@ internals.
 
 Likely filters:
 
-- fact key prefix or exact fact key
+- exact fact key
+- fact key schema id
+- typed fact key field equality or range
 - request schema id
 - request hash
 - response schema id
@@ -376,6 +521,25 @@ Likely filters:
 
 Public pagination should use opaque cursors. It should not expose internal append XIDs, sort keys,
 cursor versions, or store epochs.
+
+Generic CLI examples:
+
+```sh
+mfm facts query \
+  --key-schema mfm.wallet.balance.v1 \
+  --field chain=bitcoin \
+  --field network=mainnet \
+  --field account_ref=addr:bc1q...
+
+mfm facts query \
+  --key-schema mfm.weather.observation.v1 \
+  --field country=IE \
+  --field locality=Dublin \
+  --field measure=temperature
+```
+
+Domain-specific commands may provide friendlier syntax, but they should compile down to the same
+typed fact-key schema and field filters.
 
 ## Privacy And Security
 
@@ -401,6 +565,7 @@ Required checks:
 - artifact id matches admitted fact response evidence
 - source run/event identity matches the run stream
 - response schema/hash matches the event payload
+- fact key schema/hash and searchable fields match the event payload
 - no private facts appear in the projection
 
 The store should eventually expose a validation/rebuild path for projection corruption, similar in
@@ -421,19 +586,24 @@ Facts and platform projections must remain atomic.
 
 1. Document `FactRecorded` as the platform knowledge primitive.
 2. Add `FactVisibility` to `FactRecorded`, defaulting to platform-visible.
-3. Add `PlatformFactRef` types and query DTOs.
-4. Add the `platform_facts` projection table to the PostgreSQL store.
-5. Populate `platform_facts` in the same append transaction that inserts `run_events`.
-6. Add query APIs over platform facts.
-7. Add tests for atomicity, private filtering, ordering, timestamp filters, idempotent retry,
-   projection rebuild, and replay pinning.
-8. Build the first collector as a recurring certified workflow that emits ordinary
+3. Add typed fact-key material support and schema-declared searchable key fields.
+4. Add `PlatformFactRef` types and query DTOs.
+5. Add the `platform_facts` and `platform_fact_key_fields` projection tables to the PostgreSQL
+   store.
+6. Populate both projection tables in the same append transaction that inserts `run_events`.
+7. Add query APIs over platform facts and fact-key fields.
+8. Add tests for atomicity, private filtering, key-field filtering, ordering, timestamp filters,
+   idempotent retry, projection rebuild, and replay pinning.
+9. Build the first collector as a recurring certified workflow that emits ordinary
    platform-visible `FactRecorded` events.
 
 ## Open Questions
 
 - Should `observed_at` be a direct field on `FactRecorded`, or should it come from a typed fact
   summary descriptor?
+- Should typed fact-key material be embedded directly in `FactRecorded`, retained as a small
+  key-material artifact, or represented only by hash plus schema-declared searchable fields?
+- What scalar types should `FactKeyFieldValue` support in v1?
 - What is the minimal public query API for the first collector use case?
 - Should fact visibility be a simple enum or should it include future named scopes?
 - How should cross-store fact export/import prove source store trust scope and retained artifact
@@ -447,7 +617,9 @@ Facts and platform projections must remain atomic.
 Start with the smallest vertical slice:
 
 - one PostgreSQL projection table
+- one companion key-field projection table
 - one `PlatformFactRef` query path
+- one typed fact-key material path with schema-declared searchable fields
 - `FactVisibility::Platform` and `FactVisibility::RunPrivate`
 - no `observed_at` extraction unless the event layer carries it explicitly
 - no SQL triggers for typed extraction
