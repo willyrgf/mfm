@@ -196,6 +196,65 @@ fn category_dependency_rules_reject_forbidden_state_to_live_transport_edges() {
 }
 
 #[test]
+fn category_dependency_rules_reject_transport_runtime_config_edges() {
+    let root = repo_root();
+    let mut metadata = workspace_metadata(&root);
+    push_path_dependency(
+        &mut metadata,
+        "mfm-transports-evm",
+        "mfm-runtime-config",
+        &root.join("crates/runtime-config"),
+    );
+
+    let error =
+        validate_category_dependency_rules(&metadata, &root).expect_err("fixture must fail");
+    assert!(
+        error.contains("source_category=transport")
+            && error.contains("dependency_category=runtime-config")
+            && error.contains("mfm-runtime-config"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn category_dependency_rules_reject_ops_and_states_runtime_config_edges() {
+    let root = repo_root();
+    let mut metadata = workspace_metadata(&root);
+    push_path_dependency(
+        &mut metadata,
+        "mfm-state-portfolio",
+        "mfm-runtime-config",
+        &root.join("crates/runtime-config"),
+    );
+
+    let error =
+        validate_category_dependency_rules(&metadata, &root).expect_err("fixture must fail");
+    assert!(
+        error.contains("source_category=state")
+            && error.contains("dependency_category=runtime-config")
+            && error.contains("mfm-runtime-config"),
+        "unexpected error: {error}"
+    );
+
+    let mut metadata = workspace_metadata(&root);
+    push_path_dependency(
+        &mut metadata,
+        "mfm-op-portfolio-tracker",
+        "mfm-runtime-config",
+        &root.join("crates/runtime-config"),
+    );
+
+    let error =
+        validate_category_dependency_rules(&metadata, &root).expect_err("fixture must fail");
+    assert!(
+        error.contains("source_category=operation")
+            && error.contains("dependency_category=runtime-config")
+            && error.contains("mfm-runtime-config"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn state_category_allows_adapter_contracts_and_rejects_adapters() {
     let root = repo_root();
     let mut metadata = workspace_metadata(&root);

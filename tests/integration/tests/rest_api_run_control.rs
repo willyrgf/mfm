@@ -568,6 +568,83 @@ async fn absent_run_status_resume_replay_and_public_output_are_not_found() {
 }
 
 #[tokio::test]
+async fn malformed_runtime_config_does_not_block_read_only_routes() {
+    let runtime_config_dir = tempfile::tempdir().expect("runtime config tempdir");
+    let runtime_config_path = runtime_config_dir.path().join("malformed-runtime.toml");
+    std::fs::write(&runtime_config_path, "not valid toml = [").expect("runtime config");
+    let mut state = in_memory_state();
+    state.runtime_config_path = Some(runtime_config_path.clone());
+    let app = mfm_rest_api::make_app(state);
+
+    let health = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/health")
+                .body(Body::empty())
+                .expect("health request"),
+        )
+        .await
+        .expect("health response");
+    assert_eq!(health.status(), StatusCode::OK);
+
+    let status = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/runs/{VALID_RUN_ID}/status"))
+                .body(Body::empty())
+                .expect("status request"),
+        )
+        .await
+        .expect("status response");
+    assert_eq!(status.status(), StatusCode::NOT_FOUND);
+
+    let replay = app
+        .clone()
+        .oneshot(empty_post(&format!("/v1/runs/{VALID_RUN_ID}/replay")))
+        .await
+        .expect("replay response");
+    assert_eq!(replay.status(), StatusCode::NOT_FOUND);
+
+    let public_output = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/v1/runs/{VALID_RUN_ID}/public-output/{VALID_SCHEMA_ID}"
+                ))
+                .body(Body::empty())
+                .expect("public output request"),
+        )
+        .await
+        .expect("public output response");
+    assert_eq!(public_output.status(), StatusCode::NOT_FOUND);
+
+    let start = app
+        .oneshot(json_post(
+            "/v1/runs/start",
+            serde_json::json!({
+                "op": "portfolio_snapshot",
+                "config_format": "json",
+                "config": portfolio_snapshot_config(),
+            }),
+        ))
+        .await
+        .expect("live start response");
+    assert_eq!(start.status(), StatusCode::BAD_REQUEST);
+    let body = response_json(start).await;
+    assert_eq!(body["status"], "error");
+    assert_eq!(body["error"]["code"], "LaunchRunnerUnavailable");
+    let rendered = body.to_string();
+    assert!(!rendered.contains(&runtime_config_path.display().to_string()));
+    assert!(!rendered.contains("not valid toml"));
+}
+
+#[tokio::test]
 async fn stream_validates_sequence_range_before_reading() {
     let app = test_app();
 
