@@ -2,8 +2,7 @@
 //! Typed proof workflow operation.
 //!
 //! The proof workflow is authored through `mfm-program` and lowers to certified typed state
-//! programs. It does not expose the old dynamic `PlannedOp`, `PortKey`, context-key, or generic
-//! IO surfaces.
+//! programs.
 //!
 //! # Examples
 //!
@@ -267,12 +266,14 @@ mod tests {
     fn proof_program_lowers_to_typed_state_contracts() {
         let draft = proof_program_draft(ProofWorkflowConfig::default()).expect("draft");
         assert_eq!(draft.state_nodes().len(), 3);
-        assert!(
-            draft
-                .state_nodes()
-                .iter()
-                .all(|node| !node.state_descriptor_name.contains("DynContext")),
-            "proof state descriptors must not expose dynamic context"
+        let state_keys = draft
+            .state_nodes()
+            .iter()
+            .map(|node| node.key.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            state_keys,
+            ["read_fact", "apply_side_effect", "assemble_output"]
         );
 
         let certified = mfm_certify::certify_program_draft(&draft).expect("certified proof spec");

@@ -53,9 +53,6 @@ pub enum SpecError {
         /// Hash recomputed from the spec.
         actual: Box<SpecHash>,
     },
-    /// Obsolete pre-v1 sketch shape was detected.
-    #[error("obsolete spec shape: {0}")]
-    ObsoleteSketchShape(String),
 }
 
 /// Machine-readable side-effect submit/verify pair resolution failure class.
@@ -855,35 +852,12 @@ pub mod v1 {
             Ok(spec_hash_from_canonical(&self.canonical_json()?))
         }
 
-        /// Rejects obsolete pre-v1 sketch objects that used `state_program` or `outputs`.
-        pub fn validate_persisted_json_shape(input: &str) -> Result<()> {
-            let value: serde_json::Value = serde_json::from_str(input)
-                .map_err(|error| SpecError::Serialize(error.to_string()))?;
-            let Some(object) = value.as_object() else {
-                return Err(SpecError::ObsoleteSketchShape(
-                    "typed execution spec must be a JSON object".to_owned(),
-                ));
-            };
-            if object.contains_key("state_program") {
-                return Err(SpecError::ObsoleteSketchShape(
-                    "state_program is not part of the v1 contract".to_owned(),
-                ));
-            }
-            if object.contains_key("outputs") {
-                return Err(SpecError::ObsoleteSketchShape(
-                    "outputs is obsolete; use public_outputs".to_owned(),
-                ));
-            }
-            Ok(())
-        }
-
         /// Decodes a persisted v1 typed execution spec from canonical or non-canonical JSON.
         ///
         /// The returned value is reconstructed through checked typed constructors and can be
         /// re-hashed through [`Self::spec_hash`]. Callers that load a run-start artifact must
         /// compare the recomputed hash with the `RunAdmitted.spec_hash` stored in the typed stream.
         pub fn from_json_str(input: &str) -> Result<Self> {
-            Self::validate_persisted_json_shape(input)?;
             let input_canonical = PlainCanonicalJsonBytes::from_json_str(input)
                 .map_err(|error| SpecError::Canonical(error.to_string()))?;
             let value: serde_json::Value =

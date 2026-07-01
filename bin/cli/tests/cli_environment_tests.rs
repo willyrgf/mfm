@@ -52,19 +52,6 @@ fn runtime_config_cli_arg_overrides_runtime_config_env() {
 }
 
 #[test]
-fn old_keystore_path_env_no_longer_selects_keystore() {
-    let fixture = KeystoreFixture::new("old-env-path-test");
-
-    let mut list_cmd = Command::cargo_bin("mfm_cli").unwrap();
-    list_cmd.env("MFM_KEYSTORE_PATH", fixture.keystore_path.to_str().unwrap());
-    list_cmd.args(["keystore", "list"]);
-
-    list_cmd.assert().failure().stderr(predicate::str::contains(
-        "provide --keystore or --runtime-config",
-    ));
-}
-
-#[test]
 fn runtime_config_empty_unlock_file_fails() {
     let fixture = KeystoreFixture::new("empty-unlock-file-test");
     std::fs::write(&fixture.password_file, "").expect("empty password file");
@@ -85,7 +72,6 @@ fn runtime_config_empty_unlock_file_fails() {
 
 struct KeystoreFixture {
     _dir: TempDir,
-    keystore_path: std::path::PathBuf,
     password_file: std::path::PathBuf,
     runtime_config: std::path::PathBuf,
 }
@@ -109,7 +95,6 @@ impl KeystoreFixture {
         write_runtime_config(&runtime_config, &keystore_path, &password_file);
         Self {
             _dir: dir,
-            keystore_path,
             password_file,
             runtime_config,
         }

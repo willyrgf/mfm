@@ -2265,20 +2265,20 @@ async fn observation_cursor_lifecycle_is_epoch_bound_without_ttl() {
     .expect("age cursor");
     decode_observation_cursor(&store.pool, &cursor, &metadata)
         .await
-        .expect("old issued_at does not expire current-epoch cursor");
+        .expect("aged issued_at does not expire current-epoch cursor");
 
     sqlx::query(
         "UPDATE run_observation_cursors \
-         SET store_epoch = 'mfm.store.epoch.v1:old' \
+         SET store_epoch = 'mfm.store.epoch.v1:prior' \
          WHERE token_hash = $1",
     )
     .bind(&token_hash)
     .execute(&store.pool)
     .await
-    .expect("move cursor to old epoch");
+    .expect("move cursor to prior epoch");
     let expired = decode_observation_cursor(&store.pool, &cursor, &metadata)
         .await
-        .expect_err("old epoch cursor expires");
+        .expect_err("prior epoch cursor expires");
     assert_cursor_expired(expired);
 
     drop_schema(&store, &schema).await;

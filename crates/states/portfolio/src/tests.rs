@@ -5,19 +5,19 @@ use mfm_portfolio_model::wallet::WalletSubject;
 use mfm_values::MfmConfig as _;
 
 #[test]
-fn removed_portfolio_version_fields_are_rejected_on_decode() {
+fn unknown_portfolio_config_fields_are_rejected_on_decode() {
     let workflow_error =
-        serde_json::from_str::<PortfolioWorkflowConfig>(r#"{"workflow_version":1}"#)
-            .expect_err("stale workflow version must fail");
+        serde_json::from_str::<PortfolioWorkflowConfig>(r#"{"unexpected_field":1}"#)
+            .expect_err("unknown workflow field must fail");
     assert!(workflow_error.to_string().contains("unknown field"));
 
     let pin_error =
-        serde_json::from_str::<PinViewsConfig>(r#"{"pin_version":1,"pinned_networks":[]}"#)
-            .expect_err("stale pin version must fail");
+        serde_json::from_str::<PinViewsConfig>(r#"{"pinned_networks":[],"unexpected_field":1}"#)
+            .expect_err("unknown pin field must fail");
     assert!(pin_error.to_string().contains("unknown field"));
 
-    let merge_error = serde_json::from_str::<MergeObservationsConfig>(r#"{"merge_version":1}"#)
-        .expect_err("stale merge version must fail");
+    let merge_error = serde_json::from_str::<MergeObservationsConfig>(r#"{"unexpected_field":1}"#)
+        .expect_err("unknown merge field must fail");
     assert!(merge_error.to_string().contains("unknown field"));
 }
 
