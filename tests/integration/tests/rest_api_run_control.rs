@@ -1176,11 +1176,10 @@ fn write_evm_runtime_config_with_malformed_signers(
     let mut config = std::fs::read_to_string(&path).expect("runtime config");
     config.push_str(
         r#"
-[evm.signers.deployer]
+[signers.deployer]
 provider = "raw-private-key"
 entry_id = "not-a-uuid"
-keystore_path = "/runtime/keystore.json"
-unlock_file = "/runtime/unlock"
+private_key = "placeholder-private-key-value"
 "#,
     );
     std::fs::write(&path, config).expect("write malformed signer runtime config");
