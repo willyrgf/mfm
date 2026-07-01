@@ -1,8 +1,8 @@
 error[E0277]: the trait bound `TypedSpecCertificationInput: From<TypedExecutionSpec>` is not satisfied
-  --> tests/ui/fail/raw_typed_spec_not_certification_input.rs:10:32
+  --> tests/ui/fail/uncertified_typed_spec_not_certification_input.rs:10:32
    |
-10 |     let _ = certify_typed_spec(raw_spec(), &registry);
-   |             ------------------ ^^^^^^^^^^ the trait `From<TypedExecutionSpec>` is not implemented for `TypedSpecCertificationInput`
+10 |     let _ = certify_typed_spec(uncertified_spec(), &registry);
+   |             ------------------ ^^^^^^^^^^^^^^^^^^ the trait `From<TypedExecutionSpec>` is not implemented for `TypedSpecCertificationInput`
    |             |
    |             required by a bound introduced by this call
    |

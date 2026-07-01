@@ -1,8 +1,8 @@
 error[E0308]: mismatched types
- --> tests/ui/fail/raw_typed_spec.rs:9:39
+ --> tests/ui/fail/uncertified_typed_spec.rs:9:39
   |
-9 |     let _ = CertifiedRuntimeSpec::new(raw_spec());
-  |             ------------------------- ^^^^^^^^^^ expected `CertifiedTypedSpec`, found `TypedExecutionSpec`
+9 |     let _ = CertifiedRuntimeSpec::new(uncertified_spec());
+  |             ------------------------- ^^^^^^^^^^^^^^^^^^ expected `CertifiedTypedSpec`, found `TypedExecutionSpec`
   |             |
   |             arguments to this function are incorrect
   |
