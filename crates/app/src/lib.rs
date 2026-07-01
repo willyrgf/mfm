@@ -2295,9 +2295,7 @@ fn certified_evm_chain_guards_for_failed_node(
     launch: &RunLaunchEvidence,
     node_id: &mfm_ids::NodeId,
 ) -> Result<Vec<EvmChainGuard>, AppError> {
-    let node = runtime_spec
-        .node(node_id)
-        .ok_or_else(replay_diagnostic_error)?;
+    let node = certified_evm_guard_node_for_failed_node(runtime_spec, node_id)?;
     let artifact = launch_config_artifact_for_node(launch, node)?;
     let mut guards = mfm_adapters_portfolio::evm_chain_guards_from_launch_config(
         &node.config_ref.schema_id,
@@ -2312,6 +2310,25 @@ fn certified_evm_chain_guards_for_failed_node(
         .map_err(|_| replay_diagnostic_error())?,
     );
     Ok(guards)
+}
+
+fn certified_evm_guard_node_for_failed_node<'a>(
+    runtime_spec: &'a CertifiedRuntimeSpec,
+    node_id: &mfm_ids::NodeId,
+) -> Result<&'a spec::NodeSpec, AppError> {
+    let node = runtime_spec
+        .node(node_id)
+        .ok_or_else(replay_diagnostic_error)?;
+    if let Some(spec::FrameworkNodeSpec::SideEffectVerify(verify)) = &node.framework {
+        let submit_node = runtime_spec
+            .node(&verify.submit_node_id)
+            .ok_or_else(replay_diagnostic_error)?;
+        if submit_node.side_effect.is_none() || submit_node.framework.is_some() {
+            return Err(replay_diagnostic_error());
+        }
+        return Ok(submit_node);
+    }
+    Ok(node)
 }
 
 fn launch_config_artifact_for_node<'a>(

@@ -578,6 +578,86 @@ async fn app_runner_resumes_replays_and_renders_deploy_lifecycle_run() {
 }
 
 #[tokio::test]
+async fn replay_diagnostic_resolves_evm_guard_from_side_effect_submit_node() {
+    let store = test_run_store();
+    let artifacts = crate::artifact_read_provider_from_retained(store.clone());
+    let signer = test_contract_signer();
+    let config = deploy_config(&signer.address);
+    let mut certification = CertificationRegistry::new();
+    mfm_op_evm_contract_lifecycle::register_contract_lifecycle_certification_descriptors(
+        &mut certification,
+    )
+    .expect("contract certification descriptors");
+    let mut runners = ErasedRunnerRegistry::new();
+    mfm_adapters_evm_contracts::register_contract_lifecycle_runners_with_factory(
+        &mut runners,
+        Arc::new(TestRuntimeFactory::with_signer(
+            artifacts,
+            Arc::new(signer.provider),
+            true,
+        )),
+    )
+    .expect("contract runners");
+    let services =
+        make_run_services_with_certification_registry(runners, store.clone(), store, certification);
+    let request = prepare_evm_entry_point_request(
+        &services,
+        "evm_contract_deploy",
+        serde_json::to_value(config).expect("deploy config json"),
+    )
+    .await;
+    let runtime_spec =
+        CertifiedRuntimeSpec::new(request.certified_spec.clone()).expect("runtime spec");
+    let verify_node = runtime_spec
+        .topological_order()
+        .iter()
+        .filter_map(|node_id| runtime_spec.node(node_id))
+        .find(|node| {
+            matches!(
+                &node.framework,
+                Some(mfm_spec::v1::FrameworkNodeSpec::SideEffectVerify(_))
+            )
+        })
+        .expect("deploy spec has side-effect verifier");
+    let Some(mfm_spec::v1::FrameworkNodeSpec::SideEffectVerify(verify)) = &verify_node.framework
+    else {
+        unreachable!("matched side-effect verifier");
+    };
+    let submit_node = runtime_spec
+        .node(&verify.submit_node_id)
+        .expect("submit node is certified");
+    assert!(submit_node.side_effect.is_some());
+    assert_ne!(
+        verify_node.config_ref.schema_id, submit_node.config_ref.schema_id,
+        "verifier framework config must not be used as EVM guard authority"
+    );
+
+    let guards = crate::certified_evm_chain_guards_for_failed_node(
+        &runtime_spec,
+        &request.evidence,
+        &verify_node.node_id,
+    )
+    .expect("verifier diagnostics derive submit-node guards");
+    assert!(
+        guards.iter().any(|guard| {
+            guard.network_id().as_str() == "reth-dev" && guard.expected_chain_id() == 31337
+        }),
+        "derived guards must include the submit node's certified EVM guard"
+    );
+    let details = json!({
+        "network_id": "reth-dev",
+        "expected_chain_id": 31337,
+        "observed_chain_id": 31338,
+        "source_ref": "reth-dev",
+        "policy_id": "reth-dev",
+    });
+    let expected =
+        events::RedactedJson::new(crate::canonical_value_digest(&details).expect("details digest"));
+    crate::verify_replay_public_details(Some(&expected), &details, &guards)
+        .expect("verifier diagnostic details match submit-node guard");
+}
+
+#[tokio::test]
 async fn app_runner_resumes_replays_and_renders_full_lifecycle_run() {
     let store = test_run_store();
     let artifacts = crate::artifact_read_provider_from_retained(store.clone());
