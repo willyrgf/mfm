@@ -19,7 +19,7 @@ The simplified model is:
 ```text
 FactRecorded
   -> FactDescriptor
-  -> FactKey from kind-scoped subject fields
+  -> FactKey from kind-scoped subject material
   -> fact_index row
   -> fact_index_terms rows from subject/result/metadata fields
   -> FactQueryReceipt pinned by FactQueryEvidence
@@ -27,9 +27,9 @@ FactRecorded
 
 `FactDescriptor` binds the fact kind, subject type, response type, field
 definitions, ordering policies, and exposure rules. Only descriptor fields with
-`source = Subject` participate in `FactKey` derivation. Result and metadata
-fields make observed values searchable and orderable without changing subject
-identity.
+`source = Subject` define subject material and participate in `FactKey`
+derivation. Result and metadata fields make observed values searchable and
+orderable without changing subject identity.
 
 In short:
 
@@ -73,12 +73,11 @@ domain into `FactRef`.
 
 - Reuse operations, states, adapters, transports, runtime, store, and replay.
 - Treat `FactRecorded` as the canonical platform knowledge primitive.
-- Author facts through one sealed/derive-oriented `MfmFactType`.
+- Author facts through one derive-owned `MfmFactType`.
 - Use one durable `FactDescriptor` per fact shape.
 - Treat `FactDescriptor` as certified authority allowed by the certified spec
   for the producing node, not merely store-admitted data.
-- Derive `FactKey` only from fact kind, descriptor subject fields, and canonical
-  subject material.
+- Derive `FactKey` only from fact kind and canonical subject material.
 - Support observed-result indexing in v1 through descriptor-owned result
   fields.
 - Support metadata fields for store/claim fields such as `recorded_at`,
@@ -183,6 +182,9 @@ hash is not embedded inside those canonical bytes.
 
 The subject is the stable identity of what the fact is about. It is typed
 canonical material described by `source = Subject` fields in `FactDescriptor`.
+In v1, every subject field is required identity material. If a value should be
+searchable but should not change identity, it must be modeled as a result or
+metadata field, not as a subject field.
 
 For a wallet balance, the subject can include chain, network, account, asset,
 and balance kind. It should not include the balance amount.
@@ -206,7 +208,7 @@ about. Otherwise it belongs in provenance, result fields, or metadata fields.
 Derivation:
 
 ```text
-fact_subject_namespace_hash = hash(canonical { fact_kind, key_part subject fields })
+fact_subject_namespace_hash = hash(canonical { fact_kind, subject fields })
 subject_material_hash = hash(canonical subject material)
 fact_key = hash(
   "mfm.fact-key.v1",
@@ -274,6 +276,24 @@ It binds:
 
 The claim is not an unqualified global truth. It is an observation with
 provenance.
+
+### FactClaimId
+
+`FactClaimId` is the stable projection identity for one recorded claim.
+
+V1 uses the run-stream event coordinate:
+
+```rust
+pub struct FactClaimId {
+    pub source_run_id: RunId,
+    pub source_seq: StreamSeq,
+    pub source_ordinal: EventOrdinal,
+}
+```
+
+`FactClaimId` identifies a claim. `FactKey` identifies the claim subject. Query
+joins for result and metadata terms must use `FactClaimId`; `FactKey` is only
+for grouping claims about the same subject.
 
 ### FactRef
 
@@ -473,19 +493,36 @@ descriptor is both:
 
 ## FactDescriptor Contract
 
-Every `FactRecorded` producer must use a sealed/derive-owned fact type. The
+Every `FactRecorded` producer must use a derive-owned fact type. The
 runner API should make this the only available path for fact publication.
 
 Conceptual API:
 
 ```rust
-pub trait MfmFactType: private::Sealed {
+pub trait MfmFactType: MfmValue + facts_private::DerivedFactMarker {
     type Subject: MfmValue;
     type Response: MfmValue;
 
     fn descriptor() -> &'static FactDescriptor;
+    fn subject(&self) -> &Self::Subject;
+    fn response(&self) -> &Self::Response;
+}
+
+#[doc(hidden)]
+pub mod facts_private {
+    pub trait DerivedFactMarker {
+        const DERIVE_FINGERPRINT: ContentDigest;
+    }
 }
 ```
+
+`MfmFactType` is derive-owned, but not enforced through an inaccessible private
+supertrait. The derive macro emits the hidden marker implementation, descriptor
+artifact, subject/response accessors, and compile-time shape checks. The public
+recorder API accepts only `T: MfmFactType`, and the facts kernel still validates
+descriptor bytes, hashes, field extraction, and certified descriptor allow-lists
+at append time. Manual implementations are unsupported because they cannot
+produce admitted descriptor authority by assertion alone.
 
 Framework-owned canonicalization turns typed subject values into canonical bytes.
 Field extraction must be descriptor-declared and kernel-owned. Append and
@@ -511,16 +548,14 @@ pub struct FactDescriptor {
 
 pub struct FactFieldDescriptor {
     pub field_id: FactFieldId,
-    pub source: FactFieldSource,
     pub path: FactFieldPath,
     pub value_type: FactFieldValueType,
-    pub extraction: FactFieldExtraction,
+    pub accessor: FactFieldAccessor,
     pub operators: &'static [FactQueryOperator],
     pub exposure: FactFieldExposure,
     pub unit: Option<FactUnit>,
     pub scale: Option<FactScale>,
     pub sortable: bool,
-    pub key_part: bool,
     pub required: bool,
 }
 
@@ -537,9 +572,6 @@ pub struct FactOrderingDescriptor {
 
 pub struct FactOrderingTerm {
     pub field_id: FactFieldId,
-    pub source: FactFieldSource,
-    pub path: FactFieldPath,
-    pub value_type: FactFieldValueType,
     pub direction: SortDirection,
     pub nulls: NullOrdering,
     pub tie_breaker: bool,
@@ -550,14 +582,15 @@ pub struct FactOrderingTerm {
 schema-facing pointer that may evolve across descriptor versions. Index rows,
 ordering policies, compatibility rules, and query evidence bind to `field_id`.
 
-`key_part = true` is valid only for `source = Subject`. The ordered set of
-required subject fields with `key_part = true` defines subject key material for
-the descriptor. Result and metadata fields never participate in `FactKey`.
+`accessor` is the single source of field extraction authority. Its variant
+defines whether the field is `Subject`, `Result`, or `Metadata`. In v1, every
+`SubjectPath` field is required and participates in `FactKey`; result and
+metadata fields never participate in `FactKey`.
 
 V1 extraction grammar:
 
 ```rust
-pub enum FactFieldExtraction {
+pub enum FactFieldAccessor {
     SubjectPath(CanonicalValuePath),
     ResponsePath(CanonicalValuePath),
     Metadata(FactMetadataField),
@@ -585,6 +618,16 @@ V1 extraction rules:
 This is intentionally smaller than a general expression language. It is
 deterministic, bounded, and replayable from retained authority.
 
+Descriptor validation must reject:
+
+- duplicate `field_id` values
+- zero `SubjectPath` fields
+- optional `SubjectPath` fields
+- descriptor paths whose prefix conflicts with the accessor source
+- ordering terms that reference missing or non-sortable fields
+- fields whose allowed operators conflict with their value type
+- unsupported timestamp, decimal, digest, numeric bound, or normalization rules
+
 Ordering policies must define type comparison, null handling, and deterministic
 tie-breakers. Store order should be the final fallback tie-breaker.
 
@@ -592,7 +635,7 @@ Descriptor hashing:
 
 ```text
 fact_descriptor_hash = hash(canonical FactDescriptor bytes)
-fact_subject_namespace_hash = hash(canonical { fact_kind, key_part subject fields })
+fact_subject_namespace_hash = hash(canonical { fact_kind, subject fields })
 subject_material_hash = hash(canonical subject material)
 fact_key = hash(
   "mfm.fact-key.v1",
@@ -631,15 +674,15 @@ pub struct WalletBalanceFact {
 }
 
 pub struct WalletBalanceSubject {
-    #[mfm_fact(field = "subject.chain", key)]
+    #[mfm_fact(field = "subject.chain")]
     pub chain: ChainRef,
-    #[mfm_fact(field = "subject.network", key)]
+    #[mfm_fact(field = "subject.network")]
     pub network: NetworkRef,
-    #[mfm_fact(field = "subject.account_ref", key)]
+    #[mfm_fact(field = "subject.account_ref")]
     pub account_ref: AccountRef,
-    #[mfm_fact(field = "subject.asset_ref", key)]
+    #[mfm_fact(field = "subject.asset_ref")]
     pub asset_ref: AssetRef,
-    #[mfm_fact(field = "subject.balance_kind", key)]
+    #[mfm_fact(field = "subject.balance_kind")]
     pub balance_kind: BalanceKind,
 }
 
@@ -665,13 +708,13 @@ pub struct WeatherObservationFact {
 }
 
 pub struct WeatherObservationSubject {
-    #[mfm_fact(field = "subject.country", key)]
+    #[mfm_fact(field = "subject.country")]
     pub country: CountryCode,
-    #[mfm_fact(field = "subject.locality", key)]
+    #[mfm_fact(field = "subject.locality")]
     pub locality: Locality,
-    #[mfm_fact(field = "subject.coordinate_cell", key)]
+    #[mfm_fact(field = "subject.coordinate_cell")]
     pub coordinate_cell: CoordinateCell,
-    #[mfm_fact(field = "subject.measure", key)]
+    #[mfm_fact(field = "subject.measure")]
     pub measure: WeatherMeasure,
 }
 
@@ -760,7 +803,7 @@ material, computes the canonical response hash, admits the artifact, derives
 index terms, and records `FactRecorded` from that same material.
 
 There is no valid old-shape `FactRecorded` after this reset. If code cannot
-provide a sealed `MfmFactType`, it cannot record a fact.
+provide a derive-owned `MfmFactType`, it cannot record a fact.
 
 ### Batched Response Binding
 
@@ -837,6 +880,7 @@ Stores one indexed claim per `FactRecorded` with `FactVisibility::Indexed`.
 Conceptual columns:
 
 ```text
+fact_claim_id
 source_run_id
 source_seq
 source_ordinal
@@ -877,12 +921,13 @@ Stores generic typed field terms for indexed facts.
 Logical shape:
 
 ```text
+fact_claim_id
 source_run_id
 source_seq
 source_ordinal
 fact_key
 fact_descriptor_hash
-field_source            // subject | result | metadata
+field_source            // derived from descriptor accessor
 field_id
 field_path
 value_type
@@ -908,6 +953,7 @@ material, response artifacts, and claim metadata.
 Useful logical indexes:
 
 ```text
+(fact_claim_id, field_id)
 (fact_descriptor_hash, field_id, typed_value)
 (audience, visibility_scope, fact_kind, recorded_at desc)
 (audience, visibility_scope, fact_key, recorded_at desc)
@@ -918,6 +964,10 @@ Useful logical indexes:
 These are logical access paths. A physical implementation may satisfy them with
 joins against `fact_index`, partial indexes per audience, or safe
 denormalization of audience and fact kind onto term rows.
+
+Term joins that combine subject, result, and metadata predicates for the same
+claim must join on `fact_claim_id`. `fact_key` must not be used as the claim
+join key because it groups all claims for the same subject.
 
 ### Projection Algorithm
 
@@ -930,19 +980,20 @@ For each appended `FactRecorded`:
 4. Validate fact kind, subject schema id, response schema id, and descriptor
    hash.
 5. Canonicalize subject material.
-6. Recompute subject material hash and fact subject namespace hash.
-7. Recompute `FactKey` from fact subject namespace hash and subject material
+6. Derive `FactClaimId` from the run-stream event coordinate.
+7. Recompute subject material hash and fact subject namespace hash.
+8. Recompute `FactKey` from fact subject namespace hash and subject material
    hash.
-8. Validate that the response artifact contains exactly one claim payload in v1.
-9. Derive subject terms from subject material using the kernel extractor.
-10. Derive result terms from the typed response artifact
+9. Validate that the response artifact contains exactly one claim payload in v1.
+10. Derive subject terms from subject material using the kernel extractor.
+11. Derive result terms from the typed response artifact
     using the kernel extractor.
-11. Derive metadata terms from claim/store metadata using the kernel extractor.
-12. Verify field id, type, unit, scale, operator, exposure, size, and scalar
+12. Derive metadata terms from claim/store metadata using the kernel extractor.
+13. Verify field id, type, unit, scale, operator, exposure, size, and scalar
     constraints.
-13. If visibility is `RunPrivate`, admit descriptor evidence and insert only the
+14. If visibility is `RunPrivate`, admit descriptor evidence and insert only the
     run event and artifacts; do not insert fact index or term rows.
-14. If visibility is `Indexed`, upsert descriptor index, fact index, and index
+15. If visibility is `Indexed`, upsert descriptor index, fact index, and index
     terms inside the same append transaction.
 
 If projection fails for an indexed fact, the append fails. MFM should not commit
@@ -957,10 +1008,7 @@ ordering policy. Different policies are different semantics.
 Ordering terms are canonical structures:
 
 ```text
-source       // metadata | result | subject
 field_id
-path
-value_type
 direction
 nulls
 tie_breakers
@@ -1111,7 +1159,7 @@ pub struct FactQueryEvidence {
 
 pub struct CanonicalFactQueryPlan {
     pub store_scope: StoreScopeRef,
-    pub visibility: FactVisibility,
+    pub query_scope: FactQueryScope,
     pub query_compiler_version: Version,
     pub canonicalizer_version: Version,
     pub resolved_descriptors: Vec<ContentDigest>,
@@ -1120,6 +1168,11 @@ pub struct CanonicalFactQueryPlan {
     pub canonical_query_hash: ContentDigest,
     pub ordering: FactOrdering,
     pub limit: Option<u64>,
+}
+
+pub struct FactQueryScope {
+    pub audience: FactAudience,
+    pub scope: FactVisibilityScope,
 }
 
 pub struct FactQueryReceipt {
@@ -1132,6 +1185,9 @@ pub struct FactQueryReceipt {
     pub result_cardinality: QueryResultCardinality,
 }
 ```
+
+`FactQueryScope` is read-specific. `RunPrivate` is not queryable through the fact
+index and therefore cannot appear in a canonical query plan.
 
 This evidence covers selected facts, bounded result sets, and empty-result
 branches. Returned refs are enough only when replay can deterministically
@@ -1235,6 +1291,7 @@ The ref DTO should remain generic:
 
 ```rust
 pub struct FactRef {
+    pub fact_claim_id: FactClaimId,
     pub source_run_id: RunId,
     pub source_seq: StreamSeq,
     pub source_ordinal: EventOrdinal,
@@ -1262,8 +1319,7 @@ pub struct FactRef {
 
 It intentionally does not contain domain columns such as `chain`, `network`,
 `asset`, `country`, `measure`, `amount`, `temperature`, or `block_number`.
-Those are descriptor-derived fields joined through `fact_key` or source claim
-identity.
+Those are descriptor-derived fields joined through `fact_claim_id`.
 
 Public API output is a filtered `FactRef` view for `audience = Platform`. It
 must not return canonical subject material or response artifacts wholesale.
@@ -1334,6 +1390,8 @@ Required validation:
 
 - every fact index row points to an existing `FactRecorded` event
 - every fact index row has `FactVisibility::Indexed`
+- every fact index row and term row uses the `FactClaimId` derived from source
+  run id, sequence, and ordinal
 - public platform APIs expose only authorized `audience = Platform` rows
 - no `RunPrivate` fact creates fact index or term rows
 - descriptor hash matches descriptor canonical bytes
@@ -1380,7 +1438,7 @@ discarded with the old store baseline.
 1. Document `FactRecorded` as the platform knowledge primitive.
 2. Add explicit scoped `FactVisibility` with `RunPrivate` and indexed
    `FactAudience::{Control, Platform}`.
-3. Add sealed/derive-owned `MfmFactType` support.
+3. Add derive-owned `MfmFactType` support.
 4. Add certified `FactDescriptor` admission and validation against the
    producing node's certified spec.
 5. Replace ad hoc `FactKey` construction with typed subject material.
@@ -1406,7 +1464,8 @@ discarded with the old store baseline.
 - Visibility is explicit and scoped; there is no default public publication.
 - `Control` is the non-public indexed audience for collector checkpoints and
   shared operational state.
-- Every `FactRecorded` must use a sealed typed `MfmFactType` after the reset.
+- Every `FactRecorded` must use a derive-owned typed `MfmFactType` after the
+  reset.
 - Fact descriptors are certified authority: a node may emit only descriptors
   allowed by its certified spec.
 - `FactDescriptor` is the durable shape for subject identity, result fields,
@@ -1466,7 +1525,8 @@ discarded with the old store baseline.
 Suggested crate placement for the first planning pass:
 
 - `crates/kernel/facts`: fact descriptors, field descriptors, extraction
-  grammar, `FactKey`, `FactRef`, query plan/receipt types, and validation logic.
+  grammar, `FactKey`, `FactClaimId`, `FactRef`, query scope/plan/receipt types,
+  and validation logic.
 - `crates/kernel/events`: new `FactRecorded` event payload and normalized
   `FactClaim` shape.
 - `crates/kernel/values`: shared `MfmValue` canonical value integration needed
@@ -1491,8 +1551,10 @@ Gate 1: facts kernel types and canonical contracts.
 
 - `FactVisibility::{RunPrivate, Indexed { audience, scope }}`
 - `FactAudience::{Control, Platform}`
-- `FactDescriptor`, `FactFieldDescriptor`, field ids, and ordering descriptors
+- `FactDescriptor`, `FactFieldDescriptor`, `FactFieldAccessor`, field ids, and
+  ordering descriptors
 - kind-scoped `FactKey` derivation
+- `FactClaimId` derived from run-stream event coordinates
 - v1 field extraction grammar and validation
 - `FactRecordInput`, normalized `FactClaim`, `FactRef`
 - canonical hash golden tests and descriptor compatibility tests
@@ -1524,6 +1586,7 @@ Gate 4: reusable query compiler and replay evidence.
 - explicit ordering policies for store commit order, observed time, and
   descriptor-declared result fields
 - semantic `StoreReadFrontier`
+- read-only `FactQueryScope`
 - `CanonicalFactQueryPlan` with descriptor resolution,
   compiler/canonicalizer version, scope decision evidence, canonical query,
   ordering, and limit
