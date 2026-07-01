@@ -1899,12 +1899,17 @@ where
         runtime_spec: &CertifiedRuntimeSpec,
         run_id: &RunId,
     ) -> Result<DriveStatus, AppError> {
-        if let Some(status) = self
-            .drive_binding_decline_status(runtime_spec, run_id)
-            .await?
-        {
+        let context = self.load_verified_status_read_context(run_id).await?;
+        if let Some(status) = self.drive_binding_decline_status(runtime_spec, &context)? {
             return Ok(status);
         }
+        let launch_evidence = stored_launch_evidence_from_run_admitted(
+            &self.artifacts,
+            context.read.view().run_admitted(),
+        )
+        .await?;
+        self.scheduler
+            .validate_admitted_run_ingress(runtime_spec, &launch_evidence)?;
         let mut lease = match self.acquire_execution_claim_for_drive(run_id).await? {
             ExecutionClaimAcquire::Acquired(lease) => lease,
             ExecutionClaimAcquire::Busy => return Ok(DriveStatus::ExecutionClaimBusy),
@@ -1936,12 +1941,11 @@ where
         }
     }
 
-    async fn drive_binding_decline_status(
+    fn drive_binding_decline_status(
         &self,
         runtime_spec: &CertifiedRuntimeSpec,
-        run_id: &RunId,
+        context: &VerifiedStatusReadContext,
     ) -> Result<Option<DriveStatus>, AppError> {
-        let context = self.load_verified_status_read_context(run_id).await?;
         let compatibility = self
             .scheduler
             .run_admitted_binding_compatibility(runtime_spec, context.read.view().run_admitted())?;
@@ -2248,6 +2252,93 @@ pub async fn load_certified_spec_for_run(
     )?;
     validate_run_admitted_matches_spec(run_admitted, certified.envelope())?;
     Ok(certified)
+}
+
+async fn stored_launch_evidence_from_run_admitted(
+    artifacts: &(impl store::RetainedArtifactReadProvider + ?Sized),
+    run_admitted: &events::RunAdmitted,
+) -> Result<RunLaunchEvidence, AppError> {
+    let spec_artifact = stored_run_launch_artifact(
+        artifacts,
+        run_artifact_requirement(
+            store::EventArtifactReferenceSource::RunSpec,
+            &run_admitted.spec_artifact,
+            events::ArtifactRole::TypedExecutionSpec,
+        ),
+        |evidence| validate_spec_artifact_evidence(run_admitted, evidence),
+    )
+    .await?;
+    let certificate_artifact = stored_run_launch_artifact(
+        artifacts,
+        run_artifact_requirement(
+            store::EventArtifactReferenceSource::RunCertificate,
+            &run_admitted.certificate_artifact,
+            events::ArtifactRole::TypedSpecCertificate,
+        ),
+        |evidence| validate_certificate_artifact_evidence(run_admitted, evidence),
+    )
+    .await?;
+    let mut config_artifacts = Vec::with_capacity(run_admitted.config_artifacts.len());
+    for config in &run_admitted.config_artifacts {
+        config_artifacts.push(
+            stored_run_launch_artifact(
+                artifacts,
+                run_artifact_requirement(
+                    store::EventArtifactReferenceSource::RunConfig,
+                    config,
+                    events::ArtifactRole::TypedConfig,
+                ),
+                |_| Ok(()),
+            )
+            .await?,
+        );
+    }
+    let mut seed_cells = Vec::with_capacity(run_admitted.seed_cells.len());
+    for cell in &run_admitted.seed_cells {
+        let artifact = artifacts
+            .read_retained_artifact(&seed_cell_artifact_requirement(cell))
+            .await?;
+        let evidence = artifact.evidence().clone();
+        validate_artifact_requirement_for_app(
+            seed_cell_artifact_requirement(cell),
+            &evidence,
+            ErrorClass::Internal,
+            "RunAdmittedSeedArtifactMismatch",
+            "RunAdmitted seed artifact evidence does not match retained bytes",
+        )?;
+        seed_cells.push(RunLaunchSeedCell {
+            bytes: artifact.into_bytes(),
+            cell: cell.clone(),
+        });
+    }
+    Ok(RunLaunchEvidence {
+        entry_point: run_admitted.entry_point.clone(),
+        spec_artifact,
+        certificate_artifact,
+        config_artifacts,
+        seed_cells,
+    })
+}
+
+async fn stored_run_launch_artifact(
+    artifacts: &(impl store::RetainedArtifactReadProvider + ?Sized),
+    requirement: store::EventArtifactRequirement,
+    validate: impl FnOnce(&store::ArtifactEvidenceRef) -> Result<(), AppError>,
+) -> Result<RunLaunchArtifact, AppError> {
+    let artifact = artifacts.read_retained_artifact(&requirement).await?;
+    let evidence = artifact.evidence().clone();
+    validate_artifact_requirement_for_app(
+        requirement,
+        &evidence,
+        ErrorClass::Internal,
+        "RunAdmittedArtifactMismatch",
+        "RunAdmitted artifact evidence does not match retained bytes",
+    )?;
+    validate(&evidence)?;
+    Ok(RunLaunchArtifact {
+        bytes: artifact.into_bytes(),
+        evidence,
+    })
 }
 
 async fn load_runtime_spec_for_run(
@@ -2659,6 +2750,21 @@ fn seed_artifact_requirement(
         producer_node_id: None,
         producer_seed_id: Some(seed_spec.seed_id.clone()),
         artifact_role: Some(events::ArtifactRole::SeedInput),
+    }
+}
+
+fn seed_cell_artifact_requirement(cell: &events::SeedCellRef) -> store::EventArtifactRequirement {
+    store::EventArtifactRequirement {
+        source: store::EventArtifactReferenceSource::SeedCell,
+        artifact_id: cell.seed_artifact.artifact_id.clone(),
+        digest: Some(cell.seed_artifact.content_digest.clone()),
+        byte_len: Some(cell.seed_artifact.byte_len),
+        media_type: Some(cell.seed_artifact.media_type.clone()),
+        schema_id: Some(cell.seed_artifact.schema_id.clone()),
+        semantic_type_id: cell.seed_artifact.semantic_type_id.clone(),
+        producer_node_id: None,
+        producer_seed_id: Some(cell.seed_id.clone()),
+        artifact_role: Some(cell.seed_artifact.role),
     }
 }
 

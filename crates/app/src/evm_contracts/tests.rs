@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     make_run_services_with_certification_registry, prepare_entry_point_run_launch,
-    EntryPointRunLaunchInput, RunLaunchRequest, RunModeStatus, RunServices,
+    EntryPointRunLaunchInput, ErrorClass, RunLaunchRequest, RunModeStatus, RunServices,
 };
 use mfm_adapters_evm_contracts::{
     ensure_prepared_invocation_public, EvmContractRuntime, EvmContractRuntimeFactory,
@@ -28,7 +28,7 @@ use mfm_evm_capabilities::{
 use mfm_evm_contract_config::{ConfigurePhaseConfig, DeployPhaseConfig, ValidatePhaseConfig};
 use mfm_evm_contract_model::{ConfiguredContract, DeployedContract};
 use mfm_op_evm_contract_lifecycle::ContractLifecycleConfig;
-use mfm_runtime::ErasedRunnerRegistry;
+use mfm_runtime::{CertifiedRuntimeSpec, ErasedRunnerRegistry};
 use mfm_signing::{
     PublicSigningIdentity, SignatureBytes, SignerRef, SigningError, SigningFuture, SigningProvider,
     SigningRequest, SigningResult,
@@ -198,6 +198,20 @@ async fn app_runner_resumes_replays_and_renders_validate_only_lifecycle_run() {
 }
 
 #[tokio::test]
+async fn app_resume_missing_runtime_config_fails_before_claim_or_attempt() {
+    assert_resume_runtime_config_ingress_failure(None).await;
+}
+
+#[tokio::test]
+async fn app_resume_malformed_runtime_config_fails_before_claim_or_attempt() {
+    let runtime_config_dir = tempfile::tempdir().expect("runtime config tempdir");
+    let runtime_config_path = runtime_config_dir.path().join("runtime.toml");
+    std::fs::write(&runtime_config_path, "[evm.sources.bad\n").expect("write malformed config");
+
+    assert_resume_runtime_config_ingress_failure(Some(&runtime_config_path)).await;
+}
+
+#[tokio::test]
 async fn app_runner_reports_execution_claim_lost_after_renewal_failure() {
     let store = test_run_store();
     let artifacts = crate::artifact_read_provider_from_retained(store.clone());
@@ -255,6 +269,103 @@ async fn app_runner_reports_execution_claim_lost_after_renewal_failure() {
     let resumed = launch.await.expect("launch task");
 
     assert_eq!(resumed.scheduler_status, "execution_claim_lost");
+}
+
+async fn assert_resume_runtime_config_ingress_failure(
+    runtime_config_path: Option<&std::path::Path>,
+) {
+    let store = test_run_store();
+    let artifacts = crate::artifact_read_provider_from_retained(store.clone());
+    let configured = configured_contract();
+    let mut certification = CertificationRegistry::new();
+    mfm_op_evm_contract_lifecycle::register_contract_lifecycle_certification_descriptors(
+        &mut certification,
+    )
+    .expect("contract certification descriptors");
+    let mut launch_runners = ErasedRunnerRegistry::new();
+    mfm_adapters_evm_contracts::register_contract_lifecycle_runners_with_factory(
+        &mut launch_runners,
+        Arc::new(TestRuntimeFactory::new(artifacts.clone())),
+    )
+    .expect("contract runners");
+    let launch_services = make_run_services_with_certification_registry(
+        launch_runners,
+        store.clone(),
+        store.clone(),
+        certification.clone(),
+    );
+    let request = prepare_evm_entry_point_request(
+        &launch_services,
+        "evm_contract_validate",
+        json!({
+            "config": validate_config(),
+            "configured": configured,
+        }),
+    )
+    .await;
+    let run_id = request.run_id.clone();
+    let runtime_spec =
+        CertifiedRuntimeSpec::new(request.certified_spec.clone()).expect("runtime spec");
+    let expected_next_seq = store
+        .expected_next_seq(&run_id)
+        .await
+        .expect("expected next seq");
+    let launch = launch_services
+        .scheduler
+        .prepare_run_launch(
+            &runtime_spec,
+            request.identity_material,
+            request.evidence,
+            expected_next_seq,
+        )
+        .expect("prepare admitted-only launch");
+    launch_services
+        .scheduler
+        .start_run(&store, launch)
+        .await
+        .expect("admit run");
+    let admitted_stream = store
+        .load_run_stream(&run_id)
+        .await
+        .expect("admitted stream");
+    assert_eq!(
+        admitted_stream.len(),
+        1,
+        "test setup must admit only RunAdmitted"
+    );
+
+    let resume_runners = crate::production_runner_registry(artifacts, runtime_config_path)
+        .expect("production runners");
+    let resume_services = make_run_services_with_certification_registry(
+        resume_runners,
+        store.clone(),
+        store.clone(),
+        certification,
+    );
+    let error = resume_services
+        .resume_stored_run(&run_id)
+        .await
+        .expect_err("resume ingress must reject missing or malformed runtime config");
+
+    assert_eq!(error.class, ErrorClass::BadRequest);
+    assert_eq!(error.code, "LaunchRunnerUnavailable");
+    assert_eq!(error.message, "A required typed runner is unavailable");
+    assert!(matches!(
+        store
+            .execution_claim_status(&run_id)
+            .await
+            .expect("execution claim status"),
+        ExecutionClaimStatus::Unclaimed
+    ));
+    let stream = store.load_run_stream(&run_id).await.expect("run stream");
+    assert_eq!(stream, admitted_stream);
+    assert!(
+        stream.iter().all(|event| !matches!(
+            event.payload(),
+            events::KernelEventPayload::StateAttemptStarted(_)
+        )),
+        "resume ingress failure must not append attempts"
+    );
 }
 
 #[tokio::test]
