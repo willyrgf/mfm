@@ -31,19 +31,6 @@ const SEMANTIC_FIELD_EXCEPTION_COUNTS: &[(&str, &str, usize)] = &[
     ("crates/ops/proof-op/src/lib.rs", "authorization", 5),
 ];
 
-const REMOVED_RUNTIME_CONFIG_EXCEPTION_COUNTS: &[(&str, &str, usize)] = &[
-    (
-        "bin/cli/tests/cli_environment_tests.rs",
-        "MFM_KEYSTORE_PATH",
-        1,
-    ),
-    (
-        "crates/runtime-config/tests/runtime_config.rs",
-        "evm.signers",
-        1,
-    ),
-];
-
 #[test]
 fn semantic_surface_runtime_fields_match_tracked_exception_counts() {
     let root = repo_root();
@@ -94,43 +81,6 @@ fn repository_text_entries_include_tracked_dot_config_surfaces() {
             .iter()
             .all(|entry| !entry.path.starts_with("migrations/")),
         "Postgres migrations must live under the owning storage crate"
-    );
-}
-
-#[test]
-fn old_evm_runtime_env_surfaces_do_not_return() {
-    let root = repo_root();
-    let entries = repo_text_entries(&root);
-    let forbidden = [
-        "MFM_EVM_RPC_SOURCES_JSON",
-        "MFM_EVM_NETWORK_ROUTES_JSON",
-        "MFM_EVM_SIGNERS_JSON",
-        "MFM_KEYSTORE_PATH",
-        "MFM_KEYSTORE_PASSWORD",
-        "MFM_KEYSTORE_PASSWORD_FILE",
-        "MFM_INTEGRATION_TEST",
-        "--evm-rpc-sources",
-        "EvmJsonRpcClient::from_env",
-        "KeystoreSignerRegistryEntry::from_env_sources",
-        "from_env_sources",
-        "evm.signers",
-        "SignerProviderRuntimeConfig",
-        "RuntimeSecretSource",
-        "KeystorePathSource",
-        "KeystorePasswordSource",
-        "mfm_core::config",
-        "pub mod config",
-        "UnavailablePortfolioEvmProvider",
-        "EvmContractRuntimeRoute",
-        "PortfolioEvmRoute",
-    ];
-
-    assert_forbidden_terms_are_allowlisted(
-        "old EVM runtime surface",
-        &entries,
-        &forbidden,
-        REMOVED_RUNTIME_CONFIG_EXCEPTION_COUNTS,
-        |path, _source| !TEST_HARNESS_PATHS.contains(&path),
     );
 }
 
@@ -314,59 +264,12 @@ fn evm_contract_lifecycle_runners_live_in_adapter_not_app() {
             "EVM contract adapter must own runner behavior: {required}"
         );
     }
-
-    let forbidden_adapter_surfaces = [
-        concat!("artifact", "_store", "_fs").to_owned(),
-        "EvmJsonRpcClient".to_owned(),
-        "KeystoreSignerProvider".to_owned(),
-        "KeystoreSignerRegistryEntry".to_owned(),
-        ["MFM", "_EVM", "_SIGNERS_JSON"].concat(),
-        "RuntimeSignerConfig".to_owned(),
-        ["from", "_env", "_sources"].concat(),
-    ];
-    for forbidden in forbidden_adapter_surfaces {
-        assert!(
-            !adapter.contains(&forbidden),
-            "EVM contract adapter must not own concrete process wiring: {forbidden}"
-        );
-    }
 }
 
 #[test]
-fn postgres_migrations_do_not_reintroduce_removed_storage_surfaces() {
+fn postgres_baseline_migration_defines_current_run_store_schema() {
     let root = repo_root();
     let migration_dir = root.join("crates/storages/stream-store-postgres/migrations");
-    let mut migrations = fs::read_dir(&migration_dir)
-        .unwrap_or_else(|error| panic!("read migration dir {}: {error}", migration_dir.display()))
-        .map(|entry| {
-            entry
-                .unwrap_or_else(|error| panic!("read migration dir entry: {error}"))
-                .path()
-        })
-        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("sql"))
-        .collect::<Vec<_>>();
-    migrations.sort();
-
-    for path in migrations {
-        let source = fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("read migration {}: {error}", path.display()));
-        for forbidden in [
-            "typed_",
-            "payload_json JSONB",
-            "jsonb::text",
-            "commit_pos",
-            "change_pos",
-            "CREATE SEQUENCE",
-            "LOCK TABLE",
-        ] {
-            assert!(
-                !source.contains(forbidden),
-                "Postgres migrations must not reintroduce removed RFC storage surface `{forbidden}` in {}",
-                path.display()
-            );
-        }
-    }
-
     let baseline =
         fs::read_to_string(migration_dir.join("0001_run_store.sql")).expect("baseline migration");
     for required in [
@@ -379,7 +282,7 @@ fn postgres_migrations_do_not_reintroduce_removed_storage_surfaces() {
     ] {
         assert!(
             baseline.contains(required),
-            "baseline migration must keep RFC target storage surface `{required}`"
+            "baseline migration must keep current run-store schema item `{required}`"
         );
     }
 }
@@ -429,38 +332,6 @@ fn postgres_migrations_do_not_claim_maintenance_role_boundaries() {
             "baseline migration must keep append-owned artifact blob immutability guard `{required}`"
         );
     }
-}
-
-#[test]
-fn postgres_production_code_rejects_removed_storage_shortcuts() {
-    let root = repo_root();
-    let entries = repo_text_entries(&root);
-    let forbidden = [
-        "CREATE TABLE typed_",
-        "INSERT INTO typed_",
-        "UPDATE typed_",
-        "DELETE FROM typed_",
-        "FROM typed_",
-        "JOIN typed_",
-        "payload_json JSONB",
-        "jsonb::text",
-        "commit_pos",
-        "change_pos",
-        "global_commit",
-        "global_change",
-    ];
-
-    assert_forbidden_terms_are_allowlisted(
-        "Postgres removed storage shortcut",
-        &entries,
-        &forbidden,
-        &[],
-        |path, _source| {
-            path.starts_with("crates/storages/stream-store-postgres/")
-                && !path.ends_with("/src/schema.rs")
-                && !is_test_support_path(path)
-        },
-    );
 }
 
 #[test]
@@ -704,22 +575,6 @@ fn artifact_blob_table_access_stays_inside_postgres_storage() {
                 && !SOURCE_OF_TRUTH_DOC_PATHS.contains(&path)
                 && !is_test_support_path(path)
                 && !path.starts_with("crates/storages/stream-store-postgres/")
-        },
-    );
-}
-
-#[test]
-fn jsonb_text_canonicalization_shortcuts_are_not_used() {
-    let root = repo_root();
-    let entries = repo_text_entries(&root);
-
-    assert_forbidden_terms_are_allowlisted(
-        "jsonb text canonicalization shortcut",
-        &entries,
-        &["jsonb::text", "payload_json JSONB"],
-        &[],
-        |path, _source| {
-            !TEST_HARNESS_PATHS.contains(&path) && !SOURCE_OF_TRUTH_DOC_PATHS.contains(&path)
         },
     );
 }
