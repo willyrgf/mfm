@@ -141,6 +141,8 @@ pub struct PortfolioReadError {
     pub message: String,
     /// Optional closed redacted diagnostic details for retained runtime evidence.
     pub redacted_details: Option<serde_json::Value>,
+    /// Whether this read error must fail the runtime attempt instead of becoming domain output.
+    pub fatal_attempt_failure: bool,
 }
 
 impl PortfolioReadError {
@@ -150,12 +152,19 @@ impl PortfolioReadError {
             code: code.into(),
             message: message.into(),
             redacted_details: None,
+            fatal_attempt_failure: false,
         }
     }
 
     /// Attaches closed redacted diagnostic details.
     pub fn with_redacted_details(mut self, details: serde_json::Value) -> Self {
         self.redacted_details = Some(details);
+        self
+    }
+
+    /// Marks this read error as a runtime attempt failure.
+    pub fn with_fatal_attempt_failure(mut self) -> Self {
+        self.fatal_attempt_failure = true;
         self
     }
 }
@@ -1068,10 +1077,9 @@ impl ReadState for ObserveBatchState {
 
     fn run<'a>(&'a self, input: Self::Input, _caps: &'a Self::Caps) -> Self::RunFuture<'a> {
         Box::pin(async move {
-            Ok(
-                observe_batch_with_backend(&self.config, &input, &UnavailablePortfolioReadBackend)
-                    .await,
-            )
+            observe_batch_with_backend(&self.config, &input, &UnavailablePortfolioReadBackend)
+                .await
+                .map_err(state_error_from_portfolio_read)
         })
     }
 }
@@ -1460,16 +1468,21 @@ pub async fn observe_batch_with_backend<B>(
     config: &ObserveBatchConfig,
     input: &ObserveBatchInput,
     backend: &B,
-) -> ObservationBatch
+) -> Result<ObservationBatch, PortfolioReadError>
 where
     B: PortfolioReadBackend + ?Sized,
 {
     let block_number = evm_block_number_for(&input.views, config.network.network_id());
     match backend.observe_raw_balance(config, block_number).await {
-        Ok((raw, decimals)) => {
-            observation_batch_from_raw_balance(config, input, raw, decimals, block_number)
-        }
-        Err(error) => observation_batch_error(config, error.code, error.message),
+        Ok((raw, decimals)) => Ok(observation_batch_from_raw_balance(
+            config,
+            input,
+            raw,
+            decimals,
+            block_number,
+        )),
+        Err(error) if error.fatal_attempt_failure => Err(error),
+        Err(error) => Ok(observation_batch_error(config, error.code, error.message)),
     }
 }
 

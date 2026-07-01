@@ -42,7 +42,7 @@ use mfm_evm_capabilities::{
     SignedEvmPayload,
 };
 use mfm_evm_contract_config::{
-    ConfigurePhaseConfig, DeployPhaseConfig, EvmTransactionPolicy,
+    ConfigurePhaseConfig, DeployPhaseConfig, EvmNetworkIntent, EvmTransactionPolicy,
     EvmTransactionStyle as ConfigTransactionStyle, ReceiptRetryPolicy, ValidatePhaseConfig,
 };
 use mfm_evm_contract_model::{
@@ -95,6 +95,32 @@ const REPLAY_VERIFIER_ID: &str = "mfm.evm.contract.replay.v1";
 
 /// Result type for lifecycle adapter operations.
 pub type Result<T> = std::result::Result<T, EvmContractAdapterError>;
+
+/// Extracts certified EVM guards from a contract lifecycle launch config artifact.
+pub fn evm_chain_guards_from_launch_config(
+    schema_id: &SchemaId,
+    bytes: &[u8],
+) -> Result<Vec<EvmChainGuard>> {
+    if schema_id == &config_schema::<ValidatePhaseConfig>()? {
+        let config = decode_replay_config::<ValidatePhaseConfig>(bytes)?;
+        return Ok(vec![evm_chain_guard_for_network(
+            config.as_ref().network(),
+        )?]);
+    }
+    if schema_id == &config_schema::<DeployPhaseConfig>()? {
+        let config = decode_replay_config::<DeployPhaseConfig>(bytes)?;
+        return Ok(vec![evm_chain_guard_for_network(
+            config.as_ref().network(),
+        )?]);
+    }
+    if schema_id == &config_schema::<ConfigurePhaseConfig>()? {
+        let config = decode_replay_config::<ConfigurePhaseConfig>(bytes)?;
+        return Ok(vec![evm_chain_guard_for_network(
+            config.as_ref().network(),
+        )?]);
+    }
+    Ok(Vec::new())
+}
 
 /// Capability providers needed for mutation phases.
 #[derive(Clone, Copy)]
@@ -3094,6 +3120,22 @@ where
         .map_err(|error| mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string()))
 }
 
+fn decode_replay_config<T>(bytes: &[u8]) -> Result<ValidatedConfig<T>>
+where
+    T: MfmConfig + DeserializeOwned,
+{
+    let config = serde_json::from_slice::<T>(bytes)
+        .map_err(|error| EvmContractAdapterError::Config(error.to_string()))?;
+    ValidatedConfig::new(config).map_err(|error| EvmContractAdapterError::Config(error.to_string()))
+}
+
+fn config_schema<T>() -> Result<SchemaId>
+where
+    T: MfmConfig,
+{
+    T::schema_id().map_err(|error| EvmContractAdapterError::Config(error.to_string()))
+}
+
 async fn load_prepared_invocation(
     artifact: &store::SideEffectArtifactProjection,
     role: events::ArtifactRole,
@@ -3431,6 +3473,10 @@ fn evm_chain_guard(network_id: &str, expected_chain_id: u64) -> Result<EvmChainG
     EvmChainGuard::new(EvmNetworkId::new(network_id)?, expected_chain_id).map_err(Into::into)
 }
 
+fn evm_chain_guard_for_network(network: &EvmNetworkIntent) -> Result<EvmChainGuard> {
+    evm_chain_guard(network.network_id(), network.expected_chain_id())
+}
+
 fn runtime_artifact_read_error(
     error: mfm_artifact_capabilities::ArtifactReadError,
 ) -> mfm_runtime::RuntimeError {
@@ -3455,6 +3501,9 @@ pub enum EvmContractAdapterError {
     /// Stable identity construction failed.
     #[error("contract adapter identity failed: {0}")]
     Identity(String),
+    /// Launch config extraction failed.
+    #[error("contract config failed: {0}")]
+    Config(String),
     /// State contract failed.
     #[error("contract state failed: {0}")]
     State(String),
