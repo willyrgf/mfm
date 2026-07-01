@@ -51,8 +51,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use mfm_evm_capabilities::{EvmNetworkId, EvmSourcePolicyId, EvmSourceRef};
-use mfm_ids::RuntimeEnvName;
+use mfm_ids::{LocalPublicId, RuntimeEnvName};
 use mfm_signing::SignerRef;
+use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::Value;
 use uuid::Uuid;
@@ -88,18 +89,22 @@ impl RuntimeConfigFormat {
 }
 
 /// Capability families required from a runtime config parse.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimeConfigRequirement {
     evm: bool,
-    evm_signers: bool,
+    keystores: bool,
+    signers: bool,
+    parse_all: bool,
 }
 
 impl RuntimeConfigRequirement {
-    /// Creates a requirement with no mandatory capability families.
+    /// Creates a requirement with no mandatory capability families and validates every present family.
     pub const fn none() -> Self {
         Self {
             evm: false,
-            evm_signers: false,
+            keystores: false,
+            signers: false,
+            parse_all: true,
         }
     }
 
@@ -107,7 +112,9 @@ impl RuntimeConfigRequirement {
     pub const fn evm() -> Self {
         Self {
             evm: true,
-            evm_signers: false,
+            keystores: false,
+            signers: false,
+            parse_all: false,
         }
     }
 
@@ -115,7 +122,19 @@ impl RuntimeConfigRequirement {
     pub const fn evm_with_signers() -> Self {
         Self {
             evm: true,
-            evm_signers: true,
+            keystores: true,
+            signers: true,
+            parse_all: false,
+        }
+    }
+
+    /// Creates a requirement for keystore profiles.
+    pub const fn keystores() -> Self {
+        Self {
+            evm: false,
+            keystores: true,
+            signers: false,
+            parse_all: false,
         }
     }
 
@@ -124,8 +143,30 @@ impl RuntimeConfigRequirement {
         self.evm
     }
 
-    const fn parse_evm_signers(self) -> bool {
-        !self.evm || self.evm_signers
+    const fn requires_keystores(self) -> bool {
+        self.keystores || self.signers
+    }
+
+    const fn requires_signers(self) -> bool {
+        self.signers
+    }
+
+    const fn parse_evm(self) -> bool {
+        self.parse_all || self.evm
+    }
+
+    const fn parse_keystores(self) -> bool {
+        self.parse_all || self.keystores || self.signers
+    }
+
+    const fn parse_signers(self) -> bool {
+        self.parse_all || self.signers
+    }
+}
+
+impl Default for RuntimeConfigRequirement {
+    fn default() -> Self {
+        Self::none()
     }
 }
 
@@ -133,6 +174,8 @@ impl RuntimeConfigRequirement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeConfig {
     evm: Option<EvmRuntimeConfig>,
+    keystores: BTreeMap<KeystoreRef, KeystoreRuntimeConfig>,
+    signers: BTreeMap<SignerRef, RuntimeSigner>,
 }
 
 impl RuntimeConfig {
@@ -177,23 +220,334 @@ impl RuntimeConfig {
         self.evm.as_ref()
     }
 
+    /// Returns configured keystore profiles.
+    pub const fn keystores(&self) -> &BTreeMap<KeystoreRef, KeystoreRuntimeConfig> {
+        &self.keystores
+    }
+
+    /// Returns configured runtime signer bindings.
+    pub const fn signers(&self) -> &BTreeMap<SignerRef, RuntimeSigner> {
+        &self.signers
+    }
+
     fn from_raw(raw: RawRuntimeConfig, requirements: RuntimeConfigRequirement) -> Result<Self> {
         reject_extra_fields(&raw.extra, RuntimeConfigLocation::Root)?;
-        let evm = match raw.evm {
-            Some(evm) => Some(EvmRuntimeConfig::from_raw(
-                evm,
-                requirements.parse_evm_signers(),
-            )?),
-            None if requirements.requires_evm() => {
-                return Err(RuntimeConfigError::new(
+        let evm = if requirements.parse_evm() {
+            match raw.evm {
+                Some(evm) => Some(EvmRuntimeConfig::from_raw(deserialize_family(
+                    evm,
                     RuntimeConfigLocation::Evm,
-                    RuntimeConfigErrorKind::MissingFamily,
-                ));
+                    RuntimeConfigErrorKind::InvalidFamilyConfig,
+                )?)?),
+                None if requirements.requires_evm() => {
+                    return Err(RuntimeConfigError::new(
+                        RuntimeConfigLocation::Evm,
+                        RuntimeConfigErrorKind::MissingFamily,
+                    ));
+                }
+                None => None,
             }
-            None => None,
+        } else {
+            None
         };
-        Ok(Self { evm })
+        let keystores = if requirements.parse_keystores() {
+            parse_keystores(raw.keystores)?
+        } else {
+            BTreeMap::new()
+        };
+        if requirements.requires_keystores() && keystores.is_empty() {
+            return Err(RuntimeConfigError::new(
+                RuntimeConfigLocation::Keystore { keystore_ref: None },
+                RuntimeConfigErrorKind::MissingFamily,
+            ));
+        }
+        let signers = if requirements.parse_signers() {
+            parse_signers(raw.signers, &keystores)?
+        } else {
+            BTreeMap::new()
+        };
+        if requirements.requires_signers() && signers.is_empty() {
+            return Err(RuntimeConfigError::new(
+                RuntimeConfigLocation::Signer { signer_ref: None },
+                RuntimeConfigErrorKind::MissingFamily,
+            ));
+        }
+        Ok(Self {
+            evm,
+            keystores,
+            signers,
+        })
     }
+}
+
+fn deserialize_family<T>(
+    raw: Value,
+    location: RuntimeConfigLocation,
+    kind: RuntimeConfigErrorKind,
+) -> Result<T>
+where
+    T: DeserializeOwned,
+{
+    serde_json::from_value(raw).map_err(|_| RuntimeConfigError::new(location, kind))
+}
+
+/// Process-local keystore profile reference.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct KeystoreRef(LocalPublicId);
+
+impl KeystoreRef {
+    /// Creates a checked keystore profile reference.
+    pub fn new(value: impl AsRef<str>) -> Result<Self> {
+        let value = LocalPublicId::new(value).map_err(|_| {
+            RuntimeConfigError::new(
+                RuntimeConfigLocation::Keystore { keystore_ref: None },
+                RuntimeConfigErrorKind::InvalidIdentifier {
+                    kind: RuntimeConfigIdentifierKind::KeystoreRef,
+                },
+            )
+        })?;
+        Ok(Self(value))
+    }
+
+    /// Returns the canonical keystore profile reference string.
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl fmt::Display for KeystoreRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for KeystoreRef {
+    type Err = RuntimeConfigError;
+
+    fn from_str(value: &str) -> Result<Self> {
+        Self::new(value)
+    }
+}
+
+/// Runtime MFM keystore profile descriptor.
+#[derive(Clone, PartialEq, Eq)]
+pub struct KeystoreRuntimeConfig {
+    keystore_path: RuntimeSecretPath,
+    unlock_file: RuntimeSecretPath,
+}
+
+impl KeystoreRuntimeConfig {
+    /// Returns the resolved keystore path.
+    pub const fn keystore_path(&self) -> &RuntimeSecretPath {
+        &self.keystore_path
+    }
+
+    /// Returns the resolved unlock-file path.
+    pub const fn unlock_file(&self) -> &RuntimeSecretPath {
+        &self.unlock_file
+    }
+
+    fn from_raw(raw: RawKeystoreConfig, location: RuntimeConfigLocation) -> Result<Self> {
+        reject_extra_fields(&raw.extra, location.clone())?;
+        let keystore_path = resolve_required_path(
+            location.clone(),
+            "keystore_path",
+            &raw.keystore_path,
+            &raw.keystore_path_env,
+            &raw.keystore_path_file,
+            &raw.keystore_path_file_env,
+        )?;
+        let unlock_file = resolve_required_path(
+            location,
+            "unlock_file",
+            &raw.unlock_file,
+            &raw.unlock_file_env,
+            &raw.unlock_file_file,
+            &raw.unlock_file_file_env,
+        )?;
+        Ok(Self {
+            keystore_path,
+            unlock_file,
+        })
+    }
+}
+
+impl fmt::Debug for KeystoreRuntimeConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("KeystoreRuntimeConfig")
+            .field("keystore_path", &self.keystore_path)
+            .field("unlock_file", &self.unlock_file)
+            .finish()
+    }
+}
+
+fn parse_keystores(raw: Option<Value>) -> Result<BTreeMap<KeystoreRef, KeystoreRuntimeConfig>> {
+    let Some(raw) = raw else {
+        return Ok(BTreeMap::new());
+    };
+    let raw_keystores = deserialize_family::<BTreeMap<String, RawKeystoreConfig>>(
+        raw,
+        RuntimeConfigLocation::Root.with_field("keystores"),
+        RuntimeConfigErrorKind::InvalidKeystoreConfig,
+    )?;
+    let mut keystores = BTreeMap::new();
+    for (raw_keystore_ref, raw_keystore) in raw_keystores {
+        let keystore_ref = parse_keystore_ref(
+            &raw_keystore_ref,
+            RuntimeConfigLocation::Keystore { keystore_ref: None },
+        )?;
+        let location = RuntimeConfigLocation::Keystore {
+            keystore_ref: Some(keystore_ref.to_string()),
+        };
+        let keystore = KeystoreRuntimeConfig::from_raw(raw_keystore, location)?;
+        keystores.insert(keystore_ref, keystore);
+    }
+    Ok(keystores)
+}
+
+/// Runtime signer provider binding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeSigner {
+    /// MFM keystore-backed signer binding.
+    Keystore(RuntimeKeystoreSigner),
+}
+
+impl RuntimeSigner {
+    /// Returns the keystore signer binding when this entry uses the keystore provider.
+    pub const fn as_keystore(&self) -> &RuntimeKeystoreSigner {
+        match self {
+            Self::Keystore(signer) => signer,
+        }
+    }
+
+    fn from_raw(
+        raw: RawSignerConfig,
+        location: RuntimeConfigLocation,
+        keystores: &BTreeMap<KeystoreRef, KeystoreRuntimeConfig>,
+    ) -> Result<Self> {
+        reject_extra_fields(&raw.extra, location.clone())?;
+        let Some(provider) = raw.provider.as_deref() else {
+            return Err(RuntimeConfigError::new(
+                location.with_field("provider"),
+                RuntimeConfigErrorKind::MissingRequiredField,
+            ));
+        };
+        match provider {
+            "keystore" => Ok(Self::Keystore(RuntimeKeystoreSigner::from_raw(
+                raw, location, keystores,
+            )?)),
+            _ => Err(RuntimeConfigError::new(
+                location.with_field("provider"),
+                RuntimeConfigErrorKind::UnsupportedSignerProvider,
+            )),
+        }
+    }
+}
+
+/// Runtime MFM keystore signer descriptor.
+#[derive(Clone, PartialEq, Eq)]
+pub struct RuntimeKeystoreSigner {
+    entry_id: Uuid,
+    keystore_ref: KeystoreRef,
+}
+
+impl RuntimeKeystoreSigner {
+    /// Returns the keystore entry id.
+    pub const fn entry_id(&self) -> Uuid {
+        self.entry_id
+    }
+
+    /// Returns the referenced keystore profile.
+    pub const fn keystore_ref(&self) -> &KeystoreRef {
+        &self.keystore_ref
+    }
+
+    fn from_raw(
+        raw: RawSignerConfig,
+        location: RuntimeConfigLocation,
+        keystores: &BTreeMap<KeystoreRef, KeystoreRuntimeConfig>,
+    ) -> Result<Self> {
+        let Some(raw_keystore_ref) = raw.keystore_ref.as_deref() else {
+            return Err(RuntimeConfigError::new(
+                location.clone().with_field("keystore_ref"),
+                RuntimeConfigErrorKind::MissingRequiredField,
+            ));
+        };
+        let keystore_ref = parse_keystore_ref(raw_keystore_ref, location.clone())?;
+        if !keystores.contains_key(&keystore_ref) {
+            return Err(RuntimeConfigError::new(
+                location.clone().with_field("keystore_ref"),
+                RuntimeConfigErrorKind::MissingKeystore,
+            ));
+        }
+        let Some(raw_entry_id) = raw.entry_id.as_deref() else {
+            return Err(RuntimeConfigError::new(
+                location.with_field("entry_id"),
+                RuntimeConfigErrorKind::MissingRequiredField,
+            ));
+        };
+        let entry_id = Uuid::parse_str(raw_entry_id).map_err(|_| {
+            RuntimeConfigError::new(
+                location.with_field("entry_id"),
+                RuntimeConfigErrorKind::InvalidEntryId,
+            )
+        })?;
+        Ok(Self {
+            entry_id,
+            keystore_ref,
+        })
+    }
+}
+
+impl fmt::Debug for RuntimeKeystoreSigner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RuntimeKeystoreSigner")
+            .field("entry_id", &self.entry_id)
+            .field("keystore_ref", &self.keystore_ref)
+            .finish()
+    }
+}
+
+fn parse_signers(
+    raw: Option<Value>,
+    keystores: &BTreeMap<KeystoreRef, KeystoreRuntimeConfig>,
+) -> Result<BTreeMap<SignerRef, RuntimeSigner>> {
+    let Some(raw) = raw else {
+        return Ok(BTreeMap::new());
+    };
+    let raw_signers = deserialize_family::<BTreeMap<String, RawSignerConfig>>(
+        raw,
+        RuntimeConfigLocation::Root.with_field("signers"),
+        RuntimeConfigErrorKind::InvalidSignerConfig,
+    )?;
+    let mut signers = BTreeMap::new();
+    for (raw_signer_ref, raw_signer) in raw_signers {
+        let signer_ref = SignerRef::new(&raw_signer_ref).map_err(|_| {
+            RuntimeConfigError::new(
+                RuntimeConfigLocation::Signer { signer_ref: None },
+                RuntimeConfigErrorKind::InvalidIdentifier {
+                    kind: RuntimeConfigIdentifierKind::SignerRef,
+                },
+            )
+        })?;
+        let location = RuntimeConfigLocation::Signer {
+            signer_ref: Some(signer_ref.to_string()),
+        };
+        let signer = RuntimeSigner::from_raw(raw_signer, location, keystores)?;
+        signers.insert(signer_ref, signer);
+    }
+    Ok(signers)
+}
+
+fn parse_keystore_ref(raw: &str, location: RuntimeConfigLocation) -> Result<KeystoreRef> {
+    KeystoreRef::new(raw).map_err(|_| {
+        RuntimeConfigError::new(
+            location,
+            RuntimeConfigErrorKind::InvalidIdentifier {
+                kind: RuntimeConfigIdentifierKind::KeystoreRef,
+            },
+        )
+    })
 }
 
 /// Runtime-local EVM descriptors.
@@ -202,7 +556,6 @@ pub struct EvmRuntimeConfig {
     sources: BTreeMap<EvmSourceRef, EvmRpcSource>,
     policies: BTreeMap<EvmSourcePolicyId, EvmSourcePolicy>,
     routes: BTreeMap<EvmNetworkId, EvmRoute>,
-    signers: BTreeMap<SignerRef, EvmSigner>,
 }
 
 impl EvmRuntimeConfig {
@@ -221,12 +574,7 @@ impl EvmRuntimeConfig {
         &self.routes
     }
 
-    /// Returns configured EVM signer bindings.
-    pub const fn signers(&self) -> &BTreeMap<SignerRef, EvmSigner> {
-        &self.signers
-    }
-
-    fn from_raw(raw: RawEvmConfig, parse_signers: bool) -> Result<Self> {
+    fn from_raw(raw: RawEvmConfig) -> Result<Self> {
         reject_extra_fields(&raw.extra, RuntimeConfigLocation::Evm)?;
 
         let mut sources = BTreeMap::new();
@@ -289,49 +637,12 @@ impl EvmRuntimeConfig {
             routes.insert(network_id, route);
         }
 
-        let signers = if parse_signers {
-            parse_evm_signers(raw.signers)?
-        } else {
-            BTreeMap::new()
-        };
-
         Ok(Self {
             sources,
             policies,
             routes,
-            signers,
         })
     }
-}
-
-fn parse_evm_signers(raw: Option<Value>) -> Result<BTreeMap<SignerRef, EvmSigner>> {
-    let Some(raw) = raw else {
-        return Ok(BTreeMap::new());
-    };
-    let raw_signers =
-        serde_json::from_value::<BTreeMap<String, RawEvmSigner>>(raw).map_err(|_| {
-            RuntimeConfigError::new(
-                RuntimeConfigLocation::Evm.with_field("signers"),
-                RuntimeConfigErrorKind::InvalidSignerConfig,
-            )
-        })?;
-    let mut signers = BTreeMap::new();
-    for (raw_signer_ref, raw_signer) in raw_signers {
-        let signer_ref = SignerRef::new(&raw_signer_ref).map_err(|_| {
-            RuntimeConfigError::new(
-                RuntimeConfigLocation::EvmSigner { signer_ref: None },
-                RuntimeConfigErrorKind::InvalidIdentifier {
-                    kind: RuntimeConfigIdentifierKind::SignerRef,
-                },
-            )
-        })?;
-        let location = RuntimeConfigLocation::EvmSigner {
-            signer_ref: Some(signer_ref.to_string()),
-        };
-        let signer = EvmSigner::from_raw(raw_signer, location)?;
-        signers.insert(signer_ref, signer);
-    }
-    Ok(signers)
 }
 
 /// Runtime EVM JSON-RPC source descriptor.
@@ -539,111 +850,6 @@ impl EvmRoute {
     }
 }
 
-/// Runtime EVM signer provider binding.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EvmSigner {
-    /// MFM keystore-backed signer binding.
-    Keystore(EvmKeystoreSigner),
-}
-
-impl EvmSigner {
-    /// Returns the keystore signer binding when this entry uses the keystore provider.
-    pub const fn as_keystore(&self) -> &EvmKeystoreSigner {
-        match self {
-            Self::Keystore(signer) => signer,
-        }
-    }
-
-    fn from_raw(raw: RawEvmSigner, location: RuntimeConfigLocation) -> Result<Self> {
-        reject_extra_fields(&raw.extra, location.clone())?;
-        let Some(provider) = raw.provider.as_deref() else {
-            return Err(RuntimeConfigError::new(
-                location.with_field("provider"),
-                RuntimeConfigErrorKind::MissingRequiredField,
-            ));
-        };
-        match provider {
-            "keystore" => Ok(Self::Keystore(EvmKeystoreSigner::from_raw(raw, location)?)),
-            _ => Err(RuntimeConfigError::new(
-                location.with_field("provider"),
-                RuntimeConfigErrorKind::UnsupportedSignerProvider,
-            )),
-        }
-    }
-}
-
-/// Runtime MFM keystore signer descriptor.
-#[derive(Clone, PartialEq, Eq)]
-pub struct EvmKeystoreSigner {
-    entry_id: Uuid,
-    keystore_path: RuntimeSecretPath,
-    unlock_file: RuntimeSecretPath,
-}
-
-impl EvmKeystoreSigner {
-    /// Returns the keystore entry id.
-    pub const fn entry_id(&self) -> Uuid {
-        self.entry_id
-    }
-
-    /// Returns the resolved keystore path.
-    pub const fn keystore_path(&self) -> &RuntimeSecretPath {
-        &self.keystore_path
-    }
-
-    /// Returns the resolved unlock-file path.
-    pub const fn unlock_file(&self) -> &RuntimeSecretPath {
-        &self.unlock_file
-    }
-
-    fn from_raw(raw: RawEvmSigner, location: RuntimeConfigLocation) -> Result<Self> {
-        let Some(raw_entry_id) = raw.entry_id.as_deref() else {
-            return Err(RuntimeConfigError::new(
-                location.with_field("entry_id"),
-                RuntimeConfigErrorKind::MissingRequiredField,
-            ));
-        };
-        let entry_id = Uuid::parse_str(raw_entry_id).map_err(|_| {
-            RuntimeConfigError::new(
-                location.clone().with_field("entry_id"),
-                RuntimeConfigErrorKind::InvalidEntryId,
-            )
-        })?;
-        let keystore_path = resolve_required_path(
-            location.clone(),
-            "keystore_path",
-            &raw.keystore_path,
-            &raw.keystore_path_env,
-            &raw.keystore_path_file,
-            &raw.keystore_path_file_env,
-        )?;
-        let unlock_file = resolve_required_path(
-            location,
-            "unlock_file",
-            &raw.unlock_file,
-            &raw.unlock_file_env,
-            &raw.unlock_file_file,
-            &raw.unlock_file_file_env,
-        )?;
-
-        Ok(Self {
-            entry_id,
-            keystore_path,
-            unlock_file,
-        })
-    }
-}
-
-impl fmt::Debug for EvmKeystoreSigner {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("EvmKeystoreSigner")
-            .field("entry_id", &self.entry_id)
-            .field("keystore_path", &self.keystore_path)
-            .field("unlock_file", &self.unlock_file)
-            .finish()
-    }
-}
-
 /// Source kind used to resolve a runtime-local secret value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeValueSourceKind {
@@ -763,8 +969,13 @@ pub enum RuntimeConfigLocation {
         /// Checked semantic network id when available.
         network_id: Option<String>,
     },
-    /// EVM signer entry.
-    EvmSigner {
+    /// Keystore profile entry.
+    Keystore {
+        /// Checked keystore profile ref when available.
+        keystore_ref: Option<String>,
+    },
+    /// Runtime signer entry.
+    Signer {
         /// Checked signer ref when available.
         signer_ref: Option<String>,
     },
@@ -803,9 +1014,13 @@ impl fmt::Display for RuntimeConfigLocation {
                 Some(network_id) => write!(f, "evm.routes[{network_id}]"),
                 None => f.write_str("evm.routes[<invalid>]"),
             },
-            Self::EvmSigner { signer_ref } => match signer_ref {
-                Some(signer_ref) => write!(f, "evm.signers[{signer_ref}]"),
-                None => f.write_str("evm.signers[<invalid>]"),
+            Self::Keystore { keystore_ref } => match keystore_ref {
+                Some(keystore_ref) => write!(f, "keystores[{keystore_ref}]"),
+                None => f.write_str("keystores[<invalid>]"),
+            },
+            Self::Signer { signer_ref } => match signer_ref {
+                Some(signer_ref) => write!(f, "signers[{signer_ref}]"),
+                None => f.write_str("signers[<invalid>]"),
             },
             Self::Field { parent, field } => write!(f, "{parent}.{field}"),
         }
@@ -826,6 +1041,8 @@ pub enum RuntimeConfigErrorKind {
     ConfigFileRead,
     /// A required capability family was missing.
     MissingFamily,
+    /// Capability family section did not have the expected shape.
+    InvalidFamilyConfig,
     /// Runtime config contained an unknown field.
     UnknownField,
     /// Runtime config contained forbidden source chain metadata.
@@ -871,6 +1088,10 @@ pub enum RuntimeConfigErrorKind {
     UnsupportedSignerProvider,
     /// Signer binding section did not have the expected shape.
     InvalidSignerConfig,
+    /// Keystore profile section did not have the expected shape.
+    InvalidKeystoreConfig,
+    /// Referenced keystore profile was missing.
+    MissingKeystore,
     /// Keystore entry id was malformed.
     InvalidEntryId,
 }
@@ -882,6 +1103,7 @@ impl fmt::Display for RuntimeConfigErrorKind {
             Self::Syntax { format } => write!(f, "{format:?} syntax is invalid"),
             Self::ConfigFileRead => f.write_str("config file could not be read"),
             Self::MissingFamily => f.write_str("required capability family is missing"),
+            Self::InvalidFamilyConfig => f.write_str("capability family config is invalid"),
             Self::UnknownField => f.write_str("unknown field"),
             Self::ForbiddenExpectedChainId => {
                 f.write_str("source-level expected_chain_id is forbidden")
@@ -909,6 +1131,8 @@ impl fmt::Display for RuntimeConfigErrorKind {
             }
             Self::UnsupportedSignerProvider => f.write_str("signer provider is unsupported"),
             Self::InvalidSignerConfig => f.write_str("signer config is invalid"),
+            Self::InvalidKeystoreConfig => f.write_str("keystore config is invalid"),
+            Self::MissingKeystore => f.write_str("referenced keystore profile is missing"),
             Self::InvalidEntryId => f.write_str("keystore entry id is invalid"),
         }
     }
@@ -925,6 +1149,8 @@ pub enum RuntimeConfigIdentifierKind {
     NetworkId,
     /// Signer reference.
     SignerRef,
+    /// Keystore profile reference.
+    KeystoreRef,
     /// Runtime environment variable name.
     EnvName,
 }
@@ -936,6 +1162,7 @@ impl fmt::Display for RuntimeConfigIdentifierKind {
             Self::PolicyId => f.write_str("policy_id"),
             Self::NetworkId => f.write_str("network_id"),
             Self::SignerRef => f.write_str("signer_ref"),
+            Self::KeystoreRef => f.write_str("keystore_ref"),
             Self::EnvName => f.write_str("env_name"),
         }
     }
@@ -944,7 +1171,11 @@ impl fmt::Display for RuntimeConfigIdentifierKind {
 #[derive(Debug, Deserialize)]
 struct RawRuntimeConfig {
     #[serde(default)]
-    evm: Option<RawEvmConfig>,
+    evm: Option<Value>,
+    #[serde(default)]
+    keystores: Option<Value>,
+    #[serde(default)]
+    signers: Option<Value>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -957,8 +1188,6 @@ struct RawEvmConfig {
     policies: BTreeMap<String, RawEvmPolicy>,
     #[serde(default)]
     routes: BTreeMap<String, RawEvmRoute>,
-    #[serde(default)]
-    signers: Option<Value>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -1004,11 +1233,7 @@ struct RawEvmRoute {
 }
 
 #[derive(Debug, Default, Deserialize)]
-struct RawEvmSigner {
-    #[serde(default)]
-    provider: Option<String>,
-    #[serde(default)]
-    entry_id: Option<String>,
+struct RawKeystoreConfig {
     #[serde(default)]
     keystore_path: Option<String>,
     #[serde(default)]
@@ -1025,6 +1250,18 @@ struct RawEvmSigner {
     unlock_file_file: Option<String>,
     #[serde(default)]
     unlock_file_file_env: Option<String>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawSignerConfig {
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    keystore_ref: Option<String>,
+    #[serde(default)]
+    entry_id: Option<String>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }

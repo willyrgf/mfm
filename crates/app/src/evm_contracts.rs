@@ -2,9 +2,7 @@ use std::sync::Arc;
 
 use mfm_artifact_capabilities::ArtifactReadProvider;
 use mfm_evm_capabilities::EvmNetworkId;
-use mfm_signers_keystore::{
-    KeystorePasswordSource, KeystorePathSource, KeystoreSignerProvider, KeystoreSignerRegistryEntry,
-};
+use mfm_signers_keystore::{KeystoreSignerProvider, KeystoreSignerRegistryEntry};
 use mfm_signing::SignerRef;
 
 use crate::{evm_json_rpc_client, runtime_evm_transport_error, RuntimeConfigLoader};
@@ -30,8 +28,10 @@ impl RuntimeConfigEvmContractRuntimeFactory {
         self.runtime_config.load_evm()
     }
 
-    fn load_evm_with_signers(&self) -> mfm_runtime::Result<mfm_runtime_config::EvmRuntimeConfig> {
-        self.runtime_config.load_evm_with_signers()
+    fn load_runtime_config_with_signers(
+        &self,
+    ) -> mfm_runtime::Result<mfm_runtime_config::RuntimeConfig> {
+        self.runtime_config.load_runtime_config_with_signers()
     }
 }
 
@@ -47,10 +47,14 @@ impl mfm_adapters_evm_contracts::EvmContractRuntimeFactory
         network_id: &str,
         signer_ref: Option<&SignerRef>,
     ) -> mfm_runtime::Result<()> {
-        let evm = if signer_ref.is_some() {
-            self.load_evm_with_signers()?
+        let (evm, signer_configured) = if let Some(signer_ref) = signer_ref {
+            let runtime_config = self.load_runtime_config_with_signers()?;
+            let evm = runtime_config.evm().cloned().ok_or_else(|| {
+                mfm_runtime::RuntimeError::RunnerBinding("missing EVM runtime config".to_owned())
+            })?;
+            (evm, runtime_config.signers().contains_key(signer_ref))
         } else {
-            self.load_evm()?
+            (self.load_evm()?, true)
         };
         let network_id = EvmNetworkId::new(network_id)
             .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
@@ -58,12 +62,10 @@ impl mfm_adapters_evm_contracts::EvmContractRuntimeFactory
         client
             .validate_route_binding(&network_id)
             .map_err(runtime_evm_transport_error)?;
-        if let Some(signer_ref) = signer_ref {
-            if !evm.signers().contains_key(signer_ref) {
-                return Err(mfm_runtime::RuntimeError::RunnerBinding(
-                    "missing EVM signer binding".to_owned(),
-                ));
-            }
+        if !signer_configured {
+            return Err(mfm_runtime::RuntimeError::RunnerBinding(
+                "missing EVM signer binding".to_owned(),
+            ));
         }
         Ok(())
     }
@@ -88,7 +90,10 @@ impl mfm_adapters_evm_contracts::EvmContractRuntimeFactory
         &self,
         network_id: &str,
     ) -> mfm_runtime::Result<mfm_adapters_evm_contracts::EvmContractRuntime> {
-        let evm = self.load_evm_with_signers()?;
+        let runtime_config = self.load_runtime_config_with_signers()?;
+        let evm = runtime_config.evm().cloned().ok_or_else(|| {
+            mfm_runtime::RuntimeError::RunnerBinding("missing EVM runtime config".to_owned())
+        })?;
         let network_id = EvmNetworkId::new(network_id)
             .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
         let evm_client = evm_json_rpc_client(evm.clone())?;
@@ -96,7 +101,7 @@ impl mfm_adapters_evm_contracts::EvmContractRuntimeFactory
             .validate_route_binding(&network_id)
             .map_err(runtime_evm_transport_error)?;
         let evm_provider = Arc::new(evm_client);
-        let signer = Arc::new(keystore_signer_provider_from_config(&evm));
+        let signer = Arc::new(keystore_signer_provider_from_config(&runtime_config)?);
         Ok(mfm_adapters_evm_contracts::EvmContractRuntime::new(
             evm_provider,
             signer,
@@ -105,18 +110,28 @@ impl mfm_adapters_evm_contracts::EvmContractRuntimeFactory
 }
 
 fn keystore_signer_provider_from_config(
-    evm: &mfm_runtime_config::EvmRuntimeConfig,
-) -> KeystoreSignerProvider {
-    let entries = evm.signers().iter().map(|(signer_ref, signer)| {
+    runtime_config: &mfm_runtime_config::RuntimeConfig,
+) -> mfm_runtime::Result<KeystoreSignerProvider> {
+    let entries = runtime_config.signers().iter().map(|(signer_ref, signer)| {
         let signer = signer.as_keystore();
-        KeystoreSignerRegistryEntry::new(
+        let keystore = runtime_config
+            .keystores()
+            .get(signer.keystore_ref())
+            .ok_or_else(|| {
+                mfm_runtime::RuntimeError::RunnerBinding(
+                    "missing keystore profile for signer binding".to_owned(),
+                )
+            })?;
+        Ok(KeystoreSignerRegistryEntry::new(
             signer_ref.clone(),
             signer.entry_id(),
-            KeystorePathSource::path(signer.keystore_path().expose_path()),
-            KeystorePasswordSource::file(signer.unlock_file().expose_path()),
-        )
+            keystore.keystore_path().expose_path(),
+            keystore.unlock_file().expose_path(),
+        ))
     });
-    KeystoreSignerProvider::new(entries)
+    Ok(KeystoreSignerProvider::new(
+        entries.collect::<mfm_runtime::Result<Vec<_>>>()?,
+    ))
 }
 
 /// Registers contract lifecycle runners in the process production runner registry.

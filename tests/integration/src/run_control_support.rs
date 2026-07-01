@@ -110,11 +110,14 @@ source_ref = {network}
     if let Some(signer) = signer {
         config.push_str(&format!(
             r#"
-[evm.signers.{signer_ref}]
-provider = "keystore"
-entry_id = {entry_id}
+[keystores.default]
 keystore_path = {keystore_path}
 unlock_file = {unlock_file}
+
+[signers.{signer_ref}]
+provider = "keystore"
+keystore_ref = "default"
+entry_id = {entry_id}
 "#,
             signer_ref = toml_string(signer.signer_ref),
             entry_id = toml_string(signer.entry_id),

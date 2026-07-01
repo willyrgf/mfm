@@ -3,8 +3,8 @@ use std::sync::Mutex;
 
 use mfm_evm_capabilities::{EvmSourcePolicyId, EvmSourceRef};
 use mfm_runtime_config::{
-    RuntimeConfig, RuntimeConfigErrorKind, RuntimeConfigFormat, RuntimeConfigRequirement,
-    RuntimeSecretValue, RuntimeValueSourceKind,
+    KeystoreRef, RuntimeConfig, RuntimeConfigErrorKind, RuntimeConfigFormat,
+    RuntimeConfigRequirement, RuntimeSecretValue, RuntimeValueSourceKind,
 };
 use mfm_signing::SignerRef;
 use tempfile::tempdir;
@@ -226,11 +226,14 @@ fn route_source_policy_and_signer_ids_are_checked() {
     ));
 
     let bad_signer = r#"
-        [evm.signers."bad/signer"]
-        provider = "keystore"
-        entry_id = "00000000-0000-0000-0000-000000000000"
+        [keystores.default]
         keystore_path = "/runtime/keystore.json"
         unlock_file = "/runtime/unlock"
+
+        [signers."bad/signer"]
+        provider = "keystore"
+        keystore_ref = "default"
+        entry_id = "00000000-0000-0000-0000-000000000000"
     "#;
     let err = RuntimeConfig::from_str(bad_signer, RuntimeConfigFormat::Toml).expect_err("signer");
     assert!(matches!(
@@ -296,18 +299,20 @@ fn duplicate_policy_sources_are_rejected() {
 #[test]
 fn signer_shape_is_validated() {
     let valid = r#"
-        [evm.signers.deployer]
-        provider = "keystore"
-        entry_id = "00000000-0000-0000-0000-000000000000"
+        [keystores.default]
         keystore_path = "/runtime/keystore.json"
         unlock_file = "/runtime/unlock"
+
+        [signers.deployer]
+        provider = "keystore"
+        keystore_ref = "default"
+        entry_id = "00000000-0000-0000-0000-000000000000"
     "#;
     let runtime = RuntimeConfig::from_str(valid, RuntimeConfigFormat::Toml).expect("valid");
     let signer_ref = SignerRef::new("deployer").expect("signer");
+    let keystore_ref = KeystoreRef::new("default").expect("keystore");
     assert_eq!(
         runtime
-            .evm()
-            .expect("evm")
             .signers()
             .get(&signer_ref)
             .expect("signer")
@@ -316,13 +321,34 @@ fn signer_shape_is_validated() {
             .to_string(),
         "00000000-0000-0000-0000-000000000000"
     );
+    assert_eq!(
+        runtime
+            .signers()
+            .get(&signer_ref)
+            .expect("signer")
+            .as_keystore()
+            .keystore_ref(),
+        &keystore_ref
+    );
+    assert_eq!(
+        runtime
+            .keystores()
+            .get(&keystore_ref)
+            .expect("keystore")
+            .keystore_path()
+            .expose_path(),
+        std::path::Path::new("/runtime/keystore.json")
+    );
 
     let unsupported = r#"
-        [evm.signers.deployer]
-        provider = "raw-private-key"
-        entry_id = "00000000-0000-0000-0000-000000000000"
+        [keystores.default]
         keystore_path = "/runtime/keystore.json"
         unlock_file = "/runtime/unlock"
+
+        [signers.deployer]
+        provider = "raw-private-key"
+        keystore_ref = "default"
+        entry_id = "00000000-0000-0000-0000-000000000000"
     "#;
     let err =
         RuntimeConfig::from_str(unsupported, RuntimeConfigFormat::Toml).expect_err("provider");
@@ -346,7 +372,7 @@ fn route_only_evm_requirement_ignores_unused_malformed_signers() {
         [evm.routes.dev]
         source_ref = "local"
 
-        [evm.signers.deployer]
+        [signers.deployer]
         provider = "raw-private-key"
         entry_id = "not-a-uuid"
         private_key = "placeholder-private-key-value"
@@ -358,10 +384,7 @@ fn route_only_evm_requirement_ignores_unused_malformed_signers() {
         RuntimeConfigRequirement::evm(),
     )
     .expect("route-only EVM config");
-    assert!(
-        runtime.evm().expect("evm").signers().is_empty(),
-        "route-only parses must not retain unused signer descriptors"
-    );
+    assert!(runtime.signers().is_empty());
 }
 
 #[test]
@@ -373,11 +396,14 @@ fn signer_requirement_rejects_malformed_signers() {
         [evm.routes.dev]
         source_ref = "local"
 
-        [evm.signers.deployer]
-        provider = "raw-private-key"
-        entry_id = "00000000-0000-0000-0000-000000000000"
+        [keystores.default]
         keystore_path = "/runtime/keystore.json"
         unlock_file = "/runtime/unlock"
+
+        [signers.deployer]
+        provider = "raw-private-key"
+        keystore_ref = "default"
+        entry_id = "00000000-0000-0000-0000-000000000000"
     "#;
 
     let err = RuntimeConfig::from_str_with_requirements(
@@ -393,6 +419,25 @@ fn signer_requirement_rejects_malformed_signers() {
 }
 
 #[test]
+fn old_evm_signer_table_is_rejected() {
+    let config = r#"
+        [evm.sources.local]
+        rpc_url = "http://127.0.0.1:8545"
+
+        [evm.routes.dev]
+        source_ref = "local"
+
+        [evm.signers.deployer]
+        provider = "keystore"
+        entry_id = "00000000-0000-0000-0000-000000000000"
+        keystore_path = "/runtime/keystore.json"
+        unlock_file = "/runtime/unlock"
+    "#;
+    let err = RuntimeConfig::from_str(config, RuntimeConfigFormat::Toml).expect_err("old shape");
+    assert_eq!(err.kind(), &RuntimeConfigErrorKind::UnknownField);
+}
+
+#[test]
 fn secret_material_fields_are_rejected() {
     for field in [
         "password",
@@ -403,11 +448,14 @@ fn secret_material_fields_are_rejected() {
     ] {
         let config = format!(
             r#"
-            [evm.signers.deployer]
-            provider = "keystore"
-            entry_id = "00000000-0000-0000-0000-000000000000"
+            [keystores.default]
             keystore_path = "/runtime/keystore.json"
             unlock_file = "/runtime/unlock"
+
+            [signers.deployer]
+            provider = "keystore"
+            keystore_ref = "default"
+            entry_id = "00000000-0000-0000-0000-000000000000"
             {field} = "secret-value"
             "#
         );
@@ -492,11 +540,14 @@ fn diagnostics_are_closed_and_redacted() {
     assert_redacted(&format!("{err:?}"));
 
     let signer_secret = r#"
-        [evm.signers.deployer]
-        provider = "keystore"
-        entry_id = "00000000-0000-0000-0000-000000000000"
+        [keystores.default]
         keystore_path = "/very/secret/keystore.json"
         unlock_file = "/very/secret/unlock-file"
+
+        [signers.deployer]
+        provider = "keystore"
+        keystore_ref = "default"
+        entry_id = "00000000-0000-0000-0000-000000000000"
         private_key = "placeholder-private-key-value"
     "#;
     let err =
