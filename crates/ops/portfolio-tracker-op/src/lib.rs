@@ -33,8 +33,7 @@ use mfm_portfolio_model::symbol::SymbolConfig;
 use mfm_portfolio_model::wallet::WalletConfig;
 use mfm_program::{
     build_root_with_registries, DomainKeyedNonEmptyHandles, Operation, OperationExpansion,
-    OperationKey, OperationRegistryBuilder, PublicOutputKey, RootBuilder, ScopeKey, StateKey,
-    StateRegistryBuilder, TypedProgramLaunchPlan,
+    OperationKey, PublicOutputKey, RootBuilder, ScopeKey, StateKey, TypedProgramLaunchPlan,
 };
 pub use mfm_state_portfolio::{
     balance_reader_kind, observation_batch_id, portfolio_adapter_kind, portfolio_adapter_version,
@@ -207,80 +206,21 @@ impl Operation for PortfolioTrackerWorkflowOperation {
     }
 }
 
-/// Builds the portfolio state registry used for authoring and certification.
-pub fn portfolio_state_registry() -> mfm_program::Result<mfm_program::StateRegistrySnapshot> {
-    let mut states = StateRegistryBuilder::new();
-    states.register::<PrepareSourcesState>()?;
-    states.register::<ResolveSubjectsState>()?;
-    states.register::<PinViewsState>()?;
-    states.register::<ResolveValuationsState>()?;
-    states.register::<ObserveBatchState>()?;
-    states.register::<MergeObservationsState>()?;
-    states.register::<AssembleSnapshotState>()?;
-    states.register::<ProjectReportState>()?;
-    Ok(states.into_snapshot())
-}
-
-/// Builds the portfolio operation registry used for authoring and certification.
-pub fn portfolio_operation_registry() -> mfm_program::Result<mfm_program::OperationRegistrySnapshot>
-{
-    let mut operations = OperationRegistryBuilder::new();
-    operations.register::<PortfolioTrackerWorkflowOperation>()?;
-    Ok(operations.into_snapshot())
-}
-
-/// Adds portfolio workflow descriptors to a trusted certification registry.
-pub fn register_portfolio_certification_descriptors(
-    registry: &mut mfm_certify::CertificationRegistry,
-) -> mfm_certify::Result<()> {
-    let mut states = StateRegistryBuilder::new();
-    registry.register_state(
-        &states
-            .register::<PrepareSourcesState>()
-            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
-    )?;
-    registry.register_state(
-        &states
-            .register::<ResolveSubjectsState>()
-            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
-    )?;
-    registry.register_state(
-        &states
-            .register::<PinViewsState>()
-            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
-    )?;
-    registry.register_state(
-        &states
-            .register::<ResolveValuationsState>()
-            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
-    )?;
-    registry.register_state(
-        &states
-            .register::<ObserveBatchState>()
-            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
-    )?;
-    registry.register_state(
-        &states
-            .register::<MergeObservationsState>()
-            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
-    )?;
-    registry.register_state(
-        &states
-            .register::<AssembleSnapshotState>()
-            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
-    )?;
-    registry.register_state(
-        &states
-            .register::<ProjectReportState>()
-            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
-    )?;
-    let mut operations = OperationRegistryBuilder::new();
-    registry.register_operation(
-        &operations
-            .register::<PortfolioTrackerWorkflowOperation>()
-            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
-    )?;
-    Ok(())
+mfm_certify::define_program_descriptor_registry! {
+    state_registry: pub portfolio_state_registry,
+    operation_registry: pub portfolio_operation_registry,
+    certification: pub register_portfolio_certification_descriptors,
+    states: [
+        PrepareSourcesState,
+        ResolveSubjectsState,
+        PinViewsState,
+        ResolveValuationsState,
+        ObserveBatchState,
+        MergeObservationsState,
+        AssembleSnapshotState,
+        ProjectReportState,
+    ],
+    operations: [PortfolioTrackerWorkflowOperation],
 }
 
 /// Builds a typed portfolio program draft.

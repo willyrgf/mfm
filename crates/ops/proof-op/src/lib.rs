@@ -27,11 +27,10 @@ use mfm_ids::{DigestAlgorithm, OperationKind, OperationVersion, SchemaId};
 use mfm_program::{
     build_root_with_registries, ManualAuthorizationDraft, ManualAuthorizationVerifierId,
     ManualResolutionPolicyDraft, ManualSigningSchemeSpec, NonEmptyUniqueOperators, Operation,
-    OperationExpansion, OperationKey, OperationRegistryBuilder, OperatorAuthorityId,
-    OperatorAuthorityMemberSpec, OperatorAuthoritySnapshotDraft, OperatorId,
-    OperatorPublicIdentity, PublicOutputKey, ResourceClaim, RootBuilder, ScopeKey,
-    SideEffectSagaPolicy, SideEffectVerificationSpec, StateKey, StateRegistryBuilder,
-    ThresholdQuorum,
+    OperationExpansion, OperationKey, OperatorAuthorityId, OperatorAuthorityMemberSpec,
+    OperatorAuthoritySnapshotDraft, OperatorId, OperatorPublicIdentity, PublicOutputKey,
+    ResourceClaim, RootBuilder, ScopeKey, SideEffectSagaPolicy, SideEffectVerificationSpec,
+    StateKey, ThresholdQuorum,
 };
 
 const PROOF_OPERATION_KIND_NAME: &str = "workflow";
@@ -101,48 +100,13 @@ impl Operation for ProofWorkflowOperation {
     }
 }
 
-fn proof_state_registry() -> mfm_program::Result<mfm_program::StateRegistrySnapshot> {
-    let mut states = StateRegistryBuilder::new();
-    states.register::<ProofReadFactState>()?;
-    states.register::<ProofApplySideEffectState>()?;
-    states.register::<ProofAssembleOutputState>()?;
-    Ok(states.into_snapshot())
-}
-
-fn proof_operation_registry() -> mfm_program::Result<mfm_program::OperationRegistrySnapshot> {
-    let mut operations = OperationRegistryBuilder::new();
-    operations.register::<ProofWorkflowOperation>()?;
-    Ok(operations.into_snapshot())
-}
-
-/// Adds proof workflow descriptors to a trusted certification registry.
-pub fn register_proof_certification_descriptors(
-    registry: &mut mfm_certify::CertificationRegistry,
-) -> mfm_certify::Result<()> {
-    let mut states = StateRegistryBuilder::new();
-    registry.register_state(
-        &states
-            .register::<ProofReadFactState>()
-            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
-    )?;
-    registry.register_state(
-        &states
-            .register::<ProofApplySideEffectState>()
-            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
-    )?;
-    registry.register_state(
-        &states
-            .register::<ProofAssembleOutputState>()
-            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
-    )?;
-    let mut operations = OperationRegistryBuilder::new();
-    registry.register_operation(
-        &operations
-            .register::<ProofWorkflowOperation>()
-            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
-    )?;
-    register_proof_manual_resolution_authority(registry)?;
-    Ok(())
+mfm_certify::define_program_descriptor_registry! {
+    state_registry: proof_state_registry,
+    operation_registry: proof_operation_registry,
+    certification: pub register_proof_certification_descriptors,
+    states: [ProofReadFactState, ProofApplySideEffectState, ProofAssembleOutputState],
+    operations: [ProofWorkflowOperation],
+    after_registration: register_proof_manual_resolution_authority,
 }
 
 /// Builds a typed proof program draft.

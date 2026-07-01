@@ -29,9 +29,8 @@ use mfm_evm_contract_model::{ConfiguredContract, DeployedContract, ValidationRep
 use mfm_ids::{DigestAlgorithm, OperationKind, OperationVersion, SeedId};
 use mfm_program::{
     build_root_with_registries, CanonicalSeed, Handle, Operation, OperationExpansion, OperationKey,
-    OperationRegistryBuilder, PublicOutputKey, RootBound, RootBuilder, ScopeKey, SeedKey,
-    SideEffectSagaPolicy, SideEffectVerificationSpec, StateKey, StateRegistryBuilder,
-    TypedProgramLaunchPlan,
+    PublicOutputKey, RootBound, RootBuilder, ScopeKey, SeedKey, SideEffectSagaPolicy,
+    SideEffectVerificationSpec, StateKey, TypedProgramLaunchPlan,
 };
 use mfm_program_derive::{MfmConfig, OperationOutput, PublicOutputs};
 use mfm_state_evm_contracts::{
@@ -410,70 +409,17 @@ impl Operation for ContractLifecycleOperation {
     }
 }
 
-/// Builds the contract lifecycle state registry used for authoring and certification.
-pub fn contract_lifecycle_state_registry() -> mfm_program::Result<mfm_program::StateRegistrySnapshot>
-{
-    let mut states = StateRegistryBuilder::new();
-    states.register::<DeployContractState>()?;
-    states.register::<ConfigureContractState>()?;
-    states.register::<ValidateContractState>()?;
-    Ok(states.into_snapshot())
-}
-
-/// Builds the contract lifecycle operation registry used for authoring and certification.
-pub fn contract_lifecycle_operation_registry(
-) -> mfm_program::Result<mfm_program::OperationRegistrySnapshot> {
-    let mut operations = OperationRegistryBuilder::new();
-    operations.register::<DeployContractOperation>()?;
-    operations.register::<ConfigureContractOperation>()?;
-    operations.register::<ValidateContractOperation>()?;
-    operations.register::<ContractLifecycleOperation>()?;
-    Ok(operations.into_snapshot())
-}
-
-/// Adds lifecycle operation descriptors to a trusted certification registry.
-pub fn register_contract_lifecycle_certification_descriptors(
-    registry: &mut mfm_certify::CertificationRegistry,
-) -> mfm_certify::Result<()> {
-    let mut states = StateRegistryBuilder::new();
-    registry.register_state(
-        &states
-            .register::<DeployContractState>()
-            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
-    )?;
-    registry.register_state(
-        &states
-            .register::<ConfigureContractState>()
-            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
-    )?;
-    registry.register_state(
-        &states
-            .register::<ValidateContractState>()
-            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
-    )?;
-
-    let mut operations = OperationRegistryBuilder::new();
-    registry.register_operation(
-        &operations
-            .register::<DeployContractOperation>()
-            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
-    )?;
-    registry.register_operation(
-        &operations
-            .register::<ConfigureContractOperation>()
-            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
-    )?;
-    registry.register_operation(
-        &operations
-            .register::<ValidateContractOperation>()
-            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
-    )?;
-    registry.register_operation(
-        &operations
-            .register::<ContractLifecycleOperation>()
-            .map_err(|error| mfm_certify::CertifyError::Lowering(error.to_string()))?,
-    )?;
-    Ok(())
+mfm_certify::define_program_descriptor_registry! {
+    state_registry: pub contract_lifecycle_state_registry,
+    operation_registry: pub contract_lifecycle_operation_registry,
+    certification: pub register_contract_lifecycle_certification_descriptors,
+    states: [DeployContractState, ConfigureContractState, ValidateContractState],
+    operations: [
+        DeployContractOperation,
+        ConfigureContractOperation,
+        ValidateContractOperation,
+        ContractLifecycleOperation,
+    ],
 }
 
 /// Builds a typed deploy-only program draft.
@@ -502,7 +448,12 @@ pub fn configure_contract_program_draft(
     config: ConfigurePhaseConfig,
     deployed: DeployedContract,
 ) -> mfm_program::Result<mfm_program::TypedProgramDraft> {
-    ensure_network_matches_deployed(config.network(), &deployed)?;
+    ensure_networks_match(
+        config.network(),
+        &deployed.network_id,
+        deployed.expected_chain_id,
+        "seed",
+    )?;
     build_program(|root| {
         root.set_saga_policy(SideEffectSagaPolicy::FailWithoutAcdcClaim)?;
         let deployed = root.seed(
@@ -529,7 +480,12 @@ pub fn validate_contract_program_draft(
     config: ValidatePhaseConfig,
     configured: ConfiguredContract,
 ) -> mfm_program::Result<mfm_program::TypedProgramDraft> {
-    ensure_network_matches_configured(config.network(), &configured)?;
+    ensure_networks_match(
+        config.network(),
+        &configured.deployed.network_id,
+        configured.deployed.expected_chain_id,
+        "seed",
+    )?;
     build_program(|root| {
         let configured = root.seed(
             SeedKey::new(CONFIGURED_SEED_KEY)?,
@@ -673,48 +629,35 @@ fn ensure_phase_networks_match(
     configure: &ConfigurePhaseConfig,
     validate: &ValidatePhaseConfig,
 ) -> mfm_program::Result<()> {
-    ensure_network_pair_matches(deploy.network(), configure.network(), "deploy/configure")?;
-    ensure_network_pair_matches(deploy.network(), validate.network(), "deploy/validate")
+    ensure_networks_match(
+        deploy.network(),
+        configure.network().network_id(),
+        configure.network().expected_chain_id(),
+        "deploy/configure",
+    )?;
+    ensure_networks_match(
+        deploy.network(),
+        validate.network().network_id(),
+        validate.network().expected_chain_id(),
+        "deploy/validate",
+    )
 }
 
-fn ensure_network_pair_matches(
+fn ensure_networks_match(
     left: &EvmNetworkIntent,
-    right: &EvmNetworkIntent,
+    network_id: &str,
+    expected_chain_id: u64,
     label: &'static str,
 ) -> mfm_program::Result<()> {
-    if left.network_id() != right.network_id() {
-        return Err(mfm_program::PlanError::Key(format!(
-            "contract lifecycle {label} network id mismatch"
-        )));
+    if left.network_id() != network_id {
+        return Err(network_mismatch_error(label, "network id"));
     }
-    if left.expected_chain_id() != right.expected_chain_id() {
-        return Err(mfm_program::PlanError::Key(format!(
-            "contract lifecycle {label} expected chain id mismatch"
-        )));
+    if left.expected_chain_id() != expected_chain_id {
+        return Err(network_mismatch_error(label, "expected chain id"));
     }
     Ok(())
 }
 
-fn ensure_network_matches_deployed(
-    network: &EvmNetworkIntent,
-    deployed: &DeployedContract,
-) -> mfm_program::Result<()> {
-    if network.network_id() != deployed.network_id {
-        return Err(mfm_program::PlanError::Key(
-            "contract lifecycle seed network id mismatch".to_owned(),
-        ));
-    }
-    if network.expected_chain_id() != deployed.expected_chain_id {
-        return Err(mfm_program::PlanError::Key(
-            "contract lifecycle seed expected chain id mismatch".to_owned(),
-        ));
-    }
-    Ok(())
-}
-
-fn ensure_network_matches_configured(
-    network: &EvmNetworkIntent,
-    configured: &ConfiguredContract,
-) -> mfm_program::Result<()> {
-    ensure_network_matches_deployed(network, &configured.deployed)
+fn network_mismatch_error(label: &'static str, field: &'static str) -> mfm_program::PlanError {
+    mfm_program::PlanError::Key(format!("contract lifecycle {label} {field} mismatch"))
 }

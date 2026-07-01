@@ -31,6 +31,221 @@ fn in_memory_state() -> test_support::InMemoryRestAppState {
     test_support::in_memory_rest_app_state()
 }
 
+fn state_and_app_with_runtime_config(
+    runtime_config_path: std::path::PathBuf,
+) -> (test_support::InMemoryRestAppState, axum::Router) {
+    let mut state = in_memory_state();
+    state.runtime_config_path = Some(runtime_config_path);
+    let app = mfm_rest_api::make_app(state.clone());
+    (state, app)
+}
+
+struct RuntimeConfigApp {
+    _runtime_config_dir: tempfile::TempDir,
+    runtime_config_path: std::path::PathBuf,
+    state: test_support::InMemoryRestAppState,
+    app: axum::Router,
+}
+
+fn runtime_config_app(network_id: &str, rpc_url: &str) -> RuntimeConfigApp {
+    runtime_config_app_with(network_id, rpc_url, |dir, network_id, rpc_url| {
+        test_support::write_evm_runtime_config_for_test(dir, network_id, rpc_url, None)
+    })
+}
+
+fn malformed_signer_runtime_config_app(network_id: &str, rpc_url: &str) -> RuntimeConfigApp {
+    runtime_config_app_with(
+        network_id,
+        rpc_url,
+        write_evm_runtime_config_with_malformed_signers,
+    )
+}
+
+fn runtime_config_app_with(
+    network_id: &str,
+    rpc_url: &str,
+    write: impl FnOnce(&std::path::Path, &str, &str) -> std::path::PathBuf,
+) -> RuntimeConfigApp {
+    let runtime_config_dir = tempfile::tempdir().expect("runtime config tempdir");
+    let runtime_config_path = write(runtime_config_dir.path(), network_id, rpc_url);
+    let (state, app) = state_and_app_with_runtime_config(runtime_config_path.clone());
+    RuntimeConfigApp {
+        _runtime_config_dir: runtime_config_dir,
+        runtime_config_path,
+        state,
+        app,
+    }
+}
+
+fn get(uri: impl Into<String>) -> Request<Body> {
+    Request::builder()
+        .method("GET")
+        .uri(uri.into())
+        .body(Body::empty())
+        .expect("request")
+}
+
+async fn assert_error_response(response: axum::response::Response, status: StatusCode, code: &str) {
+    assert_eq!(response.status(), status);
+    let value = response_json(response).await;
+    assert_eq!(value["status"], "error");
+    assert_eq!(value["error"]["code"], code);
+}
+
+async fn assert_start_request_error(request: Request<Body>, code: &str) {
+    let response = test_app().oneshot(request).await.expect("response");
+    assert_error_response(response, StatusCode::BAD_REQUEST, code).await;
+}
+
+async fn assert_start_json_error(body: serde_json::Value, code: &str) {
+    assert_start_request_error(json_post("/v1/runs/start", body), code).await;
+}
+
+async fn get_success(path: &str) -> serde_json::Value {
+    let response = test_app().oneshot(get(path)).await.expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let value = response_json(response).await;
+    assert_eq!(value["status"], "success");
+    assert_eq!(value["data"]["ok"], true);
+    value
+}
+
+async fn start_entry_point(
+    app: &axum::Router,
+    op: &str,
+    config: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let response = app
+        .clone()
+        .oneshot(json_post(
+            "/v1/runs/start",
+            serde_json::json!({
+                "op": op,
+                "op_version": 1,
+                "config_format": "json",
+                "config": config,
+            }),
+        ))
+        .await
+        .expect("entry-point start response");
+    let status = response.status();
+    (status, response_json(response).await)
+}
+
+async fn start_portfolio_snapshot(app: &axum::Router) -> (serde_json::Value, RunId) {
+    let response = app
+        .clone()
+        .oneshot(json_post(
+            "/v1/runs/start",
+            serde_json::json!({
+                "op": "portfolio_snapshot",
+                "config_format": "json",
+                "config": portfolio_snapshot_config(),
+            }),
+        ))
+        .await
+        .expect("portfolio snapshot start response");
+    let status = response.status();
+    let body = response_json(response).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["outcome"], "admitted");
+    let run_id = RunId::parse(body["data"]["run"]["run_id"].as_str().expect("run id"))
+        .expect("typed run id");
+    (body, run_id)
+}
+
+fn event_index(
+    stream: &[store::KernelEventEnvelope],
+    label: &str,
+    matches_payload: impl Fn(&events::KernelEventPayload) -> bool,
+) -> usize {
+    stream
+        .iter()
+        .position(|event| matches_payload(event.payload()))
+        .unwrap_or_else(|| panic!("{label}"))
+}
+
+fn first_failed_attempt(
+    stream: &[store::KernelEventEnvelope],
+) -> (usize, &events::StateAttemptFailed) {
+    let index = event_index(stream, "StateAttemptFailed", |payload| {
+        matches!(payload, events::KernelEventPayload::StateAttemptFailed(_))
+    });
+    let events::KernelEventPayload::StateAttemptFailed(failed) = stream[index].payload() else {
+        panic!("expected failed attempt");
+    };
+    (index, failed)
+}
+
+fn portfolio_chain_mismatch_public_details() -> serde_json::Value {
+    serde_json::json!({
+        "network_id": PORTFOLIO_NETWORK_ID,
+        "expected_chain_id": 31337,
+        "observed_chain_id": 31338,
+        "source_ref": PORTFOLIO_NETWORK_ID,
+        "policy_id": PORTFOLIO_NETWORK_ID,
+    })
+}
+
+async fn assert_evm_start_fails_before_admission(
+    state: &test_support::InMemoryRestAppState,
+    app: &axum::Router,
+    op: &str,
+    config: serde_json::Value,
+    message: &str,
+) {
+    let prepared = test_support::prepare_entry_point_launch_for_store(
+        &state.store,
+        op,
+        Some(mfm_app::OpVersion::new(1).expect("op version")),
+        &config,
+        None,
+    )
+    .await;
+    assert_evm_entry_point_evidence(&prepared.evidence, op);
+
+    let (status, body) = start_entry_point(app, op, config).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["status"], "error");
+    assert_eq!(body["error"]["code"], "LaunchRunnerUnavailable");
+
+    let stream = state
+        .store
+        .load_run_stream(&prepared.request.run_id)
+        .await
+        .expect("run stream");
+    assert!(stream.is_empty(), "{message}");
+}
+
+async fn assert_absent_run_routes_not_found(app: &axum::Router, include_resume: bool) {
+    let mut requests = vec![(
+        get(format!("/v1/runs/{VALID_RUN_ID}/status")),
+        "status response",
+    )];
+    if include_resume {
+        requests.push((
+            empty_post(&format!("/v1/runs/{VALID_RUN_ID}/resume")),
+            "resume response",
+        ));
+    }
+    requests.extend([
+        (
+            empty_post(&format!("/v1/runs/{VALID_RUN_ID}/replay")),
+            "replay response",
+        ),
+        (
+            get(format!(
+                "/v1/runs/{VALID_RUN_ID}/public-output/{VALID_SCHEMA_ID}"
+            )),
+            "public output response",
+        ),
+    ]);
+    for (request, label) in requests {
+        let response = app.clone().oneshot(request).await.expect(label);
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+}
+
 async fn start_portfolio_rpc_chain_flip_mock(first_chain_id: u64, later_chain_id: u64) -> String {
     let state = Arc::new(PortfolioRpcChainFlipState {
         first_chain_id,
@@ -102,140 +317,50 @@ async fn portfolio_rpc_chain_flip_handler(
 
 #[tokio::test]
 async fn health_endpoint_reports_liveness() {
-    let app = test_app();
-
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/v1/health")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("response");
-
-    assert_eq!(resp.status(), StatusCode::OK);
-    let v = response_json(resp).await;
-    assert_eq!(v["status"], "success");
-    assert_eq!(v["data"]["ok"], true);
+    get_success("/v1/health").await;
 }
 
 #[tokio::test]
 async fn ready_endpoint_reports_run_store_readiness() {
-    let app = test_app();
-
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/v1/ready")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("response");
-
-    assert_eq!(resp.status(), StatusCode::OK);
-    let v = response_json(resp).await;
-    assert_eq!(v["status"], "success");
-    assert_eq!(v["data"]["ok"], true);
+    let v = get_success("/v1/ready").await;
     assert_eq!(v["data"]["checks"]["run_store"], "ready");
 }
 
 #[tokio::test]
 async fn start_rejects_invalid_json_with_stable_envelope() {
-    let app = test_app();
-
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/runs/start")
-                .header("content-type", "application/json")
-                .body(Body::from("not json"))
-                .expect("request"),
-        )
-        .await
-        .expect("response");
-
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    let v = response_json(resp).await;
-    assert_eq!(v["status"], "error");
-    assert_eq!(v["error"]["code"], "InvalidJson");
+    assert_start_request_error(
+        Request::builder()
+            .method("POST")
+            .uri("/v1/runs/start")
+            .header("content-type", "application/json")
+            .body(Body::from("not json"))
+            .expect("request"),
+        "InvalidJson",
+    )
+    .await;
 }
 
 #[tokio::test]
-async fn start_rejects_unknown_start_fields() {
-    let app = test_app();
-
-    let resp = app
-        .oneshot(json_post(
-            "/v1/runs/start",
-            serde_json::json!({
-                "unexpected": true
-            }),
-        ))
-        .await
-        .expect("response");
-
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    let v = response_json(resp).await;
-    assert_eq!(v["status"], "error");
-    assert_eq!(v["error"]["code"], "InvalidJson");
-}
-
-#[tokio::test]
-async fn start_accepts_entry_point_toml_shape_with_default_format() {
-    let app = test_app();
-
-    let resp = app
-        .oneshot(json_post(
-            "/v1/runs/start",
+async fn start_validates_entry_point_request_shapes() {
+    for (body, code) in [
+        (serde_json::json!({ "unexpected": true }), "InvalidJson"),
+        (
             serde_json::json!({
                 "op": "missing_contract_test_op",
                 "config": "portfolio_id = \"main\"\n",
             }),
-        ))
-        .await
-        .expect("response");
-
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    let v = response_json(resp).await;
-    assert_eq!(v["status"], "error");
-    assert_eq!(v["error"]["code"], "EntryPointOpNotFound");
-}
-
-#[tokio::test]
-async fn start_accepts_entry_point_toml_shape_with_explicit_version() {
-    let app = test_app();
-
-    let resp = app
-        .oneshot(json_post(
-            "/v1/runs/start",
+            "EntryPointOpNotFound",
+        ),
+        (
             serde_json::json!({
                 "op": "missing_contract_test_op",
                 "op_version": 1,
                 "config_format": "toml",
                 "config": "portfolio_id = \"main\"\n",
             }),
-        ))
-        .await
-        .expect("response");
-
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    let v = response_json(resp).await;
-    assert_eq!(v["status"], "error");
-    assert_eq!(v["error"]["code"], "EntryPointOpNotFound");
-}
-
-#[tokio::test]
-async fn start_accepts_entry_point_json_object_config_shape() {
-    let app = test_app();
-
-    let resp = app
-        .oneshot(json_post(
-            "/v1/runs/start",
+            "EntryPointOpNotFound",
+        ),
+        (
             serde_json::json!({
                 "op": "missing_contract_test_op",
                 "config_format": "json",
@@ -244,23 +369,9 @@ async fn start_accepts_entry_point_json_object_config_shape() {
                     "wallets": []
                 },
             }),
-        ))
-        .await
-        .expect("response");
-
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    let v = response_json(resp).await;
-    assert_eq!(v["status"], "error");
-    assert_eq!(v["error"]["code"], "EntryPointOpNotFound");
-}
-
-#[tokio::test]
-async fn start_rejects_raw_run_id_field_as_unknown_json() {
-    let app = test_app();
-
-    let resp = app
-        .oneshot(json_post(
-            "/v1/runs/start",
+            "EntryPointOpNotFound",
+        ),
+        (
             serde_json::json!({
                 "op": "portfolio_snapshot",
                 "config_format": "json",
@@ -270,38 +381,25 @@ async fn start_rejects_raw_run_id_field_as_unknown_json() {
                 },
                 "run_id": VALID_RUN_ID,
             }),
-        ))
-        .await
-        .expect("response");
-
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    let v = response_json(resp).await;
-    assert_eq!(v["status"], "error");
-    assert_eq!(v["error"]["code"], "InvalidJson");
+            "InvalidJson",
+        ),
+    ] {
+        assert_start_json_error(body, code).await;
+    }
 }
 
 #[tokio::test]
 async fn start_distinct_run_key_derives_separate_run_without_persisting_raw_key() {
     let rpc_url = test_support::start_portfolio_rpc_mock(31337).await;
-    let runtime_config_dir = tempfile::tempdir().expect("runtime config tempdir");
-    let runtime_config_path = test_support::write_evm_runtime_config_for_test(
-        runtime_config_dir.path(),
-        PORTFOLIO_NETWORK_ID,
-        &rpc_url,
-        None,
-    );
-    let mut state = in_memory_state();
-    state.runtime_config_path = Some(runtime_config_path);
-    let app = mfm_rest_api::make_app(state.clone());
+    let runtime = runtime_config_app(PORTFOLIO_NETWORK_ID, &rpc_url);
+    let app = runtime.app.clone();
+    let store = &runtime.state.store;
     let raw_key = "distinct-alpha";
-    let first_run_id = test_support::prepare_portfolio_launch_for_store(
-        &state.store,
-        &portfolio_snapshot_config(),
-        None,
-    )
-    .await
-    .request
-    .run_id;
+    let first_run_id =
+        test_support::prepare_portfolio_launch_for_store(store, &portfolio_snapshot_config(), None)
+            .await
+            .request
+            .run_id;
 
     let distinct = app
         .oneshot(json_post(
@@ -327,8 +425,7 @@ async fn start_distinct_run_key_derives_separate_run_without_persisting_raw_key(
     .expect("typed distinct run id");
     assert_ne!(first_run_id, distinct_run_id);
 
-    let stream = state
-        .store
+    let stream = store
         .load_run_stream(&distinct_run_id)
         .await
         .expect("distinct stream");
@@ -346,56 +443,20 @@ async fn start_distinct_run_key_derives_separate_run_without_persisting_raw_key(
 #[tokio::test]
 async fn portfolio_chain_mismatch_fails_after_admission_with_redacted_diagnostic() {
     let rpc_url = test_support::start_portfolio_rpc_mock(31338).await;
-    let runtime_config_dir = tempfile::tempdir().expect("runtime config tempdir");
-    let runtime_config_path = test_support::write_evm_runtime_config_for_test(
-        runtime_config_dir.path(),
-        PORTFOLIO_NETWORK_ID,
-        &rpc_url,
-        None,
-    );
-    let mut state = in_memory_state();
-    state.runtime_config_path = Some(runtime_config_path.clone());
-    let app = mfm_rest_api::make_app(state.clone());
+    let runtime = runtime_config_app(PORTFOLIO_NETWORK_ID, &rpc_url);
+    let app = runtime.app.clone();
+    let store = &runtime.state.store;
+    let runtime_config_path = &runtime.runtime_config_path;
 
-    let resp = app
-        .clone()
-        .oneshot(json_post(
-            "/v1/runs/start",
-            serde_json::json!({
-                "op": "portfolio_snapshot",
-                "config_format": "json",
-                "config": portfolio_snapshot_config(),
-            }),
-        ))
-        .await
-        .expect("chain mismatch start response");
-    let status = resp.status();
-    let body = response_json(resp).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["data"]["outcome"], "admitted");
+    let (body, run_id) = start_portfolio_snapshot(&app).await;
     assert_ne!(body["data"]["run"]["run_mode"], "completed");
 
-    let run_id = RunId::parse(body["data"]["run"]["run_id"].as_str().expect("run id"))
-        .expect("typed run id");
-    let stream = state.store.load_run_stream(&run_id).await.expect("stream");
-    let admitted_index = stream
-        .iter()
-        .position(|event| matches!(event.payload(), events::KernelEventPayload::RunAdmitted(_)))
-        .expect("RunAdmitted");
-    let failed_index = stream
-        .iter()
-        .position(|event| {
-            matches!(
-                event.payload(),
-                events::KernelEventPayload::StateAttemptFailed(_)
-            )
-        })
-        .expect("StateAttemptFailed");
+    let stream = store.load_run_stream(&run_id).await.expect("stream");
+    let admitted_index = event_index(&stream, "RunAdmitted", |payload| {
+        matches!(payload, events::KernelEventPayload::RunAdmitted(_))
+    });
+    let (failed_index, failed) = first_failed_attempt(&stream);
     assert!(admitted_index < failed_index);
-    let failed = stream[failed_index].payload();
-    let events::KernelEventPayload::StateAttemptFailed(failed) = failed else {
-        panic!("expected failed attempt");
-    };
     assert_eq!(failed.error.category, events::ErrorCategory::Validation);
     assert_eq!(failed.error.safe_message, "runner output failed validation");
     let diagnostic = failed
@@ -410,8 +471,7 @@ async fn portfolio_chain_mismatch_fails_after_admission_with_redacted_diagnostic
         .expect("chain mismatch records public details digest")
         .content_digest
         .clone();
-    let diagnostic_artifact = state
-        .store
+    let diagnostic_artifact = store
         .read_retained_artifact(&diagnostic_artifact_requirement(diagnostic))
         .await
         .expect("diagnostic artifact");
@@ -419,13 +479,7 @@ async fn portfolio_chain_mismatch_fails_after_admission_with_redacted_diagnostic
         .expect("diagnostic json");
     assert_eq!(
         diagnostic_json["public_details"],
-        serde_json::json!({
-            "network_id": PORTFOLIO_NETWORK_ID,
-            "expected_chain_id": 31337,
-            "observed_chain_id": 31338,
-            "source_ref": PORTFOLIO_NETWORK_ID,
-            "policy_id": PORTFOLIO_NETWORK_ID,
-        })
+        portfolio_chain_mismatch_public_details()
     );
     assert_eq!(
         mfm_canonical::PlainCanonicalJsonBytes::from_json_str(
@@ -445,7 +499,7 @@ async fn portfolio_chain_mismatch_fails_after_admission_with_redacted_diagnostic
         .to_string()
         .contains(&runtime_config_path.display().to_string()));
 
-    std::fs::remove_file(&runtime_config_path).expect("remove runtime config");
+    std::fs::remove_file(runtime_config_path).expect("remove runtime config");
     let replay = app
         .oneshot(empty_post(&format!("/v1/runs/{run_id}/replay")))
         .await
@@ -456,74 +510,33 @@ async fn portfolio_chain_mismatch_fails_after_admission_with_redacted_diagnostic
 #[tokio::test]
 async fn portfolio_observe_batch_chain_mismatch_is_attempt_failure() {
     let rpc_url = start_portfolio_rpc_chain_flip_mock(31337, 31338).await;
-    let runtime_config_dir = tempfile::tempdir().expect("runtime config tempdir");
-    let runtime_config_path = test_support::write_evm_runtime_config_for_test(
-        runtime_config_dir.path(),
-        PORTFOLIO_NETWORK_ID,
-        &rpc_url,
-        None,
-    );
-    let mut state = in_memory_state();
-    state.runtime_config_path = Some(runtime_config_path.clone());
-    let app = mfm_rest_api::make_app(state.clone());
+    let runtime = runtime_config_app(PORTFOLIO_NETWORK_ID, &rpc_url);
+    let app = runtime.app.clone();
+    let store = &runtime.state.store;
+    let runtime_config_path = &runtime.runtime_config_path;
 
-    let resp = app
-        .clone()
-        .oneshot(json_post(
-            "/v1/runs/start",
-            serde_json::json!({
-                "op": "portfolio_snapshot",
-                "config_format": "json",
-                "config": portfolio_snapshot_config(),
-            }),
-        ))
-        .await
-        .expect("delayed chain mismatch start response");
-    let status = resp.status();
-    let body = response_json(resp).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["data"]["outcome"], "admitted");
-
-    let run_id = RunId::parse(body["data"]["run"]["run_id"].as_str().expect("run id"))
-        .expect("typed run id");
-    let stream = state.store.load_run_stream(&run_id).await.expect("stream");
-    let admitted_index = stream
-        .iter()
-        .position(|event| matches!(event.payload(), events::KernelEventPayload::RunAdmitted(_)))
-        .expect("RunAdmitted");
-    let pinned_index = stream
-        .iter()
-        .position(|event| match event.payload() {
-            events::KernelEventPayload::CellProduced(payload) => payload
-                .schema_id
-                .as_str()
-                .contains("mfm.portfolio.pinned_views"),
-            _ => false,
-        })
-        .expect("pinned views cell");
-    let failed_index = stream
-        .iter()
-        .position(|event| {
-            matches!(
-                event.payload(),
-                events::KernelEventPayload::StateAttemptFailed(_)
-            )
-        })
-        .expect("StateAttemptFailed");
+    let (_, run_id) = start_portfolio_snapshot(&app).await;
+    let stream = store.load_run_stream(&run_id).await.expect("stream");
+    let admitted_index = event_index(&stream, "RunAdmitted", |payload| {
+        matches!(payload, events::KernelEventPayload::RunAdmitted(_))
+    });
+    let pinned_index = event_index(&stream, "pinned views cell", |payload| match payload {
+        events::KernelEventPayload::CellProduced(payload) => payload
+            .schema_id
+            .as_str()
+            .contains("mfm.portfolio.pinned_views"),
+        _ => false,
+    });
+    let (failed_index, failed) = first_failed_attempt(&stream);
     assert!(admitted_index < pinned_index);
     assert!(pinned_index < failed_index);
 
-    let events::KernelEventPayload::StateAttemptFailed(failed) = stream[failed_index].payload()
-    else {
-        panic!("expected failed attempt");
-    };
     let diagnostic = failed
         .error
         .diagnostic_ref
         .as_ref()
         .expect("chain mismatch records diagnostic artifact");
-    let diagnostic_artifact = state
-        .store
+    let diagnostic_artifact = store
         .read_retained_artifact(&diagnostic_artifact_requirement(diagnostic))
         .await
         .expect("diagnostic artifact");
@@ -531,16 +544,10 @@ async fn portfolio_observe_batch_chain_mismatch_is_attempt_failure() {
         .expect("diagnostic json");
     assert_eq!(
         diagnostic_json["public_details"],
-        serde_json::json!({
-            "network_id": PORTFOLIO_NETWORK_ID,
-            "expected_chain_id": 31337,
-            "observed_chain_id": 31338,
-            "source_ref": PORTFOLIO_NETWORK_ID,
-            "policy_id": PORTFOLIO_NETWORK_ID,
-        })
+        portfolio_chain_mismatch_public_details()
     );
 
-    std::fs::remove_file(&runtime_config_path).expect("remove runtime config");
+    std::fs::remove_file(runtime_config_path).expect("remove runtime config");
     let replay = app
         .oneshot(empty_post(&format!("/v1/runs/{run_id}/replay")))
         .await
@@ -554,78 +561,33 @@ async fn evm_contract_start_requires_capability_before_admission_for_all_entry_p
     let app = mfm_rest_api::make_app(state.clone());
 
     for (op, config) in evm_entry_point_configs() {
-        let prepared = test_support::prepare_entry_point_launch_for_store(
-            &state.store,
+        assert_evm_start_fails_before_admission(
+            &state,
+            &app,
             op,
-            Some(mfm_app::OpVersion::new(1).expect("op version")),
-            &config,
-            None,
+            config,
+            &format!("{op} must fail capability ingress before RunAdmitted"),
         )
         .await;
-        assert_evm_entry_point_evidence(&prepared.evidence, op);
-        let run_id = prepared.request.run_id.clone();
-        let resp = app
-            .clone()
-            .oneshot(json_post(
-                "/v1/runs/start",
-                serde_json::json!({
-                    "op": op,
-                    "op_version": 1,
-                    "config_format": "json",
-                    "config": config,
-                }),
-            ))
-            .await
-            .expect("EVM entry-point start response");
-        let status = resp.status();
-        let body = response_json(resp).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-        assert_eq!(body["status"], "error");
-        assert_eq!(body["error"]["code"], "LaunchRunnerUnavailable");
-
-        let stream = state
-            .store
-            .load_run_stream(&run_id)
-            .await
-            .expect("run stream");
-        assert!(
-            stream.is_empty(),
-            "{op} must fail capability ingress before RunAdmitted"
-        );
     }
 }
 
 #[tokio::test]
 async fn evm_contract_validation_ignores_unused_malformed_signers() {
     let rpc_url = test_support::start_portfolio_rpc_mock(1).await;
-    let runtime_config_dir = tempfile::tempdir().expect("runtime config tempdir");
-    let runtime_config_path = write_evm_runtime_config_with_malformed_signers(
-        runtime_config_dir.path(),
-        "ethereum-mainnet",
-        &rpc_url,
-    );
-    let mut state = in_memory_state();
-    state.runtime_config_path = Some(runtime_config_path);
-    let app = mfm_rest_api::make_app(state.clone());
+    let runtime = malformed_signer_runtime_config_app("ethereum-mainnet", &rpc_url);
+    let store = &runtime.state.store;
 
-    let resp = app
-        .oneshot(json_post(
-            "/v1/runs/start",
-            serde_json::json!({
-                "op": "evm_contract_validate",
-                "op_version": 1,
-                "config_format": "json",
-                "config": evm_validate_entry_config_json(),
-            }),
-        ))
-        .await
-        .expect("validate start response");
-    let status = resp.status();
-    let body = response_json(resp).await;
+    let (status, body) = start_entry_point(
+        &runtime.app,
+        "evm_contract_validate",
+        evm_validate_entry_config_json(),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let run_id = RunId::parse(body["data"]["run"]["run_id"].as_str().expect("run id"))
         .expect("typed run id");
-    let stream = state.store.load_run_stream(&run_id).await.expect("stream");
+    let stream = store.load_run_stream(&run_id).await.expect("stream");
     assert!(
         stream
             .iter()
@@ -637,100 +599,31 @@ async fn evm_contract_validation_ignores_unused_malformed_signers() {
 #[tokio::test]
 async fn evm_contract_mutation_requires_signers_before_admission() {
     let rpc_url = test_support::start_portfolio_rpc_mock(1).await;
-    let runtime_config_dir = tempfile::tempdir().expect("runtime config tempdir");
-    let runtime_config_path = test_support::write_evm_runtime_config_for_test(
-        runtime_config_dir.path(),
-        "ethereum-mainnet",
-        &rpc_url,
-        None,
-    );
-    let mut state = in_memory_state();
-    state.runtime_config_path = Some(runtime_config_path);
-    let app = mfm_rest_api::make_app(state.clone());
-    let prepared = test_support::prepare_entry_point_launch_for_store(
-        &state.store,
+    let runtime = runtime_config_app("ethereum-mainnet", &rpc_url);
+
+    assert_evm_start_fails_before_admission(
+        &runtime.state,
+        &runtime.app,
         "evm_contract_deploy",
-        Some(mfm_app::OpVersion::new(1).expect("op version")),
-        &evm_deploy_config_json(),
-        None,
+        evm_deploy_config_json(),
+        "missing signer must fail before admission",
     )
     .await;
-    let run_id = prepared.request.run_id.clone();
-
-    let resp = app
-        .oneshot(json_post(
-            "/v1/runs/start",
-            serde_json::json!({
-                "op": "evm_contract_deploy",
-                "op_version": 1,
-                "config_format": "json",
-                "config": evm_deploy_config_json(),
-            }),
-        ))
-        .await
-        .expect("deploy start response");
-    let status = resp.status();
-    let body = response_json(resp).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    assert_eq!(body["error"]["code"], "LaunchRunnerUnavailable");
-    let stream = state
-        .store
-        .load_run_stream(&run_id)
-        .await
-        .expect("run stream");
-    assert!(
-        stream.is_empty(),
-        "missing signer must fail before admission"
-    );
 }
 
 #[tokio::test]
 async fn evm_contract_mutation_rejects_malformed_signers_before_admission() {
     let rpc_url = test_support::start_portfolio_rpc_mock(1).await;
-    let runtime_config_dir = tempfile::tempdir().expect("runtime config tempdir");
-    let runtime_config_path = write_evm_runtime_config_with_malformed_signers(
-        runtime_config_dir.path(),
-        "ethereum-mainnet",
-        &rpc_url,
-    );
-    let mut state = in_memory_state();
-    state.runtime_config_path = Some(runtime_config_path);
-    let app = mfm_rest_api::make_app(state.clone());
-    let prepared = test_support::prepare_entry_point_launch_for_store(
-        &state.store,
+    let runtime = malformed_signer_runtime_config_app("ethereum-mainnet", &rpc_url);
+
+    assert_evm_start_fails_before_admission(
+        &runtime.state,
+        &runtime.app,
         "evm_contract_deploy",
-        Some(mfm_app::OpVersion::new(1).expect("op version")),
-        &evm_deploy_config_json(),
-        None,
+        evm_deploy_config_json(),
+        "malformed signer config must fail before admission",
     )
     .await;
-    let run_id = prepared.request.run_id.clone();
-
-    let resp = app
-        .oneshot(json_post(
-            "/v1/runs/start",
-            serde_json::json!({
-                "op": "evm_contract_deploy",
-                "op_version": 1,
-                "config_format": "json",
-                "config": evm_deploy_config_json(),
-            }),
-        ))
-        .await
-        .expect("deploy start response");
-    let status = resp.status();
-    let body = response_json(resp).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    assert_eq!(body["error"]["code"], "LaunchRunnerUnavailable");
-    let stream = state
-        .store
-        .load_run_stream(&run_id)
-        .await
-        .expect("run stream");
-    assert!(
-        stream.is_empty(),
-        "malformed signer config must fail before admission"
-    );
 }
 
 #[tokio::test]
@@ -774,13 +667,7 @@ async fn portfolio_status_route_reports_interrupted_attempt_and_framework_attemp
 
     let status = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!("/v1/runs/{run_id}/status"))
-                .body(Body::empty())
-                .expect("status request"),
-        )
+        .oneshot(get(format!("/v1/runs/{run_id}/status")))
         .await
         .expect("status response");
     assert_eq!(status.status(), StatusCode::OK);
@@ -833,13 +720,7 @@ async fn portfolio_status_route_reports_interrupted_attempt_and_framework_attemp
     );
 
     let stream = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!("/v1/runs/{run_id}/stream"))
-                .body(Body::empty())
-                .expect("stream request"),
-        )
+        .oneshot(get(format!("/v1/runs/{run_id}/stream")))
         .await
         .expect("stream response");
     assert_eq!(stream.status(), StatusCode::OK);
@@ -861,66 +742,18 @@ async fn status_invalid_run_id_has_domain_error() {
     let app = test_app();
 
     let resp = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/v1/runs/not-a-uuid/status")
-                .body(Body::empty())
-                .expect("request"),
-        )
+        .oneshot(get("/v1/runs/not-a-uuid/status"))
         .await
         .expect("response");
 
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    let v = response_json(resp).await;
-    assert_eq!(v["status"], "error");
-    assert_eq!(v["error"]["code"], "InvalidRunId");
+    assert_error_response(resp, StatusCode::BAD_REQUEST, "InvalidRunId").await;
 }
 
 #[tokio::test]
 async fn absent_run_status_resume_replay_and_public_output_are_not_found() {
     let app = test_app();
 
-    let status = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!("/v1/runs/{VALID_RUN_ID}/status"))
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("status response");
-    assert_eq!(status.status(), StatusCode::NOT_FOUND);
-
-    let resume = app
-        .clone()
-        .oneshot(empty_post(&format!("/v1/runs/{VALID_RUN_ID}/resume")))
-        .await
-        .expect("resume response");
-    assert_eq!(resume.status(), StatusCode::NOT_FOUND);
-
-    let replay = app
-        .clone()
-        .oneshot(empty_post(&format!("/v1/runs/{VALID_RUN_ID}/replay")))
-        .await
-        .expect("replay response");
-    assert_eq!(replay.status(), StatusCode::NOT_FOUND);
-
-    let output = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!(
-                    "/v1/runs/{VALID_RUN_ID}/public-output/{VALID_SCHEMA_ID}"
-                ))
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("public output response");
-    assert_eq!(output.status(), StatusCode::NOT_FOUND);
+    assert_absent_run_routes_not_found(&app, true).await;
 }
 
 #[tokio::test]
@@ -928,57 +761,16 @@ async fn malformed_runtime_config_does_not_block_read_only_routes() {
     let runtime_config_dir = tempfile::tempdir().expect("runtime config tempdir");
     let runtime_config_path = runtime_config_dir.path().join("malformed-runtime.toml");
     std::fs::write(&runtime_config_path, "not valid toml = [").expect("runtime config");
-    let mut state = in_memory_state();
-    state.runtime_config_path = Some(runtime_config_path.clone());
-    let app = mfm_rest_api::make_app(state);
+    let (_, app) = state_and_app_with_runtime_config(runtime_config_path.clone());
 
     let health = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/v1/health")
-                .body(Body::empty())
-                .expect("health request"),
-        )
+        .oneshot(get("/v1/health"))
         .await
         .expect("health response");
     assert_eq!(health.status(), StatusCode::OK);
 
-    let status = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!("/v1/runs/{VALID_RUN_ID}/status"))
-                .body(Body::empty())
-                .expect("status request"),
-        )
-        .await
-        .expect("status response");
-    assert_eq!(status.status(), StatusCode::NOT_FOUND);
-
-    let replay = app
-        .clone()
-        .oneshot(empty_post(&format!("/v1/runs/{VALID_RUN_ID}/replay")))
-        .await
-        .expect("replay response");
-    assert_eq!(replay.status(), StatusCode::NOT_FOUND);
-
-    let public_output = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!(
-                    "/v1/runs/{VALID_RUN_ID}/public-output/{VALID_SCHEMA_ID}"
-                ))
-                .body(Body::empty())
-                .expect("public output request"),
-        )
-        .await
-        .expect("public output response");
-    assert_eq!(public_output.status(), StatusCode::NOT_FOUND);
+    assert_absent_run_routes_not_found(&app, false).await;
 
     let start = app
         .oneshot(json_post(
@@ -1005,22 +797,13 @@ async fn stream_validates_sequence_range_before_reading() {
     let app = test_app();
 
     let resp = app
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri(format!(
-                    "/v1/runs/{VALID_RUN_ID}/stream?from_seq=3&to_seq=2"
-                ))
-                .body(Body::empty())
-                .expect("request"),
-        )
+        .oneshot(get(format!(
+            "/v1/runs/{VALID_RUN_ID}/stream?from_seq=3&to_seq=2"
+        )))
         .await
         .expect("response");
 
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    let v = response_json(resp).await;
-    assert_eq!(v["status"], "error");
-    assert_eq!(v["error"]["code"], "InvalidSequenceRange");
+    assert_error_response(resp, StatusCode::BAD_REQUEST, "InvalidSequenceRange").await;
 }
 
 #[test]

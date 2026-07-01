@@ -90,6 +90,13 @@ fn fixture_terminal_policies(fixture: &Fixture) -> store::SideEffectTerminalPoli
     runtime_spec_terminal_policies(&fixture.runtime_spec)
 }
 
+macro_rules! assert_side_effect_binding {
+    ($payload:expr, $ledger_key:expr, $invocation_epoch:expr) => {{
+        assert_eq!($payload.ledger_key, $ledger_key);
+        assert_eq!($payload.invocation_epoch, $invocation_epoch);
+    }};
+}
+
 macro_rules! delegate_execution_claim_store_to_inner {
     ($ty:ty) => {
         impl store::ExecutionClaimStore for $ty {
@@ -376,6 +383,20 @@ impl TestTypedRunStore {
 
     fn load_run_stream(&self, run_id: &RunId) -> Vec<store::KernelEventEnvelope> {
         block_on_ready(self.inner.load_run_stream(run_id)).expect("test store read")
+    }
+
+    fn run_admitted(&self, run_id: &RunId) -> Box<events::RunAdmitted> {
+        self.load_run_stream(run_id)
+            .into_iter()
+            .find_map(|event| match event.payload().clone() {
+                events::KernelEventPayload::RunAdmitted(payload) => Some(payload),
+                _ => None,
+            })
+            .expect("RunAdmitted payload")
+    }
+
+    fn assert_run_stream_len(&self, run_id: &RunId, expected: usize) {
+        assert_eq!(self.load_run_stream(run_id).len(), expected);
     }
 
     fn expected_next_seq(&self, run_id: &RunId) -> store::StreamSeq {
@@ -737,6 +758,111 @@ fn test_scheduler_with_artifacts(
 ) -> SerialTypedScheduler {
     SerialTypedScheduler::new(registry, artifact_store)
 }
+
+fn fixture_scheduler(registry: ErasedRunnerRegistry, fixture: &Fixture) -> SerialTypedScheduler {
+    test_scheduler(register_fixture_capabilities(registry, fixture))
+}
+
+fn register_read_external_fixture_runner(registry: &mut ErasedRunnerRegistry, fixture: &Fixture) {
+    registry
+        .register(binding(
+            fixture.descriptor_b.clone(),
+            READ_EXTERNAL_RUNNER,
+            RecordingRunner {
+                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                output_artifact: artifact(0xb1),
+                output_digest: content(0xb2),
+            },
+        ))
+        .expect("binding read");
+}
+
+fn register_default_fixture_read_runner(registry: &mut ErasedRunnerRegistry, fixture: &Fixture) {
+    registry
+        .register(binding(
+            fixture.descriptor_b.clone(),
+            "read",
+            RecordingRunner {
+                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
+                output_artifact: artifact(0xb1),
+                output_digest: content(0xb2),
+            },
+        ))
+        .expect("binding b");
+}
+
+fn register_default_fixture_pure_runner(registry: &mut ErasedRunnerRegistry, fixture: &Fixture) {
+    registry
+        .register(binding(
+            fixture.descriptor_a.clone(),
+            "pure",
+            RecordingRunner {
+                expected_caps: Vec::new(),
+                output_artifact: artifact(0xa1),
+                output_digest: content(0xa2),
+            },
+        ))
+        .expect("binding a");
+}
+
+fn fixture_registry_with_first_runner<R: ErasedNodeRunner + 'static>(
+    fixture: &Fixture,
+    runner_name: &'static str,
+    runner: R,
+) -> ErasedRunnerRegistry {
+    let mut registry = ErasedRunnerRegistry::new();
+    registry
+        .register(binding(fixture.descriptor_a.clone(), runner_name, runner))
+        .expect("binding a");
+    register_default_fixture_read_runner(&mut registry, fixture);
+    registry
+}
+
+fn side_effect_driver_registry_with_submission_decision(
+    fixture: &Fixture,
+    decision: TestSubmissionDecision,
+) -> ErasedRunnerRegistry {
+    let mut registry = ErasedRunnerRegistry::new();
+    registry
+        .register(binding(
+            fixture.descriptor_a.clone(),
+            APPLY_SIDE_EFFECT_RUNNER,
+            DriverSideEffectRunner::new(fixture).with_submission_decision(decision),
+        ))
+        .expect("binding side effect");
+    register_read_external_fixture_runner(&mut registry, fixture);
+    registry
+}
+
+macro_rules! assert_drive {
+    ($scheduler:ident, $store:ident, $fixture:ident, $status:ident, $message:literal $(,)?) => {
+        assert_eq!(
+            drive_fixture_once(&$scheduler, &mut $store, &$fixture)
+                .await
+                .expect($message),
+            SchedulerStatus::$status
+        );
+    };
+}
+
+macro_rules! drive_ok {
+    ($scheduler:ident, $store:ident, $fixture:ident, $message:literal $(,)?) => {
+        drive_fixture_once(&$scheduler, &mut $store, &$fixture)
+            .await
+            .expect($message)
+    };
+}
+
+macro_rules! assert_first_node_invalid_after_drive {
+    ($scheduler:ident, $store:ident, $fixture:ident, $message:literal $(,)?) => {{
+        assert_drive!($scheduler, $store, $fixture, Advanced, $message);
+        let node = node_by_output(&$fixture, &$fixture.cell_a);
+        assert_node_failed_with_code(&$store, &node.node_id, "runner_output_invalid");
+    }};
+}
+
+const TOUCHED_SET_EVIDENCE_ERR: &str = "without touched-set evidence";
+const EXACT_TOUCHED_SET_CLAIM_ERR: &str = "without an exact-touched-set certified resource claim";
 
 fn register_fixture_capabilities(
     mut registry: ErasedRunnerRegistry,
@@ -1361,398 +1487,361 @@ impl ErasedNodeRunner for ErrorRunner {
 #[test]
 fn runner_kit_builders_create_context_bound_artifacts_payloads_and_output() {
     let fixture = fixture();
-    let node = node_by_output(&fixture, &fixture.cell_a);
-    let descriptor = fixture
-        .runtime_spec
-        .state_descriptor_for_node(node)
-        .expect("state descriptor");
-    let output_cell = fixture
-        .runtime_spec
-        .cell(&node.output_cell)
-        .expect("output cell");
-    let attempt_id = attempt_id(
-        &fixture.run_id,
-        fixture.runtime_spec.spec_hash(),
-        &node.node_id,
-        1,
-    )
-    .expect("attempt id");
-    let config_artifact = config_artifact(&fixture.runtime_spec, &node.config_ref).evidence;
-    let projections = store::ProjectionSnapshot::default();
-    let run_stream = Vec::new();
-    let invocation = PreparedRunnerInvocation {
-        runtime_spec: &fixture.runtime_spec,
-        run_id: &fixture.run_id,
-        spec_hash: fixture.runtime_spec.spec_hash(),
-        node,
-        descriptor,
-        output_cell,
-        attempt_id: &attempt_id,
-        attempt_no: 1,
-        config_artifact,
-        inputs: MaterializedInputs {
-            input_schema_id: node.input_bindings.input_schema_id.clone(),
-            root: MaterializedInputNode::Unit,
-        },
-        caps: CertifiedRuntimeCapabilities::new(
-            node.node_id.clone(),
-            node.capability_bindings.clone(),
-        ),
-        recorded_facts: RecordedFacts::default(),
-        projections: &projections,
-        run_stream: &run_stream,
-    };
-    let ctx = ErasedRunCtx::from_prepared(&invocation);
-    let artifacts = RunnerArtifactBuilder::new(&ctx);
-    let payloads = RunnerPayloadBuilder::new(&ctx);
-    let value = CertifierValue { amount: 42 };
-    let binding = RunnerCapabilityBinding {
-        capability_kind: fixture.cap_kind.clone(),
-        capability_version: fixture.cap_version.clone(),
-        adapter_kind: fixture.adapter_kind.clone(),
-        adapter_version: fixture.adapter_version.clone(),
-    };
+    with_runner_erased_ctx(&fixture, &fixture.cell_a, |ctx| {
+        let artifacts = RunnerArtifactBuilder::new(&ctx);
+        let payloads = RunnerPayloadBuilder::new(&ctx);
+        let value = CertifierValue { amount: 42 };
+        let binding = RunnerCapabilityBinding {
+            capability_kind: fixture.cap_kind.clone(),
+            capability_version: fixture.cap_version.clone(),
+            adapter_kind: fixture.adapter_kind.clone(),
+            adapter_version: fixture.adapter_version.clone(),
+        };
 
-    let state = artifacts.state_output(&value).expect("state output");
-    assert_eq!(
-        state.evidence().artifact_role,
-        events::ArtifactRole::StateOutput
-    );
-    assert_eq!(
-        state.evidence().producer_node_id.as_ref(),
-        Some(&ctx.node().node_id)
-    );
-    assert_eq!(
-        artifacts.content_digest(&value).expect("content digest"),
-        state.evidence().digest
-    );
+        let state = artifacts.state_output(&value).expect("state output");
+        assert_eq!(
+            state.evidence().artifact_role,
+            events::ArtifactRole::StateOutput
+        );
+        assert_eq!(
+            state.evidence().producer_node_id.as_ref(),
+            Some(&ctx.node().node_id)
+        );
+        assert_eq!(
+            artifacts.content_digest(&value).expect("content digest"),
+            state.evidence().digest
+        );
 
-    let cell = payloads.cell_produced(&state).expect("cell payload");
-    match &cell {
-        RunnerEventPayload::CellProduced(payload) => {
-            assert_eq!(payload.spec_hash, *ctx.spec_hash());
-            assert_eq!(payload.node_id, ctx.node().node_id);
-            assert_eq!(payload.cell_id, ctx.node().output_cell);
-            assert_eq!(payload.schema_id, ctx.output_cell().schema_id);
-            assert_eq!(payload.semantic_type_id, ctx.output_cell().semantic_type_id);
-            assert_eq!(payload.artifact_id, state.evidence().artifact_id);
-            assert_eq!(payload.content_digest, state.evidence().digest);
+        let cell = payloads.cell_produced(&state).expect("cell payload");
+        match &cell {
+            RunnerEventPayload::CellProduced(payload) => {
+                assert_eq!(payload.spec_hash, *ctx.spec_hash());
+                assert_eq!(payload.node_id, ctx.node().node_id);
+                assert_eq!(payload.cell_id, ctx.node().output_cell);
+                assert_eq!(payload.schema_id, ctx.output_cell().schema_id);
+                assert_eq!(payload.semantic_type_id, ctx.output_cell().semantic_type_id);
+                assert_eq!(payload.artifact_id, state.evidence().artifact_id);
+                assert_eq!(payload.content_digest, state.evidence().digest);
+            }
+            _ => panic!("expected cell produced payload"),
         }
-        _ => panic!("expected cell produced payload"),
-    }
 
-    let response = artifacts.fact_response(&value).expect("fact response");
-    let fact = payloads
-        .fact_recorded(
-            events::FactKey::new("mfm.test.runner_kit.fact").expect("fact key"),
-            &value,
-            &response,
-            binding.clone(),
-        )
-        .expect("fact payload");
-    match &fact {
-        RunnerEventPayload::FactRecorded(payload) => {
-            assert_eq!(payload.node_id, ctx.node().node_id);
-            assert_eq!(payload.attempt_id, *ctx.attempt_id());
-            assert_eq!(payload.request_hash, state.evidence().digest);
-            assert_eq!(payload.response_hash, response.evidence().digest);
-            assert_eq!(payload.artifact_id, response.evidence().artifact_id);
+        let response = artifacts.fact_response(&value).expect("fact response");
+        let fact = payloads
+            .fact_recorded(
+                events::FactKey::new("mfm.test.runner_kit.fact").expect("fact key"),
+                &value,
+                &response,
+                binding.clone(),
+            )
+            .expect("fact payload");
+        match &fact {
+            RunnerEventPayload::FactRecorded(payload) => {
+                assert_eq!(payload.node_id, ctx.node().node_id);
+                assert_eq!(payload.attempt_id, *ctx.attempt_id());
+                assert_eq!(payload.request_hash, state.evidence().digest);
+                assert_eq!(payload.response_hash, response.evidence().digest);
+                assert_eq!(payload.artifact_id, response.evidence().artifact_id);
+            }
+            _ => panic!("expected fact recorded payload"),
         }
-        _ => panic!("expected fact recorded payload"),
-    }
 
-    let ledger_key =
-        events::SideEffectLedgerKey::new("mfm.test.runner_kit.ledger").expect("ledger key");
-    let side_effect = RunnerSideEffectBinding {
-        ledger_key: ledger_key.clone(),
-        ledger_purpose: events::SideEffectLedgerPurpose::Forward,
-        pair_id: synthetic_side_effect_pair_id(0x31),
-        invocation_epoch: 1,
-    };
-    let idempotency_key =
-        events::IdempotencyKeyRef::new("mfm.test.runner_kit.idem").expect("idempotency key");
-    let owner = events::RunnerInvocationId::new("mfm.test.runner_kit.owner").expect("claim owner");
-    let next_owner =
-        events::RunnerInvocationId::new("mfm.test.runner_kit.owner.next").expect("claim owner");
-    let token =
-        events::side_effect::ClaimFencingToken::new("mfm.test.runner_kit.token").expect("token");
-    let next_token = events::side_effect::ClaimFencingToken::new("mfm.test.runner_kit.token.next")
-        .expect("next token");
-    let verifier = events::ReplayVerifierId::new("mfm.test.runner_kit.verifier").expect("verifier");
+        let ledger_key =
+            events::SideEffectLedgerKey::new("mfm.test.runner_kit.ledger").expect("ledger key");
+        let side_effect = RunnerSideEffectBinding {
+            ledger_key: ledger_key.clone(),
+            ledger_purpose: events::SideEffectLedgerPurpose::Forward,
+            pair_id: synthetic_side_effect_pair_id(0x31),
+            invocation_epoch: 1,
+        };
+        let idempotency_key =
+            events::IdempotencyKeyRef::new("mfm.test.runner_kit.idem").expect("idempotency key");
+        let owner =
+            events::RunnerInvocationId::new("mfm.test.runner_kit.owner").expect("claim owner");
+        let next_owner =
+            events::RunnerInvocationId::new("mfm.test.runner_kit.owner.next").expect("claim owner");
+        let token = events::side_effect::ClaimFencingToken::new("mfm.test.runner_kit.token")
+            .expect("token");
+        let next_token =
+            events::side_effect::ClaimFencingToken::new("mfm.test.runner_kit.token.next")
+                .expect("next token");
+        let verifier =
+            events::ReplayVerifierId::new("mfm.test.runner_kit.verifier").expect("verifier");
 
-    let intent = artifacts
-        .side_effect_intent(&value)
-        .expect("side-effect intent");
-    let intent_payload = payloads
-        .side_effect_intent_persisted(
+        let intent = artifacts
+            .side_effect_intent(&value)
+            .expect("side-effect intent");
+        let intent_payload = payloads
+            .side_effect_intent_persisted(
+                side_effect.clone(),
+                &intent,
+                &value,
+                idempotency_key,
+                binding,
+            )
+            .expect("intent payload");
+        match &intent_payload {
+            RunnerEventPayload::SideEffectIntentPersisted(payload) => {
+                assert_eq!(payload.ledger_key, ledger_key);
+                assert_eq!(payload.intent_hash, intent.evidence().digest);
+                assert_eq!(payload.intent_artifact_id, intent.evidence().artifact_id);
+                assert_eq!(payload.idempotency_input_hash, state.evidence().digest);
+            }
+            _ => panic!("expected side-effect intent payload"),
+        }
+
+        let claim = payloads.side_effect_claimed(
             side_effect.clone(),
-            &intent,
-            &value,
-            idempotency_key,
-            binding,
-        )
-        .expect("intent payload");
-    match &intent_payload {
-        RunnerEventPayload::SideEffectIntentPersisted(payload) => {
-            assert_eq!(payload.ledger_key, ledger_key);
-            assert_eq!(payload.intent_hash, intent.evidence().digest);
-            assert_eq!(payload.intent_artifact_id, intent.evidence().artifact_id);
-            assert_eq!(payload.idempotency_input_hash, state.evidence().digest);
+            RunnerClaimBinding {
+                claim_owner: owner.clone(),
+                claim_generation: 1,
+                claim_fencing_token: token.clone(),
+            },
+        );
+        match &claim {
+            RunnerEventPayload::SideEffectClaimed(payload) => {
+                assert_eq!(payload.claim_owner, owner);
+                assert_eq!(payload.claim_generation, 1);
+                assert_eq!(payload.claim_fencing_token, token);
+            }
+            _ => panic!("expected side-effect claimed payload"),
         }
-        _ => panic!("expected side-effect intent payload"),
-    }
 
-    let claim = payloads.side_effect_claimed(
-        side_effect.clone(),
-        RunnerClaimBinding {
-            claim_owner: owner.clone(),
-            claim_generation: 1,
-            claim_fencing_token: token.clone(),
-        },
-    );
-    match &claim {
-        RunnerEventPayload::SideEffectClaimed(payload) => {
-            assert_eq!(payload.claim_owner, owner);
-            assert_eq!(payload.claim_generation, 1);
-            assert_eq!(payload.claim_fencing_token, token);
-        }
-        _ => panic!("expected side-effect claimed payload"),
-    }
-
-    let takeover = payloads.side_effect_claim_taken_over(
-        side_effect.clone(),
-        RunnerClaimTakeoverBinding {
-            previous_claim_owner: owner.clone(),
-            new_claim_owner: next_owner.clone(),
-            previous_claim_generation: 1,
-            claim_generation: 2,
-            claim_fencing_token: next_token.clone(),
-        },
-    );
-    match &takeover {
-        RunnerEventPayload::SideEffectClaimTakenOver(payload) => {
-            assert_eq!(payload.previous_claim_owner, owner);
-            assert_eq!(payload.new_claim_owner, next_owner);
-            assert_eq!(payload.previous_claim_generation, 1);
-            assert_eq!(payload.claim_generation, 2);
-            assert_eq!(payload.claim_fencing_token, next_token);
-        }
-        _ => panic!("expected side-effect claim takeover payload"),
-    }
-
-    let prepared = artifacts
-        .prepared_invocation(&serde_json::json!({"prepared": true}))
-        .expect("prepared invocation");
-    assert_eq!(
-        prepared.evidence().artifact_role,
-        events::ArtifactRole::PreparedInvocation
-    );
-    assert!(prepared.evidence().schema_id.is_none());
-    let prepared_payload = payloads
-        .side_effect_invocation_prepared(
+        let takeover = payloads.side_effect_claim_taken_over(
             side_effect.clone(),
-            Some(&prepared),
-            RunnerPreparedInvocationBinding {
+            RunnerClaimTakeoverBinding {
+                previous_claim_owner: owner.clone(),
+                new_claim_owner: next_owner.clone(),
+                previous_claim_generation: 1,
                 claim_generation: 2,
                 claim_fencing_token: next_token.clone(),
-                resource_key: None,
             },
-        )
-        .expect("prepared payload");
-    match &prepared_payload {
-        RunnerEventPayload::SideEffectInvocationPrepared(payload) => {
-            assert_eq!(
-                payload.prepared_artifact_id.as_ref(),
-                Some(&prepared.evidence().artifact_id)
-            );
-            assert_eq!(
-                payload.prepared_hash.as_ref(),
-                Some(&prepared.evidence().digest)
-            );
-            assert_eq!(payload.claim_generation, 2);
+        );
+        match &takeover {
+            RunnerEventPayload::SideEffectClaimTakenOver(payload) => {
+                assert_eq!(payload.previous_claim_owner, owner);
+                assert_eq!(payload.new_claim_owner, next_owner);
+                assert_eq!(payload.previous_claim_generation, 1);
+                assert_eq!(payload.claim_generation, 2);
+                assert_eq!(payload.claim_fencing_token, next_token);
+            }
+            _ => panic!("expected side-effect claim takeover payload"),
         }
-        _ => panic!("expected side-effect invocation prepared payload"),
-    }
 
-    let started = payloads.side_effect_invocation_started(
-        side_effect.clone(),
-        RunnerClaimBinding {
-            claim_owner: next_owner.clone(),
-            claim_generation: 2,
-            claim_fencing_token: next_token.clone(),
-        },
-    );
-    match &started {
-        RunnerEventPayload::SideEffectInvocationStarted(payload) => {
-            assert_eq!(payload.claim_owner, next_owner);
-            assert_eq!(payload.claim_generation, 2);
-            assert_eq!(payload.claim_fencing_token, next_token);
+        let prepared = artifacts
+            .prepared_invocation(&serde_json::json!({"prepared": true}))
+            .expect("prepared invocation");
+        assert_eq!(
+            prepared.evidence().artifact_role,
+            events::ArtifactRole::PreparedInvocation
+        );
+        assert!(prepared.evidence().schema_id.is_none());
+        let prepared_payload = payloads
+            .side_effect_invocation_prepared(
+                side_effect.clone(),
+                Some(&prepared),
+                RunnerPreparedInvocationBinding {
+                    claim_generation: 2,
+                    claim_fencing_token: next_token.clone(),
+                    resource_key: None,
+                },
+            )
+            .expect("prepared payload");
+        match &prepared_payload {
+            RunnerEventPayload::SideEffectInvocationPrepared(payload) => {
+                assert_eq!(
+                    payload.prepared_artifact_id.as_ref(),
+                    Some(&prepared.evidence().artifact_id)
+                );
+                assert_eq!(
+                    payload.prepared_hash.as_ref(),
+                    Some(&prepared.evidence().digest)
+                );
+                assert_eq!(payload.claim_generation, 2);
+            }
+            _ => panic!("expected side-effect invocation prepared payload"),
         }
-        _ => panic!("expected side-effect invocation started payload"),
-    }
 
-    let not_submitted = artifacts
-        .not_submitted_proof(&value)
-        .expect("not-submitted proof");
-    let not_submitted_payload = payloads
-        .side_effect_not_submitted_proven(side_effect.clone(), &not_submitted)
-        .expect("not-submitted payload");
-    match &not_submitted_payload {
-        RunnerEventPayload::SideEffectNotSubmittedProven(payload) => {
-            assert_eq!(payload.proof_hash, not_submitted.evidence().digest);
-            assert_eq!(
-                payload.proof_artifact_id,
-                not_submitted.evidence().artifact_id
-            );
-        }
-        _ => panic!("expected side-effect not-submitted payload"),
-    }
-
-    let submission = artifacts.submission(&value).expect("submission");
-    let submission_payload = payloads
-        .side_effect_submission_observed(side_effect.clone(), &submission)
-        .expect("submission payload");
-    match &submission_payload {
-        RunnerEventPayload::SideEffectSubmissionObserved(payload) => {
-            assert_eq!(payload.submission_hash, submission.evidence().digest);
-            assert_eq!(
-                payload.submission_artifact_id,
-                submission.evidence().artifact_id
-            );
-        }
-        _ => panic!("expected side-effect submission payload"),
-    }
-
-    let submission_unknown = artifacts
-        .submission_unknown(&value)
-        .expect("submission unknown evidence");
-    let submission_unknown_payload = payloads
-        .side_effect_submission_unknown(side_effect.clone(), &submission_unknown)
-        .expect("submission unknown payload");
-    match &submission_unknown_payload {
-        RunnerEventPayload::SideEffectSubmissionUnknown(payload) => {
-            assert_eq!(payload.evidence_hash, submission_unknown.evidence().digest);
-            assert_eq!(
-                payload.evidence_artifact_id,
-                submission_unknown.evidence().artifact_id
-            );
-        }
-        _ => panic!("expected side-effect submission unknown payload"),
-    }
-
-    let receipt = artifacts.receipt(&value).expect("receipt");
-    let receipt_payload = payloads
-        .side_effect_receipt_observed(side_effect.clone(), &receipt, verifier.clone(), None)
-        .expect("receipt payload");
-    match &receipt_payload {
-        RunnerEventPayload::SideEffectReceiptObserved(payload) => {
-            assert_eq!(payload.receipt_hash, receipt.evidence().digest);
-            assert_eq!(payload.receipt_artifact_id, receipt.evidence().artifact_id);
-            assert_eq!(payload.replay_verifier_id, verifier);
-        }
-        _ => panic!("expected side-effect receipt payload"),
-    }
-
-    let confirmation = artifacts.confirmation(&value).expect("confirmation");
-    let confirmation_payload = payloads
-        .side_effect_confirmation_observed(
+        let started = payloads.side_effect_invocation_started(
             side_effect.clone(),
-            &confirmation,
-            verifier.clone(),
-            None,
-        )
-        .expect("confirmation payload");
-    match &confirmation_payload {
-        RunnerEventPayload::SideEffectConfirmationObserved(payload) => {
-            assert_eq!(payload.confirmation_hash, confirmation.evidence().digest);
-            assert_eq!(
-                payload.confirmation_artifact_id,
-                confirmation.evidence().artifact_id
-            );
-            assert_eq!(payload.replay_verifier_id, verifier);
+            RunnerClaimBinding {
+                claim_owner: next_owner.clone(),
+                claim_generation: 2,
+                claim_fencing_token: next_token.clone(),
+            },
+        );
+        match &started {
+            RunnerEventPayload::SideEffectInvocationStarted(payload) => {
+                assert_eq!(payload.claim_owner, next_owner);
+                assert_eq!(payload.claim_generation, 2);
+                assert_eq!(payload.claim_fencing_token, next_token);
+            }
+            _ => panic!("expected side-effect invocation started payload"),
         }
-        _ => panic!("expected side-effect confirmation payload"),
-    }
 
-    let ambiguity = artifacts
-        .ambiguity_evidence(&value)
-        .expect("ambiguity evidence");
-    let ambiguity_payload = payloads
-        .side_effect_ambiguous(
+        let not_submitted = artifacts
+            .not_submitted_proof(&value)
+            .expect("not-submitted proof");
+        let not_submitted_payload = payloads
+            .side_effect_not_submitted_proven(side_effect.clone(), &not_submitted)
+            .expect("not-submitted payload");
+        match &not_submitted_payload {
+            RunnerEventPayload::SideEffectNotSubmittedProven(payload) => {
+                assert_eq!(payload.proof_hash, not_submitted.evidence().digest);
+                assert_eq!(
+                    payload.proof_artifact_id,
+                    not_submitted.evidence().artifact_id
+                );
+            }
+            _ => panic!("expected side-effect not-submitted payload"),
+        }
+
+        let submission = artifacts.submission(&value).expect("submission");
+        let submission_payload = payloads
+            .side_effect_submission_observed(side_effect.clone(), &submission)
+            .expect("submission payload");
+        match &submission_payload {
+            RunnerEventPayload::SideEffectSubmissionObserved(payload) => {
+                assert_eq!(payload.submission_hash, submission.evidence().digest);
+                assert_eq!(
+                    payload.submission_artifact_id,
+                    submission.evidence().artifact_id
+                );
+            }
+            _ => panic!("expected side-effect submission payload"),
+        }
+
+        let submission_unknown = artifacts
+            .submission_unknown(&value)
+            .expect("submission unknown evidence");
+        let submission_unknown_payload = payloads
+            .side_effect_submission_unknown(side_effect.clone(), &submission_unknown)
+            .expect("submission unknown payload");
+        match &submission_unknown_payload {
+            RunnerEventPayload::SideEffectSubmissionUnknown(payload) => {
+                assert_eq!(payload.evidence_hash, submission_unknown.evidence().digest);
+                assert_eq!(
+                    payload.evidence_artifact_id,
+                    submission_unknown.evidence().artifact_id
+                );
+            }
+            _ => panic!("expected side-effect submission unknown payload"),
+        }
+
+        let receipt = artifacts.receipt(&value).expect("receipt");
+        let receipt_payload = payloads
+            .side_effect_receipt_observed(side_effect.clone(), &receipt, verifier.clone(), None)
+            .expect("receipt payload");
+        match &receipt_payload {
+            RunnerEventPayload::SideEffectReceiptObserved(payload) => {
+                assert_eq!(payload.receipt_hash, receipt.evidence().digest);
+                assert_eq!(payload.receipt_artifact_id, receipt.evidence().artifact_id);
+                assert_eq!(payload.replay_verifier_id, verifier);
+            }
+            _ => panic!("expected side-effect receipt payload"),
+        }
+
+        let confirmation = artifacts.confirmation(&value).expect("confirmation");
+        let confirmation_payload = payloads
+            .side_effect_confirmation_observed(
+                side_effect.clone(),
+                &confirmation,
+                verifier.clone(),
+                None,
+            )
+            .expect("confirmation payload");
+        match &confirmation_payload {
+            RunnerEventPayload::SideEffectConfirmationObserved(payload) => {
+                assert_eq!(payload.confirmation_hash, confirmation.evidence().digest);
+                assert_eq!(
+                    payload.confirmation_artifact_id,
+                    confirmation.evidence().artifact_id
+                );
+                assert_eq!(payload.replay_verifier_id, verifier);
+            }
+            _ => panic!("expected side-effect confirmation payload"),
+        }
+
+        let ambiguity = artifacts
+            .ambiguity_evidence(&value)
+            .expect("ambiguity evidence");
+        let ambiguity_payload = payloads
+            .side_effect_ambiguous(
+                side_effect.clone(),
+                events::SideEffectPairRole::Verify,
+                events::AmbiguityCode::new("runner_kit_test").expect("ambiguity code"),
+                &ambiguity,
+            )
+            .expect("ambiguity payload");
+        match &ambiguity_payload {
+            RunnerEventPayload::SideEffectAmbiguous(payload) => {
+                assert_eq!(payload.evidence_hash, ambiguity.evidence().digest);
+                assert_eq!(
+                    payload.evidence_artifact_id,
+                    ambiguity.evidence().artifact_id
+                );
+            }
+            _ => panic!("expected side-effect ambiguous payload"),
+        }
+
+        let failed = payloads.side_effect_failed(
             side_effect.clone(),
             events::SideEffectPairRole::Verify,
-            events::AmbiguityCode::new("runner_kit_test").expect("ambiguity code"),
-            &ambiguity,
-        )
-        .expect("ambiguity payload");
-    match &ambiguity_payload {
-        RunnerEventPayload::SideEffectAmbiguous(payload) => {
-            assert_eq!(payload.evidence_hash, ambiguity.evidence().digest);
-            assert_eq!(
-                payload.evidence_artifact_id,
-                ambiguity.evidence().artifact_id
-            );
-        }
-        _ => panic!("expected side-effect ambiguous payload"),
-    }
-
-    let failed = payloads.side_effect_failed(
-        side_effect.clone(),
-        events::SideEffectPairRole::Verify,
-        events::side_effect::FailurePhase::BeforeInvocationStarted,
-        true,
-        events::MfmErrorInfo::new(
-            events::ErrorCode::new("runner_kit_failure").expect("error code"),
-            events::ErrorCategory::Runtime,
+            events::side_effect::FailurePhase::BeforeInvocationStarted,
             true,
-            "runner kit failure",
-        )
-        .expect("error info"),
-    );
-    match &failed {
-        RunnerEventPayload::SideEffectFailed(payload) => {
-            assert_eq!(payload.ledger_key, ledger_key);
-            assert_eq!(
-                payload.failure_phase,
-                events::side_effect::FailurePhase::BeforeInvocationStarted
-            );
-            assert!(payload.retryable);
-            assert_eq!(payload.error.safe_message, "runner kit failure");
+            events::MfmErrorInfo::new(
+                events::ErrorCode::new("runner_kit_failure").expect("error code"),
+                events::ErrorCategory::Runtime,
+                true,
+                "runner kit failure",
+            )
+            .expect("error info"),
+        );
+        match &failed {
+            RunnerEventPayload::SideEffectFailed(payload) => {
+                assert_eq!(payload.ledger_key, ledger_key);
+                assert_eq!(
+                    payload.failure_phase,
+                    events::side_effect::FailurePhase::BeforeInvocationStarted
+                );
+                assert!(payload.retryable);
+                assert_eq!(payload.error.safe_message, "runner kit failure");
+            }
+            _ => panic!("expected side-effect failed payload"),
         }
-        _ => panic!("expected side-effect failed payload"),
-    }
 
-    let role_mismatch = payloads
-        .cell_produced(&response)
-        .expect_err("fact response cannot produce a cell");
-    assert!(matches!(
-        role_mismatch,
-        RuntimeError::InvalidRunnerOutput(message)
-            if message.contains("fact_response")
-                && message.contains("state_output")
-    ));
+        let role_mismatch = payloads
+            .cell_produced(&response)
+            .expect_err("fact response cannot produce a cell");
+        assert!(matches!(
+            role_mismatch,
+            RuntimeError::InvalidRunnerOutput(message)
+                if message.contains("fact_response")
+                    && message.contains("state_output")
+        ));
 
-    let mut state_output = RunnerOutputBuilder::new(&ctx);
-    state_output
-        .stage_attempt_artifact(&state)
-        .expect("stage state output")
-        .retain_runtime_evidence(&state)
-        .payload(cell.clone());
-    let state_output = state_output.finish();
-    assert_eq!(state_output.staged_artifacts.len(), 1);
-    assert_eq!(state_output.staged_retention_refs.len(), 1);
-    assert_eq!(state_output.payloads, vec![cell]);
+        let mut state_output = RunnerOutputBuilder::new(&ctx);
+        state_output
+            .stage_attempt_artifact(&state)
+            .expect("stage state output")
+            .retain_runtime_evidence(&state)
+            .payload(cell.clone());
+        let state_output = state_output.finish();
+        assert_eq!(state_output.staged_artifacts.len(), 1);
+        assert_eq!(state_output.staged_retention_refs.len(), 1);
+        assert_eq!(state_output.payloads, vec![cell]);
 
-    let mut side_effect_output = RunnerOutputBuilder::new(&ctx);
-    side_effect_output
-        .stage_side_effect_artifact(&intent, ledger_key, 1)
-        .expect("stage side-effect artifact")
-        .retain_runtime_evidence(&intent)
-        .payload(intent_payload);
-    let side_effect_output = side_effect_output.finish();
-    assert_eq!(side_effect_output.staged_artifacts.len(), 1);
-    assert_eq!(side_effect_output.staged_retention_refs.len(), 1);
-    assert_eq!(side_effect_output.payloads.len(), 1);
+        let mut side_effect_output = RunnerOutputBuilder::new(&ctx);
+        side_effect_output
+            .stage_side_effect_artifact(&intent, ledger_key, 1)
+            .expect("stage side-effect artifact")
+            .retain_runtime_evidence(&intent)
+            .payload(intent_payload);
+        let side_effect_output = side_effect_output.finish();
+        assert_eq!(side_effect_output.staged_artifacts.len(), 1);
+        assert_eq!(side_effect_output.staged_retention_refs.len(), 1);
+        assert_eq!(side_effect_output.payloads.len(), 1);
+    });
 }
 
 #[test]
@@ -1804,12 +1893,11 @@ fn side_effect_evidence_builder_prepares_and_stages_claimed_invocation() {
         assert_eq!(output.payloads.len(), 4);
         match &output.payloads[0] {
             RunnerEventPayload::SideEffectIntentPersisted(payload) => {
-                assert_eq!(payload.ledger_key, ledger_key);
+                assert_side_effect_binding!(payload, ledger_key, 3);
                 assert_eq!(
                     payload.ledger_purpose,
                     events::SideEffectLedgerPurpose::Forward
                 );
-                assert_eq!(payload.invocation_epoch, 3);
                 assert_eq!(payload.idempotency_key, idempotency_key);
                 assert_eq!(payload.capability_kind, fixture.cap_kind);
                 assert_eq!(payload.adapter_kind, fixture.adapter_kind);
@@ -1874,8 +1962,7 @@ fn side_effect_evidence_builder_builds_progress_evidence_with_replay_and_resourc
                 .expect("submission evidence"),
         ) {
             RunnerEventPayload::SideEffectSubmissionObserved(payload) => {
-                assert_eq!(payload.ledger_key, ledger_key);
-                assert_eq!(payload.invocation_epoch, 4);
+                assert_side_effect_binding!(payload, ledger_key, 4);
             }
             other => panic!("expected submission observed payload: {other:?}"),
         }
@@ -1885,8 +1972,7 @@ fn side_effect_evidence_builder_builds_progress_evidence_with_replay_and_resourc
                 .expect("submission unknown evidence"),
         ) {
             RunnerEventPayload::SideEffectSubmissionUnknown(payload) => {
-                assert_eq!(payload.ledger_key, ledger_key);
-                assert_eq!(payload.invocation_epoch, 4);
+                assert_side_effect_binding!(payload, ledger_key, 4);
             }
             other => panic!("expected submission unknown payload: {other:?}"),
         }
@@ -1896,8 +1982,7 @@ fn side_effect_evidence_builder_builds_progress_evidence_with_replay_and_resourc
                 .expect("not-submitted evidence"),
         ) {
             RunnerEventPayload::SideEffectNotSubmittedProven(payload) => {
-                assert_eq!(payload.ledger_key, ledger_key);
-                assert_eq!(payload.invocation_epoch, 4);
+                assert_side_effect_binding!(payload, ledger_key, 4);
             }
             other => panic!("expected not-submitted payload: {other:?}"),
         }
@@ -1914,8 +1999,7 @@ fn side_effect_evidence_builder_builds_progress_evidence_with_replay_and_resourc
                 .expect("receipt evidence"),
         ) {
             RunnerEventPayload::SideEffectReceiptObserved(payload) => {
-                assert_eq!(payload.ledger_key, ledger_key);
-                assert_eq!(payload.invocation_epoch, 4);
+                assert_side_effect_binding!(payload, ledger_key, 4);
                 assert_eq!(payload.replay_verifier_id, verifier);
                 assert_eq!(payload.resource_touched_set.as_ref(), Some(&touched_set));
             }
@@ -1934,8 +2018,7 @@ fn side_effect_evidence_builder_builds_progress_evidence_with_replay_and_resourc
                 .expect("confirmation evidence"),
         ) {
             RunnerEventPayload::SideEffectConfirmationObserved(payload) => {
-                assert_eq!(payload.ledger_key, ledger_key);
-                assert_eq!(payload.invocation_epoch, 4);
+                assert_side_effect_binding!(payload, ledger_key, 4);
                 assert_eq!(payload.replay_verifier_id, verifier);
                 assert_eq!(payload.resource_touched_set.as_ref(), Some(&touched_set));
             }
@@ -1953,8 +2036,7 @@ fn side_effect_evidence_builder_builds_progress_evidence_with_replay_and_resourc
                 .expect("ambiguity evidence"),
         ) {
             RunnerEventPayload::SideEffectAmbiguous(payload) => {
-                assert_eq!(payload.ledger_key, ledger_key);
-                assert_eq!(payload.invocation_epoch, 4);
+                assert_side_effect_binding!(payload, ledger_key, 4);
             }
             other => panic!("expected ambiguity payload: {other:?}"),
         }
@@ -2342,16 +2424,12 @@ async fn side_effect_driver_preserves_concrete_exclusive_resource_key_across_run
     )
     .await
     .expect("start first run");
-    assert_eq!(
-        drive_once(
-            &scheduler,
-            &mut store,
-            &fixture.runtime_spec,
-            &fixture.run_id,
-        )
-        .await
-        .expect("first run claims resource lane"),
-        SchedulerStatus::Advanced
+    assert_drive!(
+        scheduler,
+        store,
+        fixture,
+        Advanced,
+        "first run claims resource lane"
     );
     let first_stream = store.load_run_stream(&fixture.run_id);
     let claim_seq = first_stream
@@ -2425,26 +2503,14 @@ async fn exclusive_side_effect_prepare_failure_after_claim_terminalizes_attempt(
         &fixture,
         FailingAfterPreclaimRunner::new(&fixture),
     ));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+    let mut store = started_fixture_store(&scheduler, &fixture).await;
 
-    assert_eq!(
-        drive_once(
-            &scheduler,
-            &mut store,
-            &fixture.runtime_spec,
-            &fixture.run_id,
-        )
-        .await
-        .expect("exclusive run terminalizes failed resource-lane claim"),
-        SchedulerStatus::Advanced
+    assert_drive!(
+        scheduler,
+        store,
+        fixture,
+        Advanced,
+        "exclusive run terminalizes failed resource-lane claim"
     );
     let node = node_by_output(&fixture, &fixture.cell_a);
     let stream = store.load_run_stream(&fixture.run_id);
@@ -2484,47 +2550,17 @@ async fn exclusive_side_effect_prepare_failure_after_claim_terminalizes_attempt(
 async fn runner_block_leaves_started_attempt_open_without_failure() {
     let fixture = fixture();
     let node = node_by_output(&fixture, &fixture.cell_a).clone();
-    let mut registry = ErasedRunnerRegistry::new();
+    let mut registry = fixture_registry_with_first_runner(&fixture, "pure", BlockingRunner);
     register_spec_capabilities(&mut registry, &fixture.runtime_spec);
-    registry
-        .register(binding(
-            fixture.descriptor_a.clone(),
-            "pure",
-            BlockingRunner,
-        ))
-        .expect("binding blocking node");
-    registry
-        .register(binding(
-            fixture.descriptor_b.clone(),
-            "read",
-            RecordingRunner {
-                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
-                output_artifact: artifact(0xb1),
-                output_digest: content(0xb2),
-            },
-        ))
-        .expect("binding b");
     let scheduler = test_scheduler(registry);
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+    let mut store = started_fixture_store(&scheduler, &fixture).await;
 
-    assert_eq!(
-        drive_once(
-            &scheduler,
-            &mut store,
-            &fixture.runtime_spec,
-            &fixture.run_id,
-        )
-        .await
-        .expect("blocked runner leaves attempt open"),
-        SchedulerStatus::Blocked
+    assert_drive!(
+        scheduler,
+        store,
+        fixture,
+        Blocked,
+        "blocked runner leaves attempt open"
     );
     let stream = store.load_run_stream(&fixture.run_id);
     assert!(stream.iter().any(|event| matches!(
@@ -2542,16 +2578,7 @@ async fn runner_block_leaves_started_attempt_open_without_failure() {
 #[tokio::test]
 async fn side_effect_driver_submits_from_started_projection() {
     let fixture = fixture_with_first_exclusive_side_effect_state();
-    let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+    let (_, mut store) = started_side_effect_fixture_run(&fixture).await;
     let node = node_by_output(&fixture, &fixture.cell_a);
     let (attempt_id, ledger_key) = append_synthetic_exclusive_started(
         &mut store,
@@ -2571,8 +2598,7 @@ async fn side_effect_driver_submits_from_started_projection() {
     assert_eq!(output.payloads.len(), 1);
     match &output.payloads[0] {
         RunnerEventPayload::SideEffectSubmissionObserved(payload) => {
-            assert_eq!(payload.ledger_key, ledger_key);
-            assert_eq!(payload.invocation_epoch, 1);
+            assert_side_effect_binding!(payload, ledger_key, 1);
         }
         other => panic!("expected submission payload: {other:?}"),
     }
@@ -2581,16 +2607,7 @@ async fn side_effect_driver_submits_from_started_projection() {
 #[tokio::test]
 async fn side_effect_driver_persists_submission_recovery_decisions() {
     let fixture = fixture_with_first_exclusive_side_effect_state();
-    let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+    let (_, mut store) = started_side_effect_fixture_run(&fixture).await;
     let node = node_by_output(&fixture, &fixture.cell_a);
     let (attempt_id, _ledger_key) = append_synthetic_exclusive_started(
         &mut store,
@@ -2640,16 +2657,7 @@ async fn side_effect_driver_persists_submission_recovery_decisions() {
 #[tokio::test]
 async fn side_effect_submission_unknown_keeps_exclusive_resource_lane_held() {
     let fixture = fixture_with_first_exclusive_side_effect_state();
-    let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+    let (_, mut store) = started_side_effect_fixture_run(&fixture).await;
     let node = node_by_output(&fixture, &fixture.cell_a);
     let pair_id = fixture_side_effect_pair_id(&fixture, node);
     let (attempt_id, _ledger_key) = append_synthetic_exclusive_started(
@@ -2724,16 +2732,7 @@ async fn side_effect_submission_unknown_keeps_exclusive_resource_lane_held() {
 #[tokio::test]
 async fn side_effect_verify_driver_maps_receipt_to_state_output() {
     let fixture = fixture_with_first_exclusive_side_effect_state();
-    let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+    let (_, mut store) = started_side_effect_fixture_run(&fixture).await;
     let node = node_by_output(&fixture, &fixture.cell_a);
     let (submit_attempt_id, ledger_key) = append_synthetic_exclusive_started(
         &mut store,
@@ -2790,16 +2789,7 @@ async fn side_effect_verify_driver_maps_receipt_to_state_output() {
 #[tokio::test]
 async fn side_effect_receipt_verification_releases_exclusive_resource_lane() {
     let fixture = fixture_with_first_exclusive_side_effect_state();
-    let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+    let (scheduler, mut store) = started_side_effect_fixture_run(&fixture).await;
     let submit_node = node_by_output(&fixture, &fixture.cell_a).clone();
     let verify_node = side_effect_verify_node_for_submit(&fixture, &submit_node).clone();
     let pair_id = fixture_side_effect_pair_id(&fixture, &submit_node);
@@ -2809,14 +2799,9 @@ async fn side_effect_receipt_verification_releases_exclusive_resource_lane() {
 
     for _ in 0..10 {
         assert_ne!(
-            drive_once(
-                &scheduler,
-                &mut store,
-                &fixture.runtime_spec,
-                &fixture.run_id
-            )
-            .await
-            .expect("advance receipt verification"),
+            drive_fixture_once(&scheduler, &mut store, &fixture)
+                .await
+                .expect("advance receipt verification"),
             SchedulerStatus::Blocked
         );
         let snapshot = store.projection_snapshot();
@@ -2856,16 +2841,7 @@ async fn side_effect_receipt_verification_releases_exclusive_resource_lane() {
 #[tokio::test]
 async fn side_effect_driver_rejects_ambiguous_projection() {
     let fixture = fixture_with_first_exclusive_side_effect_state();
-    let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+    let (_, mut store) = started_side_effect_fixture_run(&fixture).await;
     let node = node_by_output(&fixture, &fixture.cell_a);
     let (attempt_id, ledger_key) = append_synthetic_exclusive_started(
         &mut store,
@@ -2896,16 +2872,7 @@ async fn side_effect_driver_rejects_ambiguous_projection() {
 #[tokio::test]
 async fn side_effect_driver_starts_and_submits_from_prepared_projection() {
     let fixture = fixture_with_first_exclusive_side_effect_state();
-    let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+    let (_, mut store) = started_side_effect_fixture_run(&fixture).await;
     let node = node_by_output(&fixture, &fixture.cell_a);
     let (attempt_id, ledger_key) = append_synthetic_exclusive_prepare(
         &mut store,
@@ -2927,15 +2894,13 @@ async fn side_effect_driver_starts_and_submits_from_prepared_projection() {
     assert_eq!(output.payloads.len(), 2);
     match &output.payloads[0] {
         RunnerEventPayload::SideEffectInvocationStarted(payload) => {
-            assert_eq!(payload.ledger_key, ledger_key);
-            assert_eq!(payload.invocation_epoch, 1);
+            assert_side_effect_binding!(payload, ledger_key, 1);
         }
         other => panic!("expected invocation started payload: {other:?}"),
     }
     match &output.payloads[1] {
         RunnerEventPayload::SideEffectSubmissionObserved(payload) => {
-            assert_eq!(payload.ledger_key, ledger_key);
-            assert_eq!(payload.invocation_epoch, 1);
+            assert_side_effect_binding!(payload, ledger_key, 1);
         }
         other => panic!("expected submission payload: {other:?}"),
     }
@@ -2988,19 +2953,60 @@ async fn side_effect_driver_starts_and_submits_from_prepared_projection() {
     ));
 }
 
+macro_rules! with_prepared_runner_ctx {
+    (
+        $fixture:expr,
+        $node:expr,
+        $attempt_id:expr,
+        $projections:expr,
+        $run_stream:expr,
+        |$ctx:ident| $body:block $(,)?
+    ) => {{
+        let invocation_node = $node;
+        let descriptor = $fixture
+            .runtime_spec
+            .state_descriptor_for_node(invocation_node)
+            .expect("state descriptor");
+        let output_cell = $fixture
+            .runtime_spec
+            .cell(&invocation_node.output_cell)
+            .expect("output cell");
+        let config_artifact =
+            config_artifact(&$fixture.runtime_spec, &invocation_node.config_ref).evidence;
+        let projections = $projections;
+        let run_stream = $run_stream;
+        let invocation = PreparedRunnerInvocation {
+            runtime_spec: &$fixture.runtime_spec,
+            run_id: &$fixture.run_id,
+            spec_hash: $fixture.runtime_spec.spec_hash(),
+            node: invocation_node,
+            descriptor,
+            output_cell,
+            attempt_id: $attempt_id,
+            attempt_no: 1,
+            config_artifact,
+            inputs: MaterializedInputs {
+                input_schema_id: invocation_node.input_bindings.input_schema_id.clone(),
+                root: MaterializedInputNode::Unit,
+            },
+            caps: CertifiedRuntimeCapabilities::new(
+                invocation_node.node_id.clone(),
+                invocation_node.capability_bindings.clone(),
+            ),
+            recorded_facts: RecordedFacts::default(),
+            projections: &projections,
+            run_stream: &run_stream,
+        };
+        let $ctx = ErasedRunCtx::from_prepared(&invocation);
+        $body
+    }};
+}
+
 fn with_runner_erased_ctx<R, F>(fixture: &Fixture, cell_id: &CellId, test: F) -> R
 where
     F: for<'a> FnOnce(ErasedRunCtx<'a>) -> R,
 {
     let node = node_by_output(fixture, cell_id);
-    let descriptor = fixture
-        .runtime_spec
-        .state_descriptor_for_node(node)
-        .expect("state descriptor");
-    let output_cell = fixture
-        .runtime_spec
-        .cell(&node.output_cell)
-        .expect("output cell");
     let attempt_id = attempt_id(
         &fixture.run_id,
         fixture.runtime_spec.spec_hash(),
@@ -3008,32 +3014,14 @@ where
         1,
     )
     .expect("attempt id");
-    let config_artifact = config_artifact(&fixture.runtime_spec, &node.config_ref).evidence;
-    let projections = store::ProjectionSnapshot::default();
-    let run_stream = Vec::new();
-    let invocation = PreparedRunnerInvocation {
-        runtime_spec: &fixture.runtime_spec,
-        run_id: &fixture.run_id,
-        spec_hash: fixture.runtime_spec.spec_hash(),
+    with_prepared_runner_ctx!(
+        fixture,
         node,
-        descriptor,
-        output_cell,
-        attempt_id: &attempt_id,
-        attempt_no: 1,
-        config_artifact,
-        inputs: MaterializedInputs {
-            input_schema_id: node.input_bindings.input_schema_id.clone(),
-            root: MaterializedInputNode::Unit,
-        },
-        caps: CertifiedRuntimeCapabilities::new(
-            node.node_id.clone(),
-            node.capability_bindings.clone(),
-        ),
-        recorded_facts: RecordedFacts::default(),
-        projections: &projections,
-        run_stream: &run_stream,
-    };
-    test(ErasedRunCtx::from_prepared(&invocation))
+        &attempt_id,
+        store::ProjectionSnapshot::default(),
+        Vec::new(),
+        |ctx| { test(ctx) },
+    )
 }
 
 async fn drive_side_effect_driver_empty<C>(
@@ -3045,14 +3033,6 @@ where
     C: SideEffectDriverCallbacks + ?Sized,
 {
     let node = node_by_output(fixture, cell_id);
-    let descriptor = fixture
-        .runtime_spec
-        .state_descriptor_for_node(node)
-        .expect("state descriptor");
-    let output_cell = fixture
-        .runtime_spec
-        .cell(&node.output_cell)
-        .expect("output cell");
     let attempt_id = attempt_id(
         &fixture.run_id,
         fixture.runtime_spec.spec_hash(),
@@ -3060,32 +3040,14 @@ where
         1,
     )
     .expect("attempt id");
-    let config_artifact = config_artifact(&fixture.runtime_spec, &node.config_ref).evidence;
-    let projections = store::ProjectionSnapshot::default();
-    let run_stream = Vec::new();
-    let invocation = PreparedRunnerInvocation {
-        runtime_spec: &fixture.runtime_spec,
-        run_id: &fixture.run_id,
-        spec_hash: fixture.runtime_spec.spec_hash(),
+    with_prepared_runner_ctx!(
+        fixture,
         node,
-        descriptor,
-        output_cell,
-        attempt_id: &attempt_id,
-        attempt_no: 1,
-        config_artifact,
-        inputs: MaterializedInputs {
-            input_schema_id: node.input_bindings.input_schema_id.clone(),
-            root: MaterializedInputNode::Unit,
-        },
-        caps: CertifiedRuntimeCapabilities::new(
-            node.node_id.clone(),
-            node.capability_bindings.clone(),
-        ),
-        recorded_facts: RecordedFacts::default(),
-        projections: &projections,
-        run_stream: &run_stream,
-    };
-    SideEffectDriver::drive(ErasedRunCtx::from_prepared(&invocation), callbacks).await
+        &attempt_id,
+        store::ProjectionSnapshot::default(),
+        Vec::new(),
+        |ctx| { SideEffectDriver::drive(ctx, callbacks).await },
+    )
 }
 
 async fn drive_side_effect_driver_from_store<C>(
@@ -3098,40 +3060,14 @@ async fn drive_side_effect_driver_from_store<C>(
 where
     C: SideEffectDriverCallbacks + ?Sized,
 {
-    let descriptor = fixture
-        .runtime_spec
-        .state_descriptor_for_node(node)
-        .expect("state descriptor");
-    let output_cell = fixture
-        .runtime_spec
-        .cell(&node.output_cell)
-        .expect("output cell");
-    let config_artifact = config_artifact(&fixture.runtime_spec, &node.config_ref).evidence;
-    let projections = store.projection_snapshot().clone();
-    let run_stream = store.load_run_stream(&fixture.run_id);
-    let invocation = PreparedRunnerInvocation {
-        runtime_spec: &fixture.runtime_spec,
-        run_id: &fixture.run_id,
-        spec_hash: fixture.runtime_spec.spec_hash(),
+    with_prepared_runner_ctx!(
+        fixture,
         node,
-        descriptor,
-        output_cell,
         attempt_id,
-        attempt_no: 1,
-        config_artifact,
-        inputs: MaterializedInputs {
-            input_schema_id: node.input_bindings.input_schema_id.clone(),
-            root: MaterializedInputNode::Unit,
-        },
-        caps: CertifiedRuntimeCapabilities::new(
-            node.node_id.clone(),
-            node.capability_bindings.clone(),
-        ),
-        recorded_facts: RecordedFacts::default(),
-        projections: &projections,
-        run_stream: &run_stream,
-    };
-    SideEffectDriver::drive(ErasedRunCtx::from_prepared(&invocation), callbacks).await
+        store.projection_snapshot().clone(),
+        store.load_run_stream(&fixture.run_id),
+        |ctx| { SideEffectDriver::drive(ctx, callbacks).await },
+    )
 }
 
 async fn drive_side_effect_verify_driver_from_store<C>(
@@ -3144,40 +3080,14 @@ async fn drive_side_effect_verify_driver_from_store<C>(
 where
     C: SideEffectVerifyCallbacks + ?Sized,
 {
-    let descriptor = fixture
-        .runtime_spec
-        .state_descriptor_for_node(node)
-        .expect("state descriptor");
-    let output_cell = fixture
-        .runtime_spec
-        .cell(&node.output_cell)
-        .expect("output cell");
-    let config_artifact = config_artifact(&fixture.runtime_spec, &node.config_ref).evidence;
-    let projections = store.projection_snapshot().clone();
-    let run_stream = store.load_run_stream(&fixture.run_id);
-    let invocation = PreparedRunnerInvocation {
-        runtime_spec: &fixture.runtime_spec,
-        run_id: &fixture.run_id,
-        spec_hash: fixture.runtime_spec.spec_hash(),
+    with_prepared_runner_ctx!(
+        fixture,
         node,
-        descriptor,
-        output_cell,
         attempt_id,
-        attempt_no: 1,
-        config_artifact,
-        inputs: MaterializedInputs {
-            input_schema_id: node.input_bindings.input_schema_id.clone(),
-            root: MaterializedInputNode::Unit,
-        },
-        caps: CertifiedRuntimeCapabilities::new(
-            node.node_id.clone(),
-            node.capability_bindings.clone(),
-        ),
-        recorded_facts: RecordedFacts::default(),
-        projections: &projections,
-        run_stream: &run_stream,
-    };
-    SideEffectVerifyDriver::drive(ErasedRunCtx::from_prepared(&invocation), callbacks).await
+        store.projection_snapshot().clone(),
+        store.load_run_stream(&fixture.run_id),
+        |ctx| { SideEffectVerifyDriver::drive(ctx, callbacks).await },
+    )
 }
 
 fn single_side_effect_payload(output: &ErasedRunnerOutput) -> &RunnerEventPayload {
@@ -3271,51 +3181,9 @@ fn runner_registration_builder_preserves_explicit_binding_authority() {
 #[tokio::test]
 async fn serial_scheduler_runs_nodes_in_certified_topological_order() {
     let fixture = fixture();
-    let mut registry = ErasedRunnerRegistry::new();
-    registry
-        .register(binding(
-            fixture.descriptor_a.clone(),
-            "pure",
-            RecordingRunner {
-                expected_caps: Vec::new(),
-                output_artifact: artifact(0xa1),
-                output_digest: content(0xa2),
-            },
-        ))
-        .expect("binding a");
-    registry
-        .register(binding(
-            fixture.descriptor_b.clone(),
-            "read",
-            RecordingRunner {
-                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
-                output_artifact: artifact(0xb1),
-                output_digest: content(0xb2),
-            },
-        ))
-        .expect("binding b");
-    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+    let (scheduler, mut store) = started_fixture_run(&fixture).await;
 
-    assert_eq!(
-        drive_once(
-            &scheduler,
-            &mut store,
-            &fixture.runtime_spec,
-            &fixture.run_id
-        )
-        .await
-        .expect("drive a"),
-        SchedulerStatus::Advanced
-    );
+    assert_drive!(scheduler, store, fixture, Advanced, "drive a");
     assert!(store
         .projection_snapshot()
         .cell_terminal(&fixture.cell_a)
@@ -3324,17 +3192,7 @@ async fn serial_scheduler_runs_nodes_in_certified_topological_order() {
         .projection_snapshot()
         .cell_terminal(&fixture.cell_b)
         .is_none());
-    assert_eq!(
-        drive_once(
-            &scheduler,
-            &mut store,
-            &fixture.runtime_spec,
-            &fixture.run_id
-        )
-        .await
-        .expect("drive b"),
-        SchedulerStatus::Advanced
-    );
+    assert_drive!(scheduler, store, fixture, Advanced, "drive b");
     assert!(store
         .projection_snapshot()
         .cell_terminal(&fixture.cell_b)
@@ -3348,26 +3206,12 @@ async fn serial_scheduler_runs_nodes_in_certified_topological_order() {
 #[tokio::test]
 async fn scheduler_completes_run_after_public_output_evidence() {
     let fixture = fixture();
-    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+    let (scheduler, mut store) = started_fixture_run(&fixture).await;
 
     assert_eq!(
-        drive_until_blocked(
-            &scheduler,
-            &mut store,
-            &fixture.runtime_spec,
-            &fixture.run_id
-        )
-        .await
-        .expect("drive to public output"),
+        drive_fixture_until_blocked(&scheduler, &mut store, &fixture)
+            .await
+            .expect("drive to public output"),
         SchedulerStatus::PublicOutputProjected
     );
     assert_eq!(
@@ -3479,18 +3323,14 @@ async fn scheduler_completes_run_after_public_output_evidence() {
         )
     }));
     let stream_len = stream.len();
-    assert_eq!(
-        drive_once(
-            &scheduler,
-            &mut store,
-            &fixture.runtime_spec,
-            &fixture.run_id
-        )
-        .await
-        .expect("drive completed run"),
-        SchedulerStatus::PublicOutputProjected
+    assert_drive!(
+        scheduler,
+        store,
+        fixture,
+        PublicOutputProjected,
+        "drive completed run"
     );
-    assert_eq!(store.load_run_stream(&fixture.run_id).len(), stream_len);
+    store.assert_run_stream_len(&fixture.run_id, stream_len);
 }
 
 #[tokio::test]
@@ -3655,16 +3495,7 @@ async fn run_launch_commits_single_admission_root_and_admits_launch_artifacts() 
             artifacts: Arc::new(Mutex::new(BTreeMap::new())),
         }),
     );
-    let mut store = TestTypedRunStore::new();
-
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+    let store = started_fixture_store(&scheduler, &fixture).await;
 
     let stream = store.load_run_stream(&fixture.run_id);
     let first = stream.first().expect("stream event");
@@ -3710,16 +3541,7 @@ async fn run_launch_commits_single_admission_root_and_admits_launch_artifacts() 
 #[tokio::test]
 async fn scheduler_binds_staged_retention_refs_and_projects_manifest() {
     let fixture = fixture_with_retention_lifecycle_node();
-    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+    let (scheduler, mut store) = started_fixture_run(&fixture).await;
 
     let projection_snapshot = store.projection_snapshot();
     let start_retention = projection_snapshot
@@ -3729,14 +3551,9 @@ async fn scheduler_binds_staged_retention_refs_and_projects_manifest() {
         .refs
         .contains_key(&fixture.seed_ref.seed_artifact.artifact_id));
 
-    let status = drive_until_blocked(
-        &scheduler,
-        &mut store,
-        &fixture.runtime_spec,
-        &fixture.run_id,
-    )
-    .await
-    .expect("drive to completion");
+    let status = drive_fixture_until_blocked(&scheduler, &mut store, &fixture)
+        .await
+        .expect("drive to completion");
     assert_eq!(status, SchedulerStatus::PublicOutputProjected);
     let render_receipt_artifact = match store
         .projection_snapshot()
@@ -3828,16 +3645,7 @@ async fn scheduler_binds_staged_retention_refs_and_projects_manifest() {
 #[tokio::test]
 async fn retention_manifest_projection_retry_is_idempotent_after_current_store_advanced() {
     let fixture = fixture_with_retention_lifecycle_node();
-    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+    let (scheduler, mut store) = started_fixture_run(&fixture).await;
 
     drive_until_public_output_produced(&scheduler, &mut store, &fixture).await;
     let retention_node =
@@ -3845,14 +3653,12 @@ async fn retention_manifest_projection_retry_is_idempotent_after_current_store_a
     append_attempt_start(&mut store, &fixture, retention_node, 1);
     let stale_stream = store.load_run_stream(&fixture.run_id);
 
-    drive_once(
-        &scheduler,
-        &mut store,
-        &fixture.runtime_spec,
-        &fixture.run_id,
-    )
-    .await
-    .expect("advance current store with retention projection");
+    drive_ok!(
+        scheduler,
+        store,
+        fixture,
+        "advance current store with retention projection"
+    );
     assert!(store
         .projection_snapshot()
         .retention(&fixture.run_id)
@@ -3876,16 +3682,7 @@ async fn retention_manifest_projection_retry_is_idempotent_after_current_store_a
 #[tokio::test]
 async fn runtime_rejects_standalone_retention_manifest_projection_history() {
     let fixture = fixture_with_retention_lifecycle_node();
-    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+    let (scheduler, mut store) = started_fixture_run(&fixture).await;
     drive_until_public_output_produced(&scheduler, &mut store, &fixture).await;
 
     let manifest = build_retention_manifest_artifact(
@@ -3922,24 +3719,10 @@ async fn runtime_rejects_standalone_retention_manifest_projection_history() {
 #[tokio::test]
 async fn runtime_rejects_complete_run_receipt_commit_without_run_completed() {
     let fixture = fixture();
-    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
-    drive_until_blocked(
-        &scheduler,
-        &mut store,
-        &fixture.runtime_spec,
-        &fixture.run_id,
-    )
-    .await
-    .expect("drive to completion");
+    let (scheduler, mut store) = started_fixture_run(&fixture).await;
+    drive_fixture_until_blocked(&scheduler, &mut store, &fixture)
+        .await
+        .expect("drive to completion");
 
     let valid_stream = store.load_run_stream(&fixture.run_id);
     let corrupt_stream = rewrite_stream_without_payloads(&valid_stream, |payload| {
@@ -3956,32 +3739,9 @@ async fn runtime_rejects_complete_run_receipt_commit_without_run_completed() {
 #[tokio::test]
 async fn public_output_render_failure_resumes_and_completes() {
     let fixture = fixture();
-    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
-    drive_once(
-        &scheduler,
-        &mut store,
-        &fixture.runtime_spec,
-        &fixture.run_id,
-    )
-    .await
-    .expect("drive a");
-    drive_once(
-        &scheduler,
-        &mut store,
-        &fixture.runtime_spec,
-        &fixture.run_id,
-    )
-    .await
-    .expect("drive b");
+    let (scheduler, mut store) = started_fixture_run(&fixture).await;
+    drive_ok!(scheduler, store, fixture, "drive a");
+    drive_ok!(scheduler, store, fixture, "drive b");
     let render_node = node_by_output(&fixture, &fixture.render_cell);
     let failed_attempt = append_attempt_start(&mut store, &fixture, render_node, 1);
     append_public_output_render_failure(&mut store, &fixture, render_node, &failed_attempt);
@@ -3993,14 +3753,9 @@ async fn public_output_render_failure_resumes_and_completes() {
     ));
 
     assert_eq!(
-        drive_until_blocked(
-            &scheduler,
-            &mut store,
-            &fixture.runtime_spec,
-            &fixture.run_id
-        )
-        .await
-        .expect("retry render"),
+        drive_fixture_until_blocked(&scheduler, &mut store, &fixture)
+            .await
+            .expect("retry render"),
         SchedulerStatus::PublicOutputProjected
     );
     assert_eq!(
@@ -4056,16 +3811,7 @@ fn certified_runtime_spec_accepts_verified_persisted_parts_authority() {
 #[tokio::test]
 async fn replay_rejects_run_completed_without_public_output_evidence() {
     let fixture = fixture();
-    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+    let (scheduler, mut store) = started_fixture_run(&fixture).await;
     store
         .append_prepared_commit(store_typed_commit_request! {
             run_id: fixture.run_id.clone(),
@@ -4101,7 +3847,7 @@ async fn replay_rejects_run_completed_without_public_output_evidence() {
         .expect("append forged completion");
 
     assert!(matches!(
-        drive_once(&scheduler, &mut store, &fixture.runtime_spec, &fixture.run_id)
+        drive_fixture_once(&scheduler, &mut store, &fixture)
             .await,
         Err(RuntimeError::InvalidRunStream(message))
             if message.contains("RunCompleted appeared before PublicOutputProduced")
@@ -4147,51 +3893,21 @@ async fn scheduler_rejects_uncertified_capability_use() {
     }
 
     let fixture = fixture();
-    let mut registry = ErasedRunnerRegistry::new();
-    registry
-        .register(binding(
-            fixture.descriptor_a.clone(),
-            "pure",
-            BadFactRunner {
-                cap_kind: fixture.cap_kind.clone(),
-                cap_version: fixture.cap_version.clone(),
-            },
-        ))
-        .expect("binding");
-    registry
-        .register(binding(
-            fixture.descriptor_b.clone(),
-            "read",
-            RecordingRunner {
-                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
-                output_artifact: artifact(0xb1),
-                output_digest: content(0xb2),
-            },
-        ))
-        .expect("binding b");
-    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
+    let registry = fixture_registry_with_first_runner(
         &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
-    assert_eq!(
-        drive_once(
-            &scheduler,
-            &mut store,
-            &fixture.runtime_spec,
-            &fixture.run_id
-        )
-        .await
-        .expect("terminalize uncertified capability use"),
-        SchedulerStatus::Advanced
+        "pure",
+        BadFactRunner {
+            cap_kind: fixture.cap_kind.clone(),
+            cap_version: fixture.cap_version.clone(),
+        },
     );
-    let node = node_by_output(&fixture, &fixture.cell_a);
-    assert_node_failed_with_code(&store, &node.node_id, "runner_output_invalid");
+    let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
+    assert_first_node_invalid_after_drive!(
+        scheduler,
+        store,
+        fixture,
+        "terminalize uncertified capability use"
+    );
 }
 
 #[tokio::test]
@@ -4228,53 +3944,23 @@ async fn runner_cannot_stage_artifact_with_foreign_producer() {
 
     let fixture = fixture();
     let foreign_node_id = node_by_output(&fixture, &fixture.cell_b).node_id.clone();
-    let mut registry = ErasedRunnerRegistry::new();
-    registry
-        .register(binding(
-            fixture.descriptor_a.clone(),
-            "pure",
-            ForeignProducerArtifactRunner {
-                foreign_node_id,
-                output_artifact: artifact(0xa1),
-                output_digest: content(0xa2),
-            },
-        ))
-        .expect("binding a");
-    registry
-        .register(binding(
-            fixture.descriptor_b.clone(),
-            "read",
-            RecordingRunner {
-                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
-                output_artifact: artifact(0xb1),
-                output_digest: content(0xb2),
-            },
-        ))
-        .expect("binding b");
-    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
+    let registry = fixture_registry_with_first_runner(
         &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
-
-    assert_eq!(
-        drive_once(
-            &scheduler,
-            &mut store,
-            &fixture.runtime_spec,
-            &fixture.run_id
-        )
-        .await
-        .expect("terminalize foreign producer artifact"),
-        SchedulerStatus::Advanced
+        "pure",
+        ForeignProducerArtifactRunner {
+            foreign_node_id,
+            output_artifact: artifact(0xa1),
+            output_digest: content(0xa2),
+        },
     );
-    let node = node_by_output(&fixture, &fixture.cell_a);
-    assert_node_failed_with_code(&store, &node.node_id, "runner_output_invalid");
+    let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
+
+    assert_first_node_invalid_after_drive!(
+        scheduler,
+        store,
+        fixture,
+        "terminalize foreign producer artifact"
+    );
 }
 
 #[tokio::test]
@@ -4312,52 +3998,22 @@ async fn runner_cannot_stage_inline_artifact_with_mismatched_bytes() {
     }
 
     let fixture = fixture();
-    let mut registry = ErasedRunnerRegistry::new();
-    registry
-        .register(binding(
-            fixture.descriptor_a.clone(),
-            "pure",
-            BadInlineArtifactRunner {
-                output_artifact: artifact(0xa1),
-                output_digest: content(0xa2),
-            },
-        ))
-        .expect("binding a");
-    registry
-        .register(binding(
-            fixture.descriptor_b.clone(),
-            "read",
-            RecordingRunner {
-                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
-                output_artifact: artifact(0xb1),
-                output_digest: content(0xb2),
-            },
-        ))
-        .expect("binding b");
-    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
+    let registry = fixture_registry_with_first_runner(
         &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
-
-    assert_eq!(
-        drive_once(
-            &scheduler,
-            &mut store,
-            &fixture.runtime_spec,
-            &fixture.run_id
-        )
-        .await
-        .expect("terminalize mismatched inline artifact"),
-        SchedulerStatus::Advanced
+        "pure",
+        BadInlineArtifactRunner {
+            output_artifact: artifact(0xa1),
+            output_digest: content(0xa2),
+        },
     );
-    let node = node_by_output(&fixture, &fixture.cell_a);
-    assert_node_failed_with_code(&store, &node.node_id, "runner_output_invalid");
+    let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
+
+    assert_first_node_invalid_after_drive!(
+        scheduler,
+        store,
+        fixture,
+        "terminalize mismatched inline artifact"
+    );
 }
 
 #[tokio::test]
@@ -4397,47 +4053,11 @@ async fn runner_can_commit_inline_state_output_artifact() {
     let output_digest = digest_for_bytes(&output_bytes);
     let output_artifact =
         ArtifactId::from_digest(output_digest.algorithm(), *output_digest.digest());
-    let mut registry = ErasedRunnerRegistry::new();
-    registry
-        .register(binding(
-            fixture.descriptor_a.clone(),
-            "pure",
-            InlineArtifactRunner { output_bytes },
-        ))
-        .expect("binding a");
-    registry
-        .register(binding(
-            fixture.descriptor_b.clone(),
-            "read",
-            RecordingRunner {
-                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
-                output_artifact: artifact(0xb1),
-                output_digest: content(0xb2),
-            },
-        ))
-        .expect("binding b");
-    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+    let registry =
+        fixture_registry_with_first_runner(&fixture, "pure", InlineArtifactRunner { output_bytes });
+    let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
 
-    assert_eq!(
-        drive_once(
-            &scheduler,
-            &mut store,
-            &fixture.runtime_spec,
-            &fixture.run_id
-        )
-        .await
-        .expect("drive inline output"),
-        SchedulerStatus::Advanced
-    );
+    assert_drive!(scheduler, store, fixture, Advanced, "drive inline output");
     assert!(matches!(
         store.projection_snapshot().cell_terminal(&fixture.cell_a),
         Some(store::CellTerminalProjection::Produced {
@@ -4491,55 +4111,25 @@ async fn runner_cannot_stage_reserved_retention_reasons() {
     ] {
         let fixture = fixture();
         let node = node_by_output(&fixture, &fixture.cell_a).clone();
-        let mut registry = ErasedRunnerRegistry::new();
-        registry
-            .register(binding(
-                fixture.descriptor_a.clone(),
-                "pure",
-                ReservedRetentionReasonRunner {
-                    output_bytes: br#"{"reserved":true}"#.to_vec(),
-                    reason,
-                },
-            ))
-            .expect("binding a");
-        registry
-            .register(binding(
-                fixture.descriptor_b.clone(),
-                "read",
-                RecordingRunner {
-                    expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
-                    output_artifact: artifact(0xb1),
-                    output_digest: content(0xb2),
-                },
-            ))
-            .expect("binding b");
-        let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-        let mut store = TestTypedRunStore::new();
-        start_fixture_run(
-            &scheduler,
-            &mut store,
+        let registry = fixture_registry_with_first_runner(
             &fixture,
-            vec![fixture.seed_ref.clone()],
-        )
-        .await
-        .expect("start run");
+            "pure",
+            ReservedRetentionReasonRunner {
+                output_bytes: br#"{"reserved":true}"#.to_vec(),
+                reason,
+            },
+        );
+        let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
         let stream_before = store.load_run_stream(&fixture.run_id);
 
-        assert_eq!(
-            drive_once(
-                &scheduler,
-                &mut store,
-                &fixture.runtime_spec,
-                &fixture.run_id
-            )
-            .await
-            .expect("terminalize reserved retention reason"),
-            SchedulerStatus::Advanced
+        assert_drive!(
+            scheduler,
+            store,
+            fixture,
+            Advanced,
+            "terminalize reserved retention reason"
         );
-        assert_eq!(
-            store.load_run_stream(&fixture.run_id).len(),
-            stream_before.len() + 4
-        );
+        store.assert_run_stream_len(&fixture.run_id, stream_before.len() + 4);
         assert_node_failed_with_code(&store, &node.node_id, "runner_output_invalid");
         assert!(store
             .projection_snapshot()
@@ -4572,52 +4162,22 @@ async fn runner_output_requires_payload_bound_staged_artifact() {
     }
 
     let fixture = fixture();
-    let mut registry = ErasedRunnerRegistry::new();
-    registry
-        .register(binding(
-            fixture.descriptor_a.clone(),
-            "pure",
-            MissingStagedArtifactRunner {
-                output_artifact: artifact(0xa1),
-                output_digest: content(0xa2),
-            },
-        ))
-        .expect("binding a");
-    registry
-        .register(binding(
-            fixture.descriptor_b.clone(),
-            "read",
-            RecordingRunner {
-                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
-                output_artifact: artifact(0xb1),
-                output_digest: content(0xb2),
-            },
-        ))
-        .expect("binding b");
-    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
+    let registry = fixture_registry_with_first_runner(
         &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
-
-    assert_eq!(
-        drive_once(
-            &scheduler,
-            &mut store,
-            &fixture.runtime_spec,
-            &fixture.run_id
-        )
-        .await
-        .expect("terminalize missing staged artifact"),
-        SchedulerStatus::Advanced
+        "pure",
+        MissingStagedArtifactRunner {
+            output_artifact: artifact(0xa1),
+            output_digest: content(0xa2),
+        },
     );
-    let node = node_by_output(&fixture, &fixture.cell_a);
-    assert_node_failed_with_code(&store, &node.node_id, "runner_output_invalid");
+    let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
+
+    assert_first_node_invalid_after_drive!(
+        scheduler,
+        store,
+        fixture,
+        "terminalize missing staged artifact"
+    );
 }
 
 #[tokio::test]
@@ -4658,40 +4218,17 @@ async fn rejected_staged_payload_mismatch_does_not_admit_artifact_evidence() {
     let staged_digest = content(0xa2);
     let payload_artifact = artifact(0xa3);
     let payload_digest = content(0xa4);
-    let mut registry = ErasedRunnerRegistry::new();
-    registry
-        .register(binding(
-            fixture.descriptor_a.clone(),
-            "pure",
-            MismatchedStagedArtifactRunner {
-                staged_artifact: staged_artifact.clone(),
-                staged_digest: staged_digest.clone(),
-                payload_artifact,
-                payload_digest,
-            },
-        ))
-        .expect("binding a");
-    registry
-        .register(binding(
-            fixture.descriptor_b.clone(),
-            "read",
-            RecordingRunner {
-                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
-                output_artifact: artifact(0xb1),
-                output_digest: content(0xb2),
-            },
-        ))
-        .expect("binding b");
-    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
+    let registry = fixture_registry_with_first_runner(
         &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+        "pure",
+        MismatchedStagedArtifactRunner {
+            staged_artifact: staged_artifact.clone(),
+            staged_digest: staged_digest.clone(),
+            payload_artifact,
+            payload_digest,
+        },
+    );
+    let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
     let attempt_id = attempt_id(
         &fixture.run_id,
         fixture.runtime_spec.spec_hash(),
@@ -4700,16 +4237,12 @@ async fn rejected_staged_payload_mismatch_does_not_admit_artifact_evidence() {
     )
     .expect("attempt id");
 
-    assert_eq!(
-        drive_once(
-            &scheduler,
-            &mut store,
-            &fixture.runtime_spec,
-            &fixture.run_id
-        )
-        .await
-        .expect("terminalize staged payload mismatch"),
-        SchedulerStatus::Advanced
+    assert_drive!(
+        scheduler,
+        store,
+        fixture,
+        Advanced,
+        "terminalize staged payload mismatch"
     );
     assert_node_failed_with_code(&store, &node.node_id, "runner_output_invalid");
 
@@ -4933,14 +4466,7 @@ async fn run_admission_returns_bound_context_with_capability_and_framework_autho
         BoundFrameworkHandlerKind::PublicOutputRender
     );
 
-    let run_admitted = store
-        .load_run_stream(&fixture.run_id)
-        .into_iter()
-        .find_map(|event| match event.payload().clone() {
-            events::KernelEventPayload::RunAdmitted(payload) => Some(payload),
-            _ => None,
-        })
-        .expect("RunAdmitted payload");
+    let run_admitted = store.run_admitted(&fixture.run_id);
     assert_eq!(
         run_admitted.runner_executables,
         authority.bound_context().runner_executables()
@@ -4961,29 +4487,15 @@ async fn run_admission_returns_bound_context_with_capability_and_framework_autho
 #[test]
 fn run_start_rejects_missing_capability_implementation() {
     let fixture = fixture();
-    let mut registry = ErasedRunnerRegistry::new();
-    registry
-        .register(binding(
-            fixture.descriptor_a.clone(),
-            "pure",
-            RecordingRunner {
-                expected_caps: Vec::new(),
-                output_artifact: artifact(0xa1),
-                output_digest: content(0xa2),
-            },
-        ))
-        .expect("binding a");
-    registry
-        .register(binding(
-            fixture.descriptor_b.clone(),
-            "read",
-            RecordingRunner {
-                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
-                output_artifact: artifact(0xb1),
-                output_digest: content(0xb2),
-            },
-        ))
-        .expect("binding b");
+    let registry = fixture_registry_with_first_runner(
+        &fixture,
+        "pure",
+        RecordingRunner {
+            expected_caps: Vec::new(),
+            output_artifact: artifact(0xa1),
+            output_digest: content(0xa2),
+        },
+    );
     let scheduler = test_scheduler(registry);
     let store = TestTypedRunStore::new();
     let error =
@@ -5013,28 +4525,8 @@ fn run_start_rejects_capability_implementation_descriptor_mismatch() {
             implementation_id,
         ))
         .expect("capability implementation");
-    registry
-        .register(binding(
-            fixture.descriptor_a.clone(),
-            "pure",
-            RecordingRunner {
-                expected_caps: Vec::new(),
-                output_artifact: artifact(0xa1),
-                output_digest: content(0xa2),
-            },
-        ))
-        .expect("binding a");
-    registry
-        .register(binding(
-            fixture.descriptor_b.clone(),
-            "read",
-            RecordingRunner {
-                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
-                output_artifact: artifact(0xb1),
-                output_digest: content(0xb2),
-            },
-        ))
-        .expect("binding b");
+    register_default_fixture_pure_runner(&mut registry, &fixture);
+    register_default_fixture_read_runner(&mut registry, &fixture);
     let scheduler = test_scheduler(registry);
     let store = TestTypedRunStore::new();
     let error =
@@ -5049,62 +4541,26 @@ fn run_start_rejects_capability_implementation_descriptor_mismatch() {
 #[tokio::test]
 async fn resume_rejects_missing_downstream_binding_before_attempt_start() {
     let fixture = fixture();
-    let launch_scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &launch_scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+    let (_, mut store) = started_fixture_run(&fixture).await;
     let stream_len_before = store.load_run_stream(&fixture.run_id).len();
 
     let mut partial_registry = ErasedRunnerRegistry::new();
-    partial_registry
-        .register(binding(
-            fixture.descriptor_a.clone(),
-            "pure",
-            RecordingRunner {
-                expected_caps: Vec::new(),
-                output_artifact: artifact(0xa1),
-                output_digest: content(0xa2),
-            },
-        ))
-        .expect("binding a");
+    register_default_fixture_pure_runner(&mut partial_registry, &fixture);
     let resume_scheduler = test_scheduler(partial_registry);
-    let error = drive_once(
-        &resume_scheduler,
-        &mut store,
-        &fixture.runtime_spec,
-        &fixture.run_id,
-    )
-    .await
-    .expect_err("missing descriptor b binding should reject bound context");
+    let error = drive_fixture_once(&resume_scheduler, &mut store, &fixture)
+        .await
+        .expect_err("missing descriptor b binding should reject bound context");
 
     assert!(
         matches!(error, RuntimeError::RunnerBinding(message) if message.contains("missing runner binding"))
     );
-    assert_eq!(
-        store.load_run_stream(&fixture.run_id).len(),
-        stream_len_before
-    );
+    store.assert_run_stream_len(&fixture.run_id, stream_len_before);
 }
 
 #[tokio::test]
 async fn resume_rejects_runner_executable_identity_mismatch_before_attempt_start() {
     let fixture = fixture();
-    let launch_scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &launch_scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+    let (_, mut store) = started_fixture_run(&fixture).await;
     let stream_len_before = store.load_run_stream(&fixture.run_id).len();
 
     let mut changed_registry = ErasedRunnerRegistry::new();
@@ -5119,60 +4575,25 @@ async fn resume_rejects_runner_executable_identity_mismatch_before_attempt_start
     );
     changed_a.executable.binary_digest = content(0xee);
     changed_registry.register(changed_a).expect("binding a");
-    changed_registry
-        .register(binding(
-            fixture.descriptor_b.clone(),
-            "read",
-            RecordingRunner {
-                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
-                output_artifact: artifact(0xb1),
-                output_digest: content(0xb2),
-            },
-        ))
-        .expect("binding b");
-    let resume_scheduler =
-        test_scheduler(register_fixture_capabilities(changed_registry, &fixture));
-    let run_admitted = store
-        .load_run_stream(&fixture.run_id)
-        .into_iter()
-        .find_map(|event| match event.payload().clone() {
-            events::KernelEventPayload::RunAdmitted(payload) => Some(payload),
-            _ => None,
-        })
-        .expect("RunAdmitted payload");
+    register_default_fixture_read_runner(&mut changed_registry, &fixture);
+    let resume_scheduler = fixture_scheduler(changed_registry, &fixture);
+    let run_admitted = store.run_admitted(&fixture.run_id);
     resume_scheduler
         .validate_admitted_run_binding(&fixture.runtime_spec, &run_admitted)
         .expect_err("changed executable identity should reject binding validation");
-    let error = drive_once(
-        &resume_scheduler,
-        &mut store,
-        &fixture.runtime_spec,
-        &fixture.run_id,
-    )
-    .await
-    .expect_err("changed executable identity should reject bound context");
+    let error = drive_fixture_once(&resume_scheduler, &mut store, &fixture)
+        .await
+        .expect_err("changed executable identity should reject bound context");
 
     assert!(matches!(error, RuntimeError::RunnerBinding(message)
             if message.contains("runner executable identities")));
-    assert_eq!(
-        store.load_run_stream(&fixture.run_id).len(),
-        stream_len_before
-    );
+    store.assert_run_stream_len(&fixture.run_id, stream_len_before);
 }
 
 #[tokio::test]
 async fn resume_rejects_adapter_executable_identity_mismatch_before_attempt_start() {
     let fixture = fixture();
-    let launch_scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &launch_scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+    let (_, mut store) = started_fixture_run(&fixture).await;
     let stream_len_before = store.load_run_stream(&fixture.run_id).len();
 
     let mut changed_adapter = test_adapter_executable_identity();
@@ -5181,47 +4602,23 @@ async fn resume_rejects_adapter_executable_identity_mismatch_before_attempt_star
         &fixture,
         changed_adapter,
     ));
-    let run_admitted = store
-        .load_run_stream(&fixture.run_id)
-        .into_iter()
-        .find_map(|event| match event.payload().clone() {
-            events::KernelEventPayload::RunAdmitted(payload) => Some(payload),
-            _ => None,
-        })
-        .expect("RunAdmitted payload");
+    let run_admitted = store.run_admitted(&fixture.run_id);
     resume_scheduler
         .validate_admitted_run_binding(&fixture.runtime_spec, &run_admitted)
         .expect_err("changed adapter executable identity should reject binding validation");
-    let error = drive_once(
-        &resume_scheduler,
-        &mut store,
-        &fixture.runtime_spec,
-        &fixture.run_id,
-    )
-    .await
-    .expect_err("changed adapter executable identity should reject bound context");
+    let error = drive_fixture_once(&resume_scheduler, &mut store, &fixture)
+        .await
+        .expect_err("changed adapter executable identity should reject bound context");
 
     assert!(matches!(error, RuntimeError::RunnerBinding(message)
             if message.contains("adapter executable identities")));
-    assert_eq!(
-        store.load_run_stream(&fixture.run_id).len(),
-        stream_len_before
-    );
+    store.assert_run_stream_len(&fixture.run_id, stream_len_before);
 }
 
 #[tokio::test]
 async fn runner_invocation_uses_run_admitted_config_evidence_without_reference_event() {
     let fixture = fixture();
-    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+    let (scheduler, mut store) = started_fixture_run(&fixture).await;
 
     let valid_stream = store.load_run_stream(&fixture.run_id);
     assert!(valid_stream.iter().all(|event| {
@@ -5231,37 +4628,19 @@ async fn runner_invocation_uses_run_admitted_config_evidence_without_reference_e
                 if payload.artifact_ref.role == events::ArtifactRole::TypedConfig
         )
     }));
-    drive_once(
-        &scheduler,
-        &mut store,
-        &fixture.runtime_spec,
-        &fixture.run_id,
-    )
-    .await
-    .expect("drive with RunAdmitted config evidence");
+    drive_ok!(
+        scheduler,
+        store,
+        fixture,
+        "drive with RunAdmitted config evidence"
+    );
 }
 
 #[tokio::test]
 async fn runner_invocation_requires_committed_produced_input_artifact_reference() {
     let fixture = fixture();
-    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
-    drive_once(
-        &scheduler,
-        &mut store,
-        &fixture.runtime_spec,
-        &fixture.run_id,
-    )
-    .await
-    .expect("produce first cell");
+    let (scheduler, mut store) = started_fixture_run(&fixture).await;
+    drive_ok!(scheduler, store, fixture, "produce first cell");
 
     let producer_node_id = node_by_output(&fixture, &fixture.cell_a).node_id.clone();
     let consumer_node_id = node_by_output(&fixture, &fixture.cell_b).node_id.clone();
@@ -5292,24 +4671,8 @@ async fn runner_invocation_requires_committed_produced_input_artifact_reference(
 #[tokio::test]
 async fn post_start_materialization_failure_terminalizes_attempt() {
     let fixture = fixture();
-    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
-    drive_once(
-        &scheduler,
-        &mut store,
-        &fixture.runtime_spec,
-        &fixture.run_id,
-    )
-    .await
-    .expect("produce first cell");
+    let (scheduler, mut store) = started_fixture_run(&fixture).await;
+    drive_ok!(scheduler, store, fixture, "produce first cell");
 
     let producer_node_id = node_by_output(&fixture, &fixture.cell_a).node_id.clone();
     let consumer_node = node_by_output(&fixture, &fixture.cell_b).clone();
@@ -5343,50 +4706,23 @@ async fn post_start_materialization_failure_terminalizes_attempt() {
 #[tokio::test]
 async fn post_start_runtime_validation_failure_terminalizes_attempt() {
     let fixture = fixture();
-    let mut registry = ErasedRunnerRegistry::new();
-    registry
-        .register(binding(
-            fixture.descriptor_a.clone(),
-            "pure",
-            ErrorRunner {
-                error: RuntimeError::RuntimeValidation(
-                    "synthetic post-start validation failure".to_owned(),
-                ),
-            },
-        ))
-        .expect("binding a");
-    registry
-        .register(binding(
-            fixture.descriptor_b.clone(),
-            "read",
-            RecordingRunner {
-                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
-                output_artifact: artifact(0xb1),
-                output_digest: content(0xb2),
-            },
-        ))
-        .expect("binding b");
-    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
+    let registry = fixture_registry_with_first_runner(
         &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+        "pure",
+        ErrorRunner {
+            error: RuntimeError::RuntimeValidation(
+                "synthetic post-start validation failure".to_owned(),
+            ),
+        },
+    );
+    let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
 
-    assert_eq!(
-        drive_once(
-            &scheduler,
-            &mut store,
-            &fixture.runtime_spec,
-            &fixture.run_id
-        )
-        .await
-        .expect("terminalize runtime validation failure"),
-        SchedulerStatus::Advanced
+    assert_drive!(
+        scheduler,
+        store,
+        fixture,
+        Advanced,
+        "terminalize runtime validation failure"
     );
 
     let node = node_by_output(&fixture, &fixture.cell_a);
@@ -5400,42 +4736,17 @@ async fn post_start_runtime_validation_failure_terminalizes_attempt() {
 #[tokio::test]
 async fn post_start_invalid_run_stream_failure_does_not_terminalize_attempt() {
     let fixture = fixture();
-    let mut registry = ErasedRunnerRegistry::new();
-    registry
-        .register(binding(
-            fixture.descriptor_a.clone(),
-            "pure",
-            ErrorRunner {
-                error: RuntimeError::InvalidRunStream(
-                    "synthetic corrupt stream authority".to_owned(),
-                ),
-            },
-        ))
-        .expect("binding a");
-    registry
-        .register(binding(
-            fixture.descriptor_b.clone(),
-            "read",
-            RecordingRunner {
-                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
-                output_artifact: artifact(0xb1),
-                output_digest: content(0xb2),
-            },
-        ))
-        .expect("binding b");
-    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
+    let registry = fixture_registry_with_first_runner(
         &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+        "pure",
+        ErrorRunner {
+            error: RuntimeError::InvalidRunStream("synthetic corrupt stream authority".to_owned()),
+        },
+    );
+    let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
 
     assert!(matches!(
-        drive_once(&scheduler, &mut store, &fixture.runtime_spec, &fixture.run_id)
+        drive_fixture_once(&scheduler, &mut store, &fixture)
             .await,
         Err(RuntimeError::InvalidRunStream(message))
             if message.contains("synthetic corrupt stream authority")
@@ -5464,16 +4775,7 @@ async fn post_start_invalid_run_stream_failure_does_not_terminalize_attempt() {
 #[tokio::test]
 async fn replay_rejects_terminal_cell_producer_outside_certified_spec() {
     let fixture = fixture();
-    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+    let (scheduler, mut store) = started_fixture_run(&fixture).await;
 
     let forged_node = fixture
         .runtime_spec
@@ -5563,13 +4865,7 @@ async fn replay_rejects_terminal_cell_producer_outside_certified_spec() {
         .expect("append forged terminal");
 
     assert!(matches!(
-        drive_once(
-            &scheduler,
-            &mut store,
-            &fixture.runtime_spec,
-            &fixture.run_id
-        )
-        .await,
+        drive_fixture_once(&scheduler, &mut store, &fixture).await,
         Err(RuntimeError::InvalidRunStream(_))
     ));
 }
@@ -5577,16 +4873,7 @@ async fn replay_rejects_terminal_cell_producer_outside_certified_spec() {
 #[tokio::test]
 async fn store_rejects_fact_without_started_attempt() {
     let fixture = fixture();
-    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+    let (_, mut store) = started_fixture_run(&fixture).await;
     let node = fixture
         .runtime_spec
         .topological_order()
@@ -5646,16 +4933,7 @@ async fn store_rejects_fact_without_started_attempt() {
 #[tokio::test]
 async fn replay_rejects_public_output_without_render_attempt() {
     let fixture = fixture();
-    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+    let (scheduler, mut store) = started_fixture_run(&fixture).await;
     let non_render_node = fixture
         .runtime_spec
         .topological_order()
@@ -5791,13 +5069,7 @@ async fn replay_rejects_public_output_without_render_attempt() {
         })
         .expect("append forged public output");
     assert!(matches!(
-        drive_once(
-            &scheduler,
-            &mut store,
-            &fixture.runtime_spec,
-            &fixture.run_id
-        )
-        .await,
+        drive_fixture_once(&scheduler, &mut store, &fixture).await,
         Err(RuntimeError::InvalidRunStream(_))
     ));
 }
@@ -5805,32 +5077,9 @@ async fn replay_rejects_public_output_without_render_attempt() {
 #[tokio::test]
 async fn replay_rejects_public_output_with_forged_rendered_digest() {
     let fixture = fixture();
-    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
-    drive_once(
-        &scheduler,
-        &mut store,
-        &fixture.runtime_spec,
-        &fixture.run_id,
-    )
-    .await
-    .expect("drive a");
-    drive_once(
-        &scheduler,
-        &mut store,
-        &fixture.runtime_spec,
-        &fixture.run_id,
-    )
-    .await
-    .expect("drive b");
+    let (scheduler, mut store) = started_fixture_run(&fixture).await;
+    drive_ok!(scheduler, store, fixture, "drive a");
+    drive_ok!(scheduler, store, fixture, "drive b");
 
     let render_node = node_by_output(&fixture, &fixture.render_cell).clone();
     let attempt_id = append_attempt_start(&mut store, &fixture, &render_node, 1);
@@ -5953,30 +5202,11 @@ async fn replay_rejects_public_output_with_forged_rendered_digest() {
 #[tokio::test]
 async fn recovery_interrupts_started_pure_attempt_before_retrying_fresh_attempt() {
     let fixture = fixture();
-    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+    let (scheduler, mut store) = started_fixture_run(&fixture).await;
     let node = node_by_output(&fixture, &fixture.cell_a);
     let interrupted_attempt_id = append_attempt_start(&mut store, &fixture, node, 1);
 
-    assert_eq!(
-        drive_once(
-            &scheduler,
-            &mut store,
-            &fixture.runtime_spec,
-            &fixture.run_id
-        )
-        .await
-        .expect("interrupt pure"),
-        SchedulerStatus::Advanced
-    );
+    assert_drive!(scheduler, store, fixture, Advanced, "interrupt pure");
     let projection_snapshot = store.projection_snapshot();
     let interrupted_attempt = projection_snapshot
         .attempt(&node.node_id, &interrupted_attempt_id)
@@ -5993,17 +5223,7 @@ async fn recovery_interrupts_started_pure_attempt_before_retrying_fresh_attempt(
         "interruption must not terminalize the output cell"
     );
 
-    assert_eq!(
-        drive_once(
-            &scheduler,
-            &mut store,
-            &fixture.runtime_spec,
-            &fixture.run_id
-        )
-        .await
-        .expect("retry pure"),
-        SchedulerStatus::Advanced
-    );
+    assert_drive!(scheduler, store, fixture, Advanced, "retry pure");
     assert_eq!(
         attempt_started_count(&store, &fixture.run_id, &node.node_id),
         2
@@ -6035,16 +5255,7 @@ async fn recovery_interrupts_started_pure_attempt_before_retrying_fresh_attempt(
 #[tokio::test]
 async fn recovery_delegates_started_side_effect_attempt_to_side_effect_lifecycle() {
     let fixture = fixture_with_first_exclusive_side_effect_state();
-    let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+    let (_, mut store) = started_side_effect_fixture_run(&fixture).await;
 
     let node = node_by_output(&fixture, &fixture.cell_a);
     let (attempt_id, _) = append_synthetic_exclusive_prepare(
@@ -6094,68 +5305,18 @@ async fn recovery_delegates_started_side_effect_attempt_to_side_effect_lifecycle
 #[test]
 fn side_effect_attempt_view_from_erased_context_is_empty_before_ledger() {
     let fixture = fixture_with_first_side_effect_state();
-    let node = node_by_output(&fixture, &fixture.cell_a);
-    let descriptor = fixture
-        .runtime_spec
-        .state_descriptor_for_node(node)
-        .expect("state descriptor");
-    let output_cell = fixture
-        .runtime_spec
-        .cell(&node.output_cell)
-        .expect("output cell");
-    let attempt_id = attempt_id(
-        &fixture.run_id,
-        fixture.runtime_spec.spec_hash(),
-        &node.node_id,
-        1,
-    )
-    .expect("attempt id");
-    let config_artifact = config_artifact(&fixture.runtime_spec, &node.config_ref).evidence;
-    let projections = store::ProjectionSnapshot::default();
-    let run_stream = Vec::new();
-    let invocation = PreparedRunnerInvocation {
-        runtime_spec: &fixture.runtime_spec,
-        run_id: &fixture.run_id,
-        spec_hash: fixture.runtime_spec.spec_hash(),
-        node,
-        descriptor,
-        output_cell,
-        attempt_id: &attempt_id,
-        attempt_no: 1,
-        config_artifact,
-        inputs: MaterializedInputs {
-            input_schema_id: node.input_bindings.input_schema_id.clone(),
-            root: MaterializedInputNode::Unit,
-        },
-        caps: CertifiedRuntimeCapabilities::new(
-            node.node_id.clone(),
-            node.capability_bindings.clone(),
-        ),
-        recorded_facts: RecordedFacts::default(),
-        projections: &projections,
-        run_stream: &run_stream,
-    };
-    let ctx = ErasedRunCtx::from_prepared(&invocation);
-    let view = SideEffectAttemptView::from_erased_context(&ctx).expect("side-effect view");
-
-    assert!(view.projection().is_none());
-    assert!(view.ledger_state().is_none());
-    assert!(view.phase().is_none());
+    with_runner_erased_ctx(&fixture, &fixture.cell_a, |ctx| {
+        let view = SideEffectAttemptView::from_erased_context(&ctx).expect("side-effect view");
+        assert!(view.projection().is_none());
+        assert!(view.ledger_state().is_none());
+        assert!(view.phase().is_none());
+    });
 }
 
 #[tokio::test]
 async fn side_effect_attempt_view_from_verified_context_exposes_ledger_state() {
     let fixture = fixture_with_first_exclusive_side_effect_state();
-    let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+    let (_, mut store) = started_side_effect_fixture_run(&fixture).await;
 
     let node = node_by_output(&fixture, &fixture.cell_a);
     let (attempt_id, ledger_key) = append_synthetic_exclusive_prepare(
@@ -6217,15 +5378,7 @@ async fn recovery_sweep_includes_open_remediation_attempts() {
     let forward_a_output = effective_output_cell_for_node(&fixture, &forward_a);
     let forward_b_output = effective_output_cell_for_node(&fixture, &forward_b);
     let scheduler = compensated_saga_scheduler(&fixture);
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+    let mut store = started_fixture_store(&scheduler, &fixture).await;
 
     drive_until_cells_terminal(
         &scheduler,
@@ -6302,27 +5455,15 @@ async fn assert_prepared_boundary_side_effect_recovery_interrupts(emit_claim: bo
         &fixture,
         PrePreparedSideEffectRunner { emit_claim },
     ));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+    let mut store = started_fixture_store(&scheduler, &fixture).await;
     let node = node_by_output(&fixture, &fixture.cell_a).clone();
 
-    assert_eq!(
-        drive_once(
-            &scheduler,
-            &mut store,
-            &fixture.runtime_spec,
-            &fixture.run_id
-        )
-        .await
-        .expect("append pre-prepared side-effect evidence"),
-        SchedulerStatus::Advanced
+    assert_drive!(
+        scheduler,
+        store,
+        fixture,
+        Advanced,
+        "append pre-prepared side-effect evidence"
     );
     let stream = store.load_run_stream(&fixture.run_id);
     let view = RuntimeRunView::from_stream(&fixture.runtime_spec, &fixture.run_id, &stream)
@@ -6354,16 +5495,12 @@ async fn assert_prepared_boundary_side_effect_recovery_interrupts(emit_claim: bo
         _ => panic!("pre-prepared side-effect attempt must interrupt"),
     }
 
-    assert_eq!(
-        drive_once(
-            &scheduler,
-            &mut store,
-            &fixture.runtime_spec,
-            &fixture.run_id
-        )
-        .await
-        .expect("interrupt pre-prepared side-effect attempt"),
-        SchedulerStatus::Advanced
+    assert_drive!(
+        scheduler,
+        store,
+        fixture,
+        Advanced,
+        "interrupt pre-prepared side-effect attempt"
     );
     assert!(matches!(
         store
@@ -6378,24 +5515,8 @@ async fn assert_prepared_boundary_side_effect_recovery_interrupts(emit_claim: bo
 #[tokio::test]
 async fn recovery_rejects_split_terminal_cell_and_attempt_completion() {
     let fixture = fixture();
-    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
-    drive_once(
-        &scheduler,
-        &mut store,
-        &fixture.runtime_spec,
-        &fixture.run_id,
-    )
-    .await
-    .expect("produce first cell");
+    let (scheduler, mut store) = started_fixture_run(&fixture).await;
+    drive_ok!(scheduler, store, fixture, "produce first cell");
     let valid_stream = store.load_run_stream(&fixture.run_id);
     let corrupt_stream = rewrite_stream_without_payloads(&valid_stream, |payload| {
         matches!(
@@ -6415,16 +5536,7 @@ async fn recovery_rejects_split_terminal_cell_and_attempt_completion() {
 #[tokio::test]
 async fn recovery_rejects_attempt_started_before_inputs_were_terminal() {
     let fixture = fixture();
-    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+    let (scheduler, mut store) = started_fixture_run(&fixture).await;
     let node_a = node_by_output(&fixture, &fixture.cell_a);
     let node_b = node_by_output(&fixture, &fixture.cell_b);
     append_attempt_start(&mut store, &fixture, node_b, 1);
@@ -6439,13 +5551,7 @@ async fn recovery_rejects_attempt_started_before_inputs_were_terminal() {
     );
 
     assert!(matches!(
-        drive_once(
-            &scheduler,
-            &mut store,
-            &fixture.runtime_spec,
-            &fixture.run_id
-        )
-        .await,
+        drive_fixture_once(&scheduler, &mut store, &fixture).await,
         Err(RuntimeError::InvalidRunStream(_))
     ));
 }
@@ -6496,17 +5602,7 @@ async fn recovery_reuses_committed_read_facts_for_same_attempt() {
     let fixture = fixture();
     let fact_key = events::FactKey::new("reused-fact").expect("fact key");
     let mut registry = ErasedRunnerRegistry::new();
-    registry
-        .register(binding(
-            fixture.descriptor_a.clone(),
-            "pure",
-            RecordingRunner {
-                expected_caps: Vec::new(),
-                output_artifact: artifact(0xa1),
-                output_digest: content(0xa2),
-            },
-        ))
-        .expect("binding a");
+    register_default_fixture_pure_runner(&mut registry, &fixture);
     registry
         .register(binding(
             fixture.descriptor_b.clone(),
@@ -6518,24 +5614,8 @@ async fn recovery_reuses_committed_read_facts_for_same_attempt() {
             },
         ))
         .expect("binding b");
-    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
-    drive_once(
-        &scheduler,
-        &mut store,
-        &fixture.runtime_spec,
-        &fixture.run_id,
-    )
-    .await
-    .expect("produce input");
+    let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
+    drive_ok!(scheduler, store, fixture, "produce input");
     let node = node_by_output(&fixture, &fixture.cell_b);
     let attempt_id = append_attempt_start(&mut store, &fixture, node, 1);
     append_fact(
@@ -6548,14 +5628,7 @@ async fn recovery_reuses_committed_read_facts_for_same_attempt() {
         content(0xd2),
     );
 
-    drive_once(
-        &scheduler,
-        &mut store,
-        &fixture.runtime_spec,
-        &fixture.run_id,
-    )
-    .await
-    .expect("resume read");
+    drive_ok!(scheduler, store, fixture, "resume read");
     assert_eq!(fact_recorded_count(&store), 1);
     match store
         .projection_snapshot()
@@ -6605,17 +5678,7 @@ async fn recovery_rejects_new_fact_after_same_attempt_fact_exists() {
 
     let fixture = fixture();
     let mut registry = ErasedRunnerRegistry::new();
-    registry
-        .register(binding(
-            fixture.descriptor_a.clone(),
-            "pure",
-            RecordingRunner {
-                expected_caps: Vec::new(),
-                output_artifact: artifact(0xa1),
-                output_digest: content(0xa2),
-            },
-        ))
-        .expect("binding a");
+    register_default_fixture_pure_runner(&mut registry, &fixture);
     registry
         .register(binding(
             fixture.descriptor_b.clone(),
@@ -6628,24 +5691,8 @@ async fn recovery_rejects_new_fact_after_same_attempt_fact_exists() {
             },
         ))
         .expect("binding b");
-    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
-    drive_once(
-        &scheduler,
-        &mut store,
-        &fixture.runtime_spec,
-        &fixture.run_id,
-    )
-    .await
-    .expect("produce input");
+    let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
+    drive_ok!(scheduler, store, fixture, "produce input");
     let node = node_by_output(&fixture, &fixture.cell_b);
     let attempt_id = append_attempt_start(&mut store, &fixture, node, 1);
     append_fact(
@@ -6658,16 +5705,12 @@ async fn recovery_rejects_new_fact_after_same_attempt_fact_exists() {
         content(0xd2),
     );
 
-    assert_eq!(
-        drive_once(
-            &scheduler,
-            &mut store,
-            &fixture.runtime_spec,
-            &fixture.run_id
-        )
-        .await
-        .expect("terminalize duplicate fact output"),
-        SchedulerStatus::Advanced
+    assert_drive!(
+        scheduler,
+        store,
+        fixture,
+        Advanced,
+        "terminalize duplicate fact output"
     );
     assert_node_failed_with_code(&store, &node.node_id, "runner_output_invalid");
     assert_eq!(store.projection_snapshot().facts().count(), 1);
@@ -6685,53 +5728,23 @@ async fn recovery_allows_managed_write_artifact_restage_before_terminal_commit()
         .iter()
         .map(|capability| (capability.kind.clone(), capability.version.clone()))
         .collect();
-    let mut registry = ErasedRunnerRegistry::new();
-    registry
-        .register(binding(
-            fixture.descriptor_a.clone(),
-            "managed-write",
-            RecordingRunner {
-                expected_caps,
-                output_artifact: output_artifact.clone(),
-                output_digest: output_digest.clone(),
-            },
-        ))
-        .expect("binding a");
-    registry
-        .register(binding(
-            fixture.descriptor_b.clone(),
-            "read",
-            RecordingRunner {
-                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
-                output_artifact: artifact(0xb1),
-                output_digest: content(0xb2),
-            },
-        ))
-        .expect("binding b");
-    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
+    let registry = fixture_registry_with_first_runner(
         &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+        "managed-write",
+        RecordingRunner {
+            expected_caps,
+            output_artifact: output_artifact.clone(),
+            output_digest: output_digest.clone(),
+        },
+    );
+    let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
     let attempt_id = append_attempt_start(&mut store, &fixture, node, 1);
     assert!(store
         .projection_snapshot()
         .cell_terminal(&fixture.cell_a)
         .is_none());
 
-    drive_once(
-        &scheduler,
-        &mut store,
-        &fixture.runtime_spec,
-        &fixture.run_id,
-    )
-    .await
-    .expect("resume managed write");
+    drive_ok!(scheduler, store, fixture, "resume managed write");
     assert_eq!(
         attempt_started_count(&store, &fixture.run_id, &node.node_id),
         1
@@ -6777,16 +5790,7 @@ async fn scheduler_reloads_and_redecides_after_stale_expected_sequence_on_termin
 #[tokio::test]
 async fn side_effect_scheduler_commits_durable_ledger_phases_before_output() {
     let fixture = fixture_with_first_side_effect_state();
-    let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+    let (scheduler, mut store) = started_side_effect_fixture_run(&fixture).await;
 
     let node = node_by_output(&fixture, &fixture.cell_a);
     let verify_node = side_effect_verify_node_for_submit(&fixture, node);
@@ -6799,16 +5803,12 @@ async fn side_effect_scheduler_commits_durable_ledger_phases_before_output() {
     .expect("attempt id");
     let mut receipt_before_output = false;
     for _ in 0..8 {
-        assert_eq!(
-            drive_once(
-                &scheduler,
-                &mut store,
-                &fixture.runtime_spec,
-                &fixture.run_id
-            )
-            .await
-            .expect("drive side effect phase"),
-            SchedulerStatus::Advanced
+        assert_drive!(
+            scheduler,
+            store,
+            fixture,
+            Advanced,
+            "drive side effect phase"
         );
         let projection_snapshot = store.projection_snapshot();
         let projection = side_effect_projection_for_attempt(
@@ -6841,16 +5841,12 @@ async fn side_effect_scheduler_commits_durable_ledger_phases_before_output() {
         .cell_terminal(&verify_node.output_cell)
         .is_none());
 
-    assert_eq!(
-        drive_once(
-            &scheduler,
-            &mut store,
-            &fixture.runtime_spec,
-            &fixture.run_id
-        )
-        .await
-        .expect("materialize side-effect output"),
-        SchedulerStatus::Advanced
+    assert_drive!(
+        scheduler,
+        store,
+        fixture,
+        Advanced,
+        "materialize side-effect output"
     );
 
     assert!(store
@@ -6891,36 +5887,16 @@ async fn side_effect_scheduler_commits_durable_ledger_phases_before_output() {
 #[tokio::test]
 async fn runtime_rejects_exact_touched_set_receipt_without_evidence() {
     let fixture = fixture_with_first_exact_touched_set_side_effect_state();
-    let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
+    let (scheduler, mut store) = started_side_effect_fixture_run(&fixture).await;
+
+    assert_invalid_output_after(
         &scheduler,
         &mut store,
         &fixture,
-        vec![fixture.seed_ref.clone()],
+        3,
+        TOUCHED_SET_EVIDENCE_ERR,
     )
-    .await
-    .expect("start run");
-
-    for _ in 0..3 {
-        assert_eq!(
-            drive_once(
-                &scheduler,
-                &mut store,
-                &fixture.runtime_spec,
-                &fixture.run_id
-            )
-            .await
-            .expect("advance before receipt"),
-            SchedulerStatus::Advanced
-        );
-    }
-    assert!(matches!(
-        drive_once(&scheduler, &mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await,
-        Err(RuntimeError::InvalidRunnerOutput(message))
-            if message.contains("without touched-set evidence")
-    ));
+    .await;
 }
 
 #[tokio::test]
@@ -6931,35 +5907,16 @@ async fn runtime_rejects_exact_touched_set_confirmation_without_evidence() {
         DriverSideEffectRunner::new(&fixture),
         TouchedSetSideEffectVerifyRunner::with_receipt(&fixture),
     ));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
+    let mut store = started_fixture_store(&scheduler, &fixture).await;
+
+    assert_invalid_output_after(
         &scheduler,
         &mut store,
         &fixture,
-        vec![fixture.seed_ref.clone()],
+        4,
+        TOUCHED_SET_EVIDENCE_ERR,
     )
-    .await
-    .expect("start run");
-
-    for _ in 0..4 {
-        assert_eq!(
-            drive_once(
-                &scheduler,
-                &mut store,
-                &fixture.runtime_spec,
-                &fixture.run_id
-            )
-            .await
-            .expect("advance through receipt"),
-            SchedulerStatus::Advanced
-        );
-    }
-    assert!(matches!(
-        drive_once(&scheduler, &mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await,
-        Err(RuntimeError::InvalidRunnerOutput(message))
-            if message.contains("without touched-set evidence")
-    ));
+    .await;
 }
 
 #[tokio::test]
@@ -6970,35 +5927,16 @@ async fn runtime_rejects_touched_set_confirmation_without_exact_claim() {
         DriverSideEffectRunner::new(&fixture),
         TouchedSetSideEffectVerifyRunner::with_confirmation(&fixture),
     ));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
+    let mut store = started_fixture_store(&scheduler, &fixture).await;
+
+    assert_invalid_output_after(
         &scheduler,
         &mut store,
         &fixture,
-        vec![fixture.seed_ref.clone()],
+        4,
+        EXACT_TOUCHED_SET_CLAIM_ERR,
     )
-    .await
-    .expect("start run");
-
-    for _ in 0..4 {
-        assert_eq!(
-            drive_once(
-                &scheduler,
-                &mut store,
-                &fixture.runtime_spec,
-                &fixture.run_id
-            )
-            .await
-            .expect("advance through receipt"),
-            SchedulerStatus::Advanced
-        );
-    }
-    assert!(matches!(
-        drive_once(&scheduler, &mut store, &fixture.runtime_spec, &fixture.run_id)
-            .await,
-        Err(RuntimeError::InvalidRunnerOutput(message))
-            if message.contains("without an exact-touched-set certified resource claim")
-    ));
+    .await;
 }
 
 #[tokio::test]
@@ -7010,26 +5948,8 @@ async fn runtime_fails_pre_boundary_forward_attempt_before_saga_terminal() {
         &fixture,
         FailActiveSideEffectAfterSagaRunner::before_invocation_started(&fixture),
     ));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
-    let forward_attempt = attempt_id(
-        &fixture.run_id,
-        fixture.runtime_spec.spec_hash(),
-        &forward_node.node_id,
-        1,
-    )
-    .expect("forward attempt id");
-    assert_eq!(
-        append_or_get_started_attempt(&mut store, &fixture, &forward_node, 1),
-        forward_attempt
-    );
+    let mut store = started_fixture_store(&scheduler, &fixture).await;
+    let forward_attempt = append_or_get_first_attempt(&mut store, &fixture, &forward_node);
 
     drive_until_side_effect_attempt_phase(
         &scheduler,
@@ -7049,16 +5969,12 @@ async fn runtime_fails_pre_boundary_forward_attempt_before_saga_terminal() {
         store::RunMode::FailedWithoutAcdcClaim
     );
 
-    assert_eq!(
-        drive_once(
-            &scheduler,
-            &mut store,
-            &fixture.runtime_spec,
-            &fixture.run_id
-        )
-        .await
-        .expect("fail active pre-boundary forward attempt"),
-        SchedulerStatus::Advanced
+    assert_drive!(
+        scheduler,
+        store,
+        fixture,
+        Advanced,
+        "fail active pre-boundary forward attempt"
     );
     let projection_snapshot = store.projection_snapshot();
     assert!(matches!(
@@ -7090,16 +6006,12 @@ async fn runtime_fails_pre_boundary_forward_attempt_before_saga_terminal() {
         .run_completion(&fixture.run_id)
         .is_none());
 
-    assert_eq!(
-        drive_once(
-            &scheduler,
-            &mut store,
-            &fixture.runtime_spec,
-            &fixture.run_id
-        )
-        .await
-        .expect("resolve saga terminal after active attempt closed"),
-        SchedulerStatus::Advanced
+    assert_drive!(
+        scheduler,
+        store,
+        fixture,
+        Advanced,
+        "resolve saga terminal after active attempt closed"
     );
     assert!(matches!(
         store
@@ -7121,26 +6033,8 @@ async fn runtime_fails_not_submitted_forward_attempt_before_saga_terminal() {
         FailActiveSideEffectAfterSagaRunner::new(&fixture)
             .with_submission_decision(TestSubmissionDecision::NotSubmitted),
     ));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
-    let forward_attempt = attempt_id(
-        &fixture.run_id,
-        fixture.runtime_spec.spec_hash(),
-        &forward_node.node_id,
-        1,
-    )
-    .expect("forward attempt id");
-    assert_eq!(
-        append_or_get_started_attempt(&mut store, &fixture, &forward_node, 1),
-        forward_attempt
-    );
+    let mut store = started_fixture_store(&scheduler, &fixture).await;
+    let forward_attempt = append_or_get_first_attempt(&mut store, &fixture, &forward_node);
 
     drive_until_side_effect_attempt_phase(
         &scheduler,
@@ -7156,16 +6050,12 @@ async fn runtime_fails_not_submitted_forward_attempt_before_saga_terminal() {
     let failing_attempt = append_or_get_started_attempt(&mut store, &fixture, &failing_node, 1);
     append_attempt_failure(&mut store, &fixture, &failing_node, &failing_attempt, false);
 
-    assert_eq!(
-        drive_once(
-            &scheduler,
-            &mut store,
-            &fixture.runtime_spec,
-            &fixture.run_id
-        )
-        .await
-        .expect("fail active not-submitted forward attempt"),
-        SchedulerStatus::Advanced
+    assert_drive!(
+        scheduler,
+        store,
+        fixture,
+        Advanced,
+        "fail active not-submitted forward attempt"
     );
     let projection_snapshot = store.projection_snapshot();
     assert!(matches!(
@@ -7189,16 +6079,12 @@ async fn runtime_fails_not_submitted_forward_attempt_before_saga_terminal() {
         .run_completion(&fixture.run_id)
         .is_none());
 
-    assert_eq!(
-        drive_once(
-            &scheduler,
-            &mut store,
-            &fixture.runtime_spec,
-            &fixture.run_id
-        )
-        .await
-        .expect("resolve saga terminal after not-submitted attempt closed"),
-        SchedulerStatus::Advanced
+    assert_drive!(
+        scheduler,
+        store,
+        fixture,
+        Advanced,
+        "resolve saga terminal after not-submitted attempt closed"
     );
     assert!(matches!(
         store
@@ -7247,16 +6133,7 @@ async fn runtime_remediates_confirmed_forward_ledgers_in_reverse_confirmation_or
             BlockingRunner,
         ))
         .expect("binding failure node");
-    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+    let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
 
     drive_until_cells_terminal(
         &scheduler,
@@ -7288,14 +6165,7 @@ async fn runtime_remediates_confirmed_forward_ledgers_in_reverse_confirmation_or
     assert_eq!(saga.obligations.len(), 2);
 
     for _ in 0..12 {
-        let status = drive_once(
-            &scheduler,
-            &mut store,
-            &fixture.runtime_spec,
-            &fixture.run_id,
-        )
-        .await
-        .expect("drive remediation phase");
+        let status = drive_ok!(scheduler, store, fixture, "drive remediation phase");
         assert!(
             matches!(
                 status,
@@ -7338,14 +6208,7 @@ async fn runtime_remediates_confirmed_forward_ledgers_in_reverse_confirmation_or
         if store.projection_snapshot().run_state(&fixture.run_id) == store::RunState::Completed {
             break;
         }
-        let status = drive_once(
-            &scheduler,
-            &mut store,
-            &fixture.runtime_spec,
-            &fixture.run_id,
-        )
-        .await
-        .expect("resolve compensated terminal");
+        let status = drive_ok!(scheduler, store, fixture, "resolve compensated terminal");
         assert!(matches!(
             status,
             SchedulerStatus::Advanced | SchedulerStatus::PublicOutputProjected
@@ -7363,16 +6226,12 @@ async fn runtime_remediates_confirmed_forward_ledgers_in_reverse_confirmation_or
             .outcome,
         events::RunCompletionOutcome::Compensated
     ));
-    assert_eq!(
-        drive_once(
-            &scheduler,
-            &mut store,
-            &fixture.runtime_spec,
-            &fixture.run_id
-        )
-        .await
-        .expect("completed compensated run"),
-        SchedulerStatus::PublicOutputProjected
+    assert_drive!(
+        scheduler,
+        store,
+        fixture,
+        PublicOutputProjected,
+        "completed compensated run"
     );
 }
 
@@ -7405,15 +6264,7 @@ async fn runtime_compensated_saga_resume_boundaries_do_not_duplicate_mutations()
     )
     .clone();
     let mut scheduler = compensated_saga_scheduler(&fixture);
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+    let mut store = started_fixture_store(&scheduler, &fixture).await;
 
     drive_until_side_effect_confirmation_without_output(
         &scheduler,
@@ -7526,16 +6377,12 @@ async fn runtime_compensated_saga_resume_boundaries_do_not_duplicate_mutations()
     );
 
     scheduler = compensated_saga_scheduler(&fixture);
-    assert_eq!(
-        drive_once(
-            &scheduler,
-            &mut store,
-            &fixture.runtime_spec,
-            &fixture.run_id
-        )
-        .await
-        .expect("resolve compensated terminal after resume"),
-        SchedulerStatus::Advanced
+    assert_drive!(
+        scheduler,
+        store,
+        fixture,
+        Advanced,
+        "resolve compensated terminal after resume"
     );
     assert_eq!(
         store.projection_snapshot().run_state(&fixture.run_id),
@@ -7549,16 +6396,12 @@ async fn runtime_compensated_saga_resume_boundaries_do_not_duplicate_mutations()
             .outcome,
         events::RunCompletionOutcome::Compensated
     ));
-    assert_eq!(
-        drive_once(
-            &scheduler,
-            &mut store,
-            &fixture.runtime_spec,
-            &fixture.run_id
-        )
-        .await
-        .expect("completed compensated run"),
-        SchedulerStatus::PublicOutputProjected
+    assert_drive!(
+        scheduler,
+        store,
+        fixture,
+        PublicOutputProjected,
+        "completed compensated run"
     );
 
     assert_eq!(
@@ -7585,16 +6428,7 @@ async fn runtime_compensated_saga_resume_boundaries_do_not_duplicate_mutations()
 async fn runtime_resolves_clean_failure_without_acdc_claim() {
     let fixture = fixture();
     let failure_node = node_by_output(&fixture, &fixture.cell_a).clone();
-    let scheduler = test_scheduler(registered_fixture_runners(&fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+    let (scheduler, mut store) = started_fixture_run(&fixture).await;
 
     let failure_attempt = append_or_get_started_attempt(&mut store, &fixture, &failure_node, 1);
     append_attempt_failure(&mut store, &fixture, &failure_node, &failure_attempt, false);
@@ -7602,16 +6436,12 @@ async fn runtime_resolves_clean_failure_without_acdc_claim() {
     assert_eq!(saga.run_mode, store::RunMode::FailedWithoutAcdcClaim);
     assert!(saga.obligations.is_empty());
 
-    assert_eq!(
-        drive_once(
-            &scheduler,
-            &mut store,
-            &fixture.runtime_spec,
-            &fixture.run_id
-        )
-        .await
-        .expect("resolve clean failure terminal"),
-        SchedulerStatus::Advanced
+    assert_drive!(
+        scheduler,
+        store,
+        fixture,
+        Advanced,
+        "resolve clean failure terminal"
     );
     assert!(matches!(
         store
@@ -7638,27 +6468,8 @@ async fn runtime_materializes_confirmed_forward_output_before_failed_without_cla
             DriverSideEffectRunner::new(&fixture),
         ))
         .expect("binding side effect");
-    registry
-        .register(binding(
-            fixture.descriptor_b.clone(),
-            READ_EXTERNAL_RUNNER,
-            RecordingRunner {
-                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
-                output_artifact: artifact(0xb1),
-                output_digest: content(0xb2),
-            },
-        ))
-        .expect("binding failure node");
-    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+    register_read_external_fixture_runner(&mut registry, &fixture);
+    let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
 
     let (forward_attempt, ledger) = append_synthetic_exclusive_started(
         &mut store,
@@ -7728,16 +6539,12 @@ async fn runtime_materializes_confirmed_forward_output_before_failed_without_cla
     let saga = derive_fixture_saga(&fixture, store.projection_snapshot());
     assert_eq!(saga.run_mode, store::RunMode::FailedWithoutAcdcClaim);
 
-    assert_eq!(
-        drive_once(
-            &scheduler,
-            &mut store,
-            &fixture.runtime_spec,
-            &fixture.run_id
-        )
-        .await
-        .expect("materialize confirmed forward output"),
-        SchedulerStatus::Advanced
+    assert_drive!(
+        scheduler,
+        store,
+        fixture,
+        Advanced,
+        "materialize confirmed forward output"
     );
     assert!(store
         .projection_snapshot()
@@ -7748,16 +6555,12 @@ async fn runtime_materializes_confirmed_forward_output_before_failed_without_cla
         .run_completion(&fixture.run_id)
         .is_none());
 
-    assert_eq!(
-        drive_once(
-            &scheduler,
-            &mut store,
-            &fixture.runtime_spec,
-            &fixture.run_id
-        )
-        .await
-        .expect("resolve failed-without-claim terminal"),
-        SchedulerStatus::Advanced
+    assert_drive!(
+        scheduler,
+        store,
+        fixture,
+        Advanced,
+        "resolve failed-without-claim terminal"
     );
     assert!(matches!(
         store
@@ -7772,26 +6575,10 @@ async fn runtime_materializes_confirmed_forward_output_before_failed_without_cla
 #[tokio::test]
 async fn runtime_resolves_manual_resolution_terminal() {
     let fixture = fixture_with_manual_resolution_side_effect_state();
-    let mut registry = ErasedRunnerRegistry::new();
-    registry
-        .register(binding(
-            fixture.descriptor_a.clone(),
-            APPLY_SIDE_EFFECT_RUNNER,
-            DriverSideEffectRunner::new(&fixture)
-                .with_submission_decision(TestSubmissionDecision::Ambiguous),
-        ))
-        .expect("binding side effect");
-    registry
-        .register(binding(
-            fixture.descriptor_b.clone(),
-            READ_EXTERNAL_RUNNER,
-            RecordingRunner {
-                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
-                output_artifact: artifact(0xb1),
-                output_digest: content(0xb2),
-            },
-        ))
-        .expect("binding read");
+    let registry = side_effect_driver_registry_with_submission_decision(
+        &fixture,
+        TestSubmissionDecision::Ambiguous,
+    );
     let mut store = TestTypedRunStore::new();
     let artifact_store = Arc::new(store.clone());
     let scheduler = test_scheduler_with_artifacts(
@@ -7808,17 +6595,7 @@ async fn runtime_resolves_manual_resolution_terminal() {
     .expect("start run");
 
     for _ in 0..2 {
-        assert_eq!(
-            drive_once(
-                &scheduler,
-                &mut store,
-                &fixture.runtime_spec,
-                &fixture.run_id
-            )
-            .await
-            .expect("advance to ambiguity"),
-            SchedulerStatus::Advanced
-        );
+        assert_drive!(scheduler, store, fixture, Advanced, "advance to ambiguity");
     }
     let saga = derive_fixture_saga(&fixture, store.projection_snapshot());
     assert_eq!(saga.run_mode, store::RunMode::ManualBlocked);
@@ -7841,16 +6618,12 @@ async fn runtime_resolves_manual_resolution_terminal() {
         register_fixture_capabilities(registry, &fixture),
         artifact_store,
     );
-    assert_eq!(
-        drive_once(
-            &fresh_scheduler,
-            &mut store,
-            &fixture.runtime_spec,
-            &fixture.run_id
-        )
-        .await
-        .expect("resolve manual terminal"),
-        SchedulerStatus::Advanced
+    assert_drive!(
+        fresh_scheduler,
+        store,
+        fixture,
+        Advanced,
+        "resolve manual terminal"
     );
     assert!(matches!(
         store
@@ -7865,48 +6638,19 @@ async fn runtime_resolves_manual_resolution_terminal() {
 #[tokio::test]
 async fn runtime_rejects_manual_resolution_prefix_with_open_attempt() {
     let fixture = fixture_with_manual_resolution_side_effect_state();
-    let mut registry = ErasedRunnerRegistry::new();
-    registry
-        .register(binding(
-            fixture.descriptor_a.clone(),
-            APPLY_SIDE_EFFECT_RUNNER,
-            DriverSideEffectRunner::new(&fixture)
-                .with_submission_decision(TestSubmissionDecision::Ambiguous),
-        ))
-        .expect("binding side effect");
-    registry
-        .register(binding(
-            fixture.descriptor_b.clone(),
-            READ_EXTERNAL_RUNNER,
-            RecordingRunner {
-                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
-                output_artifact: artifact(0xb1),
-                output_digest: content(0xb2),
-            },
-        ))
-        .expect("binding read");
-    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
+    let registry = side_effect_driver_registry_with_submission_decision(
         &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+        TestSubmissionDecision::Ambiguous,
+    );
+    let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
 
     for _ in 0..2 {
-        assert_eq!(
-            drive_once(
-                &scheduler,
-                &mut store,
-                &fixture.runtime_spec,
-                &fixture.run_id
-            )
-            .await
-            .expect("advance to manual block"),
-            SchedulerStatus::Advanced
+        assert_drive!(
+            scheduler,
+            store,
+            fixture,
+            Advanced,
+            "advance to manual block"
         );
     }
     let saga = derive_fixture_saga(&fixture, store.projection_snapshot());
@@ -7942,26 +6686,10 @@ async fn runtime_rejects_manual_resolution_prefix_with_open_attempt() {
 #[tokio::test]
 async fn runtime_missing_manual_terminal_authorization_artifact_leaves_open_attempt() {
     let fixture = fixture_with_manual_resolution_side_effect_state();
-    let mut registry = ErasedRunnerRegistry::new();
-    registry
-        .register(binding(
-            fixture.descriptor_a.clone(),
-            APPLY_SIDE_EFFECT_RUNNER,
-            DriverSideEffectRunner::new(&fixture)
-                .with_submission_decision(TestSubmissionDecision::Ambiguous),
-        ))
-        .expect("binding side effect");
-    registry
-        .register(binding(
-            fixture.descriptor_b.clone(),
-            READ_EXTERNAL_RUNNER,
-            RecordingRunner {
-                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
-                output_artifact: artifact(0xb1),
-                output_digest: content(0xb2),
-            },
-        ))
-        .expect("binding read");
+    let registry = side_effect_driver_registry_with_submission_decision(
+        &fixture,
+        TestSubmissionDecision::Ambiguous,
+    );
     let mut store = TestTypedRunStore::new();
     let artifact_store = Arc::new(FilteringRuntimeArtifactStore::new(store.clone()));
     let scheduler = test_scheduler_with_artifacts(
@@ -7978,17 +6706,7 @@ async fn runtime_missing_manual_terminal_authorization_artifact_leaves_open_atte
     .expect("start run");
 
     for _ in 0..2 {
-        assert_eq!(
-            drive_once(
-                &scheduler,
-                &mut store,
-                &fixture.runtime_spec,
-                &fixture.run_id
-            )
-            .await
-            .expect("advance to ambiguity"),
-            SchedulerStatus::Advanced
-        );
+        assert_drive!(scheduler, store, fixture, Advanced, "advance to ambiguity");
     }
     append_manual_resolution(
         &scheduler,
@@ -8021,14 +6739,11 @@ async fn runtime_missing_manual_terminal_authorization_artifact_leaves_open_atte
         })
         .expect("resolve saga terminal node");
     assert!(matches!(
-        drive_once(&scheduler, &mut store, &fixture.runtime_spec, &fixture.run_id)
+        drive_fixture_once(&scheduler, &mut store, &fixture)
             .await,
         Err(RuntimeError::Store(message)) if message.contains("missing artifact")
     ));
-    assert_eq!(
-        store.load_run_stream(&fixture.run_id).len(),
-        stream_len_before + 1
-    );
+    store.assert_run_stream_len(&fixture.run_id, stream_len_before + 1);
     let resolve_attempt = attempt_id(
         &fixture.run_id,
         fixture.runtime_spec.spec_hash(),
@@ -8053,36 +6768,11 @@ async fn runtime_missing_manual_terminal_authorization_artifact_leaves_open_atte
 #[tokio::test]
 async fn runtime_rejects_manual_resolution_before_manual_blocked() {
     let fixture = fixture_with_manual_resolution_side_effect_state();
-    let mut registry = ErasedRunnerRegistry::new();
-    registry
-        .register(binding(
-            fixture.descriptor_a.clone(),
-            APPLY_SIDE_EFFECT_RUNNER,
-            DriverSideEffectRunner::new(&fixture)
-                .with_submission_decision(TestSubmissionDecision::Ambiguous),
-        ))
-        .expect("binding side effect");
-    registry
-        .register(binding(
-            fixture.descriptor_b.clone(),
-            READ_EXTERNAL_RUNNER,
-            RecordingRunner {
-                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
-                output_artifact: artifact(0xb1),
-                output_digest: content(0xb2),
-            },
-        ))
-        .expect("binding read");
-    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
+    let registry = side_effect_driver_registry_with_submission_decision(
         &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+        TestSubmissionDecision::Ambiguous,
+    );
+    let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
     let evidence_bytes = br#"{"operator_note":"too_early"}"#.to_vec();
 
     let error = record_manual_resolution(
@@ -8120,41 +6810,15 @@ async fn runtime_rejects_forward_node_emitting_remediation_ledger_purpose() {
             ForwardEmitsRemediationPurposeRunner,
         ))
         .expect("binding a");
-    registry
-        .register(binding(
-            fixture.descriptor_b.clone(),
-            READ_EXTERNAL_RUNNER,
-            RecordingRunner {
-                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
-                output_artifact: artifact(0xb1),
-                output_digest: content(0xb2),
-            },
-        ))
-        .expect("binding b");
-    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+    register_read_external_fixture_runner(&mut registry, &fixture);
+    let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
 
-    assert_eq!(
-        drive_once(
-            &scheduler,
-            &mut store,
-            &fixture.runtime_spec,
-            &fixture.run_id
-        )
-        .await
-        .expect("terminalize wrong forward ledger purpose"),
-        SchedulerStatus::Advanced
+    assert_first_node_invalid_after_drive!(
+        scheduler,
+        store,
+        fixture,
+        "terminalize wrong forward ledger purpose"
     );
-    let node = node_by_output(&fixture, &fixture.cell_a);
-    assert_node_failed_with_code(&store, &node.node_id, "runner_output_invalid");
 }
 
 #[tokio::test]
@@ -8194,16 +6858,7 @@ async fn runtime_rejects_remediation_node_emitting_forward_ledger_purpose() {
             BlockingRunner,
         ))
         .expect("binding failure node");
-    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+    let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
 
     drive_until_cells_terminal(
         &scheduler,
@@ -8216,16 +6871,12 @@ async fn runtime_rejects_remediation_node_emitting_forward_ledger_purpose() {
     let failure_attempt = append_or_get_started_attempt(&mut store, &fixture, &failure_node, 1);
     append_attempt_failure(&mut store, &fixture, &failure_node, &failure_attempt, false);
 
-    assert_eq!(
-        drive_once(
-            &scheduler,
-            &mut store,
-            &fixture.runtime_spec,
-            &fixture.run_id
-        )
-        .await
-        .expect("terminalize wrong remediation ledger purpose"),
-        SchedulerStatus::Advanced
+    assert_drive!(
+        scheduler,
+        store,
+        fixture,
+        Advanced,
+        "terminalize wrong remediation ledger purpose"
     );
     assert_failure_code_count(&store, "runner_output_invalid", 1);
 }
@@ -8233,24 +6884,8 @@ async fn runtime_rejects_remediation_node_emitting_forward_ledger_purpose() {
 #[tokio::test]
 async fn side_effect_not_submitted_resume_completes_submit_boundary() {
     let fixture = fixture_with_first_side_effect_state();
-    let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
-    drive_once(
-        &scheduler,
-        &mut store,
-        &fixture.runtime_spec,
-        &fixture.run_id,
-    )
-    .await
-    .expect("prepare and start side effect");
+    let (scheduler, mut store) = started_side_effect_fixture_run(&fixture).await;
+    drive_ok!(scheduler, store, fixture, "prepare and start side effect");
 
     let node = node_by_output(&fixture, &fixture.cell_a);
     let attempt_id = attempt_id(
@@ -8262,14 +6897,7 @@ async fn side_effect_not_submitted_resume_completes_submit_boundary() {
     .expect("attempt id");
     append_not_submitted_proven(&mut store, &fixture, node, &attempt_id, 1);
 
-    drive_once(
-        &scheduler,
-        &mut store,
-        &fixture.runtime_spec,
-        &fixture.run_id,
-    )
-    .await
-    .expect("resume not-submitted");
+    drive_ok!(scheduler, store, fixture, "resume not-submitted");
     let projection_snapshot = store.projection_snapshot();
     let projection = side_effect_projection_for_attempt(
         &fixture.runtime_spec,
@@ -8391,100 +7019,35 @@ async fn side_effect_staged_artifact_must_match_payload_ledger_binding() {
             },
         ))
         .expect("binding a");
-    registry
-        .register(binding(
-            fixture.descriptor_b.clone(),
-            READ_EXTERNAL_RUNNER,
-            RecordingRunner {
-                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
-                output_artifact: artifact(0xb1),
-                output_digest: content(0xb2),
-            },
-        ))
-        .expect("binding b");
-    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+    register_read_external_fixture_runner(&mut registry, &fixture);
+    let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
 
-    assert_eq!(
-        drive_once(
-            &scheduler,
-            &mut store,
-            &fixture.runtime_spec,
-            &fixture.run_id
-        )
-        .await
-        .expect("terminalize side-effect artifact binding mismatch"),
-        SchedulerStatus::Advanced
+    assert_first_node_invalid_after_drive!(
+        scheduler,
+        store,
+        fixture,
+        "terminalize side-effect artifact binding mismatch"
     );
-    let node = node_by_output(&fixture, &fixture.cell_a);
-    assert_node_failed_with_code(&store, &node.node_id, "runner_output_invalid");
 }
 
 #[tokio::test]
 async fn side_effect_ambiguous_phase_blocks_resume() {
     let fixture = fixture_with_first_side_effect_state();
-    let mut registry = ErasedRunnerRegistry::new();
-    registry
-        .register(binding(
-            fixture.descriptor_a.clone(),
-            APPLY_SIDE_EFFECT_RUNNER,
-            DriverSideEffectRunner::new(&fixture)
-                .with_submission_decision(TestSubmissionDecision::Ambiguous),
-        ))
-        .expect("binding a");
-    registry
-        .register(binding(
-            fixture.descriptor_b.clone(),
-            READ_EXTERNAL_RUNNER,
-            RecordingRunner {
-                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
-                output_artifact: artifact(0xb1),
-                output_digest: content(0xb2),
-            },
-        ))
-        .expect("binding b");
-    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
+    let registry = side_effect_driver_registry_with_submission_decision(
         &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+        TestSubmissionDecision::Ambiguous,
+    );
+    let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
 
     for _ in 0..3 {
-        assert_eq!(
-            drive_once(
-                &scheduler,
-                &mut store,
-                &fixture.runtime_spec,
-                &fixture.run_id
-            )
-            .await
-            .expect("advance to ambiguity"),
-            SchedulerStatus::Advanced
-        );
+        assert_drive!(scheduler, store, fixture, Advanced, "advance to ambiguity");
     }
-    assert_eq!(
-        drive_once(
-            &scheduler,
-            &mut store,
-            &fixture.runtime_spec,
-            &fixture.run_id
-        )
-        .await
-        .expect("ambiguous side effect resolves terminal"),
-        SchedulerStatus::PublicOutputProjected
+    assert_drive!(
+        scheduler,
+        store,
+        fixture,
+        PublicOutputProjected,
+        "ambiguous side effect resolves terminal"
     );
     assert!(store
         .projection_snapshot()
@@ -8503,68 +7066,19 @@ async fn side_effect_ambiguous_phase_blocks_resume() {
 #[tokio::test]
 async fn side_effect_ambiguity_blocks_independent_ready_nodes() {
     let fixture = fixture_with_independent_second_node_and_first_side_effect_state();
-    let mut registry = ErasedRunnerRegistry::new();
-    registry
-        .register(binding(
-            fixture.descriptor_a.clone(),
-            APPLY_SIDE_EFFECT_RUNNER,
-            DriverSideEffectRunner::new(&fixture)
-                .with_submission_decision(TestSubmissionDecision::Ambiguous),
-        ))
-        .expect("binding a");
-    registry
-        .register(binding(
-            fixture.descriptor_b.clone(),
-            READ_EXTERNAL_RUNNER,
-            RecordingRunner {
-                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
-                output_artifact: artifact(0xb1),
-                output_digest: content(0xb2),
-            },
-        ))
-        .expect("binding b");
-    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
+    let registry = side_effect_driver_registry_with_submission_decision(
         &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
-    let forward_node = node_by_output(&fixture, &fixture.cell_a).clone();
-    let forward_attempt = attempt_id(
-        &fixture.run_id,
-        fixture.runtime_spec.spec_hash(),
-        &forward_node.node_id,
-        1,
-    )
-    .expect("forward attempt id");
-    assert_eq!(
-        append_or_get_started_attempt(&mut store, &fixture, &forward_node, 1),
-        forward_attempt
+        TestSubmissionDecision::Ambiguous,
     );
+    let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
+    let forward_node = node_by_output(&fixture, &fixture.cell_a).clone();
+    append_or_get_first_attempt(&mut store, &fixture, &forward_node);
 
     for _ in 0..3 {
-        drive_once(
-            &scheduler,
-            &mut store,
-            &fixture.runtime_spec,
-            &fixture.run_id,
-        )
-        .await
-        .expect("advance to ambiguity");
+        drive_ok!(scheduler, store, fixture, "advance to ambiguity");
     }
     for _ in 0..8 {
-        let status = drive_once(
-            &scheduler,
-            &mut store,
-            &fixture.runtime_spec,
-            &fixture.run_id,
-        )
-        .await
-        .expect("ambiguity resolves terminal");
+        let status = drive_ok!(scheduler, store, fixture, "ambiguity resolves terminal");
         assert!(
             matches!(
                 status,
@@ -8608,56 +7122,21 @@ async fn side_effect_output_before_terminal_evidence_is_rejected() {
             },
         ))
         .expect("binding a");
-    registry
-        .register(binding(
-            fixture.descriptor_b.clone(),
-            READ_EXTERNAL_RUNNER,
-            RecordingRunner {
-                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
-                output_artifact: artifact(0xb1),
-                output_digest: content(0xb2),
-            },
-        ))
-        .expect("binding b");
-    let scheduler = test_scheduler(register_fixture_capabilities(registry, &fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+    register_read_external_fixture_runner(&mut registry, &fixture);
+    let (scheduler, mut store) = started_fixture_run_with_registry(registry, &fixture).await;
 
-    assert_eq!(
-        drive_once(
-            &scheduler,
-            &mut store,
-            &fixture.runtime_spec,
-            &fixture.run_id
-        )
-        .await
-        .expect("terminalize premature side-effect output"),
-        SchedulerStatus::Advanced
+    assert_first_node_invalid_after_drive!(
+        scheduler,
+        store,
+        fixture,
+        "terminalize premature side-effect output"
     );
-    let node = node_by_output(&fixture, &fixture.cell_a);
-    assert_node_failed_with_code(&store, &node.node_id, "runner_output_invalid");
 }
 
 #[tokio::test]
 async fn receipt_policy_allows_verify_output_after_receipt() {
     let fixture = fixture_with_first_exclusive_side_effect_state();
-    let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+    let (_, mut store) = started_side_effect_fixture_run(&fixture).await;
     let submit_node = node_by_output(&fixture, &fixture.cell_a);
     let submit_attempt_id = append_synthetic_exclusive_receipt_phase(
         &mut store,
@@ -8713,16 +7192,7 @@ async fn finalized_policy_rejects_verify_output_after_receipt_before_confirmatio
         RuntimeSideEffectClaim::Exclusive,
         spec::SideEffectVerificationSpec::Finalized { depth: 1 },
     );
-    let scheduler = test_scheduler(registered_side_effect_fixture_runners(&fixture));
-    let mut store = TestTypedRunStore::new();
-    start_fixture_run(
-        &scheduler,
-        &mut store,
-        &fixture,
-        vec![fixture.seed_ref.clone()],
-    )
-    .await
-    .expect("start run");
+    let (_, mut store) = started_side_effect_fixture_run(&fixture).await;
     let submit_node = node_by_output(&fixture, &fixture.cell_a);
     append_synthetic_exclusive_receipt_phase(
         &mut store,
@@ -9832,6 +8302,45 @@ async fn start_fixture_run(
     scheduler_start_run(scheduler, store, launch).await
 }
 
+async fn started_fixture_store(
+    scheduler: &SerialTypedScheduler,
+    fixture: &Fixture,
+) -> TestTypedRunStore {
+    let mut store = TestTypedRunStore::new();
+    start_fixture_run(
+        scheduler,
+        &mut store,
+        fixture,
+        vec![fixture.seed_ref.clone()],
+    )
+    .await
+    .expect("start run");
+    store
+}
+
+async fn started_fixture_run(fixture: &Fixture) -> (SerialTypedScheduler, TestTypedRunStore) {
+    let scheduler = test_scheduler(registered_fixture_runners(fixture));
+    let store = started_fixture_store(&scheduler, fixture).await;
+    (scheduler, store)
+}
+
+async fn started_fixture_run_with_registry(
+    registry: ErasedRunnerRegistry,
+    fixture: &Fixture,
+) -> (SerialTypedScheduler, TestTypedRunStore) {
+    let scheduler = fixture_scheduler(registry, fixture);
+    let store = started_fixture_store(&scheduler, fixture).await;
+    (scheduler, store)
+}
+
+async fn started_side_effect_fixture_run(
+    fixture: &Fixture,
+) -> (SerialTypedScheduler, TestTypedRunStore) {
+    let scheduler = test_scheduler(registered_side_effect_fixture_runners(fixture));
+    let store = started_fixture_store(&scheduler, fixture).await;
+    (scheduler, store)
+}
+
 async fn start_fixture_run_async_store<S: store::RunEventStore + ?Sized>(
     scheduler: &SerialTypedScheduler,
     store: &S,
@@ -9879,6 +8388,36 @@ async fn drive_once(
     drive_once_with_claim(scheduler, &*store, runtime_spec, run_id).await
 }
 
+async fn drive_fixture_once(
+    scheduler: &SerialTypedScheduler,
+    store: &mut TestTypedRunStore,
+    fixture: &Fixture,
+) -> Result<SchedulerStatus> {
+    drive_once(scheduler, store, &fixture.runtime_spec, &fixture.run_id).await
+}
+
+async fn assert_invalid_output_after(
+    scheduler: &SerialTypedScheduler,
+    store: &mut TestTypedRunStore,
+    fixture: &Fixture,
+    drive_count: usize,
+    expected_message: &str,
+) {
+    for _ in 0..drive_count {
+        assert_eq!(
+            drive_fixture_once(scheduler, store, fixture)
+                .await
+                .expect("advance before invalid output"),
+            SchedulerStatus::Advanced
+        );
+    }
+    assert!(matches!(
+        drive_fixture_once(scheduler, store, fixture).await,
+        Err(RuntimeError::InvalidRunnerOutput(message))
+            if message.contains(expected_message)
+    ));
+}
+
 async fn drive_until_blocked(
     scheduler: &SerialTypedScheduler,
     store: &mut TestTypedRunStore,
@@ -9886,6 +8425,14 @@ async fn drive_until_blocked(
     run_id: &RunId,
 ) -> Result<SchedulerStatus> {
     drive_until_blocked_with_claim(scheduler, &*store, runtime_spec, run_id).await
+}
+
+async fn drive_fixture_until_blocked(
+    scheduler: &SerialTypedScheduler,
+    store: &mut TestTypedRunStore,
+    fixture: &Fixture,
+) -> Result<SchedulerStatus> {
+    drive_until_blocked(scheduler, store, &fixture.runtime_spec, &fixture.run_id).await
 }
 
 async fn drive_once_with_claim<S>(
@@ -10375,6 +8922,14 @@ fn append_or_get_started_attempt(
         return attempt_id;
     }
     append_attempt_start(store, fixture, node, attempt_no)
+}
+
+fn append_or_get_first_attempt(
+    store: &mut TestTypedRunStore,
+    fixture: &Fixture,
+    node: &spec::NodeSpec,
+) -> AttemptId {
+    append_or_get_started_attempt(store, fixture, node, 1)
 }
 
 fn append_attempt_failure(
@@ -11721,28 +10276,8 @@ fn registered_fixture_runners_with_adapter_executable(
         &fixture.runtime_spec,
         adapter_executable,
     );
-    registry
-        .register(binding(
-            fixture.descriptor_a.clone(),
-            "pure",
-            RecordingRunner {
-                expected_caps: Vec::new(),
-                output_artifact: artifact(0xa1),
-                output_digest: content(0xa2),
-            },
-        ))
-        .expect("binding a");
-    registry
-        .register(binding(
-            fixture.descriptor_b.clone(),
-            "read",
-            RecordingRunner {
-                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
-                output_artifact: artifact(0xb1),
-                output_digest: content(0xb2),
-            },
-        ))
-        .expect("binding b");
+    register_default_fixture_pure_runner(&mut registry, fixture);
+    register_default_fixture_read_runner(&mut registry, fixture);
     registry
 }
 
@@ -11757,17 +10292,7 @@ fn registered_side_effect_fixture_runners(fixture: &Fixture) -> ErasedRunnerRegi
             DriverSideEffectRunner::new(fixture),
         ))
         .expect("binding a");
-    registry
-        .register(binding(
-            fixture.descriptor_b.clone(),
-            READ_EXTERNAL_RUNNER,
-            RecordingRunner {
-                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
-                output_artifact: artifact(0xb1),
-                output_digest: content(0xb2),
-            },
-        ))
-        .expect("binding b");
+    register_read_external_fixture_runner(&mut registry, fixture);
     registry
 }
 
@@ -11785,17 +10310,7 @@ fn registered_first_side_effect_runners_with<R: ErasedNodeRunner + 'static>(
             runner,
         ))
         .expect("binding a");
-    registry
-        .register(binding(
-            fixture.descriptor_b.clone(),
-            READ_EXTERNAL_RUNNER,
-            RecordingRunner {
-                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
-                output_artifact: artifact(0xb1),
-                output_digest: content(0xb2),
-            },
-        ))
-        .expect("binding b");
+    register_read_external_fixture_runner(&mut registry, fixture);
     registry
 }
 
@@ -11821,17 +10336,7 @@ fn registered_first_side_effect_and_verify_runners_with<
             runner,
         ))
         .expect("binding a");
-    registry
-        .register(binding(
-            fixture.descriptor_b.clone(),
-            READ_EXTERNAL_RUNNER,
-            RecordingRunner {
-                expected_caps: vec![(fixture.cap_kind.clone(), fixture.cap_version.clone())],
-                output_artifact: artifact(0xb1),
-                output_digest: content(0xb2),
-            },
-        ))
-        .expect("binding b");
+    register_read_external_fixture_runner(&mut registry, fixture);
     registry
 }
 
