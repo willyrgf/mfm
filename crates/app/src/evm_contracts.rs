@@ -1,13 +1,16 @@
 use std::sync::Arc;
 
 use mfm_artifact_capabilities::ArtifactReadProvider;
-use mfm_evm_capabilities::{EvmChainGuard, EvmNetworkId};
+use mfm_evm_capabilities::EvmNetworkId;
 use mfm_signers_keystore::{
     KeystorePasswordSource, KeystorePathSource, KeystoreSignerProvider, KeystoreSignerRegistryEntry,
 };
 use mfm_signing::SignerRef;
 
 use crate::{evm_json_rpc_client, runtime_evm_transport_error, RuntimeConfigLoader};
+
+#[cfg(test)]
+use mfm_evm_capabilities::EvmChainGuard;
 
 #[derive(Clone)]
 struct RuntimeConfigEvmContractRuntimeFactory {
@@ -45,7 +48,7 @@ impl mfm_adapters_evm_contracts::EvmContractRuntimeFactory
             .map_err(|error| mfm_runtime::RuntimeError::RunnerBinding(error.to_string()))?;
         let client = evm_json_rpc_client(evm.clone())?;
         client
-            .validate_guard(&EvmChainGuard::new(network_id, 0))
+            .validate_route_binding(&network_id)
             .map_err(runtime_evm_transport_error)?;
         if let Some(signer_ref) = signer_ref {
             if !evm.signers().contains_key(signer_ref) {

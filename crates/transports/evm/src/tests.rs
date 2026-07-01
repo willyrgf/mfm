@@ -264,6 +264,92 @@ async fn supports_legacy_fee_source_without_eip1559_methods() {
     assert_eq!(fee.max_fee_per_gas, None);
 }
 
+#[test]
+fn route_binding_validation_does_not_require_guard_or_live_io() {
+    let client = client_for("http://127.0.0.1:1", "primary", "mainnet", 1);
+
+    client
+        .validate_route_binding(&EvmNetworkId::new("mainnet").expect("network"))
+        .expect("route binding");
+
+    let missing = client
+        .validate_route_binding(&EvmNetworkId::new("sepolia").expect("network"))
+        .expect_err("missing route");
+    assert_eq!(missing, EvmTransportError::RouteUnavailable);
+}
+
+#[tokio::test]
+async fn rejects_explicit_block_identity_mismatch() {
+    let server = TestRpcServer::spawn_block_identity_mismatch("0x1").await;
+    let client = client_for(&server.url, "primary", "mainnet", 1);
+    let guard = guard("mainnet", 1);
+
+    let number_error = client
+        .read_block(&EvmBlockReadRequest {
+            guard: guard.clone(),
+            block: EvmBlockSelector::Number(42),
+        })
+        .await
+        .expect_err("number mismatch");
+    assert_eq!(
+        number_error,
+        EvmCapabilityError::redacted_provider_failure(EvmTransportError::InvalidResponse)
+    );
+
+    let hash_error = client
+        .read_block(&EvmBlockReadRequest {
+            guard,
+            block: EvmBlockSelector::Hash(HASH_HEX.parse::<B256>().expect("hash")),
+        })
+        .await
+        .expect_err("hash mismatch");
+    assert_eq!(
+        hash_error,
+        EvmCapabilityError::redacted_provider_failure(EvmTransportError::InvalidResponse)
+    );
+}
+
+#[tokio::test]
+async fn rejects_receipt_transaction_hash_mismatch() {
+    let server = TestRpcServer::spawn_receipt_hash_mismatch("0x1").await;
+    let client = client_for(&server.url, "primary", "mainnet", 1);
+
+    let error = client
+        .read_receipt(&EvmReceiptReadRequest {
+            guard: guard("mainnet", 1),
+            transaction_hash: HASH_HEX.parse::<B256>().expect("hash"),
+        })
+        .await
+        .expect_err("receipt hash mismatch");
+
+    assert_eq!(
+        error,
+        EvmCapabilityError::redacted_provider_failure(EvmTransportError::InvalidResponse)
+    );
+}
+
+#[tokio::test]
+async fn rejects_log_entries_that_contradict_filter() {
+    let server = TestRpcServer::spawn_log_filter_mismatch("0x1").await;
+    let client = client_for(&server.url, "primary", "mainnet", 1);
+
+    let error = client
+        .read_logs(&EvmLogsReadRequest {
+            guard: guard("mainnet", 1),
+            from_block: EvmBlockSelector::Number(42),
+            to_block: EvmBlockSelector::Number(42),
+            address: Some(address!("0x1111111111111111111111111111111111111111")),
+            topics: vec![HASH_HEX.parse::<B256>().expect("hash")],
+        })
+        .await
+        .expect_err("log filter mismatch");
+
+    assert_eq!(
+        error,
+        EvmCapabilityError::redacted_provider_failure(EvmTransportError::InvalidResponse)
+    );
+}
+
 #[tokio::test]
 async fn runtime_sources_redact_url_and_authorization() {
     let server = TestRpcServer::spawn("0x1").await;
@@ -364,6 +450,7 @@ fn guard(network_id: &str, expected_chain_id: u64) -> EvmChainGuard {
         EvmNetworkId::new(network_id).expect("network"),
         expected_chain_id,
     )
+    .expect("guard")
 }
 
 struct TestRpcServer {
@@ -386,6 +473,18 @@ impl TestRpcServer {
 
     async fn spawn_nonce_occupancy(chain_id: &'static str) -> Self {
         Self::spawn_with_mode(TestRpcMode::NonceOccupancy { chain_id }).await
+    }
+
+    async fn spawn_block_identity_mismatch(chain_id: &'static str) -> Self {
+        Self::spawn_with_mode(TestRpcMode::BlockIdentityMismatch { chain_id }).await
+    }
+
+    async fn spawn_receipt_hash_mismatch(chain_id: &'static str) -> Self {
+        Self::spawn_with_mode(TestRpcMode::ReceiptHashMismatch { chain_id }).await
+    }
+
+    async fn spawn_log_filter_mismatch(chain_id: &'static str) -> Self {
+        Self::spawn_with_mode(TestRpcMode::LogFilterMismatch { chain_id }).await
     }
 
     async fn spawn_failure() -> Self {
@@ -495,6 +594,48 @@ impl TestRpcServer {
                                 body
                             )
                         }
+                        TestRpcMode::BlockIdentityMismatch { chain_id } => {
+                            let result = block_identity_mismatch_rpc_result(chain_id, &method);
+                            let body = serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": 1,
+                                "result": result,
+                            })
+                            .to_string();
+                            format!(
+                                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                                body.len(),
+                                body
+                            )
+                        }
+                        TestRpcMode::ReceiptHashMismatch { chain_id } => {
+                            let result = receipt_hash_mismatch_rpc_result(chain_id, &method);
+                            let body = serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": 1,
+                                "result": result,
+                            })
+                            .to_string();
+                            format!(
+                                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                                body.len(),
+                                body
+                            )
+                        }
+                        TestRpcMode::LogFilterMismatch { chain_id } => {
+                            let result = log_filter_mismatch_rpc_result(chain_id, &method);
+                            let body = serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": 1,
+                                "result": result,
+                            })
+                            .to_string();
+                            format!(
+                                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                                body.len(),
+                                body
+                            )
+                        }
                         TestRpcMode::Failure => {
                             "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\n\r\n"
                                 .to_owned()
@@ -521,6 +662,9 @@ enum TestRpcMode {
     LegacyFee { chain_id: &'static str },
     PendingReceipt { chain_id: &'static str },
     NonceOccupancy { chain_id: &'static str },
+    BlockIdentityMismatch { chain_id: &'static str },
+    ReceiptHashMismatch { chain_id: &'static str },
+    LogFilterMismatch { chain_id: &'static str },
     Failure,
 }
 
@@ -614,5 +758,47 @@ fn nonce_occupancy_rpc_result(chain_id: &str, method: &str) -> Value {
             }],
         }),
         other => panic!("unexpected nonce occupancy method {other}"),
+    }
+}
+
+fn block_identity_mismatch_rpc_result(chain_id: &str, method: &str) -> Value {
+    match method {
+        "eth_chainId" => json!(chain_id),
+        "eth_getBlockByNumber" => json!({
+            "number": "0x2b",
+            "hash": HASH_HEX,
+        }),
+        "eth_getBlockByHash" => json!({
+            "number": "0x2a",
+            "hash": OCCUPYING_HASH_HEX,
+        }),
+        other => rpc_result(chain_id, other),
+    }
+}
+
+fn receipt_hash_mismatch_rpc_result(chain_id: &str, method: &str) -> Value {
+    match method {
+        "eth_chainId" => json!(chain_id),
+        "eth_getTransactionReceipt" => json!({
+            "transactionHash": OCCUPYING_HASH_HEX,
+            "blockNumber": "0x2a",
+            "status": "0x1",
+        }),
+        other => rpc_result(chain_id, other),
+    }
+}
+
+fn log_filter_mismatch_rpc_result(chain_id: &str, method: &str) -> Value {
+    match method {
+        "eth_chainId" => json!(chain_id),
+        "eth_getLogs" => json!([{
+            "address": "0x2222222222222222222222222222222222222222",
+            "topics": [OCCUPYING_HASH_HEX],
+            "data": "0x1234",
+            "blockNumber": "0x2b",
+            "transactionHash": HASH_HEX,
+            "logIndex": "0x0",
+        }]),
+        other => rpc_result(chain_id, other),
     }
 }

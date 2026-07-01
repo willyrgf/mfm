@@ -12,7 +12,7 @@
 //!     EvmChainGuard, EvmFeeReadCapability, EvmNetworkId,
 //! };
 //!
-//! let guard = EvmChainGuard::new(EvmNetworkId::new("ethereum-mainnet")?, 1);
+//! let guard = EvmChainGuard::new(EvmNetworkId::new("ethereum-mainnet")?, 1)?;
 //! assert_eq!(guard.network_id().as_str(), "ethereum-mainnet");
 //! assert_eq!(EvmFeeReadCapability::name(), "mfm.evm.fee.read");
 //! # Ok::<(), mfm_evm_capabilities::EvmCapabilityError>(())
@@ -20,6 +20,7 @@
 
 use std::fmt;
 use std::future::Future;
+use std::num::NonZeroU64;
 use std::pin::Pin;
 use std::str::FromStr;
 
@@ -379,16 +380,20 @@ impl From<EvmSourcePolicyId> for String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvmChainGuard {
     network_id: EvmNetworkId,
-    expected_chain_id: u64,
+    expected_chain_id: NonZeroU64,
 }
 
 impl EvmChainGuard {
     /// Creates a semantic chain guard.
-    pub const fn new(network_id: EvmNetworkId, expected_chain_id: u64) -> Self {
-        Self {
+    pub fn new(network_id: EvmNetworkId, expected_chain_id: u64) -> Result<Self> {
+        let expected_chain_id =
+            NonZeroU64::new(expected_chain_id).ok_or(EvmCapabilityError::InvalidRequest {
+                reason: EvmInvalidRequest::ZeroExpectedChainId,
+            })?;
+        Ok(Self {
             network_id,
             expected_chain_id,
-        }
+        })
     }
 
     /// Returns the semantic network id.
@@ -398,7 +403,7 @@ impl EvmChainGuard {
 
     /// Returns the expected EVM chain id.
     pub const fn expected_chain_id(&self) -> u64 {
-        self.expected_chain_id
+        self.expected_chain_id.get()
     }
 }
 
@@ -755,6 +760,8 @@ pub enum EvmNonceOccupancy {
 pub enum EvmInvalidRequest {
     /// Identifier was invalid.
     InvalidIdentifier,
+    /// Expected chain id was zero.
+    ZeroExpectedChainId,
     /// Signed payload was empty.
     EmptySignedPayload,
 }
@@ -816,6 +823,7 @@ mod tests {
             EvmNetworkId::new(network_id).expect("network"),
             expected_chain_id,
         )
+        .expect("guard")
     }
 
     fn evidence(
@@ -838,6 +846,19 @@ mod tests {
         evidence("mainnet", 1, 1)
             .verify_guard(&guard)
             .expect("matching evidence");
+    }
+
+    #[test]
+    fn chain_guard_rejects_zero_expected_chain_id() {
+        let error = EvmChainGuard::new(EvmNetworkId::new("mainnet").expect("network"), 0)
+            .expect_err("zero chain id");
+
+        assert_eq!(
+            error,
+            EvmCapabilityError::InvalidRequest {
+                reason: EvmInvalidRequest::ZeroExpectedChainId,
+            }
+        );
     }
 
     #[test]

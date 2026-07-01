@@ -727,7 +727,12 @@ fn portfolio_evm_guard(network: &NetworkConfig) -> Result<EvmChainGuard, Portfol
             "portfolio network id could not be used as an EVM guard",
         )
     })?;
-    Ok(EvmChainGuard::new(network_id, expected_chain_id))
+    EvmChainGuard::new(network_id, expected_chain_id).map_err(|_| {
+        PortfolioReadError::new(
+            "chain_id_invalid",
+            "portfolio EVM chain id could not be used as an EVM guard",
+        )
+    })
 }
 
 #[derive(Clone)]
