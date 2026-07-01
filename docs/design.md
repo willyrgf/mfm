@@ -219,6 +219,12 @@ supplies replay implementations backed only by recorded facts, typed artifacts, 
 evidence. Adapters translate state-owned intent into capability calls and evidence phases without
 moving protocol IO or signer material into state code.
 
+App assembly keeps evidence-only services separate from live driver services. Status, stream
+inspection, list/watch, replay, and public-output rendering construct only store, artifact, and
+certification/replay authority; they do not parse live runtime config, construct live EVM transports,
+or construct signer providers. Malformed or missing live capability wiring can block live
+start/resume when that run needs it, but it must not affect evidence-only reads.
+
 Runtime admission binds each certified capability descriptor to a registered non-secret
 implementation identity before the run can start or resume. Missing or mismatched implementation
 bindings are deployment/ingress failures, not semantic attempt outcomes.
@@ -522,6 +528,8 @@ type-valid frontier.
 Replay loads the stored certified spec and certificate artifacts, verifies them against the compiled
 certification registry, compares the hashes to `RunAdmitted`, rebuilds stream evidence, and uses
 replay adapters only. Live capability construction during replay is a contract violation.
+Replay service construction itself is evidence-only app assembly: it must not construct the live
+runner registry, live transports, signer providers, keystores, or live capability runtime config.
 
 Manual-resolution replay additionally verifies that the stream prefix derives `ManualBlocked`, the
 event matches certified policy, evidence and authorization artifacts match certified roles and

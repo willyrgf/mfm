@@ -3,7 +3,7 @@ use std::fmt;
 use crate::commands::result::{CommandError, CommandOutput, CommandResult};
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_command_result;
-use crate::support::run_store::{connect_run_services, RunStoresArgs};
+use crate::support::run_store::{connect_run_read_services, RunStoresArgs};
 use clap::Args;
 use mfm_store::v1 as store;
 use serde::Serialize;
@@ -104,7 +104,7 @@ async fn execute_internal(args: &ListArgs) -> CommandResult<ListOutput> {
             "`mfm run list --watch` requires --cursor from a previous list page",
         ));
     }
-    let services = connect_run_services(&args.stores).await?;
+    let services = connect_run_read_services(&args.stores).await?;
     let page = services
         .read_run_observations(store::RunObservationQuery::new(
             args.cursor.clone(),

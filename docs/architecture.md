@@ -499,6 +499,10 @@ corruption, or low-level storage contract fixtures.
 `crates/app` must not own workflow planning, state behavior, or adapter runner behavior. It may
 construct concrete process-local resources such as the Postgres run store, protocol clients, and
 signer providers, then pass them into adapter-owned runner factories.
+Evidence-only app services for status, stream inspection, list/watch, replay, and public-output
+rendering must be constructible from store, artifact, and certification/replay authority only. They
+must not construct live EVM transports, signer providers, or live capability runtime config. Live
+start/resume services may construct those live drivers because they are execution authority.
 
 `bin/cli` and `bin/rest-api` may:
 
@@ -508,6 +512,9 @@ signer providers, then pass them into adapter-owned runner factories.
 - start, resume, replay, inspect, and render typed runs
 - read run list/watch observations through the shared app API
 - preserve stable response envelopes
+
+Read-only CLI/REST commands and routes must use evidence-only app services. Live start, resume, and
+manual-resolution drive paths may use live app services that bind runners and capabilities.
 
 `bin/cli` and `bin/rest-api` must not:
 

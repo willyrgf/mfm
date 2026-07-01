@@ -114,3 +114,50 @@ fn resource_key_status_redacts_raw_key() {
     assert!(!rendered.contains(raw_key));
     assert!(!rendered.contains("\"key\""));
 }
+
+#[tokio::test]
+async fn run_read_services_are_evidence_only() {
+    let source = include_str!("lib.rs");
+    let production_read_constructor = source
+        .split("pub async fn connect_production_run_read_services")
+        .nth(1)
+        .expect("production read constructor is present")
+        .split("/// Builds the production typed runner registry")
+        .next()
+        .expect("production read constructor is bounded");
+    assert!(!production_read_constructor.contains("production_runner_registry"));
+    assert!(!production_read_constructor.contains("std::env"));
+
+    let read_services_impl = source
+        .split("pub struct RunReadServices")
+        .nth(1)
+        .expect("read services are present")
+        .split("/// Application facade for certified typed runtime dispatch.")
+        .next()
+        .expect("read services implementation is bounded");
+    assert!(!read_services_impl.contains("production_runner_registry"));
+    assert!(!read_services_impl.contains("std::env"));
+
+    let store = store::AsyncInMemoryRunStore::default();
+    let services = make_run_read_services_with_certification_registry(
+        store.clone(),
+        store,
+        production_certification_registry().expect("cert registry"),
+    );
+    let run_id = RunId::parse(
+        "run:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000001",
+    )
+    .expect("run id");
+
+    let status = services
+        .run_status(&run_id)
+        .await
+        .expect_err("missing run should come from store evidence");
+    assert_eq!(status.code, "RunNotFound");
+
+    let observations = services
+        .read_run_observations(store::RunObservationQuery::new(None, 50, 0))
+        .await
+        .expect("list observations does not construct live drivers");
+    assert!(observations.runs.is_empty());
+}
