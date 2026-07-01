@@ -417,6 +417,22 @@ pub struct RedactedEvmSourceEvidence {
     pub policy_id: EvmSourcePolicyId,
 }
 
+impl RedactedEvmSourceEvidence {
+    /// Verifies that provider evidence matches the semantic request guard.
+    pub fn verify_guard(&self, guard: &EvmChainGuard) -> Result<()> {
+        if &self.network_id == guard.network_id()
+            && self.expected_chain_id == guard.expected_chain_id()
+            && self.observed_chain_id == guard.expected_chain_id()
+        {
+            Ok(())
+        } else {
+            Err(EvmCapabilityError::ChainMismatch {
+                evidence: self.clone(),
+            })
+        }
+    }
+}
+
 /// EVM block selector.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EvmBlockSelector {
@@ -765,6 +781,12 @@ pub enum EvmCapabilityError {
         /// Closed provider failure reason.
         reason: EvmProviderFailure,
     },
+    /// Provider evidence did not match the semantic request guard.
+    #[error("EVM source chain id did not match request guard")]
+    ChainMismatch {
+        /// Closed redacted mismatch evidence.
+        evidence: RedactedEvmSourceEvidence,
+    },
     /// A transaction receipt is not available yet.
     #[error("EVM transaction receipt is pending")]
     ReceiptPending,
@@ -782,5 +804,53 @@ impl EvmCapabilityError {
 fn invalid_identifier(_source: mfm_ids::CheckedStringError) -> EvmCapabilityError {
     EvmCapabilityError::InvalidRequest {
         reason: EvmInvalidRequest::InvalidIdentifier,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn guard(network_id: &str, expected_chain_id: u64) -> EvmChainGuard {
+        EvmChainGuard::new(
+            EvmNetworkId::new(network_id).expect("network"),
+            expected_chain_id,
+        )
+    }
+
+    fn evidence(
+        network_id: &str,
+        expected_chain_id: u64,
+        observed_chain_id: u64,
+    ) -> RedactedEvmSourceEvidence {
+        RedactedEvmSourceEvidence {
+            network_id: EvmNetworkId::new(network_id).expect("network"),
+            expected_chain_id,
+            observed_chain_id,
+            source_ref: EvmSourceRef::new("primary").expect("source"),
+            policy_id: EvmSourcePolicyId::new("policy").expect("policy"),
+        }
+    }
+
+    #[test]
+    fn redacted_evidence_verifies_semantic_guard() {
+        let guard = guard("mainnet", 1);
+        evidence("mainnet", 1, 1)
+            .verify_guard(&guard)
+            .expect("matching evidence");
+    }
+
+    #[test]
+    fn redacted_evidence_rejects_guard_mismatch_without_secret_surfaces() {
+        let guard = guard("mainnet", 1);
+        let error = evidence("mainnet", 1, 2)
+            .verify_guard(&guard)
+            .expect_err("mismatch");
+        let rendered = format!("{error:?} {error}");
+
+        assert!(matches!(error, EvmCapabilityError::ChainMismatch { .. }));
+        assert!(rendered.contains("observed_chain_id: 2"));
+        assert!(!rendered.contains("http://"));
+        assert!(!rendered.contains("Bearer"));
     }
 }

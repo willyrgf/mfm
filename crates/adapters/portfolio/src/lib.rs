@@ -748,10 +748,14 @@ impl EvmCapabilityPortfolioBackend {
         let response = self
             .evm
             .read_block(&EvmBlockReadRequest {
-                guard,
+                guard: guard.clone(),
                 block: EvmBlockSelector::Latest,
             })
             .await
+            .map_err(portfolio_evm_capability_error)?;
+        response
+            .evidence
+            .verify_guard(&guard)
             .map_err(portfolio_evm_capability_error)?;
         Ok(response.block_number)
     }
@@ -768,11 +772,15 @@ impl EvmCapabilityPortfolioBackend {
                 let response = self
                     .evm
                     .read_balance(&EvmBalanceReadRequest {
-                        guard,
+                        guard: guard.clone(),
                         account: wallet,
                         block: EvmBlockSelector::Number(block_number),
                     })
                     .await
+                    .map_err(portfolio_evm_capability_error)?;
+                response
+                    .evidence
+                    .verify_guard(&guard)
                     .map_err(portfolio_evm_capability_error)?;
                 Ok((response.balance_wei, config.symbol().decimals.unwrap_or(18)))
             }
@@ -837,12 +845,16 @@ impl EvmCapabilityPortfolioBackend {
         let response = self
             .evm
             .read_call(&EvmCallReadRequest {
-                guard,
+                guard: guard.clone(),
                 to,
                 calldata,
                 block: EvmBlockSelector::Number(block_number),
             })
             .await
+            .map_err(portfolio_evm_capability_error)?;
+        response
+            .evidence
+            .verify_guard(&guard)
             .map_err(portfolio_evm_capability_error)?;
         decode_u256_return(&response.return_data)
     }

@@ -25,6 +25,13 @@ fn evidence_for_guard(guard: &EvmChainGuard) -> RedactedEvmSourceEvidence {
     }
 }
 
+fn mismatched_evidence_for_guard(guard: &EvmChainGuard) -> RedactedEvmSourceEvidence {
+    RedactedEvmSourceEvidence {
+        observed_chain_id: guard.expected_chain_id() + 1,
+        ..evidence_for_guard(guard)
+    }
+}
+
 fn artifact_json() -> serde_json::Value {
     json!({
         "abi": {
@@ -135,6 +142,7 @@ enum TestEvmProviderMode {
     },
     ReceiptFailure,
     Finality,
+    FinalityMismatchedEvidence,
 }
 
 impl TestEvmProviders {
@@ -169,6 +177,10 @@ impl TestEvmProviders {
 
     fn finality() -> Self {
         Self::new(TestEvmProviderMode::Finality)
+    }
+
+    fn finality_mismatched_evidence() -> Self {
+        Self::new(TestEvmProviderMode::FinalityMismatchedEvidence)
     }
 
     fn submit_hash_mismatch(returned_hash: B256, submit_count: Arc<Mutex<u32>>) -> Self {
@@ -209,7 +221,9 @@ impl EvmChainIdentityProvider for TestEvmProviders {
         request: &'a EvmChainIdentityRequest,
     ) -> EvmCapabilityFuture<'a, EvmChainIdentityResponse> {
         match self.mode {
-            TestEvmProviderMode::Preparation => Box::pin(async {
+            TestEvmProviderMode::Preparation
+            | TestEvmProviderMode::Recovery { .. }
+            | TestEvmProviderMode::SubmitHashMismatch { .. } => Box::pin(async {
                 Ok(EvmChainIdentityResponse {
                     evidence: evidence_for_guard(&request.guard),
                     chain_id: request.guard.expected_chain_id(),
@@ -227,13 +241,21 @@ impl EvmBlockReadProvider for TestEvmProviders {
         request: &'a EvmBlockReadRequest,
     ) -> EvmCapabilityFuture<'a, EvmBlockReadResponse> {
         match self.mode {
-            TestEvmProviderMode::Finality => Box::pin(async {
-                Ok(EvmBlockReadResponse {
-                    evidence: evidence_for_guard(&request.guard),
-                    block_number: 64,
-                    block_hash: B256::from([0x64; 32]),
+            TestEvmProviderMode::Finality | TestEvmProviderMode::FinalityMismatchedEvidence => {
+                let evidence = match self.mode {
+                    TestEvmProviderMode::FinalityMismatchedEvidence => {
+                        mismatched_evidence_for_guard(&request.guard)
+                    }
+                    _ => evidence_for_guard(&request.guard),
+                };
+                Box::pin(async move {
+                    Ok(EvmBlockReadResponse {
+                        evidence,
+                        block_number: 64,
+                        block_hash: B256::from([0x64; 32]),
+                    })
                 })
-            }),
+            }
             _ => unexpected_evm_call("read_block"),
         }
     }
@@ -1097,6 +1119,35 @@ async fn finality_confirmation_requires_certified_depth() {
     .await
     .expect_err("insufficient confirmations");
     assert!(matches!(error, mfm_runtime::RuntimeError::Blocked(_)));
+}
+
+#[tokio::test]
+async fn finality_rejects_mismatched_guard_evidence() {
+    let runtime = runtime_from_provider(TestEvmProviders::finality_mismatched_evidence());
+    let receipt = ContractTransactionReceipt {
+        receipt_version: 1,
+        transaction_hash: "0x1111111111111111111111111111111111111111111111111111111111111111"
+            .to_owned(),
+        block_number: 63,
+        status: true,
+        receipt_evidence: None,
+    };
+
+    let error = verified_finality_confirmations(
+        &runtime,
+        "ethereum-mainnet",
+        1,
+        std::slice::from_ref(&receipt),
+        1,
+    )
+    .await
+    .expect_err("mismatched evidence");
+
+    assert!(matches!(
+        error,
+        mfm_runtime::RuntimeError::InvalidRunnerOutput(_)
+    ));
+    assert!(error.to_string().contains("EVM source chain id"));
 }
 
 #[test]

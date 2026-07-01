@@ -40,6 +40,14 @@ async fn rejects_chain_id_mismatch_without_leaking_source_details() {
         .expect_err("chain mismatch");
 
     let rendered = format!("{error:?} {error}");
+    let EvmCapabilityError::ChainMismatch { evidence } = error else {
+        panic!("expected chain mismatch error");
+    };
+    assert_eq!(evidence.network_id.as_str(), "mainnet");
+    assert_eq!(evidence.expected_chain_id, 1);
+    assert_eq!(evidence.observed_chain_id, 2);
+    assert_eq!(evidence.source_ref.as_str(), "primary");
+    assert_eq!(evidence.policy_id.as_str(), "mainnet");
     assert!(!rendered.contains(&server.url));
     assert!(!rendered.contains("Bearer"));
 }
@@ -149,6 +157,32 @@ async fn supports_core_evm_json_rpc_calls() {
         .expect("receipt");
     assert_eq!(receipt.block_number, 42);
     assert!(receipt.status);
+
+    assert_eq!(
+        server.methods(),
+        [
+            "eth_chainId",
+            "eth_getBlockByNumber",
+            "eth_chainId",
+            "eth_getBalance",
+            "eth_chainId",
+            "eth_call",
+            "eth_chainId",
+            "eth_getLogs",
+            "eth_chainId",
+            "eth_getTransactionCount",
+            "eth_chainId",
+            "eth_gasPrice",
+            "eth_maxPriorityFeePerGas",
+            "eth_getBlockByNumber",
+            "eth_chainId",
+            "eth_estimateGas",
+            "eth_chainId",
+            "eth_sendRawTransaction",
+            "eth_chainId",
+            "eth_getTransactionReceipt",
+        ]
+    );
 }
 
 #[test]
@@ -334,7 +368,7 @@ fn guard(network_id: &str, expected_chain_id: u64) -> EvmChainGuard {
 
 struct TestRpcServer {
     url: String,
-    _requests: Arc<Mutex<Vec<String>>>,
+    requests: Arc<Mutex<Vec<String>>>,
 }
 
 impl TestRpcServer {
@@ -472,8 +506,12 @@ impl TestRpcServer {
         });
         Self {
             url: format!("http://{addr}"),
-            _requests: requests,
+            requests,
         }
+    }
+
+    fn methods(&self) -> Vec<String> {
+        self.requests.lock().expect("requests").clone()
     }
 }
 

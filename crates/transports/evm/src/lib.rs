@@ -703,7 +703,17 @@ impl EvmJsonRpcClient {
                         },
                     });
                 }
-                Ok(_) => return Err(EvmTransportError::ChainIdMismatch),
+                Ok(chain_id) => {
+                    return Err(EvmTransportError::ChainIdMismatch {
+                        evidence: RedactedEvmSourceEvidence {
+                            network_id: guard.network_id().clone(),
+                            expected_chain_id: guard.expected_chain_id(),
+                            observed_chain_id: chain_id,
+                            source_ref: source.id.clone(),
+                            policy_id: route.policy_id().clone(),
+                        },
+                    });
+                }
                 Err(EvmTransportError::RequestFailed) => {
                     last_failure = EvmTransportError::RequestFailed;
                 }
@@ -866,6 +876,9 @@ impl_provider!(
 fn capability_error_from_transport(error: EvmTransportError) -> EvmCapabilityError {
     match error {
         EvmTransportError::ReceiptPending => EvmCapabilityError::ReceiptPending,
+        EvmTransportError::ChainIdMismatch { evidence } => {
+            EvmCapabilityError::ChainMismatch { evidence }
+        }
         other => EvmCapabilityError::redacted_provider_failure(other),
     }
 }
@@ -949,7 +962,7 @@ fn parse_log_entry(value: &Value) -> TransportResult<EvmLogEntry> {
 }
 
 /// Redaction-safe EVM transport setup/runtime error.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EvmTransportError {
     /// Runtime source registry was invalid.
     #[error("EVM source registry was invalid")]
@@ -968,7 +981,10 @@ pub enum EvmTransportError {
     SourceNotAllowed,
     /// Source chain id did not match the expected chain.
     #[error("EVM source chain id did not match expected chain")]
-    ChainIdMismatch,
+    ChainIdMismatch {
+        /// Closed redacted mismatch evidence.
+        evidence: RedactedEvmSourceEvidence,
+    },
     /// JSON-RPC request failed.
     #[error("EVM JSON-RPC request failed")]
     RequestFailed,
