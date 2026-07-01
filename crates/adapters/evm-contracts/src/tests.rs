@@ -15,6 +15,10 @@ use mfm_signing::{
 use serde_json::json;
 use std::sync::Mutex;
 
+const TEST_TRANSACTION_HASH: &str =
+    "0x1111111111111111111111111111111111111111111111111111111111111111";
+const MISMATCH_HASH: &str = TEST_TRANSACTION_HASH;
+
 fn evidence_for_guard(guard: &EvmChainGuard) -> RedactedEvmSourceEvidence {
     RedactedEvmSourceEvidence {
         network_id: guard.network_id().clone(),
@@ -99,6 +103,8 @@ struct DeployPreparationFixture {
     intent: ContractDeployIntent,
 }
 
+type PreparedDeployFixture = (DeployPreparationFixture, PreparedContractMutation);
+
 impl DeployPreparationFixture {
     fn new(style: &str) -> Self {
         let providers = TestEvmProviders::preparation();
@@ -121,6 +127,24 @@ impl DeployPreparationFixture {
             .await
             .expect("prepared")
     }
+
+    fn reconstruct_with_hash(
+        &self,
+        prepared: &PreparedContractMutation,
+        expected_transaction_hash: &str,
+    ) -> PreparedContractMutation {
+        let mut evidence = prepared.evidence().clone();
+        evidence.transactions[0].expected_transaction_hash = expected_transaction_hash.to_owned();
+        self.adapter()
+            .reconstruct_deploy_invocation(&self.config, &self.intent, &evidence)
+            .expect("reconstructed")
+    }
+}
+
+async fn prepared_deploy_fixture(style: &str) -> PreparedDeployFixture {
+    let fixture = DeployPreparationFixture::new(style);
+    let prepared = fixture.prepare().await;
+    (fixture, prepared)
 }
 
 struct TestEvmProviders {
@@ -205,6 +229,141 @@ fn runtime_from_provider(provider: TestEvmProviders) -> EvmContractRuntime {
     let evm: Arc<dyn EvmContractProvider> = provider.clone();
     let signer: Arc<dyn SigningProvider> = provider;
     EvmContractRuntime::new(evm, signer)
+}
+
+type ContractSubmissionDecision = SideEffectSubmissionDecision<
+    ContractTransactionSubmissions,
+    ContractTransactionSubmissions,
+    ContractNotSubmittedProof,
+    ContractTransactionSubmissions,
+>;
+
+async fn recover_with_provider(
+    receipt_mode: RecoveryReceiptMode,
+    pending_nonce: u64,
+    occupancy_mode: RecoveryOccupancyMode,
+    prepared: &PreparedContractMutation,
+) -> (ContractSubmissionDecision, Arc<Mutex<u32>>) {
+    let submit_count = Arc::new(Mutex::new(0));
+    let runtime = runtime_from_provider(TestEvmProviders::recovery(
+        receipt_mode,
+        pending_nonce,
+        occupancy_mode,
+        Arc::clone(&submit_count),
+    ));
+    (recover_submission(&runtime, prepared).await, submit_count)
+}
+
+async fn recover_submission(
+    runtime: &EvmContractRuntime,
+    prepared: &PreparedContractMutation,
+) -> ContractSubmissionDecision {
+    submit_or_recover_contract_submission(
+        runtime,
+        prepared,
+        SideEffectProtocolAction::SubmitOrRecoverSubmission {
+            invocation_epoch: 1,
+        },
+    )
+    .await
+    .expect("recovered")
+}
+
+async fn start_with_submit_hash_mismatch(
+    mismatched_hash: B256,
+    prepared: &PreparedContractMutation,
+) -> (ContractSubmissionDecision, Arc<Mutex<u32>>) {
+    let submit_count = Arc::new(Mutex::new(0));
+    let runtime = runtime_from_provider(TestEvmProviders::submit_hash_mismatch(
+        mismatched_hash,
+        Arc::clone(&submit_count),
+    ));
+    let decision = submit_or_recover_contract_submission(
+        &runtime,
+        prepared,
+        SideEffectProtocolAction::StartPreparedAndSubmitOrRecoverSubmission {
+            invocation_epoch: 1,
+        },
+    )
+    .await
+    .expect("submission decision");
+
+    (decision, submit_count)
+}
+
+fn expected_transaction_hash(prepared: &PreparedContractMutation) -> &str {
+    &prepared.evidence().transactions[0].expected_transaction_hash
+}
+
+fn assert_submit_count(submit_count: &Arc<Mutex<u32>>, expected: u32) {
+    assert_eq!(*submit_count.lock().expect("submit count"), expected);
+}
+
+fn assert_observed_submission(
+    decision: ContractSubmissionDecision,
+    submit_count: &Arc<Mutex<u32>>,
+    expected_count: u32,
+    prepared: &PreparedContractMutation,
+) {
+    let SideEffectSubmissionDecision::Observed(submissions) = decision else {
+        panic!("expected observed submission");
+    };
+    assert_submit_count(submit_count, expected_count);
+    assert_eq!(
+        submissions.transactions[0].transaction_hash,
+        expected_transaction_hash(prepared)
+    );
+}
+
+fn assert_unknown_submission(
+    decision: ContractSubmissionDecision,
+    submit_count: &Arc<Mutex<u32>>,
+    prepared: &PreparedContractMutation,
+) {
+    let SideEffectSubmissionDecision::Unknown(evidence) = decision else {
+        panic!("expected unknown submission");
+    };
+    assert_submit_count(submit_count, 0);
+    assert_eq!(
+        evidence.transactions[0].transaction_hash,
+        expected_transaction_hash(prepared)
+    );
+}
+
+fn assert_hash_mismatch_ambiguity(
+    decision: ContractSubmissionDecision,
+    submit_count: &Arc<Mutex<u32>>,
+    expected_count: u32,
+) -> ContractTransactionSubmissions {
+    let SideEffectSubmissionDecision::Ambiguous {
+        ambiguity_code,
+        evidence,
+    } = decision
+    else {
+        panic!("expected transaction-hash mismatch ambiguity");
+    };
+    assert_submit_count(submit_count, expected_count);
+    assert_eq!(ambiguity_code.as_str(), "mfm.evm.transaction_hash_mismatch");
+    evidence
+}
+
+async fn assert_recovery_observed(receipt_mode: RecoveryReceiptMode, expected_count: u32) {
+    let (_fixture, prepared) = prepared_deploy_fixture("eip1559").await;
+    let (decision, submit_count) =
+        recover_with_provider(receipt_mode, 7, RecoveryOccupancyMode::Unknown, &prepared).await;
+    assert_observed_submission(decision, &submit_count, expected_count, &prepared);
+}
+
+async fn assert_recovery_unknown(receipt_mode: RecoveryReceiptMode, pending_nonce: u64) {
+    let (_fixture, prepared) = prepared_deploy_fixture("eip1559").await;
+    let (decision, submit_count) = recover_with_provider(
+        receipt_mode,
+        pending_nonce,
+        RecoveryOccupancyMode::Unknown,
+        &prepared,
+    )
+    .await;
+    assert_unknown_submission(decision, &submit_count, &prepared);
 }
 
 fn unexpected_evm_call<'a, T>(capability: &'static str) -> EvmCapabilityFuture<'a, T> {
@@ -562,8 +721,7 @@ fn executable_identity_summary_matches_golden() {
 
 #[tokio::test]
 async fn deploy_preparation_defaults_to_eip1559_contract_creation() {
-    let fixture = DeployPreparationFixture::new("eip1559");
-    let prepared = fixture.prepare().await;
+    let (_fixture, prepared) = prepared_deploy_fixture("eip1559").await;
 
     assert_eq!(prepared.evidence().transactions.len(), 1);
     assert_eq!(
@@ -579,8 +737,7 @@ async fn deploy_preparation_defaults_to_eip1559_contract_creation() {
 
 #[tokio::test]
 async fn deploy_preparation_supports_legacy_contract_creation() {
-    let fixture = DeployPreparationFixture::new("legacy");
-    let prepared = fixture.prepare().await;
+    let (_fixture, prepared) = prepared_deploy_fixture("legacy").await;
 
     assert_eq!(
         prepared.evidence().transactions[0].style,
@@ -594,8 +751,7 @@ async fn deploy_preparation_supports_legacy_contract_creation() {
 
 #[tokio::test]
 async fn prepared_invocation_evidence_excludes_live_and_secret_surfaces() {
-    let fixture = DeployPreparationFixture::new("eip1559");
-    let prepared = fixture.prepare().await;
+    let (_fixture, prepared) = prepared_deploy_fixture("eip1559").await;
 
     ensure_prepared_invocation_public(prepared.evidence()).expect("public evidence");
     let evidence = prepared.evidence();
@@ -665,8 +821,7 @@ async fn prepared_invocation_evidence_excludes_live_and_secret_surfaces() {
 
 #[tokio::test]
 async fn prepared_invocation_reconstruction_preserves_submission_anchor() {
-    let fixture = DeployPreparationFixture::new("eip1559");
-    let prepared = fixture.prepare().await;
+    let (fixture, prepared) = prepared_deploy_fixture("eip1559").await;
     let reconstructed = fixture
         .adapter()
         .reconstruct_deploy_invocation(&fixture.config, &fixture.intent, prepared.evidence())
@@ -681,15 +836,9 @@ async fn prepared_invocation_reconstruction_preserves_submission_anchor() {
 
 #[tokio::test]
 async fn submit_rejects_resigned_hash_mismatch_before_broadcast() {
-    let fixture = DeployPreparationFixture::new("eip1559");
-    let prepared = fixture.prepare().await;
-    let mut evidence = prepared.evidence().clone();
-    evidence.transactions[0].expected_transaction_hash =
-        "0x1111111111111111111111111111111111111111111111111111111111111111".to_owned();
+    let (fixture, prepared) = prepared_deploy_fixture("eip1559").await;
+    let reconstructed = fixture.reconstruct_with_hash(&prepared, MISMATCH_HASH);
     let adapter = fixture.adapter();
-    let reconstructed = adapter
-        .reconstruct_deploy_invocation(&fixture.config, &fixture.intent, &evidence)
-        .expect("reconstructed");
 
     assert!(matches!(
         adapter.submit_prepared(&reconstructed).await,
@@ -699,145 +848,41 @@ async fn submit_rejects_resigned_hash_mismatch_before_broadcast() {
 
 #[tokio::test]
 async fn recovery_observes_landed_anchor_without_resubmitting() {
-    let fixture = DeployPreparationFixture::new("eip1559");
-    let prepared = fixture.prepare().await;
-    let submit_count = Arc::new(Mutex::new(0_u32));
-    let runtime = runtime_from_provider(TestEvmProviders::recovery(
-        RecoveryReceiptMode::Landed,
-        7,
-        RecoveryOccupancyMode::Unknown,
-        Arc::clone(&submit_count),
-    ));
-
-    let decision = submit_or_recover_contract_submission(
-        &runtime,
-        &prepared,
-        SideEffectProtocolAction::SubmitOrRecoverSubmission {
-            invocation_epoch: 1,
-        },
-    )
-    .await
-    .expect("recovered");
-
-    let SideEffectSubmissionDecision::Observed(submissions) = decision else {
-        panic!("expected observed anchor recovery");
-    };
-    assert_eq!(*submit_count.lock().expect("submit count"), 0);
-    assert_eq!(
-        submissions.transactions[0].transaction_hash,
-        prepared.evidence().transactions[0].expected_transaction_hash
-    );
+    assert_recovery_observed(RecoveryReceiptMode::Landed, 0).await;
 }
 
 #[tokio::test]
 async fn recovery_rebroadcasts_unlanded_anchor_after_resign_match() {
-    let fixture = DeployPreparationFixture::new("eip1559");
-    let prepared = fixture.prepare().await;
-    let submit_count = Arc::new(Mutex::new(0_u32));
-    let runtime = runtime_from_provider(TestEvmProviders::recovery(
-        RecoveryReceiptMode::Pending,
-        7,
-        RecoveryOccupancyMode::Unknown,
-        Arc::clone(&submit_count),
-    ));
-
-    let decision = submit_or_recover_contract_submission(
-        &runtime,
-        &prepared,
-        SideEffectProtocolAction::SubmitOrRecoverSubmission {
-            invocation_epoch: 1,
-        },
-    )
-    .await
-    .expect("recovered");
-
-    let SideEffectSubmissionDecision::Observed(submissions) = decision else {
-        panic!("expected observed rebroadcast");
-    };
-    assert_eq!(*submit_count.lock().expect("submit count"), 1);
-    assert_eq!(
-        submissions.transactions[0].transaction_hash,
-        prepared.evidence().transactions[0].expected_transaction_hash
-    );
+    assert_recovery_observed(RecoveryReceiptMode::Pending, 1).await;
 }
 
 #[tokio::test]
 async fn recovery_does_not_rebroadcast_when_resign_hash_mismatches_anchor() {
-    let fixture = DeployPreparationFixture::new("eip1559");
-    let prepared = fixture.prepare().await;
-    let mut evidence = prepared.evidence().clone();
-    evidence.transactions[0].expected_transaction_hash =
-        "0x1111111111111111111111111111111111111111111111111111111111111111".to_owned();
-    let reconstructed = fixture
-        .adapter()
-        .reconstruct_deploy_invocation(&fixture.config, &fixture.intent, &evidence)
-        .expect("reconstructed");
-    let submit_count = Arc::new(Mutex::new(0_u32));
-    let runtime = runtime_from_provider(TestEvmProviders::recovery(
+    let (fixture, prepared) = prepared_deploy_fixture("eip1559").await;
+    let reconstructed = fixture.reconstruct_with_hash(&prepared, MISMATCH_HASH);
+    let (decision, submit_count) = recover_with_provider(
         RecoveryReceiptMode::Pending,
         7,
         RecoveryOccupancyMode::Unknown,
-        Arc::clone(&submit_count),
-    ));
-
-    let decision = submit_or_recover_contract_submission(
-        &runtime,
         &reconstructed,
-        SideEffectProtocolAction::SubmitOrRecoverSubmission {
-            invocation_epoch: 1,
-        },
     )
-    .await
-    .expect("recovered");
+    .await;
 
-    let SideEffectSubmissionDecision::Ambiguous {
-        ambiguity_code,
-        evidence,
-    } = decision
-    else {
-        panic!("expected ambiguous mismatched anchor evidence");
-    };
-    assert_eq!(*submit_count.lock().expect("submit count"), 0);
-    assert_eq!(ambiguity_code.as_str(), "mfm.evm.transaction_hash_mismatch");
-    assert_eq!(
-        evidence.transactions[0].transaction_hash,
-        "0x1111111111111111111111111111111111111111111111111111111111111111"
-    );
+    let evidence = assert_hash_mismatch_ambiguity(decision, &submit_count, 0);
+    assert_eq!(evidence.transactions[0].transaction_hash, MISMATCH_HASH);
 }
 
 #[tokio::test]
 async fn fresh_submit_records_ambiguity_when_provider_returns_mismatched_hash() {
-    let fixture = DeployPreparationFixture::new("eip1559");
-    let prepared = fixture.prepare().await;
-    let submit_count = Arc::new(Mutex::new(0_u32));
+    let (_fixture, prepared) = prepared_deploy_fixture("eip1559").await;
     let mismatched_hash = B256::from([0x11; 32]);
-    let runtime = runtime_from_provider(TestEvmProviders::submit_hash_mismatch(
-        mismatched_hash,
-        Arc::clone(&submit_count),
-    ));
+    let (decision, submit_count) =
+        start_with_submit_hash_mismatch(mismatched_hash, &prepared).await;
 
-    let decision = submit_or_recover_contract_submission(
-        &runtime,
-        &prepared,
-        SideEffectProtocolAction::StartPreparedAndSubmitOrRecoverSubmission {
-            invocation_epoch: 1,
-        },
-    )
-    .await
-    .expect("fresh submit mismatch handled");
-
-    let SideEffectSubmissionDecision::Ambiguous {
-        ambiguity_code,
-        evidence,
-    } = decision
-    else {
-        panic!("expected ambiguous provider hash mismatch evidence");
-    };
-    assert_eq!(*submit_count.lock().expect("submit count"), 1);
-    assert_eq!(ambiguity_code.as_str(), "mfm.evm.transaction_hash_mismatch");
+    let evidence = assert_hash_mismatch_ambiguity(decision, &submit_count, 1);
     assert_eq!(
         evidence.transactions[0].transaction_hash,
-        prepared.evidence().transactions[0].expected_transaction_hash
+        expected_transaction_hash(&prepared)
     );
     assert_ne!(
         evidence.transactions[0].transaction_hash,
@@ -847,70 +892,32 @@ async fn fresh_submit_records_ambiguity_when_provider_returns_mismatched_hash() 
 
 #[tokio::test]
 async fn recovery_keeps_advanced_nonce_unknown_without_occupancy_proof() {
-    let fixture = DeployPreparationFixture::new("eip1559");
-    let prepared = fixture.prepare().await;
-    let submit_count = Arc::new(Mutex::new(0_u32));
-    let runtime = runtime_from_provider(TestEvmProviders::recovery(
-        RecoveryReceiptMode::Pending,
-        8,
-        RecoveryOccupancyMode::Unknown,
-        Arc::clone(&submit_count),
-    ));
-
-    let decision = submit_or_recover_contract_submission(
-        &runtime,
-        &prepared,
-        SideEffectProtocolAction::SubmitOrRecoverSubmission {
-            invocation_epoch: 1,
-        },
-    )
-    .await
-    .expect("recovered");
-
-    let SideEffectSubmissionDecision::Unknown(evidence) = decision else {
-        panic!("expected unknown occupied nonce evidence");
-    };
-    assert_eq!(*submit_count.lock().expect("submit count"), 0);
-    assert_eq!(
-        evidence.transactions[0].transaction_hash,
-        prepared.evidence().transactions[0].expected_transaction_hash
-    );
+    assert_recovery_unknown(RecoveryReceiptMode::Pending, 8).await;
 }
 
 #[tokio::test]
 async fn recovery_proves_not_submitted_when_foreign_transaction_occupies_nonce() {
-    let fixture = DeployPreparationFixture::new("eip1559");
-    let prepared = fixture.prepare().await;
-    let submit_count = Arc::new(Mutex::new(0_u32));
+    let (_fixture, prepared) = prepared_deploy_fixture("eip1559").await;
     let occupying_hash = "0x2222222222222222222222222222222222222222222222222222222222222222"
         .parse::<B256>()
         .expect("occupying hash");
-    let runtime = runtime_from_provider(TestEvmProviders::recovery(
+    let (decision, submit_count) = recover_with_provider(
         RecoveryReceiptMode::Pending,
         8,
         RecoveryOccupancyMode::Occupied {
             transaction_hash: occupying_hash,
         },
-        Arc::clone(&submit_count),
-    ));
-
-    let decision = submit_or_recover_contract_submission(
-        &runtime,
         &prepared,
-        SideEffectProtocolAction::SubmitOrRecoverSubmission {
-            invocation_epoch: 1,
-        },
     )
-    .await
-    .expect("recovered");
+    .await;
 
     let SideEffectSubmissionDecision::NotSubmitted(proof) = decision else {
         panic!("expected not-submitted proof");
     };
-    assert_eq!(*submit_count.lock().expect("submit count"), 0);
+    assert_submit_count(&submit_count, 0);
     assert_eq!(
         proof.expected_transaction_hash,
-        prepared.evidence().transactions[0].expected_transaction_hash
+        expected_transaction_hash(&prepared)
     );
     assert_eq!(
         proof.occupying_transaction_hash,
@@ -922,34 +929,7 @@ async fn recovery_proves_not_submitted_when_foreign_transaction_occupies_nonce()
 
 #[tokio::test]
 async fn recovery_records_unknown_on_transient_anchor_read_failure() {
-    let fixture = DeployPreparationFixture::new("eip1559");
-    let prepared = fixture.prepare().await;
-    let submit_count = Arc::new(Mutex::new(0_u32));
-    let runtime = runtime_from_provider(TestEvmProviders::recovery(
-        RecoveryReceiptMode::ProviderFailure,
-        7,
-        RecoveryOccupancyMode::Unknown,
-        Arc::clone(&submit_count),
-    ));
-
-    let decision = submit_or_recover_contract_submission(
-        &runtime,
-        &prepared,
-        SideEffectProtocolAction::SubmitOrRecoverSubmission {
-            invocation_epoch: 1,
-        },
-    )
-    .await
-    .expect("recovered");
-
-    let SideEffectSubmissionDecision::Unknown(evidence) = decision else {
-        panic!("expected unknown recovery evidence");
-    };
-    assert_eq!(*submit_count.lock().expect("submit count"), 0);
-    assert_eq!(
-        evidence.transactions[0].transaction_hash,
-        prepared.evidence().transactions[0].expected_transaction_hash
-    );
+    assert_recovery_unknown(RecoveryReceiptMode::ProviderFailure, 7).await;
 }
 
 #[test]
@@ -1003,6 +983,47 @@ fn prepared_invocation_fixture() -> PreparedContractInvocation {
     }
 }
 
+fn receipt_polling_invocation(transaction_hash: &str) -> PreparedContractInvocation {
+    let mut prepared = prepared_invocation_fixture();
+    prepared.network_id = "reth-dev".to_owned();
+    prepared.expected_chain_id = 31337;
+    prepared.expected_signer_address = "0x0000000000000000000000000000000000000001".to_owned();
+    prepared.poll_interval_ms = 25;
+    prepared.max_receipt_polls = 3;
+
+    let transaction = &mut prepared.transactions[0];
+    transaction.chain_id = 31337;
+    transaction.data_len = 0;
+    transaction.signing_digest = transaction_hash.to_owned();
+    transaction.expected_transaction_hash = transaction_hash.to_owned();
+    prepared
+}
+
+fn finality_receipt() -> ContractTransactionReceipt {
+    ContractTransactionReceipt {
+        receipt_version: 1,
+        transaction_hash: TEST_TRANSACTION_HASH.to_owned(),
+        block_number: 63,
+        status: true,
+        receipt_evidence: None,
+    }
+}
+
+async fn verified_test_finality(
+    runtime: &EvmContractRuntime,
+    receipt: &ContractTransactionReceipt,
+    required_confirmations: u64,
+) -> mfm_runtime::Result<u64> {
+    verified_finality_confirmations(
+        runtime,
+        "ethereum-mainnet",
+        1,
+        std::slice::from_ref(receipt),
+        required_confirmations,
+    )
+    .await
+}
+
 fn sorted_json_keys(value: &serde_json::Value) -> Vec<&str> {
     let mut keys = value
         .as_object()
@@ -1042,33 +1063,8 @@ fn replay_verifier_uses_contract_namespace() {
 async fn receipt_polling_does_not_retry_permanent_capability_failures() {
     let reads = Arc::new(Mutex::new(0_u32));
     let runtime = runtime_from_provider(TestEvmProviders::receipt_failure(Arc::clone(&reads)));
-    let transaction_hash = "0x1111111111111111111111111111111111111111111111111111111111111111";
-    let prepared = PreparedContractInvocation {
-        prepared_version: 1,
-        phase: ContractMutationPhase::Deploy,
-        network_id: "reth-dev".to_owned(),
-        expected_chain_id: 31337,
-        signer_ref: "deployer".to_owned(),
-        expected_signer_address: "0x0000000000000000000000000000000000000001".to_owned(),
-        transactions: vec![PreparedContractTransactionEvidence {
-            index: 0,
-            style: PreparedContractTransactionStyle::Eip1559,
-            chain_id: 31337,
-            nonce: 7,
-            to_address: None,
-            value_wei: "0".to_owned(),
-            gas_limit: 21_000,
-            max_fee_per_gas: Some("11".to_owned()),
-            max_priority_fee_per_gas: Some("3".to_owned()),
-            gas_price: None,
-            data_digest: "content:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000".to_owned(),
-            data_len: 0,
-            signing_digest: transaction_hash.to_owned(),
-            expected_transaction_hash: transaction_hash.to_owned(),
-        }],
-        poll_interval_ms: 25,
-        max_receipt_polls: 3,
-    };
+    let transaction_hash = TEST_TRANSACTION_HASH;
+    let prepared = receipt_polling_invocation(transaction_hash);
     let submissions = ContractTransactionSubmissions {
         submissions_version: 1,
         transactions: vec![ContractTransactionSubmission {
@@ -1089,59 +1085,27 @@ async fn receipt_polling_does_not_retry_permanent_capability_failures() {
 #[tokio::test]
 async fn finality_confirmation_requires_certified_depth() {
     let runtime = runtime_from_provider(TestEvmProviders::finality());
-    let receipt = ContractTransactionReceipt {
-        receipt_version: 1,
-        transaction_hash: "0x1111111111111111111111111111111111111111111111111111111111111111"
-            .to_owned(),
-        block_number: 63,
-        status: true,
-        receipt_evidence: None,
-    };
+    let receipt = finality_receipt();
 
-    let confirmations = verified_finality_confirmations(
-        &runtime,
-        "ethereum-mainnet",
-        1,
-        std::slice::from_ref(&receipt),
-        2,
-    )
-    .await
-    .expect("sufficient confirmations");
+    let confirmations = verified_test_finality(&runtime, &receipt, 2)
+        .await
+        .expect("sufficient confirmations");
     assert_eq!(confirmations, 2);
 
-    let error = verified_finality_confirmations(
-        &runtime,
-        "ethereum-mainnet",
-        1,
-        std::slice::from_ref(&receipt),
-        3,
-    )
-    .await
-    .expect_err("insufficient confirmations");
+    let error = verified_test_finality(&runtime, &receipt, 3)
+        .await
+        .expect_err("insufficient confirmations");
     assert!(matches!(error, mfm_runtime::RuntimeError::Blocked(_)));
 }
 
 #[tokio::test]
 async fn finality_rejects_mismatched_guard_evidence() {
     let runtime = runtime_from_provider(TestEvmProviders::finality_mismatched_evidence());
-    let receipt = ContractTransactionReceipt {
-        receipt_version: 1,
-        transaction_hash: "0x1111111111111111111111111111111111111111111111111111111111111111"
-            .to_owned(),
-        block_number: 63,
-        status: true,
-        receipt_evidence: None,
-    };
+    let receipt = finality_receipt();
 
-    let error = verified_finality_confirmations(
-        &runtime,
-        "ethereum-mainnet",
-        1,
-        std::slice::from_ref(&receipt),
-        1,
-    )
-    .await
-    .expect_err("mismatched evidence");
+    let error = verified_test_finality(&runtime, &receipt, 1)
+        .await
+        .expect_err("mismatched evidence");
 
     assert!(matches!(
         error,

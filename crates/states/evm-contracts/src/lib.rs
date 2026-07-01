@@ -558,7 +558,11 @@ impl SideEffectState for ConfigureContractState {
     type SubmitFuture<'a> = future::Ready<StateResult<Self::Submission>>;
 
     fn prepare_intent(&self, input: &Self::Input) -> StateResult<Self::Intent> {
-        ensure_network_matches_deployed(self.config.network(), &input.deployed)?;
+        ensure_network_matches(
+            self.config.network(),
+            &input.deployed.network_id,
+            input.deployed.expected_chain_id,
+        )?;
         let transactions = self
             .config
             .calls()
@@ -596,7 +600,11 @@ impl SideEffectState for ConfigureContractState {
         _intent: &Self::Intent,
         receipt: &Self::Receipt,
     ) -> StateResult<Self::Output> {
-        ensure_network_matches_deployed(self.config.network(), &input.deployed)?;
+        ensure_network_matches(
+            self.config.network(),
+            &input.deployed.network_id,
+            input.deployed.expected_chain_id,
+        )?;
         Ok(ConfiguredContract {
             lifecycle_version: 1,
             deployed: input.deployed.clone(),
@@ -629,7 +637,11 @@ impl SideEffectState for ConfigureContractState {
         _intent: &Self::Intent,
         confirmation: &Self::Confirmation,
     ) -> StateResult<Self::Output> {
-        ensure_network_matches_deployed(self.config.network(), &input.deployed)?;
+        ensure_network_matches(
+            self.config.network(),
+            &input.deployed.network_id,
+            input.deployed.expected_chain_id,
+        )?;
         Ok(ConfiguredContract {
             lifecycle_version: 1,
             deployed: input.deployed.clone(),
@@ -673,7 +685,11 @@ impl ValidateContractState {
         &self,
         input: &ValidateContractInput,
     ) -> StateResult<ContractValidationReadRequest> {
-        ensure_network_matches_configured(self.config.network(), &input.configured)?;
+        ensure_network_matches(
+            self.config.network(),
+            &input.configured.deployed.network_id,
+            input.configured.deployed.expected_chain_id,
+        )?;
         Ok(ContractValidationReadRequest {
             request_version: 1,
             configured_contract: ConfiguredContractRef::from_configured(&input.configured),
@@ -689,7 +705,11 @@ impl ValidateContractState {
         input: &ValidateContractInput,
         response: ContractValidationReadResponse,
     ) -> StateResult<ValidationReport> {
-        ensure_network_matches_configured(self.config.network(), &input.configured)?;
+        ensure_network_matches(
+            self.config.network(),
+            &input.configured.deployed.network_id,
+            input.configured.deployed.expected_chain_id,
+        )?;
         let valid = response.observed_chain_id == self.config.network().expected_chain_id()
             && response
                 .configuration_read_results
@@ -828,28 +848,22 @@ fn transaction_intent_from_configure_call(
     }
 }
 
-fn ensure_network_matches_deployed(
+fn ensure_network_matches(
     network: &EvmNetworkIntent,
-    deployed: &DeployedContract,
+    network_id: &str,
+    expected_chain_id: u64,
 ) -> StateResult<()> {
-    if network.network_id() != deployed.network_id {
+    if network.network_id() != network_id {
         return Err(StateError::Message(
             "contract lifecycle network id mismatch".to_owned(),
         ));
     }
-    if network.expected_chain_id() != deployed.expected_chain_id {
+    if network.expected_chain_id() != expected_chain_id {
         return Err(StateError::Message(
             "contract lifecycle expected chain id mismatch".to_owned(),
         ));
     }
     Ok(())
-}
-
-fn ensure_network_matches_configured(
-    network: &EvmNetworkIntent,
-    configured: &ConfiguredContract,
-) -> StateResult<()> {
-    ensure_network_matches_deployed(network, &configured.deployed)
 }
 
 fn idempotency_from_intent<T>(intent: &T) -> StateResult<ContractTransactionIdempotency>
