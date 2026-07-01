@@ -49,6 +49,7 @@ enum CrateCategory {
     Transport,
     SignerContract,
     SignerProvider,
+    RuntimeConfig,
     Storage,
     App,
     Binary,
@@ -69,6 +70,7 @@ impl CrateCategory {
             "transport" => Some(Self::Transport),
             "signer-contract" => Some(Self::SignerContract),
             "signer-provider" => Some(Self::SignerProvider),
+            "runtime-config" => Some(Self::RuntimeConfig),
             "storage" => Some(Self::Storage),
             "app" => Some(Self::App),
             "binary" => Some(Self::Binary),
@@ -90,6 +92,7 @@ impl CrateCategory {
             Self::Transport => "transport",
             Self::SignerContract => "signer-contract",
             Self::SignerProvider => "signer-provider",
+            Self::RuntimeConfig => "runtime-config",
             Self::Storage => "storage",
             Self::App => "app",
             Self::Binary => "binary",
@@ -671,6 +674,7 @@ fn validate_category_path(
             )
         }
         CrateCategory::SignerProvider => package.manifest_rel.starts_with("crates/signers/"),
+        CrateCategory::RuntimeConfig => package.manifest_rel == "crates/runtime-config/Cargo.toml",
         CrateCategory::Storage => package.manifest_rel.starts_with("crates/storages/"),
         CrateCategory::App => package.manifest_rel == "crates/app/Cargo.toml",
         CrateCategory::Binary => package.manifest_rel.starts_with("bin/"),
@@ -692,7 +696,8 @@ fn validate_category_path(
 fn category_dependency_allowed(source: CrateCategory, dependency: CrateCategory) -> bool {
     use CrateCategory::{
         Adapter, AdapterContract, App, Binary, CapabilityContract, DomainConfig, DomainModel,
-        Kernel, Operation, SignerContract, SignerProvider, State, Storage, TestSupport, Transport,
+        Kernel, Operation, RuntimeConfig, SignerContract, SignerProvider, State, Storage,
+        TestSupport, Transport,
     };
 
     match source {
@@ -740,11 +745,12 @@ fn category_dependency_allowed(source: CrateCategory, dependency: CrateCategory)
             dependency,
             Kernel | DomainModel | SignerContract | SignerProvider
         ),
+        RuntimeConfig => matches!(dependency, Kernel | CapabilityContract | SignerContract),
         Storage => matches!(dependency, Kernel | CapabilityContract),
         App => !matches!(dependency, Binary | TestSupport),
         Binary => matches!(
             dependency,
-            Kernel | App | Operation | DomainModel | DomainConfig
+            Kernel | App | Operation | DomainModel | DomainConfig | RuntimeConfig
         ),
         TestSupport => true,
     }

@@ -36,6 +36,7 @@ members = [
 	"crates/evm-signing",
 	"crates/signers/keystore",
 	"crates/authored-config",
+	"crates/runtime-config",
 	"crates/portfolio-config",
 	"crates/portfolio/model",
 	"crates/states/evm-contracts",
