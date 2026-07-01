@@ -7,7 +7,7 @@ use mfm_ids::RunId;
 use mfm_integration_tests::test_support::{self, empty_post, json_post, response_json};
 use mfm_spec::v1 as spec;
 use mfm_store::v1 as store;
-use mfm_store::v1::RunEventStore;
+use mfm_store::v1::{RetainedArtifactReadProvider, RunEventStore};
 use tower::ServiceExt;
 
 const VALID_RUN_ID: &str =
@@ -284,6 +284,7 @@ async fn portfolio_chain_mismatch_fails_after_admission_with_redacted_diagnostic
     let app = mfm_rest_api::make_app(state.clone());
 
     let resp = app
+        .clone()
         .oneshot(json_post(
             "/v1/runs/start",
             serde_json::json!({
@@ -323,11 +324,59 @@ async fn portfolio_chain_mismatch_fails_after_admission_with_redacted_diagnostic
     };
     assert_eq!(failed.error.category, events::ErrorCategory::Validation);
     assert_eq!(failed.error.safe_message, "runner output failed validation");
+    let diagnostic = failed
+        .error
+        .diagnostic_ref
+        .as_ref()
+        .expect("chain mismatch records diagnostic artifact");
+    let details_digest = failed
+        .error
+        .public_details
+        .as_ref()
+        .expect("chain mismatch records public details digest")
+        .content_digest
+        .clone();
+    let diagnostic_artifact = state
+        .store
+        .read_retained_artifact(&diagnostic_artifact_requirement(diagnostic))
+        .await
+        .expect("diagnostic artifact");
+    let diagnostic_json = serde_json::from_slice::<serde_json::Value>(diagnostic_artifact.bytes())
+        .expect("diagnostic json");
+    assert_eq!(
+        diagnostic_json["public_details"],
+        serde_json::json!({
+            "network_id": PORTFOLIO_NETWORK_ID,
+            "expected_chain_id": 31337,
+            "observed_chain_id": 31338,
+            "source_ref": PORTFOLIO_NETWORK_ID,
+            "policy_id": PORTFOLIO_NETWORK_ID,
+        })
+    );
+    assert_eq!(
+        mfm_canonical::PlainCanonicalJsonBytes::from_json_str(
+            &serde_json::to_string(&diagnostic_json["public_details"]).expect("details json")
+        )
+        .expect("canonical details")
+        .content_digest(),
+        details_digest
+    );
 
     let rendered = format!("{body:?} {stream:?}");
     assert!(!rendered.contains(&rpc_url));
     assert!(!rendered.contains(&runtime_config_path.display().to_string()));
     assert!(!rendered.contains("31338"));
+    assert!(!diagnostic_json.to_string().contains(&rpc_url));
+    assert!(!diagnostic_json
+        .to_string()
+        .contains(&runtime_config_path.display().to_string()));
+
+    std::fs::remove_file(&runtime_config_path).expect("remove runtime config");
+    let replay = app
+        .oneshot(empty_post(&format!("/v1/runs/{run_id}/replay")))
+        .await
+        .expect("replay response");
+    assert_eq!(replay.status(), StatusCode::OK);
 }
 
 #[tokio::test]
@@ -967,6 +1016,23 @@ unlock_file = "/runtime/unlock"
     );
     std::fs::write(&path, config).expect("write malformed signer runtime config");
     path
+}
+
+fn diagnostic_artifact_requirement(
+    reference: &events::ArtifactEvidenceRef,
+) -> store::EventArtifactRequirement {
+    store::EventArtifactRequirement {
+        source: store::EventArtifactReferenceSource::ArtifactReferenced,
+        artifact_id: reference.artifact_id.clone(),
+        digest: Some(reference.content_digest.clone()),
+        byte_len: Some(reference.byte_len),
+        media_type: Some(reference.media_type.clone()),
+        schema_id: Some(reference.schema_id.clone()),
+        semantic_type_id: reference.semantic_type_id.clone(),
+        producer_node_id: None,
+        producer_seed_id: None,
+        artifact_role: Some(reference.role),
+    }
 }
 
 fn evm_deployed_contract_json() -> serde_json::Value {

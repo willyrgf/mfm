@@ -498,7 +498,10 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
             .await?;
         chain.evidence.verify_guard(&guard)?;
         if chain.chain_id != prepared.evidence().expected_chain_id {
-            return Err(EvmContractAdapterError::ChainMismatch);
+            return Err(EvmCapabilityError::ChainMismatch {
+                evidence: chain.evidence.with_observed_chain_id(chain.chain_id),
+            }
+            .into());
         }
         let mut submissions = Vec::with_capacity(prepared.signing_requests.len());
         for (transaction, signing_request) in prepared
@@ -754,7 +757,10 @@ impl<'a> EvmContractLifecycleAdapter<'a> {
             .await?;
         chain.evidence.verify_guard(&guard)?;
         if chain.chain_id != expected_chain_id {
-            return Err(EvmContractAdapterError::ChainMismatch);
+            return Err(EvmCapabilityError::ChainMismatch {
+                evidence: chain.evidence.with_observed_chain_id(chain.chain_id),
+            }
+            .into());
         }
 
         let nonce_response = self
@@ -933,7 +939,10 @@ async fn validate_contract_with_reads(
         .await?;
     chain.evidence.verify_guard(&guard)?;
     if chain.chain_id != request.expected_chain_id {
-        return Err(EvmContractAdapterError::ChainMismatch);
+        return Err(EvmCapabilityError::ChainMismatch {
+            evidence: chain.evidence.with_observed_chain_id(chain.chain_id),
+        }
+        .into());
     }
 
     let (configuration_read_results, configuration_event_results) = evaluate_assertions(
@@ -3467,9 +3476,6 @@ pub enum EvmContractAdapterError {
     /// Prepared invocation did not match state intent.
     #[error("contract intent did not match state config")]
     IntentMismatch,
-    /// Observed chain id did not match typed config.
-    #[error("contract lifecycle chain id mismatch")]
-    ChainMismatch,
     /// Required contract artifact was absent.
     #[error("contract artifact is required for this lifecycle phase")]
     MissingContractArtifact,
@@ -3504,7 +3510,24 @@ impl From<mfm_program::StateError> for EvmContractAdapterError {
 
 impl From<EvmContractAdapterError> for mfm_runtime::RuntimeError {
     fn from(error: EvmContractAdapterError) -> Self {
-        Self::InvalidRunnerOutput(error.to_string())
+        match error {
+            EvmContractAdapterError::EvmCapability(EvmCapabilityError::ChainMismatch {
+                evidence,
+            }) => {
+                let message =
+                    EvmContractAdapterError::EvmCapability(EvmCapabilityError::ChainMismatch {
+                        evidence: evidence.clone(),
+                    })
+                    .to_string();
+                Self::InvalidRunnerOutputDiagnostic {
+                    message,
+                    details: mfm_runtime::RuntimeDiagnosticDetails::from_json(
+                        evidence.chain_mismatch_diagnostic_details(),
+                    ),
+                }
+            }
+            error => Self::InvalidRunnerOutput(error.to_string()),
+        }
     }
 }
 

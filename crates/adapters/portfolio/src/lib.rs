@@ -909,10 +909,21 @@ fn wallet_evm_address(config: &ObserveBatchConfig) -> Result<Address, PortfolioR
 }
 
 fn portfolio_evm_capability_error(error: EvmCapabilityError) -> PortfolioReadError {
-    PortfolioReadError::new(
+    let details = match &error {
+        EvmCapabilityError::ChainMismatch { evidence } => {
+            Some(evidence.chain_mismatch_diagnostic_details())
+        }
+        _ => None,
+    };
+    let error = PortfolioReadError::new(
         "evm_capability_failed",
         format!("portfolio EVM read capability failed: {error}"),
-    )
+    );
+    if let Some(details) = details {
+        error.with_redacted_details(details)
+    } else {
+        error
+    }
 }
 
 fn runtime_artifact_read_error(
@@ -922,7 +933,14 @@ fn runtime_artifact_read_error(
 }
 
 fn portfolio_read_runtime_error(error: PortfolioReadError) -> mfm_runtime::RuntimeError {
-    mfm_runtime::RuntimeError::InvalidRunnerOutput(error.to_string())
+    let message = error.to_string();
+    match error.redacted_details {
+        Some(details) => mfm_runtime::RuntimeError::InvalidRunnerOutputDiagnostic {
+            message,
+            details: mfm_runtime::RuntimeDiagnosticDetails::from_json(details),
+        },
+        None => mfm_runtime::RuntimeError::InvalidRunnerOutput(message),
+    }
 }
 
 fn portfolio_runtime_binding_error(error: PortfolioReadError) -> mfm_runtime::RuntimeError {

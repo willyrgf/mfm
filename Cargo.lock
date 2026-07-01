@@ -2253,6 +2253,7 @@ dependencies = [
  "mfm-canonical",
  "mfm-capabilities",
  "mfm-ids",
+ "serde_json",
  "thiserror",
 ]
 
