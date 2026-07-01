@@ -11,7 +11,7 @@ use mfm_program::{
 use mfm_program_derive::{MfmConfig, MfmValue, OperationOutput, PublicOutputs};
 use serde::{Deserialize, Serialize};
 
-fn certify_raw_typed_spec(
+fn certify_untrusted_typed_spec(
     typed: spec::TypedExecutionSpec,
     registry: &CertificationRegistry,
 ) -> Result<CertifiedTypedSpec> {
@@ -704,7 +704,7 @@ fn typed_spec_requires_registry_authority() {
         .spec()
         .clone();
     let error =
-        certify_raw_typed_spec(spec, &CertificationRegistry::new()).expect_err("must reject");
+        certify_untrusted_typed_spec(spec, &CertificationRegistry::new()).expect_err("must reject");
     assert_eq!(
         error.problem_class(),
         Some(ProblemClass::InvalidSemanticTransition)
@@ -757,7 +757,7 @@ fn certification_accepts_valid_lifecycle_framework_node_shapes() {
         .spec()
         .clone();
 
-    certify_raw_typed_spec(spec, &registry).expect("lifecycle framework nodes certify");
+    certify_untrusted_typed_spec(spec, &registry).expect("lifecycle framework nodes certify");
 }
 
 #[test]
@@ -1283,7 +1283,7 @@ fn certification_lowers_side_effect_submit_verify_pair() {
 }
 
 #[test]
-fn persisted_side_effect_verify_specs_reject_obsolete_submit_output_cell_id() {
+fn persisted_side_effect_verify_specs_reject_unknown_submit_output_cell_id() {
     let (_registry, typed) = side_effect_registry_and_spec();
     let submit_output_cell = side_effect_submit_node(&typed).output_cell.clone();
     let mut value: serde_json::Value =
@@ -1305,7 +1305,7 @@ fn persisted_side_effect_verify_specs_reject_obsolete_submit_output_cell_id() {
     let input = serde_json::to_string(&value).expect("JSON");
 
     let error = spec::TypedExecutionSpec::from_json_str(&input)
-        .expect_err("obsolete submit output anchor must reject");
+        .expect_err("unknown submit output anchor must reject");
 
     assert!(error.to_string().contains("unknown or non-normalized"));
 }
@@ -1830,7 +1830,7 @@ fn certification_records_manual_authority_evidence() {
     let (mut registry, typed) = side_effect_spec_with_manual(manual.clone());
     register_manual_authority(&mut registry, &manual);
 
-    let certified = certify_raw_typed_spec(typed, &registry).expect("certified manual spec");
+    let certified = certify_untrusted_typed_spec(typed, &registry).expect("certified manual spec");
 
     assert_eq!(
         certified
@@ -1882,7 +1882,7 @@ fn certification_rejects_unknown_manual_evidence_schema() {
         .register_operator_authority_snapshot(manual.authorization.authority.clone())
         .expect("register authority");
 
-    let error = certify_raw_typed_spec(typed, &registry).expect_err("unknown schema rejects");
+    let error = certify_untrusted_typed_spec(typed, &registry).expect_err("unknown schema rejects");
 
     assert_eq!(
         error.problem_class(),
@@ -1909,7 +1909,7 @@ fn certification_rejects_manual_schema_with_wrong_role() {
         .register_operator_authority_snapshot(manual.authorization.authority.clone())
         .expect("register authority");
 
-    let error = certify_raw_typed_spec(typed, &registry).expect_err("wrong role rejects");
+    let error = certify_untrusted_typed_spec(typed, &registry).expect_err("wrong role rejects");
 
     assert_eq!(
         error.problem_class(),
@@ -1933,7 +1933,8 @@ fn certification_rejects_unknown_manual_authorization_verifier() {
         .register_operator_authority_snapshot(manual.authorization.authority.clone())
         .expect("register authority");
 
-    let error = certify_raw_typed_spec(typed, &registry).expect_err("unknown verifier rejects");
+    let error =
+        certify_untrusted_typed_spec(typed, &registry).expect_err("unknown verifier rejects");
 
     assert_eq!(
         error.problem_class(),
@@ -1966,7 +1967,8 @@ fn certification_rejects_operator_authority_snapshot_mismatch() {
         .register_operator_authority_snapshot(mismatched)
         .expect("register mismatched authority");
 
-    let error = certify_raw_typed_spec(typed, &registry).expect_err("authority mismatch rejects");
+    let error =
+        certify_untrusted_typed_spec(typed, &registry).expect_err("authority mismatch rejects");
 
     assert_eq!(
         error.problem_class(),
@@ -1983,7 +1985,8 @@ fn certification_rejects_empty_operator_authority() {
     let (mut registry, typed) = side_effect_spec_with_manual(manual.clone());
     register_manual_authority(&mut registry, &manual);
 
-    let error = certify_raw_typed_spec(typed, &registry).expect_err("empty authority rejects");
+    let error =
+        certify_untrusted_typed_spec(typed, &registry).expect_err("empty authority rejects");
 
     assert_eq!(
         error.problem_class(),
@@ -2002,7 +2005,7 @@ fn certification_rejects_unsupported_manual_signing_scheme_and_quorum() {
     let (mut registry, typed) = side_effect_spec_with_manual(manual.clone());
     register_manual_authority(&mut registry, &manual);
 
-    let error = certify_raw_typed_spec(typed, &registry).expect_err("signing scheme rejects");
+    let error = certify_untrusted_typed_spec(typed, &registry).expect_err("signing scheme rejects");
 
     assert_eq!(
         error.problem_class(),
@@ -2018,7 +2021,7 @@ fn certification_rejects_unsupported_manual_signing_scheme_and_quorum() {
     let (mut registry, typed) = side_effect_spec_with_manual(manual.clone());
     register_manual_authority(&mut registry, &manual);
 
-    let error = certify_raw_typed_spec(typed, &registry).expect_err("quorum rejects");
+    let error = certify_untrusted_typed_spec(typed, &registry).expect_err("quorum rejects");
 
     assert_eq!(
         error.problem_class(),
@@ -2070,7 +2073,7 @@ fn assert_rejects(
 ) {
     let mut mutated = base.clone();
     mutate(&mut mutated);
-    let error = certify_raw_typed_spec(mutated, registry).expect_err("mutation must reject");
+    let error = certify_untrusted_typed_spec(mutated, registry).expect_err("mutation must reject");
     assert_eq!(error.problem_class(), Some(expected), "{error}");
 }
 
@@ -2220,8 +2223,8 @@ fn retarget_first_remediation_input(typed: &mut spec::TypedExecutionSpec, cell_i
         .expect("remediation output cell")
         .clone();
     let (
-        old_node_id,
-        old_output_cell,
+        previous_node_id,
+        previous_output_cell,
         node_id,
         output_cell,
         scope_id,
@@ -2229,7 +2232,7 @@ fn retarget_first_remediation_input(typed: &mut spec::TypedExecutionSpec, cell_i
         config_digest,
     ) = {
         let remediation = typed.remediations.values_mut().next().expect("remediation");
-        let old_node_id = remediation.node_id.clone();
+        let previous_node_id = remediation.node_id.clone();
         remediation.input_bindings.root = root;
         remediation.input_bindings.digest = digest;
         remediation.deterministic_predecessors = predecessors;
@@ -2244,7 +2247,7 @@ fn retarget_first_remediation_input(typed: &mut spec::TypedExecutionSpec, cell_i
         )
         .expect("remediation output cell");
         (
-            old_node_id,
+            previous_node_id,
             original_output_cell,
             remediation.node_id.clone(),
             remediation.output_cell.clone(),
@@ -2264,7 +2267,7 @@ fn retarget_first_remediation_input(typed: &mut spec::TypedExecutionSpec, cell_i
     typed
         .cells
         .iter_mut()
-        .find(|cell| cell.cell_id == old_output_cell)
+        .find(|cell| cell.cell_id == previous_output_cell)
         .expect("remediation output cell")
         .cell_id = output_cell.clone();
     let output = typed
@@ -2277,7 +2280,7 @@ fn retarget_first_remediation_input(typed: &mut spec::TypedExecutionSpec, cell_i
     let value_lineage = typed
         .value_lineages
         .iter_mut()
-        .find(|lineage| lineage.producer == spec::CellProducer::Node(old_node_id.clone()))
+        .find(|lineage| lineage.producer == spec::CellProducer::Node(previous_node_id.clone()))
         .expect("remediation value lineage");
     value_lineage.producer = spec::CellProducer::Node(node_id);
     value_lineage.lineage_ref = lineage;

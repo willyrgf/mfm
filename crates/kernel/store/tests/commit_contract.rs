@@ -5642,27 +5642,25 @@ fn side_effect_ledger_purpose_cannot_change_after_intent() {
 }
 
 #[test]
-fn removed_run_completion_outcome_tags_are_rejected() {
+fn unknown_run_completion_outcome_tag_is_rejected() {
     let payload = KernelEventPayload::RunCompleted(events::RunCompleted {
         run_id: run_id(95),
         spec_hash: spec_hash(1),
         outcome: events::RunCompletionOutcome::FailedWithoutAcdcClaim,
     });
-    for removed in ["failed", "cancelled"] {
-        let mut json = payload_json_value(&payload);
-        json.get_mut("outcome")
-            .and_then(serde_json::Value::as_object_mut)
-            .expect("outcome object")
-            .insert(
-                "kind".to_owned(),
-                serde_json::Value::String(removed.to_owned()),
-            );
-        assert!(matches!(
-            payload_from_json_value(&json),
-            Err(StoreError::Identity(message))
-                if message.contains(&format!("unknown run completion outcome {removed}"))
-        ));
-    }
+    let mut json = payload_json_value(&payload);
+    json.get_mut("outcome")
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("outcome object")
+        .insert(
+            "kind".to_owned(),
+            serde_json::Value::String("invented".to_owned()),
+        );
+    assert!(matches!(
+        payload_from_json_value(&json),
+        Err(StoreError::Identity(message))
+            if message.contains("unknown run completion outcome invented")
+    ));
 }
 
 #[test]
@@ -5695,25 +5693,15 @@ fn manual_resolution_outcome_is_closed() {
             if message.contains("unknown manual resolution outcome invented")
     ));
 
-    let mut old = payload_json_value(&payload);
-    let old_object = old.as_object_mut().expect("payload object");
-    old_object.remove("authorization_schema_id");
-    old_object.remove("authorization_hash");
-    old_object.remove("authorization_artifact_id");
-    old_object.insert(
-        "operator_identity_ref_schema_id".to_owned(),
-        serde_json::Value::String(schema_id("mfm.test.operator_identity", 99).to_string()),
-    );
-    old_object.insert(
-        "operator_identity_ref_hash".to_owned(),
-        serde_json::Value::String(content_digest(99).to_string()),
-    );
-    old_object.insert(
-        "operator_identity_ref_artifact_id".to_owned(),
-        serde_json::Value::String(artifact_id(99).to_string()),
-    );
+    let mut missing_authorization = payload_json_value(&payload);
+    let object = missing_authorization
+        .as_object_mut()
+        .expect("payload object");
+    object.remove("authorization_schema_id");
+    object.remove("authorization_hash");
+    object.remove("authorization_artifact_id");
     assert!(matches!(
-        payload_from_json_value(&old),
+        payload_from_json_value(&missing_authorization),
         Err(StoreError::Event(message)) if message.contains("authorization_schema_id")
     ));
 }

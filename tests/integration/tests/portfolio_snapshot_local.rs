@@ -110,7 +110,7 @@ async fn rest_portfolio_snapshot_matches_public_output() {
 }
 
 #[tokio::test]
-async fn read_only_routes_work_after_runtime_config_is_removed() {
+async fn read_only_routes_work_without_runtime_config() {
     let _env_guard = RPC_ENV_LOCK.lock().await;
     let rpc_url = start_rpc_mock().await;
     let runtime_config = set_rpc_file_env(rpc_url);
@@ -130,19 +130,19 @@ async fn read_only_routes_work_after_runtime_config_is_removed() {
     drop(runtime_config);
     assert!(
         std::env::var_os(support::ENV_RUNTIME_CONFIG_FILE).is_none(),
-        "runtime config selector must be removed before evidence-only reads"
+        "runtime config selector must be absent before evidence-only reads"
     );
     assert!(
         std::env::var_os(RPC_URL_FILE_ENV).is_none(),
-        "RPC value file selector must be removed before evidence-only reads"
+        "RPC value file selector must be absent before evidence-only reads"
     );
     assert!(
         !runtime_config_path.exists(),
-        "runtime config file must be removed before evidence-only reads"
+        "runtime config file must be absent before evidence-only reads"
     );
     assert!(
         !rpc_url_path.exists(),
-        "RPC value file must be removed before evidence-only reads"
+        "RPC value file must be absent before evidence-only reads"
     );
 
     let status = app

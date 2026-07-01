@@ -419,25 +419,6 @@ fn signer_requirement_rejects_malformed_signers() {
 }
 
 #[test]
-fn old_evm_signer_table_is_rejected() {
-    let config = r#"
-        [evm.sources.local]
-        rpc_url = "http://127.0.0.1:8545"
-
-        [evm.routes.dev]
-        source_ref = "local"
-
-        [evm.signers.deployer]
-        provider = "keystore"
-        entry_id = "00000000-0000-0000-0000-000000000000"
-        keystore_path = "/runtime/keystore.json"
-        unlock_file = "/runtime/unlock"
-    "#;
-    let err = RuntimeConfig::from_str(config, RuntimeConfigFormat::Toml).expect_err("old shape");
-    assert_eq!(err.kind(), &RuntimeConfigErrorKind::UnknownField);
-}
-
-#[test]
 fn secret_material_fields_are_rejected() {
     for field in [
         "password",

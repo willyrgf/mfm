@@ -2,8 +2,7 @@
 //! Typed portfolio tracker workflow operation.
 //!
 //! The portfolio tracker workflow is authored through `mfm-program` and lowers to certified typed
-//! state programs. This crate exposes no old dynamic `PlannedOp`, `PortKey`, context-key, or
-//! generic IO surface.
+//! state programs.
 //!
 //! # Examples
 //!
@@ -419,31 +418,57 @@ mod tests {
             6,
             "source, subject, view, valuation, observation batch, and report outputs need domain-key lineage"
         );
-        assert!(
-            draft
-                .state_nodes()
-                .iter()
-                .all(|node| !node.state_descriptor_name.contains("DynContext")),
-            "portfolio descriptors must not expose dynamic context"
-        );
-
-        assert!(
-            draft
-                .state_nodes()
-                .iter()
-                .all(|node| node.key.as_str() != "publish_snapshot"),
-            "portfolio snapshot graph must not include the removed publish wrapper"
+        let state_keys = draft
+            .state_nodes()
+            .iter()
+            .map(|node| node.key.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            state_keys,
+            [
+                "prepare_sources",
+                "resolve_subjects",
+                "pin_views",
+                "resolve_valuations",
+                "observe/wallet/wallet_main/symbol/eth.native.ethereum-mainnet",
+                "merge_observations",
+                "assemble_snapshot",
+                "project_report",
+            ]
         );
 
         let certified = certify_program_draft(&draft).expect("certified portfolio spec");
-        assert!(
+        assert_eq!(
             certified
                 .envelope()
                 .spec
                 .nodes
                 .iter()
-                .all(|node| !node.node_id.as_str().contains("publish_snapshot")),
-            "certified portfolio spec must not include the removed publish wrapper"
+                .map(|node| node.stable_key.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "prepare_sources",
+                "resolve_subjects",
+                "pin_views",
+                "resolve_valuations",
+                "observe/wallet/wallet_main/symbol/eth.native.ethereum-mainnet",
+                "merge_observations",
+                "assemble_snapshot",
+                "project_report",
+                "portfolio",
+                "framework/project-retention-manifest",
+                "framework/complete-run",
+                "framework/resolve-saga-terminal",
+            ]
+        );
+        assert_eq!(
+            draft
+                .public_output_spec()
+                .outputs()
+                .iter()
+                .map(|output| output.public_field_path().as_str())
+                .collect::<Vec<_>>(),
+            ["snapshot", "report"]
         );
         assert_eq!(
             certified
